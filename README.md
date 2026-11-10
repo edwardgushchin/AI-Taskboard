@@ -4,7 +4,7 @@ An agent-native Kanban task board for software projects. The Electron app and Co
 
 ## Use the app
 
-On Linux, install the local package with `sudo apt install ./ai-taskboard-0.1.0-linux-amd64.deb` or `sudo dnf install ./ai-taskboard-0.1.0-linux-x86_64.rpm` so the package manager can resolve desktop dependencies.
+The first version targets Windows x64. Run `ai-taskboard-0.1.0-win-x64.exe`, then start AI Taskboard from the Start menu.
 
 1. Open AI Taskboard and choose a project folder. Select **Create board** if the project has no board yet.
 2. Open **Settings → Codex integration → Connect Codex**. Open a new local Codex chat for the project after the app confirms installation.
@@ -19,10 +19,8 @@ The board lives in the project's `.tasks` folder. Git operations require Git 2.3
 
 Use Node.js 24.12 or newer and Git 2.38 or newer. Run `npm ci`, `npm run check`, and `npm test`. Run `npm start` to open the app. For a direct CLI command, use `npm run taskboard -- --project "/path/to/project" list --json`.
 
-Run `npm run package` on the OS and architecture you are building for. The installer and unpacked application are written to `release/`. The package includes a standalone CLI with its own Node.js runtime.
+Run `npm run package` on Windows x64. The NSIS installer and unpacked application are written to `release/`. The package includes a standalone CLI with its own Node.js runtime.
 
-- Windows produces an NSIS installer.
-- Linux produces `.deb` and `.rpm` packages. Set `AI_TASKBOARD_PROJECT_URL` to the project URL and `AI_TASKBOARD_MAINTAINER` to the package maintainer name and email.
-- macOS produces a `.pkg`. Configure the Developer ID identities and notarization credentials for distribution.
+Future Linux and macOS releases use platform-native packages. The Linux build uses `AI_TASKBOARD_PROJECT_URL` and `AI_TASKBOARD_MAINTAINER` for package metadata. The macOS distribution requires Developer ID identities and notarization credentials.
 
 [Project design](docs/design.md)
