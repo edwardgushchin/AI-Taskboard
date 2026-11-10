@@ -1,0 +1,566 @@
+const api = window.taskboard;
+const byId = id => document.getElementById(id);
+let frame = {};
+let archiveView = false;
+let sheetKind = "";
+let taskInSheet;
+const sheet = byId("sheet");
+const body = byId("sheet-body");
+
+const language = (english, russian) => frame.russian ? russian : english;
+const lanes = [
+  ["draft", "Draft", "Черновик"], ["ready", "Ready", "Готово к работе"],
+  ["in_progress", "In progress", "В работе"], ["blocked", "Blocked", "Заблокировано"],
+  ["review", "In review", "На проверке"], ["done", "Done", "Завершено"],
+  ["cancelled", "Cancelled", "Отменено"],
+];
+
+function element(tag, text, className) {
+  const item = document.createElement(tag);
+  if (text !== undefined) item.textContent = text;
+  if (className) item.className = className;
+  return item;
+}
+
+function icon(name) {
+  const namespace = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(namespace, "svg");
+  const use = document.createElementNS(namespace, "use");
+  svg.setAttribute("class", "icon");
+  svg.setAttribute("aria-hidden", "true");
+  use.setAttribute("href", "#icon-" + name);
+  svg.append(use);
+  return svg;
+}
+
+function notice(message) {
+  const target = sheet.open ? byId("sheet-notice") : byId("notice");
+  target.textContent = message || "";
+  target.hidden = !message;
+}
+
+function boardError(error) {
+  if (error.code === "GIT_UNAVAILABLE") {
+    return language("Install Git 2.38 or newer, then reopen the project.", "Установите Git 2.38 или новее, затем откройте проект снова.");
+  }
+  const { output, path, paths } = error.details ?? {};
+  const files = Array.isArray(paths) ? paths.join("\n") : undefined;
+  return [error.message, path, files, output].filter(value => typeof value === "string" && value.length)
+    .join("\n").slice(0, 4000);
+}
+
+function protect(callback) {
+  return (...args) => { Promise.resolve().then(() => callback(...args)).catch(error => notice(error.message)); };
+}
+
+function button(label, click, kind = "") {
+  const item = element("button", label, ("button " + kind).trim());
+  item.type = "button";
+  item.addEventListener("click", protect(click));
+  return item;
+}
+
+async function command(action, id, input) {
+  const result = await api.command(action, id, input);
+  if (!result.ok) {
+    notice(boardError(result.error));
+    return undefined;
+  }
+  notice();
+  return result.data;
+}
+
+function openSheet(kind, title) {
+  sheetKind = kind;
+  byId("sheet-title").textContent = title;
+  body.replaceChildren();
+  byId("sheet-notice").hidden = true;
+  if (!sheet.open) sheet.showModal();
+}
+
+function section(title, content) {
+  if (content === undefined || content === "" || (Array.isArray(content) && !content.length)) return;
+  const area = element("section", undefined, "sheet-section");
+  area.append(element("h3", title));
+  if (Array.isArray(content)) {
+    const list = element("ul");
+    for (const value of content) list.append(element("li", value));
+    area.append(list);
+  } else area.append(element("p", content));
+  body.append(area);
+}
+
+function card(task) {
+  const item = button("", () => showTask(task.id), "");
+  item.className = "task-card";
+  if (task.tags?.length) {
+    const tags = element("span", undefined, "task-tags");
+    for (const value of task.tags) {
+      const tag = element("span", value, "tag");
+      let color = 0;
+      for (const character of value) color = (color * 31 + character.codePointAt(0)) % 5;
+      tag.dataset.color = color;
+      tags.append(tag);
+    }
+    item.append(tags);
+  }
+  item.append(element("strong", task.title));
+  const meta = element("span", undefined, "task-meta");
+  meta.append(element("span", task.id, "task-id"));
+  if (task.subtasks?.length) {
+    const count = task.subtasks.filter(entry => entry.done).length + "/" + task.subtasks.length;
+    const subtasks = element("span", undefined, "task-stat");
+    subtasks.title = language("Subtasks", "Подзадачи") + " " + count;
+    subtasks.append(icon("checklist"), count);
+    meta.append(subtasks);
+  }
+  if (task.attachments?.length) {
+    const attachments = element("span", undefined, "task-stat");
+    attachments.title = language("Attachments", "Вложения") + " " + task.attachments.length;
+    attachments.append(icon("attachment"), String(task.attachments.length));
+    meta.append(attachments);
+  }
+  if (task.priority) {
+    const priority = element("span", priorityName(task.priority), "task-priority");
+    priority.dataset.priority = task.priority;
+    meta.append(priority);
+  }
+  item.append(meta);
+  return item;
+}
+
+function controlLabel(id, label) {
+  const control = byId(id);
+  const text = control.querySelector("span");
+  if (text) text.textContent = label;
+  control.title = label;
+  control.setAttribute("aria-label", label);
+}
+
+function filterOptions(id, options, label) {
+  const select = byId(id);
+  const previous = select.value;
+  select.replaceChildren(...[["", label], ...options].map(([value, name]) => new Option(name, value)));
+  if (options.some(([value]) => value === previous)) select.value = previous;
+  return select.value;
+}
+
+function render() {
+  document.documentElement.lang = frame.russian ? "ru" : "en";
+  const board = frame.board;
+  const noBoard = !board;
+  const initialize = frame.error?.code === "BOARD_NOT_FOUND";
+  const open = language("Open project", "Открыть проект");
+  controlLabel("open-project", open);
+  controlLabel("settings", language("Settings", "Настройки"));
+  byId("app-header").hidden = !noBoard;
+  byId("welcome").hidden = !noBoard;
+  byId("workspace").hidden = noBoard;
+  byId("welcome-title").textContent = initialize ? language("Create a board", "Создать доску") : language("Open a project", "Открыть проект");
+  byId("welcome-note").textContent = frame.loading ? language("Reading project…", "Читаем проект…") :
+    initialize ? language("This folder is ready for its first task board.", "В этой папке можно создать доску задач.") :
+      language("Choose a project folder to open its task board.", "Выберите папку проекта, чтобы открыть доску задач.");
+  byId("welcome-action").textContent = initialize ? language("Create board", "Создать доску") : language("Open folder", "Открыть папку");
+  byId("welcome-action").disabled = Boolean(frame.loading);
+  if (frame.error && !initialize) notice(boardError(frame.error));
+  else if (!sheet.open) notice();
+  if (!board) return;
+
+  const projectName = frame.project.split(/[\\/]/).filter(Boolean).at(-1) || frame.project;
+  controlLabel("board-project", projectName);
+  byId("board-project").title = frame.project + "\n" + open;
+  byId("board-project").setAttribute("aria-label", projectName + " · " + open);
+  byId("board-title").textContent = archiveView ? language("Archive", "Архив") : language("Task board", "Доска задач");
+  controlLabel("archive-toggle", archiveView ? language("Board", "Доска") : language("Archive", "Архив"));
+  byId("archive-toggle").setAttribute("aria-pressed", String(archiveView));
+  controlLabel("create", language("Create task", "Создать задачу"));
+  controlLabel("board-settings", language("Settings", "Настройки"));
+  controlLabel("refresh", language("Refresh board", "Обновить доску"));
+  byId("search").placeholder = language("Search tasks…", "Поиск задач…");
+  byId("search").setAttribute("aria-label", language("Search tasks", "Поиск задач"));
+  byId("filters").hidden = archiveView;
+  byId("lanes").hidden = archiveView;
+  byId("archive-list").hidden = !archiveView;
+  const query = byId("search").value.trim().toLocaleLowerCase();
+  const matches = task => [task.id, task.title, ...(task.tags ?? [])].some(value => value.toLocaleLowerCase().includes(query));
+  if (archiveView) {
+    const tasks = board.archived.filter(matches);
+    byId("archive-list").replaceChildren(...(tasks.length ? tasks.map(card) :
+      [element("p", language("No archived tasks found.", "Архивных задач не найдено."), "muted")]));
+    return;
+  }
+  byId("filter-label").textContent = language("Filters", "Фильтры");
+  byId("priority-filter-label").textContent = language("Priority", "Приоритет");
+  byId("tag-filter-label").textContent = language("Tag", "Тег");
+  const priorities = ["low", "normal", "high", "urgent"].map(value => [value, priorityName(value)]);
+  const tags = [...new Set(board.tasks.flatMap(task => task.tags ?? []))].sort((a, b) => a.localeCompare(b));
+  const priority = filterOptions("priority-filter", priorities, language("Any priority", "Любой приоритет"));
+  const tag = filterOptions("tag-filter", tags.map(value => [value, value]), language("Any tag", "Любой тег"));
+  const filterCount = Number(Boolean(priority)) + Number(Boolean(tag));
+  byId("filter-count").hidden = filterCount === 0;
+  byId("filter-count").textContent = filterCount;
+  const visible = board.tasks.filter(task => matches(task) &&
+    (!priority || task.priority === priority) && (!tag || task.tags.includes(tag)));
+  const columns = lanes.map(([state, english, russian]) => {
+    const tasks = visible.filter(task => task.status === state);
+    const column = element("section", undefined, "lane");
+    column.dataset.state = state;
+    const heading = element("h2", language(english, russian), "lane-title");
+    heading.append(element("span", String(tasks.length), "count"));
+    const content = element("div", undefined, "lane-cards");
+    content.append(...tasks.map(card));
+    column.append(heading, content);
+    return column;
+  });
+  byId("lanes").replaceChildren(...columns);
+}
+
+const lineList = value => value.split("\n").map(line => line.trim()).filter(Boolean);
+const shortDate = value => new Date(value).toLocaleString(frame.russian ? "ru" : undefined);
+const priorityName = value => ({
+  low: language("Low", "Низкий"), normal: language("Normal", "Обычный"),
+  high: language("High", "Высокий"), urgent: language("Urgent", "Срочный"),
+})[value] || value;
+
+function form(kind, title, fields, label, submit) {
+  openSheet(kind, title);
+  const form = element("form", undefined, "form");
+  const inputs = {};
+  for (const field of fields) {
+    const row = element("label", field.label);
+    const input = element(field.type === "area" ? "textarea" : field.options ? "select" : "input");
+    if (field.options) {
+      for (const [value, label] of field.options) {
+        const option = element("option", label);
+        option.value = value;
+        input.append(option);
+      }
+    } else if (field.type !== "area") input.type = field.type || "text";
+    if (field.type === "number") input.min = "0";
+    input.required = Boolean(field.required);
+    input.value = field.value ?? "";
+    inputs[field.name] = input;
+    row.append(input);
+    form.append(row);
+  }
+  const save = element("button", label, "button primary");
+  save.type = "submit";
+  form.append(save);
+  form.addEventListener("submit", protect(async event => {
+    event.preventDefault();
+    save.disabled = true;
+    try {
+      await submit(Object.fromEntries(Object.entries(inputs).map(([key, input]) => [key, input.value])));
+    } finally { save.disabled = false; }
+  }));
+  body.append(form);
+}
+
+function taskEditor(task) {
+  const current = task || {};
+  const fields = [
+    { name: "title", label: language("Title", "Название"), required: true, value: current.title },
+    { name: "description", label: language("Description", "Описание"), type: "area", value: current.description },
+    { name: "criteria", label: language("Acceptance criteria, one per line", "Критерии приёмки, по одному на строку"), type: "area",
+      value: current.criteria?.join("\n") },
+    { name: "tags", label: language("Tags, comma separated", "Теги через запятую"), value: current.tags?.join(", ") },
+    { name: "priority", label: language("Priority", "Приоритет"), value: current.priority || "normal",
+      options: ["low", "normal", "high", "urgent"].map(value => [value, priorityName(value)]) },
+  ];
+  if (task) fields.push({ name: "note", label: language("Reason for change", "Причина изменения") });
+  form("editor", task ? language("Edit task", "Редактировать задачу") : language("New task", "Новая задача"),
+    fields, language("Save", "Сохранить"), async values => {
+      const data = {
+        title: values.title, description: values.description, criteria: lineList(values.criteria),
+        tags: values.tags.split(",").map(tag => tag.trim()).filter(Boolean), priority: values.priority,
+        actor: "user", revision: task?.revision, ...(values.note ? { note: values.note } : {}),
+      };
+      const saved = await command(task ? "update" : "create", task?.id, data);
+      if (saved) await showTask(saved.id);
+    });
+}
+
+async function showTask(id) {
+  const task = await command("show", id);
+  if (!task) return;
+  taskInSheet = task;
+  openSheet("task", task.id + " · " + task.title);
+  const lane = lanes.find(([state]) => state === task.status);
+  const status = lane ? language(lane[1], lane[2]) : task.status;
+  body.append(element("p", status + " · " + priorityName(task.priority) + " · " + shortDate(task.updatedAt), "muted"));
+  section(language("Description", "Описание"), task.description);
+  section(language("Acceptance criteria", "Критерии приёмки"), task.criteria);
+  section(language("Open questions", "Открытые вопросы"), task.questions);
+  section(language("Subtasks", "Подзадачи"), task.subtasks.map(item => (item.done ? "✓ " : "○ ") + item.title));
+  if (task.status === "in_progress") section(language("Submission", "Сдача"), language("Result not submitted", "Результат не сдан"));
+  section(language("Progress", "Ход работы"), task.summary);
+  section(language("Next step", "Следующий шаг"), task.nextStep);
+  if (task.blocked) section(language("Blocker", "Причина блокировки"), [task.blocked.reason, task.blocked.condition]);
+  if (task.result) {
+    section(language("Result", "Результат"), task.result.summary);
+    section(language("Checks", "Проверки"), task.result.checks);
+    section(language("Limitations", "Ограничения"), task.result.limitations);
+  }
+  if (task.git) {
+    section("Git", [task.git.target, task.git.worktree, task.git.submission?.sha, task.git.accepted].filter(Boolean));
+  }
+  if (task.attachments.length) {
+    const downloads = element("div", undefined, "sheet-actions");
+    for (const attachment of task.attachments) {
+      downloads.append(button("↓ " + attachment.name, async () => {
+        const result = await api.saveAttachment(task.id, attachment.file, attachment.name);
+        if (!result.ok) notice(boardError(result.error));
+      }));
+    }
+    body.append(downloads);
+  }
+  const actions = element("div", undefined, "sheet-actions");
+  const act = async (name, input) => {
+    const result = await command(name, task.id, { revision: task.revision, ...input });
+    if (result) await showTask(task.id);
+  };
+  if (task.status === "draft") actions.append(button(language("Approve", "Утвердить"), () => act("approve"), "primary"));
+  if (task.status === "review") {
+    actions.append(button(language("Review changes", "Проверить изменения"), () => showReview(task), "primary"));
+    actions.append(button(language("Request changes", "Вернуть на доработку"), () => noteTask(task, "request-changes")));
+  }
+  if (task.git?.worktree) actions.append(button(language("Open worktree", "Открыть worktree"), async () => {
+    const result = await api.openWorktree(task.id);
+    if (!result.ok) notice(boardError(result.error));
+  }));
+  if (["done", "cancelled"].includes(task.status)) {
+    if (task.git) actions.append(button(language("Remove worktree", "Убрать рабочую копию"), () => act("cleanup")));
+  } else {
+    actions.append(button(language("Edit", "Редактировать"), () => taskEditor(task)));
+    actions.append(button(language("Comment", "Комментарий"), () => noteTask(task, "comment")));
+    actions.append(button(language("Attach file", "Добавить файл"), async () => {
+      const result = await api.attach(task.id, task.revision);
+      if (!result.ok) notice(boardError(result.error));
+      else if (result.data) await showTask(task.id);
+    }));
+    actions.append(button(language("Cancel task", "Отменить задачу"), () => noteTask(task, "cancel"), "danger"));
+  }
+  body.append(actions);
+  section(language("History", "История"), task.history.slice().reverse().map(event =>
+    shortDate(event.at) + " · " + event.actor + " · " + (event.text || event.action)));
+}
+
+function noteTask(task, action) {
+  const comment = action === "comment";
+  form("note", comment ? language("Add comment", "Добавить комментарий") : language("Reason", "Причина"), [
+    { name: "note", label: comment ? language("Comment", "Комментарий") : language("Reason", "Причина"), type: "area", required: true },
+  ], language("Save", "Сохранить"), async ({ note }) => {
+    const saved = await command(action, task.id, {
+      revision: task.revision, actor: "user", [comment ? "text" : "reason"]: note,
+    });
+    if (saved) await showTask(task.id);
+  });
+}
+
+async function showReview(task) {
+  const review = await command("review", task.id);
+  if (!review) return;
+  form("review", language("Review changes", "Проверка изменений"), [
+    { name: "message", label: language("Acceptance commit message", "Сообщение коммита приёмки"), type: "area",
+      value: review.message, required: true },
+  ], language("Accept", "Принять"), async ({ message }) => {
+    const accepted = await command("accept", task.id, { revision: task.revision, targetHead: review.targetHead, message });
+    if (accepted) await showTask(task.id);
+  });
+  const diff = element("pre", review.diff);
+  const caption = element("p", review.target + " · " + review.mode + " · " + review.submitted.slice(0, 12), "muted");
+  body.prepend(caption, diff);
+  if (review.stale) {
+    notice(language("The task worktree changed. Submit it again.", "Рабочая копия изменилась. Сдайте задачу повторно."));
+    body.querySelector("button[type=submit]").disabled = true;
+  }
+  body.append(button(language("Use an existing acceptance commit", "Указать существующий коммит приёмки"), () => {
+    form("review", language("Existing acceptance commit", "Существующий коммит приёмки"), [
+      { name: "commit", label: language("Full commit SHA", "Полный SHA коммита"), required: true },
+    ], language("Verify and accept", "Проверить и принять"), async ({ commit }) => {
+      const accepted = await command("accept", task.id, { revision: task.revision, commit });
+      if (accepted) await showTask(task.id);
+    });
+    body.prepend(element("p", review.target, "muted"));
+  }));
+}
+
+function codexSettings() {
+  const section = element("section", undefined, "integration-panel");
+  section.append(element("h3", language("Codex integration", "Интеграция с Codex")));
+  const status = element("p", language("Checking Codex…", "Проверяем Codex…"), "muted");
+  status.setAttribute("role", "status");
+  const details = element("p", undefined, "muted");
+  const actions = element("div", undefined, "sheet-actions");
+  const install = button(language("Connect Codex", "Подключить Codex"), () => update(api.installCodex), "primary");
+  install.id = "connect-codex";
+  const choose = button(language("Choose executable…", "Выбрать файл…"), () => update(api.chooseCodex));
+  const auto = button(language("Detect automatically", "Найти автоматически"), () => update(api.autoDetectCodex));
+  const refresh = button(language("Refresh status", "Обновить статус"), () => update(api.codexStatus));
+  actions.append(install, choose, auto, refresh);
+  section.append(status, details, actions);
+  body.append(section);
+
+  async function update(load) {
+    for (const item of actions.children) item.disabled = true;
+    status.textContent = language("Checking Codex…", "Проверяем Codex…");
+    try {
+      const result = await load();
+      const messages = {
+        unavailable: language("Codex with plugin support was not found.", "Codex с поддержкой плагинов не найден."),
+        ready: language("Codex is available.", "Codex найден."),
+        installed: language("Installed. Open a new Codex chat to load the skills.", "Плагин установлен. Откройте новый чат Codex, чтобы загрузить навыки."),
+        disabled: language("The plugin is installed and disabled.", "Плагин установлен и отключён."),
+        conflict: language("The plugin name is in use by a different source.", "Имя плагина уже используется другим источником."),
+        error: language("Codex did not confirm the connection.", "Codex не подтвердил подключение."),
+      };
+      status.textContent = messages[result.state] || messages.error;
+      details.textContent = [result.clientPath, result.clientVersion ? "Codex " + result.clientVersion : "",
+        result.pluginVersion ? "AI Taskboard " + result.pluginVersion : "", result.error].filter(Boolean).join(" · ");
+      install.textContent = result.state === "installed"
+        ? language("Reconnect Codex", "Переподключить Codex") : language("Connect Codex", "Подключить Codex");
+      install.disabled = !["ready", "installed", "disabled", "error"].includes(result.state) ||
+        (result.state === "error" && !result.clientPath);
+      auto.hidden = !result.selectedPath;
+    } catch (error) {
+      status.textContent = language("Could not check Codex.", "Не удалось проверить Codex.");
+      details.textContent = error.message;
+    } finally {
+      for (const item of [choose, auto, refresh]) item.disabled = false;
+    }
+  }
+
+  void update(api.codexStatus);
+}
+
+function settings() {
+  if (!frame.board) {
+    openSheet("settings", language("Settings", "Настройки"));
+    body.append(element("p", language("Open a project to configure its board.", "Откройте проект, чтобы настроить доску.")));
+    appearanceSettings();
+    codexSettings();
+    return;
+  }
+  const current = frame.board.settings;
+  form("settings", language("Board settings", "Настройки доски"), [
+    { name: "archive", label: language("Archive after days (blank disables)", "Архивировать через N дней (пусто — отключено)"),
+      type: "number", value: current.archiveAfterDays },
+    { name: "mode", label: language("Acceptance mode", "Режим приёмки"), value: current.integrationMode,
+      options: [["merge", "Merge"], ["squash", "Squash"]] },
+  ], language("Save settings", "Сохранить настройки"), async values => {
+    if (await command("settings", undefined, {
+      archiveAfterDays: values.archive === "" ? null : Number(values.archive), integrationMode: values.mode,
+    })) sheet.close();
+  });
+  body.append(button(language("Check archives now", "Проверить архивацию"), () => command("archive")));
+  appearanceSettings();
+  codexSettings();
+}
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  const select = byId("theme-select");
+  if (select) select.value = theme;
+}
+
+function appearanceSettings() {
+  const panel = element("section", undefined, "appearance-panel");
+  panel.append(element("h3", language("Appearance", "Оформление")));
+  const label = element("label", language("Theme", "Тема"));
+  const select = element("select");
+  select.id = "theme-select";
+  select.disabled = true;
+  label.append(select);
+  panel.append(label);
+  body.prepend(panel);
+  api.themes().then(themes => {
+    const translated = {
+      system: language("System", "Как в системе"),
+      light: language("Light", "Светлая"),
+      dark: language("Dark", "Тёмная"),
+    };
+    select.replaceChildren(...themes.map(([id, label]) => new Option(translated[id] ?? label, id)));
+    select.value = frame.theme ?? "system";
+    select.disabled = false;
+  }).catch(error => notice(error.message));
+  select.addEventListener("change", protect(async () => {
+    select.disabled = true;
+    try {
+      const result = await api.setTheme(select.value);
+      if (!result.ok) {
+        select.value = frame.theme;
+        notice(boardError(result.error));
+      }
+    } finally {
+      select.disabled = false;
+    }
+  }));
+}
+
+function update(next) {
+  const projectChanged = frame.project !== next.project;
+  frame = next;
+  applyTheme(next.theme);
+  if (projectChanged) {
+    archiveView = false;
+    byId("search").value = "";
+    byId("filters").open = false;
+    byId("priority-filter").value = "";
+    byId("tag-filter").value = "";
+    if (sheet.open) sheet.close();
+  }
+  render();
+  if (sheetKind === "task" && sheet.open && taskInSheet) {
+    const task = frame.board?.tasks.find(entry => entry.id === taskInSheet.id);
+    const archived = frame.board?.archived.some(entry => entry.id === taskInSheet.id);
+    if ((task && task.revision !== taskInSheet.revision) ||
+        (archived && !task && !["done", "cancelled"].includes(taskInSheet.status))) {
+      void protect(() => showTask(taskInSheet.id))();
+    }
+  }
+}
+
+byId("open-project").addEventListener("click", protect(() => api.open()));
+byId("board-project").addEventListener("click", protect(() => api.open()));
+byId("welcome-action").addEventListener("click", protect(() =>
+  frame.error?.code === "BOARD_NOT_FOUND" ? command("init") : api.open()));
+byId("settings").addEventListener("click", settings);
+byId("board-settings").addEventListener("click", settings);
+byId("close-sheet").addEventListener("click", () => sheet.close());
+byId("archive-toggle").addEventListener("click", () => {
+  archiveView = !archiveView;
+  byId("filters").open = false;
+  render();
+});
+byId("refresh").addEventListener("click", protect(async () => {
+  const current = frame;
+  const board = await command("list");
+  if (board && frame === current) update({ ...frame, board, error: undefined });
+}));
+byId("search").addEventListener("input", render);
+byId("filters").addEventListener("change", render);
+document.addEventListener("pointerdown", event => {
+  const filters = byId("filters");
+  if (filters.open && !filters.contains(event.target)) filters.open = false;
+});
+document.addEventListener("keydown", event => {
+  const filters = byId("filters");
+  if (event.key === "Escape" && filters.open) {
+    filters.open = false;
+    filters.querySelector("summary").focus();
+  }
+  if (!sheet.open && frame.board && (event.ctrlKey || event.metaKey) && event.code === "KeyF") {
+    event.preventDefault();
+    byId("search").focus();
+    byId("search").select();
+  }
+});
+byId("create").addEventListener("click", () => taskEditor());
+sheet.addEventListener("close", () => { sheetKind = ""; taskInSheet = undefined; });
+api.subscribe(update);
+api.onSettings(settings);
+api.onTheme(theme => {
+  frame.theme = theme;
+  applyTheme(theme);
+});
+api.bootstrap().then(update).catch(error => notice(error.message));

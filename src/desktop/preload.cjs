@@ -1,0 +1,19 @@
+const { contextBridge, ipcRenderer } = require("electron");
+
+contextBridge.exposeInMainWorld("taskboard", {
+  bootstrap: () => ipcRenderer.invoke("board:bootstrap"),
+  open: () => ipcRenderer.invoke("board:open"),
+  command: (action, id, input) => ipcRenderer.invoke("board:command", action, id, input),
+  attach: (id, revision) => ipcRenderer.invoke("board:attach", id, revision),
+  saveAttachment: (id, file, name) => ipcRenderer.invoke("board:saveAttachment", id, file, name),
+  openWorktree: id => ipcRenderer.invoke("board:openWorktree", id),
+  subscribe: listener => { ipcRenderer.on("board:changed", (_event, frame) => listener(frame)); },
+  onSettings: listener => { ipcRenderer.on("board:settings", () => listener()); },
+  themes: () => ipcRenderer.invoke("appearance:themes"),
+  setTheme: theme => ipcRenderer.invoke("appearance:theme", theme),
+  onTheme: listener => { ipcRenderer.on("appearance:changed", (_event, theme) => listener(theme)); },
+  codexStatus: () => ipcRenderer.invoke("codex:status"),
+  chooseCodex: () => ipcRenderer.invoke("codex:choose"),
+  autoDetectCodex: () => ipcRenderer.invoke("codex:auto"),
+  installCodex: () => ipcRenderer.invoke("codex:install"),
+});

@@ -1,0 +1,31 @@
+{
+  "name": "ai-taskboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "An agent-native Kanban task board for software projects.",
+  "desktopName": "ai-taskboard-desktop.desktop",
+  "type": "module",
+  "engines": {
+    "node": ">=24.12.0"
+  },
+  "scripts": {
+    "taskboard": "node src/cli/main.ts",
+    "test": "node --test \"tests/**/*.test.ts\"",
+    "check": "tsc --noEmit",
+    "start": "electron .",
+    "build:cli": "node scripts/build-cli.mjs",
+    "package": "npm run build:cli && node scripts/package.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "electron": "45.2.3",
+    "electron-builder": "26.18.0",
+    "esbuild": "0.28.2",
+    "postject": "1.0.0-alpha.6",
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "fflate": "0.8.3"
+  },
+  "main": "src/desktop/main.ts"
+}

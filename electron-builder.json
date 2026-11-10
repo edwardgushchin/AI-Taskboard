@@ -1,0 +1,62 @@
+{
+  "appId": "org.aitaskboard.desktop",
+  "productName": "AI Taskboard",
+  "directories": {
+    "output": "release"
+  },
+  "files": [
+    "src/**/*",
+    "codex/marketplace/**/*",
+    "codex/marketplace/.agents/**/*",
+    "codex/marketplace/plugins/ai-taskboard/.codex-plugin/**/*"
+  ],
+  "extraResources": [
+    {
+      "from": "dist/cli",
+      "to": "bin",
+      "filter": [
+        "ai-taskboard",
+        "ai-taskboard.exe"
+      ]
+    }
+  ],
+  "win": {
+    "target": [
+      "nsis"
+    ]
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowElevation": false,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "include": "build/installer.nsh",
+    "allowToChangeInstallationDirectory": true
+  },
+  "mac": {
+    "target": [
+      "pkg"
+    ],
+    "category": "public.app-category.developer-tools"
+  },
+  "pkg": {
+    "installLocation": "/Applications"
+  },
+  "linux": {
+    "target": [
+      "deb",
+      "rpm"
+    ],
+    "category": "Development",
+    "executableName": "ai-taskboard-desktop",
+    "syncDesktopName": true
+  },
+  "deb": {
+    "fpm": ["--depends", "libgbm1", "--depends", "libasound2t64 | libasound2"]
+  },
+  "rpm": {
+    "fpm": ["--depends", "mesa-libgbm", "--depends", "alsa-lib"]
+  },
+  "artifactName": "ai-taskboard-${version}-${os}-${arch}.${ext}"
+}

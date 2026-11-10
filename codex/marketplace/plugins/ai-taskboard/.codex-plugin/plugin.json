@@ -1,0 +1,10 @@
+{
+  "name": "ai-taskboard",
+  "version": "0.1.0",
+  "description": "Read and work on local AI Taskboard tasks through the shared CLI.",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "AI Taskboard",
+    "shortDescription": "Manage tasks in your local AI Taskboard."
+  }
+}
