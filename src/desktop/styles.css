@@ -262,6 +262,19 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .draft-attachments li { display: flex; align-items: center; gap: 8px; }
 .draft-attachments span { flex: 1; overflow-wrap: anywhere; min-width: 0; }
 pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); padding: 11px; border-radius: 6px; font-size: 12px; }
+.review-diff code { display: block; min-width: 100%; width: max-content; }
+.review-diff code > span { display: block; min-height: 1lh; }
+.review-diff .diff-added { background: color-mix(in srgb, var(--green) 12%, var(--lane)); }
+.review-diff .diff-removed { background: color-mix(in srgb, var(--warn) 12%, var(--lane)); }
+.review-diff .diff-added .diff-marker { color: var(--green); }
+.review-diff .diff-removed .diff-marker { color: var(--warn); }
+.review-diff .diff-header { color: var(--text); font-weight: bold; }
+.review-diff .diff-hunk { background: color-mix(in srgb, var(--blue) 12%, var(--lane)); color: var(--blue); }
+.review-diff .diff-meta, .review-diff .syntax-comment { color: var(--muted); }
+.review-diff :is(.syntax-tag, .syntax-selector, .syntax-keyword) { color: var(--purple); }
+.review-diff :is(.syntax-attr-name, .syntax-property) { color: var(--blue); }
+.review-diff :is(.syntax-string, .syntax-attr-value) { color: var(--green); }
+.review-diff :is(.syntax-number, .syntax-function, .syntax-important) { color: var(--pink); }
 .muted { color: var(--muted); }
 .integration-panel, .appearance-panel, .tag-settings {
   display: grid; gap: 9px; padding-top: 15px; border-top: 1px solid var(--border);
