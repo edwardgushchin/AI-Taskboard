@@ -1,0 +1,37 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "AI Taskboard",
+      "type": "node",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "runtimeExecutable": "${workspaceFolder}/node_modules/electron/dist/electron.exe",
+      "args": [".", "--user-data-dir=${workspaceFolder}/dist/vscode-profile"],
+      "autoAttachChildProcesses": false,
+      "outputCapture": "std"
+    },
+    {
+      "name": "Проверить задачу",
+      "type": "node",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/.tasks/worktrees/${input:reviewTaskId}",
+      "runtimeExecutable": "${workspaceFolder}/node_modules/electron/dist/electron.exe",
+      "args": [
+        ".",
+        "--project",
+        "${workspaceFolder}",
+        "--user-data-dir=${workspaceFolder}/dist/review-${input:reviewTaskId}-profile"
+      ],
+      "autoAttachChildProcesses": false,
+      "outputCapture": "std"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "reviewTaskId",
+      "type": "promptString",
+      "description": "Номер задачи, например T-0002"
+    }
+  ]
+}
