@@ -14,9 +14,11 @@ function chatEventLabel(action) {
 }
 
 function reasoningName(effort) {
-  const labels = { none: "Нет", minimal: "Минимальный", low: "Низкий", medium: "Средний",
-    high: "Высокий", xhigh: "Очень высокий", max: "Максимальный", ultra: "Ультра" };
-  return frame.russian && Object.hasOwn(labels, effort) ? labels[effort] : effort;
+  const labels = {
+    none: ["None", "Нет"], minimal: ["Minimal", "Минимальное"], low: ["Low", "Низкое"], medium: ["Medium", "Среднее"],
+    high: ["High", "Высокое"], xhigh: ["Very high", "Очень высокое"], max: ["Max", "Максимальное"], ultra: ["Ultra", "Ультра"],
+  };
+  return Object.hasOwn(labels, effort) ? language(...labels[effort]) : effort;
 }
 
 function taskChat(task) {
@@ -37,11 +39,20 @@ function taskChat(task) {
   const header = element("div", undefined, "chat-header");
   const usage = latestReply?.usage;
   const percent = usage ? Math.min(100, Math.round(100 * usage.used / usage.limit)) : undefined;
-  const context = element("span", language("Context", "Контекст") + (percent === undefined ? " —" : " " + percent + "%"), "chat-context");
+  const context = element("span", undefined, "chat-context");
   context.title = usage
-    ? language("Last reply: ", "Последний ответ: ") + usage.used.toLocaleString() + " / " + usage.limit.toLocaleString() + language(" tokens", " токенов")
-    : language("Usage will appear after the first reply.", "Расход появится после первого ответа.");
-  header.append(heading, context);
+    ? language("Context", "Контекст") + " " + percent + "% · " + usage.used.toLocaleString() + " / " + usage.limit.toLocaleString() + language(" tokens", " токенов")
+    : language("Context usage will appear after the first reply.", "Расход контекста появится после первого ответа.");
+  if (percent !== undefined) {
+    context.style.setProperty("--context-used", percent + "%");
+    context.setAttribute("role", "meter");
+    context.setAttribute("aria-label", language("Context", "Контекст"));
+    context.setAttribute("aria-valuenow", String(percent));
+  } else {
+    context.setAttribute("role", "img");
+    context.setAttribute("aria-label", context.title);
+  }
+  header.append(heading);
   area.append(header);
   const list = element("ol", undefined, "chat-log");
   list.setAttribute("aria-label", language("Messages", "Сообщения"));
@@ -80,6 +91,7 @@ function taskChat(task) {
   });
   if (["done", "cancelled"].includes(task.status)) {
     if (latestReply) header.append(element("span", latestReply.model, "muted"));
+    header.append(context);
     return area;
   }
 
@@ -98,8 +110,19 @@ function taskChat(task) {
   const controls = element("div", undefined, "chat-controls");
   const model = element("select");
   model.setAttribute("aria-label", language("Model", "Модель"));
+  model.autofocus = true;
   const effort = element("select");
   effort.setAttribute("aria-label", language("Reasoning effort", "Уровень рассуждения"));
+  const options = element("div", undefined, "chat-options");
+  const picker = element("div", undefined, "chat-picker");
+  picker.popover = "auto";
+  picker.append(model, effort);
+  const selection = element("button", undefined, "chat-selection");
+  selection.type = "button";
+  selection.popoverTargetElement = picker;
+  const modelLabel = element("span", undefined, "chat-model-label");
+  const effortLabel = element("span", undefined, "chat-effort-label");
+  selection.append(modelLabel, effortLabel);
   const feedback = element("p", undefined, "chat-status");
   feedback.setAttribute("role", "status");
   const send = element("button", language("Send", "Отправить"), "button primary");
@@ -121,7 +144,8 @@ function taskChat(task) {
     chatCatalog = undefined;
     return loadModels();
   }, "quiet");
-  controls.append(attach, microphone, model, effort, send);
+  options.append(context, selection, picker, microphone);
+  controls.append(attach, options, send);
   composer.append(input, fileInput, pendingFiles, controls, feedback, retry, reload);
   area.append(composer);
 
@@ -132,6 +156,10 @@ function taskChat(task) {
     input.readOnly = working;
     attach.disabled = microphone.disabled = working;
     model.disabled = effort.disabled = working || !models.length;
+    selection.disabled = model.disabled;
+    modelLabel.textContent = model.selectedOptions[0]?.textContent ?? "";
+    effortLabel.textContent = model.value ? effort.selectedOptions[0]?.textContent ?? "" : "";
+    controlLabelForIcon(selection, [modelLabel.textContent, effortLabel.textContent].filter(Boolean).join(" · "));
     send.disabled = working || !model.value || !effort.value || (!draft.text.trim() && !draft.files.length);
     retry.hidden = !last?.chat || last.actor !== "user" || working;
     retry.disabled = !model.value || !effort.value;
