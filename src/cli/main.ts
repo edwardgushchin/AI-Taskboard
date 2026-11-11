@@ -4,6 +4,7 @@ import type { FSWatcher } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { acceptTask, inspectReview } from "./acceptance.ts";
+import { describeSavedChanges, restoreSavedChanges } from "./saved-changes.ts";
 import {
   addAttachment, archiveDiagnostics, createWithAttachments, isArchived, readAttachment, readTask, sweepArchives,
   upgradeTagCatalog,
@@ -21,7 +22,7 @@ const taskActions = new Set(["approve", "request-changes", "cancel", "comment", 
 const help = [
   "Usage: ai-taskboard [--project PATH] [--json] COMMAND [TASK-ID] [--stdin]",
   "Commands: init, list, show, create, update, comment, approve, start, progress,",
-  "          block, resume, preview, submit, review, accept, request-changes, cancel, cleanup, settings, watch, doctor",
+  "          block, resume, preview, submit, review, accept, restore-changes, request-changes, cancel, cleanup, settings, watch, doctor",
   "          list --archived, archive sweep, attachment add TASK-ID, attachment read TASK-ID",
   "          list --tag NAME, tag ensure --stdin, tag set --stdin (name and color)",
   "With --stdin, pass one JSON object as the command input.",
@@ -172,11 +173,15 @@ function run(
     store.saveIndex();
     return store.index.settings;
   }
-  if (command !== "show" && command !== "start" && command !== "cleanup" && command !== "preview" && command !== "submit" && command !== "review" && command !== "accept" && !taskActions.has(command)) {
+  if (command !== "show" && command !== "start" && command !== "cleanup" && command !== "preview" && command !== "submit" && command !== "review" && command !== "accept" && command !== "restore-changes" && !taskActions.has(command)) {
     throw new TaskboardError("UNKNOWN_COMMAND", "Unknown command " + command + ".");
   }
   if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
-  if (command === "show") return taskWithCurrentWorktree(store, readTask(store, id));
+  if (command === "show") {
+    const task = taskWithCurrentWorktree(store, readTask(store, id));
+    return { ...task, savedChanges: describeSavedChanges(store, task) };
+  }
+  if (command === "restore-changes") return restoreSavedChanges(store, readTask(store, id), input);
   if (command === "cleanup" && isArchived(store, id)) return cleanTaskWorktree(store, readTask(store, id));
   const task = store.card(id);
   if (command === "start") return startTask(store, task, input);

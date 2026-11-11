@@ -47,7 +47,13 @@ function boardError(error) {
   }
   const { output, path, paths } = error.details ?? {};
   const files = Array.isArray(paths) ? paths.join("\n") : undefined;
-  return [error.message, path, files, output].filter(value => typeof value === "string" && value.length)
+  const message = error.code === "LOCAL_CHANGES_CONFLICT"
+    ? language("The task conflicts with local changes. The target worktree was left untouched.",
+      "Задача конфликтует с локальными правками. Целевая копия осталась без изменений.")
+    : error.code === "RESTORE_CONFLICT"
+    ? language("Could not restore the changes. The backup is still available.", "Не удалось восстановить правки. Сохранённая копия доступна.")
+    : error.message;
+  return [message, path, files, output].filter(value => typeof value === "string" && value.length)
     .join("\n").slice(0, 4000);
 }
 
@@ -526,6 +532,7 @@ async function showTask(id) {
   const lane = lanes.find(([state]) => state === task.status);
   const status = lane ? language(lane[1], lane[2]) : task.status;
   body.append(element("p", status + " · " + priorityName(task.priority) + " · " + shortDate(task.updatedAt), "muted"));
+  savedChangesSection(task, task.savedChanges);
   if (task.tags.length) {
     const tags = element("div", undefined, "task-tags");
     tags.id = "task-sheet-tags";
@@ -601,20 +608,70 @@ function noteTask(task, action) {
   });
 }
 
-async function showReview(task) {
+function savedChangesSection(task, saved, pending = false) {
+  if (!saved) return;
+  const area = element("section", undefined, "sheet-section");
+  area.append(element("h3", language("Saved local changes", "Сохранённые локальные правки")));
+  if (saved.restored) {
+    area.append(element("p", language("Restored to ", "Восстановлены в папке ") + saved.restored.path));
+  } else {
+    const restore = async destination => {
+      const result = await command("restore-changes", task.id, { revision: task.revision, destination });
+      if (result) await showTask(task.id);
+    };
+    const actions = element("div", undefined, "sheet-actions");
+    if (!pending) {
+      const target = task.git.target.replace(/^refs\/heads\//, "");
+      actions.append(button(language("Restore in ", "Восстановить в ") + target, () => restore("target")));
+    }
+    actions.append(button(language("Restore in a separate worktree", "Восстановить в отдельной рабочей копии"), () => restore("worktree")));
+    area.append(actions);
+  }
+  body.append(area);
+}
+
+async function showReview(task, messageDraft) {
   const review = await command("review", task.id);
   if (!review) return;
-  form("review", language("Review changes", "Проверка изменений"), [
+  task = { ...task, revision: review.revision };
+  const local = review.localChanges;
+  const editor = form("review", language("Review changes", "Проверка изменений"), [
     { name: "message", label: language("Acceptance commit message", "Сообщение коммита приёмки"), type: "area",
-      value: review.message, required: true },
+      value: messageDraft ?? review.message, required: true },
   ], language("Accept", "Принять"), async ({ message }) => {
-    const accepted = await command("accept", task.id, { revision: task.revision, targetHead: review.targetHead, message });
-    if (accepted) await showTask(task.id);
+    const result = await api.command("accept", task.id, {
+      revision: task.revision, targetHead: review.targetHead, message,
+    });
+    if (result.ok) {
+      await showTask(task.id);
+      if (result.data.localChangesWarning) notice(boardError(result.data.localChangesWarning));
+    } else {
+      if (sheetKind === "review" && taskInSheet?.id === task.id) await showReview(task, message);
+      notice(boardError(result.error));
+    }
   });
   const diff = element("pre", review.diff);
   const caption = element("p", review.target + " · " + review.mode + " · " + review.submitted.slice(0, 12), "muted");
   body.prepend(caption, diff);
-  if (review.stale) {
+  if (local && !review.pending) {
+    const overlap = new Set(local.overlaps);
+    const changes = element("section", undefined, "sheet-section");
+    changes.append(element("h3", language("Local changes in the target worktree", "Локальные правки в целевой копии")));
+    changes.append(element("p", local.path, "muted"));
+    const list = element("ul");
+    for (const path of local.paths) {
+      list.append(element("li", path + (overlap.has(path) ? language(" (also changed by the task)", " (затронут задачей)") : "")));
+    }
+    changes.append(list);
+    changes.append(element("p", local.token
+      ? language("Your local changes will remain in the worktree after acceptance.",
+        "После приёмки локальные правки останутся в рабочей копии.")
+      : language("The current Git state prevents automatic preservation.", "Текущее состояние Git мешает автоматически сохранить правки.")));
+    editor.before(changes);
+    if (!local.token) editor.querySelector("button[type=submit]").disabled = true;
+  }
+  savedChangesSection(task, review.savedChanges, review.pending);
+  if (review.stale && !review.pending) {
     notice(language("The task worktree changed. Submit it again.", "Рабочая копия изменилась. Сдайте задачу повторно."));
     body.querySelector("button[type=submit]").disabled = true;
   }

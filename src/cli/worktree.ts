@@ -1,7 +1,7 @@
 import { realpathSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
 import {
-  excludeBoard, git, localBranch, requireRepository, resolveCommit, worktrees,
+  excludeBoard, git, invokeGit, localBranch, requireRepository, resolveCommit, worktrees,
 } from "./git.ts";
 import type { Repository, Worktree } from "./git.ts";
 import { object, record, requireRevision, requireState, TaskboardError, text } from "./model.ts";
@@ -38,6 +38,39 @@ export function gitStatus(path: string, ignored = false): string {
     "status", "--porcelain=v2", "-z", "--no-renames", "--untracked-files=all", "--ignore-submodules=none",
     ignored ? "--ignored=traditional" : "--ignored=no",
   ]);
+}
+
+export function collidingPaths(path: string, changed: string[], local: string[]): string[] {
+  const ignoreCase = invokeGit(path, ["config", "--bool", "core.ignorecase"]).stdout.trim();
+  const normalize = (name: string) => ignoreCase === "true" || (!ignoreCase && process.platform === "win32")
+    ? name.normalize("NFC").toLowerCase() : name;
+  const protectedPaths = new Set(local.map(normalize));
+  const containing = new Set<string>();
+  for (const name of protectedPaths) {
+    for (let slash = name.indexOf("/"); slash !== -1; slash = name.indexOf("/", slash + 1)) {
+      containing.add(name.slice(0, slash));
+    }
+  }
+  return changed.filter(name => {
+    const normalized = normalize(name);
+    if (protectedPaths.has(normalized) || containing.has(normalized)) return true;
+    for (let slash = normalized.indexOf("/"); slash !== -1; slash = normalized.indexOf("/", slash + 1)) {
+      if (protectedPaths.has(normalized.slice(0, slash))) return true;
+    }
+    return false;
+  });
+}
+
+export function checkProtectedPaths(path: string, changed: string[]): void {
+  const ignored = git(path, [
+    "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", ".", ":(top,exclude).tasks",
+  ]).split("\0").filter(Boolean);
+  const collisions = collidingPaths(path, changed, [".tasks", ...ignored]);
+  if (collisions.length) {
+    throw new TaskboardError("PROTECTED_PATH_COLLISION", "The operation would touch local ignored files or board data.", {
+      paths: collisions,
+    });
+  }
 }
 
 export function requireNoGitOperation(path: string): void {

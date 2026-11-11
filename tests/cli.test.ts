@@ -404,6 +404,156 @@ test("accept creates a merge commit and protects the source and ignored files", 
   assert.equal(cli(root, ["accept", task.id], { revision: task.revision }).git.accepted, done.git.accepted);
 });
 
+test("accept saves confirmed local edits and restores them in the target", t => {
+  const root = fixture(t, true);
+  const { task } = submitFixture(root, path => writeFileSync(join(path, "result.txt"), "delivered\n"));
+  cli(root, ["settings"], { integrationMode: "squash" });
+  writeFileSync(join(root, "source.txt"), "staged\n");
+  git(root, "add", "source.txt");
+  writeFileSync(join(root, "source.txt"), "working\n");
+  writeFileSync(join(root, "new file.txt"), "untracked\n");
+  writeFileSync(join(root, "secret.local"), "ignored\n");
+  const first = cli(root, ["review", task.id]);
+  assert.deepEqual(first.localChanges.paths, ["source.txt", "new file.txt"]);
+  assert.deepEqual(first.localChanges.overlaps, []);
+  writeFileSync(join(root, "additional.txt"), "appeared after review\n");
+  const input = { revision: task.revision, targetHead: first.targetHead, saveLocalChanges: first.localChanges.token };
+  cli(root, ["accept", task.id], input, "LOCAL_CHANGES_CHANGED");
+  assert.equal(readFileSync(join(root, "source.txt"), "utf8"), "working\n");
+  assert.equal(readFileSync(join(root, "additional.txt"), "utf8"), "appeared after review\n");
+  const review = cli(root, ["review", task.id]);
+  const done = cli(root, ["accept", task.id], { ...input, saveLocalChanges: review.localChanges.token });
+  assert.equal(done.status, "done");
+  assert.equal(git(root, "status", "--porcelain"), "");
+  assert.equal(readFileSync(join(root, "secret.local"), "utf8"), "ignored\n");
+  const ref = git(root, "for-each-ref", "--format=%(refname)", "refs/ai-taskboard/saved/" + task.id);
+  const sha = git(root, "rev-parse", ref);
+  assert.equal(cli(root, ["show", task.id]).savedChanges.sha, sha);
+  git(root, "stash", "drop");
+  const restored = cli(root, ["restore-changes", task.id], { revision: done.revision, destination: "target" });
+  assert.equal(restored.destination, "target");
+  assert.equal(readFileSync(join(root, "source.txt"), "utf8"), "working\n");
+  assert.equal(git(root, "show", ":source.txt"), "staged");
+  assert.equal(readFileSync(join(root, "new file.txt"), "utf8"), "untracked\n");
+  assert.equal(readFileSync(join(root, "additional.txt"), "utf8"), "appeared after review\n");
+  assert.equal(git(root, "show", "HEAD:source.txt"), "baseline");
+  assert.equal(git(root, "rev-parse", ref), sha);
+  assert.deepEqual(cli(root, ["restore-changes", task.id], { revision: done.revision, destination: "target" }), restored);
+});
+
+test("restore checks conflicts away from the target and can recover in a separate worktree", t => {
+  const root = fixture(t, true);
+  const { task } = submitFixture(root, path => writeFileSync(join(path, "source.txt"), "task change\n"));
+  writeFileSync(join(root, "source.txt"), "local change\n");
+  writeFileSync(join(root, "new.txt"), "keep me\n");
+  const review = cli(root, ["review", task.id]);
+  assert.deepEqual(review.localChanges.overlaps, ["source.txt"]);
+  const done = cli(root, ["accept", task.id], {
+    revision: task.revision, targetHead: review.targetHead, saveLocalChanges: review.localChanges.token,
+  });
+  assert.equal(done.status, "done");
+  const target = { revision: done.revision, destination: "target" };
+  const error = cli(root, ["restore-changes", task.id], target, "RESTORE_CONFLICT");
+  assert.deepEqual(error.details.paths, ["source.txt"]);
+  assert.equal(git(root, "status", "--porcelain"), "");
+  assert.equal(git(root, "rev-parse", "HEAD"), done.git.accepted);
+  assert.equal(readFileSync(join(root, "source.txt"), "utf8").trim(), "task change");
+  assert.ok(!existsSync(join(root, "new.txt")));
+  assert.doesNotMatch(git(root, "worktree", "list", "--porcelain"), /\.restore-check-/);
+  const recovery = cli(root, ["restore-changes", task.id], { ...target, destination: "worktree" });
+  assert.equal(git(recovery.path, "rev-parse", "HEAD"), review.targetHead);
+  assert.equal(readFileSync(join(recovery.path, "source.txt"), "utf8"), "local change\n");
+  assert.equal(readFileSync(join(recovery.path, "new.txt"), "utf8"), "keep me\n");
+  assert.deepEqual(cli(root, ["show", task.id]).savedChanges.restored, recovery);
+  assert.equal(git(root, "status", "--porcelain"), "");
+});
+
+test("a failed acceptance keeps the saved edits recoverable", t => {
+  const root = fixture(t, true);
+  const { task } = submitFixture(root, path => writeFileSync(join(path, "result.txt"), "delivered\n"));
+  writeFileSync(join(root, "source.txt"), "local changes\n");
+  const review = cli(root, ["review", task.id]);
+  const hooks = join(root, ".git", "hooks");
+  writeFileSync(join(hooks, "pre-merge-commit"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  cli(root, ["accept", task.id], {
+    revision: task.revision, targetHead: review.targetHead, saveLocalChanges: review.localChanges.token,
+  }, "GIT_FAILED");
+  assert.equal(git(root, "rev-parse", "HEAD"), review.targetHead);
+  const pending = cli(root, ["show", task.id]);
+  assert.equal(pending.status, "review");
+  const ref = git(root, "for-each-ref", "--format=%(refname)", "refs/ai-taskboard/saved/" + task.id);
+  assert.equal(pending.savedChanges.sha, git(root, "rev-parse", ref));
+  git(root, "update-ref", "-d", ref);
+  assert.equal(cli(root, ["show", task.id]).savedChanges.sha, pending.savedChanges.sha);
+  const restored = cli(root, ["restore-changes", task.id], { revision: task.revision, destination: "worktree" });
+  assert.equal(readFileSync(join(restored.path, "source.txt"), "utf8"), "local changes\n");
+});
+
+test("ordinary acceptance leaves disjoint edits and new files in place", t => {
+  const root = fixture(t, true);
+  const { task } = submitFixture(root, path => writeFileSync(join(path, "result.txt"), "delivered\n"));
+  cli(root, ["settings"], { integrationMode: "squash" });
+  writeFileSync(join(root, "source.txt"), "local\n");
+  writeFileSync(join(root, "launch.json"), "untracked\n");
+  const hook = join(root, ".git", "hooks", "pre-commit");
+  writeFileSync(hook, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  cli(root, ["accept", task.id], { revision: task.revision }, "GIT_FAILED");
+  rmSync(hook);
+  const done = cli(root, ["accept", task.id]);
+  assert.equal(done.status, "done");
+  assert.equal(git(root, "show", "HEAD:result.txt"), "delivered");
+  assert.equal(git(root, "show", "HEAD:source.txt"), "baseline");
+  assert.equal(readFileSync(join(root, "source.txt"), "utf8"), "local\n");
+  assert.equal(readFileSync(join(root, "launch.json"), "utf8"), "untracked\n");
+  assert.equal(git(root, "stash", "list"), "");
+});
+
+test("ordinary acceptance reapplies compatible edits including the index", t => {
+  const root = fixture(t, true);
+  const original = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
+  const write = (path: string, lines: string[]) => writeFileSync(join(path, "source.txt"), lines.join("\n") + "\n");
+  write(root, original);
+  git(root, "add", "source.txt");
+  git(root, "commit", "-m", "chore: extend fixture");
+  const delivered = ["task change", ...original.slice(1)];
+  const { task } = submitFixture(root, path => write(path, delivered));
+  const staged = [...original.slice(0, -1), "staged local change"];
+  write(root, staged);
+  git(root, "add", "source.txt");
+  write(root, [...staged, "unstaged local change"]);
+  writeFileSync(join(root, "launch.json"), "untracked\n");
+  const done = cli(root, ["accept", task.id], { revision: task.revision });
+  assert.equal(done.status, "done");
+  assert.equal(done.localChangesWarning, undefined);
+  assert.equal(git(root, "show", "HEAD:source.txt"), delivered.join("\n"));
+  const restoredIndex = [delivered[0], ...staged.slice(1)];
+  assert.equal(git(root, "show", ":source.txt"), restoredIndex.join("\n"));
+  assert.equal(readFileSync(join(root, "source.txt"), "utf8"), [...restoredIndex, "unstaged local change"].join("\n") + "\n");
+  assert.equal(readFileSync(join(root, "launch.json"), "utf8"), "untracked\n");
+  assert.equal(cli(root, ["show", task.id]).savedChanges.restored.destination, "target");
+});
+
+test("ordinary acceptance reports local conflicts before changing the target", t => {
+  const root = fixture(t, true);
+  const { task } = submitFixture(root, path => {
+    writeFileSync(join(path, "source.txt"), "task change\n");
+    writeFileSync(join(path, "new.txt"), "task file\n");
+  });
+  const head = git(root, "rev-parse", "HEAD");
+  writeFileSync(join(root, "source.txt"), "local change\n");
+  const input = { revision: task.revision };
+  const conflict = cli(root, ["accept", task.id], input, "LOCAL_CHANGES_CONFLICT");
+  assert.deepEqual(conflict.details.paths, ["source.txt"]);
+  writeFileSync(join(root, "new.txt"), "untracked\n");
+  const collision = cli(root, ["accept", task.id], input, "LOCAL_CHANGES_CONFLICT");
+  assert.deepEqual(collision.details.paths, ["new.txt"]);
+  assert.equal(git(root, "rev-parse", "HEAD"), head);
+  assert.equal(readFileSync(join(root, "source.txt"), "utf8"), "local change\n");
+  assert.equal(readFileSync(join(root, "new.txt"), "utf8"), "untracked\n");
+  assert.equal(git(root, "stash", "list"), "");
+  assert.equal(cli(root, ["show", task.id]).status, "review");
+});
+
 test("squash accepts into a local branch that was not checked out", t => {
   const root = fixture(t, true);
   const initial = git(root, "rev-parse", "HEAD");

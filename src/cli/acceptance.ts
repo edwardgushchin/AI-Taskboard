@@ -3,10 +3,11 @@ import { git, invokeGit, localBranch, requireRepository, resolveCommit } from ".
 import type { Repository } from "./git.ts";
 import { object, record, requireRevision, requireState, TaskboardError, text } from "./model.ts";
 import type { IntegrationMode, Task, TaskGit } from "./model.ts";
+import { checkPreserveChanges, describeSavedChanges, inspectLocalChanges, restoreSavedChanges, saveLocalChanges } from "./saved-changes.ts";
 import { exists, readJson, removeFile, writeJson } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
 import { conventionalMessage } from "./submission.ts";
-import { findWorktree, gitStatus, requireNoGitOperation, usableWorktree } from "./worktree.ts";
+import { checkProtectedPaths, collidingPaths, findWorktree, gitStatus, requireNoGitOperation, usableWorktree } from "./worktree.ts";
 
 interface AcceptIntent {
   action: "accept";
@@ -17,6 +18,7 @@ interface AcceptIntent {
   tree: string;
   mode: IntegrationMode;
   message: string;
+  restoreLocalChanges?: true;
 }
 
 const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -59,10 +61,21 @@ export function inspectReview(store: BoardStore, task: Task) {
   const item = findWorktree(repo, context.branch);
   const stale = !item || item.prunable || item.head !== submitted || !exists(item.path) ||
     Boolean(gitStatus(usableWorktree(item)));
+  const paths = splitPaths(git(repo.root, ["diff", "--no-renames", "--name-only", "-z", base, submitted]));
+  const checkout = findWorktree(repo, target);
+  const local = checkout && !checkout.prunable && exists(checkout.path)
+    ? inspectLocalChanges(usableWorktree(checkout), head) : undefined;
+  const savedChanges = describeSavedChanges(store, task);
+  const retry = readIntent(store.pendingPath(task.id), task, target, submitted);
   return {
-    target, targetHead: head, submitted, stale, message: context.submission.message,
+    target, targetHead: head, submitted, stale, revision: task.revision, message: retry?.message ?? context.submission.message,
     mode: store.index.settings.integrationMode,
-    paths: splitPaths(git(repo.root, ["diff", "--name-only", "-z", base, submitted])),
+    paths, savedChanges,
+    localChanges: local && {
+      path: local.path, paths: local.paths, token: local.token,
+      overlaps: collidingPaths(local.path, local.paths, paths),
+    },
+    pending: Boolean(retry),
     diff: git(repo.root, ["diff", ...diffOptions, "--binary", base, submitted]),
   };
 }
@@ -81,34 +94,8 @@ function mergeTree(path: string, parent: string, submitted: string): string {
   return tree;
 }
 
-function checkTargetPaths(path: string, parent: string, tree: string): void {
-  const changed = splitPaths(git(path, ["diff", "--no-renames", "--name-only", "-z", parent, tree]));
-  const ignoreCase = invokeGit(path, ["config", "--bool", "core.ignorecase"]).stdout.trim();
-  const insensitive = ignoreCase === "true" || (!ignoreCase && process.platform === "win32");
-  const normalize = (name: string) => insensitive ? name.normalize("NFC").toLowerCase() : name;
-  const ignored = splitPaths(git(path, [
-    "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", ".", ":(top,exclude).tasks",
-  ]));
-  const protectedPaths = new Set([".tasks", ...ignored].map(normalize));
-  const containing = new Set<string>();
-  for (const protectedPath of protectedPaths) {
-    for (let slash = protectedPath.indexOf("/"); slash !== -1; slash = protectedPath.indexOf("/", slash + 1)) {
-      containing.add(protectedPath.slice(0, slash));
-    }
-  }
-  const collisions = changed.filter(name => {
-    const normalized = normalize(name);
-    if (protectedPaths.has(normalized) || containing.has(normalized)) return true;
-    for (let slash = normalized.indexOf("/"); slash !== -1; slash = normalized.indexOf("/", slash + 1)) {
-      if (protectedPaths.has(normalized.slice(0, slash))) return true;
-    }
-    return false;
-  });
-  if (collisions.length) {
-    throw new TaskboardError("PROTECTED_PATH_COLLISION", "The merge would touch local ignored files or board data.", {
-      paths: collisions,
-    });
-  }
+function targetPaths(path: string, parent: string, tree: string): string[] {
+  return splitPaths(git(path, ["diff", "--no-renames", "--name-only", "-z", parent, tree]));
 }
 
 function temporaryTargetPath(store: BoardStore, task: Task): string {
@@ -183,17 +170,29 @@ function readIntent(path: string, task: Task, target: string, submitted: string)
   if (typeof pending.parent !== "string" || !oid.test(pending.parent) ||
       typeof pending.tree !== "string" || !oid.test(pending.tree) ||
       (pending.mode !== "merge" && pending.mode !== "squash") ||
+      (pending.restoreLocalChanges !== undefined && pending.restoreLocalChanges !== true) ||
       typeof pending.message !== "string" || conventionalMessage(pending.message, task.id) !== pending.message) {
     throw new TaskboardError("CORRUPT_STORAGE", "Invalid acceptance recovery record.");
   }
   return pending as unknown as AcceptIntent;
 }
 
-function finish(store: BoardStore, task: Task, sha: string): Task {
+function finish(store: BoardStore, task: Task, sha: string, restoreLocalChanges = false) {
+  let localChangesWarning;
+  if (restoreLocalChanges) {
+    try {
+      const saved = describeSavedChanges(store, task);
+      if (saved && !saved.restored) restoreSavedChanges(store, task, { revision: task.revision, destination: "target" }, true);
+    } catch (error) {
+      localChangesWarning = error instanceof TaskboardError
+        ? { code: error.code, message: error.message, details: error.details }
+        : { code: "RESTORE_FAILED", message: String(error) };
+    }
+  }
   const context = reviewed(task);
   const completed = store.save(record({ ...task, git: { ...context, accepted: sha } }, "accept", "user", "done", sha));
   removeFile(store.pendingPath(task.id));
-  return completed;
+  return { ...completed, localChangesWarning };
 }
 
 function verifyExternal(repo: Repository, task: Task, head: string, submitted: string, value: unknown): string {
@@ -215,11 +214,12 @@ function verifyExternal(repo: Repository, task: Task, head: string, submitted: s
   return sha;
 }
 
-function preparedSquash(path: string, tree: string, status: string): boolean {
-  if (!status) return false;
-  if (!splitPaths(status).every(line => /^1 [MADT]\. /.test(line))) return false;
+function preparedSquash(path: string, head: string, tree: string, status: string): boolean {
+  const local = inspectLocalChanges(path, head, status);
+  if (!local?.token || !local.indexDirty) return false;
   const squashFile = git(path, ["rev-parse", "--path-format=absolute", "--git-path", "SQUASH_MSG"]).trimEnd();
-  return exists(squashFile) && git(path, ["write-tree"]).trim() === tree;
+  return exists(squashFile) && git(path, ["write-tree"]).trim() === tree &&
+    !collidingPaths(path, targetPaths(path, head, tree), local.working).length;
 }
 
 export function acceptTask(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
@@ -247,7 +247,7 @@ function integrateTask(store: BoardStore, task: Task, input: Record<string, unkn
   if (intent && input.commit !== undefined) {
     throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted local acceptance first.");
   }
-  if (intent && head !== intent.parent) return finish(store, task, recoverCommit(repo, head, intent));
+  if (intent && head !== intent.parent) return finish(store, task, recoverCommit(repo, head, intent), intent.restoreLocalChanges);
   if (!intent && input.commit !== undefined) return finish(store, task, verifyExternal(repo, task, head, submitted, input.commit));
   if (input.targetHead !== undefined && input.targetHead !== head) {
     throw new TaskboardError("TARGET_CHANGED", "The target branch advanced. Review the changes again.", { head });
@@ -264,31 +264,60 @@ function integrateTask(store: BoardStore, task: Task, input: Record<string, unkn
   const path = checkoutTarget(store, repo, task, target);
   requireNoGitOperation(path);
   const status = gitStatus(path);
-  const resumedSquash = Boolean(intent?.mode === "squash" && preparedSquash(path, intent.tree, status));
-  if (status && !resumedSquash) {
+  const resumedSquash = Boolean(intent?.mode === "squash" && preparedSquash(path, head, intent.tree, status));
+  const saveToken = input.saveLocalChanges;
+  const local = resumedSquash ? undefined : inspectLocalChanges(path, head, status);
+  if (local && intent && saveToken !== undefined) {
     throw new TaskboardError("DIRTY_TARGET", "The target worktree has local changes.", { path });
   }
+  if (!status && !intent && saveToken !== undefined && !describeSavedChanges(store, task)) {
+    throw new TaskboardError("LOCAL_CHANGES_CHANGED", "Local changes have changed. Review the file list again.", { path });
+  }
+  const retry = Boolean(intent);
   if (!intent) {
     const message = conventionalMessage(input.message ?? context.submission.message, task.id);
     const tree = mergeTree(path, head, submitted);
     if (store.index.settings.integrationMode === "squash" && commitInfo(path, head).tree === tree) {
       throw new TaskboardError("ALREADY_INTEGRATED", "The target branch already contains the submitted changes.");
     }
-    checkTargetPaths(path, head, tree);
     intent = {
       action: "accept", revision: task.revision, target, parent: head, submitted, tree,
       mode: store.index.settings.integrationMode, message,
     };
-    writeJson(pendingPath, intent);
   } else {
     if (input.message !== undefined && conventionalMessage(input.message, task.id) !== intent.message) {
       throw new TaskboardError("PENDING_OPERATION", "Retry with the originally confirmed message.");
     }
-    if (!resumedSquash) checkTargetPaths(path, head, intent.tree);
+  }
+  const changed = resumedSquash ? [] : targetPaths(path, head, intent.tree);
+  if (!resumedSquash) checkProtectedPaths(path, changed);
+  const direct = local && !local.indexDirty && !collidingPaths(path, changed, local.paths).length;
+  const preserve = local && saveToken === undefined && !direct;
+  if (local && !local.token) {
+    throw new TaskboardError("LOCAL_CHANGES_UNSUPPORTED", "These local changes cannot be preserved automatically.", { path });
+  }
+  if (preserve) {
+    if (retry && !intent.restoreLocalChanges) {
+      throw new TaskboardError("DIRTY_TARGET", "The target worktree changed during acceptance.", { path });
+    }
+    checkPreserveChanges(store, path, head, intent.tree, changed, local);
+    intent.restoreLocalChanges = true;
   }
   if (resolveCommit(path, "HEAD") !== head || git(path, ["symbolic-ref", "HEAD"]).trim() !== target) {
     throw new TaskboardError("TARGET_CHANGED", "The target checkout moved before acceptance.", { path });
   }
+  if (gitStatus(path) !== status) {
+    throw new TaskboardError("LOCAL_CHANGES_CHANGED", "Local changes have changed. Review the task again.", { path });
+  }
+  if (preserve && !retry) writeJson(pendingPath, intent);
+  if (local && (saveToken !== undefined || preserve)) {
+    saveLocalChanges(store, task, path, head, saveToken ?? local.token, !preserve);
+    if (resolveCommit(path, "HEAD") !== head || git(path, ["symbolic-ref", "HEAD"]).trim() !== target) {
+      throw new TaskboardError("TARGET_CHANGED", "The target checkout moved after saving local changes.", { path });
+    }
+    checkProtectedPaths(path, changed);
+  }
+  if (!retry && !preserve) writeJson(pendingPath, intent);
 
   try {
     if (intent.mode === "merge") {
@@ -302,8 +331,16 @@ function integrateTask(store: BoardStore, task: Task, input: Record<string, unkn
       git(path, ["commit", "--cleanup=verbatim", "-m", intent.message]);
     }
   } catch (error) {
-    if (resolveCommit(path, "HEAD") === head && !gitStatus(path).length) removeFile(pendingPath);
+    const beforeMerge = preserve ? local.untracked.map(name => "? " + name + "\0").join("") : direct && saveToken === undefined ? status : "";
+    if (resolveCommit(path, "HEAD") === head && gitStatus(path) === beforeMerge) {
+      removeFile(pendingPath);
+      if (intent.restoreLocalChanges && describeSavedChanges(store, task)) {
+        try {
+          restoreSavedChanges(store, task, { revision: task.revision, destination: "target" }, true);
+        } catch { /* The saved changes remain available in the task card. */ }
+      }
+    }
     throw error;
   }
-  return finish(store, task, recoverCommit(repo, targetHead(repo, target), intent));
+  return finish(store, task, recoverCommit(repo, targetHead(repo, target), intent), intent.restoreLocalChanges);
 }
