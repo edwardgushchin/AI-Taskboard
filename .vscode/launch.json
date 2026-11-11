@@ -19,8 +19,6 @@
       "runtimeExecutable": "${workspaceFolder}/node_modules/electron/dist/electron.exe",
       "args": [
         ".",
-        "--project",
-        "${workspaceFolder}",
         "--user-data-dir=${workspaceFolder}/dist/review-${input:reviewTaskId}-profile"
       ],
       "autoAttachChildProcesses": false,

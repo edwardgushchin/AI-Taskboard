@@ -21,6 +21,8 @@ Use Node.js 24.12 or newer and Git 2.38 or newer. Run `npm ci`, `npm run check`,
 
 In VS Code on Windows, open the repository folder and press **F5** to launch **AI Taskboard** from **Run and Debug**. Set breakpoints in `src/desktop/main.ts` to debug the Electron main process. The debug session uses its own profile in `dist/vscode-profile`.
 
+To review a task, select **Проверить задачу** in **Run and Debug**, press **F5**, and enter the task ID. The app opens its welcome page from the task's worktree and uses a separate profile for that task.
+
 Run `npm run package` on Windows x64. The NSIS installer and unpacked application are written to `release/`. The package includes a standalone CLI with its own Node.js runtime.
 
 Future Linux and macOS releases use platform-native packages. The Linux build uses `AI_TASKBOARD_PROJECT_URL` and `AI_TASKBOARD_MAINTAINER` for package metadata. The macOS distribution requires Developer ID identities and notarization credentials.
