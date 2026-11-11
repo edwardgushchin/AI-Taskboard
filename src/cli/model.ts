@@ -1,6 +1,7 @@
 export const taskStates = ["draft", "ready", "in_progress", "blocked", "review", "done", "cancelled"] as const;
 export const priorities = ["low", "normal", "high", "urgent"] as const;
 export const tagColors = ["purple", "blue", "cyan", "pink", "green"] as const;
+export const maxAttachmentBytes = 64 * 1024 * 1024;
 
 export type TaskState = typeof taskStates[number];
 export type Priority = typeof priorities[number];

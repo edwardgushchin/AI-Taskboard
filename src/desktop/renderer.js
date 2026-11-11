@@ -421,30 +421,101 @@ function form(kind, title, fields, label, submit) {
     } finally { save.disabled = false; }
   }));
   body.append(form);
+  return form;
+}
+
+function newTaskDraft() {
+  const project = frame.project;
+  const files = [];
+  const hint = element("p", api.isMac
+    ? language("Paste files or screenshots with ⌘V.", "Вставьте файлы или скриншоты через ⌘V.")
+    : language("Paste files or screenshots with Ctrl+V.", "Вставьте файлы или скриншоты через Ctrl+V."), "muted");
+  hint.id = "draft-paste-hint";
+  const attachments = element("ul", undefined, "draft-attachments");
+  attachments.hidden = true;
+  attachments.setAttribute("aria-label", language("Attachments", "Вложения"));
+  const progress = element("p", language("Codex is preparing a draft…", "Codex готовит черновик…"), "muted");
+  progress.hidden = true;
+  progress.setAttribute("role", "status");
+  const editor = form("new-task", language("New task", "Новая задача"), [
+    { name: "request", label: language("What needs to be done?", "Что нужно сделать?"), type: "area", required: true },
+  ], language("Create draft", "Создать черновик"), async ({ request }) => {
+    notice();
+    progress.hidden = false;
+    input.readOnly = true;
+    for (const button of attachments.querySelectorAll("button")) button.disabled = true;
+    try {
+      const pasted = await Promise.all(files.map(async file => ({
+        name: file.name, type: file.type, bytes: await file.arrayBuffer(),
+      })));
+      const result = await api.draft(request, pasted);
+      if (!editor.isConnected || !sheet.open || frame.project !== project) return;
+      if (!result.ok) {
+        notice(boardError(result.error));
+        return;
+      }
+      archiveView = false;
+      render();
+      await showTask(result.data.id);
+    } finally {
+      progress.hidden = true;
+      input.readOnly = false;
+      for (const button of attachments.querySelectorAll("button")) button.disabled = false;
+    }
+  });
+  editor.append(progress);
+  const input = editor.querySelector("textarea");
+  input.setAttribute("aria-describedby", hint.id);
+  editor.querySelector("[type=submit]").before(hint, attachments);
+  input.addEventListener("paste", event => {
+    if (input.readOnly) return;
+    const pasted = Array.from(event.clipboardData?.files ?? []);
+    if (!pasted.length) return;
+    if (!event.clipboardData.getData("text/plain")) event.preventDefault();
+    if ([...files, ...pasted].reduce((total, file) => total + file.size, 0) > 64 * 1024 * 1024) {
+      notice(language("Attachments are limited to 64 MiB per task.", "Лимит вложений на задачу — 64 МиБ."));
+      return;
+    }
+    notice();
+    for (const file of pasted) {
+      files.push(file);
+      const row = element("li");
+      const remove = button("×", () => {
+        if (input.readOnly) return;
+        files.splice(files.indexOf(file), 1);
+        row.remove();
+        attachments.hidden = input.required = !files.length;
+        notice();
+        input.focus();
+      }, "quiet");
+      remove.setAttribute("aria-label", language("Remove ", "Удалить ") + file.name);
+      row.append(icon("attachment"), element("span", file.name), remove);
+      attachments.append(row);
+    }
+    input.required = attachments.hidden = false;
+  });
+  input.focus();
 }
 
 function taskEditor(task) {
-  const current = task || {};
-  const fields = [
-    { name: "title", label: language("Title", "Название"), required: true, value: current.title },
-    { name: "description", label: language("Description", "Описание"), type: "area", value: current.description },
+  form("editor", language("Edit task", "Редактировать задачу"), [
+    { name: "title", label: language("Title", "Название"), required: true, value: task.title },
+    { name: "description", label: language("Description", "Описание"), type: "area", value: task.description },
     { name: "criteria", label: language("Acceptance criteria, one per line", "Критерии приёмки, по одному на строку"), type: "area",
-      value: current.criteria?.join("\n") },
-    { name: "tags", label: language("Tags, comma separated", "Теги через запятую"), value: current.tags?.join(", ") },
-    { name: "priority", label: language("Priority", "Приоритет"), value: current.priority || "normal",
+      value: task.criteria.join("\n") },
+    { name: "tags", label: language("Tags, comma separated", "Теги через запятую"), value: task.tags.join(", ") },
+    { name: "priority", label: language("Priority", "Приоритет"), value: task.priority,
       options: ["low", "normal", "high", "urgent"].map(value => [value, priorityName(value)]) },
-  ];
-  if (task) fields.push({ name: "note", label: language("Reason for change", "Причина изменения") });
-  form("editor", task ? language("Edit task", "Редактировать задачу") : language("New task", "Новая задача"),
-    fields, language("Save", "Сохранить"), async values => {
-      const data = {
-        title: values.title, description: values.description, criteria: lineList(values.criteria),
-        tags: values.tags.split(",").map(tag => tag.trim()).filter(Boolean), priority: values.priority,
-        actor: "user", revision: task?.revision, ...(values.note ? { note: values.note } : {}),
-      };
-      const saved = await command(task ? "update" : "create", task?.id, data);
-      if (saved) await showTask(saved.id);
-    });
+    { name: "note", label: language("Reason for change", "Причина изменения") },
+  ], language("Save", "Сохранить"), async values => {
+    const data = {
+      title: values.title, description: values.description, criteria: lineList(values.criteria),
+      tags: values.tags.split(",").map(tag => tag.trim()).filter(Boolean), priority: values.priority,
+      actor: "user", revision: task.revision, ...(values.note ? { note: values.note } : {}),
+    };
+    const saved = await command("update", task.id, data);
+    if (saved) await showTask(saved.id);
+  });
 }
 
 async function showTask(id) {
@@ -771,7 +842,7 @@ document.addEventListener("keydown", event => {
     byId("search").select();
   }
 });
-byId("create").addEventListener("click", () => taskEditor());
+byId("create").addEventListener("click", newTaskDraft);
 sheet.addEventListener("close", () => {
   if (sheet.open) return;
   sheetKind = "";

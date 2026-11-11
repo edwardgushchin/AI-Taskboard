@@ -8,7 +8,7 @@ The first version targets Windows x64. Run `ai-taskboard-0.1.0-win-x64.exe`, the
 
 1. Open AI Taskboard and choose a project folder. Select **Create board** if the project has no board yet.
 2. Open **Settings → Codex integration → Connect Codex**. Open a new local Codex chat for the project after the app confirms installation.
-3. Ask Codex to create a task. Approve it in AI Taskboard, then ask Codex to work on its task number. A second chat can resume the same task and worktree.
+3. Select **Create task** and describe the change. Codex fills in the draft fields and AI Taskboard opens the saved draft. Review and approve it, then ask Codex in the project chat to work on its task number. A second chat can resume the same task and worktree.
 4. Review the submitted diff in the app. **Accept** creates or verifies the acceptance commit in the target branch.
 
 Use **Settings → Appearance** to follow the system or select a built-in theme. The setting applies to every window.

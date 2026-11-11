@@ -3,13 +3,12 @@ import { readdirSync, realpathSync, rmdirSync, statSync, writeFileSync } from "n
 import { basename, join, resolve } from "node:path";
 import { gzipSync, gunzipSync } from "node:zlib";
 import { unzipSync, zipSync } from "fflate";
-import { record, registerTags, requireRevision, requireState, TaskboardError, text } from "./model.ts";
+import { maxAttachmentBytes, object, record, registerTags, requireRevision, requireState, TaskboardError, text } from "./model.ts";
 import type { ArchiveLink, Attachment, BoardTag, Task } from "./model.ts";
 import { directory, exists, readBinary, removeFile, validateCard, writeAtomic } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
 import { actorFor } from "./tasks.ts";
 
-const maxAttachments = 64 * 1024 * 1024;
 const maxCard = 16 * 1024 * 1024;
 const day = 24 * 60 * 60 * 1000;
 
@@ -65,7 +64,7 @@ function openArchive(store: BoardStore, id: string, link: ArchiveLink): Archived
     if (task.status !== link.status || task.title !== link.title || closedAt(task) !== link.closedAt ||
         (link.tags !== undefined && JSON.stringify(link.tags) !== JSON.stringify(task.tags)) ||
         zipped !== (task.attachments.length > 0) ||
-        task.attachments.reduce((total, entry) => total + entry.bytes, 0) > maxAttachments) {
+        task.attachments.reduce((total, entry) => total + entry.bytes, 0) > maxAttachmentBytes) {
       throw new Error("The archived card differs from the archive index.");
     }
     return { task, card: bytes, zip: zipped ? data : undefined };
@@ -126,11 +125,8 @@ export function upgradeTagCatalog(store: BoardStore): BoardTag[] {
   return tags;
 }
 
-export function addAttachment(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
-  requireState(task, ["draft", "ready", "in_progress", "blocked", "review"]);
-  requireRevision(task, input.revision);
+function loadAttachment(input: Record<string, unknown>, limit: number) {
   const source = realpathSync(resolve(text(input.path, "path", true)));
-  const limit = maxAttachments - task.attachments.reduce((sum, item) => sum + item.bytes, 0);
   const entry = statSync(source);
   if (!entry.isFile()) throw new TaskboardError("INVALID_INPUT", "Choose a file to attach.");
   if (entry.size > limit) throw new TaskboardError("ATTACHMENT_LIMIT", "Attachments are limited to 64 MiB per task.");
@@ -140,6 +136,43 @@ export function addAttachment(store: BoardStore, task: Task, input: Record<strin
     name: input.name === undefined ? basename(source) : text(input.name, "name", true),
     file: randomUUID(), bytes: data.length, sha256: checksum(data),
   };
+  return { attachment, data };
+}
+
+export function createWithAttachments(store: BoardStore, task: Task, sources: unknown): Task {
+  if (sources === undefined) return store.create(task);
+  if (!Array.isArray(sources)) throw new TaskboardError("INVALID_INPUT", "attachmentSources must be an array.");
+  if (!sources.length) return store.create(task);
+
+  let remaining = maxAttachmentBytes;
+  const files = sources.map(source => {
+    const file = loadAttachment(object(source), remaining);
+    remaining -= file.attachment.bytes;
+    return file;
+  });
+  const folder = attachmentFolder(store, task, true);
+  const written: string[] = [];
+  try {
+    for (const { attachment, data } of files) {
+      const path = join(folder, attachment.file);
+      writeAtomic(path, data);
+      written.push(path);
+    }
+    return store.create({ ...task, attachments: files.map(file => file.attachment) });
+  } catch (error) {
+    // A saved card whose index update failed can be recovered by doctor with its files.
+    if (!exists(store.cardPath(task.id))) {
+      for (const path of written) removeFile(path);
+    }
+    throw error;
+  }
+}
+
+export function addAttachment(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
+  requireState(task, ["draft", "ready", "in_progress", "blocked", "review"]);
+  requireRevision(task, input.revision);
+  const limit = maxAttachmentBytes - task.attachments.reduce((sum, item) => sum + item.bytes, 0);
+  const { attachment, data } = loadAttachment(input, limit);
   const actor = actorFor(input, "agent");
   writeAtomic(join(attachmentFolder(store, task, true), attachment.file), data);
   return store.save(record({

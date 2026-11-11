@@ -1,14 +1,17 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell } from "electron";
 import type { IpcMainInvokeEvent } from "electron";
 import { existsSync, mkdirSync, statSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { bundled, callCli, cliChild, cliFailure, entry } from "./cli.ts";
-import { codexStatus, installCodex, setCodexExecutable, skillLaunch } from "./codex.ts";
+import { codexStatus, composeDraft, installCodex, setCodexExecutable, skillLaunch } from "./codex.ts";
 import type { CodexStatus } from "./codex.ts";
 import type { CliReply } from "./cli.ts";
 import type { ArchiveLink, BoardSettings, BoardTag, Task } from "../cli/model.ts";
+import { maxAttachmentBytes } from "../cli/model.ts";
 import { readJson, writeJson } from "../cli/storage.ts";
 
 interface Board {
@@ -25,6 +28,7 @@ interface WindowState {
   board?: Board;
   error?: { code: string; message: string };
   loading?: boolean;
+  drafting?: boolean;
   selection: number;
 }
 
@@ -38,7 +42,7 @@ const html = new URL("./index.html", import.meta.url);
 const windowStates = new Map<number, WindowState>();
 const subscriptions = new Map<string, BoardWatch>();
 const commands = new Map<string, string[]>([
-  ["init", ["init"]], ["list", ["list"]], ["show", ["show"]], ["create", ["create"]], ["update", ["update"]],
+  ["init", ["init"]], ["list", ["list"]], ["show", ["show"]], ["update", ["update"]],
   ["comment", ["comment"]],
   ["approve", ["approve"]], ["review", ["review"]], ["accept", ["accept"]],
   ["request-changes", ["request-changes"]], ["cancel", ["cancel"]], ["cleanup", ["cleanup"]],
@@ -253,6 +257,65 @@ ipcMain.handle("menu:action", async (event, action: unknown) => {
 
 ipcMain.handle("board:bootstrap", event => frame(stateOf(event)));
 ipcMain.handle("board:open", async event => pickProject(stateOf(event)));
+
+interface PastedFile {
+  name: string;
+  type: string;
+  bytes: ArrayBuffer;
+}
+
+function isPastedFile(file: unknown): file is PastedFile {
+  if (!file || typeof file !== "object") return false;
+  const { name, type, bytes } = file as Partial<PastedFile>;
+  return typeof name === "string" && Boolean(name.trim()) && typeof type === "string" && bytes instanceof ArrayBuffer;
+}
+
+const imageExtensions = new Map([
+  ["image/png", ".png"], ["image/jpeg", ".jpg"], ["image/webp", ".webp"], ["image/gif", ".gif"],
+]);
+
+ipcMain.handle("board:draft", async (event, request: unknown, files: unknown = []) => {
+  const state = stateOf(event);
+  const board = state.board;
+  if (!board || typeof request !== "string" || !Array.isArray(files) ||
+      !files.every(isPastedFile) || (!request.trim() && !files.length)) {
+    return cliFailure("INVALID_INPUT", lang("Describe the task on an open board.", "Опишите задачу на открытой доске."));
+  }
+  if (state.drafting) return cliFailure("DRAFT_IN_PROGRESS", lang("Codex is already preparing a draft.", "Codex уже готовит черновик."));
+  if (files.reduce((total, file) => total + file.bytes.byteLength, 0) > maxAttachmentBytes) {
+    return cliFailure("ATTACHMENT_LIMIT", lang("Attachments are limited to 64 MiB per task.", "Лимит вложений на задачу — 64 МиБ."));
+  }
+  state.drafting = true;
+  let scratch: string | undefined;
+  try {
+    const attachments = [];
+    if (files.length) {
+      scratch = await mkdtemp(join(tmpdir(), "ai-taskboard-paste-"));
+      for (const [index, file] of files.entries()) {
+        const extension = imageExtensions.get(file.type);
+        const path = join(scratch, String(index) + (extension ?? ""));
+        await writeFile(path, Buffer.from(file.bytes));
+        attachments.push({ path, name: file.name.trim(), image: extension !== undefined });
+      }
+    }
+    const draft = await composeDraft(
+      app.getPath("userData"), request.trim(), board.tags.map(tag => tag.name), attachments, lang("English", "Russian"),
+    );
+    if (!draft) return cliFailure("CODEX_UNAVAILABLE",
+      lang("Choose a Codex executable in Settings → Codex integration.", "Выберите Codex в разделе «Настройки → Интеграция с Codex»."));
+    return await callCli<Task>(board.project, ["create"], {
+      ...draft, actor: "agent", attachmentSources: attachments.map(({ path, name }) => ({ path, name })),
+    });
+  } catch {
+    return cliFailure("CODEX_DRAFT_FAILED", lang(
+      "Codex could not prepare a draft. Check that Codex is up to date and you are signed in, then retry.",
+      "Codex не смог подготовить черновик. Проверьте версию Codex и вход в аккаунт, затем повторите попытку.",
+    ));
+  } finally {
+    if (scratch) await rm(scratch, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
+    state.drafting = false;
+  }
+});
 ipcMain.handle("appearance:themes", event => {
   stateOf(event);
   return Object.entries(themes).map(([id, [label]]) => [id, label]);

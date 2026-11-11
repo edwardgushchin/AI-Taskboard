@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("taskboard", {
   bootstrap: () => ipcRenderer.invoke("board:bootstrap"),
   open: () => ipcRenderer.invoke("board:open"),
+  draft: (request, files) => ipcRenderer.invoke("board:draft", request, files),
   menuAction: action => ipcRenderer.invoke("menu:action", action),
   isMac: process.platform === "darwin",
   command: (action, id, input) => ipcRenderer.invoke("board:command", action, id, input),

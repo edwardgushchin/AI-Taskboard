@@ -196,6 +196,9 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .form { display: grid; gap: 12px; }
 .form label { display: grid; gap: 6px; font-weight: 600; }
 .form textarea { resize: vertical; min-height: 67px; }
+.draft-attachments { list-style: none; margin: 0; padding: 0; }
+.draft-attachments li { display: flex; align-items: center; gap: 8px; }
+.draft-attachments span { flex: 1; overflow-wrap: anywhere; min-width: 0; }
 pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); padding: 11px; border-radius: 6px; font-size: 12px; }
 .muted { color: var(--muted); }
 .integration-panel, .appearance-panel, .tag-settings {

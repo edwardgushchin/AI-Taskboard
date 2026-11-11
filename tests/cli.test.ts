@@ -63,6 +63,28 @@ function cli(root: string, args: string[], input?: unknown, expectedCode?: strin
   return payload.data;
 }
 
+test("create saves attachments with the draft and rejects incomplete batches", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const path = join(root, "screenshot.png");
+  const bytes = Buffer.from([0, 255, 1]);
+  writeFileSync(path, bytes);
+  const source = { path, name: "Скриншот.png" };
+  cli(root, ["create"], { title: "Draft", attachmentSources: [source, { path: root }] }, "INVALID_INPUT");
+  assert.deepEqual(cli(root, ["list"]).tasks, []);
+  assert.ok(!existsSync(join(root, ".tasks", "attachments", "T-0001")));
+
+  const task = cli(root, ["create"], { title: "Draft", attachmentSources: [source, source] });
+  assert.equal(task.id, "T-0001");
+  assert.equal(task.status, "draft");
+  assert.equal(task.attachments.length, 2);
+  assert.notEqual(task.attachments[0].file, task.attachments[1].file);
+  for (const attachment of task.attachments) {
+    assert.equal(attachment.name, source.name);
+    assert.equal(cli(root, ["attachment", "read", task.id], { file: attachment.file }).base64, bytes.toString("base64"));
+  }
+});
+
 test("normal commands enforce task state, criteria, and revisions", t => {
   const root = fixture(t);
   cli(root, ["list"], undefined, "BOARD_NOT_FOUND");

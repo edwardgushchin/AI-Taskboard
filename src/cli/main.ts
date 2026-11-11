@@ -4,7 +4,10 @@ import type { FSWatcher } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { acceptTask, inspectReview } from "./acceptance.ts";
-import { addAttachment, archiveDiagnostics, isArchived, readAttachment, readTask, sweepArchives, upgradeTagCatalog } from "./archive.ts";
+import {
+  addAttachment, archiveDiagnostics, createWithAttachments, isArchived, readAttachment, readTask, sweepArchives,
+  upgradeTagCatalog,
+} from "./archive.ts";
 import { member, number, object, registerTags, tagColors, tagKey, TaskboardError, text } from "./model.ts";
 import type { Task } from "./model.ts";
 import { initializeBoard, locateBoard, onBoard } from "./storage.ts";
@@ -119,7 +122,7 @@ function run(
   }
   if (command === "create") {
     const task = createTask(store.allocateId(), input);
-    return store.create(task.tags.length ? assignTags(store, task) : task);
+    return createWithAttachments(store, task.tags.length ? assignTags(store, task) : task, input.attachmentSources);
   }
   if (command === "tag") {
     if (id !== "ensure" && id !== "set") throw new TaskboardError("INVALID_INPUT", "Use tag ensure or tag set.");
