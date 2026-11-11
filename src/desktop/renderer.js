@@ -713,7 +713,7 @@ async function showReview(task, messageDraft) {
       notice(boardError(result.error));
     }
   });
-  const diff = element("pre", review.diff);
+  const diff = renderReviewDiff(review.diff);
   const caption = element("p", review.target + " · " + review.mode + " · " + review.submitted.slice(0, 12), "muted");
   body.prepend(caption, diff);
   if (local && !review.pending) {
