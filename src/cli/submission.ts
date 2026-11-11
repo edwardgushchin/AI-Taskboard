@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { copyFileSync } from "node:fs";
 import { join } from "node:path";
-import { git, requireRepository, resolveCommit } from "./git.ts";
+import { git, isAncestor, mergeTree, requireRepository, resolveCommit } from "./git.ts";
 import { object, record, requireRevision, requireState, strings, TaskboardError, text } from "./model.ts";
 import type { Task, TaskGit } from "./model.ts";
 import { exists, readJson, removeFile, writeJson } from "./storage.ts";
@@ -54,7 +54,7 @@ function capture(store: BoardStore, task: Task, path: string, includeDiff: boole
     let paths = changedPaths(range);
     let base: string | undefined;
     let commitMessage: string | undefined;
-    if (!paths.length && task.git?.submission && !gitStatus(path).length) {
+    if (!paths.length && task.git && !gitStatus(path).length) {
       base = git(path, ["merge-base", task.git.target, head]).trim();
       range = [base, head];
       paths = changedPaths(range);
@@ -114,10 +114,24 @@ export function previewSubmission(store: BoardStore, task: Task) {
   if (exists(store.pendingPath(task.id))) {
     throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before preparing a new submission.");
   }
-  const { path } = taskCheckout(store, task);
+  const { path, context } = taskCheckout(store, task);
   const snapshot = capture(store, task, path, true);
   requireCleanIndex(path, snapshot.head);
-  return snapshot;
+  return { ...snapshot, target: context.target, targetHead: checkSubmissionMerge(path, context, snapshot) };
+}
+
+function checkSubmissionMerge(path: string, context: TaskGit, snapshot: Snapshot & { commitMessage?: string }): string {
+  const targetHead = resolveCommit(path, context.target);
+  if (!targetHead) throw new TaskboardError("TARGET_UNAVAILABLE", "The target branch no longer has a commit.", { target: context.target });
+  if (snapshot.paths.length && !isAncestor(path, targetHead, snapshot.head)) {
+    // A temporary commit lets Git check the exact snapshot without staging it or moving any ref.
+    const candidate = snapshot.commitMessage ? snapshot.head : git(path, [
+      "-c", "user.name=AI Taskboard", "-c", "user.email=taskboard@localhost",
+      "commit-tree", snapshot.tree, "-p", snapshot.head, "--no-gpg-sign", "-m", "Check task submission",
+    ]).trim();
+    mergeTree(path, targetHead, candidate);
+  }
+  return targetHead;
 }
 
 function readIntent(path: string, task: Task): SubmitIntent | undefined {
@@ -168,6 +182,7 @@ export function submitTask(store: BoardStore, task: Task, input: Record<string, 
     if (snapshot.token !== text(input.token, "token", true)) {
       throw new TaskboardError("STALE_SNAPSHOT", "The worktree changed. Prepare a new submission.", { paths: snapshot.paths });
     }
+    checkSubmissionMerge(path, context, snapshot);
     if (snapshot.commitMessage !== undefined) {
       if (snapshot.commitMessage !== message) {
         throw new TaskboardError("INVALID_COMMIT_MESSAGE", "Confirm the existing Conventional Commit message with this task's trailer.");

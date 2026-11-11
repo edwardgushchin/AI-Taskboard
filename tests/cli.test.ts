@@ -401,7 +401,35 @@ test("accept creates a merge commit and protects the source and ignored files", 
   assert.equal(done.git.accepted, git(root, "rev-parse", "HEAD"));
   assert.equal(git(root, "show", "-s", "--format=%P"), initial + " " + task.git.submission.sha);
   assert.equal(git(root, "show", "-s", "--format=%B"), "feat: deliver result\n\nTask: " + task.id);
+  assert.equal(existsSync(worktree), false);
+  assert.equal(git(root, "branch", "--list", "ai-taskboard/" + task.id), "");
+  assert.equal(git(root, "rev-parse", "HEAD^2"), task.git.submission.sha);
   assert.equal(cli(root, ["accept", task.id], { revision: task.revision }).git.accepted, done.git.accepted);
+});
+
+test("accepted task cleanup preserves local files and refuses to delete a changed branch", t => {
+  const root = fixture(t, true);
+  const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "result.txt"), "delivered\n"));
+  const exclude = join(root, ".git", "info", "exclude");
+  writeFileSync(exclude, readFileSync(exclude, "utf8") + "\n/ignored.local\n");
+  const ignored = join(worktree, "ignored.local");
+  writeFileSync(ignored, "keep this file");
+  const done = cli(root, ["accept", task.id], { revision: task.revision });
+  assert.equal(done.status, "done");
+  assert.equal(done.cleanupWarning.code, "DIRTY_WORKTREE");
+  assert.equal(readFileSync(ignored, "utf8"), "keep this file");
+  assert.equal(git(root, "rev-parse", task.git.branch), task.git.submission.sha);
+
+  git(worktree, "commit", "--allow-empty", "-m", "chore: save further work");
+  const extra = git(worktree, "rev-parse", "HEAD");
+  cli(root, ["cleanup", task.id], undefined, "TASK_BRANCH_CHANGED");
+  assert.equal(git(worktree, "rev-parse", "HEAD"), extra);
+  git(worktree, "reset", "--hard", task.git.submission.sha);
+  rmSync(ignored);
+  assert.equal(cli(root, ["cleanup", task.id]).branchRemoved, true);
+  assert.equal(git(root, "branch", "--list", "ai-taskboard/" + task.id), "");
+  assert.equal(existsSync(worktree), false);
+  assert.equal(cli(root, ["cleanup", task.id]).removed, false);
 });
 
 test("accept saves confirmed local edits and restores them in the target", t => {
@@ -558,7 +586,7 @@ test("squash accepts into a local branch that was not checked out", t => {
   const root = fixture(t, true);
   const initial = git(root, "rev-parse", "HEAD");
   git(root, "branch", "release");
-  const { task } = submitFixture(root, path => writeFileSync(join(path, "result.txt"), "delivered\n"), "release");
+  const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "result.txt"), "delivered\n"), "release");
   cli(root, ["settings"], { integrationMode: "squash" });
   const done = cli(root, ["accept", task.id], {
     revision: task.revision, message: "feat: release the result",
@@ -569,7 +597,10 @@ test("squash accepts into a local branch that was not checked out", t => {
   assert.equal(git(root, "show", "-s", "--format=%P", "release"), initial);
   assert.equal(git(root, "show", "-s", "--format=%B", "release"), "feat: release the result\n\nTask: " + task.id);
   assert.equal(git(root, "show", "release:result.txt"), "delivered");
-  assert.equal(git(root, "rev-parse", task.git.branch), task.git.submission.sha);
+  assert.equal(existsSync(worktree), false);
+  assert.equal(git(root, "branch", "--list", "ai-taskboard/" + task.id), "");
+  const ref = "refs/ai-taskboard/submissions/" + task.id + "/" + task.git.submission.sha;
+  assert.equal(git(root, "rev-parse", ref), task.git.submission.sha);
   git(root, "switch", "release");
   assert.equal(git(root, "rev-parse", "HEAD"), done.git.accepted);
 });
@@ -586,17 +617,63 @@ test("accept preserves local files created in the temporary target checkout", t 
   assert.equal(git(target, "branch", "--show-current"), "release");
 });
 
-test("accept reports a conflicting merge before touching the target", t => {
+test("submission checks for conflicts against changes accepted after preview", t => {
   const root = fixture(t, true);
-  const { task } = submitFixture(root, path => writeFileSync(join(path, "source.txt"), "task version\n"));
+  cli(root, ["init"]);
+  const task = cli(root, ["create"], { title: "Edit source", criteria: ["Source is updated."] });
+  cli(root, ["approve", task.id]);
+  const { worktree } = cli(root, ["start", task.id]);
+  const source = join(worktree, "source.txt");
+  writeFileSync(source, "task version\n");
+  const preview = cli(worktree, ["preview", task.id]);
+  writeFileSync(join(root, "source.txt"), "target version\n");
+  git(root, "commit", "-am", "fix: edit target independently");
+  const targetHead = git(root, "rev-parse", "HEAD");
+  const input = { token: preview.token, message: "fix: update source", summary: "Updated", checks: [] };
+  const conflict = cli(worktree, ["submit", task.id], input, "MERGE_CONFLICT");
+  assert.deepEqual(conflict.details, { paths: ["source.txt"], targetHead });
+  assert.deepEqual(cli(worktree, ["preview", task.id], undefined, "MERGE_CONFLICT").details, conflict.details);
+  assert.equal(cli(root, ["show", task.id]).status, "in_progress");
+  assert.equal(git(worktree, "rev-parse", "HEAD"), preview.head);
+  assert.equal(git(worktree, "diff", "--cached", "--name-only"), "");
+  assert.equal(readFileSync(source, "utf8"), "task version\n");
+  assert.equal(git(root, "status", "--porcelain"), "");
+});
+
+test("accept reports conflicts and an agent can reopen and resubmit the task", t => {
+  const root = fixture(t, true);
+  const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "source.txt"), "task version\n"));
+  const resolve = { revision: task.revision, resolveConflicts: true };
+  cli(root, ["start", task.id], resolve, "NO_MERGE_CONFLICT");
   writeFileSync(join(root, "source.txt"), "target version\n");
   git(root, "add", "source.txt");
   git(root, "commit", "-m", "fix: edit target independently");
   const head = git(root, "rev-parse", "HEAD");
-  cli(root, ["accept", task.id], { revision: task.revision }, "MERGE_CONFLICT");
+  const conflict = cli(root, ["accept", task.id], { revision: task.revision }, "MERGE_CONFLICT");
+  assert.deepEqual(conflict.details, { paths: ["source.txt"], targetHead: head });
   assert.equal(git(root, "rev-parse", "HEAD"), head);
   assert.equal(git(root, "status", "--porcelain"), "");
   assert.equal(cli(root, ["show", task.id]).status, "review");
+
+  const reopened = cli(root, ["start", task.id], resolve);
+  assert.equal(reopened.worktree, worktree);
+  assert.equal(reopened.task.status, "in_progress");
+  assert.equal(reopened.task.history.at(-1).actor, "agent");
+  assert.equal(reopened.targetHead, head);
+  assert.equal(git(worktree, "rev-parse", "HEAD"), task.git.submission.sha);
+  assert.throws(() => git(worktree, "rebase", reopened.targetHead));
+  writeFileSync(join(worktree, "source.txt"), "target version\ntask version\n");
+  git(worktree, "add", "source.txt");
+  git(worktree, "-c", "core.editor=true", "rebase", "--continue");
+  const preview = cli(worktree, ["preview", task.id]);
+  const resubmitted = cli(worktree, ["submit", task.id], {
+    revision: reopened.task.revision, token: preview.token, message: preview.commitMessage, summary: "Combined", checks: [],
+  });
+  assert.notEqual(resubmitted.git.submission.sha, task.git.submission.sha);
+  assert.equal(resubmitted.status, "review");
+  assert.equal(git(root, "rev-parse", "HEAD"), head);
+  cli(root, ["accept", task.id], { revision: resubmitted.revision, targetHead: head });
+  assert.equal(readFileSync(join(root, "source.txt"), "utf8"), "target version\ntask version\n");
 });
 
 test("accept retries a prepared squash with a staged rename after a hook refusal", t => {

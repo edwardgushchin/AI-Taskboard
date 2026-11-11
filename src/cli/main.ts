@@ -3,7 +3,7 @@ import { readFileSync, watch } from "node:fs";
 import type { FSWatcher } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { acceptTask, inspectReview } from "./acceptance.ts";
+import { acceptTask, inspectReview, reopenConflictingReview } from "./acceptance.ts";
 import { describeSavedChanges, restoreSavedChanges } from "./saved-changes.ts";
 import {
   addAttachment, archiveDiagnostics, createWithAttachments, isArchived, readAttachment, readTask, sweepArchives,
@@ -184,7 +184,10 @@ function run(
   if (command === "restore-changes") return restoreSavedChanges(store, readTask(store, id), input);
   if (command === "cleanup" && isArchived(store, id)) return cleanTaskWorktree(store, readTask(store, id));
   const task = store.card(id);
-  if (command === "start") return startTask(store, task, input);
+  if (command === "start") {
+    if (task.status !== "in_progress" && input.resolveConflicts === true) return reopenConflictingReview(store, task, input);
+    return startTask(store, task, input);
+  }
   if (command === "preview") return previewSubmission(store, task);
   if (command === "submit") return submitTask(store, task, input);
   if (command === "review") return inspectReview(store, task);

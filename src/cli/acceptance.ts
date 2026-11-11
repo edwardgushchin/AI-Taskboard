@@ -1,5 +1,5 @@
 import { join, relative } from "node:path";
-import { git, invokeGit, localBranch, requireRepository, resolveCommit } from "./git.ts";
+import { git, isAncestor, localBranch, mergeTree, requireRepository, resolveCommit } from "./git.ts";
 import type { Repository } from "./git.ts";
 import { object, record, requireRevision, requireState, TaskboardError, text } from "./model.ts";
 import type { IntegrationMode, Task, TaskGit } from "./model.ts";
@@ -7,7 +7,7 @@ import { checkPreserveChanges, describeSavedChanges, inspectLocalChanges, restor
 import { exists, readJson, removeFile, writeJson } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
 import { conventionalMessage } from "./submission.ts";
-import { checkProtectedPaths, collidingPaths, findWorktree, gitStatus, requireNoGitOperation, usableWorktree } from "./worktree.ts";
+import { checkProtectedPaths, cleanTaskWorktree, collidingPaths, findWorktree, gitStatus, requireNoGitOperation, usableWorktree } from "./worktree.ts";
 
 interface AcceptIntent {
   action: "accept";
@@ -27,12 +27,6 @@ const mergeOptions = ["-s", "ort", "--no-autostash", "--no-overwrite-ignore", "-
 
 function splitPaths(output: string): string[] {
   return output.split("\0").filter(Boolean);
-}
-
-function isAncestor(path: string, older: string, newer: string): boolean {
-  const result = invokeGit(path, ["merge-base", "--is-ancestor", older, newer]);
-  if (result.code === 0 || result.code === 1) return result.code === 0;
-  throw new TaskboardError("GIT_FAILED", "Git could not compare commits.", { output: result.stderr.trim() });
 }
 
 function reviewed(task: Task): TaskGit & { submission: NonNullable<TaskGit["submission"]> } {
@@ -80,18 +74,25 @@ export function inspectReview(store: BoardStore, task: Task) {
   };
 }
 
-function mergeTree(path: string, parent: string, submitted: string): string {
-  const result = invokeGit(path, ["merge-tree", "--write-tree", "--no-messages", parent, submitted]);
-  if (result.code === 1) {
-    throw new TaskboardError("MERGE_CONFLICT", "The submitted commit conflicts with the target branch.", {
-      output: result.stdout.trim(),
-    });
+export function reopenConflictingReview(store: BoardStore, task: Task, input: Record<string, unknown>) {
+  requireState(task, ["review"]);
+  requireRevision(task, input.revision, true);
+  if (exists(store.pendingPath(task.id))) {
+    throw new TaskboardError("PENDING_OPERATION", "Finish the pending Git operation first.");
   }
-  const tree = result.stdout.trim();
-  if (result.code !== 0 || !oid.test(tree)) {
-    throw new TaskboardError("GIT_FAILED", "Git could not calculate the merge result.", { output: result.stderr.trim() });
+  const context = reviewed(task);
+  const repo = requireRepository(store.location.repository);
+  const target = localBranch(repo, context.target);
+  const head = targetHead(repo, target);
+  const worktree = usableWorktree(findWorktree(repo, context.branch));
+  try {
+    mergeTree(repo.root, head, context.submission.sha);
+  } catch (error) {
+    if (!(error instanceof TaskboardError) || error.code !== "MERGE_CONFLICT") throw error;
+    const updated = store.save(record(task, "resolve-conflicts", "agent", "in_progress"));
+    return { task: updated, worktree, target, targetHead: head, conflict: error.details };
   }
-  return tree;
+  throw new TaskboardError("NO_MERGE_CONFLICT", "The reviewed submission can be merged into the current target.");
 }
 
 function targetPaths(path: string, parent: string, tree: string): string[] {
@@ -222,9 +223,18 @@ function preparedSquash(path: string, head: string, tree: string, status: string
     !collidingPaths(path, targetPaths(path, head, tree), local.working).length;
 }
 
-export function acceptTask(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
+export function acceptTask(store: BoardStore, task: Task, input: Record<string, unknown>) {
   try {
-    return integrateTask(store, task, input);
+    const completed = integrateTask(store, task, input);
+    try {
+      cleanTaskWorktree(store, completed);
+      return completed;
+    } catch (error) {
+      const cleanupWarning = error instanceof TaskboardError
+        ? { code: error.code, message: error.message, details: error.details }
+        : { code: "CLEANUP_FAILED", message: String(error) };
+      return { ...completed, cleanupWarning };
+    }
   } finally {
     releaseTemporaryTarget(store, task);
   }

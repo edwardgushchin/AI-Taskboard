@@ -54,6 +54,26 @@ export function git(cwd: string, args: string[], overrides?: NodeJS.ProcessEnv):
   return result.stdout;
 }
 
+export function isAncestor(path: string, older: string, newer: string): boolean {
+  const result = invokeGit(path, ["merge-base", "--is-ancestor", older, newer]);
+  if (result.code === 0 || result.code === 1) return result.code === 0;
+  throw new TaskboardError("GIT_FAILED", "Git could not compare commits.", { output: result.stderr.trim() });
+}
+
+export function mergeTree(path: string, targetHead: string, submitted: string): string {
+  const result = invokeGit(path, ["merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", targetHead, submitted]);
+  const [tree, ...paths] = result.stdout.split("\0").filter(Boolean);
+  if (result.code === 1) {
+    throw new TaskboardError("MERGE_CONFLICT", "Resolve the conflicts in the task worktree and submit the result again.", {
+      paths: [...new Set(paths)], targetHead,
+    });
+  }
+  if (result.code !== 0 || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(tree ?? "")) {
+    throw new TaskboardError("GIT_FAILED", "Git could not calculate the merge result.", { output: result.stderr.trim() });
+  }
+  return tree;
+}
+
 export function worktrees(cwd: string): Worktree[] {
   const records: Worktree[] = [];
   let record: Worktree | undefined;

@@ -1,7 +1,7 @@
 import { realpathSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
 import {
-  excludeBoard, git, invokeGit, localBranch, requireRepository, resolveCommit, worktrees,
+  excludeBoard, git, invokeGit, isAncestor, localBranch, requireRepository, resolveCommit, worktrees,
 } from "./git.ts";
 import type { Repository, Worktree } from "./git.ts";
 import { object, record, requireRevision, requireState, TaskboardError, text } from "./model.ts";
@@ -25,12 +25,15 @@ export function usableWorktree(item: Worktree | undefined): string {
   return realpathSync(item.path);
 }
 
-export function taskWithCurrentWorktree(store: BoardStore, task: Task): Task {
+export function taskWithCurrentWorktree(store: BoardStore, task: Task): Task & { cleanupAvailable?: boolean } {
   if (!task.git) return task;
   const repo = store.location.repository;
   const item = repo && findWorktree(repo, task.git.branch);
   const worktree = item && !item.prunable && exists(item.path) ? usableWorktree(item) : undefined;
-  return { ...task, git: { ...task.git, worktree } };
+  const cleanupAvailable = task.status === "done"
+    ? Boolean(item || (repo && resolveCommit(repo.root, task.git.branch)))
+    : task.status === "cancelled" && Boolean(item);
+  return { ...task, git: { ...task.git, worktree }, cleanupAvailable };
 }
 
 export function gitStatus(path: string, ignored = false): string {
@@ -184,7 +187,26 @@ export function cleanTaskWorktree(store: BoardStore, task: Task) {
   if (!task.git || task.git.branch !== worktreeBranch(task)) return { removed: false };
   const repo = requireRepository(store.location.repository);
   const item = findWorktree(repo, task.git.branch);
-  if (!item) return { removed: false };
+  const submitted = task.status === "done" ? task.git.submission?.sha : undefined;
+  const tip = submitted && resolveCommit(repo.root, task.git.branch);
+  if (tip && tip !== submitted) {
+    throw new TaskboardError("TASK_BRANCH_CHANGED", "The task branch no longer points to the confirmed submission.", { tip, submitted });
+  }
+  if (item) removeTaskWorktree(store, repo, item);
+  if (!tip) return { removed: Boolean(item) };
+  if (findWorktree(repo, task.git.branch)) {
+    throw new TaskboardError("WORKTREE_LOCKED", "The task branch is still checked out.");
+  }
+  const target = resolveCommit(repo.root, task.git.target);
+  if (!target || !isAncestor(repo.root, tip, target)) {
+    // Squash retains the accepted result but leaves the submitted SHA outside the target history.
+    git(repo.root, ["update-ref", "--no-deref", "refs/ai-taskboard/submissions/" + task.id + "/" + tip, tip]);
+  }
+  git(repo.root, ["update-ref", "--no-deref", "-d", task.git.branch, tip]);
+  return { removed: Boolean(item), branchRemoved: true };
+}
+
+function removeTaskWorktree(store: BoardStore, repo: Repository, item: Worktree): void {
   if (item.locked) throw new TaskboardError("WORKTREE_LOCKED", "The task worktree is locked.");
   const path = usableWorktree(item);
   const managedRoot = realpathSync(store.subdirectory("worktrees"));
@@ -197,8 +219,11 @@ export function cleanTaskWorktree(store: BoardStore, task: Task) {
   if (changes.length) {
     throw new TaskboardError("DIRTY_WORKTREE", "The task worktree still contains local files or changes.", {
       path, changes: changes.split("\0").filter(Boolean),
+      output: git(path, [
+        "-c", "core.quotepath=false", "status", "--short", "--no-renames",
+        "--untracked-files=all", "--ignore-submodules=none", "--ignored=traditional",
+      ]).trimEnd(),
     });
   }
   git(repo.root, ["worktree", "remove", path]);
-  return { removed: true };
 }

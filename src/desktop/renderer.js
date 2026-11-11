@@ -47,7 +47,10 @@ function boardError(error) {
   }
   const { output, path, paths } = error.details ?? {};
   const files = Array.isArray(paths) ? paths.join("\n") : undefined;
-  const message = error.code === "LOCAL_CHANGES_CONFLICT"
+  const message = error.code === "MERGE_CONFLICT"
+    ? language("The task conflicts with the target branch. Ask the agent to resolve the conflicts and resubmit.",
+      "Изменения задачи конфликтуют с целевой веткой. Поручите агенту разрешить конфликты и повторно сдать задачу.")
+    : error.code === "LOCAL_CHANGES_CONFLICT"
     ? language("The task conflicts with local changes. The target worktree was left untouched.",
       "Задача конфликтует с локальными правками. Целевая копия осталась без изменений.")
     : error.code === "RESTORE_CONFLICT"
@@ -580,7 +583,12 @@ async function showTask(id) {
     if (!result.ok) notice(boardError(result.error));
   }));
   if (["done", "cancelled"].includes(task.status)) {
-    if (task.git) actions.append(button(language("Remove worktree", "Убрать рабочую копию"), () => act("cleanup")));
+    if (task.cleanupAvailable) {
+      const label = task.status === "done"
+        ? language("Remove worktree and branch", "Убрать рабочую копию и ветку")
+        : language("Remove worktree", "Убрать рабочую копию");
+      actions.append(button(label, () => act("cleanup")));
+    }
   } else {
     actions.append(button(language("Edit", "Редактировать"), () => taskEditor(task)));
     actions.append(button(language("Comment", "Комментарий"), () => noteTask(task, "comment")));
@@ -630,6 +638,17 @@ function savedChangesSection(task, saved, pending = false) {
   body.append(area);
 }
 
+async function showAcceptedTask(task) {
+  await showTask(task.id);
+  const messages = [];
+  if (task.localChangesWarning) messages.push(boardError(task.localChangesWarning));
+  if (task.cleanupWarning) {
+    messages.push(language("The task was accepted. Cleanup needs attention.",
+      "Задача принята. Завершите уборку рабочей копии и ветки.") + "\n" + boardError(task.cleanupWarning));
+  }
+  if (messages.length) notice(messages.join("\n"));
+}
+
 async function showReview(task, messageDraft) {
   const review = await command("review", task.id);
   if (!review) return;
@@ -643,10 +662,26 @@ async function showReview(task, messageDraft) {
       revision: task.revision, targetHead: review.targetHead, message,
     });
     if (result.ok) {
-      await showTask(task.id);
-      if (result.data.localChangesWarning) notice(boardError(result.data.localChangesWarning));
+      await showAcceptedTask(result.data);
     } else {
-      if (sheetKind === "review" && taskInSheet?.id === task.id) await showReview(task, message);
+      if (sheetKind === "review" && taskInSheet?.id === task.id) {
+        await showReview(task, message);
+        if (result.error.code === "MERGE_CONFLICT" && sheetKind === "review" && taskInSheet?.id === task.id) {
+          const start = "start " + task.id + " --stdin";
+          const input = JSON.stringify({ revision: task.revision, resolveConflicts: true });
+          const prompt = [
+            language("Resolve conflicts in task ", "Разреши конфликты в задаче ") + task.id + ".",
+            language("Use AI Taskboard ", "Вызови команду AI Taskboard ") + start + " " +
+              language("with JSON input ", "с JSON на stdin ") + input + ".",
+            language("Resolve the conflicts in the task worktree, run the checks and resubmit for review.",
+              "Разреши конфликты в рабочей копии задачи, выполни проверки и повторно сдай результат."),
+          ].join("\n");
+          body.append(button(language("Copy request for agent", "Скопировать запрос для агента"), async () => {
+            await navigator.clipboard.writeText(prompt);
+            notice(language("Request copied.", "Запрос скопирован."));
+          }));
+        }
+      }
       notice(boardError(result.error));
     }
   });
@@ -680,7 +715,7 @@ async function showReview(task, messageDraft) {
       { name: "commit", label: language("Full commit SHA", "Полный SHA коммита"), required: true },
     ], language("Verify and accept", "Проверить и принять"), async ({ commit }) => {
       const accepted = await command("accept", task.id, { revision: task.revision, commit });
-      if (accepted) await showTask(task.id);
+      if (accepted) await showAcceptedTask(accepted);
     });
     body.prepend(element("p", review.target, "muted"));
   }));
