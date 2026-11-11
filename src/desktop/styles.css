@@ -10,6 +10,29 @@ body {
   height: 100vh; margin: 0; display: flex; flex-direction: column; overflow: hidden;
   background: var(--bg); color: var(--text);
 }
+@media (forced-colors: none) {
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-button { display: none; }
+  ::-webkit-scrollbar-button:single-button { display: block; width: 12px; height: 12px; }
+  ::-webkit-scrollbar-button:vertical:decrement {
+    background: conic-gradient(from 135deg at 50% 0, var(--muted) 90deg, transparent 0) center / 6px 3px no-repeat;
+  }
+  ::-webkit-scrollbar-button:vertical:increment {
+    background: conic-gradient(from -45deg at 50% 100%, var(--muted) 90deg, transparent 0) center / 6px 3px no-repeat;
+  }
+  ::-webkit-scrollbar-button:horizontal:decrement {
+    background: conic-gradient(from 45deg at 0 50%, var(--muted) 90deg, transparent 0) center / 3px 6px no-repeat;
+  }
+  ::-webkit-scrollbar-button:horizontal:increment {
+    background: conic-gradient(from 225deg at 100% 50%, var(--muted) 90deg, transparent 0) center / 3px 6px no-repeat;
+  }
+  ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    border: 2px solid transparent; border-radius: 5px;
+    background: color-mix(in srgb, var(--muted) 65%, transparent) padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { background-color: var(--muted); }
+}
 main { display: flex; flex: 1; flex-direction: column; min-height: 0; }
 .icon-library { display: none; }
 .icon {
@@ -153,23 +176,6 @@ input, textarea, select {
 .sheet-section p, .sheet-section ul { line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
 .sheet-section ul { padding-left: 22px; margin: 0; }
 .sheet .notice { flex: none; margin-inline: 20px; }
-@media (forced-colors: none) {
-  .sheet ::-webkit-scrollbar { width: 10px; height: 10px; }
-  .sheet ::-webkit-scrollbar-button { display: none; }
-  .sheet ::-webkit-scrollbar-button:vertical:single-button {
-    display: block; height: 12px;
-    background: conic-gradient(from 135deg at 50% 0, var(--muted) 90deg, transparent 0) center / 6px 3px no-repeat;
-  }
-  .sheet ::-webkit-scrollbar-button:vertical:single-button:increment {
-    background-image: conic-gradient(from -45deg at 50% 100%, var(--muted) 90deg, transparent 0);
-  }
-  .sheet ::-webkit-scrollbar-track, .sheet ::-webkit-scrollbar-corner { background: transparent; }
-  .sheet ::-webkit-scrollbar-thumb {
-    border: 2px solid transparent; border-radius: 5px;
-    background: color-mix(in srgb, var(--muted) 65%, transparent) padding-box;
-  }
-  .sheet ::-webkit-scrollbar-thumb:hover { background-color: var(--muted); }
-}
 .form { display: grid; gap: 12px; }
 .form label { display: grid; gap: 6px; font-weight: 600; }
 .form textarea { resize: vertical; min-height: 67px; }
