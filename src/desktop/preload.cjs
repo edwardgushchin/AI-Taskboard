@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld("taskboard", {
   setTheme: theme => ipcRenderer.invoke("appearance:theme", theme),
   onTheme: listener => { ipcRenderer.on("appearance:changed", (_event, theme) => listener(theme)); },
   codexStatus: () => ipcRenderer.invoke("codex:status"),
+  executionModels: () => ipcRenderer.invoke("codex:executionModels"),
   chooseCodex: () => ipcRenderer.invoke("codex:choose"),
   autoDetectCodex: () => ipcRenderer.invoke("codex:auto"),
   installCodex: () => ipcRenderer.invoke("codex:install"),
