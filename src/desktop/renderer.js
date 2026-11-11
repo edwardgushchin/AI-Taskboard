@@ -42,6 +42,14 @@ function notice(message) {
 }
 
 function boardError(error) {
+  if (error.code === "DEPENDENCIES_INCOMPLETE") {
+    return language("Complete the dependencies first.", "Сначала завершите зависимости.") + " " +
+      (error.details?.dependencies ?? []).join(", ");
+  }
+  if (error.code === "DEPENDENCY_CYCLE") {
+    return language("A task cannot depend on itself, directly or indirectly.",
+      "Задача не может зависеть от себя напрямую или через другие задачи.");
+  }
   if (error.code === "BOARD_NOT_FOUND") {
     return language("No board in the selected folder. Choose another folder or create a board.",
       "В выбранной папке нет доски. Выберите другую папку или создайте доску.");
@@ -299,6 +307,9 @@ function card(task) {
   item.append(element("strong", task.title));
   const meta = element("span", undefined, "task-meta");
   meta.append(element("span", task.id, "task-id"));
+  if (task.unfinishedDependencies?.length && ["draft", "ready"].includes(task.status)) {
+    meta.append(element("span", language("Blocked by dependencies", "Ждёт зависимости"), "dependency-warning"));
+  }
   if (task.subtasks?.length) {
     const count = task.subtasks.filter(entry => entry.done).length + "/" + task.subtasks.length;
     const subtasks = element("span", undefined, "task-stat");
@@ -555,6 +566,75 @@ function taskEditor(task) {
   });
 }
 
+function editDependencies(task) {
+  const dependencies = new Set(task.dependencies ?? []);
+  const board = frame.board;
+  const entries = [...board.tasks, ...board.archived].filter(candidate => candidate.id !== task.id);
+  const editor = form("dependencies", language("Task dependencies", "Зависимости задачи"), [],
+    language("Save", "Сохранить"), async () => {
+      const saved = await command("update", task.id, {
+        dependencies: [...dependencies], revision: task.revision, actor: "user",
+      });
+      if (saved) await showTask(saved.id);
+    });
+  const choices = element("fieldset", undefined, "dependency-choices");
+  choices.append(element("legend", language("Complete before starting this task", "Завершить перед запуском задачи")));
+  for (const candidate of entries) {
+    const row = element("label", undefined, "dependency-option");
+    const checkbox = element("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = dependencies.has(candidate.id);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) dependencies.add(candidate.id);
+      else dependencies.delete(candidate.id);
+    });
+    row.append(checkbox, candidate.id + " · " + candidate.title);
+    choices.append(row);
+  }
+  if (!entries.length) choices.append(element("p", language("No other tasks on this board.", "На доске нет других задач.")));
+  editor.prepend(choices);
+}
+
+async function editExecution(task) {
+  const title = language("Execution settings", "Параметры запуска");
+  openSheet("execution", title);
+  const loading = element("p", language("Loading Codex models…", "Загрузка моделей Codex…"), "muted");
+  body.append(loading);
+  const result = await api.executionModels();
+  if (!sheet.open || !loading.isConnected) return;
+  const models = result.ok ? result.data : [];
+  const selected = task.execution?.model ?? "";
+  const defaultLabel = language("Provider default", "По умолчанию у провайдера");
+  const modelOptions = [["", defaultLabel], ...models.map(model => [model.id, model.name])];
+  if (selected && !models.some(model => model.id === selected)) {
+    modelOptions.push([selected, selected + " · " + language("unavailable", "недоступна")]);
+  }
+  const editor = form("execution", title, [
+    { name: "model", label: language("Model", "Модель"), value: selected, options: modelOptions },
+    { name: "effort", label: language("Reasoning effort", "Уровень размышлений"), options: [] },
+  ], language("Save", "Сохранить"), async ({ model, effort }) => {
+    if (model && !models.some(entry => entry.id === model)) {
+      notice(language("Choose an available model.", "Выберите доступную модель."));
+      return;
+    }
+    const saved = await command("update", task.id, {
+      execution: model ? { model, effort: effort || undefined } : null,
+      revision: task.revision, actor: "user",
+    });
+    if (saved) await showTask(saved.id);
+  });
+  const [model, effort] = editor.querySelectorAll("select");
+  function setEfforts(value) {
+    const available = models.find(entry => entry.id === model.value)?.efforts ?? [];
+    effort.replaceChildren(new Option(defaultLabel, ""), ...available.map(value => new Option(value, value)));
+    effort.disabled = !available.length;
+    if (available.includes(value)) effort.value = value;
+  }
+  model.addEventListener("change", () => setEfforts(""));
+  setEfforts(task.execution?.effort);
+  if (!result.ok) notice(boardError(result.error));
+}
+
 async function showTask(id) {
   const task = await command("show", id);
   if (!task) return;
@@ -577,6 +657,19 @@ async function showTask(id) {
   if (task.status === "in_progress") section(language("Submission", "Сдача"), language("Result not submitted", "Результат не сдан"));
   section(language("Progress", "Ход работы"), task.summary);
   section(language("Next step", "Следующий шаг"), task.nextStep);
+  if (task.dependencies?.length) {
+    const waiting = new Set(task.unfinishedDependencies);
+    const names = new Map([...(frame.board?.tasks ?? []), ...(frame.board?.archived ?? [])]
+      .map(entry => [entry.id, entry.title]));
+    const label = waiting.size ? language("Blocked by dependencies", "Заблокировано зависимостями") :
+      language("Task dependencies", "Зависимости задачи");
+    section(label, task.dependencies.map(id => (waiting.has(id) ? "○ " : "✓ ") +
+      id + (names.has(id) ? " · " + names.get(id) : "")));
+  }
+  if (task.execution) {
+    section(language("Execution settings", "Параметры запуска"), task.execution.model + " · " +
+      (task.execution.effort ?? language("Provider default", "По умолчанию у провайдера")));
+  }
   if (task.blocked) section(language("Blocker", "Причина блокировки"), [task.blocked.reason, task.blocked.condition]);
   if (task.result) {
     section(language("Result", "Результат"), task.result.summary);
@@ -602,6 +695,10 @@ async function showTask(id) {
     if (result) await showTask(task.id);
   };
   if (task.status === "draft") actions.append(button(language("Approve", "Утвердить"), () => act("approve"), "primary"));
+  if (["draft", "ready"].includes(task.status)) {
+    actions.append(button(language("Dependencies…", "Зависимости…"), () => editDependencies(task)));
+    actions.append(button(language("Execution settings…", "Параметры запуска…"), () => editExecution(task)));
+  }
   if (task.status === "review") {
     actions.append(button(language("Review changes", "Проверить изменения"), () => showReview(task), "primary"));
     actions.append(button(language("Request changes", "Вернуть на доработку"), () => noteTask(task, "request-changes")));
@@ -925,7 +1022,8 @@ function update(next) {
     if (tagsChanged) byId("task-sheet-tags")?.replaceChildren(...tagBadges(taskInSheet.tags));
     const task = frame.board?.tasks.find(entry => entry.id === taskInSheet.id);
     const archived = frame.board?.archived.some(entry => entry.id === taskInSheet.id);
-    if ((task && task.revision !== taskInSheet.revision) ||
+    if ((task && (task.revision !== taskInSheet.revision ||
+        String(task.unfinishedDependencies) !== String(taskInSheet.unfinishedDependencies))) ||
         (archived && !task && !["done", "cancelled"].includes(taskInSheet.status))) {
       void protect(() => showTask(taskInSheet.id))();
     }

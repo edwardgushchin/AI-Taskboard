@@ -10,6 +10,7 @@ import { bundled, callCli, cliChild, cliFailure, entry } from "./cli.ts";
 import { codexStatus, composeDraft, installCodex, setCodexExecutable, skillLaunch } from "./codex.ts";
 import type { CodexStatus } from "./codex.ts";
 import type { CliReply } from "./cli.ts";
+import { executionModels } from "./codex-models.ts";
 import type { ArchiveLink, BoardSettings, BoardTag, Task } from "../cli/model.ts";
 import { maxAttachmentBytes } from "../cli/model.ts";
 import { readJson, writeJson } from "../cli/storage.ts";
@@ -420,6 +421,16 @@ ipcMain.handle("board:attach", async (event, id: unknown, revision: unknown) => 
   const result = await dialog.showOpenDialog(state.window, { properties: ["openFile"] });
   if (result.canceled || !result.filePaths[0]) return { ok: true, data: null };
   return callCli(project, ["attachment", "add", id], { path: result.filePaths[0], actor: "user", revision });
+});
+
+ipcMain.handle("codex:executionModels", async event => {
+  const { project } = stateOf(event);
+  if (!project) return cliFailure("INVALID_INPUT", "Choose a project.");
+  try {
+    return { ok: true, data: await executionModels(app.getPath("userData"), project) };
+  } catch (error) {
+    return cliFailure("CODEX_MODELS_UNAVAILABLE", (error as Error).message);
+  }
 });
 
 ipcMain.handle("board:saveAttachment", async (event, id: unknown, file: unknown, name: unknown) => {

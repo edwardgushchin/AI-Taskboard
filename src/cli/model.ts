@@ -73,6 +73,8 @@ export interface Task {
   closedAt?: string;
   summary: string;
   nextStep: string;
+  dependencies?: string[];
+  execution?: { model: string; effort?: string };
   blocked?: { reason: string; condition: string };
   result?: { summary: string; checks: string[]; limitations: string[] };
   git?: TaskGit;
@@ -114,6 +116,7 @@ export class TaskboardError extends Error {
 }
 
 export const taskIdPattern = /^T-[0-9]{4,}$/;
+export const reasoningEffortPattern = /^[a-z][a-z0-9_-]{0,31}$/;
 
 export function object(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {

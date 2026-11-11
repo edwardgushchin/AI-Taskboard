@@ -7,7 +7,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { discoverRepository, excludeBoard, git } from "./git.ts";
 import type { Repository } from "./git.ts";
-import { registerTags, tagColors, tagKey, TaskboardError, taskIdPattern, taskStates } from "./model.ts";
+import { reasoningEffortPattern, registerTags, tagColors, tagKey, TaskboardError, taskIdPattern, taskStates } from "./model.ts";
 import type { BoardIndex, Task } from "./model.ts";
 
 function stat(path: string) {
@@ -187,6 +187,12 @@ export function validateCard(value: unknown, id: string): Task {
       Number(value.revision) < 1 || typeof value.createdAt !== "string" || typeof value.updatedAt !== "string" ||
       typeof value.description !== "string" || typeof value.summary !== "string" ||
       typeof value.nextStep !== "string" || !Array.isArray(value.history) ||
+      (value.dependencies !== undefined && (!Array.isArray(value.dependencies) ||
+        value.dependencies.some(entry => typeof entry !== "string" || !taskIdPattern.test(entry)))) ||
+      (value.execution !== undefined && (!isRecord(value.execution) ||
+        typeof value.execution.model !== "string" || !value.execution.model.trim() ||
+        (value.execution.effort !== undefined &&
+          (typeof value.execution.effort !== "string" || !reasoningEffortPattern.test(value.execution.effort))))) ||
       !["criteria", "questions", "subtasks"].every(key => Array.isArray(value[key])) || !isTagList(value.tags) ||
       !Array.isArray(value.attachments) || value.attachments.some(entry => !isRecord(entry) ||
         typeof entry.name !== "string" || typeof entry.file !== "string" ||

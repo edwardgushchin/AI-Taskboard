@@ -1,5 +1,6 @@
 import {
-  member, object, priorities, record, requireRevision, requireState, strings, TaskboardError, text,
+  member, object, priorities, reasoningEffortPattern, record, requireRevision, requireState, strings, taskIdPattern,
+  TaskboardError, text,
 } from "./model.ts";
 import type { Actor, Task, TaskState } from "./model.ts";
 
@@ -13,6 +14,29 @@ function fields(task: Task, input: Record<string, unknown>): Task {
     if (input[key] !== undefined) updated[key] = strings(input[key], key);
   }
   if (input.priority !== undefined) updated.priority = member(input.priority, priorities, "priority");
+  if (input.dependencies !== undefined) {
+    requireState(task, ["draft", "ready"]);
+    const dependencies = [...new Set(strings(input.dependencies, "dependencies"))];
+    if (dependencies.some(id => !taskIdPattern.test(id))) {
+      throw new TaskboardError("INVALID_INPUT", "Dependencies must be task IDs.");
+    }
+    if (dependencies.length) updated.dependencies = dependencies;
+    else delete updated.dependencies;
+  }
+  if (input.execution !== undefined) {
+    requireState(task, ["draft", "ready"]);
+    if (input.execution === null) {
+      delete updated.execution;
+    } else {
+      const execution = object(input.execution);
+      const model = text(execution.model, "model", true);
+      const effort = execution.effort === undefined ? undefined : text(execution.effort, "effort", true);
+      if (effort && !reasoningEffortPattern.test(effort)) {
+        throw new TaskboardError("INVALID_INPUT", "Invalid reasoning effort.");
+      }
+      updated.execution = { model, effort };
+    }
+  }
   if (input.subtasks !== undefined) {
     if (!Array.isArray(input.subtasks)) throw new TaskboardError("INVALID_INPUT", "subtasks must be an array.");
     updated.subtasks = input.subtasks.map(item => {

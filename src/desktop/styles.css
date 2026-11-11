@@ -223,6 +223,9 @@ input, textarea, select {
 .task-priority { margin-inline-start: auto; }
 .task-priority[data-priority="high"] { color: var(--yellow); }
 .task-priority[data-priority="urgent"] { color: var(--warn); }
+.dependency-warning { color: var(--warn); }
+.dependency-choices { min-width: 0; max-height: 42vh; overflow: auto; border: 1px solid var(--border); }
+.form .dependency-option { display: flex; align-items: baseline; gap: 8px; padding: 4px; overflow-wrap: anywhere; }
 .tag {
   --tag-color: var(--purple);
   max-width: 100%; padding: 1px 5px; border-radius: 8px; overflow-wrap: anywhere;

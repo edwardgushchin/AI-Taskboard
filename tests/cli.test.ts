@@ -63,6 +63,46 @@ function cli(root: string, args: string[], input?: unknown, expectedCode?: strin
   return payload.data;
 }
 
+test("dependencies prevent worktree creation until every dependency is completed", t => {
+  const root = fixture(t, true);
+  cli(root, ["init"]);
+  const fields = { criteria: ["Verified"] };
+  const first = cli(root, ["create"], { ...fields, title: "First" });
+  const second = cli(root, ["create"], { ...fields, title: "Second" });
+  const task = cli(root, ["create"], {
+    ...fields, title: "Dependent", dependencies: [first.id, second.id],
+    execution: { model: "test-model", effort: "high" },
+  });
+  cli(root, ["update", first.id], { dependencies: [task.id] }, "DEPENDENCY_CYCLE");
+  cli(root, ["update", task.id], { dependencies: ["T-9999"] }, "TASK_NOT_FOUND");
+  cli(root, ["approve", task.id]);
+  const blocked = () => cli(root, ["start", task.id], undefined, "DEPENDENCIES_INCOMPLETE").details.dependencies;
+  assert.deepEqual(blocked(), [first.id, second.id]);
+  assert.equal(cli(root, ["show", task.id]).status, "ready");
+  assert.ok(!existsSync(join(root, ".tasks", "worktrees", task.id)));
+
+  function complete(dependency: string, file: string) {
+    cli(root, ["approve", dependency]);
+    const { worktree } = cli(root, ["start", dependency]);
+    writeFileSync(join(worktree, file), "dependency\n");
+    const preview = cli(root, ["preview", dependency]);
+    cli(root, ["submit", dependency], { token: preview.token, message: "feat: complete dependency", summary: "Complete", checks: ["Checked"] });
+    const review = cli(root, ["review", dependency]);
+    cli(root, ["accept", dependency], { revision: review.revision, targetHead: review.targetHead, message: review.message });
+  }
+  complete(first.id, "first.txt");
+  assert.deepEqual(blocked(), [second.id]);
+  cli(root, ["settings"], { archiveAfterDays: 0 });
+  cli(root, ["archive", "sweep"]);
+  assert.deepEqual(blocked(), [second.id]);
+  complete(second.id, "second.txt");
+  assert.deepEqual(cli(root, ["show", task.id]).unfinishedDependencies, []);
+  const started = cli(root, ["start", task.id]);
+  assert.equal(started.task.status, "in_progress");
+  assert.deepEqual(started.task.execution, { model: "test-model", effort: "high" });
+  assert.ok(existsSync(started.worktree));
+});
+
 test("create saves attachments with the draft and rejects incomplete batches", t => {
   const root = fixture(t);
   cli(root, ["init"]);
