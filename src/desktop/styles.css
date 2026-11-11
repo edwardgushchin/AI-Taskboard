@@ -207,6 +207,8 @@ input, textarea, select {
   background: color-mix(in srgb, var(--text) 9%, transparent); font-size: 10px; font-variant-numeric: tabular-nums;
 }
 .lane-cards { display: grid; gap: 6px; min-height: 13px; }
+.ready-task { display: grid; gap: 2px; }
+.ready-task > .button { justify-self: end; font-size: 11px; }
 .task-card {
   width: 100%; min-width: 0; display: grid; gap: 6px; text-align: left; padding: 8px;
   border: 1px solid color-mix(in srgb, var(--border) 70%, var(--lane)); border-radius: 4px;

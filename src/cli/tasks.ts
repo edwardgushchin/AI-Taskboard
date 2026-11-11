@@ -1,6 +1,7 @@
 import {
   member, object, priorities, record, requireRevision, requireState, strings, TaskboardError, text,
 } from "./model.ts";
+import { codexThreadPattern } from "./model.ts";
 import type { Actor, Task, TaskState } from "./model.ts";
 
 const activeStates = ["draft", "ready", "in_progress", "blocked", "review"] as const;
@@ -77,6 +78,13 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
     }
     case "update": {
       const updated = fields(task, input);
+      if (input.codexThreadId !== undefined) {
+        const id = text(input.codexThreadId, "codexThreadId", true);
+        if (!codexThreadPattern.test(id) || (task.codexThreadId && task.codexThreadId !== id)) {
+          throw new TaskboardError("INVALID_INPUT", "Expected a valid Codex thread ID for this task.");
+        }
+        updated.codexThreadId = id;
+      }
       const actor = actorFor(input, "agent");
       const requirementsChanged = updated.description !== task.description ||
         JSON.stringify(updated.criteria) !== JSON.stringify(task.criteria);
