@@ -104,6 +104,20 @@ test("normal commands enforce task state, criteria, and revisions", t => {
   assert.equal(cli(root, ["list"]).tasks.length, 1);
 });
 
+test("creating a board can initialize Git in the selected folder without changing its parent", t => {
+  const parent = fixture(t, true);
+  const selected = join(parent, "Selected board");
+  mkdirSync(selected);
+  const created = cli(selected, ["init"], { git: true });
+  assert.equal(created.project, realpathSync(selected));
+  assert.ok(existsSync(join(selected, ".git")));
+  assert.ok(existsSync(join(selected, ".tasks", "board.json")));
+  assert.ok(!existsSync(join(parent, ".tasks")));
+  const task = cli(selected, ["create"], { title: "Keep this task" });
+  assert.equal(cli(selected, ["init"], { git: true }).tasks[0].id, task.id);
+  assert.equal(git(selected, "status", "--porcelain"), "");
+});
+
 test("doctor restores an unindexed task with its tags and numbering does not reuse it", t => {
   const root = fixture(t);
   cli(root, ["init"]);

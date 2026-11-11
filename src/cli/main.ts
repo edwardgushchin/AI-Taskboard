@@ -25,6 +25,7 @@ const help = [
   "          block, resume, preview, submit, review, accept, restore-changes, request-changes, cancel, cleanup, settings, watch, doctor",
   "          list --archived, archive sweep, attachment add TASK-ID, attachment read TASK-ID",
   "          list --tag NAME, tag ensure --stdin, tag set --stdin (name and color)",
+  "For init, pass git: true with --stdin to initialize Git in the chosen folder.",
   "With --stdin, pass one JSON object as the command input.",
 ].join("\n");
 
@@ -229,7 +230,7 @@ try {
     if (values.archived && command !== "list") throw new TaskboardError("INVALID_INPUT", "Use --archived with list.");
     if (values.tag !== undefined && command !== "list") throw new TaskboardError("INVALID_INPUT", "Use --tag with list.");
     const input = readInput(values.stdin);
-    const location = locateBoard(values.project ?? process.cwd(), command === "init");
+    const location = locateBoard(values.project ?? process.cwd(), command === "init", command === "init" && input.git === true);
     if (command === "watch") {
       watchBoard(location);
     } else {

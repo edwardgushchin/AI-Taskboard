@@ -3,7 +3,7 @@ import type { IpcMainInvokeEvent } from "electron";
 import { existsSync, mkdirSync, statSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { bundled, callCli, cliChild, cliFailure, entry } from "./cli.ts";
@@ -39,6 +39,8 @@ interface BoardWatch {
 }
 
 const html = new URL("./index.html", import.meta.url);
+const customTitleBar = process.platform === "win32";
+const titleBarHeight = 36;
 const windowStates = new Map<number, WindowState>();
 const subscriptions = new Map<string, BoardWatch>();
 const commands = new Map<string, string[]>([
@@ -70,6 +72,42 @@ const themes = {
 } as const;
 type Theme = keyof typeof themes;
 let theme: Theme = "system";
+let recentBoards: string[] = [];
+
+function recentBoardsFile(): string {
+  return join(app.getPath("userData"), "recent-boards.json");
+}
+
+function loadRecentBoards(): void {
+  try {
+    const saved = readJson(recentBoardsFile());
+    if (Array.isArray(saved)) {
+      recentBoards = [...new Set(saved.filter((path): path is string =>
+        typeof path === "string" && isAbsolute(path) && !path.includes("\0")))].slice(0, 10);
+    }
+  } catch {
+    // A missing profile or an invalid file starts with an empty history.
+  }
+}
+
+function rememberBoard(path: string, current: WindowState): void {
+  const key = (value: string) => process.platform === "win32" ? value.toLowerCase() : value;
+  if (recentBoards[0] === path) return;
+  recentBoards = [path, ...recentBoards.filter(previous => key(previous) !== key(path))].slice(0, 10);
+  try {
+    mkdirSync(app.getPath("userData"), { recursive: true });
+    writeJson(recentBoardsFile(), recentBoards);
+  } catch {
+    // Keep the board usable and retain its history in this session.
+  }
+  for (const state of windowStates.values()) {
+    if (state !== current) send(state);
+  }
+}
+
+function titleBarOverlay() {
+  return { height: titleBarHeight, color: "#00000000", symbolColor: nativeTheme.shouldUseDarkColors ? "#e3e7f3" : "#20283a" };
+}
 
 function isTheme(value: unknown): value is Theme {
   return typeof value === "string" && Object.hasOwn(themes, value);
@@ -95,7 +133,10 @@ function stateOf(event: IpcMainInvokeEvent): WindowState {
 }
 
 function frame(state: WindowState) {
-  return { project: state.project, board: state.board, error: state.error, loading: state.loading, russian, theme };
+  return {
+    project: state.project, board: state.board, error: state.error, loading: state.loading, russian, theme,
+    recentBoards: recentBoards.map(path => ({ name: basename(path) || path, path })),
+  };
 }
 
 function send(state: WindowState): void {
@@ -180,9 +221,10 @@ function bind(state: WindowState, board: Board): void {
   }
   watch.windows.add(state);
   state.board = watch.board;
+  rememberBoard(board.project, state);
 }
 
-async function openProject(state: WindowState, project: string): Promise<void> {
+async function openProject(state: WindowState, project: string, create = false): Promise<void> {
   const selection = ++state.selection;
   unbind(state);
   state.project = project;
@@ -190,7 +232,8 @@ async function openProject(state: WindowState, project: string): Promise<void> {
   state.error = undefined;
   state.loading = true;
   send(state);
-  const result = await callCli<Board>(project, ["list"]);
+  const result = existsSync(project) ? await callCli<Board>(project, [create ? "init" : "list"], create ? { git: true } : undefined)
+    : cliFailure("PROJECT_UNAVAILABLE", lang("The folder is unavailable.", "Папка недоступна."));
   if (state.selection !== selection || state.window.isDestroyed()) return;
   state.loading = false;
   if (result.ok) bind(state, result.data);
@@ -198,9 +241,15 @@ async function openProject(state: WindowState, project: string): Promise<void> {
   send(state);
 }
 
-async function pickProject(state: WindowState): Promise<void> {
-  const result = await dialog.showOpenDialog(state.window, { properties: ["openDirectory"] });
-  if (!result.canceled && result.filePaths[0]) await openProject(state, result.filePaths[0]);
+async function pickProject(state: WindowState, create = false): Promise<void> {
+  const result = await dialog.showOpenDialog(state.window, {
+    title: create ? lang("Create board", "Создать доску") : lang("Open existing board", "Открыть существующую доску"),
+    defaultPath: state.project && existsSync(state.project) ? state.project : undefined,
+    properties: ["openDirectory"],
+  });
+  if (!result.canceled && result.filePaths[0] && !state.window.isDestroyed()) {
+    await openProject(state, result.filePaths[0], create);
+  }
 }
 
 function createWindow(initial?: string): WindowState {
@@ -211,6 +260,7 @@ function createWindow(initial?: string): WindowState {
       contextIsolation: true, sandbox: true, nodeIntegration: false,
     },
     title: "AI Taskboard",
+    ...(customTitleBar ? { titleBarStyle: "hidden", titleBarOverlay: titleBarOverlay() } : {}),
   });
   window.webContents.zoomMode = "isolated";
   const id = window.webContents.id;
@@ -316,6 +366,12 @@ ipcMain.handle("board:draft", async (event, request: unknown, files: unknown = [
     if (scratch) await rm(scratch, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
     state.drafting = false;
   }
+});
+ipcMain.handle("board:create", async event => pickProject(stateOf(event), true));
+ipcMain.handle("board:recent", async (event, path: unknown) => {
+  const state = stateOf(event);
+  if (typeof path !== "string" || !recentBoards.includes(path)) throw new Error("Unknown recent board.");
+  await openProject(state, path);
 });
 ipcMain.handle("appearance:themes", event => {
   stateOf(event);
@@ -429,7 +485,15 @@ else {
   void app.whenReady().then(() => {
     russian = app.getLocale().toLowerCase().startsWith("ru");
     loadTheme();
+    loadRecentBoards();
     Menu.setApplicationMenu(null);
+    if (customTitleBar) {
+      nativeTheme.on("updated", () => {
+        for (const { window } of windowStates.values()) {
+          if (!window.isDestroyed()) window.setTitleBarOverlay(titleBarOverlay());
+        }
+      });
+    }
     const option = process.argv.indexOf("--project");
     createWindow(option === -1 ? undefined : process.argv[option + 1]);
     app.on("activate", () => { if (!windowStates.size) createWindow(); });
