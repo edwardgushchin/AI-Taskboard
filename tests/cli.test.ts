@@ -82,18 +82,59 @@ test("normal commands enforce task state, criteria, and revisions", t => {
   assert.equal(cli(root, ["list"]).tasks.length, 1);
 });
 
-test("doctor restores an unindexed task and numbering does not reuse it", t => {
+test("doctor restores an unindexed task with its tags and numbering does not reuse it", t => {
   const root = fixture(t);
   cli(root, ["init"]);
-  const task = cli(root, ["create"], { title: "Recover me" });
+  const task = cli(root, ["create"], { title: "Recover me", tags: ["Orphan"] });
   const indexPath = join(root, ".tasks", "board.json");
   const index = JSON.parse(readFileSync(indexPath, "utf8"));
   delete index.tasks[task.id];
+  index.tags = [];
   index.nextId = 1;
   writeFileSync(indexPath, JSON.stringify(index));
   assert.equal(cli(root, ["create"], { title: "Next task" }).id, "T-0002");
   assert.deepEqual(cli(root, ["doctor"], { repair: true }).recovered, [task.id]);
   assert.equal(cli(root, ["show", task.id]).title, "Recover me");
+  const snapshot = cli(root, ["list", "--tag", "orphan"]);
+  assert.deepEqual(snapshot.tasks, [task]);
+  assert.equal(snapshot.tags[0].name, "Orphan");
+});
+
+test("the board tag catalog migrates older tasks and shares names and colors across cards", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const active = cli(root, ["create"], { title: "Active task", tags: ["Интерфейс"] });
+  const archived = cli(root, ["create"], { title: "Old task", tags: ["Отчёты"] });
+  cli(root, ["cancel", archived.id], { reason: "Archive fixture" });
+  cli(root, ["settings"], { archiveAfterDays: 0 });
+  cli(root, ["archive", "sweep"]);
+  const indexPath = join(root, ".tasks", "board.json");
+  const index = JSON.parse(readFileSync(indexPath, "utf8"));
+  delete index.tags;
+  delete index.archive[archived.id].tags;
+  writeFileSync(indexPath, JSON.stringify(index));
+
+  const snapshot = cli(root, ["list", "--tag", " ИНТЕРФЕЙС "]);
+  assert.deepEqual(snapshot.tags.map((tag: { name: string }) => tag.name), ["Интерфейс", "Отчёты"]);
+  assert.deepEqual(snapshot.tasks, [active]);
+  const matches = cli(root, ["list", "--archived", "--tag", "ОТЧЁТЫ"]).archived;
+  assert.deepEqual(matches.map((task: { id: string }) => task.id), [archived.id]);
+  assert.deepEqual(matches[0].tags, ["Отчёты"]);
+
+  const name = "Ошибки";
+  assert.deepEqual(cli(root, ["tag", "ensure"], { name, color: "green" }), { name, color: "green" });
+  assert.deepEqual(cli(root, ["tag", "ensure"], { name: "ОШИБКИ", color: "pink" }), { name, color: "green" });
+  cli(root, ["tag", "set"], { name, color: "invalid" }, "INVALID_INPUT");
+  const updated = cli(root, ["update", active.id], { tags: [" ошибки ", "ОШИБКИ"], revision: active.revision });
+  assert.deepEqual(updated.tags, [name]);
+  cli(root, ["update", active.id], { tags: ["Stale tag"], revision: active.revision }, "REVISION_CONFLICT");
+  cli(root, ["tag", "set"], { name: "ошибки", color: "blue" });
+  assert.deepEqual(cli(root, ["show", active.id]), updated);
+  cli(root, ["update", active.id], { tags: [], revision: updated.revision });
+  const empty = cli(root, ["list", "--tag", name]);
+  assert.deepEqual(empty.tasks, []);
+  assert.ok(empty.tags.some((tag: { name: string; color: string }) => tag.name === name && tag.color === "blue"));
+  assert.ok(!empty.tags.some((tag: { name: string }) => tag.name === "Stale tag"));
 });
 
 test("linked worktrees share the board and cleanup preserves local files and the branch", t => {
@@ -142,11 +183,11 @@ test("failed start without a branch or worktree keeps the ready task editable", 
   assert.ok(!existsSync(join(root, ".tasks", "pending", ready.id + ".json")));
 });
 
-test("parallel processes receive unique task IDs", async t => {
+test("parallel processes receive unique task IDs and share one catalog entry per tag", async t => {
   const root = fixture(t);
   cli(root, ["init"]);
   const tasks = await Promise.all(Array.from({ length: 8 }, async (_, index) => {
-    const input = { title: "Parallel " + index };
+    const input = { title: "Parallel " + index, tags: [index % 2 ? "Shared" : "SHARED", "Tag " + index] };
     const child = spawn(process.execPath, commandArgs(root, ["create"], input), {
       env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
     });
@@ -157,10 +198,13 @@ test("parallel processes receive unique task IDs", async t => {
     child.stderr.on("data", chunk => { err += chunk; });
     const [code] = await once(child, "close");
     assert.equal(code, 0, out || err);
-    return JSON.parse(out).data.id;
+    return JSON.parse(out).data;
   }));
-  assert.equal(new Set(tasks).size, 8);
-  assert.equal(cli(root, ["list"]).tasks.length, 8);
+  assert.equal(new Set(tasks.map(task => task.id)).size, 8);
+  assert.equal(new Set(tasks.map(task => task.tags[0])).size, 1);
+  const snapshot = cli(root, ["list", "--tag", "shared"]);
+  assert.equal(snapshot.tasks.length, 8);
+  assert.equal(snapshot.tags.length, 9);
 });
 
 test("watch streams the initial board and updates from another process", { timeout: 10000 }, async t => {
@@ -185,6 +229,10 @@ test("watch streams the initial board and updates from another process", { timeo
   assert.deepEqual((await frame()).data.tasks, []);
   const task = cli(root, ["create"], { title: "Visible to watcher" });
   assert.equal((await frame()).data.tasks[0].id, task.id);
+  const tag = cli(root, ["tag", "ensure"], { name: "Watched", color: "pink" });
+  assert.deepEqual((await frame()).data.tags, [tag]);
+  const recolored = cli(root, ["tag", "set"], { name: tag.name, color: "blue" });
+  assert.deepEqual((await frame()).data.tags, [recolored]);
 });
 
 test("submission commits the confirmed snapshot and rejects changed or incomplete inputs", t => {

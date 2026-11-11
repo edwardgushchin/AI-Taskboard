@@ -4,8 +4,9 @@ import type { FSWatcher } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { acceptTask, inspectReview } from "./acceptance.ts";
-import { addAttachment, archiveDiagnostics, isArchived, readAttachment, readTask, sweepArchives } from "./archive.ts";
-import { member, number, object, TaskboardError } from "./model.ts";
+import { addAttachment, archiveDiagnostics, isArchived, readAttachment, readTask, sweepArchives, upgradeTagCatalog } from "./archive.ts";
+import { member, number, object, registerTags, tagColors, tagKey, TaskboardError, text } from "./model.ts";
+import type { Task } from "./model.ts";
 import { initializeBoard, locateBoard, onBoard } from "./storage.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
 import { previewSubmission, submitTask } from "./submission.ts";
@@ -19,6 +20,7 @@ const help = [
   "Commands: init, list, show, create, update, comment, approve, start, progress,",
   "          block, resume, preview, submit, review, accept, request-changes, cancel, cleanup, settings, watch, doctor",
   "          list --archived, archive sweep, attachment add TASK-ID, attachment read TASK-ID",
+  "          list --tag NAME, tag ensure --stdin, tag set --stdin (name and color)",
   "With --stdin, pass one JSON object as the command input.",
 ].join("\n");
 
@@ -39,8 +41,21 @@ function readInput(fromStdin: boolean | undefined): Record<string, unknown> {
   return fromStdin ? object(JSON.parse(readFileSync(0, "utf8").replace(/^\uFEFF/, ""))) : {};
 }
 
+function snapshotBoard(store: BoardStore) {
+  upgradeTagCatalog(store);
+  return store.snapshot();
+}
+
+function assignTags(store: BoardStore, task: Task): Task {
+  const catalog = upgradeTagCatalog(store);
+  const previous = catalog.length;
+  const tags = registerTags(catalog, task.tags);
+  if (catalog.length !== previous) store.saveIndex();
+  return { ...task, tags };
+}
+
 function watchBoard(location: BoardLocation): void {
-  let previous = JSON.stringify(onBoard(location, store => ({ ok: true, data: store.snapshot() })));
+  let previous = JSON.stringify({ ok: true, data: onBoard(location, snapshotBoard) });
   process.stdout.write(previous + "\n");
   let refreshTimer: NodeJS.Timeout | undefined;
   const watchers: FSWatcher[] = [];
@@ -48,7 +63,7 @@ function watchBoard(location: BoardLocation): void {
     refreshTimer = undefined;
     let current: string;
     try {
-      current = JSON.stringify(onBoard(location, store => ({ ok: true, data: store.snapshot() })));
+      current = JSON.stringify({ ok: true, data: onBoard(location, snapshotBoard) });
     } catch (error) {
       if (error instanceof TaskboardError && error.code === "BOARD_BUSY") return;
       current = JSON.stringify({ ok: false, error: describe(error) });
@@ -92,13 +107,39 @@ function run(
   id: string | undefined,
   extra: string | undefined,
   input: Record<string, unknown>,
-  archived: boolean,
+  filters: { archived?: boolean; tag?: string },
 ) {
   if (command === "list") {
-    const snapshot = store.snapshot();
-    return archived ? { project: snapshot.project, archived: snapshot.archived } : snapshot;
+    const key = filters.tag === undefined ? undefined : tagKey(text(filters.tag, "tag", true));
+    const matches = (entry: { tags?: string[] }) => key === undefined || entry.tags?.some(name => tagKey(name) === key);
+    const snapshot = snapshotBoard(store);
+    const archived = snapshot.archived.filter(matches);
+    return filters.archived ? { project: snapshot.project, tags: snapshot.tags, archived } :
+      { ...snapshot, tasks: snapshot.tasks.filter(matches), archived };
   }
-  if (command === "create") return createTask(store, input);
+  if (command === "create") {
+    const task = createTask(store.allocateId(), input);
+    return store.create(task.tags.length ? assignTags(store, task) : task);
+  }
+  if (command === "tag") {
+    if (id !== "ensure" && id !== "set") throw new TaskboardError("INVALID_INPUT", "Use tag ensure or tag set.");
+    const name = text(input.name, "name", true);
+    const color = member(input.color, tagColors, "color");
+    const tags = upgradeTagCatalog(store);
+    const key = tagKey(name);
+    const existing = tags.find(tag => tagKey(tag.name) === key);
+    if (existing) {
+      if (id === "set" && existing.color !== color) {
+        existing.color = color;
+        store.saveIndex();
+      }
+      return existing;
+    }
+    const tag = { name, color };
+    tags.push(tag);
+    store.saveIndex();
+    return tag;
+  }
   if (command === "archive") {
     if (id !== "sweep") throw new TaskboardError("INVALID_INPUT", "Use archive sweep.");
     return sweepArchives(store);
@@ -144,7 +185,8 @@ function run(
     throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before modifying the task.");
   }
   if (command === "cleanup") return cleanTaskWorktree(store, task);
-  return store.save(changeTask(task, command, input));
+  const updated = changeTask(task, command, input);
+  return store.save(command === "update" && input.tags !== undefined ? assignTags(store, updated) : updated);
 }
 
 process.stdout.on("error", error => {
@@ -160,6 +202,7 @@ try {
       json: { type: "boolean" },
       stdin: { type: "boolean" },
       archived: { type: "boolean" },
+      tag: { type: "string" },
       version: { type: "boolean" },
       help: { type: "boolean" },
     },
@@ -176,12 +219,14 @@ try {
       throw new TaskboardError("INVALID_INPUT", "Unexpected positional argument.");
     }
     if (values.archived && command !== "list") throw new TaskboardError("INVALID_INPUT", "Use --archived with list.");
+    if (values.tag !== undefined && command !== "list") throw new TaskboardError("INVALID_INPUT", "Use --tag with list.");
     const input = readInput(values.stdin);
     const location = locateBoard(values.project ?? process.cwd(), command === "init");
     if (command === "watch") {
       watchBoard(location);
     } else {
-      const data = command === "init" ? initializeBoard(location) : onBoard(location, store => run(store, command, id, extra, input, values.archived === true));
+      const data = command === "init" ? initializeBoard(location, snapshotBoard) :
+        onBoard(location, store => run(store, command, id, extra, input, values));
       send({ ok: true, data });
     }
   }

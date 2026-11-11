@@ -3,8 +3,8 @@ import { readdirSync, realpathSync, rmdirSync, statSync, writeFileSync } from "n
 import { basename, join, resolve } from "node:path";
 import { gzipSync, gunzipSync } from "node:zlib";
 import { unzipSync, zipSync } from "fflate";
-import { record, requireRevision, requireState, TaskboardError, text } from "./model.ts";
-import type { ArchiveLink, Attachment, Task } from "./model.ts";
+import { record, registerTags, requireRevision, requireState, TaskboardError, text } from "./model.ts";
+import type { ArchiveLink, Attachment, BoardTag, Task } from "./model.ts";
 import { directory, exists, readBinary, removeFile, validateCard, writeAtomic } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
 import { actorFor } from "./tasks.ts";
@@ -63,6 +63,7 @@ function openArchive(store: BoardStore, id: string, link: ArchiveLink): Archived
     const bytes = Buffer.from(card);
     const task = validateCard(JSON.parse(bytes.toString("utf8")), id);
     if (task.status !== link.status || task.title !== link.title || closedAt(task) !== link.closedAt ||
+        (link.tags !== undefined && JSON.stringify(link.tags) !== JSON.stringify(task.tags)) ||
         zipped !== (task.attachments.length > 0) ||
         task.attachments.reduce((total, entry) => total + entry.bytes, 0) > maxAttachments) {
       throw new Error("The archived card differs from the archive index.");
@@ -102,6 +103,27 @@ export function isArchived(store: BoardStore, id: string): boolean {
 
 export function readTask(store: BoardStore, id: string): Task {
   return isArchived(store, id) ? openArchive(store, id, store.index.archive[id]).task : store.card(id);
+}
+
+export function upgradeTagCatalog(store: BoardStore): BoardTag[] {
+  if (store.index.tags !== undefined) return store.index.tags;
+  const names = Object.keys(store.index.tasks).flatMap(id => store.card(id).tags);
+  for (const [id, link] of Object.entries(store.index.archive)) {
+    if (link.tags === undefined) {
+      try {
+        link.tags = openArchive(store, id, link).task.tags;
+      } catch (error) {
+        if (!(error instanceof TaskboardError && error.code === "ARCHIVE_CORRUPT")) throw error;
+        continue;
+      }
+    }
+    for (const name of link.tags) names.push(name);
+  }
+  const tags: BoardTag[] = [];
+  registerTags(tags, names);
+  store.index.tags = tags;
+  store.saveIndex();
+  return tags;
 }
 
 export function addAttachment(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
@@ -187,6 +209,7 @@ function archiveTask(store: BoardStore, task: Task, now: Date, closure: string):
   const link: ArchiveLink = {
     path: "archive/" + task.id + (task.attachments.length ? ".zip" : ".json.gz"),
     title: task.title, status: task.status, closedAt: closure, archivedAt: now.toISOString(),
+    tags: task.tags,
   };
   let compressed: Uint8Array;
   if (task.attachments.length) {

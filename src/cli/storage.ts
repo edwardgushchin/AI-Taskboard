@@ -7,7 +7,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { discoverRepository, excludeBoard } from "./git.ts";
 import type { Repository } from "./git.ts";
-import { TaskboardError, taskIdPattern, taskStates } from "./model.ts";
+import { registerTags, tagColors, tagKey, TaskboardError, taskIdPattern, taskStates } from "./model.ts";
 import type { BoardIndex, Task } from "./model.ts";
 
 function stat(path: string) {
@@ -141,11 +141,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isTagList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(name => typeof name === "string" && name.trim());
+}
+
 function readIndex(path: string): BoardIndex {
   const index = readJson(path);
   if (!isRecord(index) || index.version !== 1 || typeof index.nextId !== "number" ||
       !Number.isSafeInteger(index.nextId) || index.nextId < 1 || !isRecord(index.tasks) ||
       !isRecord(index.archive) || !isRecord(index.settings) ||
+      (index.tags !== undefined && (!Array.isArray(index.tags) || index.tags.some(tag =>
+        !isRecord(tag) || typeof tag.name !== "string" || !tag.name.trim() || !tagColors.some(color => color === tag.color)) ||
+        new Set(index.tags.map(tag => tagKey(tag.name))).size !== index.tags.length)) ||
       !["merge", "squash"].includes(String(index.settings.integrationMode)) ||
       !(index.settings.archiveAfterDays === null ||
         (Number.isSafeInteger(index.settings.archiveAfterDays) && Number(index.settings.archiveAfterDays) >= 0))) {
@@ -160,7 +167,8 @@ function readIndex(path: string): BoardIndex {
     if (!taskIdPattern.test(id) || !isRecord(entry) ||
         !["archive/" + id + ".json.gz", "archive/" + id + ".zip"].includes(String(entry.path)) ||
         typeof entry.title !== "string" || !["done", "cancelled"].includes(String(entry.status)) ||
-        typeof entry.closedAt !== "string" || typeof entry.archivedAt !== "string") {
+        typeof entry.closedAt !== "string" || typeof entry.archivedAt !== "string" ||
+        (entry.tags !== undefined && !isTagList(entry.tags))) {
       throw new TaskboardError("CORRUPT_STORAGE", "Invalid archive link in the board index.", { id });
     }
   }
@@ -173,7 +181,7 @@ export function validateCard(value: unknown, id: string): Task {
       Number(value.revision) < 1 || typeof value.createdAt !== "string" || typeof value.updatedAt !== "string" ||
       typeof value.description !== "string" || typeof value.summary !== "string" ||
       typeof value.nextStep !== "string" || !Array.isArray(value.history) ||
-      !["criteria", "questions", "tags", "subtasks"].every(key => Array.isArray(value[key])) ||
+      !["criteria", "questions", "subtasks"].every(key => Array.isArray(value[key])) || !isTagList(value.tags) ||
       !Array.isArray(value.attachments) || value.attachments.some(entry => !isRecord(entry) ||
         typeof entry.name !== "string" || typeof entry.file !== "string" ||
         !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(entry.file) ||
@@ -263,6 +271,7 @@ export class BoardStore {
     return {
       project: this.location.root,
       settings: this.index.settings,
+      tags: this.index.tags ?? [],
       tasks: Object.keys(this.index.tasks).map(id => this.card(id)),
       archived: Object.entries(this.index.archive).map(([id, entry]) => ({ id, ...entry })),
     };
@@ -285,9 +294,10 @@ export class BoardStore {
         continue;
       }
       try {
-        this.readCardFile(id);
+        const task = this.readCardFile(id);
         if (repair) {
           this.index.tasks[id] = "tasks/" + id + ".json";
+          if (this.index.tags) registerTags(this.index.tags, task.tags);
           recovered.push(id);
         } else {
           issues.push({ id, problem: "Unindexed task file." });
@@ -308,7 +318,7 @@ export class BoardStore {
   }
 }
 
-export function initializeBoard(location: BoardLocation) {
+export function initializeBoard<T>(location: BoardLocation, snapshot: (store: BoardStore) => T): T {
   directory(location.directory, true);
   return withLock(location, () => {
     const path = join(location.directory, "board.json");
@@ -318,11 +328,11 @@ export function initializeBoard(location: BoardLocation) {
         directory(join(location.directory, name), true);
       }
       const board: BoardIndex = {
-        version: 1, nextId: 1, settings: { archiveAfterDays: 90, integrationMode: "merge" }, tasks: {}, archive: {},
+        version: 1, nextId: 1, settings: { archiveAfterDays: 90, integrationMode: "merge" }, tags: [], tasks: {}, archive: {},
       };
       writeJson(path, board);
     }
-    return new BoardStore(location).snapshot();
+    return snapshot(new BoardStore(location));
   });
 }
 

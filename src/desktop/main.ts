@@ -8,12 +8,13 @@ import { bundled, callCli, cliChild, cliFailure, entry } from "./cli.ts";
 import { codexStatus, installCodex, setCodexExecutable, skillLaunch } from "./codex.ts";
 import type { CodexStatus } from "./codex.ts";
 import type { CliReply } from "./cli.ts";
-import type { ArchiveLink, BoardSettings, Task } from "../cli/model.ts";
+import type { ArchiveLink, BoardSettings, BoardTag, Task } from "../cli/model.ts";
 import { readJson, writeJson } from "../cli/storage.ts";
 
 interface Board {
   project: string;
   settings: BoardSettings;
+  tags: BoardTag[];
   tasks: Task[];
   archived: (ArchiveLink & { id: string })[];
 }
@@ -42,6 +43,7 @@ const commands = new Map<string, string[]>([
   ["approve", ["approve"]], ["review", ["review"]], ["accept", ["accept"]],
   ["request-changes", ["request-changes"]], ["cancel", ["cancel"]], ["cleanup", ["cleanup"]],
   ["settings", ["settings"]], ["archive", ["archive", "sweep"]], ["doctor", ["doctor"]],
+  ["tag-color", ["tag", "set"]],
 ]);
 
 let russian = false;

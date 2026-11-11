@@ -4,6 +4,7 @@ let frame = {};
 let archiveView = false;
 let sheetKind = "";
 let taskInSheet;
+let boardTags = new Map();
 const sheet = byId("sheet");
 const body = byId("sheet-body");
 
@@ -90,18 +91,29 @@ function section(title, content) {
   body.append(area);
 }
 
+const tagKey = name => name.trim().normalize().toLowerCase();
+
+function tagBadge(name, color) {
+  const badge = element("span", name, "tag");
+  if (color) badge.dataset.color = color;
+  return badge;
+}
+
+function tagBadges(names) {
+  const tags = new Map();
+  for (const name of names) {
+    const key = tagKey(name);
+    if (!tags.has(key)) tags.set(key, boardTags.get(key) ?? { name });
+  }
+  return Array.from(tags.values(), tag => tagBadge(tag.name, tag.color));
+}
+
 function card(task) {
   const item = button("", () => showTask(task.id), "");
   item.className = "task-card";
   if (task.tags?.length) {
     const tags = element("span", undefined, "task-tags");
-    for (const value of task.tags) {
-      const tag = element("span", value, "tag");
-      let color = 0;
-      for (const character of value) color = (color * 31 + character.codePointAt(0)) % 5;
-      tag.dataset.color = color;
-      tags.append(tag);
-    }
+    tags.append(...tagBadges(task.tags));
     item.append(tags);
   }
   item.append(element("strong", task.title));
@@ -178,29 +190,30 @@ function render() {
   controlLabel("refresh", language("Refresh board", "Обновить доску"));
   byId("search").placeholder = language("Search tasks…", "Поиск задач…");
   byId("search").setAttribute("aria-label", language("Search tasks", "Поиск задач"));
-  byId("filters").hidden = archiveView;
   byId("lanes").hidden = archiveView;
   byId("archive-list").hidden = !archiveView;
-  const query = byId("search").value.trim().toLocaleLowerCase();
-  const matches = task => [task.id, task.title, ...(task.tags ?? [])].some(value => value.toLocaleLowerCase().includes(query));
+  byId("filter-label").textContent = language("Filters", "Фильтры");
+  byId("priority-filter-label").textContent = language("Priority", "Приоритет");
+  byId("priority-filter-label").parentElement.hidden = archiveView;
+  byId("tag-filter-label").textContent = language("Tag", "Тег");
+  const priorities = ["low", "normal", "high", "urgent"].map(value => [value, priorityName(value)]);
+  const tags = [...boardTags].sort(([, a], [, b]) => a.name.localeCompare(b.name));
+  const priority = archiveView ? "" : filterOptions("priority-filter", priorities, language("Any priority", "Любой приоритет"));
+  const tag = filterOptions("tag-filter", tags.map(([key, value]) => [key, value.name]), language("Any tag", "Любой тег"));
+  const filterCount = Number(Boolean(priority)) + Number(Boolean(tag));
+  byId("filter-count").hidden = filterCount === 0;
+  byId("filter-count").textContent = filterCount;
+  const query = tagKey(byId("search").value);
+  const matches = task => (!priority || task.priority === priority) &&
+    (!tag || task.tags?.some(name => tagKey(name) === tag)) &&
+    [task.id, task.title, ...(task.tags ?? [])].some(value => tagKey(value).includes(query));
   if (archiveView) {
     const tasks = board.archived.filter(matches);
     byId("archive-list").replaceChildren(...(tasks.length ? tasks.map(card) :
       [element("p", language("No archived tasks found.", "Архивных задач не найдено."), "muted")]));
     return;
   }
-  byId("filter-label").textContent = language("Filters", "Фильтры");
-  byId("priority-filter-label").textContent = language("Priority", "Приоритет");
-  byId("tag-filter-label").textContent = language("Tag", "Тег");
-  const priorities = ["low", "normal", "high", "urgent"].map(value => [value, priorityName(value)]);
-  const tags = [...new Set(board.tasks.flatMap(task => task.tags ?? []))].sort((a, b) => a.localeCompare(b));
-  const priority = filterOptions("priority-filter", priorities, language("Any priority", "Любой приоритет"));
-  const tag = filterOptions("tag-filter", tags.map(value => [value, value]), language("Any tag", "Любой тег"));
-  const filterCount = Number(Boolean(priority)) + Number(Boolean(tag));
-  byId("filter-count").hidden = filterCount === 0;
-  byId("filter-count").textContent = filterCount;
-  const visible = board.tasks.filter(task => matches(task) &&
-    (!priority || task.priority === priority) && (!tag || task.tags.includes(tag)));
+  const visible = board.tasks.filter(matches);
   const columns = lanes.map(([state, english, russian]) => {
     const tasks = visible.filter(task => task.status === state);
     const column = element("section", undefined, "lane");
@@ -288,6 +301,12 @@ async function showTask(id) {
   const lane = lanes.find(([state]) => state === task.status);
   const status = lane ? language(lane[1], lane[2]) : task.status;
   body.append(element("p", status + " · " + priorityName(task.priority) + " · " + shortDate(task.updatedAt), "muted"));
+  if (task.tags.length) {
+    const tags = element("div", undefined, "task-tags");
+    tags.id = "task-sheet-tags";
+    tags.append(...tagBadges(task.tags));
+    body.append(tags);
+  }
   section(language("Description", "Описание"), task.description);
   section(language("Acceptance criteria", "Критерии приёмки"), task.criteria);
   section(language("Open questions", "Открытые вопросы"), task.questions);
@@ -433,6 +452,40 @@ function codexSettings() {
   void update(api.codexStatus);
 }
 
+function renderTagSettings(panel) {
+  const focusedTag = panel.contains(document.activeElement) ? document.activeElement.dataset.tag : undefined;
+  panel.replaceChildren(element("h3", language("Tag colors", "Цвета тегов")));
+  if (!boardTags.size) {
+    panel.append(element("p", language("No tags on this board yet.", "На этой доске пока нет тегов."), "muted"));
+    return;
+  }
+  const colors = [
+    ["purple", language("Purple", "Фиолетовый")], ["blue", language("Blue", "Синий")],
+    ["cyan", language("Cyan", "Бирюзовый")], ["pink", language("Pink", "Розовый")],
+    ["green", language("Green", "Зелёный")],
+  ];
+  const tags = [...boardTags.values()].sort((a, b) => a.name.localeCompare(b.name));
+  for (const tag of tags) {
+    const row = element("label", undefined, "tag-setting");
+    const badge = tagBadge(tag.name, tag.color);
+    const select = element("select");
+    select.dataset.tag = tag.name;
+    select.append(...colors.map(([value, label]) => new Option(label, value)));
+    select.value = tag.color;
+    select.addEventListener("change", protect(async () => {
+      select.disabled = true;
+      try {
+        const saved = await command("tag-color", undefined, { name: tag.name, color: select.value });
+        select.value = saved?.color ?? tag.color;
+        badge.dataset.color = select.value;
+      } finally { select.disabled = false; }
+    }));
+    row.append(badge, select);
+    panel.append(row);
+    if (tag.name === focusedTag) select.focus();
+  }
+}
+
 function settings() {
   if (!frame.board) {
     openSheet("settings", language("Settings", "Настройки"));
@@ -453,6 +506,10 @@ function settings() {
     })) sheet.close();
   });
   body.append(button(language("Check archives now", "Проверить архивацию"), () => command("archive")));
+  const tags = element("section", undefined, "tag-settings");
+  tags.id = "tag-settings";
+  renderTagSettings(tags);
+  body.append(tags);
   appearanceSettings();
   codexSettings();
 }
@@ -499,7 +556,9 @@ function appearanceSettings() {
 
 function update(next) {
   const projectChanged = frame.project !== next.project;
+  const tagsChanged = JSON.stringify(frame.board?.tags) !== JSON.stringify(next.board?.tags);
   frame = next;
+  if (tagsChanged) boardTags = new Map((next.board?.tags ?? []).map(tag => [tagKey(tag.name), tag]));
   applyTheme(next.theme);
   if (projectChanged) {
     archiveView = false;
@@ -510,7 +569,10 @@ function update(next) {
     if (sheet.open) sheet.close();
   }
   render();
+  const tagSettings = byId("tag-settings");
+  if (tagsChanged && sheet.open && tagSettings) renderTagSettings(tagSettings);
   if (sheetKind === "task" && sheet.open && taskInSheet) {
+    if (tagsChanged) byId("task-sheet-tags")?.replaceChildren(...tagBadges(taskInSheet.tags));
     const task = frame.board?.tasks.find(entry => entry.id === taskInSheet.id);
     const archived = frame.board?.archived.some(entry => entry.id === taskInSheet.id);
     if ((task && task.revision !== taskInSheet.revision) ||

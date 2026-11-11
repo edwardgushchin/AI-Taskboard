@@ -61,7 +61,6 @@ h1, h2, h3, p { margin: 0; }
 .project-button:hover { border-color: var(--border); }
 .project-button span { overflow: hidden; text-overflow: ellipsis; }
 .board-actions { display: grid; grid-template-columns: minmax(100px, 1fr) repeat(5, auto); align-items: center; gap: 6px; }
-.board-actions:has(#filters[hidden]) { grid-template-columns: minmax(100px, 1fr) repeat(4, auto); }
 .sheet-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 input, textarea, select {
   border: 1px solid var(--border); border-radius: 4px; background: var(--panel); color: var(--text); padding: 7px 9px;
@@ -125,14 +124,14 @@ input, textarea, select {
 .task-priority[data-priority="urgent"] { color: var(--warn); }
 .tag {
   --tag-color: var(--purple);
-  max-width: 100%; padding: 1px 5px; border-radius: 8px;
+  max-width: 100%; padding: 1px 5px; border-radius: 8px; overflow-wrap: anywhere;
   background: color-mix(in srgb, var(--tag-color) 16%, var(--panel));
   color: color-mix(in srgb, var(--tag-color) 82%, var(--text)); font-size: 10px; line-height: 1.25;
 }
-.tag[data-color="1"] { --tag-color: var(--blue); }
-.tag[data-color="2"] { --tag-color: var(--cyan); }
-.tag[data-color="3"] { --tag-color: var(--pink); }
-.tag[data-color="4"] { --tag-color: var(--green); }
+.tag[data-color="blue"] { --tag-color: var(--blue); }
+.tag[data-color="cyan"] { --tag-color: var(--cyan); }
+.tag[data-color="pink"] { --tag-color: var(--pink); }
+.tag[data-color="green"] { --tag-color: var(--green); }
 .archive-list {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; align-content: start;
   padding: 11px 12px; overflow: auto; flex: 1; min-height: 0;
@@ -157,13 +156,15 @@ input, textarea, select {
 .form textarea { resize: vertical; min-height: 67px; }
 pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); padding: 11px; border-radius: 6px; font-size: 12px; }
 .muted { color: var(--muted); }
-.integration-panel, .appearance-panel {
+.integration-panel, .appearance-panel, .tag-settings {
   display: grid; gap: 9px; padding-top: 15px; border-top: 1px solid var(--border);
 }
 .integration-panel p { line-height: 1.45; overflow-wrap: anywhere; }
 .appearance-panel { padding-top: 0; padding-bottom: 14px; border-top: 0; border-bottom: 1px solid var(--border); }
 .appearance-panel label { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .appearance-panel select { min-width: 175px; }
+.tag-setting { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.tag-setting select { min-width: 140px; }
 
 @media (max-width: 840px) {
   .board-heading { grid-template-columns: minmax(0, 1fr); gap: 3px; }

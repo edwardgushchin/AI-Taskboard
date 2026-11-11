@@ -1,10 +1,43 @@
 export const taskStates = ["draft", "ready", "in_progress", "blocked", "review", "done", "cancelled"] as const;
 export const priorities = ["low", "normal", "high", "urgent"] as const;
+export const tagColors = ["purple", "blue", "cyan", "pink", "green"] as const;
 
 export type TaskState = typeof taskStates[number];
 export type Priority = typeof priorities[number];
 export type Actor = "agent" | "user";
 export type IntegrationMode = "merge" | "squash";
+export type TagColor = typeof tagColors[number];
+
+export interface BoardTag {
+  name: string;
+  color: TagColor;
+}
+
+export function tagKey(name: string): string {
+  return name.trim().normalize().toLowerCase();
+}
+
+function defaultTagColor(name: string): TagColor {
+  let color = 0;
+  for (const character of name) color = (color * 31 + character.codePointAt(0)!) % tagColors.length;
+  return tagColors[color];
+}
+
+export function registerTags(tags: BoardTag[], names: string[]): string[] {
+  const byName = new Map(tags.map(tag => [tagKey(tag.name), tag]));
+  const assigned = new Set<string>();
+  for (const name of names) {
+    const key = tagKey(name);
+    let tag = byName.get(key);
+    if (!tag) {
+      tag = { name, color: defaultTagColor(name) };
+      byName.set(key, tag);
+      tags.push(tag);
+    }
+    assigned.add(tag.name);
+  }
+  return [...assigned];
+}
 
 export interface Attachment {
   name: string;
@@ -56,12 +89,14 @@ export interface ArchiveLink {
   status: "done" | "cancelled";
   closedAt: string;
   archivedAt: string;
+  tags?: string[];
 }
 
 export interface BoardIndex {
   version: 1;
   nextId: number;
   settings: BoardSettings;
+  tags?: BoardTag[];
   tasks: Record<string, string>;
   archive: Record<string, ArchiveLink>;
 }

@@ -2,7 +2,6 @@ import {
   member, object, priorities, record, requireRevision, requireState, strings, TaskboardError, text,
 } from "./model.ts";
 import type { Actor, Task, TaskState } from "./model.ts";
-import type { BoardStore } from "./storage.ts";
 
 const activeStates = ["draft", "ready", "in_progress", "blocked", "review"] as const;
 
@@ -31,16 +30,15 @@ export function actorFor(input: Record<string, unknown>, fallback: Actor): Actor
   return input.actor === undefined ? fallback : member(input.actor, ["agent", "user"], "actor");
 }
 
-export function createTask(store: BoardStore, input: Record<string, unknown>): Task {
+export function createTask(id: string, input: Record<string, unknown>): Task {
   const now = new Date().toISOString();
-  const task = fields({
-    id: store.allocateId(),
+  return fields({
+    id,
     title: text(input.title, "title", true),
     description: "", criteria: [], questions: [], tags: [], priority: "normal", subtasks: [], attachments: [],
     status: "draft", revision: 1, createdAt: now, updatedAt: now, summary: "", nextStep: "",
     history: [{ at: now, actor: actorFor(input, "agent"), action: "create" }],
   }, input);
-  return store.create(task);
 }
 
 export function changeTask(task: Task, action: string, input: Record<string, unknown>): Task {
