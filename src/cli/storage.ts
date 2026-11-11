@@ -204,6 +204,8 @@ export function validateCard(value: unknown, id: string): Task {
     if (!isRecord(chat) || event.action !== "chat" || !["agent", "user"].includes(event.actor) ||
         typeof chat.model !== "string" || typeof chat.effort !== "string" ||
         (chat.files !== undefined && (!Array.isArray(chat.files) || chat.files.some(file => !files.has(file)))) ||
+        (chat.commentary !== undefined && (event.actor !== "agent" || !Array.isArray(chat.commentary) ||
+          chat.commentary.some(item => typeof item !== "string" || !item.trim()))) ||
         (chat.usage !== undefined && (!isRecord(chat.usage) || !Number.isSafeInteger(chat.usage.used) ||
           Number(chat.usage.used) < 0 || !Number.isSafeInteger(chat.usage.limit) || Number(chat.usage.limit) < 1))) {
       throw new TaskboardError("CORRUPT_STORAGE", "Invalid chat message for " + id + ".", { id });

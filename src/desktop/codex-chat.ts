@@ -108,6 +108,7 @@ interface TurnNotification {
 
 export function replyToTask(
   profile: string, project: string, settings: ChatSettings, prompt: string, images: string[],
+  onCommentary: (text: string) => void,
 ) {
   return withServer(profile, project, async ({ request, receive }) => {
     const models = await listModels(request);
@@ -131,12 +132,19 @@ export function replyToTask(
     let turn: TurnNotification["turn"];
     let usage: ChatUsage | undefined;
     const answers: string[] = [];
+    const commentary: string[] = [];
     function notify(message: RpcMessage) {
       const data = message.params as TurnNotification | undefined;
       if (data?.threadId !== thread.id) return;
       if (message.method === "turn/completed") turn = data.turn;
-      if (message.method === "item/completed" && data.item?.type === "agentMessage" &&
-          data.item.text && data.item.phase !== "commentary") answers.push(data.item.text);
+      if (message.method === "item/completed" && data.item?.type === "agentMessage" && data.item.text?.trim()) {
+        if (data.item.phase === "commentary") {
+          commentary.push(data.item.text);
+          onCommentary(data.item.text);
+        } else {
+          answers.push(data.item.text);
+        }
+      }
       if (message.method === "thread/tokenUsage/updated") {
         const used = data.tokenUsage?.last?.totalTokens;
         const limit = data.tokenUsage?.modelContextWindow;
@@ -152,6 +160,6 @@ export function replyToTask(
     if (turn.status !== "completed") throw new Error(turn.error?.message ?? "Codex did not complete the reply.");
     const text = answers.join("\n\n").trim();
     if (!text) throw new Error("Codex returned no message.");
-    return { text, usage };
+    return { text, usage, commentary };
   });
 }

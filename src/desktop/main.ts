@@ -325,7 +325,8 @@ function isPastedFile(file: unknown): file is PastedFile {
 const imageExtensions = new Map([
   ["image/png", ".png"], ["image/jpeg", ".jpg"], ["image/webp", ".webp"], ["image/gif", ".gif"],
 ]);
-const imageSuffixes = new Set([".jpg", ...imageExtensions.values()]);
+const imageTypes = new Map([...imageExtensions].map(([type, suffix]) => [suffix, type]));
+imageTypes.set(".jpeg", "image/jpeg");
 const chatRuns = new Set<string>();
 
 ipcMain.handle("chat:models", async event => {
@@ -346,7 +347,9 @@ interface ChatRequest {
   retryAt?: number;
 }
 
-async function sendChat(project: string, id: string, request: ChatRequest) {
+type ChatUpdate = { type: "saved" } | { type: "commentary"; text: string };
+
+async function sendChat(project: string, id: string, request: ChatRequest, notify: (update: ChatUpdate) => void) {
   const key = project + "\0" + id;
   if (chatRuns.has(key)) {
     return { saved: false, result: cliFailure("CHAT_BUSY", lang("Codex is already replying to this task.", "Codex уже отвечает в этой задаче.")) };
@@ -365,10 +368,11 @@ async function sendChat(project: string, id: string, request: ChatRequest) {
         const suffix = imageExtensions.get(file.type);
         const name = file.name.trim();
         await writeFile(path, Buffer.from(file.bytes));
-        sources.push({ path, name: suffix && !imageSuffixes.has(extname(name).toLowerCase()) ? name + suffix : name });
+        sources.push({ path, name: suffix && !imageTypes.has(extname(name).toLowerCase()) ? name + suffix : name });
       }
       reply = await callCli<Task>(project, ["chat", id], { text, model, effort, attachmentSources: sources });
       saved = reply.ok;
+      if (saved) notify({ type: "saved" });
     } else {
       reply = await callCli<Task>(project, ["show", id]);
     }
@@ -391,7 +395,7 @@ async function sendChat(project: string, id: string, request: ChatRequest) {
         path = join(scratch, "attachment-" + index + safeExtension);
         const copy = await callCli(project, ["attachment", "read", id], { file: file.file, destination: path });
         if (!copy.ok) return { saved, result: copy };
-        if (imageSuffixes.has(safeExtension)) images.push(path);
+        if (imageTypes.has(safeExtension)) images.push(path);
       }
       attachments.push({ id: file.file, name: file.name, path });
     }
@@ -404,7 +408,8 @@ async function sendChat(project: string, id: string, request: ChatRequest) {
       attachments,
       latestUserMessage: { text: message.text ?? "", files: message.chat?.files ?? [] },
     });
-    const answer = await replyToTask(app.getPath("userData"), project, { model, effort }, prompt, images);
+    const answer = await replyToTask(app.getPath("userData"), project, { model, effort }, prompt, images,
+      text => notify({ type: "commentary", text }));
     const result = await callCli<Task>(project, ["chat", id], { ...answer, actor: "agent", model, effort, replyTo: last });
     return { saved, result };
   } catch (error) {
@@ -429,7 +434,9 @@ ipcMain.handle("chat:send", async (event, id: unknown, request: unknown) => {
   if (input.files.reduce((total, file) => total + file.bytes.byteLength, 0) > maxAttachmentBytes) {
     return { saved: false, result: cliFailure("ATTACHMENT_LIMIT", lang("Attachments are limited to 64 MiB per task.", "Лимит вложений на задачу — 64 МиБ.")) };
   }
-  return sendChat(project, id, input as ChatRequest);
+  return sendChat(project, id, input as ChatRequest, update => {
+    if (!event.sender.isDestroyed()) event.sender.send("chat:update", { project, id, ...update });
+  });
 });
 
 ipcMain.handle("board:draft", async (event, request: unknown, files: unknown = []) => {
@@ -537,6 +544,15 @@ ipcMain.handle("board:saveAttachment", async (event, id: unknown, file: unknown,
   const result = await dialog.showSaveDialog(state.window, { defaultPath: basename(name.replaceAll("\\", "/")) });
   if (result.canceled || !result.filePath) return { ok: true, data: null };
   return callCli(project, ["attachment", "read", id], { file, destination: result.filePath });
+});
+
+ipcMain.handle("board:attachmentPreview", async (event, id: unknown, file: unknown) => {
+  const project = stateOf(event).project;
+  if (!project || typeof id !== "string" || !/^T-\d{4,}$/.test(id) || typeof file !== "string") return null;
+  const result = await callCli<{ name: string; base64: string }>(project, ["attachment", "read", id], { file });
+  if (!result.ok) return null;
+  const type = imageTypes.get(extname(result.data.name).toLowerCase());
+  return type ? "data:" + type + ";base64," + result.data.base64 : null;
 });
 
 ipcMain.handle("board:openWorktree", async (event, id: unknown) => {

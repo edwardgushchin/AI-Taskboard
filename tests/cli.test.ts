@@ -121,10 +121,12 @@ test("task chat stores messages and attachments together and archives the conver
   const file = sent.attachments[0].file;
   assert.deepEqual(sent.history[0], task.history[0]);
   assert.deepEqual(sent.history.at(-1).chat, { ...settings, files: [file] });
-  const reply = { ...settings, actor: "agent", text: "Who should receive the export?", usage: { used: 32, limit: 256 } };
+  const reply = { ...settings, actor: "agent", text: "Who should receive the export?", usage: { used: 32, limit: 256 },
+    commentary: ["I have checked the export settings."] };
   cli(root, ["chat", task.id], { ...reply, replyTo: 0 }, "CHAT_CHANGED");
   const answered = cli(root, ["chat", task.id], { ...reply, replyTo: sent.history.length - 1 });
   assert.deepEqual(answered.history.at(-1).chat.usage, reply.usage);
+  assert.deepEqual(answered.history.at(-1).chat.commentary, reply.commentary);
   cli(root, ["chat", task.id], { ...reply, replyTo: sent.history.length - 1 }, "CHAT_CHANGED");
 
   cli(root, ["cancel", task.id], { reason: "Archive the conversation" });

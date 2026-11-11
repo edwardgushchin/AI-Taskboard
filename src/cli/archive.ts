@@ -3,7 +3,7 @@ import { readdirSync, realpathSync, rmdirSync, statSync, writeFileSync } from "n
 import { basename, join, resolve } from "node:path";
 import { gzipSync, gunzipSync } from "node:zlib";
 import { unzipSync, zipSync } from "fflate";
-import { maxAttachmentBytes, number, object, record, registerTags, requireRevision, requireState, TaskboardError, text } from "./model.ts";
+import { maxAttachmentBytes, number, object, record, registerTags, requireRevision, requireState, strings, TaskboardError, text } from "./model.ts";
 import type { ArchiveLink, Attachment, BoardTag, Task } from "./model.ts";
 import { directory, exists, readBinary, removeFile, validateCard, writeAtomic } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
@@ -190,8 +190,10 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
     }
     const updated = record(task, "chat", actor, task.status, message);
     const usage = input.usage === undefined ? undefined : object(input.usage);
+    const commentary = input.commentary === undefined ? [] : strings(input.commentary, "commentary");
     updated.history.at(-1)!.chat = {
       model, effort,
+      ...(commentary.length ? { commentary } : {}),
       ...(usage ? { usage: { used: number(usage.used, "used", 0), limit: number(usage.limit, "limit") } } : {}),
     };
     return store.save(updated);

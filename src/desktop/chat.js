@@ -1,5 +1,61 @@
 const chatDrafts = new Map();
 let chatCatalog;
+const chatPreviews = new IntersectionObserver(entries => {
+  for (const { isIntersecting, target } of entries) {
+    if (!isIntersecting) continue;
+    chatPreviews.unobserve(target);
+    if (!target.isConnected) continue;
+    const { task, file } = target.dataset;
+    void api.attachmentPreview(task, file).then(src => {
+      if (src && target.isConnected) showChatPreview(target, src);
+    }).catch(() => {});
+  }
+});
+
+function showChatPreview(tile, src) {
+  const preview = element("img");
+  preview.alt = "";
+  const release = () => { if (src.startsWith("blob:")) URL.revokeObjectURL(src); };
+  preview.onload = () => {
+    release();
+    const list = tile.closest(".chat-log");
+    const atBottom = list && list.scrollHeight - list.clientHeight - list.scrollTop <= 8;
+    tile.prepend(preview);
+    tile.classList.add("has-preview");
+    if (atBottom) list.scrollTop = list.scrollHeight;
+  };
+  preview.onerror = release;
+  preview.src = src;
+}
+
+function renderChatTurn(list, draft) {
+  const turn = list.querySelector(".chat-turn");
+  const atBottom = draft.scroll === undefined;
+  turn.hidden = draft.pending !== "replying";
+  turn.replaceChildren(...(draft.commentary ?? []).map(text => element("p", text, "chat-text")));
+  if (!turn.hidden) {
+    const thinking = element("p", language("Thinking…", "Думаю…"), "chat-thinking");
+    thinking.setAttribute("role", "status");
+    turn.append(thinking);
+  }
+  if (atBottom) list.scrollTop = list.scrollHeight;
+}
+
+function updateChat({ project, id, type, text }) {
+  const draft = chatDrafts.get(project + "\0" + id);
+  if (!draft?.pending) return;
+  const open = frame.project === project && sheet.open && sheetKind === "task" && taskInSheet?.id === id;
+  if (type === "saved" && draft.pending === "saving") {
+    draft.text = "";
+    draft.files = [];
+    draft.pending = "replying";
+    if (open) void protect(() => showTask(id))();
+  } else if (type === "commentary") {
+    draft.commentary.push(text);
+    const list = open && body.querySelector(".chat-log");
+    if (list) renderChatTurn(list, draft);
+  }
+}
 
 function chatEventLabel(action) {
   const labels = {
@@ -62,28 +118,59 @@ function taskChat(task) {
   if (task.questions.length) events.splice(1, 0, {
     at: task.createdAt, actor: "agent", action: "questions", text: task.questions.join("\n\n"),
   });
+  const locale = frame.russian ? "ru" : undefined;
+  const dayFormat = new Intl.DateTimeFormat(locale, { dateStyle: "medium" });
+  const timeFormat = new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit" });
+  let day;
   for (const event of events) {
+    const timestamp = new Date(event.at);
+    const eventDay = Number.isNaN(+timestamp) ? "" : dayFormat.format(timestamp);
+    if (eventDay && eventDay !== day) {
+      day = eventDay;
+      const divider = element("li", undefined, "chat-day");
+      divider.append(element("span", day));
+      list.append(divider);
+    }
+    for (const text of event.chat?.commentary ?? []) {
+      const commentary = element("li", text, "chat-commentary chat-text");
+      commentary.setAttribute("aria-label", language("Agent update", "Сообщение агента о ходе ответа"));
+      list.append(commentary);
+    }
     const conversation = ["chat", "comment", "questions"].includes(event.action);
     const entry = element("li", undefined, "chat-entry");
     entry.dataset.actor = event.actor;
     entry.classList.toggle("chat-event", !conversation);
-    const meta = element("div", undefined, "chat-meta");
     const author = event.actor === "user" ? language("You", "Вы") : language("Agent", "Агент");
-    const date = element("time", shortDate(event.at));
+    const date = element("time", eventDay ? timeFormat.format(timestamp) : event.at, "chat-time");
     date.dateTime = event.at;
-    meta.append(element("strong", author), date);
-    entry.append(meta);
+    date.title = shortDate(event.at);
+    entry.append(element("span", author, "chat-author"));
     if (!conversation) {
       const status = lanes.find(([code]) => code === event.to);
       entry.append(element("p", chatEventLabel(event.action) + (status ? " · " + language(status[1], status[2]) : ""), "chat-action"));
     }
-    if (event.text) entry.append(element("p", event.text, "chat-text"));
-    for (const id of event.chat?.files ?? []) {
-      const file = files.get(id);
-      if (file) entry.append(taskAttachmentButton(task.id, file, "quiet"));
+    const attachments = (event.chat?.files ?? []).map(id => files.get(id)).filter(Boolean);
+    if (attachments.length) {
+      const tiles = element("div", undefined, "chat-attachments");
+      for (const file of attachments) {
+        const tile = taskAttachmentButton(task.id, file, "quiet chat-attachment");
+        controlLabelForIcon(tile, language("Save ", "Сохранить ") + file.name);
+        tile.replaceChildren(icon("attachment"), element("span", file.name));
+        if (/\.(png|jpe?g|webp|gif)$/i.test(file.name)) {
+          tile.dataset.task = task.id;
+          tile.dataset.file = file.file;
+          chatPreviews.observe(tile);
+        }
+        tiles.append(tile);
+      }
+      entry.append(tiles);
     }
+    if (event.text) entry.append(element("p", event.text, "chat-text"));
+    entry.append(date);
     list.append(entry);
   }
+  list.append(element("li", undefined, "chat-turn"));
+  renderChatTurn(list, draft);
   area.append(list);
   requestAnimationFrame(() => { list.scrollTop = draft.scroll ?? list.scrollHeight; });
   list.addEventListener("scroll", () => {
@@ -146,15 +233,15 @@ function taskChat(task) {
   }, "quiet");
   options.append(context, selection, picker, microphone);
   controls.append(attach, options, send);
-  composer.append(input, fileInput, pendingFiles, controls, feedback, retry, reload);
+  composer.append(pendingFiles, input, fileInput, controls, feedback, retry, reload);
   area.append(composer);
 
   let models = [];
   let loadError = "";
   function sync() {
     const working = Boolean(draft.pending);
-    input.readOnly = working;
-    attach.disabled = microphone.disabled = working;
+    input.readOnly = draft.pending === "saving";
+    attach.disabled = microphone.disabled = input.readOnly;
     model.disabled = effort.disabled = working || !models.length;
     selection.disabled = model.disabled;
     modelLabel.textContent = model.selectedOptions[0]?.textContent ?? "";
@@ -164,15 +251,26 @@ function taskChat(task) {
     retry.hidden = !last?.chat || last.actor !== "user" || working;
     retry.disabled = !model.value || !effort.value;
     reload.hidden = working || !loadError;
-    feedback.textContent = working ? language("Codex is replying…", "Codex отвечает…") : draft.error || loadError;
+    feedback.textContent = draft.error || loadError;
     feedback.hidden = !feedback.textContent;
+    for (const remove of pendingFiles.querySelectorAll("button")) remove.disabled = input.readOnly;
+  }
+
+  function renderPendingFiles() {
     pendingFiles.hidden = !draft.files.length;
     pendingFiles.replaceChildren(...draft.files.map((file, index) => {
-      const row = element("li");
-      const remove = button("×", () => { draft.files.splice(index, 1); sync(); input.focus(); }, "quiet");
-      remove.disabled = working;
+      const row = element("li", undefined, "chat-attachment");
+      row.title = file.name;
+      const remove = button("×", () => {
+        draft.files.splice(index, 1);
+        renderPendingFiles();
+        sync();
+        input.focus();
+      }, "quiet");
+      remove.disabled = draft.pending === "saving";
       remove.setAttribute("aria-label", language("Remove ", "Удалить ") + file.name);
       row.append(icon("attachment"), element("span", file.name), remove);
+      if (/^image\/(png|jpeg|webp|gif)$/.test(file.type)) showChatPreview(row, URL.createObjectURL(file));
       return row;
     }));
   }
@@ -212,7 +310,7 @@ function taskChat(task) {
   }
 
   function addFiles(newFiles) {
-    if (draft.pending || !newFiles.length) return;
+    if (draft.pending === "saving" || !newFiles.length) return;
     const total = task.attachments.reduce((sum, file) => sum + file.bytes, 0) +
       [...draft.files, ...newFiles].reduce((sum, file) => sum + file.size, 0);
     if (total > 64 * 1024 * 1024) {
@@ -220,16 +318,19 @@ function taskChat(task) {
     } else {
       draft.files.push(...newFiles);
       draft.error = "";
+      renderPendingFiles();
     }
     sync();
   }
 
   async function submit(retryAt) {
     if (draft.pending || !model.value || !effort.value || (retryAt === undefined && send.disabled)) return;
-    draft.pending = true;
+    draft.pending = retryAt === undefined ? "saving" : "replying";
+    draft.commentary = [];
     draft.error = "";
     draft.scroll = undefined;
     sync();
+    renderChatTurn(list, draft);
     try {
       const files = retryAt === undefined ? await Promise.all(draft.files.map(async file => ({
         name: file.name, type: file.type, bytes: await file.arrayBuffer(),
@@ -237,7 +338,7 @@ function taskChat(task) {
       const { saved, result } = await api.chatSend(task.id, {
         model: draft.model, effort: draft.effort, text: draft.text, files, retryAt,
       });
-      if (saved && retryAt === undefined) {
+      if (saved && draft.pending === "saving") {
         draft.text = "";
         draft.files = [];
       }
@@ -245,8 +346,9 @@ function taskChat(task) {
     } catch (error) {
       draft.error = error.message;
     } finally {
-      draft.pending = false;
-      if (frame.project === project && sheetKind === "task" && taskInSheet?.id === task.id) await showTask(task.id);
+      draft.pending = undefined;
+      draft.commentary = [];
+      if (frame.project === project && sheet.open && sheetKind === "task" && taskInSheet?.id === task.id) await showTask(task.id);
     }
   }
 
@@ -267,6 +369,7 @@ function taskChat(task) {
   model.addEventListener("change", () => { draft.effort = undefined; setEffort(); });
   effort.addEventListener("change", () => { draft.effort = effort.value; sync(); });
   composer.addEventListener("submit", event => { event.preventDefault(); void submit(); });
+  renderPendingFiles();
   void loadModels();
   return area;
 }

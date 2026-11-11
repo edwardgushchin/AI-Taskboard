@@ -249,6 +249,7 @@ async function command(action, id, input) {
 
 function openSheet(kind, title) {
   if (kind !== "task") taskSheetRequest++;
+  chatPreviews.disconnect();
   sheetKind = kind;
   byId("sheet-title").textContent = title;
   body.replaceChildren();
@@ -977,6 +978,7 @@ document.addEventListener("keydown", event => {
 byId("create").addEventListener("click", newTaskDraft);
 sheet.addEventListener("close", () => {
   if (sheet.open) return;
+  chatPreviews.disconnect();
   taskSheetRequest++;
   sheetKind = "";
   taskInSheet = undefined;
@@ -986,6 +988,7 @@ sheet.addEventListener("close", () => {
   focusBeforeSheet = undefined;
 });
 api.subscribe(update);
+api.onChatUpdate(updateChat);
 api.onTheme(theme => {
   frame.theme = theme;
   applyTheme(theme);

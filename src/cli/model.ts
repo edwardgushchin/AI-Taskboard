@@ -73,7 +73,7 @@ export interface TaskEvent {
   text?: string;
   from?: TaskState;
   to?: TaskState;
-  chat?: ChatSettings & { files?: string[]; usage?: ChatUsage };
+  chat?: ChatSettings & { files?: string[]; usage?: ChatUsage; commentary?: string[] };
 }
 
 export interface Task {
