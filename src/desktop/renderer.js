@@ -42,6 +42,10 @@ function notice(message) {
 }
 
 function boardError(error) {
+  if (error.code === "BOARD_NOT_FOUND") {
+    return language("No board in the selected folder. Choose another folder or create a board.",
+      "В выбранной папке нет доски. Выберите другую папку или создайте доску.");
+  }
   if (error.code === "GIT_UNAVAILABLE") {
     return language("Install Git 2.38 or newer, then reopen the project.", "Установите Git 2.38 или новее, затем откройте проект снова.");
   }
@@ -241,7 +245,6 @@ function openSheet(kind, title) {
   if (!sheet.open) {
     focusBeforeSheet = document.activeElement;
     sheet.show();
-    byId("app-header").inert = true;
     byId("app-content").inert = true;
   }
 }
@@ -328,22 +331,14 @@ function render() {
   document.documentElement.lang = frame.russian ? "ru" : "en";
   const board = frame.board;
   const noBoard = !board;
-  const initialize = frame.error?.code === "BOARD_NOT_FOUND";
-  const open = language("Open project", "Открыть проект");
-  controlLabel("open-project", open);
-  controlLabel("settings", language("Settings", "Настройки"));
-  byId("app-header").hidden = !noBoard;
   byId("welcome").hidden = !noBoard;
   byId("workspace").hidden = noBoard;
-  byId("welcome-title").textContent = initialize ? language("Create a board", "Создать доску") : language("Open a project", "Открыть проект");
-  byId("welcome-note").textContent = frame.loading ? language("Reading project…", "Читаем проект…") :
-    initialize ? language("This folder is ready for its first task board.", "В этой папке можно создать доску задач.") :
-      language("Choose a project folder to open its task board.", "Выберите папку проекта, чтобы открыть доску задач.");
-  byId("welcome-action").textContent = initialize ? language("Create board", "Создать доску") : language("Open folder", "Открыть папку");
-  byId("welcome-action").disabled = Boolean(frame.loading);
-  if (frame.error && !initialize) notice(boardError(frame.error));
+  if (frame.error) notice(boardError(frame.error));
   else if (!sheet.open) notice();
-  if (!board) return;
+  if (!board) {
+    renderWelcome();
+    return;
+  }
 
   byId("workspace").setAttribute("aria-label", archiveView ? language("Archive", "Архив") : language("Task board", "Доска задач"));
   controlLabel("archive-toggle", archiveView ? language("Board", "Доска") : language("Archive", "Архив"));
@@ -389,6 +384,28 @@ function render() {
     return column;
   });
   byId("lanes").replaceChildren(...columns);
+}
+
+function renderWelcome() {
+  const loading = Boolean(frame.loading);
+  byId("welcome").setAttribute("aria-busy", String(loading));
+  byId("welcome-start").textContent = language("Start", "Запуск");
+  byId("welcome-recent").textContent = language("Recent boards", "Последние доски");
+  controlLabel("welcome-create", language("Create board", "Создать доску"));
+  controlLabel("welcome-open", language("Open existing board", "Открыть существующую доску"));
+  byId("welcome-create").disabled = loading;
+  byId("welcome-open").disabled = loading;
+  const recent = frame.recentBoards ?? [];
+  byId("recent-empty").hidden = recent.length > 0;
+  byId("recent-empty").textContent = language("No recent boards yet.", "Пока нет недавних досок.");
+  byId("recent-boards").replaceChildren(...recent.map(({ name, path }) => {
+    const row = element("li");
+    const open = button("", () => api.openRecent(path), "welcome-link recent-board");
+    open.disabled = loading;
+    open.append(element("span", name), element("span", path, "muted"));
+    row.append(open);
+    return row;
+  }));
 }
 
 const lineList = value => value.split("\n").map(line => line.trim()).filter(Boolean);
@@ -875,7 +892,11 @@ function update(next) {
   const projectChanged = frame.project !== next.project;
   const tagsChanged = JSON.stringify(frame.board?.tags) !== JSON.stringify(next.board?.tags);
   frame = next;
-  if (byId("app-menu").hidden) mountAppMenu();
+  if (byId("app-header").hidden) {
+    byId("app-header").classList.toggle("titlebar", api.customTitleBar);
+    mountAppMenu();
+    byId("app-header").hidden = false;
+  }
   if (tagsChanged) boardTags = new Map((next.board?.tags ?? []).map(tag => [tagKey(tag.name), tag]));
   applyTheme(next.theme);
   if (projectChanged) {
@@ -900,10 +921,8 @@ function update(next) {
   }
 }
 
-byId("open-project").addEventListener("click", protect(() => api.open()));
-byId("welcome-action").addEventListener("click", protect(() =>
-  frame.error?.code === "BOARD_NOT_FOUND" ? command("init") : api.open()));
-byId("settings").addEventListener("click", settings);
+byId("welcome-create").addEventListener("click", protect(() => api.createBoard()));
+byId("welcome-open").addEventListener("click", protect(() => api.open()));
 byId("board-settings").addEventListener("click", settings);
 byId("close-sheet").addEventListener("click", () => sheet.close());
 byId("archive-toggle").addEventListener("click", () => {
@@ -939,7 +958,6 @@ sheet.addEventListener("close", () => {
   if (sheet.open) return;
   sheetKind = "";
   taskInSheet = undefined;
-  byId("app-header").inert = false;
   byId("app-content").inert = false;
   if (document.activeElement === document.body || sheet.contains(document.activeElement)) focusBeforeSheet?.focus();
   focusBeforeSheet = undefined;

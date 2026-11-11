@@ -5,7 +5,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { discoverRepository, excludeBoard } from "./git.ts";
+import { discoverRepository, excludeBoard, git } from "./git.ts";
 import type { Repository } from "./git.ts";
 import { registerTags, tagColors, tagKey, TaskboardError, taskIdPattern, taskStates } from "./model.ts";
 import type { BoardIndex, Task } from "./model.ts";
@@ -93,12 +93,18 @@ export interface BoardLocation {
   repository: Repository | null;
 }
 
-export function locateBoard(path: string, initializing = false): BoardLocation {
+export function locateBoard(path: string, initializing = false, initializeGit = false): BoardLocation {
   const selected = realpathSync(resolve(path));
   if (!statSync(selected).isDirectory()) {
     throw new TaskboardError("INVALID_PROJECT", "Select a project directory.");
   }
-  const repository = discoverRepository(selected);
+  let repository = discoverRepository(selected);
+  if (initializeGit && (!repository || (repository.bare
+    ? repository.root !== selected
+    : git(selected, ["rev-parse", "--show-prefix"]).trimEnd() !== ""))) {
+    git(selected, ["init"]);
+    repository = discoverRepository(selected);
+  }
   let root = repository?.root ?? selected;
   if (!repository && !initializing) {
     for (let cursor = selected; ; cursor = dirname(cursor)) {
@@ -322,8 +328,8 @@ export function initializeBoard<T>(location: BoardLocation, snapshot: (store: Bo
   directory(location.directory, true);
   return withLock(location, () => {
     const path = join(location.directory, "board.json");
+    if (location.repository) excludeBoard(location.repository);
     if (!exists(path)) {
-      if (location.repository) excludeBoard(location.repository);
       for (const name of ["tasks", "attachments", "archive", "pending", "worktrees"]) {
         directory(join(location.directory, name), true);
       }
