@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, isAbsolute, join, normalize } from "node:path";
+import { delimiter, dirname, isAbsolute, join, normalize } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { object, priorities } from "../cli/model.ts";
@@ -85,16 +86,31 @@ async function windowsDesktopClients(): Promise<Launch[]> {
   }
 }
 
+function windowsNpmClient(root: string): Launch[] {
+  const packageRoot = join(root, "node_modules", "@openai", "codex");
+  const entry = join(packageRoot, "bin", "codex.js");
+  const arch = process.arch === "arm64" ? "arm64" : "x64";
+  const triple = arch === "arm64" ? "aarch64-pc-windows-msvc" : "x86_64-pc-windows-msvc";
+  let vendor = join(packageRoot, "vendor");
+  try {
+    const manifest = createRequire(entry).resolve("@openai/codex-win32-" + arch + "/package.json");
+    vendor = join(dirname(manifest), "vendor");
+  } catch {
+    // Older npm releases shipped their native binaries in the main package.
+  }
+  // The npm shim spawns a console executable without windowsHide.
+  const path = join(vendor, triple, "bin", "codex.exe");
+  return isFile(path) ? [{
+    path, args: [], env: { ...process.env, CODEX_MANAGED_BY_NPM: "1", CODEX_MANAGED_PACKAGE_ROOT: packageRoot },
+  }] : [];
+}
+
 function candidates(): Launch[] {
   const path = pathEntries();
   if (process.platform === "win32") {
     return [
       ...path.map(root => ({ path: join(root, "codex.exe"), args: [] })),
-      ...path.filter(root => isFile(join(root, "codex.cmd"))).map(root => ({
-        path: process.execPath,
-        args: [join(root, "node_modules", "@openai", "codex", "bin", "codex.js")],
-        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
-      })).filter(candidate => isFile(candidate.args[0])),
+      ...path.filter(root => isFile(join(root, "codex.cmd"))).flatMap(windowsNpmClient),
     ];
   }
   const home = homedir();
