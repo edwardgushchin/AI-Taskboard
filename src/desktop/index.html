@@ -26,8 +26,11 @@
     </div>
     <div id="board-actions" class="board-actions" hidden>
       <label class="search-box">
-        <svg class="icon" aria-hidden="true"><use href="#icon-search"/></svg>
-        <input id="search" type="search" aria-label="Search tasks" placeholder="Search tasks…">
+        <input id="search" type="search" aria-label="Search tasks" placeholder=" ">
+        <span class="search-hint" aria-hidden="true">
+          <svg class="icon"><use href="#icon-search"/></svg>
+          <span id="search-hint">Search tasks…</span>
+        </span>
       </label>
       <div class="task-actions">
         <details id="filters" class="filters">

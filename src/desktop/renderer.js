@@ -355,7 +355,7 @@ function render() {
 
   byId("workspace").setAttribute("aria-label", archiveView ? language("Archive", "Архив") : language("Task board", "Доска задач"));
   controlLabel("create", language("Create task", "Создать задачу"));
-  byId("search").placeholder = language("Search tasks…", "Поиск задач…");
+  byId("search-hint").textContent = language("Search tasks…", "Поиск задач…");
   byId("search").setAttribute("aria-label", language("Search tasks", "Поиск задач"));
   byId("lanes").hidden = archiveView;
   byId("archive-list").hidden = !archiveView;
