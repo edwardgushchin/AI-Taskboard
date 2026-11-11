@@ -95,6 +95,7 @@ function mountAppMenu() {
       ["select-all", "Select all", "Выделить всё", "A"],
     ]],
     ["View", "Вид", [
+      ["archive-view", "Archive", "Архив"],
       ["zoom-in", "Zoom in", "Увеличить", "+"],
       ["zoom-out", "Zoom out", "Уменьшить", "-"],
       ["reset-zoom", "Reset zoom", "Сбросить масштаб", "0"],
@@ -124,10 +125,17 @@ function mountAppMenu() {
   }
 
   const run = protect(action => {
+    if (action === "archive-view" && !frame.board) return;
     if (active) {
       const trigger = active.trigger;
       close();
       (previousFocus?.isConnected ? previousFocus : trigger).focus();
+    }
+    if (action === "archive-view") {
+      archiveView = !archiveView;
+      byId("filters").open = false;
+      render();
+      return;
     }
     return action === "settings" ? settings() : api.menuAction(action);
   });
@@ -150,7 +158,8 @@ function mountAppMenu() {
       const item = button("", () => run(action));
       item.className = "app-menu-item";
       item.tabIndex = -1;
-      item.setAttribute("role", "menuitem");
+      item.setAttribute("role", action === "archive-view" ? "menuitemcheckbox" : "menuitem");
+      if (action === "archive-view") item.id = "archive-menu-item";
       item.append(element("span", language(en, ru)));
       if (shortcut) {
         shortcuts.set(shortcut, action);
@@ -246,6 +255,7 @@ function openSheet(kind, title) {
     focusBeforeSheet = document.activeElement;
     sheet.show();
     byId("app-content").inert = true;
+    byId("board-actions").inert = true;
   }
 }
 
@@ -333,6 +343,9 @@ function render() {
   const noBoard = !board;
   byId("welcome").hidden = !noBoard;
   byId("workspace").hidden = noBoard;
+  byId("board-actions").hidden = noBoard;
+  byId("archive-menu-item").setAttribute("aria-disabled", String(noBoard));
+  byId("archive-menu-item").setAttribute("aria-checked", String(archiveView));
   if (frame.error) notice(boardError(frame.error));
   else if (!sheet.open) notice();
   if (!board) {
@@ -341,16 +354,11 @@ function render() {
   }
 
   byId("workspace").setAttribute("aria-label", archiveView ? language("Archive", "Архив") : language("Task board", "Доска задач"));
-  controlLabel("archive-toggle", archiveView ? language("Board", "Доска") : language("Archive", "Архив"));
-  byId("archive-toggle").setAttribute("aria-pressed", String(archiveView));
   controlLabel("create", language("Create task", "Создать задачу"));
-  controlLabel("board-settings", language("Settings", "Настройки"));
-  controlLabel("refresh", language("Refresh board", "Обновить доску"));
-  byId("search").placeholder = language("Search tasks…", "Поиск задач…");
+  byId("search-hint").textContent = language("Search tasks…", "Поиск задач…");
   byId("search").setAttribute("aria-label", language("Search tasks", "Поиск задач"));
   byId("lanes").hidden = archiveView;
   byId("archive-list").hidden = !archiveView;
-  byId("filter-label").textContent = language("Filters", "Фильтры");
   byId("priority-filter-label").textContent = language("Priority", "Приоритет");
   byId("priority-filter-label").parentElement.hidden = archiveView;
   byId("tag-filter-label").textContent = language("Tag", "Тег");
@@ -359,6 +367,9 @@ function render() {
   const priority = archiveView ? "" : filterOptions("priority-filter", priorities, language("Any priority", "Любой приоритет"));
   const tag = filterOptions("tag-filter", tags.map(([key, value]) => [key, value.name]), language("Any tag", "Любой тег"));
   const filterCount = Number(Boolean(priority)) + Number(Boolean(tag));
+  const filterToggle = byId("filter-toggle");
+  filterToggle.title = language("Filters", "Фильтры");
+  filterToggle.setAttribute("aria-label", filterCount ? filterToggle.title + " (" + filterCount + ")" : filterToggle.title);
   byId("filter-count").hidden = filterCount === 0;
   byId("filter-count").textContent = filterCount;
   const query = tagKey(byId("search").value);
@@ -923,18 +934,7 @@ function update(next) {
 
 byId("welcome-create").addEventListener("click", protect(() => api.createBoard()));
 byId("welcome-open").addEventListener("click", protect(() => api.open()));
-byId("board-settings").addEventListener("click", settings);
 byId("close-sheet").addEventListener("click", () => sheet.close());
-byId("archive-toggle").addEventListener("click", () => {
-  archiveView = !archiveView;
-  byId("filters").open = false;
-  render();
-});
-byId("refresh").addEventListener("click", protect(async () => {
-  const current = frame;
-  const board = await command("list");
-  if (board && frame === current) update({ ...frame, board, error: undefined });
-}));
 byId("search").addEventListener("input", render);
 byId("filters").addEventListener("change", render);
 document.addEventListener("pointerdown", event => {
@@ -959,6 +959,7 @@ sheet.addEventListener("close", () => {
   sheetKind = "";
   taskInSheet = undefined;
   byId("app-content").inert = false;
+  byId("board-actions").inert = false;
   if (document.activeElement === document.body || sheet.contains(document.activeElement)) focusBeforeSheet?.focus();
   focusBeforeSheet = undefined;
 });
