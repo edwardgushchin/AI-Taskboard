@@ -3,7 +3,7 @@ import { readdirSync, realpathSync, rmdirSync, statSync, writeFileSync } from "n
 import { basename, join, resolve } from "node:path";
 import { gzipSync, gunzipSync } from "node:zlib";
 import { unzipSync, zipSync } from "fflate";
-import { maxAttachmentBytes, object, record, registerTags, requireRevision, requireState, TaskboardError, text } from "./model.ts";
+import { maxAttachmentBytes, number, object, record, registerTags, requireRevision, requireState, TaskboardError, text } from "./model.ts";
 import type { ArchiveLink, Attachment, BoardTag, Task } from "./model.ts";
 import { directory, exists, readBinary, removeFile, validateCard, writeAtomic } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
@@ -140,11 +140,19 @@ function loadAttachment(input: Record<string, unknown>, limit: number) {
 }
 
 export function createWithAttachments(store: BoardStore, task: Task, sources: unknown): Task {
-  if (sources === undefined) return store.create(task);
-  if (!Array.isArray(sources)) throw new TaskboardError("INVALID_INPUT", "attachmentSources must be an array.");
-  if (!sources.length) return store.create(task);
+  return withNewAttachments(store, task, sources, attachments => store.create({ ...task, attachments }),
+    () => exists(store.cardPath(task.id)));
+}
 
-  let remaining = maxAttachmentBytes;
+function withNewAttachments(
+  store: BoardStore, task: Task, sources: unknown, save: (attachments: Attachment[]) => Task,
+  keepOnError = () => false,
+): Task {
+  if (sources === undefined) return save([]);
+  if (!Array.isArray(sources)) throw new TaskboardError("INVALID_INPUT", "attachmentSources must be an array.");
+  if (!sources.length) return save([]);
+
+  let remaining = maxAttachmentBytes - task.attachments.reduce((sum, item) => sum + item.bytes, 0);
   const files = sources.map(source => {
     const file = loadAttachment(object(source), remaining);
     remaining -= file.attachment.bytes;
@@ -158,14 +166,45 @@ export function createWithAttachments(store: BoardStore, task: Task, sources: un
       writeAtomic(path, data);
       written.push(path);
     }
-    return store.create({ ...task, attachments: files.map(file => file.attachment) });
+    return save(files.map(file => file.attachment));
   } catch (error) {
     // A saved card whose index update failed can be recovered by doctor with its files.
-    if (!exists(store.cardPath(task.id))) {
+    if (!keepOnError()) {
       for (const path of written) removeFile(path);
     }
     throw error;
   }
+}
+
+export function addChatMessage(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
+  requireState(task, ["draft", "ready", "in_progress", "blocked", "review"]);
+  requireRevision(task, input.revision);
+  const actor = actorFor(input, "user");
+  const message = text(input.text, "text", actor === "agent");
+  const model = text(input.model, "model", true);
+  const effort = text(input.effort, "effort", true);
+  if (actor === "agent") {
+    const last = task.history.findLastIndex(event => event.chat);
+    if (last !== number(input.replyTo, "replyTo", 0) || task.history[last]?.actor !== "user") {
+      throw new TaskboardError("CHAT_CHANGED", "The last chat message changed before the reply was saved.");
+    }
+    const updated = record(task, "chat", actor, task.status, message);
+    const usage = input.usage === undefined ? undefined : object(input.usage);
+    updated.history.at(-1)!.chat = {
+      model, effort,
+      ...(usage ? { usage: { used: number(usage.used, "used", 0), limit: number(usage.limit, "limit") } } : {}),
+    };
+    return store.save(updated);
+  }
+
+  return withNewAttachments(store, task, input.attachmentSources, attachments => {
+    if (!message && !attachments.length) throw new TaskboardError("INVALID_INPUT", "Write a message or attach a file.");
+    const updated = record({
+      ...task, attachments: [...task.attachments, ...attachments],
+    }, "chat", actor, task.status, message);
+    updated.history.at(-1)!.chat = { model, effort, files: attachments.map(attachment => attachment.file) };
+    return store.save(updated);
+  });
 }
 
 export function addAttachment(store: BoardStore, task: Task, input: Record<string, unknown>): Task {

@@ -4,6 +4,7 @@ let frame = {};
 let archiveView = false;
 let sheetKind = "";
 let taskInSheet;
+let taskSheetRequest = 0;
 let focusBeforeSheet;
 let boardTags = new Map();
 const sheet = byId("sheet");
@@ -247,6 +248,7 @@ async function command(action, id, input) {
 }
 
 function openSheet(kind, title) {
+  if (kind !== "task") taskSheetRequest++;
   sheetKind = kind;
   byId("sheet-title").textContent = title;
   body.replaceChildren();
@@ -556,8 +558,19 @@ function taskEditor(task) {
 }
 
 async function showTask(id) {
-  const task = await command("show", id);
-  if (!task) return;
+  const request = ++taskSheetRequest;
+  const project = frame.project;
+  const result = await api.command("show", id);
+  if (request !== taskSheetRequest || project !== frame.project) return;
+  if (!result.ok) {
+    notice(boardError(result.error));
+    return;
+  }
+  const task = result.data;
+  notice();
+  const sameTask = sheetKind === "task" && taskInSheet?.id === id;
+  const scroll = sameTask ? body.scrollTop : 0;
+  const focusedChat = sameTask && document.activeElement.id === "task-chat-input" ? document.activeElement : undefined;
   taskInSheet = task;
   openSheet("task", task.id + " · " + task.title);
   const lane = lanes.find(([state]) => state === task.status);
@@ -572,7 +585,6 @@ async function showTask(id) {
   }
   section(language("Description", "Описание"), task.description);
   section(language("Acceptance criteria", "Критерии приёмки"), task.criteria);
-  section(language("Open questions", "Открытые вопросы"), task.questions);
   section(language("Subtasks", "Подзадачи"), task.subtasks.map(item => (item.done ? "✓ " : "○ ") + item.title));
   if (task.status === "in_progress") section(language("Submission", "Сдача"), language("Result not submitted", "Результат не сдан"));
   section(language("Progress", "Ход работы"), task.summary);
@@ -587,14 +599,12 @@ async function showTask(id) {
     section("Git", [task.git.target, task.git.worktree, task.git.submission?.sha, task.git.accepted].filter(Boolean));
   }
   if (task.attachments.length) {
+    const chatFiles = new Set(task.history.flatMap(event => event.chat?.files ?? []));
     const downloads = element("div", undefined, "sheet-actions");
-    for (const attachment of task.attachments) {
-      downloads.append(button("↓ " + attachment.name, async () => {
-        const result = await api.saveAttachment(task.id, attachment.file, attachment.name);
-        if (!result.ok) notice(boardError(result.error));
-      }));
+    for (const attachment of task.attachments.filter(file => !chatFiles.has(file.file))) {
+      downloads.append(taskAttachmentButton(task.id, attachment));
     }
-    body.append(downloads);
+    if (downloads.childElementCount) body.append(downloads);
   }
   const actions = element("div", undefined, "sheet-actions");
   const act = async (name, input) => {
@@ -619,7 +629,6 @@ async function showTask(id) {
     }
   } else {
     actions.append(button(language("Edit", "Редактировать"), () => taskEditor(task)));
-    actions.append(button(language("Comment", "Комментарий"), () => noteTask(task, "comment")));
     actions.append(button(language("Attach file", "Добавить файл"), async () => {
       const result = await api.attach(task.id, task.revision);
       if (!result.ok) notice(boardError(result.error));
@@ -628,8 +637,19 @@ async function showTask(id) {
     actions.append(button(language("Cancel task", "Отменить задачу"), () => noteTask(task, "cancel"), "danger"));
   }
   body.append(actions);
-  section(language("History", "История"), task.history.slice().reverse().map(event =>
-    shortDate(event.at) + " · " + event.actor + " · " + (event.text || event.action)));
+  body.append(taskChat(task));
+  body.scrollTop = scroll;
+  if (focusedChat && byId("task-chat-input")) {
+    byId("task-chat-input").focus({ preventScroll: true });
+    byId("task-chat-input").setSelectionRange(focusedChat.selectionStart, focusedChat.selectionEnd);
+  }
+}
+
+function taskAttachmentButton(id, attachment, kind) {
+  return button("↓ " + attachment.name, async () => {
+    const result = await api.saveAttachment(id, attachment.file, attachment.name);
+    if (!result.ok) notice(boardError(result.error));
+  }, kind);
 }
 
 function noteTask(task, action) {
@@ -832,6 +852,7 @@ function renderTagSettings(panel) {
 }
 
 function settings() {
+  chatCatalog = undefined;
   if (!frame.board) {
     openSheet("settings", language("Settings", "Настройки"));
     body.append(element("p", language("Open a project to configure its board.", "Откройте проект, чтобы настроить доску.")));
@@ -956,6 +977,7 @@ document.addEventListener("keydown", event => {
 byId("create").addEventListener("click", newTaskDraft);
 sheet.addEventListener("close", () => {
   if (sheet.open) return;
+  taskSheetRequest++;
   sheetKind = "";
   taskInSheet = undefined;
   byId("app-content").inert = false;

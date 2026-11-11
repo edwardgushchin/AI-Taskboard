@@ -104,6 +104,37 @@ test("normal commands enforce task state, criteria, and revisions", t => {
   assert.equal(cli(root, ["list"]).tasks.length, 1);
 });
 
+test("task chat stores messages and attachments together and archives the conversation", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const task = cli(root, ["create"], { title: "Discuss export", questions: ["Which format?"] });
+  const path = join(root, "sample.txt");
+  const contents = "example attachment\n";
+  writeFileSync(path, contents);
+  const settings = { model: "fixture-model", effort: "medium" };
+  const message = { ...settings, text: "Use this example.", attachmentSources: [{ path }] };
+  cli(root, ["chat", task.id], { ...message, attachmentSources: [{ path }, { path: root }] }, "INVALID_INPUT");
+  assert.equal(cli(root, ["show", task.id]).revision, task.revision);
+  assert.ok(!existsSync(join(root, ".tasks", "attachments", task.id)));
+
+  const sent = cli(root, ["chat", task.id], message);
+  const file = sent.attachments[0].file;
+  assert.deepEqual(sent.history[0], task.history[0]);
+  assert.deepEqual(sent.history.at(-1).chat, { ...settings, files: [file] });
+  const reply = { ...settings, actor: "agent", text: "Who should receive the export?", usage: { used: 32, limit: 256 } };
+  cli(root, ["chat", task.id], { ...reply, replyTo: 0 }, "CHAT_CHANGED");
+  const answered = cli(root, ["chat", task.id], { ...reply, replyTo: sent.history.length - 1 });
+  assert.deepEqual(answered.history.at(-1).chat.usage, reply.usage);
+  cli(root, ["chat", task.id], { ...reply, replyTo: sent.history.length - 1 }, "CHAT_CHANGED");
+
+  cli(root, ["cancel", task.id], { reason: "Archive the conversation" });
+  cli(root, ["chat", task.id], message, "INVALID_TRANSITION");
+  cli(root, ["settings"], { archiveAfterDays: 0 });
+  assert.deepEqual(cli(root, ["archive", "sweep"]).archived, [task.id]);
+  assert.deepEqual(cli(root, ["show", task.id]).history.slice(0, -1), answered.history);
+  assert.equal(cli(root, ["attachment", "read", task.id], { file }).base64, Buffer.from(contents).toString("base64"));
+});
+
 test("creating a board can initialize Git in the selected folder without changing its parent", t => {
   const parent = fixture(t, true);
   const selected = join(parent, "Selected board");

@@ -254,6 +254,37 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .sheet-section h3 { font-size: 13px; margin-bottom: 5px; }
 .sheet-section p, .sheet-section ul { line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
 .sheet-section ul { padding-left: 22px; margin: 0; }
+.task-chat { display: grid; gap: 12px; min-width: 0; padding-top: 14px; border-top: 1px solid var(--border); }
+.chat-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; }
+.chat-header h3 { margin-inline-end: auto; font-size: 15px; }
+.chat-context { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.chat-log {
+  display: grid; gap: 8px; max-height: 360px; overflow: auto; overscroll-behavior: contain; list-style: none;
+  margin: 0; padding: 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--lane);
+}
+.chat-entry {
+  display: grid; gap: 5px; justify-self: start; min-width: 0; max-width: min(92%, 56ch);
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel);
+}
+.chat-entry[data-actor="user"]:not(.chat-event) {
+  justify-self: end; background: color-mix(in srgb, var(--blue) 12%, var(--panel));
+}
+.chat-entry.chat-event {
+  justify-self: stretch; max-width: none; padding: 4px 6px; border: 0; background: transparent; color: var(--muted);
+  font-size: 12px;
+}
+.chat-meta { display: flex; flex-wrap: wrap; gap: 4px 9px; align-items: baseline; font-size: 11px; }
+.chat-meta time { color: var(--muted); }
+.chat-text, .chat-action { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }
+.chat-entry .button { justify-self: start; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.chat-composer { display: grid; gap: 8px; min-width: 0; }
+.chat-composer textarea { width: 100%; resize: vertical; }
+.chat-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.chat-controls select { max-width: 100%; min-height: 30px; padding: 4px 6px; font-size: 12px; }
+.chat-controls .chat-icon { width: 30px; padding: 0; }
+.chat-controls [type="submit"] { margin-inline-start: auto; }
+.chat-status { color: var(--muted); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-composer > .button { justify-self: start; }
 .sheet .notice { flex: none; margin-inline: 20px; }
 .form { display: grid; gap: 12px; }
 .form label { display: grid; gap: 6px; font-weight: 600; }

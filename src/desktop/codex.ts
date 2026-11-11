@@ -152,6 +152,10 @@ async function findClient(dataDirectory: string, selectedPath?: string): Promise
   return await probe(candidates()) ?? (process.platform === "win32" ? await probe(await windowsDesktopClients()) : undefined);
 }
 
+export function configuredCodex(dataDirectory: string) {
+  return findClient(dataDirectory, preference(dataDirectory));
+}
+
 const stringList = { type: "array", items: { type: "string" } };
 const draftFields = {
   title: { type: "string" },
@@ -171,7 +175,7 @@ export async function composeDraft(
   dataDirectory: string, request: string, tags: string[],
   attachments: { path: string; name: string; image: boolean }[], fallbackLanguage: string,
 ) {
-  const client = await findClient(dataDirectory, preference(dataDirectory));
+  const client = await configuredCodex(dataDirectory);
   if (!client) return undefined;
 
   const scratch = mkdtempSync(join(tmpdir(), "ai-taskboard-draft-"));

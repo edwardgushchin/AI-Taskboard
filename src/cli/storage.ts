@@ -196,7 +196,20 @@ export function validateCard(value: unknown, id: string): Task {
       new Set(value.attachments.map(entry => entry.file)).size !== value.attachments.length) {
     throw new TaskboardError("CORRUPT_STORAGE", "Invalid card for " + id + ".", { id });
   }
-  return value as unknown as Task;
+  const task = value as unknown as Task;
+  const files = new Set(task.attachments.map(file => file.file));
+  for (const event of task.history) {
+    const chat = event?.chat;
+    if (chat === undefined) continue;
+    if (!isRecord(chat) || event.action !== "chat" || !["agent", "user"].includes(event.actor) ||
+        typeof chat.model !== "string" || typeof chat.effort !== "string" ||
+        (chat.files !== undefined && (!Array.isArray(chat.files) || chat.files.some(file => !files.has(file)))) ||
+        (chat.usage !== undefined && (!isRecord(chat.usage) || !Number.isSafeInteger(chat.usage.used) ||
+          Number(chat.usage.used) < 0 || !Number.isSafeInteger(chat.usage.limit) || Number(chat.usage.limit) < 1))) {
+      throw new TaskboardError("CORRUPT_STORAGE", "Invalid chat message for " + id + ".", { id });
+    }
+  }
+  return task;
 }
 
 export class BoardStore {
