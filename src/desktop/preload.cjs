@@ -13,6 +13,8 @@ contextBridge.exposeInMainWorld("taskboard", {
   attach: (id, revision) => ipcRenderer.invoke("board:attach", id, revision),
   saveAttachment: (id, file, name) => ipcRenderer.invoke("board:saveAttachment", id, file, name),
   openWorktree: id => ipcRenderer.invoke("board:openWorktree", id),
+  launchTask: id => ipcRenderer.invoke("board:launchTask", id),
+  openCodexThread: id => ipcRenderer.invoke("board:openCodexThread", id),
   subscribe: listener => { ipcRenderer.on("board:changed", (_event, frame) => listener(frame)); },
   themes: () => ipcRenderer.invoke("appearance:themes"),
   setTheme: theme => ipcRenderer.invoke("appearance:theme", theme),

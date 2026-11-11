@@ -321,6 +321,28 @@ function card(task) {
   return item;
 }
 
+function codexTaskAction(task) {
+  if (task.codexThreadId) {
+    return button(language("Open Codex chat", "Открыть чат Codex"), async () => {
+      const result = await api.openCodexThread(task.id);
+      if (!result.ok) notice(boardError(result.error));
+    });
+  }
+  if (!["ready", "in_progress"].includes(task.status)) return null;
+  const launch = button(language("Run in Codex", "Запустить в Codex"), async () => {
+    launch.disabled = true;
+    try {
+      const result = await api.launchTask(task.id);
+      if (!result.ok) notice(boardError(result.error));
+      else if (sheetKind === "task" && taskInSheet?.id === task.id) await showTask(task.id);
+    } finally {
+      launch.disabled = Boolean(task.unfinishedDependencies?.length);
+    }
+  });
+  launch.disabled = Boolean(task.unfinishedDependencies?.length);
+  return launch;
+}
+
 function controlLabel(id, label) {
   const control = byId(id);
   const text = control.querySelector("span");
@@ -390,7 +412,13 @@ function render() {
     const heading = element("h2", language(english, russian), "lane-title");
     heading.append(element("span", String(tasks.length), "count"));
     const content = element("div", undefined, "lane-cards");
-    content.append(...tasks.map(card));
+    content.append(...tasks.map(task => {
+      const details = card(task);
+      if (state !== "ready") return details;
+      const entry = element("div", undefined, "ready-task");
+      entry.append(details, codexTaskAction(task));
+      return entry;
+    }));
     column.append(heading, content);
     return column;
   });
@@ -627,6 +655,8 @@ async function showTask(id) {
     }));
     actions.append(button(language("Cancel task", "Отменить задачу"), () => noteTask(task, "cancel"), "danger"));
   }
+  const codexAction = codexTaskAction(task);
+  if (codexAction) actions.append(codexAction);
   body.append(actions);
   section(language("History", "История"), task.history.slice().reverse().map(event =>
     shortDate(event.at) + " · " + event.actor + " · " + (event.text || event.action)));
