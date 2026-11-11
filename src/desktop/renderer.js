@@ -4,6 +4,7 @@ let frame = {};
 let archiveView = false;
 let sheetKind = "";
 let taskInSheet;
+let focusBeforeSheet;
 let boardTags = new Map();
 const sheet = byId("sheet");
 const body = byId("sheet-body");
@@ -61,6 +62,158 @@ function button(label, click, kind = "") {
   return item;
 }
 
+function mountAppMenu() {
+  const bar = byId("app-menu");
+  bar.setAttribute("aria-label", language("Application menu", "Меню приложения"));
+  const groups = [
+    ["File", "Файл", [
+      ["new-window", "New window", "Новое окно", "N"],
+      ["open-project", "Open project folder…", "Открыть папку проекта…", "O"],
+      ["close-window", "Close window", "Закрыть окно", "W"],
+      ["settings", "Settings…", "Настройки…", ","],
+      ["quit", "Exit", "Выход"],
+    ]],
+    ["Edit", "Правка", [
+      ["undo", "Undo", "Отменить", "Z"],
+      ["redo", "Redo", "Повторить", api.isMac ? "Shift+Z" : "Y"],
+      ["cut", "Cut", "Вырезать", "X"],
+      ["copy", "Copy", "Копировать", "C"],
+      ["paste", "Paste", "Вставить", "V"],
+      ["select-all", "Select all", "Выделить всё", "A"],
+    ]],
+    ["View", "Вид", [
+      ["zoom-in", "Zoom in", "Увеличить", "+"],
+      ["zoom-out", "Zoom out", "Уменьшить", "-"],
+      ["reset-zoom", "Reset zoom", "Сбросить масштаб", "0"],
+      ["fullscreen", "Full screen", "Полноэкранный режим", "F11"],
+    ]],
+    ["Help", "Справка", [
+      ["about", "About AI Taskboard", "О программе"],
+    ]],
+  ];
+  const shortcuts = new Map();
+  let active;
+  let previousFocus;
+
+  function close() {
+    if (!active) return;
+    active.popup.hidden = true;
+    active.trigger.setAttribute("aria-expanded", "false");
+    active = undefined;
+  }
+
+  function open(menu, index = 0) {
+    close();
+    active = menu;
+    menu.popup.hidden = false;
+    menu.trigger.setAttribute("aria-expanded", "true");
+    menu.items.at(index).focus();
+  }
+
+  const run = protect(action => {
+    if (active) {
+      const trigger = active.trigger;
+      close();
+      (previousFocus?.isConnected ? previousFocus : trigger).focus();
+    }
+    return action === "settings" ? settings() : api.menuAction(action);
+  });
+
+  const menus = groups.map(([english, russian, commands], index) => {
+    const group = element("div", undefined, "app-menu-group");
+    group.setAttribute("role", "none");
+    const label = language(english, russian);
+    const trigger = element("button", label, "app-menu-trigger");
+    trigger.type = "button";
+    trigger.tabIndex = index === 0 ? 0 : -1;
+    trigger.setAttribute("role", "menuitem");
+    trigger.setAttribute("aria-haspopup", "menu");
+    trigger.setAttribute("aria-expanded", "false");
+    const popup = element("div", undefined, "app-menu-popup");
+    popup.hidden = true;
+    popup.setAttribute("role", "menu");
+    popup.setAttribute("aria-label", label);
+    const items = commands.map(([action, en, ru, shortcut]) => {
+      const item = button("", () => run(action));
+      item.className = "app-menu-item";
+      item.tabIndex = -1;
+      item.setAttribute("role", "menuitem");
+      item.append(element("span", language(en, ru)));
+      if (shortcut) {
+        shortcuts.set(shortcut, action);
+        const prefix = shortcut === "F11" ? "" : api.isMac ? "⌘" : "Ctrl+";
+        item.append(element("kbd", prefix + shortcut));
+      }
+      popup.append(item);
+      return item;
+    });
+    const menu = { group, trigger, popup, items };
+    trigger.addEventListener("click", () => {
+      if (active === menu) close();
+      else open(menu);
+    });
+    group.append(trigger, popup);
+    bar.append(group);
+    return menu;
+  });
+
+  document.addEventListener("pointerdown", event => {
+    if (!bar.contains(event.target)) close();
+  });
+  document.addEventListener("focusin", event => {
+    if (!bar.contains(event.target)) {
+      close();
+      previousFocus = event.target;
+      return;
+    }
+    const focused = menus.find(menu => menu.group.contains(event.target));
+    for (const menu of menus) menu.trigger.tabIndex = menu === focused ? 0 : -1;
+  });
+  bar.addEventListener("keydown", event => {
+    const index = menus.findIndex(menu => menu.group.contains(event.target));
+    const menu = menus[index];
+    if (!menu) return;
+    if (event.key === "Escape" || event.key === "Tab") {
+      if (!active) return;
+      close();
+      menu.trigger.focus();
+      if (event.key === "Tab") return;
+      event.stopPropagation();
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      const offset = event.key === "ArrowLeft" ? -1 : 1;
+      const next = menus[(index + offset + menus.length) % menus.length];
+      if (active) open(next);
+      else next.trigger.focus();
+    } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      const offset = event.key === "ArrowDown" ? 1 : -1;
+      const itemIndex = menu.items.indexOf(event.target);
+      if (itemIndex < 0) open(menu, offset === 1 ? 0 : -1);
+      else menu.items[(itemIndex + offset + menu.items.length) % menu.items.length].focus();
+    } else if (active && (event.key === "Home" || event.key === "End")) {
+      menu.items.at(event.key === "Home" ? 0 : -1).focus();
+    } else return;
+    event.preventDefault();
+  });
+  document.addEventListener("keydown", event => {
+    if (event.defaultPrevented || event.altKey || event.isComposing) return;
+    if (event.key === "F10" && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+      event.preventDefault();
+      bar.querySelector('.app-menu-trigger[tabindex="0"]').focus();
+      return;
+    }
+    const modifier = api.isMac ? event.metaKey : event.ctrlKey;
+    if (!modifier && event.key !== "F11") return;
+    const key = event.code.startsWith("Key") ? event.code.slice(3) : event.key;
+    if (event.shiftKey && key !== "Z" && key !== "+") return;
+    const shortcut = key === "=" ? "+" : event.shiftKey && key === "Z" ? "Shift+Z" : key;
+    const action = !api.isMac && shortcut === "Shift+Z" ? "redo" : shortcuts.get(shortcut);
+    if (!action) return;
+    event.preventDefault();
+    if (!event.repeat) run(action);
+  });
+  bar.hidden = false;
+}
+
 async function command(action, id, input) {
   const result = await api.command(action, id, input);
   if (!result.ok) {
@@ -76,7 +229,12 @@ function openSheet(kind, title) {
   byId("sheet-title").textContent = title;
   body.replaceChildren();
   byId("sheet-notice").hidden = true;
-  if (!sheet.open) sheet.showModal();
+  if (!sheet.open) {
+    focusBeforeSheet = document.activeElement;
+    sheet.show();
+    byId("app-header").inert = true;
+    byId("app-content").inert = true;
+  }
 }
 
 function section(title, content) {
@@ -178,11 +336,7 @@ function render() {
   else if (!sheet.open) notice();
   if (!board) return;
 
-  const projectName = frame.project.split(/[\\/]/).filter(Boolean).at(-1) || frame.project;
-  controlLabel("board-project", projectName);
-  byId("board-project").title = frame.project + "\n" + open;
-  byId("board-project").setAttribute("aria-label", projectName + " · " + open);
-  byId("board-title").textContent = archiveView ? language("Archive", "Архив") : language("Task board", "Доска задач");
+  byId("workspace").setAttribute("aria-label", archiveView ? language("Archive", "Архив") : language("Task board", "Доска задач"));
   controlLabel("archive-toggle", archiveView ? language("Board", "Доска") : language("Archive", "Архив"));
   byId("archive-toggle").setAttribute("aria-pressed", String(archiveView));
   controlLabel("create", language("Create task", "Создать задачу"));
@@ -558,6 +712,7 @@ function update(next) {
   const projectChanged = frame.project !== next.project;
   const tagsChanged = JSON.stringify(frame.board?.tags) !== JSON.stringify(next.board?.tags);
   frame = next;
+  if (byId("app-menu").hidden) mountAppMenu();
   if (tagsChanged) boardTags = new Map((next.board?.tags ?? []).map(tag => [tagKey(tag.name), tag]));
   applyTheme(next.theme);
   if (projectChanged) {
@@ -583,7 +738,6 @@ function update(next) {
 }
 
 byId("open-project").addEventListener("click", protect(() => api.open()));
-byId("board-project").addEventListener("click", protect(() => api.open()));
 byId("welcome-action").addEventListener("click", protect(() =>
   frame.error?.code === "BOARD_NOT_FOUND" ? command("init") : api.open()));
 byId("settings").addEventListener("click", settings);
@@ -618,9 +772,16 @@ document.addEventListener("keydown", event => {
   }
 });
 byId("create").addEventListener("click", () => taskEditor());
-sheet.addEventListener("close", () => { sheetKind = ""; taskInSheet = undefined; });
+sheet.addEventListener("close", () => {
+  if (sheet.open) return;
+  sheetKind = "";
+  taskInSheet = undefined;
+  byId("app-header").inert = false;
+  byId("app-content").inert = false;
+  if (document.activeElement === document.body || sheet.contains(document.activeElement)) focusBeforeSheet?.focus();
+  focusBeforeSheet = undefined;
+});
 api.subscribe(update);
-api.onSettings(settings);
 api.onTheme(theme => {
   frame.theme = theme;
   applyTheme(theme);

@@ -22,12 +22,13 @@
     <symbol id="icon-checklist" viewBox="0 0 16 16"><path d="m2 5 1.25 1.25L5.5 4M7.5 5H14M2 10h3v3H2zm5.5 1.5H14"/></symbol>
     <symbol id="icon-attachment" viewBox="0 0 16 16"><path d="m9.75 5-4 4a1.4 1.4 0 0 0 2 2l4.6-4.6a2.65 2.65 0 0 0-3.75-3.75L3.75 7.5a3.9 3.9 0 0 0 5.5 5.5l3-3"/></symbol>
   </svg>
+  <nav id="app-menu" class="app-menu" role="menubar" hidden></nav>
   <header id="app-header" class="topbar">
     <div class="brand"><svg class="icon" aria-hidden="true"><use href="#icon-board"/></svg>AI Taskboard</div>
     <button id="open-project" class="button" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-folder"/></svg><span>Open project</span></button>
     <button id="settings" class="button" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-settings"/></svg><span>Settings</span></button>
   </header>
-  <main>
+  <main id="app-content">
     <div id="notice" class="notice" role="status" hidden></div>
     <section id="welcome" class="welcome">
       <div class="welcome-card">
@@ -39,10 +40,6 @@
     </section>
     <section id="workspace" class="workspace" hidden>
       <header class="board-heading">
-        <div class="breadcrumb">
-          <button id="board-project" class="button project-button" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-board"/></svg><span></span></button>
-          <span aria-hidden="true">/</span><h1 id="board-title">Task board</h1>
-        </div>
         <div class="board-actions">
           <label class="search-box">
             <svg class="icon" aria-hidden="true"><use href="#icon-search"/></svg>
@@ -65,7 +62,7 @@
       <div id="archive-list" class="archive-list" hidden></div>
     </section>
   </main>
-  <dialog id="sheet" class="sheet" aria-labelledby="sheet-title">
+  <dialog id="sheet" class="sheet" aria-labelledby="sheet-title" closedby="closerequest">
     <div class="sheet-header">
       <h2 id="sheet-title"></h2>
       <button id="close-sheet" class="button quiet" aria-label="Close">×</button>

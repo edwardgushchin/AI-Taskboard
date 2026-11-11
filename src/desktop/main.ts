@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell } from "electron";
-import type { IpcMainInvokeEvent, MenuItemConstructorOptions } from "electron";
+import type { IpcMainInvokeEvent } from "electron";
 import { existsSync, mkdirSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -207,6 +207,7 @@ function createWindow(initial?: string): WindowState {
     },
     title: "AI Taskboard",
   });
+  window.webContents.zoomMode = "isolated";
   const id = window.webContents.id;
   const state: WindowState = { window, selection: 0 };
   windowStates.set(id, state);
@@ -222,42 +223,33 @@ function createWindow(initial?: string): WindowState {
   return state;
 }
 
-function menu(): void {
-  const mac = process.platform === "darwin";
-  const active = () => {
-    const window = BrowserWindow.getFocusedWindow();
-    return window ? windowStates.get(window.webContents.id) : undefined;
-  };
-  const settings: MenuItemConstructorOptions = {
-    label: lang("Settings…", "Настройки…"), accelerator: "CmdOrCtrl+,",
-    click: () => active()?.window.webContents.send("board:settings"),
-  };
-  const template: MenuItemConstructorOptions[] = [
-    ...(mac ? [{ role: "appMenu" as const, submenu: [{ role: "about" as const }, settings, { type: "separator" as const }, { role: "quit" as const }] }] : []),
-    { label: lang("File", "Файл"), submenu: [
-      { label: lang("New Window", "Новое окно"), accelerator: "CmdOrCtrl+N", click: () => createWindow() },
-      { label: lang("Open Project Folder…", "Открыть папку проекта…"), accelerator: "CmdOrCtrl+O", click: () => {
-        void pickProject(active() ?? createWindow());
-      } },
-      { role: "close", label: lang("Close Window", "Закрыть окно") },
-      ...(mac ? [] : [{ type: "separator" as const }, settings, { role: "quit" as const, label: lang("Exit", "Выход") }]),
-    ] },
-    { label: lang("Edit", "Правка"), submenu: [
-      { role: "undo" }, { role: "redo" }, { type: "separator" }, { role: "cut" }, { role: "copy" }, { role: "paste" }, { role: "selectAll" },
-    ] },
-    { label: lang("View", "Вид"), submenu: [
-      { role: "resetZoom" }, { role: "zoomIn" }, { role: "zoomOut" }, { type: "separator" }, { role: "togglefullscreen" },
-    ] },
-    ...(mac ? [{ role: "windowMenu" as const }] : []),
-    { label: lang("Help", "Справка"), submenu: [{ label: lang("About AI Taskboard", "О программе"), click: () => {
-      void dialog.showMessageBox({
-        title: "AI Taskboard", message: "AI Taskboard " + app.getVersion(),
-        detail: lang("A local task board for software projects.", "Локальная доска задач для программных проектов."),
-      });
-    } }] },
-  ];
-  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
-}
+const menuActions: Record<string, (state: WindowState) => unknown> = {
+  "new-window": () => createWindow(),
+  "open-project": pickProject,
+  "close-window": ({ window }) => window.close(),
+  quit: () => app.quit(),
+  undo: ({ window }) => window.webContents.undo(),
+  redo: ({ window }) => window.webContents.redo(),
+  cut: ({ window }) => window.webContents.cut(),
+  copy: ({ window }) => window.webContents.copy(),
+  paste: ({ window }) => window.webContents.paste(),
+  "select-all": ({ window }) => window.webContents.selectAll(),
+  "zoom-in": ({ window }) => { window.webContents.zoomLevel += 1; },
+  "zoom-out": ({ window }) => { window.webContents.zoomLevel -= 1; },
+  "reset-zoom": ({ window }) => { window.webContents.zoomLevel = 0; },
+  fullscreen: ({ window }) => window.setFullScreen(!window.isFullScreen()),
+  about: ({ window }) => dialog.showMessageBox(window, {
+    title: "AI Taskboard",
+    message: "AI Taskboard " + app.getVersion(),
+    detail: lang("A local task board for software projects.", "Локальная доска задач для программных проектов."),
+  }),
+};
+
+ipcMain.handle("menu:action", async (event, action: unknown) => {
+  const state = stateOf(event);
+  if (typeof action !== "string" || !Object.hasOwn(menuActions, action)) throw new Error("Unknown menu action.");
+  await menuActions[action](state);
+});
 
 ipcMain.handle("board:bootstrap", event => frame(stateOf(event)));
 ipcMain.handle("board:open", async event => pickProject(stateOf(event)));
@@ -373,7 +365,7 @@ else {
   void app.whenReady().then(() => {
     russian = app.getLocale().toLowerCase().startsWith("ru");
     loadTheme();
-    menu();
+    Menu.setApplicationMenu(null);
     const option = process.argv.indexOf("--project");
     createWindow(option === -1 ? undefined : process.argv[option + 1]);
     app.on("activate", () => { if (!windowStates.size) createWindow(); });
