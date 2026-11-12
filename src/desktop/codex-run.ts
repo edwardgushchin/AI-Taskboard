@@ -6,6 +6,7 @@ import { git } from "../cli/git.ts";
 import { codexThreadPattern } from "../cli/model.ts";
 import type { Task } from "../cli/model.ts";
 import type { configuredCodex } from "./codex.ts";
+import { codexProject } from "./codex-project.ts";
 
 type Client = NonNullable<Awaited<ReturnType<typeof configuredCodex>>>;
 type Turn = { id: string; status: string; error?: { message?: string } | null };
@@ -121,11 +122,17 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     } catch (error) {
       throw new Error("Codex cannot write to the task worktree, board or Git directories. " + (error as Error).message);
     }
-    const started = await request<{
-      thread: { id: string }; activePermissionProfile?: { id: string };
-    }>("thread/start", {
-      cwd, model: task.execution?.model, approvalPolicy: "never", permissions: profile,
+    const projectId = await codexProject(request, project).catch(error => {
+      throw new Error("Codex could not open or create the project for this board. " + (error as Error).message);
     });
+    const started = await request<{
+      thread: { id: string; projectId: string | null }; activePermissionProfile?: { id: string };
+    }>("thread/start", {
+      cwd, projectId, model: task.execution?.model, approvalPolicy: "never", permissions: profile,
+    });
+    if (started.thread.projectId !== projectId) {
+      throw new Error("Codex did not attach the task chat to the board project.");
+    }
     if (started.activePermissionProfile?.id !== profile) {
       throw new Error("Codex did not apply the write permissions for this task.");
     }

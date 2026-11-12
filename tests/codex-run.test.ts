@@ -34,8 +34,11 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '  let result = {};',
     '  if (method === "command/exec") {',
     '    result = outcome === "denied" ? { exitCode: 1, stderr: "EACCES: permission denied" } : { exitCode: 0 };',
+    '  } else if (method === "project/list") {',
+    '    result = { data: [{ id: "board-project", roots: [{ path: require("node:path").dirname(capture) }] }], nextCursor: null };',
     '  } else if (method === "thread/start") {',
-    '    result = { thread: { id: thread }, activePermissionProfile: { id: outcome === "readonly" ? ":read-only" : params.permissions } };',
+    '    result = { thread: { id: thread, projectId: outcome === "wrong-project" ? null : params.projectId },',
+    '      activePermissionProfile: { id: outcome === "readonly" ? ":read-only" : params.permissions } };',
     '  } else if (method === "turn/start") {',
     '    result = { turn: { id: "turn-1", status: "inProgress" } };',
     '  }',
@@ -63,17 +66,21 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(launched.cwd, worktree);
   assert.equal(launched.flags[0], "app-server");
   assert.deepEqual(launched.requests.map((req: { method: string }) => req.method),
-    ["initialize", "command/exec", "thread/start", "turn/start"]);
-  const [, probe, started, turn] = launched.requests;
+    ["initialize", "command/exec", "project/list", "thread/start", "turn/start"]);
+  const [, probe, , started, turn] = launched.requests;
   assert.equal(probe.params.permissionProfile, started.params.permissions);
   assert.ok(probe.params.command.includes(join(folder, ".git", "objects")));
   assert.ok(probe.params.command.includes(join(folder, ".git", "worktrees", "T-0001")));
   assert.equal(started.params.model, "test-model");
+  assert.equal(started.params.projectId, "board-project");
+  assert.equal(started.params.cwd, worktree);
   assert.equal(turn.params.effort, "high");
   assert.match(turn.params.input[0].text, /T-0001.*Проверка/s);
   await assert.rejects(launch("denied"), /Codex cannot write.*EACCES/s);
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "command/exec");
   await assert.rejects(launch("readonly"), /did not apply the write permissions/);
+  assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
+  await assert.rejects(launch("wrong-project"), /did not attach the task chat/);
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
   assert.equal(await (await launch("failed")).completion, "Provider disconnected");
   assert.match((await (await launch("closed")).completion) ?? "", /Codex process closed/);
