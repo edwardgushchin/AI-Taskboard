@@ -66,6 +66,9 @@ function boardError(error) {
     : error.code === "LOCAL_CHANGES_CONFLICT"
     ? language("The task conflicts with local changes. The target worktree was left untouched.",
       "Задача конфликтует с локальными правками. Целевая копия осталась без изменений.")
+    : error.code === "WORKTREE_ACCESS_DENIED"
+    ? language("Close programs using the worktree or restore access, then retry cleanup.",
+      "Закройте программы, использующие рабочую копию, или восстановите доступ, затем повторите уборку.")
     : error.code === "RESTORE_CONFLICT"
     ? language("Could not restore the changes. The backup is still available.", "Не удалось восстановить правки. Сохранённая копия доступна.")
     : error.message;

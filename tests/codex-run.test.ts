@@ -63,11 +63,12 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(run.threadId, thread);
   assert.equal(await run.completion, undefined);
   const launched = JSON.parse(readFileSync(capture, "utf8"));
-  assert.equal(launched.cwd, worktree);
+  assert.equal(launched.cwd, folder);
   assert.equal(launched.flags[0], "app-server");
   assert.deepEqual(launched.requests.map((req: { method: string }) => req.method),
     ["initialize", "command/exec", "project/list", "thread/start", "turn/start"]);
   const [, probe, , started, turn] = launched.requests;
+  assert.equal(probe.params.cwd, worktree);
   assert.equal(probe.params.permissionProfile, started.params.permissions);
   assert.ok(probe.params.command.includes(join(folder, ".git", "objects")));
   assert.ok(probe.params.command.includes(join(folder, ".git", "worktrees", "T-0001")));

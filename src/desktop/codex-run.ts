@@ -46,7 +46,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   const child = spawn(client.path, [
     ...client.args, "app-server", "-c", "permissions." + profile + "={filesystem={" + filesystem + "}}",
     "-c", "default_permissions=" + JSON.stringify(profile),
-  ], { cwd, env: client.env, windowsHide: true, stdio: "pipe" });
+  ], { cwd: project, env: client.env, windowsHide: true, stdio: "pipe" });
   const output = createInterface({ input: child.stdout });
   const lines = output[Symbol.asyncIterator]();
   const turns = new Map<string, Turn>();
