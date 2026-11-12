@@ -246,7 +246,9 @@ function taskChat(task) {
   const dayFormat = new Intl.DateTimeFormat(locale, { dateStyle: "medium" });
   const timeFormat = new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit" });
   let day;
+  let lastMessage;
   for (const event of events) {
+    if (event.chat) lastMessage = event;
     const timestamp = new Date(event.at);
     const eventDay = Number.isNaN(+timestamp) ? "" : dayFormat.format(timestamp);
     if (eventDay && eventDay !== day) {
@@ -279,6 +281,9 @@ function taskChat(task) {
         element("span", chatEventLabel(event.action) + (status ? " · " + language(status[1], status[2]) : ""), "chat-action"), date);
       list.append(service);
       if (!event.text) continue;
+      // A chat edit can quote the pending request as its audit note.
+      if (event.action === "update" && event.actor === "user" &&
+          lastMessage?.actor === "user" && event.text === lastMessage.text) continue;
     }
     const entry = element("li", undefined, "chat-entry");
     entry.dataset.actor = event.actor;
