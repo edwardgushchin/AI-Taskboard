@@ -301,8 +301,9 @@ function tagBadges(names) {
 }
 
 function card(task) {
+  const card = element("article", undefined, "task-card");
   const item = button("", () => showTask(task.id), "");
-  item.className = "task-card";
+  item.className = "task-card-details";
   if (task.tags?.length) {
     const tags = element("span", undefined, "task-tags");
     tags.append(...tagBadges(task.tags));
@@ -333,7 +334,9 @@ function card(task) {
     meta.append(priority);
   }
   item.append(meta);
-  return item;
+  card.append(item);
+  if (task.status === "ready") card.append(codexTaskAction(task));
+  return card;
 }
 
 function codexTaskAction(task) {
@@ -344,7 +347,7 @@ function codexTaskAction(task) {
     });
   }
   if (!["ready", "in_progress"].includes(task.status)) return null;
-  const launch = button(language("Run in Codex", "Запустить в Codex"), async () => {
+  const launch = button(language("Send to work", "Передать в работу"), async () => {
     launch.disabled = true;
     try {
       const result = await api.launchTask(task.id);
@@ -447,13 +450,7 @@ function render() {
     const heading = element("h2", language(english, russian), "lane-title");
     heading.append(element("span", String(tasks.length), "count"));
     const content = element("div", undefined, "lane-cards");
-    content.append(...tasks.map(task => {
-      const details = card(task);
-      if (state !== "ready") return details;
-      const entry = element("div", undefined, "ready-task");
-      entry.append(details, codexTaskAction(task));
-      return entry;
-    }));
+    content.append(...tasks.map(card));
     column.append(heading, content);
     return column;
   });

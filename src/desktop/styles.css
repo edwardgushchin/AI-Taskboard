@@ -210,14 +210,17 @@ input, textarea, select {
   background: color-mix(in srgb, var(--text) 9%, transparent); font-size: 10px; font-variant-numeric: tabular-nums;
 }
 .lane-cards { display: grid; gap: 6px; min-height: 13px; }
-.ready-task { display: grid; gap: 2px; }
-.ready-task > .button { justify-self: end; font-size: 11px; }
 .task-card {
-  width: 100%; min-width: 0; display: grid; gap: 6px; text-align: left; padding: 8px;
+  width: 100%; min-width: 0; display: grid;
   border: 1px solid color-mix(in srgb, var(--border) 70%, var(--lane)); border-radius: 4px;
-  background: var(--panel); cursor: pointer; overflow-wrap: anywhere;
+  background: var(--panel); overflow-wrap: anywhere;
 }
-.task-card:hover { border-color: var(--focus); }
+.task-card-details {
+  min-width: 0; display: grid; gap: 6px; text-align: left; padding: 8px;
+  border: 0; border-radius: inherit; background: transparent; cursor: pointer;
+}
+.task-card > .button { justify-self: end; margin: 0 8px 8px; font-size: 11px; }
+.task-card:hover, .task-card:focus-within { border-color: var(--focus); }
 .task-card strong { display: block; font-size: 13px; line-height: 1.3; font-weight: 650; }
 .task-tags, .task-meta { display: flex; align-items: center; flex-wrap: wrap; }
 .task-tags { gap: 3px; }
