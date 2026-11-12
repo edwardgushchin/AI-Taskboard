@@ -568,6 +568,64 @@ test("accepted task cleanup preserves local files and refuses to delete a change
   assert.equal(cli(root, ["cleanup", task.id]).removed, false);
 });
 
+test("Windows cleanup recovers a worktree left unregistered by a directory lock", {
+  skip: process.platform !== "win32",
+}, async t => {
+  const root = fixture(t, true);
+  const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "result.txt"), "delivered\n"));
+  const holder = spawn(process.execPath, ["-e", "console.log('ready'); process.stdin.resume()"], {
+    cwd: worktree, windowsHide: true,
+  });
+  const closed = once(holder, "close");
+  try {
+    await once(holder.stdout, "data");
+    const done = cli(root, ["accept", task.id], { revision: task.revision });
+    assert.equal(done.status, "done");
+    assert.equal(done.cleanupWarning.code, "WORKTREE_ACCESS_DENIED");
+    assert.equal(existsSync(worktree), true);
+    assert.ok(!git(root, "worktree", "list", "--porcelain").includes(task.git.branch));
+    assert.equal(cli(root, ["show", task.id]).cleanupAvailable, true);
+    cli(root, ["cleanup", task.id], undefined, "WORKTREE_ACCESS_DENIED");
+    assert.equal(git(root, "rev-parse", task.git.branch), task.git.submission.sha);
+  } finally {
+    holder.stdin.end();
+    await closed;
+  }
+
+  const local = join(worktree, "keep.local");
+  writeFileSync(local, "local data");
+  cli(root, ["cleanup", task.id], undefined, "DIRTY_WORKTREE");
+  assert.equal(readFileSync(local, "utf8"), "local data");
+  assert.equal(git(root, "rev-parse", task.git.branch), task.git.submission.sha);
+  rmSync(local);
+  assert.deepEqual(cli(root, ["cleanup", task.id]), { removed: true, branchRemoved: true });
+  assert.equal(existsSync(worktree), false);
+  assert.equal(git(root, "branch", "--list", "ai-taskboard/" + task.id), "");
+  assert.equal(cli(root, ["show", task.id]).cleanupAvailable, false);
+});
+
+test("Windows can accept and clean up while the host process runs in the board root", {
+  skip: process.platform !== "win32",
+}, async t => {
+  const root = fixture(t, true);
+  const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "result.txt"), "delivered\n"));
+  const holder = spawn(process.execPath, ["-e", "console.log('ready'); process.stdin.resume()"], {
+    cwd: root, windowsHide: true,
+  });
+  const closed = once(holder, "close");
+  try {
+    await once(holder.stdout, "data");
+    const done = cli(root, ["accept", task.id], { revision: task.revision });
+    assert.equal(done.status, "done");
+    assert.equal(done.cleanupWarning, undefined);
+    assert.equal(existsSync(worktree), false);
+    assert.equal(git(root, "branch", "--list", "ai-taskboard/" + task.id), "");
+  } finally {
+    holder.stdin.end();
+    await closed;
+  }
+});
+
 test("accept saves confirmed local edits and restores them in the target", t => {
   const root = fixture(t, true);
   const { task } = submitFixture(root, path => writeFileSync(join(path, "result.txt"), "delivered\n"));

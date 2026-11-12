@@ -1,4 +1,4 @@
-import { realpathSync } from "node:fs";
+import { realpathSync, rmdirSync } from "node:fs";
 import { dependencyStatus, unfinishedDependencies } from "./dependencies.ts";
 import { isAbsolute, join, relative, sep } from "node:path";
 import {
@@ -31,9 +31,10 @@ export function taskWithCurrentWorktree(store: BoardStore, task: Task): Task & {
   const repo = store.location.repository;
   const item = repo && findWorktree(repo, task.git.branch);
   const worktree = item && !item.prunable && exists(item.path) ? usableWorktree(item) : undefined;
-  const cleanupAvailable = task.status === "done"
-    ? Boolean(item || (repo && resolveCommit(repo.root, task.git.branch)))
-    : task.status === "cancelled" && Boolean(item);
+  const closed = task.status === "done" || task.status === "cancelled";
+  const cleanupAvailable = closed && Boolean(item || (repo && (
+    orphanedTaskWorktree(store, repo, task) || (task.status === "done" && resolveCommit(repo.root, task.git.branch))
+  )));
   return { ...task, git: { ...task.git, worktree }, cleanupAvailable };
 }
 
@@ -199,8 +200,15 @@ export function cleanTaskWorktree(store: BoardStore, task: Task) {
   if (tip && tip !== submitted) {
     throw new TaskboardError("TASK_BRANCH_CHANGED", "The task branch no longer points to the confirmed submission.", { tip, submitted });
   }
-  if (item) removeTaskWorktree(store, repo, item);
-  if (!tip) return { removed: Boolean(item) };
+  let removed = false;
+  if (item) {
+    removeTaskWorktree(store, repo, item);
+    removed = true;
+  } else {
+    const orphan = orphanedTaskWorktree(store, repo, task);
+    if (orphan) removed = removeEmptyWorktree(orphan);
+  }
+  if (!tip) return { removed };
   if (findWorktree(repo, task.git.branch)) {
     throw new TaskboardError("WORKTREE_LOCKED", "The task branch is still checked out.");
   }
@@ -210,7 +218,38 @@ export function cleanTaskWorktree(store: BoardStore, task: Task) {
     git(repo.root, ["update-ref", "--no-deref", "refs/ai-taskboard/submissions/" + task.id + "/" + tip, tip]);
   }
   git(repo.root, ["update-ref", "--no-deref", "-d", task.git.branch, tip]);
-  return { removed: Boolean(item), branchRemoved: true };
+  return { removed, branchRemoved: true };
+}
+
+function orphanedTaskWorktree(store: BoardStore, repo: Repository, task: Task): string | undefined {
+  const recorded = task.git?.worktree;
+  if (!recorded || !isAbsolute(recorded)) return undefined;
+  const expected = join(store.subdirectory("worktrees"), task.id);
+  if (relative(expected, recorded) || !exists(expected)) return undefined;
+  // Git for Windows can remove the registration while the directory itself is still in use.
+  if (worktrees(repo.root).some(item => !relative(expected, item.path))) return undefined;
+  return expected;
+}
+
+function worktreeAccessDenied(path: string, output: string): TaskboardError {
+  return new TaskboardError("WORKTREE_ACCESS_DENIED",
+    "Could not remove the worktree. Close programs using it or restore access, then retry cleanup.", { path, output });
+}
+
+function removeEmptyWorktree(path: string): boolean {
+  directory(path);
+  try {
+    rmdirSync(path);
+    return true;
+  } catch (error) {
+    const { code, message } = error as NodeJS.ErrnoException;
+    if (code === "ENOENT") return false;
+    if (code === "ENOTEMPTY" || code === "EEXIST") {
+      throw new TaskboardError("DIRTY_WORKTREE", "The unregistered worktree still contains local files.", { path });
+    }
+    if (code === "EACCES" || code === "EPERM" || code === "EBUSY") throw worktreeAccessDenied(path, message);
+    throw error;
+  }
 }
 
 function removeTaskWorktree(store: BoardStore, repo: Repository, item: Worktree): void {
@@ -232,5 +271,13 @@ function removeTaskWorktree(store: BoardStore, repo: Repository, item: Worktree)
       ]).trimEnd(),
     });
   }
-  git(repo.root, ["worktree", "remove", path]);
+  try {
+    git(repo.root, ["worktree", "remove", path]);
+  } catch (error) {
+    const details = error instanceof TaskboardError ? error.details as { output?: string } | undefined : undefined;
+    if (process.platform === "win32" && details?.output && /permission denied|access is denied/i.test(details.output)) {
+      throw worktreeAccessDenied(path, details.output);
+    }
+    throw error;
+  }
 }
