@@ -263,6 +263,9 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
   padding: 15px 20px; border-bottom: 1px solid var(--border);
 }
 .sheet-header h2 { font-size: 20px; overflow-wrap: anywhere; max-height: 25vh; overflow: auto; }
+.task-agent-run {
+  display: inline-block; margin-inline-start: 8px; vertical-align: middle; font-size: 12px; font-weight: 400;
+}
 .sheet-body { padding: 20px; display: grid; gap: 16px; overflow: auto; }
 .sheet-body:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .sheet-section h3 { font-size: 13px; margin-bottom: 5px; }

@@ -895,6 +895,10 @@ async function showTask(id) {
   const focusedChat = sameTask && document.activeElement.id === "task-chat-input" ? document.activeElement : undefined;
   taskInSheet = task;
   openSheet("task", task.id + " · " + task.title);
+  const runStatus = element("span", undefined, "task-agent-run muted");
+  runStatus.id = "task-agent-run";
+  renderAgentRunStatus(runStatus, task);
+  byId("sheet-title").append(runStatus);
   const lane = lanes.find(([state]) => state === shownStatus(task));
   const status = lane ? language(lane[1], lane[2]) : task.status;
   body.append(element("p", status + " · " + priorityName(task.priority) + " · " + shortDate(task.updatedAt), "muted"));
@@ -905,10 +909,6 @@ async function showTask(id) {
     tags.append(...tagBadges(task.tags));
     body.append(tags);
   }
-  const runStatus = element("p", undefined, "muted");
-  runStatus.id = "task-agent-run";
-  renderAgentRunStatus(runStatus, task);
-  body.append(runStatus);
   section(language("Description", "Описание"), task.description);
   section(language("Acceptance criteria", "Критерии приёмки"), task.criteria);
   section(language("Subtasks", "Подзадачи"), task.subtasks.map(item => (item.done ? "✓ " : "○ ") + item.title));
