@@ -183,6 +183,9 @@ input, textarea, select {
   border: 1px solid var(--border); border-radius: 5px; box-shadow: 0 8px 22px #0003;
 }
 .filter-panel label { display: grid; gap: 4px; font-size: 12px; }
+.tag-filters { min-width: 0; margin: 0; padding: 0; border: 0; font-size: 12px; }
+#tag-filter { max-height: min(42vh, 280px); overflow: auto; }
+#tag-filter label { display: flex; align-items: center; gap: 5px; padding: 3px; cursor: pointer; }
 .lanes {
   display: grid; grid-auto-columns: minmax(145px, 1fr); grid-auto-flow: column; align-items: start;
   gap: 9px; overflow: auto; flex: 1; min-height: 0; padding: 11px 12px 17px;
@@ -405,4 +408,5 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 .appearance-panel label { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .appearance-panel select { min-width: 175px; }
 .tag-setting { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.tag-setting select { min-width: 140px; }
+.tag-create { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.tag-create input:not([type="color"]) { flex: 1; min-width: 10em; }

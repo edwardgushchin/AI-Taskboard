@@ -1,6 +1,7 @@
 export const taskStates = ["draft", "ready", "in_progress", "blocked", "review", "done", "cancelled"] as const;
 export const priorities = ["low", "normal", "high", "urgent"] as const;
 export const tagColors = ["purple", "blue", "cyan", "pink", "green"] as const;
+export const hexTagColor = /^#[0-9a-f]{6}$/i;
 export const maxAttachmentBytes = 64 * 1024 * 1024;
 export const codexThreadPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 
@@ -13,6 +14,7 @@ export type TagColor = typeof tagColors[number];
 export interface BoardTag {
   name: string;
   color: TagColor;
+  customColor?: string;
 }
 
 export function tagKey(name: string): string {

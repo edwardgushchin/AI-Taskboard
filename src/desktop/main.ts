@@ -56,6 +56,7 @@ const commands = new Map<string, string[]>([
   ["request-changes", ["request-changes"]], ["cancel", ["cancel"]], ["cleanup", ["cleanup"]],
   ["settings", ["settings"]], ["archive", ["archive", "sweep"]], ["doctor", ["doctor"]],
   ["tag-color", ["tag", "set"]],
+  ["tag-create", ["tag", "ensure"]],
 ]);
 
 let russian = false;
