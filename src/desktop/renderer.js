@@ -308,7 +308,14 @@ const cardCovers = new IntersectionObserver(entries => {
 });
 
 function selectedCover(task, images) {
-  return images.find(file => file.file === task.coverAttachment) ?? images[0];
+  const explicit = images.find(file => file.file === task.coverAttachment);
+  if (explicit) return explicit;
+  // Both attachment commands append their files after the attachments saved at creation.
+  const later = (task.history ?? []).reduce((total, event) => total +
+    (event.action === "attach" ? 1 : event.chat?.files?.length ?? 0), 0);
+  const attachments = task.attachments ?? [];
+  const initial = attachments.slice(0, Math.max(0, attachments.length - later));
+  return initial.find(isImageAttachment);
 }
 
 const tagKey = name => name.trim().normalize().toLowerCase();
@@ -794,12 +801,17 @@ async function showTask(id) {
   }
   if (task.attachments.length) {
     const images = task.attachments.filter(isImageAttachment);
-    if (images.length > 1 && !frame.board?.archived.some(entry => entry.id === task.id)) {
+    const previous = selectedCover(task, images)?.file ?? "";
+    if ((images.length > 1 || (images.length === 1 && !previous)) && !frame.board?.archived.some(entry => entry.id === task.id)) {
       const label = element("label", undefined, "task-cover-setting");
       label.append(element("span", language("Card cover", "Превью карточки")));
       const picker = element("select");
+      if (!previous) {
+        const none = new Option(language("No cover", "Без превью"), "");
+        none.disabled = true;
+        picker.append(none);
+      }
       picker.append(...images.map(file => new Option(file.name, file.file)));
-      const previous = selectedCover(task, images).file;
       picker.value = previous;
       picker.addEventListener("change", protect(async () => {
         picker.disabled = true;
