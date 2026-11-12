@@ -516,10 +516,10 @@ function laneTools(state, title, tasks, total, count, content) {
   };
   const toolbar = element("div", undefined, "lane-toolbar");
   const filter = element("details", undefined, "lane-filter");
-  const summary = element("summary", undefined, "button quiet lane-filter-toggle");
+  const summary = element("summary", undefined, "button quiet");
   const filterLabel = language("Filter ", "Фильтр колонки ") + title;
   const filterCount = element("span", undefined, "count");
-  summary.append(icon("filter"), element("span", language("Filter", "Фильтр")), filterCount);
+  summary.append(icon("filter"), filterCount);
   const options = element("div", undefined, "lane-filter-options");
   const priorityLabel = element("label", undefined, "lane-priority");
   priorityLabel.append(element("span", language("Priority", "Приоритет")), priority);
