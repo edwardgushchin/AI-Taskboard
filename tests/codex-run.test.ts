@@ -82,6 +82,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   const launched = JSON.parse(readFileSync(capture, "utf8"));
   assert.equal(launched.cwd, folder);
   assert.equal(launched.flags[0], "app-server");
+  assert.equal(launched.flags.includes('windows.sandbox="mxc"'), process.platform === "win32");
   assert.deepEqual(launched.requests.map((req: { method: string }) => req.method),
     ["initialize", "command/exec", "project/list", "thread/start", "turn/start"]);
   const [, probe, , started, turn] = launched.requests;
