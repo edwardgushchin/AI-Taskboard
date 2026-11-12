@@ -383,18 +383,19 @@ function card(task) {
   }
   item.append(meta);
   card.append(item);
-  if (task.status === "ready" && task.codexThreadId) card.append(codexTaskAction(task));
+  if (task.status === "ready" && task.codexThreadId) card.append(openCodexTaskAction(task));
   return card;
 }
 
+function openCodexTaskAction(task) {
+  return button(language("Open Codex chat", "Открыть чат Codex"), async () => {
+    const result = await api.openCodexThread(task.id);
+    if (!result.ok) notice(boardError(result.error));
+  });
+}
+
 function codexTaskAction(task) {
-  if (task.codexThreadId) {
-    return button(language("Open Codex chat", "Открыть чат Codex"), async () => {
-      const result = await api.openCodexThread(task.id);
-      if (!result.ok) notice(boardError(result.error));
-    });
-  }
-  if (!["ready", "in_progress"].includes(task.status)) return null;
+  if (task.status !== "ready" && (task.status !== "in_progress" || task.codexThreadId)) return null;
   const launch = button(language("Send to work", "Передать в работу"), async () => {
     launch.disabled = true;
     try {
@@ -852,6 +853,7 @@ async function showTask(id) {
   }
   const codexAction = codexTaskAction(task);
   if (codexAction) actions.append(codexAction);
+  if (task.codexThreadId) actions.append(openCodexTaskAction(task));
   body.append(actions);
   body.append(taskChat(task));
   body.scrollTop = scroll;

@@ -127,13 +127,20 @@ export function startTask(store: BoardStore, task: Task, input: Record<string, u
   if (pending && pending.action !== "start") {
     throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before starting.");
   }
-  if (task.status === "in_progress") {
+  if (task.git || task.status === "in_progress") {
     if (!task.git || task.git.branch !== branch) {
       throw new TaskboardError("CORRUPT_STORAGE", "The task has no matching Git branch.");
     }
+    if (task.status === "ready") {
+      requireRevision(task, input.revision);
+      if (input.target !== undefined && localBranch(repo, text(input.target, "target", true)) !== task.git.target) {
+        throw new TaskboardError("INVALID_INPUT", "Resume the task on its original target branch.");
+      }
+    }
     const worktree = usableWorktree(findWorktree(repo, branch));
     if (pending) removeFile(pendingPath);
-    return { task, worktree };
+    if (task.status === "in_progress") return { task, worktree };
+    return { task: store.save(record({ ...task, git: { ...task.git, worktree } }, "start", "agent", "in_progress")), worktree };
   }
 
   requireRevision(task, input.revision);

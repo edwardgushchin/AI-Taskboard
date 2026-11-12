@@ -299,8 +299,12 @@ test("linked worktrees share the board and cleanup preserves local files and the
   assert.equal(cli(worktree, ["show", task.id]).status, "in_progress");
   assert.equal(cli(worktree, ["start", task.id]).worktree, worktree);
   assert.equal(git(root, "status", "--porcelain"), "");
-  assert.equal(cli(worktree, ["progress", task.id], { summary: "Started", nextStep: "Edit the source" }).nextStep,
-    "Edit the source");
+  const progress = cli(worktree, ["progress", task.id], { summary: "Started", nextStep: "Edit the source" });
+  assert.equal(progress.nextStep, "Edit the source");
+  assert.equal(progress.status, "ready");
+  assert.equal(cli(root, ["start", task.id]).worktree, worktree);
+  assert.equal(cli(root, ["pause", task.id]).status, "ready");
+  assert.equal(cli(root, ["start", task.id]).worktree, worktree);
   cli(worktree, ["block", task.id], { reason: "Missing input", condition: "Receive input" });
   assert.equal(cli(worktree, ["resume", task.id], { reason: "Received input" }).status, "in_progress");
   const moved = join(root, ".tasks", "worktrees", "moved task worktree");
@@ -420,7 +424,7 @@ test("submission commits the confirmed snapshot and rejects changed or incomplet
   assert.equal(edited.title, "Review source");
   assert.equal(edited.status, "review");
   const updated = cli(root, ["update", task.id], requirements);
-  assert.equal(updated.status, "in_progress");
+  assert.equal(updated.status, "ready");
   assert.equal(cli(root, ["start", task.id]).worktree, worktree);
 });
 
@@ -490,7 +494,13 @@ test("resubmission verifies the actual Conventional Commit after an external reb
   assert.notEqual(head, task.git.submission.sha);
   assert.equal(cli(root, ["review", task.id]).stale, true);
   cli(root, ["accept", task.id], { revision: task.revision }, "STALE_SUBMISSION");
-  cli(root, ["request-changes", task.id], { reason: "Review the rebased result" });
+  const returned = cli(root, ["request-changes", task.id], { reason: "Review the rebased result" });
+  assert.equal(returned.status, "in_progress");
+  assert.equal(returned.history.at(-1).text, "Review the rebased result");
+  const restarted = cli(root, ["start", task.id], { revision: returned.revision });
+  assert.equal(restarted.worktree, worktree);
+  assert.equal(restarted.task.git.branch, task.git.branch);
+  assert.equal(restarted.task.status, "in_progress");
 
   const preview = cli(worktree, ["preview", task.id]);
   assert.deepEqual(preview.paths, ["result.txt"]);

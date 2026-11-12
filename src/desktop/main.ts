@@ -518,6 +518,9 @@ ipcMain.handle("board:command", async (event, command: unknown, id: unknown, inp
   if (id !== undefined && (typeof id !== "string" || !/^T-\d{4,}$/.test(id))) {
     return cliFailure("INVALID_INPUT", "Invalid task number.");
   }
+  if (command === "request-changes" && typeof id === "string") {
+    return launchTask(state.project, id, { input });
+  }
   const selection = state.selection;
   const result = await callCli<Board>(state.project, id === undefined ? args : [...args, id], input);
   if (command === "init" && result.ok && selection === state.selection && !state.window.isDestroyed()) {
@@ -593,32 +596,38 @@ async function recordRunFailure(project: string, id: string, reason: string) {
   if (!result.ok && result.error.code !== "INVALID_TRANSITION") return result.error.message;
 }
 
-ipcMain.handle("board:launchTask", async (event, id: unknown) => {
-  const { project } = stateOf(event);
-  if (!project || typeof id !== "string" || !taskIdPattern.test(id)) {
-    return cliFailure("INVALID_INPUT", "Choose a task.");
-  }
+async function launchTask(project: string, id: string, revisionRequest?: { input: unknown }) {
   const key = project + "\0" + id;
   if (launchingTasks.has(key)) return cliFailure("LAUNCH_IN_PROGRESS", "This task is already being launched.");
   launchingTasks.add(key);
   let prepared = false;
   let monitoring = false;
   try {
-    const current = await callCli<Task>(project, ["show", id]);
-    if (!current.ok || current.data.codexThreadId) return current;
+    const current = await callCli<Task>(project, [revisionRequest ? "request-changes" : "show", id], revisionRequest?.input);
+    if (!current.ok) return current;
+    prepared = Boolean(revisionRequest);
     const client = await configuredCodex(app.getPath("userData"));
-    if (!client) return cliFailure("CODEX_UNAVAILABLE", lang("Connect Codex in settings.", "Подключите Codex в настройках."));
+    if (!client) {
+      const reason = lang("Connect Codex in settings.", "Подключите Codex в настройках.");
+      if (prepared) throw new Error(reason);
+      return cliFailure("CODEX_UNAVAILABLE", reason);
+    }
     const started = await callCli<{ task: Task; worktree: string }>(project, ["start", id], { revision: current.data.revision });
-    if (!started.ok) return started;
+    if (!started.ok) {
+      if (prepared) throw new Error(started.error.message);
+      return started;
+    }
     prepared = true;
     const { threadId: codexThreadId, completion } = await startCodexRun(client, project, started.data.worktree, started.data.task);
     monitoring = true;
     runningTasks.add(key);
     notifyRunChange(project);
     // Preserve edits made while Codex was starting.
-    const saved = await callCli<Task>(project, ["update", id], { codexThreadId, actor: "user" });
+    const saved = started.data.task.codexThreadId ? { ok: true as const, data: started.data.task } :
+      await callCli<Task>(project, ["update", id], { codexThreadId, actor: "user" });
     void completion.then(async reason => {
       if (reason) await recordRunFailure(project, id, reason);
+      else await callCli<Task>(project, ["pause", id]);
     }).finally(() => {
       runningTasks.delete(key);
       launchingTasks.delete(key);
@@ -633,6 +642,14 @@ ipcMain.handle("board:launchTask", async (event, id: unknown) => {
   } finally {
     if (!monitoring) launchingTasks.delete(key);
   }
+}
+
+ipcMain.handle("board:launchTask", async (event, id: unknown) => {
+  const { project } = stateOf(event);
+  if (!project || typeof id !== "string" || !taskIdPattern.test(id)) {
+    return cliFailure("INVALID_INPUT", "Choose a task.");
+  }
+  return launchTask(project, id);
 });
 
 ipcMain.handle("board:openCodexThread", async (event, id: unknown) => {

@@ -36,8 +36,8 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '    result = outcome === "denied" ? { exitCode: 1, stderr: "EACCES: permission denied" } : { exitCode: 0 };',
     '  } else if (method === "project/list") {',
     '    result = { data: [{ id: "board-project", roots: [{ path: require("node:path").dirname(capture) }] }], nextCursor: null };',
-    '  } else if (method === "thread/start") {',
-    '    result = { thread: { id: thread, projectId: outcome === "wrong-project" ? null : params.projectId },',
+    '  } else if (method === "thread/start" || method === "thread/resume") {',
+    '    result = { thread: { id: params.threadId ?? thread, projectId: outcome === "wrong-project" ? null : params.projectId },',
     '      activePermissionProfile: { id: outcome === "readonly" ? ":read-only" : params.permissions } };',
     '  } else if (method === "turn/start") {',
     '    result = { turn: { id: "turn-1", status: "inProgress" } };',
@@ -85,4 +85,12 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
   assert.equal(await (await launch("failed")).completion, "Provider disconnected");
   assert.match((await (await launch("closed")).completion) ?? "", /Codex process closed/);
+  const resumed = await startCodexRun(client("ok"), folder, worktree, { ...task, codexThreadId: thread });
+  assert.equal(resumed.threadId, thread);
+  assert.equal(await resumed.completion, undefined);
+  const resumedCalls = JSON.parse(readFileSync(capture, "utf8")).requests;
+  assert.deepEqual(resumedCalls.map((req: { method: string }) => req.method),
+    ["initialize", "command/exec", "thread/resume", "turn/start"]);
+  assert.equal(resumedCalls[2].params.threadId, thread);
+  assert.equal(resumedCalls[2].params.cwd, worktree);
 });

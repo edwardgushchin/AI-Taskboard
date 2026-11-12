@@ -82,6 +82,9 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
     case "request-changes":
       requireState(task, ["review"]);
       return record(task, action, "user", "in_progress", text(input.reason, "reason", true));
+    case "pause":
+      requireState(task, ["in_progress"]);
+      return record(task, action, "agent", "ready");
     case "cancel":
       return record(task, action, "user", "cancelled", text(input.reason, "reason", true));
     case "comment":
@@ -90,7 +93,7 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
       requireState(task, ["in_progress", "blocked"]);
       const summary = text(input.summary, "summary", true);
       const nextStep = input.nextStep === undefined ? task.nextStep : text(input.nextStep, "nextStep");
-      return record({ ...task, summary, nextStep }, action, "agent", task.status, summary);
+      return record({ ...task, summary, nextStep }, action, "agent", task.status === "blocked" ? "blocked" : "ready", summary);
     }
     case "block": {
       requireState(task, ["in_progress"]);
@@ -125,7 +128,7 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
           throw new TaskboardError("CRITERIA_REQUIRED", "An approved task needs acceptance criteria.");
         }
         note = text(input.note, "note", true);
-        if (status === "review") status = "in_progress";
+        if (status === "review") status = "ready";
       }
       if (input.preserveStatus === true && status !== task.status) {
         throw new TaskboardError("STATUS_CHANGE_REQUIRED", "These requirements would reopen the task. Ask the user to apply the changes on the board.");
