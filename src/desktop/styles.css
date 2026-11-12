@@ -249,7 +249,8 @@ select:hover:not(:disabled) {
 .task-cover-setting select { max-width: 100%; }
 .task-tags, .task-meta { display: flex; align-items: center; flex-wrap: wrap; }
 .task-tags { gap: 3px; }
-.task-meta { gap: 4px 6px; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.task-meta { gap: 4px 6px; color: var(--muted); font-size: 10px; line-height: 12px; font-variant-numeric: tabular-nums; }
+.task-meta > span { display: inline-flex; align-items: center; min-width: 0; max-width: 100%; }
 .task-id { font-family: ui-monospace, Consolas, monospace; }
 .task-stat { display: inline-flex; align-items: center; gap: 2px; }
 .task-stat .icon { width: 12px; height: 12px; }
