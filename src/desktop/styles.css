@@ -47,6 +47,7 @@ button { color: inherit; }
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, summary:focus-visible {
   outline: 2px solid var(--focus); outline-offset: 2px;
 }
+:where(:root:not([data-keyboard-focus])) :is(input, textarea):focus { outline: none; }
 h1, h2, h3, p { margin: 0; }
 .app-menu {
   display: flex; align-items: center; gap: 2px; font-size: 12px;
@@ -183,7 +184,7 @@ select:hover:not(:disabled) {
   min-width: 0; height: 24px; padding-inline: 8px; font-size: 12px; line-height: 16px;
   border: 1px solid var(--toolbar-border); border-radius: 6px; color: var(--toolbar-muted); background: var(--toolbar-control);
 }
-.search-box:focus-within { border-color: var(--focus); }
+:where(:root[data-keyboard-focus]) .search-box:focus-within { border-color: var(--focus); }
 .search-box input, .search-hint { grid-area: 1 / 1; }
 .search-box input { width: 100%; min-width: 0; border: 0; padding: 0; background: transparent; outline: none; }
 .search-box input:focus-visible { outline: none; }
@@ -379,7 +380,7 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
   display: grid; gap: 8px; min-width: 0; padding: 9px;
   border: 1px solid var(--border); border-radius: 14px; background: var(--panel);
 }
-.chat-composer:has(textarea:focus-visible) { border-color: var(--focus); }
+:where(:root[data-keyboard-focus]) .chat-composer:has(textarea:focus-visible) { border-color: var(--focus); }
 .chat-composer textarea { width: 100%; resize: vertical; border: 0; padding: 5px 6px; background: transparent; outline: none; }
 .chat-composer .draft-attachments { max-height: 176px; overflow: auto; }
 .chat-composer .draft-attachments img { max-width: 112px; max-height: 88px; }
