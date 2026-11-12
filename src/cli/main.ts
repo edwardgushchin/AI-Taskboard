@@ -13,6 +13,7 @@ import { hexTagColor, member, number, object, record, registerTags, requireRevis
 import type { Task } from "./model.ts";
 import { initializeBoard, locateBoard, onBoard } from "./storage.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
+import { invokeGit } from "./git.ts";
 import { previewSubmission, submitTask } from "./submission.ts";
 import { changeTask, createTask, recordRunLog } from "./tasks.ts";
 import { dependencyStatus, unfinishedDependencies, validateDependencies } from "./dependencies.ts";
@@ -68,8 +69,25 @@ function assignTags(store: BoardStore, task: Task): Task {
   return { ...task, tags };
 }
 
+function boardGitInfo(location: BoardLocation) {
+  if (!location.repository || location.repository.bare) return {};
+  const value = (args: string[]) => {
+    try {
+      const result = invokeGit(location.root, args);
+      return result.code === 0 ? result.stdout.trim() || undefined : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  return { branch: value(["symbolic-ref", "--quiet", "--short", "HEAD"]), user: value(["config", "--get", "user.name"]) };
+}
+
 function watchBoard(location: BoardLocation): void {
-  let previous = JSON.stringify({ ok: true, data: onBoard(location, snapshotBoard) });
+  const read = () => {
+    const board = onBoard(location, snapshotBoard);
+    return { ok: true, data: { ...board, gitInfo: boardGitInfo(location) } };
+  };
+  let previous = JSON.stringify(read());
   process.stdout.write(previous + "\n");
   let refreshTimer: NodeJS.Timeout | undefined;
   const watchers: FSWatcher[] = [];
@@ -77,7 +95,7 @@ function watchBoard(location: BoardLocation): void {
     refreshTimer = undefined;
     let current: string;
     try {
-      current = JSON.stringify({ ok: true, data: onBoard(location, snapshotBoard) });
+      current = JSON.stringify(read());
     } catch (error) {
       if (error instanceof TaskboardError && error.code === "BOARD_BUSY") return;
       current = JSON.stringify({ ok: false, error: describe(error) });

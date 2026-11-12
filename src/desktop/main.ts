@@ -28,6 +28,7 @@ interface Board {
   tags: BoardTag[];
   tasks: Task[];
   archived: (ArchiveLink & { id: string })[];
+  gitInfo?: { branch?: string; user?: string };
 }
 
 interface WindowState {

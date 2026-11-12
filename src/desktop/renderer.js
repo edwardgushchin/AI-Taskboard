@@ -1302,6 +1302,45 @@ function appearanceSettings() {
   }));
 }
 
+function renderStatusBar(projectChanged) {
+  const { branch, user } = frame.board?.gitInfo ?? {};
+  for (const [id, value, label] of [
+    ["status-branch", branch, language("Git branch", "Ветка Git")],
+    ["status-user", user, language("Git user", "Пользователь Git")],
+  ]) {
+    const item = byId(id);
+    item.hidden = !value;
+    item.title = value ? label + " · " + value : "";
+    item.querySelector("span").textContent = value ?? "";
+  }
+  const menu = byId("notifications");
+  if (projectChanged && menu.matches(":popover-open")) menu.hidePopover();
+  const bell = byId("status-notifications");
+  const label = language("Notifications", "Уведомления");
+  const submitted = (frame.board?.tasks ?? []).filter(task => task.status === "review").flatMap(task => {
+    const event = task.history.findLast(entry => entry.action === "submit" && entry.actor === "agent" && entry.to === "review");
+    return event ? [{ id: task.id, title: task.title, at: event.at }] : [];
+  }).sort((a, b) => b.at.localeCompare(a.at));
+  bell.title = label;
+  bell.setAttribute("aria-label", submitted.length ? label + " · " + submitted.length : label);
+  const count = bell.querySelector(".count");
+  count.textContent = submitted.length;
+  count.hidden = !submitted.length;
+  menu.setAttribute("aria-label", label);
+  const entries = JSON.stringify([frame.russian, submitted]);
+  if (menu.dataset.entries === entries) return;
+  menu.dataset.entries = entries;
+  menu.replaceChildren(...(submitted.length ? submitted.map(task => {
+    const open = button("", () => {
+      menu.hidePopover();
+      return showTask(task.id);
+    }, "quiet notification-entry");
+    open.append(element("span", language("Agent completed a task", "Агент завершил задачу")),
+      element("strong", task.id + " · " + task.title));
+    return open;
+  }) : [element("p", language("No new notifications.", "Новые уведомления отсутствуют."), "muted")]));
+}
+
 function update(next) {
   const projectChanged = frame.project !== next.project;
   const tagsChanged = JSON.stringify(frame.board?.tags) !== JSON.stringify(next.board?.tags);
@@ -1313,6 +1352,7 @@ function update(next) {
   }
   if (tagsChanged) boardTags = new Map((next.board?.tags ?? []).map(tag => [tagKey(tag.name), tag]));
   applyTheme(next.theme);
+  renderStatusBar(projectChanged);
   if (projectChanged) {
     lanePreferences = loadLanePreferences();
     cardCoverCache.clear();
