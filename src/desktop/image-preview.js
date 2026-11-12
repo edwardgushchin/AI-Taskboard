@@ -8,14 +8,16 @@ function openImagePreview(taskId, files, initialIndex, initialSrc) {
   viewport.tabIndex = 0;
   viewport.setAttribute("aria-label", language("Image", "Изображение"));
   const stage = element("div", undefined, "image-preview-stage");
-  const image = element("img");
-  image.draggable = false;
+  let image = element("img");
+  image.hidden = true;
   const scaleLabel = element("output");
   const position = element("output");
   const status = element("p", undefined, "image-preview-status");
   status.setAttribute("role", "status");
   let index = initialIndex;
+  let displayedIndex = initialIndex;
   let request = 0;
+  const cache = new Map();
   let scale = 1;
   let fitted = true;
   let drag;
@@ -55,10 +57,10 @@ function openImagePreview(taskId, files, initialIndex, initialSrc) {
   const original = button("1:1", () => { fitted = false; resize(1); }, "quiet");
   controlLabelForIcon(original, language("Actual size", "Исходный размер"));
   const save = button(language("Save", "Сохранить"), async () => {
-    const file = files[index];
+    const file = files[displayedIndex];
     const selection = request;
     const result = await api.saveAttachment(taskId, file.file, file.name);
-    if (!result.ok && dialog.open && selection === request) {
+    if (!result.ok && dialog.open && selection === request && file === files[displayedIndex]) {
       status.textContent = boardError(result.error);
       status.hidden = false;
     }
@@ -102,39 +104,79 @@ function openImagePreview(taskId, files, initialIndex, initialSrc) {
     viewport.classList.remove("dragging");
   });
   const observer = new ResizeObserver(() => { if (fitted) fit(); });
-  dialog.addEventListener("close", () => { request++; observer.disconnect(); dialog.remove(); });
-  async function show(at, cached) {
-    const selection = ++request;
-    index = at;
+  dialog.addEventListener("close", () => { request++; cache.clear(); observer.disconnect(); dialog.remove(); });
+
+  function load(at, cached) {
+    if (cache.has(at)) return cache.get(at);
+    const entry = { image: null, pending: null };
+    cache.set(at, entry);
+    entry.pending = (async () => {
+      try {
+        const src = cached ?? await api.attachmentPreview(taskId, files[at].file);
+        if (!src || !dialog.open) return null;
+        const loaded = element("img");
+        loaded.draggable = false;
+        loaded.alt = files[at].name;
+        loaded.src = src;
+        // Decode off screen so a ready element can replace the current image in one paint.
+        await loaded.decode();
+        if (!dialog.open) return null;
+        entry.image = loaded;
+        return loaded;
+      } catch {
+        return null;
+      }
+    })();
+    return entry;
+  }
+
+  function describe(at) {
     const file = files[at];
     const label = file.name;
-    title.textContent = title.title = image.alt = label;
+    title.textContent = title.title = label;
     dialog.setAttribute("aria-label", label);
     position.value = (at + 1) + " / " + files.length;
-    image.hidden = true;
-    image.removeAttribute("src");
-    image.removeAttribute("style");
-    scale = 1;
-    scaleLabel.value = "—";
-    fitted = true;
-    viewport.scrollTo(0, 0);
-    status.hidden = false;
-    status.textContent = language("Loading image…", "Загрузка изображения…");
-    const unavailable = () => {
-      if (selection === request) status.textContent = language("Image unavailable.", "Изображение недоступно.");
-    };
-    const src = cached ?? await api.attachmentPreview(taskId, file.file).catch(() => null);
-    if (selection !== request || !dialog.open) return;
-    if (!src) return unavailable();
-    image.onerror = unavailable;
-    image.onload = () => {
-      if (selection !== request) return;
-      image.hidden = false;
-      status.hidden = true;
-      fit();
-    };
-    image.src = src;
   }
+
+  function show(at, cached) {
+    const selection = ++request;
+    index = at;
+    const entry = load(at, cached);
+    const display = loaded => {
+      if (selection !== request || !dialog.open) return;
+      if (!loaded) {
+        status.textContent = language("Image unavailable: ", "Изображение недоступно: ") + files[at].name;
+        status.hidden = false;
+        return;
+      }
+      if (loaded !== image) {
+        image.replaceWith(loaded);
+        image = loaded;
+        image.removeAttribute("style");
+        scale = 1;
+        fitted = true;
+        viewport.scrollTo(0, 0);
+        fit();
+      }
+      displayedIndex = at;
+      describe(at);
+      status.hidden = true;
+      save.disabled = false;
+    };
+    if (entry.image) display(entry.image);
+    else {
+      status.textContent = language("Loading image…", "Загрузка изображения…");
+      status.hidden = false;
+      void entry.pending.then(display);
+    }
+    if (files.length > 1) {
+      load((at + 1) % files.length);
+      load((at - 1 + files.length) % files.length);
+    }
+  }
+  describe(initialIndex);
+  scaleLabel.value = "—";
+  save.disabled = true;
   document.body.append(dialog);
   dialog.showModal();
   observer.observe(viewport);
