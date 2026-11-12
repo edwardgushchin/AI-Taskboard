@@ -4,6 +4,7 @@ export const tagColors = ["purple", "blue", "cyan", "pink", "green"] as const;
 export const hexTagColor = /^#[0-9a-f]{6}$/i;
 export const maxAttachmentBytes = 64 * 1024 * 1024;
 export const codexThreadPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+export const imageAttachmentPattern = /\.(png|jpe?g|webp|gif)$/i;
 
 export type TaskState = typeof taskStates[number];
 export type Priority = typeof priorities[number];
@@ -89,6 +90,7 @@ export interface Task {
   priority: Priority;
   subtasks: { title: string; done: boolean }[];
   attachments: Attachment[];
+  coverAttachment?: string;
   status: TaskState;
   codexThreadId?: string;
   revision: number;

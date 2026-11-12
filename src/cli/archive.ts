@@ -3,7 +3,7 @@ import { readdirSync, realpathSync, rmdirSync, statSync, writeFileSync } from "n
 import { basename, join, resolve } from "node:path";
 import { gzipSync, gunzipSync } from "node:zlib";
 import { unzipSync, zipSync } from "fflate";
-import { maxAttachmentBytes, number, object, record, registerTags, requireRevision, requireState, strings, TaskboardError, text } from "./model.ts";
+import { imageAttachmentPattern, maxAttachmentBytes, number, object, record, registerTags, requireRevision, requireState, strings, TaskboardError, text } from "./model.ts";
 import type { ArchiveLink, Attachment, BoardTag, Task } from "./model.ts";
 import { directory, exists, readBinary, removeFile, validateCard, writeAtomic } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
@@ -102,6 +102,18 @@ export function isArchived(store: BoardStore, id: string): boolean {
 
 export function readTask(store: BoardStore, id: string): Task {
   return isArchived(store, id) ? openArchive(store, id, store.index.archive[id]).task : store.card(id);
+}
+
+export function setAttachmentCover(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
+  requireRevision(task, input.revision);
+  const file = text(input.file, "file", true);
+  const attachment = task.attachments.find(entry => entry.file === file);
+  if (!attachment || !imageAttachmentPattern.test(attachment.name)) {
+    throw new TaskboardError("INVALID_INPUT", "Choose an image attached to this task.");
+  }
+  if (task.coverAttachment === file) return task;
+  const updated = record({ ...task, coverAttachment: file }, "cover", "user");
+  return store.save({ ...updated, closedAt: task.closedAt });
 }
 
 export function upgradeTagCatalog(store: BoardStore): BoardTag[] {

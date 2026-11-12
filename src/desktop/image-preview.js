@@ -1,3 +1,5 @@
+const isImageAttachment = file => /\.(png|jpe?g|webp|gif)$/i.test(file.name);
+
 function openImagePreview(src, name, save) {
   const dialog = element("dialog", undefined, "image-preview");
   dialog.setAttribute("aria-label", name);
