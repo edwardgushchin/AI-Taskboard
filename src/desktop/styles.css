@@ -234,7 +234,8 @@ input, textarea, select {
 .task-priority { margin-inline-start: auto; }
 .task-priority[data-priority="high"] { color: var(--yellow); }
 .task-priority[data-priority="urgent"] { color: var(--warn); }
-.dependency-warning { color: var(--warn); }
+.dependency-warning { color: var(--yellow); }
+.task-error { color: var(--warn); }
 .dependency-choices { min-width: 0; max-height: 42vh; overflow: auto; border: 1px solid var(--border); }
 .form .dependency-option { display: flex; align-items: baseline; gap: 8px; padding: 4px; overflow-wrap: anywhere; }
 .tag {

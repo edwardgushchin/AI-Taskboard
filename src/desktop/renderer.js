@@ -350,6 +350,19 @@ function renderAgentRunStatus(target, task) {
   target.hidden = !target.childNodes.length;
 }
 
+function shownStatus(task) {
+  return task.status === "ready" && task.unfinishedDependencies?.length ? "blocked" : task.status;
+}
+
+function taskIndicator(name, count, label, className) {
+  const indicator = element("span", undefined, "task-stat " + className);
+  indicator.title = label + " · " + count;
+  indicator.setAttribute("role", "img");
+  indicator.setAttribute("aria-label", indicator.title);
+  indicator.append(icon(name), String(count));
+  return indicator;
+}
+
 function card(task) {
   const card = element("article", undefined, "task-card");
   const item = button("", () => showTask(task.id), "");
@@ -376,8 +389,12 @@ function card(task) {
   const runStatus = element("span");
   renderAgentRunStatus(runStatus, task);
   if (!runStatus.hidden) meta.append(runStatus);
-  if (task.unfinishedDependencies?.length && ["draft", "ready"].includes(task.status)) {
-    meta.append(element("span", language("Blocked by dependencies", "Ждёт зависимости"), "dependency-warning"));
+  if (task.unfinishedDependencies?.length && ["draft", "blocked"].includes(task.status)) {
+    meta.append(taskIndicator("dependency", task.unfinishedDependencies.length,
+      language("Unfinished dependencies", "Незавершённые зависимости"), "dependency-warning"));
+  }
+  if (task.status === "blocked" && task.blocked) {
+    meta.append(taskIndicator("error", 1, language("Execution error", "Ошибка выполнения"), "task-error"));
   }
   if (task.subtasks?.length) {
     const count = task.subtasks.filter(entry => entry.done).length + "/" + task.subtasks.length;
@@ -568,7 +585,12 @@ function laneTools(state, title, tasks, total, count, content) {
 function render() {
   cardCovers.disconnect();
   document.documentElement.lang = frame.russian ? "ru" : "en";
-  const board = frame.board;
+  const currentBoard = frame.board;
+  // Project waiting tasks into the blocked lane while keeping their workflow status in the board data.
+  const board = currentBoard && { ...currentBoard, tasks: currentBoard.tasks.map(task => {
+    const status = shownStatus(task);
+    return status === task.status ? task : { ...task, status };
+  }) };
   const noBoard = !board;
   byId("welcome").hidden = !noBoard;
   byId("workspace").hidden = noBoard;
@@ -873,7 +895,7 @@ async function showTask(id) {
   const focusedChat = sameTask && document.activeElement.id === "task-chat-input" ? document.activeElement : undefined;
   taskInSheet = task;
   openSheet("task", task.id + " · " + task.title);
-  const lane = lanes.find(([state]) => state === task.status);
+  const lane = lanes.find(([state]) => state === shownStatus(task));
   const status = lane ? language(lane[1], lane[2]) : task.status;
   body.append(element("p", status + " · " + priorityName(task.priority) + " · " + shortDate(task.updatedAt), "muted"));
   savedChangesSection(task, task.savedChanges);
