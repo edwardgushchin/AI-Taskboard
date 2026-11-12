@@ -92,6 +92,7 @@ export interface TaskEvent {
 }
 
 export interface Task {
+  tokenUsage?: import("./token-usage.ts").TaskTokenUsage;
   id: string;
   title: string;
   description: string;

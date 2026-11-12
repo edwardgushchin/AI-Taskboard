@@ -10,7 +10,7 @@ import { createTask } from "../src/cli/tasks.ts";
 const source = readFileSync(new URL("../src/desktop/main.ts", import.meta.url), "utf8");
 const parsed = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, true);
 const names = new Set([
-  "frame", "send", "notifyRunChange", "sendChat", "windowStates", "chatRuns", "replyingTasks",
+  "frame", "send", "notifyRunChange", "sendChat", "saveTaskTokenUsage", "windowStates", "chatRuns", "replyingTasks",
   "runningTasks", "runActivityByTask", "imageExtensions", "imageTypes", "recentBoards", "russian", "theme",
 ]);
 // Exercise the main-process lifecycle without starting Electron or a real provider.

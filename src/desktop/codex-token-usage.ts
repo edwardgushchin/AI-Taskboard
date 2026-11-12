@@ -1,0 +1,157 @@
+import { randomUUID } from "node:crypto";
+import { emptyTokenCounts, tokenFields, usageKey } from "../cli/token-usage.ts";
+import type { TokenCounts, TokenUsageRecord, TokenUsageReport } from "../cli/token-usage.ts";
+
+type ThreadUsage = { model: string | null; turnId?: string; previous?: TokenCounts; incomplete: boolean; finished: boolean };
+
+function counts(value: unknown): TokenCounts {
+  const data = value as Partial<TokenCounts> | undefined;
+  const result = emptyTokenCounts();
+  for (const key of tokenFields) {
+    const count = data?.[key];
+    if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) result[key] = count;
+  }
+  if (result.inputTokens !== null && [result.cachedInputTokens, result.cacheWriteInputTokens].some(value => value !== null && value > result.inputTokens!) ||
+      result.outputTokens !== null && result.reasoningOutputTokens !== null && result.reasoningOutputTokens > result.outputTokens) return emptyTokenCounts();
+  return result;
+}
+
+// One collector per App Server invocation. Thread totals survive turns; records
+// contain only this invocation's deltas, never a resumed thread's old consumption.
+export class CodexTokenUsage {
+  private id = randomUUID();
+  private sequence = 0;
+  private threads = new Map<string, ThreadUsage>();
+  private records = new Map<string, TokenUsageRecord>();
+  private root?: string;
+
+  track(threadId: string, model: string | null, root = false): boolean {
+    if (root) this.root = threadId;
+    const existing = this.threads.get(threadId);
+    if (existing) {
+      if (!model || existing.model === model) return false;
+      if (existing.model === null) {
+        for (const [key, entry] of this.records) {
+          if (entry.threadId !== threadId || entry.model !== null) continue;
+          this.records.delete(key);
+          entry.model = model;
+          entry.incomplete = existing.incomplete || tokenFields.some(field => entry[field] === null);
+          this.records.set(usageKey(entry), entry);
+        }
+      }
+      existing.model = model;
+    } else {
+      const thread = { model, incomplete: false, finished: false };
+      this.threads.set(threadId, thread);
+      const rootTurn = this.root && this.threads.get(this.root)?.turnId;
+      if (!root && rootTurn) this.entry(threadId, { ...thread, turnId: "unreported:" + rootTurn });
+    }
+    return true;
+  }
+
+  begin(threadId: string, turnId: string): TokenUsageReport | undefined {
+    const thread = this.threads.get(threadId);
+    if (!thread || !turnId || thread.turnId === turnId) return;
+    for (const [key, entry] of this.records) {
+      if (entry.threadId === threadId && entry.turnId.startsWith("unreported:")) this.records.delete(key);
+    }
+    thread.turnId = turnId;
+    thread.incomplete = false;
+    thread.finished = false;
+    this.entry(threadId, thread);
+    return this.snapshot();
+  }
+
+  private entry(threadId: string, thread: ThreadUsage): TokenUsageRecord {
+    const value = { ...emptyTokenCounts(), threadId, turnId: thread.turnId!, model: thread.model, incomplete: true };
+    const key = usageKey(value);
+    if (!this.records.has(key)) this.records.set(key, value);
+    return this.records.get(key)!;
+  }
+
+  observe(message: { method?: string; params?: unknown }): TokenUsageReport | undefined {
+    const data = message.params as {
+      threadId?: string; turnId?: string; turn?: { id?: string; status?: string }; toModel?: string;
+      thread?: { id: string; parentThreadId?: string; model?: string };
+      threadSettings?: { model?: string };
+      item?: { type?: string; kind?: string; tool?: string; agentThreadId?: string; model?: string; receiverThreadIds?: string[] };
+      tokenUsage?: { total?: unknown; last?: unknown };
+    } | undefined;
+    if (!data) return;
+    if (message.method === "thread/started" && data.thread?.parentThreadId && this.threads.has(data.thread.parentThreadId)) {
+      if (this.track(data.thread.id, data.thread.model ?? null)) return this.snapshot();
+    }
+    const threadId = data.threadId;
+    const thread = threadId ? this.threads.get(threadId) : undefined;
+    if (!thread || !threadId) return;
+    const item = data.item;
+    let discovered = false;
+    if (["item/started", "item/completed"].includes(message.method ?? "")) {
+      if (item?.type === "subAgentActivity" && item.agentThreadId) discovered = this.track(item.agentThreadId, item.model ?? null);
+      if (item?.type === "collabAgentToolCall" && item.tool === "spawnAgent") {
+        for (const id of item.receiverThreadIds ?? []) discovered = this.track(id, null) || discovered;
+      }
+    }
+    if (discovered) return this.snapshot();
+    if (message.method === "turn/started" && data.turn?.id) return this.begin(threadId, data.turn.id);
+    if (message.method === "turn/completed" && data.turn?.id === thread.turnId) thread.finished = true;
+    if (message.method === "model/rerouted" && data.turnId && data.turnId !== thread.turnId) return;
+    const model = message.method === "model/rerouted" ? data.toModel :
+      message.method === "thread/settings/updated" ? data.threadSettings?.model : undefined;
+    if (model) {
+      // A route selected before any usage does not leave a fictitious unknown charge.
+      for (const [key, entry] of this.records) {
+        if (entry.threadId === threadId && entry.turnId === thread.turnId && tokenFields.every(field => entry[field] === null)) this.records.delete(key);
+      }
+      thread.model = model;
+      if (thread.turnId) this.entry(threadId, thread);
+      return this.snapshot();
+    }
+    if ((message.method === "error" || message.method === "turn/completed" &&
+        ["failed", "interrupted"].includes(data.turn?.status ?? "")) && thread.turnId) {
+      thread.incomplete = true;
+      this.entry(threadId, thread).incomplete = true;
+      return this.snapshot();
+    }
+    if (message.method !== "thread/tokenUsage/updated" || !data.turnId) return;
+    // Child turns can start before their discovery event reaches the parent.
+    if (!thread.turnId && threadId !== this.root) this.begin(threadId, data.turnId);
+    if (data.turnId !== thread.turnId) return;
+    const total = counts(data.tokenUsage?.total);
+    const last = counts(data.tokenUsage?.last);
+    const entry = this.entry(threadId, thread);
+    if (thread.previous && tokenFields.every(key => total[key] === thread.previous![key])) return;
+    for (const key of tokenFields) {
+      const current = total[key];
+      const before = thread.previous?.[key];
+      const delta = !thread.previous ? last[key] !== null && current !== null && last[key] <= current ? last[key] : null :
+        current !== null && before !== null && before !== undefined && current >= before ? current - before : null;
+      if (delta === null || current === null || !Number.isSafeInteger((entry[key] ?? 0) + delta)) {
+        thread.incomplete = true;
+      } else {
+        entry[key] = (entry[key] ?? 0) + delta;
+      }
+    }
+    thread.previous = total;
+    entry.incomplete = thread.incomplete || thread.model === null || tokenFields.some(key => entry[key] === null);
+    return this.snapshot();
+  }
+
+  finish(incomplete = false): TokenUsageReport | undefined {
+    const rootTurn = this.root && this.threads.get(this.root)?.turnId;
+    if (!rootTurn) return;
+    for (const [threadId, thread] of this.threads) {
+      if (!thread.turnId) {
+        thread.turnId = "unreported:" + rootTurn;
+      }
+      const entry = this.entry(threadId, thread);
+      entry.incomplete ||= incomplete && !thread.finished;
+    }
+    return this.snapshot();
+  }
+
+  private snapshot(): TokenUsageReport | undefined {
+    if (!this.records.size) return;
+    return { id: this.id, sequence: ++this.sequence, records: [...this.records.values()].map(entry => ({ ...entry })) };
+  }
+}

@@ -10,6 +10,7 @@ import { createRequire } from "node:module";
 import { bundled, callCli, cliChild, cliFailure, entry } from "./cli.ts";
 import { codexStatus, composeDraft, installCodex, setCodexExecutable, skillLaunch } from "./codex.ts";
 import { chatModels, replyToTask } from "./codex-chat.ts";
+import type { TokenUsageReport } from "../cli/token-usage.ts";
 import { taskChatActions } from "./chat-actions.ts";
 import type { CodexStatus } from "./codex.ts";
 import type { CliReply } from "./cli.ts";
@@ -362,6 +363,11 @@ interface ChatRequest {
 
 type ChatUpdate = { type: "saved" | "changed" } | { type: "commentary"; text: string };
 
+async function saveTaskTokenUsage(project: string, id: string, report: TokenUsageReport): Promise<void> {
+  const saved = await callCli(project, ["token-usage", id], report);
+  if (!saved.ok) throw new Error("Could not save task token usage: " + saved.error.message);
+}
+
 async function sendChat(project: string, id: string, request: ChatRequest, notify: (update: ChatUpdate) => void) {
   const key = project + "\0" + id;
   if (chatRuns.has(key)) {
@@ -429,7 +435,8 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     const answer = await replyToTask(app.getPath("userData"), project, { model, effort }, prompt, images,
       text => notify({ type: "commentary", text }),
       taskChatActions(project, task, message.text ?? "", () => notify({ type: "changed" })),
-      scratch, maxAttachmentBytes - task.attachments.reduce((sum, file) => sum + file.bytes, 0));
+      scratch, maxAttachmentBytes - task.attachments.reduce((sum, file) => sum + file.bytes, 0),
+      report => saveTaskTokenUsage(project, id, report));
     const result = await callCli<Task>(project, ["chat", id], {
       ...answer, actor: "agent", model, effort, replyTo: last, durationMs: Math.round(performance.now() - replyStarted),
     });
@@ -696,7 +703,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     const { threadId: codexThreadId, completion } = await startCodexRun(client, project, started.data.worktree, started.data.task, item => {
       activity.set(item.id, item);
       updateTimer ??= setTimeout(publish, 80);
-    });
+    }, report => saveTaskTokenUsage(project, id, report));
     monitoring = true;
     runningTasks.add(key);
     notifyRunChange(project);
