@@ -380,7 +380,7 @@ function card(task) {
   }
   item.append(meta);
   card.append(item);
-  if (task.status === "ready") card.append(codexTaskAction(task));
+  if (task.status === "ready" && task.codexThreadId) card.append(codexTaskAction(task));
   return card;
 }
 
