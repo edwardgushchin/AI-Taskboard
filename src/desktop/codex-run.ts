@@ -47,6 +47,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     ...client.args, "app-server", "-c", "permissions." + profile + "={filesystem={" + filesystem + "}}",
     "-c", "default_permissions=" + JSON.stringify(profile),
   ], { cwd: project, env: client.env, windowsHide: true, stdio: "pipe" });
+  const exited = new Promise<void>(resolve => child.once("close", resolve));
   const output = createInterface({ input: child.stdout });
   const lines = output[Symbol.asyncIterator]();
   const turns = new Map<string, Turn>();
@@ -62,6 +63,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     output.close();
     child.stdin.end();
     child.kill();
+    return exited;
   };
   child.stderr.setEncoding("utf8").on("data", chunk => { lastError = (lastError + chunk).slice(-1500); });
   const streamError = (error: Error) => {
@@ -103,7 +105,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     } catch (error) {
       return (error as Error).message;
     } finally {
-      close();
+      await close();
     }
   }
 
@@ -122,22 +124,23 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     } catch (error) {
       throw new Error("Codex cannot write to the task worktree, board or Git directories. " + (error as Error).message);
     }
-    const projectId = await codexProject(request, project).catch(error => {
+    const existing = task.codexThreadId;
+    const projectId = existing ? undefined : await codexProject(request, project).catch(error => {
       throw new Error("Codex could not open or create the project for this board. " + (error as Error).message);
     });
     const started = await request<{
       thread: { id: string; projectId: string | null }; activePermissionProfile?: { id: string };
-    }>("thread/start", {
-      cwd, projectId, model: task.execution?.model, approvalPolicy: "never", permissions: profile,
+    }>(existing ? "thread/resume" : "thread/start", {
+      cwd, projectId, threadId: existing, model: task.execution?.model, approvalPolicy: "never", permissions: profile,
     });
-    if (started.thread.projectId !== projectId) {
+    if (projectId && started.thread.projectId !== projectId) {
       throw new Error("Codex did not attach the task chat to the board project.");
     }
     if (started.activePermissionProfile?.id !== profile) {
       throw new Error("Codex did not apply the write permissions for this task.");
     }
     const threadId = started.thread.id;
-    if (!codexThreadPattern.test(threadId)) throw new Error("Codex returned an invalid thread ID.");
+    if (!codexThreadPattern.test(threadId) || (existing && threadId !== existing)) throw new Error("Codex returned an unexpected thread ID.");
     const prompt = [
       "Выполни задачу AI Taskboard " + task.id + " в подготовленной рабочей копии.",
       "Корень доски: " + project,
@@ -152,7 +155,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     if (turn.status !== "inProgress") turns.set(turn.id, turn);
     return { threadId, completion: monitor(turn.id) };
   } catch (error) {
-    close();
+    await close();
     throw error;
   }
 }

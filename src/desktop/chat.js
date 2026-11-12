@@ -88,6 +88,7 @@ function chatEventLabel(action) {
     approve: ["Approved the task", "Утвердил задачу"], start: ["Started work", "Начал работу"],
     "return-to-draft": ["Returned the task to draft", "Вернул задачу в черновик"],
     progress: ["Updated progress", "Обновил ход работы"], block: ["Blocked the task", "Заблокировал задачу"],
+    pause: ["Paused work", "Приостановил работу"],
     resume: ["Resumed work", "Продолжил работу"], submit: ["Submitted for review", "Сдал на проверку"],
     accept: ["Accepted the task", "Принял задачу"], cancel: ["Cancelled the task", "Отменил задачу"],
     cover: ["Changed the card cover", "Сменил превью карточки"],

@@ -613,7 +613,7 @@ ipcMain.handle("board:launchTask", async (event, id: unknown) => {
   let monitoring = false;
   try {
     const current = await callCli<Task>(project, ["show", id]);
-    if (!current.ok || current.data.codexThreadId) return current;
+    if (!current.ok) return current;
     const client = await configuredCodex(app.getPath("userData"));
     if (!client) return cliFailure("CODEX_UNAVAILABLE", lang("Connect Codex in settings.", "Подключите Codex в настройках."));
     const started = await callCli<{ task: Task; worktree: string }>(project, ["start", id], { revision: current.data.revision });
@@ -624,9 +624,11 @@ ipcMain.handle("board:launchTask", async (event, id: unknown) => {
     runningTasks.add(key);
     notifyRunChange(project);
     // Preserve edits made while Codex was starting.
-    const saved = await callCli<Task>(project, ["update", id], { codexThreadId, actor: "user" });
+    const saved = started.data.task.codexThreadId ? { ok: true as const, data: started.data.task } :
+      await callCli<Task>(project, ["update", id], { codexThreadId, actor: "user" });
     void completion.then(async reason => {
       if (reason) await recordRunFailure(project, id, reason);
+      else await callCli<Task>(project, ["pause", id]);
     }).finally(() => {
       runningTasks.delete(key);
       launchingTasks.delete(key);
