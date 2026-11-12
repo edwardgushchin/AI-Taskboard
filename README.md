@@ -19,6 +19,8 @@ The board lives in the project's `.tasks` folder. Git operations require Git 2.3
 
 Use Node.js 24.12 or newer and Git 2.38 or newer. Run `npm ci`, `npm run check`, and `npm test`. Run `npm start` to open the app. For a direct CLI command, use `npm run taskboard -- --project "/path/to/project" list --json`.
 
+Run `node scripts/check-board.mjs` to check board refreshes in a hidden Electron window using local fixture data. It verifies preview stability, data updates, filters, focus and scrolling, and saves a screenshot in `.dev-diary/board-check/`.
+
 In VS Code on Windows, open the repository folder and press **F5** to launch **AI Taskboard** from **Run and Debug**. Set breakpoints in `src/desktop/main.ts` to debug the Electron main process. The debug session uses its own profile in `dist/vscode-profile`.
 
 To review a task, select **Проверить задачу** in **Run and Debug**, press **F5**, and enter the task ID. The app opens its welcome page from the task's worktree and uses a separate profile for that task.

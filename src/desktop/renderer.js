@@ -9,6 +9,8 @@ let focusBeforeSheet;
 let boardTags = new Map();
 let lanePreferences = {};
 const cardCoverCache = new Map();
+const boardCards = new Map();
+const boardLanes = new Map();
 const sheet = byId("sheet");
 const body = byId("sheet-body");
 
@@ -388,7 +390,19 @@ function blockerBanner({ reason, condition }) {
 }
 
 function card(task) {
-  const card = button("", () => showTask(task.id));
+  const cover = selectedCover(task, (task.attachments ?? []).filter(isImageAttachment));
+  // Only visible card data belongs in this key: chat/log/revision updates must not rebuild it.
+  const signature = JSON.stringify([frame.russian, task.title,
+    task.tags?.map(name => boardTags.get(tagKey(name)) ?? { name }), cover?.file,
+    frame.runningTasks?.includes(task.id) ?? false, task.status, Boolean(task.codexThreadId),
+    task.unfinishedDependencies?.length, task.blocked, task.subtasks?.map(entry => entry.done),
+    task.attachments?.length, task.priority]);
+  const previous = boardCards.get(task.id);
+  if (previous?.signature === signature) return previous.node;
+  const card = previous?.node ?? button("", () => showTask(task.id));
+  const oldDetails = card.querySelector(".task-card-details");
+  const oldImage = card.querySelector(".task-card-cover");
+  if (oldDetails) cardCovers.unobserve(oldDetails);
   card.className = "task-card";
   const item = element("span", undefined, "task-card-details");
   if (task.tags?.length) {
@@ -397,16 +411,16 @@ function card(task) {
     item.append(tags);
   }
   item.append(element("strong", task.title));
-  const cover = selectedCover(task, (task.attachments ?? []).filter(isImageAttachment));
   if (cover) {
-    const image = element("img", undefined, "task-card-cover");
-    image.alt = "";
-    image.hidden = true;
-    image.dataset.task = task.id;
-    image.dataset.file = cover.file;
-    image.onload = () => { image.hidden = false; };
+    const image = oldImage?.dataset.file === cover.file ? oldImage : element("img", undefined, "task-card-cover");
+    if (image !== oldImage) {
+      image.alt = "";
+      image.hidden = true;
+      image.dataset.task = task.id;
+      image.dataset.file = cover.file;
+      image.onload = () => { image.hidden = false; };
+    }
     item.prepend(image);
-    cardCovers.observe(item);
   }
   const meta = element("span", undefined, "task-meta");
   meta.append(element("span", task.id, "task-id"));
@@ -441,8 +455,37 @@ function card(task) {
     meta.append(priority);
   }
   item.append(meta);
-  card.append(item);
+  card.replaceChildren(item);
+  boardCards.set(task.id, { node: card, signature });
   return card;
+}
+
+function syncChildren(target, children) {
+  // Keep matching nodes in place; move connected cards without resetting their browser state.
+  let cursor = target.firstChild;
+  for (const child of children) {
+    if (child === cursor) cursor = cursor.nextSibling;
+    else if (child.isConnected && target.isConnected) target.moveBefore(child, cursor);
+    else target.insertBefore(child, cursor);
+  }
+  while (cursor) {
+    const next = cursor.nextSibling;
+    for (const details of cursor.querySelectorAll(".task-card-details")) cardCovers.unobserve(details);
+    cursor.remove();
+    cursor = next;
+  }
+  for (const child of children) {
+    const image = child.querySelector(".task-card-cover");
+    if (image && !image.getAttribute("src")) cardCovers.observe(image.parentElement);
+  }
+}
+
+function resetBoardRendering() {
+  cardCovers.disconnect();
+  boardCards.clear();
+  boardLanes.clear();
+  byId("lanes").replaceChildren();
+  byId("archive-list").replaceChildren();
 }
 
 function openCodexTaskAction(task) {
@@ -478,6 +521,9 @@ function controlLabel(id, label) {
 
 function filterOptions(id, options, label) {
   const select = byId(id);
+  const key = JSON.stringify([options, label]);
+  if (select.dataset.options === key) return select.value;
+  select.dataset.options = key;
   const previous = select.value;
   select.replaceChildren(...[["", label], ...options].map(([value, name]) => new Option(name, value)));
   if (options.some(([value]) => value === previous)) select.value = previous;
@@ -487,6 +533,9 @@ function filterOptions(id, options, label) {
 function tagFilters() {
   const list = byId("tag-filter");
   const selected = new Set(Array.from(list.querySelectorAll(":checked"), input => input.value));
+  const key = JSON.stringify([...boardTags]);
+  if (list.dataset.options === key) return [...selected];
+  list.dataset.options = key;
   const focused = list.contains(document.activeElement) ? document.activeElement.value : undefined;
   const scroll = list.scrollTop;
   const tags = [...boardTags].sort(([, a], [, b]) => a.name.localeCompare(b.name));
@@ -582,20 +631,25 @@ function laneTools(state, title, tasks, total, count, content) {
     toggle.setAttribute("aria-label", label);
     toggle.setAttribute("aria-expanded", String(!collapsed));
   }
+  let empty;
   function updateCards() {
     const matching = tasks.filter(task => (!priority.value || task.priority === priority.value) &&
       (!selected.size || task.tags.some(name => selected.has(tagKey(name)))));
     const active = selected.size + Number(Boolean(priority.value));
-    for (const old of content.querySelectorAll(".task-card-details")) cardCovers.unobserve(old);
-    content.replaceChildren(...matching.map(card));
+    const children = matching.map(card);
     if (!matching.length && (total || active)) {
-      const empty = element("div", undefined, "lane-filter-empty");
-      empty.append(element("p", language("No matching tasks", "Нет подходящих карточек"), "muted"));
-      if (active) empty.append(button(resetLabel, clearFilters, "quiet"));
-      content.append(empty);
+      if (!empty) {
+        empty = element("div", undefined, "lane-filter-empty");
+        empty.append(element("p", language("No matching tasks", "Нет подходящих карточек"), "muted"),
+          button(resetLabel, clearFilters, "quiet"));
+      }
+      empty.querySelector("button").hidden = !active;
+      children.push(empty);
     }
-    count.textContent = matching.length === total ? String(total) : matching.length + language(" of ", " из ") + total;
-    filterCount.textContent = active;
+    syncChildren(content, children);
+    const label = matching.length === total ? String(total) : matching.length + language(" of ", " из ") + total;
+    if (count.textContent !== label) count.textContent = label;
+    if (filterCount.textContent !== String(active)) filterCount.textContent = active;
     filterCount.hidden = active === 0;
     reset.hidden = active === 0;
     summary.title = filterLabel;
@@ -604,11 +658,14 @@ function laneTools(state, title, tasks, total, count, content) {
   updateCards();
   updateCollapse();
   toolbar.append(filter, toggle);
-  return toolbar;
+  return { toolbar, update(nextTasks, nextTotal) {
+    tasks = nextTasks;
+    total = nextTotal;
+    updateCards();
+  } };
 }
 
 function render() {
-  cardCovers.disconnect();
   document.documentElement.lang = frame.russian ? "ru" : "en";
   const currentBoard = frame.board;
   // Project waiting tasks into the blocked lane while keeping their workflow status in the board data.
@@ -625,8 +682,17 @@ function render() {
   if (frame.error) notice(boardError(frame.error));
   else if (!sheet.open) notice();
   if (!board) {
+    resetBoardRendering();
     renderWelcome();
     return;
+  }
+
+  const ids = new Set([...board.tasks, ...board.archived].map(task => task.id));
+  for (const [id, { node }] of boardCards) {
+    if (ids.has(id)) continue;
+    const details = node.querySelector(".task-card-details");
+    if (details) cardCovers.unobserve(details);
+    boardCards.delete(id);
   }
 
   byId("workspace").setAttribute("aria-label", archiveView ? language("Archive", "Архив") : language("Task board", "Доска задач"));
@@ -653,29 +719,41 @@ function render() {
     [task.id, task.title, ...(task.tags ?? [])].some(value => tagKey(value).includes(query));
   if (archiveView) {
     const tasks = board.archived.filter(matches);
-    byId("archive-list").replaceChildren(...(tasks.length ? tasks.map(card) :
-      [element("p", language("No archived tasks found.", "Архивных задач не найдено."), "muted")]));
+    syncChildren(byId("archive-list"), tasks.length ? tasks.map(card) :
+      [element("p", language("No archived tasks found.", "Архивных задач не найдено."), "muted")]);
     return;
   }
   const visible = board.tasks.filter(matches);
+  const focused = document.activeElement;
+  const toolsKey = JSON.stringify([frame.russian, [...boardTags]]);
   const columns = lanes.map(([state, english, russian]) => {
     const tasks = visible.filter(task => task.status === state);
-    const column = element("section", undefined, "lane");
-    column.dataset.state = state;
+    let lane = boardLanes.get(state);
+    if (!lane) {
+      const column = element("section", undefined, "lane");
+      column.dataset.state = state;
+      const header = element("div", undefined, "lane-header");
+      const content = element("div", undefined, "lane-cards");
+      content.id = "lane-cards-" + state;
+      column.append(header, content);
+      lane = { column, header, content };
+      boardLanes.set(state, lane);
+    }
     const title = language(english, russian);
-    const heading = element("h2", undefined, "lane-title");
-    heading.title = title;
-    const count = element("span", undefined, "count");
-    heading.append(element("span", title), count);
-    const content = element("div", undefined, "lane-cards");
-    content.id = "lane-cards-" + state;
-    const header = element("div", undefined, "lane-header");
     const total = board.tasks.filter(task => task.status === state).length;
-    header.append(heading, laneTools(state, title, tasks, total, count, content));
-    column.append(header, content);
-    return column;
+    if (lane.toolsKey !== toolsKey) {
+      const heading = element("h2", undefined, "lane-title");
+      heading.title = title;
+      const count = element("span", undefined, "count");
+      heading.append(element("span", title), count);
+      lane.tools = laneTools(state, title, tasks, total, count, lane.content);
+      lane.header.replaceChildren(heading, lane.tools.toolbar);
+      lane.toolsKey = toolsKey;
+    } else lane.tools.update(tasks, total);
+    return lane.column;
   });
-  byId("lanes").replaceChildren(...columns);
+  syncChildren(byId("lanes"), columns);
+  if (focused?.isConnected && document.activeElement !== focused) focused.focus({ preventScroll: true });
 }
 
 function renderWelcome() {
@@ -1559,11 +1637,13 @@ function update(next) {
   if (projectChanged) {
     lanePreferences = loadLanePreferences();
     cardCoverCache.clear();
+    resetBoardRendering();
     archiveView = false;
     byId("search").value = "";
     byId("filters").open = false;
     byId("priority-filter").value = "";
     byId("tag-filter").replaceChildren();
+    delete byId("tag-filter").dataset.options;
     if (sheet.open) sheet.close();
   }
   render();
