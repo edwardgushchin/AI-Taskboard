@@ -146,14 +146,19 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     });
     const started = await request<{
       thread: { id: string; projectId: string | null }; activePermissionProfile?: { id: string };
+      approvalPolicy?: string; approvalsReviewer?: string;
     }>(existing ? "thread/resume" : "thread/start", {
-      cwd, projectId, threadId: existing, model: task.execution?.model, approvalPolicy: "never", permissions: profile,
+      cwd, projectId, threadId: existing, model: task.execution?.model, permissions: profile,
+      approvalPolicy: "on-request", approvalsReviewer: "auto_review",
     });
     if (projectId && started.thread.projectId !== projectId) {
       throw new Error("Codex did not attach the task chat to the board project.");
     }
     if (started.activePermissionProfile?.id !== profile) {
       throw new Error("Codex did not apply the write permissions for this task.");
+    }
+    if (started.approvalPolicy !== "on-request" || started.approvalsReviewer !== "auto_review") {
+      throw new Error("Codex did not enable automatic approval review. Check the connected Codex version and its approval policy.");
     }
     const threadId = started.thread.id;
     if (!codexThreadPattern.test(threadId) || (existing && threadId !== existing)) throw new Error("Codex returned an unexpected thread ID.");
@@ -162,7 +167,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       "Выполни задачу AI Taskboard " + task.id + " в подготовленной рабочей копии.",
       "Корень доски: " + project,
       "Используй навык ai-taskboard:work-task и прочитай актуальную карточку по номеру.",
-      "Заверши проход командой сдачи, записи прогресса, паузы или блокировки в AI Taskboard. При отказе инструмента укажи его причину в ответе.",
+      "Заверши проход командой сдачи, записи прогресса, паузы или блокировки в AI Taskboard.",
+      "Если доступ отклонён, продолжай разрешённым способом. Если без доступа нельзя выполнить обязательный шаг, заблокируй задачу. В причине укажи шаг, нужный ресурс и причину отказа, в условии разблокировки — конкретное действие для продолжения.",
       "Рабочая копия: " + cwd,
       JSON.stringify({ title: task.title, description: task.description, criteria: task.criteria }),
       ...(feedback ? ["Замечание к последней сдаче: " + feedback] : []),

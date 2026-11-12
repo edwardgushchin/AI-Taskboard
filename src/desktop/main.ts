@@ -619,10 +619,10 @@ function notifyRunChange(project: string) {
   }
 }
 
-async function recordRunFailure(project: string, id: string, reason: string) {
+async function recordRunFailure(project: string, id: string, reason: string, condition?: string) {
   const result = await callCli<Task>(project, ["block", id], {
     reason,
-    condition: lang("Resolve the reported issue and resume the task.", "Устраните указанную причину и возобновите задачу."),
+    condition: condition ?? lang("Resolve the reported issue and resume the task.", "Устраните указанную причину и возобновите задачу."),
   });
   if (!result.ok && result.error.code !== "INVALID_TRANSITION") return result.error.message;
 }
@@ -684,7 +684,18 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         ?? items.findLast(item => item.type === "commandExecution" && ["failed", "declined"].includes(item.status))?.text;
       const incomplete = lang("The agent finished without submitting the task or recording progress.",
         "Агент завершил сеанс без сдачи задачи или записи прогресса.");
-      const failure = await recordRunFailure(project, id, reason ?? [incomplete, detail?.trim().slice(0, 2000)].filter(Boolean).join("\n\n"));
+      const rejected = items.findLast(item => item.type === "autoApprovalReview" && ["denied", "timedOut"].includes(item.status));
+      const timedOut = rejected?.status === "timedOut";
+      const reviewOutcome = timedOut ? lang("Access review timed out", "Истекло время проверки доступа") :
+        lang("Access denied by Auto-review", "Auto-review отклонил доступ");
+      const condition = rejected && (timedOut ? lang("Resume the task to retry the access review.", "Возобновите задачу, чтобы повторить проверку доступа.") :
+        lang("Provide the required resource in an allowed location or revise the blocked step to use an authorized operation, then resume the task.",
+          "Предоставьте нужный ресурс в доступной области или уточните, каким разрешённым способом выполнить указанный шаг. Затем возобновите задачу."));
+      const summary = detail?.trim().slice(0, 2000);
+      const diagnostic = rejected ? [
+        [reviewOutcome, rejected.title.slice(0, 1000)].filter(Boolean).join(" — "), rejected.text.slice(0, 1500), reason, summary,
+      ].filter(Boolean).join("\n\n") : reason ?? [incomplete, summary].filter(Boolean).join("\n\n");
+      const failure = await recordRunFailure(project, id, diagnostic, condition);
       if (failure) publishRunActivity(project, id, [
         ...runLog(activity), { id: "block-error", type: "error", title: "", text: failure, status: "failed" },
       ]);

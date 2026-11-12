@@ -9,6 +9,17 @@ function bounded(value: string): string {
 }
 
 export function runActivity(entries: Map<string, RunActivity>, method: string, params: Record<string, unknown>): RunActivity | undefined {
+  if (method === "item/autoApprovalReview/started" || method === "item/autoApprovalReview/completed") {
+    const reviewId = string(params.reviewId);
+    const review = params.review as Record<string, unknown> | undefined;
+    const status = string(review?.status);
+    if (!reviewId || !status) return;
+    const action = params.action as Record<string, unknown> | undefined;
+    const title = string(action?.command) || string(action?.target) || string(action?.toolName) ||
+      string(action?.program) || (action?.permissions ? JSON.stringify(action.permissions) : string(action?.type));
+    const text = [string(action?.reason), string(review?.rationale)].filter(Boolean).join("\n");
+    return { id: "approval:" + reviewId, type: "autoApprovalReview", title: bounded(title), text: bounded(text), status };
+  }
   if (method === "item/started" || method === "item/completed") {
     const item = params.item as Record<string, unknown> | undefined;
     const id = string(item?.id);

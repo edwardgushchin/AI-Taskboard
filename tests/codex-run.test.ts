@@ -39,6 +39,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '    result = { data: [{ id: "board-project", roots: [{ path: require("node:path").dirname(capture) }] }], nextCursor: null };',
     '  } else if (method === "thread/start" || method === "thread/resume") {',
     '    result = { thread: { id: params.threadId ?? thread, projectId: outcome === "wrong-project" ? null : params.projectId },',
+    '      approvalPolicy: params.approvalPolicy, approvalsReviewer: outcome === "manual-review" ? "user" : params.approvalsReviewer,',
     '      activePermissionProfile: { id: outcome === "readonly" ? ":read-only" : params.permissions } };',
     '  } else if (method === "turn/start") {',
     '    result = { turn: { id: "turn-1", status: "inProgress" } };',
@@ -47,6 +48,13 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '  if (method === "turn/start") {',
     '    if (outcome === "closed") { process.stdin.destroy(); return; }',
     '    const itemEvent = (method, params) => send({ method: "item/" + method, params: { threadId: thread, ...params } });',
+    '    if (["review-denied", "review-approved"].includes(outcome)) {',
+    '      const review = { reviewId: "access-1", action: { type: "networkAccess", target: "docs.example.com:443" } };',
+    '      itemEvent("autoApprovalReview/started", { ...review, review: { status: "inProgress" } });',
+    '      itemEvent("autoApprovalReview/completed", { ...review, review: outcome === "review-denied"',
+    '        ? { status: "denied", rationale: "This destination is outside the project scope." }',
+    '        : { status: "approved", rationale: "Read public documentation." } });',
+    '    }',
     '    itemEvent("started", { item: { id: "note", type: "agentMessage", text: "" } });',
     '    itemEvent("agentMessage/delta", { itemId: "note", delta: "Checking" });',
     '    itemEvent("completed", { item: { id: "note", type: "agentMessage", text: "Checking files." } });',
@@ -98,16 +106,30 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.ok(probe.params.command.includes(join(folder, ".git", "objects")));
   assert.ok(probe.params.command.includes(join(folder, ".git", "worktrees", "T-0001")));
   assert.equal(started.params.model, "test-model");
+  assert.equal(started.params.approvalPolicy, "on-request");
+  assert.equal(started.params.approvalsReviewer, "auto_review");
   assert.equal(started.params.projectId, "board-project");
   assert.equal(started.params.cwd, worktree);
   assert.equal(turn.params.effort, "high");
   assert.match(turn.params.input[0].text, /T-0001.*Проверка/s);
+  assert.match(turn.params.input[0].text, /обязательный шаг, заблокируй задачу/);
   await assert.rejects(launch("denied"), /Codex cannot write.*EACCES/s);
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "command/exec");
   await assert.rejects(launch("readonly"), /did not apply the write permissions/);
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
   await assert.rejects(launch("wrong-project"), /did not attach the task chat/);
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
+  await assert.rejects(launch("manual-review"), /did not enable automatic approval review/);
+  assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
+  for (const [status, rationale] of [["denied", "This destination is outside the project scope."], ["approved", "Read public documentation."]]) {
+    activity.length = 0;
+    assert.equal(await (await launch("review-" + status)).completion, undefined);
+    assert.deepEqual(activity.filter(item => item.type === "autoApprovalReview"), [
+      { id: "approval:access-1", type: "autoApprovalReview", title: "docs.example.com:443", text: "", status: "inProgress" },
+      { id: "approval:access-1", type: "autoApprovalReview", title: "docs.example.com:443", text: rationale, status },
+    ]);
+    assert.ok(activity.some(item => item.id === "cmd" && item.status === "completed"));
+  }
   assert.equal(await (await launch("failed")).completion, "Provider disconnected");
   assert.match((await (await launch("closed")).completion) ?? "", /Codex process closed/);
   const resumed = await startCodexRun(client("ok"), folder, worktree, { ...task, codexThreadId: thread });
@@ -118,4 +140,6 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     ["initialize", "command/exec", "thread/resume", "turn/start"]);
   assert.equal(resumedCalls[2].params.threadId, thread);
   assert.equal(resumedCalls[2].params.cwd, worktree);
+  assert.equal(resumedCalls[2].params.approvalPolicy, "on-request");
+  assert.equal(resumedCalls[2].params.approvalsReviewer, "auto_review");
 });

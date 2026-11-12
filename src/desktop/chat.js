@@ -130,7 +130,7 @@ function activityCount(count, english, russian) {
 }
 
 function activityState(items) {
-  const failed = items.filter(item => ["failed", "declined"].includes(item.status)).length;
+  const failed = items.filter(item => ["failed", "declined", "denied", "timedOut", "aborted"].includes(item.status)).length;
   const running = items.filter(item => item.status === "inProgress").length;
   return {
     code: failed ? "failed" : running ? "running" : "completed",
@@ -184,7 +184,15 @@ function renderRunActivity(container, items, completed = false, durationMs) {
     // Only shorten the visible preview; the original command remains available below.
     const command = item.type === "commandExecution" ? readableRunCommand(item.title) : item.title;
     const preview = command.replace(/^(?:"[^"\r\n]*(?:pwsh|powershell)(?:\.exe)?"|\S*(?:pwsh|powershell)(?:\.exe)?)\s+-Command\s+/i, "");
-    activitySummary(detail, label, preview, kind, state);
+    const approvalLabels = {
+      inProgress: ["Reviewing access", "Проверка доступа"],
+      approved: ["Access approved", "Доступ одобрен"],
+      denied: ["Access denied", "Доступ отклонён"],
+      timedOut: ["Access review timed out", "Время проверки доступа истекло"],
+      aborted: ["Access review cancelled", "Проверка доступа отменена"],
+    };
+    const approvalLabel = item.type === "autoApprovalReview" && Object.hasOwn(approvalLabels, item.status) ? approvalLabels[item.status] : undefined;
+    activitySummary(detail, approvalLabel ? language(...approvalLabel) : label, preview, kind, state);
     if (command) detail.append(element("pre", command, "chat-run-command"));
     detail.append(element("pre", item.text || language("No output.", "Нет вывода."), "chat-run-output"));
     if (command !== item.title) {

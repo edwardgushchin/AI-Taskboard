@@ -258,7 +258,16 @@ select:hover:not(:disabled) {
 .task-priority[data-priority="high"] { color: var(--yellow); }
 .task-priority[data-priority="urgent"] { color: var(--warn); }
 .dependency-warning { color: var(--yellow); }
-.task-error { color: var(--warn); }
+.task-blocker {
+  display: grid; gap: 4px; min-width: 0; padding: 8px; border-radius: 4px;
+  border-inline-start: 2px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 10%, var(--panel));
+  font-size: 12px; line-height: 1.4;
+}
+.task-blocker-detail { white-space: pre-wrap; overflow-wrap: anywhere; }
+.task-card .task-blocker-detail {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+}
 .dependency-choices { min-width: 0; max-height: 42vh; overflow: auto; border: 1px solid var(--border); }
 .form .dependency-option { display: flex; align-items: baseline; gap: 8px; padding: 4px; overflow-wrap: anywhere; }
 .tag {

@@ -376,6 +376,17 @@ function taskIndicator(name, count, label, className) {
   return indicator;
 }
 
+function blockerBanner({ reason, condition }) {
+  const banner = element("span", undefined, "task-blocker");
+  banner.append(
+    element("strong", language("Why it is blocked", "Причина блокировки")),
+    element("span", reason, "task-blocker-detail"),
+    element("strong", language("How to continue", "Как продолжить")),
+    element("span", condition, "task-blocker-detail"),
+  );
+  return banner;
+}
+
 function card(task) {
   const card = button("", () => showTask(task.id));
   card.className = "task-card";
@@ -407,7 +418,9 @@ function card(task) {
       language("Unfinished dependencies", "Незавершённые зависимости"), "dependency-warning"));
   }
   if (task.status === "blocked" && task.blocked) {
-    meta.append(taskIndicator("error", 1, language("Execution error", "Ошибка выполнения"), "task-error"));
+    const banner = blockerBanner(task.blocked);
+    banner.title = task.blocked.reason + "\n\n" + task.blocked.condition;
+    item.append(banner);
   }
   if (task.subtasks?.length) {
     const count = task.subtasks.filter(entry => entry.done).length + "/" + task.subtasks.length;
@@ -915,6 +928,7 @@ async function showTask(id) {
   const lane = lanes.find(([state]) => state === shownStatus(task));
   const status = lane ? language(lane[1], lane[2]) : task.status;
   body.append(element("p", status + " · " + priorityName(task.priority) + " · " + shortDate(task.updatedAt), "muted"));
+  if (task.status === "blocked" && task.blocked) body.append(blockerBanner(task.blocked));
   savedChangesSection(task, task.savedChanges);
   if (task.tags.length) {
     const tags = element("div", undefined, "task-tags");
@@ -941,7 +955,6 @@ async function showTask(id) {
     section(language("Execution settings", "Параметры запуска"), task.execution.model + " · " +
       (task.execution.effort ?? language("Provider default", "По умолчанию у провайдера")));
   }
-  if (task.blocked) section(language("Blocker", "Причина блокировки"), [task.blocked.reason, task.blocked.condition]);
   if (task.result) {
     section(language("Result", "Результат"), task.result.summary);
     section(language("Checks", "Проверки"), task.result.checks);
