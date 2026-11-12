@@ -248,6 +248,15 @@ test("the board tag catalog migrates older tasks and shares names and colors acr
   assert.deepEqual(empty.tasks, []);
   assert.ok(empty.tags.some((tag: { name: string; color: string }) => tag.name === name && tag.color === "blue"));
   assert.ok(!empty.tags.some((tag: { name: string }) => tag.name === "Stale tag"));
+  assert.equal(cli(root, ["tag", "set"], { name, color: "#12ab34" }).customColor, "#12AB34");
+  assert.equal(cli(root, ["list"]).tags.find((tag: { name: string }) => tag.name === name).customColor, "#12AB34");
+  cli(root, ["tag", "set"], { name, color: "#12AB34FF" }, "INVALID_INPUT");
+  const closed = cli(root, ["cancel", active.id], { reason: "No longer needed" });
+  const retagged = cli(root, ["tag", "assign", active.id], { tags: [name], revision: closed.revision });
+  assert.equal(retagged.status, "cancelled");
+  assert.equal(retagged.closedAt, closed.closedAt);
+  assert.deepEqual(retagged.tags, [name]);
+  cli(root, ["tag", "assign", active.id], { tags: [], revision: closed.revision }, "REVISION_CONFLICT");
 });
 
 test("linked worktrees share the board and cleanup preserves local files and the branch", t => {

@@ -7,7 +7,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { discoverRepository, excludeBoard, git } from "./git.ts";
 import type { Repository } from "./git.ts";
-import { reasoningEffortPattern, registerTags, tagColors, tagKey, TaskboardError, taskIdPattern, taskStates } from "./model.ts";
+import { hexTagColor, reasoningEffortPattern, registerTags, tagColors, tagKey, TaskboardError, taskIdPattern, taskStates } from "./model.ts";
 import type { BoardIndex, Task } from "./model.ts";
 
 function stat(path: string) {
@@ -157,7 +157,8 @@ function readIndex(path: string): BoardIndex {
       !Number.isSafeInteger(index.nextId) || index.nextId < 1 || !isRecord(index.tasks) ||
       !isRecord(index.archive) || !isRecord(index.settings) ||
       (index.tags !== undefined && (!Array.isArray(index.tags) || index.tags.some(tag =>
-        !isRecord(tag) || typeof tag.name !== "string" || !tag.name.trim() || !tagColors.some(color => color === tag.color)) ||
+        !isRecord(tag) || typeof tag.name !== "string" || !tag.name.trim() || !tagColors.some(color => color === tag.color) ||
+        (tag.customColor !== undefined && (typeof tag.customColor !== "string" || !hexTagColor.test(tag.customColor)))) ||
         new Set(index.tags.map(tag => tagKey(tag.name))).size !== index.tags.length)) ||
       !["merge", "squash"].includes(String(index.settings.integrationMode)) ||
       !(index.settings.archiveAfterDays === null ||

@@ -9,7 +9,7 @@ import {
   addAttachment, addChatMessage, archiveDiagnostics, createWithAttachments, isArchived, readAttachment, readTask, sweepArchives,
   upgradeTagCatalog,
 } from "./archive.ts";
-import { member, number, object, registerTags, tagColors, tagKey, TaskboardError, text } from "./model.ts";
+import { hexTagColor, member, number, object, record, registerTags, requireRevision, strings, tagColors, tagKey, TaskboardError, text } from "./model.ts";
 import type { Task } from "./model.ts";
 import { initializeBoard, locateBoard, onBoard } from "./storage.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
@@ -25,7 +25,7 @@ const help = [
   "Commands: init, list, show, create, update, comment, approve, start, progress,",
   "          block, resume, preview, submit, review, accept, restore-changes, request-changes, cancel, cleanup, settings, watch, doctor",
   "          list --archived, archive sweep, chat TASK-ID, attachment add TASK-ID, attachment read TASK-ID",
-  "          list --tag NAME, tag ensure --stdin, tag set --stdin (name and color)",
+  "          list --tag NAME, tag ensure --stdin, tag set --stdin (name and color), tag assign TASK-ID --stdin (tags)",
   "For init, pass git: true with --stdin to initialize Git in the chosen folder.",
   "With --stdin, pass one JSON object as the command input.",
 ].join("\n");
@@ -135,21 +135,30 @@ function run(
     return createWithAttachments(store, task.tags.length ? assignTags(store, task) : task, input.attachmentSources);
   }
   if (command === "tag") {
+    if (id === "assign") {
+      if (!extra) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
+      const task = store.card(extra);
+      requireRevision(task, input.revision);
+      if (hasPending(store, task)) {
+        throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before modifying the task.");
+      }
+      const updated = assignTags(store, { ...task, tags: strings(input.tags, "tags") });
+      if (JSON.stringify(task.tags) === JSON.stringify(updated.tags)) return task;
+      return store.save({ ...record(updated, "update", "user"), closedAt: task.closedAt });
+    }
     if (id !== "ensure" && id !== "set") throw new TaskboardError("INVALID_INPUT", "Use tag ensure or tag set.");
     const name = text(input.name, "name", true);
-    const color = member(input.color, tagColors, "color");
+    const value = text(input.color, "color", true);
+    const customColor = hexTagColor.test(value) ? value.toUpperCase() : undefined;
+    const color = customColor ? undefined : member(value, tagColors, "color");
     const tags = upgradeTagCatalog(store);
-    const key = tagKey(name);
-    const existing = tags.find(tag => tagKey(tag.name) === key);
-    if (existing) {
-      if (id === "set" && existing.color !== color) {
-        existing.color = color;
-        store.saveIndex();
-      }
-      return existing;
-    }
-    const tag = { name, color };
-    tags.push(tag);
+    const existing = tags.find(tag => tagKey(tag.name) === tagKey(name));
+    if (existing && id === "ensure") return existing;
+    if (!existing) registerTags(tags, [name]);
+    const tag = existing ?? tags.at(-1)!;
+    if (color) tag.color = color;
+    if (customColor) tag.customColor = customColor;
+    else delete tag.customColor;
     store.saveIndex();
     return tag;
   }
@@ -242,7 +251,7 @@ try {
     if (values.json) send({ ok: true, data: { help } });
     else process.stdout.write(help + "\n");
   } else {
-    if (unexpected !== undefined || (command !== "attachment" && extra !== undefined)) {
+    if (unexpected !== undefined || (command !== "attachment" && !(command === "tag" && id === "assign") && extra !== undefined)) {
       throw new TaskboardError("INVALID_INPUT", "Unexpected positional argument.");
     }
     if (values.archived && command !== "list") throw new TaskboardError("INVALID_INPUT", "Use --archived with list.");

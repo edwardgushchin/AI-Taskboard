@@ -284,9 +284,10 @@ function section(title, content) {
 
 const tagKey = name => name.trim().normalize().toLowerCase();
 
-function tagBadge(name, color) {
+function tagBadge(name, color, customColor) {
   const badge = element("span", name, "tag");
   if (color) badge.dataset.color = color;
+  if (customColor) badge.style.setProperty("--tag-color", customColor);
   return badge;
 }
 
@@ -296,7 +297,7 @@ function tagBadges(names) {
     const key = tagKey(name);
     if (!tags.has(key)) tags.set(key, boardTags.get(key) ?? { name });
   }
-  return Array.from(tags.values(), tag => tagBadge(tag.name, tag.color));
+  return Array.from(tags.values(), tag => tagBadge(tag.name, tag.color, tag.customColor));
 }
 
 function card(task) {
@@ -373,6 +374,27 @@ function filterOptions(id, options, label) {
   return select.value;
 }
 
+function tagFilters() {
+  const list = byId("tag-filter");
+  const selected = new Set(Array.from(list.querySelectorAll(":checked"), input => input.value));
+  const focused = list.contains(document.activeElement) ? document.activeElement.value : undefined;
+  const scroll = list.scrollTop;
+  const tags = [...boardTags].sort(([, a], [, b]) => a.name.localeCompare(b.name));
+  list.replaceChildren(...tags.map(([key, tag]) => {
+    const row = element("label");
+    const input = element("input");
+    input.type = "checkbox";
+    input.value = key;
+    input.checked = selected.has(key);
+    row.append(input, tagBadge(tag.name, tag.color, tag.customColor));
+    return row;
+  }));
+  [...list.querySelectorAll("input")].find(input => input.value === focused)?.focus({ preventScroll: true });
+  list.scrollTop = scroll;
+  list.parentElement.hidden = tags.length === 0;
+  return [...selected].filter(key => boardTags.has(key));
+}
+
 function render() {
   document.documentElement.lang = frame.russian ? "ru" : "en";
   const board = frame.board;
@@ -397,12 +419,11 @@ function render() {
   byId("archive-list").hidden = !archiveView;
   byId("priority-filter-label").textContent = language("Priority", "Приоритет");
   byId("priority-filter-label").parentElement.hidden = archiveView;
-  byId("tag-filter-label").textContent = language("Tag", "Тег");
+  byId("tag-filter-label").textContent = language("Tags", "Теги");
   const priorities = ["low", "normal", "high", "urgent"].map(value => [value, priorityName(value)]);
-  const tags = [...boardTags].sort(([, a], [, b]) => a.name.localeCompare(b.name));
   const priority = archiveView ? "" : filterOptions("priority-filter", priorities, language("Any priority", "Любой приоритет"));
-  const tag = filterOptions("tag-filter", tags.map(([key, value]) => [key, value.name]), language("Any tag", "Любой тег"));
-  const filterCount = Number(Boolean(priority)) + Number(Boolean(tag));
+  const tags = tagFilters();
+  const filterCount = Number(Boolean(priority)) + tags.length;
   const filterToggle = byId("filter-toggle");
   filterToggle.title = language("Filters", "Фильтры");
   filterToggle.setAttribute("aria-label", filterCount ? filterToggle.title + " (" + filterCount + ")" : filterToggle.title);
@@ -410,7 +431,7 @@ function render() {
   byId("filter-count").textContent = filterCount;
   const query = tagKey(byId("search").value);
   const matches = task => (!priority || task.priority === priority) &&
-    (!tag || task.tags?.some(name => tagKey(name) === tag)) &&
+    tags.every(key => task.tags?.some(name => tagKey(name) === key)) &&
     [task.id, task.title, ...(task.tags ?? [])].some(value => tagKey(value).includes(query));
   if (archiveView) {
     const tasks = board.archived.filter(matches);
@@ -942,35 +963,49 @@ function codexSettings() {
 
 function renderTagSettings(panel) {
   const focusedTag = panel.contains(document.activeElement) ? document.activeElement.dataset.tag : undefined;
-  panel.replaceChildren(element("h3", language("Tag colors", "Цвета тегов")));
-  if (!boardTags.size) {
-    panel.append(element("p", language("No tags on this board yet.", "На этой доске пока нет тегов."), "muted"));
-    return;
-  }
-  const colors = [
-    ["purple", language("Purple", "Фиолетовый")], ["blue", language("Blue", "Синий")],
-    ["cyan", language("Cyan", "Бирюзовый")], ["pink", language("Pink", "Розовый")],
-    ["green", language("Green", "Зелёный")],
-  ];
+  const add = element("form", undefined, "tag-create");
+  const name = element("input");
+  name.required = true;
+  name.placeholder = language("Tag name", "Название тега");
+  name.setAttribute("aria-label", name.placeholder);
+  const color = element("input");
+  color.type = "color";
+  color.value = "#6747a9";
+  color.setAttribute("aria-label", language("New tag color", "Цвет нового тега"));
+  const submit = element("button", language("Add tag", "Добавить тег"), "button");
+  submit.type = "submit";
+  add.append(name, color, submit);
+  add.addEventListener("submit", event => {
+    event.preventDefault();
+    void protect(async () => {
+      submit.disabled = true;
+      try {
+        if (await command("tag-create", undefined, { name: name.value, color: color.value })) name.value = "";
+      } finally { submit.disabled = false; }
+    })();
+  });
+  panel.replaceChildren(element("h3", language("Board tags", "Теги доски")), add);
+  const theme = getComputedStyle(document.documentElement);
   const tags = [...boardTags.values()].sort((a, b) => a.name.localeCompare(b.name));
   for (const tag of tags) {
     const row = element("label", undefined, "tag-setting");
-    const badge = tagBadge(tag.name, tag.color);
-    const select = element("select");
-    select.dataset.tag = tag.name;
-    select.append(...colors.map(([value, label]) => new Option(label, value)));
-    select.value = tag.color;
-    select.addEventListener("change", protect(async () => {
-      select.disabled = true;
+    const badge = tagBadge(tag.name, tag.color, tag.customColor);
+    const picker = element("input");
+    picker.type = "color";
+    picker.dataset.tag = tag.name;
+    const previous = tag.customColor ?? theme.getPropertyValue("--" + tag.color).trim();
+    picker.value = previous;
+    picker.addEventListener("change", protect(async () => {
+      picker.disabled = true;
       try {
-        const saved = await command("tag-color", undefined, { name: tag.name, color: select.value });
-        select.value = saved?.color ?? tag.color;
-        badge.dataset.color = select.value;
-      } finally { select.disabled = false; }
+        const saved = await command("tag-color", undefined, { name: tag.name, color: picker.value });
+        picker.value = saved?.customColor ?? previous;
+        if (saved?.customColor) badge.style.setProperty("--tag-color", saved.customColor);
+      } finally { picker.disabled = false; }
     }));
-    row.append(badge, select);
+    row.append(badge, picker);
     panel.append(row);
-    if (tag.name === focusedTag) select.focus();
+    if (tag.name === focusedTag) picker.focus();
   }
 }
 
@@ -1059,7 +1094,7 @@ function update(next) {
     byId("search").value = "";
     byId("filters").open = false;
     byId("priority-filter").value = "";
-    byId("tag-filter").value = "";
+    byId("tag-filter").replaceChildren();
     if (sheet.open) sheet.close();
   }
   render();
