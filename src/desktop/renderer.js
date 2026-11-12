@@ -7,6 +7,7 @@ let taskInSheet;
 let taskSheetRequest = 0;
 let focusBeforeSheet;
 let boardTags = new Map();
+let lanePreferences = {};
 const cardCoverCache = new Map();
 const sheet = byId("sheet");
 const body = byId("sheet-body");
@@ -431,7 +432,15 @@ function tagFilters() {
   const focused = list.contains(document.activeElement) ? document.activeElement.value : undefined;
   const scroll = list.scrollTop;
   const tags = [...boardTags].sort(([, a], [, b]) => a.name.localeCompare(b.name));
-  list.replaceChildren(...tags.map(([key, tag]) => {
+  list.replaceChildren(...tagChoices(tags, selected));
+  [...list.querySelectorAll("input")].find(input => input.value === focused)?.focus({ preventScroll: true });
+  list.scrollTop = scroll;
+  list.parentElement.hidden = tags.length === 0;
+  return [...selected].filter(key => boardTags.has(key));
+}
+
+function tagChoices(tags, selected) {
+  return tags.map(([key, tag]) => {
     const row = element("label");
     const input = element("input");
     input.type = "checkbox";
@@ -439,11 +448,78 @@ function tagFilters() {
     input.checked = selected.has(key);
     row.append(input, tagBadge(tag.name, tag.color, tag.customColor));
     return row;
-  }));
-  [...list.querySelectorAll("input")].find(input => input.value === focused)?.focus({ preventScroll: true });
-  list.scrollTop = scroll;
-  list.parentElement.hidden = tags.length === 0;
-  return [...selected].filter(key => boardTags.has(key));
+  });
+}
+
+function lanePreferenceKey() {
+  return "ai-taskboard:columns:" + frame.project;
+}
+
+function loadLanePreferences() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(lanePreferenceKey()));
+    return saved && typeof saved === "object" ? saved : {};
+  } catch {
+    return {};
+  }
+}
+
+function laneTools(state, title, tasks, count, content) {
+  const saved = lanePreferences[state];
+  const selected = new Set(Array.isArray(saved?.tags) ? saved.tags.filter(key => boardTags.has(key)) : []);
+  let collapsed = saved?.collapsed === true;
+  const persist = () => {
+    lanePreferences[state] = { tags: [...selected], collapsed };
+    try {
+      localStorage.setItem(lanePreferenceKey(), JSON.stringify({ ...loadLanePreferences(), [state]: lanePreferences[state] }));
+    } catch {
+      // Preferences stay in this window.
+    }
+  };
+  const toolbar = element("div", undefined, "lane-toolbar");
+  const filter = element("details", undefined, "lane-filter");
+  const summary = element("summary", undefined, "button quiet icon-button");
+  const filterLabel = language("Filter ", "Фильтр колонки ") + title;
+  const filterCount = element("span", undefined, "count");
+  summary.append(icon("filter"), filterCount);
+  const options = element("div", undefined, "lane-filter-options");
+  options.append(...tagChoices([...boardTags].sort(([, a], [, b]) => a.name.localeCompare(b.name)), selected));
+  filter.append(summary, options);
+  filter.hidden = !options.childElementCount;
+  options.addEventListener("change", () => {
+    selected.clear();
+    for (const checkbox of options.querySelectorAll(":checked")) selected.add(checkbox.value);
+    persist();
+    updateCards();
+  });
+  const toggle = button("", () => {
+    collapsed = !collapsed;
+    persist();
+    updateCollapse();
+  }, "quiet lane-collapse");
+  toggle.setAttribute("aria-controls", content.id);
+  function updateCollapse() {
+    content.hidden = collapsed;
+    toggle.textContent = collapsed ? "+" : "−";
+    const label = (collapsed ? language("Expand ", "Развернуть колонку ") : language("Collapse ", "Свернуть колонку ")) + title;
+    toggle.title = label;
+    toggle.setAttribute("aria-label", label);
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+  }
+  function updateCards() {
+    const matching = tasks.filter(task => [...selected].every(key => task.tags.some(name => tagKey(name) === key)));
+    for (const old of content.querySelectorAll(".task-card-details")) cardCovers.unobserve(old);
+    content.replaceChildren(...matching.map(card));
+    count.textContent = matching.length;
+    filterCount.textContent = selected.size;
+    filterCount.hidden = selected.size === 0;
+    summary.title = filterLabel;
+    summary.setAttribute("aria-label", selected.size ? filterLabel + " (" + selected.size + ")" : filterLabel);
+  }
+  updateCards();
+  updateCollapse();
+  toolbar.append(filter, toggle);
+  return toolbar;
 }
 
 function render() {
@@ -496,11 +572,15 @@ function render() {
     const tasks = visible.filter(task => task.status === state);
     const column = element("section", undefined, "lane");
     column.dataset.state = state;
-    const heading = element("h2", language(english, russian), "lane-title");
-    heading.append(element("span", String(tasks.length), "count"));
+    const title = language(english, russian);
+    const heading = element("h2", title, "lane-title");
+    const count = element("span", undefined, "count");
+    heading.append(count);
     const content = element("div", undefined, "lane-cards");
-    content.append(...tasks.map(card));
-    column.append(heading, content);
+    content.id = "lane-cards-" + state;
+    const header = element("div", undefined, "lane-header");
+    header.append(heading, laneTools(state, title, tasks, count, content));
+    column.append(header, content);
     return column;
   });
   byId("lanes").replaceChildren(...columns);
@@ -1162,6 +1242,7 @@ function update(next) {
   if (tagsChanged) boardTags = new Map((next.board?.tags ?? []).map(tag => [tagKey(tag.name), tag]));
   applyTheme(next.theme);
   if (projectChanged) {
+    lanePreferences = loadLanePreferences();
     cardCoverCache.clear();
     archiveView = false;
     byId("search").value = "";
