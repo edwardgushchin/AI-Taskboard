@@ -516,10 +516,10 @@ function laneTools(state, title, tasks, total, count, content) {
   };
   const toolbar = element("div", undefined, "lane-toolbar");
   const filter = element("details", undefined, "lane-filter");
-  const summary = element("summary", undefined, "button quiet icon-button");
+  const summary = element("summary", undefined, "button quiet lane-filter-toggle");
   const filterLabel = language("Filter ", "Фильтр колонки ") + title;
   const filterCount = element("span", undefined, "count");
-  summary.append(icon("filter"), filterCount);
+  summary.append(icon("filter"), element("span", language("Filter", "Фильтр")), filterCount);
   const options = element("div", undefined, "lane-filter-options");
   const priorityLabel = element("label", undefined, "lane-priority");
   priorityLabel.append(element("span", language("Priority", "Приоритет")), priority);
@@ -548,10 +548,10 @@ function laneTools(state, title, tasks, total, count, content) {
     persist();
     updateCollapse();
   }, "quiet lane-collapse");
+  toggle.append(icon("chevron"));
   toggle.setAttribute("aria-controls", content.id);
   function updateCollapse() {
     content.hidden = collapsed;
-    toggle.textContent = collapsed ? "+" : "−";
     const label = (collapsed ? language("Expand ", "Развернуть колонку ") : language("Collapse ", "Свернуть колонку ")) + title;
     toggle.title = label;
     toggle.setAttribute("aria-label", label);
@@ -638,9 +638,9 @@ function render() {
     const column = element("section", undefined, "lane");
     column.dataset.state = state;
     const title = language(english, russian);
-    const heading = element("h2", title, "lane-title");
+    const heading = element("h2", undefined, "lane-title");
     const count = element("span", undefined, "count");
-    heading.append(count);
+    heading.append(element("span", title), count);
     const content = element("div", undefined, "lane-cards");
     content.id = "lane-cards-" + state;
     const header = element("div", undefined, "lane-header");

@@ -430,11 +430,24 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 .appearance-panel label { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .appearance-panel select { min-width: 175px; }
 .tag-setting { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.lane-header { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 3px; }
-.lane-header .lane-title { min-width: 0; overflow-wrap: anywhere; }
-.lane-toolbar { display: flex; flex: none; align-items: center; gap: 2px; }
-.lane-toolbar .button { min-width: 23px; min-height: 23px; padding: 2px; }
+.lane-header {
+  position: relative; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: 6px; padding: 7px 4px; margin-block: 6px;
+  border: 1px solid var(--border); border-radius: 5px; background: var(--panel);
+}
+.lane-header .lane-title { min-width: 0; align-items: center; gap: 6px; padding: 0; overflow-wrap: anywhere; }
+.lane-header .lane-title .count {
+  flex: none; border-radius: 4px; padding: 2px 5px; color: var(--text);
+  background: color-mix(in srgb, var(--lane-accent) 20%, var(--panel));
+}
+.lane-toolbar { display: flex; flex: none; align-items: center; gap: 4px; margin-inline-start: auto; }
+.lane-toolbar .button { min-width: 25px; min-height: 25px; gap: 4px; padding: 2px 3px; }
 .lane-toolbar .icon { width: 14px; height: 14px; }
+.button.lane-filter-toggle {
+  border-color: color-mix(in srgb, var(--lane-accent) 65%, var(--border));
+  background: color-mix(in srgb, var(--lane-accent) 12%, var(--panel));
+}
+.lane-filter[open] .lane-filter-toggle { border-color: var(--lane-accent); }
 .lane-filter summary { list-style: none; }
 .lane-filter-options {
   position: absolute; z-index: 1; top: calc(100% + 4px); right: 0; width: min(176px, 100%);
@@ -448,6 +461,6 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 .lane-filter-options .lane-priority { display: grid; margin-bottom: 4px; }
 .lane-filter-options .lane-priority select { min-width: 0; padding: 4px; }
 .lane-filter-empty { display: grid; gap: 5px; padding: 7px; font-size: 12px; }
-.lane-collapse { font-size: 16px; line-height: 1; }
+.lane-collapse[aria-expanded="false"] .icon { transform: rotate(180deg); }
 .tag-create { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .tag-create input:not([type="color"]) { flex: 1; min-width: 10em; }
