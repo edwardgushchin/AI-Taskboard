@@ -2,17 +2,18 @@ import { spawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { createInterface } from "node:readline";
 import { git } from "../cli/git.ts";
 import { codexThreadPattern } from "../cli/model.ts";
 import type { RunActivity, Task } from "../cli/model.ts";
 import { runActivity } from "./run-activity.ts";
 import type { configuredCodex } from "./codex.ts";
 import { codexProject } from "./codex-project.ts";
+import { codexRpc, turnControl } from "./codex-rpc.ts";
+import type { AgentControl } from "./codex-rpc.ts";
 
 type Client = NonNullable<Awaited<ReturnType<typeof configuredCodex>>>;
 type Turn = { id: string; status: string; error?: { message?: string } | null };
-type Run = { threadId: string; completion: Promise<string | undefined> };
+type Run = AgentControl & { threadId: string; completion: Promise<string | undefined> };
 const profile = "ai-taskboard";
 
 function accessPaths(project: string, cwd: string, branch: string): string[] {
@@ -55,71 +56,44 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     ...(process.platform === "win32" ? ["-c", 'windows.sandbox="mxc"'] : []),
   ], { cwd: project, env: client.env, windowsHide: true, stdio: "pipe" });
   const exited = new Promise<void>(resolve => child.once("close", resolve));
-  const output = createInterface({ input: child.stdout });
-  const lines = output[Symbol.asyncIterator]();
   const turns = new Map<string, Turn>();
   const activity = new Map<string, RunActivity>();
   let activeThreadId: string | undefined;
   let lastError = "";
-  let nextId = 0;
   const timeout = setTimeout(() => {
     lastError = "Codex did not start the task in time.";
     child.kill();
-    output.close();
+    rpc.close();
   }, 60_000);
   const close = () => {
     clearTimeout(timeout);
-    output.close();
+    rpc.close();
     child.stdin.end();
     child.kill();
     return exited;
   };
   child.stderr.setEncoding("utf8").on("data", chunk => { lastError = (lastError + chunk).slice(-1500); });
-  const streamError = (error: Error) => {
-    lastError = error.message;
-    output.close();
-  };
-  child.once("error", streamError);
-  child.stdin.on("error", streamError);
-
-  const send = (message: object) => child.stdin.write(JSON.stringify(message) + "\n");
-  async function receive() {
-    const line = await lines.next();
-    if (line.done) throw new Error(lastError.trim() || "The Codex process closed.");
-    const message = JSON.parse(line.value);
-    if (onActivity && activeThreadId && message.method?.startsWith("item/") && message.params?.threadId === activeThreadId) {
-      const item = runActivity(activity, message.method, message.params);
-      if (item) {
-        activity.set(item.id, item);
-        onActivity(item);
+  const rpc = codexRpc(child, message => {
+    const params = message.params as { threadId?: string; turn: Turn };
+    if (activeThreadId && params?.threadId === activeThreadId) {
+      if (onActivity && message.method?.startsWith("item/")) {
+        const item = runActivity(activity, message.method, params);
+        if (item) {
+          activity.set(item.id, item);
+          onActivity(item);
+        }
       }
+      if (message.method === "turn/completed") turns.set(params.turn.id, params.turn);
     }
-    if (message.method === "turn/completed") {
-      const turn = message.params.turn as Turn;
-      turns.set(turn.id, turn);
-    }
-    if (message.method && message.id !== undefined) {
-      send({ id: message.id, error: { code: -32601, message: "This request is unavailable in an unattended task run." } });
-    }
-    return message;
-  }
-  async function request<R>(method: string, params: object): Promise<R> {
-    const id = nextId++;
-    send({ id, method, params });
-    for (;;) {
-      const response = await receive();
-      if (response.id !== id || response.method) continue;
-      if (response.error) throw new Error(response.error.message);
-      return response.result;
-    }
-  }
+  });
+  const { request, send } = rpc;
   async function monitor(turnId: string) {
     try {
-      while (!turns.has(turnId)) await receive();
+      while (!turns.has(turnId)) await rpc.receive();
       const turn = turns.get(turnId)!;
       if (turn.status !== "completed") return turn.error?.message || "Codex ended the task run: " + turn.status + ".";
     } catch (error) {
-      return (error as Error).message;
+      return lastError.trim() || (error as Error).message;
     } finally {
       await close();
     }
@@ -179,7 +153,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     });
     clearTimeout(timeout);
     if (turn.status !== "inProgress") turns.set(turn.id, turn);
-    return { threadId, completion: monitor(turn.id) };
+    return { threadId, completion: monitor(turn.id), ...turnControl(request, threadId, turn.id) };
   } catch (error) {
     await close();
     throw error;

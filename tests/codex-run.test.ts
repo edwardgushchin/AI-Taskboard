@@ -44,8 +44,16 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '  } else if (method === "turn/start") {',
     '    result = { turn: { id: "turn-1", status: "inProgress" } };',
     '  }',
+    '  if (method === "turn/steer") {',
+    '    send({ method: "item/agentMessage/delta", params: { threadId: thread, itemId: "live", delta: params.input[0].text } });',
+    '    if (params.input[0].text === "reject") { send({ id, error: { message: "No active turn" } }); return; }',
+    '    setTimeout(() => send({ id, result: { turnId: params.expectedTurnId } }), params.input[0].text === "first" ? 20 : 0); return;',
+    '  }',
     '  send({ id, result });',
+    '  if (method === "turn/interrupt") send({ method: "turn/completed", params: { threadId: thread, turn: { id: params.turnId, status: "interrupted" } } });',
+
     '  if (method === "turn/start") {',
+    '    if (outcome === "control") return;',
     '    if (outcome === "closed") { process.stdin.destroy(); return; }',
     '    const itemEvent = (method, params) => send({ method: "item/" + method, params: { threadId: thread, ...params } });',
     '    if (["review-denied", "review-approved"].includes(outcome)) {',
@@ -132,6 +140,17 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   }
   assert.equal(await (await launch("failed")).completion, "Provider disconnected");
   assert.match((await (await launch("closed")).completion) ?? "", /Codex process closed/);
+  const controlled = await launch("control");
+  await Promise.all([controlled.steer("first", ["extra.png"]), controlled.steer("second", [])]);
+  await assert.rejects(controlled.steer("reject", []), /No active turn/);
+  assert.ok(activity.some(item => item.id === "live" && item.text.includes("first")));
+  await controlled.interrupt();
+  assert.match((await controlled.completion) ?? "", /interrupted/);
+  const controls = JSON.parse(readFileSync(capture, "utf8")).requests.filter((entry: { method: string }) => entry.method.startsWith("turn/"));
+  assert.deepEqual(controls.map((entry: { method: string }) => entry.method), ["turn/start", "turn/steer", "turn/steer", "turn/steer", "turn/interrupt"]);
+  assert.equal(controls[1].params.expectedTurnId, "turn-1");
+  assert.deepEqual(controls[1].params.input[1], { type: "localImage", path: "extra.png" });
+  assert.deepEqual(controls.at(-1).params, { threadId: thread, turnId: "turn-1" });
   const resumed = await startCodexRun(client("ok"), folder, worktree, { ...task, codexThreadId: thread });
   assert.equal(resumed.threadId, thread);
   assert.equal(await resumed.completion, undefined);

@@ -233,6 +233,59 @@ app.whenReady().then(async () => {
   await evaluate(`const retainedImageTile = liveImages.querySelector('.chat-attachment'); retainedImageTile.focus();
     const readsBeforeUpdate = imageReads.length; updateChat({ project: 'fixture', id: 'T-0032', type: 'run', items: viewedImages });`);
   await check(`liveImages.querySelector('.chat-attachment') === retainedImageTile && document.activeElement === retainedImageTile && imageReads.length === readsBeforeUpdate`, "stream updates retain image tiles, reads and keyboard focus");
+  await evaluate(`
+    sheetKind = 'task';
+    frame.runningTasks = [];
+    frame.runActivity = {};
+    taskInSheet.history = [];
+    taskInSheet.attachments = [];
+    chatDrafts.clear();
+    window.sentMessages = [];
+    window.pendingReplies = [];
+    window.stopCalls = 0;
+    showTask = async () => { body.replaceChildren(taskChat(taskInSheet)); };
+    api.chatSend = async (_id, request) => {
+      window.sentMessages.push(request.text);
+      taskInSheet.history.push({ at: new Date().toISOString(), action: 'chat', actor: 'user', text: request.text,
+        chat: { model: request.model, effort: request.effort, files: [] } });
+      updateChat({ project: 'fixture', id: taskInSheet.id, type: 'saved' });
+      if (window.sentMessages.length === 1) return new Promise(resolve => window.pendingReplies.push(resolve));
+      return { saved: true, result: { ok: true, data: taskInSheet } };
+    };
+    api.chatStop = async () => {
+      window.stopCalls++;
+      window.pendingReplies.splice(0).forEach(resolve => resolve({ saved: true, result: { ok: true, data: taskInSheet } }));
+      return { ok: true };
+    };
+    body.replaceChildren(taskChat(taskInSheet));
+    window.typeMessage = text => {
+      const input = body.querySelector('#task-chat-input');
+      input.value = text;
+      input.dispatchEvent(new Event('input'));
+    };
+    void 0;
+  `);
+  await check(`body.querySelector('.chat-send use').getAttribute('href') === '#icon-play' && body.querySelector('.chat-send').disabled && !body.querySelector('.chat-send').textContent`, "idle composer uses an accessible play icon");
+  await evaluate(`window.typeMessage('Первое сообщение'); body.querySelector('.chat-composer').requestSubmit()`);
+  await check(`body.querySelector('.chat-log').textContent.includes('Первое сообщение') && body.querySelector('.chat-send use').getAttribute('href') === '#icon-stop' && !body.querySelector('.chat-send').disabled`, "saved message is visible and empty input switches to stop before the reply");
+  await capture('chat-stop-thinking.png');
+  await evaluate(`window.typeMessage('Новые данные во время размышления')`);
+  await check(`body.querySelector('.chat-send use').getAttribute('href') === '#icon-play' && !body.querySelector('.chat-send').disabled`, "typing during a reply switches stop to enabled play");
+  await capture('chat-play-steering.png');
+  await evaluate(`body.querySelector('#task-chat-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }))`);
+  await check(`window.sentMessages.length === 2 && window.pendingReplies.length === 1 && body.querySelector('.chat-log').textContent.includes('Новые данные во время размышления') && body.querySelector('#task-chat-input').value === '' && body.querySelector('.chat-send use').getAttribute('href') === '#icon-stop'`, "Ctrl+Enter sends new input immediately, shows it, and leaves the first reply running");
+  await capture('chat-steering-saved.png');
+  await evaluate(`body.querySelector('.chat-send').click()`);
+  await check(`window.stopCalls === 1 && body.querySelector('.chat-send use').getAttribute('href') === '#icon-play' && body.querySelector('.chat-send').disabled`, "stop interrupts the running reply and resets the composer");
+  await evaluate(`
+    frame.runningTasks = ['T-0032'];
+    body.querySelector('.task-chat').syncAgentState();
+  `);
+  await check(`body.querySelector('.chat-send use').getAttribute('href') === '#icon-stop' && !body.querySelector('.chat-send').disabled`, "activity from another window enables stop without a local pending reply");
+  await evaluate(`window.typeMessage('Сохранить черновик'); frame.runningTasks = []; body.querySelector('.task-chat').syncAgentState()`);
+  await check(`body.querySelector('#task-chat-input').value === 'Сохранить черновик' && body.querySelector('.chat-send use').getAttribute('href') === '#icon-play'`, "completion retains a new draft");
+  await evaluate(`api.chatSend = async () => ({ saved: false, result: { ok: false, error: { message: 'Write failed' } } }); body.querySelector('.chat-composer').requestSubmit()`);
+  await check(`body.querySelector('#task-chat-input').value === 'Сохранить черновик' && body.querySelector('.chat-status').textContent.includes('Write failed')`, "a save failure retains the draft and displays the error");
   console.log("Chat Chromium checks passed; screenshots: " + artifacts);
 }).catch(error => {
   console.error(error);

@@ -10,8 +10,8 @@ import { createTask } from "../src/cli/tasks.ts";
 const source = readFileSync(new URL("../src/desktop/main.ts", import.meta.url), "utf8");
 const parsed = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, true);
 const names = new Set([
-  "frame", "send", "notifyRunChange", "sendChat", "windowStates", "chatRuns", "replyingTasks",
-  "runningTasks", "runActivityByTask", "imageExtensions", "imageTypes", "recentBoards", "russian", "theme",
+  "activeAgents", "stopChat", "frame", "send", "notifyRunChange", "sendChat", "windowStates", "chatRuns", "replyingTasks",
+  "launchingTasks", "runningTasks", "runActivityByTask", "imageExtensions", "imageTypes", "recentBoards", "russian", "theme",
 ]);
 // Exercise the main-process lifecycle without starting Electron or a real provider.
 const activitySource = parsed.statements.filter(node => {
@@ -20,14 +20,16 @@ const activitySource = parsed.statements.filter(node => {
     ts.isIdentifier(declaration.name) && names.has(declaration.name.text));
 }).map(node => node.getText(parsed)).join("\n");
 
-function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean; saveReplyFailure?: boolean } = {}) {
+function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean; saveReplyFailure?: boolean; controlled?: boolean; steerFailure?: boolean; stopFailure?: boolean } = {}) {
   const task = createTask("T-0001", { title: "Discussion" });
   task.status = "review";
   task.history.push({ at: new Date().toISOString(), actor: "user", action: "comment", text: "Discuss", chat: { model: "test", effort: "low", files: [] } });
-  const response = Promise.withResolvers<{ text: string }>();
+  const response = Promise.withResolvers<{ text: string } | { interrupted: true }>();
+  const delivered: string[] = [];
+  const writes: { actor?: string; replyTo?: number }[] = [];
   const started = Promise.withResolvers<void>();
   const runtime = runInNewContext(stripTypeScriptTypes(activitySource) +
-    "\n({ sendChat, frame, windowStates, runningTasks })", {
+    "\n({ sendChat, stopChat, activeAgents, frame, windowStates, runningTasks, launchingTasks })", {
     basename, extname, join, performance,
     app: { getPath: () => "profile" },
     lang: (english: string) => english,
@@ -38,14 +40,32 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
     cliFailure: (code: string, message: string) => ({ ok: false, error: { code, message } }),
     taskChatActions: () => ({}),
     maxAttachmentBytes: 64 * 1024 * 1024,
-    callCli: async (_project: string, args: string[], input: { actor?: string }) => {
+    callCli: async (_project: string, args: string[], input: { actor?: string; text?: string; model?: string; effort?: string; replyTo?: number }) => {
       if (args[0] === "attachment") return { ok: false, error: { code: "ATTACHMENT_MISSING" } };
       if (args[0] === "chat" && (options.writeFailure || input?.actor === "agent" && options.saveReplyFailure)) {
         return { ok: false, error: { code: "STORAGE_ERROR" } };
       }
+      if (args[0] === "chat") {
+        writes.push(input);
+        if (options.controlled) task.history.push({ at: new Date().toISOString(), actor: input.actor === "agent" ? "agent" : "user",
+          action: "chat", text: input.text, chat: { model: "test", effort: "low" } });
+      }
       return { ok: true, data: task };
     },
-    replyToTask: async () => { started.resolve(); return response.promise; },
+    replyToTask: async (...args: unknown[]) => {
+      (args[9] as Function)({
+        steer: async (prompt: string) => {
+          if (options.steerFailure) throw new Error("Turn already ended");
+          delivered.push(JSON.parse(prompt).latestUserMessage.text);
+        },
+        interrupt: async () => {
+          if (options.stopFailure) throw new Error("Provider disconnected");
+          response.resolve({ interrupted: true });
+        },
+      });
+      started.resolve();
+      return response.promise;
+    },
   });
   const windows = ["project-a", "project-a", "project-b"].map(project => {
     const updates: string[][] = [];
@@ -68,7 +88,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   const run = (retry = false) => runtime.sendChat("project-a", task.id,
     { ...request, ...(retry ? { retryAt: task.history.length - 1 } : {}) }, () => {});
   const active = (index = 0): string[] => Array.from(runtime.frame(windows[index].state).runningTasks);
-  return { task, runtime, windows, run, active, response, started: started.promise };
+  return { task, runtime, windows, run, active, response, delivered, writes, started: started.promise };
 }
 
 test("chat replies publish the existing task activity in every window of their board", async () => {
@@ -80,7 +100,7 @@ test("chat replies publish the existing task activity in every window of their b
   assert.deepEqual(f.active(1), ["T-0001"]);
   assert.deepEqual(f.active(2), []);
   assert.deepEqual(f.windows.map(window => window.updates), [[["T-0001"]], [["T-0001"]], []]);
-  assert.equal((await f.run()).result.error.code, "CHAT_BUSY");
+  assert.equal((await f.run(true)).result.error.code, "CHAT_BUSY");
   assert.deepEqual(f.active(), ["T-0001"]);
   f.response.resolve({ text: "Reply" });
   assert.equal((await pending).result.ok, true);
@@ -122,4 +142,69 @@ test("message-write and attachment failures never leave chat activity behind", a
     assert.deepEqual(f.active(), []);
     assert.deepEqual(f.windows[0].updates.at(-1) ?? [], []);
   }
+});
+
+test("a second message reaches the in-flight reply before it completes and becomes its reply target", async () => {
+  const f = fixture({ controlled: true });
+  const pending = f.run();
+  await f.started;
+  assert.equal((await f.run()).result.ok, true);
+  assert.deepEqual(f.delivered, ["Discuss"]);
+  assert.equal(f.writes.filter(write => write.actor !== "agent").length, 2);
+  assert.deepEqual(f.active(), ["T-0001"]);
+  f.response.resolve({ text: "Reply with the new input" });
+  assert.equal((await pending).result.ok, true);
+  assert.equal(f.writes.at(-1)?.replyTo, 3);
+  assert.deepEqual(f.active(), []);
+});
+
+test("stop interrupts the discussion without saving a completed reply", async () => {
+  const f = fixture({ controlled: true });
+  const pending = f.run();
+  await f.started;
+  assert.equal((await f.runtime.stopChat("project-a", "T-0001")).ok, true);
+  assert.equal((await pending).result.ok, true);
+  assert.equal(f.writes.filter(write => write.actor === "agent").length, 0);
+  assert.deepEqual(f.active(), []);
+  assert.equal((await f.runtime.stopChat("project-a", "T-0001")).error.code, "CHAT_NOT_RUNNING");
+});
+
+test("a delivery rejection keeps the saved user message and does not start another reply", async () => {
+  const f = fixture({ controlled: true, steerFailure: true, stopFailure: true });
+  const pending = f.run();
+  await f.started;
+  const reply = await f.run();
+  assert.equal(reply.saved, true);
+  assert.equal(reply.result.error.code, "CHAT_FAILED");
+  assert.equal(f.task.history.at(-1)?.actor, "user");
+  assert.deepEqual(f.delivered, []);
+  assert.equal((await f.runtime.stopChat("project-a", "T-0001")).error.code, "CHAT_STOP_FAILED");
+  assert.deepEqual(f.active(), ["T-0001"]);
+  f.response.resolve({ text: "Original reply" });
+  await pending;
+});
+
+test("messages and stop target a board execution in the same project and task", async () => {
+  const f = fixture({ controlled: true });
+  let interrupted = false;
+  f.runtime.runningTasks.add("project-a\0T-0001");
+  f.runtime.activeAgents.set("project-a\0T-0001", { directories: new Set(), control: {
+    steer: async (prompt: string) => f.delivered.push(JSON.parse(prompt).latestUserMessage.text),
+    interrupt: async () => { interrupted = true; },
+  } });
+  assert.equal((await f.run()).result.ok, true);
+  assert.deepEqual(f.delivered, ["Discuss"]);
+  assert.deepEqual(f.active(), ["T-0001"]);
+  assert.equal((await f.runtime.stopChat("project-b", "T-0001")).error.code, "CHAT_NOT_RUNNING");
+  assert.equal((await f.runtime.stopChat("project-a", "T-0001")).ok, true);
+  assert.equal(interrupted, true);
+});
+
+test("a task being launched never starts a competing chat provider", async () => {
+  const f = fixture();
+  f.runtime.launchingTasks.add("project-a\0T-0001");
+  const reply = await f.run();
+  assert.equal(reply.saved, false);
+  assert.equal(reply.result.error.code, "CHAT_BUSY");
+  assert.equal(f.writes.length, 0);
 });
