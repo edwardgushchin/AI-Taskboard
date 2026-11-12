@@ -670,6 +670,14 @@ function laneTools(state, title, tasks, total, count, content) {
   } };
 }
 
+function newestTaskFirst(a, b) {
+  const aCreated = Date.parse(a.createdAt);
+  const bCreated = Date.parse(b.createdAt);
+  return (Number.isFinite(bCreated) ? bCreated : -Infinity) -
+    (Number.isFinite(aCreated) ? aCreated : -Infinity) ||
+    b.id.localeCompare(a.id, "en", { numeric: true });
+}
+
 function render() {
   document.documentElement.lang = frame.russian ? "ru" : "en";
   const currentBoard = frame.board;
@@ -728,7 +736,7 @@ function render() {
       [element("p", language("No archived tasks found.", "Архивных задач не найдено."), "muted")]);
     return;
   }
-  const visible = board.tasks.filter(matches);
+  const visible = board.tasks.filter(matches).sort(newestTaskFirst);
   const focused = document.activeElement;
   const toolsKey = JSON.stringify([frame.russian, [...boardTags]]);
   const columns = lanes.map(([state, english, russian]) => {

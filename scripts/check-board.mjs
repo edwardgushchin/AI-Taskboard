@@ -61,11 +61,12 @@ app.whenReady().then(async () => {
   `);
   await evaluate(`
     const task = (id, title, extra = {}) => ({ id, title, status: 'ready', revision: 1, priority: 'normal',
+      createdAt: '2026-11-01T12:00:00.000Z', updatedAt: '2026-11-01T12:00:00.000Z',
       tags: [], subtasks: [], attachments: [], history: [], ...extra });
     const fixture = { project: 'board-fixture', russian: true, theme: 'dark', runningTasks: [],
       board: { tags: [{ name: 'UI', color: 'blue' }], archived: [], tasks: [
         task('T-0001', 'Стабильное превью', { attachments: [{ file: 'cover.png', name: 'cover.png' }] }),
-        task('T-0002', 'Обновляемая карточка', { tags: ['UI'] })
+        task('T-0002', 'Обновляемая карточка', { tags: ['UI'], createdAt: '2026-11-02T12:00:00.000Z' })
       ] } };
     const push = () => window.pushBoard(structuredClone(fixture));
     const lane = state => document.querySelector('.lane[data-state="' + state + '"]');
@@ -80,6 +81,7 @@ app.whenReady().then(async () => {
     void 0;
   `);
   await evaluate(`waitFor(() => findCard('T-0001').querySelector('img')?.naturalWidth > 0)`);
+  await check(`lane('ready').querySelector('.task-id').textContent === 'T-0002'`, "initial board shows the newest task first");
   await evaluate(`
     const originalCard = findCard('T-0001');
     const originalCover = originalCard.querySelector('img');
@@ -111,10 +113,15 @@ app.whenReady().then(async () => {
   await evaluate(`fixture.board.tasks[0].status = 'review'; push(); void 0`);
   await check(`lane('review').contains(originalCard) && originalCard.querySelector('img') === originalCover`, "status changes move the existing card and preview");
   await check(`lane('review').querySelector('.count').textContent === '1' && lane('ready').querySelector('.count').textContent === '1'`, "lane counters follow status changes");
-  await evaluate(`fixture.board.tasks.push(task('T-0003', 'Новая карточка', { priority: 'high' })); push(); void 0`);
+  await evaluate(`findCard('T-0002').focus(); const focusBeforeCreation = document.activeElement; void 0`);
+  await evaluate(`fixture.board.tasks.push(task('T-0003', 'Новая карточка', { priority: 'high', createdAt: '2026-11-03T12:00:00.000Z' })); push(); void 0`);
   await check(`findCard('T-0003') !== undefined`, "new tasks appear after refresh");
+  await check(`lane('ready').querySelector('.task-id').textContent === 'T-0003'`, "a newly created task appears above older tasks");
+  await check(`document.activeElement === focusBeforeCreation && lane('ready').querySelectorAll('.task-card')[1] === focusBeforeCreation`, "inserting a newer task above the focused card preserves focus");
   await evaluate(`findCard('T-0003').focus(); const focusedCard = document.activeElement; fixture.board.tasks.reverse(); push(); void 0`);
-  await check(`document.activeElement === focusedCard && lane('ready').querySelector('.task-card') === focusedCard`, "reordering preserves keyboard focus on the moved card");
+  await check(`document.activeElement === focusedCard && lane('ready').querySelector('.task-card') === focusedCard`, "refresh preserves newest-first order and keyboard focus despite changed input order");
+  await evaluate(`fixture.board.tasks.find(task => task.id === 'T-0002').updatedAt = '2026-11-10T12:00:00.000Z'; push(); void 0`);
+  await check(`lane('ready').querySelector('.task-card') === focusedCard`, "editing an older task does not move it above newer tasks");
   await evaluate(`fixture.board.tasks.reverse(); lane('ready').querySelector('.lane-collapse').click(); push(); void 0`);
   await check(`lane('ready').querySelector('.lane-cards').hidden`, "refresh retains a collapsed column");
   await evaluate(`lane('ready').querySelector('.lane-collapse').click(); void 0`);
@@ -158,11 +165,42 @@ app.whenReady().then(async () => {
   await check(`findCard('T-0001').querySelector('img') === pendingImage && window.previewCalls === callsBeforeDelay + 1`, "updates during preview loading retain the pending image and share its request");
   await evaluate(`fixture.board.tasks.push(...Array.from({ length: 40 }, (_, index) => task('S-' + index, 'Scroll task ' + index))); push(); document.querySelector('#lanes').scrollTop = 400; const boardScroll = document.querySelector('#lanes').scrollTop; push(); void 0`);
   await check(`boardScroll > 0 && document.querySelector('#lanes').scrollTop === boardScroll`, "refresh retains the scroll position on a long board");
+  await evaluate(`
+    fixture.russian = true;
+    fixture.project = 'sorting-fixture';
+    const taskId = number => 'T-' + String(number).padStart(4, '0');
+    fixture.board.tasks = lanes.flatMap(([status], index) => [
+      task(taskId(100 + index * 2), 'Старая задача от 1 ноября', { status, createdAt: '2026-11-01T12:00:00.000Z' }),
+      task(taskId(101 + index * 2), 'Новая задача от 3 ноября', { status, createdAt: '2026-11-03T12:00:00.000Z' })
+    ]);
+    const laneIds = state => [...lane(state).querySelectorAll('.task-id')].map(node => node.textContent).join(',');
+    const allLanesSorted = () => lanes.every(([state], index) => laneIds(state) === taskId(101 + index * 2) + ',' + taskId(100 + index * 2));
+    const sourceOrder = fixture.board.tasks.map(task => task.id).join(',');
+    push(); void 0;
+  `);
+  await check(`allLanesSorted()`, "every column sorts tasks by descending creation date");
+  await check(`frame.board.tasks.map(task => task.id).join(',') === sourceOrder`, "rendering does not reorder the source snapshot");
+  await evaluate(`fixture.board.tasks.reverse(); push(); void 0`);
+  await check(`allLanesSorted()`, "all columns retain creation order when a refresh changes snapshot order");
+  await evaluate(`fixture.board.tasks.push(task('T-0000', 'Самая новая задача от 4 ноября', { createdAt: '2026-11-04T12:00:00.000Z', tags: ['UI'] })); push(); void 0`);
+  await check(`laneIds('ready') === 'T-0000,T-0103,T-0102'`, "creation date takes precedence over task number");
+  await evaluate(`settle()`);
+  writeFileSync(join(artifacts, "board-newest-first.png"), (await window.webContents.capturePage()).toPNG());
+  await evaluate(`byId('search').value = 'задача'; render(); void 0`);
+  await check(`laneIds('ready') === 'T-0000,T-0103,T-0102'`, "search results keep newest-first order");
+  await evaluate(`fixture.board.tasks.find(task => task.id === 'T-0102').priority = 'high'; fixture.board.tasks.find(task => task.id === 'T-0000').priority = 'high'; push(); const sortingFilter = lane('ready').querySelector('select'); sortingFilter.value = 'high'; sortingFilter.dispatchEvent(new Event('change', { bubbles: true })); void 0`);
+  await check(`laneIds('ready') === 'T-0000,T-0102'`, "column filters preserve newest-first order for the matching subset");
+  await evaluate(`lane('ready').querySelector('.lane-filter-options button').click(); byId('search').value = ''; byId('search').dispatchEvent(new Event('input', { bubbles: true })); fixture.board.tasks.find(task => task.id === 'T-0103').unfinishedDependencies = ['T-0100']; push(); void 0`);
+  await check(`laneIds('blocked') === 'T-0107,T-0103,T-0106'`, "dependency-blocked tasks use creation order within the blocked column");
+  await evaluate(`fixture.board.tasks.push(task('T-9999', 'Совпадающая дата', { createdAt: '2026-11-04T12:00:00.000Z' })); push(); const tiedOrder = laneIds('ready'); fixture.board.tasks.reverse(); push(); void 0`);
+  await check(`laneIds('ready') === tiedOrder && tiedOrder.startsWith('T-9999,T-0000,')`, "equal creation dates use a stable descending task-number tie-breaker");
+  await evaluate(`fixture.board.tasks.push(task('T-9998', 'Без даты', { createdAt: '' }), task('T-9997', 'Повреждённая дата', { createdAt: 'invalid' })); push(); void 0`);
+  await check(`laneIds('ready') === 'T-9999,T-0000,T-0102,T-9998,T-9997'`, "missing or invalid creation dates sort after dated tasks without breaking rendering");
   await evaluate(`fixture.russian = true; fixture.project = 'board-fixture'; fixture.board.tasks = [task('T-0001', 'Стабильное превью', { attachments: [{ file: 'cover.png', name: 'cover.png' }] }), task('T-0002', 'Обновляемая карточка', { tags: ['UI'] })]; push(); void 0`);
   await evaluate(`waitFor(() => findCard('T-0001').querySelector('img')?.naturalWidth > 0)`);
   await evaluate(`settle()`);
   writeFileSync(join(artifacts, "board-stable.png"), (await window.webContents.capturePage()).toPNG());
-  console.log(`Board Chromium checks passed: ${checks}; screenshot: ${join(artifacts, "board-stable.png")}`);
+  console.log(`Board Chromium checks passed: ${checks}; screenshots: ${join(artifacts, "board-stable.png")}, ${join(artifacts, "board-newest-first.png")}`);
 }).catch(error => {
   console.error(error);
   process.exitCode = 1;
