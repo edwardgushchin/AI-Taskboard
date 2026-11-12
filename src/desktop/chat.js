@@ -86,6 +86,7 @@ function chatEventLabel(action) {
   const labels = {
     create: ["Created the task", "Создал задачу"], update: ["Updated the task", "Обновил задачу"],
     approve: ["Approved the task", "Утвердил задачу"], start: ["Started work", "Начал работу"],
+    "return-to-draft": ["Returned the task to draft", "Вернул задачу в черновик"],
     progress: ["Updated progress", "Обновил ход работы"], block: ["Blocked the task", "Заблокировал задачу"],
     resume: ["Resumed work", "Продолжил работу"], submit: ["Submitted for review", "Сдал на проверку"],
     accept: ["Accepted the task", "Принял задачу"], cancel: ["Cancelled the task", "Отменил задачу"],

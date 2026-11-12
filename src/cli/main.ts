@@ -19,10 +19,10 @@ import { dependencyStatus, unfinishedDependencies, validateDependencies } from "
 import { cleanTaskWorktree, hasPending, startTask, taskWithCurrentWorktree } from "./worktree.ts";
 import packageInfo from "../../package.json" with { type: "json" };
 
-const taskActions = new Set(["approve", "request-changes", "cancel", "comment", "progress", "block", "resume", "update"]);
+const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "block", "resume", "update"]);
 const help = [
   "Usage: ai-taskboard [--project PATH] [--json] COMMAND [TASK-ID] [--stdin]",
-  "Commands: init, list, show, create, update, comment, approve, start, progress,",
+  "Commands: init, list, show, create, update, comment, approve, return-to-draft, start, progress,",
   "          block, resume, preview, submit, review, accept, restore-changes, request-changes, cancel, cleanup, settings, watch, doctor",
   "          list --archived, archive sweep, chat TASK-ID, attachment add TASK-ID, attachment read TASK-ID",
   "          list --tag NAME, tag ensure --stdin, tag set --stdin (name and color)",

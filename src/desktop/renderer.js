@@ -734,6 +734,7 @@ async function showTask(id) {
     if (result) await showTask(task.id);
   };
   if (task.status === "draft") actions.append(button(language("Approve", "Утвердить"), () => act("approve"), "primary"));
+  if (task.status === "ready") actions.append(button(language("Return to draft", "Вернуть в черновик"), () => act("return-to-draft")));
   if (["draft", "ready"].includes(task.status)) {
     actions.append(button(language("Dependencies…", "Зависимости…"), () => editDependencies(task)));
     actions.append(button(language("Execution settings…", "Параметры запуска…"), () => editExecution(task)));
