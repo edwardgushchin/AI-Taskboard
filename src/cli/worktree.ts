@@ -1,6 +1,6 @@
-import { realpathSync, rmdirSync } from "node:fs";
+import { mkdtempSync, readdirSync, realpathSync, renameSync, rmdirSync } from "node:fs";
 import { dependencyStatus, unfinishedDependencies } from "./dependencies.ts";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import {
   excludeBoard, git, invokeGit, isAncestor, localBranch, requireRepository, resolveCommit, worktrees,
 } from "./git.ts";
@@ -209,7 +209,7 @@ export function cleanTaskWorktree(store: BoardStore, task: Task) {
   }
   let removed = false;
   if (item) {
-    removeTaskWorktree(store, repo, item);
+    removeTaskWorktree(store, repo, item, submitted && task.git.accepted ? task.id : undefined);
     removed = true;
   } else {
     const orphan = orphanedTaskWorktree(store, repo, task);
@@ -259,7 +259,30 @@ function removeEmptyWorktree(path: string): boolean {
   }
 }
 
-function removeTaskWorktree(store: BoardStore, repo: Repository, item: Worktree): void {
+function archiveTaskOutput(store: BoardStore, id: string, path: string, changes: string[]): boolean {
+  const roots = [".dev-diary", ".tasks/qa"].filter(root => changes.some(change => change.startsWith("! " + root + "/")));
+  if (!roots.length || changes.some(change => !roots.some(root => change.startsWith("! " + root + "/")))) return false;
+  if (git(path, ["ls-files", "-z", "--", ...roots])) return false;
+  for (const root of roots) {
+    const source = join(path, root);
+    directory(dirname(source));
+    directory(source);
+    if (readdirSync(source, { recursive: true, withFileTypes: true }).some(entry => !entry.isFile() && !entry.isDirectory())) {
+      return false;
+    }
+  }
+  const taskArtifacts = join(store.subdirectory("artifacts", true), id);
+  directory(taskArtifacts, true);
+  const archive = mkdtempSync(join(taskArtifacts, "worktree-"));
+  for (const root of roots) {
+    const destination = join(archive, root);
+    directory(dirname(destination), true);
+    renameSync(join(path, root), destination);
+  }
+  return true;
+}
+
+function removeTaskWorktree(store: BoardStore, repo: Repository, item: Worktree, acceptedTask?: string): void {
   if (item.locked) throw new TaskboardError("WORKTREE_LOCKED", "The task worktree is locked.");
   const path = usableWorktree(item);
   const managedRoot = realpathSync(store.subdirectory("worktrees"));
@@ -268,7 +291,10 @@ function removeTaskWorktree(store: BoardStore, repo: Repository, item: Worktree)
     throw new TaskboardError("UNMANAGED_WORKTREE", "Only worktrees in the managed directory can be removed.");
   }
   requireNoGitOperation(path);
-  const changes = gitStatus(path, true);
+  let changes = gitStatus(path, true);
+  if (acceptedTask && changes && archiveTaskOutput(store, acceptedTask, path, changes.split("\0").filter(Boolean))) {
+    changes = gitStatus(path, true);
+  }
   if (changes.length) {
     throw new TaskboardError("DIRTY_WORKTREE", "The task worktree still contains local files or changes.", {
       path, changes: changes.split("\0").filter(Boolean),

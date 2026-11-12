@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import childProcess, { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { syncBuiltinESMExports } from "node:module";
@@ -705,10 +705,13 @@ test("accepted task cleanup preserves local files and refuses to delete a change
   writeFileSync(exclude, readFileSync(exclude, "utf8") + "\n/ignored.local\n");
   const ignored = join(worktree, "ignored.local");
   writeFileSync(ignored, "keep this file");
+  mkdirSync(join(worktree, ".tasks", "qa"), { recursive: true });
+  writeFileSync(join(worktree, ".tasks", "qa", "report.txt"), "keep this report");
   const done = cli(root, ["accept", task.id], { revision: task.revision });
   assert.equal(done.status, "done");
   assert.equal(done.cleanupWarning.code, "DIRTY_WORKTREE");
   assert.equal(readFileSync(ignored, "utf8"), "keep this file");
+  assert.equal(readFileSync(join(worktree, ".tasks", "qa", "report.txt"), "utf8"), "keep this report");
   assert.equal(git(root, "rev-parse", task.git.branch), task.git.submission.sha);
 
   git(worktree, "commit", "--allow-empty", "-m", "chore: save further work");
@@ -720,7 +723,33 @@ test("accepted task cleanup preserves local files and refuses to delete a change
   assert.equal(cli(root, ["cleanup", task.id]).branchRemoved, true);
   assert.equal(git(root, "branch", "--list", "ai-taskboard/" + task.id), "");
   assert.equal(existsSync(worktree), false);
+  const artifacts = join(root, ".tasks", "artifacts", task.id);
+  const [archive] = readdirSync(artifacts);
+  assert.equal(readFileSync(join(artifacts, archive, ".tasks", "qa", "report.txt"), "utf8"), "keep this report");
   assert.equal(cli(root, ["cleanup", task.id]).removed, false);
+});
+
+test("accept archives ignored Worklog and QA output before removing the task worktree", t => {
+  const root = fixture(t, true);
+  const exclude = join(root, ".git", "info", "exclude");
+  writeFileSync(exclude, readFileSync(exclude, "utf8") + "\n/.dev-diary/\n");
+  const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "result.txt"), "delivered\n"));
+  const diary = join(".dev-diary", "2026", "11");
+  const qa = join(".tasks", "qa");
+  mkdirSync(join(worktree, diary), { recursive: true });
+  mkdirSync(join(worktree, qa), { recursive: true });
+  writeFileSync(join(worktree, diary, "2026-11-12.md"), "Worklog entry\n");
+  writeFileSync(join(worktree, qa, "results.bin"), Buffer.from([0, 255, 128]));
+
+  const done = cli(root, ["accept", task.id], { revision: task.revision });
+  assert.equal(done.status, "done");
+  assert.equal(done.cleanupWarning, undefined);
+  assert.equal(existsSync(worktree), false);
+  assert.equal(git(root, "branch", "--list", "ai-taskboard/" + task.id), "");
+  const artifacts = join(root, ".tasks", "artifacts", task.id);
+  const [archive] = readdirSync(artifacts);
+  assert.equal(readFileSync(join(artifacts, archive, diary, "2026-11-12.md"), "utf8"), "Worklog entry\n");
+  assert.deepEqual(readFileSync(join(artifacts, archive, qa, "results.bin")), Buffer.from([0, 255, 128]));
 });
 
 test("Windows cleanup recovers a worktree left unregistered by a directory lock", {
