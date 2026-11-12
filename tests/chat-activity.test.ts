@@ -42,10 +42,10 @@ function fixture(russian = true) {
     element: (tag: string, text?: string, className?: string) => new Node(tag, text, className),
     icon: (name: string) => new Node("svg", name),
     IntersectionObserver: class {},
-  }) as (container: Node, items: RunActivity[]) => void;
+  }) as (container: Node, items: RunActivity[], completed?: boolean, durationMs?: number) => void;
   const container = new Node("li");
   const row = (id: string) => container.querySelectorAll("details").find(node => node.dataset.item === "item:" + id)!;
-  return { render: (items: RunActivity[]) => render(container, items), container, document, row, frame };
+  return { render: (items: RunActivity[], completed = false, durationMs?: number) => render(container, items, completed, durationMs), container, document, row, frame };
 }
 
 test("activity groups consecutive operations without hiding messages, reasoning or errors", () => {
@@ -124,4 +124,44 @@ test("unknown tools, empty output, image tool calls and both languages have usab
   view.frame.russian = true;
   view.render(Array.from({ length: 5 }, (_, index) => action(String(index))));
   assert.match(view.container.children[0].querySelector("summary")!.textContent, /5 действий.*5 команд/);
+});
+
+test("completed work folds the whole chronology and keeps every final answer visible", () => {
+  const view = fixture();
+  const items: RunActivity[] = [
+    { ...action("note", "agentMessage", "completed", "", "Checking files"), phase: "commentary" },
+    action("command"),
+    { ...action("answer", "agentMessage", "completed", "", "Final answer"), phase: "final_answer" },
+    { ...action("answer-2", "agentMessage", "completed", "", "More results"), phase: "final_answer" },
+  ];
+  view.render(items);
+  assert.equal(view.container.querySelectorAll(".chat-work").length, 0, "live chronology is visible");
+  view.render(items, true, 433_000);
+  const work = view.container.querySelector(".chat-work")!;
+  assert.equal(work.open, false);
+  assert.match(work.querySelector("summary")!.textContent, /Выполнено за 7 мин 13 с/);
+  assert.ok(work.textContent.includes("Checking files"));
+  assert.ok(!work.textContent.includes("Final answer"));
+  assert.equal(view.container.children[1].textContent, "Final answer");
+  assert.equal(view.container.children[2].textContent, "More results");
+  work.open = true;
+  view.row("command").open = true;
+  view.render(items, true, 433_000);
+  assert.equal(view.container.querySelector(".chat-work")!.open, true);
+  assert.equal(view.row("command").open, true);
+});
+
+test("older logs, commentary-only replies and errors retain readable completed histories", () => {
+  const view = fixture(false);
+  view.render([action("command"), action("answer", "agentMessage", "completed", "", "Legacy answer")], true);
+  assert.match(view.container.querySelector(".chat-work")!.querySelector("summary")!.textContent, /Completed/);
+  assert.equal(view.container.children[1].textContent, "Legacy answer");
+  view.render([
+    { ...action("note", "agentMessage", "completed", "", "Still checking"), phase: "commentary" },
+    action("error", "error", "failed", "", "Disconnected"),
+  ], true, 0);
+  const work = view.container.querySelector(".chat-work")!;
+  assert.equal(view.container.querySelectorAll(".chat-run-final").length, 0);
+  assert.match(work.querySelector("summary")!.textContent, /Completed in 0s.*Failed: 1/);
+  assert.equal(work.querySelector(".chat-run-error")!.textContent, "Disconnected");
 });

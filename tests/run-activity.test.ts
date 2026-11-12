@@ -10,3 +10,15 @@ test("nonzero command exit codes remain visible as failures in collapsed activit
   assert.equal(failed.text, "failed\nExit code: 1");
   assert.equal(runActivity(new Map(), "item/completed", { item: { ...item, exitCode: 0 } })!.status, "completed");
 });
+
+test("agent message phases survive streaming updates and completion", () => {
+  const entries = new Map();
+  const started = runActivity(entries, "item/started", { item: { id: "answer", type: "agentMessage", phase: "final_answer" } })!;
+  entries.set(started.id, started);
+  const delta = runActivity(entries, "item/agentMessage/delta", { itemId: "answer", delta: "Done" })!;
+  entries.set(delta.id, delta);
+  const completed = runActivity(entries, "item/completed", { item: { id: "answer", type: "agentMessage", text: "Done" } })!;
+  assert.equal(completed.phase, "final_answer");
+  assert.equal(completed.text, "Done");
+  assert.equal(completed.status, "completed");
+});

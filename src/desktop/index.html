@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="./styles.css">
   <script src="taskboard-assets://vendor/markdown-it.js" defer></script>
   <script src="./image-preview.js" defer></script>
+  <script src="./keyboard-focus.js" defer></script>
   <script src="./chat.js" defer></script>
   <script src="./renderer.js" defer></script>
 </head>
@@ -32,6 +33,13 @@
     <symbol id="icon-error" viewBox="0 0 16 16"><path d="m8 2 6.25 11H1.75ZM8 6v3m0 1.75v.25"/></symbol>
     <symbol id="icon-attachment" viewBox="0 0 16 16"><path d="m9.75 5-4 4a1.4 1.4 0 0 0 2 2l4.6-4.6a2.65 2.65 0 0 0-3.75-3.75L3.75 7.5a3.9 3.9 0 0 0 5.5 5.5l3-3"/></symbol>
     <symbol id="icon-microphone" viewBox="0 0 16 16"><rect x="6" y="2" width="4" height="7" rx="2"/><path d="M4 7a4 4 0 0 0 8 0M8 11v3m-2 0h4"/></symbol>
+    <symbol id="icon-git-branch" viewBox="0 0 16 16"><circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12.5" r="1.5"/><circle cx="11.5" cy="3.5" r="1.5"/><path d="M4.5 5v6m7-6c0 3.5-7 2-7 5.5"/></symbol>
+    <symbol id="icon-git-user" viewBox="0 0 16 16"><circle cx="8" cy="5" r="2.5"/><path d="M3 14v-1a5 4 0 0 1 10 0v1"/></symbol>
+    <symbol id="icon-git-tag" viewBox="0 0 16 16"><path d="M2.5 2.5H8l5.5 5.5L8 13.5 2.5 8Z"/><circle cx="5.5" cy="5.5" r=".75"/></symbol>
+    <symbol id="icon-check" viewBox="0 0 16 16"><path d="m3 8 3.25 3.25L13 4.5"/></symbol>
+    <symbol id="icon-arrow-left" viewBox="0 0 16 16"><path d="M13 8H3m4-4L3 8l4 4"/></symbol>
+    <symbol id="icon-notifications" viewBox="0 0 16 16"><path d="M5.5 13.5a2.5 2.5 0 0 0 5 0M8 2c-2.5 0-4 1.5-4 4v3l-1.5 2.5h11L12 9V6c0-2.5-1.5-4-4-4Z"/></symbol>
+    <symbol id="icon-cloud-upload" viewBox="0 0 16 16"><path d="M4.5 12H4a3 3 0 0 1-.5-6A4.5 4.5 0 0 1 12 5a3.5 3.5 0 0 1 .5 7H12M8 14V8m-2 2 2-2 2 2"/></symbol>
   </svg>
   <header id="app-header" class="app-menu-bar" hidden>
     <div class="app-menu-start">
@@ -80,6 +88,16 @@
       <div id="archive-list" class="archive-list" hidden></div>
     </section>
   </main>
+  <footer class="status-bar">
+    <button id="status-branch" type="button" class="button quiet status-git" popovertarget="git-branches" hidden><svg class="icon" aria-hidden="true"><use href="#icon-git-branch"/></svg><span></span></button>
+    <button id="status-publish" type="button" class="button quiet" aria-label="Publish to GitHub" hidden><svg class="icon" aria-hidden="true"><use href="#icon-cloud-upload"/></svg></button>
+    <section id="git-branches" class="git-branches" popover aria-label="Branches and tags"></section>
+    <span id="status-user" class="status-git" hidden><svg class="icon" aria-hidden="true"><use href="#icon-git-user"/></svg><span></span></span>
+    <button id="status-notifications" type="button" class="button quiet" popovertarget="notifications" aria-label="Notifications">
+      <svg class="icon" aria-hidden="true"><use href="#icon-notifications"/></svg><span class="count" aria-hidden="true" hidden></span>
+    </button>
+    <section id="notifications" class="notifications" popover aria-label="Notifications"></section>
+  </footer>
   <dialog id="sheet" class="sheet" aria-labelledby="sheet-title" closedby="closerequest">
     <div class="sheet-header">
       <h2 id="sheet-title"></h2>

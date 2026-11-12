@@ -203,6 +203,7 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
   }
   const usage = actor === "agent" && input.usage !== undefined ? object(input.usage) : undefined;
   const commentary = actor === "agent" && input.commentary !== undefined ? strings(input.commentary, "commentary") : [];
+  const durationMs = actor === "agent" && input.durationMs !== undefined ? number(input.durationMs, "durationMs", 0) : undefined;
   const chat = {
     model, effort,
     ...(commentary.length ? { commentary } : {}),
@@ -218,6 +219,7 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
       ...chat,
       ...(actor === "user" || attachments.length ? { files: attachments.map(attachment => attachment.file) } : {}),
     };
+    if (durationMs !== undefined) updated.history.at(-1)!.durationMs = durationMs;
     return store.save(updated);
   });
 }

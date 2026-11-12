@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import childProcess, { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { syncBuiltinESMExports } from "node:module";
+import { promisify } from "node:util";
 import { createInterface } from "node:readline";
 import { test } from "node:test";
 import type { TestContext } from "node:test";
@@ -62,6 +64,141 @@ function cli(root: string, args: string[], input?: unknown, expectedCode?: strin
   assert.equal(payload.ok, true);
   return payload.data;
 }
+
+test("repository Git menu lists commit metadata and changes only the main worktree", t => {
+  const root = fixture(t, true);
+  cli(root, ["init"]);
+  const base = git(root, "rev-parse", "HEAD");
+  git(root, "branch", "feature");
+  git(root, "tag", "light");
+  git(root, "tag", "-a", "release", "-m", "Release tag message");
+  const snapshot = () => cli(root, ["git", "refs"]);
+  const current = () => ({ head: snapshot().head, branch: snapshot().branch });
+  const initial = snapshot();
+  assert.deepEqual(initial.refs.map((ref: { name: string }) => ref.name).sort(), ["feature", "light", "main", "release"]);
+  for (const ref of initial.refs) {
+    assert.equal(ref.sha, base);
+    assert.equal(ref.author, "Taskboard Tests");
+    assert.equal(ref.subject, "chore: initialize test repository");
+    assert.ok(Number.isFinite(Date.parse(ref.date)));
+  }
+  assert.equal(cli(root, ["git", "switch"], { ...current(), ref: "refs/heads/feature" }).branch, "feature");
+  cli(root, ["git", "create"], { ...current(), name: "from-tag", ref: "refs/tags/release" });
+  assert.equal(git(root, "rev-parse", "HEAD"), base);
+  cli(root, ["git", "create"], { ...current(), name: "new-branch" });
+  cli(root, ["git", "detach"], { ...current(), ref: "refs/heads/main" });
+  assert.equal(snapshot().branch, undefined);
+  assert.equal(snapshot().head, base);
+  cli(root, ["git", "switch"], { ...current(), ref: "refs/heads/main" });
+  cli(root, ["git", "switch"], { ...current(), ref: "refs/tags/light" });
+  assert.equal(snapshot().branch, undefined);
+  cli(root, ["git", "switch"], { ...current(), ref: "refs/heads/main" });
+
+  const task = cli(root, ["create"], { title: "Active task", criteria: ["Checked"] });
+  cli(root, ["approve", task.id]);
+  const { worktree } = cli(root, ["start", task.id]);
+  cli(worktree, ["git", "switch"], { ...current(), ref: "refs/heads/feature" });
+  assert.equal(git(root, "branch", "--show-current"), "feature");
+  assert.equal(git(worktree, "branch", "--show-current"), "ai-taskboard/" + task.id);
+  cli(root, ["git", "switch"], { ...current(), ref: "refs/heads/ai-taskboard/" + task.id }, "GIT_FAILED");
+  assert.equal(git(worktree, "rev-parse", "HEAD"), base);
+});
+
+test("repository Git menu preserves conflicting edits and rejects invalid or stale actions", t => {
+  const root = fixture(t, true);
+  cli(root, ["init"]);
+  const initial = cli(root, ["git", "refs"]);
+  const current = () => {
+    const { head, branch } = cli(root, ["git", "refs"]);
+    return { head, branch };
+  };
+  git(root, "switch", "-c", "different");
+  writeFileSync(join(root, "source.txt"), "different\n");
+  git(root, "commit", "-am", "feat: different content");
+  git(root, "switch", "main");
+  writeFileSync(join(root, "source.txt"), "local edits\n");
+  cli(root, ["git", "switch"], { ...current(), ref: "refs/heads/different" }, "GIT_FAILED");
+  assert.equal(readFileSync(join(root, "source.txt"), "utf8"), "local edits\n");
+  assert.equal(git(root, "branch", "--show-current"), "main");
+  cli(root, ["git", "create"], { ...current(), name: "--discard-changes" }, "INVALID_INPUT");
+  cli(root, ["git", "create"], { ...current(), name: "bad name" }, "INVALID_INPUT");
+  cli(root, ["git", "switch"], { ...current(), ref: "--discard-changes" }, "INVALID_INPUT");
+  cli(root, ["git", "switch"], { ...current(), ref: "refs/heads/missing" }, "GIT_COMMIT_REQUIRED");
+  cli(root, ["git", "create"], { ...current(), name: "main" }, "GIT_FAILED");
+  cli(root, ["git", "create"], { head: "stale", branch: "main", name: "stale" }, "STALE_REPOSITORY");
+  cli(root, ["git", "create"], { ...initial, branch: "other", name: "stale" }, "STALE_REPOSITORY");
+  writeFileSync(join(root, ".git", "MERGE_HEAD"), initial.head + "\n");
+  cli(root, ["git", "create"], { ...current(), name: "during-merge" }, "GIT_OPERATION_IN_PROGRESS");
+
+  const plain = fixture(t);
+  cli(plain, ["init"]);
+  cli(plain, ["git", "refs"], undefined, "GIT_REQUIRED");
+  const empty = fixture(t);
+  git(empty, "init", "-b", "main");
+  cli(empty, ["init"]);
+  assert.deepEqual(cli(empty, ["git", "refs"]), { branch: "main", refs: [] });
+  const created = cli(empty, ["git", "create"], { branch: "main", name: "first" });
+  assert.equal(created.branch, "first");
+  cli(empty, ["git", "detach"], { branch: "first" }, "GIT_COMMIT_REQUIRED");
+});
+
+test("GitHub publication validates input, preserves partial results and pins push arguments", async t => {
+  const root = fixture(t, true);
+  cli(root, ["init"]);
+  let mode = "";
+  const calls: { command: string; args: string[] }[] = [];
+  const remote = "https://github.com/owner/repository.git";
+  const fake = Object.assign(() => {}, { [promisify.custom]: async (command: string, args: string[], options: { cwd: string }) => {
+    assert.equal(options.cwd, root);
+    calls.push({ command, args });
+    if (args[0] === "auth" && ["missing", "auth-failed"].includes(mode)) {
+      throw Object.assign(new Error("Authentication failed"), { code: mode === "missing" ? "ENOENT" : 1 });
+    }
+    if (args[0] === "repo") {
+      if (mode === "create-failed") throw Object.assign(new Error("Create failed"), { stderr: "Connection failed" });
+      if (mode === "move-head") git(root, "switch", "other");
+      git(root, "remote", "add", "origin", remote);
+    }
+    if (command === "git" && mode === "push-failed") throw Object.assign(new Error("Push failed"), { stderr: "Push rejected" });
+    return { stdout: "", stderr: "" };
+  } });
+  const original = childProcess.execFile;
+  childProcess.execFile = fake as unknown as typeof original;
+  syncBuiltinESMExports();
+  t.after(() => { childProcess.execFile = original; syncBuiltinESMExports(); });
+  const { publishRepository } = await import(new URL("../src/cli/repository.ts", import.meta.url).href);
+  const { locateBoard } = await import("../src/cli/storage.ts");
+  const location = locateBoard(root);
+  const snapshot = cli(root, ["git", "refs"]);
+  const input = { head: snapshot.head, branch: snapshot.branch, name: "owner/repository", visibility: "private" };
+  const publish = async (nextMode: string, fields: Record<string, unknown>, code?: string) => {
+    mode = nextMode;
+    if (code) await assert.rejects(publishRepository(location, fields), { code });
+    else assert.deepEqual(await publishRepository(location, fields), { remote });
+  };
+  await publish("", { ...input, name: "--public" }, "INVALID_INPUT");
+  await publish("", { ...input, visibility: "internal" }, "INVALID_INPUT");
+  await publish("", { ...input, head: "stale" }, "STALE_REPOSITORY");
+  await publish("missing", input, "GITHUB_UNAVAILABLE");
+  await publish("auth-failed", input, "GITHUB_UNAVAILABLE");
+  assert.equal(git(root, "remote"), "");
+  await publish("create-failed", input, "GITHUB_PUBLISH_FAILED");
+  await publish("push-failed", input, "GITHUB_PUSH_FAILED");
+  assert.equal(git(root, "remote", "get-url", "origin"), remote);
+  await publish("", input, "REMOTE_EXISTS");
+  git(root, "remote", "remove", "origin");
+  git(root, "switch", "-c", "other");
+  writeFileSync(join(root, "other.txt"), "other branch\n");
+  git(root, "add", "other.txt");
+  git(root, "commit", "-m", "feat: other branch");
+  git(root, "switch", "main");
+  await publish("move-head", input);
+  assert.equal(git(root, "branch", "--show-current"), "other");
+  assert.deepEqual(calls.findLast(call => call.command === "gh" && call.args[0] === "repo")?.args, [
+    "repo", "create", "owner/repository", "--private", "--source", root, "--remote", "origin",
+  ]);
+  assert.deepEqual(calls.at(-1), { command: "git", args: ["push", "origin", input.head + ":refs/heads/main"] });
+});
 
 test("dependencies prevent worktree creation until every dependency is completed", t => {
   const root = fixture(t, true);
@@ -191,12 +328,20 @@ test("task chat stores messages and attachments together and archives the conver
   assert.deepEqual(sent.history[0], task.history[0]);
   assert.deepEqual(sent.history.at(-1).chat, { ...settings, files: [file] });
   const reply = { ...settings, actor: "agent", text: "Who should receive the export?", usage: { used: 32, limit: 256 },
-    commentary: ["I have checked the export settings."] };
+    commentary: ["I have checked the export settings."], durationMs: 12_000 };
   cli(root, ["chat", task.id], { ...reply, replyTo: 0 }, "CHAT_CHANGED");
+  cli(root, ["chat", task.id], { ...reply, durationMs: -1, replyTo: sent.history.length - 1 }, "INVALID_INPUT");
   const answered = cli(root, ["chat", task.id], { ...reply, replyTo: sent.history.length - 1 });
   assert.deepEqual(answered.history.at(-1).chat.usage, reply.usage);
   assert.deepEqual(answered.history.at(-1).chat.commentary, reply.commentary);
+  assert.equal(answered.history.at(-1).durationMs, reply.durationMs);
   cli(root, ["chat", task.id], { ...reply, replyTo: sent.history.length - 1 }, "CHAT_CHANGED");
+  const entries = [{ id: "final", type: "agentMessage", phase: "final_answer", title: "", text: "Saved result", status: "completed" }];
+  cli(root, ["run-log", task.id], { entries, durationMs: -1 }, "INVALID_INPUT");
+  cli(root, ["run-log", task.id], { entries: [{ ...entries[0], phase: "unknown" }] }, "INVALID_INPUT");
+  const logged = cli(root, ["run-log", task.id], { entries, durationMs: 433_000 });
+  assert.deepEqual(logged.history.at(-1).run, entries);
+  assert.equal(logged.history.at(-1).durationMs, 433_000);
 
   const closing = cli(root, ["chat", task.id], { ...settings, text: "Cancel this task." });
   cli(root, ["cancel", task.id], { reason: "Archive the conversation" });

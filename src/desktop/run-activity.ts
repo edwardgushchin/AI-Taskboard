@@ -17,7 +17,9 @@ export function runActivity(entries: Map<string, RunActivity>, method: string, p
     const previous = entries.get(id);
     const status = string(item.status) || (method === "item/completed" ? "completed" : "inProgress");
     if (type === "agentMessage" || type === "plan") {
-      return { id, type, title: "", text: bounded(string(item.text) || previous?.text || ""), status };
+      const phase = item.phase ?? previous?.phase;
+      return { id, type, title: "", text: bounded(string(item.text) || previous?.text || ""), status,
+        ...(phase === "commentary" || phase === "final_answer" ? { phase } : {}) };
     }
     if (type === "reasoning") {
       const summary = Array.isArray(item.summary) ? item.summary.map(string).join("\n") : "";

@@ -206,9 +206,13 @@ export function validateCard(value: unknown, id: string): Task {
   const task = value as unknown as Task;
   const files = new Set(task.attachments.map(file => file.file));
   for (const event of task.history) {
+    if (event?.durationMs !== undefined && (!Number.isSafeInteger(event.durationMs) || event.durationMs < 0)) {
+      throw new TaskboardError("CORRUPT_STORAGE", "Invalid reply duration for " + id + ".", { id });
+    }
     if (event?.run !== undefined && (event.action !== "run-log" || !Array.isArray(event.run) ||
         event.run.some(item => !isRecord(item) ||
-          !["id", "type", "title", "text", "status"].every(key => typeof item[key] === "string")))) {
+          !["id", "type", "title", "text", "status"].every(key => typeof item[key] === "string") ||
+          (item.phase !== undefined && !["commentary", "final_answer"].includes(String(item.phase)))))) {
       throw new TaskboardError("CORRUPT_STORAGE", "Invalid run log for " + id + ".", { id });
     }
     const chat = event?.chat;

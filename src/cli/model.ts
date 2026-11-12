@@ -76,10 +76,12 @@ export interface RunActivity {
   title: string;
   text: string;
   status: string;
+  phase?: "commentary" | "final_answer";
 }
 
 export interface TaskEvent {
   at: string;
+  durationMs?: number;
   actor: Actor;
   action: string;
   text?: string;

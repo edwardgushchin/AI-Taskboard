@@ -93,6 +93,32 @@ function renderChatTurn(list, draft) {
   if (atBottom) list.scrollTop = list.scrollHeight;
 }
 
+function readableRunCommand(command) {
+  // Codex quotes Windows argv for display, escaping quotes and backslashes.
+  const quoted = String.raw`"(?:\\[\s\S]|[^"\\])*"`;
+  const match = new RegExp(`^(${quoted}) -Command (${quoted})$`, "i").exec(command);
+  if (!match) return command;
+  try {
+    const parse = value => JSON.parse(value.replace(/\r/g, "\\r").replace(/\n/g, "\\n").replace(/\t/g, "\\t"));
+    const executable = parse(match[1]);
+    if (!/^[A-Z]:\\.*\\(?:pwsh|powershell)\.exe$/i.test(executable)) return command;
+    const script = parse(match[2]);
+    // Decode JSON only inside complete literal here-strings. Backslashes in code
+    // and ordinary messages are content, not another transport encoding layer.
+    return script.replace(/(^|\r?\n)@'\r?\n([\s\S]*?)\r?\n'@(?=\s|$)/g, (source, prefix, json) => {
+      try {
+        const value = JSON.parse(json);
+        if (!value || typeof value !== "object") return source;
+        return prefix + "@'\n" + JSON.stringify(value, null, 2) + "\n'@";
+      } catch {
+        return source;
+      }
+    });
+  } catch {
+    return command;
+  }
+}
+
 function activityKind(item) {
   if (["imageView", "imageGeneration"].includes(item.type) || /(?:view_image|open_image|image_view)/i.test(item.title)) return "image";
   return ({ commandExecution: "command", fileChange: "edit", webSearch: "search", reasoning: "reasoning" })[item.type] ?? "tool";
@@ -125,10 +151,21 @@ function activitySummary(detail, label, preview, kind, state) {
   detail.append(summary);
 }
 
-function renderRunActivity(container, items) {
+function renderRunActivity(container, items, completed = false, durationMs) {
   const previous = new Map([...container.querySelectorAll("details")].map(entry => [entry.dataset.item, entry.open]));
   const focused = container.contains(document.activeElement) ? document.activeElement.closest("details")?.dataset.item : undefined;
   const nodes = [];
+  const finalItems = new Set();
+  if (completed) {
+    for (const item of items) {
+      if (item.type === "agentMessage" && item.phase === "final_answer" && item.text.trim()) finalItems.add(item);
+    }
+    // Older logs have no phase. Their last completed message is the final reply.
+    if (!finalItems.size && !items.some(item => item.type === "agentMessage" && item.phase)) {
+      const last = items.findLast(item => item.type === "agentMessage" && item.status === "completed" && item.text.trim());
+      if (last) finalItems.add(last);
+    }
+  }
   let operations = [];
   function operation(item) {
     const kind = activityKind(item);
@@ -145,10 +182,18 @@ function renderRunActivity(container, items) {
       state.code === "failed" ? language("Action failed", "Ошибка действия") :
       item.type === "imageGeneration" ? language("Generated image", "Создано изображение") : language(...labels[kind]);
     // Only shorten the visible preview; the original command remains available below.
-    const preview = item.title.replace(/^(?:"[^"\r\n]*(?:pwsh|powershell)(?:\.exe)?"|\S*(?:pwsh|powershell)(?:\.exe)?)\s+-Command\s+/i, "");
+    const command = item.type === "commandExecution" ? readableRunCommand(item.title) : item.title;
+    const preview = command.replace(/^(?:"[^"\r\n]*(?:pwsh|powershell)(?:\.exe)?"|\S*(?:pwsh|powershell)(?:\.exe)?)\s+-Command\s+/i, "");
     activitySummary(detail, label, preview, kind, state);
-    if (item.title) detail.append(element("pre", item.title, "chat-run-command"));
+    if (command) detail.append(element("pre", command, "chat-run-command"));
     detail.append(element("pre", item.text || language("No output.", "Нет вывода."), "chat-run-output"));
+    if (command !== item.title) {
+      const original = element("details", undefined, "chat-run-original");
+      original.dataset.item = "item:" + item.id + "/original";
+      original.open = previous.get(original.dataset.item) ?? false;
+      original.append(element("summary", language("Original command", "Исходная команда")), element("pre", item.title));
+      detail.append(original);
+    }
     return detail;
   }
   function flush() {
@@ -177,6 +222,7 @@ function renderRunActivity(container, items) {
     operations = [];
   }
   for (const item of items) {
+    if (finalItems.has(item)) continue;
     if (["agentMessage", "plan", "truncated", "error", "reasoning"].includes(item.type)) {
       flush();
       if (item.type === "agentMessage" || item.type === "plan") nodes.push(chatText(item.text));
@@ -185,6 +231,28 @@ function renderRunActivity(container, items) {
     } else operations.push(item);
   }
   flush();
+  if (completed && nodes.length) {
+    const work = element("details", undefined, "chat-work");
+    work.dataset.item = "work";
+    work.open = previous.get("work") ?? false;
+    let label = language("Completed", "Выполнено");
+    if (Number.isSafeInteger(durationMs) && durationMs >= 0) {
+      const seconds = Math.floor(durationMs / 1000);
+      const minutes = Math.floor(seconds / 60);
+      label = language("Completed in ", "Выполнено за ") +
+        (minutes ? minutes + language("m ", " мин ") : "") + seconds % 60 + language("s", " с");
+    }
+    activitySummary(work, label, "", "reasoning", activityState(items));
+    const chronology = element("div", undefined, "chat-run-body");
+    chronology.append(...nodes);
+    work.append(chronology);
+    nodes.splice(0, nodes.length, work);
+  }
+  for (const item of finalItems) {
+    const final = element("div", undefined, "chat-run-final");
+    final.append(chatText(item.text));
+    nodes.push(final);
+  }
   container.replaceChildren(...nodes);
   container.hidden = items.length === 0;
   if (focused) [...container.querySelectorAll("details")].find(entry => entry.dataset.item === focused)?.querySelector("summary")?.focus({ preventScroll: true });
@@ -244,8 +312,7 @@ function reasoningName(effort) {
 function taskChat(task) {
   const project = frame.project;
   const key = project + "\0" + task.id;
-  const lastChatIndex = task.history.findLastIndex(event => event.chat);
-  const last = task.history[lastChatIndex];
+  const last = task.history.findLast(event => event.chat);
   const latestReply = task.history.findLast(event => event.chat && event.actor === "agent")?.chat;
   let draft = chatDrafts.get(key);
   if (!draft) {
@@ -297,14 +364,15 @@ function taskChat(task) {
     }
     if (event.run?.length) {
       const log = element("li", undefined, "chat-run");
-      renderRunActivity(log, event.run);
+      renderRunActivity(log, event.run, true, event.durationMs);
       list.append(log);
       continue;
     }
-    for (const text of event.chat?.commentary ?? []) {
-      const commentary = element("li", undefined, "chat-commentary");
-      commentary.append(chatText(text));
-      commentary.setAttribute("aria-label", language("Agent update", "Сообщение агента о ходе ответа"));
+    if (event.chat?.commentary?.length) {
+      const commentary = element("li", undefined, "chat-run");
+      renderRunActivity(commentary, event.chat.commentary.map((text, index) => ({
+        id: String(index), type: "agentMessage", phase: "commentary", title: "", text, status: "completed",
+      })), true, event.durationMs);
       list.append(commentary);
     }
     const conversation = ["chat", "comment", "questions"].includes(event.action);
@@ -412,14 +480,13 @@ function taskChat(task) {
   }, "quiet chat-icon");
   microphone.append(icon("microphone"));
   controlLabelForIcon(microphone, language("Voice input", "Голосовой ввод"));
-  const retry = button(language("Retry reply", "Повторить ответ"), () => submit(lastChatIndex), "quiet");
   const reload = button(language("Reload models", "Загрузить модели снова"), () => {
     chatCatalog = undefined;
     return loadModels();
   }, "quiet");
   options.append(context, selection, picker, microphone);
   controls.append(attach, options, send);
-  composer.append(pendingFiles, input, fileInput, controls, feedback, retry, reload);
+  composer.append(pendingFiles, input, fileInput, controls, feedback, reload);
   area.append(composer);
 
   let models = [];
@@ -434,8 +501,6 @@ function taskChat(task) {
     effortLabel.textContent = model.value ? effort.selectedOptions[0]?.textContent ?? "" : "";
     controlLabelForIcon(selection, [modelLabel.textContent, effortLabel.textContent].filter(Boolean).join(" · "));
     send.disabled = working || !model.value || !effort.value || (!draft.text.trim() && !draft.files.length);
-    retry.hidden = !last?.chat || last.actor !== "user" || working;
-    retry.disabled = !model.value || !effort.value;
     reload.hidden = working || !loadError;
     feedback.textContent = draft.error || loadError;
     feedback.hidden = !feedback.textContent;
@@ -509,20 +574,20 @@ function taskChat(task) {
     sync();
   }
 
-  async function submit(retryAt) {
-    if (draft.pending || !model.value || !effort.value || (retryAt === undefined && send.disabled)) return;
-    draft.pending = retryAt === undefined ? "saving" : "replying";
+  async function submit() {
+    if (send.disabled) return;
+    draft.pending = "saving";
     draft.commentary = [];
     draft.error = "";
     draft.scroll = undefined;
     sync();
     renderChatTurn(list, draft);
     try {
-      const files = retryAt === undefined ? await Promise.all(draft.files.map(async file => ({
+      const files = await Promise.all(draft.files.map(async file => ({
         name: file.name, type: file.type, bytes: await file.arrayBuffer(),
-      }))) : [];
+      })));
       const { saved, result } = await api.chatSend(task.id, {
-        model: draft.model, effort: draft.effort, text: draft.text, files, retryAt,
+        model: draft.model, effort: draft.effort, text: draft.text, files,
       });
       if (saved && draft.pending === "saving") {
         draft.text = "";

@@ -28,6 +28,7 @@ interface Board {
   tags: BoardTag[];
   tasks: Task[];
   archived: (ArchiveLink & { id: string })[];
+  gitInfo?: { branch?: string; head?: string; user?: string };
 }
 
 interface WindowState {
@@ -56,6 +57,8 @@ const subscriptions = new Map<string, BoardWatch>();
 const commands = new Map<string, string[]>([
   ["init", ["init"]], ["list", ["list"]], ["show", ["show"]], ["update", ["update"]],
   ["comment", ["comment"]],
+  ["git-refs", ["git", "refs"]], ["git-switch", ["git", "switch"]],
+  ["git-create", ["git", "create"]], ["git-detach", ["git", "detach"]], ["git-publish", ["git", "publish"]],
   ["approve", ["approve"]], ["review", ["review"]], ["accept", ["accept"]],
   ["return-to-draft", ["return-to-draft"]],
   ["restore-changes", ["restore-changes"]],
@@ -132,7 +135,10 @@ function stateOf(event: IpcMainInvokeEvent): WindowState {
 function frame(state: WindowState) {
   return {
     project: state.project, board: state.board, error: state.error, loading: state.loading, russian, theme,
-    runningTasks: state.board?.tasks.filter(task => runningTasks.has(state.project + "\0" + task.id)).map(task => task.id),
+    runningTasks: state.board?.tasks.filter(task => {
+      const key = state.project + "\0" + task.id;
+      return runningTasks.has(key) || replyingTasks.has(key);
+    }).map(task => task.id),
     runActivity: Object.fromEntries(state.board?.tasks.flatMap(task => {
       const log = runActivityByTask.get(state.project + "\0" + task.id);
       return log ? [[task.id, log]] : [];
@@ -333,6 +339,7 @@ const imageExtensions = new Map([
 const imageTypes = new Map([...imageExtensions].map(([type, suffix]) => [suffix, type]));
 imageTypes.set(".jpeg", "image/jpeg");
 const chatRuns = new Set<string>();
+const replyingTasks = new Set<string>();
 
 ipcMain.handle("chat:models", async event => {
   const project = stateOf(event).board?.project;
@@ -389,6 +396,8 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
         (retryAt !== undefined && last !== retryAt)) {
       return { saved, result: cliFailure("CHAT_CHANGED", lang("This message is no longer awaiting a reply.", "Это сообщение больше не ожидает ответа.")) };
     }
+    replyingTasks.add(key);
+    notifyRunChange(project);
     const activeFiles = new Set(message.chat?.files);
     const images = [];
     const attachments = [];
@@ -415,16 +424,20 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       attachments,
       latestUserMessage: { text: message.text ?? "", files: message.chat?.files ?? [] },
     });
+    const replyStarted = performance.now();
     const answer = await replyToTask(app.getPath("userData"), project, { model, effort }, prompt, images,
       text => notify({ type: "commentary", text }),
       taskChatActions(project, task, message.text ?? "", () => notify({ type: "changed" })),
       scratch, maxAttachmentBytes - task.attachments.reduce((sum, file) => sum + file.bytes, 0));
-    const result = await callCli<Task>(project, ["chat", id], { ...answer, actor: "agent", model, effort, replyTo: last });
+    const result = await callCli<Task>(project, ["chat", id], {
+      ...answer, actor: "agent", model, effort, replyTo: last, durationMs: Math.round(performance.now() - replyStarted),
+    });
     return { saved, result };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { saved, result: cliFailure("CHAT_FAILED", message.slice(0, 1500)) };
   } finally {
+    if (replyingTasks.delete(key)) notifyRunChange(project);
     if (scratch) await rm(scratch, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
     chatRuns.delete(key);
   }
@@ -619,6 +632,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   if (launchingTasks.has(key)) return cliFailure("LAUNCH_IN_PROGRESS", "This task is already being launched.");
   launchingTasks.add(key);
   const activity = new Map<string, RunActivity>();
+  const runStarted = performance.now();
   let updateTimer: NodeJS.Timeout | undefined;
   const publish = () => {
     updateTimer = undefined;
@@ -628,7 +642,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     clearTimeout(updateTimer);
     const items = runLog(activity);
     if (!items.length) return;
-    const saved = await callCli<Task>(project, ["run-log", id], { entries: items });
+    const saved = await callCli<Task>(project, ["run-log", id], { entries: items, durationMs: Math.round(performance.now() - runStarted) });
     if (saved.ok) publishRunActivity(project, id, []);
     else publishRunActivity(project, id, [
       ...items, { id: "save-error", type: "error", title: "", text: saved.error.message, status: "failed" },
