@@ -135,7 +135,10 @@ function stateOf(event: IpcMainInvokeEvent): WindowState {
 function frame(state: WindowState) {
   return {
     project: state.project, board: state.board, error: state.error, loading: state.loading, russian, theme,
-    runningTasks: state.board?.tasks.filter(task => runningTasks.has(state.project + "\0" + task.id)).map(task => task.id),
+    runningTasks: state.board?.tasks.filter(task => {
+      const key = state.project + "\0" + task.id;
+      return runningTasks.has(key) || replyingTasks.has(key);
+    }).map(task => task.id),
     runActivity: Object.fromEntries(state.board?.tasks.flatMap(task => {
       const log = runActivityByTask.get(state.project + "\0" + task.id);
       return log ? [[task.id, log]] : [];
@@ -336,6 +339,7 @@ const imageExtensions = new Map([
 const imageTypes = new Map([...imageExtensions].map(([type, suffix]) => [suffix, type]));
 imageTypes.set(".jpeg", "image/jpeg");
 const chatRuns = new Set<string>();
+const replyingTasks = new Set<string>();
 
 ipcMain.handle("chat:models", async event => {
   const project = stateOf(event).board?.project;
@@ -392,6 +396,8 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
         (retryAt !== undefined && last !== retryAt)) {
       return { saved, result: cliFailure("CHAT_CHANGED", lang("This message is no longer awaiting a reply.", "Это сообщение больше не ожидает ответа.")) };
     }
+    replyingTasks.add(key);
+    notifyRunChange(project);
     const activeFiles = new Set(message.chat?.files);
     const images = [];
     const attachments = [];
@@ -428,6 +434,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     const message = error instanceof Error ? error.message : String(error);
     return { saved, result: cliFailure("CHAT_FAILED", message.slice(0, 1500)) };
   } finally {
+    if (replyingTasks.delete(key)) notifyRunChange(project);
     if (scratch) await rm(scratch, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
     chatRuns.delete(key);
   }
