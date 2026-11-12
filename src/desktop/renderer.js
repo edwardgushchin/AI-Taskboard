@@ -30,6 +30,11 @@ function element(tag, text, className) {
 }
 
 function icon(name) {
+  if (name === "git-branch" || name === "cloud-upload") {
+    const item = element("i", undefined, "icon codicon codicon-" + name);
+    item.setAttribute("aria-hidden", "true");
+    return item;
+  }
   const namespace = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(namespace, "svg");
   const use = document.createElementNS(namespace, "use");
