@@ -20,6 +20,7 @@ function fixture(russian = true) {
     open = false;
     hidden = false;
     value = "";
+    click?: () => unknown;
     constructor(tag: string, text = "", className = "") { this.tag = tag; this.value = text; this.className = className; }
     get textContent(): string { return this.value + this.children.map(child => child.textContent).join(""); }
     set innerText(text: string) { this.value = text; }
@@ -34,19 +35,62 @@ function fixture(russian = true) {
     contains(node?: Node): boolean { return node === this || this.children.some(child => child.contains(node)); }
     focus() { document.activeElement = this; }
     addEventListener() {}
+    setAttribute() {}
   }
   const frame = { russian };
+  const previews: unknown[][] = [];
+  const reads: string[] = [];
+  const saves: string[] = [];
   const render = runInNewContext(source + ";renderRunActivity", {
     window: {}, document, frame,
     language: (english: string, translated: string) => frame.russian ? translated : english,
     element: (tag: string, text?: string, className?: string) => new Node(tag, text, className),
     icon: (name: string) => new Node("svg", name),
-    IntersectionObserver: class {},
-  }) as (container: Node, items: RunActivity[], completed?: boolean, durationMs?: number) => void;
+    button: (text: string, click: () => unknown, className: string) => Object.assign(new Node("button", text, className), { click }),
+    openImagePreview: (...args: unknown[]) => previews.push(args),
+    api: { runImagePreview: (_id: string, path: string) => reads.push(path), saveRunImage: (_id: string, path: string) => saves.push(path) },
+    IntersectionObserver: class { observe() {} },
+  }) as (container: Node, items: RunActivity[], completed?: boolean, durationMs?: number, taskId?: string) => void;
   const container = new Node("li");
   const row = (id: string) => container.querySelectorAll("details").find(node => node.dataset.item === "item:" + id)!;
-  return { render: (items: RunActivity[], completed = false, durationMs?: number) => render(container, items, completed, durationMs), container, document, row, frame };
+  return { render: (items: RunActivity[], completed = false, durationMs?: number) => render(container, items, completed, durationMs, "T-0042"), container, document, row, frame, previews, reads, saves };
 }
+
+test("saved and live image views replace service JSON with clickable previews of every image", () => {
+  const view = fixture(false);
+  const items = ["C:\\project\\first.png", "second.png"].map((path, index) =>
+    action(String(index), "imageView", "completed", "", JSON.stringify({ path, startedAtMs: 1 })));
+  for (const completed of [false, true]) {
+    view.render(items, completed);
+    assert.equal(view.container.querySelectorAll(".chat-run-images").length, 2);
+    assert.equal(view.container.querySelectorAll("pre").length, 0);
+    assert.ok(!view.container.textContent.includes("startedAtMs"));
+    assert.equal(view.row("0").open, true);
+    const tile = view.row("1").querySelector("button")!;
+    assert.equal(tile.dataset.path, "second.png");
+    tile.click!();
+    const [task, files, index, , source] = view.previews.at(-1)! as [string, { file: string }[], number, unknown, { preview: Function; save: Function }];
+    assert.equal(task, "T-0042");
+    assert.equal(files.length, 2);
+    assert.equal(index, 1);
+    source.preview(files[0]); source.save(files[1]);
+    assert.equal(view.reads.at(-1), "C:\\project\\first.png");
+    assert.equal(view.saves.at(-1), "second.png");
+  }
+  view.row("0").open = false;
+  const retainedTile = view.row("0").querySelector("button");
+  retainedTile!.focus();
+  view.render(items);
+  assert.equal(view.row("0").open, false);
+  assert.equal(view.row("0").querySelector("button"), retainedTile, "stream updates retain loaded image tiles");
+  assert.equal(view.document.activeElement, retainedTile, "stream updates retain focus on image buttons");
+  view.render([...items, action("new", "imageView", "completed", "", '{"path":"third.png"}')]);
+  retainedTile!.click!();
+  assert.equal((view.previews.at(-1)![1] as unknown[]).length, 3, "retained tiles navigate the latest set of images");
+  view.render([action("bad", "imageView", "failed", "", "File not found"), action("old", "imageView", "completed", "", "unsupported output")]);
+  assert.equal(view.container.querySelectorAll(".chat-run-images").length, 0);
+  assert.equal(view.row("bad").querySelector("pre")!.textContent, "File not found");
+});
 
 test("activity groups consecutive operations without hiding messages, reasoning or errors", () => {
   const view = fixture();

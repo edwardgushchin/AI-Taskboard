@@ -1,6 +1,9 @@
 const isImageAttachment = file => /\.(png|jpe?g|webp|gif)$/i.test(file.name);
 
-function openImagePreview(taskId, files, initialIndex, initialSrc) {
+function openImagePreview(taskId, files, initialIndex, initialSrc, source = {
+  preview: file => api.attachmentPreview(taskId, file.file),
+  save: file => api.saveAttachment(taskId, file.file, file.name),
+}) {
   const dialog = element("dialog", undefined, "image-preview");
   const toolbar = element("header", undefined, "image-preview-toolbar");
   const title = element("strong");
@@ -59,7 +62,7 @@ function openImagePreview(taskId, files, initialIndex, initialSrc) {
   const save = button(language("Save", "Сохранить"), async () => {
     const file = files[displayedIndex];
     const selection = request;
-    const result = await api.saveAttachment(taskId, file.file, file.name);
+    const result = await source.save(file);
     if (!result.ok && dialog.open && selection === request && file === files[displayedIndex]) {
       status.textContent = boardError(result.error);
       status.hidden = false;
@@ -112,7 +115,7 @@ function openImagePreview(taskId, files, initialIndex, initialSrc) {
     cache.set(at, entry);
     entry.pending = (async () => {
       try {
-        const src = cached ?? await api.attachmentPreview(taskId, files[at].file);
+        const src = cached ?? await source.preview(files[at]);
         if (!src || !dialog.open) return null;
         const loaded = element("img");
         loaded.draggable = false;
