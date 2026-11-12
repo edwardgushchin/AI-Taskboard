@@ -429,7 +429,7 @@ function card(task) {
   }
   const meta = element("span", undefined, "task-meta");
   meta.append(element("span", task.id, "task-id"));
-  const runStatus = element("span");
+  const runStatus = element("span", undefined, "task-run-status");
   renderAgentRunStatus(runStatus, task);
   if (!runStatus.hidden) meta.append(runStatus);
   if (task.unfinishedDependencies?.length && ["draft", "blocked"].includes(task.status)) {
