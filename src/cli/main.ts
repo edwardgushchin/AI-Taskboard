@@ -6,7 +6,7 @@ import { parseArgs } from "node:util";
 import { acceptTask, inspectReview, reopenConflictingReview } from "./acceptance.ts";
 import { describeSavedChanges, restoreSavedChanges } from "./saved-changes.ts";
 import {
-  addAttachment, addChatMessage, archiveDiagnostics, createWithAttachments, isArchived, readAttachment, readTask, sweepArchives,
+  addAttachment, addChatMessage, archiveDiagnostics, createWithAttachments, isArchived, readAttachment, readTask, restoreReplyImages, sweepArchives,
   setAttachmentCover, upgradeTagCatalog,
 } from "./archive.ts";
 import { hexTagColor, member, number, object, record, registerTags, requireRevision, strings, tagColors, tagKey, TaskboardError, text } from "./model.ts";
@@ -26,6 +26,7 @@ const help = [
   "          block, resume, preview, submit, review, accept, restore-changes, request-changes, cancel, cleanup, settings, watch, doctor",
   "          list --archived, archive sweep, chat TASK-ID, attachment add TASK-ID, attachment read TASK-ID",
   "          attachment cover TASK-ID --stdin (file and revision)",
+  "          attachment restore-reply TASK-ID --stdin (replyAt, revision and attachmentSources)",
   "          list --tag NAME, tag ensure --stdin, tag set --stdin (name and color), tag assign TASK-ID --stdin (tags)",
   "For init, pass git: true with --stdin to initialize Git in the chosen folder.",
   "With --stdin, pass one JSON object as the command input.",
@@ -168,13 +169,14 @@ function run(
     return sweepArchives(store);
   }
   if (command === "attachment") {
-    if (!extra || !id || !["add", "read", "cover"].includes(id)) {
-      throw new TaskboardError("INVALID_INPUT", "Use attachment add, read or cover with a task ID.");
+    if (!extra || !id || !["add", "read", "cover", "restore-reply"].includes(id)) {
+      throw new TaskboardError("INVALID_INPUT", "Use attachment add, read, cover or restore-reply with a task ID.");
     }
     if (id === "read") return readAttachment(store, extra, input);
     const task = store.card(extra);
     if (hasPending(store, task)) throw new TaskboardError("PENDING_OPERATION", "Finish the pending Git operation first.");
     if (id === "cover") return setAttachmentCover(store, task, input);
+    if (id === "restore-reply") return restoreReplyImages(store, task, input);
     return addAttachment(store, task, input);
   }
   if (command === "doctor") {

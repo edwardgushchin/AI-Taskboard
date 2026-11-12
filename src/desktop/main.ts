@@ -412,7 +412,8 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     });
     const answer = await replyToTask(app.getPath("userData"), project, { model, effort }, prompt, images,
       text => notify({ type: "commentary", text }),
-      taskChatActions(project, task, message.text ?? "", () => notify({ type: "changed" })));
+      taskChatActions(project, task, message.text ?? "", () => notify({ type: "changed" })),
+      scratch, maxAttachmentBytes - task.attachments.reduce((sum, file) => sum + file.bytes, 0));
     const result = await callCli<Task>(project, ["chat", id], { ...answer, actor: "agent", model, effort, replyTo: last });
     return { saved, result };
   } catch (error) {
