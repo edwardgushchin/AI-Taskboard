@@ -93,6 +93,32 @@ function renderChatTurn(list, draft) {
   if (atBottom) list.scrollTop = list.scrollHeight;
 }
 
+function readableRunCommand(command) {
+  // Codex quotes Windows argv for display, escaping quotes and backslashes.
+  const quoted = String.raw`"(?:\\[\s\S]|[^"\\])*"`;
+  const match = new RegExp(`^(${quoted}) -Command (${quoted})$`, "i").exec(command);
+  if (!match) return command;
+  try {
+    const parse = value => JSON.parse(value.replace(/\r/g, "\\r").replace(/\n/g, "\\n").replace(/\t/g, "\\t"));
+    const executable = parse(match[1]);
+    if (!/^[A-Z]:\\.*\\(?:pwsh|powershell)\.exe$/i.test(executable)) return command;
+    const script = parse(match[2]);
+    // Decode JSON only inside complete literal here-strings. Backslashes in code
+    // and ordinary messages are content, not another transport encoding layer.
+    return script.replace(/(^|\r?\n)@'\r?\n([\s\S]*?)\r?\n'@(?=\s|$)/g, (source, prefix, json) => {
+      try {
+        const value = JSON.parse(json);
+        if (!value || typeof value !== "object") return source;
+        return prefix + "@'\n" + JSON.stringify(value, null, 2) + "\n'@";
+      } catch {
+        return source;
+      }
+    });
+  } catch {
+    return command;
+  }
+}
+
 function renderRunActivity(container, items) {
   const labels = {
     commandExecution: ["Command", "Команда"], fileChange: ["File changes", "Изменения файлов"],
@@ -107,10 +133,18 @@ function renderRunActivity(container, items) {
     const detail = element("details", undefined, "chat-run-item");
     detail.dataset.item = item.id;
     detail.open = expanded.has(item.id);
-    const label = item.title || (Object.hasOwn(labels, item.type) ? language(...labels[item.type]) : item.type);
+    const command = item.type === "commandExecution" ? readableRunCommand(item.title) : item.title;
+    const label = command || (Object.hasOwn(labels, item.type) ? language(...labels[item.type]) : item.type);
     const state = item.status === "failed" ? language("Failed", "Ошибка") :
       item.status === "inProgress" ? language("Running", "Выполняется") : "";
     detail.append(element("summary", [label, state].filter(Boolean).join(" · ")));
+    if (command !== item.title) {
+      const original = element("details");
+      original.dataset.item = item.id + "/original";
+      original.open = expanded.has(original.dataset.item);
+      original.append(element("summary", language("Original command", "Исходная команда")), element("pre", item.title));
+      detail.append(original);
+    }
     if (item.text) detail.append(element("pre", item.text));
     return detail;
   }));
