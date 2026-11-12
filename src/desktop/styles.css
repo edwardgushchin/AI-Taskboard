@@ -211,7 +211,7 @@ input, textarea, select {
 }
 .lane-cards { display: grid; gap: 6px; min-height: 13px; }
 .task-card {
-  width: 100%; min-width: 0; display: grid;
+  width: 100%; min-width: 0; display: grid; padding: 0;
   border: 1px solid color-mix(in srgb, var(--border) 70%, var(--lane)); border-radius: 4px;
   background: var(--panel); overflow-wrap: anywhere;
 }
@@ -219,7 +219,6 @@ input, textarea, select {
   min-width: 0; display: grid; gap: 6px; text-align: left; padding: 8px;
   border: 0; border-radius: inherit; background: transparent; cursor: pointer;
 }
-.task-card > .button { justify-self: end; margin: 0 8px 8px; font-size: 11px; }
 .task-card:hover, .task-card:focus-within { border-color: var(--focus); }
 .task-card strong { display: block; font-size: 13px; line-height: 1.3; font-weight: 650; }
 .task-card-cover { display: block; width: calc(100% + 16px); height: auto; margin: -8px -8px 0; }

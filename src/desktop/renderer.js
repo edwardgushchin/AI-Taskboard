@@ -364,9 +364,9 @@ function taskIndicator(name, count, label, className) {
 }
 
 function card(task) {
-  const card = element("article", undefined, "task-card");
-  const item = button("", () => showTask(task.id), "");
-  item.className = "task-card-details";
+  const card = button("", () => showTask(task.id));
+  card.className = "task-card";
+  const item = element("span", undefined, "task-card-details");
   if (task.tags?.length) {
     const tags = element("span", undefined, "task-tags");
     tags.append(...tagBadges(task.tags));
@@ -416,7 +416,6 @@ function card(task) {
   }
   item.append(meta);
   card.append(item);
-  if (task.status === "ready" && task.codexThreadId) card.append(openCodexTaskAction(task));
   return card;
 }
 
