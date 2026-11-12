@@ -192,7 +192,7 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
   requireRevision(task, input.revision);
   const actor = actorFor(input, "user");
   if (actor === "user") requireState(task, ["draft", "ready", "in_progress", "blocked", "review"]);
-  const message = text(input.text, "text", actor === "agent");
+  const message = text(input.text, "text");
   const model = text(input.model, "model", true);
   const effort = text(input.effort, "effort", true);
   if (actor === "agent") {
@@ -200,24 +200,45 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
     if (last !== number(input.replyTo, "replyTo", 0) || task.history[last]?.actor !== "user") {
       throw new TaskboardError("CHAT_CHANGED", "The last chat message changed before the reply was saved.");
     }
-    const updated = record(task, "chat", actor, task.status, message);
-    const usage = input.usage === undefined ? undefined : object(input.usage);
-    const commentary = input.commentary === undefined ? [] : strings(input.commentary, "commentary");
-    updated.history.at(-1)!.chat = {
-      model, effort,
-      ...(commentary.length ? { commentary } : {}),
-      ...(usage ? { usage: { used: number(usage.used, "used", 0), limit: number(usage.limit, "limit") } } : {}),
-    };
-    return store.save(updated);
   }
+  const usage = actor === "agent" && input.usage !== undefined ? object(input.usage) : undefined;
+  const commentary = actor === "agent" && input.commentary !== undefined ? strings(input.commentary, "commentary") : [];
+  const chat = {
+    model, effort,
+    ...(commentary.length ? { commentary } : {}),
+    ...(usage ? { usage: { used: number(usage.used, "used", 0), limit: number(usage.limit, "limit") } } : {}),
+  };
 
   return withNewAttachments(store, task, input.attachmentSources, attachments => {
     if (!message && !attachments.length) throw new TaskboardError("INVALID_INPUT", "Write a message or attach a file.");
     const updated = record({
       ...task, attachments: [...task.attachments, ...attachments],
     }, "chat", actor, task.status, message);
-    updated.history.at(-1)!.chat = { model, effort, files: attachments.map(attachment => attachment.file) };
+    updated.history.at(-1)!.chat = {
+      ...chat,
+      ...(actor === "user" || attachments.length ? { files: attachments.map(attachment => attachment.file) } : {}),
+    };
     return store.save(updated);
+  });
+}
+
+export function restoreReplyImages(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
+  requireState(task, ["draft", "ready", "in_progress", "blocked", "review"]);
+  requireRevision(task, input.revision, true);
+  const replyAt = number(input.replyAt, "replyAt", 0);
+  const reply = task.history[replyAt];
+  const chat = reply?.chat;
+  if (reply?.action !== "chat" || reply.actor !== "agent" || !chat || chat.files?.length) {
+    throw new TaskboardError("CHAT_CHANGED", "Choose an agent reply without attachments.");
+  }
+  return withNewAttachments(store, task, input.attachmentSources, attachments => {
+    if (!attachments.length || attachments.some(file => !imageAttachmentPattern.test(file.name))) {
+      throw new TaskboardError("INVALID_INPUT", "Choose images to restore to the reply.");
+    }
+    const history = task.history.slice();
+    history[replyAt] = { ...reply, chat: { ...chat, files: attachments.map(file => file.file) } };
+    return store.save({ ...task, revision: task.revision + 1, updatedAt: new Date().toISOString(),
+      history, attachments: [...task.attachments, ...attachments] });
   });
 }
 

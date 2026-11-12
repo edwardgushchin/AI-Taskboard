@@ -3,6 +3,8 @@ import { createInterface } from "node:readline";
 import { configuredCodex } from "./codex.ts";
 import { chatTools } from "./chat-actions.ts";
 import { cliFailure } from "./cli.ts";
+import { saveChatImages } from "./chat-images.ts";
+import type { ChatImage } from "./chat-images.ts";
 import type { CliReply } from "./cli.ts";
 import type { ChatSettings, ChatUsage } from "../cli/model.ts";
 
@@ -111,7 +113,7 @@ export function chatModels(profile: string, project: string) {
 interface TurnNotification {
   threadId?: string;
   turn?: { status: string; error?: { message?: string } };
-  item?: { type: string; text?: string; phase?: string };
+  item?: { type: string; text?: string; phase?: string } & Partial<ChatImage>;
   tokenUsage?: { last?: { totalTokens?: number }; modelContextWindow?: number };
 }
 
@@ -119,6 +121,7 @@ export function replyToTask(
   profile: string, project: string, settings: ChatSettings, prompt: string, images: string[],
   onCommentary: (text: string) => void,
   runAction: (name: string, args: unknown) => Promise<CliReply>,
+  imageDirectory: string, imageLimit: number,
 ) {
   let threadId: string | undefined;
   const calls = new Map<string, CliReply>();
@@ -151,10 +154,15 @@ export function replyToTask(
     let usage: ChatUsage | undefined;
     const answers: string[] = [];
     const commentary: string[] = [];
+    const generated = new Map<string, ChatImage>();
     function notify(message: RpcMessage) {
       const data = message.params as TurnNotification | undefined;
       if (data?.threadId !== thread.id) return;
       if (message.method === "turn/completed") turn = data.turn;
+      if (message.method === "item/completed" && data.item?.type === "imageGeneration" &&
+          data.item.status === "completed" && data.item.id) {
+        generated.set(data.item.id, { ...data.item, id: data.item.id });
+      }
       if (message.method === "item/completed" && data.item?.type === "agentMessage" && data.item.text?.trim()) {
         if (data.item.phase === "commentary") {
           commentary.push(data.item.text);
@@ -177,8 +185,9 @@ export function replyToTask(
     while (!turn) await receive(notify);
     if (turn.status !== "completed") throw new Error(turn.error?.message ?? "Codex did not complete the reply.");
     const text = answers.join("\n\n").trim();
-    if (!text) throw new Error("Codex returned no message.");
-    return { text, usage, commentary };
+    if (!text && !generated.size) throw new Error("Codex returned no message.");
+    const attachmentSources = await saveChatImages([...generated.values()], imageDirectory, imageLimit);
+    return { text, usage, commentary, attachmentSources };
   }, async message => {
     const params = message.params as {
       threadId?: string; callId?: string; namespace?: string | null; tool?: string; arguments?: unknown;
