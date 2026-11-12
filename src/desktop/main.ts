@@ -141,6 +141,7 @@ function stateOf(event: IpcMainInvokeEvent): WindowState {
 function frame(state: WindowState) {
   return {
     project: state.project, board: state.board, error: state.error, loading: state.loading, russian, theme,
+    runningTasks: state.board?.tasks.filter(task => runningTasks.has(state.project + "\0" + task.id)).map(task => task.id),
     recentBoards: recentBoards.map(path => ({ name: basename(path) || path, path })),
   };
 }
@@ -582,6 +583,22 @@ ipcMain.handle("board:openWorktree", async (event, id: unknown) => {
 });
 
 const launchingTasks = new Set<string>();
+const runningTasks = new Set<string>();
+
+function notifyRunChange(project: string) {
+  for (const state of windowStates.values()) {
+    if (state.project === project) send(state);
+  }
+}
+
+async function recordRunFailure(project: string, id: string, reason: string) {
+  const result = await callCli<Task>(project, ["block", id], {
+    reason,
+    condition: lang("Restore Codex access and resume the task.", "Восстановите доступ Codex и возобновите задачу."),
+  });
+  if (!result.ok && result.error.code !== "INVALID_TRANSITION") return result.error.message;
+}
+
 ipcMain.handle("board:launchTask", async (event, id: unknown) => {
   const { project } = stateOf(event);
   if (!project || typeof id !== "string" || !taskIdPattern.test(id)) {
@@ -590,6 +607,8 @@ ipcMain.handle("board:launchTask", async (event, id: unknown) => {
   const key = project + "\0" + id;
   if (launchingTasks.has(key)) return cliFailure("LAUNCH_IN_PROGRESS", "This task is already being launched.");
   launchingTasks.add(key);
+  let prepared = false;
+  let monitoring = false;
   try {
     const current = await callCli<Task>(project, ["show", id]);
     if (!current.ok || current.data.codexThreadId) return current;
@@ -597,15 +616,28 @@ ipcMain.handle("board:launchTask", async (event, id: unknown) => {
     if (!client) return cliFailure("CODEX_UNAVAILABLE", lang("Connect Codex in settings.", "Подключите Codex в настройках."));
     const started = await callCli<{ task: Task; worktree: string }>(project, ["start", id], { revision: current.data.revision });
     if (!started.ok) return started;
-    const codexThreadId = await startCodexRun(client, project, started.data.worktree, started.data.task);
+    prepared = true;
+    const { threadId: codexThreadId, completion } = await startCodexRun(client, project, started.data.worktree, started.data.task);
+    monitoring = true;
+    runningTasks.add(key);
+    notifyRunChange(project);
     // Preserve edits made while Codex was starting.
     const saved = await callCli<Task>(project, ["update", id], { codexThreadId, actor: "user" });
+    void completion.then(async reason => {
+      if (reason) await recordRunFailure(project, id, reason);
+    }).finally(() => {
+      runningTasks.delete(key);
+      launchingTasks.delete(key);
+      notifyRunChange(project);
+    });
     if (saved.ok) return saved;
     return cliFailure("CODEX_LINK_FAILED", saved.error.message + "\n" + "codex://threads/" + codexThreadId);
   } catch (error) {
-    return cliFailure("CODEX_LAUNCH_FAILED", (error as Error).message);
+    const reason = (error as Error).message;
+    const failure = prepared ? await recordRunFailure(project, id, reason) : undefined;
+    return cliFailure("CODEX_LAUNCH_FAILED", [reason, failure].filter(Boolean).join("\n"));
   } finally {
-    launchingTasks.delete(key);
+    if (!monitoring) launchingTasks.delete(key);
   }
 });
 
