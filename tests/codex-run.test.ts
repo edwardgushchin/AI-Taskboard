@@ -68,7 +68,11 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     git: { target: "refs/heads/main", base, branch: "refs/heads/ai-taskboard/T-0001", worktree },
     execution: { model: "test-model", effort: "high" },
   };
-  const client = (outcome: string) => ({ path: process.execPath, args: [stub, capture, outcome], version: "test" });
+  const codexHome = join(folder, "codex-home");
+  const client = (outcome: string) => ({
+    path: process.execPath, args: [stub, capture, outcome], version: "test",
+    env: { ...process.env, CODEX_HOME: codexHome },
+  });
   const activity: RunActivity[] = [];
   const launch = (outcome: string) => startCodexRun(client(outcome), folder, worktree, task, item => activity.push(item));
   const run = await launch("ok");
@@ -83,6 +87,9 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(launched.cwd, folder);
   assert.equal(launched.flags[0], "app-server");
   assert.equal(launched.flags.includes('windows.sandbox="mxc"'), process.platform === "win32");
+  const worklogData = join(codexHome, "plugins", "data", "codex-worklog-codex-worklog");
+  assert.ok(launched.flags[2].includes(JSON.stringify(join(worklogData, "sessions-v2")) + ' = "write"'));
+  assert.ok(!launched.flags[2].includes(JSON.stringify(worklogData) + ' = "write"'));
   assert.deepEqual(launched.requests.map((req: { method: string }) => req.method),
     ["initialize", "command/exec", "project/list", "thread/start", "turn/start"]);
   const [, probe, , started, turn] = launched.requests;

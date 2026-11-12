@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { git } from "../cli/git.ts";
 import { codexThreadPattern } from "../cli/model.ts";
@@ -40,9 +41,12 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   onActivity?: (item: RunActivity) => void): Promise<Run> {
   if (!task.git) throw new Error("The task has no prepared Git worktree.");
   const paths = [...new Set(accessPaths(project, cwd, task.git.branch))];
+  const codexHome = (client.env ?? process.env).CODEX_HOME || join(homedir(), ".codex");
+  const worklogSessions = resolve(project, codexHome, "plugins", "data", "codex-worklog-codex-worklog", "sessions-v2");
   const filesystem = [
     '":root" = "read"',
     ...paths.map(path => JSON.stringify(path) + ' = "write"'),
+    JSON.stringify(worklogSessions) + ' = "write"',
     JSON.stringify(join(paths[1], "worktrees")) + ' = "read"',
   ].join(", ");
   const child = spawn(client.path, [
