@@ -430,10 +430,17 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 .appearance-panel label { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .appearance-panel select { min-width: 175px; }
 .tag-setting { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.lane-header { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 3px; }
-.lane-header .lane-title { min-width: 0; overflow-wrap: anywhere; }
-.lane-toolbar { display: flex; flex: none; align-items: center; gap: 2px; }
-.lane-toolbar .button { min-width: 23px; min-height: 23px; padding: 2px; }
+.lane-header {
+  position: relative; display: flex; align-items: center; gap: 4px; padding: 8px 2px;
+}
+.lane-header .lane-title { flex: 1; min-width: 0; align-items: center; padding: 0; }
+.lane-header .lane-title > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lane-header .lane-title .count {
+  flex: none; border-radius: 4px; padding: 2px 5px; color: var(--text);
+  background: color-mix(in srgb, var(--lane-accent) 20%, var(--panel));
+}
+.lane-toolbar { display: flex; flex: none; align-items: center; gap: 3px; }
+.lane-toolbar .button { min-width: 24px; height: 24px; min-height: 0; gap: 3px; padding: 0 3px; }
 .lane-toolbar .icon { width: 14px; height: 14px; }
 .lane-filter summary { list-style: none; }
 .lane-filter-options {
@@ -448,6 +455,6 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 .lane-filter-options .lane-priority { display: grid; margin-bottom: 4px; }
 .lane-filter-options .lane-priority select { min-width: 0; padding: 4px; }
 .lane-filter-empty { display: grid; gap: 5px; padding: 7px; font-size: 12px; }
-.lane-collapse { font-size: 16px; line-height: 1; }
+.lane-collapse[aria-expanded="false"] .icon { transform: rotate(180deg); }
 .tag-create { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .tag-create input:not([type="color"]) { flex: 1; min-width: 10em; }
