@@ -495,8 +495,8 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 
 .status-bar {
   --status-muted: light-dark(var(--muted), color-mix(in srgb, var(--muted) 67%, var(--toolbar)));
-  flex: none; height: 36px; display: flex; align-items: center; gap: 4px; padding: 6px 8px 3px;
-  border-top: 1px solid color-mix(in srgb, var(--text) 6%, var(--toolbar));
+  flex: none; height: 36px; display: flex; align-items: center; gap: 4px; padding: 4px 8px;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 6%, var(--toolbar));
   color: var(--status-muted); background: var(--toolbar); font-size: 12px; line-height: 18px;
 }
 .status-git { min-width: 0; display: flex; align-items: center; gap: 4px; }
@@ -545,7 +545,7 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 .git-menu-action .icon { color: var(--muted); }
 .git-branches p { padding: 8px; font: inherit; }
 .git-ref-list { overflow: auto; min-height: 0; margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--border); }
-.git-branches .git-ref { display: grid; width: 100%; min-height: 44px; gap: 0; }
+.git-branches .git-ref { display: grid; width: 100%; min-height: 44px; gap: 0; justify-content: stretch; }
 .git-ref-heading, .git-ref-detail { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .git-ref-name, .git-ref-author, .git-ref-subject { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .git-ref-name { min-width: 0; }
