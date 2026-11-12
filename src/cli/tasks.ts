@@ -81,7 +81,7 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
       return record(task, action, "user", "draft");
     case "request-changes":
       requireState(task, ["review"]);
-      return record(task, action, "user", "ready", text(input.reason, "reason", true));
+      return record(task, action, "user", "in_progress", text(input.reason, "reason", true));
     case "pause":
       requireState(task, ["in_progress"]);
       return record(task, action, "agent", "ready");

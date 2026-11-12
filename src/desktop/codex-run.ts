@@ -141,12 +141,14 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     }
     const threadId = started.thread.id;
     if (!codexThreadPattern.test(threadId) || (existing && threadId !== existing)) throw new Error("Codex returned an unexpected thread ID.");
+    const feedback = task.history.findLast(event => event.action === "request-changes")?.text;
     const prompt = [
       "Выполни задачу AI Taskboard " + task.id + " в подготовленной рабочей копии.",
       "Корень доски: " + project,
       "Используй навык ai-taskboard:work-task и прочитай актуальную карточку по номеру.",
       "Рабочая копия: " + cwd,
       JSON.stringify({ title: task.title, description: task.description, criteria: task.criteria }),
+      ...(feedback ? ["Замечание к последней сдаче: " + feedback] : []),
     ].join("\n");
     const { turn } = await request<{ turn: Turn }>("turn/start", {
       threadId, effort: task.execution?.effort, input: [{ type: "text", text: prompt, text_elements: [] }],

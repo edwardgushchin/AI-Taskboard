@@ -495,9 +495,8 @@ test("resubmission verifies the actual Conventional Commit after an external reb
   assert.equal(cli(root, ["review", task.id]).stale, true);
   cli(root, ["accept", task.id], { revision: task.revision }, "STALE_SUBMISSION");
   const returned = cli(root, ["request-changes", task.id], { reason: "Review the rebased result" });
-  assert.equal(returned.status, "ready");
+  assert.equal(returned.status, "in_progress");
   assert.equal(returned.history.at(-1).text, "Review the rebased result");
-  cli(worktree, ["preview", task.id], undefined, "INVALID_TRANSITION");
   const restarted = cli(root, ["start", task.id], { revision: returned.revision });
   assert.equal(restarted.worktree, worktree);
   assert.equal(restarted.task.git.branch, task.git.branch);
