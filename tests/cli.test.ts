@@ -169,11 +169,15 @@ test("task chat stores messages and attachments together and archives the conver
   assert.deepEqual(answered.history.at(-1).chat.commentary, reply.commentary);
   cli(root, ["chat", task.id], { ...reply, replyTo: sent.history.length - 1 }, "CHAT_CHANGED");
 
+  const closing = cli(root, ["chat", task.id], { ...settings, text: "Cancel this task." });
   cli(root, ["cancel", task.id], { reason: "Archive the conversation" });
   cli(root, ["chat", task.id], message, "INVALID_TRANSITION");
+  const closed = cli(root, ["chat", task.id], { ...reply, text: "The task was cancelled.", replyTo: closing.history.length - 1 });
+  assert.equal(closed.status, "cancelled");
+  cli(root, ["chat", task.id], { ...reply, replyTo: closing.history.length - 1 }, "CHAT_CHANGED");
   cli(root, ["settings"], { archiveAfterDays: 0 });
   assert.deepEqual(cli(root, ["archive", "sweep"]).archived, [task.id]);
-  assert.deepEqual(cli(root, ["show", task.id]).history.slice(0, -1), answered.history);
+  assert.deepEqual(cli(root, ["show", task.id]).history, closed.history);
   assert.equal(cli(root, ["attachment", "read", task.id], { file }).base64, Buffer.from(contents).toString("base64"));
 });
 

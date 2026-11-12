@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld("taskboard", {
   attach: (id, revision) => ipcRenderer.invoke("board:attach", id, revision),
   saveAttachment: (id, file, name) => ipcRenderer.invoke("board:saveAttachment", id, file, name),
   attachmentPreview: (id, file) => ipcRenderer.invoke("board:attachmentPreview", id, file),
+  openLink: url => ipcRenderer.invoke("chat:openLink", url),
   openWorktree: id => ipcRenderer.invoke("board:openWorktree", id),
   launchTask: id => ipcRenderer.invoke("board:launchTask", id),
   openCodexThread: id => ipcRenderer.invoke("board:openCodexThread", id),

@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { bundled, callCli, cliChild, cliFailure, entry } from "./cli.ts";
 import { codexStatus, composeDraft, installCodex, setCodexExecutable, skillLaunch } from "./codex.ts";
 import { chatModels, replyToTask } from "./codex-chat.ts";
+import { taskChatActions } from "./chat-actions.ts";
 import type { CodexStatus } from "./codex.ts";
 import type { CliReply } from "./cli.ts";
 import { executionModels } from "./codex-models.ts";
@@ -350,7 +351,7 @@ interface ChatRequest {
   retryAt?: number;
 }
 
-type ChatUpdate = { type: "saved" } | { type: "commentary"; text: string };
+type ChatUpdate = { type: "saved" | "changed" } | { type: "commentary"; text: string };
 
 async function sendChat(project: string, id: string, request: ChatRequest, notify: (update: ChatUpdate) => void) {
   const key = project + "\0" + id;
@@ -404,15 +405,18 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     }
     const prompt = JSON.stringify({
       task: { id, title: task.title, status: task.status, description: task.description,
-        criteria: task.criteria, openQuestions: task.questions, summary: task.summary, nextStep: task.nextStep },
+        criteria: task.criteria, openQuestions: task.questions, tags: task.tags, priority: task.priority,
+        subtasks: task.subtasks, dependencies: task.dependencies, summary: task.summary, nextStep: task.nextStep },
       history: task.history.slice(0, last).map(event => ({
         actor: event.actor, action: event.action, text: event.text, from: event.from, to: event.to, files: event.chat?.files,
       })),
+      subsequentEvents: task.history.slice(last + 1),
       attachments,
       latestUserMessage: { text: message.text ?? "", files: message.chat?.files ?? [] },
     });
     const answer = await replyToTask(app.getPath("userData"), project, { model, effort }, prompt, images,
-      text => notify({ type: "commentary", text }));
+      text => notify({ type: "commentary", text }),
+      taskChatActions(project, task, message.text ?? "", () => notify({ type: "changed" })));
     const result = await callCli<Task>(project, ["chat", id], { ...answer, actor: "agent", model, effort, replyTo: last });
     return { saved, result };
   } catch (error) {
@@ -566,6 +570,12 @@ ipcMain.handle("board:attachmentPreview", async (event, id: unknown, file: unkno
   if (!result.ok) return null;
   const type = imageTypes.get(extname(result.data.name).toLowerCase());
   return type ? "data:" + type + ";base64," + result.data.base64 : null;
+});
+
+ipcMain.handle("chat:openLink", async (_event, value: unknown) => {
+  if (typeof value !== "string") return;
+  const url = URL.parse(value);
+  if (url && ["https:", "http:"].includes(url.protocol)) await shell.openExternal(url.href);
 });
 
 ipcMain.handle("board:openWorktree", async (event, id: unknown) => {

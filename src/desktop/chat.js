@@ -1,5 +1,24 @@
 const chatDrafts = new Map();
 let chatCatalog;
+const chatMarkdown = window.markdownit?.({ breaks: true, linkify: true, html: false }).disable("image");
+if (chatMarkdown) chatMarkdown.validateLink = url => /^https?:\/\//i.test(url);
+
+function chatText(text) {
+  const block = element("div", undefined, "chat-text");
+  if (!chatMarkdown) {
+    block.innerText = text;
+    return block;
+  }
+  block.innerHTML = chatMarkdown.render(text);
+  block.addEventListener("click", event => {
+    const link = event.target.closest("a");
+    if (!link) return;
+    event.preventDefault();
+    void protect(() => api.openLink(link.href))();
+  });
+  return block;
+}
+
 const chatPreviews = new IntersectionObserver(entries => {
   for (const { isIntersecting, target } of entries) {
     if (!isIntersecting) continue;
@@ -22,6 +41,10 @@ function showChatPreview(tile, src) {
     const atBottom = list && list.scrollHeight - list.clientHeight - list.scrollTop <= 8;
     tile.prepend(preview);
     tile.classList.add("has-preview");
+    if (tile.dataset.file) {
+      const name = tile.querySelector("span").textContent;
+      controlLabelForIcon(tile, language("Preview ", "Просмотреть ") + name);
+    }
     if (atBottom) list.scrollTop = list.scrollHeight;
   };
   preview.onerror = release;
@@ -32,7 +55,7 @@ function renderChatTurn(list, draft) {
   const turn = list.querySelector(".chat-turn");
   const atBottom = draft.scroll === undefined;
   turn.hidden = draft.pending !== "replying";
-  turn.replaceChildren(...(draft.commentary ?? []).map(text => element("p", text, "chat-text")));
+  turn.replaceChildren(...(draft.commentary ?? []).map(text => chatText(text)));
   if (!turn.hidden) {
     const thinking = element("p", language("Thinking…", "Думаю…"), "chat-thinking");
     thinking.setAttribute("role", "status");
@@ -49,6 +72,8 @@ function updateChat({ project, id, type, text }) {
     draft.text = "";
     draft.files = [];
     draft.pending = "replying";
+    if (open) void protect(() => showTask(id))();
+  } else if (type === "changed") {
     if (open) void protect(() => showTask(id))();
   } else if (type === "commentary") {
     draft.commentary.push(text);
@@ -132,28 +157,43 @@ function taskChat(task) {
       list.append(divider);
     }
     for (const text of event.chat?.commentary ?? []) {
-      const commentary = element("li", text, "chat-commentary chat-text");
+      const commentary = element("li", undefined, "chat-commentary");
+      commentary.append(chatText(text));
       commentary.setAttribute("aria-label", language("Agent update", "Сообщение агента о ходе ответа"));
       list.append(commentary);
     }
     const conversation = ["chat", "comment", "questions"].includes(event.action);
-    const entry = element("li", undefined, "chat-entry");
-    entry.dataset.actor = event.actor;
-    entry.classList.toggle("chat-event", !conversation);
     const author = event.actor === "user" ? language("You", "Вы") : language("Agent", "Агент");
     const date = element("time", eventDay ? timeFormat.format(timestamp) : event.at, "chat-time");
     date.dateTime = event.at;
     date.title = shortDate(event.at);
-    entry.append(element("span", author, "chat-author"));
     if (!conversation) {
       const status = lanes.find(([code]) => code === event.to);
-      entry.append(element("p", chatEventLabel(event.action) + (status ? " · " + language(status[1], status[2]) : ""), "chat-action"));
+      const service = element("li", undefined, "chat-entry chat-event");
+      service.append(element("span", author, "chat-author"),
+        element("span", chatEventLabel(event.action) + (status ? " · " + language(status[1], status[2]) : ""), "chat-action"), date);
+      list.append(service);
+      if (!event.text) continue;
     }
+    const entry = element("li", undefined, "chat-entry");
+    entry.dataset.actor = event.actor;
+    entry.append(element("span", author, "chat-author"));
     const attachments = (event.chat?.files ?? []).map(id => files.get(id)).filter(Boolean);
     if (attachments.length) {
       const tiles = element("div", undefined, "chat-attachments");
       for (const file of attachments) {
-        const tile = taskAttachmentButton(task.id, file, "quiet chat-attachment");
+        const tile = button("", async () => {
+          const src = tile.querySelector("img")?.src;
+          if (src) {
+            openImagePreview(src, file.name, async () => {
+              const result = await api.saveAttachment(task.id, file.file, file.name);
+              if (!result.ok) notice(boardError(result.error));
+            });
+          } else {
+            const result = await api.saveAttachment(task.id, file.file, file.name);
+            if (!result.ok) notice(boardError(result.error));
+          }
+        }, "quiet chat-attachment");
         controlLabelForIcon(tile, language("Save ", "Сохранить ") + file.name);
         tile.replaceChildren(icon("attachment"), element("span", file.name));
         if (/\.(png|jpe?g|webp|gif)$/i.test(file.name)) {
@@ -165,8 +205,8 @@ function taskChat(task) {
       }
       entry.append(tiles);
     }
-    if (event.text) entry.append(element("p", event.text, "chat-text"));
-    entry.append(date);
+    if (event.text) entry.append(chatText(event.text));
+    entry.append(conversation ? date : date.cloneNode(true));
     list.append(entry);
   }
   list.append(element("li", undefined, "chat-turn"));

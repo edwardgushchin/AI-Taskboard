@@ -177,9 +177,9 @@ function withNewAttachments(
 }
 
 export function addChatMessage(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
-  requireState(task, ["draft", "ready", "in_progress", "blocked", "review"]);
   requireRevision(task, input.revision);
   const actor = actorFor(input, "user");
+  if (actor === "user") requireState(task, ["draft", "ready", "in_progress", "blocked", "review"]);
   const message = text(input.text, "text", actor === "agent");
   const model = text(input.model, "model", true);
   const effort = text(input.effort, "effort", true);
