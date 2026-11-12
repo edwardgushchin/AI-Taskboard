@@ -171,8 +171,7 @@ function reasoningName(effort) {
 function taskChat(task) {
   const project = frame.project;
   const key = project + "\0" + task.id;
-  const lastChatIndex = task.history.findLastIndex(event => event.chat);
-  const last = task.history[lastChatIndex];
+  const last = task.history.findLast(event => event.chat);
   const latestReply = task.history.findLast(event => event.chat && event.actor === "agent")?.chat;
   let draft = chatDrafts.get(key);
   if (!draft) {
@@ -339,14 +338,13 @@ function taskChat(task) {
   }, "quiet chat-icon");
   microphone.append(icon("microphone"));
   controlLabelForIcon(microphone, language("Voice input", "Голосовой ввод"));
-  const retry = button(language("Retry reply", "Повторить ответ"), () => submit(lastChatIndex), "quiet");
   const reload = button(language("Reload models", "Загрузить модели снова"), () => {
     chatCatalog = undefined;
     return loadModels();
   }, "quiet");
   options.append(context, selection, picker, microphone);
   controls.append(attach, options, send);
-  composer.append(pendingFiles, input, fileInput, controls, feedback, retry, reload);
+  composer.append(pendingFiles, input, fileInput, controls, feedback, reload);
   area.append(composer);
 
   let models = [];
@@ -361,8 +359,6 @@ function taskChat(task) {
     effortLabel.textContent = model.value ? effort.selectedOptions[0]?.textContent ?? "" : "";
     controlLabelForIcon(selection, [modelLabel.textContent, effortLabel.textContent].filter(Boolean).join(" · "));
     send.disabled = working || !model.value || !effort.value || (!draft.text.trim() && !draft.files.length);
-    retry.hidden = !last?.chat || last.actor !== "user" || working;
-    retry.disabled = !model.value || !effort.value;
     reload.hidden = working || !loadError;
     feedback.textContent = draft.error || loadError;
     feedback.hidden = !feedback.textContent;
@@ -436,20 +432,20 @@ function taskChat(task) {
     sync();
   }
 
-  async function submit(retryAt) {
-    if (draft.pending || !model.value || !effort.value || (retryAt === undefined && send.disabled)) return;
-    draft.pending = retryAt === undefined ? "saving" : "replying";
+  async function submit() {
+    if (send.disabled) return;
+    draft.pending = "saving";
     draft.commentary = [];
     draft.error = "";
     draft.scroll = undefined;
     sync();
     renderChatTurn(list, draft);
     try {
-      const files = retryAt === undefined ? await Promise.all(draft.files.map(async file => ({
+      const files = await Promise.all(draft.files.map(async file => ({
         name: file.name, type: file.type, bytes: await file.arrayBuffer(),
-      }))) : [];
+      })));
       const { saved, result } = await api.chatSend(task.id, {
-        model: draft.model, effort: draft.effort, text: draft.text, files, retryAt,
+        model: draft.model, effort: draft.effort, text: draft.text, files,
       });
       if (saved && draft.pending === "saving") {
         draft.text = "";
