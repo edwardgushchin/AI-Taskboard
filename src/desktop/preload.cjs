@@ -14,7 +14,6 @@ contextBridge.exposeInMainWorld("taskboard", {
   isMac: process.platform === "darwin",
   isWindows: process.platform === "win32",
   command: (action, id, input) => ipcRenderer.invoke("board:command", action, id, input),
-  attach: (id, revision) => ipcRenderer.invoke("board:attach", id, revision),
   saveAttachment: (id, file, name) => ipcRenderer.invoke("board:saveAttachment", id, file, name),
   attachmentPreview: (id, file) => ipcRenderer.invoke("board:attachmentPreview", id, file),
   openLink: url => ipcRenderer.invoke("chat:openLink", url),

@@ -372,9 +372,16 @@ test("submission commits the confirmed snapshot and rejects changed or incomplet
   assert.equal(git(worktree, "log", "-1", "--format=%B"), "feat: update the source\n\nTask: " + task.id);
   assert.ok(!existsSync(join(root, "new [report].csv")));
   assert.equal(git(worktree, "ls-files", "--", "ignored.local"), "");
-  const updated = cli(root, ["update", task.id], {
-    actor: "user", criteria: ["Review the updated source and CSV."], note: "Add CSV to acceptance",
-  });
+  const requirements = { actor: "user", criteria: ["Review the updated source and CSV."], note: "Add CSV to acceptance" };
+  cli(root, ["update", task.id], { ...requirements, revision: submitted.revision, preserveStatus: true }, "STATUS_CHANGE_REQUIRED");
+  const unchanged = cli(root, ["show", task.id]);
+  assert.equal(unchanged.status, "review");
+  assert.equal(unchanged.revision, submitted.revision);
+  assert.deepEqual(unchanged.criteria, submitted.criteria);
+  const edited = cli(root, ["update", task.id], { title: "Review source", revision: submitted.revision, preserveStatus: true });
+  assert.equal(edited.title, "Review source");
+  assert.equal(edited.status, "review");
+  const updated = cli(root, ["update", task.id], requirements);
   assert.equal(updated.status, "in_progress");
   assert.equal(cli(root, ["start", task.id]).worktree, worktree);
 });

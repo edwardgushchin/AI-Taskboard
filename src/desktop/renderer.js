@@ -755,11 +755,6 @@ async function showTask(id) {
     }
   } else {
     actions.append(button(language("Edit", "Редактировать"), () => taskEditor(task)));
-    actions.append(button(language("Attach file", "Добавить файл"), async () => {
-      const result = await api.attach(task.id, task.revision);
-      if (!result.ok) notice(boardError(result.error));
-      else if (result.data) await showTask(task.id);
-    }));
     actions.append(button(language("Cancel task", "Отменить задачу"), () => noteTask(task, "cancel"), "danger"));
   }
   const codexAction = codexTaskAction(task);

@@ -532,17 +532,6 @@ ipcMain.handle("board:command", async (event, command: unknown, id: unknown, inp
   return result;
 });
 
-ipcMain.handle("board:attach", async (event, id: unknown, revision: unknown) => {
-  const state = stateOf(event);
-  if (!state.project || typeof id !== "string" || !/^T-\d{4,}$/.test(id)) {
-    return cliFailure("INVALID_INPUT", "Choose a task.");
-  }
-  const project = state.project;
-  const result = await dialog.showOpenDialog(state.window, { properties: ["openFile"] });
-  if (result.canceled || !result.filePaths[0]) return { ok: true, data: null };
-  return callCli(project, ["attachment", "add", id], { path: result.filePaths[0], actor: "user", revision });
-});
-
 ipcMain.handle("codex:executionModels", async event => {
   const { project } = stateOf(event);
   if (!project) return cliFailure("INVALID_INPUT", "Choose a project.");
