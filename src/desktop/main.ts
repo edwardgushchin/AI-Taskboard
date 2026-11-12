@@ -1,11 +1,12 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, protocol, shell } from "electron";
 import type { IpcMainInvokeEvent } from "electron";
-import { existsSync, mkdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, extname, isAbsolute, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import { bundled, callCli, cliChild, cliFailure, entry } from "./cli.ts";
 import { codexStatus, composeDraft, installCodex, setCodexExecutable, skillLaunch } from "./codex.ts";
 import { chatModels, replyToTask } from "./codex-chat.ts";
@@ -44,6 +45,8 @@ interface BoardWatch {
 }
 
 const html = new URL("./index.html", import.meta.url);
+const markdownAsset = "taskboard-assets://vendor/markdown-it.js";
+protocol.registerSchemesAsPrivileged([{ scheme: "taskboard-assets", privileges: { standard: true, secure: true } }]);
 const customTitleBar = process.platform === "win32";
 const titleBarHeight = 36;
 const windowStates = new Map<number, WindowState>();
@@ -568,7 +571,7 @@ ipcMain.handle("board:attachmentPreview", async (event, id: unknown, file: unkno
 ipcMain.handle("chat:openLink", async (_event, value: unknown) => {
   if (typeof value !== "string") return;
   const url = URL.parse(value);
-  if (url && ["https:", "http:"].includes(url.protocol)) await shell.openExternal(url.href);
+  if (url && ["https:", "http:", "mailto:"].includes(url.protocol)) await shell.openExternal(url.href);
 });
 
 ipcMain.handle("board:openWorktree", async (event, id: unknown) => {
@@ -697,6 +700,10 @@ else {
     } else if (app.isReady()) createWindow();
   });
   void app.whenReady().then(() => {
+    const markdownSource = createRequire(import.meta.url).resolve("markdown-it/browser");
+    protocol.handle("taskboard-assets", request => request.url === markdownAsset
+      ? new Response(readFileSync(markdownSource, "utf8"), { headers: { "Content-Type": "text/javascript; charset=utf-8" } })
+      : new Response(null, { status: 404 }));
     russian = app.getLocale().toLowerCase().startsWith("ru");
     loadTheme();
     loadRecentBoards();
