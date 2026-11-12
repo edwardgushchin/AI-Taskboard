@@ -14,11 +14,12 @@ import { taskChatActions } from "./chat-actions.ts";
 import type { CodexStatus } from "./codex.ts";
 import type { CliReply } from "./cli.ts";
 import { executionModels } from "./codex-models.ts";
-import type { ArchiveLink, BoardSettings, BoardTag, Task } from "../cli/model.ts";
+import type { ArchiveLink, BoardSettings, BoardTag, RunActivity, Task } from "../cli/model.ts";
 import { codexThreadPattern, maxAttachmentBytes, taskIdPattern } from "../cli/model.ts";
 import { readJson, writeJson } from "../cli/storage.ts";
 import { configuredCodex } from "./codex.ts";
 import { startCodexRun } from "./codex-run.ts";
+import { runLog } from "./run-activity.ts";
 import { normalizeRecentBoards, readRecentBoards, rememberRecentBoard } from "./recent-boards.ts";
 
 interface Board {
@@ -132,6 +133,10 @@ function frame(state: WindowState) {
   return {
     project: state.project, board: state.board, error: state.error, loading: state.loading, russian, theme,
     runningTasks: state.board?.tasks.filter(task => runningTasks.has(state.project + "\0" + task.id)).map(task => task.id),
+    runActivity: Object.fromEntries(state.board?.tasks.flatMap(task => {
+      const log = runActivityByTask.get(state.project + "\0" + task.id);
+      return log ? [[task.id, log]] : [];
+    }) ?? []),
     recentBoards: recentBoards.map(path => ({ name: basename(path) || path, path })),
   };
 }
@@ -352,7 +357,7 @@ type ChatUpdate = { type: "saved" | "changed" } | { type: "commentary"; text: st
 async function sendChat(project: string, id: string, request: ChatRequest, notify: (update: ChatUpdate) => void) {
   const key = project + "\0" + id;
   if (chatRuns.has(key)) {
-    return { saved: false, result: cliFailure("CHAT_BUSY", lang("Codex is already replying to this task.", "Codex уже отвечает в этой задаче.")) };
+    return { saved: false, result: cliFailure("CHAT_BUSY", lang("The agent is already replying to this task.", "Агент уже отвечает в этой задаче.")) };
   }
   chatRuns.add(key);
   let scratch: string | undefined;
@@ -449,7 +454,7 @@ ipcMain.handle("board:draft", async (event, request: unknown, files: unknown = [
       !files.every(isPastedFile) || (!request.trim() && !files.length)) {
     return cliFailure("INVALID_INPUT", lang("Describe the task on an open board.", "Опишите задачу на открытой доске."));
   }
-  if (state.drafting) return cliFailure("DRAFT_IN_PROGRESS", lang("Codex is already preparing a draft.", "Codex уже готовит черновик."));
+  if (state.drafting) return cliFailure("DRAFT_IN_PROGRESS", lang("The agent is already preparing a draft.", "Агент уже готовит черновик."));
   if (files.reduce((total, file) => total + file.bytes.byteLength, 0) > maxAttachmentBytes) {
     return cliFailure("ATTACHMENT_LIMIT", lang("Attachments are limited to 64 MiB per task.", "Лимит вложений на задачу — 64 МиБ."));
   }
@@ -581,6 +586,18 @@ ipcMain.handle("board:openWorktree", async (event, id: unknown) => {
 
 const launchingTasks = new Set<string>();
 const runningTasks = new Set<string>();
+const runActivityByTask = new Map<string, RunActivity[]>();
+
+function publishRunActivity(project: string, id: string, items: RunActivity[]) {
+  const key = project + "\0" + id;
+  if (items.length) runActivityByTask.set(key, items);
+  else runActivityByTask.delete(key);
+  for (const state of windowStates.values()) {
+    if (state.project === project && !state.window.isDestroyed()) {
+      state.window.webContents.send("chat:update", { project, id, type: "run", items });
+    }
+  }
+}
 
 function notifyRunChange(project: string) {
   for (const state of windowStates.values()) {
@@ -600,6 +617,22 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   const key = project + "\0" + id;
   if (launchingTasks.has(key)) return cliFailure("LAUNCH_IN_PROGRESS", "This task is already being launched.");
   launchingTasks.add(key);
+  const activity = new Map<string, RunActivity>();
+  let updateTimer: NodeJS.Timeout | undefined;
+  const publish = () => {
+    updateTimer = undefined;
+    publishRunActivity(project, id, runLog(activity));
+  };
+  const saveActivity = async () => {
+    clearTimeout(updateTimer);
+    const items = runLog(activity);
+    if (!items.length) return;
+    const saved = await callCli<Task>(project, ["run-log", id], { entries: items });
+    if (saved.ok) publishRunActivity(project, id, []);
+    else publishRunActivity(project, id, [
+      ...items, { id: "save-error", type: "error", title: "", text: saved.error.message, status: "failed" },
+    ]);
+  };
   let prepared = false;
   let monitoring = false;
   try {
@@ -618,7 +651,10 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       return started;
     }
     prepared = true;
-    const { threadId: codexThreadId, completion } = await startCodexRun(client, project, started.data.worktree, started.data.task);
+    const { threadId: codexThreadId, completion } = await startCodexRun(client, project, started.data.worktree, started.data.task, item => {
+      activity.set(item.id, item);
+      updateTimer ??= setTimeout(publish, 80);
+    });
     monitoring = true;
     runningTasks.add(key);
     notifyRunChange(project);
@@ -626,6 +662,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     const saved = started.data.task.codexThreadId ? { ok: true as const, data: started.data.task } :
       await callCli<Task>(project, ["update", id], { codexThreadId, actor: "user" });
     void completion.then(async reason => {
+      await saveActivity();
       if (reason) await recordRunFailure(project, id, reason);
       else await callCli<Task>(project, ["pause", id]);
     }).finally(() => {
@@ -637,6 +674,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     return cliFailure("CODEX_LINK_FAILED", saved.error.message + "\n" + "codex://threads/" + codexThreadId);
   } catch (error) {
     const reason = (error as Error).message;
+    await saveActivity();
     const failure = prepared ? await recordRunFailure(project, id, reason) : undefined;
     return cliFailure("CODEX_LAUNCH_FAILED", [reason, failure].filter(Boolean).join("\n"));
   } finally {

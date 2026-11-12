@@ -93,10 +93,44 @@ function renderChatTurn(list, draft) {
   if (atBottom) list.scrollTop = list.scrollHeight;
 }
 
-function updateChat({ project, id, type, text }) {
+function renderRunActivity(container, items) {
+  const labels = {
+    commandExecution: ["Command", "Команда"], fileChange: ["File changes", "Изменения файлов"],
+    mcpToolCall: ["Tool call", "Вызов инструмента"], dynamicToolCall: ["Tool call", "Вызов инструмента"],
+    reasoning: ["Summary", "Сводка"], webSearch: ["Search", "Поиск"],
+  };
+  const expanded = new Set([...container.querySelectorAll("details[open]")].map(entry => entry.dataset.item));
+  container.replaceChildren(...items.map(item => {
+    if (item.type === "agentMessage" || item.type === "plan") return chatText(item.text);
+    if (item.type === "truncated") return element("p", language("Earlier activity exceeded the log limit.", "Ранние события не поместились в журнал."), "muted");
+    if (item.type === "error") return element("p", item.text, "muted");
+    const detail = element("details", undefined, "chat-run-item");
+    detail.dataset.item = item.id;
+    detail.open = expanded.has(item.id);
+    const label = item.title || (Object.hasOwn(labels, item.type) ? language(...labels[item.type]) : item.type);
+    const state = item.status === "failed" ? language("Failed", "Ошибка") :
+      item.status === "inProgress" ? language("Running", "Выполняется") : "";
+    detail.append(element("summary", [label, state].filter(Boolean).join(" · ")));
+    if (item.text) detail.append(element("pre", item.text));
+    return detail;
+  }));
+  container.hidden = items.length === 0;
+}
+
+function updateChat({ project, id, type, text, items }) {
+  const open = frame.project === project && sheet.open && sheetKind === "task" && taskInSheet?.id === id;
+  if (type === "run" && frame.project === project) {
+    (frame.runActivity ??= {})[id] = items;
+    const list = open && body.querySelector(".chat-log");
+    if (list) {
+      const atBottom = list.scrollHeight - list.clientHeight - list.scrollTop <= 8;
+      renderRunActivity(list.querySelector(".chat-run-live"), items);
+      if (atBottom) list.scrollTop = list.scrollHeight;
+    }
+    return;
+  }
   const draft = chatDrafts.get(project + "\0" + id);
   if (!draft?.pending) return;
-  const open = frame.project === project && sheet.open && sheetKind === "task" && taskInSheet?.id === id;
   if (type === "saved" && draft.pending === "saving") {
     draft.text = "";
     draft.files = [];
@@ -188,6 +222,12 @@ function taskChat(task) {
       divider.append(element("span", day));
       list.append(divider);
     }
+    if (event.run?.length) {
+      const log = element("li", undefined, "chat-run");
+      renderRunActivity(log, event.run);
+      list.append(log);
+      continue;
+    }
     for (const text of event.chat?.commentary ?? []) {
       const commentary = element("li", undefined, "chat-commentary");
       commentary.append(chatText(text));
@@ -241,7 +281,9 @@ function taskChat(task) {
     entry.append(conversation ? date : date.cloneNode(true));
     list.append(entry);
   }
-  list.append(element("li", undefined, "chat-turn"));
+  const liveRun = element("li", undefined, "chat-run chat-run-live");
+  renderRunActivity(liveRun, frame.runActivity?.[task.id] ?? []);
+  list.append(liveRun, element("li", undefined, "chat-turn"));
   renderChatTurn(list, draft);
   area.append(list);
   requestAnimationFrame(() => { list.scrollTop = draft.scroll ?? list.scrollHeight; });
