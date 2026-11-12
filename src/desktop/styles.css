@@ -369,8 +369,10 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .image-preview-toolbar output { min-width: 5ch; text-align: center; color: var(--muted); }
 .image-preview-viewport { overflow: auto; overscroll-behavior: contain; background: var(--lane); cursor: grab; touch-action: none; }
 .image-preview-viewport.dragging { cursor: grabbing; }
-.image-preview-stage { display: flex; width: max-content; min-width: 100%; min-height: 100%; }
+.image-preview-stage { position: relative; display: flex; width: max-content; min-width: 100%; min-height: 100%; }
 .image-preview-stage img { flex: none; margin: auto; user-select: none; }
+.image-preview-status { align-self: center; margin: auto; padding: 12px; color: var(--muted); }
+.image-preview-stage img:not([hidden]) + .image-preview-status { position: absolute; inset: 12px auto auto 12px; background: var(--panel); border-radius: 6px; }
 .chat-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .chat-controls .chat-icon { width: 30px; padding: 0; }
 .chat-options { display: flex; align-items: center; gap: 6px; min-width: 0; margin-inline-start: auto; }
