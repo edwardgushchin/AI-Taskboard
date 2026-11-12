@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { startCodexRun } from "../src/desktop/codex-run.ts";
 import { createTask } from "../src/cli/tasks.ts";
 import type { RunActivity } from "../src/cli/model.ts";
+import type { TokenUsageReport } from "../src/cli/token-usage.ts";
 
 test("the Codex launch probes access, applies settings, and monitors the turn", async t => {
   const folder = realpathSync(mkdtempSync(join(tmpdir(), "ai-taskboard-codex-run-")));
@@ -38,7 +39,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '  } else if (method === "project/list") {',
     '    result = { data: [{ id: "board-project", roots: [{ path: require("node:path").dirname(capture) }] }], nextCursor: null };',
     '  } else if (method === "thread/start" || method === "thread/resume") {',
-    '    result = { thread: { id: params.threadId ?? thread, projectId: outcome === "wrong-project" ? null : params.projectId },',
+    '    result = { model: "resolved-model", thread: { id: params.threadId ?? thread, projectId: outcome === "wrong-project" ? null : params.projectId },',
     '      approvalPolicy: params.approvalPolicy, approvalsReviewer: outcome === "manual-review" ? "user" : params.approvalsReviewer,',
     '      activePermissionProfile: { id: outcome === "readonly" ? ":read-only" : params.permissions } };',
     '  } else if (method === "turn/start") {',
@@ -47,6 +48,12 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '  send({ id, result });',
     '  if (method === "turn/start") {',
     '    if (outcome === "closed") { process.stdin.destroy(); return; }',
+    '    if (outcome.startsWith("usage")) {',
+    '      send({ method: "turn/started", params: { threadId: thread, turn: { id: "turn-1" } } });',
+    '      const counts = { totalTokens: 120, inputTokens: 100, cachedInputTokens: 50, cacheWriteInputTokens: 0, outputTokens: 20, reasoningOutputTokens: 10 };',
+    '      send({ method: "thread/tokenUsage/updated", params: { threadId: thread, turnId: "turn-1", tokenUsage: { total: counts, last: counts } } });',
+    '      if (outcome === "usage-closed") { process.stdin.destroy(); return; }',
+    '    }',
     '    const itemEvent = (method, params) => send({ method: "item/" + method, params: { threadId: thread, ...params } });',
     '    if (["review-denied", "review-approved"].includes(outcome)) {',
     '      const review = { reviewId: "access-1", action: { type: "networkAccess", target: "docs.example.com:443" } };',
@@ -64,7 +71,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '    itemEvent("reasoning/textDelta", { itemId: "reason", delta: "private" });',
     '    itemEvent("completed", { item: { id: "reason", type: "reasoning", summary: ["Public summary"], content: ["private"] } });',
     '    itemEvent("agentMessage/delta", { threadId: "unrelated", itemId: "note", delta: "unrelated" });',
-    '    const failed = outcome === "failed";',
+    '    const failed = outcome === "failed" || outcome === "usage-failed";',
     '    send({ method: "turn/completed", params: { threadId: thread, turn: {',
     '      id: "turn-1", status: failed ? "failed" : "completed", error: failed ? { message: "Provider disconnected" } : null,',
     '    } } });',
@@ -142,4 +149,21 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(resumedCalls[2].params.cwd, worktree);
   assert.equal(resumedCalls[2].params.approvalPolicy, "on-request");
   assert.equal(resumedCalls[2].params.approvalsReviewer, "auto_review");
+  for (const outcome of ["usage", "usage-failed", "usage-closed"]) {
+    const reports: TokenUsageReport[] = [];
+    const measured = await startCodexRun(client(outcome), folder, worktree, task, undefined, async report => { reports.push(report); });
+    const failure = await measured.completion;
+    assert.equal(Boolean(failure), outcome !== "usage");
+    assert.ok(reports.length >= 2);
+    const record = reports.at(-1)!.records[0];
+    assert.equal(record.model, "resolved-model");
+    assert.equal(record.totalTokens, 120);
+    assert.equal(record.inputTokens, 100);
+    assert.equal(record.cachedInputTokens, 50);
+    assert.equal(record.incomplete, outcome !== "usage");
+  }
+  const storageFailure = await startCodexRun(client("usage"), folder, worktree, task, undefined, async report => {
+    if (report.records.some(record => record.totalTokens !== null)) throw new Error("Usage storage denied");
+  });
+  assert.match((await storageFailure.completion) ?? "", /Usage storage denied/);
 });

@@ -9,6 +9,7 @@ import { discoverRepository, excludeBoard, git } from "./git.ts";
 import type { Repository } from "./git.ts";
 import { hexTagColor, reasoningEffortPattern, registerTags, tagColors, tagKey, TaskboardError, taskIdPattern, taskStates } from "./model.ts";
 import type { BoardIndex, Task } from "./model.ts";
+import { parseUsageReport, tokenFields, totalTokenUsage } from "./token-usage.ts";
 
 function stat(path: string) {
   try {
@@ -204,6 +205,19 @@ export function validateCard(value: unknown, id: string): Task {
     throw new TaskboardError("CORRUPT_STORAGE", "Invalid card for " + id + ".", { id });
   }
   const task = value as unknown as Task;
+  if (task.tokenUsage !== undefined) {
+    try {
+      const usage = task.tokenUsage;
+      if (!isRecord(usage) || !Array.isArray(usage.reports) || !Array.isArray(usage.byModel)) throw new Error();
+      const reports = usage.reports.map(parseUsageReport);
+      const totals = totalTokenUsage(reports.flatMap(report => report.records));
+      if (new Set(reports.map(report => report.id)).size !== reports.length ||
+          usage.byModel.length !== totals.length || usage.byModel.some((entry, index) =>
+            !isRecord(entry) || (["model", "incomplete", ...tokenFields] as const).some(key => entry[key] !== totals[index][key]))) throw new Error();
+    } catch {
+      throw new TaskboardError("CORRUPT_STORAGE", "Invalid token usage for " + id + ".", { id });
+    }
+  }
   const files = new Set(task.attachments.map(file => file.file));
   for (const event of task.history) {
     if (event?.attachment !== undefined && (event.action !== "attach" || !files.has(event.attachment))) {
