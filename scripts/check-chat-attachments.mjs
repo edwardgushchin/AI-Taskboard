@@ -90,6 +90,7 @@ app.whenReady().then(async () => {
     };
     ${readFileSync(require.resolve("markdown-it/browser"), "utf8")}
     ${read("image-preview.js")}
+    ${read("markdown.js")}
     ${read("chat.js")}
     ${read("renderer.js")}
     frame = { project: ${JSON.stringify(project)}, russian: true, board: { tasks: [window.fixtureTask], archived: [] } };
