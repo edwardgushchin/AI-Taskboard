@@ -28,6 +28,7 @@ interface Board {
   tags: BoardTag[];
   tasks: Task[];
   archived: (ArchiveLink & { id: string })[];
+  gitInfo?: { branch?: string; head?: string; user?: string };
 }
 
 interface WindowState {
@@ -56,6 +57,8 @@ const subscriptions = new Map<string, BoardWatch>();
 const commands = new Map<string, string[]>([
   ["init", ["init"]], ["list", ["list"]], ["show", ["show"]], ["update", ["update"]],
   ["comment", ["comment"]],
+  ["git-refs", ["git", "refs"]], ["git-switch", ["git", "switch"]],
+  ["git-create", ["git", "create"]], ["git-detach", ["git", "detach"]], ["git-publish", ["git", "publish"]],
   ["approve", ["approve"]], ["review", ["review"]], ["accept", ["accept"]],
   ["return-to-draft", ["return-to-draft"]],
   ["restore-changes", ["restore-changes"]],

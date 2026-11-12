@@ -459,3 +459,59 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 .lane-collapse[aria-expanded="false"] .icon { transform: rotate(180deg); }
 .tag-create { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .tag-create input:not([type="color"]) { flex: 1; min-width: 10em; }
+
+.status-bar {
+  flex: none; min-height: 24px; display: flex; align-items: center; gap: 4px; padding-inline: 4px;
+  border-top: 1px solid var(--border); color: var(--muted); background: var(--toolbar); font-size: 12px; line-height: 18px;
+}
+.status-git { min-width: 0; display: flex; align-items: center; gap: 5px; }
+.status-git span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status-bar .icon { width: 14px; height: 14px; }
+.status-bar > button { min-height: 22px; border: 0; border-radius: 3px; padding: 2px 6px; color: inherit; font: inherit; }
+.status-bar > button:hover { background: color-mix(in srgb, var(--text) 9%, var(--toolbar)); }
+#status-user { margin-inline-start: 6px; }
+#status-notifications { margin-inline-start: auto; }
+.git-branches {
+  inset: auto auto 30px 8px; margin: 0; width: min(600px, calc(100vw - 16px)); max-height: min(70vh, 480px);
+  padding: 6px; border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); background: var(--panel); box-shadow: 0 8px 28px #0005;
+  font-size: 13px; line-height: 18px;
+}
+.git-branches:popover-open { display: flex; flex-direction: column; gap: 2px; }
+.git-branches > input { flex: none; width: 100%; min-height: 30px; margin-bottom: 4px; padding: 4px 8px; font: inherit; }
+.git-branches .button {
+  flex: none; min-height: 28px; border: 0; border-radius: 3px; padding: 5px 8px;
+  color: inherit; background: transparent; font: inherit; font-weight: 400; text-align: left;
+}
+.git-branches .button:hover { background: color-mix(in srgb, var(--text) 7%, var(--panel)); }
+.git-branches .button:focus-visible {
+  outline: 1px solid var(--focus); outline-offset: -1px;
+  background: color-mix(in srgb, var(--focus) 12%, var(--panel));
+}
+.git-branches .git-menu-action { justify-content: start; gap: 8px; padding-block: 4px; }
+.git-menu-action .icon { color: var(--muted); }
+.git-branches p { padding: 8px; font: inherit; }
+.git-ref-list { overflow: auto; min-height: 0; margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--border); }
+.git-branches .git-ref { display: grid; width: 100%; min-height: 44px; gap: 0; }
+.git-ref-heading, .git-ref-detail { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.git-ref-name, .git-ref-author, .git-ref-subject { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-ref-name { min-width: 0; }
+.git-ref-heading .icon { color: var(--muted); }
+.git-ref-heading .icon:has(use[href="#icon-check"]) { color: var(--focus); }
+.git-ref-date { flex: none; margin-inline-start: auto; padding-inline-start: 8px; color: var(--muted); font-size: 12px; }
+.git-ref-detail { margin-inline-start: 22px; color: var(--muted); font-size: 12px; line-height: 16px; }
+.git-ref-detail > span + span::before { content: "·" / ""; margin-inline-end: 6px; }
+.git-ref-author { flex: 0 1 auto; max-width: 35%; }
+.git-ref-hash { flex: none; }
+.git-ref-subject { min-width: 0; }
+.git-branches .git-ref[aria-current="true"] { background: color-mix(in srgb, var(--text) 4%, var(--panel)); }
+.git-branches .git-ref[aria-current="true"]:hover { background: color-mix(in srgb, var(--text) 8%, var(--panel)); }
+.notifications {
+  inset: auto 8px 30px auto; margin: 0; width: min(360px, calc(100vw - 16px)); max-height: min(60vh, 400px);
+  overflow: auto; padding: 6px; border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); background: var(--panel); box-shadow: 0 6px 20px #0004;
+}
+.notifications:popover-open { display: grid; gap: 4px; }
+.notifications p { padding: 7px; }
+.notification-entry { display: grid; justify-content: start; justify-items: start; text-align: start; white-space: normal; }
+.notification-entry span { color: var(--muted); }
