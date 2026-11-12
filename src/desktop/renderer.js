@@ -464,12 +464,17 @@ function loadLanePreferences() {
   }
 }
 
-function laneTools(state, title, tasks, count, content) {
+function laneTools(state, title, tasks, total, count, content) {
   const saved = lanePreferences[state];
   const selected = new Set(Array.isArray(saved?.tags) ? saved.tags.filter(key => boardTags.has(key)) : []);
+  const priorities = ["low", "normal", "high", "urgent"];
+  const priority = element("select");
+  priority.append(new Option(language("Any priority", "Любой приоритет"), ""),
+    ...priorities.map(value => new Option(priorityName(value), value)));
+  priority.value = priorities.includes(saved?.priority) ? saved.priority : "";
   let collapsed = saved?.collapsed === true;
   const persist = () => {
-    lanePreferences[state] = { tags: [...selected], collapsed };
+    lanePreferences[state] = { tags: [...selected], priority: priority.value, collapsed };
     try {
       localStorage.setItem(lanePreferenceKey(), JSON.stringify({ ...loadLanePreferences(), [state]: lanePreferences[state] }));
     } catch {
@@ -483,15 +488,28 @@ function laneTools(state, title, tasks, count, content) {
   const filterCount = element("span", undefined, "count");
   summary.append(icon("filter"), filterCount);
   const options = element("div", undefined, "lane-filter-options");
+  const priorityLabel = element("label", undefined, "lane-priority");
+  priorityLabel.append(element("span", language("Priority", "Приоритет")), priority);
+  const resetLabel = language("Reset column filter", "Сбросить фильтр колонки");
+  const reset = button(resetLabel, clearFilters, "quiet");
+  options.append(priorityLabel);
   options.append(...tagChoices([...boardTags].sort(([, a], [, b]) => a.name.localeCompare(b.name)), selected));
+  options.append(reset);
   filter.append(summary, options);
-  filter.hidden = !options.childElementCount;
   options.addEventListener("change", () => {
     selected.clear();
-    for (const checkbox of options.querySelectorAll(":checked")) selected.add(checkbox.value);
+    for (const checkbox of options.querySelectorAll("input:checked")) selected.add(checkbox.value);
     persist();
     updateCards();
   });
+  function clearFilters() {
+    priority.value = "";
+    selected.clear();
+    for (const checkbox of options.querySelectorAll("input:checked")) checkbox.checked = false;
+    persist();
+    updateCards();
+    summary.focus();
+  }
   const toggle = button("", () => {
     collapsed = !collapsed;
     persist();
@@ -507,14 +525,23 @@ function laneTools(state, title, tasks, count, content) {
     toggle.setAttribute("aria-expanded", String(!collapsed));
   }
   function updateCards() {
-    const matching = tasks.filter(task => [...selected].every(key => task.tags.some(name => tagKey(name) === key)));
+    const matching = tasks.filter(task => (!priority.value || task.priority === priority.value) &&
+      (!selected.size || task.tags.some(name => selected.has(tagKey(name)))));
+    const active = selected.size + Number(Boolean(priority.value));
     for (const old of content.querySelectorAll(".task-card-details")) cardCovers.unobserve(old);
     content.replaceChildren(...matching.map(card));
-    count.textContent = matching.length;
-    filterCount.textContent = selected.size;
-    filterCount.hidden = selected.size === 0;
+    if (!matching.length && (total || active)) {
+      const empty = element("div", undefined, "lane-filter-empty");
+      empty.append(element("p", language("No matching tasks", "Нет подходящих карточек"), "muted"));
+      if (active) empty.append(button(resetLabel, clearFilters, "quiet"));
+      content.append(empty);
+    }
+    count.textContent = matching.length === total ? String(total) : matching.length + language(" of ", " из ") + total;
+    filterCount.textContent = active;
+    filterCount.hidden = active === 0;
+    reset.hidden = active === 0;
     summary.title = filterLabel;
-    summary.setAttribute("aria-label", selected.size ? filterLabel + " (" + selected.size + ")" : filterLabel);
+    summary.setAttribute("aria-label", active ? filterLabel + " (" + active + ")" : filterLabel);
   }
   updateCards();
   updateCollapse();
@@ -579,7 +606,8 @@ function render() {
     const content = element("div", undefined, "lane-cards");
     content.id = "lane-cards-" + state;
     const header = element("div", undefined, "lane-header");
-    header.append(heading, laneTools(state, title, tasks, count, content));
+    const total = board.tasks.filter(task => task.status === state).length;
+    header.append(heading, laneTools(state, title, tasks, total, count, content));
     column.append(header, content);
     return column;
   });
