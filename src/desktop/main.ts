@@ -480,7 +480,8 @@ ipcMain.handle("board:draft", async (event, request: unknown, files: unknown = [
     if (files.length) {
       scratch = await mkdtemp(join(tmpdir(), "ai-taskboard-paste-"));
       for (const [index, file] of files.entries()) {
-        const extension = imageExtensions.get(file.type);
+        const suffix = extname(file.name.trim()).toLowerCase();
+        const extension = imageExtensions.get(file.type) ?? (imageTypes.has(suffix) ? suffix : undefined);
         const path = join(scratch, String(index) + (extension ?? ""));
         await writeFile(path, Buffer.from(file.bytes));
         attachments.push({ path, name: file.name.trim(), image: extension !== undefined });
@@ -494,11 +495,11 @@ ipcMain.handle("board:draft", async (event, request: unknown, files: unknown = [
     return await callCli<Task>(board.project, ["create"], {
       ...draft, actor: "agent", attachmentSources: attachments.map(({ path, name }) => ({ path, name })),
     });
-  } catch {
+  } catch (error) {
     return cliFailure("CODEX_DRAFT_FAILED", lang(
       "Codex could not prepare a draft. Check that Codex is up to date and you are signed in, then retry.",
       "Codex не смог подготовить черновик. Проверьте версию Codex и вход в аккаунт, затем повторите попытку.",
-    ));
+    ) + "\n" + (error instanceof Error ? error.message : String(error)).slice(0, 1500));
   } finally {
     if (scratch) await rm(scratch, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
     state.drafting = false;
