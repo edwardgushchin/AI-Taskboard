@@ -17,7 +17,9 @@ export function runActivity(entries: Map<string, RunActivity>, method: string, p
     const previous = entries.get(id);
     const status = string(item.status) || (method === "item/completed" ? "completed" : "inProgress");
     if (type === "agentMessage" || type === "plan") {
-      return { id, type, title: "", text: bounded(string(item.text) || previous?.text || ""), status };
+      const phase = item.phase ?? previous?.phase;
+      return { id, type, title: "", text: bounded(string(item.text) || previous?.text || ""), status,
+        ...(phase === "commentary" || phase === "final_answer" ? { phase } : {}) };
     }
     if (type === "reasoning") {
       const summary = Array.isArray(item.summary) ? item.summary.map(string).join("\n") : "";
@@ -26,7 +28,8 @@ export function runActivity(entries: Map<string, RunActivity>, method: string, p
     if (type === "commandExecution") {
       const output = string(item.aggregatedOutput) || previous?.text || "";
       const exit = typeof item.exitCode === "number" ? "\nExit code: " + item.exitCode : "";
-      return { id, type, title: bounded(string(item.command)), text: bounded(output + exit), status };
+      return { id, type, title: bounded(string(item.command)), text: bounded(output + exit),
+        status: typeof item.exitCode === "number" && item.exitCode !== 0 ? "failed" : status };
     }
     const { id: _id, type: _type, status: _status, ...details } = item;
     const title = [string(item.server), string(item.tool)].filter(Boolean).join(" / ") || string(item.query);

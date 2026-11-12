@@ -28,7 +28,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   const started = Promise.withResolvers<void>();
   const runtime = runInNewContext(stripTypeScriptTypes(activitySource) +
     "\n({ sendChat, frame, windowStates, runningTasks })", {
-    basename, extname, join,
+    basename, extname, join, performance,
     app: { getPath: () => "profile" },
     lang: (english: string) => english,
     tmpdir: () => "scratch",

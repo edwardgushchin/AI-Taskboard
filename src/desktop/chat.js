@@ -119,36 +119,143 @@ function readableRunCommand(command) {
   }
 }
 
-function renderRunActivity(container, items) {
-  const labels = {
-    commandExecution: ["Command", "Команда"], fileChange: ["File changes", "Изменения файлов"],
-    mcpToolCall: ["Tool call", "Вызов инструмента"], dynamicToolCall: ["Tool call", "Вызов инструмента"],
-    reasoning: ["Summary", "Сводка"], webSearch: ["Search", "Поиск"],
+function activityKind(item) {
+  if (["imageView", "imageGeneration"].includes(item.type) || /(?:view_image|open_image|image_view)/i.test(item.title)) return "image";
+  return ({ commandExecution: "command", fileChange: "edit", webSearch: "search", reasoning: "reasoning" })[item.type] ?? "tool";
+}
+
+function activityCount(count, english, russian) {
+  const form = new Intl.PluralRules(frame.russian ? "ru" : "en").select(count);
+  return count + " " + (frame.russian ? (russian[{ one: 0, few: 1, many: 2 }[form] ?? 2]) : english[count === 1 ? 0 : 1]);
+}
+
+function activityState(items) {
+  const failed = items.filter(item => ["failed", "declined"].includes(item.status)).length;
+  const running = items.filter(item => item.status === "inProgress").length;
+  return {
+    code: failed ? "failed" : running ? "running" : "completed",
+    text: [failed ? language("Failed: ", "Ошибок: ") + failed : "", running ? language("Running: ", "Выполняется: ") + running : ""].filter(Boolean).join(" · "),
   };
-  const expanded = new Set([...container.querySelectorAll("details[open]")].map(entry => entry.dataset.item));
-  container.replaceChildren(...items.map(item => {
-    if (item.type === "agentMessage" || item.type === "plan") return chatText(item.text);
-    if (item.type === "truncated") return element("p", language("Earlier activity exceeded the log limit.", "Ранние события не поместились в журнал."), "muted");
-    if (item.type === "error") return element("p", item.text, "muted");
+}
+
+function activitySummary(detail, label, preview, kind, state) {
+  const summary = element("summary");
+  const title = element("span", undefined, "chat-run-label");
+  title.append(element("span", label));
+  const compact = preview.replace(/\s+/g, " ").trim();
+  if (compact) title.append(element("span", " " + compact.slice(0, 180) + (compact.length > 180 ? "…" : ""), "chat-run-preview"));
+  summary.append(icon(({ command: "terminal", edit: "edit", image: "images", search: "search", reasoning: "thought", tool: "tool" })[kind]), title);
+  if (state.text) summary.append(element("span", state.text, "chat-run-state"));
+  summary.append(icon("chevron"));
+  detail.dataset.state = state.code;
+  detail.append(summary);
+}
+
+function renderRunActivity(container, items, completed = false, durationMs) {
+  const previous = new Map([...container.querySelectorAll("details")].map(entry => [entry.dataset.item, entry.open]));
+  const focused = container.contains(document.activeElement) ? document.activeElement.closest("details")?.dataset.item : undefined;
+  const nodes = [];
+  const finalItems = new Set();
+  if (completed) {
+    for (const item of items) {
+      if (item.type === "agentMessage" && item.phase === "final_answer" && item.text.trim()) finalItems.add(item);
+    }
+    // Older logs have no phase. Their last completed message is the final reply.
+    if (!finalItems.size && !items.some(item => item.type === "agentMessage" && item.phase)) {
+      const last = items.findLast(item => item.type === "agentMessage" && item.status === "completed" && item.text.trim());
+      if (last) finalItems.add(last);
+    }
+  }
+  let operations = [];
+  function operation(item) {
+    const kind = activityKind(item);
+    const labels = {
+      command: ["Ran command", "Выполнена команда"], edit: ["Edited files", "Изменены файлы"],
+      image: ["Viewed image", "Просмотр изображения"], search: ["Searched the web", "Поиск в интернете"],
+      reasoning: ["Reasoning summary", "Сводка размышлений"], tool: ["Used tool", "Вызов инструмента"],
+    };
     const detail = element("details", undefined, "chat-run-item");
-    detail.dataset.item = item.id;
-    detail.open = expanded.has(item.id);
+    detail.dataset.item = "item:" + item.id;
+    detail.open = previous.get(detail.dataset.item) ?? false;
+    const state = activityState([item]);
+    const label = state.code === "running" ? language("In progress", "Выполняется") :
+      state.code === "failed" ? language("Action failed", "Ошибка действия") :
+      item.type === "imageGeneration" ? language("Generated image", "Создано изображение") : language(...labels[kind]);
+    // Only shorten the visible preview; the original command remains available below.
     const command = item.type === "commandExecution" ? readableRunCommand(item.title) : item.title;
-    const label = command || (Object.hasOwn(labels, item.type) ? language(...labels[item.type]) : item.type);
-    const state = item.status === "failed" ? language("Failed", "Ошибка") :
-      item.status === "inProgress" ? language("Running", "Выполняется") : "";
-    detail.append(element("summary", [label, state].filter(Boolean).join(" · ")));
+    const preview = command.replace(/^(?:"[^"\r\n]*(?:pwsh|powershell)(?:\.exe)?"|\S*(?:pwsh|powershell)(?:\.exe)?)\s+-Command\s+/i, "");
+    activitySummary(detail, label, preview, kind, state);
+    if (command) detail.append(element("pre", command, "chat-run-command"));
+    detail.append(element("pre", item.text || language("No output.", "Нет вывода."), "chat-run-output"));
     if (command !== item.title) {
-      const original = element("details");
-      original.dataset.item = item.id + "/original";
-      original.open = expanded.has(original.dataset.item);
+      const original = element("details", undefined, "chat-run-original");
+      original.dataset.item = "item:" + item.id + "/original";
+      original.open = previous.get(original.dataset.item) ?? false;
       original.append(element("summary", language("Original command", "Исходная команда")), element("pre", item.title));
       detail.append(original);
     }
-    if (item.text) detail.append(element("pre", item.text));
     return detail;
-  }));
+  }
+  function flush() {
+    if (!operations.length) return;
+    if (operations.length === 1) nodes.push(operation(operations[0]));
+    else {
+      const group = element("details", undefined, "chat-run-group");
+      group.dataset.item = "group:" + operations[0].id;
+      group.open = previous.get(group.dataset.item) ?? operations.some(item => previous.get("item:" + item.id));
+      const kinds = [...new Set(operations.map(activityKind))];
+      const names = {
+        command: [["command", "commands"], ["команда", "команды", "команд"]],
+        edit: [["file edit", "file edits"], ["изменение файлов", "изменения файлов", "изменений файлов"]],
+        image: [["image view", "image views"], ["просмотр изображения", "просмотра изображений", "просмотров изображений"]],
+        search: [["search", "searches"], ["поиск", "поиска", "поисков"]],
+        tool: [["tool call", "tool calls"], ["вызов инструмента", "вызова инструментов", "вызовов инструментов"]],
+      };
+      const counts = kinds.map(kind => activityCount(operations.filter(item => activityKind(item) === kind).length, ...names[kind])).join(" · ");
+      const label = activityCount(operations.length, ["action", "actions"], ["действие", "действия", "действий"]);
+      activitySummary(group, label, "· " + counts, kinds.length === 1 ? kinds[0] : "tool", activityState(operations));
+      const children = element("div", undefined, "chat-run-children");
+      children.append(...operations.map(operation));
+      group.append(children);
+      nodes.push(group);
+    }
+    operations = [];
+  }
+  for (const item of items) {
+    if (finalItems.has(item)) continue;
+    if (["agentMessage", "plan", "truncated", "error", "reasoning"].includes(item.type)) {
+      flush();
+      if (item.type === "agentMessage" || item.type === "plan") nodes.push(chatText(item.text));
+      else if (item.type === "reasoning") nodes.push(operation(item));
+      else nodes.push(element("p", item.type === "error" ? item.text : language("Earlier activity exceeded the log limit.", "Ранние события не поместились в журнал."), item.type === "error" ? "chat-run-error" : "muted"));
+    } else operations.push(item);
+  }
+  flush();
+  if (completed && nodes.length) {
+    const work = element("details", undefined, "chat-work");
+    work.dataset.item = "work";
+    work.open = previous.get("work") ?? false;
+    let label = language("Completed", "Выполнено");
+    if (Number.isSafeInteger(durationMs) && durationMs >= 0) {
+      const seconds = Math.floor(durationMs / 1000);
+      const minutes = Math.floor(seconds / 60);
+      label = language("Completed in ", "Выполнено за ") +
+        (minutes ? minutes + language("m ", " мин ") : "") + seconds % 60 + language("s", " с");
+    }
+    activitySummary(work, label, "", "reasoning", activityState(items));
+    const chronology = element("div", undefined, "chat-run-body");
+    chronology.append(...nodes);
+    work.append(chronology);
+    nodes.splice(0, nodes.length, work);
+  }
+  for (const item of finalItems) {
+    const final = element("div", undefined, "chat-run-final");
+    final.append(chatText(item.text));
+    nodes.push(final);
+  }
+  container.replaceChildren(...nodes);
   container.hidden = items.length === 0;
+  if (focused) [...container.querySelectorAll("details")].find(entry => entry.dataset.item === focused)?.querySelector("summary")?.focus({ preventScroll: true });
 }
 
 function updateChat({ project, id, type, text, items }) {
@@ -259,14 +366,15 @@ function taskChat(task) {
     }
     if (event.run?.length) {
       const log = element("li", undefined, "chat-run");
-      renderRunActivity(log, event.run);
+      renderRunActivity(log, event.run, true, event.durationMs);
       list.append(log);
       continue;
     }
-    for (const text of event.chat?.commentary ?? []) {
-      const commentary = element("li", undefined, "chat-commentary");
-      commentary.append(chatText(text));
-      commentary.setAttribute("aria-label", language("Agent update", "Сообщение агента о ходе ответа"));
+    if (event.chat?.commentary?.length) {
+      const commentary = element("li", undefined, "chat-run");
+      renderRunActivity(commentary, event.chat.commentary.map((text, index) => ({
+        id: String(index), type: "agentMessage", phase: "commentary", title: "", text, status: "completed",
+      })), true, event.durationMs);
       list.append(commentary);
     }
     const conversation = ["chat", "comment", "questions"].includes(event.action);

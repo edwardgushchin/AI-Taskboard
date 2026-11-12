@@ -17,16 +17,24 @@ class Element {
   open = false;
   tag: string;
   text: string;
-  constructor(tag: string, text = "") { this.tag = tag; this.text = text; }
+  className: string;
+  constructor(tag: string, text = "", className = "") { this.tag = tag; this.text = text; this.className = className; }
   append(...children: Element[]) { this.children.push(...children); }
   replaceChildren(...children: Element[]) { this.children = children; }
-  querySelectorAll(): Element[] {
-    return this.children.flatMap(child => [...(child.open ? [child] : []), ...child.querySelectorAll()]);
+  querySelectorAll(selector: string): Element[] {
+    return this.children.flatMap(child => {
+      const matches = selector.startsWith(".") ? child.className.split(" ").includes(selector.slice(1)) : child.tag === selector;
+      return [...(matches ? [child] : []), ...child.querySelectorAll(selector)];
+    });
   }
+  querySelector(selector: string) { return this.querySelectorAll(selector)[0]; }
+  contains() { return false; }
 }
 const { readableRunCommand, renderRunActivity } = runInNewContext(source.slice(start, end) +
   "\n({ readableRunCommand, renderRunActivity })", {
-  element: (tag: string, text?: string) => new Element(tag, text),
+  element: (tag: string, text?: string, className?: string) => new Element(tag, text, className),
+  document: {}, frame: { russian: true },
+  icon: () => new Element("svg"),
   language: (_english: string, russian: string) => russian,
   chatText: (text: string) => new Element("div", text),
 }) as {
@@ -42,13 +50,14 @@ test("the screenshot command renders readable Russian and Windows paths live and
   for (const items of [[entry], saved.history.at(-1).run]) {
     const container = new Element("li");
     renderRunActivity(container, items);
-    const [summary, raw] = container.children[0].children;
-    assert.match(summary.text, /Обязательная визуальная проверка чата недоступна/);
-    assert.match(summary.text, /Выполнить node scripts\/check-chat\.mjs --references/);
-    assert.ok(!summary.text.includes("\\u0432"));
-    assert.ok(summary.text.includes(String.raw`& 'C:\Program Files\nodejs\node.exe'`));
-    assert.ok(summary.text.includes(String.raw`'G:\Projects\2026\AI Taskboard\src\cli\main.ts'`));
-    const json = summary.text.slice(summary.text.indexOf("\n") + 1, summary.text.indexOf("\n'@"));
+    const command = container.querySelector(".chat-run-command");
+    const raw = container.querySelector(".chat-run-original");
+    assert.match(command.text, /Обязательная визуальная проверка чата недоступна/);
+    assert.match(command.text, /Выполнить node scripts\/check-chat\.mjs --references/);
+    assert.ok(!command.text.includes("\\u0432"));
+    assert.ok(command.text.includes(String.raw`& 'C:\Program Files\nodejs\node.exe'`));
+    assert.ok(command.text.includes(String.raw`'G:\Projects\2026\AI Taskboard\src\cli\main.ts'`));
+    const json = command.text.slice(command.text.indexOf("\n") + 1, command.text.indexOf("\n'@"));
     assert.ok(JSON.parse(json).condition.includes(String.raw`"G:\Projects\2026\AI Taskboard\.tasks\attachments\T-0032"`));
     assert.equal(raw.children[0].text, "Исходная команда");
     assert.equal(raw.children[1].text, entry.title);
@@ -57,7 +66,7 @@ test("the screenshot command renders readable Russian and Windows paths live and
     raw.open = true;
     renderRunActivity(container, items);
     assert.equal(container.children[0].open, true);
-    assert.equal(container.children[0].children[1].open, true);
+    assert.equal(container.querySelector(".chat-run-original").open, true);
   }
   assert.equal(JSON.stringify(entry), original);
 });

@@ -424,11 +424,14 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       attachments,
       latestUserMessage: { text: message.text ?? "", files: message.chat?.files ?? [] },
     });
+    const replyStarted = performance.now();
     const answer = await replyToTask(app.getPath("userData"), project, { model, effort }, prompt, images,
       text => notify({ type: "commentary", text }),
       taskChatActions(project, task, message.text ?? "", () => notify({ type: "changed" })),
       scratch, maxAttachmentBytes - task.attachments.reduce((sum, file) => sum + file.bytes, 0));
-    const result = await callCli<Task>(project, ["chat", id], { ...answer, actor: "agent", model, effort, replyTo: last });
+    const result = await callCli<Task>(project, ["chat", id], {
+      ...answer, actor: "agent", model, effort, replyTo: last, durationMs: Math.round(performance.now() - replyStarted),
+    });
     return { saved, result };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -629,6 +632,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   if (launchingTasks.has(key)) return cliFailure("LAUNCH_IN_PROGRESS", "This task is already being launched.");
   launchingTasks.add(key);
   const activity = new Map<string, RunActivity>();
+  const runStarted = performance.now();
   let updateTimer: NodeJS.Timeout | undefined;
   const publish = () => {
     updateTimer = undefined;
@@ -638,7 +642,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     clearTimeout(updateTimer);
     const items = runLog(activity);
     if (!items.length) return;
-    const saved = await callCli<Task>(project, ["run-log", id], { entries: items });
+    const saved = await callCli<Task>(project, ["run-log", id], { entries: items, durationMs: Math.round(performance.now() - runStarted) });
     if (saved.ok) publishRunActivity(project, id, []);
     else publishRunActivity(project, id, [
       ...items, { id: "save-error", type: "error", title: "", text: saved.error.message, status: "failed" },

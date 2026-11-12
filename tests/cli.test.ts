@@ -328,12 +328,20 @@ test("task chat stores messages and attachments together and archives the conver
   assert.deepEqual(sent.history[0], task.history[0]);
   assert.deepEqual(sent.history.at(-1).chat, { ...settings, files: [file] });
   const reply = { ...settings, actor: "agent", text: "Who should receive the export?", usage: { used: 32, limit: 256 },
-    commentary: ["I have checked the export settings."] };
+    commentary: ["I have checked the export settings."], durationMs: 12_000 };
   cli(root, ["chat", task.id], { ...reply, replyTo: 0 }, "CHAT_CHANGED");
+  cli(root, ["chat", task.id], { ...reply, durationMs: -1, replyTo: sent.history.length - 1 }, "INVALID_INPUT");
   const answered = cli(root, ["chat", task.id], { ...reply, replyTo: sent.history.length - 1 });
   assert.deepEqual(answered.history.at(-1).chat.usage, reply.usage);
   assert.deepEqual(answered.history.at(-1).chat.commentary, reply.commentary);
+  assert.equal(answered.history.at(-1).durationMs, reply.durationMs);
   cli(root, ["chat", task.id], { ...reply, replyTo: sent.history.length - 1 }, "CHAT_CHANGED");
+  const entries = [{ id: "final", type: "agentMessage", phase: "final_answer", title: "", text: "Saved result", status: "completed" }];
+  cli(root, ["run-log", task.id], { entries, durationMs: -1 }, "INVALID_INPUT");
+  cli(root, ["run-log", task.id], { entries: [{ ...entries[0], phase: "unknown" }] }, "INVALID_INPUT");
+  const logged = cli(root, ["run-log", task.id], { entries, durationMs: 433_000 });
+  assert.deepEqual(logged.history.at(-1).run, entries);
+  assert.equal(logged.history.at(-1).durationMs, 433_000);
 
   const closing = cli(root, ["chat", task.id], { ...settings, text: "Cancel this task." });
   cli(root, ["cancel", task.id], { reason: "Archive the conversation" });

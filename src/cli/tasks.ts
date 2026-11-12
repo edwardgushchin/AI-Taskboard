@@ -1,5 +1,5 @@
 import {
-  member, object, priorities, reasoningEffortPattern, record, requireRevision, requireState, strings, taskIdPattern,
+  member, number, object, priorities, reasoningEffortPattern, record, requireRevision, requireState, strings, taskIdPattern,
   TaskboardError, text,
 } from "./model.ts";
 import { codexThreadPattern } from "./model.ts";
@@ -76,10 +76,12 @@ export function recordRunLog(task: Task, input: Record<string, unknown>): Task {
     return {
       id: text(item.id, "item ID", true), type: text(item.type, "item type", true),
       title: text(item.title, "item title"), text: item.text, status: text(item.status, "item status"),
+      ...(item.phase === undefined ? {} : { phase: member(item.phase, ["commentary", "final_answer"], "item phase") }),
     };
   });
   const updated = record(task, "run-log", "agent");
   updated.history.at(-1)!.run = entries;
+  if (input.durationMs !== undefined) updated.history.at(-1)!.durationMs = number(input.durationMs, "durationMs", 0);
   return { ...updated, closedAt: task.closedAt };
 }
 
