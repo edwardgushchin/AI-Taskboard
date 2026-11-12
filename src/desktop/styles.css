@@ -495,7 +495,7 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 
 .status-bar {
   --status-muted: light-dark(var(--muted), color-mix(in srgb, var(--muted) 67%, var(--toolbar)));
-  flex: none; height: 36px; display: flex; align-items: center; gap: 4px; padding: 7px 8px 4px;
+  flex: none; height: 36px; display: flex; align-items: center; gap: 4px; padding: 6px 8px 3px;
   border-top: 1px solid color-mix(in srgb, var(--text) 6%, var(--toolbar));
   color: var(--status-muted); background: var(--toolbar); font-size: 12px; line-height: 18px;
 }
@@ -510,7 +510,7 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
   color: inherit; background: color-mix(in srgb, var(--text) 20%, var(--toolbar));
 }
 .status-repository {
-  min-width: 0; max-width: 50%; height: 24px; display: flex; align-items: center;
+  min-width: 0; max-width: 50%; height: 26px; display: flex; align-items: center;
   border: 1px solid transparent; border-radius: 5px;
 }
 .status-repository:not(:has(button:not([hidden]))) { display: none; }
@@ -518,7 +518,9 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
   border-color: color-mix(in srgb, var(--text) 6%, var(--toolbar));
   background: color-mix(in srgb, var(--muted) 7%, var(--toolbar));
 }
-.status-repository .status-git { flex: 0 1 auto; padding-inline: 2px; }
+.status-repository > .button { min-height: 24px; height: 24px; border-radius: 0; padding-inline: 3px; }
+.status-repository > .button:last-child { border-radius: 0 4px 4px 0; }
+.status-repository .status-git { flex: 0 1 auto; padding-inline: 2px 4px; border-radius: 4px 0 0 4px; }
 .status-repository .button:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
 #status-user { margin-inline-start: 6px; }
 #status-notifications { margin-inline-start: auto; }
