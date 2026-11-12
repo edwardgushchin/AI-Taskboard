@@ -1,0 +1,12 @@
+@font-face {
+  font-family: codicon;
+  font-display: block;
+  src: url("./codicon.ttf") format("truetype");
+}
+.codicon {
+  display: inline-block; font: normal normal normal 16px/1 codicon;
+  text-align: center; text-rendering: auto; text-decoration: none;
+  -webkit-font-smoothing: antialiased; user-select: none;
+}
+.codicon-git-branch::before { content: "\ec6f"; }
+.codicon-cloud-upload::before { content: "\eac3"; }
