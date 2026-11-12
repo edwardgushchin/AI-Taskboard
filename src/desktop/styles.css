@@ -302,7 +302,11 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
   flex: none; display: flex; align-items: center; justify-content: space-between; gap: 14px;
   padding: 15px 20px; border-bottom: 1px solid var(--border);
 }
-.sheet-header h2 { font-size: 20px; overflow-wrap: anywhere; max-height: 25vh; overflow: auto; }
+.sheet-header h2 {
+  min-width: 0; padding-inline-end: 3px; font-size: 20px; overflow-wrap: anywhere;
+  max-height: 25vh; overflow-x: hidden; overflow-y: auto;
+}
+.sheet-header > .button { flex: none; }
 .task-agent-run {
   display: inline-block; margin-inline-start: 8px; vertical-align: middle; font-size: 12px; font-weight: 400;
 }
