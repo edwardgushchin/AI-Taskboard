@@ -31,11 +31,11 @@ export function invokeGit(cwd: string, args: string[], overrides?: NodeJS.Proces
   ]) {
     delete (env as NodeJS.ProcessEnv)[key];
   }
-  const result = spawnSync("git", ["-C", cwd, ...args], {
-    env: { ...env, ...overrides }, encoding: "utf8", windowsHide: true, maxBuffer: 64 * 1024 * 1024,
+  const result = spawnSync("git", args, {
+    cwd, env: { ...env, ...overrides }, encoding: "utf8", windowsHide: true, maxBuffer: 64 * 1024 * 1024,
   });
   if (result.error) {
-    if ((result.error as NodeJS.ErrnoException).code === "ENOENT") {
+    if ((result.error as NodeJS.ErrnoException).code === "ENOENT" && existsSync(cwd)) {
       throw new TaskboardError("GIT_UNAVAILABLE", "Install Git 2.38 or newer, then reopen the project.");
     }
     throw new TaskboardError("GIT_FAILED", result.error.message);

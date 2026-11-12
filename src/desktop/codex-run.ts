@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { git } from "../cli/git.ts";
 import { codexThreadPattern } from "../cli/model.ts";
@@ -40,14 +41,18 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   onActivity?: (item: RunActivity) => void): Promise<Run> {
   if (!task.git) throw new Error("The task has no prepared Git worktree.");
   const paths = [...new Set(accessPaths(project, cwd, task.git.branch))];
+  const codexHome = (client.env ?? process.env).CODEX_HOME || join(homedir(), ".codex");
+  const worklogSessions = resolve(project, codexHome, "plugins", "data", "codex-worklog-codex-worklog", "sessions-v2");
   const filesystem = [
     '":root" = "read"',
     ...paths.map(path => JSON.stringify(path) + ' = "write"'),
+    JSON.stringify(worklogSessions) + ' = "write"',
     JSON.stringify(join(paths[1], "worktrees")) + ' = "read"',
   ].join(", ");
   const child = spawn(client.path, [
     ...client.args, "app-server", "-c", "permissions." + profile + "={filesystem={" + filesystem + "}}",
     "-c", "default_permissions=" + JSON.stringify(profile),
+    ...(process.platform === "win32" ? ["-c", 'windows.sandbox="mxc"'] : []),
   ], { cwd: project, env: client.env, windowsHide: true, stdio: "pipe" });
   const exited = new Promise<void>(resolve => child.once("close", resolve));
   const output = createInterface({ input: child.stdout });
@@ -157,6 +162,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       "Выполни задачу AI Taskboard " + task.id + " в подготовленной рабочей копии.",
       "Корень доски: " + project,
       "Используй навык ai-taskboard:work-task и прочитай актуальную карточку по номеру.",
+      "Заверши проход командой сдачи, записи прогресса, паузы или блокировки в AI Taskboard. При отказе инструмента укажи его причину в ответе.",
       "Рабочая копия: " + cwd,
       JSON.stringify({ title: task.title, description: task.description, criteria: task.criteria }),
       ...(feedback ? ["Замечание к последней сдаче: " + feedback] : []),

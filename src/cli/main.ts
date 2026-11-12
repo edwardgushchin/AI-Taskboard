@@ -13,6 +13,8 @@ import { hexTagColor, member, number, object, record, registerTags, requireRevis
 import type { Task } from "./model.ts";
 import { initializeBoard, locateBoard, onBoard } from "./storage.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
+import { invokeGit } from "./git.ts";
+import { changeRepository, publishRepository, repositoryRefs } from "./repository.ts";
 import { previewSubmission, submitTask } from "./submission.ts";
 import { changeTask, createTask, recordRunLog } from "./tasks.ts";
 import { dependencyStatus, unfinishedDependencies, validateDependencies } from "./dependencies.ts";
@@ -28,6 +30,7 @@ const help = [
   "          attachment cover TASK-ID --stdin (file and revision)",
   "          attachment restore-reply TASK-ID --stdin (replyAt, revision and attachmentSources)",
   "          list --tag NAME, tag ensure --stdin, tag set --stdin (name and color), tag assign TASK-ID --stdin (tags)",
+  "          git refs, git switch, git create, git detach, git publish --stdin",
   "For init, pass git: true with --stdin to initialize Git in the chosen folder.",
   "With --stdin, pass one JSON object as the command input.",
 ].join("\n");
@@ -68,8 +71,29 @@ function assignTags(store: BoardStore, task: Task): Task {
   return { ...task, tags };
 }
 
+function boardGitInfo(location: BoardLocation) {
+  if (!location.repository || location.repository.bare) return {};
+  const value = (args: string[]) => {
+    try {
+      const result = invokeGit(location.root, args);
+      return result.code === 0 ? result.stdout.trim() || undefined : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  return {
+    branch: value(["symbolic-ref", "--quiet", "--short", "HEAD"]),
+    head: value(["rev-parse", "--verify", "--quiet", "HEAD"]),
+    user: value(["config", "--get", "user.name"]),
+  };
+}
+
 function watchBoard(location: BoardLocation): void {
-  let previous = JSON.stringify({ ok: true, data: onBoard(location, snapshotBoard) });
+  const read = () => {
+    const board = onBoard(location, snapshotBoard);
+    return { ok: true, data: { ...board, gitInfo: boardGitInfo(location) } };
+  };
+  let previous = JSON.stringify(read());
   process.stdout.write(previous + "\n");
   let refreshTimer: NodeJS.Timeout | undefined;
   const watchers: FSWatcher[] = [];
@@ -77,7 +101,7 @@ function watchBoard(location: BoardLocation): void {
     refreshTimer = undefined;
     let current: string;
     try {
-      current = JSON.stringify({ ok: true, data: onBoard(location, snapshotBoard) });
+      current = JSON.stringify(read());
     } catch (error) {
       if (error instanceof TaskboardError && error.code === "BOARD_BUSY") return;
       current = JSON.stringify({ ok: false, error: describe(error) });
@@ -266,8 +290,15 @@ try {
     if (command === "watch") {
       watchBoard(location);
     } else {
-      const data = command === "init" ? initializeBoard(location, snapshotBoard) :
-        onBoard(location, store => run(store, command, id, extra, input, values));
+      let data;
+      if (command === "git") {
+        const action = member(id, ["refs", "switch", "create", "detach", "publish"], "action");
+        data = action === "publish" ? await publishRepository(location, input) : onBoard(location, () =>
+          action === "refs" ? repositoryRefs(location) : changeRepository(location, action, input));
+      } else {
+        data = command === "init" ? initializeBoard(location, snapshotBoard) :
+          onBoard(location, store => run(store, command, id, extra, input, values));
+      }
       send({ ok: true, data });
     }
   }

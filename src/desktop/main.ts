@@ -28,6 +28,7 @@ interface Board {
   tags: BoardTag[];
   tasks: Task[];
   archived: (ArchiveLink & { id: string })[];
+  gitInfo?: { branch?: string; head?: string; user?: string };
 }
 
 interface WindowState {
@@ -56,6 +57,8 @@ const subscriptions = new Map<string, BoardWatch>();
 const commands = new Map<string, string[]>([
   ["init", ["init"]], ["list", ["list"]], ["show", ["show"]], ["update", ["update"]],
   ["comment", ["comment"]],
+  ["git-refs", ["git", "refs"]], ["git-switch", ["git", "switch"]],
+  ["git-create", ["git", "create"]], ["git-detach", ["git", "detach"]], ["git-publish", ["git", "publish"]],
   ["approve", ["approve"]], ["review", ["review"]], ["accept", ["accept"]],
   ["return-to-draft", ["return-to-draft"]],
   ["restore-changes", ["restore-changes"]],
@@ -609,7 +612,7 @@ function notifyRunChange(project: string) {
 async function recordRunFailure(project: string, id: string, reason: string) {
   const result = await callCli<Task>(project, ["block", id], {
     reason,
-    condition: lang("Restore Codex access and resume the task.", "Восстановите доступ Codex и возобновите задачу."),
+    condition: lang("Resolve the reported issue and resume the task.", "Устраните указанную причину и возобновите задачу."),
   });
   if (!result.ok && result.error.code !== "INVALID_TRANSITION") return result.error.message;
 }
@@ -664,8 +667,16 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       await callCli<Task>(project, ["update", id], { codexThreadId, actor: "user" });
     void completion.then(async reason => {
       await saveActivity();
-      if (reason) await recordRunFailure(project, id, reason);
-      else await callCli<Task>(project, ["pause", id]);
+      const items = [...activity.values()];
+      // Some tool rejections reach the agent's reply but do not fail the App Server turn.
+      const detail = items.findLast(item => item.type === "agentMessage" && item.status === "completed" && item.text.trim())?.text
+        ?? items.findLast(item => item.type === "commandExecution" && ["failed", "declined"].includes(item.status))?.text;
+      const incomplete = lang("The agent finished without submitting the task or recording progress.",
+        "Агент завершил сеанс без сдачи задачи или записи прогресса.");
+      const failure = await recordRunFailure(project, id, reason ?? [incomplete, detail?.trim().slice(0, 2000)].filter(Boolean).join("\n\n"));
+      if (failure) publishRunActivity(project, id, [
+        ...runLog(activity), { id: "block-error", type: "error", title: "", text: failure, status: "failed" },
+      ]);
     }).finally(() => {
       runningTasks.delete(key);
       launchingTasks.delete(key);
