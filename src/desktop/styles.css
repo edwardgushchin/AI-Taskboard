@@ -424,8 +424,11 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
   position: absolute; z-index: 1; top: calc(100% + 4px); right: 0; width: min(176px, 100%);
   max-height: min(40vh, 240px); overflow: auto; padding: 5px;
   border: 1px solid var(--border); border-radius: 4px; background: var(--panel);
+  font-size: 12px; line-height: 1.4;
 }
-.lane-filter-options label { display: flex; align-items: center; gap: 3px; padding: 3px; cursor: pointer; }
+.lane-filter-options label { display: flex; align-items: center; gap: 6px; padding: 4px; cursor: pointer; }
+.lane-filter-options input[type="checkbox"] { margin: 0; }
+.lane-filter-options .tag { font-size: inherit; }
 .lane-filter-options .lane-priority { display: grid; margin-bottom: 4px; }
 .lane-filter-options .lane-priority select { min-width: 0; padding: 4px; }
 .lane-filter-empty { display: grid; gap: 5px; padding: 7px; font-size: 12px; }
