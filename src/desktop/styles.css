@@ -371,6 +371,7 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .image-preview-viewport.dragging { cursor: grabbing; }
 .image-preview-stage { display: flex; width: max-content; min-width: 100%; min-height: 100%; }
 .image-preview-stage img { flex: none; margin: auto; user-select: none; }
+.image-preview-status { align-self: center; margin: auto; padding: 12px; color: var(--muted); }
 .chat-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .chat-controls .chat-icon { width: 30px; padding: 0; }
 .chat-options { display: flex; align-items: center; gap: 6px; min-width: 0; margin-inline-start: auto; }

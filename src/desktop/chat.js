@@ -252,21 +252,20 @@ function taskChat(task) {
     entry.append(element("span", author, "chat-author"));
     const attachments = (event.chat?.files ?? []).map(id => files.get(id)).filter(Boolean);
     if (attachments.length) {
+      const images = attachments.filter(isImageAttachment);
       const tiles = element("div", undefined, "chat-attachments");
       for (const file of attachments) {
         const tile = button("", async () => {
-          const src = tile.querySelector("img")?.src;
-          if (src) {
-            openImagePreview(src, file.name, async () => {
-              const result = await api.saveAttachment(task.id, file.file, file.name);
-              if (!result.ok) notice(boardError(result.error));
-            });
-          } else {
-            const result = await api.saveAttachment(task.id, file.file, file.name);
-            if (!result.ok) notice(boardError(result.error));
+          const index = images.indexOf(file);
+          if (index >= 0) {
+            openImagePreview(task.id, images, index, tile.querySelector("img")?.src);
+            return;
           }
+          const result = await api.saveAttachment(task.id, file.file, file.name);
+          if (!result.ok) notice(boardError(result.error));
         }, "quiet chat-attachment");
-        controlLabelForIcon(tile, language("Save ", "Сохранить ") + file.name);
+        const label = isImageAttachment(file) ? language("View ", "Просмотреть ") : language("Save ", "Сохранить ");
+        controlLabelForIcon(tile, label + file.name);
         tile.replaceChildren(icon("attachment"), element("span", file.name));
         if (isImageAttachment(file)) {
           tile.dataset.task = task.id;
