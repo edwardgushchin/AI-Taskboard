@@ -76,6 +76,9 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
         throw new TaskboardError("CRITERIA_REQUIRED", "Add acceptance criteria before approving the task.");
       }
       return record(task, action, "user", "ready");
+    case "return-to-draft":
+      requireState(task, ["ready"]);
+      return record(task, action, "user", "draft");
     case "request-changes":
       requireState(task, ["review"]);
       return record(task, action, "user", "in_progress", text(input.reason, "reason", true));

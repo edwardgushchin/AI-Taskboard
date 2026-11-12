@@ -137,6 +137,12 @@ test("normal commands enforce task state, criteria, and revisions", t => {
   cli(root, ["approve", task.id], { revision: 1 }, "REVISION_CONFLICT");
   task = cli(root, ["approve", task.id], { revision: task.revision });
   assert.equal(task.status, "ready");
+  cli(root, ["return-to-draft", task.id], { revision: task.revision - 1 }, "REVISION_CONFLICT");
+  task = cli(root, ["return-to-draft", task.id], { revision: task.revision });
+  assert.equal(cli(root, ["show", task.id]).status, "draft");
+  assert.equal(task.history.at(-1).from, "ready");
+  cli(root, ["return-to-draft", task.id], undefined, "INVALID_TRANSITION");
+  task = cli(root, ["approve", task.id], { revision: task.revision });
   cli(root, ["update", task.id], { criteria: ["Download XLSX."] }, "USER_REQUIREMENTS_REQUIRED");
   task = cli(root, ["update", task.id], { criteria: ["Download XLSX."], actor: "user", note: "Use XLSX" });
   assert.equal(task.status, "ready");
