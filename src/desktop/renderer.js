@@ -7,6 +7,7 @@ let taskInSheet;
 let taskSheetRequest = 0;
 let focusBeforeSheet;
 let boardTags = new Map();
+const cardCoverCache = new Map();
 const sheet = byId("sheet");
 const body = byId("sheet-body");
 
@@ -282,6 +283,31 @@ function section(title, content) {
   body.append(area);
 }
 
+const cardCovers = new IntersectionObserver(entries => {
+  for (const { target, isIntersecting } of entries) {
+    if (!isIntersecting) continue;
+    cardCovers.unobserve(target);
+    if (!target.isConnected) continue;
+    const image = target.querySelector(".task-card-cover");
+    const { task, file } = image.dataset;
+    const key = task + "\0" + file;
+    const request = cardCoverCache.get(key) ?? api.attachmentPreview(task, file);
+    cardCoverCache.set(key, request);
+    if (cardCoverCache.size > 32) cardCoverCache.delete(cardCoverCache.keys().next().value);
+    const discard = () => {
+      if (cardCoverCache.get(key) === request) cardCoverCache.delete(key);
+    };
+    void request.then(src => {
+      if (!src || src.length > 1_000_000) discard();
+      if (src && image.isConnected) image.src = src;
+    }).catch(discard);
+  }
+});
+
+function selectedCover(task, images) {
+  return images.find(file => file.file === task.coverAttachment) ?? images[0];
+}
+
 const tagKey = name => name.trim().normalize().toLowerCase();
 
 function tagBadge(name, color, customColor) {
@@ -316,6 +342,17 @@ function card(task) {
     item.append(tags);
   }
   item.append(element("strong", task.title));
+  const cover = selectedCover(task, (task.attachments ?? []).filter(isImageAttachment));
+  if (cover) {
+    const image = element("img", undefined, "task-card-cover");
+    image.alt = "";
+    image.hidden = true;
+    image.dataset.task = task.id;
+    image.dataset.file = cover.file;
+    image.onload = () => { image.hidden = false; };
+    item.prepend(image);
+    cardCovers.observe(item);
+  }
   const meta = element("span", undefined, "task-meta");
   meta.append(element("span", task.id, "task-id"));
   const runLabel = codexRunLabel(task);
@@ -407,6 +444,7 @@ function tagFilters() {
 }
 
 function render() {
+  cardCovers.disconnect();
   document.documentElement.lang = frame.russian ? "ru" : "en";
   const board = frame.board;
   const noBoard = !board;
@@ -751,6 +789,27 @@ async function showTask(id) {
     section("Git", [task.git.target, task.git.worktree, task.git.submission?.sha, task.git.accepted].filter(Boolean));
   }
   if (task.attachments.length) {
+    const images = task.attachments.filter(isImageAttachment);
+    if (images.length > 1 && !frame.board?.archived.some(entry => entry.id === task.id)) {
+      const label = element("label", undefined, "task-cover-setting");
+      label.append(element("span", language("Card cover", "Превью карточки")));
+      const picker = element("select");
+      picker.append(...images.map(file => new Option(file.name, file.file)));
+      const previous = selectedCover(task, images).file;
+      picker.value = previous;
+      picker.addEventListener("change", protect(async () => {
+        picker.disabled = true;
+        try {
+          const updated = await command("attachment-cover", task.id, { file: picker.value, revision: task.revision });
+          if (updated && taskInSheet?.id === task.id && sheetKind === "task") await showTask(task.id);
+          if (!updated) picker.value = previous;
+        } finally {
+          picker.disabled = false;
+        }
+      }));
+      label.append(picker);
+      body.append(label);
+    }
     const chatFiles = new Set(task.history.flatMap(event => event.chat?.files ?? []));
     const downloads = element("div", undefined, "sheet-actions");
     for (const attachment of task.attachments.filter(file => !chatFiles.has(file.file))) {
@@ -1100,6 +1159,7 @@ function update(next) {
   if (tagsChanged) boardTags = new Map((next.board?.tags ?? []).map(tag => [tagKey(tag.name), tag]));
   applyTheme(next.theme);
   if (projectChanged) {
+    cardCoverCache.clear();
     archiveView = false;
     byId("search").value = "";
     byId("filters").open = false;

@@ -54,6 +54,7 @@ const commands = new Map<string, string[]>([
   ["approve", ["approve"]], ["review", ["review"]], ["accept", ["accept"]],
   ["return-to-draft", ["return-to-draft"]],
   ["restore-changes", ["restore-changes"]],
+  ["attachment-cover", ["attachment", "cover"]],
   ["request-changes", ["request-changes"]], ["cancel", ["cancel"]], ["cleanup", ["cleanup"]],
   ["settings", ["settings"]], ["archive", ["archive", "sweep"]], ["doctor", ["doctor"]],
   ["tag-color", ["tag", "set"]],

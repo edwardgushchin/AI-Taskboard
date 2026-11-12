@@ -125,6 +125,29 @@ test("create saves attachments with the draft and rejects incomplete batches", t
   }
 });
 
+test("a card cover stores the selected image and rejects invalid attachments and stale revisions", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const path = join(root, "attachment");
+  writeFileSync(path, "attachment contents");
+  const task = cli(root, ["create"], { title: "Cover", attachmentSources: [
+    { path, name: "notes.txt" }, { path, name: "first.png" }, { path, name: "second.JPEG" },
+  ] });
+  const [notes, first, second] = task.attachments;
+  assert.equal(task.coverAttachment, undefined);
+  cli(root, ["attachment", "cover", task.id], { file: notes.file, revision: task.revision }, "INVALID_INPUT");
+  cli(root, ["attachment", "cover", task.id], { file: "missing", revision: task.revision }, "INVALID_INPUT");
+  const chosen = cli(root, ["attachment", "cover", task.id], { file: second.file, revision: task.revision });
+  assert.equal(chosen.coverAttachment, second.file);
+  assert.equal(cli(root, ["list"]).tasks[0].coverAttachment, second.file);
+  cli(root, ["attachment", "cover", task.id], { file: second.file, revision: task.revision }, "REVISION_CONFLICT");
+  const closed = cli(root, ["cancel", task.id], { reason: "No longer needed" });
+  const updated = cli(root, ["attachment", "cover", task.id], { file: first.file, revision: closed.revision });
+  assert.equal(updated.coverAttachment, first.file);
+  assert.equal(updated.status, "cancelled");
+  assert.equal(updated.closedAt, closed.closedAt);
+});
+
 test("normal commands enforce task state, criteria, and revisions", t => {
   const root = fixture(t);
   cli(root, ["list"], undefined, "BOARD_NOT_FOUND");

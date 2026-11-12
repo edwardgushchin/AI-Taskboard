@@ -90,6 +90,7 @@ function chatEventLabel(action) {
     progress: ["Updated progress", "Обновил ход работы"], block: ["Blocked the task", "Заблокировал задачу"],
     resume: ["Resumed work", "Продолжил работу"], submit: ["Submitted for review", "Сдал на проверку"],
     accept: ["Accepted the task", "Принял задачу"], cancel: ["Cancelled the task", "Отменил задачу"],
+    cover: ["Changed the card cover", "Сменил превью карточки"],
     "request-changes": ["Requested changes", "Вернул на доработку"], attach: ["Attached a file", "Добавил файл"],
   };
   return Object.hasOwn(labels, action) ? language(...labels[action]) : action;
@@ -197,7 +198,7 @@ function taskChat(task) {
         }, "quiet chat-attachment");
         controlLabelForIcon(tile, language("Save ", "Сохранить ") + file.name);
         tile.replaceChildren(icon("attachment"), element("span", file.name));
-        if (/\.(png|jpe?g|webp|gif)$/i.test(file.name)) {
+        if (isImageAttachment(file)) {
           tile.dataset.task = task.id;
           tile.dataset.file = file.file;
           chatPreviews.observe(tile);
