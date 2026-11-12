@@ -299,6 +299,12 @@ function tagBadges(names) {
   return Array.from(tags.values(), tag => tagBadge(tag.name, tag.color));
 }
 
+function codexRunLabel(task) {
+  if (task.status !== "in_progress") return "";
+  if (frame.runningTasks?.includes(task.id)) return language("Codex is working", "Codex работает");
+  return task.codexThreadId ? language("Board run inactive", "Запуск с доски не активен") : "";
+}
+
 function card(task) {
   const item = button("", () => showTask(task.id), "");
   item.className = "task-card";
@@ -310,6 +316,8 @@ function card(task) {
   item.append(element("strong", task.title));
   const meta = element("span", undefined, "task-meta");
   meta.append(element("span", task.id, "task-id"));
+  const runLabel = codexRunLabel(task);
+  if (runLabel) meta.append(element("span", runLabel));
   if (task.unfinishedDependencies?.length && ["draft", "ready"].includes(task.status)) {
     meta.append(element("span", language("Blocked by dependencies", "Ждёт зависимости"), "dependency-warning"));
   }
@@ -692,6 +700,10 @@ async function showTask(id) {
     tags.append(...tagBadges(task.tags));
     body.append(tags);
   }
+  const runStatus = element("p", codexRunLabel(task), "muted");
+  runStatus.id = "task-codex-run";
+  runStatus.hidden = !runStatus.textContent;
+  body.append(runStatus);
   section(language("Description", "Описание"), task.description);
   section(language("Acceptance criteria", "Критерии приёмки"), task.criteria);
   section(language("Subtasks", "Подзадачи"), task.subtasks.map(item => (item.done ? "✓ " : "○ ") + item.title));
@@ -1066,6 +1078,11 @@ function update(next) {
   const tagSettings = byId("tag-settings");
   if (tagsChanged && sheet.open && tagSettings) renderTagSettings(tagSettings);
   if (sheetKind === "task" && sheet.open && taskInSheet) {
+    const runStatus = byId("task-codex-run");
+    if (runStatus) {
+      runStatus.textContent = codexRunLabel(taskInSheet);
+      runStatus.hidden = !runStatus.textContent;
+    }
     if (tagsChanged) byId("task-sheet-tags")?.replaceChildren(...tagBadges(taskInSheet.tags));
     const task = frame.board?.tasks.find(entry => entry.id === taskInSheet.id);
     const archived = frame.board?.archived.some(entry => entry.id === taskInSheet.id);
