@@ -84,8 +84,10 @@
     </section>
   </main>
   <footer class="status-bar">
-    <button id="status-branch" type="button" class="button quiet status-git" popovertarget="git-branches" hidden><svg class="icon" aria-hidden="true"><use href="#icon-git-branch"/></svg><span></span></button>
-    <button id="status-publish" type="button" class="button quiet" aria-label="Publish to GitHub" hidden><svg class="icon" aria-hidden="true"><use href="#icon-cloud-upload"/></svg></button>
+    <div class="status-repository">
+      <button id="status-branch" type="button" class="button quiet status-git" popovertarget="git-branches" hidden><svg class="icon" aria-hidden="true"><use href="#icon-git-branch"/></svg><span></span></button>
+      <button id="status-publish" type="button" class="button quiet" aria-label="Publish to GitHub" hidden><svg class="icon" aria-hidden="true"><use href="#icon-cloud-upload"/></svg></button>
+    </div>
     <section id="git-branches" class="git-branches" popover aria-label="Branches and tags"></section>
     <span id="status-user" class="status-git" hidden><svg class="icon" aria-hidden="true"><use href="#icon-git-user"/></svg><span></span></span>
     <button id="status-notifications" type="button" class="button quiet" popovertarget="notifications" aria-label="Notifications">
