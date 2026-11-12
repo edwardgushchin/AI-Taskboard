@@ -639,6 +639,7 @@ function render() {
     column.dataset.state = state;
     const title = language(english, russian);
     const heading = element("h2", undefined, "lane-title");
+    heading.title = title;
     const count = element("span", undefined, "count");
     heading.append(element("span", title), count);
     const content = element("div", undefined, "lane-cards");
