@@ -3,7 +3,7 @@ import type { IpcMainInvokeEvent } from "electron";
 import { existsSync, mkdirSync, statSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, extname, isAbsolute, join } from "node:path";
+import { basename, extname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { bundled, callCli, cliChild, cliFailure, entry } from "./cli.ts";
@@ -18,6 +18,7 @@ import { codexThreadPattern, maxAttachmentBytes, taskIdPattern } from "../cli/mo
 import { readJson, writeJson } from "../cli/storage.ts";
 import { configuredCodex } from "./codex.ts";
 import { startCodexRun } from "./codex-run.ts";
+import { normalizeRecentBoards, readRecentBoards, rememberRecentBoard } from "./recent-boards.ts";
 
 interface Board {
   project: string;
@@ -82,31 +83,15 @@ type Theme = keyof typeof themes;
 let theme: Theme = "system";
 let recentBoards: string[] = [];
 
-function recentBoardsFile(): string {
-  return join(app.getPath("userData"), "recent-boards.json");
-}
-
 function loadRecentBoards(): void {
-  try {
-    const saved = readJson(recentBoardsFile());
-    if (Array.isArray(saved)) {
-      recentBoards = [...new Set(saved.filter((path): path is string =>
-        typeof path === "string" && isAbsolute(path) && !path.includes("\0")))].slice(0, 10);
-    }
-  } catch {
-    // A missing profile or an invalid file starts with an empty history.
-  }
+  recentBoards = readRecentBoards(app.getPath("appData"), app.getPath("userData")) ?? recentBoards;
 }
 
 function rememberBoard(path: string, current: WindowState): void {
-  const key = (value: string) => process.platform === "win32" ? value.toLowerCase() : value;
-  if (recentBoards[0] === path) return;
-  recentBoards = [path, ...recentBoards.filter(previous => key(previous) !== key(path))].slice(0, 10);
   try {
-    mkdirSync(app.getPath("userData"), { recursive: true });
-    writeJson(recentBoardsFile(), recentBoards);
+    recentBoards = rememberRecentBoard(app.getPath("appData"), app.getPath("userData"), path);
   } catch {
-    // Keep the board usable and retain its history in this session.
+    recentBoards = normalizeRecentBoards([path, ...recentBoards]);
   }
   for (const state of windowStates.values()) {
     if (state !== current) send(state);
@@ -315,7 +300,11 @@ ipcMain.handle("menu:action", async (event, action: unknown) => {
   await menuActions[action](state);
 });
 
-ipcMain.handle("board:bootstrap", event => frame(stateOf(event)));
+ipcMain.handle("board:bootstrap", event => {
+  const state = stateOf(event);
+  loadRecentBoards();
+  return frame(state);
+});
 ipcMain.handle("board:open", async event => pickProject(stateOf(event)));
 
 interface PastedFile {
