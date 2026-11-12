@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld("taskboard", {
   onChatUpdate: listener => { ipcRenderer.on("chat:update", (_event, update) => listener(update)); },
   createBoard: () => ipcRenderer.invoke("board:create"),
   openRecent: path => ipcRenderer.invoke("board:recent", path),
+  selectTab: project => ipcRenderer.invoke("board:selectTab", project),
+  closeTab: project => ipcRenderer.invoke("board:closeTab", project),
   menuAction: action => ipcRenderer.invoke("menu:action", action),
   customTitleBar: process.platform === "win32",
   isMac: process.platform === "darwin",

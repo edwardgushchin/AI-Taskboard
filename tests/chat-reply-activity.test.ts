@@ -6,12 +6,14 @@ import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { createTask } from "../src/cli/tasks.ts";
+import { projectLabels } from "../src/desktop/project-tabs.ts";
 
 const source = readFileSync(new URL("../src/desktop/main.ts", import.meta.url), "utf8");
 const parsed = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, true);
 const names = new Set([
   "frame", "send", "notifyRunChange", "sendChat", "windowStates", "chatRuns", "replyingTasks",
   "runningTasks", "runActivityByTask", "imageExtensions", "imageTypes", "recentBoards", "russian", "theme",
+  "beginOperation", "projectOperations", "closingProjects",
 ]);
 // Exercise the main-process lifecycle without starting Electron or a real provider.
 const activitySource = parsed.statements.filter(node => {
@@ -28,7 +30,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   const started = Promise.withResolvers<void>();
   const runtime = runInNewContext(stripTypeScriptTypes(activitySource) +
     "\n({ sendChat, frame, windowStates, runningTasks })", {
-    basename, extname, join, performance,
+    basename, extname, join, performance, projectLabels, AbortController,
     app: { getPath: () => "profile" },
     lang: (english: string) => english,
     tmpdir: () => "scratch",
@@ -47,17 +49,18 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
     },
     replyToTask: async () => { started.resolve(); return response.promise; },
   });
-  const windows = ["project-a", "project-a", "project-b"].map(project => {
+  const windows = ["project-a", "project-a", "project-b"].map((project, index) => {
     const updates: string[][] = [];
     const state = { project, board: { tasks: [task, { ...task, id: "T-0002" }] }, window: {
       isDestroyed: () => false, setTitle: () => {}, webContents: {
+        id: index,
         send: (channel: string, frame: { runningTasks: string[] }) => {
           assert.equal(channel, "board:changed");
           updates.push(Array.from(frame.runningTasks));
         },
       },
     } };
-    runtime.windowStates.set(runtime.windowStates.size, state);
+    runtime.windowStates.set(index, { window: state.window, tabs: [state], active: state });
     return { state, updates };
   });
   if (options.attachmentFailure) {

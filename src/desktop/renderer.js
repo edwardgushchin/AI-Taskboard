@@ -1,6 +1,7 @@
 const api = window.taskboard;
 const byId = id => document.getElementById(id);
 let frame = {};
+let projectGeneration = 0;
 let archiveView = false;
 let sheetKind = "";
 let taskInSheet;
@@ -112,8 +113,10 @@ function mountAppMenu() {
   const groups = [
     ["File", "Файл", [
       ["new-window", "New window", "Новое окно", "N"],
-      ["open-project", "Open project folder…", "Открыть папку проекта…", "O"],
-      ["close-window", "Close window", "Закрыть окно", "W"],
+      ["open-project", "Open project…", "Открыть проект…", "O"],
+      ["open-recent", "Open recent", "Открыть последнее"],
+      ["close-tab", "Close project", "Закрыть проект", "W"],
+      ["close-window", "Close window", "Закрыть окно", "Shift+W"],
       ["settings", "Settings…", "Настройки…", ","],
       ["quit", "Exit", "Выход"],
     ]],
@@ -139,9 +142,11 @@ function mountAppMenu() {
   const shortcuts = new Map();
   let active;
   let previousFocus;
+  let recentMenu;
 
   function close() {
     if (!active) return;
+    if (recentMenu) { recentMenu.popup.hidden = true; recentMenu.trigger.setAttribute("aria-expanded", "false"); }
     active.popup.hidden = true;
     active.trigger.setAttribute("aria-expanded", "false");
     active = undefined;
@@ -156,6 +161,32 @@ function mountAppMenu() {
   }
 
   const run = protect(action => {
+    if (action === "open-recent") {
+      const popup = recentMenu.popup;
+      popup.replaceChildren();
+      for (const recent of frame.recentBoards ?? []) {
+        const item = button("", () => {
+          close();
+          return api.openRecent(recent.path);
+        });
+        item.className = "app-menu-item";
+        item.setAttribute("role", "menuitem");
+        item.tabIndex = -1;
+        item.append(element("span", recent.name), element("small", recent.path));
+        popup.append(item);
+      }
+      if (!popup.childElementCount) {
+        const empty = button(language("No recent projects", "Нет недавних проектов"), () => {});
+        empty.className = "app-menu-item";
+        empty.setAttribute("role", "menuitem");
+        empty.setAttribute("aria-disabled", "true");
+        popup.append(empty);
+      }
+      popup.hidden = false;
+      recentMenu.trigger.setAttribute("aria-expanded", "true");
+      popup.firstElementChild.focus();
+      return;
+    }
     if (action === "archive-view" && !frame.board) return;
     if (active) {
       const trigger = active.trigger;
@@ -197,7 +228,19 @@ function mountAppMenu() {
         const prefix = shortcut === "F11" ? "" : api.isMac ? "⌘" : "Ctrl+";
         item.append(element("kbd", prefix + shortcut));
       }
-      popup.append(item);
+      if (action === "open-recent") {
+        item.setAttribute("aria-haspopup", "menu");
+        item.setAttribute("aria-expanded", "false");
+        item.append(element("span", "›"));
+        const container = element("div", undefined, "app-menu-submenu-trigger");
+        const submenu = element("div", undefined, "app-menu-popup app-menu-submenu");
+        submenu.hidden = true;
+        submenu.setAttribute("role", "menu");
+        submenu.setAttribute("aria-label", language(en, ru));
+        container.append(item, submenu);
+        popup.append(container);
+        recentMenu = { trigger: item, popup: submenu };
+      } else popup.append(item);
       return item;
     });
     const menu = { group, trigger, popup, items };
@@ -223,6 +266,28 @@ function mountAppMenu() {
     for (const menu of menus) menu.trigger.tabIndex = menu === focused ? 0 : -1;
   });
   bar.addEventListener("keydown", event => {
+    if (recentMenu && !recentMenu.popup.hidden && recentMenu.popup.contains(event.target)) {
+      const items = [...recentMenu.popup.children];
+      if (["Escape", "ArrowLeft"].includes(event.key)) {
+        recentMenu.popup.hidden = true;
+        recentMenu.trigger.setAttribute("aria-expanded", "false");
+        recentMenu.trigger.focus();
+      } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+        const index = items.indexOf(event.target);
+        const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
+          : (index + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+        items[next].focus();
+      } else if (event.key !== "Tab") return;
+      else close();
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (event.target === recentMenu?.trigger && event.key === "ArrowRight") {
+      event.preventDefault();
+      run("open-recent");
+      return;
+    }
     const index = menus.findIndex(menu => menu.group.contains(event.target));
     const menu = menus[index];
     if (!menu) return;
@@ -257,8 +322,8 @@ function mountAppMenu() {
     const modifier = api.isMac ? event.metaKey : event.ctrlKey;
     if (!modifier && event.key !== "F11") return;
     const key = event.code.startsWith("Key") ? event.code.slice(3) : event.key;
-    if (event.shiftKey && key !== "Z" && key !== "+") return;
-    const shortcut = key === "=" ? "+" : event.shiftKey && key === "Z" ? "Shift+Z" : key;
+    if (event.shiftKey && key !== "Z" && key !== "W" && key !== "+") return;
+    const shortcut = key === "=" ? "+" : event.shiftKey && ["Z", "W"].includes(key) ? "Shift+" + key : key;
     const action = !api.isMac && shortcut === "Shift+Z" ? "redo" : shortcuts.get(shortcut);
     if (!action) return;
     event.preventDefault();
@@ -268,7 +333,9 @@ function mountAppMenu() {
 }
 
 async function command(action, id, input) {
+  const generation = projectGeneration;
   const result = await api.command(action, id, input);
+  if (generation !== projectGeneration) return undefined;
   if (!result.ok) {
     notice(boardError(result.error));
     return undefined;
@@ -501,11 +568,13 @@ function openCodexTaskAction(task) {
 }
 
 function codexTaskAction(task) {
+  const generation = projectGeneration;
   if (task.status !== "ready" && (task.status !== "in_progress" || task.codexThreadId)) return null;
   const launch = button(language("Send to work", "Передать в работу"), async () => {
     launch.disabled = true;
     try {
       const result = await api.launchTask(task.id);
+      if (generation !== projectGeneration) return;
       if (!result.ok) notice(boardError(result.error));
       else if (sheetKind === "task" && taskInSheet?.id === task.id) await showTask(task.id);
     } finally {
@@ -857,6 +926,7 @@ function newTaskDraft() {
       const pasted = await Promise.all(files.map(async file => ({
         name: file.name, type: file.type, bytes: await file.arrayBuffer(),
       })));
+      if (!editor.isConnected || frame.project !== project) return;
       const result = await api.draft(request, pasted);
       if (!editor.isConnected || !sheet.open || frame.project !== project) return;
       if (!result.ok) {
@@ -1183,6 +1253,7 @@ async function showAcceptedTask(task) {
 }
 
 async function showReview(task, messageDraft) {
+  const generation = projectGeneration;
   const review = await command("review", task.id);
   if (!review) return;
   task = { ...task, revision: review.revision };
@@ -1194,6 +1265,7 @@ async function showReview(task, messageDraft) {
     const result = await api.command("accept", task.id, {
       revision: task.revision, targetHead: review.targetHead, message,
     });
+    if (generation !== projectGeneration) return;
     if (result.ok) {
       await showAcceptedTask(result.data);
     } else {
@@ -1635,6 +1707,65 @@ function renderStatusBar(projectChanged) {
   }) : [element("p", language("No new notifications.", "Новые уведомления отсутствуют."), "muted")]));
 }
 
+let tabsSignature = "";
+
+function renderProjectTabs() {
+  const bar = byId("project-tabs");
+  const tabs = frame.tabs ?? [];
+  const signature = JSON.stringify([tabs, frame.project, frame.russian]);
+  if (signature === tabsSignature) return;
+  tabsSignature = signature;
+  const focused = bar.contains(document.activeElement) ? document.activeElement : undefined;
+  const focusedPath = focused?.closest(".project-tab")?.dataset.project;
+  const closeFocused = focused?.classList.contains("project-tab-close");
+  bar.setAttribute("aria-label", language("Projects", "Проекты"));
+  bar.hidden = !tabs.length;
+  bar.replaceChildren(...tabs.map(tab => {
+    const container = element("div", undefined, "project-tab");
+    container.dataset.project = tab.path;
+    container.setAttribute("role", "presentation");
+    const select = button("", () => api.selectTab(tab.path), "project-tab-button");
+    select.className = "project-tab-button";
+    select.title = tab.path;
+    select.setAttribute("role", "tab");
+    select.setAttribute("aria-selected", String(tab.path === frame.project));
+    select.setAttribute("aria-controls", "workspace");
+    select.tabIndex = tab.path === frame.project ? 0 : -1;
+    select.append(element("span", tab.name, "project-tab-name"));
+    if (tab.detail) select.append(element("span", tab.detail, "project-tab-detail"));
+    select.addEventListener("keydown", protect(async event => {
+      const index = tabs.findIndex(entry => entry.path === tab.path);
+      let next;
+      if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
+      else if (event.key === "ArrowLeft") next = (index + tabs.length - 1) % tabs.length;
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = tabs.length - 1;
+      else if (event.key === "Delete") {
+        event.preventDefault();
+        await api.closeTab(tab.path);
+        bar.querySelector('[aria-selected="true"]')?.focus();
+        return;
+      } else return;
+      event.preventDefault();
+      await api.selectTab(tabs[next].path);
+      bar.querySelector('[aria-selected="true"]')?.focus();
+    }));
+    const close = button("×", () => api.closeTab(tab.path), "project-tab-close");
+    close.className = "project-tab-close";
+    close.setAttribute("aria-label", language("Close project ", "Закрыть проект ") + tab.name);
+    close.title = close.getAttribute("aria-label");
+    container.append(select, close);
+    return container;
+  }));
+  if (focused) {
+    const container = [...bar.children].find(item => item.dataset.project === focusedPath);
+    const target = container?.querySelector(closeFocused ? ".project-tab-close" : ".project-tab-button")
+      ?? bar.querySelector('[aria-selected="true"]');
+    target?.focus();
+  }
+  bar.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
 function update(next) {
   const projectChanged = frame.project !== next.project;
   const tagsChanged = JSON.stringify(frame.board?.tags) !== JSON.stringify(next.board?.tags);
@@ -1647,7 +1778,10 @@ function update(next) {
   if (tagsChanged) boardTags = new Map((next.board?.tags ?? []).map(tag => [tagKey(tag.name), tag]));
   applyTheme(next.theme);
   renderStatusBar(projectChanged);
+  renderProjectTabs();
   if (projectChanged) {
+    projectGeneration++;
+    taskSheetRequest++;
     lanePreferences = loadLanePreferences();
     cardCoverCache.clear();
     resetBoardRendering();

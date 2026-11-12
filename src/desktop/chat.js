@@ -652,6 +652,7 @@ function taskChat(task) {
       const files = await Promise.all(draft.files.map(async file => ({
         name: file.name, type: file.type, bytes: await file.arrayBuffer(),
       })));
+      if (!area.isConnected || frame.project !== project) return;
       const { saved, result } = await api.chatSend(task.id, {
         model: draft.model, effort: draft.effort, text: draft.text, files,
       });

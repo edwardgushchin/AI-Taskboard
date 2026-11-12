@@ -32,14 +32,15 @@ async function withServer<T>(
   profile: string, cwd: string, callback: (server: {
     request: <R>(method: string, params: object, notify?: Notification) => Promise<R>;
     receive: (notify?: Notification) => Promise<RpcMessage>;
-  }) => Promise<T>, onRequest?: ServerRequest,
+  }) => Promise<T>, onRequest?: ServerRequest, signal?: AbortSignal,
 ): Promise<T> {
   const client = await configuredCodex(profile);
   if (!client) throw new Error("Connect Codex in AI Taskboard settings.");
+  signal?.throwIfAborted();
   const child = spawn(client.path, [
     ...client.args, "app-server", "--disable", "hooks", "--disable", "plugins",
     "-c", "mcp_servers={}", "-c", 'web_search="disabled"',
-  ], { cwd, env: client.env, windowsHide: true, stdio: ["pipe", "pipe", "ignore"] });
+  ], { cwd, env: client.env, windowsHide: true, stdio: ["pipe", "pipe", "ignore"], signal });
   const reader = createInterface({ input: child.stdout, crlfDelay: Infinity });
   const lines = reader[Symbol.asyncIterator]();
   let failure = "Codex closed the connection.";
@@ -121,7 +122,7 @@ export function replyToTask(
   profile: string, project: string, settings: ChatSettings, prompt: string, images: string[],
   onCommentary: (text: string) => void,
   runAction: (name: string, args: unknown) => Promise<CliReply>,
-  imageDirectory: string, imageLimit: number,
+  imageDirectory: string, imageLimit: number, signal?: AbortSignal,
 ) {
   let threadId: string | undefined;
   const calls = new Map<string, CliReply>();
@@ -186,6 +187,7 @@ export function replyToTask(
     if (turn.status !== "completed") throw new Error(turn.error?.message ?? "Codex did not complete the reply.");
     const text = answers.join("\n\n").trim();
     if (!text && !generated.size) throw new Error("Codex returned no message.");
+    signal?.throwIfAborted();
     const attachmentSources = await saveChatImages([...generated.values()], imageDirectory, imageLimit);
     return { text, usage, commentary, attachmentSources };
   }, async message => {
@@ -201,5 +203,5 @@ export function replyToTask(
       calls.set(params.callId, result);
     }
     return { success: result.ok, contentItems: [{ type: "inputText", text: JSON.stringify(result) }] };
-  });
+  }, signal);
 }

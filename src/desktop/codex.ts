@@ -127,11 +127,11 @@ function candidates(): Launch[] {
   return found;
 }
 
-async function invoke(client: Launch, args: string[], cwd: string, input?: string): Promise<string> {
+async function invoke(client: Launch, args: string[], cwd: string, input?: string, signal?: AbortSignal): Promise<string> {
   try {
     const operation = run(client.path, [...client.args, ...args], {
       cwd, env: client.env, encoding: "utf8", timeout: input === undefined ? 20000 : 120000,
-      maxBuffer: 2 * 1024 * 1024, windowsHide: true,
+      maxBuffer: 2 * 1024 * 1024, windowsHide: true, signal,
     });
     if (input !== undefined) {
       operation.child.stdin?.on("error", () => {});
@@ -189,11 +189,12 @@ const draftFields = {
 
 export async function composeDraft(
   dataDirectory: string, request: string, tags: string[],
-  attachments: { path: string; name: string; image: boolean }[], fallbackLanguage: string,
+  attachments: { path: string; name: string; image: boolean }[], fallbackLanguage: string, signal?: AbortSignal,
 ) {
   const client = await configuredCodex(dataDirectory);
   if (!client) return undefined;
 
+  signal?.throwIfAborted();
   const scratch = mkdtempSync(join(tmpdir(), "ai-taskboard-draft-"));
   try {
     const schema = join(scratch, "schema.json");
@@ -215,7 +216,7 @@ export async function composeDraft(
       "exec", ...attachments.filter(file => file.image).flatMap(file => ["--image", file.path]),
       "--sandbox", "read-only", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check",
       "--ephemeral", "--json", "--output-schema", schema, "--output-last-message", result, "-",
-    ], scratch, prompt);
+    ], scratch, prompt, signal);
     const draft = object(readJson(result));
     if (required.some(field => !Object.hasOwn(draft, field))) throw new Error("Codex returned an incomplete draft.");
     return Object.fromEntries(required.map(field => [field, draft[field]]));

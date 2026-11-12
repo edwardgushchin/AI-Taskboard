@@ -79,6 +79,27 @@ h1, h2, h3, p { margin: 0; }
 .app-menu-item kbd { color: var(--muted); font: inherit; font-size: 11px; }
 .app-menu-item[aria-checked="true"]::after { content: "✓" / ""; }
 .app-menu-item[aria-disabled="true"] { color: var(--muted); cursor: default; }
+.app-menu-submenu { top: 0; left: calc(100% - 4px); max-width: min(520px, 65vw); }
+.app-menu-submenu .app-menu-item { display: grid; gap: 2px; text-align: start; }
+.app-menu-submenu small { color: var(--muted); overflow-wrap: anywhere; font-size: 11px; }
+.app-menu-submenu-trigger { position: relative; }
+.project-tabs {
+  display: flex; flex: none; overflow-x: auto; position: relative; z-index: 6;
+  background: var(--toolbar); border-bottom: 1px solid var(--border); padding-inline: 8px;
+}
+.project-tab {
+  display: flex; align-items: center; flex: 0 0 auto; min-width: 100px; max-width: 300px;
+  border-inline-end: 1px solid var(--border); border-bottom: 2px solid transparent;
+  color: var(--muted);
+}
+.project-tab:has([aria-selected="true"]) { background: var(--bg); border-bottom-color: var(--focus); color: var(--text); }
+.project-tab button { border: 0; background: transparent; cursor: pointer; color: inherit; }
+.project-tab-button { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 9px 10px; font-size: 12px; }
+.project-tab-name, .project-tab-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-tab-detail { color: var(--muted); font-size: 11px; }
+.project-tab-close { flex: none; margin-inline-end: 4px; width: 24px; height: 24px; border-radius: 4px; }
+.project-tab button:hover { background: color-mix(in srgb, var(--text) 8%, transparent); }
+.project-tab button:focus-visible { outline-offset: -2px; }
 .app-menu-bar {
   --window-controls-width: 0px;
   --toolbar-border: color-mix(in srgb, var(--border) 65%, var(--toolbar));

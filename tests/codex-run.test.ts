@@ -45,8 +45,10 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '    result = { turn: { id: "turn-1", status: "inProgress" } };',
     '  }',
     '  send({ id, result });',
+    '  if (method === "turn/interrupt") send({ method: "turn/completed", params: { threadId: thread, turn: { id: "turn-1", status: "interrupted" } } });',
     '  if (method === "turn/start") {',
     '    if (outcome === "closed") { process.stdin.destroy(); return; }',
+    '    if (outcome === "waiting") return;',
     '    const itemEvent = (method, params) => send({ method: "item/" + method, params: { threadId: thread, ...params } });',
     '    if (["review-denied", "review-approved"].includes(outcome)) {',
     '      const review = { reviewId: "access-1", action: { type: "networkAccess", target: "docs.example.com:443" } };',
@@ -142,4 +144,10 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(resumedCalls[2].params.cwd, worktree);
   assert.equal(resumedCalls[2].params.approvalPolicy, "on-request");
   assert.equal(resumedCalls[2].params.approvalsReviewer, "auto_review");
+  const controller = new AbortController();
+  const waiting = await startCodexRun(client("waiting"), folder, worktree, task, undefined, controller.signal);
+  controller.abort();
+  assert.match((await waiting.completion) ?? "", /aborted/i);
+  assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "turn/interrupt");
+  await assert.rejects(startCodexRun(client("ok"), folder, worktree, task, undefined, controller.signal), /aborted/i);
 });

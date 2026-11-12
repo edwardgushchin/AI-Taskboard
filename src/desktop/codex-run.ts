@@ -38,7 +38,8 @@ const verifyWrite = [
 ].join("\n");
 
 export async function startCodexRun(client: Client, project: string, cwd: string, task: Task,
-  onActivity?: (item: RunActivity) => void): Promise<Run> {
+  onActivity?: (item: RunActivity) => void, signal?: AbortSignal): Promise<Run> {
+  signal?.throwIfAborted();
   if (!task.git) throw new Error("The task has no prepared Git worktree.");
   const paths = [...new Set(accessPaths(project, cwd, task.git.branch))];
   const codexHome = (client.env ?? process.env).CODEX_HOME || join(homedir(), ".codex");
@@ -60,6 +61,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   const turns = new Map<string, Turn>();
   const activity = new Map<string, RunActivity>();
   let activeThreadId: string | undefined;
+  let activeTurnId: string | undefined;
+  let interruptTimeout: NodeJS.Timeout | undefined;
   let lastError = "";
   let nextId = 0;
   const timeout = setTimeout(() => {
@@ -69,6 +72,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   }, 60_000);
   const close = () => {
     clearTimeout(timeout);
+    clearTimeout(interruptTimeout);
+    signal?.removeEventListener("abort", interrupt);
     output.close();
     child.stdin.end();
     child.kill();
@@ -83,6 +88,17 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   child.stdin.on("error", streamError);
 
   const send = (message: object) => child.stdin.write(JSON.stringify(message) + "\n");
+  function interrupt() {
+    lastError = signal?.reason instanceof Error ? signal.reason.message : "The task run was interrupted.";
+    if (activeThreadId && activeTurnId) {
+      send({ id: nextId++, method: "turn/interrupt", params: { threadId: activeThreadId, turnId: activeTurnId } });
+      interruptTimeout = setTimeout(() => { child.kill(); output.close(); }, 5000);
+    } else {
+      child.kill();
+      output.close();
+    }
+  }
+  signal?.addEventListener("abort", interrupt, { once: true });
   async function receive() {
     const line = await lines.next();
     if (line.done) throw new Error(lastError.trim() || "The Codex process closed.");
@@ -117,7 +133,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     try {
       while (!turns.has(turnId)) await receive();
       const turn = turns.get(turnId)!;
-      if (turn.status !== "completed") return turn.error?.message || "Codex ended the task run: " + turn.status + ".";
+      if (turn.status !== "completed") return signal?.aborted ? lastError
+        : turn.error?.message || "Codex ended the task run: " + turn.status + ".";
     } catch (error) {
       return (error as Error).message;
     } finally {
@@ -178,6 +195,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       threadId, effort: task.execution?.effort, input: [{ type: "text", text: prompt, text_elements: [] }],
     });
     clearTimeout(timeout);
+    activeTurnId = turn.id;
     if (turn.status !== "inProgress") turns.set(turn.id, turn);
     return { threadId, completion: monitor(turn.id) };
   } catch (error) {
