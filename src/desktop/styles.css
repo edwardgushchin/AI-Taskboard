@@ -460,6 +460,7 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .image-preview-stage img:not([hidden]) + .image-preview-status { position: absolute; inset: 12px auto auto 12px; background: var(--panel); border-radius: 6px; }
 .chat-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .chat-controls .chat-icon { width: 30px; padding: 0; }
+.chat-controls .chat-send { flex: none; height: 30px; border-radius: 50%; }
 .chat-options { display: flex; align-items: center; gap: 6px; min-width: 0; margin-inline-start: auto; }
 .chat-selection {
   anchor-name: --chat-selection;
