@@ -429,5 +429,24 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 .appearance-panel label { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .appearance-panel select { min-width: 175px; }
 .tag-setting { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.lane-header { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 3px; }
+.lane-header .lane-title { min-width: 0; overflow-wrap: anywhere; }
+.lane-toolbar { display: flex; flex: none; align-items: center; gap: 2px; }
+.lane-toolbar .button { min-width: 23px; min-height: 23px; padding: 2px; }
+.lane-toolbar .icon { width: 14px; height: 14px; }
+.lane-filter summary { list-style: none; }
+.lane-filter-options {
+  position: absolute; z-index: 1; top: calc(100% + 4px); right: 0; width: min(176px, 100%);
+  max-height: min(40vh, 240px); overflow: auto; padding: 5px;
+  border: 1px solid var(--border); border-radius: 4px; background: var(--panel);
+  font-size: 12px; line-height: 1.4;
+}
+.lane-filter-options label { display: flex; align-items: center; gap: 6px; padding: 4px; cursor: pointer; }
+.lane-filter-options input[type="checkbox"] { margin: 0; }
+.lane-filter-options .tag { font-size: inherit; }
+.lane-filter-options .lane-priority { display: grid; margin-bottom: 4px; }
+.lane-filter-options .lane-priority select { min-width: 0; padding: 4px; }
+.lane-filter-empty { display: grid; gap: 5px; padding: 7px; font-size: 12px; }
+.lane-collapse { font-size: 16px; line-height: 1; }
 .tag-create { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .tag-create input:not([type="color"]) { flex: 1; min-width: 10em; }
