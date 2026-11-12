@@ -459,8 +459,25 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 .status-git { min-width: 0; display: flex; align-items: center; gap: 4px; }
 .status-git span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .status-bar .icon { width: 13px; height: 13px; }
-#status-notifications { min-height: 23px; border: 0; margin-inline-start: auto; padding: 2px 5px; }
-#status-notifications:hover { background: color-mix(in srgb, var(--text) 9%, var(--toolbar)); }
+.status-bar > button { min-height: 23px; border: 0; padding: 2px 5px; font: inherit; }
+.status-bar > button:hover { background: color-mix(in srgb, var(--text) 9%, var(--toolbar)); }
+#status-publish { margin-inline-start: -8px; }
+#status-notifications { margin-inline-start: auto; }
+.git-branches {
+  inset: auto auto 30px 8px; margin: 0; width: min(580px, calc(100vw - 16px)); max-height: calc(100vh - 70px);
+  padding: 7px; border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); background: var(--panel); box-shadow: 0 6px 20px #0004;
+}
+.git-branches:popover-open { display: flex; flex-direction: column; gap: 4px; }
+.git-branches > input { flex: none; width: 100%; font-size: 12px; }
+.git-branches > .button { justify-content: start; min-height: 26px; padding: 3px 7px; font-size: 12px; }
+.git-branches p { padding: 7px; font-size: 12px; }
+.git-ref-list { overflow: auto; min-height: 0; border-top: 1px solid var(--border); }
+.git-ref { display: grid; justify-items: start; width: 100%; gap: 3px; text-align: start; font-size: 12px; }
+.git-ref > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-ref > span:last-child { color: var(--muted); font-size: 11px; }
+.git-ref[aria-current="true"] { background: color-mix(in srgb, var(--text) 7%, var(--panel)); }
+.git-ref:focus-visible { outline-offset: -2px; }
 .notifications {
   inset: auto 8px 30px auto; margin: 0; width: min(360px, calc(100vw - 16px)); max-height: min(60vh, 400px);
   overflow: auto; padding: 6px; border: 1px solid var(--border); border-radius: 6px;

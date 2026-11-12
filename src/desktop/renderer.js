@@ -45,6 +45,16 @@ function notice(message) {
 }
 
 function boardError(error) {
+  const gitMessages = {
+    STALE_REPOSITORY: language("The current branch changed. Reopen the Git menu and retry.", "Текущая ветка изменилась. Откройте меню Git заново и повторите действие."),
+    GIT_WORKTREE_REQUIRED: language("Open a repository with a main worktree.", "Откройте репозиторий с основной рабочей копией."),
+    GIT_COMMIT_REQUIRED: language("Select a branch with a commit first.", "Сначала выберите ветку хотя бы с одним коммитом."),
+    REMOTE_EXISTS: language("The origin remote already exists. Manage it with your Git tools.", "Удалённый репозиторий origin уже настроен. Используйте свои инструменты Git для работы с ним."),
+    GITHUB_UNAVAILABLE: language("Install GitHub CLI (gh) and sign in with gh auth login.", "Установите GitHub CLI (gh) и войдите в аккаунт командой gh auth login."),
+    GITHUB_PUBLISH_FAILED: language("GitHub publication failed. Check your connection and permissions. Any created repository and origin were preserved; inspect them before retrying.", "Не удалось опубликовать репозиторий в GitHub. Проверьте соединение и права доступа. Если репозиторий и origin были созданы, они сохранены; проверьте их перед повтором."),
+    GITHUB_PUSH_FAILED: language("The repository and origin were created, but the push failed. Check Git authentication and push the branch with your Git tools.", "Репозиторий и origin созданы, но отправить коммиты не удалось. Проверьте авторизацию Git и отправьте ветку своими инструментами Git."),
+  };
+  if (gitMessages[error.code]) return [gitMessages[error.code], error.details?.output].filter(Boolean).join("\n");
   if (error.code === "DEPENDENCIES_INCOMPLETE") {
     return language("Complete the dependencies first.", "Сначала завершите зависимости.") + " " +
       (error.details?.dependencies ?? []).join(", ");
@@ -268,10 +278,13 @@ function openSheet(kind, title) {
   body.replaceChildren();
   byId("sheet-notice").hidden = true;
   if (!sheet.open) {
+    const branches = byId("git-branches");
+    if (branches.matches(":popover-open")) branches.hidePopover();
     focusBeforeSheet = document.activeElement;
     sheet.show();
     byId("app-content").inert = true;
     byId("board-actions").inert = true;
+    document.querySelector(".status-bar").inert = true;
   }
 }
 
@@ -1302,16 +1315,169 @@ function appearanceSettings() {
   }));
 }
 
+let gitMenuRequest = 0;
+
+async function gitCommand(action, input, project) {
+  const result = await api.command("git-" + action, undefined, input);
+  if (frame.project !== project) return;
+  if (!result.ok) {
+    notice(boardError(result.error));
+    return;
+  }
+  notice();
+  return result.data;
+}
+
+function updateGitRevision(data) {
+  frame.board.gitInfo = { ...frame.board.gitInfo, branch: data.branch, head: data.head };
+  renderStatusBar(false);
+}
+
+function newGitBranch(snapshot, ref, project) {
+  const editor = form("git-branch", language("Create new branch", "Создать новую ветку"), [
+    { name: "name", label: language("Branch name", "Название ветки"), required: true },
+  ], language("Create and switch", "Создать и переключиться"), async ({ name }) => {
+    const data = await gitCommand("create", { head: snapshot.head, branch: snapshot.branch, ref, name }, project);
+    if (!data || !editor.isConnected || frame.project !== project) return;
+    updateGitRevision(data);
+    sheet.close();
+  });
+  editor.prepend(element("p", language("Create from: ", "Создать из: ") + (ref ?? snapshot.branch ?? "HEAD"), "muted"));
+  editor.querySelector("input").focus();
+}
+
+async function openGitBranches() {
+  const menu = byId("git-branches");
+  menu.setAttribute("aria-label", language("Branches and tags", "Ветки и теги"));
+  const project = frame.project;
+  const request = ++gitMenuRequest;
+  menu.replaceChildren(element("p", language("Loading branches…", "Загрузка веток…"), "muted"));
+  const data = await gitCommand("refs", undefined, project);
+  if (!data || request !== gitMenuRequest || !menu.matches(":popover-open")) return;
+  let mode = "switch";
+  let busy = false;
+  const search = element("input");
+  search.type = "search";
+  search.setAttribute("aria-label", language("Search branches and tags", "Поиск веток и тегов"));
+  const create = button(language("＋ Create new branch…", "＋ Создать новую ветку…"), () => {
+    if (!busy) newGitBranch(data, undefined, project);
+  }, "quiet");
+  const from = button(language("＋ Create new branch from…", "＋ Создать новую ветку из…"), () => {
+    mode = "create";
+    draw();
+    search.focus();
+  }, "quiet");
+  const detach = button(language("Checkout detached…", "Извлечь в отключённом режиме…"), () => {
+    mode = "detach";
+    draw();
+    search.focus();
+  }, "quiet");
+  const back = button(language("← Back to branches", "← Назад к веткам"), () => {
+    mode = "switch";
+    draw();
+    search.focus();
+  }, "quiet");
+  const list = element("div", undefined, "git-ref-list");
+  const choose = async ref => {
+    if (busy) return;
+    if (mode === "create") return newGitBranch(data, ref.ref, project);
+    busy = true;
+    for (const control of menu.querySelectorAll("button, input")) control.disabled = true;
+    try {
+      const next = await gitCommand(mode, { head: data.head, branch: data.branch, ref: ref.ref }, project);
+      if (next && request === gitMenuRequest) {
+        updateGitRevision(next);
+        if (menu.matches(":popover-open")) menu.hidePopover();
+      }
+    } finally {
+      busy = false;
+      for (const control of menu.querySelectorAll("button, input")) control.disabled = false;
+    }
+  };
+  function draw() {
+    search.placeholder = mode === "create" ? language("Choose a starting branch or tag", "Выберите исходную ветку или тег")
+      : mode === "detach" ? language("Choose a branch or tag for detached HEAD", "Выберите ветку или тег для detached HEAD")
+      : language("Search branches and tags…", "Поиск веток и тегов…");
+    create.hidden = from.hidden = detach.hidden = mode !== "switch";
+    back.hidden = mode === "switch";
+    const query = search.value.toLocaleLowerCase();
+    const refs = data.refs.filter(ref => [ref.name, ref.sha, ref.author, ref.subject].some(value => value.toLocaleLowerCase().includes(query)));
+    list.replaceChildren(...(refs.length ? refs.map(ref => {
+      const entry = button("", () => choose(ref), "quiet git-ref");
+      entry.setAttribute("aria-current", String(!ref.tag && ref.name === data.branch));
+      const date = new Date(ref.date).toLocaleString(frame.russian ? "ru" : undefined);
+      entry.append(element("span", (ref.tag ? language("Tag · ", "Тег · ") : "⑂ ") + ref.name + (ref.name === data.branch && !ref.tag ? " ✓" : "")),
+        element("span", [ref.author, date, ref.sha.slice(0, 8), ref.subject].join(" · ")));
+      entry.title = [ref.name, ref.author, date, ref.sha, ref.subject].join("\n");
+      return entry;
+    }) : [element("p", language("No matching branches or tags.", "Подходящих веток и тегов нет."), "muted")]));
+  }
+  search.addEventListener("input", draw);
+  menu.addEventListener("keydown", event => {
+    if (!["ArrowDown", "ArrowUp"].includes(event.key)) return;
+    const controls = [...menu.querySelectorAll("input, button")].filter(item => !item.hidden && !item.disabled);
+    const index = controls.indexOf(document.activeElement);
+    event.preventDefault();
+    controls.at((index + (event.key === "ArrowDown" ? 1 : -1) + controls.length) % controls.length)?.focus();
+  }, { signal: gitMenuKeys.signal });
+  menu.replaceChildren(search, create, from, detach, back, list);
+  draw();
+  search.focus();
+}
+
+let gitMenuKeys = new AbortController();
+let publishingGit = false;
+
+async function publishToGitHub() {
+  if (publishingGit) return;
+  const project = frame.project;
+  const snapshot = await gitCommand("refs", undefined, project);
+  if (!snapshot) return;
+  const editor = form("git-publish", language("Publish to GitHub", "Опубликовать в GitHub"), [
+    { name: "name", label: language("Repository name (or owner/name)", "Имя репозитория (или владелец/имя)"), required: true,
+      value: project.split(/[\\/]/).at(-1).replace(/[^A-Za-z0-9_.-]/g, "-") },
+    { name: "visibility", label: language("Visibility", "Доступ"), value: "private", options: [
+      ["private", language("Private", "Приватный")], ["public", language("Public", "Публичный")],
+    ] },
+  ], language("Publish", "Опубликовать"), async ({ name, visibility }) => {
+    publishingGit = true;
+    byId("status-publish").disabled = true;
+    const status = editor.querySelector("p");
+    status.textContent = language("Publishing…", "Публикация…");
+    try {
+      const result = await gitCommand("publish", { head: snapshot.head, branch: snapshot.branch, name, visibility }, project);
+      if (!result || !editor.isConnected || frame.project !== project) return;
+      sheet.close();
+      notice(language("Published to GitHub: ", "Опубликовано в GitHub: ") + result.remote);
+    } finally {
+      publishingGit = false;
+      byId("status-publish").disabled = false;
+      if (editor.isConnected) status.textContent = language("Publish branch: ", "Опубликовать ветку: ") + (snapshot.branch ?? "HEAD");
+    }
+  });
+  editor.prepend(element("p", language("Publish branch: ", "Опубликовать ветку: ") + (snapshot.branch ?? "HEAD"), "muted"));
+  editor.querySelector("input").focus();
+}
+
 function renderStatusBar(projectChanged) {
-  const { branch, user } = frame.board?.gitInfo ?? {};
+  const { branch, head, user } = frame.board?.gitInfo ?? {};
   for (const [id, value, label] of [
-    ["status-branch", branch, language("Git branch", "Ветка Git")],
+    ["status-branch", branch ?? head?.slice(0, 8), language("Git branch", "Ветка Git")],
     ["status-user", user, language("Git user", "Пользователь Git")],
   ]) {
     const item = byId(id);
     item.hidden = !value;
     item.title = value ? label + " · " + value : "";
     item.querySelector("span").textContent = value ?? "";
+  }
+  const publish = byId("status-publish");
+  publish.hidden = !branch && !head;
+  publish.title = language("Publish to GitHub", "Опубликовать в GitHub");
+  publish.setAttribute("aria-label", publish.title);
+  if (projectChanged) {
+    gitMenuRequest++;
+    const branches = byId("git-branches");
+    if (branches.matches(":popover-open")) branches.hidePopover();
   }
   const menu = byId("notifications");
   if (projectChanged && menu.matches(":popover-open")) menu.hidePopover();
@@ -1381,6 +1547,13 @@ function update(next) {
 }
 
 byId("welcome-create").addEventListener("click", protect(() => api.createBoard()));
+byId("git-branches").addEventListener("toggle", protect(event => {
+  gitMenuKeys.abort();
+  gitMenuKeys = new AbortController();
+  if (event.newState === "open") return openGitBranches();
+  gitMenuRequest++;
+}));
+byId("status-publish").addEventListener("click", protect(publishToGitHub));
 byId("welcome-open").addEventListener("click", protect(() => api.open()));
 byId("close-sheet").addEventListener("click", () => sheet.close());
 byId("search").addEventListener("input", render);
@@ -1410,6 +1583,7 @@ sheet.addEventListener("close", () => {
   taskInSheet = undefined;
   byId("app-content").inert = false;
   byId("board-actions").inert = false;
+  document.querySelector(".status-bar").inert = false;
   if (document.activeElement === document.body || sheet.contains(document.activeElement)) focusBeforeSheet?.focus();
   focusBeforeSheet = undefined;
 });

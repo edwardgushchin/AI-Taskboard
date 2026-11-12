@@ -29,6 +29,7 @@
     <symbol id="icon-git-branch" viewBox="0 0 16 16"><circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12.5" r="1.5"/><circle cx="11.5" cy="3.5" r="1.5"/><path d="M4.5 5v6m7-6c0 3.5-7 2-7 5.5"/></symbol>
     <symbol id="icon-git-user" viewBox="0 0 16 16"><circle cx="8" cy="5" r="2.5"/><path d="M3 14v-1a5 4 0 0 1 10 0v1"/></symbol>
     <symbol id="icon-notifications" viewBox="0 0 16 16"><path d="M5.5 13.5a2.5 2.5 0 0 0 5 0M8 2c-2.5 0-4 1.5-4 4v3l-1.5 2.5h11L12 9V6c0-2.5-1.5-4-4-4Z"/></symbol>
+    <symbol id="icon-cloud-upload" viewBox="0 0 16 16"><path d="M4.5 12H4a3 3 0 0 1-.5-6A4.5 4.5 0 0 1 12 5a3.5 3.5 0 0 1 .5 7H12M8 14V8m-2 2 2-2 2 2"/></symbol>
   </svg>
   <header id="app-header" class="app-menu-bar" hidden>
     <div class="app-menu-start">
@@ -78,7 +79,9 @@
     </section>
   </main>
   <footer class="status-bar">
-    <span id="status-branch" class="status-git" hidden><svg class="icon" aria-hidden="true"><use href="#icon-git-branch"/></svg><span></span></span>
+    <button id="status-branch" type="button" class="button quiet status-git" popovertarget="git-branches" hidden><svg class="icon" aria-hidden="true"><use href="#icon-git-branch"/></svg><span></span></button>
+    <button id="status-publish" type="button" class="button quiet" aria-label="Publish to GitHub" hidden><svg class="icon" aria-hidden="true"><use href="#icon-cloud-upload"/></svg></button>
+    <section id="git-branches" class="git-branches" popover aria-label="Branches and tags"></section>
     <span id="status-user" class="status-git" hidden><svg class="icon" aria-hidden="true"><use href="#icon-git-user"/></svg><span></span></span>
     <button id="status-notifications" type="button" class="button quiet" popovertarget="notifications" aria-label="Notifications">
       <svg class="icon" aria-hidden="true"><use href="#icon-notifications"/></svg><span class="count" aria-hidden="true" hidden></span>
