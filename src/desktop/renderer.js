@@ -1346,6 +1346,16 @@ function newGitBranch(snapshot, ref, project) {
   editor.querySelector("input").focus();
 }
 
+function relativeCommitDate(value, now = Date.now()) {
+  const seconds = (new Date(value).getTime() - now) / 1000;
+  if (!Number.isFinite(seconds)) return "";
+  if (Math.abs(seconds) < 60) return language("just now", "только что");
+  const [unit, size] = [["year", 31536000], ["month", 2592000], ["day", 86400], ["hour", 3600], ["minute", 60]]
+    .find(([, size]) => Math.abs(seconds) >= size);
+  return new Intl.RelativeTimeFormat(frame.russian ? "ru" : "en", { numeric: "auto", style: "short" })
+    .format(Math.round(seconds / size), unit);
+}
+
 async function openGitBranches() {
   const menu = byId("git-branches");
   menu.setAttribute("aria-label", language("Branches and tags", "Ветки и теги"));
@@ -1359,24 +1369,29 @@ async function openGitBranches() {
   const search = element("input");
   search.type = "search";
   search.setAttribute("aria-label", language("Search branches and tags", "Поиск веток и тегов"));
-  const create = button(language("＋ Create new branch…", "＋ Создать новую ветку…"), () => {
+  const action = (english, russian, symbol, click) => {
+    const item = button("", click, "quiet git-menu-action");
+    item.append(icon(symbol), element("span", language(english, russian)));
+    return item;
+  };
+  const create = action("Create new branch…", "Создать новую ветку…", "plus", () => {
     if (!busy) newGitBranch(data, undefined, project);
-  }, "quiet");
-  const from = button(language("＋ Create new branch from…", "＋ Создать новую ветку из…"), () => {
+  });
+  const from = action("Create new branch from…", "Создать новую ветку из…", "plus", () => {
     mode = "create";
     draw();
     search.focus();
-  }, "quiet");
-  const detach = button(language("Checkout detached…", "Извлечь в отключённом режиме…"), () => {
+  });
+  const detach = action("Checkout detached…", "Извлечь в отключённом режиме…", "git-branch", () => {
     mode = "detach";
     draw();
     search.focus();
-  }, "quiet");
-  const back = button(language("← Back to branches", "← Назад к веткам"), () => {
+  });
+  const back = action("Back to branches", "Назад к веткам", "arrow-left", () => {
     mode = "switch";
     draw();
     search.focus();
-  }, "quiet");
+  });
   const list = element("div", undefined, "git-ref-list");
   const choose = async ref => {
     if (busy) return;
@@ -1404,11 +1419,20 @@ async function openGitBranches() {
     const refs = data.refs.filter(ref => [ref.name, ref.sha, ref.author, ref.subject].some(value => value.toLocaleLowerCase().includes(query)));
     list.replaceChildren(...(refs.length ? refs.map(ref => {
       const entry = button("", () => choose(ref), "quiet git-ref");
-      entry.setAttribute("aria-current", String(!ref.tag && ref.name === data.branch));
-      const date = new Date(ref.date).toLocaleString(frame.russian ? "ru" : undefined);
-      entry.append(element("span", (ref.tag ? language("Tag · ", "Тег · ") : "⑂ ") + ref.name + (ref.name === data.branch && !ref.tag ? " ✓" : "")),
-        element("span", [ref.author, date, ref.sha.slice(0, 8), ref.subject].join(" · ")));
-      entry.title = [ref.name, ref.author, date, ref.sha, ref.subject].join("\n");
+      const current = !ref.tag && ref.name === data.branch;
+      entry.setAttribute("aria-current", String(current));
+      const heading = element("span", undefined, "git-ref-heading");
+      const name = element("span", ref.name, "git-ref-name");
+      const date = element("time", relativeCommitDate(ref.date), "git-ref-date");
+      date.dateTime = ref.date;
+      date.setAttribute("aria-label", new Date(ref.date).toLocaleString(frame.russian ? "ru" : undefined));
+      heading.append(icon(ref.tag ? "git-tag" : "git-branch"), name);
+      if (current) heading.append(icon("check"));
+      heading.append(date);
+      const detail = element("span", undefined, "git-ref-detail");
+      detail.append(element("span", ref.author, "git-ref-author"), element("span", ref.sha.slice(0, 8), "git-ref-hash"),
+        element("span", ref.subject, "git-ref-subject"));
+      entry.append(heading, detail);
       return entry;
     }) : [element("p", language("No matching branches or tags.", "Подходящих веток и тегов нет."), "muted")]));
   }
