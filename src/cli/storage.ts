@@ -206,6 +206,11 @@ export function validateCard(value: unknown, id: string): Task {
   const task = value as unknown as Task;
   const files = new Set(task.attachments.map(file => file.file));
   for (const event of task.history) {
+    if (event?.run !== undefined && (event.action !== "run-log" || !Array.isArray(event.run) ||
+        event.run.some(item => !isRecord(item) ||
+          !["id", "type", "title", "text", "status"].every(key => typeof item[key] === "string")))) {
+      throw new TaskboardError("CORRUPT_STORAGE", "Invalid run log for " + id + ".", { id });
+    }
     const chat = event?.chat;
     if (chat === undefined) continue;
     if (!isRecord(chat) || event.action !== "chat" || !["agent", "user"].includes(event.actor) ||

@@ -4,7 +4,8 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { git } from "../cli/git.ts";
 import { codexThreadPattern } from "../cli/model.ts";
-import type { Task } from "../cli/model.ts";
+import type { RunActivity, Task } from "../cli/model.ts";
+import { runActivity } from "./run-activity.ts";
 import type { configuredCodex } from "./codex.ts";
 import { codexProject } from "./codex-project.ts";
 
@@ -35,7 +36,8 @@ const verifyWrite = [
   "}",
 ].join("\n");
 
-export async function startCodexRun(client: Client, project: string, cwd: string, task: Task): Promise<Run> {
+export async function startCodexRun(client: Client, project: string, cwd: string, task: Task,
+  onActivity?: (item: RunActivity) => void): Promise<Run> {
   if (!task.git) throw new Error("The task has no prepared Git worktree.");
   const paths = [...new Set(accessPaths(project, cwd, task.git.branch))];
   const filesystem = [
@@ -47,9 +49,12 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     ...client.args, "app-server", "-c", "permissions." + profile + "={filesystem={" + filesystem + "}}",
     "-c", "default_permissions=" + JSON.stringify(profile),
   ], { cwd: project, env: client.env, windowsHide: true, stdio: "pipe" });
+  const exited = new Promise<void>(resolve => child.once("close", resolve));
   const output = createInterface({ input: child.stdout });
   const lines = output[Symbol.asyncIterator]();
   const turns = new Map<string, Turn>();
+  const activity = new Map<string, RunActivity>();
+  let activeThreadId: string | undefined;
   let lastError = "";
   let nextId = 0;
   const timeout = setTimeout(() => {
@@ -62,6 +67,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     output.close();
     child.stdin.end();
     child.kill();
+    return exited;
   };
   child.stderr.setEncoding("utf8").on("data", chunk => { lastError = (lastError + chunk).slice(-1500); });
   const streamError = (error: Error) => {
@@ -76,6 +82,13 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     const line = await lines.next();
     if (line.done) throw new Error(lastError.trim() || "The Codex process closed.");
     const message = JSON.parse(line.value);
+    if (onActivity && activeThreadId && message.method?.startsWith("item/") && message.params?.threadId === activeThreadId) {
+      const item = runActivity(activity, message.method, message.params);
+      if (item) {
+        activity.set(item.id, item);
+        onActivity(item);
+      }
+    }
     if (message.method === "turn/completed") {
       const turn = message.params.turn as Turn;
       turns.set(turn.id, turn);
@@ -103,7 +116,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     } catch (error) {
       return (error as Error).message;
     } finally {
-      close();
+      await close();
     }
   }
 
@@ -145,6 +158,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       "Рабочая копия: " + cwd,
       JSON.stringify({ title: task.title, description: task.description, criteria: task.criteria }),
     ].join("\n");
+    activeThreadId = threadId;
     const { turn } = await request<{ turn: Turn }>("turn/start", {
       threadId, effort: task.execution?.effort, input: [{ type: "text", text: prompt, text_elements: [] }],
     });
@@ -152,7 +166,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     if (turn.status !== "inProgress") turns.set(turn.id, turn);
     return { threadId, completion: monitor(turn.id) };
   } catch (error) {
-    close();
+    await close();
     throw error;
   }
 }

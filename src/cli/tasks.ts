@@ -66,6 +66,23 @@ export function createTask(id: string, input: Record<string, unknown>): Task {
   }, input);
 }
 
+export function recordRunLog(task: Task, input: Record<string, unknown>): Task {
+  if (!Array.isArray(input.entries) || !input.entries.length || Buffer.byteLength(JSON.stringify(input.entries)) > 1_000_000) {
+    throw new TaskboardError("INVALID_INPUT", "Expected a run log of at most 1 MB.");
+  }
+  const entries = input.entries.map(value => {
+    const item = object(value);
+    if (typeof item.text !== "string") throw new TaskboardError("INVALID_INPUT", "Expected item text.");
+    return {
+      id: text(item.id, "item ID", true), type: text(item.type, "item type", true),
+      title: text(item.title, "item title"), text: item.text, status: text(item.status, "item status"),
+    };
+  });
+  const updated = record(task, "run-log", "agent");
+  updated.history.at(-1)!.run = entries;
+  return { ...updated, closedAt: task.closedAt };
+}
+
 export function changeTask(task: Task, action: string, input: Record<string, unknown>): Task {
   requireRevision(task, input.revision);
   requireState(task, activeStates);

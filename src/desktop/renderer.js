@@ -329,10 +329,17 @@ function tagBadges(names) {
   return Array.from(tags.values(), tag => tagBadge(tag.name, tag.color, tag.customColor));
 }
 
-function codexRunLabel(task) {
-  if (task.status !== "in_progress") return "";
-  if (frame.runningTasks?.includes(task.id)) return language("Codex is working", "Codex работает");
-  return task.codexThreadId ? language("Board run inactive", "Запуск с доски не активен") : "";
+function renderAgentRunStatus(target, task) {
+  target.replaceChildren();
+  if (frame.runningTasks?.includes(task.id)) {
+    const spinner = element("span", undefined, "agent-spinner");
+    spinner.setAttribute("role", "status");
+    spinner.setAttribute("aria-label", language("Agent is working", "Агент работает"));
+    target.append(spinner);
+  } else if (task.status === "in_progress" && task.codexThreadId) {
+    target.textContent = language("Board run inactive", "Запуск с доски не активен");
+  }
+  target.hidden = !target.childNodes.length;
 }
 
 function card(task) {
@@ -358,8 +365,9 @@ function card(task) {
   }
   const meta = element("span", undefined, "task-meta");
   meta.append(element("span", task.id, "task-id"));
-  const runLabel = codexRunLabel(task);
-  if (runLabel) meta.append(element("span", runLabel));
+  const runStatus = element("span");
+  renderAgentRunStatus(runStatus, task);
+  if (!runStatus.hidden) meta.append(runStatus);
   if (task.unfinishedDependencies?.length && ["draft", "ready"].includes(task.status)) {
     meta.append(element("span", language("Blocked by dependencies", "Ждёт зависимости"), "dependency-warning"));
   }
@@ -580,7 +588,7 @@ function newTaskDraft() {
   const attachments = element("ul", undefined, "draft-attachments");
   attachments.hidden = true;
   attachments.setAttribute("aria-label", language("Attachments", "Вложения"));
-  const progress = element("p", language("Codex is preparing a draft…", "Codex готовит черновик…"), "muted");
+  const progress = element("p", language("The agent is preparing a draft…", "Агент готовит черновик…"), "muted");
   progress.hidden = true;
   progress.setAttribute("role", "status");
   const editor = form("new-task", language("New task", "Новая задача"), [
@@ -696,7 +704,7 @@ function editDependencies(task) {
 async function editExecution(task) {
   const title = language("Execution settings", "Параметры запуска");
   openSheet("execution", title);
-  const loading = element("p", language("Loading Codex models…", "Загрузка моделей Codex…"), "muted");
+  const loading = element("p", language("Loading models…", "Загрузка моделей…"), "muted");
   body.append(loading);
   const result = await api.executionModels();
   if (!sheet.open || !loading.isConnected) return;
@@ -759,9 +767,9 @@ async function showTask(id) {
     tags.append(...tagBadges(task.tags));
     body.append(tags);
   }
-  const runStatus = element("p", codexRunLabel(task), "muted");
-  runStatus.id = "task-codex-run";
-  runStatus.hidden = !runStatus.textContent;
+  const runStatus = element("p", undefined, "muted");
+  runStatus.id = "task-agent-run";
+  renderAgentRunStatus(runStatus, task);
   body.append(runStatus);
   section(language("Description", "Описание"), task.description);
   section(language("Acceptance criteria", "Критерии приёмки"), task.criteria);
@@ -1174,11 +1182,8 @@ function update(next) {
   const tagSettings = byId("tag-settings");
   if (tagsChanged && sheet.open && tagSettings) renderTagSettings(tagSettings);
   if (sheetKind === "task" && sheet.open && taskInSheet) {
-    const runStatus = byId("task-codex-run");
-    if (runStatus) {
-      runStatus.textContent = codexRunLabel(taskInSheet);
-      runStatus.hidden = !runStatus.textContent;
-    }
+    const runStatus = byId("task-agent-run");
+    if (runStatus) renderAgentRunStatus(runStatus, taskInSheet);
     if (tagsChanged) byId("task-sheet-tags")?.replaceChildren(...tagBadges(taskInSheet.tags));
     const task = frame.board?.tasks.find(entry => entry.id === taskInSheet.id);
     const archived = frame.board?.archived.some(entry => entry.id === taskInSheet.id);

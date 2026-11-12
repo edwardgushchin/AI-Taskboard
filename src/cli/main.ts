@@ -14,7 +14,7 @@ import type { Task } from "./model.ts";
 import { initializeBoard, locateBoard, onBoard } from "./storage.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
 import { previewSubmission, submitTask } from "./submission.ts";
-import { changeTask, createTask } from "./tasks.ts";
+import { changeTask, createTask, recordRunLog } from "./tasks.ts";
 import { dependencyStatus, unfinishedDependencies, validateDependencies } from "./dependencies.ts";
 import { cleanTaskWorktree, hasPending, startTask, taskWithCurrentWorktree } from "./worktree.ts";
 import packageInfo from "../../package.json" with { type: "json" };
@@ -193,7 +193,7 @@ function run(
     store.saveIndex();
     return store.index.settings;
   }
-  if (command !== "show" && command !== "start" && command !== "cleanup" && command !== "preview" && command !== "submit" && command !== "review" && command !== "accept" && command !== "restore-changes" && command !== "chat" && !taskActions.has(command)) {
+  if (command !== "show" && command !== "start" && command !== "cleanup" && command !== "preview" && command !== "submit" && command !== "review" && command !== "accept" && command !== "restore-changes" && command !== "chat" && command !== "run-log" && !taskActions.has(command)) {
     throw new TaskboardError("UNKNOWN_COMMAND", "Unknown command " + command + ".");
   }
   if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
@@ -222,6 +222,7 @@ function run(
   }
   if (command === "cleanup") return cleanTaskWorktree(store, task);
   if (command === "chat") return addChatMessage(store, task, input);
+  if (command === "run-log") return store.save(recordRunLog(task, input));
   const updated = changeTask(task, command, input);
   if (command === "update" && input.dependencies !== undefined) validateDependencies(store, updated);
   return store.save(command === "update" && input.tags !== undefined ? assignTags(store, updated) : updated);

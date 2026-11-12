@@ -70,6 +70,14 @@ export interface ChatUsage {
   limit: number;
 }
 
+export interface RunActivity {
+  id: string;
+  type: string;
+  title: string;
+  text: string;
+  status: string;
+}
+
 export interface TaskEvent {
   at: string;
   actor: Actor;
@@ -78,6 +86,7 @@ export interface TaskEvent {
   from?: TaskState;
   to?: TaskState;
   chat?: ChatSettings & { files?: string[]; usage?: ChatUsage; commentary?: string[] };
+  run?: RunActivity[];
 }
 
 export interface Task {

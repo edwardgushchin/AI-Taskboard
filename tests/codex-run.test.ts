@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { startCodexRun } from "../src/desktop/codex-run.ts";
 import { createTask } from "../src/cli/tasks.ts";
+import type { RunActivity } from "../src/cli/model.ts";
 
 test("the Codex launch probes access, applies settings, and monitors the turn", async t => {
   const folder = realpathSync(mkdtempSync(join(tmpdir(), "ai-taskboard-codex-run-")));
@@ -45,6 +46,16 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '  send({ id, result });',
     '  if (method === "turn/start") {',
     '    if (outcome === "closed") { process.stdin.destroy(); return; }',
+    '    const itemEvent = (method, params) => send({ method: "item/" + method, params: { threadId: thread, ...params } });',
+    '    itemEvent("started", { item: { id: "note", type: "agentMessage", text: "" } });',
+    '    itemEvent("agentMessage/delta", { itemId: "note", delta: "Checking" });',
+    '    itemEvent("completed", { item: { id: "note", type: "agentMessage", text: "Checking files." } });',
+    '    itemEvent("started", { item: { id: "cmd", type: "commandExecution", command: "git status", status: "inProgress" } });',
+    '    itemEvent("commandExecution/outputDelta", { itemId: "cmd", delta: "clean" });',
+    '    itemEvent("completed", { item: { id: "cmd", type: "commandExecution", command: "git status", status: "completed", aggregatedOutput: "clean", exitCode: 0 } });',
+    '    itemEvent("reasoning/textDelta", { itemId: "reason", delta: "private" });',
+    '    itemEvent("completed", { item: { id: "reason", type: "reasoning", summary: ["Public summary"], content: ["private"] } });',
+    '    itemEvent("agentMessage/delta", { threadId: "unrelated", itemId: "note", delta: "unrelated" });',
     '    const failed = outcome === "failed";',
     '    send({ method: "turn/completed", params: { threadId: thread, turn: {',
     '      id: "turn-1", status: failed ? "failed" : "completed", error: failed ? { message: "Provider disconnected" } : null,',
@@ -58,10 +69,16 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     execution: { model: "test-model", effort: "high" },
   };
   const client = (outcome: string) => ({ path: process.execPath, args: [stub, capture, outcome], version: "test" });
-  const launch = (outcome: string) => startCodexRun(client(outcome), folder, worktree, task);
+  const activity: RunActivity[] = [];
+  const launch = (outcome: string) => startCodexRun(client(outcome), folder, worktree, task, item => activity.push(item));
   const run = await launch("ok");
   assert.equal(run.threadId, thread);
   assert.equal(await run.completion, undefined);
+  assert.deepEqual(activity.map(item => [item.id, item.status, item.text]), [
+    ["note", "inProgress", ""], ["note", "inProgress", "Checking"], ["note", "completed", "Checking files."],
+    ["cmd", "inProgress", ""], ["cmd", "inProgress", "clean"], ["cmd", "completed", "clean\nExit code: 0"],
+    ["reason", "completed", "Public summary"],
+  ]);
   const launched = JSON.parse(readFileSync(capture, "utf8"));
   assert.equal(launched.cwd, folder);
   assert.equal(launched.flags[0], "app-server");
