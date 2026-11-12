@@ -2,6 +2,7 @@ export const taskStates = ["draft", "ready", "in_progress", "blocked", "review",
 export const priorities = ["low", "normal", "high", "urgent"] as const;
 export const tagColors = ["purple", "blue", "cyan", "pink", "green"] as const;
 export const maxAttachmentBytes = 64 * 1024 * 1024;
+export const codexThreadPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 
 export type TaskState = typeof taskStates[number];
 export type Priority = typeof priorities[number];
@@ -87,12 +88,15 @@ export interface Task {
   subtasks: { title: string; done: boolean }[];
   attachments: Attachment[];
   status: TaskState;
+  codexThreadId?: string;
   revision: number;
   createdAt: string;
   updatedAt: string;
   closedAt?: string;
   summary: string;
   nextStep: string;
+  dependencies?: string[];
+  execution?: { model: string; effort?: string };
   blocked?: { reason: string; condition: string };
   result?: { summary: string; checks: string[]; limitations: string[] };
   git?: TaskGit;
@@ -134,6 +138,7 @@ export class TaskboardError extends Error {
 }
 
 export const taskIdPattern = /^T-[0-9]{4,}$/;
+export const reasoningEffortPattern = /^[a-z][a-z0-9_-]{0,31}$/;
 
 export function object(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {

@@ -15,6 +15,7 @@ import { initializeBoard, locateBoard, onBoard } from "./storage.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
 import { previewSubmission, submitTask } from "./submission.ts";
 import { changeTask, createTask } from "./tasks.ts";
+import { dependencyStatus, unfinishedDependencies, validateDependencies } from "./dependencies.ts";
 import { cleanTaskWorktree, hasPending, startTask, taskWithCurrentWorktree } from "./worktree.ts";
 import packageInfo from "../../package.json" with { type: "json" };
 
@@ -48,7 +49,13 @@ function readInput(fromStdin: boolean | undefined): Record<string, unknown> {
 
 function snapshotBoard(store: BoardStore) {
   upgradeTagCatalog(store);
-  return store.snapshot();
+  const board = store.snapshot();
+  const statuses = new Map([...board.tasks, ...board.archived].map(task => [task.id, task.status]));
+  return {
+    ...board,
+    tasks: board.tasks.map(task => task.dependencies?.length
+      ? { ...task, unfinishedDependencies: unfinishedDependencies(task, id => statuses.get(id)) } : task),
+  };
 }
 
 function assignTags(store: BoardStore, task: Task): Task {
@@ -124,6 +131,7 @@ function run(
   }
   if (command === "create") {
     const task = createTask(store.allocateId(), input);
+    validateDependencies(store, task);
     return createWithAttachments(store, task.tags.length ? assignTags(store, task) : task, input.attachmentSources);
   }
   if (command === "tag") {
@@ -180,7 +188,12 @@ function run(
   if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
   if (command === "show") {
     const task = taskWithCurrentWorktree(store, readTask(store, id));
-    return { ...task, savedChanges: describeSavedChanges(store, task) };
+    return {
+      ...task, savedChanges: describeSavedChanges(store, task),
+      ...(task.dependencies?.length ? {
+        unfinishedDependencies: unfinishedDependencies(task, dependency => dependencyStatus(store, dependency)),
+      } : {}),
+    };
   }
   if (command === "restore-changes") return restoreSavedChanges(store, readTask(store, id), input);
   if (command === "cleanup" && isArchived(store, id)) return cleanTaskWorktree(store, readTask(store, id));
@@ -199,6 +212,7 @@ function run(
   if (command === "cleanup") return cleanTaskWorktree(store, task);
   if (command === "chat") return addChatMessage(store, task, input);
   const updated = changeTask(task, command, input);
+  if (command === "update" && input.dependencies !== undefined) validateDependencies(store, updated);
   return store.save(command === "update" && input.tags !== undefined ? assignTags(store, updated) : updated);
 }
 

@@ -11,9 +11,12 @@ import { codexStatus, composeDraft, installCodex, setCodexExecutable, skillLaunc
 import { chatModels, replyToTask } from "./codex-chat.ts";
 import type { CodexStatus } from "./codex.ts";
 import type { CliReply } from "./cli.ts";
+import { executionModels } from "./codex-models.ts";
 import type { ArchiveLink, BoardSettings, BoardTag, Task } from "../cli/model.ts";
-import { maxAttachmentBytes } from "../cli/model.ts";
+import { codexThreadPattern, maxAttachmentBytes, taskIdPattern } from "../cli/model.ts";
 import { readJson, writeJson } from "../cli/storage.ts";
+import { configuredCodex } from "./codex.ts";
+import { startCodexRun } from "./codex-run.ts";
 
 interface Board {
   project: string;
@@ -536,6 +539,16 @@ ipcMain.handle("board:attach", async (event, id: unknown, revision: unknown) => 
   return callCli(project, ["attachment", "add", id], { path: result.filePaths[0], actor: "user", revision });
 });
 
+ipcMain.handle("codex:executionModels", async event => {
+  const { project } = stateOf(event);
+  if (!project) return cliFailure("INVALID_INPUT", "Choose a project.");
+  try {
+    return { ok: true, data: await executionModels(app.getPath("userData"), project) };
+  } catch (error) {
+    return cliFailure("CODEX_MODELS_UNAVAILABLE", (error as Error).message);
+  }
+});
+
 ipcMain.handle("board:saveAttachment", async (event, id: unknown, file: unknown, name: unknown) => {
   const state = stateOf(event);
   if (!state.project || typeof id !== "string" || !/^T-\d{4,}$/.test(id) ||
@@ -566,6 +579,50 @@ ipcMain.handle("board:openWorktree", async (event, id: unknown) => {
   }
   const error = await shell.openPath(path);
   return error ? cliFailure("WORKTREE_MISSING", error) : { ok: true, data: null };
+});
+
+const launchingTasks = new Set<string>();
+ipcMain.handle("board:launchTask", async (event, id: unknown) => {
+  const { project } = stateOf(event);
+  if (!project || typeof id !== "string" || !taskIdPattern.test(id)) {
+    return cliFailure("INVALID_INPUT", "Choose a task.");
+  }
+  const key = project + "\0" + id;
+  if (launchingTasks.has(key)) return cliFailure("LAUNCH_IN_PROGRESS", "This task is already being launched.");
+  launchingTasks.add(key);
+  try {
+    const current = await callCli<Task>(project, ["show", id]);
+    if (!current.ok || current.data.codexThreadId) return current;
+    const client = await configuredCodex(app.getPath("userData"));
+    if (!client) return cliFailure("CODEX_UNAVAILABLE", lang("Connect Codex in settings.", "Подключите Codex в настройках."));
+    const started = await callCli<{ task: Task; worktree: string }>(project, ["start", id], { revision: current.data.revision });
+    if (!started.ok) return started;
+    const codexThreadId = await startCodexRun(client, project, started.data.worktree, started.data.task);
+    // Preserve edits made while Codex was starting.
+    const saved = await callCli<Task>(project, ["update", id], { codexThreadId, actor: "user" });
+    if (saved.ok) return saved;
+    return cliFailure("CODEX_LINK_FAILED", saved.error.message + "\n" + "codex://threads/" + codexThreadId);
+  } catch (error) {
+    return cliFailure("CODEX_LAUNCH_FAILED", (error as Error).message);
+  } finally {
+    launchingTasks.delete(key);
+  }
+});
+
+ipcMain.handle("board:openCodexThread", async (event, id: unknown) => {
+  const { project } = stateOf(event);
+  if (!project || typeof id !== "string" || !taskIdPattern.test(id)) return cliFailure("INVALID_INPUT", "Choose a task.");
+  const result = await callCli<Task>(project, ["show", id]);
+  if (!result.ok) return result;
+  const thread = result.data.codexThreadId;
+  if (!thread || !codexThreadPattern.test(thread)) return cliFailure("CODEX_THREAD_MISSING", "This task has no Codex chat.");
+  const url = "codex://threads/" + thread;
+  try {
+    await shell.openExternal(url);
+    return { ok: true, data: null };
+  } catch {
+    return cliFailure("CODEX_OPEN_FAILED", lang("Could not open Codex.", "Не удалось открыть Codex.") + "\n" + url);
+  }
 });
 
 let codexInstallation: Promise<CodexStatus> | undefined;

@@ -1,4 +1,5 @@
 import { realpathSync } from "node:fs";
+import { dependencyStatus, unfinishedDependencies } from "./dependencies.ts";
 import { isAbsolute, join, relative, sep } from "node:path";
 import {
   excludeBoard, git, invokeGit, isAncestor, localBranch, requireRepository, resolveCommit, worktrees,
@@ -111,6 +112,12 @@ export function hasPending(store: BoardStore, task: Task): boolean {
 
 export function startTask(store: BoardStore, task: Task, input: Record<string, unknown>) {
   requireState(task, ["ready", "in_progress"]);
+  if (task.status === "ready") {
+    const dependencies = unfinishedDependencies(task, id => dependencyStatus(store, id));
+    if (dependencies.length) {
+      throw new TaskboardError("DEPENDENCIES_INCOMPLETE", "Complete the task dependencies before starting.", { dependencies });
+    }
+  }
   const repo = requireRepository(store.location.repository);
   const branch = worktreeBranch(task);
   const managedPath = join(store.subdirectory("worktrees"), task.id);
