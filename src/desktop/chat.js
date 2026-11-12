@@ -362,6 +362,14 @@ function reasoningName(effort) {
   return Object.hasOwn(labels, effort) ? language(...labels[effort]) : effort;
 }
 
+function chatEventAttachments(event, files) {
+  if (event.action !== "attach") return (event.chat?.files ?? []).map(id => files.get(id)).filter(Boolean);
+  if (event.attachment !== undefined) return [files.get(event.attachment)].filter(Boolean);
+  // Older attachment events recorded only a filename. Never guess between namesakes.
+  const matches = [...files.values()].filter(file => file.name === event.text);
+  return matches.length === 1 ? matches : [];
+}
+
 function taskChat(task) {
   const project = frame.project;
   const key = project + "\0" + task.id;
@@ -431,6 +439,7 @@ function taskChat(task) {
       list.append(commentary);
     }
     const conversation = ["chat", "comment", "questions"].includes(event.action);
+    const attachments = chatEventAttachments(event, files);
     const author = event.actor === "user" ? language("You", "Вы") : language("Agent", "Агент");
     const date = element("time", eventDay ? timeFormat.format(timestamp) : event.at, "chat-time");
     date.dateTime = event.at;
@@ -441,7 +450,7 @@ function taskChat(task) {
       service.append(element("span", author, "chat-author"),
         element("span", chatEventLabel(event.action) + (status ? " · " + language(status[1], status[2]) : ""), "chat-action"), date);
       list.append(service);
-      if (!event.text) continue;
+      if (!event.text && !attachments.length) continue;
       // A chat edit can quote the pending request as its audit note.
       if (event.action === "update" && event.actor === "user" &&
           lastMessage?.actor === "user" && event.text === lastMessage.text) continue;
@@ -449,7 +458,6 @@ function taskChat(task) {
     const entry = element("li", undefined, "chat-entry");
     entry.dataset.actor = event.actor;
     entry.append(element("span", author, "chat-author"));
-    const attachments = (event.chat?.files ?? []).map(id => files.get(id)).filter(Boolean);
     if (attachments.length) {
       const images = attachments.filter(isImageAttachment);
       const tiles = element("div", undefined, "chat-attachments");
@@ -475,7 +483,7 @@ function taskChat(task) {
       }
       entry.append(tiles);
     }
-    if (event.text) entry.append(chatText(event.text));
+    if (event.text && !(event.action === "attach" && attachments.length)) entry.append(chatText(event.text));
     entry.append(conversation ? date : date.cloneNode(true));
     list.append(entry);
   }

@@ -85,6 +85,7 @@ export interface TaskEvent {
   actor: Actor;
   action: string;
   text?: string;
+  attachment?: string;
   from?: TaskState;
   to?: TaskState;
   chat?: ChatSettings & { files?: string[]; usage?: ChatUsage; commentary?: string[] };
