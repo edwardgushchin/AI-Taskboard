@@ -6,7 +6,7 @@ import { parseArgs } from "node:util";
 import { acceptTask, inspectReview, reopenConflictingReview } from "./acceptance.ts";
 import { describeSavedChanges, restoreSavedChanges } from "./saved-changes.ts";
 import {
-  addAttachment, archiveDiagnostics, createWithAttachments, isArchived, readAttachment, readTask, sweepArchives,
+  addAttachment, addChatMessage, archiveDiagnostics, createWithAttachments, isArchived, readAttachment, readTask, sweepArchives,
   upgradeTagCatalog,
 } from "./archive.ts";
 import { member, number, object, registerTags, tagColors, tagKey, TaskboardError, text } from "./model.ts";
@@ -24,7 +24,7 @@ const help = [
   "Usage: ai-taskboard [--project PATH] [--json] COMMAND [TASK-ID] [--stdin]",
   "Commands: init, list, show, create, update, comment, approve, start, progress,",
   "          block, resume, preview, submit, review, accept, restore-changes, request-changes, cancel, cleanup, settings, watch, doctor",
-  "          list --archived, archive sweep, attachment add TASK-ID, attachment read TASK-ID",
+  "          list --archived, archive sweep, chat TASK-ID, attachment add TASK-ID, attachment read TASK-ID",
   "          list --tag NAME, tag ensure --stdin, tag set --stdin (name and color)",
   "For init, pass git: true with --stdin to initialize Git in the chosen folder.",
   "With --stdin, pass one JSON object as the command input.",
@@ -182,7 +182,7 @@ function run(
     store.saveIndex();
     return store.index.settings;
   }
-  if (command !== "show" && command !== "start" && command !== "cleanup" && command !== "preview" && command !== "submit" && command !== "review" && command !== "accept" && command !== "restore-changes" && !taskActions.has(command)) {
+  if (command !== "show" && command !== "start" && command !== "cleanup" && command !== "preview" && command !== "submit" && command !== "review" && command !== "accept" && command !== "restore-changes" && command !== "chat" && !taskActions.has(command)) {
     throw new TaskboardError("UNKNOWN_COMMAND", "Unknown command " + command + ".");
   }
   if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
@@ -210,6 +210,7 @@ function run(
     throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before modifying the task.");
   }
   if (command === "cleanup") return cleanTaskWorktree(store, task);
+  if (command === "chat") return addChatMessage(store, task, input);
   const updated = changeTask(task, command, input);
   if (command === "update" && input.dependencies !== undefined) validateDependencies(store, updated);
   return store.save(command === "update" && input.tags !== undefined ? assignTags(store, updated) : updated);

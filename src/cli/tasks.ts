@@ -124,6 +124,9 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
         note = text(input.note, "note", true);
         if (status === "review") status = "in_progress";
       }
+      if (input.preserveStatus === true && status !== task.status) {
+        throw new TaskboardError("STATUS_CHANGE_REQUIRED", "These requirements would reopen the task. Ask the user to apply the changes on the board.");
+      }
       return record(updated, action, actor, status, note);
     }
     default:

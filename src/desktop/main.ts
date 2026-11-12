@@ -3,11 +3,13 @@ import type { IpcMainInvokeEvent } from "electron";
 import { existsSync, mkdirSync, statSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, isAbsolute, join } from "node:path";
+import { basename, extname, isAbsolute, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { bundled, callCli, cliChild, cliFailure, entry } from "./cli.ts";
 import { codexStatus, composeDraft, installCodex, setCodexExecutable, skillLaunch } from "./codex.ts";
+import { chatModels, replyToTask } from "./codex-chat.ts";
+import { taskChatActions } from "./chat-actions.ts";
 import type { CodexStatus } from "./codex.ts";
 import type { CliReply } from "./cli.ts";
 import { executionModels } from "./codex-models.ts";
@@ -327,6 +329,122 @@ function isPastedFile(file: unknown): file is PastedFile {
 const imageExtensions = new Map([
   ["image/png", ".png"], ["image/jpeg", ".jpg"], ["image/webp", ".webp"], ["image/gif", ".gif"],
 ]);
+const imageTypes = new Map([...imageExtensions].map(([type, suffix]) => [suffix, type]));
+imageTypes.set(".jpeg", "image/jpeg");
+const chatRuns = new Set<string>();
+
+ipcMain.handle("chat:models", async event => {
+  const project = stateOf(event).board?.project;
+  if (!project) return cliFailure("BOARD_NOT_FOUND", "Open a board first.");
+  try {
+    return { ok: true, data: await chatModels(app.getPath("userData"), project) };
+  } catch (error) {
+    return cliFailure("CODEX_UNAVAILABLE", error instanceof Error ? error.message : String(error));
+  }
+});
+
+interface ChatRequest {
+  model: string;
+  effort: string;
+  text: string;
+  files: PastedFile[];
+  retryAt?: number;
+}
+
+type ChatUpdate = { type: "saved" | "changed" } | { type: "commentary"; text: string };
+
+async function sendChat(project: string, id: string, request: ChatRequest, notify: (update: ChatUpdate) => void) {
+  const key = project + "\0" + id;
+  if (chatRuns.has(key)) {
+    return { saved: false, result: cliFailure("CHAT_BUSY", lang("Codex is already replying to this task.", "Codex уже отвечает в этой задаче.")) };
+  }
+  chatRuns.add(key);
+  let scratch: string | undefined;
+  let saved = request.retryAt !== undefined;
+  try {
+    const { model, effort, text, files, retryAt } = request;
+    scratch = await mkdtemp(join(tmpdir(), "ai-taskboard-chat-"));
+    let reply: CliReply<Task>;
+    if (retryAt === undefined) {
+      const sources = [];
+      for (const [index, file] of files.entries()) {
+        const path = join(scratch, "upload-" + index);
+        const suffix = imageExtensions.get(file.type);
+        const name = file.name.trim();
+        await writeFile(path, Buffer.from(file.bytes));
+        sources.push({ path, name: suffix && !imageTypes.has(extname(name).toLowerCase()) ? name + suffix : name });
+      }
+      reply = await callCli<Task>(project, ["chat", id], { text, model, effort, attachmentSources: sources });
+      saved = reply.ok;
+      if (saved) notify({ type: "saved" });
+    } else {
+      reply = await callCli<Task>(project, ["show", id]);
+    }
+    if (!reply.ok) return { saved, result: reply };
+    const task = reply.data;
+    const last = task.history.findLastIndex(entry => entry.chat);
+    const message = task.history[last];
+    if (["done", "cancelled"].includes(task.status) || message?.actor !== "user" ||
+        (retryAt !== undefined && last !== retryAt)) {
+      return { saved, result: cliFailure("CHAT_CHANGED", lang("This message is no longer awaiting a reply.", "Это сообщение больше не ожидает ответа.")) };
+    }
+    const activeFiles = new Set(message.chat?.files);
+    const images = [];
+    const attachments = [];
+    for (const [index, file] of task.attachments.entries()) {
+      let path = join(project, ".tasks", "attachments", id, file.file);
+      if (activeFiles.has(file.file)) {
+        const extension = extname(file.name).toLowerCase();
+        const safeExtension = /^\.[a-z0-9]{1,10}$/.test(extension) ? extension : "";
+        path = join(scratch, "attachment-" + index + safeExtension);
+        const copy = await callCli(project, ["attachment", "read", id], { file: file.file, destination: path });
+        if (!copy.ok) return { saved, result: copy };
+        if (imageTypes.has(safeExtension)) images.push(path);
+      }
+      attachments.push({ id: file.file, name: file.name, path });
+    }
+    const prompt = JSON.stringify({
+      task: { id, title: task.title, status: task.status, description: task.description,
+        criteria: task.criteria, openQuestions: task.questions, tags: task.tags, priority: task.priority,
+        subtasks: task.subtasks, dependencies: task.dependencies, summary: task.summary, nextStep: task.nextStep },
+      history: task.history.slice(0, last).map(event => ({
+        actor: event.actor, action: event.action, text: event.text, from: event.from, to: event.to, files: event.chat?.files,
+      })),
+      subsequentEvents: task.history.slice(last + 1),
+      attachments,
+      latestUserMessage: { text: message.text ?? "", files: message.chat?.files ?? [] },
+    });
+    const answer = await replyToTask(app.getPath("userData"), project, { model, effort }, prompt, images,
+      text => notify({ type: "commentary", text }),
+      taskChatActions(project, task, message.text ?? "", () => notify({ type: "changed" })));
+    const result = await callCli<Task>(project, ["chat", id], { ...answer, actor: "agent", model, effort, replyTo: last });
+    return { saved, result };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { saved, result: cliFailure("CHAT_FAILED", message.slice(0, 1500)) };
+  } finally {
+    if (scratch) await rm(scratch, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
+    chatRuns.delete(key);
+  }
+}
+
+ipcMain.handle("chat:send", async (event, id: unknown, request: unknown) => {
+  const project = stateOf(event).board?.project;
+  const input = request as Partial<ChatRequest> | undefined;
+  if (!project || typeof id !== "string" || !/^T-\d{4,}$/.test(id) || !input ||
+      typeof input.model !== "string" || !input.model.trim() || typeof input.effort !== "string" || !input.effort.trim() ||
+      typeof input.text !== "string" || !Array.isArray(input.files) || !input.files.every(isPastedFile) ||
+      (input.retryAt !== undefined && (!Number.isSafeInteger(input.retryAt) || input.retryAt < 0)) ||
+      (input.retryAt === undefined && !input.text.trim() && !input.files.length)) {
+    return { saved: false, result: cliFailure("INVALID_INPUT", lang("Choose a task, a model, and a message.", "Выберите задачу и модель, напишите сообщение.")) };
+  }
+  if (input.files.reduce((total, file) => total + file.bytes.byteLength, 0) > maxAttachmentBytes) {
+    return { saved: false, result: cliFailure("ATTACHMENT_LIMIT", lang("Attachments are limited to 64 MiB per task.", "Лимит вложений на задачу — 64 МиБ.")) };
+  }
+  return sendChat(project, id, input as ChatRequest, update => {
+    if (!event.sender.isDestroyed()) event.sender.send("chat:update", { project, id, ...update });
+  });
+});
 
 ipcMain.handle("board:draft", async (event, request: unknown, files: unknown = []) => {
   const state = stateOf(event);
@@ -414,17 +532,6 @@ ipcMain.handle("board:command", async (event, command: unknown, id: unknown, inp
   return result;
 });
 
-ipcMain.handle("board:attach", async (event, id: unknown, revision: unknown) => {
-  const state = stateOf(event);
-  if (!state.project || typeof id !== "string" || !/^T-\d{4,}$/.test(id)) {
-    return cliFailure("INVALID_INPUT", "Choose a task.");
-  }
-  const project = state.project;
-  const result = await dialog.showOpenDialog(state.window, { properties: ["openFile"] });
-  if (result.canceled || !result.filePaths[0]) return { ok: true, data: null };
-  return callCli(project, ["attachment", "add", id], { path: result.filePaths[0], actor: "user", revision });
-});
-
 ipcMain.handle("codex:executionModels", async event => {
   const { project } = stateOf(event);
   if (!project) return cliFailure("INVALID_INPUT", "Choose a project.");
@@ -443,6 +550,21 @@ ipcMain.handle("board:saveAttachment", async (event, id: unknown, file: unknown,
   const result = await dialog.showSaveDialog(state.window, { defaultPath: basename(name.replaceAll("\\", "/")) });
   if (result.canceled || !result.filePath) return { ok: true, data: null };
   return callCli(project, ["attachment", "read", id], { file, destination: result.filePath });
+});
+
+ipcMain.handle("board:attachmentPreview", async (event, id: unknown, file: unknown) => {
+  const project = stateOf(event).project;
+  if (!project || typeof id !== "string" || !/^T-\d{4,}$/.test(id) || typeof file !== "string") return null;
+  const result = await callCli<{ name: string; base64: string }>(project, ["attachment", "read", id], { file });
+  if (!result.ok) return null;
+  const type = imageTypes.get(extname(result.data.name).toLowerCase());
+  return type ? "data:" + type + ";base64," + result.data.base64 : null;
+});
+
+ipcMain.handle("chat:openLink", async (_event, value: unknown) => {
+  if (typeof value !== "string") return;
+  const url = URL.parse(value);
+  if (url && ["https:", "http:"].includes(url.protocol)) await shell.openExternal(url.href);
 });
 
 ipcMain.handle("board:openWorktree", async (event, id: unknown) => {

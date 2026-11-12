@@ -57,6 +57,26 @@ export interface TaskGit {
   accepted?: string;
 }
 
+export interface ChatSettings {
+  model: string;
+  effort: string;
+}
+
+export interface ChatUsage {
+  used: number;
+  limit: number;
+}
+
+export interface TaskEvent {
+  at: string;
+  actor: Actor;
+  action: string;
+  text?: string;
+  from?: TaskState;
+  to?: TaskState;
+  chat?: ChatSettings & { files?: string[]; usage?: ChatUsage; commentary?: string[] };
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -80,7 +100,7 @@ export interface Task {
   blocked?: { reason: string; condition: string };
   result?: { summary: string; checks: string[]; limitations: string[] };
   git?: TaskGit;
-  history: { at: string; actor: Actor; action: string; text?: string; from?: TaskState; to?: TaskState }[];
+  history: TaskEvent[];
 }
 
 export interface BoardSettings {

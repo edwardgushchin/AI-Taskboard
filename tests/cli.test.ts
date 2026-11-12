@@ -144,6 +144,43 @@ test("normal commands enforce task state, criteria, and revisions", t => {
   assert.equal(cli(root, ["list"]).tasks.length, 1);
 });
 
+test("task chat stores messages and attachments together and archives the conversation", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const task = cli(root, ["create"], { title: "Discuss export", questions: ["Which format?"] });
+  const path = join(root, "sample.txt");
+  const contents = "example attachment\n";
+  writeFileSync(path, contents);
+  const settings = { model: "fixture-model", effort: "medium" };
+  const message = { ...settings, text: "Use this example.", attachmentSources: [{ path }] };
+  cli(root, ["chat", task.id], { ...message, attachmentSources: [{ path }, { path: root }] }, "INVALID_INPUT");
+  assert.equal(cli(root, ["show", task.id]).revision, task.revision);
+  assert.ok(!existsSync(join(root, ".tasks", "attachments", task.id)));
+
+  const sent = cli(root, ["chat", task.id], message);
+  const file = sent.attachments[0].file;
+  assert.deepEqual(sent.history[0], task.history[0]);
+  assert.deepEqual(sent.history.at(-1).chat, { ...settings, files: [file] });
+  const reply = { ...settings, actor: "agent", text: "Who should receive the export?", usage: { used: 32, limit: 256 },
+    commentary: ["I have checked the export settings."] };
+  cli(root, ["chat", task.id], { ...reply, replyTo: 0 }, "CHAT_CHANGED");
+  const answered = cli(root, ["chat", task.id], { ...reply, replyTo: sent.history.length - 1 });
+  assert.deepEqual(answered.history.at(-1).chat.usage, reply.usage);
+  assert.deepEqual(answered.history.at(-1).chat.commentary, reply.commentary);
+  cli(root, ["chat", task.id], { ...reply, replyTo: sent.history.length - 1 }, "CHAT_CHANGED");
+
+  const closing = cli(root, ["chat", task.id], { ...settings, text: "Cancel this task." });
+  cli(root, ["cancel", task.id], { reason: "Archive the conversation" });
+  cli(root, ["chat", task.id], message, "INVALID_TRANSITION");
+  const closed = cli(root, ["chat", task.id], { ...reply, text: "The task was cancelled.", replyTo: closing.history.length - 1 });
+  assert.equal(closed.status, "cancelled");
+  cli(root, ["chat", task.id], { ...reply, replyTo: closing.history.length - 1 }, "CHAT_CHANGED");
+  cli(root, ["settings"], { archiveAfterDays: 0 });
+  assert.deepEqual(cli(root, ["archive", "sweep"]).archived, [task.id]);
+  assert.deepEqual(cli(root, ["show", task.id]).history, closed.history);
+  assert.equal(cli(root, ["attachment", "read", task.id], { file }).base64, Buffer.from(contents).toString("base64"));
+});
+
 test("creating a board can initialize Git in the selected folder without changing its parent", t => {
   const parent = fixture(t, true);
   const selected = join(parent, "Selected board");
@@ -335,9 +372,16 @@ test("submission commits the confirmed snapshot and rejects changed or incomplet
   assert.equal(git(worktree, "log", "-1", "--format=%B"), "feat: update the source\n\nTask: " + task.id);
   assert.ok(!existsSync(join(root, "new [report].csv")));
   assert.equal(git(worktree, "ls-files", "--", "ignored.local"), "");
-  const updated = cli(root, ["update", task.id], {
-    actor: "user", criteria: ["Review the updated source and CSV."], note: "Add CSV to acceptance",
-  });
+  const requirements = { actor: "user", criteria: ["Review the updated source and CSV."], note: "Add CSV to acceptance" };
+  cli(root, ["update", task.id], { ...requirements, revision: submitted.revision, preserveStatus: true }, "STATUS_CHANGE_REQUIRED");
+  const unchanged = cli(root, ["show", task.id]);
+  assert.equal(unchanged.status, "review");
+  assert.equal(unchanged.revision, submitted.revision);
+  assert.deepEqual(unchanged.criteria, submitted.criteria);
+  const edited = cli(root, ["update", task.id], { title: "Review source", revision: submitted.revision, preserveStatus: true });
+  assert.equal(edited.title, "Review source");
+  assert.equal(edited.status, "review");
+  const updated = cli(root, ["update", task.id], requirements);
   assert.equal(updated.status, "in_progress");
   assert.equal(cli(root, ["start", task.id]).worktree, worktree);
 });

@@ -3,12 +3,15 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src blob: data:">
   <title>AI Taskboard</title>
   <script src="../../node_modules/prismjs/prism.js" defer data-manual></script>
   <script src="./review-diff.js" defer></script>
   <link rel="stylesheet" href="./themes.css">
   <link rel="stylesheet" href="./styles.css">
+  <script src="../../node_modules/markdown-it/dist/browser/markdown-it.umd.min.js" defer></script>
+  <script src="./image-preview.js" defer></script>
+  <script src="./chat.js" defer></script>
   <script src="./renderer.js" defer></script>
 </head>
 <body>
@@ -20,6 +23,7 @@
     <symbol id="icon-plus" viewBox="0 0 16 16"><path d="M8 3.5v9m-4.5-4.5h9"/></symbol>
     <symbol id="icon-checklist" viewBox="0 0 16 16"><path d="m2 5 1.25 1.25L5.5 4M7.5 5H14M2 10h3v3H2zm5.5 1.5H14"/></symbol>
     <symbol id="icon-attachment" viewBox="0 0 16 16"><path d="m9.75 5-4 4a1.4 1.4 0 0 0 2 2l4.6-4.6a2.65 2.65 0 0 0-3.75-3.75L3.75 7.5a3.9 3.9 0 0 0 5.5 5.5l3-3"/></symbol>
+    <symbol id="icon-microphone" viewBox="0 0 16 16"><rect x="6" y="2" width="4" height="7" rx="2"/><path d="M4 7a4 4 0 0 0 8 0M8 11v3m-2 0h4"/></symbol>
   </svg>
   <header id="app-header" class="app-menu-bar" hidden>
     <div class="app-menu-start">
