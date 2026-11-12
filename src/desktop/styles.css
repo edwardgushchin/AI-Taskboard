@@ -324,6 +324,10 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 }
 .chat-attachments, .chat-composer .draft-attachments { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px; }
 .chat-attachments + .chat-text { margin-top: 5px; }
+.chat-text img { max-width: 100%; height: auto; }
+.chat-text table { display: block; max-width: 100%; overflow: auto; border-collapse: collapse; }
+.chat-text th, .chat-text td { border: 1px solid var(--border); padding: 3px 6px; }
+.chat-text input[type="checkbox"] { margin: 0 4px 0 0; }
 .chat-attachment, .chat-composer .draft-attachments li {
   position: relative; display: flex; gap: 6px; align-items: center; min-width: 0; max-width: 100%;
   padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; text-align: start;

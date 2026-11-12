@@ -1,7 +1,36 @@
 const chatDrafts = new Map();
 let chatCatalog;
-const chatMarkdown = window.markdownit?.({ breaks: true, linkify: true, html: false }).disable("image");
-if (chatMarkdown) chatMarkdown.validateLink = url => /^https?:\/\//i.test(url);
+const chatMarkdown = window.markdownit?.({ breaks: true, linkify: true, html: false });
+if (chatMarkdown) {
+  const web = url => /^https?:\/\//i.test(url);
+  const inlineImage = url => /^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$/i.test(url);
+  chatMarkdown.validateLink = url => web(url) || /^mailto:/i.test(url) || inlineImage(url);
+  const image = chatMarkdown.renderer.rules.image;
+  chatMarkdown.renderer.rules.image = (tokens, index, options, env, renderer) => {
+    const token = tokens[index];
+    const src = token.attrGet("src");
+    if (!web(src) && !inlineImage(src)) return chatMarkdown.utils.escapeHtml(token.content);
+    token.attrSet("loading", "lazy");
+    token.attrSet("referrerpolicy", "no-referrer");
+    return image(tokens, index, options, env, renderer);
+  };
+  chatMarkdown.core.ruler.after("inline", "task_checkboxes", state => {
+    for (let i = 2; i < state.tokens.length; i++) {
+      const token = state.tokens[i];
+      if (token.type !== "inline" || state.tokens[i - 1].type !== "paragraph_open" ||
+          state.tokens[i - 2].type !== "list_item_open") continue;
+      const first = token.children?.[0];
+      const marker = first?.type === "text" && /^\[([ xX])\](?:[ \t]+|$)/.exec(first.content);
+      if (!marker || !/^\[[ xX]\](?:[ \t]+|$)/.test(token.content)) continue;
+      first.content = first.content.slice(marker[0].length);
+      const checkbox = new state.Token("task_checkbox", "input", 0);
+      checkbox.markup = marker[1];
+      token.children.unshift(checkbox);
+    }
+  });
+  chatMarkdown.renderer.rules.task_checkbox = (tokens, index) =>
+    "<input type=\"checkbox\" disabled" + (tokens[index].markup === " " ? "" : " checked") + "> ";
+}
 
 function chatText(text) {
   const block = element("div", undefined, "chat-text");
