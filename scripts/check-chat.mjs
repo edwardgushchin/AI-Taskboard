@@ -169,6 +169,70 @@ app.whenReady().then(async () => {
   await check(`!live.hidden && !live.querySelector('.chat-work') && live.textContent.includes('Проверяю карточку')`, "live run chronology stays visible through the normal update handler");
   await evaluate(`updateChat({ project: 'fixture', id: 'T-0032', type: 'run', items: [] }); body.replaceChildren(taskChat(taskInSheet))`);
   await check(`!body.querySelector('.chat-work').open && body.querySelector('.chat-run-final').textContent.includes('Готово.') && body.querySelector('.chat-run-live').hidden`, "reopening restores folded work and a visible final reply without duplicating the live log");
+
+  // Native imageView results, including old saved JSON, use the same viewer as attachments.
+  await evaluate(`
+    const imageReads = [], imageSaves = [];
+    frame.russian = true;
+    api.runImagePreview = async (_task, path) => {
+      imageReads.push(path);
+      if (path === 'missing.png') return null;
+      if (path === 'corrupt.png') return 'data:image/png;base64,bm90IGFuIGltYWdl';
+      return window.testImages[Number(path.match(/viewed-(\\d+)/)[1])];
+    };
+    api.saveRunImage = async (_task, path) => { imageSaves.push(path); return { ok: true }; };
+    const viewedImages = [...window.testImages.map((_, index) => 'viewed-' + index + '.png'), 'missing.png', 'corrupt.png']
+      .map((path, index) => ({ id: 'view-' + index, type: 'imageView', title: '', status: 'completed',
+        text: JSON.stringify({ path, startedAtMs: 1, completedAtMs: 1 }) }));
+    taskInSheet.history = [{ at: '2026-11-12T15:00:00Z', actor: 'agent', action: 'run-log', run: viewedImages }];
+    body.replaceChildren(taskChat(taskInSheet));
+    const imageLog = body.querySelector('.chat-log');
+    const imageWork = imageLog.querySelector('.chat-work');
+    imageWork.open = true;
+    imageWork.querySelector('.chat-run-group').open = true;
+    imageLog.scrollTop = 0;
+  `);
+  await evaluate(`new Promise(resolve => { const poll = () => imageWork.querySelectorAll('.has-preview img').length === window.testImages.length &&
+    [...imageWork.querySelectorAll('.chat-attachment span')].filter(node => node.textContent.includes('недоступно')).length === 2 ? resolve() : requestAnimationFrame(poll); poll(); })`);
+  await check(`!imageWork.querySelector('pre') && !imageWork.textContent.includes('startedAtMs')`, "image views replace service JSON with thumbnails");
+  await check(`imageWork.querySelectorAll('.chat-run-images').length === viewedImages.length`, "every viewed image has its own tile");
+  await check(`imageWork.textContent.includes('Изображение недоступно: missing.png') && imageWork.textContent.includes('Изображение недоступно: corrupt.png')`, "missing and corrupt image files have readable fallbacks");
+  for (const theme of ['dark', 'light']) {
+    nativeTheme.themeSource = theme;
+    for (const width of [850, 390]) {
+      window.setSize(width, 960);
+      await check(`imageLog.scrollWidth <= imageLog.clientWidth + 1 && body.scrollWidth <= body.clientWidth + 1`, `image thumbnails fit ${theme} at ${width}px`);
+      await capture(`image-views-${theme}-${width}.png`);
+    }
+  }
+  window.setSize(850, 960);
+  nativeTheme.themeSource = 'dark';
+  await evaluate(`imageWork.querySelector('.chat-attachment').click()`);
+  await evaluate(`new Promise(resolve => { const poll = () => document.querySelector('.image-preview-stage img')?.naturalWidth > 0 ? resolve() : requestAnimationFrame(poll); poll(); })`);
+  await check(`document.querySelector('.image-preview').open && document.querySelector('.image-preview-stage img').src === window.testImages[0]`, "clicking a viewed image opens the enlarged viewer");
+  await capture('image-view-enlarged.png');
+  await evaluate(`document.querySelector('[aria-label="Zoom in"], [aria-label="Увеличить"]').click()`);
+  await check(`parseInt(document.querySelector('.image-preview-toolbar output').value) > 0`, "viewed images can be zoomed");
+  for (let index = 1; index < images.length; index++) {
+    await evaluate(`document.querySelector('.image-preview').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))`);
+    await evaluate(`new Promise(resolve => { const poll = () => document.querySelector('.image-preview-toolbar strong').textContent === 'viewed-${index}.png' ? resolve() : requestAnimationFrame(poll); poll(); })`);
+    await check(`document.querySelector('.image-preview-stage img').src === window.testImages[${index}]`, "all viewed images can be navigated in order");
+  }
+  await evaluate(`document.querySelector('.image-preview').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))`);
+  await evaluate(`new Promise(resolve => { const poll = () => document.querySelector('.image-preview-status').textContent.includes('missing.png') ? resolve() : requestAnimationFrame(poll); poll(); })`);
+  await check(`document.querySelector('.image-preview-stage img').src === window.testImages[${images.length - 1}]`, "an unavailable next view retains the current image");
+  await evaluate(`[...document.querySelectorAll('.image-preview button')].find(node => ['Save', 'Сохранить'].includes(node.textContent)).click()`);
+  await check(`imageSaves.at(-1) === 'viewed-${images.length - 1}.png'`, "saving targets the visible image");
+  await evaluate(`document.querySelector('.image-preview').close();
+    body.replaceChildren(taskChat(taskInSheet));
+    const restoredImages = body.querySelector('.chat-work'); restoredImages.open = true; restoredImages.querySelector('.chat-run-group').open = true;
+    updateChat({ project: 'fixture', id: 'T-0032', type: 'run', items: viewedImages });
+    const liveImages = body.querySelector('.chat-run-live'); liveImages.querySelector('.chat-run-group').open = true;
+  `);
+  await check(`body.querySelector('.chat-work').querySelectorAll('.chat-run-images').length === viewedImages.length && liveImages.querySelectorAll('.chat-run-images').length === viewedImages.length`, "reopening and live updates both retain every viewed image");
+  await evaluate(`const retainedImageTile = liveImages.querySelector('.chat-attachment'); retainedImageTile.focus();
+    const readsBeforeUpdate = imageReads.length; updateChat({ project: 'fixture', id: 'T-0032', type: 'run', items: viewedImages });`);
+  await check(`liveImages.querySelector('.chat-attachment') === retainedImageTile && document.activeElement === retainedImageTile && imageReads.length === readsBeforeUpdate`, "stream updates retain image tiles, reads and keyboard focus");
   console.log("Chat Chromium checks passed; screenshots: " + artifacts);
 }).catch(error => {
   console.error(error);

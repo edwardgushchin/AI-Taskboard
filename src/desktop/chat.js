@@ -53,12 +53,30 @@ const chatPreviews = new IntersectionObserver(entries => {
     if (!isIntersecting) continue;
     chatPreviews.unobserve(target);
     if (!target.isConnected) continue;
-    const { task, file } = target.dataset;
-    void api.attachmentPreview(task, file).then(src => {
+    const { task, file, path } = target.dataset;
+    const preview = path ? api.runImagePreview(task, path) : api.attachmentPreview(task, file);
+    void preview.then(src => {
       if (src && target.isConnected) showChatPreview(target, src);
-    }).catch(() => {});
+      else if (path && target.isConnected) unavailableRunImage(target);
+    }).catch(() => { if (path && target.isConnected) unavailableRunImage(target); });
   }
 });
+
+function unavailableRunImage(tile) {
+  const label = language("Image unavailable: ", "Изображение недоступно: ") + tile.querySelector("span").textContent;
+  tile.querySelector("span").textContent = label;
+  controlLabelForIcon(tile, label);
+}
+
+function runImageFile(item) {
+  if (item.type !== "imageView" || item.status !== "completed") return;
+  try {
+    const path = JSON.parse(item.text)?.path;
+    if (typeof path === "string" && path.trim() && !path.includes("\0")) {
+      return { file: path, name: path.replaceAll("\\", "/").split("/").pop() };
+    }
+  } catch { /* Keep incomplete or unrecognized results as text. */ }
+}
 
 function showChatPreview(tile, src) {
   const preview = element("img");
@@ -76,7 +94,7 @@ function showChatPreview(tile, src) {
     }
     if (atBottom) list.scrollTop = list.scrollHeight;
   };
-  preview.onerror = release;
+  preview.onerror = () => { release(); if (tile.dataset.path) unavailableRunImage(tile); };
   preview.src = src;
 }
 
@@ -151,10 +169,14 @@ function activitySummary(detail, label, preview, kind, state) {
   detail.append(summary);
 }
 
-function renderRunActivity(container, items, completed = false, durationMs) {
+function renderRunActivity(container, items, completed = false, durationMs, taskId) {
   const previous = new Map([...container.querySelectorAll("details")].map(entry => [entry.dataset.item, entry.open]));
+  const previousImages = new Map([...container.querySelectorAll(".chat-run-item")].map(entry =>
+    [entry.dataset.item, entry.querySelector(".chat-run-images")?.querySelector("button")]));
+  const focusedImage = [...previousImages.values()].find(tile => tile?.contains(document.activeElement));
   const focused = container.contains(document.activeElement) ? document.activeElement.closest("details")?.dataset.item : undefined;
   const nodes = [];
+  const images = taskId ? items.map(runImageFile).filter(Boolean) : [];
   const finalItems = new Set();
   if (completed) {
     for (const item of items) {
@@ -193,6 +215,28 @@ function renderRunActivity(container, items, completed = false, durationMs) {
     };
     const approvalLabel = item.type === "autoApprovalReview" && Object.hasOwn(approvalLabels, item.status) ? approvalLabels[item.status] : undefined;
     activitySummary(detail, approvalLabel ? language(...approvalLabel) : label, preview, kind, state);
+    const image = taskId && runImageFile(item);
+    if (image) {
+      detail.open = previous.get(detail.dataset.item) ?? true;
+      const tiles = element("div", undefined, "chat-attachments chat-run-images");
+      let tile = previousImages.get(detail.dataset.item);
+      if (!tile || tile.dataset.path !== image.file || tile.dataset.task !== taskId) {
+        tile = button("", () => openImagePreview(taskId, tile.imageFiles, tile.imageFiles.findIndex(file => file.file === image.file),
+          tile.querySelector("img")?.src, {
+            preview: file => api.runImagePreview(taskId, file.file),
+            save: file => api.saveRunImage(taskId, file.file),
+          }), "quiet chat-attachment");
+        controlLabelForIcon(tile, language("View ", "Просмотреть ") + image.name);
+        tile.append(icon("images"), element("span", image.name));
+        tile.dataset.task = taskId;
+        tile.dataset.path = image.file;
+        chatPreviews.observe(tile);
+      }
+      tile.imageFiles = images;
+      tiles.append(tile);
+      detail.append(tiles);
+      return detail;
+    }
     if (command) detail.append(element("pre", command, "chat-run-command"));
     detail.append(element("pre", item.text || language("No output.", "Нет вывода."), "chat-run-output"));
     if (command !== item.title) {
@@ -263,7 +307,8 @@ function renderRunActivity(container, items, completed = false, durationMs) {
   }
   container.replaceChildren(...nodes);
   container.hidden = items.length === 0;
-  if (focused) [...container.querySelectorAll("details")].find(entry => entry.dataset.item === focused)?.querySelector("summary")?.focus({ preventScroll: true });
+  if (focusedImage && container.contains(focusedImage)) focusedImage.focus({ preventScroll: true });
+  else if (focused) [...container.querySelectorAll("details")].find(entry => entry.dataset.item === focused)?.querySelector("summary")?.focus({ preventScroll: true });
 }
 
 function updateChat({ project, id, type, text, items }) {
@@ -273,7 +318,7 @@ function updateChat({ project, id, type, text, items }) {
     const list = open && body.querySelector(".chat-log");
     if (list) {
       const atBottom = list.scrollHeight - list.clientHeight - list.scrollTop <= 8;
-      renderRunActivity(list.querySelector(".chat-run-live"), items);
+      renderRunActivity(list.querySelector(".chat-run-live"), items, false, undefined, id);
       if (atBottom) list.scrollTop = list.scrollHeight;
     }
     return;
@@ -374,7 +419,7 @@ function taskChat(task) {
     }
     if (event.run?.length) {
       const log = element("li", undefined, "chat-run");
-      renderRunActivity(log, event.run, true, event.durationMs);
+      renderRunActivity(log, event.run, true, event.durationMs, task.id);
       list.append(log);
       continue;
     }
@@ -435,7 +480,7 @@ function taskChat(task) {
     list.append(entry);
   }
   const liveRun = element("li", undefined, "chat-run chat-run-live");
-  renderRunActivity(liveRun, frame.runActivity?.[task.id] ?? []);
+  renderRunActivity(liveRun, frame.runActivity?.[task.id] ?? [], false, undefined, task.id);
   list.append(liveRun, element("li", undefined, "chat-turn"));
   renderChatTurn(list, draft);
   area.append(list);

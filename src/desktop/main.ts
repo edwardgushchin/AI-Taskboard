@@ -20,6 +20,7 @@ import { readJson, writeJson } from "../cli/storage.ts";
 import { configuredCodex } from "./codex.ts";
 import { startCodexRun } from "./codex-run.ts";
 import { runLog } from "./run-activity.ts";
+import { readRunImage } from "./run-images.ts";
 import { normalizeRecentBoards, readRecentBoards, rememberRecentBoard } from "./recent-boards.ts";
 
 interface Board {
@@ -577,6 +578,32 @@ ipcMain.handle("board:attachmentPreview", async (event, id: unknown, file: unkno
   if (!result.ok) return null;
   const type = imageTypes.get(extname(result.data.name).toLowerCase());
   return type ? "data:" + type + ";base64," + result.data.base64 : null;
+});
+
+async function taskRunImage(event: IpcMainInvokeEvent, id: unknown, path: unknown) {
+  const { project } = stateOf(event);
+  if (!project || typeof id !== "string" || !taskIdPattern.test(id) || typeof path !== "string") return null;
+  const task = await callCli<Task>(project, ["show", id]);
+  if (!task.ok) return null;
+  return readRunImage(project, task.data, runActivityByTask.get(project + "\0" + id) ?? [], path);
+}
+
+ipcMain.handle("board:runImagePreview", async (event, id: unknown, path: unknown) => {
+  const image = await taskRunImage(event, id, path);
+  return image ? "data:" + image.type + ";base64," + image.data.toString("base64") : null;
+});
+
+ipcMain.handle("board:saveRunImage", async (event, id: unknown, path: unknown) => {
+  const image = await taskRunImage(event, id, path);
+  if (!image) return cliFailure("IMAGE_UNAVAILABLE", lang("Image unavailable.", "Изображение недоступно."));
+  const result = await dialog.showSaveDialog(stateOf(event).window, { defaultPath: image.name });
+  if (result.canceled || !result.filePath) return { ok: true, data: null };
+  try {
+    await writeFile(result.filePath, image.data);
+    return { ok: true, data: null };
+  } catch {
+    return cliFailure("STORAGE_ERROR", lang("Could not save the image.", "Не удалось сохранить изображение."));
+  }
 });
 
 ipcMain.handle("chat:openLink", async (_event, value: unknown) => {
