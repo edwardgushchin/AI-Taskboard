@@ -206,6 +206,9 @@ export function validateCard(value: unknown, id: string): Task {
   const task = value as unknown as Task;
   const files = new Set(task.attachments.map(file => file.file));
   for (const event of task.history) {
+    if (event?.attachment !== undefined && (event.action !== "attach" || !files.has(event.attachment))) {
+      throw new TaskboardError("CORRUPT_STORAGE", "Invalid attachment event for " + id + ".", { id });
+    }
     if (event?.durationMs !== undefined && (!Number.isSafeInteger(event.durationMs) || event.durationMs < 0)) {
       throw new TaskboardError("CORRUPT_STORAGE", "Invalid reply duration for " + id + ".", { id });
     }

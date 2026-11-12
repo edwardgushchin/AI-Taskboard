@@ -38,6 +38,9 @@ function render(task: Task): Element[] {
     element: (tag: string, text?: string, className?: string) => new Element(tag, text, className),
     button: (text: string, _action: unknown, className: string) => new Element("button", text, className),
     icon: () => new Element("svg"),
+    controlLabelForIcon: () => {},
+    isImageAttachment: (file: { name: string }) => /\.(png|jpe?g|webp|gif)$/i.test(file.name),
+    chatPreviews: { observe: () => {} },
     language: (_english: string, russian: string) => russian,
     shortDate: (value: string) => value,
     chatText: (text: string) => new Element("div", text, "chat-text"),
@@ -116,4 +119,36 @@ test("matching text in other events or outside the pending user turn is preserve
     { at, actor: "user", action: "update", text: request },
   );
   assert.deepEqual(messages(task).map(message => message.text), [request, request, request, "Reply", request]);
+});
+
+test("legacy attachment events render all four welcome PNGs as image tiles", () => {
+  const task = createTask("T-0041", { title: "Welcome" });
+  task.attachments = ["dark-1384", "dark-500", "light-1384", "light-500"].map((variant, index) => ({
+    file: String(index), name: "welcome-" + variant + ".png", bytes: 1, sha256: "",
+  }));
+  task.history.push(...task.attachments.map(file => ({ at: task.createdAt, actor: "agent" as const,
+    action: "attach", text: file.name })));
+  const rows = render(task).filter(row => row.className === "chat-entry");
+  assert.deepEqual(rows.map(row => row.children.find(child => child.className === "chat-attachments")!
+    .children.map(tile => ({ task: tile.dataset.task, file: tile.dataset.file, name: tile.children[1].text }))),
+  task.attachments.map(file => [{ task: task.id, file: file.file, name: file.name }]));
+  assert.ok(rows.every(row => !row.children.some(child => child.className === "chat-text")));
+});
+
+test("attachment events use IDs for namesakes and preserve unresolved legacy filenames", () => {
+  const task = createTask("T-0001", { title: "Attachments" });
+  task.attachments = ["first", "second"].map(file => ({ file, name: "same.png", bytes: 1, sha256: "" }));
+  const at = task.createdAt;
+  task.history.push(
+    { at, actor: "user", action: "attach", text: "same.png" },
+    { at, actor: "agent", action: "attach", text: "missing.png" },
+    { at, actor: "agent", action: "attach", text: "same.png", attachment: "missing" },
+    { at, actor: "agent", action: "attach", text: "same.png", attachment: "second" },
+    { at, actor: "user", action: "chat", chat: { ...settings, files: ["first"] } },
+  );
+  const rows = render(task).filter(row => row.className === "chat-entry");
+  assert.deepEqual(rows.slice(0, 3).map(row => row.children.find(child => child.className === "chat-text")?.text),
+    ["same.png", "missing.png", "same.png"]);
+  assert.deepEqual(rows.slice(3).map(row => row.children.find(child => child.className === "chat-attachments")!
+    .children[0].dataset.file), ["second", "first"]);
 });
