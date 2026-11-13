@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld("taskboard", {
   open: () => ipcRenderer.invoke("board:open"),
   draft: (request, files) => ipcRenderer.invoke("board:draft", request, files),
   chatModels: () => ipcRenderer.invoke("chat:models"),
+  chatStop: id => ipcRenderer.invoke("chat:stop", id),
   chatSend: (id, request) => ipcRenderer.invoke("chat:send", id, request),
   onChatUpdate: listener => { ipcRenderer.on("chat:update", (_event, update) => listener(update)); },
   createBoard: () => ipcRenderer.invoke("board:create"),

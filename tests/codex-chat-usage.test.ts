@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createInterface } from "node:readline";
+import { codexRpc } from "../src/desktop/codex-rpc.ts";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import { CodexTokenUsage } from "../src/desktop/codex-token-usage.ts";
@@ -47,7 +47,7 @@ test("task discussion streams task usage before success, provider failure, or a 
   for (const outcome of ["ok", "unknown", "failed", "closed", "storage-failed"]) {
     const reports: TokenUsageReport[] = [];
     const runtime = runInNewContext(stripTypeScriptTypes(source) + "\n({ replyToTask })", {
-      spawn, createInterface, CodexTokenUsage, setTimeout, clearTimeout,
+      spawn, codexRpc, CodexTokenUsage, setTimeout, clearTimeout,
       configuredCodex: async () => ({ path: process.execPath, args: [stub, outcome] }),
       chatTools: [], saveChatImages: async () => [],
       cliFailure: (code: string, message: string) => ({ ok: false, error: { code, message } }),
@@ -58,7 +58,7 @@ test("task discussion streams task usage before success, provider failure, or a 
         reports.push(report);
       });
     if (["failed", "closed", "storage-failed"].includes(outcome)) {
-      await assert.rejects(reply, /Provider failed|closed the connection|Usage storage denied/);
+      await assert.rejects(reply, /Provider failed|process closed|Usage storage denied/);
     } else {
       const answer = await reply;
       assert.equal(answer.text, "Reply");

@@ -1674,6 +1674,7 @@ function update(next) {
   const tagSettings = byId("tag-settings");
   if (tagsChanged && sheet.open && tagSettings) renderTagSettings(tagSettings);
   if (sheetKind === "task" && sheet.open && taskInSheet) {
+    body.querySelector(".task-chat")?.syncAgentState?.();
     const runStatus = byId("task-agent-run");
     if (runStatus) renderAgentRunStatus(runStatus, taskInSheet);
     const launch = byId("task-launch");

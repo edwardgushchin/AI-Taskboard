@@ -276,16 +276,18 @@ function updateChat({ project, id, type, text, items }) {
     return;
   }
   const draft = chatDrafts.get(project + "\0" + id);
-  if (!draft?.pending) return;
-  if (type === "saved" && draft.pending === "saving") {
-    draft.text = "";
-    draft.files = [];
-    draft.pending = "replying";
+  if (type === "saved") {
+    if (draft?.saving) {
+      draft.text = "";
+      draft.files = [];
+      draft.saving = undefined;
+      draft.pending = "replying";
+    }
     if (open) void protect(() => showTask(id))();
   } else if (type === "changed") {
     if (open) void protect(() => showTask(id))();
-  } else if (type === "commentary") {
-    draft.commentary.push(text);
+  } else if (type === "commentary" && draft?.pending) {
+    (draft.commentary ??= []).push(text);
     const list = open && body.querySelector(".chat-log");
     if (list) renderChatTurn(list, draft);
   }
@@ -484,7 +486,7 @@ function taskChat(task) {
   selection.append(modelLabel, effortLabel);
   const feedback = element("p", undefined, "chat-status");
   feedback.setAttribute("role", "status");
-  const send = element("button", language("Send", "Отправить"), "button primary");
+  const send = element("button", undefined, "button primary chat-icon chat-send");
   send.type = "submit";
   const attach = button("", () => fileInput.click(), "quiet chat-icon");
   attach.append(icon("attachment"));
@@ -509,21 +511,29 @@ function taskChat(task) {
 
   let models = [];
   let loadError = "";
+  function working() { return Boolean(draft.pending || frame.runningTasks?.includes(task.id)); }
+  function stopping() { return working() && !draft.text.trim() && !draft.files.length; }
   function sync() {
-    const working = Boolean(draft.pending);
-    input.readOnly = draft.pending === "saving";
+    const active = working();
+    input.readOnly = Boolean(draft.saving);
     attach.disabled = microphone.disabled = input.readOnly;
-    model.disabled = effort.disabled = working || !models.length;
+    model.disabled = effort.disabled = active || !models.length;
     selection.disabled = model.disabled;
     modelLabel.textContent = model.selectedOptions[0]?.textContent ?? "";
     effortLabel.textContent = model.value ? effort.selectedOptions[0]?.textContent ?? "" : "";
     controlLabelForIcon(selection, [modelLabel.textContent, effortLabel.textContent].filter(Boolean).join(" · "));
-    send.disabled = working || !model.value || !effort.value || (!draft.text.trim() && !draft.files.length);
-    reload.hidden = working || !loadError;
+    const stop = stopping();
+    send.replaceChildren(icon(stop ? "stop" : "play"));
+    controlLabelForIcon(send, stop ? language("Stop agent", "Остановить агента") : language("Send message", "Отправить сообщение"));
+    send.disabled = Boolean(draft.saving || draft.stopping) || (!stop &&
+      (!model.value || !effort.value || (!draft.text.trim() && !draft.files.length)));
+    reload.hidden = active || !loadError;
     feedback.textContent = draft.error || loadError;
     feedback.hidden = !feedback.textContent;
     for (const remove of pendingFiles.querySelectorAll("button")) remove.disabled = input.readOnly;
   }
+
+  area.syncAgentState = sync;
 
   function renderPendingFiles() {
     pendingFiles.hidden = !draft.files.length;
@@ -536,7 +546,7 @@ function taskChat(task) {
         sync();
         input.focus();
       }, "quiet");
-      remove.disabled = draft.pending === "saving";
+      remove.disabled = Boolean(draft.saving);
       remove.setAttribute("aria-label", language("Remove ", "Удалить ") + file.name);
       row.append(icon("attachment"), element("span", file.name), remove);
       if (/^image\/(png|jpeg|webp|gif)$/.test(file.type)) showChatPreview(row, URL.createObjectURL(file));
@@ -579,7 +589,7 @@ function taskChat(task) {
   }
 
   function addFiles(newFiles) {
-    if (draft.pending === "saving" || !newFiles.length) return;
+    if (draft.saving || !newFiles.length) return;
     const total = task.attachments.reduce((sum, file) => sum + file.bytes, 0) +
       [...draft.files, ...newFiles].reduce((sum, file) => sum + file.size, 0);
     if (total > 64 * 1024 * 1024) {
@@ -594,10 +604,29 @@ function taskChat(task) {
 
   async function submit() {
     if (send.disabled) return;
-    draft.pending = "saving";
-    draft.commentary = [];
+    if (stopping()) {
+      draft.stopping = true;
+      draft.error = "";
+      sync();
+      try {
+        const result = await api.chatStop(task.id);
+        if (!result.ok) draft.error = boardError(result.error);
+      } catch (error) { draft.error = error.message; }
+      finally {
+        draft.stopping = false;
+        sync();
+        if (frame.project === project && sheet.open && sheetKind === "task" && taskInSheet?.id === task.id) await showTask(task.id);
+      }
+      return;
+    }
+    const submission = {};
+    (draft.requests ??= new Set()).add(submission);
+    draft.saving = submission;
+    draft.pending ??= "saving";
+    draft.commentary ??= [];
     draft.error = "";
     draft.scroll = undefined;
+    const text = draft.text;
     sync();
     renderChatTurn(list, draft);
     try {
@@ -605,9 +634,9 @@ function taskChat(task) {
         name: file.name, type: file.type, bytes: await file.arrayBuffer(),
       })));
       const { saved, result } = await api.chatSend(task.id, {
-        model: draft.model, effort: draft.effort, text: draft.text, files,
+        model: draft.model, effort: draft.effort, text, files,
       });
-      if (saved && draft.pending === "saving") {
+      if (saved && draft.saving === submission) {
         draft.text = "";
         draft.files = [];
       }
@@ -615,8 +644,12 @@ function taskChat(task) {
     } catch (error) {
       draft.error = error.message;
     } finally {
-      draft.pending = undefined;
-      draft.commentary = [];
+      draft.requests.delete(submission);
+      if (draft.saving === submission) draft.saving = undefined;
+      if (!draft.requests.size) {
+        draft.pending = undefined;
+        draft.commentary = [];
+      }
       if (frame.project === project && sheet.open && sheetKind === "task" && taskInSheet?.id === task.id) await showTask(task.id);
     }
   }
