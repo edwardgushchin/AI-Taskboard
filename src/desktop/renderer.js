@@ -33,7 +33,7 @@ function element(tag, text, className) {
 }
 
 function icon(name) {
-  if (name === "git-branch" || name === "cloud-upload") {
+  if (["git-branch", "cloud-upload", "close"].includes(name)) {
     const item = element("i", undefined, "icon codicon codicon-" + name);
     item.setAttribute("aria-hidden", "true");
     return item;
@@ -941,9 +941,20 @@ function draftComposer() {
   const files = [];
   const editor = element("form", undefined, "board-draft");
   editor.id = "board-draft";
+  const chat = element("section", undefined, "board-chat");
+  chat.id = "board-chat";
+  const chatTitle = element("h2");
+  const log = element("div", undefined, "board-chat-log");
+  log.setAttribute("role", "log");
+  log.setAttribute("aria-live", "polite");
+  log.tabIndex = 0;
+  const greeting = element("p", undefined, "muted");
+  log.append(greeting);
+  chat.append(chatTitle, log);
   const input = element("textarea");
   input.name = "request";
   input.rows = 1;
+  input.setAttribute("aria-controls", chat.id);
   const hint = element("p", undefined, "muted draft-hint");
   hint.id = "board-paste-hint";
   input.setAttribute("aria-describedby", hint.id);
@@ -964,8 +975,11 @@ function draftComposer() {
   progress.hidden = true;
   progress.setAttribute("role", "status");
   editor.localize = () => {
-    input.placeholder = language("What would you like to do with the board?", "Что сделать с доской?");
+    input.placeholder = language("What shall we work on?", "Чем займемся?");
     input.setAttribute("aria-label", input.placeholder);
+    chatTitle.textContent = language("Orchestrator", "Оркестратор");
+    chat.setAttribute("aria-label", chatTitle.textContent);
+    greeting.textContent = language("Describe a task — I will prepare a draft for the board.", "Опишите задачу — я подготовлю черновик для доски.");
     hint.textContent = language("Describe a new task. Paste or attach files", "Опишите новую задачу. Вставьте или прикрепите файлы") + (api.isMac ? " (⌘V)." : " (Ctrl+V).");
     for (const [control, label] of [[attach, language("Attach files", "Прикрепить файлы")],
       [save, language("Create draft", "Создать черновик")]]) {
@@ -975,8 +989,21 @@ function draftComposer() {
     attachments.setAttribute("aria-label", language("Attachments", "Вложения"));
   };
   editor.localize();
-  editor.append(icon("chat"));
+  editor.append(chat, icon("chat"));
   editor.append(input, controls, picker, hint, attachments, progress);
+  const chatMessage = (actor, text) => {
+    greeting.hidden = true;
+    const entry = element("div", undefined, "chat-entry");
+    entry.dataset.actor = actor;
+    entry.append(element("p", text, "chat-text"));
+    log.append(entry);
+    scrollChat();
+    return entry;
+  };
+  // Hover/focus can reveal the log after messages arrived while it had no layout.
+  const scrollChat = () => requestAnimationFrame(() => requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; }));
+  editor.addEventListener("pointerenter", scrollChat);
+  input.addEventListener("focus", scrollChat);
   const message = text => {
     progress.textContent = text;
     progress.hidden = !text;
@@ -997,11 +1024,18 @@ function draftComposer() {
         name: file.name, type: file.type, bytes: await file.arrayBuffer(),
       })));
       if (!editor.isConnected || frame.project !== project) { message(""); return; }
+      chatMessage("user", [request, ...files.map(file => file.name)].filter(Boolean).join("\n"));
       const result = await api.draft(request, pasted);
       if (!result.ok) {
         message(boardError(result.error));
+        chatMessage("agent", boardError(result.error));
         return;
       }
+      const reply = chatMessage("agent", language("Draft created", "Черновик создан"));
+      const open = button(result.data.id + (result.data.title ? " · " + result.data.title : ""), () => showTask(result.data.id), "quiet board-chat-task");
+      open.dataset.task = result.data.id;
+      reply.append(open);
+      scrollChat();
       input.value = "";
       files.length = 0;
       attachments.replaceChildren();
@@ -1010,8 +1044,7 @@ function draftComposer() {
       if (!editor.isConnected || frame.project !== project || sheet.open) return;
       archiveView = false;
       render();
-      await showTask(result.data.id);
-    })().catch(error => message(error.message)).finally(() => busy(false));
+    })().catch(error => { message(error.message); chatMessage("agent", error.message); }).finally(() => busy(false));
   });
   function addFiles(pasted) {
     if (input.readOnly) return;
@@ -1829,8 +1862,9 @@ function renderProjectTabs() {
       await api.selectTab(tabs[next].path);
       bar.querySelector('[aria-selected="true"]')?.focus();
     }));
-    const close = button("×", () => api.closeTab(tab.path), "project-tab-close");
+    const close = button("", () => api.closeTab(tab.path), "project-tab-close");
     close.className = "project-tab-close";
+    close.append(icon("close"));
     close.setAttribute("aria-label", language("Close project ", "Закрыть проект ") + tab.name);
     close.title = close.getAttribute("aria-label");
     container.append(select, close);

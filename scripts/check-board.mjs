@@ -30,6 +30,11 @@ app.whenReady().then(async () => {
   await window.webContents.insertCSS(read("themes.css") + "\n" + iconStyles + "\n" + read("styles.css"));
   const evaluate = code => window.webContents.executeJavaScript(code);
   await evaluate(`document.fonts.load('16px codicon')`);
+  const hover = async selector => {
+    const point = await evaluate(`(() => { const rect = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) }; })()`);
+    window.webContents.sendInputEvent({ type: "mouseMove", ...point });
+    await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+  };
   const capture = async name => {
     // Hidden windows can paint a transition one compositor frame behind layout.
     await window.webContents.capturePage();
@@ -378,6 +383,7 @@ app.whenReady().then(async () => {
   await check(`document.fonts.check('16px codicon') && ['.codicon-git-branch', '.codicon-cloud-upload'].every(selector => { const node = document.querySelector(selector); return getComputedStyle(node).fontFamily === 'codicon' && getComputedStyle(node, '::before').content.length > 2 && node.getBoundingClientRect().width === 16; })`, "status Git branch and publication icons load the actual Codicons font and glyphs");
   await check(`byId('project-tabs').getAttribute('aria-orientation') === 'vertical' && byId('project-tabs').getBoundingClientRect().right <= byId('app-content').getBoundingClientRect().left`, "project tabs form a vertical rail to the left of the board");
   await check(`getComputedStyle(byId('project-tabs').querySelector('[role=tab]')).writingMode === 'vertical-rl'`, "project names are rotated vertically");
+  await check(`(() => { const tab = byId('project-tabs').firstElementChild, close = tab.querySelector('.codicon-close'), label = tab.querySelector('.project-tab-name'); const gap = label.getBoundingClientRect().top - close.getBoundingClientRect().bottom; return getComputedStyle(close).fontFamily === 'codicon' && getComputedStyle(close, '::before').content.length > 2 && gap >= 6 && gap <= 8 && tab.getBoundingClientRect().height < 124; })()`, "compact tabs use the shared close icon with a six-to-eight pixel gap to the name");
   await check(`findCard('T-0055').dataset.selected === 'true' && getComputedStyle(findCard('T-0055')).borderTopColor === themeColor('--accent')`, "selection retains a theme accent border after details close");
   await check(`getComputedStyle(findCard('T-0051'), '::before').backgroundColor === themeColor('--warn') && !!lane('done').querySelector('.task-done[aria-label]')`, "blocked and done states have distinct stripe and accessible checkmark indicators");
   await check(`findCard('T-0055').querySelector('.task-card-heading').nextElementSibling.className === 'task-tags' && findCard('T-0055').querySelector('.task-tags').nextElementSibling.tagName === 'IMG'`, "card title, tags and inset cover follow reference order");
@@ -400,6 +406,28 @@ app.whenReady().then(async () => {
     await check(`getComputedStyle(findCard('T-0055')).borderTopColor === themeColor('--accent') && getComputedStyle(findCard('T-0055')).backgroundColor === themeColor('--panel') && getComputedStyle(findCard('T-0055')).color === themeColor('--text') && getComputedStyle(findCard('T-0051'), '::before').backgroundColor === themeColor('--warn') && getComputedStyle(draftForm()).backgroundColor === themeColor('--panel')`, theme + " uses active theme colors for cards, states and composer");
     await capture("board-reference-" + theme + ".png");
   }
+  for (const width of [1380, 1280, 1180]) {
+    window.setContentSize(width, 900);
+    await evaluate(`settle()`);
+    await check(`byId('lanes').scrollWidth === byId('lanes').clientWidth && [...byId('lanes').children].every(column => column.getBoundingClientRect().right <= innerWidth)`, "all seven columns fit without horizontal scrolling at " + width + " pixels");
+    await check(`lane('blocked').querySelector('.lane-title > span').getClientRects().length === 1`, "a single-word column title stays intact at " + width + " pixels");
+    if (width === 1380) await capture("board-adaptive-1380.png");
+  }
+  await check(`Math.abs(byId('lanes').getBoundingClientRect().bottom - document.querySelector('.status-bar').getBoundingClientRect().top) <= 1 && getComputedStyle(byId('board-composer')).position === 'absolute'`, "columns extend to the status bar underneath a floating composer");
+  await evaluate(`byId('lanes').scrollTop = byId('lanes').scrollHeight; settle()`);
+  await check(`(() => { const cards = lane('done').querySelectorAll('.task-card'); return cards[cards.length - 1].getBoundingClientRect().bottom <= draftForm().getBoundingClientRect().top; })()`, "the final card can scroll completely above the floating field");
+  await evaluate(`byId('lanes').scrollTop = 0; void 0`);
+  await check(`getComputedStyle(draftForm().querySelector('.board-chat')).display === 'none' && draftText().placeholder === 'Чем займемся?'`, "orchestrator initially shows only the compact renamed field");
+  await hover(".board-draft textarea");
+  await check(`getComputedStyle(draftForm().querySelector('.board-chat')).display === 'flex'`, "hovering the field opens the orchestrator chat");
+  await hover(".board-chat-log");
+  await check(`getComputedStyle(draftForm().querySelector('.board-chat')).display === 'flex'`, "moving the pointer into chat keeps it open");
+  await evaluate(`draftText().focus(); void 0`);
+  await hover("#app-menu");
+  await check(`getComputedStyle(draftForm().querySelector('.board-chat')).display === 'flex'`, "input focus keeps chat open after the pointer leaves");
+  await capture("board-orchestrator-open.png");
+  await evaluate(`draftText().blur(); void 0`);
+  await check(`getComputedStyle(draftForm().querySelector('.board-chat')).display === 'none'`, "chat collapses after pointer and keyboard focus both leave");
   window.setContentSize(760, 760);
   await evaluate(`settle()`);
   await check(`byId('lanes').scrollWidth > byId('lanes').clientWidth && draftForm().getBoundingClientRect().right <= innerWidth && draftForm().getBoundingClientRect().bottom <= document.querySelector('.status-bar').getBoundingClientRect().top`, "narrow windows scroll the columns and retain a usable bottom composer");
@@ -415,7 +443,7 @@ app.whenReady().then(async () => {
   await evaluate(`waitFor(() => !draftText().readOnly)`);
   await check(`draftCalls.length === 1 && draftCalls[0].files[0].name === 'image.png' && draftText().value === 'Сохранить мой запрос' && draftForm().querySelectorAll('li').length === 1 && draftForm().textContent.includes('Draft unavailable')`, "failed preparation retains request and attachment and rejects duplicate submits");
   await evaluate(`byId('project-tabs').querySelector('[aria-selected=true]').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })); settle()`);
-  await check(`fixture.project === 'design-other' && !draftText().value && !draftForm().querySelectorAll('li').length && findCard('T-0001').querySelector('.task-description').textContent === 'Описание другой задачи'`, "Down switches projects with isolated input, attachments and description preview");
+  await check(`fixture.project === 'design-other' && !draftText().value && !draftForm().querySelectorAll('li').length && !draftForm().querySelectorAll('.chat-entry').length && findCard('T-0001').querySelector('.task-description').textContent === 'Описание другой задачи'`, "Down switches projects with isolated input, attachments, chat and description preview");
   await evaluate(`draftText().value = 'Другой запрос'; byId('project-tabs').querySelector('[aria-selected=true]').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true })); settle()`);
   await check(`fixture.project === 'design-board' && draftText().value === 'Сохранить мой запрос' && draftForm().querySelectorAll('li').length === 1 && findCard('T-0055').dataset.selected === 'true'`, "Up restores the source project's draft, attachment and selection");
   await evaluate(`draftForm().querySelector('.draft-attachments button').click(); settle()`);
@@ -440,15 +468,24 @@ app.whenReady().then(async () => {
     window.taskboard.draft = async (request, files) => { draftCalls.push({ request, files }); return { ok: true, data: { id: 'T-0056' } }; };
     draftText().value = 'Создать задачу'; draftText().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); void 0;
   `);
+  await evaluate(`waitFor(() => !draftText().readOnly && !!draftForm().querySelector('[data-task="T-0056"]'))`);
+  await check(`!sheet.open && !draftText().value && draftCalls.at(-1).request === 'Создать задачу' && draftForm().querySelector('.board-chat-log').textContent.includes('Черновик создан')`, "Enter creates a draft and shows the result in the orchestrator chat");
+  await evaluate(`draftText().focus(); void 0`);
+  await evaluate(`settle()`);
+  await check(`(() => { const log = draftForm().querySelector('.board-chat-log'), result = log.querySelector('[data-task="T-0056"]'); return result.getBoundingClientRect().bottom <= log.getBoundingClientRect().bottom + 1; })()`, "opening chat scrolls to the latest result");
+  await check(`getComputedStyle(draftForm().querySelector('.chat-text')).fontFamily.includes('Segoe UI')`, "orchestrator messages retain the application font");
+  await capture("board-orchestrator-result.png");
+  await evaluate(`draftForm().querySelector('[data-task="T-0056"]').click(); void 0`);
   await evaluate(`waitFor(() => sheet.open && taskInSheet?.id === 'T-0056')`);
-  await check(`!draftText().value && draftCalls.at(-1).request === 'Создать задачу'`, "Enter creates a draft and opens the confirmed task");
+  await check(`taskInSheet.id === 'T-0056'`, "a chat result opens the created task on request");
   await evaluate(`sheet.close(); archiveView = true; render(); void 0`);
   await check(`byId('board-composer').hidden`, "archive view hides task creation field");
   console.log(`Board Chromium checks passed: ${checks}`);
   if (keepArtifacts) console.log("Screenshots: " + artifacts);
-}).catch(error => {
+}).catch(async error => {
   console.error(error);
   process.exitCode = 1;
+  if (window && keepArtifacts) writeFileSync(join(artifacts, "board-failure.png"), (await window.webContents.capturePage()).toPNG());
 }).finally(() => {
   window?.destroy();
   app.exit(process.exitCode ?? 0);
