@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, watch } from "node:fs";
+import { existsSync, readFileSync, watch } from "node:fs";
 import type { FSWatcher } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
@@ -13,10 +13,11 @@ import { hexTagColor, member, number, object, record, registerTags, requireRevis
 import type { Task } from "./model.ts";
 import { initializeBoard, locateBoard, onBoard } from "./storage.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
-import { invokeGit } from "./git.ts";
+import { discoverRepository, invokeGit } from "./git.ts";
 import { changeRepository, publishRepository, repositoryRefs } from "./repository.ts";
 import { previewSubmission, submitTask } from "./submission.ts";
 import { changeTask, createTask, recordRunLog } from "./tasks.ts";
+import { recordTokenUsage } from "./token-usage.ts";
 import { dependencyStatus, unfinishedDependencies, validateDependencies } from "./dependencies.ts";
 import { cleanTaskWorktree, hasPending, startTask, taskWithCurrentWorktree } from "./worktree.ts";
 import packageInfo from "../../package.json" with { type: "json" };
@@ -28,6 +29,7 @@ const help = [
   "          pause, block, resume, preview, submit, review, accept, restore-changes, request-changes, cancel, cleanup, settings, watch, doctor",
   "          list --archived, archive sweep, chat TASK-ID, attachment add TASK-ID, attachment read TASK-ID",
   "          attachment cover TASK-ID --stdin (file and revision)",
+  "          token-usage TASK-ID --stdin (id, sequence and records with threadId, turnId, model and token breakdown)",
   "          attachment restore-reply TASK-ID --stdin (replyAt, revision and attachmentSources)",
   "          list --tag NAME, tag ensure --stdin, tag set --stdin (name and color), tag assign TASK-ID --stdin (tags)",
   "          git refs, git switch, git create, git detach, git publish --stdin",
@@ -90,7 +92,13 @@ function boardGitInfo(location: BoardLocation) {
 
 function watchBoard(location: BoardLocation): void {
   const read = () => {
-    const board = onBoard(location, snapshotBoard);
+    const board = onBoard(location, store => {
+      if (!location.repository && existsSync(join(location.root, ".git"))) {
+        const repo = discoverRepository(location.root);
+        if (repo?.root === location.root) location.repository = repo;
+      }
+      return snapshotBoard(store);
+    });
     return { ok: true, data: { ...board, gitInfo: boardGitInfo(location) } };
   };
   let previous = JSON.stringify(read());
@@ -219,7 +227,7 @@ function run(
     store.saveIndex();
     return store.index.settings;
   }
-  if (command !== "show" && command !== "start" && command !== "cleanup" && command !== "preview" && command !== "submit" && command !== "review" && command !== "accept" && command !== "restore-changes" && command !== "chat" && command !== "run-log" && !taskActions.has(command)) {
+  if (command !== "show" && command !== "start" && command !== "cleanup" && command !== "preview" && command !== "submit" && command !== "review" && command !== "accept" && command !== "restore-changes" && command !== "chat" && command !== "run-log" && command !== "token-usage" && !taskActions.has(command)) {
     throw new TaskboardError("UNKNOWN_COMMAND", "Unknown command " + command + ".");
   }
   if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
@@ -235,6 +243,7 @@ function run(
   if (command === "restore-changes") return restoreSavedChanges(store, readTask(store, id), input);
   if (command === "cleanup" && isArchived(store, id)) return cleanTaskWorktree(store, readTask(store, id));
   const task = store.card(id);
+  if (command === "token-usage") return store.save(recordTokenUsage(task, input));
   if (command === "start") {
     if (task.status !== "in_progress" && input.resolveConflicts === true) return reopenConflictingReview(store, task, input);
     return startTask(store, task, input);

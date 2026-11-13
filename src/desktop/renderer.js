@@ -368,9 +368,13 @@ function section(title, content) {
   area.append(element("h3", title));
   if (Array.isArray(content)) {
     const list = element("ul");
-    for (const value of content) list.append(element("li", value));
+    for (const value of content) {
+      const item = element("li");
+      item.append(chatText(value));
+      list.append(item);
+    }
     area.append(list);
-  } else area.append(element("p", content));
+  } else area.append(chatText(content));
   body.append(area);
 }
 
@@ -496,7 +500,7 @@ function card(task) {
   }
   const meta = element("span", undefined, "task-meta");
   meta.append(element("span", task.id, "task-id"));
-  const runStatus = element("span");
+  const runStatus = element("span", undefined, "task-run-status");
   renderAgentRunStatus(runStatus, task);
   if (!runStatus.hidden) meta.append(runStatus);
   if (task.unfinishedDependencies?.length && ["draft", "blocked"].includes(task.status)) {
@@ -569,8 +573,11 @@ function openCodexTaskAction(task) {
 
 function codexTaskAction(task) {
   const generation = projectGeneration;
-  if (task.status !== "ready" && (task.status !== "in_progress" || task.codexThreadId)) return null;
-  const launch = button(language("Send to work", "Передать в работу"), async () => {
+  if (task.status !== "ready" && task.status !== "in_progress") return null;
+  const label = task.status === "in_progress" || task.git
+    ? language("Continue", "Продолжить")
+    : language("Send to work", "Передать в работу");
+  const launch = button(label, async () => {
     launch.disabled = true;
     try {
       const result = await api.launchTask(task.id);
@@ -581,6 +588,8 @@ function codexTaskAction(task) {
       launch.disabled = Boolean(task.unfinishedDependencies?.length);
     }
   });
+  launch.id = "task-launch";
+  launch.hidden = frame.runningTasks?.includes(task.id) ?? false;
   launch.disabled = Boolean(task.unfinishedDependencies?.length);
   return launch;
 }
@@ -1797,8 +1806,11 @@ function update(next) {
   const tagSettings = byId("tag-settings");
   if (tagsChanged && sheet.open && tagSettings) renderTagSettings(tagSettings);
   if (sheetKind === "task" && sheet.open && taskInSheet) {
+    body.querySelector(".task-chat")?.syncAgentState?.();
     const runStatus = byId("task-agent-run");
     if (runStatus) renderAgentRunStatus(runStatus, taskInSheet);
+    const launch = byId("task-launch");
+    if (launch) launch.hidden = frame.runningTasks?.includes(taskInSheet.id) ?? false;
     if (tagsChanged) byId("task-sheet-tags")?.replaceChildren(...tagBadges(taskInSheet.tags));
     const task = frame.board?.tasks.find(entry => entry.id === taskInSheet.id);
     const archived = frame.board?.archived.some(entry => entry.id === taskInSheet.id);

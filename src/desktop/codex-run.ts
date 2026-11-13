@@ -2,17 +2,20 @@ import { spawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { createInterface } from "node:readline";
 import { git } from "../cli/git.ts";
 import { codexThreadPattern } from "../cli/model.ts";
 import type { RunActivity, Task } from "../cli/model.ts";
 import { runActivity } from "./run-activity.ts";
 import type { configuredCodex } from "./codex.ts";
 import { codexProject } from "./codex-project.ts";
+import { codexRpc, turnControl } from "./codex-rpc.ts";
+import type { AgentControl } from "./codex-rpc.ts";
+import { CodexTokenUsage } from "./codex-token-usage.ts";
+import type { TokenUsageReport } from "../cli/token-usage.ts";
 
 type Client = NonNullable<Awaited<ReturnType<typeof configuredCodex>>>;
 type Turn = { id: string; status: string; error?: { message?: string } | null };
-type Run = { threadId: string; completion: Promise<string | undefined> };
+type Run = AgentControl & { threadId: string; completion: Promise<string | undefined> };
 const profile = "ai-taskboard";
 
 function accessPaths(project: string, cwd: string, branch: string): string[] {
@@ -38,7 +41,7 @@ const verifyWrite = [
 ].join("\n");
 
 export async function startCodexRun(client: Client, project: string, cwd: string, task: Task,
-  onActivity?: (item: RunActivity) => void, signal?: AbortSignal): Promise<Run> {
+  onActivity?: (item: RunActivity) => void, onTokenUsage?: (report: TokenUsageReport) => Promise<void>, signal?: AbortSignal): Promise<Run> {
   signal?.throwIfAborted();
   if (!task.git) throw new Error("The task has no prepared Git worktree.");
   const paths = [...new Set(accessPaths(project, cwd, task.git.branch))];
@@ -56,90 +59,70 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     ...(process.platform === "win32" ? ["-c", 'windows.sandbox="mxc"'] : []),
   ], { cwd: project, env: client.env, windowsHide: true, stdio: "pipe" });
   const exited = new Promise<void>(resolve => child.once("close", resolve));
-  const output = createInterface({ input: child.stdout });
-  const lines = output[Symbol.asyncIterator]();
   const turns = new Map<string, Turn>();
   const activity = new Map<string, RunActivity>();
+  const tokens = new CodexTokenUsage();
   let activeThreadId: string | undefined;
-  let activeTurnId: string | undefined;
+  let control: AgentControl | undefined;
   let interruptTimeout: NodeJS.Timeout | undefined;
   let lastError = "";
-  let nextId = 0;
   const timeout = setTimeout(() => {
     lastError = "Codex did not start the task in time.";
     child.kill();
-    output.close();
+    rpc.close();
   }, 60_000);
   const close = () => {
     clearTimeout(timeout);
     clearTimeout(interruptTimeout);
     signal?.removeEventListener("abort", interrupt);
-    output.close();
+    rpc.close();
     child.stdin.end();
     child.kill();
     return exited;
   };
   child.stderr.setEncoding("utf8").on("data", chunk => { lastError = (lastError + chunk).slice(-1500); });
-  const streamError = (error: Error) => {
-    lastError = error.message;
-    output.close();
-  };
-  child.once("error", streamError);
-  child.stdin.on("error", streamError);
-
-  const send = (message: object) => child.stdin.write(JSON.stringify(message) + "\n");
+  const rpc = codexRpc(child, async message => {
+    const usage = tokens.observe(message);
+    if (usage) await onTokenUsage?.(usage);
+    const params = message.params as { threadId?: string; turn: Turn };
+    if (activeThreadId && params?.threadId === activeThreadId) {
+      if (onActivity && message.method?.startsWith("item/")) {
+        const item = runActivity(activity, message.method, params);
+        if (item) {
+          activity.set(item.id, item);
+          onActivity(item);
+        }
+      }
+      if (message.method === "turn/completed") turns.set(params.turn.id, params.turn);
+    }
+  });
+  const { request, send } = rpc;
   function interrupt() {
     lastError = signal?.reason instanceof Error ? signal.reason.message : "The task run was interrupted.";
-    if (activeThreadId && activeTurnId) {
-      send({ id: nextId++, method: "turn/interrupt", params: { threadId: activeThreadId, turnId: activeTurnId } });
-      interruptTimeout = setTimeout(() => { child.kill(); output.close(); }, 5000);
-    } else {
-      child.kill();
-      output.close();
-    }
+    if (control) void control.interrupt().catch(error => { rpc.fail(error); child.kill(); });
+    else { rpc.fail(new Error(lastError)); child.kill(); }
+    interruptTimeout = setTimeout(() => { rpc.fail(new Error(lastError)); child.kill(); }, 5000);
   }
   signal?.addEventListener("abort", interrupt, { once: true });
-  async function receive() {
-    const line = await lines.next();
-    if (line.done) throw new Error(lastError.trim() || "The Codex process closed.");
-    const message = JSON.parse(line.value);
-    if (onActivity && activeThreadId && message.method?.startsWith("item/") && message.params?.threadId === activeThreadId) {
-      const item = runActivity(activity, message.method, message.params);
-      if (item) {
-        activity.set(item.id, item);
-        onActivity(item);
-      }
-    }
-    if (message.method === "turn/completed") {
-      const turn = message.params.turn as Turn;
-      turns.set(turn.id, turn);
-    }
-    if (message.method && message.id !== undefined) {
-      send({ id: message.id, error: { code: -32601, message: "This request is unavailable in an unattended task run." } });
-    }
-    return message;
-  }
-  async function request<R>(method: string, params: object): Promise<R> {
-    const id = nextId++;
-    send({ id, method, params });
-    for (;;) {
-      const response = await receive();
-      if (response.id !== id || response.method) continue;
-      if (response.error) throw new Error(response.error.message);
-      return response.result;
-    }
-  }
   async function monitor(turnId: string) {
+    let failure: string | undefined;
     try {
-      while (!turns.has(turnId)) await receive();
+      while (!turns.has(turnId)) await rpc.receive();
       const turn = turns.get(turnId)!;
-      if (turn.status !== "completed") return signal?.aborted ? lastError
+      if (turn.status !== "completed") failure = signal?.aborted ? lastError
         : turn.error?.message || "Codex ended the task run: " + turn.status + ".";
     } catch (error) {
-      return (error as Error).message;
+      failure = lastError.trim() || (error as Error).message;
     } finally {
+      try {
+        const usage = tokens.finish(Boolean(failure));
+        if (usage) await onTokenUsage?.(usage);
+      } catch (error) {
+        failure = [failure, (error as Error).message].filter(Boolean).join("\n");
+      }
       await close();
     }
+    return failure;
   }
 
   try {
@@ -162,7 +145,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       throw new Error("Codex could not open or create the project for this board. " + (error as Error).message);
     });
     const started = await request<{
-      thread: { id: string; projectId: string | null }; activePermissionProfile?: { id: string };
+      thread: { id: string; projectId: string | null; model?: string }; model?: string; activePermissionProfile?: { id: string };
       approvalPolicy?: string; approvalsReviewer?: string;
     }>(existing ? "thread/resume" : "thread/start", {
       cwd, projectId, threadId: existing, model: task.execution?.model, permissions: profile,
@@ -191,15 +174,20 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       ...(feedback ? ["Замечание к последней сдаче: " + feedback] : []),
     ].join("\n");
     activeThreadId = threadId;
+    tokens.track(threadId, started.model ?? started.thread.model ?? null, true);
     const { turn } = await request<{ turn: Turn }>("turn/start", {
       threadId, effort: task.execution?.effort, input: [{ type: "text", text: prompt, text_elements: [] }],
     });
+    control = turnControl(request, threadId, turn.id);
+    const usage = tokens.begin(threadId, turn.id);
+    if (usage) await onTokenUsage?.(usage);
     clearTimeout(timeout);
-    activeTurnId = turn.id;
     if (turn.status !== "inProgress") turns.set(turn.id, turn);
-    return { threadId, completion: monitor(turn.id) };
+    return { threadId, completion: monitor(turn.id), ...control };
   } catch (error) {
     await close();
+    const usage = tokens.finish(true);
+    if (usage) await onTokenUsage?.(usage);
     throw error;
   }
 }

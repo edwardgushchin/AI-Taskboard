@@ -10,6 +10,8 @@ import { createRequire } from "node:module";
 import { bundled, callCli, cliChild, cliFailure, entry } from "./cli.ts";
 import { codexStatus, composeDraft, installCodex, setCodexExecutable, skillLaunch } from "./codex.ts";
 import { chatModels, replyToTask } from "./codex-chat.ts";
+import type { AgentControl } from "./codex-rpc.ts";
+import type { TokenUsageReport } from "../cli/token-usage.ts";
 import { taskChatActions } from "./chat-actions.ts";
 import type { CodexStatus } from "./codex.ts";
 import type { CliReply } from "./cli.ts";
@@ -22,6 +24,7 @@ import { startCodexRun } from "./codex-run.ts";
 import { runLog } from "./run-activity.ts";
 import { readRunImage } from "./run-images.ts";
 import { projectIdentity, projectLabels, projectPath, savedWindows } from "./project-tabs.ts";
+import { readMarkdownFile } from "./markdown-files.ts";
 import { normalizeRecentBoards, readRecentBoards, rememberRecentBoard } from "./recent-boards.ts";
 
 interface Board {
@@ -494,6 +497,29 @@ const imageTypes = new Map([...imageExtensions].map(([type, suffix]) => [suffix,
 imageTypes.set(".jpeg", "image/jpeg");
 const chatRuns = new Set<string>();
 const replyingTasks = new Set<string>();
+interface ActiveAgent {
+  control: AgentControl;
+  directories: Set<string>;
+  updateMessage?: (task: Task, index: number) => () => void;
+}
+const activeAgents = new Map<string, ActiveAgent>();
+
+async function stopChat(project: string, id: string) {
+  const active = activeAgents.get(project + "\0" + id);
+  if (!active) return cliFailure("CHAT_NOT_RUNNING", lang("The agent is no longer running.", "Агент уже завершил работу."));
+  try {
+    await active.control.interrupt();
+    return { ok: true as const, data: null };
+  } catch (error) {
+    return cliFailure("CHAT_STOP_FAILED", (error as Error).message);
+  }
+}
+
+ipcMain.handle("chat:stop", async (event, id: unknown) => {
+  const project = stateOf(event).board?.project;
+  if (!project || typeof id !== "string" || !taskIdPattern.test(id)) return cliFailure("INVALID_INPUT", "Choose a task.");
+  return stopChat(project, id);
+});
 
 ipcMain.handle("chat:models", async event => {
   const project = stateOf(event).board?.project;
@@ -515,20 +541,28 @@ interface ChatRequest {
 
 type ChatUpdate = { type: "saved" | "changed" } | { type: "commentary"; text: string };
 
+async function saveTaskTokenUsage(project: string, id: string, report: TokenUsageReport): Promise<void> {
+  const saved = await callCli(project, ["token-usage", id], report);
+  if (!saved.ok) throw new Error("Could not save task token usage: " + saved.error.message);
+}
+
 async function sendChat(project: string, id: string, request: ChatRequest, notify: (update: ChatUpdate) => void) {
   const key = project + "\0" + id;
-  if (chatRuns.has(key)) {
+  const active = activeAgents.get(key);
+  if ((!active && (chatRuns.has(key) || launchingTasks.has(key))) || (active && request.retryAt !== undefined)) {
     return { saved: false, result: cliFailure("CHAT_BUSY", lang("The agent is already replying to this task.", "Агент уже отвечает в этой задаче.")) };
   }
   const operation = beginOperation(project);
   const signal = operation.controller.signal;
-  chatRuns.add(key);
+  if (!active) chatRuns.add(key);
+  const directories = active?.directories ?? new Set<string>();
   let scratch: string | undefined;
   let saved = request.retryAt !== undefined;
   try {
     const { model, effort, text, files, retryAt } = request;
     signal.throwIfAborted();
     scratch = await mkdtemp(join(tmpdir(), "ai-taskboard-chat-"));
+    directories.add(scratch);
     let reply: CliReply<Task>;
     if (retryAt === undefined) {
       const sources = [];
@@ -554,7 +588,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
         (retryAt !== undefined && last !== retryAt)) {
       return { saved, result: cliFailure("CHAT_CHANGED", lang("This message is no longer awaiting a reply.", "Это сообщение больше не ожидает ответа.")) };
     }
-    replyingTasks.add(key);
+    if (!active) replyingTasks.add(key);
     notifyRunChange(project);
     const activeFiles = new Set(message.chat?.files);
     const images = [];
@@ -583,23 +617,54 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       latestUserMessage: { text: message.text ?? "", files: message.chat?.files ?? [] },
     });
     signal.throwIfAborted();
+    if (active) {
+      // A finished turn must not silently turn a steering message into another run.
+      if (activeAgents.get(key) !== active) throw new Error(lang("The agent finished before receiving this message. Send a new message to continue.",
+        "Агент завершил работу до получения сообщения. Отправьте новое сообщение, чтобы продолжить."));
+      const undo = active.updateMessage?.(task, last);
+      try { await active.control.steer(prompt, images); }
+      catch (error) { undo?.(); throw error; }
+      return { saved, result: { ok: true as const, data: task } };
+    }
     const replyStarted = performance.now();
+    let replyTo = last;
+    let runAction = taskChatActions(project, task, message.text ?? "", () => notify({ type: "changed" }));
+    const ready = Promise.withResolvers<AgentControl>();
+    void ready.promise.catch(() => {});
+    activeAgents.set(key, { directories, control: {
+      steer: async (text, images) => (await ready.promise).steer(text, images),
+      interrupt: async () => (await ready.promise).interrupt(),
+    }, updateMessage: (latest, index) => {
+      if (index < replyTo) return () => {};
+      const previousIndex = replyTo, previousAction = runAction;
+      replyTo = index;
+      runAction = taskChatActions(project, latest, latest.history[index].text ?? "", () => notify({ type: "changed" }));
+      return () => { if (replyTo === index) { replyTo = previousIndex; runAction = previousAction; } };
+    } });
     const answer = await replyToTask(app.getPath("userData"), project, { model, effort }, prompt, images,
       text => notify({ type: "commentary", text }),
-      taskChatActions(project, task, message.text ?? "", () => notify({ type: "changed" })),
-      scratch, maxAttachmentBytes - task.attachments.reduce((sum, file) => sum + file.bytes, 0), signal);
+      (name, args) => runAction(name, args),
+      scratch, maxAttachmentBytes - task.attachments.reduce((sum, file) => sum + file.bytes, 0),
+      report => saveTaskTokenUsage(project, id, report),
+      control => ready.resolve(control), signal).finally(() => ready.reject(new Error("The agent session ended.")));
+    if ("interrupted" in answer) return { saved, result: { ok: true as const, data: task } };
     signal.throwIfAborted();
     const result = await callCli<Task>(project, ["chat", id], {
-      ...answer, actor: "agent", model, effort, replyTo: last, durationMs: Math.round(performance.now() - replyStarted),
+      ...answer, actor: "agent", model, effort, replyTo, durationMs: Math.round(performance.now() - replyStarted),
     });
     return { saved, result };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { saved, result: cliFailure("CHAT_FAILED", message.slice(0, 1500)) };
   } finally {
-    if (replyingTasks.delete(key)) notifyRunChange(project);
-    if (scratch) await rm(scratch, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
-    chatRuns.delete(key);
+    if (!active) {
+      activeAgents.delete(key);
+      if (replyingTasks.delete(key)) notifyRunChange(project);
+      for (const directory of directories) await rm(directory, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
+      chatRuns.delete(key);
+    } else if (scratch && activeAgents.get(key) !== active) {
+      await rm(scratch, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
+    }
     operation.finish();
   }
 }
@@ -642,7 +707,8 @@ ipcMain.handle("board:draft", async (event, request: unknown, files: unknown = [
     if (files.length) {
       scratch = await mkdtemp(join(tmpdir(), "ai-taskboard-paste-"));
       for (const [index, file] of files.entries()) {
-        const extension = imageExtensions.get(file.type);
+        const suffix = extname(file.name.trim()).toLowerCase();
+        const extension = imageExtensions.get(file.type) ?? (imageTypes.has(suffix) ? suffix : undefined);
         const path = join(scratch, String(index) + (extension ?? ""));
         await writeFile(path, Buffer.from(file.bytes));
         attachments.push({ path, name: file.name.trim(), image: extension !== undefined });
@@ -657,11 +723,11 @@ ipcMain.handle("board:draft", async (event, request: unknown, files: unknown = [
     return await callCli<Task>(board.project, ["create"], {
       ...draft, actor: "agent", attachmentSources: attachments.map(({ path, name }) => ({ path, name })),
     });
-  } catch {
+  } catch (error) {
     return cliFailure("CODEX_DRAFT_FAILED", lang(
       "Codex could not prepare a draft. Check that Codex is up to date and you are signed in, then retry.",
       "Codex не смог подготовить черновик. Проверьте версию Codex и вход в аккаунт, затем повторите попытку.",
-    ));
+    ) + "\n" + (error instanceof Error ? error.message : String(error)).slice(0, 1500));
   } finally {
     if (scratch) await rm(scratch, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
     state.drafting = false;
@@ -776,6 +842,29 @@ ipcMain.handle("chat:openLink", async (_event, value: unknown) => {
   if (url && ["https:", "http:", "mailto:"].includes(url.protocol)) await shell.openExternal(url.href);
 });
 
+ipcMain.handle("board:readMarkdown", async (event, id: unknown, link: unknown, source: unknown) => {
+  const { project } = stateOf(event);
+  if (!project || typeof link !== "string" || (source !== undefined && typeof source !== "string") ||
+      (id !== undefined && (typeof id !== "string" || !taskIdPattern.test(id)))) {
+    return cliFailure("INVALID_INPUT", "Choose a Markdown link.");
+  }
+  let base = project;
+  if (typeof id === "string") {
+    const task = await callCli<Task>(project, ["show", id]);
+    if (!task.ok) return task;
+    base = task.data.git?.worktree ?? project;
+  }
+  try {
+    return { ok: true, data: await readMarkdownFile(base, link, source) };
+  } catch (error) {
+    const message = (error as Error).message === "MARKDOWN_TOO_LARGE"
+      ? lang("The Markdown file exceeds 4 MiB.", "Размер Markdown-файла превышает 4 МиБ.")
+      : lang("Could not open the Markdown file. Check its path and access permissions.",
+        "Не удалось открыть Markdown-файл. Проверьте путь и права доступа.");
+    return cliFailure("MARKDOWN_UNAVAILABLE", message);
+  }
+});
+
 ipcMain.handle("board:openWorktree", async (event, id: unknown) => {
   const state = stateOf(event);
   if (!state.project || typeof id !== "string" || !/^T-\d{4,}$/.test(id)) return cliFailure("INVALID_INPUT", "Choose a task.");
@@ -820,6 +909,7 @@ async function recordRunFailure(project: string, id: string, reason: string, con
 
 async function launchTask(project: string, id: string, revisionRequest?: { input: unknown }) {
   const key = project + "\0" + id;
+  if (chatRuns.has(key)) return cliFailure("CHAT_BUSY", lang("Wait for the chat reply or stop the agent first.", "Дождитесь ответа в чате или остановите агента."));
   if (launchingTasks.has(key)) return cliFailure("LAUNCH_IN_PROGRESS", "This task is already being launched.");
   const operation = beginOperation(project);
   const signal = operation.controller.signal;
@@ -861,10 +951,13 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     }
     prepared = true;
     signal.throwIfAborted();
-    const { threadId: codexThreadId, completion } = await startCodexRun(client, project, started.data.worktree, started.data.task, item => {
+    const run = await startCodexRun(client, project, started.data.worktree, started.data.task, item => {
       activity.set(item.id, item);
       updateTimer ??= setTimeout(publish, 80);
-    }, signal);
+    }, report => saveTaskTokenUsage(project, id, report), signal);
+    const { threadId: codexThreadId, completion } = run;
+    const directories = new Set<string>();
+    activeAgents.set(key, { control: run, directories });
     monitoring = true;
     runningTasks.add(key);
     notifyRunChange(project);
@@ -883,18 +976,21 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       const timedOut = rejected?.status === "timedOut";
       const reviewOutcome = timedOut ? lang("Access review timed out", "Истекло время проверки доступа") :
         lang("Access denied by Auto-review", "Auto-review отклонил доступ");
-      const condition = rejected && (timedOut ? lang("Resume the task to retry the access review.", "Возобновите задачу, чтобы повторить проверку доступа.") :
+      const interrupted = reason === "Codex ended the task run: interrupted.";
+      const condition = interrupted ? lang("Resume the task to continue the interrupted run.", "Возобновите задачу, чтобы продолжить остановленную работу.") : rejected && (timedOut ? lang("Resume the task to retry the access review.", "Возобновите задачу, чтобы повторить проверку доступа.") :
         lang("Provide the required resource in an allowed location or revise the blocked step to use an authorized operation, then resume the task.",
           "Предоставьте нужный ресурс в доступной области или уточните, каким разрешённым способом выполнить указанный шаг. Затем возобновите задачу."));
       const summary = detail?.trim().slice(0, 2000);
-      const diagnostic = rejected ? [
+      const diagnostic = interrupted ? lang("The user stopped the agent.", "Пользователь остановил работу агента.") : rejected ? [
         [reviewOutcome, rejected.title.slice(0, 1000)].filter(Boolean).join(" — "), rejected.text.slice(0, 1500), reason, summary,
       ].filter(Boolean).join("\n\n") : reason ?? [incomplete, summary].filter(Boolean).join("\n\n");
       const failure = await recordRunFailure(project, id, diagnostic, condition);
       if (failure) publishRunActivity(project, id, [
         ...runLog(activity), { id: "block-error", type: "error", title: "", text: failure, status: "failed" },
       ]);
-    }).finally(() => {
+    }).finally(async () => {
+      activeAgents.delete(key);
+      for (const directory of directories) await rm(directory, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
       runningTasks.delete(key);
       launchingTasks.delete(key);
       notifyRunChange(project);

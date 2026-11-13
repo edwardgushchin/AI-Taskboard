@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { createInterface } from "node:readline";
+import { codexRpc, turnControl } from "./codex-rpc.ts";
+import type { AgentControl, RpcMessage } from "./codex-rpc.ts";
 import { configuredCodex } from "./codex.ts";
 import { chatTools } from "./chat-actions.ts";
 import { cliFailure } from "./cli.ts";
@@ -7,6 +8,8 @@ import { saveChatImages } from "./chat-images.ts";
 import type { ChatImage } from "./chat-images.ts";
 import type { CliReply } from "./cli.ts";
 import type { ChatSettings, ChatUsage } from "../cli/model.ts";
+import { CodexTokenUsage } from "./codex-token-usage.ts";
+import type { TokenUsageReport } from "../cli/token-usage.ts";
 
 interface ModelEntry {
   model: string;
@@ -17,15 +20,7 @@ interface ModelEntry {
   inputModalities?: string[];
 }
 
-interface RpcMessage {
-  id?: number | string;
-  method?: string;
-  result?: unknown;
-  error?: { message?: string };
-  params?: unknown;
-}
-
-type Notification = (message: RpcMessage) => void;
+type Notification = (message: RpcMessage) => void | Promise<void>;
 type ServerRequest = (message: RpcMessage) => Promise<object | undefined>;
 
 async function withServer<T>(
@@ -41,40 +36,18 @@ async function withServer<T>(
     ...client.args, "app-server", "--disable", "hooks", "--disable", "plugins",
     "-c", "mcp_servers={}", "-c", 'web_search="disabled"',
   ], { cwd, env: client.env, windowsHide: true, stdio: ["pipe", "pipe", "ignore"], signal });
-  const reader = createInterface({ input: child.stdout, crlfDelay: Infinity });
-  const lines = reader[Symbol.asyncIterator]();
-  let failure = "Codex closed the connection.";
-  function close(reason: string) {
-    failure = reason;
-    reader.close();
+  const exited = new Promise<void>(resolve => child.once("close", resolve));
+  let notify: Notification | undefined;
+  const rpc = codexRpc(child, message => notify?.(message), onRequest);
+  const timeout = setTimeout(() => rpc.fail(new Error("Codex did not respond in time.")), 180_000);
+  const { send } = rpc;
+  async function request<R>(method: string, params: object, listener?: Notification): Promise<R> {
+    if (listener) notify = listener;
+    return rpc.request<R>(method, params);
   }
-  child.on("error", error => close(error.message));
-  child.stdin.on("error", error => close(error.message));
-  const timeout = setTimeout(() => close("Codex did not respond in time."), 180_000);
-  const send = (message: object) => child.stdin.write(JSON.stringify(message) + "\n");
-  const receive = async (notify?: Notification) => {
-    const line = await lines.next();
-    if (line.done) throw new Error(failure);
-    const message = JSON.parse(line.value) as RpcMessage;
-    if (message.method && message.id !== undefined) {
-      const result = await onRequest?.(message);
-      send(result ? { id: message.id, result } :
-        { id: message.id, error: { code: -32601, message: "Unsupported request in task chat." } });
-    } else if (message.method) {
-      notify?.(message);
-    }
-    return message;
-  };
-  let nextId = 0;
-  async function request<R>(method: string, params: object, notify?: Notification): Promise<R> {
-    const id = nextId++;
-    send({ id, method, params });
-    for (;;) {
-      const reply = await receive(notify);
-      if (reply.id !== id || reply.method) continue;
-      if (reply.error) throw new Error(reply.error.message ?? "Codex rejected the request.");
-      return reply.result as R;
-    }
+  async function receive(listener?: Notification) {
+    if (listener) notify = listener;
+    return rpc.receive();
   }
   try {
     await request("initialize", {
@@ -86,9 +59,10 @@ async function withServer<T>(
   } finally {
     clearTimeout(timeout);
     child.stdin.end();
-    reader.close();
+    rpc.close();
     child.stdout.destroy();
     if (child.exitCode === null) child.kill();
+    await exited;
   }
 }
 
@@ -113,7 +87,7 @@ export function chatModels(profile: string, project: string) {
 
 interface TurnNotification {
   threadId?: string;
-  turn?: { status: string; error?: { message?: string } };
+  turn?: { id: string; status: string; error?: { message?: string } };
   item?: { type: string; text?: string; phase?: string } & Partial<ChatImage>;
   tokenUsage?: { last?: { totalTokens?: number }; modelContextWindow?: number };
 }
@@ -122,10 +96,15 @@ export function replyToTask(
   profile: string, project: string, settings: ChatSettings, prompt: string, images: string[],
   onCommentary: (text: string) => void,
   runAction: (name: string, args: unknown) => Promise<CliReply>,
-  imageDirectory: string, imageLimit: number, signal?: AbortSignal,
+  imageDirectory: string, imageLimit: number,
+  onTokenUsage?: (report: TokenUsageReport) => Promise<void>,
+  onControl?: (control: AgentControl) => void,
+  signal?: AbortSignal,
 ) {
   let threadId: string | undefined;
-  const calls = new Map<string, CliReply>();
+  const calls = new Map<string, Promise<CliReply>>();
+  const tokens = new CodexTokenUsage();
+  let completed = false;
   return withServer(profile, project, async ({ request, receive }) => {
     const models = await listModels(request);
     const model = models.find(entry => entry.model === settings.model);
@@ -136,7 +115,7 @@ export function replyToTask(
     if (images.length && model.inputModalities && !model.inputModalities.includes("image")) {
       throw new Error("Choose a model that supports images.");
     }
-    const { thread } = await request<{ thread: { id: string } }>("thread/start", {
+    const started = await request<{ thread: { id: string; model?: string }; model?: string }>("thread/start", {
       cwd: project, model: model.model, approvalPolicy: "never", sandbox: "read-only", ephemeral: true,
       dynamicTools: chatTools,
       developerInstructions: [
@@ -150,13 +129,17 @@ export function replyToTask(
         "Read explicitly attached files when relevant. Do not edit project files or run project tasks.",
       ].join(" "),
     });
+    const { thread } = started;
     threadId = thread.id;
+    tokens.track(thread.id, started.model ?? thread.model ?? null, true);
     let turn: TurnNotification["turn"];
     let usage: ChatUsage | undefined;
     const answers: string[] = [];
     const commentary: string[] = [];
     const generated = new Map<string, ChatImage>();
-    function notify(message: RpcMessage) {
+    async function notify(message: RpcMessage) {
+      const report = tokens.observe(message);
+      if (report) await onTokenUsage?.(report);
       const data = message.params as TurnNotification | undefined;
       if (data?.threadId !== thread.id) return;
       if (message.method === "turn/completed") turn = data.turn;
@@ -178,13 +161,19 @@ export function replyToTask(
         if (typeof used === "number" && typeof limit === "number" && used >= 0 && limit > 0) usage = { used, limit };
       }
     }
-    await request("turn/start", {
+    const { turn: initialTurn } = await request<{ turn: NonNullable<TurnNotification["turn"]> }>("turn/start", {
       threadId: thread.id, effort: settings.effort, sandboxPolicy: { type: "readOnly", networkAccess: false },
       input: [{ type: "text", text: prompt, text_elements: [] },
         ...images.map(path => ({ type: "localImage", path }))],
     }, notify);
+    const report = tokens.begin(thread.id, initialTurn.id);
+    if (report) await onTokenUsage?.(report);
+    onControl?.(turnControl(request, thread.id, initialTurn.id));
+    if (initialTurn.status !== "inProgress") turn ??= initialTurn;
     while (!turn) await receive(notify);
+    if (turn.status === "interrupted") return { interrupted: true as const };
     if (turn.status !== "completed") throw new Error(turn.error?.message ?? "Codex did not complete the reply.");
+    completed = true;
     const text = answers.join("\n\n").trim();
     if (!text && !generated.size) throw new Error("Codex returned no message.");
     signal?.throwIfAborted();
@@ -196,12 +185,16 @@ export function replyToTask(
     } | undefined;
     if (message.method !== "item/tool/call" || !threadId || params?.threadId !== threadId || params.namespace ||
         typeof params.callId !== "string" || typeof params.tool !== "string") return undefined;
-    let result = calls.get(params.callId);
-    if (!result) {
-      result = await runAction(params.tool, params.arguments)
+    let pending = calls.get(params.callId);
+    if (!pending) {
+      pending = runAction(params.tool, params.arguments)
         .catch(error => cliFailure("TASK_ACTION_FAILED", String(error)));
-      calls.set(params.callId, result);
+      calls.set(params.callId, pending);
     }
+    const result = await pending;
     return { success: result.ok, contentItems: [{ type: "inputText", text: JSON.stringify(result) }] };
-  }, signal);
+  }, signal).finally(async () => {
+    const report = tokens.finish(!completed);
+    if (report) await onTokenUsage?.(report);
+  });
 }

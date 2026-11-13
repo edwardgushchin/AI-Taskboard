@@ -1,53 +1,5 @@
 const chatDrafts = new Map();
 let chatCatalog;
-const chatMarkdown = window.markdownit?.({ breaks: true, linkify: true, html: false });
-if (chatMarkdown) {
-  const web = url => /^https?:\/\//i.test(url);
-  const inlineImage = url => /^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$/i.test(url);
-  chatMarkdown.validateLink = url => web(url) || /^mailto:/i.test(url) || inlineImage(url);
-  const image = chatMarkdown.renderer.rules.image;
-  chatMarkdown.renderer.rules.image = (tokens, index, options, env, renderer) => {
-    const token = tokens[index];
-    const src = token.attrGet("src");
-    if (!web(src) && !inlineImage(src)) return chatMarkdown.utils.escapeHtml(token.content);
-    token.attrSet("loading", "lazy");
-    token.attrSet("referrerpolicy", "no-referrer");
-    return image(tokens, index, options, env, renderer);
-  };
-  chatMarkdown.core.ruler.after("inline", "task_checkboxes", state => {
-    for (let i = 2; i < state.tokens.length; i++) {
-      const token = state.tokens[i];
-      if (token.type !== "inline" || state.tokens[i - 1].type !== "paragraph_open" ||
-          state.tokens[i - 2].type !== "list_item_open") continue;
-      const first = token.children?.[0];
-      const marker = first?.type === "text" && /^\[([ xX])\](?:[ \t]+|$)/.exec(first.content);
-      if (!marker || !/^\[[ xX]\](?:[ \t]+|$)/.test(token.content)) continue;
-      first.content = first.content.slice(marker[0].length);
-      const checkbox = new state.Token("task_checkbox", "input", 0);
-      checkbox.markup = marker[1];
-      token.children.unshift(checkbox);
-    }
-  });
-  chatMarkdown.renderer.rules.task_checkbox = (tokens, index) =>
-    "<input type=\"checkbox\" disabled" + (tokens[index].markup === " " ? "" : " checked") + "> ";
-}
-
-function chatText(text) {
-  const block = element("div", undefined, "chat-text");
-  if (!chatMarkdown) {
-    block.innerText = text;
-    return block;
-  }
-  block.innerHTML = chatMarkdown.render(text);
-  block.addEventListener("click", event => {
-    const link = event.target.closest("a");
-    if (!link) return;
-    event.preventDefault();
-    void protect(() => api.openLink(link.href))();
-  });
-  return block;
-}
-
 const chatPreviews = new IntersectionObserver(entries => {
   for (const { isIntersecting, target } of entries) {
     if (!isIntersecting) continue;
@@ -324,16 +276,18 @@ function updateChat({ project, id, type, text, items }) {
     return;
   }
   const draft = chatDrafts.get(project + "\0" + id);
-  if (!draft?.pending) return;
-  if (type === "saved" && draft.pending === "saving") {
-    draft.text = "";
-    draft.files = [];
-    draft.pending = "replying";
+  if (type === "saved") {
+    if (draft?.saving) {
+      draft.text = "";
+      draft.files = [];
+      draft.saving = undefined;
+      draft.pending = "replying";
+    }
     if (open) void protect(() => showTask(id))();
   } else if (type === "changed") {
     if (open) void protect(() => showTask(id))();
-  } else if (type === "commentary") {
-    draft.commentary.push(text);
+  } else if (type === "commentary" && draft?.pending) {
+    (draft.commentary ??= []).push(text);
     const list = open && body.querySelector(".chat-log");
     if (list) renderChatTurn(list, draft);
   }
@@ -532,7 +486,7 @@ function taskChat(task) {
   selection.append(modelLabel, effortLabel);
   const feedback = element("p", undefined, "chat-status");
   feedback.setAttribute("role", "status");
-  const send = element("button", language("Send", "Отправить"), "button primary");
+  const send = element("button", undefined, "button primary chat-icon chat-send");
   send.type = "submit";
   const attach = button("", () => fileInput.click(), "quiet chat-icon");
   attach.append(icon("attachment"));
@@ -557,21 +511,29 @@ function taskChat(task) {
 
   let models = [];
   let loadError = "";
+  function working() { return Boolean(draft.pending || frame.runningTasks?.includes(task.id)); }
+  function stopping() { return working() && !draft.text.trim() && !draft.files.length; }
   function sync() {
-    const working = Boolean(draft.pending);
-    input.readOnly = draft.pending === "saving";
+    const active = working();
+    input.readOnly = Boolean(draft.saving);
     attach.disabled = microphone.disabled = input.readOnly;
-    model.disabled = effort.disabled = working || !models.length;
+    model.disabled = effort.disabled = active || !models.length;
     selection.disabled = model.disabled;
     modelLabel.textContent = model.selectedOptions[0]?.textContent ?? "";
     effortLabel.textContent = model.value ? effort.selectedOptions[0]?.textContent ?? "" : "";
     controlLabelForIcon(selection, [modelLabel.textContent, effortLabel.textContent].filter(Boolean).join(" · "));
-    send.disabled = working || !model.value || !effort.value || (!draft.text.trim() && !draft.files.length);
-    reload.hidden = working || !loadError;
+    const stop = stopping();
+    send.replaceChildren(icon(stop ? "stop" : "play"));
+    controlLabelForIcon(send, stop ? language("Stop agent", "Остановить агента") : language("Send message", "Отправить сообщение"));
+    send.disabled = Boolean(draft.saving || draft.stopping) || (!stop &&
+      (!model.value || !effort.value || (!draft.text.trim() && !draft.files.length)));
+    reload.hidden = active || !loadError;
     feedback.textContent = draft.error || loadError;
     feedback.hidden = !feedback.textContent;
     for (const remove of pendingFiles.querySelectorAll("button")) remove.disabled = input.readOnly;
   }
+
+  area.syncAgentState = sync;
 
   function renderPendingFiles() {
     pendingFiles.hidden = !draft.files.length;
@@ -584,7 +546,7 @@ function taskChat(task) {
         sync();
         input.focus();
       }, "quiet");
-      remove.disabled = draft.pending === "saving";
+      remove.disabled = Boolean(draft.saving);
       remove.setAttribute("aria-label", language("Remove ", "Удалить ") + file.name);
       row.append(icon("attachment"), element("span", file.name), remove);
       if (/^image\/(png|jpeg|webp|gif)$/.test(file.type)) showChatPreview(row, URL.createObjectURL(file));
@@ -627,7 +589,7 @@ function taskChat(task) {
   }
 
   function addFiles(newFiles) {
-    if (draft.pending === "saving" || !newFiles.length) return;
+    if (draft.saving || !newFiles.length) return;
     const total = task.attachments.reduce((sum, file) => sum + file.bytes, 0) +
       [...draft.files, ...newFiles].reduce((sum, file) => sum + file.size, 0);
     if (total > 64 * 1024 * 1024) {
@@ -642,10 +604,29 @@ function taskChat(task) {
 
   async function submit() {
     if (send.disabled) return;
-    draft.pending = "saving";
-    draft.commentary = [];
+    if (stopping()) {
+      draft.stopping = true;
+      draft.error = "";
+      sync();
+      try {
+        const result = await api.chatStop(task.id);
+        if (!result.ok) draft.error = boardError(result.error);
+      } catch (error) { draft.error = error.message; }
+      finally {
+        draft.stopping = false;
+        sync();
+        if (frame.project === project && sheet.open && sheetKind === "task" && taskInSheet?.id === task.id) await showTask(task.id);
+      }
+      return;
+    }
+    const submission = {};
+    (draft.requests ??= new Set()).add(submission);
+    draft.saving = submission;
+    draft.pending ??= "saving";
+    draft.commentary ??= [];
     draft.error = "";
     draft.scroll = undefined;
+    const text = draft.text;
     sync();
     renderChatTurn(list, draft);
     try {
@@ -654,9 +635,9 @@ function taskChat(task) {
       })));
       if (!area.isConnected || frame.project !== project) return;
       const { saved, result } = await api.chatSend(task.id, {
-        model: draft.model, effort: draft.effort, text: draft.text, files,
+        model: draft.model, effort: draft.effort, text, files,
       });
-      if (saved && draft.pending === "saving") {
+      if (saved && draft.saving === submission) {
         draft.text = "";
         draft.files = [];
       }
@@ -664,8 +645,12 @@ function taskChat(task) {
     } catch (error) {
       draft.error = error.message;
     } finally {
-      draft.pending = undefined;
-      draft.commentary = [];
+      draft.requests.delete(submission);
+      if (draft.saving === submission) draft.saving = undefined;
+      if (!draft.requests.size) {
+        draft.pending = undefined;
+        draft.commentary = [];
+      }
       if (frame.project === project && sheet.open && sheetKind === "task" && taskInSheet?.id === task.id) await showTask(task.id);
     }
   }

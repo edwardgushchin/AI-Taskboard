@@ -88,17 +88,19 @@ h1, h2, h3, p { margin: 0; }
   background: var(--toolbar); border-bottom: 1px solid var(--border); padding-inline: 8px;
 }
 .project-tab {
+  --project-tab-background: var(--toolbar);
   display: flex; align-items: center; flex: 0 0 auto; min-width: 100px; max-width: 300px;
   border-inline-end: 1px solid var(--border); border-bottom: 2px solid transparent;
-  color: var(--muted);
+  background: var(--project-tab-background); color: var(--muted);
+  transition: background-color var(--hover-time) ease;
 }
-.project-tab:has([aria-selected="true"]) { background: var(--bg); border-bottom-color: var(--focus); color: var(--text); }
+.project-tab:has([aria-selected="true"]) { --project-tab-background: var(--bg); border-bottom-color: var(--focus); color: var(--text); }
 .project-tab button { border: 0; background: transparent; cursor: pointer; color: inherit; }
-.project-tab-button { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 9px 10px; font-size: 12px; }
+.project-tab-button { display: flex; flex: 1; align-items: baseline; gap: 8px; min-width: 0; padding: 9px 10px; font-size: 12px; }
 .project-tab-name, .project-tab-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-tab-detail { color: var(--muted); font-size: 11px; }
 .project-tab-close { flex: none; margin-inline-end: 4px; width: 24px; height: 24px; border-radius: 4px; }
-.project-tab button:hover { background: color-mix(in srgb, var(--text) 8%, transparent); }
+.project-tab:hover { background: color-mix(in srgb, var(--text) 8%, var(--project-tab-background)); }
 .project-tab button:focus-visible { outline-offset: -2px; }
 .app-menu-bar {
   --window-controls-width: 0px;
@@ -108,7 +110,7 @@ h1, h2, h3, p { margin: 0; }
     color-mix(in srgb, var(--muted), var(--text) 8%),
     color-mix(in srgb, var(--muted) 82%, var(--toolbar))
   );
-  position: relative; z-index: 6; flex: none; display: grid; align-items: center; column-gap: 6px;
+  position: relative; z-index: 7; flex: none; display: grid; align-items: center; column-gap: 6px;
   grid-template: "menu search actions" / minmax(max-content, 1fr) minmax(0, 600px) minmax(max-content, 1fr);
   padding-inline: 8px;
   border-bottom: 1px solid var(--toolbar-border); background: var(--toolbar);
@@ -277,6 +279,7 @@ select:hover:not(:disabled) {
 .task-tags { gap: 3px; }
 .task-meta { gap: 4px 6px; color: var(--muted); font-size: 10px; line-height: 12px; font-variant-numeric: tabular-nums; }
 .task-meta > span { display: inline-flex; align-items: center; min-width: 0; max-width: 100%; }
+.task-meta > .task-run-status { flex: 1; }
 .task-id { font-family: ui-monospace, Consolas, monospace; }
 .task-stat { display: inline-flex; align-items: center; gap: 2px; }
 .task-stat .icon { width: 12px; height: 12px; }
@@ -336,6 +339,15 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .sheet-section h3 { font-size: 13px; margin-bottom: 5px; }
 .sheet-section p, .sheet-section ul { line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
 .sheet-section ul { padding-left: 22px; margin: 0; }
+.sheet-section .chat-text :is(p, ul, ol) { white-space: normal; }
+.markdown-preview {
+  width: min(960px, 94vw); max-height: 88vh; padding: 0;
+  color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+}
+.markdown-preview[open] { display: flex; flex-direction: column; }
+.markdown-preview::backdrop { background: #0b102079; }
+.markdown-preview-content { min-height: 0; overflow: auto; padding: 20px; }
+.markdown-preview-path { margin-bottom: 16px; font-size: 12px; overflow-wrap: anywhere; }
 .task-chat { display: grid; gap: 12px; min-width: 0; padding-top: 14px; border-top: 1px solid var(--border); }
 .chat-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; }
 .chat-header h3 { margin-inline-end: auto; font-size: 15px; }
@@ -481,6 +493,7 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .image-preview-stage img:not([hidden]) + .image-preview-status { position: absolute; inset: 12px auto auto 12px; background: var(--panel); border-radius: 6px; }
 .chat-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .chat-controls .chat-icon { width: 30px; padding: 0; }
+.chat-controls .chat-send { flex: none; height: 30px; border-radius: 50%; }
 .chat-options { display: flex; align-items: center; gap: 6px; min-width: 0; margin-inline-start: auto; }
 .chat-selection {
   anchor-name: --chat-selection;

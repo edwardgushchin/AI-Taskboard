@@ -92,6 +92,46 @@ if (!process.versions.electron) {
       await waitFor(async () => !(await frame()).loading, "project loading");
     };
     const select = async path => evaluate("window.taskboard.selectTab(" + JSON.stringify(path) + ")");
+    const checkAppearance = async theme => {
+      await evaluate("window.taskboard.setTheme(" + JSON.stringify(theme) + ")");
+      await evaluate("document.querySelector('.app-menu-trigger').click()");
+      await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+      const menuPosition = await evaluate(`(() => {
+        const menu = document.querySelector('.app-menu-group > .app-menu-popup');
+        const trigger = document.querySelector('.app-menu-trigger').getBoundingClientRect();
+        const popup = menu.getBoundingClientRect();
+        const tabs = document.querySelector('#project-tabs').getBoundingClientRect();
+        const point = document.elementFromPoint(popup.left + 12, tabs.top + tabs.height / 2);
+        return { gap: popup.top - trigger.bottom, aboveTabs: menu.contains(point) };
+      })()`);
+      writeFileSync(join(artifacts, "project-tabs-menu-" + theme + ".png"), (await window.webContents.capturePage()).toPNG());
+      check(menuPosition.gap >= 0 && menuPosition.gap <= 4, "File menu is anchored directly below its trigger in " + theme);
+      check(menuPosition.aboveTabs, "File menu paints above the project tabs in " + theme);
+      await evaluate("document.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))");
+      const hover = async selector => {
+        const point = await evaluate(`(() => {
+          const tab = document.querySelector('.project-tab:has([aria-selected="false"])');
+          const target = tab.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
+          return { x: Math.round(target.left + target.width / 2), y: Math.round(target.top + target.height / 2) };
+        })()`);
+        window.webContents.sendInputEvent({ type: "mouseMove", ...point });
+        await new Promise(resolve => setTimeout(resolve, 200));
+        return evaluate(`(() => {
+          const tab = document.querySelector('.project-tab:has([aria-selected="false"])');
+          return { hovered: tab.matches(':hover'), background: getComputedStyle(tab).backgroundColor,
+            label: getComputedStyle(tab.querySelector('.project-tab-button')).backgroundColor,
+            close: getComputedStyle(tab.querySelector('.project-tab-close')).backgroundColor };
+        })()`);
+      };
+      const label = await hover(".project-tab-button");
+      check(label.hovered && label.background !== "rgba(0, 0, 0, 0)" && label.label === "rgba(0, 0, 0, 0)" &&
+        label.close === "rgba(0, 0, 0, 0)", "hover highlights the entire tab including the close area in " + theme);
+      const close = await hover(".project-tab-close");
+      check(close.hovered && close.background === label.background && close.close === "rgba(0, 0, 0, 0)",
+        "moving to the close button retains the full tab highlight in " + theme);
+      writeFileSync(join(artifacts, "project-tabs-hover-" + theme + ".png"), (await window.webContents.capturePage()).toPNG());
+      window.webContents.sendInputEvent({ type: "mouseMove", x: 500, y: 400 });
+    };
     if (stage === "open") {
       await open(first);
       await open(second);
@@ -101,6 +141,10 @@ if (!process.versions.electron) {
       check(await evaluate("[...document.querySelectorAll('.project-tab-detail')].map(item => item.textContent).join(',') === 'first,second'"), "same names have parent paths");
       await select(first);
       check(await evaluate("document.querySelector('.task-card strong').textContent === 'First project task'"), "switching tabs renders the matching task");
+      await checkAppearance("dark");
+      window.setSize(760, 700);
+      await checkAppearance("light");
+      window.setSize(1380, 900);
       await open(process.platform === "win32" ? first.toUpperCase() : first);
       check((await frame()).tabs.length === 2, "case aliases do not create duplicate tabs");
       const alias = join(artifacts, "linked-project");

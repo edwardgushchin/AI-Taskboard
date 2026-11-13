@@ -149,6 +149,21 @@ export function resolveCommit(cwd: string, revision: string): string | undefined
   throw new TaskboardError("GIT_FAILED", "Could not resolve the Git commit.", { output: result.stderr.trim() });
 }
 
+export function createInitialCommit(repo: Repository, target: string): string {
+  const head = invokeGit(repo.root, ["symbolic-ref", "--quiet", "HEAD"]).stdout.trim();
+  if (repo.bare || target !== head || git(repo.root, ["for-each-ref", "--count=1", "--format=%(refname)"])) {
+    throw new TaskboardError("TARGET_HAS_NO_COMMIT", "Select a local target branch with a commit.");
+  }
+  // Build the empty tree directly so staged files and the main worktree are untouched.
+  const tree = git(repo.root, ["mktree"]).trim();
+  const commit = git(repo.root, [
+    "-c", "user.name=AI Taskboard", "-c", "user.email=ai-taskboard@localhost",
+    "commit-tree", tree, "-m", "chore: initialize repository",
+  ]).trim();
+  git(repo.root, ["update-ref", "--no-deref", target, commit, ""]);
+  return commit;
+}
+
 export function requireRepository(repository: Repository | null): Repository {
   if (!repository) throw new TaskboardError("GIT_REQUIRED", "Starting a code task requires a Git repository.");
   return repository;
