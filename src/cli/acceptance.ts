@@ -6,7 +6,7 @@ import type { IntegrationMode, Task, TaskGit } from "./model.ts";
 import { checkPreserveChanges, describeSavedChanges, inspectLocalChanges, restoreSavedChanges, saveLocalChanges } from "./saved-changes.ts";
 import { exists, readJson, removeFile, writeJson } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
-import { conventionalMessage } from "./submission.ts";
+import { conventionalMessage, noChangesReviewIsStale } from "./submission.ts";
 import { checkProtectedPaths, cleanTaskWorktree, collidingPaths, findWorktree, gitStatus, requireNoGitOperation, usableWorktree } from "./worktree.ts";
 
 interface AcceptIntent {
@@ -18,6 +18,7 @@ interface AcceptIntent {
   tree: string;
   mode: IntegrationMode;
   message: string;
+  actor?: "manager";
   restoreLocalChanges?: true;
 }
 
@@ -46,6 +47,12 @@ function targetHead(repo: Repository, target: string): string {
 
 export function inspectReview(store: BoardStore, task: Task) {
   requireState(task, ["review"]);
+  if (task.result?.noChanges) {
+    return {
+      noChanges: true, revision: task.revision, targetHead: null, paths: [], diff: "",
+      stale: noChangesReviewIsStale(store, task, task.result.noChanges.head), result: task.result,
+    };
+  }
   const context = reviewed(task);
   const repo = requireRepository(store.location.repository);
   const target = localBranch(repo, context.target);
@@ -172,13 +179,14 @@ function readIntent(path: string, task: Task, target: string, submitted: string)
       typeof pending.tree !== "string" || !oid.test(pending.tree) ||
       (pending.mode !== "merge" && pending.mode !== "squash") ||
       (pending.restoreLocalChanges !== undefined && pending.restoreLocalChanges !== true) ||
+      (pending.actor !== undefined && pending.actor !== "manager") ||
       typeof pending.message !== "string" || conventionalMessage(pending.message, task.id) !== pending.message) {
     throw new TaskboardError("CORRUPT_STORAGE", "Invalid acceptance recovery record.");
   }
   return pending as unknown as AcceptIntent;
 }
 
-function finish(store: BoardStore, task: Task, sha: string, restoreLocalChanges = false) {
+function finish(store: BoardStore, task: Task, sha: string, restoreLocalChanges = false, actor: "user" | "manager" = "user") {
   let localChangesWarning;
   if (restoreLocalChanges) {
     try {
@@ -191,7 +199,7 @@ function finish(store: BoardStore, task: Task, sha: string, restoreLocalChanges 
     }
   }
   const context = reviewed(task);
-  const completed = store.save(record({ ...task, git: { ...context, accepted: sha } }, "accept", "user", "done", sha));
+  const completed = store.save(record({ ...task, git: { ...context, accepted: sha } }, "accept", actor, "done", sha));
   removeFile(store.pendingPath(task.id));
   return { ...completed, localChangesWarning };
 }
@@ -242,11 +250,22 @@ export function acceptTask(store: BoardStore, task: Task, input: Record<string, 
 
 function integrateTask(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
   const pendingPath = store.pendingPath(task.id);
-  if (task.status === "done" && task.git?.accepted) {
+  if (task.status === "done" && (task.git?.accepted || task.result?.noChanges)) {
     if (exists(pendingPath) && object(readJson(pendingPath)).action === "accept") removeFile(pendingPath);
     return task;
   }
   requireState(task, ["review"]);
+  if (task.result?.noChanges) {
+    requireRevision(task, input.revision, true);
+    if (exists(pendingPath)) throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation first.");
+    if (input.commit !== undefined || input.message !== undefined || (input.targetHead !== undefined && input.targetHead !== null)) {
+      throw new TaskboardError("INVALID_INPUT", "This submission does not need an acceptance commit.");
+    }
+    if (noChangesReviewIsStale(store, task, task.result.noChanges.head)) {
+      throw new TaskboardError("STALE_SUBMISSION", "The task worktree changed. Submit the task again.");
+    }
+    return store.save(record(task, "accept", input.actor === "manager" ? "manager" : "user", "done"));
+  }
   const context = reviewed(task);
   const repo = requireRepository(store.location.repository);
   const target = localBranch(repo, context.target);
@@ -257,7 +276,7 @@ function integrateTask(store: BoardStore, task: Task, input: Record<string, unkn
   if (intent && input.commit !== undefined) {
     throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted local acceptance first.");
   }
-  if (intent && head !== intent.parent) return finish(store, task, recoverCommit(repo, head, intent), intent.restoreLocalChanges);
+  if (intent && head !== intent.parent) return finish(store, task, recoverCommit(repo, head, intent), intent.restoreLocalChanges, intent.actor);
   if (!intent && input.commit !== undefined) return finish(store, task, verifyExternal(repo, task, head, submitted, input.commit));
   if (input.targetHead !== undefined && input.targetHead !== head) {
     throw new TaskboardError("TARGET_CHANGED", "The target branch advanced. Review the changes again.", { head });
@@ -293,6 +312,7 @@ function integrateTask(store: BoardStore, task: Task, input: Record<string, unkn
     intent = {
       action: "accept", revision: task.revision, target, parent: head, submitted, tree,
       mode: store.index.settings.integrationMode, message,
+      ...(input.actor === "manager" ? { actor: "manager" as const } : {}),
     };
   } else {
     if (input.message !== undefined && conventionalMessage(input.message, task.id) !== intent.message) {
@@ -352,5 +372,5 @@ function integrateTask(store: BoardStore, task: Task, input: Record<string, unkn
     }
     throw error;
   }
-  return finish(store, task, recoverCommit(repo, targetHead(repo, target), intent), intent.restoreLocalChanges);
+  return finish(store, task, recoverCommit(repo, targetHead(repo, target), intent), intent.restoreLocalChanges, intent.actor);
 }

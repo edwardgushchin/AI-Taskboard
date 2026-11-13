@@ -175,12 +175,27 @@ export function submitTask(store: BoardStore, task: Task, input: Record<string, 
   if (!head) throw new TaskboardError("GIT_FAILED", "The task branch has no commit.");
 
   if (!intent) {
-    const message = conventionalMessage(input.message, task.id);
+    const noChanges = input.noChanges === true;
+    if (noChanges && input.message !== undefined) {
+      throw new TaskboardError("INVALID_INPUT", "Omit the commit message for a submission without Git changes.");
+    }
+    const message = noChanges ? null : conventionalMessage(input.message, task.id);
     const result = resultOf(input);
     requireCleanIndex(path, head);
     const snapshot = capture(store, task, path, false);
     if (snapshot.token !== text(input.token, "token", true)) {
       throw new TaskboardError("STALE_SNAPSHOT", "The worktree changed. Prepare a new submission.", { paths: snapshot.paths });
+    }
+    if (message === null) {
+      if (!result.checks.length) {
+        throw new TaskboardError("CHECKS_REQUIRED", "Report how you verified the result outside Git.");
+      }
+      if (snapshot.paths.length || gitStatus(path).length) {
+        throw new TaskboardError("CHANGES_PRESENT", "Submit the Git changes with a commit message.");
+      }
+      return store.save(record({
+        ...task, git: { ...context, submission: undefined }, result: { ...result, noChanges: { head: snapshot.head } },
+      }, "submit", "agent", "review", result.summary));
     }
     checkSubmissionMerge(path, context, snapshot);
     if (snapshot.commitMessage !== undefined) {
@@ -192,7 +207,7 @@ export function submitTask(store: BoardStore, task: Task, input: Record<string, 
       }, "submit", "agent", "review", result.summary));
     }
     if (!snapshot.paths.length) {
-      throw new TaskboardError("NO_CHANGES", "There are no new changes or previous submission to review.");
+      throw new TaskboardError("NO_CHANGES", "Use noChanges: true to submit a completed result without Git changes.");
     }
     intent = { action: "submit", revision: task.revision, snapshot, message, result };
     writeJson(pendingPath, intent);
@@ -237,4 +252,15 @@ export function submitTask(store: BoardStore, task: Task, input: Record<string, 
   }, "submit", "agent", "review", intent.result.summary));
   removeFile(pendingPath);
   return updated;
+}
+
+export function noChangesReviewIsStale(store: BoardStore, task: Task, head: string): boolean {
+  try {
+    const { path } = taskCheckout(store, task);
+    return resolveCommit(path, "HEAD") !== head || Boolean(gitStatus(path));
+  } catch (error) {
+    if (error instanceof TaskboardError &&
+        ["WORKTREE_MISSING", "WORKTREE_BRANCH_CHANGED", "GIT_OPERATION_IN_PROGRESS"].includes(error.code)) return true;
+    throw error;
+  }
 }

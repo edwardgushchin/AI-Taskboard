@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, protocol, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, protocol, session, shell } from "electron";
 import type { IpcMainInvokeEvent } from "electron";
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -8,8 +8,11 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { bundled, callCli, cliChild, cliFailure, entry } from "./cli.ts";
-import { codexStatus, composeDraft, installCodex, setCodexExecutable, skillLaunch } from "./codex.ts";
-import { chatModels, replyToTask } from "./codex-chat.ts";
+import { codexStatus, installCodex, setCodexExecutable, skillLaunch } from "./codex.ts";
+import { boardModel, boardSuggestions, chatModels, readBoardHistory, replyToBoard, replyToTask, updateBoardGoal } from "./codex-chat.ts";
+import type { BoardGoal, BoardGoalAction } from "./codex-chat.ts";
+import { boardActions, boardInstructions, boardMcpTools, boardTools } from "./board-actions.ts";
+import type { BoardChange } from "./board-actions.ts";
 import type { AgentControl } from "./codex-rpc.ts";
 import type { TokenUsageReport } from "../cli/token-usage.ts";
 import { taskChatActions } from "./chat-actions.ts";
@@ -26,6 +29,8 @@ import { readRunImage } from "./run-images.ts";
 import { projectIdentity, projectLabels, projectPath, savedWindows } from "./project-tabs.ts";
 import { readMarkdownFile } from "./markdown-files.ts";
 import { normalizeRecentBoards, readRecentBoards, rememberRecentBoard } from "./recent-boards.ts";
+import { transcribeVoice } from "./voice-transcription.ts";
+import { startWindowsDictation } from "./windows-dictation.ts";
 
 interface Board {
   project: string;
@@ -43,7 +48,6 @@ interface ProjectTab {
   board?: Board;
   error?: { code: string; message: string };
   loading?: boolean;
-  drafting?: boolean;
   selection: number;
 }
 
@@ -693,51 +697,260 @@ ipcMain.handle("chat:send", async (event, id: unknown, request: unknown) => {
   });
 });
 
-ipcMain.handle("board:draft", async (event, request: unknown, files: unknown = []) => {
-  const state = stateOf(event);
-  const board = state.board;
-  if (!board || typeof request !== "string" || !Array.isArray(files) ||
-      !files.every(isPastedFile) || (!request.trim() && !files.length)) {
-    return cliFailure("INVALID_INPUT", lang("Describe the task on an open board.", "Опишите задачу на открытой доске."));
+const boardRequests = new Map<string, {
+  stop?: () => Promise<void>;
+  goal?: (action: BoardGoalAction) => Promise<BoardGoal | null>;
+  changingGoal?: boolean;
+}>();
+
+function broadcastBoardChat(project: string, type: string, details: { goal?: BoardGoal | null } = {}, except?: Electron.WebContents) {
+  for (const { window, tabs } of windowStates.values()) {
+    if (!window.isDestroyed() && window.webContents !== except && tabs.some(tab => tab.project === project)) {
+      window.webContents.send("chat:update", { project, type, ...details });
+    }
   }
-  if (state.drafting) return cliFailure("DRAFT_IN_PROGRESS", lang("The agent is already preparing a draft.", "Агент уже готовит черновик."));
+}
+
+function boardThreadPath(project: string) {
+  return join(project, ".tasks", "orchestrator.json");
+}
+
+function readBoardThread(path: string): string | undefined {
+  if (!existsSync(path)) return;
+  const stored = readJson(path) as { provider?: unknown; id?: unknown } | null;
+  if (stored?.provider !== "codex" || typeof stored.id !== "string" || !codexThreadPattern.test(stored.id)) {
+    throw new Error(lang("Invalid saved orchestrator chat.", "Не удалось прочитать привязку чата оркестратора."));
+  }
+  return stored.id;
+}
+
+ipcMain.handle("board:history", async event => {
+  const board = stateOf(event).board;
+  if (!board) return cliFailure("BOARD_NOT_FOUND", "Open a board first.");
+  const { project } = board;
+  try {
+    const id = readBoardThread(boardThreadPath(project));
+    const profile = app.getPath("userData");
+    const data = id ? await readBoardHistory(profile, project, id) :
+      { turns: [], model: board.settings.manager?.model ?? await boardModel(profile, project).catch(() => undefined) };
+    return { ok: true, data };
+  } catch (error) {
+    return cliFailure("BOARD_HISTORY_FAILED", (error as Error).message);
+  }
+});
+
+const suggestions = new Map<string, Promise<string[]>>();
+ipcMain.handle("board:suggestions", async event => {
+  const board = stateOf(event).board;
+  if (!board) return [];
+  const language = lang("English", "Russian");
+  const key = board.project + "\0" + language;
+  let pending = suggestions.get(key);
+  if (!pending) {
+    const snapshot = JSON.stringify({
+      project: basename(board.project),
+      tasks: board.tasks.slice(-100).map(({ title, status }) => ({ title: title.slice(0, 140), status })),
+    });
+    pending = boardSuggestions(app.getPath("userData"), board.project, snapshot, language, AbortSignal.timeout(60_000))
+      .catch(() => []);
+    suggestions.set(key, pending);
+  }
+  const result = await pending;
+  if (!result.length) suggestions.delete(key);
+  return result;
+});
+
+ipcMain.handle("board:stopOrchestrator", async event => {
+  const project = stateOf(event).board?.project;
+  const request = project && boardRequests.get(projectIdentity(project));
+  const stop = request && !request.changingGoal && request.stop;
+  if (!stop) return cliFailure("CHAT_NOT_RUNNING", lang("The agent is no longer running.", "Агент уже завершил работу."));
+  request.changingGoal = true;
+  try {
+    await stop();
+    return { ok: true, data: null };
+  } catch (error) {
+    return cliFailure("CHAT_STOP_FAILED", (error as Error).message);
+  } finally {
+    request.changingGoal = false;
+  }
+});
+
+ipcMain.handle("board:goal", async (event, kind: unknown, objective: unknown) => {
+  const project = stateOf(event).board?.project;
+  if (!project || (kind !== "pause" && kind !== "clear" && (kind !== "edit" || typeof objective !== "string" || !objective.trim()))) {
+    return cliFailure("INVALID_INPUT", lang("Choose an action for the project goal.", "Выберите действие для цели проекта."));
+  }
+  const action: BoardGoalAction = kind === "edit" ? { kind, objective: (objective as string).trim() } : { kind };
+  const key = projectIdentity(project);
+  const running = boardRequests.get(key);
+  if (running && (!running.goal || running.changingGoal)) {
+    return cliFailure("BOARD_REQUEST_IN_PROGRESS", lang("The project manager is connecting or changing the goal.", "Менеджер проекта подключается или изменяет цель."));
+  }
+  const operation = running ?? {};
+  operation.changingGoal = true;
+  if (!running) boardRequests.set(key, operation);
+  try {
+    const id = readBoardThread(boardThreadPath(project));
+    if (!id) return cliFailure("INVALID_INPUT", lang("There is no saved goal.", "Сохранённой цели нет."));
+    const goal = running?.goal ? await running.goal(action) : await updateBoardGoal(app.getPath("userData"), project, id, action);
+    if (!running) broadcastBoardChat(project, "orchestrator-goal", { goal });
+    return { ok: true, data: goal };
+  } catch (error) {
+    return cliFailure("BOARD_GOAL_FAILED", (error as Error).message);
+  } finally {
+    operation.changingGoal = false;
+    if (!running) boardRequests.delete(key);
+  }
+});
+
+ipcMain.handle("board:request", async (event, request: unknown, files: unknown = [], project?: string, goal: unknown = false) => {
+  const state = stateOf(event);
+  const board = project === undefined ? state.board :
+    windowStates.get(state.window.webContents.id)?.tabs.find(tab => tab.board?.project === project)?.board;
+  if (!board || typeof request !== "string" || !Array.isArray(files) ||
+      !files.every(isPastedFile) || (goal === "resume" ? Boolean(request.trim() || files.length) :
+        typeof goal !== "boolean" || (!request.trim() && (goal || !files.length)))) {
+    return cliFailure("INVALID_INPUT", lang("Enter a request on an open board.", "Введите запрос на открытой доске."));
+  }
+  const projectKey = projectIdentity(board.project);
+  if (boardRequests.has(projectKey)) return cliFailure("BOARD_REQUEST_IN_PROGRESS", lang("The agent is already handling a request.", "Агент уже обрабатывает запрос."));
   if (files.reduce((total, file) => total + file.bytes.byteLength, 0) > maxAttachmentBytes) {
     return cliFailure("ATTACHMENT_LIMIT", lang("Attachments are limited to 64 MiB per task.", "Лимит вложений на задачу — 64 МиБ."));
   }
   const operation = beginOperation(board.project);
   const signal = operation.controller.signal;
-  state.drafting = true;
+  const running: NonNullable<ReturnType<typeof boardRequests.get>> = {};
+  boardRequests.set(projectKey, running);
+  const changes: BoardChange[] = [];
+  const requestText = request.trim();
+  let pendingAction: Promise<unknown> = Promise.resolve();
   let scratch: string | undefined;
+  let items: RunActivity[] = [];
+  let threadId: string | undefined;
+  let cancelledWhileWaiting = false;
+  let goalSet = false;
+  let activeGoal: BoardGoal | undefined;
+  let goalWork = new AbortController();
+  const notify = (type: string, details: { items?: RunActivity[]; model?: string; goal?: BoardGoal | null } = {}) => {
+    if (!event.sender.isDestroyed()) event.sender.send("chat:update", { project: board.project, type, ...details });
+  };
   try {
-    const attachments = [];
+    const binding = boardThreadPath(board.project);
+    threadId = readBoardThread(binding);
+    if (goal === "resume" && !threadId) return cliFailure("INVALID_INPUT", lang("There is no saved goal.", "Сохранённой цели нет."));
+    const settings = await callCli<BoardSettings>(board.project, ["settings"]);
+    if (!settings.ok) return settings;
+    const attachments: { path: string; name: string; image?: string }[] = [];
     if (files.length) {
-      scratch = await mkdtemp(join(tmpdir(), "ai-taskboard-paste-"));
+      scratch = await mkdtemp(join(tmpdir(), "ai-taskboard-orchestrator-"));
       for (const [index, file] of files.entries()) {
         const suffix = extname(file.name.trim()).toLowerCase();
         const extension = imageExtensions.get(file.type) ?? (imageTypes.has(suffix) ? suffix : undefined);
         const path = join(scratch, String(index) + (extension ?? ""));
         await writeFile(path, Buffer.from(file.bytes));
-        attachments.push({ path, name: file.name.trim(), image: extension !== undefined });
+        const mime = extension && imageTypes.get(extension);
+        attachments.push({ path, name: file.name.trim(),
+          image: mime ? "data:" + mime + ";base64," + Buffer.from(file.bytes).toString("base64") : undefined });
       }
     }
-    const draft = await composeDraft(
-      app.getPath("userData"), request.trim(), board.tags.map(tag => tag.name), attachments, lang("English", "Russian"), signal,
-    );
+    let imageIndex = 0;
+    const attachmentContext = attachments.length ? JSON.stringify({
+      attachments: attachments.map(({ name, image }, index) => ({
+        id: index + 1, name, image: Boolean(image), ...(image ? { imageIndex: ++imageIndex } : {}),
+      })),
+      fallbackLanguage: lang("English", "Russian"),
+    }) : undefined;
+    const runAction = boardActions(board.project, attachments, changes, signal,
+      (id, revision, reason) => reason ?
+        launchTask(board.project, id, { input: { revision, reason, actor: "manager" } }) :
+        launchTask(board.project, id, undefined, false, revision),
+      () => activeGoal && threadId ? { threadId, objective: activeGoal.objective, signal: goalWork.signal } : undefined,
+      id => {
+        const key = board.project + "\0" + id;
+        return launchingTasks.has(key) || runningTasks.has(key) || chatRuns.has(key);
+      });
+    const response = await replyToBoard(app.getPath("userData"), board.project,
+      goal === "resume" ? "" : requestText || lang("See attachments.", "См. вложения."),
+      attachments.flatMap(file => file.image ? [file.image] : []),
+      (name, args) => {
+        // Starts can overlap, but they must see any board edits queued before them.
+        const independent = name === "task_wait" || name === "task_start";
+        const pending = (name === "task_wait" ? runAction(name, args) : pendingAction.then(() => runAction(name, args)))
+          .catch(error => cliFailure("ACTION_FAILED", (error as Error).message));
+        if (!independent) pendingAction = pending;
+        return pending;
+      }, boardTools, boardInstructions, signal, {
+        id: threadId,
+        settings: settings.data.manager,
+        attachmentContext,
+        mcpTools: boardMcpTools,
+        goal: goal === true ? requestText : undefined,
+        resumeGoal: goal === "resume",
+        onGoalSet: () => { goalSet = true; },
+        onGoal: goal => {
+          activeGoal = goal?.status === "active" ? goal : undefined;
+          if (activeGoal && goalWork.signal.aborted) goalWork = new AbortController();
+          if (!activeGoal) goalWork.abort();
+          notify("orchestrator-goal", { goal });
+          broadcastBoardChat(board.project, "orchestrator-goal", { goal }, event.sender);
+        },
+        onGoalControl: control => { running.goal = control; },
+        title: lang("Project manager for ", "Менеджер проекта ") + (basename(board.project) || board.project),
+        save: id => {
+          writeJson(binding, { provider: "codex", id });
+          threadId = id;
+        },
+        onActivity: activity => {
+          items = activity;
+          notify("orchestrator", { items });
+        },
+        onWaiting: waiting => {
+          running.stop = waiting ? async () => {
+            cancelledWhileWaiting = true;
+            operation.controller.abort();
+          } : undefined;
+          notify(waiting ? "orchestrator-waiting" : "orchestrator-sending");
+        },
+        onControl: (control, model) => {
+          running.stop = () => control.interrupt();
+          notify("orchestrator-ready", { model });
+        },
+      });
+    await pendingAction;
     signal.throwIfAborted();
-    if (!draft) return cliFailure("CODEX_UNAVAILABLE",
-      lang("Choose a Codex executable in Settings → Codex integration.", "Выберите Codex в разделе «Настройки → Интеграция с Codex»."));
-    return await callCli<Task>(board.project, ["create"], {
-      ...draft, actor: "agent", attachmentSources: attachments.map(({ path, name }) => ({ path, name })),
-    });
+    if ("interrupted" in response) return { ok: true as const, data: {
+      answer: "", items, changes, error: lang("Reply stopped.", "Ответ остановлен."), id: threadId,
+    } };
+    const goalNotice = {
+      paused: lang("Goal paused.", "Цель приостановлена."),
+      blocked: lang("Goal blocked.", "Цель заблокирована."),
+      usageLimited: lang("Codex reached its usage limit.", "Достигнут лимит использования Codex."),
+      budgetLimited: lang("The goal reached its token budget.", "Исчерпан бюджет токенов цели."),
+      cleared: lang("Goal cleared.", "Цель снята."),
+      active: undefined,
+      complete: undefined,
+    };
+    const error = response.goalStatus && goalNotice[response.goalStatus];
+    return { ok: true as const, data: { answer: response.text, items, changes, model: response.model, error, id: threadId } };
   } catch (error) {
-    return cliFailure("CODEX_DRAFT_FAILED", lang(
-      "Codex could not prepare a draft. Check that Codex is up to date and you are signed in, then retry.",
-      "Codex не смог подготовить черновик. Проверьте версию Codex и вход в аккаунт, затем повторите попытку.",
-    ) + "\n" + (error instanceof Error ? error.message : String(error)).slice(0, 1500));
+    await pendingAction;
+    if (cancelledWhileWaiting) return cliFailure("BOARD_WAIT_CANCELLED", "");
+    const message = lang(
+      "Could not complete the board request.",
+      "Не удалось выполнить запрос к доске.",
+    ) + "\n" + (error instanceof Error ? error.message : String(error)).slice(0, 1500);
+    if (goalSet || changes.length) return { ok: true as const, data: { answer: "", items, changes, error: goalSet ? lang(
+      "The goal is saved in the Codex chat. This run ended before the goal finished.",
+      "Цель сохранена в чате Codex. Этот запуск прервался до её завершения.",
+    ) + "\n" + message : message, id: threadId } };
+    return cliFailure("CODEX_BOARD_REQUEST_FAILED", message);
   } finally {
+    goalWork.abort();
     if (scratch) await rm(scratch, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
-    state.drafting = false;
+    boardRequests.delete(projectKey);
     operation.finish();
+    if (threadId) broadcastBoardChat(board.project, "orchestrator-history", {}, event.sender);
   }
 });
 ipcMain.handle("board:create", async event => pickProject(stateOf(event), true));
@@ -766,6 +979,52 @@ ipcMain.handle("appearance:theme", (event, value: unknown) => {
     if (!state.window.isDestroyed()) state.window.webContents.send("appearance:changed", theme);
   }
   return { ok: true, data: theme };
+});
+const windowsDictations = new Map<number, ReturnType<typeof startWindowsDictation>>();
+ipcMain.handle("chat:windowsSpeech", async (event, action: unknown, language: unknown) => {
+  stateOf(event);
+  const id = event.sender.id;
+  const current = windowsDictations.get(id);
+  if (action === "cancel" || action === "stop") {
+    if (!current) return;
+    if (action === "cancel") {
+      windowsDictations.delete(id);
+      current.cancel();
+      return;
+    }
+    current.stop();
+    const text = await current.result;
+    if (windowsDictations.get(id) === current) windowsDictations.delete(id);
+    return text;
+  }
+  if (process.platform !== "win32" || (language !== "en" && language !== "ru")) return false;
+  if (action !== "start" || current) return false;
+  const speech = startWindowsDictation(language);
+  windowsDictations.set(id, speech);
+  const cancel = () => speech.cancel();
+  event.sender.once("destroyed", cancel);
+  void speech.result.then(() => {
+    event.sender.removeListener("destroyed", cancel);
+  });
+  const ready = await speech.ready;
+  if (!ready && windowsDictations.get(id) === speech) windowsDictations.delete(id);
+  return ready;
+});
+ipcMain.handle("chat:transcribeVoice", async (event, samples: unknown, language: unknown) => {
+  stateOf(event);
+  if (!(samples instanceof Float32Array) ||
+      !samples.length || samples.length > 16_000 * 125 || (language !== "en" && language !== "ru")) {
+    return cliFailure("INVALID_INPUT", lang("Invalid voice recording.", "Некорректная голосовая запись."));
+  }
+  try {
+    const text = await transcribeVoice(samples, language, join(app.getPath("userData"), "speech-models"));
+    return { ok: true, data: text };
+  } catch {
+    return cliFailure("DICTATION_UNAVAILABLE", lang(
+      "Could not transcribe the recording. The first use needs an internet connection to download the speech model.",
+      "Не удалось распознать запись. При первом использовании нужен интернет для загрузки модели.",
+    ));
+  }
 });
 ipcMain.handle("board:command", async (event, command: unknown, id: unknown, input: unknown) => {
   const state = stateOf(event);
@@ -913,9 +1172,9 @@ async function recordRunFailure(project: string, id: string, reason: string, con
   if (!result.ok && result.error.code !== "INVALID_TRANSITION") return result.error.message;
 }
 
-async function launchTask(project: string, id: string, revisionRequest?: { input: unknown }, newThread = false) {
+async function launchTask(project: string, id: string, revisionRequest?: { input: unknown }, newThread = false, revision?: number) {
   const key = project + "\0" + id;
-  if (chatRuns.has(key)) return cliFailure("CHAT_BUSY", lang("Wait for the chat reply or stop the agent first.", "Дождитесь ответа в чате или остановите агента."));
+  if (chatRuns.has(key) || runningTasks.has(key)) return cliFailure("CHAT_BUSY", lang("Wait for the chat reply or stop the agent first.", "Дождитесь ответа в чате или остановите агента."));
   if (launchingTasks.has(key)) return cliFailure("LAUNCH_IN_PROGRESS", "This task is already being launched.");
   const operation = beginOperation(project);
   const signal = operation.controller.signal;
@@ -962,7 +1221,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       prepared = true;
     }
     signal.throwIfAborted();
-    const started = await callCli<{ task: Task; worktree: string }>(project, ["start", id], { revision: current.data.revision });
+    const started = await callCli<{ task: Task; worktree: string }>(project, ["start", id], { revision: revision ?? current.data.revision });
     if (!started.ok) {
       if (prepared) throw new Error(started.error.message);
       return started;
@@ -1118,6 +1377,16 @@ else {
     } else if (app.isReady()) createWindow();
   });
   void app.whenReady().then(() => {
+    const trustedFrame = (id: number | undefined, url: string | undefined, mainFrame: boolean) =>
+      id !== undefined && windowStates.has(id) && mainFrame && url === html.href;
+    session.defaultSession.setPermissionCheckHandler((contents, permission, _origin, details) =>
+      trustedFrame(contents?.id, details.requestingUrl ?? contents?.getURL(), details.isMainFrame) &&
+      (permission === "clipboard-sanitized-write" || (permission === "media" && details.mediaType === "audio")));
+    session.defaultSession.setPermissionRequestHandler((contents, permission, respond, details) => {
+      respond(trustedFrame(contents.id, details.requestingUrl ?? contents.getURL(), details.isMainFrame) &&
+        (permission === "clipboard-sanitized-write" || (permission === "media" && "mediaTypes" in details &&
+          details.mediaTypes?.length === 1 && details.mediaTypes[0] === "audio")));
+    });
     const markdownSource = createRequire(import.meta.url).resolve("markdown-it/browser");
     protocol.handle("taskboard-assets", request => request.url === markdownAsset
       ? new Response(readFileSync(markdownSource, "utf8"), { headers: { "Content-Type": "text/javascript; charset=utf-8" } })

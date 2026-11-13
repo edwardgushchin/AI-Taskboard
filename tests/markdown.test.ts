@@ -33,6 +33,18 @@ test("Markdown links preserve captions and local paths with spaces, slashes and 
   assert.match(markdown.render("`[Код](docs/report.md)`"), /<code>\[Код\]/);
 });
 
+test("plain Markdown paths use the filename as the label and preserve the target", () => {
+  const text = String.raw`Источники: docs/decisions/index.md; **docs/maps.md#details** (docs\отчёт.md:97:3).`;
+  const html = markdown.render(text);
+  assert.match(html, /<a href="docs\/decisions\/index\.md" title="docs\/decisions\/index\.md">index\.md<\/a>;/);
+  assert.match(html, /<strong><a href="docs\/maps\.md#details"[^>]*>maps\.md<\/a><\/strong>/);
+  const windows = /<a href="([^"]+)"[^>]*>отчёт\.md<\/a>/.exec(html);
+  assert.equal(decodeURIComponent(windows?.[1] ?? ""), String.raw`docs\отчёт.md:97:3`);
+  assert.match(markdown.render("docs/with%20%23%20hash.md"), />with # hash\.md<\/a>/);
+  assert.equal((markdown.render("[docs/report.md](docs/report.md) https://example.com/docs/file.md").match(/<a /g) ?? []).length, 2);
+  assert.doesNotMatch(markdown.render("vbscript:docs/file.md //host/docs/file.md docs/file.md.bak \x60docs/example.md\x60"), /<a /);
+});
+
 test("Markdown rendering keeps HTML inert and refuses executable schemes and other local files", () => {
   for (const link of ["javascript:alert(1)", "data:text/html,test", "vbscript:test.md", "httpsx:test.md", "docs/script.exe", "docs/file.txt"]) {
     assert.doesNotMatch(markdown.render("[Bad](" + link + ")"), /<a /);

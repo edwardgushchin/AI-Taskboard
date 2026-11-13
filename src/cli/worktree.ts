@@ -119,6 +119,7 @@ export function startTask(store: BoardStore, task: Task, input: Record<string, u
       throw new TaskboardError("DEPENDENCIES_INCOMPLETE", "Complete the task dependencies before starting.", { dependencies });
     }
   }
+  requireRevision(task, input.revision);
   const branch = worktreeBranch(task);
   const managedPath = join(store.subdirectory("worktrees"), task.id);
   const pendingPath = store.pendingPath(task.id);
@@ -132,7 +133,6 @@ export function startTask(store: BoardStore, task: Task, input: Record<string, u
     }
     const repo = requireRepository(store.location.repository);
     if (task.status === "ready") {
-      requireRevision(task, input.revision);
       if (input.target !== undefined && localBranch(repo, text(input.target, "target", true)) !== task.git.target) {
         throw new TaskboardError("INVALID_INPUT", "Resume the task on its original target branch.");
       }
@@ -143,7 +143,6 @@ export function startTask(store: BoardStore, task: Task, input: Record<string, u
     return { task: store.save(record({ ...task, git: { ...task.git, worktree } }, "start", "agent", "in_progress")), worktree };
   }
 
-  requireRevision(task, input.revision);
   const requested = input.target === undefined ? undefined : text(input.target, "target", true);
   const repo = store.location.repository ?? requireRepository(locateBoard(store.location.root, true, true).repository);
   excludeBoard(repo);
@@ -201,7 +200,7 @@ export function cleanTaskWorktree(store: BoardStore, task: Task) {
   if (!task.git || task.git.branch !== worktreeBranch(task)) return { removed: false };
   const repo = requireRepository(store.location.repository);
   const item = findWorktree(repo, task.git.branch);
-  const submitted = task.status === "done" ? task.git.submission?.sha : undefined;
+  const submitted = task.status === "done" ? task.git.submission?.sha ?? task.result?.noChanges?.head : undefined;
   const tip = submitted && resolveCommit(repo.root, task.git.branch);
   if (tip && tip !== submitted) {
     throw new TaskboardError("TASK_BRANCH_CHANGED", "The task branch no longer points to the confirmed submission.", { tip, submitted });

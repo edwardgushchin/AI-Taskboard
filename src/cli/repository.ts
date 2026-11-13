@@ -46,6 +46,35 @@ export function repositoryRefs(location: BoardLocation) {
   return { ...currentRevision(root), refs };
 }
 
+export function inspectRepository(location: BoardLocation, input: Record<string, unknown>) {
+  const root = repositoryPath(location);
+  const view = member(input.view, ["status", "log", "diff", "staged_diff"], "view");
+  const commands = {
+    status: ["status", "--porcelain=v1", "--branch", "--untracked-files=normal", "--ignore-submodules=dirty"],
+    log: ["log", "-20", "--oneline", "--decorate=short", "--no-color", "--no-notes", "--no-show-signature"],
+    diff: ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "--ignore-submodules=dirty", "--submodule=short"],
+    staged_diff: ["diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", "--ignore-submodules=dirty", "--submodule=short"],
+  };
+  const env = { GIT_NO_LAZY_FETCH: "1" };
+  const args = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
+  const disabledFilters = new Set<string>();
+  if (view === "status" || view === "diff") {
+    // Worktree inspection may otherwise run repository-defined content filters.
+    const filters = invokeGit(root, ["config", "--null", "--name-only", "--get-regexp", "^filter\\..*\\.(clean|process|required)$"], env);
+    if (filters.code !== 0 && filters.code !== 1) throw new TaskboardError("GIT_FAILED", "Git could not read filter configuration.");
+    for (const key of new Set(filters.stdout.split("\0").filter(Boolean))) {
+      if (key.includes("=")) throw new TaskboardError("GIT_FAILED", "Git cannot disable this content filter for inspection.");
+      args.push("-c", key + (key.endsWith(".required") ? "=false" : "="));
+      disabledFilters.add(key.slice("filter.".length, key.lastIndexOf(".")));
+    }
+  }
+  const output = git(root, [...args, ...commands[view]], env).trimEnd();
+  return {
+    output: output.slice(0, 24_000), truncated: output.length > 24_000,
+    ...(disabledFilters.size ? { note: "Git content filters were disabled. Filtered files may appear modified.", disabledFilters: [...disabledFilters] } : {}),
+  };
+}
+
 export function changeRepository(location: BoardLocation, action: string, input: Record<string, unknown>) {
   const root = repositoryPath(location);
   requireNoGitOperation(root);

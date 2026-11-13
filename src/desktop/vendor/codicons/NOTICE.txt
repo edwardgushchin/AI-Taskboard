@@ -7,5 +7,5 @@ License: Creative Commons Attribution 4.0 International (CC-BY-4.0).
 See LICENSE, or https://creativecommons.org/licenses/by/4.0/.
 
 codicon.ttf is copied without modification from the official npm package.
-codicon.css contains the local font declaration and the three glyph mappings used
-by AI Taskboard: git-branch (U+EC6F), cloud-upload (U+EAC3) and close (U+EA76).
+codicon.css contains the local font declaration and the glyph mappings used
+by AI Taskboard.

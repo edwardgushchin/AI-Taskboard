@@ -121,7 +121,7 @@ function activitySummary(detail, label, preview, kind, state) {
   detail.append(summary);
 }
 
-function renderRunActivity(container, items, completed = false, durationMs, taskId) {
+function renderRunActivity(container, items, completed = false, durationMs, taskId, context) {
   const previous = new Map([...container.querySelectorAll("details")].map(entry => [entry.dataset.item, entry.open]));
   const previousImages = new Map([...container.querySelectorAll(".chat-run-item")].map(entry =>
     [entry.dataset.item, entry.querySelector(".chat-run-images")?.querySelector("button")]));
@@ -227,9 +227,14 @@ function renderRunActivity(container, items, completed = false, durationMs, task
   }
   for (const item of items) {
     if (finalItems.has(item)) continue;
+    if (item.type === "reasoning" && !item.text.trim()) continue;
     if (["agentMessage", "plan", "truncated", "error", "reasoning"].includes(item.type)) {
       flush();
-      if (item.type === "agentMessage" || item.type === "plan") nodes.push(chatText(item.text));
+      if (item.type === "agentMessage" || item.type === "plan") {
+        const message = chatText(item.text, context);
+        message.dataset.item = "message:" + item.id;
+        nodes.push(message);
+      }
       else if (item.type === "reasoning") nodes.push(operation(item));
       else nodes.push(element("p", item.type === "error" ? item.text : language("Earlier activity exceeded the log limit.", "Ранние события не поместились в журнал."), item.type === "error" ? "chat-run-error" : "muted"));
     } else operations.push(item);
@@ -254,16 +259,26 @@ function renderRunActivity(container, items, completed = false, durationMs, task
   }
   for (const item of finalItems) {
     const final = element("div", undefined, "chat-run-final");
-    final.append(chatText(item.text));
+    final.dataset.item = "final:" + item.id;
+    final.append(chatText(item.text, context));
     nodes.push(final);
   }
   container.replaceChildren(...nodes);
-  container.hidden = items.length === 0;
+  container.hidden = nodes.length === 0;
   if (focusedImage && container.contains(focusedImage)) focusedImage.focus({ preventScroll: true });
   else if (focused) [...container.querySelectorAll("details")].find(entry => entry.dataset.item === focused)?.querySelector("summary")?.focus({ preventScroll: true });
 }
 
-function updateChat({ project, id, type, text, items }) {
+function updateChat({ project, id, type, text, items, goal }) {
+  if (["orchestrator", "orchestrator-history", "orchestrator-ready", "orchestrator-waiting", "orchestrator-sending", "orchestrator-goal"].includes(type)) {
+    const composer = frame.project === project ? byId("board-composer").firstChild : boardViews.get(project)?.composer[0];
+    if (type === "orchestrator") composer?.updateActivity?.(items);
+    else if (type === "orchestrator-goal") composer?.updateGoal?.(goal);
+    else if (type === "orchestrator-ready") composer?.enableStop?.();
+    else if (type === "orchestrator-waiting" || type === "orchestrator-sending") composer?.setWaiting?.(type === "orchestrator-waiting");
+    else composer?.invalidateHistory?.();
+    return;
+  }
   const open = frame.project === project && sheet.open && sheetKind === "task" && taskInSheet?.id === id;
   if (type === "run" && frame.project === project) {
     (frame.runActivity ??= {})[id] = items;
@@ -394,7 +409,8 @@ function taskChat(task) {
     }
     const conversation = ["chat", "comment", "questions"].includes(event.action);
     const attachments = chatEventAttachments(event, files);
-    const author = event.actor === "user" ? language("You", "Вы") : language("Agent", "Агент");
+    const author = event.actor === "manager" ? language("Project manager", "Менеджер проекта") :
+      event.actor === "user" ? language("You", "Вы") : language("Agent", "Агент");
     const date = element("time", eventDay ? timeFormat.format(timestamp) : event.at, "chat-time");
     date.dateTime = event.at;
     date.title = shortDate(event.at);

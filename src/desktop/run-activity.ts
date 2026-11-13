@@ -48,6 +48,11 @@ export function runActivity(entries: Map<string, RunActivity>, method: string, p
     return { id, type, title: bounded(title), text: bounded(result), status };
   }
   const [itemType, update] = method.slice("item/".length).split("/");
+  if (itemType === "reasoning" && update === "summaryPartAdded") {
+    const previous = entries.get(string(params.itemId));
+    if (previous?.text && !previous.text.endsWith("\n")) return { ...previous, text: bounded(previous.text + "\n\n") };
+    return;
+  }
   if (!["delta", "outputDelta", "progress", "summaryTextDelta"].includes(update)) return;
   const id = string(params.itemId);
   if (!id || (itemType === "reasoning" && update !== "summaryTextDelta")) return;

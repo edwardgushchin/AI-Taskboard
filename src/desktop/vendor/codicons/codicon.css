@@ -11,3 +11,12 @@
 .codicon-git-branch::before { content: "\ec6f"; }
 .codicon-cloud-upload::before { content: "\eac3"; }
 .codicon-close::before { content: "\ea76"; }
+.codicon-add::before { content: "\ea60"; }
+.codicon-file::before { content: "\ea7b"; }
+.codicon-arrow-up::before { content: "\eaa1"; }
+.codicon-debug-stop::before { content: "\ead7"; }
+.codicon-tasklist::before { content: "\eb67"; }
+.codicon-target::before { content: "\ebf8"; }
+.codicon-mic::before { content: "\ec12"; }
+.codicon-pin::before { content: "\eb2b"; }
+.codicon-pinned::before { content: "\eba0"; }

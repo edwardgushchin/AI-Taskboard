@@ -162,6 +162,10 @@ function readIndex(path: string): BoardIndex {
         (tag.customColor !== undefined && (typeof tag.customColor !== "string" || !hexTagColor.test(tag.customColor)))) ||
         new Set(index.tags.map(tag => tagKey(tag.name))).size !== index.tags.length)) ||
       !["merge", "squash"].includes(String(index.settings.integrationMode)) ||
+      (index.settings.showCardPreviews !== undefined && typeof index.settings.showCardPreviews !== "boolean") ||
+      (index.settings.manager != null && (!isRecord(index.settings.manager) ||
+        typeof index.settings.manager.model !== "string" || !index.settings.manager.model.trim() ||
+        typeof index.settings.manager.effort !== "string" || !reasoningEffortPattern.test(index.settings.manager.effort))) ||
       !(index.settings.archiveAfterDays === null ||
         (Number.isSafeInteger(index.settings.archiveAfterDays) && Number(index.settings.archiveAfterDays) >= 0))) {
     throw new TaskboardError("CORRUPT_STORAGE", "Unsupported or invalid board index at " + path + ".");

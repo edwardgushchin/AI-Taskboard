@@ -22,3 +22,16 @@ test("agent message phases survive streaming updates and completion", () => {
   assert.equal(completed.text, "Done");
   assert.equal(completed.status, "completed");
 });
+
+test("streamed reasoning keeps new summary sections on separate lines", () => {
+  const entries = new Map();
+  const update = (method: string, params: object) => {
+    const item = runActivity(entries, "item/reasoning/" + method, { itemId: "summary", ...params })!;
+    entries.set(item.id, item);
+    return item;
+  };
+  update("summaryTextDelta", { summaryIndex: 0, delta: "**Checking the board**" });
+  update("summaryPartAdded", { summaryIndex: 1 });
+  const next = update("summaryTextDelta", { summaryIndex: 1, delta: "**Preparing the answer**" });
+  assert.equal(next.text, "**Checking the board**\n\n**Preparing the answer**");
+});

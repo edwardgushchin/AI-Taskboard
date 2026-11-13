@@ -113,6 +113,22 @@ test("activity groups consecutive operations without hiding messages, reasoning 
   assert.match(view.row("image").querySelector("summary")!.textContent, /images.*Просмотр изображения/);
 });
 
+test("empty reasoning summaries stay hidden until there is text to show", () => {
+  const view = fixture();
+  const empty = action("reason", "reasoning", "inProgress", "", "");
+  view.render([empty]);
+  assert.equal(view.container.hidden, true);
+  view.render([{ ...empty, text: "Сводка от провайдера" }]);
+  assert.equal(view.container.hidden, false);
+  assert.equal(view.row("reason").querySelector(".chat-run-output")!.textContent, "Сводка от провайдера");
+  view.render([
+    { ...empty, status: "completed", text: " \n " },
+    { ...action("answer", "agentMessage", "completed", "", "Ответ менеджера"), phase: "final_answer" },
+  ], true);
+  assert.equal(view.container.querySelectorAll("details").length, 0);
+  assert.equal(view.container.textContent, "Ответ менеджера");
+});
+
 test("long commands and unsafe tool output remain complete only in disclosure details", () => {
   const view = fixture();
   const command = '"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command ' + "Get-Content ".repeat(500);

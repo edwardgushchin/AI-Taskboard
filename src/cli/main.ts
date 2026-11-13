@@ -9,12 +9,12 @@ import {
   addAttachment, addChatMessage, archiveDiagnostics, createWithAttachments, isArchived, readAttachment, readTask, restoreReplyImages, sweepArchives,
   setAttachmentCover, upgradeTagCatalog,
 } from "./archive.ts";
-import { hexTagColor, member, number, object, record, registerTags, requireRevision, strings, tagColors, tagKey, TaskboardError, text } from "./model.ts";
+import { hexTagColor, member, number, object, reasoningEffortPattern, record, registerTags, requireRevision, strings, tagColors, tagKey, TaskboardError, text } from "./model.ts";
 import type { Task } from "./model.ts";
 import { initializeBoard, locateBoard, onBoard } from "./storage.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
 import { discoverRepository, invokeGit } from "./git.ts";
-import { changeRepository, publishRepository, repositoryRefs } from "./repository.ts";
+import { changeRepository, inspectRepository, publishRepository, repositoryRefs } from "./repository.ts";
 import { previewSubmission, submitTask } from "./submission.ts";
 import { changeTask, createTask, recordRunLog } from "./tasks.ts";
 import { recordTokenUsage } from "./token-usage.ts";
@@ -22,17 +22,17 @@ import { dependencyStatus, unfinishedDependencies, validateDependencies } from "
 import { cleanTaskWorktree, hasPending, startTask, taskWithCurrentWorktree } from "./worktree.ts";
 import packageInfo from "../../package.json" with { type: "json" };
 
-const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "pause", "block", "resume", "update"]);
+const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "pause", "block", "resume", "unblock", "update"]);
 const help = [
   "Usage: ai-taskboard [--project PATH] [--json] COMMAND [TASK-ID] [--stdin]",
   "Commands: init, list, show, create, update, comment, approve, return-to-draft, start, progress,",
-  "          pause, block, resume, preview, submit, review, accept, restore-changes, request-changes, cancel, cleanup, settings, watch, doctor",
+  "          pause, block, resume, unblock, preview, submit, review, accept, restore-changes, request-changes, cancel, cleanup, settings, watch, doctor",
   "          list --archived, archive sweep, chat TASK-ID, attachment add TASK-ID, attachment read TASK-ID",
   "          attachment cover TASK-ID --stdin (file and revision)",
   "          token-usage TASK-ID --stdin (id, sequence and records with threadId, turnId, model and token breakdown)",
   "          attachment restore-reply TASK-ID --stdin (replyAt, revision and attachmentSources)",
   "          list --tag NAME, tag ensure --stdin, tag set --stdin (name and color), tag assign TASK-ID --stdin (tags)",
-  "          git refs, git switch, git create, git detach, git publish --stdin",
+  "          git refs, git inspect, git switch, git create, git detach, git publish --stdin",
   "For init, pass git: true with --stdin to initialize Git in the chosen folder.",
   "With --stdin, pass one JSON object as the command input.",
 ].join("\n");
@@ -169,7 +169,8 @@ function retryAcceptedCleanup(store: BoardStore, root: string): string[] {
     if (!Object.hasOwn(store.index.tasks, id) && store.index.archive[id]?.status !== "done") continue;
     try {
       const task = readTask(store, id);
-      if (task.status !== "done" || !task.git?.accepted || task.git.branch !== branch || hasPending(store, task)) continue;
+      if (task.status !== "done" || task.git?.branch !== branch ||
+          (!task.git.accepted && !task.result?.noChanges) || hasPending(store, task)) continue;
       if (cleanTaskWorktree(store, task).branchRemoved) cleaned.push(id);
     } catch {
       // A lock or local files can keep the worktree in place until the next pass.
@@ -248,12 +249,29 @@ function run(
     return { issues: [...active.issues, ...archive.issues], recovered: active.recovered, cleanedArchives: archive.cleaned };
   }
   if (command === "settings") {
+    if (Object.keys(input).length === 0) return store.index.settings;
     if (input.archiveAfterDays !== undefined) {
       store.index.settings.archiveAfterDays = input.archiveAfterDays === null
         ? null : number(input.archiveAfterDays, "archiveAfterDays", 0);
     }
     if (input.integrationMode !== undefined) {
       store.index.settings.integrationMode = member(input.integrationMode, ["merge", "squash"], "integrationMode");
+    }
+    if (input.showCardPreviews !== undefined) {
+      if (typeof input.showCardPreviews !== "boolean") {
+        throw new TaskboardError("INVALID_INPUT", "showCardPreviews must be a boolean.");
+      }
+      store.index.settings.showCardPreviews = input.showCardPreviews;
+    }
+    if (input.manager !== undefined) {
+      if (input.manager === null) store.index.settings.manager = null;
+      else {
+        const settings = object(input.manager);
+        const model = text(settings.model, "Manager model", true);
+        const effort = text(settings.effort, "Manager reasoning effort", true);
+        if (!reasoningEffortPattern.test(effort)) throw new TaskboardError("INVALID_INPUT", "Invalid manager reasoning effort.");
+        store.index.settings.manager = { model, effort };
+      }
     }
     store.saveIndex();
     return store.index.settings;
@@ -332,8 +350,9 @@ try {
     } else {
       let data;
       if (command === "git") {
-        const action = member(id, ["refs", "switch", "create", "detach", "publish"], "action");
-        data = action === "publish" ? await publishRepository(location, input) : onBoard(location, () =>
+        const action = member(id, ["refs", "inspect", "switch", "create", "detach", "publish"], "action");
+        data = action === "inspect" ? inspectRepository(location, input) :
+          action === "publish" ? await publishRepository(location, input) : onBoard(location, () =>
           action === "refs" ? repositoryRefs(location) : changeRepository(location, action, input));
       } else {
         data = command === "init" ? initializeBoard(location, snapshotBoard) :

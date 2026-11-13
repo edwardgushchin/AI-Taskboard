@@ -51,18 +51,27 @@ function fields(task: Task, input: Record<string, unknown>): Task {
   return updated;
 }
 
-export function actorFor(input: Record<string, unknown>, fallback: Actor): Actor {
+export function actorFor(input: Record<string, unknown>, fallback: "agent" | "user"): "agent" | "user" {
   return input.actor === undefined ? fallback : member(input.actor, ["agent", "user"], "actor");
+}
+
+function boardActor(input: Record<string, unknown>, fallback: "agent" | "user" = "agent"): Actor {
+  return input.actor === "manager" ? "manager" : actorFor(input, fallback);
 }
 
 export function createTask(id: string, input: Record<string, unknown>): Task {
   const now = new Date().toISOString();
+  const goalThreadId = input.goalThreadId === undefined ? undefined : text(input.goalThreadId, "goalThreadId", true);
+  if (goalThreadId && (input.actor !== "manager" || !codexThreadPattern.test(goalThreadId))) {
+    throw new TaskboardError("INVALID_INPUT", "Expected the manager chat ID for a goal task.");
+  }
   return fields({
     id,
     title: text(input.title, "title", true),
     description: "", criteria: [], questions: [], tags: [], priority: "normal", subtasks: [], attachments: [],
     status: "draft", revision: 1, createdAt: now, updatedAt: now, summary: "", nextStep: "",
-    history: [{ at: now, actor: actorFor(input, "agent"), action: "create" }],
+    ...(goalThreadId ? { goalThreadId } : {}),
+    history: [{ at: now, actor: boardActor(input), action: "create" }],
   }, input);
 }
 
@@ -94,20 +103,20 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
       if (!task.criteria.length) {
         throw new TaskboardError("CRITERIA_REQUIRED", "Add acceptance criteria before approving the task.");
       }
-      return record(task, action, "user", "ready");
+      return record(task, action, boardActor(input, "user"), "ready");
     case "return-to-draft":
       requireState(task, ["ready"]);
       return record(task, action, "user", "draft");
     case "request-changes":
       requireState(task, ["review"]);
-      return record(task, action, "user", "in_progress", text(input.reason, "reason", true));
+      return record(task, action, boardActor(input, "user"), "in_progress", text(input.reason, "reason", true));
     case "pause":
       requireState(task, ["in_progress"]);
       return record(task, action, "agent", "ready");
     case "cancel":
-      return record(task, action, "user", "cancelled", text(input.reason, "reason", true));
+      return record(task, action, boardActor(input, "user"), "cancelled", text(input.reason, "reason", true));
     case "comment":
-      return record(task, action, actorFor(input, "agent"), task.status, text(input.text, "text", true));
+      return record(task, action, boardActor(input), task.status, text(input.text, "text", true));
     case "progress": {
       requireState(task, ["in_progress", "blocked"]);
       const summary = text(input.summary, "summary", true);
@@ -115,15 +124,18 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
       return record({ ...task, summary, nextStep }, action, "agent", task.status === "blocked" ? "blocked" : "ready", summary);
     }
     case "block": {
-      requireState(task, ["in_progress"]);
+      requireState(task, input.allowUnstarted === true ? ["draft", "ready", "in_progress"] : ["in_progress"]);
       const reason = text(input.reason, "reason", true);
       const condition = text(input.condition, "condition", true);
-      return record({ ...task, blocked: { reason, condition } }, action, "agent", "blocked", reason);
+      const previousStatus = task.status === "draft" || task.status === "ready" ? task.status : undefined;
+      return record({ ...task, blocked: { reason, condition, previousStatus } }, action, boardActor(input), "blocked", reason);
     }
-    case "resume": {
+    case "resume":
+    case "unblock": {
       requireState(task, ["blocked"]);
-      const { blocked: _blocked, ...rest } = task;
-      return record(rest, action, "agent", "in_progress", text(input.reason, "reason", true));
+      const { blocked, ...rest } = task;
+      const status = blocked?.previousStatus ?? (action === "resume" ? "in_progress" : "ready");
+      return record(rest, action, action === "unblock" ? boardActor(input) : "agent", status, text(input.reason, "reason", true));
     }
     case "update": {
       const updated = fields(task, input);
@@ -134,13 +146,13 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
         }
         updated.codexThreadId = id;
       }
-      const actor = actorFor(input, "agent");
+      const actor = boardActor(input);
       const requirementsChanged = updated.description !== task.description ||
         JSON.stringify(updated.criteria) !== JSON.stringify(task.criteria);
       let status: TaskState = task.status;
       let note = input.note === undefined ? undefined : text(input.note, "note", true);
       if (requirementsChanged && task.status !== "draft") {
-        if (actor !== "user") {
+        if (actor === "agent") {
           throw new TaskboardError("USER_REQUIREMENTS_REQUIRED", "Approved requirements change only on explicit user direction.");
         }
         if (!updated.criteria.length) {

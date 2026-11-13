@@ -11,13 +11,14 @@ const authorization = {
   description: "Quote the exact words in the latest user message that explicitly request this specific action.",
 };
 
-const properties = {
-  authorization, title: string, description: string, criteria: strings, questions: strings,
-  tags: strings, dependencies: strings, priority: { ...string, enum: priorities }, note: string,
+export const taskFields = {
+  title: string, description: string, criteria: strings, questions: strings,
+  tags: strings, dependencies: strings, priority: { ...string, enum: priorities },
   subtasks: { type: "array", items: {
     type: "object", properties: { title: string, done: boolean }, required: ["title"], additionalProperties: false,
   } },
 };
+const properties = { ...taskFields, authorization, note: string };
 const updateTool = {
   type: "function", name: "task_update",
   description: "Edit the requested fields while keeping the current status. Lists replace existing lists.",

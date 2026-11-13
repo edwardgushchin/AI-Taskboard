@@ -41,6 +41,45 @@ if (chatMarkdown) {
     token.attrSet("referrerpolicy", "no-referrer");
     return image(tokens, index, options, env, renderer);
   };
+  chatMarkdown.core.ruler.after("text_join", "local_markdown_links", state => {
+    // Match unquoted paths in prose, with optional line/column and heading suffixes.
+    const references = /(^|[\s([{<>"'«“‘;,])((?:file:\/\/\/(?:[a-z]:\/)?|[a-z]:[\\/])?[\p{L}\p{M}\p{N}_.%+@~\\/-]+\.(?:markdown|md)(?::\d+(?::\d+)?)?(?:#[\p{L}\p{M}\p{N}_%.~-]*[\p{L}\p{M}\p{N}_%~-])?)(?=$|[\s)\]}<>"'»”’,;!?]|[.:](?=$|[\s)\]}<>"'»”’,;!?]))/giu;
+    for (const block of state.tokens) {
+      if (block.type !== "inline") continue;
+      let inLink = false;
+      block.children = block.children.flatMap(token => {
+        if (token.type === "link_open") inLink = true;
+        if (token.type === "link_close") inLink = false;
+        if (token.type !== "text" || inLink) return [token];
+
+        const parts = [];
+        const appendText = content => {
+          if (!content) return;
+          const text = new state.Token("text", "", 0);
+          text.content = content;
+          parts.push(text);
+        };
+        let cursor = 0;
+        for (const match of token.content.matchAll(references)) {
+          const [, prefix, path] = match;
+          if (!localMarkdownLink(path)) continue;
+          const target = decodeURIComponent(path.split("#", 1)[0]).replace(/:\d+(?::\d+)?$/, "");
+          if (/^(?:file:\/\/)?[\\/]{2}/i.test(target)) continue;
+          appendText(token.content.slice(cursor, match.index + prefix.length));
+          const link = new state.Token("link_open", "a", 1);
+          link.attrSet("href", chatMarkdown.normalizeLink(path));
+          link.attrSet("title", path);
+          parts.push(link);
+          appendText(target.split(/[\\/]/).pop());
+          parts.push(new state.Token("link_close", "a", -1));
+          cursor = match.index + match[0].length;
+        }
+        if (cursor === 0) return [token];
+        appendText(token.content.slice(cursor));
+        return parts;
+      });
+    }
+  });
   chatMarkdown.core.ruler.after("inline", "task_checkboxes", state => {
     for (let i = 2; i < state.tokens.length; i++) {
       const token = state.tokens[i];

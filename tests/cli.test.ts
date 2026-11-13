@@ -549,7 +549,22 @@ test("watch streams the initial board and updates from another process", { timeo
     return JSON.parse(value);
   };
   try {
-    assert.deepEqual((await frame()).data.tasks, []);
+    const initial = (await frame()).data;
+    assert.deepEqual(initial.tasks, []);
+    assert.equal(initial.settings.showCardPreviews, undefined);
+    cli(root, ["settings"], { showCardPreviews: false });
+    assert.deepEqual((await frame()).data.settings, { ...initial.settings, showCardPreviews: false });
+    cli(root, ["settings"], { showCardPreviews: "false" }, "INVALID_INPUT");
+    assert.equal(cli(root, ["list"]).settings.showCardPreviews, false);
+    cli(root, ["settings"], { showCardPreviews: true });
+    assert.equal((await frame()).data.settings.showCardPreviews, true);
+    const manager = { model: "test-manager", effort: "high" };
+    cli(root, ["settings"], { manager });
+    assert.deepEqual((await frame()).data.settings.manager, manager);
+    cli(root, ["settings"], { manager: { ...manager, effort: "bad effort" } }, "INVALID_INPUT");
+    assert.deepEqual(cli(root, ["list"]).settings.manager, manager);
+    cli(root, ["settings"], { manager: null });
+    assert.equal((await frame()).data.settings.manager, null);
     const task = cli(root, ["create"], { title: "Visible to watcher", criteria: ["Git is available."] });
     assert.equal((await frame()).data.tasks[0].id, task.id);
     const tag = cli(root, ["tag", "ensure"], { name: "Watched", color: "pink" });
@@ -623,6 +638,55 @@ function submitFixture(root: string, edit: (worktree: string) => void, target?: 
   });
   return { task: reviewed, worktree };
 }
+
+test("completed work outside Git can be submitted and accepted without a commit", t => {
+  const root = fixture(t, true);
+  const head = git(root, "rev-parse", "HEAD");
+  cli(root, ["init"]);
+  const task = cli(root, ["create"], { title: "Remove local data", criteria: ["The old local file is absent."] });
+  cli(root, ["approve", task.id]);
+  const { worktree } = cli(root, ["start", task.id]);
+  const local = join(root, "old.local");
+  writeFileSync(local, "old data");
+  rmSync(local);
+  const { token } = cli(worktree, ["preview", task.id]);
+  const input = { token, noChanges: true, summary: "Removed the old local file", checks: ["Verified old.local is absent"] };
+  cli(worktree, ["submit", task.id], { ...input, checks: [] }, "CHECKS_REQUIRED");
+
+  const source = join(worktree, "source.txt");
+  writeFileSync(source, "unexpected change\n");
+  cli(worktree, ["submit", task.id], input, "STALE_SNAPSHOT");
+  const dirty = cli(worktree, ["preview", task.id]);
+  cli(worktree, ["submit", task.id], { ...input, token: dirty.token }, "CHANGES_PRESENT");
+  writeFileSync(source, "baseline\n");
+
+  cli(worktree, ["block", task.id], { reason: "Old CLI required changes", condition: "Support submission outside Git" });
+  cli(worktree, ["resume", task.id], { reason: "Submission outside Git is supported" });
+  const resumed = cli(worktree, ["preview", task.id]);
+  const submitted = cli(worktree, ["submit", task.id], { ...input, token: resumed.token });
+  assert.equal(submitted.status, "review");
+  assert.equal(submitted.git.submission, undefined);
+  assert.equal(git(worktree, "rev-parse", "HEAD"), head);
+  const review = cli(root, ["review", task.id]);
+  assert.equal(review.noChanges, true);
+  assert.equal(review.targetHead, null);
+  assert.equal(review.stale, false);
+  assert.deepEqual(review.result.checks, input.checks);
+
+  writeFileSync(source, "modified after submission\n");
+  assert.equal(cli(root, ["review", task.id]).stale, true);
+  cli(root, ["accept", task.id], { revision: review.revision }, "STALE_SUBMISSION");
+  writeFileSync(source, "baseline\n");
+  cli(root, ["accept", task.id], { revision: review.revision - 1 }, "REVISION_CONFLICT");
+  const done = cli(root, ["accept", task.id], { revision: review.revision });
+  assert.equal(done.status, "done");
+  assert.equal(done.git.accepted, undefined);
+  assert.equal(done.cleanupWarning, undefined);
+  assert.equal(existsSync(worktree), false);
+  assert.equal(git(root, "branch", "--list", "ai-taskboard/" + task.id), "");
+  assert.equal(git(root, "rev-parse", "HEAD"), head);
+  assert.equal(cli(root, ["accept", task.id], { revision: review.revision }).revision, done.revision);
+});
 
 test("interrupted start and submit recover the existing worktree and commit", t => {
   const root = fixture(t, true);

@@ -168,6 +168,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       "Корень доски: " + project,
       "Используй навык ai-taskboard:work-task и прочитай актуальную карточку по номеру.",
       "Заверши проход командой сдачи, записи прогресса, паузы или блокировки в AI Taskboard.",
+      'Если работа выполнена вне Git и preview вернул пустой diff, передай в submit токен preview, noChanges: true, итог и результаты проверок без поля message.',
       "Если доступ отклонён, продолжай разрешённым способом. Если без доступа нельзя выполнить обязательный шаг, заблокируй задачу. В причине укажи шаг, нужный ресурс и причину отказа, в условии разблокировки — конкретное действие для продолжения.",
       "Рабочая копия: " + cwd,
       JSON.stringify({ title: task.title, description: task.description, criteria: task.criteria }),

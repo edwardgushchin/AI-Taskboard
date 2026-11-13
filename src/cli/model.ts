@@ -8,7 +8,7 @@ export const imageAttachmentPattern = /\.(png|jpe?g|webp|gif)$/i;
 
 export type TaskState = typeof taskStates[number];
 export type Priority = typeof priorities[number];
-export type Actor = "agent" | "user";
+export type Actor = "agent" | "user" | "manager";
 export type IntegrationMode = "merge" | "squash";
 export type TagColor = typeof tagColors[number];
 
@@ -106,6 +106,7 @@ export interface Task {
   coverAttachment?: string;
   status: TaskState;
   codexThreadId?: string;
+  goalThreadId?: string;
   revision: number;
   createdAt: string;
   updatedAt: string;
@@ -114,8 +115,8 @@ export interface Task {
   nextStep: string;
   dependencies?: string[];
   execution?: { model: string; effort?: string };
-  blocked?: { reason: string; condition: string };
-  result?: { summary: string; checks: string[]; limitations: string[] };
+  blocked?: { reason: string; condition: string; previousStatus?: "draft" | "ready" };
+  result?: { summary: string; checks: string[]; limitations: string[]; noChanges?: { head: string } };
   git?: TaskGit;
   history: TaskEvent[];
 }
@@ -123,6 +124,8 @@ export interface Task {
 export interface BoardSettings {
   archiveAfterDays: number | null;
   integrationMode: IntegrationMode;
+  showCardPreviews?: boolean;
+  manager?: ChatSettings | null;
 }
 
 export interface ArchiveLink {

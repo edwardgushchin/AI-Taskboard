@@ -38,6 +38,9 @@
     "target": [
       "pkg"
     ],
+    "extendInfo": {
+      "NSMicrophoneUsageDescription": "AI Taskboard uses the microphone when you dictate a message to the project manager."
+    },
     "category": "public.app-category.developer-tools"
   },
   "pkg": {

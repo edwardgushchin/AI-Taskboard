@@ -16,6 +16,7 @@ let selectedTaskId;
 const boardViews = new Map();
 const sheet = byId("sheet");
 const body = byId("sheet-body");
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
 const language = (english, russian) => frame.russian ? russian : english;
 const lanes = [
@@ -33,7 +34,7 @@ function element(tag, text, className) {
 }
 
 function icon(name) {
-  if (["git-branch", "cloud-upload", "close"].includes(name)) {
+  if (["git-branch", "cloud-upload", "close", "add", "file", "arrow-up", "debug-stop", "tasklist", "target", "mic", "pin", "pinned"].includes(name)) {
     const item = element("i", undefined, "icon codicon codicon-" + name);
     item.setAttribute("aria-hidden", "true");
     return item;
@@ -473,7 +474,8 @@ function blockerBanner({ reason, condition }) {
 }
 
 function card(task) {
-  const cover = selectedCover(task, (task.attachments ?? []).filter(isImageAttachment));
+  const showCover = archiveView || frame.board.settings?.showCardPreviews !== false;
+  const cover = showCover ? selectedCover(task, (task.attachments ?? []).filter(isImageAttachment)) : undefined;
   // Only visible card data belongs in this key: chat/log/revision updates must not rebuild it.
   const signature = JSON.stringify([frame.russian, task.title, task.description,
     task.tags?.map(name => boardTags.get(tagKey(name)) ?? { name }), cover?.file,
@@ -582,12 +584,16 @@ function resetBoardRendering() {
   boardLanes.clear();
   byId("lanes").replaceChildren();
   byId("archive-list").replaceChildren();
+  byId("board-composer").firstChild?.dispose?.();
   byId("board-composer").replaceChildren();
   selectedTaskId = undefined;
 }
 
 function switchBoardRendering(previousProject, project) {
   cardCovers.disconnect();
+  const previousComposer = byId("board-composer").firstChild;
+  previousComposer?.closeMentions?.();
+  previousComposer?.cancelDictation?.();
   if (previousProject && (boardCards.size || boardLanes.size)) {
     boardViews.set(previousProject, {
       cards: boardCards, lanes: boardLanes, covers: cardCoverCache, preferences: lanePreferences,
@@ -602,6 +608,7 @@ function switchBoardRendering(previousProject, project) {
   byId("lanes").replaceChildren(...(saved?.columns ?? []));
   byId("archive-list").replaceChildren(...(saved?.archive ?? []));
   byId("board-composer").replaceChildren(...(saved?.composer ?? []));
+  previousComposer?.syncPrompt?.();
   selectedTaskId = saved?.selectedTaskId;
   return saved?.preferences;
 }
@@ -828,7 +835,13 @@ function render() {
   byId("archive-list").hidden = !archiveView;
   byId("board-composer").hidden = archiveView;
   if (!byId("board-composer").firstChild) byId("board-composer").append(draftComposer());
-  byId("board-composer").firstChild.localize();
+  const composer = byId("board-composer").firstChild;
+  composer.localize();
+  if (!archiveView) {
+    composer.loadSuggestions();
+    composer.revealPinned();
+  }
+  composer.syncPrompt();
   if (archiveView) {
     const tasks = board.archived;
     syncChildren(byId("archive-list"), tasks.length ? tasks.map(card) :
@@ -913,9 +926,15 @@ function form(kind, title, fields, label, submit) {
     } else if (field.type !== "area") input.type = field.type || "text";
     if (field.type === "number") input.min = "0";
     input.required = Boolean(field.required);
-    input.value = field.value ?? "";
+    if (field.type === "checkbox") {
+      input.checked = Boolean(field.value);
+      row.classList.add("form-checkbox");
+      row.prepend(input);
+    } else {
+      input.value = field.value ?? "";
+      row.append(input);
+    }
     inputs[field.name] = input;
-    row.append(input);
     form.append(row);
   }
   const save = element("button", label, "button primary");
@@ -923,7 +942,8 @@ function form(kind, title, fields, label, submit) {
   form.append(save);
   const saveFields = protect(async () => {
     try {
-      await submit(Object.fromEntries(Object.entries(inputs).map(([key, input]) => [key, input.value])));
+      await submit(Object.fromEntries(Object.entries(inputs).map(([key, input]) =>
+        [key, input.type === "checkbox" ? input.checked : input.value])));
     } finally { save.disabled = false; }
   });
   form.addEventListener("submit", event => {
@@ -939,22 +959,198 @@ function form(kind, title, fields, label, submit) {
 function draftComposer() {
   const project = frame.project;
   const files = [];
+  const queued = [];
+  let active;
+  let disposed = false;
   const editor = element("form", undefined, "board-draft");
   editor.id = "board-draft";
   const chat = element("section", undefined, "board-chat");
   chat.id = "board-chat";
-  const chatTitle = element("h2");
+  const bar = element("div", undefined, "board-chat-bar");
+  const resize = element("div", undefined, "board-chat-resize");
+  resize.tabIndex = 0;
+  resize.setAttribute("role", "separator");
+  resize.setAttribute("aria-orientation", "horizontal");
+  resize.setAttribute("aria-controls", chat.id);
+  resize.append(element("span"));
+  const preferencesKey = "taskboard.orchestrator:" + project;
+  let preferences;
+  try { preferences = JSON.parse(localStorage.getItem(preferencesKey)); } catch {}
+  let pinned = preferences?.pinned === true;
+  let height = Number.isFinite(preferences?.height) ? preferences.height : undefined;
+  let prompts = [];
+  let promptIndex = -1;
+  let suggestionsLanguage;
+  let waitingForChat = false;
+  let canStop = false;
+  let stopping = false;
+  let goalMode = false;
+  let dictation;
+  const persist = () => {
+    try { localStorage.setItem(preferencesKey, JSON.stringify({ pinned, height })); } catch {}
+  };
+  const pin = button("", () => {
+    pinned = !pinned;
+    editor.setAttribute("data-open", "");
+    updatePin();
+    persist();
+  }, "quiet board-chat-pin");
+  const updatePin = () => {
+    editor.toggleAttribute("data-pinned", pinned);
+    pin.setAttribute("aria-pressed", String(pinned));
+    pin.replaceChildren(icon(pinned ? "pinned" : "pin"));
+    controlLabelForIcon(pin, pinned ? language("Unpin chat", "Открепить чат") : language("Pin chat", "Закрепить чат"));
+  };
+  const resizeChat = next => {
+    const limit = Math.max(0, window.innerHeight - 160);
+    const min = Math.min(160, limit);
+    height = Math.round(Math.min(limit, Math.max(min, next)));
+    editor.style.setProperty("--board-chat-height", height + "px");
+    resize.setAttribute("aria-valuemin", String(Math.round(min)));
+    resize.setAttribute("aria-valuemax", String(Math.round(limit)));
+    resize.setAttribute("aria-valuenow", String(height));
+  };
+  if (height !== undefined) editor.style.setProperty("--board-chat-height", height + "px");
+  resize.addEventListener("pointerdown", event => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const y = event.clientY;
+    const initialHeight = chat.getBoundingClientRect().height;
+    editor.setAttribute("data-resizing", "");
+    resize.setPointerCapture(event.pointerId);
+    resize.onpointermove = move => resizeChat(initialHeight + y - move.clientY);
+  });
+  const finishResize = () => {
+    if (!editor.hasAttribute("data-resizing")) return;
+    editor.removeAttribute("data-resizing");
+    resize.onpointermove = null;
+    persist();
+  };
+  for (const event of ["pointerup", "pointercancel", "lostpointercapture"]) resize.addEventListener(event, finishResize);
+  resize.addEventListener("keydown", event => {
+    if (!["ArrowUp", "ArrowDown"].includes(event.key)) return;
+    event.preventDefault();
+    resizeChat(chat.getBoundingClientRect().height + (event.key === "ArrowUp" ? 24 : -24));
+    persist();
+  });
+  bar.append(resize, pin);
+  let currentGoal;
+  let goalRevision = 0;
+  let changingGoal = false;
+  const goalPanel = element("details", undefined, "board-goal");
+  goalPanel.hidden = true;
+  const goalSummary = element("summary");
+  const goalHeading = element("span", undefined, "board-goal-heading");
+  const goalStatus = element("span", undefined, "board-goal-status");
+  goalStatus.setAttribute("role", "status");
+  const goalTitle = element("span", undefined, "board-goal-title");
+  goalHeading.append(icon("target"), goalStatus, goalTitle);
+  goalSummary.append(goalHeading);
+  const goalBody = element("div", undefined, "board-goal-body");
+  const goalText = element("textarea");
+  goalText.rows = 2;
+  const goalError = element("div", undefined, "board-goal-error");
+  goalError.setAttribute("role", "alert");
+  const goalActions = element("div", undefined, "board-goal-actions");
+  const saveGoal = button("", () => changeGoal("edit", goalText.value.trim()), "quiet");
+  const pauseGoal = button("", () => changeGoal("pause"), "quiet");
+  const resumeGoal = button("", () => {
+    if (active || queued.length || changingGoal) return;
+    goalError.textContent = "";
+    const entry = element("div");
+    entry.hidden = true;
+    queued.push({ entry, status: element("span"), request: "", goal: "resume", submitted: [] });
+    sendNext();
+  }, "quiet");
+  const clearGoal = button("", () => changeGoal("clear"), "quiet danger");
+  goalActions.append(saveGoal, pauseGoal, resumeGoal, clearGoal);
+  goalBody.append(goalText, goalActions, goalError);
+  goalPanel.append(goalSummary, goalBody);
+  const goalLabels = {
+    active: ["Active goal", "Активная цель"], paused: ["Goal paused", "Цель на паузе"],
+    blocked: ["Goal blocked", "Цель заблокирована"], complete: ["Goal completed", "Цель выполнена"],
+    usageLimited: ["Usage limit reached", "Достигнут лимит Codex"], budgetLimited: ["Token budget reached", "Исчерпан бюджет токенов"],
+  };
+  const syncGoal = () => {
+    if (!currentGoal) return;
+    goalStatus.textContent = language(...(goalLabels[currentGoal.status] ?? ["Goal", "Цель"]));
+    goalPanel.dataset.status = currentGoal.status;
+    pauseGoal.hidden = currentGoal.status !== "active";
+    resumeGoal.hidden = currentGoal.status === "complete" || (currentGoal.status === "active" && Boolean(active));
+    resumeGoal.disabled = changingGoal || Boolean(active) || queued.length > 0;
+    saveGoal.disabled = changingGoal || !goalText.value.trim() || goalText.value.trim() === currentGoal.objective;
+    pauseGoal.disabled = clearGoal.disabled = changingGoal;
+  };
+  const showGoal = goal => {
+    const wasEditing = currentGoal && goalText.value !== currentGoal.objective;
+    if (!wasEditing || !goal) goalText.value = goal?.objective ?? "";
+    currentGoal = goal;
+    goalPanel.hidden = !goal;
+    if (!goal) goalPanel.open = false;
+    goalTitle.textContent = goal?.objective ?? "";
+    goalTitle.title = goalTitle.textContent;
+    syncGoal();
+  };
+  editor.updateGoal = goal => {
+    goalRevision++;
+    showGoal(goal);
+  };
+  goalText.addEventListener("input", syncGoal);
+  async function changeGoal(kind, objective) {
+    if (changingGoal) return;
+    changingGoal = true;
+    goalError.textContent = "";
+    const revision = goalRevision;
+    syncGoal();
+    try {
+      const result = await api.boardGoal(kind, objective);
+      if (!result.ok) throw new Error(boardError(result.error));
+      if (kind === "edit" && goalText.value.trim() === objective) goalText.value = result.data?.objective ?? "";
+      if (revision === goalRevision) editor.updateGoal(result.data);
+    } catch (error) {
+      goalError.textContent = error.message;
+    } finally {
+      changingGoal = false;
+      syncGoal();
+    }
+  }
   const log = element("div", undefined, "board-chat-log");
   log.setAttribute("role", "log");
   log.setAttribute("aria-live", "polite");
   log.tabIndex = 0;
+  const disclosures = new WeakMap();
+  log.addEventListener("click", event => {
+    const detail = event.target.closest("summary")?.parentElement;
+    if (detail?.tagName !== "DETAILS" || reducedMotion.matches) return;
+    event.preventDefault();
+    const from = detail.getBoundingClientRect().height;
+    const previous = disclosures.get(detail);
+    previous?.animation.cancel();
+    const open = previous ? !previous.open : !detail.open;
+    detail.open = open;
+    const to = detail.getBoundingClientRect().height;
+    detail.open = true;
+    const animation = detail.animate([
+      { height: from + "px", overflow: "clip" },
+      { height: to + "px", overflow: "clip" },
+    ], { duration: 180, easing: "cubic-bezier(.2,.75,.25,1)" });
+    disclosures.set(detail, { animation, open });
+    animation.onfinish = () => {
+      detail.open = open;
+      disclosures.delete(detail);
+    };
+  });
   const greeting = element("p", undefined, "muted");
-  log.append(greeting);
-  chat.append(chatTitle, log);
+  const queue = element("div", undefined, "board-chat-queue");
+  log.append(greeting, queue);
+  chat.append(bar, goalPanel, log);
   const input = element("textarea");
   input.name = "request";
   input.rows = 1;
+  input.placeholder = " ";
   input.setAttribute("aria-controls", chat.id);
+  const prompt = element("span", undefined, "draft-placeholder");
+  prompt.setAttribute("aria-hidden", "true");
   const hint = element("p", undefined, "muted draft-hint");
   hint.id = "board-paste-hint";
   input.setAttribute("aria-describedby", hint.id);
@@ -963,91 +1159,854 @@ function draftComposer() {
   picker.type = "file";
   picker.multiple = true;
   picker.hidden = true;
-  const attach = button("", () => picker.click(), "quiet draft-attach");
-  attach.append(icon("attachment"));
-  const save = element("button", undefined, "button primary draft-send");
-  save.type = "submit";
-  save.append(icon("send"));
-  controls.append(attach, save);
-  const attachments = element("ul", undefined, "draft-attachments");
+  const add = element("button", undefined, "button quiet draft-add");
+  add.type = "button";
+  add.append(icon("add"));
+  const menu = element("div", undefined, "draft-add-menu");
+  menu.popover = "auto";
+  add.popoverTargetElement = menu;
+  const menuHeading = element("div", undefined, "draft-menu-heading muted");
+  const menuActions = element("div", undefined, "draft-menu-actions");
+  const taskPicker = element("div", undefined, "draft-task-picker");
+  taskPicker.hidden = true;
+  const taskSearch = element("input");
+  taskSearch.type = "search";
+  const taskResults = element("div", undefined, "draft-task-results");
+  taskPicker.append(taskSearch, taskResults);
+  const menuItem = (glyph, onClick) => {
+    const item = button("", onClick, "quiet draft-menu-item");
+    item.append(icon(glyph), element("span"));
+    return item;
+  };
+  const pickFiles = menuItem("file", () => {
+    menu.hidePopover();
+    picker.click();
+  });
+  const pickTasks = menuItem("tasklist", () => {
+    menuActions.hidden = true;
+    taskPicker.hidden = false;
+    taskSearch.value = "";
+    renderTaskResults();
+    taskSearch.focus();
+  });
+  const pickGoal = menuItem("target", () => {
+    menu.hidePopover();
+    setGoalMode(!goalMode);
+    input.focus();
+  });
+  menuActions.append(pickFiles, pickTasks, pickGoal);
+  menu.append(menuHeading, menuActions, taskPicker);
+  menu.addEventListener("beforetoggle", event => {
+    if (event.newState !== "open") return;
+    menuActions.hidden = false;
+    taskPicker.hidden = true;
+  });
+  taskSearch.addEventListener("input", renderTaskResults);
+  function findDraftTasks(query, limit) {
+    query = query.trim().toLocaleLowerCase();
+    const number = /^(?:t-)?(\d+)$/.exec(query)?.[1]?.replace(/^0+(?=\d)/, "");
+    const tasks = [...(frame.board?.tasks ?? []), ...(frame.board?.archived ?? [])];
+    if (number === undefined) return tasks.filter(task => (task.id + " " + task.title).toLocaleLowerCase().includes(query)).slice(0, limit);
+    const shortId = task => task.id.slice(2).replace(/^0+(?=\d)/, "");
+    const exact = tasks.filter(task => shortId(task) === number);
+    const partial = tasks.filter(task => shortId(task) !== number && shortId(task).startsWith(number));
+    return [...exact, ...partial].slice(0, limit);
+  }
+  function renderTaskResults() {
+    const matches = findDraftTasks(taskSearch.value, 50);
+    taskResults.replaceChildren(...matches.map(task => button(task.id + " · " + task.title, () => {
+      menu.hidePopover();
+      insertDraftText(task.id);
+    }, "quiet draft-menu-item")));
+    if (!matches.length) taskResults.append(element("p", language("No tasks found", "Задачи не найдены"), "draft-menu-heading muted"));
+  }
+  function insertDraftText(text, range) {
+    const { start, end } = range ?? { start: input.selectionStart, end: input.selectionEnd };
+    const leading = !range && start > 0 && /\S/.test(input.value[start - 1]) ? " " : "";
+    const trailing = end === input.value.length || (!range && /\S/.test(input.value[end])) ? " " : "";
+    input.setRangeText(leading + text + trailing, start, end, "end");
+    input.focus();
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  const mentions = element("div", undefined, "draft-task-mentions draft-task-results");
+  mentions.id = "board-task-mentions";
+  mentions.popover = "manual";
+  mentions.setAttribute("role", "listbox");
+  let mention;
+  let dismissedMention;
+  let mentionIndex = 0;
+  function closeMentions() {
+    if (mentions.matches(":popover-open")) mentions.hidePopover();
+    input.setAttribute("aria-controls", chat.id);
+    input.removeAttribute("aria-activedescendant");
+    mention = undefined;
+  }
+  editor.closeMentions = closeMentions;
+  function highlightMention(index) {
+    mentionIndex = index;
+    for (const [i, option] of [...mentions.children].entries()) option.setAttribute("aria-selected", String(i === index));
+    const option = mentions.children[index];
+    input.setAttribute("aria-activedescendant", option.id);
+    option.scrollIntoView({ block: "nearest" });
+  }
+  function syncMentions(event) {
+    if (event?.isComposing || document.activeElement !== input || input.selectionStart !== input.selectionEnd) return closeMentions();
+    const caret = input.selectionStart;
+    const match = /(?:^|[\s(\[{])(@(?:t-?)?\d*)$/i.exec(input.value.slice(0, caret));
+    if (!match) {
+      dismissedMention = undefined;
+      closeMentions();
+      return;
+    }
+    const start = caret - match[1].length;
+    const suffix = /^(?:t-?)?\d*(?![\p{L}\p{N}_-])/iu.exec(input.value.slice(caret));
+    if (!suffix) return closeMentions();
+    const end = caret + suffix[0].length;
+    const key = start + ":" + input.value.slice(start, end);
+    if (key === mention?.key) return;
+    if (key === dismissedMention) return closeMentions();
+    dismissedMention = undefined;
+    const tasks = findDraftTasks(input.value.slice(start + 1, end), 8);
+    if (!tasks.length) return closeMentions();
+    mention = { key, start, end, tasks };
+    mentions.replaceChildren(...tasks.map((task, index) => {
+      const option = element("div", task.id + " · " + task.title, "draft-menu-item draft-mention-option");
+      option.id = mentions.id + "-" + index;
+      option.setAttribute("role", "option");
+      option.addEventListener("pointerdown", event => event.preventDefault());
+      option.addEventListener("click", () => chooseMention(index));
+      return option;
+    }));
+    if (!mentions.matches(":popover-open")) mentions.showPopover();
+    input.setAttribute("aria-controls", chat.id + " " + mentions.id);
+    highlightMention(0);
+  }
+  function chooseMention(index) {
+    if (!mention) return;
+    const { start, end, tasks } = mention;
+    closeMentions();
+    insertDraftText(tasks[index].id, { start, end });
+  }
+  const microphone = button("", startDictation, "quiet draft-mic");
+  microphone.append(icon("mic"));
+  const voiceRow = element("div", undefined, "draft-voice-row");
+  const waveform = element("canvas", undefined, "draft-voice-wave");
+  waveform.setAttribute("aria-hidden", "true");
+  const cancelVoice = button("", () => endDictation(dictation, "", true), "quiet draft-voice-cancel");
+  cancelVoice.append(icon("close"));
+  const stopVoice = button("", () => stopDictation(dictation), "quiet draft-voice-stop");
+  stopVoice.append(icon("debug-stop"));
+  stopVoice.disabled = true;
+  voiceRow.append(cancelVoice, waveform, stopVoice);
+  voiceRow.addEventListener("keydown", event => {
+    if (event.key === "Escape") endDictation(dictation, "", true);
+  });
+  voiceRow.hidden = true;
+  const voiceStatus = element("p", undefined, "draft-voice-status muted");
+  voiceStatus.setAttribute("role", "status");
+  voiceStatus.hidden = true;
+  function voiceMessage(text) {
+    voiceStatus.textContent = text;
+    voiceStatus.hidden = !text;
+  }
+  function releaseMicrophone(recording) {
+    clearTimeout(recording.timeout);
+    cancelAnimationFrame(recording.animation);
+    recording.stream?.getTracks().forEach(track => track.stop());
+    recording.stream = undefined;
+    if (recording.audio?.state !== "closed") void recording.audio?.close().catch(() => {});
+    recording.audio = undefined;
+  }
+  function endDictation(recording, text = "", focus = false) {
+    if (!recording || dictation !== recording) return;
+    dictation = undefined;
+    if (recording.windowsSpeech) void api.windowsSpeech("cancel").catch(() => {});
+    if (recording.recorder?.state === "recording") recording.recorder.stop();
+    releaseMicrophone(recording);
+    editor.removeAttribute("data-dictating");
+    stopVoice.disabled = true;
+    voiceRow.hidden = true;
+    voiceMessage(text);
+    if (focus && editor.isConnected) input.focus({ preventScroll: true });
+  }
+  editor.cancelDictation = () => endDictation(dictation);
+  function stopDictation(recording) {
+    if (recording !== dictation || recording?.recorder?.state !== "recording") return;
+    stopVoice.disabled = true;
+    if (recording.windowsSpeech) recording.windowsText = api.windowsSpeech("stop").catch(() => undefined);
+    if (document.activeElement === stopVoice) cancelVoice.focus({ preventScroll: true });
+    recording.recorder.stop();
+    voiceMessage(language("Transcribing…", "Распознаю речь…"));
+  }
+  function drawWaveform(recording, analyser) {
+    const context = waveform.getContext("2d");
+    const levels = new Uint8Array(analyser.fftSize);
+    const history = [];
+    let lastSample = -Infinity;
+    const draw = now => {
+      const width = waveform.clientWidth;
+      const height = waveform.clientHeight;
+      const scale = devicePixelRatio;
+      if (waveform.width !== Math.round(width * scale) || waveform.height !== Math.round(height * scale)) {
+        waveform.width = Math.round(width * scale);
+        waveform.height = Math.round(height * scale);
+      }
+      const bars = Math.floor(width / 5);
+      if (now - lastSample >= 35) {
+        analyser.getByteTimeDomainData(levels);
+        const rms = Math.sqrt(levels.reduce((sum, level) => sum + ((level - 128) / 128) ** 2, 0) / levels.length);
+        history.push(rms);
+        lastSample = now;
+      }
+      if (history.length > bars) history.splice(0, history.length - bars);
+      context.setTransform(scale, 0, 0, scale, 0, 0);
+      context.clearRect(0, 0, width, height);
+      context.fillStyle = getComputedStyle(waveform).color;
+      for (let index = 0; index < bars; index++) {
+        const level = history[history.length - bars + index] ?? 0;
+        const size = Math.min(height, 2 + level * height * 5);
+        context.fillRect(index * 5, (height - size) / 2, 2, size);
+      }
+      recording.animation = requestAnimationFrame(draw);
+    };
+    recording.animation = requestAnimationFrame(draw);
+  }
+  async function finishDictation(recording, chunks) {
+    if (recording !== dictation) return;
+    if (recording.windowsSpeech && !recording.windowsText) {
+      recording.windowsText = api.windowsSpeech("stop").catch(() => undefined);
+    }
+    releaseMicrophone(recording);
+    stopVoice.disabled = true;
+    voiceMessage(language("Transcribing…", "Распознаю речь…"));
+    const noSpeech = language("No speech detected.", "Речь не обнаружена.");
+    const failed = language("Could not transcribe the recording.", "Не удалось распознать запись.");
+    try {
+      const nativeText = await recording.windowsText;
+      if (recording !== dictation) return;
+      if (nativeText) {
+        endDictation(recording, "", true);
+        insertDraftText(nativeText);
+        return;
+      }
+      if (!chunks.length) return endDictation(recording, noSpeech, true);
+      const decoder = new OfflineAudioContext(1, 1, 16_000);
+      const audio = await decoder.decodeAudioData(await new Blob(chunks, { type: recording.recorder.mimeType }).arrayBuffer());
+      if (recording !== dictation) return;
+      const mix = new OfflineAudioContext(1, audio.length, 16_000);
+      const source = mix.createBufferSource();
+      source.buffer = audio;
+      source.connect(mix.destination);
+      source.start();
+      const samples = (await mix.startRendering()).getChannelData(0);
+      if (recording !== dictation) return;
+      if (!samples.some(sample => Math.abs(sample) > .004)) return endDictation(recording, noSpeech, true);
+      const result = await api.transcribeVoice(samples, recording.language);
+      if (recording !== dictation) return;
+      if (!result.ok) return endDictation(recording, boardError(result.error), true);
+      endDictation(recording, result.data ? "" : noSpeech, true);
+      if (result.data) insertDraftText(result.data);
+    } catch {
+      endDictation(recording, failed, true);
+    }
+  }
+  async function startDictation() {
+    if (dictation) return;
+    const recording = { language: frame.russian ? "ru" : "en" };
+    dictation = recording;
+    closeMentions();
+    voiceRow.hidden = false;
+    stopVoice.disabled = true;
+    editor.setAttribute("data-dictating", "");
+    cancelVoice.focus({ preventScroll: true });
+    voiceMessage(language("Opening microphone…", "Подключаю микрофон…"));
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
+      if (dictation !== recording) return stream.getTracks().forEach(track => track.stop());
+      recording.stream = stream;
+      const recorder = recording.recorder = new MediaRecorder(stream);
+      const audio = recording.audio = new AudioContext();
+      void audio.resume().catch(() => {});
+      const analyser = audio.createAnalyser();
+      audio.createMediaStreamSource(stream).connect(analyser);
+      const chunks = [];
+      recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
+      recorder.onstop = () => { void finishDictation(recording, chunks); };
+      recorder.onerror = () => endDictation(recording,
+        language("Microphone recording failed.", "Не удалось записать звук."), true);
+      recorder.start();
+      if (api.isWindows && api.windowsSpeech) {
+        recording.windowsSpeech = true;
+        void api.windowsSpeech("start", recording.language).catch(() => {});
+      }
+      stopVoice.disabled = false;
+      stopVoice.focus({ preventScroll: true });
+      voiceMessage(language("Recording…", "Запись…"));
+      drawWaveform(recording, analyser);
+      recording.timeout = setTimeout(() => stopDictation(recording), 120_000);
+    } catch {
+      endDictation(recording, language(
+        "Could not access the microphone. Check your device and microphone permissions.",
+        "Не удалось открыть микрофон. Проверьте устройство и разрешение на доступ к микрофону.",
+      ), true);
+    }
+  }
+  const goalChip = button("", () => {
+    setGoalMode(false);
+    input.focus();
+  }, "quiet draft-goal-chip");
+  const goalLabel = element("span");
+  goalChip.append(icon("target"), goalLabel, icon("close"));
+  const send = element("button", undefined, "button primary draft-send");
+  send.type = "button";
+  send.addEventListener("click", () => {
+    if (hasDraft()) {
+      editor.requestSubmit();
+      return;
+    }
+    if (active && canStop && !stopping) void stopReply();
+  });
+  async function stopReply() {
+    const request = active;
+    stopping = true;
+    syncAction();
+    try {
+      const result = await api.stopOrchestrator();
+      if (!result.ok) throw new Error(boardError(result.error));
+    } catch (error) {
+      if (active !== request) return;
+      stopping = false;
+      syncAction();
+      message(error.message);
+    }
+  }
+  controls.append(microphone, send);
+  const attachments = element("ul", undefined, "draft-attachments board-attachments");
   attachments.hidden = true;
   const progress = element("p", undefined, "draft-progress muted");
   progress.hidden = true;
   progress.setAttribute("role", "status");
-  editor.localize = () => {
-    input.placeholder = language("What shall we work on?", "Чем займемся?");
-    input.setAttribute("aria-label", input.placeholder);
-    chatTitle.textContent = language("Orchestrator", "Оркестратор");
-    chat.setAttribute("aria-label", chatTitle.textContent);
-    greeting.textContent = language("Describe a task — I will prepare a draft for the board.", "Опишите задачу — я подготовлю черновик для доски.");
-    hint.textContent = language("Describe a new task. Paste or attach files", "Опишите новую задачу. Вставьте или прикрепите файлы") + (api.isMac ? " (⌘V)." : " (Ctrl+V).");
-    for (const [control, label] of [[attach, language("Attach files", "Прикрепить файлы")],
-      [save, language("Create draft", "Создать черновик")]]) {
-      control.title = label;
-      control.setAttribute("aria-label", label);
+  const currentPrompt = () => prompts[promptIndex] ??
+    language("Write to the project manager…", "Напишите менеджеру проекта…");
+  const showPrompt = () => { prompt.textContent = goalMode ? language("Describe the goal…", "Опишите цель…") : currentPrompt(); };
+  const canAnimatePrompt = () => prompts.length > 0 && !reducedMotion.matches && !document.hidden &&
+    editor.isConnected && editor.checkVisibility() && !goalMode && !input.value && !active && !input.matches(":focus");
+  const segmenter = new Intl.Segmenter();
+  const promptCharacters = () => Array.from(segmenter.segment(currentPrompt()), part => part.segment);
+  let promptTimer;
+  const pausePrompt = () => {
+    clearTimeout(promptTimer);
+    promptTimer = undefined;
+    showPrompt();
+  };
+  const animatePrompt = () => {
+    let characters = promptCharacters();
+    let length = characters.length;
+    let erasing = true;
+    const step = () => {
+      if (!canAnimatePrompt()) return pausePrompt();
+      length += erasing ? -1 : 1;
+      prompt.textContent = characters.slice(0, length).join("");
+      if (erasing && length === 0) {
+        promptIndex = (promptIndex + 1) % prompts.length;
+        characters = promptCharacters();
+        erasing = false;
+        promptTimer = setTimeout(step, 180);
+      } else if (!erasing && length === characters.length) {
+        promptTimer = undefined;
+        syncPrompt();
+      } else {
+        promptTimer = setTimeout(step, erasing ? 16 : 26);
+      }
+    };
+    step();
+  };
+  const syncPrompt = () => {
+    if (!canAnimatePrompt()) {
+      if (reducedMotion.matches && promptIndex < 0 && prompts.length) promptIndex = 0;
+      pausePrompt();
+    } else if (promptTimer === undefined && (promptIndex < 0 || prompts.length > 1)) {
+      promptTimer = setTimeout(animatePrompt, promptIndex < 0 ? 3000 : 10000);
     }
+  };
+  editor.syncPrompt = syncPrompt;
+  const loadSuggestions = () => {
+    const locale = Boolean(frame.russian);
+    if (suggestionsLanguage === locale) return;
+    suggestionsLanguage = locale;
+    prompts = [];
+    promptIndex = -1;
+    pausePrompt();
+    void api.boardSuggestions().then(result => {
+      if (suggestionsLanguage !== locale) return;
+      prompts = result;
+      syncPrompt();
+    }).catch(() => {});
+  };
+  const hasDraft = () => Boolean(input.value.trim() || (!goalMode && files.length));
+  function setGoalMode(value) {
+    goalMode = value;
+    goalChip.hidden = !value;
+    pickGoal.setAttribute("aria-pressed", String(value));
+    syncPrompt();
+    syncAction();
+  }
+  const syncAction = () => {
+    const stop = Boolean(active) && !hasDraft();
+    const mode = stop ? "stop" : "send";
+    if (send.dataset.action !== mode) {
+      send.dataset.action = mode;
+      send.replaceChildren(icon(stop ? "debug-stop" : "arrow-up"));
+      send.classList.toggle("quiet", stop);
+      send.classList.toggle("primary", !stop);
+    }
+    send.disabled = stop ? !canStop || stopping : goalMode && !hasDraft();
+    controlLabelForIcon(send, stop ? (waitingForChat ? language("Cancel sending", "Отменить отправку") :
+      language("Stop reply", "Остановить ответ")) : language("Send request", "Отправить запрос"));
+  };
+  editor.localize = () => {
+    if (promptTimer === undefined) showPrompt();
+    updatePin();
+    goalText.setAttribute("aria-label", language("Goal objective", "Формулировка цели"));
+    saveGoal.textContent = language("Save changes", "Сохранить изменения");
+    pauseGoal.textContent = language("Pause", "Пауза");
+    resumeGoal.textContent = language("Resume", "Возобновить");
+    clearGoal.textContent = language("Clear goal", "Снять цель");
+    syncGoal();
+    input.setAttribute("aria-label", language("Message the project manager", "Сообщение менеджеру проекта"));
+    chat.setAttribute("aria-label", language("Project manager chat", "Чат с менеджером проекта"));
+    resize.setAttribute("aria-label", language("Chat height", "Высота чата"));
+    greeting.textContent = language("Ask about the project or discuss what needs to change.", "Спросите о проекте или обсудите, что нужно изменить.");
+    hint.textContent = language("Paste or attach files", "Вставьте или прикрепите файлы") + (api.isMac ? " (⌘V)." : " (Ctrl+V).");
+    controlLabelForIcon(add, language("Add to message", "Добавить к сообщению"));
+    controlLabelForIcon(microphone, language("Voice input", "Голосовой ввод"));
+    controlLabelForIcon(cancelVoice, language("Cancel recording", "Отменить запись"));
+    controlLabelForIcon(stopVoice, language("Stop and transcribe", "Остановить и распознать запись"));
+    menuHeading.textContent = language("Add", "Добавить");
+    pickFiles.lastElementChild.textContent = language("Files", "Файлы");
+    pickTasks.lastElementChild.textContent = language("Tasks", "Задачи");
+    pickGoal.lastElementChild.textContent = goalLabel.textContent = language("Goal mode", "Режим цели");
+    controlLabelForIcon(goalChip, language("Exit goal mode", "Выйти из режима цели"));
+    taskSearch.placeholder = language("Find a task…", "Найти задачу…");
+    taskSearch.setAttribute("aria-label", taskSearch.placeholder);
+    mentions.setAttribute("aria-label", language("Task suggestions", "Подсказки по задачам"));
+    syncAction();
     attachments.setAttribute("aria-label", language("Attachments", "Вложения"));
   };
   editor.localize();
-  editor.append(chat, icon("chat"));
-  editor.append(input, controls, picker, hint, attachments, progress);
-  const chatMessage = (actor, text) => {
+  setGoalMode(false);
+  const field = element("div", undefined, "board-draft-field");
+  const inputArea = element("div", undefined, "draft-input");
+  inputArea.append(input, prompt);
+  field.append(add, inputArea, controls, voiceRow, menu, mentions, picker, hint, goalChip, attachments, voiceStatus, progress);
+  editor.append(chat, field);
+  const previewImages = (images, file) => openImagePreview(undefined, images, images.indexOf(file), file.url, {
+    preview: image => image.url,
+    save: image => {
+      const link = element("a");
+      link.href = image.url;
+      link.download = image.name;
+      link.click();
+      return { ok: true };
+    },
+  });
+  const chatMessage = (actor, text, files = [], animate = false) => {
     greeting.hidden = true;
     const entry = element("div", undefined, "chat-entry");
     entry.dataset.actor = actor;
-    entry.append(element("p", text, "chat-text"));
-    log.append(entry);
-    scrollChat();
+    entry.toggleAttribute("data-enter", animate);
+    if (files.length) {
+      const tiles = element("div", undefined, "chat-attachments");
+      const images = files.filter(file => file.url);
+      for (const file of files) {
+        const tile = file.url ? button("", () => previewImages(images, file), "quiet chat-attachment") :
+          element("span", undefined, "chat-attachment");
+        if (file.url) {
+          controlLabelForIcon(tile, language("View ", "Просмотреть ") + file.name);
+          const img = element("img");
+          img.alt = file.name;
+          img.loading = "lazy";
+          img.src = file.url;
+          tile.append(img);
+        } else tile.append(icon("attachment"), element("span", file.name));
+        tiles.append(tile);
+      }
+      entry.append(tiles);
+    }
+    if (text) entry.append(actor === "agent" ? chatText(text, {}) : element("p", text, "chat-text"));
+    log.insertBefore(entry, queue);
+    if (animate) scrollChat();
     return entry;
   };
-  // Hover/focus can reveal the log after messages arrived while it had no layout.
-  const scrollChat = () => requestAnimationFrame(() => requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; }));
-  editor.addEventListener("pointerenter", scrollChat);
-  input.addEventListener("focus", scrollChat);
+  // Opening can reveal the log after messages arrived while it had no layout.
+  let scrollFrame;
+  const scrollChat = () => {
+    if (scrollFrame) return;
+    scrollFrame = requestAnimationFrame(() => {
+      scrollFrame = undefined;
+      log.scrollTop = log.scrollHeight;
+    });
+  };
   const message = text => {
     progress.textContent = text;
     progress.hidden = !text;
   };
   const busy = value => {
-    input.readOnly = value;
+    syncPrompt();
     editor.setAttribute("aria-busy", String(value));
-    for (const button of editor.querySelectorAll("button")) button.disabled = value;
+    waitingForChat = false;
+    canStop = stopping = false;
+    syncAction();
   };
-  editor.addEventListener("submit", event => {
-    event.preventDefault();
-    if (input.readOnly || (!input.value.trim() && !files.length)) return;
-    const request = input.value.trim();
+  editor.enableStop = () => {
+    if (!active) return;
+    canStop = true;
+    syncAction();
+  };
+  const thinkingLabel = () => language("Thinking…", "Думаю…");
+  const showActivityStatus = text => {
+    const label = active.thinking.firstElementChild;
+    if (label.textContent === text) return;
+    label.textContent = text;
+    if (!reducedMotion.matches) {
+      active.statusAnimation?.cancel();
+      active.statusAnimation = label.animate([{ opacity: .35, transform: "translateY(2px)" }, { opacity: 1, transform: "translateY(0)" }], {
+        duration: 180, easing: "ease-out",
+      });
+    }
+  };
+  editor.setWaiting = waiting => {
+    if (!active) return;
+    waitingForChat = waiting;
+    showActivityStatus(waiting
+      ? language("Waiting for the Codex chat to become available…", "Жду освобождения чата Codex…")
+      : thinkingLabel());
+    canStop = waiting;
+    syncAction();
+  };
+  const showChanges = (changes, animate = false) => {
+    const labels = {
+      create: language("Draft created", "Черновик создан"),
+      update: language("Task updated", "Задача обновлена"),
+      comment: language("Comment added", "Комментарий добавлен"),
+      cancel: language("Task cancelled", "Задача отменена"),
+      block: language("Task blocked", "Задача заблокирована"),
+      unblock: language("Task unblocked", "Задача разблокирована"),
+      start: language("Task started", "Задача запущена"),
+      approve: language("Task approved", "Задача утверждена"),
+      accept: language("Task accepted", "Задача принята"),
+      request_changes: language("Changes requested", "Задача возвращена на доработку"),
+    };
+    for (const { id, title, action } of changes) {
+      const entry = chatMessage("agent", undefined, [], animate);
+      entry.classList.add("board-chat-change");
+      const open = button(id + (title ? " · " + title : ""), () => showTask(id), "quiet board-chat-task");
+      open.dataset.task = id;
+      entry.append(element("span", labels[action]), open);
+    }
+  };
+  const activity = () => {
+    const container = element("div", undefined, "chat-run");
+    log.insertBefore(container, queue);
+    return container;
+  };
+  const streamedText = new WeakMap();
+  const fadeDuration = 240;
+  const fadeStreamedText = (block, previous, now) => {
+    const text = block.textContent.trimEnd();
+    const oldText = previous?.text ?? "";
+    let shared = 0;
+    while (shared < oldText.length && text[shared] === oldText[shared]) shared++;
+    const ranges = (previous?.ranges ?? []).filter(range => range.end <= shared && now - range.startTime < fadeDuration);
+    // Markdown can reformat earlier characters when a closing delimiter arrives.
+    const start = Math.max(shared, Math.min(oldText.length, text.length));
+    if (start < text.length) ranges.push({ start, end: text.length, startTime: now });
+    streamedText.set(block, { text, ranges });
+    if (!ranges.length || reducedMotion.matches) return;
+
+    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    let offset = 0;
+    let index = 0;
+    for (const node of nodes) {
+      if (!node.length) continue;
+      const end = offset + node.length;
+      let tail = node;
+      while (index < ranges.length && ranges[index].start < end) {
+        const range = ranges[index];
+        const left = Math.max(offset, range.start);
+        const right = Math.min(end, range.end);
+        if (left > offset) tail = tail.splitText(left - offset);
+        const span = element("span", undefined, "chat-stream-fragment");
+        span.style.animationDelay = (range.startTime - now) + "ms";
+        const rest = right < end ? tail.splitText(right - left) : null;
+        tail.before(span);
+        span.append(tail);
+        offset = right;
+        tail = rest;
+        if (right === range.end) index++;
+        if (!tail) break;
+      }
+      offset = end;
+    }
+  };
+  const renderActivity = (container, items, completed) => {
+    const messages = new Map();
+    for (const child of container.querySelectorAll("[data-item]")) {
+      const block = child.matches(".chat-text") ? child : child.matches(".chat-run-final") ? child.firstElementChild : undefined;
+      const state = block && streamedText.get(block);
+      if (state) messages.set(child.dataset.item.replace(/^final:/, "message:"), state);
+    }
+    const previous = new Map([...container.querySelectorAll("[data-item]")].map(child =>
+      [child.dataset.item, child.getAnimations().find(animation => animation.animationName === "board-chat-enter")?.currentTime]));
+    renderRunActivity(container, items, completed, undefined, undefined, {});
+    const now = performance.now();
+    for (const child of container.querySelectorAll("[data-item]")) {
+      if (child.matches(".chat-text, .chat-run-final")) {
+        const block = child.matches(".chat-text") ? child : child.firstElementChild;
+        fadeStreamedText(block, messages.get(child.dataset.item.replace(/^final:/, "message:")), now);
+        continue;
+      }
+      if (child.parentElement.closest("[data-enter]")) continue;
+      const elapsed = previous.get(child.dataset.item);
+      if (previous.has(child.dataset.item) && !(elapsed >= 0 && elapsed < 220)) continue;
+      child.setAttribute("data-enter", "");
+      const animation = child.getAnimations()[0];
+      if (animation && elapsed != null) animation.currentTime = elapsed;
+    }
+  };
+  let loadingHistory;
+  let historyLoaded = false;
+  const previewUrls = [];
+  const pendingPreviews = new Map();
+  const previewSource = file => /^(?:image\/(?:png|jpeg|webp|gif))$/.test(file.type) || isImageAttachment(file);
+  const releasePreview = file => {
+    const url = pendingPreviews.get(file);
+    if (url) URL.revokeObjectURL(url);
+    pendingPreviews.delete(file);
+  };
+  const releaseSubmittedPreviews = submitted => {
+    for (const file of submitted) {
+      if (!files.includes(file) && !queued.some(job => job.submitted.includes(file))) releasePreview(file);
+    }
+  };
+  const releaseMessagePreviews = messageFiles => {
+    for (const { url } of messageFiles) {
+      const index = previewUrls.indexOf(url);
+      if (index === -1) continue;
+      URL.revokeObjectURL(url);
+      previewUrls.splice(index, 1);
+    }
+  };
+  editor.dispose = () => {
+    disposed = true;
+    editor.cancelDictation();
+    queued.length = 0;
+    pausePrompt();
+    for (const url of previewUrls.splice(0)) URL.revokeObjectURL(url);
+    for (const file of pendingPreviews.keys()) releasePreview(file);
+  };
+  const loadHistory = () => {
+    if (!historyLoaded && !loadingHistory) {
+      const revision = goalRevision;
+      loadingHistory = api.boardHistory().then(result => {
+        if (!result.ok) throw new Error(boardError(result.error));
+        if (revision === goalRevision && result.data.goal !== undefined) showGoal(result.data.goal);
+        const oldImages = [...log.querySelectorAll(".chat-attachments img")];
+        log.replaceChildren(greeting, queue);
+        greeting.hidden = false;
+        for (const turn of result.data.turns) {
+          for (const { text, files } of turn.messages) chatMessage("user", text, files);
+          renderRunActivity(activity(), turn.items, true, turn.durationMs, undefined, {});
+          showChanges(turn.changes);
+        }
+        if (active) queue.before(active.entry, active.container, active.thinking);
+        releaseMessagePreviews(oldImages.filter(image => !log.contains(image)).map(image => ({ url: image.src })));
+        greeting.hidden = log.childElementCount > 2 || queued.length > 0;
+        historyLoaded = true;
+        scrollChat();
+      }).finally(() => { loadingHistory = undefined; });
+    }
+    return loadingHistory;
+  };
+  const revealHistory = () => {
+    scrollChat();
+    if (active) return;
+    void loadHistory()?.then(scrollChat).catch(error => message(error.message));
+  };
+  const openChat = () => {
+    if (editor.hasAttribute("data-open") && (historyLoaded || loadingHistory)) return;
+    editor.setAttribute("data-open", "");
+    revealHistory();
+  };
+  editor.closeChat = () => {
+    if (!pinned) editor.removeAttribute("data-open");
+  };
+  editor.revealPinned = () => { if (pinned && !loadingHistory && !historyLoaded) revealHistory(); };
+  editor.invalidateHistory = () => {
+    historyLoaded = false;
+    if (editor.matches("[data-open], [data-pinned]")) revealHistory();
+  };
+  field.addEventListener("click", event => {
+    if (dictation || event.target.closest(".draft-controls, .draft-add, .draft-add-menu, .draft-task-mentions, .draft-goal-chip, .draft-attachments, .draft-progress")) return;
+    openChat();
+    if (event.target !== input) input.focus({ preventScroll: true });
+  });
+  for (const event of ["input", "focus", "blur"]) input.addEventListener(event, syncPrompt);
+  input.addEventListener("input", syncAction);
+  for (const event of ["input", "select", "click", "compositionend"]) input.addEventListener(event, syncMentions);
+  input.addEventListener("blur", closeMentions);
+  chat.addEventListener("transitionend", event => {
+    if (event.target === chat && event.propertyName === "height" && editor.matches("[data-open], [data-pinned]")) scrollChat();
+  });
+  editor.loadSuggestions = loadSuggestions;
+  editor.updateActivity = items => {
+    if (!active) return;
+    const atBottom = log.scrollHeight - log.clientHeight - log.scrollTop <= 8;
+    const running = items.findLast(item => item.status === "inProgress");
+    let status = thinkingLabel();
+    if (running?.type === "reasoning") {
+      // Codex sends Markdown headings in its public reasoning summaries.
+      const headings = [...running.text.matchAll(/^\s*\*\*([^*\r\n]{1,160})\*\*[^\S\r\n]*$/gm)];
+      status = headings.at(-1)?.[1].trim() || status;
+    } else if (running?.type === "agentMessage") {
+      status = language("Writing a reply…", "Пишу ответ…");
+    } else if (running?.type === "plan") {
+      status = language("Planning…", "Составляю план…");
+    } else if (running) {
+      const labels = {
+        command: ["Running a command…", "Выполняю команду…"],
+        edit: ["Editing files…", "Изменяю файлы…"],
+        image: ["Working with an image…", "Работаю с изображением…"],
+        search: ["Searching the web…", "Ищу в интернете…"],
+        tool: ["Using a tool…", "Использую инструмент…"],
+      };
+      status = language(...labels[activityKind(running)]);
+    }
+    if (!waitingForChat) showActivityStatus(status);
+    renderActivity(active.container, items.filter(item => item.type !== "reasoning" || item.status !== "inProgress"), false);
+    if (atBottom) scrollChat();
+  };
+  function sendNext() {
+    const next = queued[0];
+    if (disposed || active || !next || next.failed) return;
+    queued.shift();
+    const { entry, status, draft, request, goal, submitted, rows, messageFiles } = next;
+    status.remove();
+    queue.before(entry);
+    const container = activity();
+    const thinking = element("div", undefined, "chat-thinking");
+    thinking.append(element("span", thinkingLabel()));
+    active = { entry, container, thinking };
+    syncGoal();
     busy(true);
-    message(language("The agent is preparing a draft…", "Агент готовит черновик…"));
+    message("");
+    thinking.setAttribute("role", "status");
+    thinking.setAttribute("data-enter", "");
+    queue.before(thinking);
+    scrollChat();
+    let accepted = false;
     void (async () => {
-      const pasted = await Promise.all(files.map(async file => ({
+      await loadHistory()?.catch(() => {});
+      const pasted = await Promise.all(submitted.map(async file => ({
         name: file.name, type: file.type, bytes: await file.arrayBuffer(),
       })));
-      if (!editor.isConnected || frame.project !== project) { message(""); return; }
-      chatMessage("user", [request, ...files.map(file => file.name)].filter(Boolean).join("\n"));
-      const result = await api.draft(request, pasted);
-      if (!result.ok) {
-        message(boardError(result.error));
-        chatMessage("agent", boardError(result.error));
-        return;
-      }
-      const reply = chatMessage("agent", language("Draft created", "Черновик создан"));
-      const open = button(result.data.id + (result.data.title ? " · " + result.data.title : ""), () => showTask(result.data.id), "quiet board-chat-task");
-      open.dataset.task = result.data.id;
-      reply.append(open);
+      if (disposed) return;
+      const result = await api.boardRequest(request, pasted, project, goal);
+      if (!result.ok && result.error.code === "BOARD_WAIT_CANCELLED") return;
+      if (!result.ok) throw new Error(boardError(result.error));
+      accepted = true;
+      const { answer, changes, error, items = [] } = result.data;
+      renderActivity(container, items, true);
+      if (answer && !container.querySelector(".chat-run-final")) chatMessage("agent", answer, [], true);
+      showChanges(changes, true);
+      if (error) chatMessage("agent", error, [], true);
       scrollChat();
-      input.value = "";
-      files.length = 0;
-      attachments.replaceChildren();
-      attachments.hidden = true;
-      message("");
       if (!editor.isConnected || frame.project !== project || sheet.open) return;
       archiveView = false;
       render();
-    })().catch(error => { message(error.message); chatMessage("agent", error.message); }).finally(() => busy(false));
+    })().catch(error => {
+      if (goal === "resume") goalError.textContent = error.message;
+      else message(error.message);
+    }).finally(() => {
+      thinking.remove();
+      if (!container.childElementCount) container.remove();
+      active = undefined;
+      busy(false);
+      syncGoal();
+      if (disposed) return;
+      if (accepted) {
+        releaseSubmittedPreviews(submitted);
+        sendNext();
+        return;
+      }
+      if (goal === "resume") {
+        entry.remove();
+        sendNext();
+        return;
+      }
+      if (!input.value && !files.length && !queued.length && !goalMode) {
+        input.value = draft;
+        files.push(...submitted);
+        attachments.replaceChildren(...rows);
+        attachments.hidden = !rows.length;
+        if (!container.childElementCount) {
+          entry.remove();
+          releaseMessagePreviews(messageFiles);
+          greeting.hidden = log.childElementCount > 2;
+        }
+        setGoalMode(goal);
+        return;
+      }
+      next.failed = true;
+      queued.unshift(next);
+      const retry = button(language("Retry", "Повторить"), () => {
+        next.failed = false;
+        sendNext();
+      }, "quiet");
+      const remove = button(language("Remove", "Удалить"), () => {
+        queued.shift();
+        entry.remove();
+        releaseMessagePreviews(messageFiles);
+        releaseSubmittedPreviews(submitted);
+        message("");
+        sendNext();
+      }, "quiet");
+      status.replaceChildren(element("span", language("Not sent", "Не отправлено")), retry, remove);
+      entry.append(status);
+      queue.prepend(entry);
+    });
+  }
+  editor.addEventListener("submit", event => {
+    event.preventDefault();
+    if (dictation || !hasDraft()) return;
+    const draft = input.value;
+    const request = draft.trim();
+    const goal = goalMode;
+    const submitted = files.splice(0);
+    const rows = [...attachments.children];
+    input.value = "";
+    closeMentions();
+    dismissedMention = undefined;
+    attachments.replaceChildren();
+    attachments.hidden = true;
+    setGoalMode(false);
+    const messageFiles = submitted.map(file => {
+      if (!previewSource(file)) return { name: file.name };
+      const url = URL.createObjectURL(file);
+      previewUrls.push(url);
+      return { name: file.name, url };
+    });
+    const entry = chatMessage("user", request, messageFiles, true);
+    const status = element("div", language("Queued", "В очереди"), "board-queued-status");
+    entry.append(status);
+    queue.append(entry);
+    queued.push({ entry, status, draft, request, goal, submitted, rows, messageFiles });
+    sendNext();
+    syncAction();
   });
   function addFiles(pasted) {
-    if (input.readOnly) return;
     if ([...files, ...pasted].reduce((total, file) => total + file.size, 0) > 64 * 1024 * 1024) {
       message(language("Attachments are limited to 64 MiB per task.", "Лимит вложений на задачу — 64 МиБ."));
       return;
@@ -1055,22 +2014,49 @@ function draftComposer() {
     message("");
     for (const file of pasted) {
       files.push(file);
-      const row = element("li");
+      const row = element("li", undefined, "board-attachment");
+      const url = previewSource(file) ? pendingPreviews.get(file) ?? URL.createObjectURL(file) : undefined;
+      if (url) pendingPreviews.set(file, url);
       const remove = button("×", () => {
-        if (input.readOnly) return;
         files.splice(files.indexOf(file), 1);
+        if (!files.includes(file)) releasePreview(file);
         row.remove();
         attachments.hidden = !files.length;
+        syncAction();
         message("");
         input.focus();
       }, "quiet");
       remove.setAttribute("aria-label", language("Remove ", "Удалить ") + file.name);
-      row.append(icon("attachment"), element("span", file.name), remove);
+      row.title = file.name;
+      if (url) {
+        const view = button("", () => {
+          const images = files.filter(file => pendingPreviews.has(file)).map(file => ({ name: file.name, url: pendingPreviews.get(file) }));
+          previewImages(images, images.find(image => image.url === url));
+        }, "quiet board-attachment-preview");
+        controlLabelForIcon(view, language("View ", "Просмотреть ") + file.name);
+        const thumbnail = element("img");
+        thumbnail.src = url;
+        thumbnail.alt = "";
+        view.append(thumbnail);
+        row.classList.add("board-attachment-image");
+        row.append(view);
+      } else row.append(icon("attachment"), element("span", file.name));
+      remove.classList.add("board-attachment-remove");
+      row.append(remove);
       attachments.append(row);
     }
     attachments.hidden = !files.length;
+    syncAction();
   }
   picker.addEventListener("change", () => { addFiles([...picker.files]); picker.value = ""; });
+  editor.addEventListener("dragover", event => {
+    if (event.dataTransfer.types.includes("Files")) event.preventDefault();
+  });
+  editor.addEventListener("drop", event => {
+    if (!event.dataTransfer.files.length) return;
+    event.preventDefault();
+    addFiles([...event.dataTransfer.files]);
+  });
   input.addEventListener("paste", event => {
     const pasted = Array.from(event.clipboardData?.files ?? []);
     if (!pasted.length) return;
@@ -1078,9 +2064,24 @@ function draftComposer() {
     addFiles(pasted);
   });
   input.addEventListener("keydown", event => {
-    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    if (event.isComposing) return;
+    if (mention && ["ArrowUp", "ArrowDown", "Enter", "Tab", "Escape"].includes(event.key) && !event.shiftKey) {
       event.preventDefault();
-      editor.requestSubmit();
+      if (event.key === "Escape") {
+        dismissedMention = mention.key;
+        closeMentions();
+      } else if (event.key === "Enter" || event.key === "Tab") {
+        chooseMention(mentionIndex);
+      } else {
+        const count = mention.tasks.length;
+        highlightMention((mentionIndex + (event.key === "ArrowDown" ? 1 : -1) + count) % count);
+      }
+      return;
+    }
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      if (!hasDraft() && !editor.matches("[data-open], [data-pinned]")) openChat();
+      else editor.requestSubmit();
     }
   });
   return editor;
@@ -1282,7 +2283,10 @@ async function showTask(id) {
     actions.append(button(language("Execution settings…", "Параметры запуска…"), () => editExecution(task)));
   }
   if (task.status === "review") {
-    actions.append(button(language("Review changes", "Проверить изменения"), () => showReview(task), "primary"));
+    const reviewLabel = task.result?.noChanges
+      ? language("Review result", "Проверить результат")
+      : language("Review changes", "Проверить изменения");
+    actions.append(button(reviewLabel, () => showReview(task), "primary"));
     actions.append(button(language("Request changes", "Вернуть на доработку"), () => noteTask(task, "request-changes")));
   }
   if (task.git?.worktree) actions.append(button(language("Open worktree", "Открыть worktree"), async () => {
@@ -1367,8 +2371,25 @@ async function showAcceptedTask(task) {
 async function showReview(task, messageDraft) {
   const generation = projectGeneration;
   const review = await command("review", task.id);
-  if (!review) return;
+  if (!review || generation !== projectGeneration) return;
   task = { ...task, revision: review.revision };
+  if (review.noChanges) {
+    const editor = form("review", language("Review result", "Проверка результата"), [], language("Accept", "Принять"), async () => {
+      const accepted = await command("accept", task.id, { revision: review.revision });
+      if (accepted && generation === projectGeneration) await showAcceptedTask(accepted);
+    });
+    section(language("Acceptance criteria", "Критерии приёмки"), task.criteria);
+    section(language("Result", "Результат"), review.result.summary);
+    section(language("Checks", "Проверки"), review.result.checks);
+    section(language("Limitations", "Ограничения"), review.result.limitations);
+    body.prepend(element("p", language("Submitted without Git changes.", "Сдано без изменений в Git."), "muted"));
+    body.append(editor);
+    if (review.stale) {
+      notice(language("The task worktree changed. Submit it again.", "Рабочая копия изменилась. Сдайте задачу повторно."));
+      editor.querySelector("button[type=submit]").disabled = true;
+    }
+    return;
+  }
   const local = review.localChanges;
   const editor = form("review", language("Review changes", "Проверка изменений"), [
     { name: "message", label: language("Acceptance commit message", "Сообщение коммита приёмки"), type: "area",
@@ -1544,15 +2565,61 @@ function settings() {
     return;
   }
   const current = frame.board.settings;
-  form("settings", language("Board settings", "Настройки доски"), [
+  const defaultModel = language("Codex default", "По умолчанию в Codex");
+  const managerModel = current.manager?.model ?? "";
+  const managerEffort = current.manager?.effort ?? "";
+  let models = [];
+  const editor = form("settings", language("Board settings", "Настройки доски"), [
     { name: "archive", label: language("Archive after days (blank disables)", "Архивировать через N дней (пусто — отключено)"),
       type: "number", value: current.archiveAfterDays },
     { name: "mode", label: language("Acceptance mode", "Режим приёмки"), value: current.integrationMode,
       options: [["merge", "Merge"], ["squash", "Squash"]] },
+    { name: "showCardPreviews", label: language("Show previews on board cards", "Показывать превью на карточках"),
+      type: "checkbox", value: current.showCardPreviews !== false },
+    { name: "managerModel", label: language("Project manager model", "Модель менеджера проекта"),
+      value: managerModel, options: managerModel ? [[managerModel, managerModel]] : [["", defaultModel]] },
+    { name: "managerEffort", label: language("Project manager reasoning effort", "Уровень рассуждения менеджера"),
+      value: managerEffort, options: [[managerEffort, reasoningName(managerEffort)]] },
   ], language("Save settings", "Сохранить настройки"), async values => {
+    const { managerModel: model, managerEffort: effort } = values;
+    const changed = model !== managerModel || effort !== managerEffort;
+    if (changed && model && !models.some(entry => entry.id === model && (entry.effort === effort || entry.efforts.includes(effort)))) {
+      notice(language("Choose an available model and reasoning effort.", "Выберите доступную модель и уровень рассуждения."));
+      return;
+    }
     if (await command("settings", undefined, {
       archiveAfterDays: values.archive === "" ? null : Number(values.archive), integrationMode: values.mode,
+      showCardPreviews: values.showCardPreviews,
+      ...(changed ? { manager: model ? { model, effort } : null } : {}),
     })) sheet.close();
+  });
+  const [, model, effort] = editor.querySelectorAll("select");
+  const modelStatus = element("p", language("Loading Codex models…", "Загрузка моделей Codex…"), "muted");
+  modelStatus.setAttribute("role", "status");
+  effort.parentElement.after(modelStatus);
+  model.disabled = effort.disabled = true;
+  const showEfforts = (saved = "") => {
+    const selected = models.find(entry => entry.id === model.value);
+    const options = [...new Set([...(selected?.efforts ?? []), selected?.effort].filter(Boolean))];
+    if (saved && !options.includes(saved)) options.push(saved);
+    effort.replaceChildren(...options.map(value => new Option(reasoningName(value), value)));
+    effort.disabled = !selected || !options.length;
+    effort.value = saved || selected?.effort || options[0] || "";
+  };
+  model.addEventListener("change", () => showEfforts(model.value === managerModel ? managerEffort : ""));
+  void Promise.resolve().then(() => api.chatModels()).catch(error => ({ ok: false, error: { message: error.message } })).then(result => {
+    if (!editor.isConnected) return;
+    models = result.ok ? result.data : [];
+    model.replaceChildren(new Option(defaultModel, ""), ...models.map(entry => new Option(entry.name, entry.id)));
+    if (managerModel && !models.some(entry => entry.id === managerModel)) {
+      model.append(new Option(managerModel + " · " + language("unavailable", "недоступна"), managerModel));
+    }
+    model.value = managerModel;
+    model.disabled = !models.length && !managerModel;
+    showEfforts(managerEffort);
+    modelStatus.textContent = !result.ok ? boardError(result.error) : !models.length ?
+      language("No Codex models available.", "Нет доступных моделей Codex.") : "";
+    modelStatus.hidden = !modelStatus.textContent;
   });
   body.append(button(language("Check archives now", "Проверить архивацию"), () => command("archive")));
   const tags = element("section", undefined, "tag-settings");
@@ -1902,7 +2969,11 @@ function update(next) {
   }
   if (Array.isArray(next.tabs)) {
     const openProjects = new Set(next.tabs.map(tab => tab.path));
-    for (const project of boardViews.keys()) if (!openProjects.has(project)) boardViews.delete(project);
+    for (const [project, view] of boardViews) {
+      if (openProjects.has(project)) continue;
+      view.composer[0]?.dispose?.();
+      boardViews.delete(project);
+    }
   }
   render();
   const tagSettings = byId("tag-settings");
@@ -1935,6 +3006,7 @@ byId("git-branches").addEventListener("toggle", protect(event => {
 byId("status-publish").addEventListener("click", protect(publishToGitHub));
 byId("welcome-open").addEventListener("click", protect(() => api.open()));
 byId("close-sheet").addEventListener("click", () => sheet.close());
+byId("lanes").addEventListener("click", () => byId("board-composer").firstChild?.closeChat(), { capture: true });
 document.addEventListener("pointerdown", event => {
   for (const menu of document.querySelectorAll(".lane-filter[open]")) {
     if (!menu.contains(event.target)) menu.open = false;
@@ -1959,6 +3031,10 @@ sheet.addEventListener("close", () => {
 });
 api.subscribe(update);
 api.onChatUpdate(updateChat);
+window.addEventListener("focus", () => byId("board-composer").firstChild?.invalidateHistory?.());
+const syncBoardPrompt = () => byId("board-composer").firstChild?.syncPrompt?.();
+document.addEventListener("visibilitychange", syncBoardPrompt);
+reducedMotion.addEventListener("change", syncBoardPrompt);
 api.onTheme(theme => {
   frame.theme = theme;
   applyTheme(theme);
