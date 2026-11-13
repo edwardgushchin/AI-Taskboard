@@ -505,17 +505,24 @@ function openCodexTaskAction(task) {
 }
 
 function codexTaskAction(task) {
-  if (task.status !== "ready" && (task.status !== "in_progress" || task.codexThreadId)) return null;
-  const launch = button(language("Send to work", "Передать в работу"), async () => {
+  if (task.status !== "ready" && task.status !== "in_progress") return null;
+  const label = task.status === "in_progress" || task.git
+    ? language("Continue", "Продолжить")
+    : language("Send to work", "Передать в работу");
+  const launch = button(label, async () => {
+    const project = frame.project;
     launch.disabled = true;
     try {
       const result = await api.launchTask(task.id);
+      if (project !== frame.project) return;
       if (!result.ok) notice(boardError(result.error));
       else if (sheetKind === "task" && taskInSheet?.id === task.id) await showTask(task.id);
     } finally {
       launch.disabled = Boolean(task.unfinishedDependencies?.length);
     }
   });
+  launch.id = "task-launch";
+  launch.hidden = frame.runningTasks?.includes(task.id) ?? false;
   launch.disabled = Boolean(task.unfinishedDependencies?.length);
   return launch;
 }
@@ -1669,6 +1676,8 @@ function update(next) {
   if (sheetKind === "task" && sheet.open && taskInSheet) {
     const runStatus = byId("task-agent-run");
     if (runStatus) renderAgentRunStatus(runStatus, taskInSheet);
+    const launch = byId("task-launch");
+    if (launch) launch.hidden = frame.runningTasks?.includes(taskInSheet.id) ?? false;
     if (tagsChanged) byId("task-sheet-tags")?.replaceChildren(...tagBadges(taskInSheet.tags));
     const task = frame.board?.tasks.find(entry => entry.id === taskInSheet.id);
     const archived = frame.board?.archived.some(entry => entry.id === taskInSheet.id);

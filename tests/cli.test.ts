@@ -306,7 +306,6 @@ test("normal commands enforce task state, criteria, and revisions", t => {
   cli(root, ["update", task.id], { criteria: ["Download XLSX."] }, "USER_REQUIREMENTS_REQUIRED");
   task = cli(root, ["update", task.id], { criteria: ["Download XLSX."], actor: "user", note: "Use XLSX" });
   assert.equal(task.status, "ready");
-  cli(root, ["start", task.id], undefined, "GIT_REQUIRED");
   assert.equal(cli(root, ["list"]).tasks.length, 1);
 });
 
@@ -469,6 +468,33 @@ test("linked worktrees share the board and cleanup preserves local files and the
   assert.equal(git(root, "rev-parse", started.task.git.branch), started.task.git.base);
 });
 
+test("starting on a branch without commits creates an empty base and preserves the index", t => {
+  const root = fixture(t);
+  cli(root, ["init"], { git: true });
+  git(root, "config", "user.useConfigOnly", "true");
+  const branch = git(root, "symbolic-ref", "HEAD");
+  writeFileSync(join(root, "staged.txt"), "staged contents\n");
+  writeFileSync(join(root, "local.txt"), "local contents\n");
+  git(root, "add", "staged.txt");
+  const before = git(root, "status", "--porcelain");
+  const draft = cli(root, ["create"], { title: "Start task", criteria: ["Task has its own worktree."] });
+  const ready = cli(root, ["approve", draft.id]);
+  cli(root, ["start", ready.id], { target: "missing" }, "TARGET_HAS_NO_COMMIT");
+  assert.equal(git(root, "for-each-ref"), "");
+
+  const { task, worktree } = cli(root, ["start", ready.id], { target: branch });
+  assert.equal(task.status, "in_progress");
+  assert.equal(task.git.target, branch);
+  assert.equal(git(root, "rev-parse", "HEAD"), task.git.base);
+  assert.equal(git(worktree, "rev-parse", "HEAD"), task.git.base);
+  assert.equal(git(root, "ls-tree", "-r", "HEAD"), "");
+  assert.equal(git(root, "status", "--porcelain"), before);
+  assert.equal(git(root, "show", ":staged.txt"), "staged contents");
+  assert.equal(readFileSync(join(root, "local.txt"), "utf8"), "local contents\n");
+  assert.equal(cli(root, ["start", ready.id]).worktree, worktree);
+  assert.equal(git(root, "rev-list", "--count", "HEAD"), "1");
+});
+
 test("failed start without a branch or worktree keeps the ready task editable", t => {
   const root = fixture(t, true);
   git(root, "branch", "ai-taskboard");
@@ -507,7 +533,7 @@ test("parallel processes receive unique task IDs and share one catalog entry per
   assert.equal(snapshot.tags.length, 9);
 });
 
-test("watch streams the initial board and updates from another process", { timeout: 10000 }, async t => {
+test("watch streams the initial board and updates from another process", { timeout: 20000 }, async t => {
   const root = fixture(t);
   cli(root, ["init"]);
   const child = spawn(process.execPath, commandArgs(root, ["watch"]), {
@@ -515,24 +541,36 @@ test("watch streams the initial board and updates from another process", { timeo
   });
   const closed = once(child, "close");
   const reader = createInterface({ input: child.stdout });
-  t.after(async () => {
-    reader.close();
-    child.kill();
-    await closed;
-  });
+  t.signal.addEventListener("abort", () => child.kill(), { once: true });
   const lines = reader[Symbol.asyncIterator]();
   const frame = async () => {
     const { value } = await lines.next();
     assert.ok(typeof value === "string", "watch exited before sending a snapshot");
     return JSON.parse(value);
   };
-  assert.deepEqual((await frame()).data.tasks, []);
-  const task = cli(root, ["create"], { title: "Visible to watcher" });
-  assert.equal((await frame()).data.tasks[0].id, task.id);
-  const tag = cli(root, ["tag", "ensure"], { name: "Watched", color: "pink" });
-  assert.deepEqual((await frame()).data.tags, [tag]);
-  const recolored = cli(root, ["tag", "set"], { name: tag.name, color: "blue" });
-  assert.deepEqual((await frame()).data.tags, [recolored]);
+  try {
+    assert.deepEqual((await frame()).data.tasks, []);
+    const task = cli(root, ["create"], { title: "Visible to watcher", criteria: ["Git is available."] });
+    assert.equal((await frame()).data.tasks[0].id, task.id);
+    const tag = cli(root, ["tag", "ensure"], { name: "Watched", color: "pink" });
+    assert.deepEqual((await frame()).data.tags, [tag]);
+    const recolored = cli(root, ["tag", "set"], { name: tag.name, color: "blue" });
+    assert.deepEqual((await frame()).data.tags, [recolored]);
+    const ready = cli(root, ["approve", task.id]);
+    assert.equal((await frame()).data.tasks[0].status, "ready");
+    cli(root, ["start", task.id], { revision: ready.revision - 1 }, "REVISION_CONFLICT");
+    assert.ok(!existsSync(join(root, ".git")));
+    const started = cli(root, ["start", task.id]);
+    const updated = (await frame()).data;
+    assert.equal(updated.tasks[0].status, "in_progress");
+    assert.equal(updated.gitInfo.head, started.task.git.base);
+    assert.equal(updated.gitInfo.branch, git(root, "branch", "--show-current"));
+    assert.equal(cli(started.worktree, ["show", task.id]).git.worktree, started.worktree);
+  } finally {
+    reader.close();
+    child.kill();
+    await closed;
+  }
 });
 
 test("submission commits the confirmed snapshot and rejects changed or incomplete inputs", t => {

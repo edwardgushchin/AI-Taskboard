@@ -2,12 +2,12 @@ import { mkdtempSync, readdirSync, realpathSync, renameSync, rmdirSync } from "n
 import { dependencyStatus, unfinishedDependencies } from "./dependencies.ts";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import {
-  excludeBoard, git, invokeGit, isAncestor, localBranch, requireRepository, resolveCommit, worktrees,
+  createInitialCommit, excludeBoard, git, invokeGit, isAncestor, localBranch, requireRepository, resolveCommit, worktrees,
 } from "./git.ts";
 import type { Repository, Worktree } from "./git.ts";
 import { object, record, requireRevision, requireState, TaskboardError, text } from "./model.ts";
 import type { Task } from "./model.ts";
-import { directory, exists, readJson, removeFile, writeJson } from "./storage.ts";
+import { directory, exists, locateBoard, readJson, removeFile, writeJson } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
 
 export function findWorktree(repo: Repository, branch: string): Worktree | undefined {
@@ -119,7 +119,6 @@ export function startTask(store: BoardStore, task: Task, input: Record<string, u
       throw new TaskboardError("DEPENDENCIES_INCOMPLETE", "Complete the task dependencies before starting.", { dependencies });
     }
   }
-  const repo = requireRepository(store.location.repository);
   const branch = worktreeBranch(task);
   const managedPath = join(store.subdirectory("worktrees"), task.id);
   const pendingPath = store.pendingPath(task.id);
@@ -131,6 +130,7 @@ export function startTask(store: BoardStore, task: Task, input: Record<string, u
     if (!task.git || task.git.branch !== branch) {
       throw new TaskboardError("CORRUPT_STORAGE", "The task has no matching Git branch.");
     }
+    const repo = requireRepository(store.location.repository);
     if (task.status === "ready") {
       requireRevision(task, input.revision);
       if (input.target !== undefined && localBranch(repo, text(input.target, "target", true)) !== task.git.target) {
@@ -144,8 +144,9 @@ export function startTask(store: BoardStore, task: Task, input: Record<string, u
   }
 
   requireRevision(task, input.revision);
-  excludeBoard(repo);
   const requested = input.target === undefined ? undefined : text(input.target, "target", true);
+  const repo = store.location.repository ?? requireRepository(locateBoard(store.location.root, true, true).repository);
+  excludeBoard(repo);
   let target: string;
   let base: string;
   if (pending) {
@@ -160,12 +161,10 @@ export function startTask(store: BoardStore, task: Task, input: Record<string, u
     }
   } else {
     target = localBranch(repo, requested);
-    const commit = resolveCommit(repo.root, target);
-    if (!commit) throw new TaskboardError("TARGET_HAS_NO_COMMIT", "The target branch needs an initial commit.");
-    base = commit;
     if (resolveCommit(repo.root, branch) || findWorktree(repo, branch) || exists(managedPath)) {
       throw new TaskboardError("WORKTREE_COLLISION", "The task branch or worktree path is already in use.");
     }
+    base = resolveCommit(repo.root, target) ?? createInitialCommit(repo, target);
     writeJson(pendingPath, { action: "start", revision: task.revision, target, base });
   }
 

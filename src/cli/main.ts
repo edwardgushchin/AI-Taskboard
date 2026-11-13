@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, watch } from "node:fs";
+import { existsSync, readFileSync, watch } from "node:fs";
 import type { FSWatcher } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
@@ -13,7 +13,7 @@ import { hexTagColor, member, number, object, record, registerTags, requireRevis
 import type { Task } from "./model.ts";
 import { initializeBoard, locateBoard, onBoard } from "./storage.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
-import { invokeGit } from "./git.ts";
+import { discoverRepository, invokeGit } from "./git.ts";
 import { changeRepository, publishRepository, repositoryRefs } from "./repository.ts";
 import { previewSubmission, submitTask } from "./submission.ts";
 import { changeTask, createTask, recordRunLog } from "./tasks.ts";
@@ -92,7 +92,13 @@ function boardGitInfo(location: BoardLocation) {
 
 function watchBoard(location: BoardLocation): void {
   const read = () => {
-    const board = onBoard(location, snapshotBoard);
+    const board = onBoard(location, store => {
+      if (!location.repository && existsSync(join(location.root, ".git"))) {
+        const repo = discoverRepository(location.root);
+        if (repo?.root === location.root) location.repository = repo;
+      }
+      return snapshotBoard(store);
+    });
     return { ok: true, data: { ...board, gitInfo: boardGitInfo(location) } };
   };
   let previous = JSON.stringify(read());

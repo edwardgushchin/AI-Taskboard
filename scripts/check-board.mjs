@@ -201,6 +201,40 @@ app.whenReady().then(async () => {
   await evaluate(`waitFor(() => findCard('T-0001').querySelector('img')?.naturalWidth > 0)`);
   await evaluate(`settle()`);
   writeFileSync(join(artifacts, "board-stable.png"), (await window.webContents.capturePage()).toPNG());
+  await evaluate(`
+    const interrupted = task('T-0050', 'Добавить вкладки проектов в одном окне', {
+      status: 'in_progress', codexThreadId: '01234567-1234-5678-1234-123456789012',
+    });
+    fixture.board.tasks.push(interrupted);
+    const launchCalls = [];
+    let completeLaunch;
+    Object.assign(window.taskboard, {
+      command: async (name, id) => ({ ok: name === 'show' && id === interrupted.id, data: structuredClone(interrupted) }),
+      chatModels: async () => ({ ok: true, data: [] }),
+      launchTask: id => {
+        launchCalls.push(id);
+        return new Promise(resolve => { completeLaunch = resolve; });
+      },
+    });
+    const resume = () => [...byId('sheet-body').querySelectorAll('button')].find(node => node.textContent === 'Продолжить');
+    push();
+    findCard(interrupted.id).click();
+    void 0;
+  `);
+  await check(`sheet.open && !!resume() && !resume().hidden`, "an interrupted task can be resumed from its open card");
+  await evaluate(`resume().click(); void 0`);
+  await check(`resume().disabled && launchCalls.join(',') === interrupted.id`, "Continue invokes the board launch for the selected task once");
+  await evaluate(`completeLaunch({ ok: false, error: { code: 'CODEX_UNAVAILABLE', message: 'Codex unavailable' } }); void 0`);
+  await check(`!resume().disabled && byId('sheet-notice').textContent === 'Codex unavailable'`, "a launch error is shown and allows retry");
+  await evaluate(`resume().click(); void 0`);
+  await evaluate(`fixture.runningTasks = [interrupted.id]; push(); completeLaunch({ ok: true, data: interrupted }); void 0`);
+  await check(`resume().hidden && byId('task-agent-run').querySelector('.agent-spinner') !== null`, "the launch button is hidden while the agent is working");
+  await evaluate(`fixture.runningTasks = []; push(); void 0`);
+  await check(`!resume().hidden && !resume().disabled`, "a stopped launch can be resumed without reopening the card");
+  await evaluate(`interrupted.status = 'ready'; interrupted.git = { worktree: 'saved-worktree' }; interrupted.revision++; push(); void 0`);
+  await check(`resume()?.disabled === false`, "a previously started task can also continue from Ready");
+  await evaluate(`delete interrupted.git; delete interrupted.codexThreadId; interrupted.unfinishedDependencies = ['T-0001']; interrupted.revision++; push(); void 0`);
+  await check(`byId('task-launch')?.textContent === 'Передать в работу' && byId('task-launch').disabled`, "first launches retain their label and dependency check");
   console.log(`Board Chromium checks passed: ${checks}; screenshots: ${join(artifacts, "board-stable.png")}, ${join(artifacts, "board-newest-first.png")}`);
 }).catch(error => {
   console.error(error);
