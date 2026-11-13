@@ -24,7 +24,7 @@ contextBridge.exposeInMainWorld("taskboard", {
   openLink: url => ipcRenderer.invoke("chat:openLink", url),
   readMarkdown: (id, link, source) => ipcRenderer.invoke("board:readMarkdown", id, link, source),
   openWorktree: id => ipcRenderer.invoke("board:openWorktree", id),
-  launchTask: id => ipcRenderer.invoke("board:launchTask", id),
+  launchTask: (id, options) => ipcRenderer.invoke("board:launchTask", id, options),
   openCodexThread: id => ipcRenderer.invoke("board:openCodexThread", id),
   subscribe: listener => { ipcRenderer.on("board:changed", (_event, frame) => listener(frame)); },
   themes: () => ipcRenderer.invoke("appearance:themes"),

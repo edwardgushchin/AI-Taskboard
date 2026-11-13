@@ -78,6 +78,20 @@ if (!process.versions.electron) {
     const code = transformSync(source, { loader: "ts", format: "esm" }).code;
     const entry = join(artifacts, "main-under-test.mjs");
     writeFileSync(entry, code + "\nglobalThis.tabTest = { beginOperation, windowStates };\n");
+    app.on("web-contents-created", (_event, contents) => {
+      contents.setBackgroundThrottling(false);
+      contents.on("dom-ready", () => void contents.executeJavaScript(`
+        window.startupView = { welcomeSeen: false, loadingSeen: false };
+        const sampleStartup = () => {
+          window.startupView.welcomeSeen ||= !document.querySelector('#welcome').hidden;
+          window.startupView.loadingSeen ||= !document.querySelector('#loading').hidden;
+        };
+        sampleStartup();
+        window.startupObserver = new MutationObserver(sampleStartup);
+        window.startupObserver.observe(document.body, { subtree: true, attributes: true, attributeFilter: ['hidden'] });
+        void 0;
+      `));
+    });
     require(entry);
     await waitFor(() => BrowserWindow.getAllWindows().length === 1, "initial window");
     const window = BrowserWindow.getAllWindows()[0];
@@ -216,6 +230,9 @@ if (!process.versions.electron) {
         const snapshot = await frame();
         return snapshot.tabs.length === 3 && snapshot.project === second && Boolean(snapshot.board);
       }, "restored projects");
+      check(await evaluate("window.startupView.loadingSeen && !window.startupView.welcomeSeen"), "restoring a saved session shows loading without exposing the welcome screen");
+      check(await evaluate("document.querySelector('#welcome').hidden && document.querySelector('#loading').hidden"), "the active restored board replaces loading");
+      await evaluate("window.startupObserver.disconnect()");
       check((await frame()).tabs.map(tab => tab.path).join("|") === [second, first, unavailable].join("|"), "relaunch restores tab order");
       check((await frame()).project === second, "relaunch restores the active project");
       check((await frame()).runningTasks.length === 0, "relaunch does not restart agents");

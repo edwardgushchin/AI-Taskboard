@@ -31,6 +31,7 @@ let checks = 0;
 app.whenReady().then(async () => {
   window = new BrowserWindow({ width: 1380, height: 900, show: false,
     webPreferences: { sandbox: true, contextIsolation: true, backgroundThrottling: false } });
+  window.webContents.on("console-message", event => { if (event.level === "error") console.error(event.message); });
   const html = read("index.html").replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, "")
     .replace(/<link\b[^>]*>/g, "").replace(/<meta http-equiv="Content-Security-Policy"[^>]*>/, "");
   await window.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
@@ -40,6 +41,7 @@ app.whenReady().then(async () => {
     assert.equal(await evaluate(code), true, message);
     checks++;
   };
+  await check(`document.querySelector('#welcome').hidden`, "welcome is hidden before the first project snapshot");
   await evaluate(`
     window.previewCalls = 0;
     window.taskboard = {
@@ -63,7 +65,7 @@ app.whenReady().then(async () => {
   await evaluate(`
     const task = (id, title, extra = {}) => ({ id, title, status: 'ready', revision: 1, priority: 'normal',
       createdAt: '2026-11-01T12:00:00.000Z', updatedAt: '2026-11-01T12:00:00.000Z',
-      tags: [], subtasks: [], attachments: [], history: [], ...extra });
+      tags: [], subtasks: [], attachments: [], history: [], questions: [], ...extra });
     const fixture = { project: 'board-fixture', russian: true, theme: 'dark', runningTasks: [],
       board: { tags: [{ name: 'UI', color: 'blue' }], archived: [], tasks: [
         task('T-0001', 'Стабильное превью', { attachments: [{ file: 'cover.png', name: 'cover.png' }] }),
@@ -78,9 +80,14 @@ app.whenReady().then(async () => {
       const poll = () => predicate() ? resolve() : Date.now() > deadline ? reject(new Error('Timed out waiting for preview')) : requestAnimationFrame(poll);
       poll();
     });
-    push();
+    window.pushBoard({ russian: true, restoring: true });
     void 0;
   `);
+  await check(`byId('welcome').hidden && !byId('loading').hidden && byId('app-content').getAttribute('aria-busy') === 'true'`, "session restoration shows loading without flashing welcome");
+  await evaluate(`settle()`);
+  writeFileSync(join(artifacts, "project-tabs-loading.png"), (await window.webContents.capturePage()).toPNG());
+  await evaluate(`push(); void 0`);
+  await check(`byId('welcome').hidden && byId('loading').hidden && byId('app-content').getAttribute('aria-busy') === 'false'`, "a restored board replaces the loading state");
   await evaluate(`waitFor(() => findCard('T-0001').querySelector('img')?.naturalWidth > 0)`);
   await check(`lane('ready').querySelector('.task-id').textContent === 'T-0002'`, "initial board shows the newest task first");
   await evaluate(`
@@ -155,7 +162,7 @@ app.whenReady().then(async () => {
   await evaluate(`const archiveCard = findCard('T-0001'); push(); void 0`);
   await check(`findCard('T-0001') === archiveCard`, "archive refreshes retain cards too");
   await evaluate(`fixture.project = 'other-board'; fixture.board.tasks = [task('T-0001', 'Другая доска')]; fixture.board.archived = []; push(); void 0`);
-  await check(`findCard('T-0001') !== originalCard && findCard('T-0001').textContent.includes('Другая доска') && !findCard('T-0001').querySelector('img')`, "switching projects discards cached cards and covers");
+  await check(`findCard('T-0001') !== originalCard && findCard('T-0001').textContent.includes('Другая доска') && !findCard('T-0001').querySelector('img')`, "switching projects isolates cards and covers with the same task number");
   await check(`document.querySelector('#tag-filter input')?.value === 'ui'`, "switching between projects with the same tags restores the global filter options");
   await evaluate(`fixture.russian = false; push(); void 0`);
   await check(`lane('ready').querySelector('h2').textContent.includes('Ready') && findCard('T-0001').textContent.includes('Normal')`, "language changes update columns and cards");
@@ -202,6 +209,63 @@ app.whenReady().then(async () => {
   await evaluate(`settle()`);
   writeFileSync(join(artifacts, "board-stable.png"), (await window.webContents.capturePage()).toPNG());
   await evaluate(`
+    fixture.tabs = [{ path: 'board-fixture', name: 'Первый проект' }, { path: 'cache-second', name: 'Второй проект' }, { path: 'cache-delayed', name: 'Загрузка' }];
+    push();
+    const tabCard = findCard('T-0001');
+    const tabCover = tabCard.querySelector('img');
+    const firstBoard = structuredClone(fixture.board);
+    const secondBoard = { ...structuredClone(fixture.board), tasks: [task('T-0001', 'Превью другого проекта', { attachments: [{ file: 'cover.png', name: 'cover.png' }] })] };
+    const callsBeforeSwitch = window.previewCalls;
+    fixture.project = 'cache-second'; fixture.board = secondBoard; push(); void 0;
+  `);
+  await evaluate(`waitFor(() => findCard('T-0001').querySelector('img')?.naturalWidth > 0)`);
+  await check(`findCard('T-0001') !== tabCard && findCard('T-0001').querySelector('img') !== tabCover && window.previewCalls === callsBeforeSwitch + 1`, "identical attachment paths in another project have a separate preview request and image");
+  await evaluate(`
+    const secondTabCard = findCard('T-0001');
+    const secondTabCover = secondTabCard.querySelector('img');
+    firstBoard.tasks[0].title = 'Обновлено в фоновой вкладке'; firstBoard.tasks[0].revision++;
+    fixture.project = 'board-fixture'; fixture.board = firstBoard; push(); void 0;
+  `);
+  await check(`findCard('T-0001') === tabCard && tabCard.querySelector('img') === tabCover && tabCover.naturalWidth > 0 && !tabCover.hidden`, "returning to a project immediately reuses its decoded image and card");
+  await check(`tabCard.textContent.includes('Обновлено в фоновой вкладке') && window.previewCalls === callsBeforeSwitch + 1`, "background changes reach the restored card without fetching its cover again");
+  await evaluate(`
+    for (let round = 0; round < 10; round++) {
+      fixture.project = 'cache-second'; fixture.board = secondBoard; push();
+      fixture.project = 'board-fixture'; fixture.board = firstBoard; push();
+    }
+    void 0;
+  `);
+  await check(`findCard('T-0001') === tabCard && tabCard.querySelector('img') === tabCover && window.previewCalls === callsBeforeSwitch + 1`, "repeated tab switches retain decoded images without additional preview requests");
+  await evaluate(`settle()`);
+  writeFileSync(join(artifacts, "project-tabs-cached-images.png"), (await window.webContents.capturePage()).toPNG());
+  await evaluate(`
+    delete window.releasePreview;
+    fixture.project = 'cache-delayed';
+    fixture.board = { ...firstBoard, tasks: [task('T-0001', 'Отложенное превью', { attachments: [{ file: 'delayed.png', name: 'delayed.png' }] })] };
+    push(); void 0;
+  `);
+  await evaluate(`waitFor(() => !!window.releasePreview)`);
+  await evaluate(`
+    const delayedCache = cardCoverCache;
+    fixture.project = 'board-fixture'; fixture.board = firstBoard; push();
+    window.releasePreview(); void 0;
+  `);
+  await evaluate(`settle()`);
+  await check(`cardCoverCache !== delayedCache && findCard('T-0001').querySelector('img') === tabCover && tabCover.dataset.file === 'cover.png'`, "a late response from an inactive board cannot replace the current project's image");
+  await evaluate(`
+    fixture.tabs = fixture.tabs.filter(tab => tab.path !== 'cache-second'); push();
+    const callsBeforeReopen = window.previewCalls;
+    void 0;
+  `);
+  await check(`!boardViews.has('cache-second') && !secondTabCard.isConnected`, "closing a tab releases its cached board view");
+  await evaluate(`
+    fixture.tabs.push({ path: 'cache-second', name: 'Второй проект' });
+    fixture.project = 'cache-second'; fixture.board = secondBoard; push(); void 0;
+  `);
+  await evaluate(`waitFor(() => findCard('T-0001').querySelector('img')?.naturalWidth > 0)`);
+  await check(`findCard('T-0001') !== secondTabCard && findCard('T-0001').querySelector('img') !== secondTabCover && window.previewCalls === callsBeforeReopen + 1`, "reopening a closed project creates a fresh card and preview");
+  await evaluate(`fixture.project = 'board-fixture'; fixture.board = firstBoard; push(); delete fixture.tabs; void 0`);
+  await evaluate(`
     const interrupted = task('T-0050', 'Добавить вкладки проектов в одном окне', {
       status: 'in_progress', codexThreadId: '01234567-1234-5678-1234-123456789012',
     });
@@ -235,6 +299,42 @@ app.whenReady().then(async () => {
   await check(`resume()?.disabled === false`, "a previously started task can also continue from Ready");
   await evaluate(`delete interrupted.git; delete interrupted.codexThreadId; interrupted.unfinishedDependencies = ['T-0001']; interrupted.revision++; push(); void 0`);
   await check(`byId('task-launch')?.textContent === 'Передать в работу' && byId('task-launch').disabled`, "first launches retain their label and dependency check");
+  await evaluate(`
+    interrupted.status = 'review'; interrupted.codexThreadId = '01234567-1234-5678-1234-123456789012';
+    interrupted.unfinishedDependencies = []; interrupted.revision++;
+    const feedbackCalls = [];
+    window.taskboard.command = async (name, id, input) => {
+      if (name === 'request-changes') {
+        feedbackCalls.push(input);
+        interrupted.status = 'blocked'; interrupted.revision += 2;
+        interrupted.blocked = { reason: 'thread ' + interrupted.codexThreadId + ' already has an active writer', condition: 'Resume the task.' };
+        push();
+      }
+      return { ok: true, data: structuredClone(interrupted) };
+    };
+    (async () => {
+      await showTask(interrupted.id);
+      noteTask(interrupted, 'request-changes');
+      const feedbackForm = body.querySelector('form');
+      feedbackForm.querySelector('textarea').value = 'Сохранить изображения при переключении вкладок';
+      feedbackForm.addEventListener('submit', event => { window.feedbackNavigationPrevented = event.defaultPrevented; });
+      feedbackForm.requestSubmit();
+      feedbackForm.requestSubmit();
+    })();
+  `);
+  await evaluate(`waitFor(() => sheetKind === 'task' && !!byId('task-launch'))`);
+  await check(`feedbackCalls.length === 1 && sheetKind === 'task' && !body.querySelector('form#note') && taskInSheet.revision === interrupted.revision`, "saved feedback closes its form and opens the current task after a busy-chat failure");
+  await check(`window.feedbackNavigationPrevented`, "feedback submission synchronously prevents navigation and ignores duplicate submits");
+  await check(`body.querySelector('.task-blocker').textContent.includes('другом процессе') && byId('task-launch').textContent === 'Продолжить в новом чате'`, "busy chat failures show a readable reason and the explicit new-chat action");
+  await evaluate(`settle()`);
+  writeFileSync(join(artifacts, "task-busy-chat-recovery.png"), (await window.webContents.capturePage()).toPNG());
+  await evaluate(`
+    let newChatChoice;
+    window.taskboard.launchTask = async (id, options) => { newChatChoice = { id, options }; return { ok: true, data: null }; };
+    byId('task-launch').click(); void 0;
+  `);
+  await evaluate(`settle()`);
+  await check(`newChatChoice.id === interrupted.id && newChatChoice.options.newThread === true && taskInSheet.status === 'blocked'`, "the recovery action asks main to confirm a new chat and preserves the task on cancellation");
   console.log(`Board Chromium checks passed: ${checks}; screenshots: ${join(artifacts, "board-stable.png")}, ${join(artifacts, "board-newest-first.png")}`);
 }).catch(error => {
   console.error(error);

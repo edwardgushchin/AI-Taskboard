@@ -188,6 +188,9 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     await close();
     const usage = tokens.finish(true);
     if (usage) await onTokenUsage?.(usage);
+    if (error instanceof Error && /already has an active writer/i.test(error.message)) {
+      throw Object.assign(error, { code: "CODEX_THREAD_BUSY" });
+    }
     throw error;
   }
 }

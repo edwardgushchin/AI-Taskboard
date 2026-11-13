@@ -9,9 +9,10 @@ let taskSheetRequest = 0;
 let focusBeforeSheet;
 let boardTags = new Map();
 let lanePreferences = {};
-const cardCoverCache = new Map();
-const boardCards = new Map();
-const boardLanes = new Map();
+let cardCoverCache = new Map();
+let boardCards = new Map();
+let boardLanes = new Map();
+const boardViews = new Map();
 const sheet = byId("sheet");
 const body = byId("sheet-body");
 
@@ -386,11 +387,12 @@ const cardCovers = new IntersectionObserver(entries => {
     const image = target.querySelector(".task-card-cover");
     const { task, file } = image.dataset;
     const key = task + "\0" + file;
-    const request = cardCoverCache.get(key) ?? api.attachmentPreview(task, file);
-    cardCoverCache.set(key, request);
-    if (cardCoverCache.size > 32) cardCoverCache.delete(cardCoverCache.keys().next().value);
+    const cache = cardCoverCache;
+    const request = cache.get(key) ?? api.attachmentPreview(task, file);
+    cache.set(key, request);
+    if (cache.size > 32) cache.delete(cache.keys().next().value);
     const discard = () => {
-      if (cardCoverCache.get(key) === request) cardCoverCache.delete(key);
+      if (cache.get(key) === request) cache.delete(key);
     };
     void request.then(src => {
       if (!src || src.length > 1_000_000) discard();
@@ -455,6 +457,11 @@ function taskIndicator(name, count, label, className) {
 }
 
 function blockerBanner({ reason, condition }) {
+  if (/already has an active writer/i.test(reason)) {
+    reason = language("This Codex chat is already open in another process.", "Этот чат Codex уже открыт в другом процессе.");
+    condition = language("Continue in the existing chat, or stop work there and choose Continue in a new chat.",
+      "Продолжите задачу в открытом чате или остановите там работу и нажмите «Продолжить в новом чате».");
+  }
   const banner = element("span", undefined, "task-blocker");
   banner.append(
     element("strong", language("Why it is blocked", "Причина блокировки")),
@@ -564,6 +571,23 @@ function resetBoardRendering() {
   byId("archive-list").replaceChildren();
 }
 
+function switchBoardRendering(previousProject, project) {
+  cardCovers.disconnect();
+  if (previousProject && (boardCards.size || boardLanes.size)) {
+    boardViews.set(previousProject, {
+      cards: boardCards, lanes: boardLanes, covers: cardCoverCache, preferences: lanePreferences,
+      columns: [...byId("lanes").childNodes], archive: [...byId("archive-list").childNodes],
+    });
+  }
+  const saved = boardViews.get(project);
+  boardCards = saved?.cards ?? new Map();
+  boardLanes = saved?.lanes ?? new Map();
+  cardCoverCache = saved?.covers ?? new Map();
+  byId("lanes").replaceChildren(...(saved?.columns ?? []));
+  byId("archive-list").replaceChildren(...(saved?.archive ?? []));
+  return saved?.preferences;
+}
+
 function openCodexTaskAction(task) {
   return button(language("Open Codex chat", "Открыть чат Codex"), async () => {
     const result = await api.openCodexThread(task.id);
@@ -573,14 +597,15 @@ function openCodexTaskAction(task) {
 
 function codexTaskAction(task) {
   const generation = projectGeneration;
-  if (task.status !== "ready" && task.status !== "in_progress") return null;
-  const label = task.status === "in_progress" || task.git
+  const newThread = task.status === "blocked" && /already has an active writer/i.test(task.blocked?.reason ?? "");
+  if (task.status !== "ready" && task.status !== "in_progress" && !newThread) return null;
+  const label = newThread ? language("Continue in a new chat", "Продолжить в новом чате") : task.status === "in_progress" || task.git
     ? language("Continue", "Продолжить")
     : language("Send to work", "Передать в работу");
   const launch = button(label, async () => {
     launch.disabled = true;
     try {
-      const result = await api.launchTask(task.id);
+      const result = await api.launchTask(task.id, newThread ? { newThread: true } : undefined);
       if (generation !== projectGeneration) return;
       if (!result.ok) notice(boardError(result.error));
       else if (sheetKind === "task" && taskInSheet?.id === task.id) await showTask(task.id);
@@ -765,7 +790,11 @@ function render() {
     return status === task.status ? task : { ...task, status };
   }) };
   const noBoard = !board;
-  byId("welcome").hidden = !noBoard;
+  const loading = Boolean(frame.loading || frame.restoring);
+  byId("welcome").hidden = !noBoard || loading;
+  byId("loading").hidden = !noBoard || !loading;
+  byId("loading").textContent = language("Loading projects…", "Загрузка проектов…");
+  byId("app-content").setAttribute("aria-busy", String(noBoard && loading));
   byId("workspace").hidden = noBoard;
   byId("board-actions").hidden = noBoard;
   byId("archive-menu-item").setAttribute("aria-disabled", String(noBoard));
@@ -774,7 +803,7 @@ function render() {
   else if (!sheet.open) notice();
   if (!board) {
     resetBoardRendering();
-    renderWelcome();
+    if (!loading) renderWelcome();
     return;
   }
 
@@ -900,13 +929,17 @@ function form(kind, title, fields, label, submit) {
   const save = element("button", label, "button primary");
   save.type = "submit";
   form.append(save);
-  form.addEventListener("submit", protect(async event => {
-    event.preventDefault();
-    save.disabled = true;
+  const saveFields = protect(async () => {
     try {
       await submit(Object.fromEntries(Object.entries(inputs).map(([key, input]) => [key, input.value])));
     } finally { save.disabled = false; }
-  }));
+  });
+  form.addEventListener("submit", event => {
+    event.preventDefault();
+    if (save.disabled) return;
+    save.disabled = true;
+    saveFields();
+  });
   body.append(form);
   return form;
 }
@@ -1776,6 +1809,7 @@ function renderProjectTabs() {
 }
 
 function update(next) {
+  const previousProject = frame.project;
   const projectChanged = frame.project !== next.project;
   const tagsChanged = JSON.stringify(frame.board?.tags) !== JSON.stringify(next.board?.tags);
   frame = next;
@@ -1791,9 +1825,7 @@ function update(next) {
   if (projectChanged) {
     projectGeneration++;
     taskSheetRequest++;
-    lanePreferences = loadLanePreferences();
-    cardCoverCache.clear();
-    resetBoardRendering();
+    lanePreferences = switchBoardRendering(previousProject, next.project) ?? loadLanePreferences();
     archiveView = false;
     byId("search").value = "";
     byId("filters").open = false;
@@ -1801,6 +1833,10 @@ function update(next) {
     byId("tag-filter").replaceChildren();
     delete byId("tag-filter").dataset.options;
     if (sheet.open) sheet.close();
+  }
+  if (Array.isArray(next.tabs)) {
+    const openProjects = new Set(next.tabs.map(tab => tab.path));
+    for (const project of boardViews.keys()) if (!openProjects.has(project)) boardViews.delete(project);
   }
   render();
   const tagSettings = byId("tag-settings");

@@ -52,6 +52,7 @@ interface WindowState {
   active: ProjectTab;
   closing?: boolean;
   ready?: Promise<void>;
+  restoring: boolean;
 }
 
 interface BoardWatch {
@@ -147,6 +148,7 @@ function stateOf(event: IpcMainInvokeEvent): ProjectTab {
 
 function frame(state: ProjectTab) {
   return {
+    restoring: windowStates.get(state.window.webContents.id)?.restoring ?? false,
     tabs: projectLabels(windowStates.get(state.window.webContents.id)?.tabs.flatMap(tab => tab.project ? [tab.project] : []) ?? []),
     project: state.project, board: state.board, error: state.error, loading: state.loading, russian, theme,
     runningTasks: state.board?.tasks.filter(task => {
@@ -397,7 +399,7 @@ function createWindow(initial: string[] = [], selected?: string): WindowState {
   window.webContents.zoomMode = "isolated";
   const id = window.webContents.id;
   const active: ProjectTab = { window, selection: 0 };
-  const state: WindowState = { window, tabs: [active], active };
+  const state: WindowState = { window, tabs: [active], active, restoring: initial.length > 0 };
   windowStates.set(id, state);
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-navigate", event => event.preventDefault());
@@ -422,6 +424,9 @@ function createWindow(initial: string[] = [], selected?: string): WindowState {
     const selectedTab = state.tabs.find(tab => tab.project && selected && projectIdentity(tab.project) === projectIdentity(selected));
     if (selectedTab) activateTab(state, selectedTab);
     saveSession();
+  }).finally(() => {
+    state.restoring = false;
+    send(state.active);
   });
   return state;
 }
@@ -907,7 +912,7 @@ async function recordRunFailure(project: string, id: string, reason: string, con
   if (!result.ok && result.error.code !== "INVALID_TRANSITION") return result.error.message;
 }
 
-async function launchTask(project: string, id: string, revisionRequest?: { input: unknown }) {
+async function launchTask(project: string, id: string, revisionRequest?: { input: unknown }, newThread = false) {
   const key = project + "\0" + id;
   if (chatRuns.has(key)) return cliFailure("CHAT_BUSY", lang("Wait for the chat reply or stop the agent first.", "Дождитесь ответа в чате или остановите агента."));
   if (launchingTasks.has(key)) return cliFailure("LAUNCH_IN_PROGRESS", "This task is already being launched.");
@@ -934,7 +939,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   let prepared = false;
   let monitoring = false;
   try {
-    const current = await callCli<Task>(project, [revisionRequest ? "request-changes" : "show", id], revisionRequest?.input);
+    let current = await callCli<Task>(project, [revisionRequest ? "request-changes" : "show", id], revisionRequest?.input);
     if (!current.ok) return current;
     prepared = Boolean(revisionRequest);
     const client = await configuredCodex(app.getPath("userData"));
@@ -942,6 +947,18 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       const reason = lang("Connect Codex in settings.", "Подключите Codex в настройках.");
       if (prepared) throw new Error(reason);
       return cliFailure("CODEX_UNAVAILABLE", reason);
+    }
+    if (newThread) {
+      if (current.data.status !== "blocked" || !current.data.codexThreadId ||
+          !/already has an active writer/i.test(current.data.blocked?.reason ?? "")) {
+        return cliFailure("INVALID_INPUT", lang("Reopen the current task before retrying.", "Откройте актуальную карточку перед повтором."));
+      }
+      current = await callCli<Task>(project, ["resume", id], {
+        revision: current.data.revision,
+        reason: lang("The user chose to continue in a new Codex chat.", "Пользователь выбрал продолжение в новом чате Codex."),
+      });
+      if (!current.ok) return current;
+      prepared = true;
     }
     signal.throwIfAborted();
     const started = await callCli<{ task: Task; worktree: string }>(project, ["start", id], { revision: current.data.revision });
@@ -951,7 +968,8 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     }
     prepared = true;
     signal.throwIfAborted();
-    const run = await startCodexRun(client, project, started.data.worktree, started.data.task, item => {
+    const task = newThread ? { ...started.data.task, codexThreadId: undefined } : started.data.task;
+    const run = await startCodexRun(client, project, started.data.worktree, task, item => {
       activity.set(item.id, item);
       updateTimer ??= setTimeout(publish, 80);
     }, report => saveTaskTokenUsage(project, id, report), signal);
@@ -962,8 +980,12 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     runningTasks.add(key);
     notifyRunChange(project);
     // Preserve edits made while Codex was starting.
-    const saved = started.data.task.codexThreadId ? { ok: true as const, data: started.data.task } :
-      await callCli<Task>(project, ["update", id], { codexThreadId, actor: "user" });
+    const saved = started.data.task.codexThreadId === codexThreadId ? { ok: true as const, data: started.data.task } :
+      await callCli<Task>(project, ["update", id], {
+        codexThreadId, actor: "user",
+        ...(newThread ? { reason: lang("Continued in a new chat. Previous chat: ", "Продолжение в новом чате. Предыдущий чат: ") +
+          "codex://threads/" + started.data.task.codexThreadId } : {}),
+      });
     void completion.then(async reason => {
       await saveActivity();
       const items = [...activity.values()];
@@ -999,21 +1021,46 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     if (saved.ok) return saved;
     return cliFailure("CODEX_LINK_FAILED", saved.error.message + "\n" + "codex://threads/" + codexThreadId);
   } catch (error) {
-    const reason = (error as Error).message;
+    const busy = (error as { code?: string }).code === "CODEX_THREAD_BUSY";
+    const reason = busy ? lang("This Codex chat is already open in another process. The board could not start the agent.",
+      "Этот чат Codex уже открыт в другом процессе. Доске не удалось запустить агента.") + "\n\n" + (error as Error).message : (error as Error).message;
     await saveActivity();
-    const failure = prepared ? await recordRunFailure(project, id, reason) : undefined;
-    return cliFailure("CODEX_LAUNCH_FAILED", [reason, failure].filter(Boolean).join("\n"));
+    const condition = busy ? lang("Continue in the existing chat, or stop work there and choose Continue in a new chat.",
+      "Продолжите задачу в открытом чате или остановите там работу и нажмите «Продолжить в новом чате».") : undefined;
+    const failure = prepared ? await recordRunFailure(project, id, reason, condition) : undefined;
+    // The feedback was saved even when starting its follow-up run failed.
+    if (revisionRequest && prepared && !failure) return callCli<Task>(project, ["show", id]);
+    return cliFailure(busy ? "CODEX_THREAD_BUSY" : "CODEX_LAUNCH_FAILED", [reason, failure].filter(Boolean).join("\n"));
   } finally {
     if (!monitoring) { launchingTasks.delete(key); operation.finish(); }
   }
 }
 
-ipcMain.handle("board:launchTask", async (event, id: unknown) => {
-  const { project } = stateOf(event);
-  if (!project || typeof id !== "string" || !taskIdPattern.test(id)) {
+ipcMain.handle("board:launchTask", async (event, id: unknown, options: unknown = {}) => {
+  const { project, window } = stateOf(event);
+  const input = options as { newThread?: unknown } | null;
+  if (!project || typeof id !== "string" || !taskIdPattern.test(id) || !input || typeof input !== "object" ||
+      (input.newThread !== undefined && typeof input.newThread !== "boolean")) {
     return cliFailure("INVALID_INPUT", "Choose a task.");
   }
-  return launchTask(project, id);
+  if (input.newThread) {
+    const current = await callCli<Task>(project, ["show", id]);
+    if (!current.ok) return current;
+    if (current.data.status !== "blocked" || !current.data.codexThreadId ||
+        !/already has an active writer/i.test(current.data.blocked?.reason ?? "")) {
+      return cliFailure("INVALID_INPUT", lang("Reopen the current task before retrying.", "Откройте актуальную карточку перед повтором."));
+    }
+    const choice = await dialog.showMessageBox(window, {
+      type: "question", title: "AI Taskboard",
+      message: lang("Continue in a new Codex chat?", "Продолжить в новом чате Codex?"),
+      detail: lang("Stop any work in the previous chat first. The new chat will use this task and its existing worktree. The previous chat will remain available.",
+        "Сначала остановите работу в предыдущем чате. Новый чат получит эту задачу и её рабочую копию. Прежний чат останется доступен."),
+      buttons: [lang("Cancel", "Отмена"), lang("Continue in a new chat", "Продолжить в новом чате")],
+      defaultId: 0, cancelId: 0, noLink: true,
+    });
+    if (choice.response !== 1) return { ok: true, data: null };
+  }
+  return launchTask(project, id, undefined, input.newThread === true);
 });
 
 ipcMain.handle("board:openCodexThread", async (event, id: unknown) => {

@@ -39,6 +39,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '  } else if (method === "project/list") {',
     '    result = { data: [{ id: "board-project", roots: [{ path: require("node:path").dirname(capture) }] }], nextCursor: null };',
     '  } else if (method === "thread/start" || method === "thread/resume") {',
+    '    if (outcome === "busy") { send({ id, error: { message: "thread " + thread + " already has an active writer" } }); return; }',
     '    result = { model: "resolved-model", thread: { id: params.threadId ?? thread, projectId: outcome === "wrong-project" ? null : params.projectId },',
     '      approvalPolicy: params.approvalPolicy, approvalsReviewer: outcome === "manual-review" ? "user" : params.approvalsReviewer,',
     '      activePermissionProfile: { id: outcome === "readonly" ? ":read-only" : params.permissions } };',
@@ -168,6 +169,9 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(resumedCalls[2].params.cwd, worktree);
   assert.equal(resumedCalls[2].params.approvalPolicy, "on-request");
   assert.equal(resumedCalls[2].params.approvalsReviewer, "auto_review");
+  await assert.rejects(startCodexRun(client("busy"), folder, worktree, { ...task, codexThreadId: thread }),
+    (error: Error & { code?: string }) => error.code === "CODEX_THREAD_BUSY" && /active writer/.test(error.message));
+  assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/resume");
   for (const outcome of ["usage", "usage-failed", "usage-closed"]) {
     const reports: TokenUsageReport[] = [];
     const measured = await startCodexRun(client(outcome), folder, worktree, task, undefined, async report => { reports.push(report); });
