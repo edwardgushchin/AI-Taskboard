@@ -1287,9 +1287,9 @@ async function showAcceptedTask(task) {
   await showTask(task.id);
   const messages = [];
   if (task.localChangesWarning) messages.push(boardError(task.localChangesWarning));
-  if (task.cleanupWarning) {
-    messages.push(language("The task was accepted. Cleanup needs attention.",
-      "Задача принята. Завершите уборку рабочей копии и ветки.") + "\n" + boardError(task.cleanupWarning));
+  if (task.cleanupWarning && taskInSheet?.id === task.id && taskInSheet.cleanupAvailable) {
+    messages.push(language("The task was accepted. Automatic cleanup is pending.",
+      "Задача принята. Автоматическая уборка пока не завершена.") + "\n" + boardError(task.cleanupWarning));
   }
   if (messages.length) notice(messages.join("\n"));
 }
@@ -1850,7 +1850,8 @@ function update(next) {
     if (tagsChanged) byId("task-sheet-tags")?.replaceChildren(...tagBadges(taskInSheet.tags));
     const task = frame.board?.tasks.find(entry => entry.id === taskInSheet.id);
     const archived = frame.board?.archived.some(entry => entry.id === taskInSheet.id);
-    if ((task && (task.revision !== taskInSheet.revision ||
+    const cleaned = taskInSheet.cleanupAvailable && frame.board?.cleanedTasks?.includes(taskInSheet.id);
+    if (cleaned || (task && (task.revision !== taskInSheet.revision ||
         String(task.unfinishedDependencies) !== String(taskInSheet.unfinishedDependencies))) ||
         (archived && !task && !["done", "cancelled"].includes(taskInSheet.status))) {
       void protect(() => showTask(taskInSheet.id))();

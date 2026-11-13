@@ -1,30 +1,19 @@
 // Real Chromium checks for the chat renderer, without opening a board or contacting Codex.
 // Optional: --references <task attachment directory> --artifacts <screenshot directory>
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { electronCheck } from "./electron-check.mjs";
 
 const script = fileURLToPath(import.meta.url);
 const root = resolve(dirname(script), "..");
-if (!process.versions.electron) {
-  const env = { ...process.env };
-  delete env.ELECTRON_RUN_AS_NODE;
-  const result = spawnSync(createRequire(import.meta.url)("electron"), [script, ...process.argv.slice(2)], {
-    env, windowsHide: true, stdio: "inherit", timeout: 90_000,
-  });
-  if (result.error) console.error(result.error);
-  if (result.status !== 0) console.error("Electron exited before completing chat checks: " + result.status);
-  process.exit(result.status === 0 ? 0 : 1);
-}
-
+const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "chat", 90_000);
 const { app, BrowserWindow, nativeTheme } = await import("electron");
 const option = name => { const index = process.argv.indexOf(name); return index < 0 ? undefined : process.argv[index + 1]; };
-const artifacts = resolve(option("--artifacts") ?? join(root, ".dev-diary", "chat-check"));
-mkdirSync(artifacts, { recursive: true });
-const profile = mkdtempSync(join(artifacts, "profile-"));
+const profile = join(scratch, "profile");
+mkdirSync(profile);
 app.setPath("userData", profile);
 app.disableHardwareAcceleration();
 const read = name => readFileSync(join(root, "src", "desktop", name), "utf8");
@@ -348,16 +337,12 @@ app.whenReady().then(async () => {
   await check(`body.querySelector('#task-chat-input').value === 'Сохранить черновик' && body.querySelector('.chat-send use').getAttribute('href') === '#icon-play'`, "completion retains a new draft");
   await evaluate(`api.chatSend = async () => ({ saved: false, result: { ok: false, error: { message: 'Write failed' } } }); body.querySelector('.chat-composer').requestSubmit()`);
   await check(`body.querySelector('#task-chat-input').value === 'Сохранить черновик' && body.querySelector('.chat-status').textContent.includes('Write failed')`, "a save failure retains the draft and displays the error");
-  console.log("Chat Chromium checks passed; screenshots: " + artifacts);
+  console.log("Chat Chromium checks passed");
+  if (keepArtifacts) console.log("Screenshots: " + artifacts);
 }).catch(error => {
   console.error(error);
   process.exitCode = 1;
 }).finally(() => {
   window?.destroy();
-  // Electron may hold profile files briefly on Windows; leave them in the ignored artifact directory.
-  try {
-    assert.equal(dirname(profile), artifacts);
-    rmSync(profile, { recursive: true, maxRetries: 3, retryDelay: 100 });
-  } catch {}
   app.exit(process.exitCode ?? 0);
 });

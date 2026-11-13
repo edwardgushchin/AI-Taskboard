@@ -1,29 +1,19 @@
 // Windows font verification in the real app, with an isolated profile and in-memory messages.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { electronCheck } from "./electron-check.mjs";
 
-const script = fileURLToPath(import.meta.url);
-if (!process.versions.electron) {
-  const env = { ...process.env };
-  delete env.ELECTRON_RUN_AS_NODE;
-  const result = spawnSync(createRequire(import.meta.url)("electron"), [script], {
-    env, windowsHide: true, stdio: "inherit", timeout: 60_000,
-  });
-  if (result.error) console.error(result.error);
-  process.exit(result.status === 0 ? 0 : 1);
-}
-
+const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "chat-font", 60_000);
 assert.equal(process.platform, "win32", "Run this check on Windows to verify Segoe UI");
 const { app, nativeTheme } = await import("electron");
-const root = resolve(dirname(script), "..");
-const artifacts = join(root, ".dev-diary", "chat-font-check");
-mkdirSync(artifacts, { recursive: true });
-app.setPath("userData", mkdtempSync(join(artifacts, "profile-")));
+const profile = join(scratch, "profile");
+mkdirSync(profile);
+app.setPath("userData", profile);
+app.setPath("appData", scratch);
+app.requestSingleInstanceLock = () => true;
 app.disableHardwareAcceleration();
+app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
 let window;
 const loaded = new Promise((resolve, reject) => {
   const timeout = setTimeout(() => reject(new Error("App window did not load")), 20_000);
@@ -38,7 +28,6 @@ async function run() {
   try {
     await import("../src/desktop/main.ts");
     await loaded;
-    window.hide();
     window.webContents.setBackgroundThrottling(false);
     const evaluate = code => window.webContents.executeJavaScript(code);
     assert.match(window.webContents.getURL(), /\/src\/desktop\/index\.html$/);
@@ -112,13 +101,13 @@ async function run() {
     assert.equal(await evaluate(`document.querySelector('.chat-log').scrollWidth <= document.querySelector('.chat-log').clientWidth + 1`), true);
     debuggerApi.detach();
     writeFileSync(join(artifacts, "fonts.json"), JSON.stringify(report, null, 2) + "\n");
-    console.log(`${report.checks.length} Windows platform-font checks passed; artifacts: ${artifacts}`);
+    console.log(`${report.checks.length} Windows platform-font checks passed`);
+    if (keepArtifacts) console.log("Artifacts: " + artifacts);
   } catch (error) {
     console.error(error);
     process.exitCode = 1;
   } finally {
     window?.destroy();
-    // Keep the isolated profile with ignored artifacts; Chromium may still hold files on Windows.
     app.exit(process.exitCode ?? 0);
   }
 }

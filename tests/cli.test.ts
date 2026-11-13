@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import childProcess, { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { syncBuiltinESMExports } from "node:module";
@@ -761,37 +761,46 @@ test("accepted task cleanup preserves local files and refuses to delete a change
   assert.equal(cli(root, ["cleanup", task.id]).branchRemoved, true);
   assert.equal(git(root, "branch", "--list", "ai-taskboard/" + task.id), "");
   assert.equal(existsSync(worktree), false);
-  const artifacts = join(root, ".tasks", "artifacts", task.id);
-  const [archive] = readdirSync(artifacts);
-  assert.equal(readFileSync(join(artifacts, archive, ".tasks", "qa", "report.txt"), "utf8"), "keep this report");
+  assert.equal(existsSync(join(root, ".tasks", "artifacts")), false);
   assert.equal(cli(root, ["cleanup", task.id]).removed, false);
 });
 
-test("accept archives ignored Worklog and QA output before removing the task worktree", t => {
+test("accept discards ignored worktree output and preserves the project diary and task attachments", t => {
   const root = fixture(t, true);
   const exclude = join(root, ".git", "info", "exclude");
   writeFileSync(exclude, readFileSync(exclude, "utf8") + "\n/.dev-diary/\n");
   const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "result.txt"), "delivered\n"));
   const diary = join(".dev-diary", "2026", "11");
   const qa = join(".tasks", "qa");
+  const projectDiary = join(root, diary, "2026-11-12.md");
+  mkdirSync(dirname(projectDiary), { recursive: true });
+  writeFileSync(projectDiary, "Project diary\n");
   mkdirSync(join(worktree, diary), { recursive: true });
   mkdirSync(join(worktree, qa), { recursive: true });
-  writeFileSync(join(worktree, diary, "2026-11-12.md"), "Worklog entry\n");
-  writeFileSync(join(worktree, qa, "results.bin"), Buffer.from([0, 255, 128]));
+  writeFileSync(join(worktree, diary, "2026-11-12.md"), "Task diary\n");
+  const report = join(worktree, qa, "results.bin");
+  const bytes = Buffer.from([0, 255, 128]);
+  writeFileSync(report, bytes);
+  if (process.platform === "win32") chmodSync(report, 0o444);
+  symlinkSync(dirname(projectDiary), join(worktree, qa, "linked-diary"), process.platform === "win32" ? "junction" : "dir");
+  const attached = cli(root, ["chat", task.id], {
+    text: "Keep the QA result.", model: "fixture-model", effort: "medium", attachmentSources: [{ path: report }],
+  });
 
-  const done = cli(root, ["accept", task.id], { revision: task.revision });
+  const done = cli(root, ["accept", task.id], { revision: attached.revision });
   assert.equal(done.status, "done");
   assert.equal(done.cleanupWarning, undefined);
   assert.equal(existsSync(worktree), false);
   assert.equal(git(root, "branch", "--list", "ai-taskboard/" + task.id), "");
-  const artifacts = join(root, ".tasks", "artifacts", task.id);
-  const [archive] = readdirSync(artifacts);
-  assert.equal(readFileSync(join(artifacts, archive, diary, "2026-11-12.md"), "utf8"), "Worklog entry\n");
-  assert.deepEqual(readFileSync(join(artifacts, archive, qa, "results.bin")), Buffer.from([0, 255, 128]));
+  assert.equal(existsSync(join(root, ".tasks", "artifacts")), false);
+  assert.equal(readFileSync(projectDiary, "utf8"), "Project diary\n");
+  const file = done.attachments[0].file;
+  assert.equal(cli(root, ["attachment", "read", task.id], { file }).base64, bytes.toString("base64"));
 });
 
 test("Windows cleanup recovers a worktree left unregistered by a directory lock", {
   skip: process.platform !== "win32",
+  timeout: 90_000,
 }, async t => {
   const root = fixture(t, true);
   const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "result.txt"), "delivered\n"));
@@ -819,8 +828,32 @@ test("Windows cleanup recovers a worktree left unregistered by a directory lock"
   cli(root, ["cleanup", task.id], undefined, "DIRTY_WORKTREE");
   assert.equal(readFileSync(local, "utf8"), "local data");
   assert.equal(git(root, "rev-parse", task.git.branch), task.git.submission.sha);
-  rmSync(local);
-  assert.deepEqual(cli(root, ["cleanup", task.id]), { removed: true, branchRemoved: true });
+  const watcher = spawn(process.execPath, commandArgs(root, ["watch"]), {
+    env, stdio: ["ignore", "pipe", "ignore"], windowsHide: true,
+  });
+  const watcherClosed = once(watcher, "close");
+  const reader = createInterface({ input: watcher.stdout });
+  const lines = reader[Symbol.asyncIterator]();
+  const nextFrame = async () => {
+    const { value } = await lines.next();
+    assert.equal(typeof value, "string", "watch exited before sending a snapshot");
+    return JSON.parse(value!);
+  };
+  t.signal.addEventListener("abort", () => watcher.kill(), { once: true });
+  try {
+    const initial = await nextFrame();
+    assert.equal(initial.ok, true);
+    assert.deepEqual(initial.data.cleanedTasks, []);
+    assert.equal(readFileSync(local, "utf8"), "local data");
+    rmSync(local);
+    const updated = await nextFrame();
+    assert.equal(updated.ok, true);
+    assert.deepEqual(updated.data.cleanedTasks, [task.id]);
+  } finally {
+    reader.close();
+    watcher.kill();
+    await watcherClosed;
+  }
   assert.equal(existsSync(worktree), false);
   assert.equal(git(root, "branch", "--list", "ai-taskboard/" + task.id), "");
   assert.equal(cli(root, ["show", task.id]).cleanupAvailable, false);

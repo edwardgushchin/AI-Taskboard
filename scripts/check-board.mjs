@@ -1,29 +1,19 @@
 // Real Chromium regression checks for board refreshes, with a local fixture and no Codex calls.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { electronCheck } from "./electron-check.mjs";
 
 const script = fileURLToPath(import.meta.url);
 const root = resolve(dirname(script), "..");
 const require = createRequire(import.meta.url);
-if (!process.versions.electron) {
-  const env = { ...process.env };
-  delete env.ELECTRON_RUN_AS_NODE;
-  const result = spawnSync(require("electron"), [script], {
-    env, windowsHide: true, stdio: "inherit", timeout: 60_000,
-  });
-  if (result.error) console.error(result.error);
-  if (result.status !== 0) console.error("Electron exited before completing board checks: " + result.status);
-  process.exit(result.status === 0 ? 0 : 1);
-}
-
+const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "board", 60_000);
 const { app, BrowserWindow } = await import("electron");
-const artifacts = join(root, ".dev-diary", "board-check");
-mkdirSync(artifacts, { recursive: true });
-app.setPath("userData", mkdtempSync(join(artifacts, "profile-")));
+const profile = join(scratch, "profile");
+mkdirSync(profile);
+app.setPath("userData", profile);
 app.disableHardwareAcceleration();
 const read = name => readFileSync(join(root, "src", "desktop", name), "utf8");
 let window;
@@ -335,7 +325,8 @@ app.whenReady().then(async () => {
   `);
   await evaluate(`settle()`);
   await check(`newChatChoice.id === interrupted.id && newChatChoice.options.newThread === true && taskInSheet.status === 'blocked'`, "the recovery action asks main to confirm a new chat and preserves the task on cancellation");
-  console.log(`Board Chromium checks passed: ${checks}; screenshots: ${join(artifacts, "board-stable.png")}, ${join(artifacts, "board-newest-first.png")}`);
+  console.log(`Board Chromium checks passed: ${checks}`);
+  if (keepArtifacts) console.log("Screenshots: " + artifacts);
 }).catch(error => {
   console.error(error);
   process.exitCode = 1;

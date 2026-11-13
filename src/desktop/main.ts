@@ -33,6 +33,7 @@ interface Board {
   tags: BoardTag[];
   tasks: Task[];
   archived: (ArchiveLink & { id: string })[];
+  cleanedTasks?: string[];
   gitInfo?: { branch?: string; head?: string; user?: string };
 }
 

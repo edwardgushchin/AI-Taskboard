@@ -256,7 +256,7 @@ export class BoardStore {
     this.index = readIndex(join(location.directory, "board.json"));
   }
 
-  subdirectory(name: "tasks" | "worktrees" | "pending" | "attachments" | "archive" | "artifacts", create = false): string {
+  subdirectory(name: "tasks" | "worktrees" | "pending" | "attachments" | "archive", create = false): string {
     const path = join(this.location.directory, name);
     directory(path, create);
     return path;

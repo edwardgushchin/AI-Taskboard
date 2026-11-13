@@ -91,15 +91,21 @@ function boardGitInfo(location: BoardLocation) {
 }
 
 function watchBoard(location: BoardLocation): void {
+  const cleanedTasks = new Set<string>();
+  let nextCleanup = 0;
   const read = () => {
     const board = onBoard(location, store => {
       if (!location.repository && existsSync(join(location.root, ".git"))) {
         const repo = discoverRepository(location.root);
         if (repo?.root === location.root) location.repository = repo;
       }
+      if (location.repository && Date.now() >= nextCleanup) {
+        nextCleanup = Date.now() + 15_000;
+        for (const id of retryAcceptedCleanup(store, location.repository.root)) cleanedTasks.add(id);
+      }
       return snapshotBoard(store);
     });
-    return { ok: true, data: { ...board, gitInfo: boardGitInfo(location) } };
+    return { ok: true, data: { ...board, gitInfo: boardGitInfo(location), cleanedTasks: [...cleanedTasks] } };
   };
   let previous = JSON.stringify(read());
   process.stdout.write(previous + "\n");
@@ -145,6 +151,31 @@ function watchBoard(location: BoardLocation): void {
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
+}
+
+function retryAcceptedCleanup(store: BoardStore, root: string): string[] {
+  const prefix = "refs/heads/ai-taskboard/";
+  let branches: string[];
+  try {
+    const result = invokeGit(root, ["for-each-ref", "--format=%(refname)", prefix]);
+    if (result.code !== 0) return [];
+    branches = result.stdout.trimEnd().split("\n");
+  } catch {
+    return [];
+  }
+  const cleaned: string[] = [];
+  for (const branch of branches) {
+    const id = branch.slice(prefix.length);
+    if (!Object.hasOwn(store.index.tasks, id) && store.index.archive[id]?.status !== "done") continue;
+    try {
+      const task = readTask(store, id);
+      if (task.status !== "done" || !task.git?.accepted || task.git.branch !== branch || hasPending(store, task)) continue;
+      if (cleanTaskWorktree(store, task).branchRemoved) cleaned.push(id);
+    } catch {
+      // A lock or local files can keep the worktree in place until the next pass.
+    }
+  }
+  return cleaned;
 }
 
 function run(

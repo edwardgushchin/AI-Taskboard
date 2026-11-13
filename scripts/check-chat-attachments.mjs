@@ -4,34 +4,25 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { electronCheck } from "./electron-check.mjs";
 
 const script = fileURLToPath(import.meta.url);
 const root = resolve(dirname(script), "..");
 const require = createRequire(import.meta.url);
-if (!process.versions.electron) {
-  const env = { ...process.env, TASKBOARD_CHECK_NODE: process.execPath };
-  delete env.ELECTRON_RUN_AS_NODE;
-  const result = spawnSync(require("electron"), [script, ...process.argv.slice(2)], {
-    env, windowsHide: true, stdio: "inherit", timeout: 90_000,
-  });
-  if (result.error) console.error(result.error);
-  if (result.status !== 0) console.error("Electron exited before completing attachment checks: " + result.status);
-  process.exit(result.status === 0 ? 0 : 1);
-}
-
+const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "chat-attachments", 90_000);
 const { app, BrowserWindow, nativeTheme } = await import("electron");
 const option = name => { const at = process.argv.indexOf(name); return at < 0 ? undefined : process.argv[at + 1]; };
 const project = resolve(option("--project") ?? root);
 const id = option("--task");
 assert.match(id ?? "", /^T-\d{4,}$/);
-const artifacts = resolve(option("--artifacts") ?? join(root, ".dev-diary", "chat-attachments-check"));
-mkdirSync(artifacts, { recursive: true });
-const profile = mkdtempSync(join(artifacts, "profile-"));
-const downloads = mkdtempSync(join(artifacts, "downloads-"));
+const profile = join(scratch, "profile");
+const downloads = join(scratch, "downloads");
+mkdirSync(profile);
+mkdirSync(downloads);
 app.setPath("userData", profile);
 app.disableHardwareAcceleration();
 function cli(args, input) {
@@ -154,9 +145,9 @@ app.whenReady().then(async () => {
   checks.push("the source card, its status, history and revision remain unchanged");
   writeFileSync(join(artifacts, "results.json"), JSON.stringify({ platform: process.platform, electron: process.versions.electron,
     task: id, files, checks: checks.length, passed: checks }, null, 2));
-  console.log(`${checks.length} attachment Chromium checks passed; artifacts: ${artifacts}`);
+  console.log(`${checks.length} attachment Chromium checks passed`);
+  if (keepArtifacts) console.log("Artifacts: " + artifacts);
 }).catch(error => { console.error(error); process.exitCode = 1; }).finally(() => {
   window?.destroy();
-  try { assert.equal(dirname(profile), artifacts); rmSync(profile, { recursive: true, maxRetries: 3, retryDelay: 100 }); } catch {}
   app.exit(process.exitCode ?? 0);
 });
