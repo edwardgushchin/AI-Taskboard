@@ -85,6 +85,7 @@ export interface TaskEvent {
   actor: Actor;
   action: string;
   text?: string;
+  attachment?: string;
   from?: TaskState;
   to?: TaskState;
   chat?: ChatSettings & { files?: string[]; usage?: ChatUsage; commentary?: string[] };
@@ -92,6 +93,7 @@ export interface TaskEvent {
 }
 
 export interface Task {
+  tokenUsage?: import("./token-usage.ts").TaskTokenUsage;
   id: string;
   title: string;
   description: string;

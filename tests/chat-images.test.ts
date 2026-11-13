@@ -4,8 +4,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import type { TestContext } from "node:test";
-import { addChatMessage, readAttachment, readTask, restoreReplyImages, sweepArchives } from "../src/cli/archive.ts";
-import { BoardStore, initializeBoard } from "../src/cli/storage.ts";
+import { addAttachment, addChatMessage, readAttachment, readTask, restoreReplyImages, sweepArchives } from "../src/cli/archive.ts";
+import { BoardStore, initializeBoard, validateCard } from "../src/cli/storage.ts";
 import { changeTask, createTask } from "../src/cli/tasks.ts";
 import { maxAttachmentBytes } from "../src/cli/model.ts";
 import { saveChatImages } from "../src/desktop/chat-images.ts";
@@ -130,4 +130,34 @@ test("known image files restore an existing reply without changing the conversat
   assert.equal(restored.status, answered.status);
   assert.throws(() => restoreReplyImages(store, restored, input), { code: "REVISION_CONFLICT" });
   assert.throws(() => restoreReplyImages(store, restored, { ...input, revision: restored.revision }), { code: "CHAT_CHANGED" });
+});
+
+test("standalone attachments keep exact event references after reopening and archiving", t => {
+  const { root, store } = fixture(t);
+  const source = join(root, "source.png");
+  writeFileSync(source, png);
+  let task = store.create(createTask("T-0001", { title: "Standalone images" }));
+  task = addAttachment(store, task, { path: source, name: "same.png", actor: "agent" });
+  task = addAttachment(store, task, { path: source, name: "same.png", actor: "user" });
+  const expected = task.attachments.map(file => file.file);
+  assert.deepEqual(task.history.filter(event => event.action === "attach").map(event => event.attachment), expected);
+  assert.deepEqual(readTask(new BoardStore(store.location), task.id), task);
+  const invalid = structuredClone(task);
+  invalid.history.at(-1)!.attachment = "missing";
+  assert.throws(() => validateCard(invalid, task.id), { code: "CORRUPT_STORAGE" });
+  invalid.history.at(-1)!.attachment = expected[0];
+  invalid.history.at(-1)!.action = "comment";
+  assert.throws(() => validateCard(invalid, task.id), { code: "CORRUPT_STORAGE" });
+  delete invalid.history.at(-1)!.attachment;
+  assert.doesNotThrow(() => validateCard(invalid, task.id));
+  const closed = store.save(changeTask(task, "cancel", { reason: "Archive images" }));
+  store.index.settings.archiveAfterDays = 0;
+  store.saveIndex();
+  assert.deepEqual(sweepArchives(store).archived, [task.id]);
+  assert.deepEqual(readTask(new BoardStore(store.location), task.id), closed);
+  expected.forEach(file => {
+    const saved = readAttachment(store, task.id, { file });
+    assert.ok("base64" in saved);
+    assert.equal(saved.base64, png.toString("base64"));
+  });
 });

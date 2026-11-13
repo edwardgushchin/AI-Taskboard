@@ -39,6 +39,9 @@ app.whenReady().then(async () => {
     width: 850, height: 960, show: false,
     webPreferences: { sandbox: true, contextIsolation: true, backgroundThrottling: false },
   });
+  window.webContents.on("console-message", details => {
+    if (details.level === "error") console.error(details.message);
+  });
   const html = read("index.html").replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, "")
     .replace(/<link\b[^>]*>/g, "").replace(/<meta http-equiv="Content-Security-Policy"[^>]*>/, "");
   await window.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
@@ -53,11 +56,12 @@ app.whenReady().then(async () => {
     };
     ${readFileSync(require.resolve("markdown-it/browser"), "utf8")}
     ${read("image-preview.js")}
+    ${read("markdown.js")}
     ${read("chat.js")}
     ${read("renderer.js")}
     void 0;
   `);
-  const evaluate = code => window.webContents.executeJavaScript(code);
+  const evaluate = (code, userGesture = false) => window.webContents.executeJavaScript(code, userGesture);
   const check = async (code, message) => assert.equal(await evaluate(code), true, message);
   const capture = async name => {
     await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
@@ -230,9 +234,67 @@ app.whenReady().then(async () => {
     const liveImages = body.querySelector('.chat-run-live'); liveImages.querySelector('.chat-run-group').open = true;
   `);
   await check(`body.querySelector('.chat-work').querySelectorAll('.chat-run-images').length === viewedImages.length && liveImages.querySelectorAll('.chat-run-images').length === viewedImages.length`, "reopening and live updates both retain every viewed image");
+  await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
   await evaluate(`const retainedImageTile = liveImages.querySelector('.chat-attachment'); retainedImageTile.focus();
     const readsBeforeUpdate = imageReads.length; updateChat({ project: 'fixture', id: 'T-0032', type: 'run', items: viewedImages });`);
-  await check(`liveImages.querySelector('.chat-attachment') === retainedImageTile && document.activeElement === retainedImageTile && imageReads.length === readsBeforeUpdate`, "stream updates retain image tiles, reads and keyboard focus");
+  await check(`liveImages.querySelector('.chat-attachment') === retainedImageTile`, "stream updates retain image tiles");
+  await check(`document.activeElement === retainedImageTile`, "stream updates retain image keyboard focus");
+  await check(`imageReads.length === readsBeforeUpdate`, "stream updates do not repeat image reads");
+
+  await evaluate(`
+    window.markdownReads = [];
+    api.readMarkdown = async (id, link, source) => {
+      markdownReads.push({ id, link, source });
+      if (link.includes('missing.md')) return { ok: false, error: { code: 'MARKDOWN_UNAVAILABLE', message: 'Документ недоступен' } };
+      if (link === 'next.md') return { ok: true, data: { name: 'next.md', path: 'G:/AI Taskboard/docs/next.md', text: '# Следующий документ' } };
+      return { ok: true, data: { name: 'diagnostic report.md', path: 'G:/AI Taskboard/docs/diagnostic report.md',
+        text: '# Диагностика\\n\\n**Файл открыт.**\\n\\n[Следующий](next.md)\\n\\n<script>window.unsafe = true</script>' } };
+    };
+    const mdLink = '[Подробная диагностика](<G:/Projects/2026/AI Taskboard/.tasks/worktrees/T-0051/docs/codex-project-placement.md>)';
+    taskInSheet.history.push({ at: '2026-11-12T13:05:00Z', action: 'chat', actor: 'agent', text: mdLink,
+      chat: { model: 'test', effort: 'high' } });
+    body.replaceChildren();
+    section('Описание', mdLink);
+    body.append(taskChat(taskInSheet));
+    const descriptionLink = body.querySelector('.sheet-section a');
+    const chatLink = [...body.querySelectorAll('.chat-entry a')].find(node => node.textContent === 'Подробная диагностика');
+    const waitMarkdown = selector => new Promise((resolve, reject) => {
+      const until = Date.now() + 5000;
+      const poll = () => document.querySelector(selector) ? resolve() : Date.now() > until ? reject(new Error('Markdown preview timed out')) : requestAnimationFrame(poll);
+      poll();
+    });
+  `);
+  await check(`descriptionLink.textContent === 'Подробная диагностика' && chatLink.textContent === 'Подробная диагностика' && !descriptionLink.parentElement.textContent.includes('](')`, "description and agent chat show the caption without Markdown syntax");
+  await capture("markdown-links.png");
+  // User activation gives each nested native dialog its own close-request group.
+  for (const origin of ["descriptionLink", "chatLink"]) {
+    await evaluate(`${origin}.focus(); ${origin}.click(); waitMarkdown('.markdown-preview .chat-text h1')`, true);
+    await check(`markdownReads.at(-1).id === taskInSheet.id && markdownReads.at(-1).link.includes('AI%20Taskboard') && document.querySelector('.markdown-preview .chat-text strong').textContent === 'Файл открыт.'`, "caption clicks route the encoded Windows path and task to the document reader");
+    await check(`!window.unsafe && !document.querySelector('.markdown-preview script') && document.querySelector('.markdown-preview .chat-text').textContent.includes('<script>')`, "document HTML stays inert");
+    if (origin === "descriptionLink") await capture("markdown-preview.png");
+    await evaluate(`document.querySelector('.markdown-preview .chat-text a').focus(); document.querySelector('.markdown-preview .chat-text a').click(); waitMarkdown('.markdown-preview[aria-label="next.md"]')`, true);
+    await check(`markdownReads.at(-1).source === 'G:/AI Taskboard/docs/diagnostic report.md' && document.querySelectorAll('.markdown-preview').length === 2`, "nested links use the current document path and retain its preview");
+    if (!window.webContents.debugger.isAttached()) {
+      window.webContents.debugger.attach("1.3");
+      await window.webContents.debugger.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true });
+    }
+    await window.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+    await window.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+    await evaluate(`new Promise((resolve, reject) => {
+      const until = Date.now() + 5000;
+      const poll = () => document.querySelectorAll('.markdown-preview').length === 1 ? resolve() : Date.now() > until ? reject(new Error('Escape left ' + document.querySelectorAll('.markdown-preview').length + ' previews')) : requestAnimationFrame(poll); poll();
+    })`);
+    await check(`document.querySelector('.markdown-preview').getAttribute('aria-label') === 'diagnostic report.md' && document.activeElement.textContent === 'Следующий'`, "Escape restores the previous preview and link focus");
+    await evaluate(`document.querySelector('.markdown-preview .sheet-header button').click();
+      new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+    await check(`!document.querySelector('.markdown-preview') && sheet.open && document.activeElement === ${origin}`, "closing restores the task and originating link focus");
+  }
+  await evaluate(`body.append(chatText('[Недоступный файл](docs/missing.md)')); body.lastElementChild.querySelector('a').click(); waitMarkdown('.markdown-preview [role="status"]')`);
+  await evaluate(`new Promise(resolve => { const poll = () => document.querySelector('.markdown-preview [role="status"]').textContent === 'Документ недоступен' ? resolve() : requestAnimationFrame(poll); poll(); })`);
+  await check(`document.querySelector('.markdown-preview [role="status"]').textContent === 'Документ недоступен' && sheet.open`, "unavailable documents show an error and retain the task");
+  await capture("markdown-unavailable.png");
+  await evaluate(`document.querySelector('.markdown-preview').close()`);
+
   await evaluate(`
     sheetKind = 'task';
     frame.runningTasks = [];

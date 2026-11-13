@@ -16,7 +16,7 @@ export interface AgentControl {
 
 // One reader routes responses by id, so steering never competes with the turn monitor.
 export function codexRpc(child: ChildProcess,
-  onNotification: (message: RpcMessage) => void,
+  onNotification: (message: RpcMessage) => void | Promise<void>,
   onRequest?: (message: RpcMessage) => Promise<object | undefined>) {
   const reader = createInterface({ input: child.stdout! });
   const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
@@ -32,7 +32,8 @@ export function codexRpc(child: ChildProcess,
     waiting?.();
     waiting = undefined;
   }
-  reader.on("line", line => {
+  let processing = Promise.resolve();
+  async function route(line: string) {
     if (failure) return;
     try {
       const message = JSON.parse(line) as RpcMessage;
@@ -44,7 +45,8 @@ export function codexRpc(child: ChildProcess,
           if (!failure) send({ id: message.id, error: { code: -32603, message: String(error) } });
         });
       } else if (message.method) {
-        onNotification(message);
+        await onNotification(message);
+        if (failure) return;
         notifications.push(message);
         waiting?.();
         waiting = undefined;
@@ -55,8 +57,9 @@ export function codexRpc(child: ChildProcess,
         else reply?.resolve(message.result);
       }
     } catch (error) { fail(error as Error); }
-  });
-  reader.once("close", () => fail(new Error("The Codex process closed.")));
+  }
+  reader.on("line", line => { processing = processing.then(() => route(line)); });
+  reader.once("close", () => { void processing.then(() => fail(new Error("The Codex process closed."))); });
   child.once("error", fail);
   child.stdin!.on("error", fail);
   return {

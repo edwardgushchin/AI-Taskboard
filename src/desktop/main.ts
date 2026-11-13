@@ -11,6 +11,7 @@ import { bundled, callCli, cliChild, cliFailure, entry } from "./cli.ts";
 import { codexStatus, composeDraft, installCodex, setCodexExecutable, skillLaunch } from "./codex.ts";
 import { chatModels, replyToTask } from "./codex-chat.ts";
 import type { AgentControl } from "./codex-rpc.ts";
+import type { TokenUsageReport } from "../cli/token-usage.ts";
 import { taskChatActions } from "./chat-actions.ts";
 import type { CodexStatus } from "./codex.ts";
 import type { CliReply } from "./cli.ts";
@@ -22,6 +23,7 @@ import { configuredCodex } from "./codex.ts";
 import { startCodexRun } from "./codex-run.ts";
 import { runLog } from "./run-activity.ts";
 import { readRunImage } from "./run-images.ts";
+import { readMarkdownFile } from "./markdown-files.ts";
 import { normalizeRecentBoards, readRecentBoards, rememberRecentBoard } from "./recent-boards.ts";
 
 interface Board {
@@ -386,6 +388,11 @@ interface ChatRequest {
 
 type ChatUpdate = { type: "saved" | "changed" } | { type: "commentary"; text: string };
 
+async function saveTaskTokenUsage(project: string, id: string, report: TokenUsageReport): Promise<void> {
+  const saved = await callCli(project, ["token-usage", id], report);
+  if (!saved.ok) throw new Error("Could not save task token usage: " + saved.error.message);
+}
+
 async function sendChat(project: string, id: string, request: ChatRequest, notify: (update: ChatUpdate) => void) {
   const key = project + "\0" + id;
   const active = activeAgents.get(key);
@@ -480,6 +487,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       text => notify({ type: "commentary", text }),
       (name, args) => runAction(name, args),
       scratch, maxAttachmentBytes - task.attachments.reduce((sum, file) => sum + file.bytes, 0),
+      report => saveTaskTokenUsage(project, id, report),
       control => ready.resolve(control)).finally(() => ready.reject(new Error("The agent session ended.")));
     if ("interrupted" in answer) return { saved, result: { ok: true as const, data: task } };
     const result = await callCli<Task>(project, ["chat", id], {
@@ -537,7 +545,8 @@ ipcMain.handle("board:draft", async (event, request: unknown, files: unknown = [
     if (files.length) {
       scratch = await mkdtemp(join(tmpdir(), "ai-taskboard-paste-"));
       for (const [index, file] of files.entries()) {
-        const extension = imageExtensions.get(file.type);
+        const suffix = extname(file.name.trim()).toLowerCase();
+        const extension = imageExtensions.get(file.type) ?? (imageTypes.has(suffix) ? suffix : undefined);
         const path = join(scratch, String(index) + (extension ?? ""));
         await writeFile(path, Buffer.from(file.bytes));
         attachments.push({ path, name: file.name.trim(), image: extension !== undefined });
@@ -551,11 +560,11 @@ ipcMain.handle("board:draft", async (event, request: unknown, files: unknown = [
     return await callCli<Task>(board.project, ["create"], {
       ...draft, actor: "agent", attachmentSources: attachments.map(({ path, name }) => ({ path, name })),
     });
-  } catch {
+  } catch (error) {
     return cliFailure("CODEX_DRAFT_FAILED", lang(
       "Codex could not prepare a draft. Check that Codex is up to date and you are signed in, then retry.",
       "Codex не смог подготовить черновик. Проверьте версию Codex и вход в аккаунт, затем повторите попытку.",
-    ));
+    ) + "\n" + (error instanceof Error ? error.message : String(error)).slice(0, 1500));
   } finally {
     if (scratch) await rm(scratch, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
     state.drafting = false;
@@ -669,6 +678,29 @@ ipcMain.handle("chat:openLink", async (_event, value: unknown) => {
   if (url && ["https:", "http:", "mailto:"].includes(url.protocol)) await shell.openExternal(url.href);
 });
 
+ipcMain.handle("board:readMarkdown", async (event, id: unknown, link: unknown, source: unknown) => {
+  const { project } = stateOf(event);
+  if (!project || typeof link !== "string" || (source !== undefined && typeof source !== "string") ||
+      (id !== undefined && (typeof id !== "string" || !taskIdPattern.test(id)))) {
+    return cliFailure("INVALID_INPUT", "Choose a Markdown link.");
+  }
+  let base = project;
+  if (typeof id === "string") {
+    const task = await callCli<Task>(project, ["show", id]);
+    if (!task.ok) return task;
+    base = task.data.git?.worktree ?? project;
+  }
+  try {
+    return { ok: true, data: await readMarkdownFile(base, link, source) };
+  } catch (error) {
+    const message = (error as Error).message === "MARKDOWN_TOO_LARGE"
+      ? lang("The Markdown file exceeds 4 MiB.", "Размер Markdown-файла превышает 4 МиБ.")
+      : lang("Could not open the Markdown file. Check its path and access permissions.",
+        "Не удалось открыть Markdown-файл. Проверьте путь и права доступа.");
+    return cliFailure("MARKDOWN_UNAVAILABLE", message);
+  }
+});
+
 ipcMain.handle("board:openWorktree", async (event, id: unknown) => {
   const state = stateOf(event);
   if (!state.project || typeof id !== "string" || !/^T-\d{4,}$/.test(id)) return cliFailure("INVALID_INPUT", "Choose a task.");
@@ -754,7 +786,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     const run = await startCodexRun(client, project, started.data.worktree, started.data.task, item => {
       activity.set(item.id, item);
       updateTimer ??= setTimeout(publish, 80);
-    });
+    }, report => saveTaskTokenUsage(project, id, report));
     const { threadId: codexThreadId, completion } = run;
     const directories = new Set<string>();
     activeAgents.set(key, { control: run, directories });

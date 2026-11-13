@@ -10,7 +10,7 @@ import { createTask } from "../src/cli/tasks.ts";
 const source = readFileSync(new URL("../src/desktop/main.ts", import.meta.url), "utf8");
 const parsed = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, true);
 const names = new Set([
-  "activeAgents", "stopChat", "frame", "send", "notifyRunChange", "sendChat", "windowStates", "chatRuns", "replyingTasks",
+  "activeAgents", "stopChat", "frame", "send", "notifyRunChange", "sendChat", "saveTaskTokenUsage", "windowStates", "chatRuns", "replyingTasks",
   "launchingTasks", "runningTasks", "runActivityByTask", "imageExtensions", "imageTypes", "recentBoards", "russian", "theme",
 ]);
 // Exercise the main-process lifecycle without starting Electron or a real provider.
@@ -53,7 +53,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
       return { ok: true, data: task };
     },
     replyToTask: async (...args: unknown[]) => {
-      (args[9] as Function)({
+      (args[10] as Function)({
         steer: async (prompt: string) => {
           if (options.steerFailure) throw new Error("Turn already ended");
           delivered.push(JSON.parse(prompt).latestUserMessage.text);

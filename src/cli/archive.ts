@@ -251,9 +251,11 @@ export function addAttachment(store: BoardStore, task: Task, input: Record<strin
   const { attachment, data } = loadAttachment(input, limit);
   const actor = actorFor(input, "agent");
   writeAtomic(join(attachmentFolder(store, task, true), attachment.file), data);
-  return store.save(record({
+  const attached = record({
     ...task, attachments: [...task.attachments, attachment],
-  }, "attach", actor, task.status, attachment.name));
+  }, "attach", actor, task.status, attachment.name);
+  attached.history.at(-1)!.attachment = attachment.file;
+  return store.save(attached);
 }
 
 export function readAttachment(store: BoardStore, id: string, input: Record<string, unknown>) {

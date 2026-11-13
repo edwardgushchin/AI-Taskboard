@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import { codexRpc, turnControl } from "../src/desktop/codex-rpc.ts";
 import type { AgentControl } from "../src/desktop/codex-rpc.ts";
+import { CodexTokenUsage } from "../src/desktop/codex-token-usage.ts";
 
 const source = readFileSync(new URL("../src/desktop/codex-chat.ts", import.meta.url), "utf8")
   .replace(/^import[\s\S]*?;\r?\n/gm, "").replaceAll("export function", "function");
@@ -36,7 +37,7 @@ test("discussion steering and interruption share the streaming connection, inclu
     });
   `);
   const runtime = runInNewContext(stripTypeScriptTypes(source) + "\nreplyToTask", {
-    spawn, codexRpc, turnControl, setTimeout, clearTimeout,
+    spawn, codexRpc, turnControl, CodexTokenUsage, setTimeout, clearTimeout,
     configuredCodex: async () => ({ path: process.execPath, args: [script] }),
     chatTools: [], cliFailure: () => ({ ok: false }), saveChatImages: async () => [],
   });
@@ -47,7 +48,7 @@ test("discussion steering and interruption share the streaming connection, inclu
   const commentary: string[] = [];
   const pending = runtime("profile", directory, { model: "test", effort: "low" }, "Initial", [],
     (text: string) => commentary.push(text), () => { toolCalls++; toolStarted.resolve(); return releaseTool.promise; },
-    directory, 1000, (control: AgentControl) => ready.resolve(control));
+    directory, 1000, undefined, (control: AgentControl) => ready.resolve(control));
   const control = await ready.promise;
   await toolStarted.promise;
   await control.steer("New details", []);

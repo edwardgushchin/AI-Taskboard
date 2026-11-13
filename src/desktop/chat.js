@@ -1,53 +1,5 @@
 const chatDrafts = new Map();
 let chatCatalog;
-const chatMarkdown = window.markdownit?.({ breaks: true, linkify: true, html: false });
-if (chatMarkdown) {
-  const web = url => /^https?:\/\//i.test(url);
-  const inlineImage = url => /^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$/i.test(url);
-  chatMarkdown.validateLink = url => web(url) || /^mailto:/i.test(url) || inlineImage(url);
-  const image = chatMarkdown.renderer.rules.image;
-  chatMarkdown.renderer.rules.image = (tokens, index, options, env, renderer) => {
-    const token = tokens[index];
-    const src = token.attrGet("src");
-    if (!web(src) && !inlineImage(src)) return chatMarkdown.utils.escapeHtml(token.content);
-    token.attrSet("loading", "lazy");
-    token.attrSet("referrerpolicy", "no-referrer");
-    return image(tokens, index, options, env, renderer);
-  };
-  chatMarkdown.core.ruler.after("inline", "task_checkboxes", state => {
-    for (let i = 2; i < state.tokens.length; i++) {
-      const token = state.tokens[i];
-      if (token.type !== "inline" || state.tokens[i - 1].type !== "paragraph_open" ||
-          state.tokens[i - 2].type !== "list_item_open") continue;
-      const first = token.children?.[0];
-      const marker = first?.type === "text" && /^\[([ xX])\](?:[ \t]+|$)/.exec(first.content);
-      if (!marker || !/^\[[ xX]\](?:[ \t]+|$)/.test(token.content)) continue;
-      first.content = first.content.slice(marker[0].length);
-      const checkbox = new state.Token("task_checkbox", "input", 0);
-      checkbox.markup = marker[1];
-      token.children.unshift(checkbox);
-    }
-  });
-  chatMarkdown.renderer.rules.task_checkbox = (tokens, index) =>
-    "<input type=\"checkbox\" disabled" + (tokens[index].markup === " " ? "" : " checked") + "> ";
-}
-
-function chatText(text) {
-  const block = element("div", undefined, "chat-text");
-  if (!chatMarkdown) {
-    block.innerText = text;
-    return block;
-  }
-  block.innerHTML = chatMarkdown.render(text);
-  block.addEventListener("click", event => {
-    const link = event.target.closest("a");
-    if (!link) return;
-    event.preventDefault();
-    void protect(() => api.openLink(link.href))();
-  });
-  return block;
-}
-
 const chatPreviews = new IntersectionObserver(entries => {
   for (const { isIntersecting, target } of entries) {
     if (!isIntersecting) continue;
@@ -364,6 +316,14 @@ function reasoningName(effort) {
   return Object.hasOwn(labels, effort) ? language(...labels[effort]) : effort;
 }
 
+function chatEventAttachments(event, files) {
+  if (event.action !== "attach") return (event.chat?.files ?? []).map(id => files.get(id)).filter(Boolean);
+  if (event.attachment !== undefined) return [files.get(event.attachment)].filter(Boolean);
+  // Older attachment events recorded only a filename. Never guess between namesakes.
+  const matches = [...files.values()].filter(file => file.name === event.text);
+  return matches.length === 1 ? matches : [];
+}
+
 function taskChat(task) {
   const project = frame.project;
   const key = project + "\0" + task.id;
@@ -433,6 +393,7 @@ function taskChat(task) {
       list.append(commentary);
     }
     const conversation = ["chat", "comment", "questions"].includes(event.action);
+    const attachments = chatEventAttachments(event, files);
     const author = event.actor === "user" ? language("You", "Вы") : language("Agent", "Агент");
     const date = element("time", eventDay ? timeFormat.format(timestamp) : event.at, "chat-time");
     date.dateTime = event.at;
@@ -443,7 +404,7 @@ function taskChat(task) {
       service.append(element("span", author, "chat-author"),
         element("span", chatEventLabel(event.action) + (status ? " · " + language(status[1], status[2]) : ""), "chat-action"), date);
       list.append(service);
-      if (!event.text) continue;
+      if (!event.text && !attachments.length) continue;
       // A chat edit can quote the pending request as its audit note.
       if (event.action === "update" && event.actor === "user" &&
           lastMessage?.actor === "user" && event.text === lastMessage.text) continue;
@@ -451,7 +412,6 @@ function taskChat(task) {
     const entry = element("li", undefined, "chat-entry");
     entry.dataset.actor = event.actor;
     entry.append(element("span", author, "chat-author"));
-    const attachments = (event.chat?.files ?? []).map(id => files.get(id)).filter(Boolean);
     if (attachments.length) {
       const images = attachments.filter(isImageAttachment);
       const tiles = element("div", undefined, "chat-attachments");
@@ -477,7 +437,7 @@ function taskChat(task) {
       }
       entry.append(tiles);
     }
-    if (event.text) entry.append(chatText(event.text));
+    if (event.text && !(event.action === "attach" && attachments.length)) entry.append(chatText(event.text));
     entry.append(conversation ? date : date.cloneNode(true));
     list.append(entry);
   }

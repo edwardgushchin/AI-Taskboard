@@ -256,6 +256,7 @@ select:hover:not(:disabled) {
 .task-tags { gap: 3px; }
 .task-meta { gap: 4px 6px; color: var(--muted); font-size: 10px; line-height: 12px; font-variant-numeric: tabular-nums; }
 .task-meta > span { display: inline-flex; align-items: center; min-width: 0; max-width: 100%; }
+.task-meta > .task-run-status { flex: 1; }
 .task-id { font-family: ui-monospace, Consolas, monospace; }
 .task-stat { display: inline-flex; align-items: center; gap: 2px; }
 .task-stat .icon { width: 12px; height: 12px; }
@@ -315,6 +316,15 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .sheet-section h3 { font-size: 13px; margin-bottom: 5px; }
 .sheet-section p, .sheet-section ul { line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
 .sheet-section ul { padding-left: 22px; margin: 0; }
+.sheet-section .chat-text :is(p, ul, ol) { white-space: normal; }
+.markdown-preview {
+  width: min(960px, 94vw); max-height: 88vh; padding: 0;
+  color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+}
+.markdown-preview[open] { display: flex; flex-direction: column; }
+.markdown-preview::backdrop { background: #0b102079; }
+.markdown-preview-content { min-height: 0; overflow: auto; padding: 20px; }
+.markdown-preview-path { margin-bottom: 16px; font-size: 12px; overflow-wrap: anywhere; }
 .task-chat { display: grid; gap: 12px; min-width: 0; padding-top: 14px; border-top: 1px solid var(--border); }
 .chat-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; }
 .chat-header h3 { margin-inline-end: auto; font-size: 15px; }

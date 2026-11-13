@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld("taskboard", {
   runImagePreview: (id, path) => ipcRenderer.invoke("board:runImagePreview", id, path),
   saveRunImage: (id, path) => ipcRenderer.invoke("board:saveRunImage", id, path),
   openLink: url => ipcRenderer.invoke("chat:openLink", url),
+  readMarkdown: (id, link, source) => ipcRenderer.invoke("board:readMarkdown", id, link, source),
   openWorktree: id => ipcRenderer.invoke("board:openWorktree", id),
   launchTask: id => ipcRenderer.invoke("board:launchTask", id),
   openCodexThread: id => ipcRenderer.invoke("board:openCodexThread", id),
