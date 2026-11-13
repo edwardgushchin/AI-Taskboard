@@ -12,6 +12,7 @@ let lanePreferences = {};
 let cardCoverCache = new Map();
 let boardCards = new Map();
 let boardLanes = new Map();
+let selectedTaskId;
 const boardViews = new Map();
 const sheet = byId("sheet");
 const body = byId("sheet-body");
@@ -32,7 +33,7 @@ function element(tag, text, className) {
 }
 
 function icon(name) {
-  if (name === "git-branch" || name === "cloud-upload") {
+  if (["git-branch", "cloud-upload", "close"].includes(name)) {
     const item = element("i", undefined, "icon codicon codicon-" + name);
     item.setAttribute("aria-hidden", "true");
     return item;
@@ -358,7 +359,6 @@ function openSheet(kind, title) {
     focusBeforeSheet = document.activeElement;
     sheet.show();
     byId("app-content").inert = true;
-    byId("board-actions").inert = true;
     document.querySelector(".status-bar").inert = true;
   }
 }
@@ -475,7 +475,7 @@ function blockerBanner({ reason, condition }) {
 function card(task) {
   const cover = selectedCover(task, (task.attachments ?? []).filter(isImageAttachment));
   // Only visible card data belongs in this key: chat/log/revision updates must not rebuild it.
-  const signature = JSON.stringify([frame.russian, task.title,
+  const signature = JSON.stringify([frame.russian, task.title, task.description,
     task.tags?.map(name => boardTags.get(tagKey(name)) ?? { name }), cover?.file,
     frame.runningTasks?.includes(task.id) ?? false, task.status, Boolean(task.codexThreadId),
     task.unfinishedDependencies?.length, task.blocked, task.subtasks?.map(entry => entry.done),
@@ -487,13 +487,25 @@ function card(task) {
   const oldImage = card.querySelector(".task-card-cover");
   if (oldDetails) cardCovers.unobserve(oldDetails);
   card.className = "task-card";
+  card.dataset.state = task.status;
+  card.dataset.selected = String(task.id === selectedTaskId);
   const item = element("span", undefined, "task-card-details");
+  const heading = element("span", undefined, "task-card-heading");
+  heading.append(element("strong", task.title));
+  if (task.status === "done") {
+    const done = element("span", undefined, "task-done");
+    done.setAttribute("role", "img");
+    done.setAttribute("aria-label", language("Completed", "Завершено"));
+    done.append(icon("check"));
+    heading.append(done);
+  }
+  item.append(heading);
+  if (task.description && task.status !== "blocked") item.append(element("span", task.description, "task-description"));
   if (task.tags?.length) {
     const tags = element("span", undefined, "task-tags");
     tags.append(...tagBadges(task.tags));
     item.append(tags);
   }
-  item.append(element("strong", task.title));
   if (cover) {
     const image = oldImage?.dataset.file === cover.file ? oldImage : element("img", undefined, "task-card-cover");
     if (image !== oldImage) {
@@ -503,7 +515,7 @@ function card(task) {
       image.dataset.file = cover.file;
       image.onload = () => { image.hidden = false; };
     }
-    item.prepend(image);
+    item.append(image);
   }
   const meta = element("span", undefined, "task-meta");
   meta.append(element("span", task.id, "task-id"));
@@ -533,7 +545,8 @@ function card(task) {
     meta.append(attachments);
   }
   if (task.priority) {
-    const priority = element("span", priorityName(task.priority), "task-priority");
+    const priority = element("span", undefined, "task-priority task-stat");
+    priority.append(icon("flag"), priorityName(task.priority));
     priority.dataset.priority = task.priority;
     meta.append(priority);
   }
@@ -569,6 +582,8 @@ function resetBoardRendering() {
   boardLanes.clear();
   byId("lanes").replaceChildren();
   byId("archive-list").replaceChildren();
+  byId("board-composer").replaceChildren();
+  selectedTaskId = undefined;
 }
 
 function switchBoardRendering(previousProject, project) {
@@ -577,6 +592,7 @@ function switchBoardRendering(previousProject, project) {
     boardViews.set(previousProject, {
       cards: boardCards, lanes: boardLanes, covers: cardCoverCache, preferences: lanePreferences,
       columns: [...byId("lanes").childNodes], archive: [...byId("archive-list").childNodes],
+      composer: [...byId("board-composer").childNodes], selectedTaskId,
     });
   }
   const saved = boardViews.get(project);
@@ -585,6 +601,8 @@ function switchBoardRendering(previousProject, project) {
   cardCoverCache = saved?.covers ?? new Map();
   byId("lanes").replaceChildren(...(saved?.columns ?? []));
   byId("archive-list").replaceChildren(...(saved?.archive ?? []));
+  byId("board-composer").replaceChildren(...(saved?.composer ?? []));
+  selectedTaskId = saved?.selectedTaskId;
   return saved?.preferences;
 }
 
@@ -625,33 +643,6 @@ function controlLabel(id, label) {
   if (text) text.textContent = label;
   control.title = label;
   control.setAttribute("aria-label", label);
-}
-
-function filterOptions(id, options, label) {
-  const select = byId(id);
-  const key = JSON.stringify([options, label]);
-  if (select.dataset.options === key) return select.value;
-  select.dataset.options = key;
-  const previous = select.value;
-  select.replaceChildren(...[["", label], ...options].map(([value, name]) => new Option(name, value)));
-  if (options.some(([value]) => value === previous)) select.value = previous;
-  return select.value;
-}
-
-function tagFilters() {
-  const list = byId("tag-filter");
-  const selected = new Set(Array.from(list.querySelectorAll(":checked"), input => input.value));
-  const key = JSON.stringify([...boardTags]);
-  if (list.dataset.options === key) return [...selected];
-  list.dataset.options = key;
-  const focused = list.contains(document.activeElement) ? document.activeElement.value : undefined;
-  const scroll = list.scrollTop;
-  const tags = [...boardTags].sort(([, a], [, b]) => a.name.localeCompare(b.name));
-  list.replaceChildren(...tagChoices(tags, selected));
-  [...list.querySelectorAll("input")].find(input => input.value === focused)?.focus({ preventScroll: true });
-  list.scrollTop = scroll;
-  list.parentElement.hidden = tags.length === 0;
-  return [...selected].filter(key => boardTags.has(key));
 }
 
 function tagChoices(tags, selected) {
@@ -699,9 +690,9 @@ function laneTools(state, title, tasks, total, count, content) {
   const toolbar = element("div", undefined, "lane-toolbar");
   const filter = element("details", undefined, "lane-filter");
   const summary = element("summary", undefined, "button quiet");
-  const filterLabel = language("Filter ", "Фильтр колонки ") + title;
+  const filterLabel = language("Column menu: ", "Меню колонки: ") + title;
   const filterCount = element("span", undefined, "count");
-  summary.append(icon("filter"), filterCount);
+  summary.append(icon("more"), filterCount);
   const options = element("div", undefined, "lane-filter-options");
   const priorityLabel = element("label", undefined, "lane-priority");
   priorityLabel.append(element("span", language("Priority", "Приоритет")), priority);
@@ -729,8 +720,12 @@ function laneTools(state, title, tasks, total, count, content) {
     collapsed = !collapsed;
     persist();
     updateCollapse();
+    filter.open = false;
+    summary.focus();
   }, "quiet lane-collapse");
   toggle.append(icon("chevron"));
+  const toggleText = element("span");
+  toggle.append(toggleText);
   toggle.setAttribute("aria-controls", content.id);
   function updateCollapse() {
     content.hidden = collapsed;
@@ -738,13 +733,26 @@ function laneTools(state, title, tasks, total, count, content) {
     toggle.title = label;
     toggle.setAttribute("aria-label", label);
     toggle.setAttribute("aria-expanded", String(!collapsed));
+    toggleText.textContent = collapsed ? language("Expand column", "Развернуть колонку") : language("Collapse column", "Свернуть колонку");
   }
   let empty;
+  let visibleLimit = 4;
+  const more = button("", () => {
+    visibleLimit += 4;
+    updateCards();
+    if (!more.isConnected) content.querySelectorAll(".task-card")[visibleLimit - 4]?.focus();
+  }, "quiet lane-more");
   function updateCards() {
     const matching = tasks.filter(task => (!priority.value || task.priority === priority.value) &&
       (!selected.size || task.tags.some(name => selected.has(tagKey(name)))));
     const active = selected.size + Number(Boolean(priority.value));
-    const children = matching.map(card);
+    const children = matching.slice(0, visibleLimit).map(card);
+    if (matching.length > visibleLimit) {
+      const remaining = matching.length - visibleLimit;
+      const noun = { one: "задача", few: "задачи", many: "задач", other: "задачи" }[new Intl.PluralRules("ru").select(remaining)];
+      more.textContent = language("Show " + remaining + " more tasks", "Ещё " + remaining + " " + noun);
+      children.push(more);
+    }
     if (!matching.length && (total || active)) {
       if (!empty) {
         empty = element("div", undefined, "lane-filter-empty");
@@ -765,7 +773,8 @@ function laneTools(state, title, tasks, total, count, content) {
   }
   updateCards();
   updateCollapse();
-  toolbar.append(filter, toggle);
+  options.append(toggle);
+  toolbar.append(filter);
   return { toolbar, update(nextTasks, nextTotal) {
     tasks = nextTasks;
     total = nextTotal;
@@ -796,7 +805,6 @@ function render() {
   byId("loading").textContent = language("Loading projects…", "Загрузка проектов…");
   byId("app-content").setAttribute("aria-busy", String(noBoard && loading));
   byId("workspace").hidden = noBoard;
-  byId("board-actions").hidden = noBoard;
   byId("archive-menu-item").setAttribute("aria-disabled", String(noBoard));
   byId("archive-menu-item").setAttribute("aria-checked", String(archiveView));
   if (frame.error) notice(boardError(frame.error));
@@ -816,34 +824,18 @@ function render() {
   }
 
   byId("workspace").setAttribute("aria-label", archiveView ? language("Archive", "Архив") : language("Task board", "Доска задач"));
-  controlLabel("create", language("Create task", "Создать задачу"));
-  byId("search-hint").textContent = language("Search tasks…", "Поиск задач…");
-  byId("search").setAttribute("aria-label", language("Search tasks", "Поиск задач"));
   byId("lanes").hidden = archiveView;
   byId("archive-list").hidden = !archiveView;
-  byId("priority-filter-label").textContent = language("Priority", "Приоритет");
-  byId("priority-filter-label").parentElement.hidden = archiveView;
-  byId("tag-filter-label").textContent = language("Tags", "Теги");
-  const priorities = ["low", "normal", "high", "urgent"].map(value => [value, priorityName(value)]);
-  const priority = archiveView ? "" : filterOptions("priority-filter", priorities, language("Any priority", "Любой приоритет"));
-  const tags = tagFilters();
-  const filterCount = Number(Boolean(priority)) + tags.length;
-  const filterToggle = byId("filter-toggle");
-  filterToggle.title = language("Filters", "Фильтры");
-  filterToggle.setAttribute("aria-label", filterCount ? filterToggle.title + " (" + filterCount + ")" : filterToggle.title);
-  byId("filter-count").hidden = filterCount === 0;
-  byId("filter-count").textContent = filterCount;
-  const query = tagKey(byId("search").value);
-  const matches = task => (!priority || task.priority === priority) &&
-    tags.every(key => task.tags?.some(name => tagKey(name) === key)) &&
-    [task.id, task.title, ...(task.tags ?? [])].some(value => tagKey(value).includes(query));
+  byId("board-composer").hidden = archiveView;
+  if (!byId("board-composer").firstChild) byId("board-composer").append(draftComposer());
+  byId("board-composer").firstChild.localize();
   if (archiveView) {
-    const tasks = board.archived.filter(matches);
+    const tasks = board.archived;
     syncChildren(byId("archive-list"), tasks.length ? tasks.map(card) :
       [element("p", language("No archived tasks found.", "Архивных задач не найдено."), "muted")]);
     return;
   }
-  const visible = board.tasks.filter(matches).sort(newestTaskFirst);
+  const visible = [...board.tasks].sort(newestTaskFirst);
   const focused = document.activeElement;
   const toolsKey = JSON.stringify([frame.russian, [...boardTags]]);
   const columns = lanes.map(([state, english, russian]) => {
@@ -944,60 +936,123 @@ function form(kind, title, fields, label, submit) {
   return form;
 }
 
-function newTaskDraft() {
+function draftComposer() {
   const project = frame.project;
   const files = [];
-  const hint = element("p", api.isMac
-    ? language("Paste files or screenshots with ⌘V.", "Вставьте файлы или скриншоты через ⌘V.")
-    : language("Paste files or screenshots with Ctrl+V.", "Вставьте файлы или скриншоты через Ctrl+V."), "muted");
-  hint.id = "draft-paste-hint";
+  const editor = element("form", undefined, "board-draft");
+  editor.id = "board-draft";
+  const chat = element("section", undefined, "board-chat");
+  chat.id = "board-chat";
+  const chatTitle = element("h2");
+  const log = element("div", undefined, "board-chat-log");
+  log.setAttribute("role", "log");
+  log.setAttribute("aria-live", "polite");
+  log.tabIndex = 0;
+  const greeting = element("p", undefined, "muted");
+  log.append(greeting);
+  chat.append(chatTitle, log);
+  const input = element("textarea");
+  input.name = "request";
+  input.rows = 1;
+  input.setAttribute("aria-controls", chat.id);
+  const hint = element("p", undefined, "muted draft-hint");
+  hint.id = "board-paste-hint";
+  input.setAttribute("aria-describedby", hint.id);
+  const controls = element("div", undefined, "draft-controls");
+  const picker = element("input");
+  picker.type = "file";
+  picker.multiple = true;
+  picker.hidden = true;
+  const attach = button("", () => picker.click(), "quiet draft-attach");
+  attach.append(icon("attachment"));
+  const save = element("button", undefined, "button primary draft-send");
+  save.type = "submit";
+  save.append(icon("send"));
+  controls.append(attach, save);
   const attachments = element("ul", undefined, "draft-attachments");
   attachments.hidden = true;
-  attachments.setAttribute("aria-label", language("Attachments", "Вложения"));
-  const progress = element("p", language("The agent is preparing a draft…", "Агент готовит черновик…"), "muted");
+  const progress = element("p", undefined, "draft-progress muted");
   progress.hidden = true;
   progress.setAttribute("role", "status");
-  const editor = form("new-task", language("New task", "Новая задача"), [
-    { name: "request", label: language("What needs to be done?", "Что нужно сделать?"), type: "area", required: true },
-  ], language("Create draft", "Создать черновик"), async ({ request }) => {
-    notice();
-    progress.hidden = false;
-    input.readOnly = true;
-    for (const button of attachments.querySelectorAll("button")) button.disabled = true;
-    try {
+  editor.localize = () => {
+    input.placeholder = language("What shall we work on?", "Чем займемся?");
+    input.setAttribute("aria-label", input.placeholder);
+    chatTitle.textContent = language("Orchestrator", "Оркестратор");
+    chat.setAttribute("aria-label", chatTitle.textContent);
+    greeting.textContent = language("Describe a task — I will prepare a draft for the board.", "Опишите задачу — я подготовлю черновик для доски.");
+    hint.textContent = language("Describe a new task. Paste or attach files", "Опишите новую задачу. Вставьте или прикрепите файлы") + (api.isMac ? " (⌘V)." : " (Ctrl+V).");
+    for (const [control, label] of [[attach, language("Attach files", "Прикрепить файлы")],
+      [save, language("Create draft", "Создать черновик")]]) {
+      control.title = label;
+      control.setAttribute("aria-label", label);
+    }
+    attachments.setAttribute("aria-label", language("Attachments", "Вложения"));
+  };
+  editor.localize();
+  editor.append(chat, icon("chat"));
+  editor.append(input, controls, picker, hint, attachments, progress);
+  const chatMessage = (actor, text) => {
+    greeting.hidden = true;
+    const entry = element("div", undefined, "chat-entry");
+    entry.dataset.actor = actor;
+    entry.append(element("p", text, "chat-text"));
+    log.append(entry);
+    scrollChat();
+    return entry;
+  };
+  // Hover/focus can reveal the log after messages arrived while it had no layout.
+  const scrollChat = () => requestAnimationFrame(() => requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; }));
+  editor.addEventListener("pointerenter", scrollChat);
+  input.addEventListener("focus", scrollChat);
+  const message = text => {
+    progress.textContent = text;
+    progress.hidden = !text;
+  };
+  const busy = value => {
+    input.readOnly = value;
+    editor.setAttribute("aria-busy", String(value));
+    for (const button of editor.querySelectorAll("button")) button.disabled = value;
+  };
+  editor.addEventListener("submit", event => {
+    event.preventDefault();
+    if (input.readOnly || (!input.value.trim() && !files.length)) return;
+    const request = input.value.trim();
+    busy(true);
+    message(language("The agent is preparing a draft…", "Агент готовит черновик…"));
+    void (async () => {
       const pasted = await Promise.all(files.map(async file => ({
         name: file.name, type: file.type, bytes: await file.arrayBuffer(),
       })));
-      if (!editor.isConnected || frame.project !== project) return;
+      if (!editor.isConnected || frame.project !== project) { message(""); return; }
+      chatMessage("user", [request, ...files.map(file => file.name)].filter(Boolean).join("\n"));
       const result = await api.draft(request, pasted);
-      if (!editor.isConnected || !sheet.open || frame.project !== project) return;
       if (!result.ok) {
-        notice(boardError(result.error));
+        message(boardError(result.error));
+        chatMessage("agent", boardError(result.error));
         return;
       }
+      const reply = chatMessage("agent", language("Draft created", "Черновик создан"));
+      const open = button(result.data.id + (result.data.title ? " · " + result.data.title : ""), () => showTask(result.data.id), "quiet board-chat-task");
+      open.dataset.task = result.data.id;
+      reply.append(open);
+      scrollChat();
+      input.value = "";
+      files.length = 0;
+      attachments.replaceChildren();
+      attachments.hidden = true;
+      message("");
+      if (!editor.isConnected || frame.project !== project || sheet.open) return;
       archiveView = false;
       render();
-      await showTask(result.data.id);
-    } finally {
-      progress.hidden = true;
-      input.readOnly = false;
-      for (const button of attachments.querySelectorAll("button")) button.disabled = false;
-    }
+    })().catch(error => { message(error.message); chatMessage("agent", error.message); }).finally(() => busy(false));
   });
-  editor.append(progress);
-  const input = editor.querySelector("textarea");
-  input.setAttribute("aria-describedby", hint.id);
-  editor.querySelector("[type=submit]").before(hint, attachments);
-  input.addEventListener("paste", event => {
+  function addFiles(pasted) {
     if (input.readOnly) return;
-    const pasted = Array.from(event.clipboardData?.files ?? []);
-    if (!pasted.length) return;
-    if (!event.clipboardData.getData("text/plain")) event.preventDefault();
     if ([...files, ...pasted].reduce((total, file) => total + file.size, 0) > 64 * 1024 * 1024) {
-      notice(language("Attachments are limited to 64 MiB per task.", "Лимит вложений на задачу — 64 МиБ."));
+      message(language("Attachments are limited to 64 MiB per task.", "Лимит вложений на задачу — 64 МиБ."));
       return;
     }
-    notice();
+    message("");
     for (const file of pasted) {
       files.push(file);
       const row = element("li");
@@ -1005,17 +1060,30 @@ function newTaskDraft() {
         if (input.readOnly) return;
         files.splice(files.indexOf(file), 1);
         row.remove();
-        attachments.hidden = input.required = !files.length;
-        notice();
+        attachments.hidden = !files.length;
+        message("");
         input.focus();
       }, "quiet");
       remove.setAttribute("aria-label", language("Remove ", "Удалить ") + file.name);
       row.append(icon("attachment"), element("span", file.name), remove);
       attachments.append(row);
     }
-    input.required = attachments.hidden = false;
+    attachments.hidden = !files.length;
+  }
+  picker.addEventListener("change", () => { addFiles([...picker.files]); picker.value = ""; });
+  input.addEventListener("paste", event => {
+    const pasted = Array.from(event.clipboardData?.files ?? []);
+    if (!pasted.length) return;
+    if (!event.clipboardData.getData("text/plain")) event.preventDefault();
+    addFiles(pasted);
   });
-  input.focus();
+  input.addEventListener("keydown", event => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      editor.requestSubmit();
+    }
+  });
+  return editor;
 }
 
 function taskEditor(task) {
@@ -1118,6 +1186,8 @@ async function showTask(id) {
     return;
   }
   const task = result.data;
+  selectedTaskId = id;
+  for (const [cardId, { node }] of boardCards) node.dataset.selected = String(cardId === id);
   notice();
   const sameTask = sheetKind === "task" && taskInSheet?.id === id;
   const scroll = sameTask ? body.scrollTop : 0;
@@ -1778,8 +1848,8 @@ function renderProjectTabs() {
     select.addEventListener("keydown", protect(async event => {
       const index = tabs.findIndex(entry => entry.path === tab.path);
       let next;
-      if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
-      else if (event.key === "ArrowLeft") next = (index + tabs.length - 1) % tabs.length;
+      if (event.key === "ArrowDown" || event.key === "ArrowRight") next = (index + 1) % tabs.length;
+      else if (event.key === "ArrowUp" || event.key === "ArrowLeft") next = (index + tabs.length - 1) % tabs.length;
       else if (event.key === "Home") next = 0;
       else if (event.key === "End") next = tabs.length - 1;
       else if (event.key === "Delete") {
@@ -1792,8 +1862,9 @@ function renderProjectTabs() {
       await api.selectTab(tabs[next].path);
       bar.querySelector('[aria-selected="true"]')?.focus();
     }));
-    const close = button("×", () => api.closeTab(tab.path), "project-tab-close");
+    const close = button("", () => api.closeTab(tab.path), "project-tab-close");
     close.className = "project-tab-close";
+    close.append(icon("close"));
     close.setAttribute("aria-label", language("Close project ", "Закрыть проект ") + tab.name);
     close.title = close.getAttribute("aria-label");
     container.append(select, close);
@@ -1827,11 +1898,6 @@ function update(next) {
     taskSheetRequest++;
     lanePreferences = switchBoardRendering(previousProject, next.project) ?? loadLanePreferences();
     archiveView = false;
-    byId("search").value = "";
-    byId("filters").open = false;
-    byId("priority-filter").value = "";
-    byId("tag-filter").replaceChildren();
-    delete byId("tag-filter").dataset.options;
     if (sheet.open) sheet.close();
   }
   if (Array.isArray(next.tabs)) {
@@ -1869,25 +1935,17 @@ byId("git-branches").addEventListener("toggle", protect(event => {
 byId("status-publish").addEventListener("click", protect(publishToGitHub));
 byId("welcome-open").addEventListener("click", protect(() => api.open()));
 byId("close-sheet").addEventListener("click", () => sheet.close());
-byId("search").addEventListener("input", render);
-byId("filters").addEventListener("change", render);
 document.addEventListener("pointerdown", event => {
-  const filters = byId("filters");
-  if (filters.open && !filters.contains(event.target)) filters.open = false;
+  for (const menu of document.querySelectorAll(".lane-filter[open]")) {
+    if (!menu.contains(event.target)) menu.open = false;
+  }
 });
 document.addEventListener("keydown", event => {
-  const filters = byId("filters");
-  if (event.key === "Escape" && filters.open) {
-    filters.open = false;
-    filters.querySelector("summary").focus();
-  }
-  if (!sheet.open && frame.board && (event.ctrlKey || event.metaKey) && event.code === "KeyF") {
-    event.preventDefault();
-    byId("search").focus();
-    byId("search").select();
+  if (event.key === "Escape") {
+    const menu = document.querySelector(".lane-filter[open]");
+    if (menu) { menu.open = false; menu.querySelector("summary").focus(); }
   }
 });
-byId("create").addEventListener("click", newTaskDraft);
 sheet.addEventListener("close", () => {
   if (sheet.open) return;
   chatPreviews.disconnect();
@@ -1895,7 +1953,6 @@ sheet.addEventListener("close", () => {
   sheetKind = "";
   taskInSheet = undefined;
   byId("app-content").inert = false;
-  byId("board-actions").inert = false;
   document.querySelector(".status-bar").inert = false;
   if (document.activeElement === document.body || sheet.contains(document.activeElement)) focusBeforeSheet?.focus();
   focusBeforeSheet = undefined;
