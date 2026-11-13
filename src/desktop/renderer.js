@@ -1667,9 +1667,9 @@ function update(next) {
   const tagSettings = byId("tag-settings");
   if (tagsChanged && sheet.open && tagSettings) renderTagSettings(tagSettings);
   if (sheetKind === "task" && sheet.open && taskInSheet) {
+    body.querySelector(".task-chat")?.syncAgentState?.();
     const runStatus = byId("task-agent-run");
     if (runStatus) renderAgentRunStatus(runStatus, taskInSheet);
-    body.querySelector(".task-chat")?.syncAgentState?.();
     if (tagsChanged) byId("task-sheet-tags")?.replaceChildren(...tagBadges(taskInSheet.tags));
     const task = frame.board?.tasks.find(entry => entry.id === taskInSheet.id);
     const archived = frame.board?.archived.some(entry => entry.id === taskInSheet.id);
