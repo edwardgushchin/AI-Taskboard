@@ -41,7 +41,8 @@ const verifyWrite = [
 ].join("\n");
 
 export async function startCodexRun(client: Client, project: string, cwd: string, task: Task,
-  onActivity?: (item: RunActivity) => void, onTokenUsage?: (report: TokenUsageReport) => Promise<void>): Promise<Run> {
+  onActivity?: (item: RunActivity) => void, onTokenUsage?: (report: TokenUsageReport) => Promise<void>, signal?: AbortSignal): Promise<Run> {
+  signal?.throwIfAborted();
   if (!task.git) throw new Error("The task has no prepared Git worktree.");
   const paths = [...new Set(accessPaths(project, cwd, task.git.branch))];
   const codexHome = (client.env ?? process.env).CODEX_HOME || join(homedir(), ".codex");
@@ -62,6 +63,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   const activity = new Map<string, RunActivity>();
   const tokens = new CodexTokenUsage();
   let activeThreadId: string | undefined;
+  let control: AgentControl | undefined;
+  let interruptTimeout: NodeJS.Timeout | undefined;
   let lastError = "";
   const timeout = setTimeout(() => {
     lastError = "Codex did not start the task in time.";
@@ -70,6 +73,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   }, 60_000);
   const close = () => {
     clearTimeout(timeout);
+    clearTimeout(interruptTimeout);
+    signal?.removeEventListener("abort", interrupt);
     rpc.close();
     child.stdin.end();
     child.kill();
@@ -92,12 +97,20 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     }
   });
   const { request, send } = rpc;
+  function interrupt() {
+    lastError = signal?.reason instanceof Error ? signal.reason.message : "The task run was interrupted.";
+    if (control) void control.interrupt().catch(error => { rpc.fail(error); child.kill(); });
+    else { rpc.fail(new Error(lastError)); child.kill(); }
+    interruptTimeout = setTimeout(() => { rpc.fail(new Error(lastError)); child.kill(); }, 5000);
+  }
+  signal?.addEventListener("abort", interrupt, { once: true });
   async function monitor(turnId: string) {
     let failure: string | undefined;
     try {
       while (!turns.has(turnId)) await rpc.receive();
       const turn = turns.get(turnId)!;
-      if (turn.status !== "completed") failure = turn.error?.message || "Codex ended the task run: " + turn.status + ".";
+      if (turn.status !== "completed") failure = signal?.aborted ? lastError
+        : turn.error?.message || "Codex ended the task run: " + turn.status + ".";
     } catch (error) {
       failure = lastError.trim() || (error as Error).message;
     } finally {
@@ -165,15 +178,19 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     const { turn } = await request<{ turn: Turn }>("turn/start", {
       threadId, effort: task.execution?.effort, input: [{ type: "text", text: prompt, text_elements: [] }],
     });
+    control = turnControl(request, threadId, turn.id);
     const usage = tokens.begin(threadId, turn.id);
     if (usage) await onTokenUsage?.(usage);
     clearTimeout(timeout);
     if (turn.status !== "inProgress") turns.set(turn.id, turn);
-    return { threadId, completion: monitor(turn.id), ...turnControl(request, threadId, turn.id) };
+    return { threadId, completion: monitor(turn.id), ...control };
   } catch (error) {
     await close();
     const usage = tokens.finish(true);
     if (usage) await onTokenUsage?.(usage);
+    if (error instanceof Error && /already has an active writer/i.test(error.message)) {
+      throw Object.assign(error, { code: "CODEX_THREAD_BUSY" });
+    }
     throw error;
   }
 }

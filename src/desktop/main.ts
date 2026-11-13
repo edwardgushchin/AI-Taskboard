@@ -23,6 +23,7 @@ import { configuredCodex } from "./codex.ts";
 import { startCodexRun } from "./codex-run.ts";
 import { runLog } from "./run-activity.ts";
 import { readRunImage } from "./run-images.ts";
+import { projectIdentity, projectLabels, projectPath, savedWindows } from "./project-tabs.ts";
 import { readMarkdownFile } from "./markdown-files.ts";
 import { normalizeRecentBoards, readRecentBoards, rememberRecentBoard } from "./recent-boards.ts";
 
@@ -35,7 +36,7 @@ interface Board {
   gitInfo?: { branch?: string; head?: string; user?: string };
 }
 
-interface WindowState {
+interface ProjectTab {
   window: BrowserWindow;
   project?: string;
   board?: Board;
@@ -45,8 +46,17 @@ interface WindowState {
   selection: number;
 }
 
+interface WindowState {
+  window: BrowserWindow;
+  tabs: ProjectTab[];
+  active: ProjectTab;
+  closing?: boolean;
+  ready?: Promise<void>;
+  restoring: boolean;
+}
+
 interface BoardWatch {
-  windows: Set<WindowState>;
+  tabs: Set<ProjectTab>;
   board: Board;
   stop: () => void;
 }
@@ -98,14 +108,14 @@ function loadRecentBoards(): void {
   recentBoards = readRecentBoards(app.getPath("appData"), app.getPath("userData")) ?? recentBoards;
 }
 
-function rememberBoard(path: string, current: WindowState): void {
+function rememberBoard(path: string, current: ProjectTab): void {
   try {
     recentBoards = rememberRecentBoard(app.getPath("appData"), app.getPath("userData"), path);
   } catch {
     recentBoards = normalizeRecentBoards([path, ...recentBoards]);
   }
   for (const state of windowStates.values()) {
-    if (state !== current) send(state);
+    if (state.window !== current.window) send(state.active);
   }
 }
 
@@ -127,17 +137,19 @@ function loadTheme(): void {
   nativeTheme.themeSource = themes[theme][1];
 }
 
-function stateOf(event: IpcMainInvokeEvent): WindowState {
+function stateOf(event: IpcMainInvokeEvent): ProjectTab {
   const state = windowStates.get(event.sender.id);
   if (!state || !event.senderFrame || event.senderFrame !== event.sender.mainFrame ||
       event.senderFrame.url !== html.href) {
     throw new Error("Unexpected application frame.");
   }
-  return state;
+  return state.active;
 }
 
-function frame(state: WindowState) {
+function frame(state: ProjectTab) {
   return {
+    restoring: windowStates.get(state.window.webContents.id)?.restoring ?? false,
+    tabs: projectLabels(windowStates.get(state.window.webContents.id)?.tabs.flatMap(tab => tab.project ? [tab.project] : []) ?? []),
     project: state.project, board: state.board, error: state.error, loading: state.loading, russian, theme,
     runningTasks: state.board?.tasks.filter(task => {
       const key = state.project + "\0" + task.id;
@@ -151,32 +163,35 @@ function frame(state: WindowState) {
   };
 }
 
-function send(state: WindowState): void {
-  if (!state.window.isDestroyed()) {
+function send(state: ProjectTab): void {
+  if (state.window.isDestroyed()) return;
+  const owner = windowStates.get(state.window.webContents.id);
+  if (owner) {
+    state = owner.active;
     state.window.webContents.send("board:changed", frame(state));
     state.window.setTitle(state.project ? basename(state.project) + " · AI Taskboard" : "AI Taskboard");
   }
 }
 
-function unbind(state: WindowState): void {
+function unbind(state: ProjectTab): void {
   if (!state.board) return;
   const project = state.board.project;
   const watch = subscriptions.get(project);
-  watch?.windows.delete(state);
-  if (watch && !watch.windows.size) {
+  watch?.tabs.delete(state);
+  if (watch && !watch.tabs.size) {
     watch.stop();
     subscriptions.delete(project);
   }
 }
 
 function subscribe(project: string, board: Board): BoardWatch {
-  const windows = new Set<WindowState>();
+  const tabs = new Set<ProjectTab>();
   let child: ReturnType<typeof cliChild> | undefined;
   let retry: NodeJS.Timeout | undefined;
   let stopped = false;
   let startedArchiveSweep = false;
   const watch: BoardWatch = {
-    windows, board,
+    tabs, board,
     stop: () => {
       stopped = true;
       if (retry) clearTimeout(retry);
@@ -198,7 +213,7 @@ function subscribe(project: string, board: Board): BoardWatch {
       try { result = JSON.parse(line); }
       catch { result = cliFailure("CLI_UNAVAILABLE", "The CLI returned an invalid board snapshot."); }
       if (result.ok) watch.board = result.data;
-      for (const state of windows) {
+      for (const state of tabs) {
         if (result.ok) state.board = result.data;
         state.error = result.ok ? undefined : result.error;
         send(state);
@@ -212,7 +227,7 @@ function subscribe(project: string, board: Board): BoardWatch {
     active.once("close", () => {
       lines.close();
       if (stopped) return;
-      for (const state of windows) {
+      for (const state of tabs) {
         state.error = { code: "WATCH_STOPPED", message: lang("Updates paused. Reconnecting…", "Обновления приостановлены. Переподключение…") };
         send(state);
       }
@@ -223,7 +238,7 @@ function subscribe(project: string, board: Board): BoardWatch {
   return watch;
 }
 
-function bind(state: WindowState, board: Board): void {
+function bind(state: ProjectTab, board: Board): void {
   if (state.board?.project !== board.project) unbind(state);
   state.project = board.project;
   let watch = subscriptions.get(board.project);
@@ -231,29 +246,136 @@ function bind(state: WindowState, board: Board): void {
     watch = subscribe(board.project, board);
     subscriptions.set(board.project, watch);
   }
-  watch.windows.add(state);
+  watch.tabs.add(state);
   state.board = watch.board;
   rememberBoard(board.project, state);
 }
 
-async function openProject(state: WindowState, project: string, create = false): Promise<void> {
-  const selection = ++state.selection;
-  unbind(state);
-  state.project = project;
-  state.board = undefined;
-  state.error = undefined;
-  state.loading = true;
-  send(state);
-  const result = existsSync(project) ? await callCli<Board>(project, [create ? "init" : "list"], create ? { git: true } : undefined)
-    : cliFailure("PROJECT_UNAVAILABLE", lang("The folder is unavailable.", "Папка недоступна."));
-  if (state.selection !== selection || state.window.isDestroyed()) return;
-  state.loading = false;
-  if (result.ok) bind(state, result.data);
-  else state.error = result.error;
-  send(state);
+function activateTab(owner: WindowState, tab: ProjectTab): void {
+  owner.active = tab;
+  send(tab);
+  saveSession();
 }
 
-async function pickProject(state: WindowState, create = false): Promise<void> {
+async function openProject(current: ProjectTab, project: string, create = false): Promise<void> {
+  const owner = windowStates.get(current.window.webContents.id);
+  if (!owner || owner.closing) return;
+  project = projectPath(project);
+  const existing = owner.tabs.find(tab => tab.project && projectIdentity(tab.project) === projectIdentity(project));
+  if (existing) {
+    activateTab(owner, existing);
+    if (existing.board || existing.loading) return;
+  }
+  const state = existing ?? (owner.tabs.find(tab => !tab.project) || { window: owner.window, selection: 0 });
+  if (!owner.tabs.includes(state)) owner.tabs.push(state);
+  const selection = ++state.selection;
+  state.project = project;
+  state.error = undefined;
+  state.loading = true;
+  activateTab(owner, state);
+  const result = existsSync(project) ? await callCli<Board>(project, [create ? "init" : "list"], create ? { git: true } : undefined)
+    : cliFailure("PROJECT_UNAVAILABLE", lang("The folder is unavailable.", "Папка недоступна."));
+  if (state.selection !== selection || owner.window.isDestroyed() || !owner.tabs.includes(state)) return;
+  state.loading = false;
+  if (result.ok) {
+    const duplicate = owner.tabs.find(tab => tab !== state && tab.project &&
+      projectIdentity(tab.project) === projectIdentity(result.data.project));
+    if (duplicate) {
+      owner.tabs.splice(owner.tabs.indexOf(state), 1);
+      if (owner.active === state) owner.active = duplicate;
+    } else bind(state, result.data);
+  } else state.error = result.error;
+  send(state);
+  saveSession();
+}
+
+let restoringSession = false;
+let quitting = false;
+
+function saveSession(): void {
+  if (restoringSession || quitting || !windowStates.size) return;
+  try {
+    const directory = app.getPath("userData");
+    mkdirSync(directory, { recursive: true });
+    writeJson(join(directory, "project-tabs.json"), [...windowStates.values()].map(state => ({
+      projects: state.tabs.flatMap(tab => tab.project ? [tab.project] : []), active: state.active.project,
+    })));
+  } catch (error) {
+    const state = [...windowStates.values()].find(state => !state.window.isDestroyed());
+    if (state) {
+      state.active.error = { code: "SESSION_SAVE_FAILED", message: lang("Could not save open projects.", "Не удалось сохранить открытые проекты.") + " " + (error as Error).message };
+      send(state.active);
+    }
+  }
+}
+
+interface ProjectOperation {
+  controller: AbortController;
+  done: Promise<void>;
+  finish: () => void;
+}
+const projectOperations = new Map<string, Set<ProjectOperation>>();
+const closingProjects = new Set<string>();
+
+function beginOperation(project: string) {
+  if (closingProjects.has(project)) throw new Error(lang("The project is closing.", "Проект закрывается."));
+  const controller = new AbortController();
+  const completion = Promise.withResolvers<void>();
+  const operation: ProjectOperation = { controller, done: completion.promise, finish: () => {
+    projectOperations.get(project)?.delete(operation);
+    if (!projectOperations.get(project)?.size) projectOperations.delete(project);
+    completion.resolve();
+  } };
+  const operations = projectOperations.get(project) ?? new Set();
+  operations.add(operation);
+  projectOperations.set(project, operations);
+  return operation;
+}
+
+async function confirmProjectClose(state: WindowState, tabs: ProjectTab[]): Promise<boolean> {
+  const projects = [...new Set(tabs.flatMap(tab => tab.project ? [tab.project] : []))];
+  const operations = projects.flatMap(project => [...(projectOperations.get(project) ?? [])]);
+  if (!operations.length) return true;
+  const result = await dialog.showMessageBox(state.window, {
+    type: "warning", title: "AI Taskboard",
+    message: lang("A task is still running in the project. Closing will interrupt it.",
+      "В проекте ещё выполняется задача. Закрытие прервёт её выполнение."),
+    detail: projects.filter(project => projectOperations.has(project)).join("\n"),
+    buttons: [lang("Cancel", "Отмена"), lang("Interrupt and close", "Прервать и закрыть")],
+    defaultId: 0, cancelId: 0, noLink: true,
+  });
+  if (result.response !== 1) return false;
+  for (const project of projects) closingProjects.add(project);
+  try {
+    const active = projects.flatMap(project => [...(projectOperations.get(project) ?? [])]);
+    for (const operation of active) operation.controller.abort(new Error(lang("The project was closed.", "Проект закрыт.")));
+    await Promise.all(active.map(operation => operation.done));
+    return true;
+  } finally {
+    for (const project of projects) closingProjects.delete(project);
+  }
+}
+
+async function closeTab(owner: WindowState, tab: ProjectTab): Promise<void> {
+  if (owner.closing) return;
+  owner.closing = true;
+  try {
+    if (!await confirmProjectClose(owner, [tab]) || owner.window.isDestroyed()) return;
+    const index = owner.tabs.indexOf(tab);
+    if (index < 0) return;
+    unbind(tab);
+    tab.selection++;
+    owner.tabs.splice(index, 1);
+    if (!owner.tabs.length) owner.tabs.push({ window: owner.window, selection: 0 });
+    if (owner.active === tab) owner.active = owner.tabs[Math.min(index, owner.tabs.length - 1)];
+    send(owner.active);
+    saveSession();
+  } finally {
+    owner.closing = false;
+  }
+}
+
+async function pickProject(state: ProjectTab, create = false): Promise<void> {
   const result = await dialog.showOpenDialog(state.window, {
     title: create ? lang("Create board", "Создать доску") : lang("Open existing board", "Открыть существующую доску"),
     defaultPath: state.project && existsSync(state.project) ? state.project : undefined,
@@ -264,7 +386,7 @@ async function pickProject(state: WindowState, create = false): Promise<void> {
   }
 }
 
-function createWindow(initial?: string): WindowState {
+function createWindow(initial: string[] = [], selected?: string): WindowState {
   const window = new BrowserWindow({
     width: 1380, height: 900, minWidth: 720, minHeight: 540,
     webPreferences: {
@@ -276,23 +398,46 @@ function createWindow(initial?: string): WindowState {
   });
   window.webContents.zoomMode = "isolated";
   const id = window.webContents.id;
-  const state: WindowState = { window, selection: 0 };
+  const active: ProjectTab = { window, selection: 0 };
+  const state: WindowState = { window, tabs: [active], active, restoring: initial.length > 0 };
   windowStates.set(id, state);
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-navigate", event => event.preventDefault());
-  window.once("closed", () => {
-    unbind(state);
-    windowStates.delete(id);
+  window.on("close", event => {
+    if (quitting) return;
+    event.preventDefault();
+    if (state.closing) return;
+    state.closing = true;
+    void confirmProjectClose(state, state.tabs).then(confirmed => {
+      if (!confirmed) return;
+      saveSession();
+      window.destroy();
+    }).finally(() => { state.closing = false; });
   });
-  void window.loadFile(fileURLToPath(html)).then(() => {
-    if (initial) void openProject(state, initial);
+  window.once("closed", () => {
+    for (const tab of state.tabs) { unbind(tab); tab.selection++; }
+    windowStates.delete(id);
+    saveSession();
+  });
+  state.ready = window.loadFile(fileURLToPath(html)).then(async () => {
+    for (const project of initial) await openProject(state.active, project);
+    const selectedTab = state.tabs.find(tab => tab.project && selected && projectIdentity(tab.project) === projectIdentity(selected));
+    if (selectedTab) activateTab(state, selectedTab);
+    saveSession();
+  }).finally(() => {
+    state.restoring = false;
+    send(state.active);
   });
   return state;
 }
 
-const menuActions: Record<string, (state: WindowState) => unknown> = {
+const menuActions: Record<string, (state: ProjectTab) => unknown> = {
   "new-window": () => createWindow(),
   "open-project": pickProject,
+  "close-tab": tab => {
+    const owner = windowStates.get(tab.window.webContents.id)!;
+    return tab.project ? closeTab(owner, tab) : tab.window.close();
+  },
   "close-window": ({ window }) => window.close(),
   quit: () => app.quit(),
   undo: ({ window }) => window.webContents.undo(),
@@ -322,6 +467,19 @@ ipcMain.handle("board:bootstrap", event => {
   const state = stateOf(event);
   loadRecentBoards();
   return frame(state);
+});
+ipcMain.handle("board:selectTab", (event, project: unknown) => {
+  const current = stateOf(event);
+  const owner = windowStates.get(current.window.webContents.id)!;
+  const tab = owner.tabs.find(tab => tab.project === project);
+  if (!tab || owner.closing) return;
+  activateTab(owner, tab);
+});
+ipcMain.handle("board:closeTab", async (event, project: unknown) => {
+  const current = stateOf(event);
+  const owner = windowStates.get(current.window.webContents.id)!;
+  const tab = owner.tabs.find(tab => tab.project === project);
+  if (tab) await closeTab(owner, tab);
 });
 ipcMain.handle("board:open", async event => pickProject(stateOf(event)));
 
@@ -399,12 +557,15 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
   if ((!active && (chatRuns.has(key) || launchingTasks.has(key))) || (active && request.retryAt !== undefined)) {
     return { saved: false, result: cliFailure("CHAT_BUSY", lang("The agent is already replying to this task.", "Агент уже отвечает в этой задаче.")) };
   }
+  const operation = beginOperation(project);
+  const signal = operation.controller.signal;
   if (!active) chatRuns.add(key);
   const directories = active?.directories ?? new Set<string>();
   let scratch: string | undefined;
   let saved = request.retryAt !== undefined;
   try {
     const { model, effort, text, files, retryAt } = request;
+    signal.throwIfAborted();
     scratch = await mkdtemp(join(tmpdir(), "ai-taskboard-chat-"));
     directories.add(scratch);
     let reply: CliReply<Task>;
@@ -417,6 +578,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
         await writeFile(path, Buffer.from(file.bytes));
         sources.push({ path, name: suffix && !imageTypes.has(extname(name).toLowerCase()) ? name + suffix : name });
       }
+      signal.throwIfAborted();
       reply = await callCli<Task>(project, ["chat", id], { text, model, effort, attachmentSources: sources });
       saved = reply.ok;
       if (saved) notify({ type: "saved" });
@@ -459,6 +621,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       attachments,
       latestUserMessage: { text: message.text ?? "", files: message.chat?.files ?? [] },
     });
+    signal.throwIfAborted();
     if (active) {
       // A finished turn must not silently turn a steering message into another run.
       if (activeAgents.get(key) !== active) throw new Error(lang("The agent finished before receiving this message. Send a new message to continue.",
@@ -488,8 +651,9 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       (name, args) => runAction(name, args),
       scratch, maxAttachmentBytes - task.attachments.reduce((sum, file) => sum + file.bytes, 0),
       report => saveTaskTokenUsage(project, id, report),
-      control => ready.resolve(control)).finally(() => ready.reject(new Error("The agent session ended.")));
+      control => ready.resolve(control), signal).finally(() => ready.reject(new Error("The agent session ended.")));
     if ("interrupted" in answer) return { saved, result: { ok: true as const, data: task } };
+    signal.throwIfAborted();
     const result = await callCli<Task>(project, ["chat", id], {
       ...answer, actor: "agent", model, effort, replyTo, durationMs: Math.round(performance.now() - replyStarted),
     });
@@ -506,6 +670,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     } else if (scratch && activeAgents.get(key) !== active) {
       await rm(scratch, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
     }
+    operation.finish();
   }
 }
 
@@ -538,6 +703,8 @@ ipcMain.handle("board:draft", async (event, request: unknown, files: unknown = [
   if (files.reduce((total, file) => total + file.bytes.byteLength, 0) > maxAttachmentBytes) {
     return cliFailure("ATTACHMENT_LIMIT", lang("Attachments are limited to 64 MiB per task.", "Лимит вложений на задачу — 64 МиБ."));
   }
+  const operation = beginOperation(board.project);
+  const signal = operation.controller.signal;
   state.drafting = true;
   let scratch: string | undefined;
   try {
@@ -553,8 +720,9 @@ ipcMain.handle("board:draft", async (event, request: unknown, files: unknown = [
       }
     }
     const draft = await composeDraft(
-      app.getPath("userData"), request.trim(), board.tags.map(tag => tag.name), attachments, lang("English", "Russian"),
+      app.getPath("userData"), request.trim(), board.tags.map(tag => tag.name), attachments, lang("English", "Russian"), signal,
     );
+    signal.throwIfAborted();
     if (!draft) return cliFailure("CODEX_UNAVAILABLE",
       lang("Choose a Codex executable in Settings → Codex integration.", "Выберите Codex в разделе «Настройки → Интеграция с Codex»."));
     return await callCli<Task>(board.project, ["create"], {
@@ -568,6 +736,7 @@ ipcMain.handle("board:draft", async (event, request: unknown, files: unknown = [
   } finally {
     if (scratch) await rm(scratch, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
     state.drafting = false;
+    operation.finish();
   }
 });
 ipcMain.handle("board:create", async event => pickProject(stateOf(event), true));
@@ -723,7 +892,7 @@ function publishRunActivity(project: string, id: string, items: RunActivity[]) {
   if (items.length) runActivityByTask.set(key, items);
   else runActivityByTask.delete(key);
   for (const state of windowStates.values()) {
-    if (state.project === project && !state.window.isDestroyed()) {
+    if (state.active.project === project && !state.window.isDestroyed()) {
       state.window.webContents.send("chat:update", { project, id, type: "run", items });
     }
   }
@@ -731,7 +900,7 @@ function publishRunActivity(project: string, id: string, items: RunActivity[]) {
 
 function notifyRunChange(project: string) {
   for (const state of windowStates.values()) {
-    if (state.project === project) send(state);
+    if (state.tabs.some(tab => tab.project === project)) send(state.active);
   }
 }
 
@@ -743,10 +912,12 @@ async function recordRunFailure(project: string, id: string, reason: string, con
   if (!result.ok && result.error.code !== "INVALID_TRANSITION") return result.error.message;
 }
 
-async function launchTask(project: string, id: string, revisionRequest?: { input: unknown }) {
+async function launchTask(project: string, id: string, revisionRequest?: { input: unknown }, newThread = false) {
   const key = project + "\0" + id;
   if (chatRuns.has(key)) return cliFailure("CHAT_BUSY", lang("Wait for the chat reply or stop the agent first.", "Дождитесь ответа в чате или остановите агента."));
   if (launchingTasks.has(key)) return cliFailure("LAUNCH_IN_PROGRESS", "This task is already being launched.");
+  const operation = beginOperation(project);
+  const signal = operation.controller.signal;
   launchingTasks.add(key);
   const activity = new Map<string, RunActivity>();
   const runStarted = performance.now();
@@ -768,7 +939,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   let prepared = false;
   let monitoring = false;
   try {
-    const current = await callCli<Task>(project, [revisionRequest ? "request-changes" : "show", id], revisionRequest?.input);
+    let current = await callCli<Task>(project, [revisionRequest ? "request-changes" : "show", id], revisionRequest?.input);
     if (!current.ok) return current;
     prepared = Boolean(revisionRequest);
     const client = await configuredCodex(app.getPath("userData"));
@@ -777,16 +948,31 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       if (prepared) throw new Error(reason);
       return cliFailure("CODEX_UNAVAILABLE", reason);
     }
+    if (newThread) {
+      if (current.data.status !== "blocked" || !current.data.codexThreadId ||
+          !/already has an active writer/i.test(current.data.blocked?.reason ?? "")) {
+        return cliFailure("INVALID_INPUT", lang("Reopen the current task before retrying.", "Откройте актуальную карточку перед повтором."));
+      }
+      current = await callCli<Task>(project, ["resume", id], {
+        revision: current.data.revision,
+        reason: lang("The user chose to continue in a new Codex chat.", "Пользователь выбрал продолжение в новом чате Codex."),
+      });
+      if (!current.ok) return current;
+      prepared = true;
+    }
+    signal.throwIfAborted();
     const started = await callCli<{ task: Task; worktree: string }>(project, ["start", id], { revision: current.data.revision });
     if (!started.ok) {
       if (prepared) throw new Error(started.error.message);
       return started;
     }
     prepared = true;
-    const run = await startCodexRun(client, project, started.data.worktree, started.data.task, item => {
+    signal.throwIfAborted();
+    const task = newThread ? { ...started.data.task, codexThreadId: undefined } : started.data.task;
+    const run = await startCodexRun(client, project, started.data.worktree, task, item => {
       activity.set(item.id, item);
       updateTimer ??= setTimeout(publish, 80);
-    }, report => saveTaskTokenUsage(project, id, report));
+    }, report => saveTaskTokenUsage(project, id, report), signal);
     const { threadId: codexThreadId, completion } = run;
     const directories = new Set<string>();
     activeAgents.set(key, { control: run, directories });
@@ -794,8 +980,12 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     runningTasks.add(key);
     notifyRunChange(project);
     // Preserve edits made while Codex was starting.
-    const saved = started.data.task.codexThreadId ? { ok: true as const, data: started.data.task } :
-      await callCli<Task>(project, ["update", id], { codexThreadId, actor: "user" });
+    const saved = started.data.task.codexThreadId === codexThreadId ? { ok: true as const, data: started.data.task } :
+      await callCli<Task>(project, ["update", id], {
+        codexThreadId, actor: "user",
+        ...(newThread ? { reason: lang("Continued in a new chat. Previous chat: ", "Продолжение в новом чате. Предыдущий чат: ") +
+          "codex://threads/" + started.data.task.codexThreadId } : {}),
+      });
     void completion.then(async reason => {
       await saveActivity();
       const items = [...activity.values()];
@@ -826,25 +1016,51 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       runningTasks.delete(key);
       launchingTasks.delete(key);
       notifyRunChange(project);
+      operation.finish();
     });
     if (saved.ok) return saved;
     return cliFailure("CODEX_LINK_FAILED", saved.error.message + "\n" + "codex://threads/" + codexThreadId);
   } catch (error) {
-    const reason = (error as Error).message;
+    const busy = (error as { code?: string }).code === "CODEX_THREAD_BUSY";
+    const reason = busy ? lang("This Codex chat is already open in another process. The board could not start the agent.",
+      "Этот чат Codex уже открыт в другом процессе. Доске не удалось запустить агента.") + "\n\n" + (error as Error).message : (error as Error).message;
     await saveActivity();
-    const failure = prepared ? await recordRunFailure(project, id, reason) : undefined;
-    return cliFailure("CODEX_LAUNCH_FAILED", [reason, failure].filter(Boolean).join("\n"));
+    const condition = busy ? lang("Continue in the existing chat, or stop work there and choose Continue in a new chat.",
+      "Продолжите задачу в открытом чате или остановите там работу и нажмите «Продолжить в новом чате».") : undefined;
+    const failure = prepared ? await recordRunFailure(project, id, reason, condition) : undefined;
+    // The feedback was saved even when starting its follow-up run failed.
+    if (revisionRequest && prepared && !failure) return callCli<Task>(project, ["show", id]);
+    return cliFailure(busy ? "CODEX_THREAD_BUSY" : "CODEX_LAUNCH_FAILED", [reason, failure].filter(Boolean).join("\n"));
   } finally {
-    if (!monitoring) launchingTasks.delete(key);
+    if (!monitoring) { launchingTasks.delete(key); operation.finish(); }
   }
 }
 
-ipcMain.handle("board:launchTask", async (event, id: unknown) => {
-  const { project } = stateOf(event);
-  if (!project || typeof id !== "string" || !taskIdPattern.test(id)) {
+ipcMain.handle("board:launchTask", async (event, id: unknown, options: unknown = {}) => {
+  const { project, window } = stateOf(event);
+  const input = options as { newThread?: unknown } | null;
+  if (!project || typeof id !== "string" || !taskIdPattern.test(id) || !input || typeof input !== "object" ||
+      (input.newThread !== undefined && typeof input.newThread !== "boolean")) {
     return cliFailure("INVALID_INPUT", "Choose a task.");
   }
-  return launchTask(project, id);
+  if (input.newThread) {
+    const current = await callCli<Task>(project, ["show", id]);
+    if (!current.ok) return current;
+    if (current.data.status !== "blocked" || !current.data.codexThreadId ||
+        !/already has an active writer/i.test(current.data.blocked?.reason ?? "")) {
+      return cliFailure("INVALID_INPUT", lang("Reopen the current task before retrying.", "Откройте актуальную карточку перед повтором."));
+    }
+    const choice = await dialog.showMessageBox(window, {
+      type: "question", title: "AI Taskboard",
+      message: lang("Continue in a new Codex chat?", "Продолжить в новом чате Codex?"),
+      detail: lang("Stop any work in the previous chat first. The new chat will use this task and its existing worktree. The previous chat will remain available.",
+        "Сначала остановите работу в предыдущем чате. Новый чат получит эту задачу и её рабочую копию. Прежний чат останется доступен."),
+      buttons: [lang("Cancel", "Отмена"), lang("Continue in a new chat", "Продолжить в новом чате")],
+      defaultId: 0, cancelId: 0, noLink: true,
+    });
+    if (choice.response !== 1) return { ok: true, data: null };
+  }
+  return launchTask(project, id, undefined, input.newThread === true);
 });
 
 ipcMain.handle("board:openCodexThread", async (event, id: unknown) => {
@@ -917,8 +1133,35 @@ else {
       });
     }
     const option = process.argv.indexOf("--project");
-    createWindow(option === -1 ? undefined : process.argv[option + 1]);
+    if (option !== -1 && process.argv[option + 1]) createWindow([process.argv[option + 1]]);
+    else {
+      let saved = [] as ReturnType<typeof savedWindows>;
+      try { saved = savedWindows(readJson(join(app.getPath("userData"), "project-tabs.json"))); } catch {}
+      // Open all saved windows before asynchronous board loading starts saving snapshots.
+      restoringSession = true;
+      const restored = saved.map(state => createWindow(state.projects, state.active));
+      if (!saved.length) restored.push(createWindow());
+      void Promise.all(restored.map(state => state.ready)).finally(() => {
+        restoringSession = false;
+        saveSession();
+      });
+    }
     app.on("activate", () => { if (!windowStates.size) createWindow(); });
+  });
+  let quitPending = false;
+  app.on("before-quit", event => {
+    if (quitting) return;
+    event.preventDefault();
+    if (quitPending) return;
+    quitPending = true;
+    void (async () => {
+      for (const state of windowStates.values()) {
+        if (state.closing || !await confirmProjectClose(state, state.tabs)) return;
+      }
+      saveSession();
+      quitting = true;
+      app.quit();
+    })().finally(() => { quitPending = false; });
   });
   app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
 }

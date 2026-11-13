@@ -56,6 +56,7 @@ function fixture(t: TestContext) {
     ArrayBuffer, Buffer, Error, extname, join, mkdtemp, rm, writeFile, maxAttachmentBytes,
     tmpdir: () => folder, stateOf: () => state, app: { getPath: () => folder }, composeDraft: runtime,
     lang: (english: string) => english,
+    beginOperation: () => ({ controller: new AbortController(), finish() {} }),
     cliFailure: (code: string, message: string) => ({ ok: false, error: { code, message } }),
     ipcMain: { handle: (_name: string, callback: typeof handler) => { handler = callback; } },
     callCli: async (project: string, args: string[], input: Record<string, unknown>) => {
