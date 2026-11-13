@@ -301,9 +301,13 @@ function section(title, content) {
   area.append(element("h3", title));
   if (Array.isArray(content)) {
     const list = element("ul");
-    for (const value of content) list.append(element("li", value));
+    for (const value of content) {
+      const item = element("li");
+      item.append(chatText(value));
+      list.append(item);
+    }
     area.append(list);
-  } else area.append(element("p", content));
+  } else area.append(chatText(content));
   body.append(area);
 }
 

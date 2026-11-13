@@ -4,7 +4,8 @@ import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import type { RunActivity } from "../src/cli/model.ts";
 
-const source = readFileSync(new URL("../src/desktop/chat.js", import.meta.url), "utf8");
+const source = ["markdown.js", "chat.js"].map(name =>
+  readFileSync(new URL("../src/desktop/" + name, import.meta.url), "utf8")).join("\n");
 const action = (id: string, type = "commandExecution", status = "completed", title = "git status", text = "output"): RunActivity =>
   ({ id, type, status, title, text });
 
@@ -42,7 +43,7 @@ function fixture(russian = true) {
   const reads: string[] = [];
   const saves: string[] = [];
   const render = runInNewContext(source + ";renderRunActivity", {
-    window: {}, document, frame,
+    window: {}, document, frame, taskInSheet: undefined,
     language: (english: string, translated: string) => frame.russian ? translated : english,
     element: (tag: string, text?: string, className?: string) => new Node(tag, text, className),
     icon: (name: string) => new Node("svg", name),

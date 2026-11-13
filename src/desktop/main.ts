@@ -22,6 +22,7 @@ import { configuredCodex } from "./codex.ts";
 import { startCodexRun } from "./codex-run.ts";
 import { runLog } from "./run-activity.ts";
 import { readRunImage } from "./run-images.ts";
+import { readMarkdownFile } from "./markdown-files.ts";
 import { normalizeRecentBoards, readRecentBoards, rememberRecentBoard } from "./recent-boards.ts";
 
 interface Board {
@@ -618,6 +619,29 @@ ipcMain.handle("chat:openLink", async (_event, value: unknown) => {
   if (typeof value !== "string") return;
   const url = URL.parse(value);
   if (url && ["https:", "http:", "mailto:"].includes(url.protocol)) await shell.openExternal(url.href);
+});
+
+ipcMain.handle("board:readMarkdown", async (event, id: unknown, link: unknown, source: unknown) => {
+  const { project } = stateOf(event);
+  if (!project || typeof link !== "string" || (source !== undefined && typeof source !== "string") ||
+      (id !== undefined && (typeof id !== "string" || !taskIdPattern.test(id)))) {
+    return cliFailure("INVALID_INPUT", "Choose a Markdown link.");
+  }
+  let base = project;
+  if (typeof id === "string") {
+    const task = await callCli<Task>(project, ["show", id]);
+    if (!task.ok) return task;
+    base = task.data.git?.worktree ?? project;
+  }
+  try {
+    return { ok: true, data: await readMarkdownFile(base, link, source) };
+  } catch (error) {
+    const message = (error as Error).message === "MARKDOWN_TOO_LARGE"
+      ? lang("The Markdown file exceeds 4 MiB.", "Размер Markdown-файла превышает 4 МиБ.")
+      : lang("Could not open the Markdown file. Check its path and access permissions.",
+        "Не удалось открыть Markdown-файл. Проверьте путь и права доступа.");
+    return cliFailure("MARKDOWN_UNAVAILABLE", message);
+  }
 });
 
 ipcMain.handle("board:openWorktree", async (event, id: unknown) => {
