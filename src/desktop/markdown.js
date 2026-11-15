@@ -295,8 +295,7 @@ function formatReportReferences(block) {
     range.selectNodeContents(code.closest("p, li, td") ?? code.parentElement);
     range.setEndBefore(code);
     const prefix = range.toString();
-    const labels = [...prefix.matchAll(/SHA-?\d+|checksum|контрольн\S*\s+сумм\S*|commit|коммит\S*/giu)];
-    const labelBefore = labels.at(-1)?.[0] ?? "";
+    const labelBefore = /(?:^|[^\p{L}\p{N}_])(SHA-?\d+|checksum|контрольн\S*\s+сумм\S*|commit|коммит\S*)[\s:—–=-]*$/iu.exec(prefix)?.[1] ?? "";
     const commit = /^(?:commit|коммит)/iu.test(labelBefore) ||
       (value.length === 40 && !labelBefore);
     const label = language("Copy full hash", "Скопировать полный хеш");

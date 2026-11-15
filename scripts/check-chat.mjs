@@ -112,7 +112,7 @@ app.whenReady().then(async () => {
       const checksum = 'a'.repeat(64);
       const tick = String.fromCharCode(96);
       const sample = 'T-0051 ' + tick + 'T-0051' + tick + ' · 0.3.0-alpha ' + tick + 'v0.3.0-alpha' + tick +
-        ' · Commit ' + hash + '\\n\\nSHA-256 ' + checksum + '\\n\\n[Existing T-0051](https://example.com)\\n\\n' +
+        ' · Commit ' + hash + '. File archive.zip: ' + checksum + '\\n\\n[Existing T-0051](https://example.com)\\n\\n' +
         tick.repeat(3) + '\\nT-0051 0.3.0-alpha ' + hash + '\\n' + tick.repeat(3);
       body.replaceChildren();
       for (const [label, context] of [
@@ -161,6 +161,36 @@ app.whenReady().then(async () => {
           return copied.length === 24 && copied[0] === hash && copied[1] === checksum;
         } finally { delete navigator.clipboard; }
       })()`, theme + ' references, versions, full copy, confirmation sizes, fences and existing links');
+      await check(`(async () => {
+        const contexts = [{}, { agent: true }, { coordination: true }];
+        const copied = [];
+        Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async value => copied.push(value) } });
+        try {
+          for (const context of contexts) for (const quoted of [false, true]) {
+            const quote = value => quoted ? tick + value + tick : value;
+            const cases = [
+              ['Commit ' + quote(hash) + '. Файл archive.zip: ' + quote(checksum), [hash, checksum], [hash.slice(0, 7), checksum]],
+              ['Commit ' + quote(hash) + ', archive.zip: ' + quote(checksum), [hash, checksum], [hash.slice(0, 7), checksum]],
+              ['SHA-256 ' + quote(checksum) + '. Commit ' + quote(hash), [checksum, hash], [checksum, hash.slice(0, 7)]],
+              ['SHA-1 ' + quote(hash) + ', Commit: ' + quote(checksum), [hash, checksum], [hash, checksum.slice(0, 7)]],
+              ['Commit ' + quote(checksum) + '. checksum: ' + quote(hash), [checksum, hash], [checksum.slice(0, 7), hash]],
+              ['Коммит: ' + quote(checksum) + '. Контрольная сумма: ' + quote(hash), [checksum, hash], [checksum.slice(0, 7), hash]],
+              ['SHA-256 ' + quote(checksum) + '. ' + quote(hash), [checksum, hash], [checksum, hash.slice(0, 7)]],
+              ['Commit завершён. Файл archive.zip: ' + quote(checksum), [checksum], [checksum]]
+            ];
+            for (const [text, full, visible] of cases) {
+              const message = chatText(text, context);
+              const digests = [...message.querySelectorAll('.chat-digest')];
+              if (digests.length !== full.length || digests.some((button, i) => button.title !== full[i] || button.textContent !== visible[i])) return false;
+              const offset = copied.length;
+              for (const button of digests) button.click();
+              await new Promise(resolve => setTimeout(resolve, 0));
+              if (full.some((value, i) => copied[offset + i] !== value)) return false;
+            }
+          }
+          return true;
+        } finally { delete navigator.clipboard; }
+      })()`, theme + ' hash labels apply only to the adjacent hash in mixed plain and inline paragraphs');
       // A hidden Electron window paints its updated surface on capture.
       await window.webContents.capturePage();
       await evaluate(`new Promise(resolve => setTimeout(resolve, 100))`);
