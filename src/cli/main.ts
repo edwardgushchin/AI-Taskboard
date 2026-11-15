@@ -28,7 +28,7 @@ const help = [
   "Usage: ai-taskboard [--project PATH] [--json] COMMAND [TASK-ID] [--stdin]",
   "Commands: init, list, show, create, update, comment, approve, return-to-draft, start, progress,",
   "          pause, block, resume, unblock, preview, submit, review, accept, restore-changes, request-changes, cancel, cleanup, settings, watch, doctor",
-  "          list --archived, archive sweep, chat TASK-ID, attachment add TASK-ID, attachment read TASK-ID",
+  "          list --compact, list --archived, archive sweep, chat TASK-ID, attachment add TASK-ID, attachment read TASK-ID",
   "          attachment cover TASK-ID --stdin (file and revision)",
   "          token-usage TASK-ID --stdin (id, sequence and records with threadId, turnId, model and token breakdown)",
   "          metrics [TASK-ID] (cycle time, submissions, returns, and known token usage)",
@@ -57,14 +57,29 @@ function readInput(fromStdin: boolean | undefined): Record<string, unknown> {
   return fromStdin ? object(JSON.parse(readFileSync(0, "utf8").replace(/^\uFEFF/, ""))) : {};
 }
 
-function snapshotBoard(store: BoardStore) {
+function compactTask(task: Task) {
+  const { id, title, description, status, revision, tags, priority, attachments, coverAttachment, codexThreadId,
+    createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep, dependencies } = task;
+  return { id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
+    coverAttachment, codexThreadId, createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep,
+    dependencies, historyLength: task.history.length,
+    ...(status === "review" && task.git?.submission && !task.result?.noChanges ? { reviewHasCommit: true } : {}),
+    initialAttachments: attachments.length - task.history.reduce((total, event) =>
+      total + (event.action === "attach" ? 1 : event.chat?.files?.length ?? 0), 0),
+    submittedAt: status === "review" ? task.history.findLast(event => event.action === "submit" && event.to === "review")?.at : undefined };
+}
+
+function snapshotBoard(store: BoardStore, compact = false) {
   upgradeTagCatalog(store);
   const board = store.snapshot();
   const statuses = new Map([...board.tasks, ...board.archived].map(task => [task.id, task.status]));
   return {
     ...board,
-    tasks: board.tasks.map(task => task.dependencies?.length
-      ? { ...task, unfinishedDependencies: unfinishedDependencies(task, id => statuses.get(id)) } : task),
+    tasks: board.tasks.map(task => {
+      const card = compact ? compactTask(task) : task;
+      return task.dependencies?.length
+        ? { ...card, unfinishedDependencies: unfinishedDependencies(task, id => statuses.get(id)) } : card;
+    }),
   };
 }
 
@@ -188,7 +203,7 @@ function run(
   id: string | undefined,
   extra: string | undefined,
   input: Record<string, unknown>,
-  filters: { archived?: boolean; tag?: string },
+  filters: { archived?: boolean; tag?: string; compact?: boolean },
 ) {
   if (command === "metrics") {
     return id ? taskMetrics(readTask(store, id)) : store.snapshot().tasks.map(taskMetrics);
@@ -196,7 +211,7 @@ function run(
   if (command === "list") {
     const key = filters.tag === undefined ? undefined : tagKey(text(filters.tag, "tag", true));
     const matches = (entry: { tags?: string[] }) => key === undefined || entry.tags?.some(name => tagKey(name) === key);
-    const snapshot = snapshotBoard(store);
+    const snapshot = snapshotBoard(store, filters.compact);
     const archived = snapshot.archived.filter(matches);
     return filters.archived ? { project: snapshot.project, tags: snapshot.tags, archived } :
       { ...snapshot, tasks: snapshot.tasks.filter(matches), archived };
@@ -347,6 +362,7 @@ try {
       json: { type: "boolean" },
       stdin: { type: "boolean" },
       archived: { type: "boolean" },
+      compact: { type: "boolean" },
       tag: { type: "string" },
       version: { type: "boolean" },
       help: { type: "boolean" },

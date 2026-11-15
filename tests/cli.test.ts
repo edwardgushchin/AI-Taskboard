@@ -224,6 +224,8 @@ test("dependencies prevent worktree creation until every dependency is completed
   assert.equal(waiting.blocked, undefined);
   const blocked = () => cli(root, ["start", task.id], undefined, "DEPENDENCIES_INCOMPLETE").details.dependencies;
   assert.deepEqual(blocked(), [first.id, second.id]);
+  const summary = cli(root, ["list", "--compact"]).tasks.find((entry: { id: string }) => entry.id === task.id);
+  assert.deepEqual(summary.unfinishedDependencies, [first.id, second.id]);
   assert.equal(cli(root, ["show", task.id]).status, "ready");
   assert.ok(!existsSync(join(root, ".tasks", "worktrees", task.id)));
 
@@ -349,6 +351,11 @@ test("task chat stores messages and attachments together and archives the conver
   cli(root, ["run-log", task.id], { entries: [{ ...entries[0], phase: "unknown" }] }, "INVALID_INPUT");
   const logged = cli(root, ["run-log", task.id], { entries, durationMs: 433_000 });
   assert.deepEqual(logged.history.at(-1).run, entries);
+  const compact = cli(root, ["list", "--compact"]).tasks.find((entry: { id: string }) => entry.id === task.id);
+  assert.equal(compact.revision, logged.revision);
+  assert.equal(compact.historyLength, logged.history.length);
+  assert.equal(compact.history, undefined);
+  assert.deepEqual(cli(root, ["list"]).tasks.find((entry: { id: string }) => entry.id === task.id).history.at(-1).run, entries);
   assert.equal(logged.history.at(-1).durationMs, 433_000);
 
   const closing = cli(root, ["chat", task.id], { ...settings, text: "Cancel this task." });

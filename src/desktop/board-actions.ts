@@ -132,7 +132,7 @@ export function boardActions(project: string, attachments: { path: string; name:
       if (input.activeOnly !== undefined && typeof input.activeOnly !== "boolean") {
         return cliFailure("INVALID_INPUT", "Set activeOnly to true or false.");
       }
-      const result = await callCli<{ tags: BoardTag[]; tasks: Task[]; archived: (ArchiveLink & { id: string })[] }>(project, ["list"]);
+      const result = await callCli<{ tags: BoardTag[]; tasks: Task[]; archived: (ArchiveLink & { id: string })[] }>(project, ["list", "--compact"]);
       if (!result.ok) return result;
       const { tags, tasks, archived } = result.data;
       const active = input.activeOnly ? tasks.filter(({ status }) => status !== "done" && status !== "cancelled") : tasks;
