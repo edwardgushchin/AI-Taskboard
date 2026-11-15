@@ -11,6 +11,7 @@ import { managerCodexArgs, boardCodexArgs } from "../src/desktop/board-agent-hoo
 import { openBoardMcp } from "../src/desktop/board-mcp.ts";
 import { executorToolConfig, providerActions, providerTools, verifyExecutorTools } from "../src/desktop/provider-tools.ts";
 import { callCli } from "../src/desktop/cli.ts";
+import { boardMcpTools } from "../src/desktop/board-actions.ts";
 import type { Task } from "../src/cli/model.ts";
 
 test("live provider: request, assignment, real MCP call, process restart and task isolation", {
@@ -26,14 +27,17 @@ test("live provider: request, assignment, real MCP call, process restart and tas
   const local = await openBoardMcp([{ name: "task_tool_request", description: "Request a tool for this task",
     inputSchema: { type: "object", properties: {}, additionalProperties: true } }],
   async (_name, args) => callCli(root, ["tool-request", ids[0]], args));
+  let managerLocal: Awaited<ReturnType<typeof openBoardMcp>> | undefined;
+  let managerAction: ReturnType<typeof providerActions> | undefined;
   const command = async <T>(args: string[], input?: unknown) => {
     const reply = await callCli<T>(root, args, input);
     assert.ok(reply.ok, reply.ok ? "" : reply.error.code);
     return reply.data;
   };
   async function server(manager: boolean, callback: (rpc: ReturnType<typeof codexRpc>) => Promise<void>) {
-    const child = spawn(client!.path, [...client!.args, ...(manager ? managerCodexArgs : boardCodexArgs), "-c", local.config], {
-      cwd: root, windowsHide: true, stdio: "pipe", env: { ...(client!.env ?? process.env), ...local.env },
+    const connection = manager ? managerLocal! : local;
+    const child = spawn(client!.path, [...client!.args, ...(manager ? managerCodexArgs : boardCodexArgs), "-c", connection.config], {
+      cwd: root, windowsHide: true, stdio: "pipe", env: { ...(client!.env ?? process.env), ...connection.env },
     });
     const closed = once(child, "close");
     child.stderr.resume();
@@ -45,7 +49,15 @@ test("live provider: request, assignment, real MCP call, process restart and tas
       await callback(rpc);
     } finally { clearTimeout(timeout); rpc.close(); child.stdin.end(); child.kill(); await closed; }
   }
+  async function persist(rpc: ReturnType<typeof codexRpc>, threadId: string) {
+    await rpc.request("turn/start", { threadId, input: [{ type: "text", text: "Reply OK only. Do not use tools or read files." }] });
+    for (;;) { const message = await rpc.receive(); if (message.method === "turn/completed") {
+      assert.equal((message.params as { turn: { status: string } }).turn.status, "completed"); return;
+    } }
+  }
   try {
+    managerLocal = await openBoardMcp(boardMcpTools.filter(tool => ["provider_tools", "task_tool_grant"].includes(tool.name)),
+      async (name, args) => managerAction ? managerAction(name, args) : { ok: false, error: { code: "NOT_READY", message: "Provider not ready" } });
     const initialized = await command<{ project: string }>(["init"], { git: true });
     assert.equal(initialized.project, root);
     for (const title of ["First", "Second"]) {
@@ -55,9 +67,28 @@ test("live provider: request, assignment, real MCP call, process restart and tas
       await command(["start", task.id]);
     }
     console.log("Fixture tasks", ids);
+    let originalThread: string;
+    await server(false, async rpc => {
+      const config = await executorToolConfig(rpc.request, root, []);
+      const started = await rpc.request<{ thread: { id: string } }>("thread/start", {
+        cwd: root, historyMode: "paginated", sandbox: "read-only", config,
+      });
+      originalThread = started.thread.id; owned.add(originalThread);
+      await verifyExecutorTools(rpc.request, originalThread, []);
+      const status = await rpc.request<{ data: { name: string; tools: object }[] }>("mcpServerStatus/list", { threadId: originalThread });
+      assert.ok(!status.data.some(row => row.name === ref.server && Object.keys(row.tools).length));
+      await persist(rpc, originalThread);
+      const requested = await rpc.request<{ isError?: boolean; content?: { text?: string }[] }>("mcpServer/tool/call", {
+        threadId: originalThread, server: "ai_taskboard", tool: "task_tool_request", arguments: { ...ref, reason: "Read the public API docs" },
+      });
+      assert.equal(requested.isError, false, JSON.stringify(requested.content));
+      await rpc.request("thread/unsubscribe", { threadId: originalThread });
+      console.log("Existing executor requested its missing tool before assignment");
+    });
     await server(true, async rpc => {
       const started = await rpc.request<{ thread: { id: string } }>("thread/start", { cwd: root, ephemeral: true, sandbox: "read-only" });
       const id = started.thread.id;
+      managerAction = providerActions(root, rpc.request, id);
       const catalog = await providerTools(rpc.request, id, root);
       const effective = await rpc.request<{ config: { mcp_servers: Record<string, unknown> } }>("config/read", { cwd: root, includeLayers: false });
       const configured = Object.keys(effective.config.mcp_servers).filter(name => name !== "ai_taskboard");
@@ -67,16 +98,18 @@ test("live provider: request, assignment, real MCP call, process restart and tas
       const selected = catalog.tools.find(t => t.server === ref.server && t.tool === ref.tool);
       assert.equal(selected?.assignable, true, "Configured docs MCP is required for this live check");
       console.log("Provider", client!.version, "catalog entries", catalog.tools.length);
-      const requested = await rpc.request<{ isError?: boolean; content?: { text?: string }[] }>("mcpServer/tool/call", { threadId: id,
-        server: "ai_taskboard", tool: "task_tool_request", arguments: { ...ref, reason: "Read the public API docs" } });
-      assert.equal(requested.isError, false, JSON.stringify(requested.content));
       const inbox = await command<{ id: string; kind: string }[]>(["manager-inbox"]);
       assert.ok(inbox.some(m => m.id === ids[0] && m.kind === "question"));
       const task = await command<Task>(["show", ids[0]]);
-      const result = await providerActions(root, rpc.request, id)("task_tool_grant", { id: task.id, revision: task.revision, ...ref });
-      assert.ok(result.ok);
-      assert.equal((result.data as { restartRequired: boolean }).restartRequired, true);
-      assert.equal((result.data as { applied: boolean }).applied, false);
+      const granted = await rpc.request<{ isError?: boolean; content: { text: string }[] }>("mcpServer/tool/call", {
+        threadId: id, server: "ai_taskboard", tool: "task_tool_grant", arguments: { id: task.id, revision: task.revision, ...ref },
+      });
+      assert.equal(granted.isError, false);
+      const result = JSON.parse(granted.content[0].text);
+      assert.equal(result.ok, true);
+      assert.equal(result.data.restartRequired, true);
+      assert.equal(result.data.applied, false);
+      console.log("Manager granted the tool through the real local MCP action");
     });
     let threadId: string;
     for (const resumed of [false, true]) await server(false, async rpc => {
@@ -85,7 +118,7 @@ test("live provider: request, assignment, real MCP call, process restart and tas
       const config = await executorToolConfig(rpc.request, root, task.toolGrants);
       const started = await rpc.request<{ thread: { id: string } }>(resumed ? "thread/resume" : "thread/start", {
         cwd: root, sandbox: "read-only", approvalPolicy: "on-request", config,
-        ...(resumed ? { threadId: threadId! } : { historyMode: "paginated" }),
+        ...(resumed ? { threadId: originalThread! } : { historyMode: "paginated" }),
       });
       threadId = started.thread.id; owned.add(threadId);
       await verifyExecutorTools(rpc.request, threadId, task.toolGrants);
@@ -97,13 +130,8 @@ test("live provider: request, assignment, real MCP call, process restart and tas
       });
       assert.notEqual(called.isError, true);
       assert.ok(called.content?.length, "Real docs MCP must return content");
-      if (!resumed) {
-        await rpc.request("turn/start", { threadId, input: [{ type: "text", text: "Reply OK only. Do not use tools or read files." }] });
-        for (;;) { const message = await rpc.receive(); if (message.method === "turn/completed") {
-          assert.equal((message.params as { turn: { status: string } }).turn.status, "completed"); break;
-        } }
-        await rpc.request("thread/unsubscribe", { threadId });
-      } else { await rpc.request("thread/delete", { threadId }); owned.delete(threadId); }
+      if (!resumed) await persist(rpc, threadId);
+      await rpc.request("thread/delete", { threadId }); owned.delete(threadId);
       console.log(resumed ? "Resumed real MCP call passed" : "New real MCP call passed");
     });
     await server(false, async rpc => {
@@ -123,6 +151,6 @@ test("live provider: request, assignment, real MCP call, process restart and tas
         try { await rpc.request("thread/delete", { threadId }); }
         catch { await assert.rejects(rpc.request("thread/read", { threadId }), /no rollout found|thread not loaded/); }
       }
-    }); } finally { await local.close(); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); }
+    }); } finally { await managerLocal?.close(); await local.close(); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); }
   }
 });
