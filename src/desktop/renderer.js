@@ -4652,6 +4652,13 @@ function renderStatusBar(projectChanged) {
 }
 
 let tabsSignature = "";
+let draggedProject;
+
+function clearTabDrop() {
+  byId("project-tabs").querySelectorAll(".drop-before, .drop-after").forEach(tab => {
+    tab.classList.remove("drop-before", "drop-after");
+  });
+}
 
 function renderProjectTabs() {
   const bar = byId("project-tabs");
@@ -4670,6 +4677,40 @@ function renderProjectTabs() {
     container.setAttribute("role", "presentation");
     const select = button("", () => api.selectTab(tab.path), "project-tab-button");
     select.className = "project-tab-button";
+    select.draggable = true;
+    select.addEventListener("dragstart", event => {
+      draggedProject = tab.path;
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("application/x-taskboard-tab", tab.path);
+    });
+    select.addEventListener("dragend", () => {
+      draggedProject = undefined;
+      clearTabDrop();
+    });
+    container.addEventListener("dragover", event => {
+      if (!draggedProject || draggedProject === tab.path) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      clearTabDrop();
+      const rect = container.getBoundingClientRect();
+      container.classList.add(event.clientY < rect.top + rect.height / 2 ? "drop-before" : "drop-after");
+      const bounds = bar.getBoundingClientRect();
+      if (event.clientY < bounds.top + 28) bar.scrollBy(0, -20);
+      else if (event.clientY > bounds.bottom - 28) bar.scrollBy(0, 20);
+    });
+    container.addEventListener("dragleave", event => {
+      if (!container.contains(event.relatedTarget)) container.classList.remove("drop-before", "drop-after");
+    });
+    container.addEventListener("drop", event => {
+      if (!draggedProject) return;
+      event.preventDefault();
+      const project = draggedProject;
+      const rect = container.getBoundingClientRect();
+      draggedProject = undefined;
+      clearTabDrop();
+      const after = event.clientY >= rect.top + rect.height / 2;
+      protect(() => api.reorderTab(project, tab.path, after))();
+    });
     select.title = tab.path;
     select.setAttribute("role", "tab");
     select.setAttribute("aria-selected", String(tab.path === frame.project));
@@ -4704,6 +4745,13 @@ function renderProjectTabs() {
     });
     select.addEventListener("keydown", protect(async event => {
       const index = tabs.findIndex(entry => entry.path === tab.path);
+      if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+        event.preventDefault();
+        const after = event.key === "ArrowDown";
+        const target = tabs[index + (after ? 1 : -1)];
+        if (target) await api.reorderTab(tab.path, target.path, after);
+        return;
+      }
       let next;
       if (event.key === "ArrowDown" || event.key === "ArrowRight") next = (index + 1) % tabs.length;
       else if (event.key === "ArrowUp" || event.key === "ArrowLeft") next = (index + tabs.length - 1) % tabs.length;

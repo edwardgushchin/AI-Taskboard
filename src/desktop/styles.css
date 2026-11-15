@@ -116,6 +116,8 @@ h1, h2, h3, p { margin: 0; }
 .project-tab-close { flex: none; display: grid; place-items: center; margin-top: 4px; padding: 0; width: 28px; height: 24px; border-radius: 4px; }
 .project-tab:hover { background: color-mix(in srgb, var(--text) 8%, var(--project-tab-background)); }
 .project-tab button:focus-visible { outline-offset: -2px; }
+.project-tab.drop-before { box-shadow: inset 0 3px var(--accent); }
+.project-tab.drop-after { box-shadow: inset 0 -3px var(--accent); }
 .app-menu-bar {
   --window-controls-width: 0px;
   --toolbar-border: color-mix(in srgb, var(--border) 65%, var(--toolbar));

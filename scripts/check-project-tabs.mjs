@@ -1,19 +1,23 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 const root = fileURLToPath(new URL("../", import.meta.url));
 const script = fileURLToPath(import.meta.url);
 if (!process.versions.electron) {
-  const directory = join(root, ".tasks", "qa", "project-tabs");
-  mkdirSync(directory, { recursive: true });
-  const artifacts = mkdtempSync(join(directory, "run-"));
+  const artifacts = mkdtempSync(join(tmpdir(), "taskboard-tabs-"));
+  const outputIndex = process.argv.indexOf("--artifacts");
+  const output = outputIndex < 0 ? undefined : resolve(process.argv[outputIndex + 1]);
   const environment = { ...process.env };
+  if (process.argv.includes("--reorder-only")) environment.TASKBOARD_TAB_REORDER_ONLY = "1";
   delete environment.ELECTRON_RUN_AS_NODE;
+  try {
+  symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), join(artifacts, "node_modules"), process.platform === "win32" ? "junction" : "dir");
   for (const stage of ["open", "restore"]) {
     const result = spawnSync(require("electron"), [script, stage, artifacts], {
       cwd: root, encoding: "utf8", windowsHide: true, timeout: 90_000,
@@ -25,7 +29,16 @@ if (!process.versions.electron) {
       throw result.error ?? new Error("Project tab checks failed: " + result.status);
     }
   }
-  console.log("Project tab artifacts: " + artifacts);
+  if (output) {
+    mkdirSync(output, { recursive: true });
+    for (const name of ["project-tabs-reordered.png", "project-tabs-drop.png"])
+      copyFileSync(join(artifacts, name), join(output, name));
+    console.log("Project tab screenshots: " + output);
+  }
+  } finally {
+    rmSync(artifacts, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    console.log("Temporary profile removed: " + artifacts);
+  }
 } else void (async () => {
   const { app, BrowserWindow, dialog } = require("electron");
   const { transformSync } = require("esbuild");
@@ -155,9 +168,9 @@ if (!process.versions.electron) {
       check(await evaluate("[...document.querySelectorAll('.project-tab-detail')].map(item => item.textContent).join(',') === 'first,second'"), "same names have parent paths");
       await select(first);
       check(await evaluate("document.querySelector('.task-card strong').textContent === 'First project task'"), "switching tabs renders the matching task");
-      await checkAppearance("dark");
+      if (!process.env.TASKBOARD_TAB_REORDER_ONLY) await checkAppearance("dark");
       window.setSize(760, 700);
-      await checkAppearance("light");
+      if (!process.env.TASKBOARD_TAB_REORDER_ONLY) await checkAppearance("light");
       window.setSize(1380, 900);
       await open(process.platform === "win32" ? first.toUpperCase() : first);
       check((await frame()).tabs.length === 2, "case aliases do not create duplicate tabs");
@@ -223,8 +236,49 @@ if (!process.versions.electron) {
       await open(unavailable);
       check((await frame()).error.code === "PROJECT_UNAVAILABLE" && (await frame()).tabs.length === 3, "missing folder retains a closable error tab");
       await select(second);
+      const order = async expected => {
+        await waitFor(() => evaluate("[...document.querySelectorAll('.project-tab')].map(tab => tab.dataset.project).join('|') === " + JSON.stringify(expected.join("|"))), "reordered DOM");
+        check((await frame()).tabs.map(tab => tab.path).join("|") === expected.join("|"), "main process and rendered order agree");
+        check((await frame()).project === second, "reordering preserves the active project");
+      };
+      const drag = async (source, target, after, cancel = false) => {
+        await evaluate(`(() => {
+          const tabs = [...document.querySelectorAll('.project-tab')];
+          const source = tabs.find(tab => tab.dataset.project === ${JSON.stringify(source)}).querySelector('.project-tab-button');
+          const target = tabs.find(tab => tab.dataset.project === ${JSON.stringify(target)});
+          const transfer = new DataTransfer();
+          const rect = target.getBoundingClientRect();
+          const options = { bubbles: true, cancelable: true, dataTransfer: transfer, clientY: ${after} ? rect.bottom - 2 : rect.top + 2 };
+          source.dispatchEvent(new DragEvent('dragstart', options));
+          target.dispatchEvent(new DragEvent('dragover', options));
+          window.cancelTestDrag = () => source.dispatchEvent(new DragEvent('dragend', options));
+          ${cancel ? "" : "target.dispatchEvent(new DragEvent('drop', options)); window.cancelTestDrag();"}
+        })()`);
+      };
+      await drag(unavailable, second, false, true);
+      writeFileSync(join(artifacts, "project-tabs-drop.png"), (await window.webContents.capturePage()).toPNG());
+      await evaluate("window.cancelTestDrag()");
+      await order([second, first, unavailable]);
+      check(await evaluate("!document.querySelector('.drop-before, .drop-after')"), "canceled drag removes insertion marker");
+      await drag(unavailable, second, false);
+      await order([unavailable, second, first]);
+      await drag(second, first, true);
+      await order([unavailable, first, second]);
+      await drag(second, second, true);
+      await order([unavailable, first, second]);
+      await evaluate("window.taskboard.reorderTab('unknown-project', " + JSON.stringify(first) + ", false)");
+      await evaluate("window.taskboard.reorderTab(" + JSON.stringify(first) + ", 'unknown-project', false)");
+      await order([unavailable, first, second]);
+      // Files from outside the tab strip must not move or open a project.
+      await evaluate("document.querySelector('.project-tab').dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: new DataTransfer() }))");
+      await order([unavailable, first, second]);
+      await evaluate("document.querySelector('[aria-selected=true]').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', altKey: true, bubbles: true, cancelable: true }))");
+      await order([unavailable, second, first]);
+      await evaluate("document.querySelector('[aria-selected=true]').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true, cancelable: true }))");
+      await order([unavailable, first, second]);
+      writeFileSync(join(artifacts, "project-tabs-reordered.png"), (await window.webContents.capturePage()).toPNG());
       const saved = JSON.parse(readFileSync(join(profile, "project-tabs.json"), "utf8"));
-      check(saved[0].projects.join("|") === [second, first, unavailable].join("|") && saved[0].active === second, "session persists tab order and active project");
+      check(saved[0].projects.join("|") === [unavailable, first, second].join("|") && saved[0].active === second, "session persists tab order and active project");
     } else {
       await waitFor(async () => {
         const snapshot = await frame();
@@ -233,7 +287,7 @@ if (!process.versions.electron) {
       check(await evaluate("window.startupView.loadingSeen && !window.startupView.welcomeSeen"), "restoring a saved session shows loading without exposing the welcome screen");
       check(await evaluate("document.querySelector('#welcome').hidden && document.querySelector('#loading').hidden"), "the active restored board replaces loading");
       await evaluate("window.startupObserver.disconnect()");
-      check((await frame()).tabs.map(tab => tab.path).join("|") === [second, first, unavailable].join("|"), "relaunch restores tab order");
+      check((await frame()).tabs.map(tab => tab.path).join("|") === [unavailable, first, second].join("|"), "relaunch restores tab order");
       check((await frame()).project === second, "relaunch restores the active project");
       check((await frame()).runningTasks.length === 0, "relaunch does not restart agents");
       await select(unavailable);

@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld("taskboard", {
   createBoard: () => ipcRenderer.invoke("board:create"),
   openRecent: path => ipcRenderer.invoke("board:recent", path),
   selectTab: project => ipcRenderer.invoke("board:selectTab", project),
+  reorderTab: (project, target, after) => ipcRenderer.invoke("board:reorderTab", project, target, after),
   closeTab: project => ipcRenderer.invoke("board:closeTab", project),
   menuAction: action => ipcRenderer.invoke("menu:action", action),
   customTitleBar: process.platform === "win32",
