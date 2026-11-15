@@ -121,17 +121,24 @@ export function locateBoard(path: string, initializing = false, initializeGit = 
     repository = discoverRepository(selected);
   }
   let root = repository?.root ?? selected;
-  if (!repository && !initializing) {
+  // A repository discovered above the selected directory is not consent to
+  // initialize its board. Actual worktree roots still share the clone's board.
+  if (initializing && repository && !exists(join(selected, ".git")) && selected !== repository.root) {
+    repository = null;
+    root = selected;
+  }
+  if (!initializing) {
     for (let cursor = selected; ; cursor = dirname(cursor)) {
       const boardDir = join(cursor, ".tasks");
       if (exists(boardDir)) {
         directory(boardDir);
         if (exists(join(boardDir, "board.json"))) {
           root = cursor;
+          if (root !== repository?.root) repository = null;
           break;
         }
       }
-      if (dirname(cursor) === cursor) break;
+      if (cursor === repository?.root || exists(join(cursor, ".git")) || dirname(cursor) === cursor) break;
     }
   }
   return { root, directory: join(root, ".tasks"), repository };

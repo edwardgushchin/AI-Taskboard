@@ -1,1 +1,3 @@
 *.sh text eol=lf
+tests/fixtures/T-0084/*.json -text
+docs/verification/T-0084/*.json -text
