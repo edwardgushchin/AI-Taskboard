@@ -350,7 +350,9 @@ function renderRunActivity(container, items, completed = false, durationMs, task
       nodes.push(row);
       if (showTaskEvent) taskEventRows.add(row);
       if (reason) {
-        const note = element("p", reason, "chat-text");
+        const text = element("p", reason, "chat-text");
+        const note = context?.dialogue ? element("div", undefined, "board-manager-message") : text;
+        if (note !== text) note.append(text);
         note.dataset.item = "reason:" + item.id;
         nodes.push(note);
         if (showTaskEvent) taskEventRows.add(note);

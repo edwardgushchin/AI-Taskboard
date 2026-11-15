@@ -1196,6 +1196,89 @@ app.whenReady().then(async () => {
   await check(`!otherManager.textContent.includes('PRIVATE') && !otherManager.querySelector('.chat-coordination') && leaks.length === 0`,
     'late history after disposal and project switch cannot mix streams');
   await evaluate(`observer.disconnect(); otherManager.dispose()`);
+  // Exercise reasons through the same live/history composer paths as real task actions.
+  await evaluate(`
+    frame.project = 'fixture';
+    const reasonActions = ['unblock', 'approve', 'start', 'block', 'request_changes', 'accept', 'cancel', 'comment', 'update'];
+    const reasonItems = reasonActions.map((name, index) => ({
+      ...action('reason-' + name, 'mcpToolCall', 'ai_taskboard / task_' + name),
+      taskChanges: [{ id: 'T-0078', action: name, reason: name + ': Пояснение менеджера.\\nВторая строка с подробностями действия и дальнейшей проверки.' }]
+    }));
+    const publicReply = { ...action('reason-final', 'agentMessage', '', 'completed', 'Пояснения сохранены.'), phase: 'final_answer' };
+    const reasonFinish = Promise.withResolvers();
+    const reasonReady = Promise.withResolvers();
+    let reasonsSaved = false;
+    api.boardRequest = () => { reasonManager.enableStop(); reasonReady.resolve(); return reasonFinish.promise; };
+    api.boardHistory = async (_project, _cursor, view) => {
+      return { ok: true, data: view === 'live'
+        ? { work: [], chat: reasonItems } : { turns: reasonsSaved ? [{ messages: [], items: [...reasonItems, publicReply] }] : [], nextCursor: null } };
+    };
+    const reasonManager = draftComposer();
+    body.replaceChildren(reasonManager);
+    byId('sheet-title').textContent = 'T-0080 · Пояснения менеджера';
+    reasonManager.querySelector('.board-chat-pin').click();
+    let reasonLog = reasonManager.querySelector('.board-chat-log:not(.board-work)');
+    const bareReasons = [];
+    const reasonObserver = new MutationObserver(records => {
+      for (const record of records) for (const node of record.addedNodes) {
+        if (node.nodeType !== 1) continue;
+        const notes = [...node.querySelectorAll('[data-item^="reason:"]'), ...(node.matches('[data-item^="reason:"]') ? [node] : [])];
+        for (const note of notes) if (!note.matches('.board-manager-message')) bareReasons.push(note.textContent);
+      }
+    });
+    reasonObserver.observe(reasonLog, { childList: true, subtree: true });
+    reasonManager.querySelector('.draft-input textarea').value = 'Проверь пояснения действий';
+    reasonManager.dispatchEvent(new Event('submit', { cancelable: true }));
+    reasonReady.promise.then(() => true);
+  `);
+  const reasonsIntact = `reasonItems.every(item => {
+    const notes = reasonLog.querySelectorAll('[data-item="reason:' + item.id + '"]');
+    return notes.length === 1 && notes[0].matches('.board-manager-message') &&
+      notes[0].firstElementChild.matches('p.chat-text') && notes[0].textContent === item.taskChanges[0].reason;
+  }) && bareReasons.length === 0`;
+  await evaluate(`reasonManager.updateActivity(reasonItems); void 0`);
+  await check(reasonsIntact, 'all action reasons are bubbles immediately during live updates, with exact multiline text');
+  await evaluate(`reasonManager.updateActivity(reasonItems); void 0`);
+  await check(reasonsIntact, 'repeated live updates do not duplicate reasons');
+  await evaluate(`reasonFinish.resolve({ ok: true, data: { answer: publicReply.text, items: [...reasonItems, publicReply] } });
+    reasonFinish.promise.then(() => new Promise(resolve => requestAnimationFrame(() => resolve(true))))`);
+  await check(reasonsIntact, 'completion preserves reasons and their bubbles');
+  await evaluate(`reasonManager.querySelector('.board-work-toggle').click(); void 0`);
+  await check(`!reasonManager.querySelector('.board-work .board-manager-message') &&
+    reasonManager.querySelectorAll('.board-work p[data-item^="reason:"]').length === reasonItems.length`, 'work view retains plain reasons without dialogue bubble wrappers');
+  await evaluate(`reasonManager.querySelector('.board-dialogue-toggle').click(); void 0`);
+  await check(reasonsIntact, 'switching views preserves the dialogue reasons');
+  await evaluate(`reasonObserver.disconnect(); reasonManager.dispose(); reasonsSaved = true;
+    const restoredReasons = draftComposer(); body.replaceChildren(restoredReasons);
+    restoredReasons.querySelector('.board-chat-pin').click();
+    restoredReasons.querySelector('.draft-input textarea').focus();
+    reasonLog = restoredReasons.querySelector('.board-chat-log:not(.board-work)');
+    reasonObserver.observe(reasonLog, { childList: true, subtree: true });
+    new Promise(resolve => setTimeout(() => resolve(true), 250));`);
+  await evaluate(`restoredReasons.invalidateHistory(); new Promise(resolve => setTimeout(() => resolve(true), 250));`);
+  await check(reasonsIntact, 'history reload restores each reason once without intermediate bare text');
+  await check(`reasonItems.every(item => {
+    const row = reasonLog.querySelector('[data-item="item:' + item.id + '"]');
+    const note = reasonLog.querySelector('[data-item="reason:' + item.id + '"]');
+    return !!row && row.nextElementSibling === note && !row.matches('.board-manager-message');
+  }) && !!reasonLog.querySelector('.chat-work')`, 'history retains action rows, reason order and folded work');
+  for (const width of [850, 480]) {
+    window.setSize(width, 960);
+    for (const theme of ['light', 'dark']) {
+      nativeTheme.themeSource = theme;
+      await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+      await check(`(() => {
+        const note = reasonLog.querySelector('[data-item="reason:reason-unblock"]');
+        const normal = reasonLog.querySelector('.chat-run-final');
+        const a = getComputedStyle(note), b = getComputedStyle(normal);
+        return a.padding === b.padding && a.borderRadius === b.borderRadius && a.backgroundColor === b.backgroundColor &&
+          getComputedStyle(note.firstElementChild).whiteSpace === 'pre-wrap' && note.scrollWidth <= note.clientWidth;
+      })()`, 'reason matches ordinary manager bubble styling and wraps at ' + width + ' / ' + theme);
+      await evaluate(`reasonLog.scrollTop = 0`);
+      await capture('reasons-' + width + '-' + theme + '.png');
+    }
+  }
+  await evaluate(`reasonObserver.disconnect(); restoredReasons.dispose()`);
   console.log("Chat Chromium checks passed");
   if (keepArtifacts) console.log("Screenshots: " + artifacts);
 }).catch(error => {
