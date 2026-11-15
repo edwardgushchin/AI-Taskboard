@@ -592,7 +592,9 @@ function renderAgentRunStatus(target, task) {
     review === "manager" ? language("Project manager is reviewing", "Проверяет менеджер проекта") :
     frame.runningTasks?.includes(task.id) ? language("Agent is working", "Агент работает") : "";
   if (label) {
-    const spinner = target.querySelector(".agent-spinner") ?? element("span", undefined, "agent-spinner");
+    const spinner = target.querySelector(".agent-spinner") ?? icon("sync");
+    spinner.classList.add("agent-spinner");
+    spinner.removeAttribute("aria-hidden");
     spinner.setAttribute("role", "status");
     spinner.setAttribute("aria-label", label);
     spinner.title = label;
