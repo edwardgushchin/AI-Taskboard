@@ -2,9 +2,9 @@ import { open, realpath } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { insideProject } from "./project-files.ts";
+import sourceFile from "./source-files.cjs";
 
 const maxDocumentBytes = 4 * 1024 * 1024;
-const sourceFile = /\.(?:cs|fs|vb|[cm]?js|[cm]?ts|jsx|tsx|py|rs|go|java|kt|swift|[ch]|cc|cpp|cxx|hh|hpp|hxx|rb|php|lua|gd|sh|ps1)$/i;
 
 // Only read text documents; links never execute files or navigate the renderer.
 export async function readMarkdownFile(base: string, value: string, source?: string, project = base) {

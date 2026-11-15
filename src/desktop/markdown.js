@@ -1,6 +1,6 @@
 const chatMarkdown = window.markdownit?.({ breaks: true, linkify: true, html: false });
 
-const sourceLocation = /\.(?:cs|fs|vb|[cm]?js|[cm]?ts|jsx|tsx|py|rs|go|java|kt|swift|[ch]|cc|cpp|cxx|hh|hpp|hxx|rb|php|lua|gd|sh|ps1):[1-9]\d*(?::\d+)?$/i;
+const sourceLocation = new RegExp(sourceFile.source.replace(/\$$/, ":[1-9]\\d*(?::\\d+)?$"), "i");
 const fullDigest = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const reportSentences = new Intl.Segmenter(undefined, { granularity: "sentence" });
 
