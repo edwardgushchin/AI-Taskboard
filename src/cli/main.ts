@@ -313,7 +313,7 @@ function run(
   if (command === "chat") return addChatMessage(store, task, input);
   if (command === "run-log") return store.save(recordRunLog(task, input));
   const updated = changeTask(task, command, input);
-  if (command === "update" && input.dependencies !== undefined) validateDependencies(store, updated);
+  if ((command === "update" || command === "unblock") && input.dependencies !== undefined) validateDependencies(store, updated);
   return store.save(command === "update" && input.tags !== undefined ? assignTags(store, updated) : updated);
 }
 

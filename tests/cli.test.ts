@@ -213,6 +213,15 @@ test("dependencies prevent worktree creation until every dependency is completed
   cli(root, ["update", first.id], { dependencies: [task.id] }, "DEPENDENCY_CYCLE");
   cli(root, ["update", task.id], { dependencies: ["T-9999"] }, "TASK_NOT_FOUND");
   cli(root, ["approve", task.id]);
+  const manual = cli(root, ["block", task.id], {
+    allowUnstarted: true, actor: "manager", reason: "Waiting for acceptance", condition: "Accept the prerequisites",
+  });
+  const unblock = { actor: "manager", revision: manual.revision, reason: "Track the prerequisites on the board" };
+  cli(root, ["unblock", task.id], { ...unblock, dependencies: [task.id] }, "DEPENDENCY_CYCLE");
+  assert.deepEqual(cli(root, ["show", task.id]).blocked, manual.blocked);
+  const waiting = cli(root, ["unblock", task.id], { ...unblock, dependencies: [first.id, second.id] });
+  assert.equal(waiting.status, "ready");
+  assert.equal(waiting.blocked, undefined);
   const blocked = () => cli(root, ["start", task.id], undefined, "DEPENDENCIES_INCOMPLETE").details.dependencies;
   assert.deepEqual(blocked(), [first.id, second.id]);
   assert.equal(cli(root, ["show", task.id]).status, "ready");
