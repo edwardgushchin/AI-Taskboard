@@ -1014,3 +1014,7 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 .notifications p { padding: 7px; }
 .notification-entry { display: grid; justify-content: start; justify-items: start; text-align: start; white-space: normal; }
 .notification-entry span { color: var(--muted); }
+
+.statistics-counts { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 16px; margin: 8px 0 16px; }
+.statistics-counts dd { margin: 0; font-variant-numeric: tabular-nums; }
+#project-statistics { min-width: 0; overflow-wrap: anywhere; }

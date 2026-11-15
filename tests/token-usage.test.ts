@@ -248,6 +248,7 @@ test("CLI persists idempotent reports per task, validates counters and preserves
   };
   cli(["init"]);
   assert.deepEqual(cli(["manager-usage"]), { reports: 0, total: null, incomplete: true, byModel: [] });
+  assert.equal(cli(["project-usage"]).total, null);
   const first = cli(["create"], { title: "First task" });
   const second = cli(["create"], { title: "Other task" });
   const record = { ...counts(100, 20, 50, 10), threadId: "root", turnId: "turn", model: "model-a", incomplete: false };
@@ -314,4 +315,22 @@ test("CLI persists idempotent reports per task, validates counters and preserves
   cli(["archive", "sweep"]);
   assert.deepEqual(cli(["show", first.id]).tokenUsage, current.tokenUsage);
   assert.equal(cli(["metrics", first.id]).tokens.total, 350);
+  const project = cli(["project-usage"]);
+  assert.equal(project.total, 700);
+  assert.equal(project.missingTasks, 1);
+  assert.equal(project.incomplete, true);
+  assert.equal(project.byModel[0].cachedInputTokens, 260);
+  assert.equal(project.byModel[0].reasoningOutputTokens, 50);
+  assert.equal(project.byRole.manager[0].totalTokens, 350);
+  assert.equal(project.byRole.reviewer[0].totalTokens, 120);
+  assert.equal(project.byRole.unattributed[0].totalTokens, 230);
+  const zero = { ...record, ...counts(0, 0), model: null };
+  cli(["token-usage", second.id], { id: "zero", sequence: 1, role: "discussion", records: [zero] });
+  cli(["token-usage", second.id], { id: "future", sequence: 1, role: "executor",
+    records: [{ ...zero, model: "future-model", ...counts(10, 2) }] });
+  const refreshed = cli(["project-usage"]);
+  assert.equal(refreshed.total, 712);
+  assert.equal(refreshed.missingTasks, 0);
+  assert.equal(refreshed.byModel.find((m: { model: string | null }) => m.model === null).totalTokens, 0);
+  assert.equal(refreshed.byRole.executor[0].model, "future-model");
 });

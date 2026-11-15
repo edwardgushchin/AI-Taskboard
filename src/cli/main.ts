@@ -19,6 +19,7 @@ import { previewSubmission, previewTask, submitTask } from "./submission.ts";
 import { changeTask, createTask, recordRunLog, withoutVerification } from "./tasks.ts";
 import { recordTokenUsage, taskMetrics } from "./token-usage.ts";
 import type { ReviewDecisionTiming } from "./token-usage.ts";
+import { projectUsage } from "./project-usage.ts";
 import { managerUsage } from "./manager-usage.ts";
 import { dependencyStatus, unfinishedDependencies, validateDependencies } from "./dependencies.ts";
 import { checkoutTaskWorktree, cleanTaskWorktree, finishTaskStart, hasPending, inspectCleanup, prepareTaskStart, taskWithCurrentWorktree } from "./worktree.ts";
@@ -39,6 +40,7 @@ const help = [
   "          attachment cover TASK-ID --stdin (file and revision)",
   "          token-usage TASK-ID --stdin (id, sequence and records with threadId, turnId, model and token breakdown)",
   "          metrics [TASK-ID] (cycle time, submissions, returns, and known token usage)",
+  "          project-usage (all available project token usage, including archived tasks and manager)",
   "          manager-usage (known board manager token usage) or manager-usage --stdin (record a run snapshot)",
   "          message TASK-ID --stdin (text, optional kind), messages TASK-ID (optional afterSequence with --stdin), manager-inbox",
   "          tool-request TASK-ID --stdin (server, tool, reason), tool-grant TASK-ID --stdin (revision, server, tool; restart required)",
@@ -320,6 +322,10 @@ function run(
   if (command === "recover-test-data") {
     if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "Recovery takes a manifest, not a task ID.");
     return recoverTestData(store, input);
+  }
+  if (command === "project-usage") {
+    if (id !== undefined || Object.keys(input).length) throw new TaskboardError("INVALID_INPUT", "Project usage takes no arguments.");
+    return projectUsage(store);
   }
   if (command === "metrics") {
     const tasks = id ? [readTask(store, id)] : store.snapshot().tasks;
