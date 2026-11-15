@@ -112,7 +112,7 @@ app.whenReady().then(async () => {
       const checksum = 'a'.repeat(64);
       const tick = String.fromCharCode(96);
       const sample = 'T-0051 ' + tick + 'T-0051' + tick + ' · 0.3.0-alpha ' + tick + 'v0.3.0-alpha' + tick +
-        ' · Commit ' + hash + '. File archive.zip: ' + checksum + '\\n\\n[Existing T-0051](https://example.com)\\n\\n' +
+        ' · Commit ' + hash + '. File archive.zip: ' + hash + '\\n\\n[Existing T-0051](https://example.com)\\n\\n' +
         tick.repeat(3) + '\\nT-0051 0.3.0-alpha ' + hash + '\\n' + tick.repeat(3);
       body.replaceChildren();
       for (const [label, context] of [
@@ -149,7 +149,7 @@ app.whenReady().then(async () => {
                 message.querySelector('pre code').textContent !== 'T-0051 0.3.0-alpha ' + hash + '\\n') return false;
             const digests = [...message.querySelectorAll('.chat-digest')];
             if (digests[0].textContent !== hash.slice(0, 7) || digests[0].title !== hash ||
-                digests[1].textContent !== checksum) return false;
+                digests[1].textContent !== hash) return false;
             for (const control of message.querySelectorAll('.chat-digest, .chat-code-copy')) {
               const glyph = control.querySelector('.icon');
               if (getComputedStyle(glyph).fontSize !== getComputedStyle(control).fontSize) return false;
@@ -158,7 +158,7 @@ app.whenReady().then(async () => {
               if (!glyph.matches('.codicon-check') || getComputedStyle(glyph).fontSize !== getComputedStyle(control).fontSize) return false;
             }
           }
-          return copied.length === 24 && copied[0] === hash && copied[1] === checksum;
+          return copied.length === 24 && copied[0] === hash && copied[1] === hash;
         } finally { delete navigator.clipboard; }
       })()`, theme + ' references, versions, full copy, confirmation sizes, fences and existing links');
       await check(`(async () => {
@@ -178,6 +178,17 @@ app.whenReady().then(async () => {
               ['SHA-256 ' + quote(checksum) + '. ' + quote(hash), [checksum, hash], [checksum, hash.slice(0, 7)]],
               ['Commit завершён. Файл archive.zip: ' + quote(checksum), [checksum], [checksum]]
             ];
+            for (const sum of [hash, checksum]) for (const file of [
+              'Файл archive.zip:', 'File archive.zip:', 'archive.zip:',
+              'Файл README:', 'File README:', '[archive.zip](https://example.com/archive.zip):'
+            ]) {
+              cases.push(
+                [file + ' ' + quote(sum), [sum], [sum]],
+                ['Commit ' + quote(hash) + '. ' + file + ' ' + quote(sum), [hash, sum], [hash.slice(0, 7), sum]],
+                ['Commit ' + quote(hash) + ', ' + file + ' ' + quote(sum), [hash, sum], [hash.slice(0, 7), sum]],
+                [file + ' ' + quote(sum) + '. Commit ' + quote(hash), [sum, hash], [sum, hash.slice(0, 7)]]
+              );
+            }
             for (const [text, full, visible] of cases) {
               const message = chatText(text, context);
               const digests = [...message.querySelectorAll('.chat-digest')];

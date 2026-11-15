@@ -296,8 +296,9 @@ function formatReportReferences(block) {
     range.setEndBefore(code);
     const prefix = range.toString();
     const labelBefore = /(?:^|[^\p{L}\p{N}_])(SHA-?\d+|checksum|контрольн\S*\s+сумм\S*|commit|коммит\S*)[\s:—–=-]*$/iu.exec(prefix)?.[1] ?? "";
+    const fileBefore = /(?:^|\s)(?:\S+\.[\p{L}\p{N}]+|(?:file|файл)\s+[^:\n]+)[\s:：=—–-]*$/iu.test(prefix);
     const commit = /^(?:commit|коммит)/iu.test(labelBefore) ||
-      (value.length === 40 && !labelBefore);
+      (value.length === 40 && !labelBefore && !fileBefore);
     const label = language("Copy full hash", "Скопировать полный хеш");
     const copy = button("", async () => {
       try {
