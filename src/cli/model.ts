@@ -194,6 +194,7 @@ export interface Task {
   dependencies?: string[];
   milestone?: GitHubMilestone;
   execution?: { model: string; effort?: string };
+  toolGrants?: { server: string; tool: string }[];
   workingDirectory?: string;
   schedule?: TaskSchedule;
   blocked?: { reason: string; condition: string; previousStatus?: "draft" | "ready" };

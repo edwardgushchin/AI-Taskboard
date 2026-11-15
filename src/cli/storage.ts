@@ -309,6 +309,10 @@ export function validateCard(value: unknown, id: string): Task {
       (value.dependencies !== undefined && (!Array.isArray(value.dependencies) ||
         value.dependencies.some(entry => typeof entry !== "string" || !taskIdPattern.test(entry)))) ||
       (value.schedule !== undefined && !validTaskSchedule(value.schedule)) ||
+      (value.toolGrants !== undefined && (!Array.isArray(value.toolGrants) || value.toolGrants.length > 256 ||
+        value.toolGrants.some(entry => !isRecord(entry) || typeof entry.server !== "string" || !entry.server.trim() ||
+          typeof entry.tool !== "string" || !entry.tool.trim() || entry.server === "ai_taskboard" ||
+          [entry.server, entry.tool].some(name => name.length > 256 || /[\x00-\x1f\x7f]/.test(name))))) ||
       (value.execution !== undefined && (!isRecord(value.execution) ||
         typeof value.execution.model !== "string" || !value.execution.model.trim() ||
         (value.execution.effort !== undefined &&

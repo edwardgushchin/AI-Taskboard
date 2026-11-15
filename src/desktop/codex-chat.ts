@@ -8,9 +8,10 @@ import { chatTools } from "./chat-actions.ts";
 import type { BoardChange } from "./board-actions.ts";
 import { withBoardMcp } from "./board-mcp.ts";
 import { goalTaskWaitSeconds } from "./board-actions.ts";
-import { boardAgentInstructions, boardCodexArgs, boardWorklog, worklogReminder, worklogTool } from "./board-agent-hooks.ts";
+import { boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "./board-agent-hooks.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
 import { cliFailure } from "./cli.ts";
+import { providerActions } from "./provider-tools.ts";
 import { saveChatImages } from "./chat-images.ts";
 import type { ChatImage } from "./chat-images.ts";
 import type { CliReply } from "./cli.ts";
@@ -43,14 +44,17 @@ async function withServer<T>(
     receive: (notify?: Notification) => Promise<RpcMessage>;
     refreshTimeout: (ms?: number) => void;
   }) => Promise<T>, onRequest?: ServerRequest, signal?: AbortSignal,
-  { mcp, research, webSearch = research }: { mcp?: BoardMcpConnection; research?: boolean; webSearch?: boolean } = {},
+  { mcp, research, webSearch = research, providerTools = true }: {
+    mcp?: BoardMcpConnection; research?: boolean; webSearch?: boolean; providerTools?: boolean;
+  } = {},
 ): Promise<T> {
   const client = await configuredCodex(profile);
   if (!client) throw new Error("Choose the Codex executable in AI Taskboard settings.");
   signal?.throwIfAborted();
   const child = spawn(client.path, [
-    ...client.args, ...boardCodexArgs,
-    "-c", mcp?.config ?? "mcp_servers={}",
+    ...client.args, ...(providerTools ? managerCodexArgs : boardCodexArgs),
+    ...(providerTools ? mcp ? ["-c", mcp.config] : [] :
+      ["-c", mcp ? `mcp_servers={${mcp.config.slice("mcp_servers.".length)}}` : "mcp_servers={}"]),
     "-c", webSearch ? 'web_search="live"' : 'web_search="disabled"',
     ...(research ? [
       // Native SSH needs direct TCP; the optional command proxy only serves proxy-aware clients.
@@ -249,12 +253,17 @@ export function replyToBoard(
   session: BoardSession,
 ) {
   const worklog = boardWorklog(project, "manager");
+  let providerAction: ReturnType<typeof providerActions> | undefined;
+  const dispatch: RunAction = (name, args) => name === "provider_tools" || name === "task_tool_grant" || name === "task_tool_revoke"
+    ? providerAction?.(name, args) ?? Promise.resolve(cliFailure("PROVIDER_TOOLS_UNAVAILABLE", "Wait for the provider session to initialize."))
+    : runAction(name, args);
   const dialogue = !session.goal && !session.resumeGoal && !session.separateTurn;
   return withBoardMcp([...session.mcpTools, worklogTool],
-    async (name, args) => name === worklogTool.name ? worklog.submit(args) : worklog.remind(await runAction(name, args)),
-    (config, env) => reply(profile, project, prompt, images, runAction, {
+    async (name, args) => name === worklogTool.name ? worklog.submit(args) : worklog.remind(await dispatch(name, args)),
+    (config, env) => reply(profile, project, prompt, images, dispatch, {
       tools, instructions: boardAgentInstructions("manager", instructions, { dialogue }), signal, session, worklog,
       onTokenUsage: session.onTokenUsage, mcp: { config, env },
+      onProviderReady: (request, id) => { providerAction = providerActions(project, request, id); },
     }), session.goal || session.resumeGoal ? goalTaskWaitSeconds + 20 : undefined);
 }
 
@@ -473,6 +482,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
   finalAnswerSchema?: object;
   webSearch?: boolean;
   mcp?: BoardMcpConnection;
+  onProviderReady?: (request: import("./provider-tools.ts").ProviderRequest, threadId: string) => void;
   worklog?: ReturnType<typeof boardWorklog>;
 }) {
   const { onCommentary, onTokenUsage, onControl, onActivity, signal, imageDirectory, imageLimit = 0, session } = options;
@@ -532,6 +542,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
       }
     }
     const { thread } = started;
+    options.onProviderReady?.(request, thread.id);
     if (session) {
       if (!codexThreadPattern.test(thread.id) || (existing && existing !== thread.id)) {
         throw new Error("Codex returned an unexpected orchestrator thread ID.");
@@ -746,7 +757,9 @@ function reply(profile: string, project: string, prompt: string, images: string[
     const result = await pending;
     const reply = options.worklog?.remind(result) ?? result;
     return { success: result.ok, contentItems: [{ type: "inputText", text: JSON.stringify(reply) }] };
-  }, signal, { mcp: options.mcp, research, webSearch: options.webSearch }).finally(async () => {
+  }, signal, {
+    mcp: options.mcp, research, webSearch: options.webSearch ?? Boolean(session), providerTools: Boolean(session),
+  }).finally(async () => {
     options.worklog?.finish();
     await tokens.save(tokens.finish(!completed), onTokenUsage);
   });

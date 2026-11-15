@@ -25,6 +25,7 @@ import { checkoutTaskWorktree, cleanTaskWorktree, finishTaskStart, hasPending, i
 import { artifactFiles, discardTaskArtifacts, openReviewArtifact, readReviewArtifact } from "./artifacts.ts";
 import { acknowledgeTaskMessages, currentReviewApproval, managerInbox, sendTaskMessage, taskMessages } from "./task-messages.ts";
 import packageInfo from "../../package.json" with { type: "json" };
+import { grantTaskTool, requestTaskTool } from "./task-tools.ts";
 import { recoverTestData } from "./test-recovery.ts";
 
 const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "pause", "block", "resume", "unblock", "update"]);
@@ -40,6 +41,8 @@ const help = [
   "          metrics [TASK-ID] (cycle time, submissions, returns, and known token usage)",
   "          manager-usage (known board manager token usage) or manager-usage --stdin (record a run snapshot)",
   "          message TASK-ID --stdin (text, optional kind), messages TASK-ID (optional afterSequence with --stdin), manager-inbox",
+  "          tool-request TASK-ID --stdin (server, tool, reason), tool-grant TASK-ID --stdin (revision, server, tool; restart required)",
+  "          tool-revoke TASK-ID --stdin (revision, server, tool; restart required)",
   "          manager-ack [TASK-ID] --stdin (through for one card, messages with id and through for a batch)",
   "          attachment restore-reply TASK-ID --stdin (replyAt, revision and attachmentSources)",
   "          list --tag NAME, tag ensure --stdin, tag set --stdin (name and #RRGGBB color), tag assign TASK-ID --stdin (tags)",
@@ -338,6 +341,16 @@ function run(
     return createWithAttachments(store, task.tags.length ? assignTags(store, task) : task, input.attachmentSources);
   }
   if (command === "manager-inbox") return managerInbox(store.snapshot().tasks);
+  if (command === "tool-request" || command === "tool-grant" || command === "tool-revoke") {
+    if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
+    const task = store.card(id);
+    if (command !== "tool-request" && hasPending(store, task)) {
+      throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before changing tool assignments.");
+    }
+    const saved = store.save(command === "tool-request" ? requestTaskTool(task, input) : grantTaskTool(task, input, command === "tool-revoke"));
+    return { id, revision: saved.revision, sequence: saved.history.length, toolGrants: saved.toolGrants ?? [],
+      restartRequired: command !== "tool-request", applied: false };
+  }
   if (command === "manager-ack") {
     const batch = id === undefined;
     const entries = batch ? input.messages : [{ id, through: input.through }];
@@ -602,9 +615,9 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
   const reply = <T extends { task: Task }>(store: BoardStore, started: T) => {
     if (!compact) return started;
     if (input.launchDetails !== true) return { ...started, task: taskReceipt(started.task) };
-    const { description, criteria, execution, git, history, workingDirectory, schedule } = started.task;
+    const { description, criteria, execution, git, history, workingDirectory, schedule, toolGrants } = started.task;
     return { ...started, task: { ...taskLaunchState(started.task), description, criteria,
-      execution: execution ?? store.index.settings.executor ?? undefined, git, workingDirectory, schedule,
+      execution: execution ?? store.index.settings.executor ?? undefined, git, workingDirectory, schedule, toolGrants,
       feedback: history.findLast(event => event.action === "request-changes")?.text } };
   };
   return withTaskStartLock(location, id, startLockWaitMs => {

@@ -87,7 +87,7 @@ export async function openBoardMcp(
   // AI Taskboard authorizes these tools within the scope of the current chat.
   const policies = tools.map(tool => `${tool.name}={approval_mode="approve"}`).join(",");
   return {
-    config: `mcp_servers={ai_taskboard={url="http://127.0.0.1:${port}/mcp",bearer_token_env_var="${tokenVariable}",required=true,tool_timeout_sec=${toolTimeoutSeconds},tools={${policies}}}}`,
+    config: `mcp_servers.ai_taskboard={url="http://127.0.0.1:${port}/mcp",bearer_token_env_var="${tokenVariable}",required=true,tool_timeout_sec=${toolTimeoutSeconds},tools={${policies}}}`,
     env: { [tokenVariable]: token },
     close: () => new Promise<void>(resolve => {
       server.close(() => resolve());

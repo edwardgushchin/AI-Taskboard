@@ -52,7 +52,9 @@ function fixture(t: TestContext) {
     const result = spawnSync(process.execPath, [entry, "--project", cwd, "--json", ...args,
       ...(input === undefined ? [] : ["--stdin"])], { env, encoding: "utf8", input: JSON.stringify(input), windowsHide: true });
     assert.ok(result.stdout, result.stderr);
-    return JSON.parse(result.stdout);
+    const reply = JSON.parse(result.stdout);
+    if (args[0] === "init" && reply.ok) assert.equal(reply.data.project, project);
+    return reply;
   };
   const { autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools } = runInNewContext(
     boardSource + "\n({ autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools })",
@@ -174,7 +176,7 @@ function fixture(t: TestContext) {
       const expectedTools = session.separateTurn ? [
         "task_review", "task_review_diff", "task_review_artifact", "task_accept", "task_request_changes", "project_git", "project_path", "project_sha256",
       ] : [
-        "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_approve", "task_wait", "task_review_queue", "task_review", "task_review_diff",
+        "task_cancel", "provider_tools", "task_tool_grant", "task_tool_revoke", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_approve", "task_wait", "task_review_queue", "task_review", "task_review_diff",
         "task_review_artifact", "task_accept", "task_request_changes",
         "task_cleanup_status", "task_cleanup", "project_git", "project_git_push", "project_disk",
         "project_path", "project_sha256", "milestones_list", "task_set_milestone", "tag_set_color",
