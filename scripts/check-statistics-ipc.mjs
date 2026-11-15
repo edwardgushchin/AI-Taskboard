@@ -35,8 +35,9 @@ try {
   const window = await loaded;
   const project = join(scratch, "board");
   mkdirSync(project);
+  let selectedProject = project;
   const cli = (args, input) => JSON.parse(execFileSync(process.env.TASKBOARD_CHECK_NODE,
-    ["--disable-warning=ExperimentalWarning", require("node:url").fileURLToPath(new URL("../src/cli/main.ts", import.meta.url)), "--project", project, "--json", ...args, ...(input ? ["--stdin"] : [])],
+    ["--disable-warning=ExperimentalWarning", require("node:url").fileURLToPath(new URL("../src/cli/main.ts", import.meta.url)), "--project", selectedProject, "--json", ...args, ...(input ? ["--stdin"] : [])],
     { input: input ? JSON.stringify(input) : undefined, encoding: "utf8", windowsHide: true }));
   const initialized = cli(["init"]);
   assert.equal(initialized.ok, true);
@@ -53,7 +54,38 @@ try {
   assert.deepEqual(result.data, cli(["project-usage"]).data);
   assert.equal(result.data.total, 120);
   assert.equal(result.data.byRole.executor[0].cachedInputTokens, 50);
-  writeFileSync(join(artifacts, "statistics-ipc.json"), JSON.stringify({ versions: process.versions, result }, null, 2));
+  const evaluate = code => window.webContents.executeJavaScript(code);
+  const waitFor = async predicate => {
+    const deadline = Date.now() + 15000;
+    while (!await evaluate(predicate)) {
+      if (Date.now() > deadline) throw new Error("Timed out: " + predicate);
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  };
+  await evaluate("document.getElementById('app-settings').click(); document.getElementById('settings-menu-statistics').click(); void 0");
+  await waitFor("document.getElementById('project-statistics')?.textContent.includes('120')");
+  assert.equal(cli(["token-usage", task.id], {id: "test", sequence: 2, role: "executor", records: [{...record, totalTokens: 240, inputTokens: 200, outputTokens: 40}]}).ok, true);
+  assert.equal(cli(["manager-usage"], {id: "00000000-0000-0000-0000-000000000001", sequence: 1, records: [record]}).ok, true);
+  await waitFor("document.getElementById('project-statistics')?.textContent.includes('360')");
+  const updated = await evaluate("window.taskboard.command('project-usage')");
+  assert.equal(updated.data.total, 360);
+  assert.equal(updated.data.byRole.manager[0].totalTokens, 120);
+  const second = join(scratch, "second");
+  mkdirSync(second);
+  selectedProject = second;
+  const initializedSecond = cli(["init"]);
+  assert.equal(initializedSecond.ok, true);
+  assert.equal(initializedSecond.data.project, second);
+  dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [second] });
+  await evaluate("window.taskboard.open()");
+  await waitFor("!document.getElementById('sheet').open");
+  await evaluate("document.getElementById('app-settings').click(); document.getElementById('settings-menu-statistics').click(); void 0");
+  const empty = await evaluate("window.taskboard.command('project-usage')");
+  assert.equal(empty.data.total, null);
+  assert.equal(empty.data.tasks, 0);
+  await waitFor("document.getElementById('project-statistics')?.textContent.includes('0 / 0')");
+  writeFileSync(join(artifacts, "statistics-ipc.json"), JSON.stringify({ versions: process.versions, result, updated, empty,
+    checks: ["exact canonical roots before fixture writes", "real gear menu", "saved task and manager reports refresh visible statistics", "switch to second empty project closes sheet and isolates totals"] }, null, 2));
   console.log("Statistics real preload/main/CLI check passed");
 } catch (error) {
   console.error(error);

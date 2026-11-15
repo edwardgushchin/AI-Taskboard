@@ -9,7 +9,9 @@ import { CodexTokenUsage } from "../src/desktop/codex-token-usage.ts";
 import { recordTokenUsage, taskMetrics, totalTokenUsage } from "../src/cli/token-usage.ts";
 import type { TokenUsageReport } from "../src/cli/token-usage.ts";
 import { createTask } from "../src/cli/tasks.ts";
-import { validateCard } from "../src/cli/storage.ts";
+import { initializeBoard, validateCard } from "../src/cli/storage.ts";
+import { projectUsage } from "../src/cli/project-usage.ts";
+import { managerUsage } from "../src/cli/manager-usage.ts";
 
 const counts = (input: number, output: number, cached = 0, reasoning = 0) => ({
   totalTokens: input + output, inputTokens: input, outputTokens: output,
@@ -246,7 +248,7 @@ test("CLI persists idempotent reports per task, validates counters and preserves
     if (error) assert.equal(result.error.code, error);
     return result.data;
   };
-  cli(["init"]);
+  assert.equal(cli(["init"]).project, root);
   assert.deepEqual(cli(["manager-usage"]), { reports: 0, total: null, incomplete: true, byModel: [] });
   assert.equal(cli(["project-usage"]).total, null);
   const first = cli(["create"], { title: "First task" });
@@ -333,4 +335,34 @@ test("CLI persists idempotent reports per task, validates counters and preserves
   assert.equal(refreshed.missingTasks, 0);
   assert.equal(refreshed.byModel.find((m: { model: string | null }) => m.model === null).totalTokens, 0);
   assert.equal(refreshed.byRole.executor[0].model, "future-model");
+});
+
+
+test("project totals distinguish zero from missing and partial records on closed tasks", t => {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "ai-taskboard-project-usage-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const location = { root, directory: join(root, ".tasks"), repository: null };
+  initializeBoard(location, store => {
+    assert.equal(projectUsage(store).total, null);
+    const zero = { ...counts(0, 0), threadId: "zero", turnId: "zero", model: null, incomplete: false };
+    store.create(recordTokenUsage({ ...createTask("T-0001", { title: "Completed zero" }), status: "done" },
+      { id: "zero", sequence: 1, role: "executor", records: [zero] }));
+    managerUsage(location.directory, { id: "00000000-0000-0000-0000-000000000001", sequence: 1, records: [zero] });
+    const complete = projectUsage(store);
+    assert.equal(complete.total, 0);
+    assert.equal(complete.incomplete, false);
+    assert.equal(complete.byRole.executor[0].model, null);
+    store.create(recordTokenUsage({ ...createTask("T-0002", { title: "Cancelled partial" }), status: "cancelled" },
+      { id: "partial", sequence: 1, records: [{ ...zero, model: "future-model", totalTokens: null, inputTokens: 5,
+        outputTokens: null, reasoningOutputTokens: null, incomplete: true }] }));
+    store.create(createTask("T-0003", { title: "Legacy without reports" }));
+    const partial = projectUsage(store);
+    assert.equal(partial.total, 0);
+    assert.equal(partial.incomplete, true);
+    assert.equal(partial.missingTasks, 1);
+    assert.equal(partial.tasks, 3);
+    assert.equal(partial.byRole.unattributed[0].totalTokens, null);
+    assert.equal(partial.byRole.unattributed[0].inputTokens, 5);
+    assert.equal(partial.byModel.find(model => model.model === "future-model")?.totalTokens, null);
+  });
 });

@@ -58,8 +58,9 @@ try {
   assert.equal(await evaluate('body.innerText'), 'Other project');
   await evaluate(`sheet.close(); window.taskboard.command = async () => ({ ok: true, data: { total: null, incomplete: true, tasks: 0, missingTasks: 0, managerReports: 0, byModel: [], byRole: {manager: []} } }); projectStatistics()`);
   assert.match(await evaluate('body.innerText'), /No token data/);
-  await evaluate(`sheet.close(); window.taskboard.command = async () => ({ ok: true, data: { total: 0, incomplete: false, tasks: 1, missingTasks: 0, managerReports: 1, byModel: [], byRole: {} } }); projectStatistics()`);
+  await evaluate(`sheet.close(); window.taskboard.command = async () => ({ ok: true, data: { total: 0, incomplete: false, tasks: 1, missingTasks: 0, managerReports: 1, byModel: [{ ...model, model: null, totalTokens: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0, reasoningOutputTokens: 0, incomplete: false }], byRole: {} } }); projectStatistics()`);
   assert.match(await evaluate('body.innerText'), /Recorded usage/);
+  assert.match(await evaluate('body.innerText'), /Unknown model/);
   writeFileSync(join(artifacts, 'statistics-check.json'), JSON.stringify({ result: 'passed', versions: process.versions, checks: ['menu disabled without board', 'focus restoration', 'both themes and languages at 440px', 'loading', 'error and retry', 'live refresh', 'late response isolation', 'empty project', 'real zero'] }, null, 2));
   console.log('Statistics renderer checks passed');
 } catch (error) { console.error(error); process.exitCode = 1; }

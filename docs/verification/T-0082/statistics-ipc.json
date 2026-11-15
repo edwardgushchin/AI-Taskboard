@@ -1,0 +1,150 @@
+{
+  "versions": {
+    "node": "24.22.2",
+    "acorn": "8.18.0",
+    "ada": "4.0.0",
+    "amaro": "1.1.11",
+    "ares": "1.34.9",
+    "brotli": "1.2.0",
+    "cldr": "48.0",
+    "icu": "78.2",
+    "llhttp": "9.4.3",
+    "merve": "1.2.2",
+    "modules": "150",
+    "napi": "10",
+    "nbytes": "0.1.4",
+    "ncrypto": "0.0.1",
+    "nghttp2": "1.70.0",
+    "nghttp3": "",
+    "ngtcp2": "",
+    "openssl": "0.0.0",
+    "simdjson": "4.6.11",
+    "simdutf": "7.7.0",
+    "sqlite": "3.53.4",
+    "tz": "2026e",
+    "undici": "7.30.1",
+    "unicode": "17.0",
+    "uv": "1.52.1",
+    "uvwasi": "0.0.23",
+    "v8": "15.6.75.27-electron.0",
+    "zlib": "1.3.2.1-motley",
+    "zstd": "1.6.0",
+    "electron": "45.2.3",
+    "chrome": "156.0.8078.80"
+  },
+  "result": {
+    "ok": true,
+    "data": {
+      "total": 120,
+      "incomplete": true,
+      "byModel": [
+        {
+          "totalTokens": 120,
+          "inputTokens": 100,
+          "cachedInputTokens": 50,
+          "cacheWriteInputTokens": 5,
+          "outputTokens": 20,
+          "reasoningOutputTokens": 10,
+          "model": "future-model",
+          "incomplete": false
+        }
+      ],
+      "byRole": {
+        "manager": [],
+        "executor": [
+          {
+            "totalTokens": 120,
+            "inputTokens": 100,
+            "cachedInputTokens": 50,
+            "cacheWriteInputTokens": 5,
+            "outputTokens": 20,
+            "reasoningOutputTokens": 10,
+            "model": "future-model",
+            "incomplete": false
+          }
+        ],
+        "reviewer": [],
+        "discussion": [],
+        "unattributed": []
+      },
+      "tasks": 1,
+      "missingTasks": 0,
+      "managerReports": 0
+    }
+  },
+  "updated": {
+    "ok": true,
+    "data": {
+      "total": 360,
+      "incomplete": false,
+      "byModel": [
+        {
+          "totalTokens": 360,
+          "inputTokens": 300,
+          "cachedInputTokens": 100,
+          "cacheWriteInputTokens": 10,
+          "outputTokens": 60,
+          "reasoningOutputTokens": 20,
+          "model": "future-model",
+          "incomplete": false
+        }
+      ],
+      "byRole": {
+        "manager": [
+          {
+            "totalTokens": 120,
+            "inputTokens": 100,
+            "cachedInputTokens": 50,
+            "cacheWriteInputTokens": 5,
+            "outputTokens": 20,
+            "reasoningOutputTokens": 10,
+            "model": "future-model",
+            "incomplete": false
+          }
+        ],
+        "executor": [
+          {
+            "totalTokens": 240,
+            "inputTokens": 200,
+            "cachedInputTokens": 50,
+            "cacheWriteInputTokens": 5,
+            "outputTokens": 40,
+            "reasoningOutputTokens": 10,
+            "model": "future-model",
+            "incomplete": false
+          }
+        ],
+        "reviewer": [],
+        "discussion": [],
+        "unattributed": []
+      },
+      "tasks": 1,
+      "missingTasks": 0,
+      "managerReports": 1
+    }
+  },
+  "empty": {
+    "ok": true,
+    "data": {
+      "total": null,
+      "incomplete": true,
+      "byModel": [],
+      "byRole": {
+        "manager": [],
+        "executor": [],
+        "reviewer": [],
+        "discussion": [],
+        "unattributed": []
+      },
+      "tasks": 0,
+      "missingTasks": 0,
+      "managerReports": 0
+    }
+  },
+  "checks": [
+    "exact canonical roots before fixture writes",
+    "real gear menu",
+    "saved task and manager reports refresh visible statistics",
+    "switch to second empty project closes sheet and isolates totals"
+  ]
+}
