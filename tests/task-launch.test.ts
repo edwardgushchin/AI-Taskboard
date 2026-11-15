@@ -38,7 +38,7 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
   const completion = Promise.withResolvers<Completion>();
   const retryCompletion = Promise.withResolvers<Completion>();
   const slots = createAgentSlots();
-  const runtime = runInNewContext(stripTypeScriptTypes(lifecycle) + "\n({launchTask, scheduleRecurringTasks, confirmProjectClose, projectOperations, runningTasks, activeAgents, deferredExecutors})", {
+  const runtime = runInNewContext(stripTypeScriptTypes(lifecycle) + "\n({launchTask, scheduleAgentWork, scheduleRecurringTasks, confirmProjectClose, projectOperations, runningTasks, activeAgents, deferredExecutors})", {
     AbortController, performance, setTimeout, clearTimeout, setImmediate, subscriptions, agentSlots: slots,
     scheduleAutoReview: () => {}, projectIdentity: (project: string) => project,
     broadcastBoardChat: () => {},
@@ -164,7 +164,7 @@ test("a full board preserves review feedback and another board can still launch"
   const f = fixture("started");
   f.task.status = "in_progress";
   const settings = { agentLimits: { executor: 1 } };
-  f.subscriptions.set("full", { board: { tasks: [], settings }, listeners: [] });
+  f.subscriptions.set("full", { board: { tasks: [f.task], settings }, listeners: [] });
   const release = f.slots.acquire("full", "executor", settings.agentLimits)!;
   assert.equal((await f.runtime.launchTask("full", f.task.id)).error.code, "EXECUTOR_LIMIT");
   assert.equal((await f.runtime.launchTask("other", f.task.id)).ok, true);
@@ -184,6 +184,44 @@ test("a full board preserves review feedback and another board can still launch"
   f.retryCompletion.resolve(undefined);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.slots.available("full", "executor", settings.agentLimits), 1);
+});
+
+test("deferred executors wait for two occupied slots, follow limit changes and discard invalid requests", async () => {
+  for (const action of ["release", "board-increase", "app-increase", "unlimited", "decrease", "cancel", "delete", "revision", "watch-lag"]) {
+    const f = fixture("started");
+    f.slots.configure({ executor: 2, manager: 1, reviewer: 1 });
+    const settings: { agentLimits?: { executor: number } } = action === "app-increase" ? {} : { agentLimits: { executor: 2 } };
+    const board = { tasks: [f.task], settings };
+    f.subscriptions.set("project", { board, listeners: [] });
+    const first = f.slots.acquire("project", "executor", settings.agentLimits)!;
+    const second = f.slots.acquire("project", "executor", settings.agentLimits)!;
+    await f.runtime.launchTask("project", f.task.id, { input: { revision: f.task.revision, reason: "Fix" } });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.runtime.deferredExecutors.size, 1, action);
+    assert.equal(f.launched.length, 0, action);
+    if (action === "release") first();
+    if (action === "board-increase") settings.agentLimits!.executor = 3;
+    if (action === "app-increase") f.slots.configure({ executor: 3, manager: 1, reviewer: 1 });
+    if (action === "unlimited") settings.agentLimits!.executor = 0;
+    if (action === "cancel") f.task.status = "cancelled";
+    if (action === "delete") board.tasks = [];
+    if (action === "revision") f.task.revision++;
+    if (action === "watch-lag") board.tasks = [{ ...f.task, status: "review", revision: f.task.revision - 1 }];
+    if (action === "decrease") { settings.agentLimits!.executor = 1; first(); }
+    f.runtime.scheduleAgentWork();
+    await new Promise(resolve => setImmediate(resolve));
+    const waits = ["decrease", "watch-lag"].includes(action);
+    const invalid = ["cancel", "delete", "revision"].includes(action);
+    assert.equal(f.runtime.deferredExecutors.size, waits ? 1 : 0, action);
+    assert.equal(f.launched.length, waits || invalid ? 0 : 1, action);
+    if (waits) { board.tasks = [f.task]; first(); second(); f.runtime.scheduleAgentWork(); }
+    await new Promise(resolve => setImmediate(resolve));
+    if (waits) assert.equal(f.launched.length, 1, action);
+    f.task.status = "review";
+    f.completion.resolve(undefined);
+    first(); second();
+    await new Promise(resolve => setImmediate(resolve));
+  }
 });
 
 test("an approved snapshot skips the redundant card read while the CLI checks the launch revision", async () => {

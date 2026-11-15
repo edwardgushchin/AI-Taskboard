@@ -683,7 +683,9 @@ function renderAgentRunStatus(target, task) {
     spinner.title = label;
     if (!spinner.parentNode) target.replaceChildren(spinner);
   } else {
-    const text = task.status === "in_progress" && task.codexThreadId ?
+    const text = frame.waitingTasks?.includes(task.id) ?
+      language("Waiting for an available executor", "Ожидает свободного исполнителя") :
+      task.status === "in_progress" && task.codexThreadId ?
       language("Board run inactive", "Запуск с доски не активен") : "";
     if (target.firstElementChild || target.textContent !== text) target.textContent = text;
   }
@@ -751,7 +753,8 @@ function card(task) {
   // Only visible card data belongs in this key: chat/log/revision updates must not rebuild it.
   const signature = JSON.stringify([frame.russian, task.title, task.description,
     task.tags?.map(name => boardTags.get(tagKey(name)) ?? { name }), cover?.file,
-    frame.runningTasks?.includes(task.id) ?? false, frame.reviewingTasks?.[task.id], task.status, Boolean(task.codexThreadId),
+    frame.runningTasks?.includes(task.id) ?? false, frame.waitingTasks?.includes(task.id) ?? false,
+    frame.reviewingTasks?.[task.id], task.status, Boolean(task.codexThreadId),
     task.unfinishedDependencies, task.blocked, task.subtasks?.map(entry => entry.done),
     task.attachments?.length, task.priority, task.milestone, task.schedule]);
   const previous = boardCards.get(task.id);
