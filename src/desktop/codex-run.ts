@@ -9,6 +9,8 @@ import { runActivity } from "./run-activity.ts";
 import { boardAgentInstructions, boardCodexArgs, boardWorklog, worklogReminder, worklogTool } from "./board-agent-hooks.ts";
 import { openBoardMcp } from "./board-mcp.ts";
 import { checkWaitInstructions, checkWaitTool, executorToolTimeoutSeconds, waitForCheck } from "./check-wait.ts";
+import { executorToolConfig, verifyExecutorTools } from "./provider-tools.ts";
+import { callCli } from "./cli.ts";
 import { bundled, entry } from "./cli.ts";
 import { taskboardCliLaunch } from "./codex.ts";
 import type { configuredCodex } from "./codex.ts";
@@ -28,6 +30,7 @@ function executorInstructions() {
   const readInstructions = (name: string) => readFileSync(new URL(name + ".md", instructions), "utf8").trim();
   return boardAgentInstructions("executor", [
     "AI Taskboard has already started this card and assigned its working directory. Read the current card, then work in that directory. Pass --project with the board root in every CLI invocation.",
+    "If a provider MCP tool is missing, use task_tool_request with server, tool and a reason. The request is bound to this task. The manager discovers tools with provider_tools and saves an assignment with task_tool_grant. Assignments apply on the next task run, including a resumed chat; finish the current pass with progress before restarting. Do not claim hot connection or successful authorization from a saved assignment.",
     checkWaitInstructions,
     readInstructions("executor").replace("__AI_TASKBOARD_CLI__", () => JSON.stringify(taskboardCliLaunch(bundled, entry))),
     readInstructions("task-writing"),
@@ -56,7 +59,7 @@ const verifyWrite = [
   "}",
 ].join("\n");
 
-export type ExecutorTask = Pick<Task, "id" | "title" | "description" | "criteria" | "execution" | "git" | "codexThreadId" | "workingDirectory" | "schedule"> &
+export type ExecutorTask = Pick<Task, "id" | "title" | "description" | "criteria" | "execution" | "git" | "codexThreadId" | "workingDirectory" | "schedule" | "toolGrants"> &
   { feedback?: string };
 
 export function missingCodexThread(message: string | undefined, threadId: string | undefined) {
@@ -81,7 +84,11 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     ...paths.map(path => JSON.stringify(path) + ' = "write"'),
     JSON.stringify(join(boardData, "worktrees")) + ' = "read"',
   ].join(", ");
-  const mcp = await openBoardMcp([worklogTool, checkWaitTool], async (name, args, requestSignal) => name === checkWaitTool.name
+  const requestTool = { name: "task_tool_request", description: "Request a missing provider MCP tool for this task. The manager receives a question. Assignment requires a restarted task run; provider permissions still apply.",
+    inputSchema: { type: "object", properties: { server: { type: "string" }, tool: { type: "string" }, reason: { type: "string" } }, required: ["server", "tool", "reason"], additionalProperties: false } };
+  const mcp = await openBoardMcp([worklogTool, checkWaitTool, requestTool], async (name, args, requestSignal) => name === requestTool.name
+    ? worklog.remind(await callCli(project, ["tool-request", task.id, "--compact"], args))
+    : name === checkWaitTool.name
     ? worklog.remind(await waitForCheck(runDirectory, args, signal ? AbortSignal.any([signal, requestSignal]) : requestSignal))
     : worklog.submit(args), executorToolTimeoutSeconds);
   let child: ChildProcessWithoutNullStreams;
@@ -192,6 +199,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     const threadOptions = {
       cwd, model: task.execution?.model, permissions: profile,
       approvalPolicy: "on-request", approvalsReviewer: "auto_review", developerInstructions,
+      config: await executorToolConfig(request, cwd, task.toolGrants),
     };
     let started: ThreadReply | undefined;
     if (existing) {
@@ -211,6 +219,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       throw new Error("Codex did not enable automatic approval review. Check the connected Codex version and its approval policy.");
     }
     const threadId = started.thread.id;
+    await verifyExecutorTools(request, threadId, task.toolGrants);
     if (!codexThreadPattern.test(threadId) || (existing && threadId !== existing)) throw new Error("Codex returned an unexpected thread ID.");
     signal?.throwIfAborted();
     await beforeTurn?.(threadId);

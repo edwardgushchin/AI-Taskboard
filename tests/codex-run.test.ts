@@ -79,6 +79,10 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '  let result = {};',
     '  if (method === "command/exec") {',
     '    result = outcome === "denied" ? { exitCode: 1, stderr: "EACCES: permission denied" } : { exitCode: 0 };',
+    '  } else if (method === "config/read") {',
+    '    result = { config: { mcp_servers: { ai_taskboard: { url: "http://127.0.0.1/mcp" } } } };',
+    '  } else if (method === "mcpServerStatus/list") {',
+    '    result = { data: [{ name: "ai_taskboard", tools: { worklog_record: {} } }] };',
     '  } else if (method === "thread/start" || method === "thread/resume") {',
     '    if (outcome === "busy") { send({ id, error: { message: "thread " + thread + " already has an active writer" } }); return; }',
     '    if (outcome === "missing" && method === "thread/resume") { send({ id, error: { message: "no rollout found for thread id " + params.threadId } }); return; }',
@@ -100,7 +104,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '  if (method === "turn/start") {',
     '    if (outcome === "authored-worklog") {',
     '      send({ method: "turn/started", params: { threadId: thread, turn: { id: "turn-1", status: "inProgress" } } });',
-    '      const url = flags.find(flag => flag.startsWith("mcp_servers=")).match(/http[^"]+/)[0];',
+    '      const url = flags.find(flag => flag.startsWith("mcp_servers.ai_taskboard=")).match(/http[^"]+/)[0];',
     '      const entry = { title: "Исполнитель записал результат", timeline: [{ time: null, items: ["Проверил файлы."] }] };',
     '      for (const field of ["context", "changes", "decisions", "checks", "next_steps"]) entry[field] = ["Проверка пройдена."];',
     '      const args = { language: "ru", entries: [entry] };',
@@ -111,7 +115,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '      fs.writeFileSync(capture + ".worklog", reply.data.path);',
     '    }',
     '    if (outcome === "check-wait") {',
-    '      const url = flags.find(flag => flag.startsWith("mcp_servers=")).match(/http[^\"]+/)[0];',
+    '      const url = flags.find(flag => flag.startsWith("mcp_servers.ai_taskboard=")).match(/http[^\"]+/)[0];',
     '      const headers = { authorization: "Bearer " + process.env.AI_TASKBOARD_MCP_TOKEN };',
     '      const cwd = requests.find(request => request.method === "thread/start" || request.method === "thread/resume").params.cwd;',
     '      setTimeout(() => fs.writeFileSync(require("node:path").join(cwd, "check-finished.marker"), ""), 30);',
@@ -185,16 +189,16 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.ok(launched.flags.includes("network_proxy"));
   assert.ok(launched.flags.some((flag: string) => flag.startsWith("permissions.ai-taskboard=") && flag.endsWith(",network={enabled=true}}")));
   assert.equal(launched.flags.includes('windows.sandbox="mxc"'), process.platform === "win32");
-  assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers=") && flag.includes("worklog_record")));
-  assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers=") && flag.includes("check_wait") && flag.includes("tool_timeout_sec=1220")));
+  assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers.ai_taskboard=") && flag.includes("worklog_record")));
+  assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers.ai_taskboard=") && flag.includes("check_wait") && flag.includes("tool_timeout_sec=1220")));
   assert.ok(!launched.flags.some((flag: string) => flag.includes("codex-worklog-codex-worklog")));
   const diaryPath = readFileSync(capture + ".worklog", "utf8");
   assert.ok(diaryPath.startsWith(join(folder, ".tasks", "worklog")));
   assert.match(readFileSync(diaryPath, "utf8"), /ai-taskboard-role:executor T-0001/);
   assert.equal(existsSync(join(worktree, ".dev-diary")), false);
   assert.deepEqual(launched.requests.map((req: { method: string }) => req.method),
-    ["initialize", "command/exec", "thread/start", "turn/start"]);
-  const [, probe, started, turn] = launched.requests;
+    ["initialize", "command/exec", "config/read", "thread/start", "mcpServerStatus/list", "turn/start"]);
+  const [, probe, , started, , turn] = launched.requests;
   assert.equal(probe.params.cwd, worktree);
   assert.equal(probe.params.permissionProfile, started.params.permissions);
   assert.ok(probe.params.command.includes(join(folder, ".git", "objects")));
@@ -221,10 +225,10 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.match(started.params.developerInstructions, /progress <id> --compact.*block <id> --compact.*pause <id> --compact/);
   await assert.rejects(startCodexRun(client("ok"), folder, worktree, task, undefined, undefined, undefined, async threadId => {
     assert.equal(threadId, thread);
-    assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
+    assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "mcpServerStatus/list");
     throw new Error("Board busy");
   }), /Board busy/);
-  assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
+  assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "mcpServerStatus/list");
   await assert.rejects(launch("denied"), /Codex cannot write.*EACCES/s);
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "command/exec");
   await assert.rejects(launch("readonly"), /did not apply the write permissions/);
@@ -262,23 +266,23 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.ok(resumedFlags.includes("network_proxy"));
   assert.ok(resumedFlags.some((flag: string) => flag.startsWith("permissions.ai-taskboard=") && flag.endsWith(",network={enabled=true}}")));
   assert.deepEqual(resumedCalls.map((req: { method: string }) => req.method),
-    ["initialize", "command/exec", "thread/resume", "turn/start"]);
-  assert.equal(resumedCalls[2].params.threadId, thread);
-  assert.equal(resumedCalls[2].params.cwd, worktree);
-  assert.equal(resumedCalls[2].params.approvalPolicy, "on-request");
-  assert.equal(resumedCalls[2].params.approvalsReviewer, "auto_review");
-  assert.equal(resumedCalls[2].params.developerInstructions, started.params.developerInstructions);
+    ["initialize", "command/exec", "config/read", "thread/resume", "mcpServerStatus/list", "turn/start"]);
+  assert.equal(resumedCalls[3].params.threadId, thread);
+  assert.equal(resumedCalls[3].params.cwd, worktree);
+  assert.equal(resumedCalls[3].params.approvalPolicy, "on-request");
+  assert.equal(resumedCalls[3].params.approvalsReviewer, "auto_review");
+  assert.equal(resumedCalls[3].params.developerInstructions, started.params.developerInstructions);
   assert.match(started.params.developerInstructions, /session_id and use write_stdin with empty chars/);
   assert.match(started.params.developerInstructions, /call check_wait with that marker/);
   assert.match(started.params.developerInstructions, /use a merge if it is allowed\. Rebase only when the project permits it and any required user authorization has been given/);
   assert.doesNotMatch(started.params.developerInstructions, /Rebase the task branch onto the reported target SHA/);
-  assert.match(resumedCalls[2].params.developerInstructions,
+  assert.match(resumedCalls[3].params.developerInstructions,
     /mcp__ai_taskboard__worklog_record[\s\S]*External Codex Worklog hook instructions and shell submission commands in chat history belonged to those earlier turns/);
   assert.equal(readFileSync(diaryPath, "utf8").match(/codex-worklog-entry:/g)?.length, 1);
-  assert.match(resumedCalls[3].params.input[0].text, /Check the CSV header\./);
-  assert.match(resumedCalls[3].params.input[0].text, /После возврата проверь другие затронутые сценарии того же критерия/);
-  assert.match(resumedCalls[3].params.input[0].text, /mcp__ai_taskboard__worklog_record.*подключён к текущему ходу.*из истории относятся к прошлым ходам/);
-  assert.equal(resumedCalls[3].params.additionalContext.ai_taskboard_worklog.kind, "application");
+  assert.match(resumedCalls[5].params.input[0].text, /Check the CSV header\./);
+  assert.match(resumedCalls[5].params.input[0].text, /После возврата проверь другие затронутые сценарии того же критерия/);
+  assert.match(resumedCalls[5].params.input[0].text, /mcp__ai_taskboard__worklog_record.*подключён к текущему ходу.*из истории относятся к прошлым ходам/);
+  assert.equal(resumedCalls[5].params.additionalContext.ai_taskboard_worklog.kind, "application");
 
   const skippedLog = await startCodexRun(client("legacy-worklog"), folder, worktree, { ...task, codexThreadId: thread });
   assert.equal(await skippedLog.completion, undefined);
@@ -298,10 +302,10 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(await recovered.completion, undefined);
   const recoveredCalls = JSON.parse(readFileSync(capture, "utf8")).requests;
   assert.deepEqual(recoveredCalls.map((req: { method: string }) => req.method),
-    ["initialize", "command/exec", "thread/resume", "thread/start", "turn/start"]);
-  assert.equal(recoveredCalls[2].params.threadId, unavailable);
-  assert.equal(recoveredCalls[3].params.cwd, worktree);
-  assert.ok(!("projectId" in recoveredCalls[3].params));
+    ["initialize", "command/exec", "config/read", "thread/resume", "thread/start", "mcpServerStatus/list", "turn/start"]);
+  assert.equal(recoveredCalls[3].params.threadId, unavailable);
+  assert.equal(recoveredCalls[4].params.cwd, worktree);
+  assert.ok(!("projectId" in recoveredCalls[4].params));
   const externalFolder = join(folder, "external");
   mkdirSync(externalFolder);
   const external = await startCodexRun(client("ok"), folder, externalFolder,

@@ -28,6 +28,11 @@ const managerTaskFields = {
   priority: { ...taskFields.priority, description: "Follow the user's explicit choice. Otherwise use urgent for imminent serious harm or a critical incident needing immediate action, high for significant user impact or work that unblocks a release or other important tasks, normal for routine work, and low for improvements that can safely wait. Keep the existing level unless impact or urgency changes." },
 };
 const actions = {
+  provider_tools: { description: "Discover MCP tools and apps in this provider session, including availability and task-assignment limitations. Built-in tools follow the provider permission profile.", properties: {}, required: [] },
+  task_tool_revoke: { description: "Remove a task tool assignment, including one that is no longer available. Requires restarting this task run to apply the change.",
+    properties: { ...taskReference, server: string, tool: string }, required: ["id", "revision", "server", "tool"] },
+  task_tool_grant: { description: "Save an assignment of one discovered MCP tool to this task. Use server/tool from provider_tools and the current task revision. Requires restarting the executor; does not hot-connect or override provider authorization.",
+    properties: { ...taskReference, server: string, tool: string }, required: ["id", "revision", "server", "tool"] },
   ask_user: { description: "Ask the user a focused question when their answer is needed to proceed. The board shows the question and waits briefly for a choice or a free-text answer. If the user skips or does not answer, leave the question open in the conversation and continue independent work.",
     properties: { question: { ...string, minLength: 1, maxLength: 2000 },
       options: { type: "array", maxItems: 4, uniqueItems: true, items: { ...string, minLength: 1, maxLength: 200 } } },
@@ -120,7 +125,7 @@ const tools = Object.entries(actions).map(([name, { description, properties, req
   name, description, inputSchema: { type: "object", properties, required, additionalProperties: false },
 }));
 const reviewActions = new Set(["task_approve", "task_accept", "task_request_changes"]);
-const mcpNames = new Set(["ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_wait", ...reviewActions, "task_review_queue", "task_review", "task_review_diff", "task_review_artifact", "task_cleanup_status", "task_cleanup", "project_git", "project_git_push", "project_disk", "project_path", "project_sha256", "milestones_list", "task_set_milestone", "tag_set_color"]);
+const mcpNames = new Set(["task_cancel", "task_tool_revoke", "provider_tools", "task_tool_grant", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_wait", ...reviewActions, "task_review_queue", "task_review", "task_review_diff", "task_review_artifact", "task_cleanup_status", "task_cleanup", "project_git", "project_git_push", "project_disk", "project_path", "project_sha256", "milestones_list", "task_set_milestone", "tag_set_color"]);
 export const boardTools = tools.filter(tool => !mcpNames.has(tool.name));
 export const boardMcpTools = tools.filter(tool => mcpNames.has(tool.name));
 export const reviewerTools = tools.filter(tool => ["task_review_diff", "task_review_artifact", "project_path", "project_sha256"].includes(tool.name))

@@ -1,0 +1,119 @@
+import { TaskboardError } from "../cli/model.ts";
+import type { Task } from "../cli/model.ts";
+import { callCli, cliFailure } from "./cli.ts";
+
+export type ProviderRequest = <T>(method: string, params: object) => Promise<T>;
+type ServerConfig = { enabled?: boolean; required?: boolean; enabled_tools?: string[]; disabled_tools?: string[];
+  command?: string; url?: string; tools?: Record<string, { enabled?: boolean }> };
+type ServerStatus = { name: string; tools: Record<string, unknown>; toolsError?: string | null; authStatus?: string };
+export interface ProviderTool {
+  kind: "mcp" | "app"; server: string; tool: string; available: boolean; assignable: boolean; reason?: string;
+}
+
+async function pages<T>(request: ProviderRequest, method: string, params: object): Promise<T[]> {
+  const result: T[] = [];
+  const seen = new Set<string>();
+  let cursor: string | undefined;
+  do {
+    const page = await request<{ data: T[]; nextCursor?: string | null }>(method, { ...params, ...(cursor ? { cursor } : {}) });
+    if (!Array.isArray(page.data)) throw new Error("Unsupported provider response");
+    result.push(...page.data);
+    cursor = page.nextCursor ?? undefined;
+    if (cursor && seen.has(cursor)) throw new Error("Repeated provider cursor");
+    if (cursor) seen.add(cursor);
+  } while (cursor);
+  return result;
+}
+
+export async function providerTools(request: ProviderRequest, threadId: string, cwd: string) {
+  // Config can contain credentials. It stays in memory and is never included in a tool reply.
+  const { config } = await request<{ config: { mcp_servers?: Record<string, ServerConfig> } }>("config/read", { cwd, includeLayers: false });
+  const servers = config.mcp_servers ?? {};
+  const statuses = await pages<ServerStatus>(request, "mcpServerStatus/list", { threadId, detail: "toolsAndAuthOnly" });
+  const tools: ProviderTool[] = [];
+  for (const status of statuses) {
+    if (status.name === "ai_taskboard") continue;
+    const settings = servers[status.name];
+    const names = Object.keys(status.tools ?? {});
+    for (const tool of names.length ? names : [""]) {
+      const available = Boolean(tool) && !status.toolsError && status.authStatus !== "notLoggedIn" && settings?.enabled !== false &&
+        (!settings?.enabled_tools || settings.enabled_tools.includes(tool)) && !settings?.disabled_tools?.includes(tool) &&
+        settings?.tools?.[tool]?.enabled !== false;
+      const assignable = available && Boolean(settings?.command || settings?.url);
+      tools.push({ kind: "mcp", server: status.name, tool, available, assignable,
+        ...(!available ? { reason: status.authStatus === "notLoggedIn" ? "Provider authorization is required. Sign in through the provider settings and retry discovery." :
+          status.toolsError ? "Provider MCP startup or authorization failed. Check provider settings; raw diagnostics are withheld to protect credentials." :
+          tool ? "Disabled by provider configuration or policy." : "Provider advertised no callable tools for this server." } :
+          !assignable ? { reason: "This plugin has no task-scoped MCP transport in the effective provider configuration." } : {}) });
+    }
+  }
+  let appsReason: string | undefined;
+  try {
+    const apps = await pages<{ id: string; isAccessible?: boolean; isEnabled?: boolean }>(request, "app/list", { threadId });
+    for (const app of apps) tools.push({ kind: "app", server: app.id, tool: "", available: app.isAccessible === true && app.isEnabled === true,
+      assignable: false, reason: "Task-scoped app assignment is not supported by this client. Manager access follows the provider account and policy." });
+  } catch {
+    appsReason = "App discovery is unavailable in this provider version, account or policy.";
+  }
+  return { tools, appsReason, builtins: "Built-in tools are supplied by the provider and governed by its permission profile. App Server does not expose a complete built-in tool catalog for assignment." };
+}
+
+export function providerActions(project: string, request: ProviderRequest, threadId: string) {
+  return async (name: string, args: unknown) => {
+    try {
+      if (name === "task_tool_revoke") {
+        const input = args as Record<string, unknown>;
+        if (typeof input?.id !== "string") return cliFailure("INVALID_INPUT", "Supply the task ID and current revision.");
+        return callCli(project, ["tool-revoke", input.id, "--compact"], { revision: input.revision, server: input.server, tool: input.tool });
+      }
+      const catalog = await providerTools(request, threadId, project);
+      if (name === "provider_tools") return { ok: true as const, data: catalog };
+      const input = args as Record<string, unknown> | null;
+      const selected = catalog.tools.find(tool => tool.kind === "mcp" && tool.server === input?.server && tool.tool === input?.tool);
+      if (!selected?.assignable) return cliFailure("TOOL_UNAVAILABLE", selected?.reason ?? "Tool was not discovered for this provider session. Use provider_tools; no assignment was saved.");
+      if (typeof input?.id !== "string") return cliFailure("INVALID_INPUT", "Supply the task ID and current revision.");
+      return callCli(project, ["tool-grant", input.id, "--compact"], { revision: input.revision, server: selected.server, tool: selected.tool });
+    } catch {
+      return cliFailure("PROVIDER_TOOLS_UNAVAILABLE", "Provider discovery failed or is unsupported. Check the connected version, account and policy. No assignment was saved.");
+    }
+  };
+}
+
+export async function executorToolConfig(request: ProviderRequest, cwd: string, grants: Task["toolGrants"]) {
+  const { config } = await request<{ config: { mcp_servers?: Record<string, ServerConfig> } }>("config/read", { cwd, includeLayers: false })
+    .catch(() => { throw new TaskboardError("PROVIDER_TOOLS_UNAVAILABLE", "Provider tool configuration could not be read. Check the connected version, account and policy."); });
+  const servers = config?.mcp_servers;
+  if (!servers?.ai_taskboard) throw new TaskboardError("PROVIDER_TOOLS_UNAVAILABLE", "Provider did not report the local board MCP configuration.");
+  const selected: Record<string, ServerConfig> = Object.assign(Object.create(null), { ai_taskboard: servers.ai_taskboard });
+  for (const [name, settings] of Object.entries(servers)) {
+    if (name !== "ai_taskboard") selected[name] = { ...settings, enabled: false, required: false };
+  }
+  for (const grant of grants ?? []) {
+    const original = servers[grant.server];
+    if (!original || original.enabled === false || (!original.command && !original.url) ||
+        original.enabled_tools && !original.enabled_tools.includes(grant.tool) || original.disabled_tools?.includes(grant.tool) ||
+        original.tools?.[grant.tool]?.enabled === false) {
+      throw new TaskboardError("TOOL_UNAVAILABLE", "An assigned tool is unavailable under the current provider configuration or policy. Ask the manager to review the assignment.");
+    }
+    const prior = selected[grant.server];
+    selected[grant.server] = { ...original, enabled: true, required: false,
+      enabled_tools: [...new Set([...(prior.enabled ? prior.enabled_tools ?? [] : []), grant.tool])] };
+  }
+  // config/read serializes optional fields as null. Passing them back as TOML
+  // overrides turns them into empty strings in some App Server versions.
+  const withoutNulls = (value: unknown): unknown => Array.isArray(value) ? value.map(withoutNulls) :
+    value && typeof value === "object" ? Object.fromEntries(Object.entries(value)
+      .filter(([, entry]) => entry !== null && entry !== undefined).map(([key, entry]) => [key, withoutNulls(entry)])) : value;
+  return { mcp_servers: withoutNulls(selected) as Record<string, ServerConfig>, features: { apps: false } };
+}
+
+export async function verifyExecutorTools(request: ProviderRequest, threadId: string, grants: Task["toolGrants"]) {
+  const rows = await pages<ServerStatus>(request, "mcpServerStatus/list", { threadId, detail: "toolsAndAuthOnly" })
+    .catch(() => { throw new TaskboardError("PROVIDER_TOOLS_UNAVAILABLE", "Provider tool discovery is unsupported or failed. No tool access was confirmed."); });
+  if (!rows.some(row => row.name === "ai_taskboard" && !row.toolsError && Object.keys(row.tools).length)) {
+    throw new TaskboardError("PROVIDER_TOOLS_UNAVAILABLE", "Local board tools did not initialize.");
+  }
+  for (const grant of grants ?? []) if (!rows.some(row => row.name === grant.server && !row.toolsError && row.authStatus !== "notLoggedIn" && Object.hasOwn(row.tools, grant.tool))) {
+    throw new TaskboardError("TOOL_UNAVAILABLE", "An assigned tool failed provider discovery or authorization at launch. No tool access was confirmed.");
+  }
+}

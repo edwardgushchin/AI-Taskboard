@@ -1,3 +1,4 @@
+import { providerActions } from "../src/desktop/provider-tools.ts";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -8,7 +9,7 @@ import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import { withBoardMcp } from "../src/desktop/board-mcp.ts";
 import { goalTaskWaitSeconds } from "../src/desktop/board-actions.ts";
-import { boardAgentInstructions, boardCodexArgs, boardWorklog, worklogReminder, worklogTool } from "../src/desktop/board-agent-hooks.ts";
+import { boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "../src/desktop/board-agent-hooks.ts";
 import { codexRpc, turnControl } from "../src/desktop/codex-rpc.ts";
 import type { AgentControl, RpcMessage } from "../src/desktop/codex-rpc.ts";
 import type { BoardGoal, BoardGoalAction } from "../src/desktop/codex-chat.ts";
@@ -151,7 +152,7 @@ test("discussion steering and interruption share the streaming connection, inclu
     });
   `);
   const runtime = runInNewContext(stripTypeScriptTypes(source) + "\nreplyToTask", {
-    spawn, codexRpc, turnControl, CodexTokenUsage, withBoardMcp, boardAgentInstructions, boardCodexArgs, boardWorklog, worklogTool, worklogReminder,
+    spawn, codexRpc, turnControl, CodexTokenUsage, withBoardMcp, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
     process, setTimeout, clearTimeout,
     configuredCodex: async () => ({ path: process.execPath, args: [script] }),
     chatTools: [], cliFailure: () => ({ ok: false }), saveChatImages: async () => [],
@@ -223,7 +224,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
         send({ id, result: { cleared: true } });
         send({ method: "thread/goal/cleared", params: { threadId } });
       } else if (method === "turn/start") {
-        const config = process.argv.find(value => value.startsWith("mcp_servers="));
+        const config = process.argv.find(value => value.startsWith("mcp_servers.ai_taskboard="));
         const url = config.match(/http[^"]+/)[0];
         for (const name of ["task_start", "project_git", "project_disk", "project_path"]) {
           if (!config.includes(name + '={approval_mode="approve"}')) throw new Error("Missing board tool policy for " + name);
@@ -294,7 +295,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
   let providerMode = "";
   const { replyToBoard: runtime, updateBoardGoal } = runInNewContext(stripTypeScriptTypes(source) + "\n({ replyToBoard, updateBoardGoal })", {
     spawn, turnControl, CodexTokenUsage, codexThreadPattern, Error, process, withBoardMcp, goalTaskWaitSeconds,
-    boardAgentInstructions, boardCodexArgs, boardWorklog, worklogTool, worklogReminder,
+    boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
     codexRpc: (child: Parameters<typeof codexRpc>[0], notify: Parameters<typeof codexRpc>[1], onRequest: Parameters<typeof codexRpc>[2]) =>
       codexRpc(child, (message: RpcMessage) => {
         elapsed += (message.params as { elapsed?: number })?.elapsed ?? 0;
@@ -352,8 +353,10 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.deepEqual(waits, [1000, 2000, 4000, 5000]);
   const requests = JSON.parse(readFileSync(captured, "utf8"));
   const flags = () => JSON.parse(readFileSync(join(directory, "server-flags"), "utf8")) as string[];
-  assert.match(flags().find(flag => flag.startsWith("mcp_servers="))!, /tool_timeout_sec=320,/);
+  assert.match(flags().find(flag => flag.startsWith("mcp_servers.ai_taskboard="))!, /tool_timeout_sec=320,/);
   assert.ok(flags().includes('web_search="live"'));
+  assert.ok(!flags().includes("plugins"));
+  assert.ok(!flags().some(flag => flag.startsWith("mcp_servers=")));
   assert.ok(flags().includes('permissions.ai-taskboard-manager={filesystem={":root"="read"},network={enabled=true}}'));
   assert.ok(flags().includes('default_permissions="ai-taskboard-manager"'));
   assert.ok(flags().includes("network_proxy"));
@@ -438,7 +441,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.ok(flags().includes("network_proxy"));
   assert.deepEqual([...new Set(statuses)], ["active", "complete"]);
   const continuedRequests = JSON.parse(readFileSync(captured, "utf8"));
-  assert.match(flags().find(flag => flag.startsWith("mcp_servers="))!, /tool_timeout_sec=320,/);
+  assert.match(flags().find(flag => flag.startsWith("mcp_servers.ai_taskboard="))!, /tool_timeout_sec=320,/);
   assert.deepEqual(continuedRequests.find(({ method }: { method: string }) => method === "thread/resume").params.config,
     { model_reasoning_effort: "high" });
   assert.equal(continuedRequests.find(({ method }: { method: string }) => method === "thread/resume").params.permissions,
@@ -488,8 +491,9 @@ test("board chat keeps a goal streaming across turns and times out only after in
     ...session, goal: undefined, separateTurn: true, save: (id: string) => assert.equal(id, threadId),
   });
   const reviewRequests: typeof newRequests = JSON.parse(readFileSync(captured, "utf8"));
-  assert.match(flags().find(flag => flag.startsWith("mcp_servers="))!, /tool_timeout_sec=140,/);
-  assert.ok(flags().includes('web_search="disabled"'));
+  assert.match(flags().find(flag => flag.startsWith("mcp_servers.ai_taskboard="))!, /tool_timeout_sec=140,/);
+  assert.ok(flags().includes('web_search="live"'));
+  assert.ok(!flags().includes("plugins"));
   assert.ok(!flags().includes("network_proxy"));
   const reviewThread = reviewRequests.find(({ method }) => method === "thread/start");
   assert.equal(reviewThread?.params.ephemeral, true);

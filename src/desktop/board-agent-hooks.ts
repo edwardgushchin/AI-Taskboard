@@ -2,7 +2,8 @@ import { worklogInstructions } from "./board-worklog.ts";
 import { russianWriting } from "./russian-writing.ts";
 
 export { boardWorklog, worklogReminder, worklogTool } from "./board-worklog.ts";
-export const boardCodexArgs = ["app-server", "--disable", "hooks", "--disable", "plugins"];
+export const managerCodexArgs = ["app-server", "--disable", "hooks"];
+export const boardCodexArgs = [...managerCodexArgs, "--disable", "plugins"];
 type Role = "manager" | "executor" | "reviewer";
 // Adapted from Ponytail 2.0.0 (MIT).
 const ponytail = "Ponytail applies throughout this chat, including continued and automatic goal turns. Trace the relevant workflow and its callers before changing it. Fix the root cause at the shared entry point. Drop speculative work. Try existing project logic, then standard or native features, then an installed dependency before adding code. Choose the smallest correct change and avoid extra abstractions or tests without a concrete need. Preserve required behavior, validation, error handling, security and accessibility. Check the relevant behavior and report what you actually verified.";
