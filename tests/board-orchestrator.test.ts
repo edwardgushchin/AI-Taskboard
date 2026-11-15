@@ -575,9 +575,10 @@ test("the manager can read the open queue without closed or archived cards", asy
     assert.equal((await act("board_list", { activeOnly: "true" })).error.code, "INVALID_INPUT");
     const full = (await act("board_list", {})).data;
     const active = (await act("board_list", { activeOnly: true })).data;
-    assert.deepEqual(Array.from(full.tasks, task => task.id), [closed.id, open.id]);
-    assert.deepEqual(Array.from(full.archived, task => task.id), [archived.id]);
-    assert.deepEqual(Array.from(active.tasks), Array.from(full.tasks).filter(task => task.id === open.id));
+    const fullTasks = Array.from<{ id: string }>(full.tasks);
+    assert.deepEqual(fullTasks.map(task => task.id), [closed.id, open.id]);
+    assert.deepEqual(Array.from<{ id: string }>(full.archived).map(task => task.id), [archived.id]);
+    assert.deepEqual(Array.from(active.tasks), fullTasks.filter(task => task.id === open.id));
     assert.equal(active.archived.length, 0);
     assert.deepEqual(Array.from(active.tags), Array.from(full.tags));
     return { text: "Open queue read." };
