@@ -92,6 +92,13 @@ h1, h2, h3, p { margin: 0; }
 .app-settings.button:hover { color: var(--text); }
 .app-settings .icon { width: 20px; height: 20px; font-size: 20px; }
 .board-tab-menu.app-menu-popup { position: fixed; inset: 0 auto auto 0; margin: 0; color: var(--text); }
+.settings-menu.app-menu-popup {
+  position: fixed; inset: 0 auto auto 0; margin: 0; color: var(--text);
+  min-width: 0; max-width: calc(100vw - 8px); max-height: calc(100vh - 8px); overflow: auto;
+}
+.settings-menu .app-menu-item { white-space: normal; overflow-wrap: anywhere; }
+.settings-menu .app-menu-item:disabled { color: var(--muted); cursor: default; background: transparent; }
+.settings-menu hr { border: 0; border-top: 1px solid var(--border); margin: 4px; }
 .project-tab {
   --project-tab-background: var(--toolbar);
   display: flex; flex-direction: column-reverse; align-items: center; flex: 0 0 auto;
