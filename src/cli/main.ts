@@ -26,6 +26,7 @@ import { artifactFiles, discardTaskArtifacts, openReviewArtifact, readReviewArti
 import { acknowledgeTaskMessages, currentReviewApproval, managerInbox, sendTaskMessage, taskMessages } from "./task-messages.ts";
 import packageInfo from "../../package.json" with { type: "json" };
 import { grantTaskTool, requestTaskTool } from "./task-tools.ts";
+import { recoverTestData } from "./test-recovery.ts";
 
 const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "pause", "block", "resume", "unblock", "update"]);
 const help = [
@@ -49,6 +50,7 @@ const help = [
   "          milestone-batch --stdin (tasks: [{id, revision}], milestone: {repository, number} or null)",
   "          git refs, git inspect, git switch, git create, git detach, git publish --stdin, git push --stdin (branch and head)",
   "For init, pass git: true with --stdin to initialize Git in the chosen folder.",
+  "recover-test-data --stdin (manifest, optional apply:true); explicit canonical --project required; defaults to dry-run.",
   "Pass one UTF-8 JSON object with --stdin or --input-file PATH.",
 ].join("\n");
 
@@ -315,6 +317,10 @@ function run(
   filters: { archived?: boolean; tag?: string; compact?: boolean },
   lockWaitMs: number,
 ) {
+  if (command === "recover-test-data") {
+    if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "Recovery takes a manifest, not a task ID.");
+    return recoverTestData(store, input);
+  }
   if (command === "metrics") {
     const tasks = id ? [readTask(store, id)] : store.snapshot().tasks;
     const now = Date.now();
@@ -677,6 +683,9 @@ async function main() {
     if (values.tag !== undefined && command !== "list") throw new TaskboardError("INVALID_INPUT", "Use --tag with list.");
     const input = readInput(values.stdin, values["input-file"]);
     const location = locateBoard(values.project ?? process.cwd(), command === "init", command === "init" && input.git === true);
+    if (command === "recover-test-data" && values.project !== location.root) {
+      throw new TaskboardError("INVALID_PROJECT", "Recovery requires --project with the exact canonical board root.");
+    }
     if (command === "watch") {
       watchBoard(location, values.compact === true);
     } else {
