@@ -27,7 +27,7 @@ test("task run history restores paginated activity in the empty run slots", asyn
   });
   const pages = [
     { data: [row("before", 20), row("command", 120), row("user", 150, "userMessage")], nextCursor: "page-2" },
-    { data: [row("tool", 180, "mcpToolCall"), row("already-saved", 230), row("last", 330)], nextCursor: null },
+    { data: [{ ...row("tool", 180, "mcpToolCall"), startedAtMs: null, completedAtMs: 180 }, row("already-saved", 230), row("last", 330)], nextCursor: null },
   ];
   const cursors: unknown[] = [];
   const read = runInNewContext(stripTypeScriptTypes(source) + "\nwithServer = mockServer; readTaskRunHistory", {
@@ -47,6 +47,8 @@ test("task run history restores paginated activity in the empty run slots", asyn
   });
   const restored = await read("profile", "project", "executor", [log(200), log(300, [{}]), log(400)]);
   assert.deepEqual(cursors, [null, "page-2"]);
+  assert.equal(restored[0].find((item: { id: string }) => item.id === "command").at, new Date(120).toISOString());
+  assert.equal(restored[0].find((item: { id: string }) => item.id === "tool").at, new Date(180).toISOString());
   assert.deepEqual(JSON.parse(JSON.stringify(Object.entries(restored).map(([key, value]) =>
     [key, (value as { id: string }[]).map(item => item.id)]))), [["0", ["command", "tool"]], ["2", ["last"]]]);
 });

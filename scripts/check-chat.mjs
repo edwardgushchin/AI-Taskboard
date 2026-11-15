@@ -1336,6 +1336,84 @@ app.whenReady().then(async () => {
     }
   }
   await evaluate(`timedManager.dispose()`);
+
+  // Ordinary executor messages use the same renderer live, saved and reopened.
+  await evaluate(`
+    const executorAt = '2026-11-14T21:59:00.000Z';
+    const executorItem = { id: 'executor-message', type: 'agentMessage', phase: 'commentary', title: '', text: 'Проверяю время исполнителя', status: 'inProgress', at: executorAt };
+    sheetKind = 'task';
+    if (!sheet.open) sheet.showModal();
+    taskInSheet = { id: 'T-0067', createdAt: executorAt, status: 'in_progress', questions: [], attachments: [], history: [] };
+    byId('sheet-title').textContent = 'T-0067 · Время исполнителя';
+    body.replaceChildren(taskChat(taskInSheet));
+    updateChat({ project: frame.project, id: 'T-0067', type: 'run', items: [executorItem] });
+  `);
+  await check(`body.querySelector('[data-item="message:executor-message"] time')?.dateTime === executorAt`, 'ordinary executor commentary has time during streaming without dialogue context');
+  await capture('executor-live.png');
+  await evaluate(`
+    updateChat({ project: frame.project, id: 'T-0067', type: 'run', items: [] });
+    executorItem.status = 'completed';
+    taskInSheet.history = [{ action: 'run-log', actor: 'agent', at: '2026-11-14T22:05:00.000Z', durationMs: 360000,
+      run: [executorItem, { ...executorItem, id: 'executor-final', phase: 'final_answer', text: 'Время исполнителя сохранено' }] }];
+    body.replaceChildren(taskChat(JSON.parse(JSON.stringify(taskInSheet))));
+  `);
+  await check(`[...body.querySelectorAll('time')].length === 2 && [...body.querySelectorAll('time')].every(time => time.dateTime === executorAt)`, 'executor completion and reopening preserve first-event time in commentary and final answer');
+  for (const width of [850, 480]) {
+    window.setSize(width, 960);
+    for (const theme of ['light', 'dark']) {
+      nativeTheme.themeSource = theme;
+      await capture('executor-reopened-' + width + '-' + theme + '.png');
+    }
+  }
+
+  // Measure a real visible anchor while a timestamped, overflowing chat prepends a page.
+  const scrollResults = [];
+  for (const width of [850, 480]) {
+    window.setSize(width, 960);
+    for (const theme of ['light', 'dark']) {
+      nativeTheme.themeSource = theme;
+      await evaluate(`
+        frame.managerUnread = [];
+        var scrollCalls = [];
+        var olderScroll = Promise.withResolvers();
+        var scrollRows = (prefix, count) => Array.from({ length: count }, (_, i) => ({
+          messages: [{ clientId: prefix + i, text: prefix + ' Сообщение ' + i + ' с сохранённым временем', files: [], at: stamp }], items: []
+        }));
+        api.boardHistory = async (_project, cursor) => { scrollCalls.push(cursor ?? 'recent'); return cursor ? olderScroll.promise : { ok: true, data: { turns: scrollRows('current-', 30), nextCursor: 'scroll-older' } }; };
+        var scrollManager = draftComposer(); body.replaceChildren(scrollManager);
+        if (!scrollManager.hasAttribute('data-pinned')) scrollManager.querySelector('.board-chat-pin').click();
+        scrollManager.revealPinned();
+        scrollManager.querySelector('.draft-input').click();
+        scrollManager.invalidateHistory();
+        new Promise((resolve, reject) => { let tries = 0; const poll = () => {
+          if (scrollManager.querySelectorAll('[data-chat-anchor]').length >= 30) resolve(true);
+          else if (++tries > 100) reject(new Error('History not ready: ' + JSON.stringify(scrollCalls) + ' / ' + scrollManager.textContent.slice(-500)));
+          else setTimeout(poll, 20);
+        }; poll(); });
+      `);
+      await evaluate(`
+        var scrollLog = scrollManager.querySelector('.board-chat-log:not(.board-work)');
+        scrollLog.scrollTop = 40;
+        var anchor = [...scrollLog.querySelectorAll('[data-chat-anchor]')].find(row => row.getBoundingClientRect().top >= scrollLog.getBoundingClientRect().top);
+        if (!anchor) throw new Error('No visible scroll anchor: ' + JSON.stringify({ rows: scrollLog.querySelectorAll('[data-chat-anchor]').length, height: scrollLog.clientHeight, text: scrollManager.textContent.slice(-1000) }));
+        var anchorBefore = anchor.getBoundingClientRect().top - scrollLog.getBoundingClientRect().top;
+        var heightBefore = scrollLog.scrollHeight;
+        scrollLog.dispatchEvent(new Event('scroll'));
+        olderScroll.resolve({ ok: true, data: { turns: scrollRows('older-', 30), nextCursor: null } });
+        new Promise(resolve => setTimeout(() => resolve(true), 200));
+      `);
+      const result = await evaluate(`({ before: anchorBefore, after: anchor.getBoundingClientRect().top - scrollLog.getBoundingClientRect().top,
+        heightBefore, heightAfter: scrollLog.scrollHeight, clientHeight: scrollLog.clientHeight,
+        times: scrollLog.querySelectorAll('time').length, anchor: anchor.dataset.chatAnchor })`);
+      assert.ok(result.heightBefore > result.clientHeight, 'chat overflows before prepend');
+      assert.ok(result.heightAfter > result.heightBefore && result.times === 60, 'older timestamped page loaded');
+      assert.ok(Math.abs(result.after - result.before) <= 1, 'visible message stays within 1 px after prepend: ' + JSON.stringify(result));
+      scrollResults.push({ width, theme, ...result });
+      await capture('scroll-' + width + '-' + theme + '.png');
+      await evaluate(`scrollManager.dispose()`);
+    }
+  }
+  writeFileSync(join(artifacts, 'scroll-results.json'), JSON.stringify(scrollResults, null, 2));
   console.log("Chat Chromium checks passed");
   if (keepArtifacts) console.log("Screenshots: " + artifacts);
 }).catch(error => {

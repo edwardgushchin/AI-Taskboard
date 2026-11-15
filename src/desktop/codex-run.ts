@@ -134,7 +134,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     if (activeThreadId && params?.threadId === activeThreadId) {
       worklog.observe(message, activeThreadId);
       if (onActivity && message.method?.startsWith("item/")) {
-        const item = runActivity(activity, message.method, params);
+        const item = runActivity(activity, message.method, params, new Date().toISOString());
         if (item) {
           activity.set(item.id, item);
           onActivity(item);

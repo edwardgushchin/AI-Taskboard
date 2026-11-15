@@ -8,7 +8,16 @@ function bounded(value: string): string {
   return value.length > 24_000 ? value.slice(0, 24_000) + "\n[…]" : value;
 }
 
-export function runActivity(entries: Map<string, RunActivity>, method: string, params: Record<string, unknown>): RunActivity | undefined {
+export function runActivity(entries: Map<string, RunActivity>, method: string, params: Record<string, unknown>, at?: string): RunActivity | undefined {
+  const item = parseRunActivity(entries, method, params);
+  if (item) {
+    const firstAt = entries.get(item.id)?.at ?? at;
+    if (firstAt !== undefined) item.at = firstAt;
+  }
+  return item;
+}
+
+function parseRunActivity(entries: Map<string, RunActivity>, method: string, params: Record<string, unknown>): RunActivity | undefined {
   if (method === "item/autoApprovalReview/started" || method === "item/autoApprovalReview/completed") {
     const reviewId = string(params.reviewId);
     const review = params.review as Record<string, unknown> | undefined;

@@ -126,7 +126,11 @@ export function recordRunLog(task: Task, input: Record<string, unknown>): Task {
   const entries = input.entries.map(value => {
     const item = object(value);
     if (typeof item.text !== "string") throw new TaskboardError("INVALID_INPUT", "Expected item text.");
+    if (item.at !== undefined && (typeof item.at !== "string" || !item.at.trim() || !Number.isFinite(Date.parse(item.at)))) {
+      throw new TaskboardError("INVALID_INPUT", "Expected a valid item timestamp.");
+    }
     return {
+      ...(item.at === undefined ? {} : { at: item.at as string }),
       id: text(item.id, "item ID", true), type: text(item.type, "item type", true),
       title: text(item.title, "item title"), text: item.text, status: text(item.status, "item status"),
       ...(item.phase === undefined ? {} : { phase: member(item.phase, ["commentary", "final_answer"], "item phase") }),

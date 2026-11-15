@@ -328,10 +328,10 @@ export function readTaskRunHistory(profile: string, project: string, threadId: s
         await request("thread/items/list", { threadId, cursor, limit: 100, sortDirection: "asc" });
       for (const { item, startedAtMs, completedAtMs } of page.data) {
         const at = startedAtMs ?? completedAtMs;
-        if (typeof at !== "number" || item.type === "userMessage") continue;
+        if (typeof at !== "number" || !Number.isFinite(at) || item.type === "userMessage") continue;
         const run = runs.findLast(entry => at >= entry.start && at <= entry.end);
         if (!run) continue;
-        const activity = runActivity(run.items, "item/completed", { item });
+        const activity = runActivity(run.items, "item/completed", { item }, new Date(at).toISOString());
         if (activity) run.items.set(activity.id, activity);
       }
       cursor = page.nextCursor;
@@ -383,8 +383,8 @@ export function readBoardHistory(profile: string, project: string, threadId: str
   }, async () => undefined);
 }
 
-function boardActivity(entries: Map<string, BoardActivity>, method: string, params: Record<string, unknown>): BoardActivity | undefined {
-  const activity: BoardActivity | undefined = runActivity(entries, method, params);
+function boardActivity(entries: Map<string, BoardActivity>, method: string, params: Record<string, unknown>, at?: string): BoardActivity | undefined {
+  const activity: BoardActivity | undefined = runActivity(entries, method, params, at);
   if (!activity || method !== "item/completed") return activity;
   const item = params.item as Record<string, unknown>;
   const data = boardToolResult(item);
@@ -588,7 +588,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
       if (data?.threadId !== thread.id) return;
       const itemMethod = message.method;
       const activityItem: BoardActivity | undefined = itemMethod?.startsWith("item/") && (session || onActivity) ?
-        (session ? boardActivity : runActivity)(activity, itemMethod, message.params as Record<string, unknown>) : undefined;
+        (session ? boardActivity : runActivity)(activity, itemMethod, message.params as Record<string, unknown>, new Date().toISOString()) : undefined;
       options.worklog?.observe(message, thread.id);
       if (message.method === "item/completed" && data.item?.type === "userMessage") {
         const user = data.item as { clientId?: string; content?: unknown };
@@ -608,7 +608,6 @@ function reply(profile: string, project: string, prompt: string, images: string[
       if (message.method === "thread/goal/cleared") updateGoal(null);
       if (activityItem) {
         if (session && activityItem.type === "agentMessage" && typeof data.item?.text === "string") activityItem.text = data.item.text;
-        activityItem.at = activity.get(activityItem.id)?.at ?? new Date().toISOString();
         activity.set(activityItem.id, activityItem);
         activityTimer ??= setTimeout(publish, 80);
       }

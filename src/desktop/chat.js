@@ -354,7 +354,8 @@ function renderRunActivity(container, items, completed = false, durationMs, task
         const message = chatText(item.text, messageContext);
         const entry = context?.dialogue && item.type === "agentMessage" && item.text.trim()
           ? element("div", undefined, "board-manager-message") : message;
-        if (entry !== message) { entry.append(message); appendChatTime(entry, item.at); }
+        if (entry !== message) entry.append(message);
+        if (item.type === "agentMessage") appendChatTime(entry, item.at);
         entry.dataset.item = "message:" + item.id;
         nodes.push(entry);
       }
