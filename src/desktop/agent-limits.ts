@@ -1,6 +1,7 @@
 import type { AgentLimits } from "../cli/model.ts";
+import { inheritedLimits } from "../cli/settings-notices.ts";
 
-export const defaultAgentLimits: AgentLimits = { executor: 3, manager: 1, reviewer: 1 };
+export const defaultAgentLimits: AgentLimits = inheritedLimits;
 export type AgentRole = keyof AgentLimits;
 
 export function parseAgentLimits(value: unknown): AgentLimits | undefined {

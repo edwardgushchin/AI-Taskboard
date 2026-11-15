@@ -242,6 +242,7 @@ export interface ArchiveLink {
 }
 
 export interface BoardIndex {
+  managerSettings?: import("./settings-notices.ts").SettingsJournal;
   version: 1;
   nextId: number;
   settings: BoardSettings;

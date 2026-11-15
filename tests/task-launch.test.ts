@@ -33,6 +33,7 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
   const calls: { args: string[]; input: any }[] = [];
   const launched: any[] = [];
   const subscriptions = new Map();
+  const savedSettings = new Map<string, { agentLimits: { executor: number } }>();
   const previousTurn = { status: "completed", completedAt: 1 as number | null, reads: 0 };
   type Completion = { reason: string; disconnected?: boolean; interrupted?: boolean } | undefined;
   const completion = Promise.withResolvers<Completion>();
@@ -40,6 +41,8 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
   const slots = createAgentSlots();
   const runtime = runInNewContext(stripTypeScriptTypes(lifecycle) + "\n({launchTask, scheduleAgentWork, scheduleRecurringTasks, confirmProjectClose, projectOperations, runningTasks, activeAgents, deferredExecutors})", {
     AbortController, performance, setTimeout, clearTimeout, setImmediate, subscriptions, agentSlots: slots,
+    locateBoard: (project: string) => project,
+    readBoardSettings: (project: string) => savedSettings.get(project) ?? subscriptions.get(project)?.board.settings ?? {},
     scheduleAutoReview: () => {}, projectIdentity: (project: string) => project,
     broadcastBoardChat: () => {},
     lang: (english: string) => english, cliFailure: failure, missingCodexThread,
@@ -98,8 +101,25 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
         steer: async () => {}, interrupt: async () => {} };
     },
   });
-  return { runtime, task, calls, launched, previousTurn, completion, retryCompletion, subscriptions, slots };
+  return { runtime, task, calls, launched, previousTurn, completion, retryCompletion, subscriptions, slots, savedSettings };
 }
+
+test("launch uses saved limits when the watch still has the previous value", async () => {
+  for (const limit of [3, 1, 0]) {
+    const f = fixture("started");
+    f.task.status = "in_progress";
+    f.subscriptions.set("project", { board: { tasks: [f.task], settings: { agentLimits: { executor: 2 } } }, listeners: [], tabs: new Set() });
+    const releases = [f.slots.acquire("project", "executor")!, f.slots.acquire("project", "executor")!];
+    f.savedSettings.set("project", { agentLimits: { executor: limit } });
+    const result = await f.runtime.launchTask("project", f.task.id);
+    assert.equal(result.ok, limit !== 1, JSON.stringify(result));
+    assert.equal(f.launched.length, limit === 1 ? 0 : 1);
+    f.task.status = "review";
+    f.completion.resolve({ interrupted: true, reason: "Test completed." });
+    await new Promise(resolve => setImmediate(resolve));
+    for (const release of releases) release();
+  }
+});
 
 test("the scheduler launches a due approved card once, waits for an executor slot and returns it to ready", async () => {
   const f = fixture("started", { id: "result", type: "agentMessage", phase: "final_answer", status: "completed", title: "", text: "Готово" });
