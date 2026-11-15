@@ -547,6 +547,24 @@ function section(title, content, target = body) {
   target.append(area);
 }
 
+function taskDescription(text, taskId) {
+  if (!text) return;
+  const area = element("section", undefined, "sheet-section task-sheet-description");
+  const content = chatText(text, { taskId });
+  foldTechnicalDetails(content, /^Диагностика и связанные файлы$/, "task-description-details", false);
+  area.append(element("h3", language("Description", "Описание")), content);
+  body.append(area);
+}
+
+function cardDescription(text) {
+  if (!chatMarkdown) return element("span", text, "task-description");
+  // A template stays inert: no links, images or controls enter the card button.
+  const template = document.createElement("template");
+  template.innerHTML = chatMarkdown.render(text);
+  for (const image of template.content.querySelectorAll("img")) image.replaceWith(image.alt);
+  return element("span", template.content.textContent.trim(), "task-description");
+}
+
 function checkCommandLabel(command) {
   if (/\btools[\\/]wiki[\\/]/i.test(command)) {
     return /test_generate\.py/i.test(command) ? language("Documentation generator tests", "Тесты генератора документации") :
@@ -786,7 +804,7 @@ function card(task) {
   if (manualWait || (waiting.length && ["ready", "blocked"].includes(task.status))) {
     item.append(dependencyBadge(waiting, manualWait ? block : undefined));
   } else if (task.description && task.status !== "blocked") {
-    item.append(element("span", task.description, "task-description"));
+    item.append(cardDescription(task.description));
   }
   if (task.tags?.length) {
     const tags = element("span", undefined, "task-tags");
@@ -3675,11 +3693,7 @@ async function showTask(id) {
       frame.board?.archived?.find(task => task.id === id) ?? { id };
     taskInSheet = undefined;
     openTaskSheet(preview);
-    if (preview.description) {
-      const description = element("section", undefined, "sheet-section");
-      description.append(element("h3", language("Description", "Описание")), element("p", preview.description));
-      body.append(description);
-    }
+    taskDescription(preview.description, id);
     loading = element("p", language("Loading task details…", "Загружаю детали задачи…"), "muted");
     loading.setAttribute("role", "status");
     body.append(loading);
@@ -3695,6 +3709,7 @@ async function showTask(id) {
     return;
   }
   const task = result.data;
+  const descriptionOpen = [...body.querySelectorAll(".task-description-details")].map(details => details.open);
   const scroll = refresh ? body.scrollTop : 0;
   const focusedChat = refresh && document.activeElement.id === "task-chat-input" ? document.activeElement : undefined;
   const openDetails = new Set(refresh ? [...body.querySelectorAll(".task-details[open]")].map(details => details.id) : []);
@@ -3716,7 +3731,10 @@ async function showTask(id) {
     body.append(button(language("GitHub milestone", "Веха GitHub") + " · " + title,
       () => api.openLink("https://github.com/" + repository + "/milestone/" + number), "quiet task-milestone-link"));
   }
-  section(language("Description", "Описание"), task.description);
+  taskDescription(task.description, id);
+  body.querySelectorAll(".task-description-details").forEach((details, index) => {
+    details.open = descriptionOpen[index] ?? false;
+  });
   section(language("Acceptance criteria", "Критерии приёмки"), task.criteria);
   const stateLabel = (done, text) => {
     const label = element("div", undefined, "task-state-label");
