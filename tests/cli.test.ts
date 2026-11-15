@@ -509,6 +509,54 @@ test("failed start without a branch or worktree keeps the ready task editable", 
   assert.ok(!existsSync(join(root, ".tasks", "pending", ready.id + ".json")));
 });
 
+test("a new worktree checkout releases the board while its own start remains reserved", t => {
+  const root = fixture(t, true);
+  cli(root, ["init"]);
+  const ready = (title: string) => cli(root, ["approve", cli(root, ["create"], {
+    title, criteria: ["The worktree was created."],
+  }).id]);
+  const task = ready("Slow checkout");
+  const other = ready("Independent checkout");
+  const pending = join(root, ".tasks", "pending", task.id + ".json");
+  const startLock = join(root, ".tasks", "pending", task.id + ".start.sqlite");
+  const preload = `
+    import assert from "node:assert/strict";
+    import child from "node:child_process";
+    import { existsSync } from "node:fs";
+    import { syncBuiltinESMExports } from "node:module";
+    import { DatabaseSync } from "node:sqlite";
+    const spawnSync = child.spawnSync;
+    const run = (args, input) => JSON.parse(spawnSync(process.execPath, args, {
+      input: JSON.stringify(input), encoding: "utf8", windowsHide: true, timeout: 10000,
+    }).stdout);
+    child.spawnSync = (command, args, options) => {
+      if (command === "git" && args[0] === "worktree" && args[1] === "add") {
+        assert.ok(existsSync(${JSON.stringify(pending)}));
+        const lock = new DatabaseSync(${JSON.stringify(startLock)});
+        try { assert.throws(() => lock.exec("BEGIN IMMEDIATE"), { errcode: 5 }); }
+        finally { lock.close(); }
+        const cancelled = run(${JSON.stringify(commandArgs(root, ["cancel", task.id], {}))}, { reason: "Concurrent cancellation" });
+        assert.equal(cancelled.error?.code, "PENDING_OPERATION");
+        const independent = run(${JSON.stringify(commandArgs(root, ["start", other.id]))});
+        assert.equal(independent.data?.task.status, "in_progress", JSON.stringify(independent));
+      }
+      return spawnSync(command, args, options);
+    };
+    syncBuiltinESMExports();
+  `;
+  const result = spawnSync(process.execPath, [
+    "--import=data:text/javascript;base64," + Buffer.from(preload).toString("base64"),
+    ...commandArgs(root, ["start", task.id]),
+  ], { env, encoding: "utf8", windowsHide: true, timeout: 40_000 });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const started = JSON.parse(result.stdout).data;
+  assert.equal(started.task.status, "in_progress");
+  assert.equal(cli(root, ["start", task.id]).worktree, started.worktree);
+  assert.equal(cli(root, ["show", task.id]).history.filter((event: { action: string }) => event.action === "start").length, 1);
+  assert.ok(!existsSync(pending));
+});
+
 test("parallel processes receive unique task IDs and share one catalog entry per tag", async t => {
   const root = fixture(t);
   cli(root, ["init"]);

@@ -81,6 +81,7 @@ export interface RunActivity {
 
 export interface TaskEvent {
   at: string;
+  startTiming?: { lockWaitMs: number; prepareMs: number; gitWorktreeAddMs?: number };
   durationMs?: number;
   actor: Actor;
   action: string;

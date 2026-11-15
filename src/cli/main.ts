@@ -11,7 +11,7 @@ import {
 } from "./archive.ts";
 import { hexTagColor, member, number, object, reasoningEffortPattern, record, registerTags, requireRevision, strings, tagColors, tagKey, TaskboardError, text } from "./model.ts";
 import type { Task } from "./model.ts";
-import { initializeBoard, locateBoard, onBoard } from "./storage.ts";
+import { initializeBoard, locateBoard, onBoard, withTaskStartLock } from "./storage.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
 import { discoverRepository, invokeGit } from "./git.ts";
 import { changeRepository, inspectRepository, publishRepository, repositoryRefs } from "./repository.ts";
@@ -19,7 +19,7 @@ import { previewSubmission, submitTask } from "./submission.ts";
 import { changeTask, createTask, recordRunLog } from "./tasks.ts";
 import { recordTokenUsage } from "./token-usage.ts";
 import { dependencyStatus, unfinishedDependencies, validateDependencies } from "./dependencies.ts";
-import { cleanTaskWorktree, hasPending, startTask, taskWithCurrentWorktree } from "./worktree.ts";
+import { checkoutTaskWorktree, cleanTaskWorktree, finishTaskStart, hasPending, prepareTaskStart, taskWithCurrentWorktree } from "./worktree.ts";
 import packageInfo from "../../package.json" with { type: "json" };
 
 const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "pause", "block", "resume", "unblock", "update"]);
@@ -276,7 +276,7 @@ function run(
     store.saveIndex();
     return store.index.settings;
   }
-  if (command !== "show" && command !== "start" && command !== "cleanup" && command !== "preview" && command !== "submit" && command !== "review" && command !== "accept" && command !== "restore-changes" && command !== "chat" && command !== "run-log" && command !== "token-usage" && !taskActions.has(command)) {
+  if (command !== "show" && command !== "cleanup" && command !== "preview" && command !== "submit" && command !== "review" && command !== "accept" && command !== "restore-changes" && command !== "chat" && command !== "run-log" && command !== "token-usage" && !taskActions.has(command)) {
     throw new TaskboardError("UNKNOWN_COMMAND", "Unknown command " + command + ".");
   }
   if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
@@ -293,10 +293,6 @@ function run(
   if (command === "cleanup" && isArchived(store, id)) return cleanTaskWorktree(store, readTask(store, id));
   const task = store.card(id);
   if (command === "token-usage") return store.save(recordTokenUsage(task, input));
-  if (command === "start") {
-    if (task.status !== "in_progress" && input.resolveConflicts === true) return reopenConflictingReview(store, task, input);
-    return startTask(store, task, input);
-  }
   if (command === "preview") return previewSubmission(store, task);
   if (command === "submit") return submitTask(store, task, input);
   if (command === "review") return inspectReview(store, task);
@@ -310,6 +306,23 @@ function run(
   const updated = changeTask(task, command, input);
   if (command === "update" && input.dependencies !== undefined) validateDependencies(store, updated);
   return store.save(command === "update" && input.tags !== undefined ? assignTags(store, updated) : updated);
+}
+
+function startTask(location: BoardLocation, id: string, input: Record<string, unknown>) {
+  return withTaskStartLock(location, id, startLockWaitMs => {
+    const prepared = onBoard(location, (store, lockWaitMs) => {
+      const task = store.card(id);
+      if (task.status !== "in_progress" && input.resolveConflicts === true) {
+        return { started: reopenConflictingReview(store, task, input) };
+      }
+      const result = prepareTaskStart(store, task, input, startLockWaitMs + lockWaitMs);
+      return "task" in result ? { started: result } : { checkout: result };
+    });
+    if (!prepared.checkout) return prepared.started;
+    const plan = prepared.checkout;
+    const worktree = checkoutTaskWorktree(plan);
+    return onBoard(location, (store, lockWaitMs) => finishTaskStart(store, plan, worktree, lockWaitMs));
+  });
 }
 
 process.stdout.on("error", error => {
@@ -349,7 +362,10 @@ try {
       watchBoard(location);
     } else {
       let data;
-      if (command === "git") {
+      if (command === "start") {
+        if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
+        data = startTask(location, id, input);
+      } else if (command === "git") {
         const action = member(id, ["refs", "inspect", "switch", "create", "detach", "publish"], "action");
         data = action === "inspect" ? inspectRepository(location, input) :
           action === "publish" ? await publishRepository(location, input) : onBoard(location, () =>

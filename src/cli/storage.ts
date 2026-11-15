@@ -123,12 +123,12 @@ export function locateBoard(path: string, initializing = false, initializeGit = 
   return { root, directory: join(root, ".tasks"), repository };
 }
 
-function withLock<T>(location: BoardLocation, callback: () => T): T {
-  const lockPath = join(location.directory, ".lock.sqlite");
+function withSqliteLock<T>(lockPath: string, timeoutMs: 0 | 15_000, callback: (lockWaitMs: number) => T): T {
   requireRegular(lockPath);
   const lock = new DatabaseSync(lockPath);
   try {
-    lock.exec("PRAGMA busy_timeout=15000");
+    lock.exec("PRAGMA busy_timeout=" + timeoutMs);
+    const waiting = performance.now();
     try {
       lock.exec("BEGIN IMMEDIATE");
     } catch (error) {
@@ -138,9 +138,37 @@ function withLock<T>(location: BoardLocation, callback: () => T): T {
       }
       throw error;
     }
-    return callback();
+    return callback(Math.round(performance.now() - waiting));
   } finally {
     lock.close();
+  }
+}
+
+export function withLock<T>(directoryPath: string, callback: (lockWaitMs: number) => T): T {
+  return withSqliteLock(join(directoryPath, ".lock.sqlite"), 15_000, callback);
+}
+
+function taskStartLockPath(location: BoardLocation, id: string): string {
+  if (!taskIdPattern.test(id)) throw new TaskboardError("TASK_NOT_FOUND", "Invalid task ID.");
+  const pending = join(location.directory, "pending");
+  directory(pending);
+  return join(pending, id + ".start.sqlite");
+}
+
+export function withTaskStartLock<T>(location: BoardLocation, id: string, callback: (waitMs: number) => T): T {
+  requireBoard(location);
+  return withSqliteLock(taskStartLockPath(location, id), 15_000, callback);
+}
+
+export function taskStartInProgress(location: BoardLocation, id: string): boolean {
+  const path = taskStartLockPath(location, id);
+  if (!exists(path)) return false;
+  try {
+    // The caller holds the board lock. A start holding this lock may need the board lock next.
+    return withSqliteLock(path, 0, () => false);
+  } catch (error) {
+    if (error instanceof TaskboardError && error.code === "BOARD_BUSY") return true;
+    throw error;
   }
 }
 
@@ -229,6 +257,12 @@ export function validateCard(value: unknown, id: string): Task {
     }
     if (event?.durationMs !== undefined && (!Number.isSafeInteger(event.durationMs) || event.durationMs < 0)) {
       throw new TaskboardError("CORRUPT_STORAGE", "Invalid reply duration for " + id + ".", { id });
+    }
+    const start = event?.startTiming;
+    if (start !== undefined && (event.action !== "start" || !isRecord(start) ||
+        ![start.lockWaitMs, start.prepareMs, start.gitWorktreeAddMs === undefined ? 0 : start.gitWorktreeAddMs]
+          .every(value => Number.isSafeInteger(value) && Number(value) >= 0))) {
+      throw new TaskboardError("CORRUPT_STORAGE", "Invalid start timing for " + id + ".", { id });
     }
     if (event?.run !== undefined && (event.action !== "run-log" || !Array.isArray(event.run) ||
         event.run.some(item => !isRecord(item) ||
@@ -378,7 +412,7 @@ export class BoardStore {
 
 export function initializeBoard<T>(location: BoardLocation, snapshot: (store: BoardStore) => T): T {
   directory(location.directory, true);
-  return withLock(location, () => {
+  return withLock(location.directory, () => {
     const path = join(location.directory, "board.json");
     if (location.repository) excludeBoard(location.repository);
     if (!exists(path)) {
@@ -394,7 +428,7 @@ export function initializeBoard<T>(location: BoardLocation, snapshot: (store: Bo
   });
 }
 
-export function onBoard<T>(location: BoardLocation, callback: (store: BoardStore) => T): T {
+function requireBoard(location: BoardLocation): void {
   if (!exists(location.directory)) {
     throw new TaskboardError("BOARD_NOT_FOUND", "Create a board in this project first.");
   }
@@ -402,5 +436,9 @@ export function onBoard<T>(location: BoardLocation, callback: (store: BoardStore
   if (!exists(join(location.directory, "board.json"))) {
     throw new TaskboardError("BOARD_NOT_FOUND", "Create a board in this project first.");
   }
-  return withLock(location, () => callback(new BoardStore(location)));
+}
+
+export function onBoard<T>(location: BoardLocation, callback: (store: BoardStore, lockWaitMs: number) => T): T {
+  requireBoard(location);
+  return withLock(location.directory, lockWaitMs => callback(new BoardStore(location), lockWaitMs));
 }
