@@ -88,6 +88,7 @@ export interface ChatUsage {
 }
 
 export interface RunActivity {
+  at?: string;
   id: string;
   type: string;
   title: string;

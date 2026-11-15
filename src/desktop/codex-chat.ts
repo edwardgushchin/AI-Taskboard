@@ -289,10 +289,10 @@ interface BoardSession {
   mcpTools: BoardMcpTool[];
 }
 
-type BoardMessage = { id: string; sequence: number; actor: "manager" | "agent" | "reviewer"; text: string;
+type BoardMessage = { at?: string; id: string; sequence: number; actor: "manager" | "agent" | "reviewer"; text: string;
   kind?: "request-changes" };
 export type BoardActivity = RunActivity & { taskChanges?: BoardChange[]; messages?: BoardMessage[]; messagesOnly?: boolean;
-  userMessage?: ReturnType<typeof boardMessage> };
+  userMessage?: ReturnType<typeof boardMessage> & { at?: string } };
 
 export function updateBoardGoal(profile: string, project: string, threadId: string, action: BoardGoalAction) {
   return withServer(profile, project, async ({ request }) => {
@@ -348,7 +348,7 @@ export function readBoardHistory(profile: string, project: string, threadId: str
     const page = await request<{ data: {
       turnId: string; item: Record<string, unknown>; startedAtMs?: number | null; completedAtMs?: number | null;
     }[]; nextCursor: string | null }>("thread/items/list", { threadId, cursor, limit: 60, sortDirection: "desc" });
-    type Turn = { messages: (ReturnType<typeof boardMessage> & { clientId?: string })[];
+    type Turn = { messages: (ReturnType<typeof boardMessage> & { clientId?: string; at?: string })[];
       items: BoardActivity[]; start?: number; end?: number };
     const turns = new Map<string, Turn>();
     const segments: Turn[] = [];
@@ -363,12 +363,15 @@ export function readBoardHistory(profile: string, project: string, threadId: str
       }
       if (typeof startedAtMs === "number") turn.start = Math.min(turn.start ?? startedAtMs, startedAtMs);
       if (typeof completedAtMs === "number") turn.end = Math.max(turn.end ?? completedAtMs, completedAtMs);
+      const at = startedAtMs ?? completedAtMs;
+      const savedAt = typeof at === "number" && Number.isFinite(at) ? new Date(at).toISOString() : undefined;
       if (userMessage) {
-        turn.messages.push({ ...userMessage, clientId: typeof item.clientId === "string" ? item.clientId : undefined });
+        turn.messages.push({ ...userMessage, at: savedAt, clientId: typeof item.clientId === "string" ? item.clientId : undefined });
       } else {
         const activity = boardActivity(new Map(), "item/completed", { item });
         if (activity) {
           if (activity.type === "agentMessage" && typeof item.text === "string") activity.text = item.text;
+          activity.at = savedAt;
           turn.items.push(activity);
         }
       }
@@ -414,12 +417,12 @@ function boardActivity(entries: Map<string, BoardActivity>, method: string, para
   return activity;
 }
 
-function coordinationMessage(entry: { id?: unknown; sequence?: unknown } | undefined,
+function coordinationMessage(entry: { id?: unknown; sequence?: unknown; at?: unknown } | undefined,
   actor: BoardMessage["actor"], text: unknown, kind?: BoardMessage["kind"]): BoardMessage[] {
   const { id, sequence } = entry ?? {};
   if (typeof id !== "string" || !taskIdPattern.test(id) || typeof sequence !== "number" ||
       !Number.isSafeInteger(sequence) || sequence < 1 || typeof text !== "string" || !text.trim()) return [];
-  return [{ id, sequence, actor, text: text.trim(), ...(kind ? { kind } : {}) }];
+  return [{ id, sequence, actor, text: text.trim(), ...(typeof entry?.at === "string" ? { at: entry.at } : {}), ...(kind ? { kind } : {}) }];
 }
 
 function boardToolResult(item: Record<string, unknown>) {
@@ -594,7 +597,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
           const userMessage = id !== session.messageId && boardUserMessage(user);
           if (userMessage) {
             activity.set("user:" + id, { id, type: "userMessage", title: "", text: userMessage.text,
-              status: "completed", userMessage });
+              status: "completed", userMessage: { ...userMessage, at: activity.get("user:" + id)?.userMessage?.at ?? new Date().toISOString() } });
             clearTimeout(activityTimer);
             publish();
           }
@@ -605,6 +608,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
       if (message.method === "thread/goal/cleared") updateGoal(null);
       if (activityItem) {
         if (session && activityItem.type === "agentMessage" && typeof data.item?.text === "string") activityItem.text = data.item.text;
+        activityItem.at = activity.get(activityItem.id)?.at ?? new Date().toISOString();
         activity.set(activityItem.id, activityItem);
         activityTimer ??= setTimeout(publish, 80);
       }

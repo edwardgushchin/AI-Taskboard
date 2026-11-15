@@ -1,3 +1,18 @@
+function appendChatTime(entry, at) {
+  if (typeof at !== "string" || !at.trim()) return;
+  const value = new Date(at);
+  if (Number.isNaN(+value)) return;
+  const locale = frame.russian ? "ru" : undefined;
+  const time = element("time", new Intl.DateTimeFormat(locale, {
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).format(value), "chat-time");
+  time.dateTime = at;
+  time.title = new Intl.DateTimeFormat(locale, { dateStyle: "full", timeStyle: "long" }).format(value);
+  time.setAttribute("aria-label", time.title);
+  entry.append(time);
+  return time;
+}
+
 const chatDrafts = new Map();
 let chatCatalog;
 const chatPreviews = new IntersectionObserver(entries => {
@@ -326,6 +341,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
         if (returned) heading.append(element("span", language("Changes requested", "Возврат на доработку"), "chat-review-status"));
         entry.append(heading, returned ? reviewerFindings(message.text, message.id) :
           chatText(message.text, { taskId: message.id, coordination: true }));
+        appendChatTime(entry, message.at);
         nodes.push(entry);
       }
     }
@@ -338,7 +354,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
         const message = chatText(item.text, messageContext);
         const entry = context?.dialogue && item.type === "agentMessage" && item.text.trim()
           ? element("div", undefined, "board-manager-message") : message;
-        if (entry !== message) entry.append(message);
+        if (entry !== message) { entry.append(message); appendChatTime(entry, item.at); }
         entry.dataset.item = "message:" + item.id;
         nodes.push(entry);
       }
@@ -352,7 +368,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
       if (reason) {
         const text = element("p", reason, "chat-text");
         const note = context?.dialogue ? element("div", undefined, "board-manager-message") : text;
-        if (note !== text) note.append(text);
+        if (note !== text) { note.append(text); appendChatTime(note, item.at); }
         note.dataset.item = "reason:" + item.id;
         nodes.push(note);
         if (showTaskEvent) taskEventRows.add(note);
@@ -406,6 +422,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
       final.dataset.messageId = item.id;
     }
     final.append(chatText(item.text, messageContext));
+    appendChatTime(final, item.at);
     nodes.push(final);
   }
   const reportCounts = new Map();
@@ -435,7 +452,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
   }
 }
 
-function updateChat({ project, id, type, text, items, goal, goalRunning, error, question, managerRun, managerWork }) {
+function updateChat({ project, id, type, text, items, goal, goalRunning, error, question, managerRun, managerWork, at }) {
   if (type === "orchestrator-question") {
     if (frame.project === project) {
       frame.managerQuestion = question;
@@ -463,6 +480,7 @@ function updateChat({ project, id, type, text, items, goal, goalRunning, error, 
     else if (type === "orchestrator-goal") composer?.updateGoal?.(goal, goalRunning);
     else if (type === "orchestrator-review-error") composer?.reviewError?.(error);
     else if (type === "orchestrator-ready") composer?.enableStop?.();
+    else if (type === "orchestrator-message-time") composer?.setMessageTime?.(at);
     else if (type === "orchestrator-waiting" || type === "orchestrator-sending") composer?.setWaiting?.(type === "orchestrator-waiting");
     else composer?.invalidateHistory?.();
     return;
@@ -670,13 +688,12 @@ function taskChat(task) {
   const missingRuns = new Map();
   const locale = frame.russian ? "ru" : undefined;
   const dayFormat = new Intl.DateTimeFormat(locale, { dateStyle: "medium" });
-  const timeFormat = new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit" });
   let day;
   let lastMessage;
   for (const { event, index } of events) {
     if (event.chat) lastMessage = event;
     const timestamp = new Date(event.at);
-    const eventDay = Number.isNaN(+timestamp) ? "" : dayFormat.format(timestamp);
+    const eventDay = !event.at || Number.isNaN(+timestamp) ? "" : dayFormat.format(timestamp);
     if (eventDay && eventDay !== day) {
       day = eventDay;
       const divider = element("li", undefined, "chat-day");
@@ -707,14 +724,13 @@ function taskChat(task) {
     const author = event.actor === "manager" ? language("Project manager", "Менеджер проекта") :
       event.actor === "reviewer" ? language("Reviewer", "Ревьюер") :
       event.actor === "user" ? language("You", "Вы") : language("Agent", "Агент");
-    const date = element("time", eventDay ? timeFormat.format(timestamp) : event.at, "chat-time");
-    date.dateTime = event.at;
-    date.title = shortDate(event.at);
+
     if (!conversation) {
       const status = lanes.find(([code]) => code === event.to);
       const service = element("li", undefined, "chat-entry chat-event");
       service.append(element("span", author, "chat-author"),
-        element("span", chatEventLabel(event.action) + (status ? " · " + language(status[1], status[2]) : ""), "chat-action"), date);
+        element("span", chatEventLabel(event.action) + (status ? " · " + language(status[1], status[2]) : ""), "chat-action"));
+      appendChatTime(service, event.at);
       list.append(service);
       if (!event.text && !attachments.length) continue;
       // A chat edit can quote the pending request as its audit note.
@@ -758,7 +774,7 @@ function taskChat(task) {
       entry.append(returned ? reviewerFindings(text, task.id) :
         chatText(text, { taskId: task.id, coordination, agent: event.action === "chat" && event.actor === "agent" }));
     }
-    entry.append(conversation ? date : date.cloneNode(true));
+    appendChatTime(entry, event.at);
     list.append(entry);
   }
   if (missingRuns.size) {

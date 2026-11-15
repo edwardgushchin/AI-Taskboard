@@ -86,7 +86,7 @@ test("board history recovers a steering message and its attachment in the middle
   const content = [{ type: "text", text: JSON.stringify({ latestUserMessage: {
     text: "Уточнение", attachments: [{ name: "preview.png", imageIndex: 1 }],
   } }) }, { type: "image", url: "data:image/png;base64,eA==" }];
-  const row = (id: string, type: string, payload: object) => ({ turnId: "one-turn", item: { id, type, ...payload } });
+  const row = (id: string, type: string, payload: object) => ({ turnId: "one-turn", ...(type === "agentMessage" ? { startedAtMs: 123 } : {}), item: { id, type, ...payload } });
   const pages = [
     { data: [row("answer", "agentMessage", { text: "Принял уточнение", phase: "final_answer" }),
       row("steer", "userMessage", { clientId: "queue-id", content }),
@@ -116,6 +116,7 @@ test("board history recovers a steering message and its attachment in the middle
   });
   const newest = await read("profile", "project", "manager");
   assert.equal(newest.nextCursor, "more");
+  assert.equal(newest.turns[0].items[0].at, new Date(123).toISOString());
   assert.equal(pages.length, 1);
   const earlier = await read("profile", "project", "manager", newest.nextCursor);
   assert.equal(earlier.nextCursor, null);
@@ -394,7 +395,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.equal(accepted, 2);
   assert.equal(elapsed, 960_001);
 
-  let liveSteer: { text: string; files: { url: string }[] } | undefined;
+  let liveSteer: { at?: string; text: string; files: { url: string }[] } | undefined;
   const stopping = runtime("profile", directory, "Stop", [], () => ({ ok: true }), [], "", controller.signal, {
     ...session,
     onMessage: receipt.resolve,
@@ -406,6 +407,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
   const stopReply = await stop.promise;
   await control!.steer("Уточнение", [image], "queue-message");
   assert.equal(await receipt.promise, "queue-message");
+  assert.ok(Number.isFinite(Date.parse(liveSteer?.at ?? "")));
   assert.equal(liveSteer?.text, "Уточнение");
   assert.equal(liveSteer?.files[0].url, image);
   await stopReply();

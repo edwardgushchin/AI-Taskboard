@@ -10,7 +10,7 @@ import { electronCheck } from "./electron-check.mjs";
 
 const script = fileURLToPath(import.meta.url);
 const root = resolve(dirname(script), "..");
-const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "chat", 90_000);
+const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "chat", 150_000);
 const { app, BrowserWindow, nativeTheme, ipcMain } = await import("electron");
 const option = name => { const index = process.argv.indexOf(name); return index < 0 ? undefined : process.argv[index + 1]; };
 const profile = join(scratch, "profile");
@@ -570,6 +570,9 @@ app.whenReady().then(async () => {
       statusRows()[1]?.includes('Задача принята T-0002') && statusRows()[2]?.includes('Задача запущена T-0003') &&
       manager.lastElementChild.matches('.chat-run-final');
   })()`, "confirmed status events stay visible and ordered even with the tool chronology collapsed");
+  await check(`(() => { const times = [...log.querySelectorAll('.chat-entry > time')];
+    return times.length > 2 && times.every(time => time.dateTime && /^\\d{2}:\\d{2}$/.test(time.textContent) && time.title === time.getAttribute('aria-label')) && !!log.querySelector('.chat-day');
+  })()`, 'task messages use compact accessible times and preserve date dividers');
   await check(`log.querySelectorAll('.chat-work').length === 2 && log.querySelectorAll('.chat-work')[1].textContent.includes('Проверяю оформление обсуждения.')`, "discussion commentary folds above its final answer too");
   await check(`getComputedStyle(log).backgroundColor !== getComputedStyle(body).backgroundColor`, "chat restores its distinct theme background");
   await evaluate(`completedWork.querySelector('summary').click()`);
@@ -1279,6 +1282,60 @@ app.whenReady().then(async () => {
     }
   }
   await evaluate(`reasonObserver.disconnect(); restoredReasons.dispose()`);
+
+  // Timestamp delivery, streaming, persisted pages and layout use production renderers.
+  await evaluate(`
+    const stamp = '2026-11-14T21:59:00.000Z';
+    const timedReply = { id: 'timed-answer', type: 'agentMessage', phase: 'final_answer', title: '', text: 'Ответ с сохранённым временем', status: 'inProgress', at: stamp };
+    const timedReady = Promise.withResolvers(), timedFinish = Promise.withResolvers();
+    let timedSaved = false;
+    api.boardHistory = async (_project, cursor) => ({ ok: true, data: {
+      turns: timedSaved ? [{ messages: [{ text: cursor ? 'Старое сообщение' : 'Новый запрос', files: [], at: stamp }],
+        items: [{ ...timedReply, status: 'completed' }], durationMs: 62000 }] : [],
+      nextCursor: cursor ? null : 'older-timed'
+    } });
+    api.boardRequest = () => { timedReady.resolve(); return timedFinish.promise; };
+    frame.managerUnread = ['timed-answer'];
+    byId('sheet-title').textContent = 'T-0067 · Время сообщений';
+    const timedManager = draftComposer(); body.replaceChildren(timedManager);
+    timedManager.querySelector('.board-chat-pin').click();
+    timedManager.querySelector('.draft-input textarea').value = 'Новый запрос';
+    timedManager.dispatchEvent(new Event('submit', { cancelable: true }));
+    Promise.race([timedReady.promise.then(() => true), new Promise((_, reject) => setTimeout(() => reject(new Error("Timed request did not start")), 4000))]);
+  `);
+  await evaluate(`timedManager.setMessageTime(stamp); timedManager.updateActivity([timedReply]); void 0`);
+  const validTimes = `(() => {
+    const times = [...timedManager.querySelectorAll('.board-chat-log:not(.board-work) time.chat-time')];
+    const expected = new Intl.DateTimeFormat('ru', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(stamp));
+    return times.length >= 2 && times.every(time => time.dateTime === stamp && time.textContent === expected &&
+      time.title.includes('2026') && time.getAttribute('aria-label') === time.title);
+  })()`;
+  await check(validTimes, 'user delivery and streamed answer show local HH:MM with full accessible dates');
+  await evaluate(`timedManager.updateActivity([{ ...timedReply, text: timedReply.text + ' дополнен' }]); void 0`);
+  await check(validTimes, 'stream updates preserve the timestamp');
+  await evaluate(`timedFinish.resolve({ ok: true, data: { items: [{ ...timedReply, status: 'completed' }] } });
+    timedFinish.promise.then(() => new Promise(resolve => requestAnimationFrame(() => resolve(true))))`);
+  await check(validTimes, 'stream completion preserves the timestamp');
+  await evaluate(`timedSaved = true; timedManager.invalidateHistory(); new Promise(resolve => setTimeout(() => resolve(true), 250))`);
+  await check(validTimes, 'history reload preserves timestamps');
+  await check(`timedManager.querySelector('.board-chat-unread')?.nextElementSibling?.dataset.messageId === 'timed-answer'`, 'unread divider remains before the incoming reply');
+  await evaluate(`timedManager.querySelector('.board-chat-log:not(.board-work)').dispatchEvent(new WheelEvent('wheel', { deltaY: -100 }));
+    new Promise(resolve => setTimeout(() => resolve(true), 250))`);
+  await check(validTimes, 'older history preserves timestamps');
+  await check(`timedManager.querySelectorAll('.board-chat-log:not(.board-work) time').length === 4 && timedManager.textContent.includes('Старое сообщение')`, 'older messages are prepended in order');
+  await check(`(() => { const entry = element('div'); for (const at of [undefined, null, '', 'invalid']) appendChatTime(entry, at); return !entry.children.length; })()`,
+    'missing and invalid legacy times never receive a fabricated timestamp');
+  for (const width of [850, 480]) {
+    window.setSize(width, 960);
+    for (const theme of ['light', 'dark']) {
+      nativeTheme.themeSource = theme;
+      await check(`(() => { const log = timedManager.querySelector('.board-chat-log:not(.board-work)');
+        return [...log.querySelectorAll('time')].every(time => /^\\d{2}:\\d{2}$/.test(time.textContent) && time.getBoundingClientRect().height > 0) && log.scrollWidth <= log.clientWidth;
+      })()`, 'timestamp layout at ' + width + ' / ' + theme);
+      await capture('timestamps-' + width + '-' + theme + '.png');
+    }
+  }
+  await evaluate(`timedManager.dispose()`);
   console.log("Chat Chromium checks passed");
   if (keepArtifacts) console.log("Screenshots: " + artifacts);
 }).catch(error => {

@@ -32,7 +32,7 @@ class Element {
 }
 
 function render(task: Task): Element[] {
-  const taskChat = runInNewContext(source.slice(start) + "\ntaskChat", {
+  const taskChat = runInNewContext(source.slice(0, source.indexOf("const chatDrafts")) + source.slice(start) + "\ntaskChat", {
     chatDrafts: new Map(), chatCatalog: undefined, Option: Element,
     frame: { project: "fixture", russian: true }, lanes: [],
     element: (tag: string, text?: string, className?: string) => new Element(tag, text, className),

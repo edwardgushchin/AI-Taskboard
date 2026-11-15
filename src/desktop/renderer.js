@@ -1906,7 +1906,7 @@ function draftComposer() {
       const previous = !cursor && hasWorkHistory &&
         new Set([...work.querySelectorAll("[data-item]")].map(row => activityRowKey(row.dataset.item)));
       for (const turn of result.data.turns) {
-        for (const { text, files, clientId } of turn.messages) page.append(chatMessage("user", text, files, false, false, clientId));
+        for (const { text, files, clientId, at } of turn.messages) page.append(chatMessage("user", text, files, false, false, clientId, at));
         if (!turn.items.length) continue;
         for (const item of turn.items) saved.add(item.id);
         const run = element("div", undefined, "chat-run");
@@ -2540,7 +2540,7 @@ function draftComposer() {
       return { ok: true };
     },
   });
-  const chatMessage = (actor, text, files = [], animate = false, insert = true, clientId) => {
+  const chatMessage = (actor, text, files = [], animate = false, insert = true, clientId, at) => {
     greeting.hidden = true;
     const entry = element("div", undefined, "chat-entry");
     entry.dataset.actor = actor;
@@ -2566,6 +2566,7 @@ function draftComposer() {
       entry.append(tiles);
     }
     if (text) entry.append(actor === "agent" ? chatText(text, { agent: true }) : element("p", text, "chat-text"));
+    appendChatTime(entry, at);
     if (insert) log.append(entry);
     return entry;
   };
@@ -2666,7 +2667,7 @@ function draftComposer() {
     const previous = new Map([...container.querySelectorAll("[data-item]")].map(child =>
       [activityRowKey(child.dataset.item), child.getAnimations().find(animation => animation.animationName === "board-chat-enter")?.currentTime]));
     renderRunActivity(container, items, completed, undefined, undefined, {
-      ...context, userMessage: ({ text, files }) => chatMessage("user", text, files, false, false),
+      ...context, userMessage: ({ text, files, at }) => chatMessage("user", text, files, false, false, undefined, at),
     });
     if (completed && context.dialogue) rememberMessages(container);
     const now = performance.now();
@@ -2732,9 +2733,9 @@ function draftComposer() {
     const page = document.createDocumentFragment();
     const delivered = new Set();
     for (const turn of turns) {
-      for (const { text, files, clientId } of turn.messages) {
+      for (const { text, files, clientId, at } of turn.messages) {
         if (clientId && active?.id === clientId) continue;
-        page.append(chatMessage("user", text, files, false, false, clientId));
+        page.append(chatMessage("user", text, files, false, false, clientId, at));
         if (clientId) delivered.add(clientId);
       }
       const container = element("div", undefined, "chat-run");
@@ -2974,6 +2975,9 @@ function draftComposer() {
     const { status, command } = runningLabel(running);
     showActivityStatus(status, command);
   }
+  editor.setMessageTime = at => {
+    if (active?.entry && !active.entry.querySelector(".chat-time")) dialogueViewport.update(() => appendChatTime(active.entry, at));
+  };
   editor.updateActivity = items => {
     if (!active) return;
     dialogueViewport.update(() => {
@@ -3259,7 +3263,7 @@ function draftComposer() {
       dialogueViewport.update(() => {
         renderTurn(turn, items, true);
         updateUnreadMessages();
-        if (answer && !container.querySelector(".chat-run-final")) chatMessage("agent", answer, [], true);
+        if (answer && !container.querySelector(".chat-run-final")) chatMessage("agent", answer, [], true, true, undefined, items.findLast(item => item.type === "agentMessage")?.at);
         if (error) chatMessage("agent", error, [], true);
       });
       readVisibleMessages();

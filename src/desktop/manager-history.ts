@@ -13,7 +13,7 @@ import { statusNotice } from "../cli/task-messages.ts";
 export function syncTaskStatusNotices(project: string, russian = true) {
   return onBoard(locateBoard(project), store => {
     const path = join(project, ".tasks", "manager-status-position.json");
-    type Notice = { id: string; at: number; text: string };
+    type Notice = { id: string; at: number; eventAt?: string; text: string };
     type Position = { through: Record<string, number>; pending: Notice[]; lastAt: number };
     const saved = exists(path) ? readJson(path) as Position : undefined;
     const position: Position = saved ?? { through: {}, pending: [], lastAt: 0 };
@@ -21,7 +21,7 @@ export function syncTaskStatusNotices(project: string, russian = true) {
     const deliver = () => {
       for (const notice of position.pending) {
         changed = saveManagerHistory(project, notice.at, notice.id, { lane: "notice", items: [{
-          id: notice.id, type: "agentMessage", title: "", phase: "final_answer",
+          id: notice.id, at: notice.eventAt ?? new Date(notice.at).toISOString(), type: "agentMessage", title: "", phase: "final_answer",
           status: "completed", text: notice.text,
         }] }) || changed;
       }
@@ -45,7 +45,7 @@ export function syncTaskStatusNotices(project: string, russian = true) {
     events.sort((a, b) => a.at.localeCompare(b.at) || a.task.localeCompare(b.task) || a.sequence - b.sequence);
     for (const event of events) {
       position.lastAt = Math.max(Date.parse(event.at), position.lastAt + 1);
-      position.pending.push({ id: randomUUID(), at: position.lastAt, text: event.text });
+      position.pending.push({ id: randomUUID(), at: position.lastAt, eventAt: event.at, text: event.text });
     }
     writeJson(path, position);
     deliver();
@@ -54,7 +54,7 @@ export function syncTaskStatusNotices(project: string, russian = true) {
   });
 }
 
-type Message = NonNullable<BoardActivity["userMessage"]> & { clientId?: string };
+type Message = NonNullable<BoardActivity["userMessage"]> & { clientId?: string; at?: string };
 type Run = {
   message?: Message;
   items: BoardActivity[];
