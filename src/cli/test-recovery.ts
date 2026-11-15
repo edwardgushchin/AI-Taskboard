@@ -2,7 +2,7 @@ import { readdirSync, realpathSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { TaskboardError, object } from "./model.ts";
 import { readTask } from "./archive.ts";
-import { exists, finishTestRecovery, readBinary, readJson, sha256, taskStartInProgress, writeAtomic, writeJson } from "./storage.ts";
+import { exists, finishTestRecovery, readBinary, readJson, sha256, taskStartInProgress, withTaskRecoveryLock, writeAtomic, writeJson } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
 
 interface Fingerprint { path: string; bytes: number; sha256: string }
@@ -10,6 +10,10 @@ interface Fingerprint { path: string; bytes: number; sha256: string }
 // Deliberately restricted to cancelled fixtures without retained execution resources. This is
 // not a general task deletion API: histories and execution resources need review.
 export function recoverTestData(store: BoardStore, input: Record<string, unknown>) {
+  return withTaskRecoveryLock(store.location, () => recoverTestDataLocked(store, input));
+}
+
+function recoverTestDataLocked(store: BoardStore, input: Record<string, unknown>) {
   const manifest = object(input.manifest);
   const fail = (message: string): never => { throw new TaskboardError("RECOVERY_REFUSED", message); };
   if (manifest.schema !== 1 || manifest.targetRoot !== store.location.root ||
@@ -84,7 +88,7 @@ export function recoverTestData(store: BoardStore, input: Record<string, unknown
       before: result.beforeIndexSha256, after: result.afterIndexSha256,
       files: files.map(file => ({ path: file.path.slice(".tasks/".length), sha256: file.sha256 })) });
     writeAtomic(join(store.location.directory, "board.json"), after);
-    finishTestRecovery(store.location);
+    finishTestRecovery(store.location, true);
   }
   return result;
 }

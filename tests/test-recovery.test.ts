@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import fs from "node:fs";
+import { once } from "node:events";
+import { syncBuiltinESMExports } from "node:module";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
-import { sha256, writeJson } from "../src/cli/storage.ts";
+import { locateBoard, onBoard, sha256, writeJson } from "../src/cli/storage.ts";
+import { recoverTestData } from "../src/cli/test-recovery.ts";
 
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
 test("incident recovery: success, refusal matrix, and interrupted commit", t => {
@@ -109,4 +113,113 @@ test("incident recovery: success, refusal matrix, and interrupted commit", t => 
   assert.equal(cli(["doctor"]).ok, true);
   assert.equal(existsSync(path), false); assert.equal(existsSync(journalPath), false);
   assert.equal(Number(cli(["create"], { title: "Next" }).data.id.slice(2)), current.nextId);
+});
+
+test("recovery and journal continuation exclude a competing start until pending deletion", async t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "T-0077-race-")));
+  t.after(() => { rmSync(root, { recursive: true, force: true }); assert.equal(existsSync(root), false); });
+  const env = { ...process.env, GIT_CEILING_DIRECTORIES: realpathSync(tmpdir()) };
+  const cli = (args: string[], input?: unknown) => {
+    const run = spawnSync(process.execPath, ["--disable-warning=ExperimentalWarning", entry, "--project", root, "--json", ...args,
+      ...(input ? ["--stdin"] : [])], { input: input ? JSON.stringify(input) : undefined, encoding: "utf8", windowsHide: true, env });
+    assert.ok(run.stdout, run.stderr);
+    return JSON.parse(run.stdout);
+  };
+  assert.equal(cli(["init"], { git: true }).data.project, root);
+  const card = cli(["create"], { title: "First" }).data;
+  assert.equal(cli(["cancel", card.id], { revision: card.revision, reason: "Fixture" }).ok, true);
+  const other = cli(["create"], { title: "Unrelated" }).data;
+  const location = locateBoard(root);
+  const cardPath = join(root, ".tasks/tasks/" + card.id + ".json");
+  writeJson(cardPath, { ...JSON.parse(readFileSync(cardPath, "utf8")), workingDirectory: join(root, "T-0068-live-absent") });
+  const pendingPath = join(root, ".tasks/pending/" + card.id + ".start.sqlite");
+  writeFileSync(pendingPath, "");
+  const indexPath = join(root, ".tasks/board.json"), journalPath = join(root, ".tasks/test-recovery.json");
+  const originalCard = readFileSync(cardPath), originalIndex = readFileSync(indexPath), originalPending = readFileSync(pendingPath);
+  const index = JSON.parse(originalIndex.toString());
+  const fingerprint = (path: string) => ({ path, bytes: readFileSync(join(root, path)).length, sha256: sha256(readFileSync(join(root, path))) });
+  const manifest = { schema: 1, targetRoot: root, nextId: index.nextId, boardIndex: fingerprint(".tasks/board.json"),
+    cards: [{ ...fingerprint(".tasks/tasks/" + card.id + ".json"), identity: { id: card.id } }],
+    pending: [fingerprint(".tasks/pending/" + card.id + ".start.sqlite")] };
+  const storageUrl = new URL("../src/cli/storage.ts", import.meta.url).href;
+  const prelude = `import {withTaskStartLock} from ${JSON.stringify(storageUrl)}; const location=${JSON.stringify(location)};`;
+  const attempt = (id = card.id) => {
+    const script = prelude + `try { withTaskStartLock(location,${JSON.stringify(id)},()=>process.stdout.write('acquired'),0); }
+      catch(error) { process.stdout.write(error.code); }`;
+    const result = spawnSync(process.execPath, ["--disable-warning=ExperimentalWarning", "--input-type=module"],
+      { input: script, encoding: "utf8", windowsHide: true, env });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  // Start wins and remains parked before requesting the board lock.
+  const holder = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", "--input-type=module", "--eval",
+    prelude + `import {readSync} from 'node:fs'; withTaskStartLock(location,${JSON.stringify(card.id)},()=>{
+      process.stdout.write('held'); readSync(0,Buffer.alloc(1),0,1,null); });`], { windowsHide: true, env, stdio: ["pipe", "pipe", "pipe"] });
+  const exited = once(holder, "exit");
+  t.after(() => { if (holder.exitCode === null) holder.kill(); });
+  const afterIndex = structuredClone(index); delete afterIndex.tasks[card.id];
+  const afterBytes = Buffer.from(JSON.stringify(afterIndex, null, 2) + "\n");
+  const journal = { root, before: sha256(originalIndex), after: sha256(afterBytes),
+    files: [...manifest.cards, ...manifest.pending].map(file => ({ path: file.path.slice(7), sha256: file.sha256 })) };
+  try {
+    assert.equal(String((await once(holder.stdout, "data"))[0]), "held");
+    assert.equal(attempt(other.id), "acquired", "a held task lock must not serialize other starts");
+    for (const apply of [false, true]) {
+      assert.equal(cli(["recover-test-data"], { manifest, apply }).ok, false);
+      assert.deepEqual(readFileSync(indexPath), originalIndex);
+      assert.deepEqual(readFileSync(cardPath), originalCard);
+      assert.deepEqual(readFileSync(pendingPath), originalPending);
+      assert.equal(existsSync(journalPath), false);
+    }
+    // Both journal phases refuse before touching index, originals, or journal.
+    writeJson(journalPath, journal);
+    const savedJournal = readFileSync(journalPath);
+    for (const bytes of [originalIndex, afterBytes]) {
+      writeFileSync(indexPath, bytes);
+      assert.equal(cli(["doctor"]).error.code, "BOARD_BUSY");
+      assert.deepEqual(readFileSync(indexPath), bytes);
+      assert.deepEqual(readFileSync(journalPath), savedJournal);
+      assert.deepEqual(readFileSync(cardPath), originalCard);
+      assert.deepEqual(readFileSync(pendingPath), originalPending);
+    }
+  } finally {
+    holder.stdin.end("x");
+    await exited;
+  }
+  assert.equal(holder.exitCode, 0);
+  // Recovery wins. Attempt another process's start at the exact journal commit
+  // and pending unlink boundaries, rather than relying on scheduler timing.
+  const rename = fs.renameSync, unlink = fs.unlinkSync;
+  let commits = 0, deletions = 0;
+  fs.renameSync = (source, target) => {
+    if (String(target) === journalPath) { commits++; assert.equal(attempt(), "BOARD_BUSY"); }
+    return rename(source, target);
+  };
+  fs.unlinkSync = path => {
+    if (String(path) === cardPath) assert.equal(attempt(), "BOARD_BUSY");
+    if (String(path) === pendingPath) { deletions++; assert.equal(attempt(), "BOARD_BUSY"); }
+    return unlink(path);
+  };
+  syncBuiltinESMExports();
+  try {
+    onBoard(location, store => assert.equal(store.doctor(false).issues.length, 0));
+    assert.equal(deletions, 1, "journal continuation must hold the start gate through unlink");
+    assert.equal(existsSync(cardPath), false); assert.equal(existsSync(pendingPath), false);
+    assert.equal(attempt(), "TASK_NOT_FOUND"); assert.equal(existsSync(pendingPath), false);
+    // Restore only this isolated fixture to exercise the initial application.
+    writeFileSync(indexPath, originalIndex); writeFileSync(cardPath, originalCard); writeFileSync(pendingPath, originalPending);
+    onBoard(location, store => assert.equal(recoverTestData(store, { manifest, apply: true }).dryRun, false));
+    assert.equal(commits, 1); assert.equal(deletions, 2);
+    assert.equal(existsSync(cardPath), false); assert.equal(existsSync(pendingPath), false);
+    assert.equal(attempt(), "TASK_NOT_FOUND"); assert.equal(existsSync(pendingPath), false);
+    // A selected card may never have had a pending file (as in incident T-0003).
+    writeFileSync(indexPath, originalIndex); writeFileSync(cardPath, originalCard);
+    onBoard(location, store => recoverTestData(store, { manifest: { ...manifest, pending: [] }, apply: true }));
+    assert.equal(existsSync(pendingPath), false);
+    writeFileSync(cardPath, originalCard);
+    writeFileSync(journalPath, JSON.stringify({ ...journal, files: journal.files.filter(file => file.path.startsWith("tasks/")) }));
+    onBoard(location, store => assert.equal(store.doctor(false).issues.length, 0));
+    assert.equal(existsSync(cardPath), false); assert.equal(existsSync(pendingPath), false);
+    assert.equal(attempt(), "TASK_NOT_FOUND"); assert.equal(existsSync(pendingPath), false);
+  } finally { fs.renameSync = rename; fs.unlinkSync = unlink; syncBuiltinESMExports(); }
 });
