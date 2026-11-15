@@ -40,3 +40,13 @@ node --disable-warning=ExperimentalWarning --test tests/task-launch.test.ts test
 ```powershell
 node --disable-warning=ExperimentalWarning --test --test-name-pattern='reviewers agree|manager pushes a pinned|manager inspects and hashes' tests/board-orchestrator.test.ts
 ```
+
+## Объединение с T-0070
+
+Исходный HEAD `062fe19638cd1c073d46dc42f7806fe475b6ebac`; проверенные изменения сохранены в `2877a4b`. После MERGE_CONFLICT выполнен merge указанного доской target `461319f04361f799ec3ab682c72c071b507101e8`, результат `f38eb96e579f484eb16451f541f1e824d86dd78b`. В конфликте подписки сохранена синхронизация уведомлений T-0070 перед обновлением снимка и вызов планировщика T-0075 после него. Сравнение с исходным коммитом подтверждает: изменения очереди и renderer сохранены; добавлены только принятые изменения T-0070.
+
+После merge повторены TypeScript (успешно), 35/35 тестов обеих сторон и `node scripts/check-status-notices.mjs`: производственные UI/CLI/agent переходы, закрытый диалог, фоновая вкладка, изоляция досок и пузырь сообщения прошли. Скриншоты и 237 проверок `check-board` применимы: код renderer и проверки не менялись при merge, путь очереди сохранён, совместимость подписки дополнительно проверена сценарием уведомлений. Проверка уведомлений использовала временный профиль; лишний скриншот удалён.
+
+```powershell
+node --disable-warning=ExperimentalWarning --test tests/task-launch.test.ts tests/chat-reply-activity.test.ts tests/task-status-notices.test.ts tests/manager-history.test.ts
+```
