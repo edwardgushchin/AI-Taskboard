@@ -891,6 +891,28 @@ app.whenReady().then(async () => {
     `);
     await check(`stopCalls === 1 && managerButton().dataset.action === 'send'`,
       "stopping a restored run calls the manager and clears its activity when it ends");
+    await clickBoard();
+    for (const russian of [true, false]) {
+      await evaluate(`fixture.russian = ${russian}; fixture.managerRun = null;
+        fixture.managerWork = { id: 'goal-run', phase: 'running', startedAt: Date.now() }; push(); void 0`);
+      for (const [item, expected] of [
+        [{ type: 'mcpToolCall', title: 'ai_taskboard / task_set_milestone', text: '', status: 'inProgress' },
+          russian ? 'Вызов инструмента ai_taskboard / task_set_milestone' : 'Using tool ai_taskboard / task_set_milestone'],
+        [{ type: 'agentMessage', title: '', text: '', status: 'inProgress' },
+          russian ? 'Пишу ответ…' : 'Writing a reply…'],
+      ]) {
+        await evaluate(`fixture.managerWork.item = ${JSON.stringify(item)}; push(); void 0`);
+        await check(`document.querySelector('.draft-placeholder').textContent === ${JSON.stringify(expected)}`,
+          "background activity updates without a goal prefix in " + (russian ? "Russian" : "English"));
+      }
+      await evaluate(`fixture.managerWork = null; push(); void 0`);
+      await check(`document.querySelector('.draft-placeholder').textContent === ${JSON.stringify(russian ? 'Напишите менеджеру проекта…' : 'Write to the project manager…')}`,
+        "finishing background activity restores the ordinary prompt");
+      await evaluate(`fixture.managerWork = { id: 'goal-run', phase: 'running', startedAt: Date.now(),
+        item: { type: 'mcpToolCall', title: 'ai_taskboard / task_wait', text: '', status: 'inProgress' } }; push(); void 0`);
+    }
+    await evaluate(`fixture.russian = true; push(); void 0`);
+    if (keepArtifacts) await capture("board-manager-status.png");
     console.log("Goal controls Chromium checks passed: " + checks);
     return;
   }
