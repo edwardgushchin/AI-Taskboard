@@ -2270,7 +2270,7 @@ function draftComposer() {
   let promptAnimation;
   const showPrompt = () => {
     const status = !editor.matches("[data-open], [data-pinned]") && (active?.thinking.textContent || (managerWork &&
-      language("Goal · ", "Цель · ") + runningLabel(managerWork.item).status));
+      runningLabel(managerWork.item).status));
     const suggestion = document.activeElement === input ? defaultPrompt() :
       promptAnimation ? promptAnimation.characters.slice(0, promptAnimation.length).join("") : currentPrompt();
     const text = status || (goalMode ? language("Describe the goal…", "Опишите цель…") : suggestion);
