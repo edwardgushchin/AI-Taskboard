@@ -9,7 +9,7 @@ import { electronCheck } from "./electron-check.mjs";
 const script = fileURLToPath(import.meta.url);
 const root = resolve(dirname(script), "..");
 const require = createRequire(import.meta.url);
-const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "board", 90_000);
+const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "board", 180_000);
 const { app, BrowserWindow, nativeTheme } = await import("electron");
 const profile = join(scratch, "profile");
 mkdirSync(profile);
@@ -58,10 +58,24 @@ app.whenReady().then(async () => {
   await check(`document.querySelector('#welcome').hidden`, "welcome is hidden before the first project snapshot");
   await evaluate(`
     window.previewCalls = 0;
+    const savedQueue = new Map();
     window.taskboard = {
       subscribe(callback) { window.pushBoard = callback; }, onChatUpdate(callback) { window.pushChat = callback; }, onTheme() {},
-      boardHistory: async () => ({ ok: true, data: { turns: [], model: "gpt-board-test" } }),
-      boardSuggestions: async () => frame.project === "design-board" ? new Promise(resolve => { window.releaseSuggestions = () => resolve([
+      boardHistory: async (_project, _cursor, view) => ({ ok: true, data: view === 'live'
+        ? { work: [], chat: [] } : { turns: [], model: "gpt-board-test" } }),
+      agentLimits: async () => ({ ok: true, data: { executor: 3, manager: 1, reviewer: 1 } }),
+      boardQueue: async (project, action, id, draft, goal, files) => {
+        const jobs = savedQueue.get(project) ?? new Map();
+        savedQueue.set(project, jobs);
+        if (action === 'list') return { ok: true, data: [...jobs.values()] };
+        if (action === 'add') {
+          id = 'message-' + (jobs.size + 1) + '-' + Math.random();
+          jobs.set(id, { id, draft, goal, files });
+        } else if (action === 'edit') jobs.get(id).draft = draft;
+        else if (action === 'remove') jobs.delete(id);
+        return { ok: true, data: id };
+      },
+      boardSuggestions: async project => project === "design-board" ? new Promise(resolve => { window.releaseSuggestions = () => resolve([
         "Создай задачу на локализацию AI Taskboard", "Какие изменения нужны карточкам AI Taskboard?",
       ]); }) : [],
       bootstrap: () => new Promise(() => {}),
@@ -82,11 +96,11 @@ app.whenReady().then(async () => {
   `);
   await evaluate(`
     const task = (id, title, extra = {}) => ({ id, title, status: 'ready', revision: 1, priority: 'normal',
-      createdAt: '2026-11-01T12:00:00.000Z', updatedAt: '2026-11-01T12:00:00.000Z',
+      createdAt: '2026-11-01T12:00:00.000Z', updatedAt: extra.createdAt ?? '2026-11-01T12:00:00.000Z',
       tags: [], subtasks: [], attachments: [], history: [], questions: [], ...extra });
     const fixture = { project: 'board-fixture', russian: true, theme: 'dark', runningTasks: [],
       board: { settings: { archiveAfterDays: 90, integrationMode: 'merge' },
-        tags: [{ name: 'UI', color: 'blue' }], archived: [], tasks: [
+        tags: [{ name: 'UI', color: '#91B6F9' }], archived: [], tasks: [
         task('T-0001', 'Стабильное превью', { attachments: [{ file: 'cover.png', name: 'cover.png' }] }),
         task('T-0002', 'Обновляемая карточка', { tags: ['UI'], createdAt: '2026-11-02T12:00:00.000Z' })
       ] } };
@@ -96,7 +110,7 @@ app.whenReady().then(async () => {
     const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const waitFor = predicate => new Promise((resolve, reject) => {
       const deadline = Date.now() + 5000;
-      const poll = () => predicate() ? resolve() : Date.now() > deadline ? reject(new Error('Timed out waiting for ' + predicate)) : requestAnimationFrame(poll);
+      const poll = () => predicate() ? resolve() : Date.now() > deadline ? reject(new Error('Timed out waiting for ' + predicate)) : setTimeout(poll, 16);
       poll();
     });
     window.pushBoard({ russian: true, restoring: true });
@@ -107,8 +121,1304 @@ app.whenReady().then(async () => {
   writeFileSync(join(artifacts, "project-tabs-loading.png"), (await window.webContents.capturePage()).toPNG());
   await evaluate(`push(); void 0`);
   await check(`byId('welcome').hidden && byId('loading').hidden && byId('app-content').getAttribute('aria-busy') === 'false'`, "a restored board replaces the loading state");
+  if (process.argv.includes("--agent-count-only")) {
+    await evaluate(`
+      const indicator = byId('status-agents');
+      const bell = byId('status-notifications');
+      const agentCount = () => indicator.querySelector('span').textContent;
+      const reportManager = (project, sessions) => window.pushChat({ project, type: 'orchestrator-run', ...sessions });
+      const run = { id: 'manager-run', phase: 'running' };
+      void 0;
+    `);
+    await check(`!indicator.hidden && agentCount() === '0' &&
+      indicator.getBoundingClientRect().right <= bell.getBoundingClientRect().left &&
+      indicator.querySelector('.codicon-hubot') &&
+      Math.abs(indicator.getBoundingClientRect().top + indicator.offsetHeight / 2 -
+        (bell.getBoundingClientRect().top + bell.offsetHeight / 2)) < 1`,
+      "the selected board shows zero beside the bell with both items vertically aligned");
+    await evaluate(`
+      fixture.runningTasks = ['T-0001'];
+      fixture.reviewingTasks = { 'T-0001': 'reviewer', 'T-0002': 'manager', 'T-0003': 'manager' };
+      fixture.managerWork = run;
+      push();
+      void 0;
+    `);
+    await check(`agentCount() === '3' && indicator.getAttribute('aria-label') === 'Активные агенты · 3'`,
+      "overlapping execution and review count separately while the manager counts once for a batch of cards");
+    await evaluate(`reportManager(fixture.project, { managerRun: { ...run, id: 'manager-chat' } }); void 0`);
+    await check(`agentCount() === '4'`, "an active manager reply also counts without a board refresh");
+    await evaluate(`reportManager(fixture.project, { managerWork: null }); void 0`);
+    await check(`agentCount() === '3'`, "ending just one manager session decrements the count");
+    await evaluate(`
+      window.pushBoard({ ...fixture, runningTasks: [], reviewingTasks: {}, managerWork: null, managerRun: frame.managerRun });
+      void 0;
+    `);
+    await check(`agentCount() === '1'`, "finishing an executor and a reviewer leaves the active manager reply counted");
+    await evaluate(`
+      window.pushBoard({ ...fixture, project: 'other-board', runningTasks: [], reviewingTasks: {}, managerWork: null,
+        board: { ...fixture.board, project: 'other-board', tasks: [task('T-0001', 'Waiting', { status: 'review' })] } });
+      reportManager(fixture.project, { managerRun: run });
+      void 0;
+    `);
+    await check(`agentCount() === '0' && !indicator.hidden && bell.querySelector('.count').textContent === '1'`,
+      "switching boards drops the previous count and a submission waiting for review only affects the bell");
+    await evaluate(`window.pushBoard({ russian: true, theme: 'dark' }); void 0`);
+    await check(`indicator.hidden && !bell.hidden`, "with no board open only the bell is visible");
+    console.log("Agent count Chromium checks passed: " + checks);
+    return;
+  }
+  if (process.argv.includes("--settings-only")) {
+    await evaluate(`
+      const projects = [{ path: 'board-fixture', name: 'Первая доска' }, { path: 'other-board', name: 'Вторая доска' }];
+      const savedNames = new Map();
+      const savedLimits = new Map();
+      const openBoard = project => window.pushBoard({ ...fixture, project,
+        tabs: projects.map(tab => ({ ...tab, name: savedNames.get(tab.path) || tab.name })),
+        board: { ...fixture.board, project, settings: { ...fixture.board.settings,
+          name: savedNames.get(project), agentLimits: savedLimits.get(project) } } });
+      const createProjectCalls = [];
+      let limits = { executor: 3, manager: 1, reviewer: 1 };
+      Object.assign(window.taskboard, {
+        createBoard: async () => { createProjectCalls.push(frame.project ?? null); },
+        selectTab: async project => openBoard(project),
+        command: async (action, _id, values) => {
+          if (action !== 'settings') throw Error('Unexpected command: ' + action);
+          if (typeof values.name === 'string') savedNames.set(frame.project, values.name.trim());
+          if (values.agentLimits) savedLimits.set(frame.project, values.agentLimits);
+          openBoard(frame.project);
+          return { ok: true, data: frame.board.settings };
+        },
+        agentLimits: async value => ({ ok: true, data: value ? limits = value : limits }),
+        themes: async () => [],
+        codexStatus: async () => ({ state: 'unavailable' }),
+        chatModels: async () => ({ ok: true, data: [] }),
+      });
+      const limitFields = () => [...byId('agent-limits').querySelectorAll('input')];
+      const boardNameInput = () => byId('sheet-body').querySelector('form input[type="text"]');
+      const boardLimit = role => body.querySelector('[name="' + role + 'Limit"]');
+      const gearBackground = () => getComputedStyle(byId('app-settings')).backgroundColor;
+      const gearMatchesRail = () => gearBackground() === getComputedStyle(byId('project-tabs')).backgroundColor;
+      const createProjectItem = () => [...byId('app-menu').querySelectorAll('.app-menu-item')]
+        .find(item => item.textContent === 'Создать проект…');
+      window.pushBoard({ russian: true, theme: 'dark' });
+      void 0;
+    `);
+    await check(`byId('board-settings-menu-item').getAttribute('aria-disabled') === 'true' &&
+      byId('app-settings').getBoundingClientRect().left < 40 && byId('app-settings').getBoundingClientRect().bottom > innerHeight - 65 &&
+      getComputedStyle(byId('app-settings')).borderInlineEndWidth === '0px'`,
+      "the gear has no divider without project tabs and board settings need a board");
+    const welcomeGearBackground = await evaluate(`gearBackground()`);
+    await hover('#app-settings');
+    await check(`gearBackground() === ${JSON.stringify(welcomeGearBackground)} && gearBackground() === 'rgba(0, 0, 0, 0)'`,
+      "hovering the gear on the welcome screen does not paint a background square");
+    await click('#app-menu .app-menu-trigger');
+    await evaluate(`createProjectItem().click(); settle()`);
+    await check(`createProjectCalls.length === 1 && createProjectCalls[0] === null`,
+      "File invokes project creation from the welcome screen");
+    await click('#app-settings');
+    await evaluate(`waitFor(() => limitFields()[0].value === '3')`);
+    await check(`limitFields().map(input => input.value).join(',') === '3,1,1' &&
+      !!body.querySelector('.provider-panel') && !byId('tag-settings')`, "the gear opens shared settings even without an open board");
+    await evaluate(`limitFields()[0].value = '0'; byId('agent-limits').requestSubmit(); waitFor(() => !sheet.open)`);
+    await click('#app-menu .app-menu-trigger');
+    await click('#app-settings-menu-item');
+    await evaluate(`waitFor(() => limitFields()[0].value === '0')`);
+    await check(`limits.executor === 0 && limitFields()[1].value === '1'`, "File opens the same settings and zero is saved");
+    await evaluate(`sheet.close(); openBoard('board-fixture'); void 0`);
+    await check(`(() => {
+      const tabs = byId('project-tabs');
+      const gear = byId('app-settings');
+      const tabsRect = tabs.getBoundingClientRect();
+      const gearRect = gear.getBoundingClientRect();
+      const gearStyle = getComputedStyle(gear);
+      return tabsRect.right === gearRect.right && tabsRect.bottom === gearRect.top &&
+        gearRect.bottom === document.querySelector('.status-bar').getBoundingClientRect().top &&
+        gearStyle.borderInlineEndWidth === '1px' &&
+        gearStyle.borderInlineEndColor === getComputedStyle(tabs).borderInlineEndColor;
+    })()`, "the project tab divider continues beside the gear down to the status bar");
+    await check(`gearMatchesRail()`, "the gear background matches the open board rail");
+    await hover('#app-settings');
+    await check(`gearMatchesRail() && byId('app-settings').matches(':hover')`, "the gear background stays matched on hover");
+    await click('#app-menu .app-menu-trigger');
+    await evaluate(`createProjectItem().click(); settle()`);
+    await check(`createProjectCalls[1] === 'board-fixture' && frame.project === 'board-fixture'`,
+      "File invokes the same creation flow while a board is open");
+    await click('#app-menu .app-menu-trigger');
+    await click('#board-settings-menu-item');
+    await check(`!!byId('tag-settings') && !byId('agent-limits') && sheet.textContent.includes('Первая доска')`,
+      "File opens the selected board's settings");
+    await evaluate(`waitFor(() => boardLimit('executor').placeholder === '0')`);
+    await check(`boardLimit('executor').value === '' && boardLimit('reviewer').placeholder === '1'`,
+      "board limits inherit per-role application defaults");
+    await evaluate(`boardLimit('executor').value = '2'; boardLimit('reviewer').value = '0';
+      boardNameInput().form.requestSubmit(); waitFor(() => !sheet.open)`);
+    await check(`JSON.stringify(savedLimits.get('board-fixture')) === '{"executor":2,"reviewer":0}' &&
+      limits.executor === 0 && limits.reviewer === 1`, "board overrides save without changing application defaults");
+    await evaluate(`sheet.close(); byId('project-tabs').querySelector('[aria-selected="false"]')
+      .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 25, clientY: 150 })); void 0`);
+    await click('#board-tab-menu button');
+    await check(`frame.project === 'other-board' && sheet.textContent.includes('Вторая доска') &&
+      !!body.querySelector('.board-agent-settings') && !byId('agent-limits') &&
+      boardLimit('executor').value === '' && boardLimit('reviewer').value === ''`, "the project tab opens settings for that board");
+    await evaluate(`boardNameInput().value = 'Выпуск 0.3'; boardNameInput().form.requestSubmit(); waitFor(() => !sheet.open)`);
+    await check(`byId('project-tabs').querySelector('[aria-selected=true] .project-tab-name').textContent === 'Выпуск 0.3' &&
+      byId('project-tabs').querySelector('[aria-selected=false] .project-tab-name').textContent === 'Первая доска'`,
+      "saving a name updates only the tab of that board");
+    await evaluate(`boardSettings(); void 0`);
+    await check(`boardNameInput().value === 'Выпуск 0.3'`, "reopening settings shows the saved board name");
+    await evaluate(`boardNameInput().value = ''; boardNameInput().form.requestSubmit(); waitFor(() => !sheet.open)`);
+    await check(`byId('project-tabs').querySelector('[aria-selected=true] .project-tab-name').textContent === 'Вторая доска'`,
+      "clearing the board name restores the folder name");
+    await evaluate(`openBoard('board-fixture'); boardSettings(); void 0`);
+    await check(`boardLimit('executor').value === '2' && boardLimit('manager').value === '' &&
+      boardLimit('reviewer').value === '0'`, "saved overrides reopen including zero");
+    await evaluate(`boardLimit('executor').value = ''; boardLimit('reviewer').value = '';
+      boardNameInput().form.requestSubmit(); waitFor(() => !sheet.open)`);
+    await check(`Object.keys(savedLimits.get('board-fixture')).length === 0`, "clearing overrides restores inheritance");
+    console.log("Settings Chromium checks passed: " + checks);
+    return;
+  }
+  if (process.argv.includes("--reviewer-chat-only")) {
+    await evaluate(`
+      const reviewed = fixture.board.tasks[1];
+      reviewed.status = 'review';
+      reviewed.history.push({ action: 'review-approve', actor: 'reviewer', text: 'Сохранённое согласование.',
+        at: reviewed.updatedAt });
+      let attempts = [];
+      let reviewerReads = 0;
+      const openReviewer = () => byId('task-reviewer-chat');
+      window.taskboard.command = async () => ({ ok: true, data: structuredClone(reviewed) });
+      window.taskboard.chatModels = async () => ({ ok: true, data: [] });
+      window.taskboard.reviewerChat = async () => {
+        reviewerReads++;
+        return { ok: true, data: structuredClone(attempts) };
+      };
+      push();
+      showTask(reviewed.id);
+      waitFor(openReviewer);
+    `);
+    await check(`!openReviewer().open && reviewerReads === 0`, "opening a task does not load review history");
+    await evaluate(`openReviewer().querySelector('summary').click();
+      waitFor(() => openReviewer().textContent.includes('Сохранённое согласование.'))`);
+    await check(`openReviewer().textContent.includes('Сохранённые решения по проверке')`, "older cards show the decisions that were saved");
+    await evaluate(`
+      const live = { id: 'review-1', at: reviewed.updatedAt, items: [
+        { id: 'commentary', title: '', type: 'agentMessage', phase: 'commentary', text: 'Сверяю критерии.', status: 'completed' },
+        { id: 'tool', title: 'task_review_diff', type: 'dynamicToolCall', text: '[]', status: 'completed' }
+      ] };
+      attempts = [live];
+      const publishReview = () => window.pushChat({ project: fixture.project, id: reviewed.id, type: 'reviewer-chat' });
+      publishReview();
+      waitFor(() => openReviewer().textContent.includes('Сверяю критерии.'));
+    `);
+    await check(`openReviewer().textContent.includes('Ревьюер проверяет') && openReviewer().textContent.includes('task_review_diff')`,
+      "the open reviewer chat shows live commentary and a tool call");
+    await evaluate(`
+      live.durationMs = 1200;
+      live.items.push({ id: 'result', title: '', type: 'agentMessage', phase: 'final_answer', status: 'completed',
+        text: JSON.stringify({ summary: 'Результат согласован.', findings: [], evidence: ['Критерий проверен.'], needsHuman: false }) });
+      publishReview();
+      waitFor(() => openReviewer().textContent.includes('Результат согласован.'));
+    `);
+    await check(`openReviewer().textContent.includes('Критерий проверен.') && !openReviewer().textContent.includes('needsHuman')`,
+      "the final report is readable without provider JSON");
+    await evaluate(`(async () => {
+      sheet.close();
+      reviewed.status = 'done';
+      await showTask(reviewed.id);
+      openReviewer().querySelector('summary').click();
+      await waitFor(() => openReviewer().textContent.includes('Результат согласован.'));
+    })()`);
+    await check(`openReviewer().open && !document.querySelector('.task-chat .chat-composer')`, "a closed card still has the saved reviewer chat");
+    console.log("Reviewer chat Chromium checks passed: " + checks);
+    return;
+  }
+  if (process.argv.includes("--markdown-links-only")) {
+    await evaluate(`
+      const documentPath = 'docs/coverage/classes/@GlobalScope.md';
+      const cardWithDocument = fixture.board.tasks[1];
+      cardWithDocument.description = 'Проверить error_string в ' + documentPath + '.';
+      window.taskboard.command = async () => ({ ok: true, data: structuredClone(cardWithDocument) });
+      window.taskboard.chatModels = async () => ({ ok: true, data: [] });
+      const externalLinks = [];
+      let openedDocument;
+      window.taskboard.openLink = async url => { externalLinks.push(url); };
+      window.taskboard.readMarkdown = async (id, link) => {
+        openedDocument = { id, link };
+        return { ok: true, data: { path: link, name: '@GlobalScope.md', text: '# GlobalScope' } };
+      };
+      push();
+      showTask(cardWithDocument.id);
+      waitFor(() => sheet.open && body.querySelector('.sheet-section .chat-text a'));
+    `);
+    await evaluate(`
+      body.querySelector('.sheet-section .chat-text a').click();
+      waitFor(() => document.querySelector('.markdown-preview .chat-text h1') || externalLinks.length);
+    `);
+    await check(`openedDocument?.id === cardWithDocument.id && openedDocument.link === documentPath &&
+      document.querySelector('.markdown-preview h2').textContent === '@GlobalScope.md' && !externalLinks.length`,
+      "a plain Markdown path containing @ opens the task's document preview");
+    await evaluate(`document.querySelector('.markdown-preview').close(); settle()`);
+    await check(`sheet.open && !document.querySelector('.markdown-preview')`, "closing the document returns to the task");
+    console.log("Markdown link Chromium checks passed: " + checks);
+    return;
+  }
+  if (process.argv.includes("--git-status-only")) {
+    await check(`byId('status-branch').hidden && byId('status-publish').hidden && byId('status-tracking').hidden`,
+      "a board without a repository hides the Git controls");
+    await evaluate(`
+      fixture.board.gitInfo = { branch: 'master' };
+      window.taskboard.command = async (action, _id, input) => {
+        if (action === 'git-refs') return { ok: true, data: { branch: 'master', refs: [] } };
+        if (action === 'git-create' && input.branch === 'master' && input.head === undefined && input.name === 'main') {
+          return { ok: true, data: { branch: 'main', refs: [] } };
+        }
+        throw new Error('Unexpected Git operation');
+      };
+      push();
+      byId('status-branch').click();
+      waitFor(() => byId('git-branches').querySelector('.git-ref-list'));
+    `);
+    await check(`byId('status-branch').textContent === 'До первого коммита' && byId('status-publish').hidden &&
+      byId('git-branches').textContent.includes('Веток и тегов пока нет.') &&
+      byId('git-branches').querySelector('input').hidden &&
+      [...byId('git-branches').querySelectorAll('button:not([hidden])')].map(button => button.textContent).join() === 'Создать новую ветку…'`,
+      "an unborn HEAD has a distinct label and only the available Git action");
+    await evaluate(`byId('git-branches').querySelector('button:not([hidden])').click(); waitFor(() => sheet.open)`);
+    await check(`body.textContent.includes('Имя для первого коммита.') && !body.textContent.includes('master')`,
+      "naming the first branch does not present the pending name as a source reference");
+    await evaluate(`body.querySelector('form input').value = 'main'; body.querySelector('form').requestSubmit(); waitFor(() => !sheet.open)`);
+    await check(`byId('status-branch').textContent === 'До первого коммита'`, "renaming the unborn HEAD keeps the empty state");
+    await evaluate(`fixture.board.gitInfo = { branch: 'main', head: '0123456789abcdef' }; push(); void 0`);
+    await check(`byId('status-branch').textContent === 'main' && !byId('status-publish').hidden && byId('status-tracking').hidden`,
+      "a branch without tracking shows the publication control");
+    await evaluate(`fixture.board.gitInfo.tracking = { behind: 0, ahead: 19 }; push(); void 0`);
+    await check(`!byId('status-tracking').hidden && byId('status-publish').hidden &&
+      byId('status-tracking').textContent === '0↓ 19↑' &&
+      byId('status-tracking').getAttribute('aria-label').includes('Опережение 19') &&
+      getComputedStyle(byId('status-branch')).borderTopRightRadius === '0px' &&
+      getComputedStyle(byId('status-tracking')).borderTopRightRadius === '4px'`,
+      "a tracked branch shows behind and ahead in the reference order with an accessible label");
+    await check(`(() => {
+      const [icon, counts] = byId('status-tracking').children;
+      const glyph = getComputedStyle(icon, '::before');
+      return glyph.content === JSON.stringify(String.fromCodePoint(0xea77)) && glyph.fontFamily === 'codicon' &&
+        icon.getBoundingClientRect().right < counts.getBoundingClientRect().left;
+    })()`, "the circular Codicon arrows render to the left of the Git counts");
+    await evaluate(`
+      const pushButton = byId('status-tracking');
+      const pushCalls = [];
+      let finishPush;
+      window.taskboard.command = async (action, id, input) => {
+        pushCalls.push({ action, id, input });
+        return new Promise(resolve => { finishPush = resolve; });
+      };
+      const spin = () => getComputedStyle(pushButton.querySelector('.codicon-sync')).animationName;
+      void 0;
+    `);
+    await click('#status-tracking');
+    await check(`pushButton.disabled && pushButton.getAttribute('aria-busy') === 'true' && spin() === 'agent-spin' &&
+      pushCalls.length === 1 && pushCalls[0].action === 'git-push' && pushCalls[0].id === undefined &&
+      pushCalls[0].input.branch === 'main' && pushCalls[0].input.head === fixture.board.gitInfo.head &&
+      pushButton.textContent === '0↓ 19↑'`, "clicking the tracking button pushes the displayed branch tip and spins only the icon");
+    await evaluate(`pushButton.click(); push(); settle()`);
+    await check(`pushCalls.length === 1 && pushButton.disabled && spin() === 'agent-spin'`,
+      "a board refresh preserves the running state and repeat clicks cannot start a second push");
+    await evaluate(`
+      window.pushBoard({ ...fixture, project: 'other-board' });
+      void 0;
+    `);
+    await check(`!pushButton.disabled && spin() === 'none'`, "another project does not inherit the active push");
+    await evaluate(`push(); void 0`);
+    await check(`pushButton.disabled && spin() === 'agent-spin'`, "returning to the original board restores the spinner");
+    window.webContents.debugger.attach();
+    await window.webContents.debugger.sendCommand("Emulation.setEmulatedMedia", {
+      features: [{ name: "prefers-reduced-motion", value: "reduce" }],
+    });
+    await check(`pushButton.disabled && pushButton.getAttribute('aria-busy') === 'true' && spin() === 'none'`,
+      "reduced motion keeps the busy state without rotating the icon");
+    window.webContents.debugger.detach();
+    await evaluate(`finishPush({ ok: true, data: { branch: 'main' } }); waitFor(() => !pushButton.disabled)`);
+    await check(`pushButton.getAttribute('aria-busy') === 'false' && spin() === 'none'`, "a successful push stops the spinner");
+    await evaluate(`fixture.board.gitInfo.tracking = { behind: 0, ahead: 0 }; push(); void 0`);
+    await check(`byId('status-tracking').textContent === '0↓ 0↑' && !byId('status-tracking').hidden`,
+      "tracking remains visible when both counts are zero");
+    await evaluate(`
+      fixture.board.gitInfo.tracking = { behind: 1, ahead: 2 }; push();
+      pushButton.click();
+      waitFor(() => pushCalls.length === 2);
+    `);
+    await evaluate(`
+      finishPush({ ok: false, error: { code: 'GIT_PUSH_FAILED', message: 'Rejected by the remote.' } });
+      waitFor(() => !pushButton.disabled)
+    `);
+    await check(`spin() === 'none' && pushButton.textContent === '1↓ 2↑' &&
+      !byId('notice').hidden && byId('notice').textContent.includes('Rejected by the remote.') &&
+      byId('notice').textContent.includes('Отправка коммитов')`,
+      "a rejected push restores the button and preserves the counts with a contextual error");
+    await evaluate(`updateGitRevision({ branch: 'side', head: fixture.board.gitInfo.head }); void 0`);
+    await check(`byId('status-tracking').hidden && byId('status-branch').textContent === 'side'`,
+      "switching branches clears the previous counts until the watcher refreshes");
+    await evaluate(`delete fixture.board.gitInfo.branch; push(); void 0`);
+    await check(`byId('status-branch').textContent === '01234567' && byId('status-publish').hidden && byId('status-tracking').hidden`,
+      "detached HEAD shows the commit hash and keeps the Git menu available");
+    console.log("Git status Chromium checks passed: " + checks);
+    return;
+  }
+  window.webContents.debugger.attach();
+  const emulateMotion = value => window.webContents.debugger.sendCommand("Emulation.setEmulatedMedia", {
+    features: value ? [{ name: "prefers-reduced-motion", value }] : [],
+  });
+  if (process.argv.includes("--suggestions-only")) {
+    await emulateMotion("reduce");
+    await evaluate(`
+      const projects = [
+        { path: 'septic-board', name: 'Говновоз' }, { path: 'engine-board', name: 'Electron2D' },
+        { path: 'typing-board', name: 'Typing fixture' },
+      ];
+      const suggestionRequests = [];
+      const pendingSuggestions = new Map();
+      const placeholder = () => document.querySelector('.draft-placeholder').textContent;
+      const openBoard = project => window.pushBoard({ ...fixture, project, tabs: projects,
+        board: { ...fixture.board, project } });
+      window.taskboard.selectTab = async project => openBoard(project);
+      window.taskboard.boardSuggestions = project => new Promise(resolve => {
+        suggestionRequests.push(project);
+        pendingSuggestions.set(project, resolve);
+      });
+      openBoard('engine-board');
+      void 0;
+    `);
+    await click('#project-tabs [aria-selected="false"]');
+    await check(`suggestionRequests.join(',') === 'engine-board,septic-board'`, "each composer requests suggestions for its own project");
+    await evaluate(`pendingSuggestions.get('engine-board')(['Проверь фокус в TabContainer']); settle()`);
+    await check(`placeholder() === 'Напишите менеджеру проекта…'`, "a late response from the previous board leaves the current placeholder alone");
+    await evaluate(`pendingSuggestions.get('septic-board')(['Уточни требования к приёму заявок']); settle()`);
+    await check(`placeholder() === 'Уточни требования к приёму заявок'`, "the new board shows its own suggestions");
+    await click('#project-tabs [aria-selected="false"]');
+    await check(`placeholder() === 'Проверь фокус в TabContainer' && suggestionRequests.length === 2`, "switching back restores only that board's cached suggestions");
+    await emulateMotion("no-preference");
+    await evaluate(`
+      openBoard('typing-board');
+      const typedPrompt = 'Проверь сценарий загрузки проекта с длинным названием';
+      pendingSuggestions.get('typing-board')([typedPrompt]);
+      void 0;
+    `);
+    await check(`(async () => {
+      await waitFor(() => placeholder().length >= 3 && placeholder() !== typedPrompt && typedPrompt.startsWith(placeholder()));
+      const partial = placeholder();
+      for (let i = 0; i < 3; i++) openBoard('typing-board');
+      if (placeholder() !== partial) throw new Error('Refresh changed the suggestion: ' + partial + ' → ' + placeholder());
+      const field = document.querySelector('.draft-input textarea');
+      field.focus();
+      openBoard('typing-board');
+      await waitFor(() => document.activeElement === field && placeholder() === 'Напишите менеджеру проекта…');
+      field.value = 'Вопрос';
+      field.dispatchEvent(new Event('input'));
+      if (getComputedStyle(document.querySelector('.draft-placeholder')).visibility !== 'hidden') return false;
+      field.value = '';
+      field.dispatchEvent(new Event('input'));
+      field.blur();
+      openBoard('typing-board');
+      if (placeholder() !== partial) throw new Error('Blur restored ' + placeholder() + ' after ' + partial + ', active ' + document.activeElement?.tagName);
+      return true;
+    })()`, "board refreshes preserve the partial suggestion and field focus pauses it without flashing the full phrase");
+    console.log("Manager suggestions Chromium checks passed: " + checks);
+    return;
+  }
+  await emulateMotion("no-preference");
+  await check(`!byId('lanes').getAnimations({ subtree: true }).some(animation => animation.id === 'task-card-enter')`,
+    "restoring a board shows its existing cards immediately");
+  await evaluate(`
+    fixture.board.tasks.push(
+      task('T-0096', 'В работе', { status: 'in_progress' }),
+      task('T-0097', 'Завершено', { status: 'done' })
+    );
+    push();
+    settle();
+  `);
+  await evaluate(`
+    const movingCard = findCard('T-0002');
+    const sourceNeighbor = findCard('T-0001');
+    const destinationNeighbor = findCard('T-0096');
+    const unrelatedCard = findCard('T-0097');
+    const cardMove = (node = movingCard) => node.getAnimations().find(animation => animation.id === 'task-card-move');
+    const near = (a, b) => Math.abs(a.left - b.left) < 1 && Math.abs(a.top - b.top) < 1;
+    const pauseAtStart = animation => {
+      if (animation) {
+        animation.pause();
+        animation.currentTime = 0;
+      }
+      return animation;
+    };
+    const moveCard = status => {
+      fixture.board.tasks[1].status = status;
+      push();
+      return pauseAtStart(cardMove());
+    };
+    const origin = movingCard.getBoundingClientRect();
+    const sourceOrigin = sourceNeighbor.getBoundingClientRect();
+    const destinationOrigin = destinationNeighbor.getBoundingClientRect();
+    const firstMove = moveCard('in_progress');
+    const sourceShift = pauseAtStart(cardMove(sourceNeighbor));
+    const destinationShift = pauseAtStart(cardMove(destinationNeighbor));
+    void 0;
+  `);
+  await check(`Boolean(firstMove && lane('in_progress').contains(movingCard) && near(movingCard.getBoundingClientRect(), origin))`,
+    "a status update moves the same card into its new column and animates from its previous position");
+  await check(`Boolean(sourceShift && destinationShift &&
+    near(sourceNeighbor.getBoundingClientRect(), sourceOrigin) && near(destinationNeighbor.getBoundingClientRect(), destinationOrigin))`,
+    "neighbors in the source and destination columns start at their old positions");
+  await check(`(() => {
+    firstMove.currentTime = 120;
+    sourceShift.currentTime = 120;
+    destinationShift.currentTime = 120;
+    const midway = movingCard.getBoundingClientRect();
+    push();
+    return midway.left > origin.left && midway.left < lane('in_progress').getBoundingClientRect().left &&
+      sourceNeighbor.getBoundingClientRect().top < sourceOrigin.top &&
+      destinationNeighbor.getBoundingClientRect().top > destinationOrigin.top &&
+      cardMove() === firstMove && cardMove(sourceNeighbor) === sourceShift &&
+      cardMove(destinationNeighbor) === destinationShift && !cardMove(unrelatedCard);
+  })()`, "an ordinary refresh preserves live movement and leaves unrelated cards still");
+  await check(`(() => {
+    const midway = movingCard.getBoundingClientRect();
+    const neighborMidway = destinationNeighbor.getBoundingClientRect();
+    const nextMove = moveCard('review');
+    const nextShift = pauseAtStart(cardMove(destinationNeighbor));
+    return firstMove.playState === 'idle' && nextMove && lane('review').contains(movingCard) &&
+      near(movingCard.getBoundingClientRect(), midway) && destinationShift.playState === 'idle' &&
+      nextShift && near(destinationNeighbor.getBoundingClientRect(), neighborMidway);
+  })() === true`, "a second status update continues both the card and its neighbor from their current positions");
+  await check(`(() => {
+    cardMove().finish();
+    cardMove(destinationNeighbor).finish();
+    cardMove(sourceNeighbor).finish();
+    return !cardMove() && !cardMove(sourceNeighbor) && !cardMove(destinationNeighbor) &&
+      near(destinationNeighbor.getBoundingClientRect(), destinationOrigin) &&
+      Math.abs(movingCard.getBoundingClientRect().left - lane('review').getBoundingClientRect().left) < 1;
+  })()`, "the animated card and its neighbors reach their new layout without lingering transforms");
+  await evaluate(`moveCard('done'); void 0`);
+  await emulateMotion("reduce");
+  await evaluate(`settle()`);
+  await check(`!cardMove() && !cardMove(unrelatedCard) && lane('done').contains(movingCard)`,
+    "enabling reduced motion ends card and neighbor movement already in flight");
+  await check(`moveCard('ready') === undefined && !cardMove(sourceNeighbor) && lane('ready').contains(movingCard)`,
+    "reduced motion moves the card and its neighbors immediately");
+  await emulateMotion("no-preference");
+  await evaluate(`
+    const enter = node => node.getAnimations().find(animation => animation.id === 'task-card-enter');
+    const addReady = id => {
+      fixture.board.tasks.push(task(id, 'Новая карточка', { createdAt: '2026-11-15T12:00:00.000Z' }));
+      push();
+      return findCard(id);
+    };
+    const readyOrigin = movingCard.getBoundingClientRect();
+    const newCard = addReady('T-0098');
+    const appearance = pauseAtStart(enter(newCard));
+    const readyShift = pauseAtStart(cardMove());
+    void 0;
+  `);
+  await check(`Boolean(appearance && getComputedStyle(newCard).opacity === '0' &&
+    readyShift && lane('ready').contains(newCard) && near(movingCard.getBoundingClientRect(), readyOrigin) &&
+    !cardMove(unrelatedCard) && !enter(unrelatedCard))`,
+    "a new task fades in while existing cards start moving from their old positions");
+  await check(`(() => {
+    appearance.currentTime = 140;
+    readyShift.currentTime = 140;
+    push();
+    const opacity = Number(getComputedStyle(newCard).opacity);
+    return enter(newCard) === appearance && cardMove() === readyShift &&
+      opacity > 0 && opacity < 1 && movingCard.getBoundingClientRect().top > readyOrigin.top;
+  })()`, "a refresh preserves the card entrance and neighbors' movement mid-animation");
+  await check(`(() => {
+    appearance.finish();
+    readyShift.finish();
+    return !enter(newCard) && getComputedStyle(newCard).opacity === '1' && !cardMove();
+  })()`, "the card is fully visible and its neighbor reaches the new position");
+  await evaluate(`const nextEntrance = pauseAtStart(enter(addReady('T-0099'))); void 0`);
+  await check(`Boolean(nextEntrance)`, "a subsequent creation starts a new entrance animation");
+  await emulateMotion("reduce");
+  await evaluate(`settle()`);
+  await check(`nextEntrance.playState === 'idle' && !enter(addReady('T-0100')) &&
+    getComputedStyle(findCard('T-0100')).opacity === '1'`,
+    "reduced motion cancels an entrance in flight and shows later cards immediately");
+  await emulateMotion();
+  await evaluate(`fixture.board.tasks.splice(2); push(); settle()`);
+  window.webContents.debugger.detach();
+  if (process.argv.includes("--card-movement-only")) {
+    console.log("Card movement Chromium checks passed: " + checks);
+    return;
+  }
+  if (process.argv.includes("--working-directory-only")) {
+    await evaluate(`
+      const selectedTask = fixture.board.tasks[0];
+      const selectedPath = 'C:/Test/Shared files';
+      window.taskboard.executionModels = async () => ({ ok: true, data: [] });
+      window.taskboard.chatModels = async () => ({ ok: true, data: [] });
+      window.taskboard.command = async (action, id, input) => {
+        if (action === 'update') selectedTask.workingDirectory = input.workingDirectory;
+        return { ok: true, data: structuredClone(selectedTask) };
+      };
+      const openSettings = () => [...body.querySelectorAll('button')]
+        .find(button => button.textContent === 'Параметры запуска…').click();
+      showTask(selectedTask.id).then(() => {
+        openSettings();
+        return waitFor(() => body.querySelector('form input'));
+      });
+    `);
+    await check(`body.querySelector('form input').value === ''`, "a new task defaults to a worktree");
+    await evaluate(`
+      body.querySelector('form input').value = selectedPath;
+      body.querySelector('form').requestSubmit();
+      waitFor(() => sheetKind === 'task' && body.textContent.includes(selectedPath));
+    `);
+    await check(`selectedTask.workingDirectory === selectedPath && body.textContent.includes('Рабочая папка')`,
+      "execution settings save and display the existing working directory");
+    console.log("Working directory Chromium checks passed: " + checks);
+    return;
+  }
+  if (process.argv.includes("--schedule-only")) {
+    await evaluate(`
+      const recurringTask = fixture.board.tasks[0];
+      recurringTask.criteria = ['Сохранить результат проверки.'];
+      window.taskboard.chatModels = async () => ({ ok: true, data: [] });
+      window.taskboard.command = async (action, id, input) => {
+        if (action === 'update' && id === recurringTask.id) {
+          recurringTask.schedule = input.schedule ? { ...input.schedule, nextAt: '2030-01-14T09:00:00.000Z' } : undefined;
+          push();
+        }
+        return { ok: true, data: structuredClone(recurringTask) };
+      };
+      const scheduleFields = () => byId('sheet-body').querySelector('[name="scheduleMode"]')?.form.elements;
+      const edit = async () => {
+        const editButton = () => [...byId('sheet-body').querySelectorAll('button')].find(button => button.textContent === 'Редактировать');
+        await waitFor(editButton);
+        editButton().click();
+        await waitFor(scheduleFields);
+      };
+      const setScheduleMode = mode => {
+        const control = scheduleFields().scheduleMode;
+        control.value = mode;
+        control.dispatchEvent(new Event('change'));
+      };
+      showTask(recurringTask.id).then(() => edit());
+    `);
+    await check(`scheduleFields().scheduleMode.value === 'none' && scheduleFields().scheduleTime.disabled && scheduleFields().scheduleInterval.disabled`,
+      "a task without a schedule hides the timing fields");
+    for (const [mode, value, expected] of [["hourly", 1, { everyMinutes: 60 }], ["minutes", 15, { everyMinutes: 15 }],
+      ["hours", 3, { everyMinutes: 180 }], ["daily", 1, { time: "09:00" }], ["weekly", 1, { time: "09:00", weekday: 1 }],
+      ["monthly", 1, { time: "09:00", dayOfMonth: 31 }], ["yearly", 1, { time: "09:00", dayOfMonth: 29, month: 2 }]]) {
+      await evaluate(`setScheduleMode(${JSON.stringify(mode)}); scheduleFields().scheduleInterval.value = ${value};
+        scheduleFields().scheduleTime.value = '09:00'; scheduleFields().scheduleDay.value = '1';
+        scheduleFields().scheduleMonth.value = '2'; scheduleFields().scheduleMonth.dispatchEvent(new Event('change'));
+        scheduleFields().scheduleDate.value = ${JSON.stringify(String(expected.dayOfMonth ?? 1))}; scheduleFields().scheduleMode.form.requestSubmit();
+        waitFor(() => sheetKind === 'task' && !!findCard(recurringTask.id).querySelector('.task-schedule'))`);
+      await check(`(() => { const { nextAt, ...rule } = recurringTask.schedule; return JSON.stringify(rule) === ${JSON.stringify(JSON.stringify(expected))} &&
+        body.textContent.includes('Следующий запуск'); })()`, `the ${mode} rule is saved and the next run is visible`);
+      await evaluate(`edit()`);
+    }
+    await evaluate(`setScheduleMode('none'); scheduleFields().scheduleMode.form.requestSubmit();
+      waitFor(() => sheetKind === 'task' && !findCard(recurringTask.id).querySelector('.task-schedule'))`);
+    await check(`!recurringTask.schedule && !body.textContent.includes('Следующий запуск')`, "turning off the schedule stops recurrence");
+    console.log("Task schedule Chromium checks passed: " + checks);
+    return;
+  }
+  if (process.argv.includes("--goal-only")) {
+    await evaluate(`
+      const savedGoal = { objective: 'Проверить карточки', status: 'active' };
+      const goalUpdate = (goal, goalRunning) => window.pushChat({
+        project: fixture.project, type: 'orchestrator-goal', goal, goalRunning,
+      });
+      window.taskboard.boardHistory = async () => ({ ok: true, data: { turns: [], goal: savedGoal, goalRunning: false } });
+      const goalPanel = document.querySelector('.board-goal');
+      const [, pauseGoal, resumeGoal] = goalPanel.querySelectorAll('button');
+      const displayedGoal = () => goalPanel.querySelector('.board-goal-status').textContent;
+      void 0;
+    `);
+    await clickManagerField();
+    await evaluate(`waitFor(() => !goalPanel.hidden)`);
+    await evaluate(`goalPanel.querySelector('summary').click(); settle()`);
+    await check(`displayedGoal() === 'Цель ждёт продолжения' && !pauseGoal.checkVisibility() && resumeGoal.checkVisibility()`,
+      "a saved active goal without a run offers continuation");
+    await evaluate(`goalUpdate(savedGoal, true); settle()`);
+    await check(`displayedGoal() === 'Активная цель' && pauseGoal.checkVisibility() && !resumeGoal.checkVisibility()`,
+      "a goal running from another window shows only pause");
+    await evaluate(`goalUpdate(undefined, false); settle()`);
+    await check(`displayedGoal() === 'Цель ждёт продолжения' && !pauseGoal.checkVisibility() && resumeGoal.checkVisibility()`,
+      "the end of the run updates the panel without changing the saved goal");
+    await evaluate(`goalUpdate({ ...savedGoal, status: 'paused' }, false); settle()`);
+    await check(`displayedGoal() === 'Цель на паузе' && !pauseGoal.checkVisibility() && resumeGoal.checkVisibility()`,
+      "a paused goal offers resume");
+    await evaluate(`goalUpdate({ ...savedGoal, status: 'complete' }, false); settle()`);
+    await check(`displayedGoal() === 'Цель выполнена' && !pauseGoal.checkVisibility() && !resumeGoal.checkVisibility()`,
+      "a completed goal offers neither pause nor resume");
+    await evaluate(`
+      fixture.project = 'already-running-goal';
+      fixture.managerWork = { id: 'goal-run', phase: 'running', startedAt: Date.now(), item: { type: 'mcpToolCall',
+        title: 'ai_taskboard / task_wait', text: '', status: 'inProgress' } };
+      const coordination = { id: 'coordination-1', type: 'mcpToolCall', title: 'task_wait', text: '', status: 'completed',
+        messagesOnly: true, messages: [{ id: 'T-0001', sequence: 1, actor: 'agent',
+          text: 'Детали работы исполнителя.\\n\\n### Технические детали\\n\\nЛог сборки.' }] };
+      const reportCommit = '06b8c3dcc3f1f7bf008051b90e4a820c27a66203';
+      const reportText = [
+        'Текущая ветка main на коммите ' + reportCommit + ' включает принятые за эту неделю изменения.',
+        'В реестре реализовано **76,99 % API**. Подробности внесены в [отчёт сверки](docs/report.md).',
+        'T-0023 запущена для завершения учёта файловых ошибок и проверки принятой ветки для следующего выпуска.',
+        'Карточка T-0061 готова, но её запуск отложен до освобождения исполнителя, который занят текущей проверкой.',
+        'Следующей можно запустить T-0048. Приёмка изменений и проверки выпуска запланированы после достижения цели.',
+      ].join(' ');
+      const savedReply = { id: 'saved-reply', type: 'agentMessage', phase: 'final_answer', title: '', status: 'completed',
+        text: 'Сохранённый ответ.\\n\\n' + reportText + '\\n\\n### Технические детали\\n\\nСлужебная подпись.\\n\\n### Команда для запуска\\n\\nЗапустите проверку.' };
+      const dialogueLog = () => document.querySelector('.board-chat-log:not(.board-work)');
+      window.taskboard.boardHistory = async (_project, _cursor, view) => ({ ok: true, data: view === 'live' ? { work: [], chat: [] } :
+        { turns: [{ messages: [], items: [view === 'work' ? coordination : savedReply] }], goal: savedGoal, goalRunning: true } });
+      push();
+      void 0;
+    `);
+    await check(`document.querySelector('.draft-send').dataset.action === 'send' &&
+      document.querySelector('.draft-placeholder').textContent.includes('Жду обновления на доске')`,
+      "an active goal supplies activity while the manager composer can send");
+    await clickManagerField();
+    await check(`(() => {
+      const bar = document.querySelector('.board-chat-bar');
+      const dialogue = bar.querySelector('.board-dialogue-toggle');
+      const work = bar.querySelector('.board-work-toggle');
+      const grip = bar.querySelector('.board-chat-resize').getBoundingClientRect();
+      const pin = bar.querySelector('.board-chat-pin').getBoundingClientRect();
+      return dialogue.getAttribute('aria-pressed') === 'true' && work.getAttribute('aria-pressed') === 'false' &&
+        work.getBoundingClientRect().right < grip.left && grip.right < pin.left;
+    })()`, "the toolbar separates conversation tabs, resize handle, and pin");
+    await evaluate(`waitFor(() => dialogueLog().textContent.includes('Сохранённый ответ'))`);
+    await check(`getComputedStyle(dialogueLog().querySelector('.chat-report-details')).display === 'none' &&
+      dialogueLog().querySelector('h3').textContent === 'Команда для запуска'`,
+      "dialogue hides the generic appendix from saved replies and retains specific sections");
+    await check(`(async () => {
+      const report = dialogueLog().querySelector('.chat-run-final .chat-text');
+      const paragraphs = [...report.querySelectorAll(':scope > p')].slice(1, -1);
+      if (paragraphs.length < 2 || !report.querySelector('strong') || !report.querySelector('a[href="docs/report.md"]')) return false;
+      const taskId = report.querySelector('code.chat-task-reference');
+      if (taskId?.textContent !== 'T-0023' || getComputedStyle(taskId).whiteSpace !== 'nowrap') return false;
+      const hash = report.querySelector('.chat-digest');
+      if (hash?.title !== reportCommit || hash.textContent !== reportCommit.slice(0, 12) + '…') return false;
+      const original = chatText(reportText, { agent: true, source: 'discussion.md' }).querySelector('p').textContent;
+      if (paragraphs.map(p => p.textContent).join('').replace(hash.textContent, reportCommit) !== original ||
+          chatText(reportText, {}).querySelectorAll('p').length !== 1) return false;
+      let copied;
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async text => { copied = text; } } });
+      try {
+        hash.click();
+        await Promise.resolve();
+        return copied === reportCommit;
+      } finally { delete navigator.clipboard; }
+    })()`, "saved manager reports break up dense prose, preserve Markdown and copy the full commit");
+    await click(".board-work-toggle");
+    await evaluate(`waitFor(() => document.querySelector('.board-work').textContent.includes('Детали работы исполнителя'))`);
+    await check(`document.querySelector('.board-work').checkVisibility() &&
+      document.querySelector('.board-work-toggle').getAttribute('aria-pressed') === 'true' &&
+      document.querySelector('.board-work-overview').textContent.includes('Жду обновления на доске') &&
+      document.querySelector('.board-work .chat-report-details > summary').checkVisibility() &&
+      !document.querySelector('.board-chat-log:not(.board-work)').textContent.includes('Детали работы исполнителя')`,
+      "work activity shows the live goal and saved coordination outside the dialogue");
+    await click(".board-dialogue-toggle");
+    await check(`document.querySelector('.board-work').hidden &&
+      document.querySelector('.board-dialogue-toggle').getAttribute('aria-pressed') === 'true'`,
+      "dialogue can be selected directly while background work continues");
+    if (keepArtifacts) await capture("board-manager-toolbar.png");
+    await click(".board-work-toggle");
+    await evaluate(`
+      window.taskboard.boardRequest = async (prompt, _files, _project, goal) => ({
+        ok: !goal, data: { answer: prompt + ' · ответ\\n\\n### Technical details\\n\\nChecked the source.', changes: [] },
+      });
+      const parallelForm = document.querySelector('#board-draft');
+      parallelForm.querySelector('.draft-input textarea').value = 'Вопрос менеджеру';
+      parallelForm.requestSubmit();
+      waitFor(() => document.querySelector('.board-chat-log:not(.board-work)').textContent.includes('Вопрос менеджеру · ответ'));
+    `);
+    await check(`document.querySelector('.board-work').hidden && document.querySelector('.board-work-toggle').classList.contains('working')`,
+      "submitting a dialogue while the goal is running opens the reply and leaves the goal active");
+    await check(`getComputedStyle(dialogueLog().querySelector('.chat-entry .chat-report-details')).display === 'none'`,
+      "dialogue hides the generic appendix on an immediate reply too");
+    await evaluate(`
+      fixture.project = 'already-running-dialogue';
+      fixture.managerWork = null;
+      fixture.managerRun = { id: 'existing-run', phase: 'running' };
+      window.taskboard.boardHistory = async () => ({ ok: true, data: { turns: [], goal: savedGoal, goalRunning: true } });
+      push();
+      const managerField = () => document.querySelector('.draft-placeholder');
+      const managerButton = () => document.querySelector('.draft-send');
+      const managerStatus = () => document.querySelector('.board-chat .chat-thinking');
+      const publishManagerRun = run => window.pushChat({ project: fixture.project, type: 'orchestrator-run', managerRun: run });
+      void 0;
+    `);
+    await check(`managerButton().dataset.action === 'stop' && !managerButton().disabled && managerField().textContent === 'Думаю…'`,
+      "a new board view shows the running goal from its snapshot before opening the chat");
+    await evaluate(`publishManagerRun({ ...fixture.managerRun, item: {
+      type: 'mcpToolCall', status: 'inProgress', title: 'ai_taskboard / project_git', text: '',
+    } }); void 0`);
+    await check(`managerField().textContent === 'Вызов инструмента ai_taskboard / project_git'`,
+      "live activity from another window updates the collapsed composer");
+    await clickManagerField();
+    await evaluate(`waitFor(() => document.querySelector('.board-goal-status').textContent === 'Активная цель')`);
+    await check(`managerStatus().textContent === 'Вызов инструмента ai_taskboard / project_git' && !managerButton().disabled`,
+      "loading history keeps the current status and stop control for a restored run");
+    await evaluate(`
+      let stopCalls = 0;
+      window.taskboard.stopOrchestrator = async () => {
+        stopCalls++;
+        publishManagerRun(null);
+        return { ok: true, data: null };
+      };
+      managerButton().click();
+      waitFor(() => !managerStatus());
+    `);
+    await check(`stopCalls === 1 && managerButton().dataset.action === 'send'`,
+      "stopping a restored run calls the manager and clears its activity when it ends");
+    console.log("Goal controls Chromium checks passed: " + checks);
+    return;
+  }
+  if (process.argv.includes("--review-message-only")) {
+    await evaluate(`
+      const reviewed = fixture.board.tasks[0];
+      const sourcePath = 'src/Core/Object/DeferredPropertyValue.cs';
+      const text = '[P2] Критерий 1: ' + sourcePath + ':25 возвращает null из ReadNodePath(). Проверьте этот случай до и после сохранения.\\n\\n' +
+        'Проверка должна включать повторную загрузку.\\n\\n' +
+        '[P2] Критерий 3: [SceneState.md](docs/classes/SceneState.md) неверно описывает освобождение ресурсов. Уточните, когда закрывается последняя аренда.';
+      reviewed.history.push({ actor: 'reviewer', action: 'request-changes', text,
+        at: reviewed.updatedAt, from: 'review', to: 'in_progress' });
+      window.taskboard.chatModels = async () => ({ ok: true, data: [] });
+      window.taskboard.command = async () => ({ ok: true, data: structuredClone(reviewed) });
+      let openedSource;
+      window.taskboard.readMarkdown = async (id, link) => {
+        openedSource = { id, link };
+        return { ok: true, data: { path: sourcePath, name: 'DeferredPropertyValue.cs', line: 25,
+          text: '// preceding lines\\n'.repeat(24) + 'return null;\\n' } };
+      };
+      window.taskboard.boardHistory = async () => ({ ok: true, data: { turns: [
+        { messages: [], items: [{ id: 'review', type: 'mcpToolCall', messagesOnly: true, messages: [
+          { id: reviewed.id, actor: 'reviewer', kind: 'request-changes', sequence: 1, text },
+          { id: reviewed.id, actor: 'reviewer', kind: 'review-approved', sequence: 2, text: 'Сдача согласована.' },
+        ] }] },
+      ] } });
+      const findingsRendered = root => {
+        const [first, second, extra] = root.querySelectorAll('.chat-review-finding');
+        return !extra && first?.querySelector('strong')?.textContent === 'Критерий 1' &&
+          first.querySelector('.chat-review-priority')?.textContent === 'P2' &&
+          first.querySelector('a')?.getAttribute('href') === sourcePath + ':25' &&
+          first.querySelector('a')?.title === sourcePath + ':25' &&
+          [...first.querySelectorAll('code')].map(code => code.textContent).join('|') === 'DeferredPropertyValue.cs:25|null|ReadNodePath()' &&
+          first.querySelectorAll('p').length === 2 &&
+          second?.querySelector('strong')?.textContent === 'Критерий 3' &&
+          second.querySelector('a')?.getAttribute('href') === 'docs/classes/SceneState.md';
+      };
+      void 0;
+    `);
+    await clickManagerField();
+    await evaluate(`waitFor(() => document.querySelector('.board-chat .chat-review-return'))`);
+    await check(`findingsRendered(document.querySelector('.board-chat .chat-review-return'))`,
+      "reviewer returns in manager chat separate findings, keeping prose, source locations and Markdown links");
+    await check(`document.querySelector('.chat-review-status').textContent === 'Возврат на доработку' &&
+      document.querySelector('.chat-review-return .board-chat-task').textContent === reviewed.id &&
+      document.querySelector('.chat-coordination:not(.chat-review-return)').textContent.includes('Сдача согласована.')`,
+      "reviewer return keeps its task link, and reviewer approval remains a regular message");
+    await evaluate(`document.querySelector('.chat-review-return').scrollIntoView({ block: 'start' }); settle()`);
+    if (keepArtifacts) await capture("board-review-message.png");
+    await evaluate(`document.querySelector('.chat-review-finding a').click();
+      waitFor(() => document.querySelector('.markdown-preview .source-line'))`);
+    await check(`openedSource.id === reviewed.id && openedSource.link === sourcePath + ':25' &&
+      document.querySelector('.markdown-preview h2').textContent === 'DeferredPropertyValue.cs:25' &&
+      document.querySelector('.markdown-preview .source-line').textContent === 'return null;'`,
+      "a source link opens its highlighted line in the task worktree preview");
+    await evaluate(`document.querySelector('.markdown-preview').close(); settle()`);
+    await evaluate(`document.querySelector('.chat-review-return .board-chat-task').click(); settle()`);
+    await evaluate(`waitFor(() => document.querySelector('.task-chat .chat-review-return'))`);
+    await check(`findingsRendered(document.querySelector('.task-chat .chat-review-return'))`,
+      "the same findings are readable in the task chat");
+    console.log("Reviewer message Chromium checks passed: " + checks);
+    return;
+  }
+  if (process.argv.includes("--milestones-only")) {
+    await evaluate(`
+      window.taskboard.chatModels = async () => ({ ok: true, data: [] });
+      const milestoneTask = fixture.board.tasks[0];
+      milestoneTask.status = 'draft';
+      milestoneTask.unfinishedDependencies = ['T-0002'];
+      milestoneTask.subtasks = [{ title: 'Проверка', done: true }, { title: 'Приёмка', done: false }];
+      fixture.board.gitInfo = { githubRepository: 'owner/example' };
+      let openedMilestone;
+      window.taskboard.openLink = async url => { openedMilestone = url; };
+      let failMilestones = false;
+      window.taskboard.command = async (action, id, input) => {
+        if (action === 'show' && id === milestoneTask.id) return { ok: true, data: structuredClone(milestoneTask) };
+        if (action === 'milestones') {
+          return failMilestones ? { ok: false, error: { code: 'GITHUB_MILESTONES_FAILED' } } : {
+            ok: true, data: { repository: 'owner/example', milestones: [
+              { number: 5, title: 'Версия 1.0', state: 'open' },
+              { number: 3, title: 'Версия 0.9', state: 'closed' },
+            ] },
+          };
+        }
+        if (action === 'milestone' && id === milestoneTask.id && input.revision === milestoneTask.revision) {
+          if (input.milestone && (input.milestone.repository !== 'owner/example' || input.milestone.number !== 5)) {
+            throw new Error('Unexpected milestone selection');
+          }
+          milestoneTask.milestone = input.milestone ? { ...input.milestone, title: 'Версия 1.0' } : undefined;
+          milestoneTask.revision++;
+          push();
+          return { ok: true, data: structuredClone(milestoneTask) };
+        }
+        throw new Error('Unexpected action ' + action);
+      };
+      const milestoneButton = () => [...body.querySelectorAll('button')].find(control => control.textContent === 'Веха…');
+      push();
+      showTask(milestoneTask.id).then(() => milestoneButton().click())
+        .then(() => waitFor(() => body.querySelectorAll('select option').length === 3));
+    `);
+    await check(`[...body.querySelectorAll('select option')].some(option => option.textContent.includes('Версия 0.9') &&
+      option.textContent.includes('закрыта'))`, "the milestone picker lists open and closed GitHub milestones");
+    await evaluate(`
+      body.querySelector('select').value = '5';
+      body.querySelector('form').requestSubmit();
+      waitFor(() => !!body.querySelector('.task-milestone-link'));
+    `);
+    await check(`(() => {
+      const card = findCard(milestoneTask.id);
+      const id = card.querySelector('.task-id').getBoundingClientRect();
+      const milestone = card.querySelector('.task-milestone');
+      const bounds = milestone.getBoundingClientRect();
+      return milestone.textContent === 'Версия 1.0' && bounds.left > id.right && Math.abs(bounds.top - id.top) < 1;
+    })()`, "the assigned milestone appears on the same line as the task ID");
+    await check(`(() => {
+      const meta = findCard(milestoneTask.id).querySelector('.task-meta');
+      const idStyle = getComputedStyle(meta.querySelector('.task-id'));
+      const milestone = meta.querySelector('.task-milestone');
+      const textParts = [...meta.querySelectorAll('.task-id, .task-milestone, .task-stat')];
+      const icons = [...meta.querySelectorAll('.task-stat .icon')];
+      return getComputedStyle(milestone).color === idStyle.color && idStyle.color === getComputedStyle(meta).color &&
+        !!meta.querySelector('.task-id .codicon-symbol-number') && !!milestone.querySelector('.codicon-milestone') &&
+        textParts.length === 5 && textParts.every(part => {
+        const style = getComputedStyle(part);
+        return style.fontFamily === getComputedStyle(document.documentElement).fontFamily &&
+          style.fontSize === idStyle.fontSize && style.lineHeight === idStyle.lineHeight;
+      }) && icons.length === 5 && icons.every(icon => {
+        const glyph = getComputedStyle(icon, '::before');
+        return glyph.fontFamily === 'codicon' && glyph.content !== 'none' && document.fonts.check(glyph.font);
+      });
+    })()`, "task ID and milestone share the footer text color, and all five icons use the loaded Codicons font");
+    await evaluate(`body.querySelector('.task-milestone-link').click(); waitFor(() => !!openedMilestone)`);
+    await check(`openedMilestone === 'https://github.com/owner/example/milestone/5'`, "the assigned milestone opens on GitHub");
+    await evaluate(`failMilestones = true; milestoneButton().click(); waitFor(() => body.textContent.includes('Не удалось загрузить вехи GitHub'))`);
+    await check(`body.querySelector('select').selectedOptions[0].textContent.includes('Версия 1.0')`, "a GitHub error preserves the assigned milestone");
+    await evaluate(`body.querySelector('select').value = ''; body.querySelector('form').requestSubmit(); waitFor(() => !!milestoneButton())`);
+    await check(`!findCard(milestoneTask.id).querySelector('.task-milestone') && !body.querySelector('.task-milestone-link')`, "the milestone can be cleared while GitHub is unreachable");
+    await check(`(() => {
+      const title = 'Очень длинное название следующей вехи проекта';
+      milestoneTask.milestone = { repository: 'owner/example', number: 6, title };
+      push();
+      const card = findCard(milestoneTask.id);
+      card.style.width = '148px';
+      const id = card.querySelector('.task-id').getBoundingClientRect();
+      const milestone = card.querySelector('.task-milestone');
+      const bounds = milestone.getBoundingClientRect();
+      const label = milestone.querySelector('.task-milestone-label');
+      return Math.abs(bounds.top - id.top) < 1 && bounds.right <= card.getBoundingClientRect().right &&
+        label.scrollWidth > label.clientWidth && getComputedStyle(label).textOverflow === 'ellipsis' && milestone.title.includes(title);
+    })()`, "a long milestone stays next to the task ID on a narrow card and exposes its full title on hover");
+    console.log("GitHub milestone Chromium checks passed: " + checks);
+    return;
+  }
+  if (process.argv.includes("--queue-only")) {
+    await evaluate(`
+      const queueForm = byId('board-composer').querySelector('form');
+      const queueInput = queueForm.querySelector('.draft-input textarea');
+      const queuePanel = queueForm.querySelector('.board-chat-queue');
+      const row = index => queuePanel.children[index];
+      const rowButton = (index, label) => [...row(index).querySelectorAll('button')].find(control =>
+        (control.getAttribute('aria-label') || control.textContent) === label);
+      const requests = [];
+      const longMessage = 'Первая строка\\n' + 'Подробности '.repeat(600).trimEnd();
+      window.taskboard.boardRequest = (text, files, _project, _goal, immediate, id) =>
+        new Promise(resolve => requests.push({ text, files, immediate, id, resolve }));
+      const enqueueMessage = (text, files = []) => {
+        const count = queuePanel.children.length;
+        const clipboardData = new DataTransfer();
+        files.forEach(file => clipboardData.items.add(file));
+        queueInput.dispatchEvent(new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true }));
+        queueInput.value = text;
+        queueForm.requestSubmit();
+        return waitFor(() => queuePanel.children.length > count);
+      };
+      queueInput.value = 'Первый запрос';
+      queueForm.requestSubmit();
+      waitFor(() => requests.length === 1);
+    `);
+    await evaluate(`
+      enqueueMessage(longMessage, [new File(['proof'], 'proof.txt')])
+        .then(async () => {
+          for (let index = 0; index < 12; index++) await enqueueMessage('Сообщение ' + index);
+          return settle();
+        });
+    `);
+    await check(`queuePanel.children.length === 13 && queuePanel.scrollHeight > queuePanel.clientHeight &&
+      queuePanel.clientHeight > 0 && !queuePanel.closest('.board-chat-log') &&
+      row(0).querySelector('.board-queued-preview').scrollWidth > row(0).querySelector('.board-queued-preview').clientWidth &&
+      row(0).offsetHeight === row(1).offsetHeight &&
+      !queueForm.querySelector('.board-chat-log').textContent.includes('Подробности')`, "the queue uses single-line previews and scrolls independently from chat");
+    await evaluate(`rowButton(0, 'Изменить').click(); waitFor(() => row(0).querySelector('textarea'))`);
+    await check(`row(0).querySelector('textarea').value === longMessage`, "the editor opens the complete multiline message");
+    await evaluate(`
+      row(0).querySelector('textarea').value = longMessage + '\\nКонец';
+      rowButton(0, 'Сохранить').click();
+      waitFor(() => !row(0).querySelector('textarea'));
+    `);
+    await evaluate(`rowButton(1, 'Удалить').click(); waitFor(() => queuePanel.children.length === 12)`);
+    await check(`row(1).querySelector('.board-queued-preview').textContent === 'Сообщение 1'`, "any queued message can be removed without disturbing the order");
+    await evaluate(`rowButton(0, 'Отправить сейчас').click(); waitFor(() => requests.length === 2)`);
+    await check(`requests[1].immediate && requests[1].text === longMessage + '\\nКонец' && requests[1].files[0].name === 'proof.txt'`,
+      "immediate send transmits the edited multiline message with its attachment");
+    await evaluate(`
+      requests[1].resolve({ ok: false, error: { message: 'Повторите отправку' } });
+      waitFor(() => rowButton(0, 'Отправить сейчас'));
+    `);
+    await check(`queuePanel.children.length === 12 && row(0).querySelector('.board-queued-preview').textContent.endsWith('Конец')`,
+      "a failed immediate send leaves the edited message in place");
+    await evaluate(`
+      const commentary = { id: 'earlier-comment', type: 'agentMessage', title: '', text: 'Уточню карточку', phase: 'commentary', status: 'completed' };
+      const updateManager = items => window.pushChat({ project: fixture.project, type: 'orchestrator', items });
+      updateManager([commentary]);
+      rowButton(0, 'Отправить сейчас').click();
+      waitFor(() => requests.length === 3);
+    `);
+    await evaluate(`requests[2].resolve({ ok: true, data: null }); waitFor(() => queuePanel.children.length === 11)`);
+    await check(`[...queueForm.querySelectorAll('.board-chat-log .chat-text')].filter(entry => entry.textContent === requests[2].text).length === 1`,
+      "a delivered message moves from the queue to history exactly once");
+    await evaluate(`
+      const followUp = { id: requests[2].id, type: 'userMessage', title: '', text: requests[2].text, status: 'completed',
+        userMessage: { text: requests[2].text, files: [{ name: 'proof.txt' }] } };
+      const answer = { id: 'later-comment', type: 'agentMessage', title: '', text: 'Уточнение получил', phase: 'final_answer', status: 'completed' };
+      const items = [followUp, commentary, answer];
+      const queueLog = queueForm.querySelector('.board-chat-log');
+      const bubbles = () => [...queueLog.querySelectorAll('.chat-entry[data-actor="user"]')].filter(entry => entry.textContent.includes('Первая строка'));
+      const ordered = phase => {
+        const earlier = queueLog.querySelector('[data-item="message:earlier-comment"]');
+        const later = queueLog.querySelector('[data-item="' + phase + ':later-comment"]');
+        return bubbles().length === 1 && bubbles()[0].textContent.includes('proof.txt') &&
+          Boolean(earlier?.compareDocumentPosition(bubbles()[0]) & Node.DOCUMENT_POSITION_FOLLOWING) &&
+          Boolean(bubbles()[0].compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING);
+      };
+      updateManager(items);
+      void 0;
+    `);
+    await check(`ordered('message')`, "a late receipt replaces the one bubble after visible commentary and before new output");
+    await evaluate(`requests[0].resolve({ ok: true, data: { items, answer: 'Уточнение получил' } }); waitFor(() => requests.length === 4)`);
+    await check(`ordered('final') && !bubbles()[0].closest('details')`, "folding the completed turn retains the order and keeps the user message visible");
+    await check(`requests[3].text === 'Сообщение 1' && !requests[3].immediate && queuePanel.children.length === 10`,
+      "the next queued message starts automatically in order");
+    if (keepArtifacts) await capture("board-manager-queue.png");
+    await evaluate(`
+      requests[3].resolve({ ok: true, data: { answer: 'Готово' } });
+      waitFor(() => requests.length === 5);
+    `);
+    await evaluate(`
+      queueInput.click();
+      window.taskboard.boardHistory = async () => ({ ok: true, data: { turns: [
+        { messages: [], items: [commentary] },
+        { messages: [{ ...followUp.userMessage, clientId: followUp.id }], items: [answer] },
+      ] } });
+      requests[4].resolve({ ok: false, error: { message: 'Нет соединения' } });
+      waitFor(() => !queueLog.querySelector('.chat-thinking'));
+    `);
+    await evaluate(`
+      window.pushChat({ project: fixture.project, type: 'orchestrator-history' });
+      waitFor(() => bubbles().length === 1 && bubbles()[0].parentElement === queueLog);
+    `);
+    await check(`ordered('final')`, "loading the saved transcript shows the same chronology");
+    console.log("Manager queue Chromium checks passed: " + checks);
+    return;
+  }
+  if (process.argv.includes("--chat-scroll-only")) {
+    await evaluate(`
+      fixture.project = 'scroll-fixture';
+      push();
+      const scrollForm = byId('board-composer').firstChild;
+      const dialogue = scrollForm.querySelector('.board-chat-log:not(.board-work)');
+      const workLog = scrollForm.querySelector('.board-work');
+      const status = (id, text) => ({ id, text, type: 'agentMessage', title: '', status: 'completed', phase: 'final_answer' });
+      const turn = item => ({ messages: [], items: [item] });
+      let savedDialogue = Array.from({ length: 18 }, (_, i) => turn(status('dialogue-' + i, 'Ответ менеджера ' + i)));
+      let savedWork = Array.from({ length: 18 }, (_, i) => turn(status('work-' + i, 'Обновление работы ' + i)));
+      let activeWork = [];
+      window.taskboard.boardHistory = async (_project, _cursor, view) => ({ ok: true, data: view === 'live'
+        ? { work: activeWork, chat: [] } : { turns: view === 'work' ? savedWork : savedDialogue } });
+      const bottomGap = list => list.scrollHeight - list.clientHeight - list.scrollTop;
+      const row = (list, id) => list.querySelector('[data-item="message:' + id + '"], [data-item="final:' + id + '"]');
+      const y = (list, id) => row(list, id).getBoundingClientRect().top - list.getBoundingClientRect().top;
+      const place = (list, id) => { list.scrollTop += y(list, id) - 30; };
+      const event = (type, fields = {}) => window.pushChat({ project: fixture.project, type: 'orchestrator-' + type, ...fields });
+      const shown = () => !scrollForm.querySelector('.board-chat').getAnimations().some(a => a.transitionProperty === 'height');
+      const end = list => bottomGap(list) <= 2;
+      scrollForm.querySelector('.draft-input textarea').click();
+      waitFor(() => row(dialogue, 'dialogue-17') && shown() && end(dialogue)).then(settle)
+        .catch(error => { throw new Error(error.message + ' (last reply ' + Boolean(row(dialogue, 'dialogue-17')) +
+          ', panel settled ' + shown() + ', bottom gap ' + bottomGap(dialogue) + ')'); });
+    `);
+    await check(`(async () => {
+      event('run', { managerRun: { id: 'live-chat', phase: 'running' } });
+      const first = status('live-chat-1', 'Пишу ответ менеджера.');
+      const tool = { id: 'live-command', type: 'commandExecution', title: 'Get-Content README.md', status: 'inProgress', text: 'Читаю' };
+      window.pushChat({ project: fixture.project, type: 'orchestrator', items: [first] });
+      const entered = row(dialogue, first.id).getAnimations().some(a => a.animationName === 'board-chat-enter' &&
+        a.effect.getKeyframes().every(keyframe => !keyframe.transform));
+      if (!entered || !end(dialogue)) return false;
+      window.pushChat({ project: fixture.project, type: 'orchestrator', items: [first, tool] });
+      if (!end(dialogue)) return false;
+      window.pushChat({ project: fixture.project, type: 'orchestrator', items: [tool, { ...first, text: first.text.repeat(65) }] });
+      await settle();
+      return end(dialogue);
+    })()`, "live replies fade in without translation and the dialogue stays at the bottom as tools and text change");
+    await evaluate(`place(dialogue, 'dialogue-6'); settle()`);
+    await check(`(async () => {
+      const before = y(dialogue, 'dialogue-6');
+      savedDialogue[0] = turn(status('dialogue-0', 'Ранняя длинная реплика. '.repeat(25)));
+      event('history');
+      await waitFor(() => row(dialogue, 'dialogue-0')?.textContent.length > 100);
+      await settle();
+      return !end(dialogue) && Math.abs(y(dialogue, 'dialogue-6') - before) <= 1;
+    })()`, "a dialogue history refresh keeps the visible reply fixed when older content grows");
+    await evaluate(`
+      scrollForm.querySelector('.board-work-toggle').click();
+      waitFor(() => row(workLog, 'work-17') && end(workLog)).then(settle);
+    `);
+    await check(`(async () => {
+      const incoming = status('work-live', 'Текущий шаг');
+      activeWork = [incoming];
+      event('work-activity');
+      await waitFor(() => row(workLog, incoming.id));
+      if (!row(workLog, incoming.id).getAnimations().some(a => a.animationName === 'board-chat-enter') || !end(workLog)) return false;
+      savedWork = [...savedWork, turn(incoming)];
+      event('work-history');
+      await waitFor(() => workLog.querySelector('[data-item="final:work-live"]'));
+      await settle();
+      return end(workLog) && workLog.querySelectorAll('[data-item$=":work-live"]').length === 1;
+    })()`, "work activity fades in and moves to saved history once without losing the bottom");
+    await check(`(async () => {
+      const item = status('saved-work', 'Новая запись в истории.');
+      savedWork = [...savedWork, turn(item)];
+      event('work-history');
+      await waitFor(() => row(workLog, item.id));
+      const entry = row(workLog, item.id);
+      const fade = entry.getAnimations().find(animation => animation.animationName === 'board-chat-enter');
+      if (!fade) return false;
+      await fade.finished;
+      await settle();
+      if (entry.hasAttribute('data-enter')) return false;
+      scrollForm.querySelector('.board-dialogue-toggle').click();
+      await settle();
+      scrollForm.querySelector('.board-work-toggle').click();
+      return !row(workLog, item.id).getAnimations().some(animation => animation.animationName === 'board-chat-enter' &&
+        animation.playState === 'running') && end(workLog);
+    })()`, "an already displayed history entry does not fade in again on tab switch");
+    await evaluate(`place(workLog, 'work-6'); settle()`);
+    await check(`(async () => {
+      const before = y(workLog, 'work-6');
+      savedWork[0] = turn(status('work-0', 'Ранний шаг вырос. '.repeat(30)));
+      event('work-history');
+      await waitFor(() => row(workLog, 'work-0')?.textContent.length > 100);
+      await settle();
+      activeWork = [status('work-next', 'Следующий шаг. '.repeat(40))];
+      event('work-activity');
+      await waitFor(() => row(workLog, 'work-next'));
+      await settle();
+      return !end(workLog) && Math.abs(y(workLog, 'work-6') - before) <= 1;
+    })()`, "work history reloads and incoming activity keep the same visible row at the same offset");
+    await check(`(async () => {
+      const before = y(workLog, 'work-6');
+      scrollForm.querySelector('.board-dialogue-toggle').click();
+      await settle();
+      if (Math.abs(y(dialogue, 'dialogue-6') - 30) > 1) return false;
+      scrollForm.querySelector('.board-work-toggle').click();
+      await settle();
+      return Math.abs(y(workLog, 'work-6') - before) <= 1;
+    })()`, "switching views restores their independent reading positions");
+    console.log("Manager chat scroll Chromium checks passed: " + checks);
+    return;
+  }
+  if (process.argv.includes("--history-only")) {
+    await evaluate(`
+      const pageLog = byId('board-composer').querySelector('.board-chat-log');
+      const pagesRequested = [];
+      const savedPage = (label, count) => Array.from({ length: count }, (_, index) => ({
+        messages: [{ text: label + ' ' + index, files: [] }], items: [],
+      }));
+      const latestPage = savedPage('Свежее сообщение', 25);
+      window.taskboard.boardHistory = async (_project, cursor, view) => {
+        if (view) return { ok: true, data: view === 'live' ? { work: [], chat: [] } : { turns: [] } };
+        pagesRequested.push(cursor ?? null);
+        return { ok: true, data: cursor === 'older' ?
+          { turns: savedPage('Старое сообщение', 12), nextCursor: null } :
+          { turns: latestPage, nextCursor: 'older' } };
+      };
+      window.pushChat({ project: fixture.project, type: 'orchestrator-history' });
+      pageLog.closest('form').querySelector('.draft-input textarea').click();
+      waitFor(() => pageLog.textContent.includes('Свежее сообщение 24') &&
+        pageLog.clientHeight > 0 && pageLog.scrollHeight - pageLog.clientHeight - pageLog.scrollTop <= 2 &&
+        !pageLog.closest('.board-chat').getAnimations().some(animation => animation.transitionProperty === 'height')).then(settle)
+        .catch(error => { throw new Error(error.message + ' (scroll ' + pageLog.scrollTop + ', height ' +
+          pageLog.clientHeight + ', content ' + pageLog.scrollHeight + ')'); });
+    `);
+    await check(`pagesRequested.length === 1 && !pageLog.textContent.includes('Старое сообщение') &&
+      pageLog.scrollHeight - pageLog.clientHeight - pageLog.scrollTop <= 2`, "opening the transcript loads only the latest page at the bottom");
+    await evaluate(`
+      const firstRecent = [...pageLog.querySelectorAll('.chat-entry')].find(entry => entry.textContent === 'Свежее сообщение 0');
+      const recentOffset = firstRecent.getBoundingClientRect().top - pageLog.getBoundingClientRect().top + pageLog.scrollTop;
+      pageLog.scrollTop = 0;
+      waitFor(() => pageLog.textContent.includes('Старое сообщение 0')).then(settle);
+    `);
+    await check(`pagesRequested.join(',') === ',older' && pageLog.contains(firstRecent) &&
+      pageLog.querySelector('.chat-entry').textContent === 'Старое сообщение 0' &&
+      Math.abs(firstRecent.getBoundingClientRect().top - pageLog.getBoundingClientRect().top - recentOffset) < 2`,
+      "scrolling up prepends an older page without moving the previously visible message");
+    await check(`(async () => {
+      const form = pageLog.closest('form');
+      const olderMessage = [...pageLog.querySelectorAll('.chat-entry')].find(entry => entry.textContent === 'Старое сообщение 6');
+      pageLog.scrollTop = olderMessage.offsetTop - pageLog.offsetTop;
+      await settle();
+      const offset = () => olderMessage.getBoundingClientRect().top - pageLog.getBoundingClientRect().top;
+      const before = offset();
+      if (before < -1 || before >= pageLog.clientHeight) return false;
+      form.querySelector('.board-work-toggle').click();
+      latestPage.push(...savedPage('Новый ответ', 1));
+      window.pushChat({ project: fixture.project, type: 'orchestrator-history' });
+      await settle();
+      form.querySelector('.board-dialogue-toggle').click();
+      await settle();
+      return pagesRequested.length === 2 && pageLog.contains(olderMessage) && Math.abs(offset() - before) <= 1;
+    })()`, "history updates while reading work preserve an older dialogue page and the reading position");
+    await evaluate(`pageLog.scrollTop = pageLog.scrollHeight; waitFor(() => pageLog.textContent.includes('Новый ответ')).then(settle)`);
+    await check(`!pageLog.textContent.includes('Старое сообщение') && pagesRequested.length === 3 &&
+      pageLog.scrollHeight - pageLog.clientHeight - pageLog.scrollTop <= 2`, "returning to the bottom releases older messages and loads new ones");
+    await evaluate(`
+      const unreadProject = 'unread-board';
+      const otherProject = fixture.project;
+      const setUnread = ids => {
+        fixture.managerUnread = fixture.project === unreadProject ? ids : [];
+        fixture.tabs = [{ path: otherProject, name: 'Первая доска' },
+          { path: unreadProject, name: 'Вторая доска', unread: !!ids.length }];
+        push();
+      };
+      const pending = ['unread-first', 'unread-last'];
+      const receipts = [];
+      let focusedDialogue = false;
+      document.hasFocus = () => focusedDialogue;
+      const reply = (id, text) => ({ messages: [], items: [
+        { id, text, type: 'agentMessage', title: '', phase: 'final_answer', status: 'completed' },
+      ] });
+      window.taskboard.boardHistory = async (project, cursor, view) => ({ ok: true, data: view === 'live'
+        ? { work: [], chat: [] } : project !== unreadProject || view === 'work' ? { turns: [] } : cursor
+        ? { turns: [reply('read-old', 'Предыдущий ответ.'), reply(pending[0], 'Длинный ответ. '.repeat(180))] }
+        : { turns: [reply('unread-last', 'Последний ответ.')], nextCursor: 'with-unread' } });
+      window.taskboard.readManagerMessages = async (project, ids) => {
+        receipts.push({ project, ids });
+        const left = (fixture.managerUnread ?? []).filter(id => !ids.includes(id));
+        setUnread(left);
+        return { ok: true, data: left };
+      };
+      const dot = () => document.querySelector('.project-tab[data-project="unread-board"] .project-tab-unread');
+      const unreadLog = () => byId('board-composer').querySelector('.board-chat-log:not(.board-work)');
+      const unreadBubble = id => unreadLog().querySelector('[data-message-id="' + id + '"]');
+      setUnread(pending);
+      void 0;
+    `);
+    await check(`dot() && !receipts.length && !dot().parentElement.matches('[aria-selected="true"]')`,
+      "the inactive board tab signals new manager replies");
+    await evaluate(`
+      fixture.project = unreadProject; setUnread(pending);
+      byId('board-composer').querySelector('.draft-input textarea').click();
+      waitFor(() => unreadBubble(pending[0]) && unreadLog().clientHeight > 0 &&
+        !unreadLog().closest('.board-chat').getAnimations().some(animation => animation.transitionProperty === 'height')).then(settle);
+    `);
+    await check(`(() => {
+      const first = unreadBubble(pending[0]);
+      const last = unreadBubble(pending[1]);
+      return dot() && !receipts.length && first.dataset.read === 'false' &&
+        unreadBubble('read-old').dataset.read === 'true' && last.dataset.read === 'false' &&
+        first.previousElementSibling?.textContent === 'Новые сообщения' &&
+        getComputedStyle(first).borderRadius !== '0px' && last.getBoundingClientRect().width < unreadLog().clientWidth / 2;
+    })()`, "stored replies have separate left bubbles and the divider precedes the first unread reply across pages");
+    if (keepArtifacts) await capture("manager-unread.png");
+    await evaluate(`
+      byId('board-composer').querySelector('.board-work-toggle').click();
+      focusedDialogue = true;
+      unreadLog().dispatchEvent(new Event('scroll'));
+      settle();
+    `);
+    await check(`dot() && !receipts.length`, "opening the work log does not mark dialogue replies read");
+    await evaluate(`
+      byId('sheet').showModal();
+      byId('board-composer').querySelector('.board-dialogue-toggle').click();
+      settle();
+    `);
+    await check(`!!dot() && !receipts.length &&
+      unreadBubble(pending[0]).previousElementSibling?.classList.contains('board-chat-unread')`,
+      "returning to the dialogue restores the divider and a modal leaves the messages unread");
+    await evaluate(`
+      byId('sheet').close();
+      waitFor(() => receipts.length === 1).then(settle);
+    `);
+    await check(`receipts[0].project === unreadProject && receipts[0].ids.join() === pending[0] &&
+      unreadBubble(pending[0]).dataset.read === 'true' && !!dot()`,
+      "the visible reply becomes read but the below-fold reply leaves the indicator visible");
+    await evaluate(`unreadLog().scrollTop = unreadLog().scrollHeight; waitFor(() => !dot()).then(settle)`);
+    await check(`receipts.at(-1).ids.join() === pending[1] && unreadBubble(pending[1]).dataset.read === 'true'`,
+      "scrolling to the last unread reply clears the tab indicator");
+    console.log("Manager history Chromium checks passed: " + checks);
+    return;
+  }
   await evaluate(`waitFor(() => findCard('T-0001').querySelector('img')?.naturalWidth > 0)`);
   await check(`lane('ready').querySelector('.task-id').textContent === 'T-0002'`, "initial board shows the newest task first");
+  await evaluate(`
+    const baselineTasks = fixture.board.tasks;
+    const baselineCommand = window.taskboard.command;
+    let reviewQueueCalls = 0;
+    window.taskboard.command = async action => {
+      if (action !== 'review-queue') throw Error('Unexpected command: ' + action);
+      reviewQueueCalls++;
+      return { ok: true, data: [
+        { id: 'T-0003', revision: 2, status: 'conflict' },
+        { id: 'T-0004', revision: 2, status: 'clean' },
+        { id: 'T-0005', revision: 1, status: 'clean' },
+      ] };
+    };
+    fixture.board.tasks = [...baselineTasks,
+      task('T-0003', 'Первая сдача', { status: 'review', revision: 2, submittedAt: '2026-11-01T00:00:00Z' }),
+      task('T-0004', 'Чистое слияние', { status: 'review', revision: 2, reviewApproved: true, submittedAt: '2026-11-02T00:00:00Z' }),
+      task('T-0005', 'Смена ревизии', { status: 'review', revision: 2, submittedAt: '2026-11-03T00:00:00Z' }),
+    ];
+    fixture.runningTasks = ['T-0005'];
+    push();
+    void 0;
+  `);
+  await check(`reviewQueueCalls === 0 && byId('status-notifications').getAttribute('aria-label') === 'Очередь приёмки · 3'`, "the review badge updates without running Git while the queue is closed");
+  await evaluate(`byId('notifications').showPopover(); waitFor(() => byId('notifications').textContent.includes('Конфликт Git'))`);
+  await check(`(() => {
+    const rows = [...byId('notifications').querySelectorAll('[data-review-task]')];
+    return reviewQueueCalls === 1 && rows.map(row => row.dataset.reviewTask).join(',') === 'T-0004,T-0005,T-0003' &&
+      rows[0].textContent.includes('Без конфликтов Git') && rows[0].textContent.includes('Согласовано ревьюером') && rows[0].querySelector('span').title &&
+      rows[1].textContent.includes('Исполнитель ещё работает') && !rows[1].textContent.includes('Без конфликтов Git');
+  })()`, "the queue prioritizes completed clean submissions and ignores checks for older revisions");
+  await evaluate(`fixture.board.tasks = fixture.board.tasks.filter(task => task.id !== 'T-0004'); push(); waitFor(() => reviewQueueCalls === 2 && !byId('notifications').querySelector('[data-review-task="T-0004"]'))`);
+  await check(`byId('status-notifications').getAttribute('aria-label') === 'Очередь приёмки · 2'`, "a completed decision removes the review row and updates the badge");
+  if (process.argv.includes("--review-queue-only")) {
+    console.log("Review queue Chromium checks passed: " + checks);
+    return;
+  }
+  await evaluate(`
+    byId('notifications').hidePopover();
+    fixture.board.tasks = baselineTasks;
+    fixture.runningTasks = [];
+    window.taskboard.command = baselineCommand;
+    push(); void 0;
+  `);
   await evaluate(`
     const originalCard = findCard('T-0001');
     const originalCover = originalCard.querySelector('img');
@@ -140,6 +1450,13 @@ app.whenReady().then(async () => {
   await evaluate(`fixture.board.tasks[0].status = 'review'; push(); void 0`);
   await check(`lane('review').contains(originalCard) && originalCard.querySelector('img') === originalCover`, "status changes move the existing card and preview");
   await check(`lane('review').querySelector('.count').textContent === '1' && lane('ready').querySelector('.count').textContent === '1'`, "lane counters follow status changes");
+  await check(`!originalCard.querySelector('.agent-spinner')`, "a submission waiting for review has no activity indicator");
+  await evaluate(`fixture.reviewingTasks = { 'T-0001': 'reviewer' }; push(); void 0`);
+  await check(`originalCard.querySelector('.agent-spinner')?.getAttribute('aria-label') === 'Проверяет ревьюер'`, "active independent review is shown on the card");
+  await evaluate(`fixture.reviewingTasks['T-0001'] = 'manager'; push(); void 0`);
+  await check(`originalCard.querySelector('.agent-spinner')?.title === 'Проверяет менеджер проекта'`, "active manager review is named in the tooltip");
+  await evaluate(`delete fixture.reviewingTasks; push(); void 0`);
+  await check(`!originalCard.querySelector('.agent-spinner') && lane('review').contains(originalCard)`, "the indicator clears when review ends without a decision");
   await evaluate(`findCard('T-0002').focus(); const focusBeforeCreation = document.activeElement; void 0`);
   await evaluate(`fixture.board.tasks.push(task('T-0003', 'Новая карточка', { priority: 'high', createdAt: '2026-11-03T12:00:00.000Z' })); push(); void 0`);
   await check(`findCard('T-0003') !== undefined`, "new tasks appear after refresh");
@@ -148,7 +1465,8 @@ app.whenReady().then(async () => {
   await evaluate(`findCard('T-0003').focus(); const focusedCard = document.activeElement; fixture.board.tasks.reverse(); push(); void 0`);
   await check(`document.activeElement === focusedCard && lane('ready').querySelector('.task-card') === focusedCard`, "refresh preserves newest-first order and keyboard focus despite changed input order");
   await evaluate(`fixture.board.tasks.find(task => task.id === 'T-0002').updatedAt = '2026-11-10T12:00:00.000Z'; push(); void 0`);
-  await check(`lane('ready').querySelector('.task-card') === focusedCard`, "editing an older task does not move it above newer tasks");
+  await check(`lane('ready').querySelector('.task-card') === findCard('T-0002') && document.activeElement === focusedCard`,
+    "editing an older task moves it above newer tasks and preserves keyboard focus");
   await evaluate(`fixture.board.tasks.reverse(); lane('ready').querySelector('.lane-collapse').click(); push(); void 0`);
   await check(`lane('ready').querySelector('.lane-cards').hidden`, "refresh retains a collapsed column");
   await evaluate(`lane('ready').querySelector('.lane-collapse').click(); void 0`);
@@ -157,19 +1475,67 @@ app.whenReady().then(async () => {
   await evaluate(`fixture.board.tasks[2].priority = 'normal'; push(); void 0`);
   await check(`lane('ready').querySelectorAll('.task-card').length === 0 && !!lane('ready').querySelector('.lane-filter-empty')`, "refresh applies active filters and shows the empty state");
   await evaluate(`lane('ready').querySelector('.lane-filter-options button').click(); void 0`);
+  await check(`!findCard('T-0003').hasAttribute('aria-description') && getComputedStyle(findCard('T-0003'), '::before').content === 'none'`,
+    "changing a card back to normal removes its priority description and stripe");
   await check(`!!findCard('T-0002') && !!findCard('T-0003')`, "resetting the column filter restores current data");
   await evaluate(`fixture.board.tasks = fixture.board.tasks.filter(task => task.id !== 'T-0003'); push(); void 0`);
   await check(`!findCard('T-0003')`, "removed tasks disappear after refresh");
-  await evaluate(`fixture.error = { message: 'Updates paused' }; push(); void 0`);
-  await check(`document.querySelector('#notice').textContent === 'Updates paused' && findCard('T-0001') === originalCard`, "watch failures retain the last confirmed board");
+  await evaluate(`fixture.error = { code: 'BOARD_BUSY', operation: 'refresh', message: 'Another command is working on this board. Retry shortly.' }; push(); void 0`);
+  await check(`!byId('notice').hidden && byId('notice-context').textContent === 'Обновление доски · board-fixture' &&
+    byId('notice-message').textContent.includes('Обновление повторится автоматически') &&
+    byId('notice-close').getAttribute('aria-label') === 'Скрыть уведомление' && findCard('T-0001') === originalCard`,
+    "a watch failure shows its project and operation in the board language and retains the last confirmed cards");
+  await evaluate(`byId('notice-close').click(); push(); void 0`);
+  await check(`byId('notice').hidden`, "a dismissed refresh error stays hidden on subsequent snapshots");
+  await evaluate(`delete fixture.error; push(); fixture.error = { code: 'BOARD_BUSY', operation: 'refresh', message: 'Another command is working on this board. Retry shortly.' }; push(); void 0`);
+  await check(`!byId('notice').hidden`, "the same error is shown again if it recurs after a successful snapshot");
+  await evaluate(`byId('notice-close').click(); fixture.error = { ...fixture.error, operation: 'open' }; push(); void 0`);
+  await check(`!byId('notice').hidden && byId('notice-context').textContent === 'Открытие проекта · board-fixture'`,
+    "an error for a different operation is visible even with the same underlying error code and message");
   await evaluate(`delete fixture.error; fixture.runningTasks = []; push(); void 0`);
   await check(`document.querySelector('#notice').hidden && !findCard('T-0002').querySelector('.agent-spinner')`, "recovery clears the error and stale activity");
-  await evaluate(`fixture.board.tags[0].customColor = '#ab1234'; push(); void 0`);
-  await check(`findCard('T-0002').querySelector('.tag').style.getPropertyValue('--tag-color') === '#ab1234'`, "tag color changes reach existing cards");
+  await evaluate(`fixture.board.tags[0].color = '#AB1234'; push(); void 0`);
+  await check(`findCard('T-0002').querySelector('.tag').style.getPropertyValue('--tag-color') === '#AB1234'`, "tag color changes reach existing cards");
   await evaluate(`fixture.board.tasks[1].unfinishedDependencies = ['T-0001']; push(); void 0`);
-  await check(`lane('blocked').contains(findCard('T-0002'))`, "unfinished dependencies move ready tasks to the blocked lane");
+  await check(`lane('blocked').contains(findCard('T-0002')) && findCard('T-0002').dataset.state === 'ready' &&
+    findCard('T-0002').querySelector('.task-dependency-message').textContent === 'Ожидает T-0001' &&
+    getComputedStyle(findCard('T-0002').querySelector('.task-dependency-message')).justifySelf === 'start'`,
+    "a ready task waiting for a dependency shows a compact badge in the blocked lane");
+  await evaluate(`fixture.board.tasks[1].unfinishedDependencies = ['T-0003']; push(); void 0`);
+  await check(`findCard('T-0002').querySelector('.task-dependency-message').textContent === 'Ожидает T-0003'`,
+    "the displayed dependency updates even when the count stays the same");
+  await evaluate(`
+    fixture.board.tasks[1].unfinishedDependencies = ['T-0003', 'T-0004', 'T-0005'];
+    push(); void 0;
+  `);
+  await check(`(() => {
+    const badge = findCard('T-0002').querySelector('.task-dependency-message');
+    return badge.textContent === 'Ожидает T-0003 +2' && badge.title.includes('T-0003, T-0004, T-0005') &&
+      badge.getBoundingClientRect().width <= badge.parentElement.clientWidth;
+  })()`, "multiple prerequisites fit in one badge with the full list available");
   await evaluate(`fixture.board.tasks[1].unfinishedDependencies = []; push(); void 0`);
-  await check(`lane('ready').contains(findCard('T-0002'))`, "completed dependencies return tasks to the ready lane");
+  await check(`lane('ready').contains(findCard('T-0002')) && !findCard('T-0002').querySelector('.task-dependency-message')`,
+    "completed dependencies clear the waiting message and return tasks to the ready lane");
+  await evaluate(`
+    fixture.board.tasks[1].status = 'blocked';
+    fixture.board.tasks[1].blocked = { reason: 'Ожидаю приёмки задачи ' + String.fromCharCode(96) + 'T-0001' + String.fromCharCode(96) + '.',
+      condition: 'Получить результат.' };
+    push(); void 0;
+  `);
+  await check(`(() => {
+    const card = findCard('T-0002');
+    const badge = card.querySelector('.task-dependency-message');
+    return lane('blocked').contains(card) && badge?.textContent === 'Ожидает T-0001' &&
+      badge.title.includes('Получить результат.') && !card.querySelector('.task-blocker');
+  })()`, "a manual blocker that explicitly waits for a task uses the same badge");
+  await evaluate(`fixture.board.tasks[1].blocked.reason = 'Ожидаю другую задачу.'; push(); void 0`);
+  await check(`findCard('T-0002').querySelector('.task-dependency-message').textContent === 'Ожидает задачу'`,
+    "an explicit wait without a task number still shows a badge");
+  await evaluate(`fixture.board.tasks[1].blocked.reason = 'Ожидаю доступ к серверу для T-0001.'; push(); void 0`);
+  await check(`!findCard('T-0002').querySelector('.task-dependency-message') &&
+    findCard('T-0002').querySelector('.task-blocker').textContent.includes('доступ к серверу')`,
+    "an unrelated blocker mentioning a task retains its reason");
+  await evaluate(`fixture.board.tasks[1].status = 'ready'; delete fixture.board.tasks[1].blocked; push(); void 0`);
   await evaluate(`fixture.board.tasks[0].coverAttachment = 'missing.png'; fixture.board.tasks[0].attachments.push({ file: 'missing.png', name: 'missing.png' }); push(); void 0`);
   await evaluate(`settle()`);
   await check(`originalCard.querySelector('img').dataset.file === 'missing.png' && originalCard.querySelector('img').hidden`, "an unavailable replacement preview does not show the old attachment");
@@ -182,22 +1548,81 @@ app.whenReady().then(async () => {
     Object.assign(window.taskboard, {
       themes: async () => [],
       codexStatus: async () => ({ state: 'unavailable' }),
+      chooseCodex: async () => ({ state: 'ready', selectedPath: 'codex.exe', clientPath: 'codex.exe', clientVersion: '0.167.1' }),
+      autoDetectCodex: async () => ({ state: 'unavailable' }),
+      chatModels: async () => ({ ok: true, data: ['manager', 'executor', 'reviewer'].map((id, index) => ({
+        id, name: id, effort: 'low', efforts: index === 1 ? ['low'] : ['low', 'high'],
+      })) }),
       command: async (name, id, input) => {
+        if (name === 'tag-color') {
+          const tag = fixture.board.tags.find(tag => tag.name === input.name);
+          tag.color = input.color.toUpperCase();
+          push();
+          return { ok: true, data: tag };
+        }
         if (name !== 'settings' || typeof input.showCardPreviews !== 'boolean') return { ok: false, error: { message: 'Invalid settings' } };
         fixture.board.settings = input;
         push();
         return { ok: true, data: input };
       },
     });
-    settings();
+    boardSettings();
     void 0;
   `);
   await check(`previewSetting().checked && previewSetting().labels[0].textContent === 'Показывать превью на карточках'`, "boards without a saved preview preference default to showing covers");
+  await evaluate(`
+    settings();
+    const providerPanel = () => body.querySelector('.provider-panel');
+    const providerActions = () => Array.from(providerPanel().querySelectorAll('button'));
+    waitFor(() => providerPanel().querySelector('[role="status"]').textContent.includes('не найден'));
+  `);
+  await check(`providerPanel().querySelector('h3').textContent === 'Провайдер моделей Codex' &&
+    providerActions().map(button => button.textContent).join('|') === 'Выбрать файл…|Найти автоматически|Обновить статус' &&
+    providerActions()[1].hidden`, "provider settings offer executable selection without a plugin setup action");
+  await evaluate(`providerActions()[0].click(); waitFor(() => providerPanel().textContent.includes('0.167.1'))`);
+  await check(`providerPanel().textContent.includes('Исполняемый файл Codex найден.') && !providerActions()[1].hidden`,
+    "the provider panel shows the selected executable and offers to return to automatic detection");
+  await evaluate(`providerActions()[1].click(); waitFor(() => providerActions()[1].hidden)`);
+  await evaluate(`
+    boardSettings();
+    const tagHex = () => byId('tag-settings').querySelector('input[data-tag="UI"]');
+    tagHex().value = 'blue';
+    tagHex().dispatchEvent(new Event('change'));
+    void 0;
+  `);
+  await check(`!tagHex().validity.valid && fixture.board.tags[0].color === '#AB1234'`, "tag settings reject a named color");
+  await evaluate(`tagHex().value = '#217d79'; tagHex().dispatchEvent(new Event('change'));
+    waitFor(() => tagHex().value === '#217D79')`);
+  await check(`findCard('T-0002').querySelector('.tag').style.getPropertyValue('--tag-color') === '#217D79'`,
+    "entering HEX in tag settings updates the tag on existing cards");
   await evaluate(`previewSetting().labels[0].click(); previewSetting().form.requestSubmit(); waitFor(() => !sheet.open)`);
   await check(`findCard('T-0001') === originalCard && !originalCard.querySelector('img') && fixture.board.settings.showCardPreviews === false && window.previewCalls === callsBeforeToggle`, "saving the unchecked setting hides the cover without replacing the task or requesting an image");
-  await evaluate(`settings(); void 0`);
+  await evaluate(`boardSettings(); void 0`);
   await check(`!previewSetting().checked`, "reopening board settings shows the saved preference");
-  await evaluate(`previewSetting().click(); previewSetting().form.requestSubmit(); waitFor(() => !sheet.open && originalCard.querySelector('img')?.naturalWidth > 0)`);
+  await evaluate(`
+    const reviewModeSetting = () => body.querySelectorAll('.form select')[1];
+    const roleFields = () => [...body.querySelectorAll('.board-agent-settings')];
+    waitFor(() => roleFields().every(field => field.querySelectorAll('select')[1].options.length === 4))
+  `);
+  await check(`reviewModeSetting().value === 'human' &&
+    [...reviewModeSetting().options].map(option => option.value).join('|') === 'human|manager|reviewer' &&
+    roleFields().map(group => group.querySelector('legend').textContent).join('|') ===
+    'Менеджер проекта|Исполнитель|Ревьюер'`, "legacy boards without a setting use manual acceptance and show separate agent settings");
+  await evaluate(`
+    roleFields().forEach((group, index) => {
+      const [, model, effort] = group.querySelectorAll('select');
+      model.value = ['manager', 'executor', 'reviewer'][index];
+      model.dispatchEvent(new Event('change'));
+      effort.value = index === 1 ? 'low' : 'high';
+    });
+    reviewModeSetting().value = 'manager';
+    reviewModeSetting().dispatchEvent(new Event('change'));
+    previewSetting().click(); previewSetting().form.requestSubmit();
+    waitFor(() => !sheet.open && originalCard.querySelector('img')?.naturalWidth > 0)
+  `);
+  await check(`fixture.board.settings.reviewMode === 'manager' && ['manager', 'executor', 'reviewer'].every((role, index) =>
+    fixture.board.settings[role].provider === 'codex' && fixture.board.settings[role].model === role &&
+    fixture.board.settings[role].effort === (index === 1 ? 'low' : 'high'))`, "board settings save each role and the selected review mode");
   await check(`fixture.board.settings.showCardPreviews === true && originalCard.querySelector('img').dataset.file === 'cover.png' && window.previewCalls === callsBeforeToggle`, "enabling previews restores the previously selected cover from the cache");
   await evaluate(`const archivedTask = fixture.board.tasks.shift(); fixture.board.archived.push({ ...archivedTask, status: 'done' }); push(); archiveView = true; render(); void 0`);
   await check(`document.querySelector('#archive-list').contains(findCard('T-0001'))`, "archived tasks remain accessible");
@@ -205,15 +1630,25 @@ app.whenReady().then(async () => {
   await check(`findCard('T-0001') === archiveCard`, "archive refreshes retain cards too");
   await evaluate(`fixture.project = 'other-board'; fixture.board.tasks = [task('T-0001', 'Другая доска')]; fixture.board.archived = []; push(); void 0`);
   await check(`findCard('T-0001') !== originalCard && findCard('T-0001').textContent.includes('Другая доска') && !findCard('T-0001').querySelector('img')`, "switching projects isolates cards and covers with the same task number");
-  await evaluate(`fixture.russian = false; push(); void 0`);
-  await check(`lane('ready').querySelector('h2').textContent.includes('Ready') && findCard('T-0001').textContent.includes('Normal')`, "language changes update columns and cards");
+  await evaluate(`fixture.board.tasks[0].priority = 'high'; push(); fixture.russian = false; push(); void 0`);
+  await check(`lane('ready').querySelector('h2').textContent.includes('Ready') && findCard('T-0001').getAttribute('aria-description') === 'Priority · High'`, "language changes update columns and accessible priority descriptions");
   await evaluate(`const callsBeforeDelay = window.previewCalls; fixture.board.tasks[0].attachments = [{ file: 'delayed.png', name: 'delayed.png' }]; push(); void 0`);
   await evaluate(`waitFor(() => !!window.releasePreview)`);
   await evaluate(`const pendingImage = findCard('T-0001').querySelector('img'); fixture.board.tasks[0].title = 'Changed while loading'; push(); push(); window.releasePreview(); void 0`);
   await evaluate(`waitFor(() => !pendingImage.hidden)`);
   await check(`findCard('T-0001').querySelector('img') === pendingImage && window.previewCalls === callsBeforeDelay + 1`, "updates during preview loading retain the pending image and share its request");
   await evaluate(`fixture.board.tasks.push(...Array.from({ length: 40 }, (_, index) => task('S-' + index, 'Scroll task ' + index))); push(); void 0`);
-  await evaluate(`(async () => { while (lane('ready').querySelector('.lane-more')) { lane('ready').querySelector('.lane-more').click(); await settle(); } })()`);
+  await evaluate(`(async () => {
+    const ready = lane('ready');
+    let more = ready.querySelector('.lane-more');
+    while (more) {
+      const before = ready.querySelectorAll('.task-card').length;
+      more.click();
+      await Promise.resolve();
+      if (ready.querySelectorAll('.task-card').length <= before) throw new Error('Show more did not reveal tasks');
+      more = ready.querySelector('.lane-more');
+    }
+  })()`);
   await evaluate(`document.querySelector('#lanes').scrollTop = 400; const boardScroll = document.querySelector('#lanes').scrollTop; push(); void 0`);
   await check(`boardScroll > 0 && document.querySelector('#lanes').scrollTop === boardScroll`, "refresh retains the scroll position on a long board");
   await evaluate(`
@@ -221,31 +1656,52 @@ app.whenReady().then(async () => {
     fixture.project = 'sorting-fixture';
     const taskId = number => 'T-' + String(number).padStart(4, '0');
     fixture.board.tasks = lanes.flatMap(([status], index) => [
-      task(taskId(100 + index * 2), 'Старая задача от 1 ноября', { status, createdAt: '2026-11-01T12:00:00.000Z' }),
+      task(taskId(100 + index * 2), 'Обновлённая задача от 1 ноября', { status, updatedAt: '2026-11-04T12:00:00.000Z' }),
       task(taskId(101 + index * 2), 'Новая задача от 3 ноября', { status, createdAt: '2026-11-03T12:00:00.000Z' })
     ]);
     const laneIds = state => [...lane(state).querySelectorAll('.task-id')].map(node => node.textContent).join(',');
-    const allLanesSorted = () => lanes.every(([state], index) => laneIds(state) === taskId(101 + index * 2) + ',' + taskId(100 + index * 2));
+    const allLanesSorted = () => lanes.every(([state], index) => laneIds(state) === taskId(100 + index * 2) + ',' + taskId(101 + index * 2));
     const sourceOrder = fixture.board.tasks.map(task => task.id).join(',');
     push(); void 0;
   `);
-  await check(`allLanesSorted()`, "every column sorts tasks by descending creation date");
+  await check(`allLanesSorted()`, "every column sorts by last change even when the top card was created first and has a lower number");
   await check(`frame.board.tasks.map(task => task.id).join(',') === sourceOrder`, "rendering does not reorder the source snapshot");
   await evaluate(`fixture.board.tasks.reverse(); push(); void 0`);
-  await check(`allLanesSorted()`, "all columns retain creation order when a refresh changes snapshot order");
-  await evaluate(`fixture.board.tasks.push(task('T-0000', 'Самая новая задача от 4 ноября', { createdAt: '2026-11-04T12:00:00.000Z', tags: ['UI'] })); push(); void 0`);
-  await check(`laneIds('ready') === 'T-0000,T-0103,T-0102'`, "creation date takes precedence over task number");
+  await check(`allLanesSorted()`, "all columns retain last-change order when a refresh changes snapshot order");
+  await evaluate(`fixture.board.tasks.push(task('T-0000', 'Самая новая задача от 5 ноября', { createdAt: '2026-11-05T12:00:00.000Z', tags: ['UI'] })); push(); void 0`);
+  await check(`laneIds('ready') === 'T-0000,T-0102,T-0103'`, "creation is the first change and places a new task at the top");
   await evaluate(`settle()`);
   writeFileSync(join(artifacts, "board-newest-first.png"), (await window.webContents.capturePage()).toPNG());
   await evaluate(`fixture.board.tasks.find(task => task.id === 'T-0102').priority = 'high'; fixture.board.tasks.find(task => task.id === 'T-0000').priority = 'high'; push(); const sortingFilter = lane('ready').querySelector('select'); sortingFilter.value = 'high'; sortingFilter.dispatchEvent(new Event('change', { bubbles: true })); void 0`);
   await check(`laneIds('ready') === 'T-0000,T-0102'`, "column filters preserve newest-first order for the matching subset");
-  await evaluate(`lane('ready').querySelector('.lane-filter-options button').click(); fixture.board.tasks.find(task => task.id === 'T-0103').unfinishedDependencies = ['T-0100']; push(); void 0`);
-  await check(`laneIds('blocked') === 'T-0107,T-0103,T-0106'`, "dependency-blocked tasks use creation order within the blocked column");
-  await evaluate(`fixture.board.tasks.push(task('T-9999', 'Совпадающая дата', { createdAt: '2026-11-04T12:00:00.000Z' })); push(); const tiedOrder = laneIds('ready'); fixture.board.tasks.reverse(); push(); void 0`);
-  await check(`laneIds('ready') === tiedOrder && tiedOrder.startsWith('T-9999,T-0000,')`, "equal creation dates use a stable descending task-number tie-breaker");
+  await evaluate(`lane('ready').querySelector('.lane-filter-options button').click(); fixture.board.tasks.find(task => task.id === 'T-0103').unfinishedDependencies = ['T-0100']; push(); settle()`);
+  await check(`laneIds('blocked') === 'T-0106,T-0107,T-0103'`, "dependency-blocked tasks use the same last-change order in the blocked column");
+  await evaluate(`fixture.board.tasks.push(task('T-9999', 'Совпадающая дата', { createdAt: '2026-11-05T12:00:00.000Z', updatedAt: 'invalid' })); push(); settle()`);
+  await evaluate(`const tiedOrder = laneIds('ready'); fixture.board.tasks.reverse(); push(); settle()`);
+  await check(`laneIds('ready') === tiedOrder && tiedOrder.startsWith('T-9999,T-0000,')`, "invalid updatedAt falls back to creation and equal dates use a stable task-number tie-breaker");
   await evaluate(`fixture.board.tasks.push(task('T-9998', 'Без даты', { createdAt: '' }), task('T-9997', 'Повреждённая дата', { createdAt: 'invalid' })); push(); void 0`);
-  await evaluate(`lane('ready').querySelector('.lane-more').click(); settle()`);
+  await evaluate(`lane('ready').querySelector('.lane-more')?.click(); settle()`);
   await check(`laneIds('ready') === 'T-9999,T-0000,T-0102,T-9998,T-9997'`, "missing or invalid creation dates sort after dated tasks without breaking rendering");
+  await evaluate(`
+    const acceptedTask = task('T-0047', 'Завершить состояния действий Input', { status: 'review' });
+    fixture.board.tasks.push(acceptedTask); push();
+    const acceptedCard = findCard(acceptedTask.id);
+    acceptedTask.status = 'done';
+    acceptedTask.updatedAt = '2026-11-07T12:00:00.000Z';
+    push(); settle();
+  `);
+  await check(`laneIds('done') === 'T-0047,T-0110,T-0111' && lane('done').querySelector('.task-card') === acceptedCard`,
+    "an accepted older card moves to the top of Done without replacing its node");
+  await evaluate(`
+    fixture.board.archived = [
+      { id: 'T-9999', title: 'Старый формат архива', status: 'done', closedAt: '2026-11-10T12:00:00.000Z' },
+      { id: 'T-0033', title: 'Обновлён архивный тег', status: 'done', closedAt: '2026-11-01T12:00:00.000Z', updatedAt: '2026-11-11T12:00:00.000Z' },
+    ];
+    push(); archiveView = true; render(); void 0;
+  `);
+  await check(`byId('archive-list').querySelector('.task-id').textContent === 'T-0033'`,
+    "archive sorts by last change and falls back to the closing date for older archive entries");
+  await evaluate(`archiveView = false; fixture.board.archived = []; void 0`);
   await evaluate(`fixture.russian = true; fixture.project = 'board-fixture'; fixture.board.tasks = [task('T-0001', 'Стабильное превью', { attachments: [{ file: 'cover.png', name: 'cover.png' }] }), task('T-0002', 'Обновляемая карточка', { tags: ['UI'] })]; push(); void 0`);
   await evaluate(`waitFor(() => findCard('T-0001').querySelector('img')?.naturalWidth > 0)`);
   await evaluate(`settle()`);
@@ -377,21 +1833,80 @@ app.whenReady().then(async () => {
   `);
   await evaluate(`settle()`);
   await check(`newChatChoice.id === interrupted.id && newChatChoice.options.newThread === true && taskInSheet.status === 'blocked'`, "the recovery action asks main to confirm a new chat and preserves the task on cancellation");
+  await evaluate(`
+    interrupted.blocked = {
+      reason: 'Could not save task token usage: Another command is working on this board.\\n\\n{"level":"WARN","target":"codex_otel"}',
+      condition: 'Resolve the reported issue and resume the task.',
+    };
+    interrupted.revision++;
+    push(); void 0;
+  `);
+  await evaluate(`waitFor(() => body.querySelector('.task-blocker') && taskInSheet?.revision === interrupted.revision)`);
+  await check(`[body.querySelector('.task-blocker'), findCard(interrupted.id).querySelector('.task-blocker')].every(banner =>
+    banner.textContent.includes('записи статистики токенов') && !banner.textContent.includes('codex_otel') &&
+    !banner.title.includes('codex_otel')) && !byId('task-launch')`,
+    "a legacy telemetry blocker shows a short explanation without offering a new Codex chat");
+  await evaluate(`
+    interrupted.status = 'done';
+    interrupted.git = { worktree: 'saved-worktree' };
+    interrupted.cleanupAvailable = true;
+    interrupted.artifacts = [{ source: 'first.log', sha256: 'first' }];
+    window.taskboard.command = async (name, id, input) => {
+      if (name === 'cleanup-status') return { ok: true, data: { pending: true, path: 'saved-worktree', entries: ['!! report.local'] } };
+      if (name === 'cleanup') {
+        if (input.artifacts?.join() !== 'report.local') return { ok: false, error: { message: 'Expected the report path' } };
+        interrupted.cleanupAvailable = false;
+        delete interrupted.git.worktree;
+        interrupted.artifacts = [];
+      }
+      return { ok: true, data: structuredClone(interrupted) };
+    };
+    const sheetButton = text => [...body.querySelectorAll('button')].find(node => node.textContent === text);
+    showTask(interrupted.id); void 0;
+  `);
+  await evaluate(`waitFor(() => sheetButton('Уборка рабочей копии…'))`);
+  await check(`body.textContent.includes('Принято · рабочая копия сохранена') &&
+    body.querySelector('#task-review-files summary').textContent.includes('1 файл')`, "an accepted card shows pending cleanup and a count of its saved artifacts");
+  await evaluate(`sheetButton('Уборка рабочей копии…').click(); waitFor(() => sheetKind === 'cleanup')`);
+  await check(`body.textContent.includes('!! report.local')`, "cleanup shows the files in the retained worktree");
+  await evaluate(`body.querySelector('textarea').value = 'report.local'; body.querySelector('form').requestSubmit(); waitFor(() => sheetKind === 'task' && !sheetButton('Уборка рабочей копии…'))`);
+  await check(`!body.querySelector('#task-review-files')`, "cleanup returns to the original card after discarding temporary artifacts");
+  await evaluate(`
+    let tagEdit;
+    const cleanupCommands = window.taskboard.command;
+    window.taskboard.command = async (name, id, input) => {
+      if (name === 'tag-assign') {
+        tagEdit = { id, revision: input.revision, tags: [...input.tags] };
+        interrupted.tags = [...input.tags];
+        interrupted.revision++;
+        push();
+      }
+      return cleanupCommands(name, id, input);
+    };
+    sheetButton('Изменить теги').click();
+    waitFor(() => sheetKind === 'task-tags');
+  `);
+  await evaluate(`body.querySelector('input').value = 'Готово, Интерфейс'; body.querySelector('form').requestSubmit();
+    waitFor(() => sheetKind === 'task' && taskInSheet.tags.includes('Готово'))`);
+  await check(`tagEdit.id === interrupted.id && tagEdit.revision === taskInSheet.revision - 1 &&
+    tagEdit.tags.join(',') === 'Готово,Интерфейс' && taskInSheet.status === 'done' &&
+    byId('task-sheet-tags').textContent.includes('Готово')`, "a completed card supports a tag-only edit and shows the result");
   window.setContentSize(1720, 960);
   await evaluate(`
     sheet.close();
     fixture.project = 'design-board'; fixture.theme = 'dark'; fixture.runningTasks = [];
     fixture.tabs = [{ path: 'design-board', name: 'AI Taskboard' }, { path: 'design-other', name: 'Electron2D' }];
-    fixture.board = { gitInfo: { branch: 'main', user: 'Developer' }, tags: [{ name: 'интерфейс', color: 'blue' }, { name: 'карточки', color: 'purple' }],
+    fixture.board = { gitInfo: { branch: 'main', head: '0123456789abcdef', user: 'Developer' }, tags: [{ name: 'интерфейс', color: '#91B6F9' }, { name: 'карточки', color: '#C0A5F4' }],
       archived: [task('T-0580', 'Похожий номер', { status: 'done' }), task('T-0058', 'Настроить порядок вкладок', { status: 'done' })], tasks: [
       task('T-0056', 'Убрать надпись «Загрузка проектов»', { tags: ['интерфейс'], createdAt: '2026-11-05' }),
       task('T-0055', 'Исправить обрезку превью по скруглению карточки', { tags: ['интерфейс', 'карточки'], priority: 'high', attachments: [{ file: 'cover.png', name: 'cover.png' }] }),
-      task('T-0051', 'Исправить создание чатов вне папки проекта', { status: 'blocked', blocked: { reason: 'Нужно обновить Codex', condition: 'Установить обновление и продолжить задачу.' }, attachments: [{ file: 'notes.txt', name: 'notes.txt' }], priority: 'high' }),
-      task('T-0017', 'Добавить отдельную прокрутку колонок доски', { status: 'cancelled', attachments: [{ file: 'notes.txt', name: 'notes.txt' }] }),
+      task('T-0051', 'Исправить создание чатов вне папки проекта', { status: 'blocked', blocked: { reason: 'Нужно обновить Codex', condition: 'Установить обновление и продолжить задачу.' }, attachments: [{ file: 'notes.txt', name: 'notes.txt' }] }),
+      task('T-0017', 'Добавить отдельную прокрутку колонок доски', { status: 'cancelled', priority: 'low', attachments: [{ file: 'notes.txt', name: 'notes.txt' }] }),
       ...Array.from({ length: 52 }, (_, index) => task('D-' + index, [
         'Добавить поддержку ссылок Markdown и открытие MD-файлов', 'Передавать вложения агенту при создании задачи',
         'Выровнять текст в карточке задачи', 'Добавить вкладки проектов в одном окне'
-      ][index % 4], { status: 'done', attachments: index === 0 ? [{ file: 'cover.png', name: 'cover.png' }] : [] }))
+      ][index % 4], { status: 'done', priority: index === 51 ? 'urgent' : 'normal',
+        attachments: index === 0 ? [{ file: 'cover.png', name: 'cover.png' }] : [] }))
     ] };
     const designBoard = structuredClone(fixture.board);
     const designOther = { tags: [], archived: [], tasks: [task('T-0001', 'Другая доска', { description: 'Описание другой задачи' })] };
@@ -415,6 +1930,34 @@ app.whenReady().then(async () => {
   `);
   await evaluate(`waitFor(() => sheetKind === 'task' && taskInSheet?.id === 'T-0055')`);
   await evaluate(`sheet.close(); waitFor(() => findCard('T-0055').querySelector('img')?.naturalWidth > 0)`);
+  await evaluate(`
+    const questionUpdates = [];
+    const questionView = { id: 'question-1', text: 'Доступен ли сеанс Windows?', options: ['Да', 'Нет'] };
+    const pendingQuestion = question => updateChat({ project: frame.project, type: 'orchestrator-question', question });
+    const questionPopup = () => document.querySelector('.manager-question[open]');
+    api.answerBoardQuestion = async (id, answer) => {
+      questionUpdates.push({ id, answer });
+      pendingQuestion(null);
+      return { ok: true, data: null };
+    };
+    pendingQuestion(questionView);
+  `);
+  await check(`Boolean(questionPopup()?.textContent.includes(questionView.text)) && !draftForm().hasAttribute('data-open') &&
+    questionPopup().querySelectorAll('.manager-question-options button').length === 2`,
+    "the manager question opens automatically above a collapsed chat");
+  await evaluate(`questionPopup().querySelector('.manager-question-options button').click(); settle()`);
+  await check(`questionUpdates.length === 1 && questionUpdates[0].id === 'question-1' && questionUpdates[0].answer === 'Да' &&
+    !questionPopup() && draftForm().querySelector('.manager-question-trigger').hidden`, "a choice answers the question once and closes the popup");
+  await evaluate(`pendingQuestion({ ...questionView, id: 'question-2' }); questionPopup().close(); settle()`);
+  await check(`!questionPopup() && !draftForm().querySelector('.manager-question-trigger').hidden`, "dismissing a popup keeps its question available");
+  await evaluate(`draftForm().querySelector('.manager-question-trigger').click(); settle()`);
+  await evaluate(`const customAnswer = questionPopup().querySelector('textarea');
+    customAnswer.value = 'Сеанс будет вечером.';
+    customAnswer.dispatchEvent(new Event('input'));
+    questionPopup().querySelector('form').requestSubmit();
+    settle()`);
+  await check(`questionUpdates.at(-1).id === 'question-2' && questionUpdates.at(-1).answer === 'Сеанс будет вечером.' &&
+    !questionPopup()`, "the user can reopen the popup and send a custom answer");
   await check(`!byId('search') && !byId('filters') && !byId('create') && !byId('board-actions')`, "top search, global filters and creation button are removed");
   await check(`byId('lanes').children.length === 7 && getComputedStyle(lane('ready')).backgroundColor === 'rgba(0, 0, 0, 0)'`, "reference composition uses seven open columns");
   await check(`!byId('status-branch').hidden && byId('status-branch').textContent === 'main' && !byId('status-user').hidden && byId('status-user').textContent === 'Developer' && !byId('status-notifications').hidden && document.querySelector('.status-bar').getBoundingClientRect().bottom === innerHeight`, "status bar retains Git branch, user and notifications at the bottom of the window");
@@ -422,17 +1965,73 @@ app.whenReady().then(async () => {
   await check(`byId('project-tabs').getAttribute('aria-orientation') === 'vertical' && byId('project-tabs').getBoundingClientRect().right <= byId('app-content').getBoundingClientRect().left`, "project tabs form a vertical rail to the left of the board");
   await check(`getComputedStyle(byId('project-tabs').querySelector('[role=tab]')).writingMode === 'vertical-rl'`, "project names are rotated vertically");
   await check(`(() => { const tab = byId('project-tabs').firstElementChild, close = tab.querySelector('.codicon-close'), label = tab.querySelector('.project-tab-name'); const gap = label.getBoundingClientRect().top - close.getBoundingClientRect().bottom; return getComputedStyle(close).fontFamily === 'codicon' && getComputedStyle(close, '::before').content.length > 2 && gap >= 6 && gap <= 8 && tab.getBoundingClientRect().height < 124; })()`, "compact tabs use the shared close icon with a six-to-eight pixel gap to the name");
-  await check(`findCard('T-0055').dataset.selected === 'true' && getComputedStyle(findCard('T-0055')).borderTopColor === themeColor('--accent')`, "selection retains a theme accent border after details close");
-  await check(`getComputedStyle(findCard('T-0051'), '::before').backgroundColor === themeColor('--warn') && !!lane('done').querySelector('.task-done[aria-label]')`, "blocked and done states have distinct stripe and accessible checkmark indicators");
+  await check(`(() => {
+    const card = findCard('T-0055');
+    return getComputedStyle(card).borderTopColor === themeColor('--border') && getComputedStyle(card).boxShadow === 'none';
+  })()`, "opening and closing task details leaves the normal border and no accent shadow");
+  await check(`(() => {
+    const blocked = findCard('T-0051');
+    const stripe = id => getComputedStyle(findCard(id), '::before');
+    const urgent = stripe('D-51').backgroundColor;
+    return stripe('T-0051').content === 'none' &&
+      blocked.querySelector('.task-blocker')?.textContent.includes('Нужно обновить Codex') &&
+      stripe('T-0055').backgroundColor === themeColor('--yellow') &&
+      stripe('T-0017').backgroundColor === themeColor('--muted') &&
+      stripe('D-51').content !== 'none' && ![themeColor('--yellow'), themeColor('--muted'), themeColor('--warn')].includes(urgent) &&
+      !findCard('D-51').querySelector('.task-meta').textContent.includes('Срочный') &&
+      findCard('D-51').getAttribute('aria-description') === 'Приоритет · Срочный' &&
+      !!lane('done').querySelector('.task-done[aria-label]');
+  })()`, "priority stripes are independent of status, and normal cards have no priority marker");
   await check(`findCard('T-0055').querySelector('.task-card-heading').nextElementSibling.className === 'task-tags' && findCard('T-0055').querySelector('.task-tags').nextElementSibling.tagName === 'IMG'`, "card title, tags and inset cover follow reference order");
   await check(`(() => { const image = findCard('T-0055').querySelector('img'), card = findCard('T-0055'); return image.getBoundingClientRect().left > card.getBoundingClientRect().left && image.getBoundingClientRect().right < card.getBoundingClientRect().right && parseInt(getComputedStyle(image).borderRadius) > 0; })()`, "cover fits inside the card padding with its own rounded border");
-  await check(`lane('done').querySelectorAll('.task-card').length === 4 && lane('done').querySelector('.lane-more').textContent === 'Ещё 48 задач' && lane('done').querySelector('.count').textContent === '52'`, "column initially shows four cards and the full matching count");
+  await evaluate(`
+    const shownDone = () => lane('done').querySelectorAll('.task-card').length;
+    const moreDone = () => lane('done').querySelector('.lane-more');
+    waitFor(() => shownDone() > 4)
+  `);
+  window.setContentSize(1920, 960);
+  await evaluate(`settle()`);
+  const edgeCount = await evaluate(`shownDone()`);
+  const edgeHeight = await evaluate(`(() => {
+    const board = byId('lanes');
+    const content = moreDone().parentElement.getBoundingClientRect();
+    const layoutOutsideCards = innerHeight - (board.getBoundingClientRect().top + board.clientHeight - 8 - board.scrollTop - content.top);
+    return Math.ceil(layoutOutsideCards + content.height / 1.5) + 4;
+  })()`);
+  window.setContentSize(1920, edgeHeight);
+  await evaluate(`settle()`);
+  await check(`shownDone() === ${edgeCount} && lane('done').getBoundingClientRect().left >= byId('board-composer').getBoundingClientRect().right`,
+    "the completed column uses the available height beside the composer");
+  window.setContentSize(1720, 960);
+  await evaluate(`settle()`);
+  const tallCount = await evaluate(`shownDone()`);
+  await check(`parseInt(moreDone().textContent.match(/\\d+/)[0]) === 52 - shownDone() && lane('done').querySelector('.count').textContent === '52'`, "a tall column fits more than four cards and reports its full count");
+  await check(`(() => {
+    const board = byId('lanes');
+    const content = moreDone().parentElement.getBoundingClientRect();
+    const visibleHeight = board.getBoundingClientRect().top + board.clientHeight - 8 - board.scrollTop - content.top;
+    return content.height > visibleHeight && content.height <= visibleHeight * 1.5;
+  })()`, "the initial cards extend below the viewport and show More within one and a half column heights");
   await evaluate(`settle()`);
   await capture("board-reference-dark.png");
-  await evaluate(`lane('done').querySelector('.lane-more').click(); settle()`);
-  await check(`lane('done').querySelectorAll('.task-card').length === 8 && lane('done').querySelector('.lane-more').textContent === 'Ещё 44 задачи'`, "More reveals the next four cards and updates the remaining count");
+  window.setContentSize(1720, 560);
+  await evaluate(`waitFor(() => shownDone() < ${tallCount})`);
+  window.setContentSize(1720, 960);
+  await evaluate(`waitFor(() => shownDone() === ${tallCount})`);
+  await evaluate(`moreDone().click(); settle()`);
+  const expandedCount = tallCount + 4;
+  await check(`shownDone() === ${expandedCount} && parseInt(moreDone().textContent.match(/\\d+/)[0]) === 52 - shownDone()`, "More reveals the next four cards and updates the remaining count");
   await evaluate(`push(); void 0`);
-  await check(`lane('done').querySelectorAll('.task-card').length === 8`, "ordinary snapshots preserve expanded card batches");
+  await check(`shownDone() === ${expandedCount}`, "ordinary snapshots preserve expanded card batches");
+  window.setContentSize(1720, 560);
+  await evaluate(`settle()`);
+  await check(`shownDone() === ${expandedCount}`, "shrinking the window keeps manually revealed cards");
+  window.setContentSize(1720, 960);
+  await evaluate(`settle()`);
+  if (process.argv.includes("--columns-only")) {
+    console.log(`Board Chromium checks passed: ${checks}, column fit ${tallCount}/52 before expanding`);
+    return;
+  }
   await evaluate(`lane('ready').querySelector('summary').click(); void 0`);
   await check(`lane('ready').querySelector('details').open && lane('ready').querySelector('.lane-filter-options').contains(lane('ready').querySelector('.lane-collapse'))`, "ellipsis opens column filters and collapse in one menu");
   await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); void 0`);
@@ -441,7 +2040,7 @@ app.whenReady().then(async () => {
   for (const theme of ["github-light", "nord"]) {
     nativeTheme.themeSource = theme.endsWith("light") ? "light" : "dark";
     await evaluate(`fixture.theme = '${theme}'; push(); new Promise(resolve => setTimeout(resolve, 220))`);
-    await check(`getComputedStyle(findCard('T-0055')).borderTopColor === themeColor('--accent') && getComputedStyle(findCard('T-0055')).backgroundColor === themeColor('--panel') && getComputedStyle(findCard('T-0055')).color === themeColor('--text') && getComputedStyle(findCard('T-0051'), '::before').backgroundColor === themeColor('--warn') && getComputedStyle(draftForm().querySelector('.board-draft-field')).backgroundColor === themeColor('--panel') && getComputedStyle(draftForm().querySelector('.board-chat')).backgroundColor === themeColor('--bg')`, theme + " uses active theme colors for cards, states, the composer and the chat panel");
+    await check(`getComputedStyle(findCard('T-0055')).borderTopColor === themeColor('--border') && getComputedStyle(findCard('T-0055')).backgroundColor === themeColor('--panel') && getComputedStyle(findCard('T-0055')).color === themeColor('--text') && getComputedStyle(findCard('T-0055'), '::before').backgroundColor === themeColor('--yellow') && getComputedStyle(findCard('T-0051'), '::before').content === 'none' && getComputedStyle(draftForm().querySelector('.board-draft-field')).backgroundColor === themeColor('--panel') && getComputedStyle(draftForm().querySelector('.board-chat')).backgroundColor === themeColor('--bg')`, theme + " uses active theme colors for cards, priorities, the composer and the chat panel");
     await capture("board-reference-" + theme + ".png");
   }
   for (const width of [1380, 1280, 1180]) {
@@ -508,7 +2107,7 @@ app.whenReady().then(async () => {
   await evaluate(`new Promise(resolve => setTimeout(resolve, 250))`);
   await check(`getComputedStyle(draftForm().querySelector('.board-chat')).visibility === 'visible'`, "chat stays open after the pointer and input focus leave");
   await clickBoard();
-  await evaluate(`waitFor(() => draftForm().querySelector('.board-chat').getBoundingClientRect().height === 0)`);
+  await evaluate(`waitFor(() => getComputedStyle(draftForm().querySelector('.board-chat')).visibility === 'hidden')`);
   await check(`getComputedStyle(draftForm().querySelector('.board-chat')).visibility === 'hidden' && draftBounds() === collapsedDraftBounds`, "clicking outside the chat on the board collapses it without shifting the composer");
   await evaluate(`
     draftText().value = '';
@@ -583,7 +2182,7 @@ app.whenReady().then(async () => {
       recordedGoal = { text, goal };
       window.pushChat({ project, type: 'orchestrator-goal', goal: {
         objective: goal === 'resume' ? 'Проверить карточки' : text, status: 'active',
-      } });
+      }, goalRunning: true });
       return { ok: true, data: { answer: 'Цель принята', changes: [] } };
     };
     draftText().value = 'Обновить карточки';
@@ -635,12 +2234,12 @@ app.whenReady().then(async () => {
         return voiceStream = output.stream;
       },
     };
-    let voiceStream, voiceAudio, voiceCalls = 0;
+    let voiceStream, voiceAudio, finishTranscription, voiceCalls = 0;
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: mediaDevices });
     window.taskboard.transcribeVoice = async (samples, locale) => {
       if (!(samples instanceof Float32Array) || !samples.length || locale !== 'ru') throw new Error('Wrong transcription input');
       voiceCalls++;
-      return { ok: true, data: 'Голосовой черновик' };
+      return new Promise(resolve => { finishTranscription = () => resolve({ ok: true, data: 'Голосовой черновик' }); });
     };
     const voiceStop = () => draftForm().querySelector('.draft-voice-stop');
     const voiceCancel = () => draftForm().querySelector('.draft-voice-cancel');
@@ -653,9 +2252,21 @@ app.whenReady().then(async () => {
   await evaluate(`
     new Promise(resolve => setTimeout(resolve, 1000)).then(() => {
       voiceStop().click();
-      return waitFor(() => !draftForm().hasAttribute('data-dictating'));
+      return waitFor(() => !!finishTranscription);
     });
   `);
+  await check(`(() => {
+    const status = draftForm().querySelector('.draft-voice-status');
+    const text = document.createRange();
+    text.selectNodeContents(status);
+    const label = text.getBoundingClientRect();
+    const cancel = voiceCancel().getBoundingClientRect();
+    const stop = voiceStop().getBoundingClientRect();
+    const center = bounds => bounds.top + bounds.height / 2;
+    return status.textContent === 'Распознаю речь…' && label.left > cancel.right && label.right < stop.left &&
+      Math.abs(center(label) - center(cancel)) < 1.5 && Math.abs(center(label) - center(stop)) < 1.5;
+  })()`, "the transcription label is centered between the voice controls");
+  await evaluate(`finishTranscription(); waitFor(() => !draftForm().hasAttribute('data-dictating'))`);
   await check(`draftText().value.trim() === 'Начало Голосовой черновик' && voiceCalls === 1 && !draftCalls.length &&
     voiceStream.getAudioTracks()[0].readyState === 'ended'`, "stopping releases the microphone and inserts the transcript in the existing draft");
   await evaluate(`
@@ -746,11 +2357,14 @@ app.whenReady().then(async () => {
     !draftForm().querySelector('[aria-label="Отменить отправку"]').disabled && draftForm().querySelector('.draft-progress').hidden`, "busy chat keeps the pending request visible with a cancel button");
   await evaluate(`draftForm().querySelector('[aria-label="Отменить отправку"]').click(); void 0`);
   await evaluate(`waitFor(() => draftForm().getAttribute('aria-busy') === 'false')`);
-  await check(`draftCalls.length === 1 && draftCalls[0].files[0].name === 'image.png' && draftText().value === 'Сохранить мой запрос' && draftForm().querySelectorAll('.board-attachment img').length === 1 && draftForm().querySelector('.draft-progress').hidden && !draftForm().querySelector('.chat-thinking')`, "cancelling the wait restores the draft and its preview without an error");
+  await check(`draftCalls.length === 1 && draftCalls[0].files[0].name === 'image.png' && !draftText().value && draftForm().querySelector('.board-chat-queue .board-queued-thumbnail img') && draftForm().querySelector('.draft-progress').hidden && !draftForm().querySelector('.chat-thinking')`, "cancelling the wait leaves the request and image in the queue");
+  await evaluate(`draftForm().querySelector('.board-chat-queue [aria-label="Удалить"]').click(); waitFor(() => !draftForm().querySelector('.board-chat-queue').childElementCount)`);
+  await evaluate(`draftText().value = 'Сохранить мой запрос'; draftPaste([new File([png], 'image.png', { type: 'image/png' })]); void 0`);
   await evaluate(`byId('project-tabs').querySelector('[aria-selected=true]').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })); settle()`);
   await check(`fixture.project === 'design-other' && !draftText().value && !draftForm().querySelectorAll('li').length && !draftForm().querySelectorAll('.chat-entry').length && findCard('T-0001').querySelector('.task-description').textContent === 'Описание другой задачи'`, "Down switches projects with isolated input, attachments, chat and description preview");
   await evaluate(`draftText().value = 'Другой запрос'; byId('project-tabs').querySelector('[aria-selected=true]').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true })); settle()`);
-  await check(`fixture.project === 'design-board' && draftText().value === 'Сохранить мой запрос' && draftForm().querySelectorAll('li').length === 1 && findCard('T-0055').dataset.selected === 'true'`, "Up restores the source project's draft, attachment and selection");
+  await check(`fixture.project === 'design-board' && draftText().value === 'Сохранить мой запрос' && draftForm().querySelectorAll('li').length === 1 &&
+    getComputedStyle(findCard('T-0055')).borderTopColor === themeColor('--border')`, "Up restores the source project's draft and attachment without an accent border on the last opened card");
   await evaluate(`draftForm().querySelector('.board-attachment-remove').click(); settle()`);
   await check(`draftForm().querySelector('.draft-attachments').hidden`, "attached files can be removed before sending");
   await evaluate(`draftPaste([new File([new Uint8Array(64 * 1024 * 1024 + 1)], 'large.bin')]); void 0`);
@@ -772,7 +2386,9 @@ app.whenReady().then(async () => {
   await clickBoard();
   await evaluate(`waitFor(() => getComputedStyle(draftForm().querySelector('.board-chat')).visibility === 'hidden')`);
   await evaluate(`
-    window.taskboard.boardRequest = async (request, files) => { draftCalls.push({ request, files }); return { ok: true, data: { answer: 'Готово', changes: [{ id: 'T-0056', action: 'create' }] } }; };
+    const managerTaskCall = (id, action) => ({ id: action + id, type: 'dynamicToolCall', title: 'task_' + action,
+      text: '{}', status: 'completed', taskChanges: [{ id, action }] });
+    window.taskboard.boardRequest = async (request, files) => { draftCalls.push({ request, files }); return { ok: true, data: { answer: 'Готово', items: [managerTaskCall('T-0056', 'create')] } }; };
     draftText().value = 'Создать задачу'; draftText().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); void 0;
   `);
   await evaluate(`waitFor(() => draftForm().getAttribute('aria-busy') === 'false' && !!draftForm().querySelector('[data-task="T-0056"]'))`);
@@ -781,10 +2397,10 @@ app.whenReady().then(async () => {
   await clickManagerField();
   await evaluate(`waitFor(() => !draftForm().querySelector('.board-chat').getAnimations().length && draftForm().querySelector('.board-chat').getBoundingClientRect().height > 0); `);
   await evaluate(`settle()`);
-  await check(`(() => { const log = draftForm().querySelector('.board-chat-log'), result = log.querySelector('[data-task="T-0056"]'); return result.getBoundingClientRect().bottom <= log.getBoundingClientRect().bottom + 1; })()`, "opening chat scrolls to the latest result");
+  await check(`(() => { const result = draftForm().querySelector('[data-task="T-0056"]'); return !!result.closest('.chat-work:not([open])'); })()`, "the result is inside the collapsed work chronology");
   await check(`getComputedStyle(draftForm().querySelector('.chat-text')).fontFamily.includes('Segoe UI')`, "orchestrator messages retain the application font");
   await capture("board-orchestrator-result.png");
-  await evaluate(`draftForm().querySelector('[data-task="T-0056"]').click(); void 0`);
+  await evaluate(`const createdTaskLink = draftForm().querySelector('[data-task="T-0056"]'); createdTaskLink.closest('.chat-work').open = true; createdTaskLink.closest('.chat-run-item').open = true; createdTaskLink.click(); void 0`);
   await evaluate(`waitFor(() => sheet.open && taskInSheet?.id === 'T-0056')`);
   await check(`taskInSheet.id === 'T-0056'`, "a chat result opens the created task on request");
   await evaluate(`const previousTaskLinks = draftForm().querySelectorAll('.board-chat-task').length; void 0`);
@@ -796,11 +2412,11 @@ app.whenReady().then(async () => {
   await evaluate(`waitFor(() => draftForm().getAttribute('aria-busy') === 'false' && draftForm().textContent.includes('На доске три готовых задачи.'))`);
   await check(`!draftText().value && draftForm().querySelectorAll('.board-chat-task').length === previousTaskLinks`, "a discussion reply does not add a task result");
   await evaluate(`
-    window.taskboard.boardRequest = async () => ({ ok: true, data: { answer: '', changes: [{ id: 'T-0055', action: 'cancel' }] } });
+    window.taskboard.boardRequest = async () => ({ ok: true, data: { answer: '', items: [managerTaskCall('T-0055', 'cancel')] } });
     draftText().value = 'Задача 55 не актуальна, отменяй'; draftForm().requestSubmit(); void 0;
   `);
   await evaluate(`waitFor(() => draftForm().getAttribute('aria-busy') === 'false' && !!draftForm().querySelector('[data-task="T-0055"]'))`);
-  await check(`draftForm().querySelector('[data-task="T-0055"]').parentElement.textContent.includes('Задача отменена') && !sheet.open`, "a cancellation links to the affected task and shows its action");
+  await check(`draftForm().querySelector('[data-task="T-0055"]').closest('.chat-run-item').querySelector('summary').textContent.includes('Задача отменена') && !sheet.open`, "a cancellation links to the affected task and shows its action");
   await evaluate(`
     const savedItems = [
       { id: 'a', type: 'dynamicToolCall', title: 'board_list', text: 'Board contents', status: 'completed' },
@@ -816,21 +2432,24 @@ app.whenReady().then(async () => {
     window.taskboard.boardHistory = async () => ({ ok: true, data: { id: 'thread', turns: [
       { messages: [{ text: 'Вопрос из истории', files: [{ name: 'notes.txt' }] }], changes: [], items: savedItems, durationMs: 13000 },
       { messages: [{ text: 'Задача 55 не актуальна', files: [] }],
-        changes: [{ id: 'T-0055', title: 'Исправить обрезку превью по скруглению карточки', action: 'cancel' }],
-        items: [{ id: 'd', type: 'agentMessage', text: 'T-0055 отменена как неактуальная.', status: 'completed', phase: 'final_answer' }] },
+        items: [managerTaskCall('T-0055', 'cancel'),
+          { id: 'd', type: 'agentMessage', text: 'T-0055 отменена как неактуальная.', status: 'completed', phase: 'final_answer' }] },
     ] } });
     window.pushChat({ project: fixture.project, type: 'orchestrator-history' });
     draftText().focus(); void 0;
   `);
   await evaluate(`waitFor(() => !!draftForm().querySelector('.chat-work .chat-run-group'))`);
-  await check(`draftForm().querySelectorAll('.chat-run-item').length === 2 && draftForm().querySelector('.chat-run-final').textContent.includes('Ответ из истории') && draftForm().textContent.includes('Вопрос из истории') && draftForm().querySelector('.chat-attachment').textContent.includes('notes.txt')`, "provider history uses the agent chat work group, tool details, attachments and final answer");
+  await check(`draftForm().querySelectorAll('.chat-run-item').length === 3 && draftForm().querySelector('.chat-run-final').textContent.includes('Ответ из истории') && draftForm().textContent.includes('Вопрос из истории') && draftForm().querySelector('.chat-attachment').textContent.includes('notes.txt') &&
+    draftForm().querySelector('.chat-run > .chat-run-item:has([data-task="T-0055"]) > summary')?.checkVisibility()`,
+    "provider history shows the confirmed cancellation with the work chronology collapsed");
   await check(`(() => {
     const log = draftForm().querySelector('.board-chat-log');
-    const answer = log.querySelector('.chat-run-final .chat-text');
+    const answer = log.querySelector('.chat-run-final.board-manager-message').getBoundingClientRect();
     const style = getComputedStyle(log);
     const width = log.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
-    return Math.abs(answer.getBoundingClientRect().width - width) < 1 && log.scrollWidth === log.clientWidth;
-  })()`, "the manager's answer fills the transcript between its side insets without horizontal scrolling");
+    return answer.width > 0 && answer.width <= width * .88 + 1 && log.scrollWidth === log.clientWidth &&
+      Math.abs(answer.left - log.getBoundingClientRect().left - parseFloat(style.paddingLeft)) < 1;
+  })()`, "the manager's answer is a left-aligned bubble within the transcript without horizontal scrolling");
   await evaluate(`draftForm().querySelector('.board-chat-log').scrollTop = 0; settle()`);
   await capture("board-manager-spacing.png");
   await evaluate(`
@@ -862,12 +2481,12 @@ app.whenReady().then(async () => {
   await evaluate(`
     const managerRequests = [];
     let stoppedOrchestrator = 0;
-    window.taskboard.boardRequest = (text, files, project) => new Promise(resolve => {
-      managerRequests.push({ text, files, project, resolve });
+    window.taskboard.boardRequest = (text, files, project, goal, immediate, id) => new Promise(resolve => {
+      managerRequests.push({ text, files, project, immediate, id, resolve });
     });
     window.taskboard.stopOrchestrator = async () => {
       stoppedOrchestrator++;
-      managerRequests[0].resolve({ ok: true, data: { id: 'thread', answer: '', changes: [], items: savedItems.slice(0, 2), error: 'Ответ остановлен.' } });
+      managerRequests[0].resolve({ ok: true, data: { id: 'thread', answer: '', changes: [], items: steeredItems, error: 'Ответ остановлен.' } });
       return { ok: true };
     };
     draftText().value = 'Покажи, что происходит'; draftForm().requestSubmit(); void 0;
@@ -886,22 +2505,25 @@ app.whenReady().then(async () => {
       { id: 'streaming', type: 'agentMessage', title: '', text, status: 'inProgress', phase: 'final_answer' },
     ] });
     update('Проверяю');
-    const first = draftForm().querySelector('.chat-stream-fragment');
-    if (first?.textContent !== 'Проверяю' || first.getAnimations()[0]?.animationName !== 'board-chat-text-fade') return false;
+    const reply = () => draftForm().querySelector('[data-item="message:streaming"]');
+    const first = reply();
+    const fade = first?.getAnimations().find(animation => animation.animationName === 'board-chat-enter');
+    if (first?.textContent.trim() !== 'Проверяю' || !fade) return false;
+    fade.currentTime = 80;
     update('Проверяю **карточки**');
-    const block = draftForm().querySelector('[data-item="message:streaming"]');
-    const earlier = block.querySelector('.chat-stream-fragment');
+    const block = reply();
+    const continued = block.getAnimations().find(animation => animation.animationName === 'board-chat-enter');
     const tail = block.querySelector('strong .chat-stream-fragment');
-    const fades = earlier?.textContent === 'Проверяю' && parseFloat(earlier.style.animationDelay) < 0 &&
-      tail?.textContent === 'карточки' && block.textContent.trim() === 'Проверяю карточки';
+    const fades = continued?.currentTime >= 80 && tail?.textContent === 'карточки' &&
+      tail.getAnimations()[0]?.animationName === 'board-chat-text-fade' && block.textContent.trim() === 'Проверяю карточки';
     window.pushChat({ project: fixture.project, type: 'orchestrator', items: savedItems.slice(0, 2) });
     return fades;
-  })()`, "streaming text fades each new fragment and keeps the earlier fade in progress while Markdown remains formatted");
+  })()`, "streaming text fades new fragments while preserving the reply's entrance progress and Markdown");
   await check(`(() => {
     const status = draftForm().querySelector('.chat-thinking > span');
-    const update = (type, text, state = 'inProgress') => window.pushChat({
+    const update = (type, text, state = 'inProgress', title = '') => window.pushChat({
       project: fixture.project, type: 'orchestrator',
-      items: [...savedItems.slice(0, 2), { id: 'live', type, title: '', text, status: state }],
+      items: [...savedItems.slice(0, 2), { id: 'live', type, title, text, status: state }],
     });
     if (status.textContent !== 'Думаю…') return false;
     update('reasoning', '**Проверяю карточки**');
@@ -914,12 +2536,41 @@ app.whenReady().then(async () => {
     update('reasoning', '**Готовлю ответ**', 'completed');
     if (status.textContent !== 'Думаю…' || !draftForm().querySelector('[data-item="item:live"]')) return false;
     update('commandExecution', '');
-    return status.textContent === 'Выполняю команду…' && status.closest('.chat-thinking').nextElementSibling.matches('.board-chat-queue:empty');
+    if (status.textContent !== 'Выполняю команду…') return false;
+    update('mcpToolCall', '', 'inProgress', 'ai_taskboard / task_wait');
+    if (status.textContent !== 'Жду обновления на доске…') return false;
+    update('mcpToolCall', '', 'completed', 'ai_taskboard / task_wait');
+    return status.textContent === 'Думаю…' && draftForm().querySelector('.board-chat-queue').matches(':empty');
   })()`, "the latest activity replaces and animates one status line without duplicating the live summary");
+  await evaluate(`const activityHint = draftForm().querySelector('.draft-placeholder');
+    const ordinaryHint = activityHint.textContent; void 0`);
   await clickBoard();
   await evaluate(`waitFor(() => draftForm().querySelector('.board-chat').getBoundingClientRect().height === 0)`);
   await check(`!draftText().readOnly && draftForm().getAttribute('aria-busy') === 'true'`, "an outside click collapses the chat and the field remains editable while the reply continues");
+  await check(`activityHint.textContent === 'Думаю…' && draftText().value === '' &&
+    activityHint.parentElement === draftText().parentElement && getComputedStyle(activityHint).visibility === 'visible'`,
+    "a collapsed manager chat shows the current activity as the empty field's placeholder");
+  await evaluate(`window.pushChat({ project: fixture.project, type: 'orchestrator', items: [
+    ...savedItems.slice(0, 2),
+    { id: 'live', type: 'mcpToolCall', title: 'ai_taskboard / project_git', text: '', status: 'inProgress' },
+  ] }); void 0`);
+  await check(`activityHint.textContent === 'Вызов инструмента ai_taskboard / project_git'`,
+    "tool activity updates the status even while the manager chat is collapsed");
+  await check(`(() => {
+    const input = draftText();
+    input.value = 'Черновик';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    const hidden = getComputedStyle(activityHint).visibility === 'hidden' && input.value === 'Черновик';
+    input.value = '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    return hidden && getComputedStyle(activityHint).visibility === 'visible' &&
+      activityHint.textContent === 'Вызов инструмента ai_taskboard / project_git';
+  })()`, "typing hides the activity and clearing the field reveals the latest status again");
   await clickManagerField();
+  await check(`activityHint.textContent === ordinaryHint &&
+    draftForm().querySelector('.chat-thinking').textContent === 'Вызов инструмента ai_taskboard / project_git'`,
+    "opening the chat keeps the current status visible only in the log");
+  await evaluate(`window.pushChat({ project: fixture.project, type: 'orchestrator', items: savedItems.slice(0, 2) }); void 0`);
   await evaluate(`const managerAction = draftForm().querySelector('.draft-send'); void 0`);
   await check(`managerAction.dataset.action === 'stop' && managerAction.parentElement.querySelectorAll('button').length === 2`, "an empty composer shows microphone and a single stop action");
   await evaluate(`draftPaste([new File(['notes'], 'follow-up.txt')]); void 0`);
@@ -927,15 +2578,53 @@ app.whenReady().then(async () => {
   await evaluate(`
     draftText().value = 'Уточнение к запросу';
     draftText().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    waitFor(() => draftForm().querySelector('.board-chat-queue').childElementCount === 1);
+  `);
+  await evaluate(`
     draftText().value = 'Следующее сообщение';
     draftText().dispatchEvent(new Event('input', { bubbles: true }));
     draftForm().querySelector('.draft-send').click();
-    window.stopModeAfterSend = managerAction.dataset.action;
-    void 0;
+    waitFor(() => draftForm().querySelector('.board-chat-queue').childElementCount === 2);
   `);
   await check(`managerRequests.length === 1 && draftForm().querySelectorAll('.board-chat-queue .board-queued-status').length === 2 &&
-    draftForm().querySelector('.board-chat-queue').textContent.includes('follow-up.txt') &&
-    draftForm().querySelector('.board-chat-queue').textContent.includes('В очереди') && stopModeAfterSend === 'stop'`, "text and attachments can be sent with Enter or the button while a reply is active");
+    draftForm().querySelector('.board-queued-row').title.includes('follow-up.txt') &&
+    !draftForm().querySelector('.board-chat-log .board-queued-row') && managerAction.dataset.action === 'stop'`, "text and attachments queue separately from the transcript during an active reply");
+  await evaluate(`
+    const queuedMessage = index => draftForm().querySelector('.board-chat-queue').children[index];
+    const queuedButton = (index, label) => [...queuedMessage(index).querySelectorAll('button')].find(button => button.textContent === label);
+    queuedButton(1, 'Изменить').click();
+    waitFor(() => queuedMessage(1).querySelector('textarea'));
+  `);
+  await evaluate(`
+    queuedMessage(1).querySelector('textarea').value = 'Срочное уточнение';
+    queuedButton(1, 'Сохранить').click();
+    waitFor(() => queuedMessage(1).querySelector('.board-queued-preview').textContent === 'Срочное уточнение');
+  `);
+  await evaluate(`queuedButton(1, 'Отправить сейчас').click(); waitFor(() => managerRequests.length === 2)`);
+  await check(`managerRequests[1].immediate === true && managerRequests[1].text === 'Срочное уточнение' &&
+    stoppedOrchestrator === 0 && queuedMessage(0).title.includes('follow-up.txt')`, "editing keeps queue order and Send now uses the active turn ahead of the earlier message");
+  await evaluate(`managerRequests[1].resolve({ ok: false, error: { message: 'Ход уже завершился' } }); waitFor(() => queuedButton(1, 'Отправить сейчас'))`);
+  await check(`queuedMessage(1).textContent.includes('Срочное уточнение') && draftForm().textContent.includes('Ход уже завершился')`,
+    "an immediate-send rejection keeps the edited message in the queue");
+  await evaluate(`queuedButton(1, 'Отправить сейчас').click(); waitFor(() => managerRequests.length === 3)`);
+  await evaluate(`
+    const steered = managerRequests[2];
+    const steerMessage = { text: steered.text, files: [{ name: 'report.txt' }] };
+    const steeredItems = [...savedItems.slice(0, 2),
+      { id: steered.id, type: 'userMessage', userMessage: steerMessage, text: steered.text, title: '', status: 'completed' },
+      { id: 'after-steer', type: 'agentMessage', text: 'Уточнение получил', status: 'completed', phase: 'final_answer' }];
+    const immediateBubbles = () => [...draftForm().querySelectorAll('.board-chat-log .chat-entry[data-actor="user"]')]
+      .filter(entry => entry.querySelector('.chat-text')?.textContent === steered.text);
+    const appearsBefore = (first, second) => Boolean(first && second && first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING);
+    window.pushChat({ project: fixture.project, type: 'orchestrator', items: steeredItems });
+    steered.resolve({ ok: true, data: null });
+    waitFor(() => !queuedMessage(1));
+  `);
+  await check(`immediateBubbles().length === 1 && immediateBubbles()[0].textContent.includes('report.txt') &&
+    appearsBefore(draftForm().querySelector('.chat-run [data-item="item:a"]'), immediateBubbles()[0]) &&
+    appearsBefore(immediateBubbles()[0], draftForm().querySelector('[data-item="message:after-steer"]')) && stoppedOrchestrator === 0`,
+    "immediate delivery shows one bubble with attachments between earlier and later activity");
+  await evaluate(`managerRequests.splice(1); draftText().value = 'Следующее сообщение'; draftForm().requestSubmit(); waitFor(() => queuedMessage(1))`);
   await evaluate(`
     draftForm().querySelector('[aria-label="Остановить ответ"]').click();
     draftText().value = 'Новый черновик';
@@ -954,8 +2643,29 @@ app.whenReady().then(async () => {
   await evaluate(`managerRequests[2].resolve({ ok: true, data: { answer: 'Получил уточнение', changes: [] } }); waitFor(() => managerRequests.length === 4)`);
   await check(`managerRequests[3].text === 'Следующее сообщение' && !managerRequests[3].files.length &&
     draftForm().querySelector('.board-chat-queue').childElementCount === 0`, "successful retry sends the next message without mixing attachments");
+  await evaluate(`draftForm().closeChat(); void 0`);
   await evaluate(`managerRequests[3].resolve({ ok: true, data: { answer: 'Получил второе сообщение', changes: [] } }); waitFor(() => !draftForm().querySelector('.chat-thinking'))`);
+  await check(`draftForm().getAttribute('aria-busy') === 'false' &&
+    getComputedStyle(activityHint).visibility === 'hidden' && draftText().value === 'Новый черновик'`,
+    "finishing while collapsed leaves the draft visible and clears the running state");
+  await clickManagerField();
+  await check(`activityHint.textContent === ordinaryHint`, "focusing the composer after completion restores its ordinary prompt");
   await check(`draftText().value === 'Новый черновик' && draftForm().textContent.includes('Получил второе сообщение')`, "the composer keeps text entered while queued requests complete");
+  await check(`immediateBubbles().length === 1 && !immediateBubbles()[0].closest('details') &&
+    appearsBefore(immediateBubbles()[0], draftForm().querySelector('[data-item="final:after-steer"]'))`,
+    "folding the completed reply leaves the immediate message visible in chronological order");
+  await evaluate(`
+    window.taskboard.boardHistory = async () => ({ ok: true, data: { turns: [
+      { messages: [{ text: managerRequests[0].text, files: [] }], items: steeredItems.slice(0, 2) },
+      { messages: [{ ...steerMessage, clientId: steered.id }], items: steeredItems.slice(-1) },
+    ] } });
+    window.pushChat({ project: fixture.project, type: 'orchestrator-history' });
+    waitFor(() => immediateBubbles().length === 1 && immediateBubbles()[0].parentNode.matches('.board-chat-log'));
+  `);
+  await check(`immediateBubbles().length === 1 && immediateBubbles()[0].textContent.includes('report.txt') &&
+    appearsBefore(draftForm().querySelector('.chat-run [data-item="item:a"]'), immediateBubbles()[0]) &&
+    appearsBefore(immediateBubbles()[0], draftForm().querySelector('[data-item="final:after-steer"]'))`,
+    "reloading history preserves the immediate message in the same place without duplication");
   await evaluate(`archiveView = true; render(); void 0`);
   await check(`byId('board-composer').hidden`, "archive view hides task creation field");
   console.log(`Board Chromium checks passed: ${checks}`);

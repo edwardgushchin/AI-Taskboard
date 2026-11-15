@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,34 +8,79 @@ import { codexRpc } from "../src/desktop/codex-rpc.ts";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import { CodexTokenUsage } from "../src/desktop/codex-token-usage.ts";
+import { boardAgentInstructions, boardCodexArgs, boardWorklog, worklogReminder, worklogTool } from "../src/desktop/board-agent-hooks.ts";
+import { withBoardMcp } from "../src/desktop/board-mcp.ts";
+import { runActivity, runLog } from "../src/desktop/run-activity.ts";
+import type { RunActivity } from "../src/cli/model.ts";
 import type { TokenUsageReport } from "../src/cli/token-usage.ts";
 
 test("task discussion streams task usage before success, provider failure, or a disconnect", async t => {
   const folder = mkdtempSync(join(tmpdir(), "ai-taskboard-chat-usage-"));
   t.after(() => rmSync(folder, { recursive: true, force: true }));
+  mkdirSync(join(folder, ".tasks"));
   const stub = join(folder, "server.cjs");
   writeFileSync(stub, `
     const send = value => console.log(JSON.stringify(value));
     const outcome = process.argv[2];
-    require("node:readline").createInterface({ input: process.stdin }).on("line", line => {
-      const { id, method } = JSON.parse(line);
+    require("node:readline").createInterface({ input: process.stdin }).on("line", async line => {
+      const { id, method, params } = JSON.parse(line);
       if (id === undefined) return;
       let result = {};
       if (method === "model/list") result = { data: [{ model: "selected", defaultReasoningEffort: "low", supportedReasoningEfforts: [] }], nextCursor: null };
-      if (method === "thread/start") result = { thread: { id: "root" }, model: "actual" };
+      if (method === "thread/start") {
+        const assert = require("node:assert/strict");
+        const reviewing = outcome.startsWith("review");
+        assert.ok(process.argv.includes(reviewing ? 'web_search="disabled"' : 'web_search="live"'));
+        assert.equal(params.permissions, undefined);
+        assert.equal(params.sandbox, "read-only");
+        if (reviewing) {
+          assert.match(params.developerInstructions, /ready for acceptance in as few revision rounds as possible/);
+          assert.match(params.developerInstructions, /Approve with an empty findings list/);
+          assert.match(params.developerInstructions, /reuse evidence that is still valid for unaffected criteria/);
+          assert.match(params.developerInstructions, /Report all material gaps together in a single return/);
+          assert.match(params.developerInstructions, /check every criterion, even if you already found a defect/);
+          assert.match(params.developerInstructions, /tested revision or provides concrete evidence that it still applies/);
+          assert.match(params.developerInstructions, /Ponytail.*humanizer-ru.*worklog_record/s);
+        } else {
+          assert.match(params.developerInstructions, /Use built-in web search for relevant public sources/);
+        }
+        result = { thread: { id: "root" }, model: "actual" };
+      }
       if (method === "turn/start") {
+        require("node:assert/strict").deepEqual(params.sandboxPolicy, { type: "readOnly", networkAccess: false });
+        if (outcome.startsWith("review")) {
+          require("node:assert/strict").ok(params.outputSchema.required.includes("verifyRisk"));
+        }
         send({ method: "turn/started", params: { threadId: "root", turn: { id: "turn-1" } } });
         const counts = { totalTokens: 120, inputTokens: 100, cachedInputTokens: 50, cacheWriteInputTokens: 0, outputTokens: 20, reasoningOutputTokens: 10 };
         const notify = () => send({ method: "thread/tokenUsage/updated", params: { threadId: "root", turnId: "turn-1", tokenUsage: { total: counts, last: counts, modelContextWindow: 1000 } } });
         if (outcome !== "unknown") { notify(); notify(); }
         result = { turn: { id: "turn-1", status: "inProgress" } };
         send({ id, result });
+        if (outcome === "review") {
+          const url = process.argv.find(flag => flag.startsWith("mcp_servers=")).match(/http[^"]+/)[0];
+          const entry = { title: "Reviewed the task", timeline: [{ time: null, items: ["Read the submission."] }] };
+          for (const field of ["context", "changes", "decisions", "checks", "next_steps"]) entry[field] = ["Verified the criterion."];
+          const args = { language: "en", entries: [entry] };
+          const response = await fetch(url, { method: "POST", headers: { authorization: "Bearer " + process.env.AI_TASKBOARD_MCP_TOKEN },
+            body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "worklog_record", arguments: args } }) });
+          const reply = JSON.parse((await response.json()).result.content[0].text);
+          if (!reply.ok) throw new Error(JSON.stringify(reply));
+          require("node:fs").writeFileSync("worklog-path", reply.data.path);
+        }
         if (outcome === "closed") { process.stdin.destroy(); return; }
+        if (outcome.startsWith("review")) {
+          send({ method: "item/completed", params: { threadId: "root", item: {
+            id: "commentary", type: "agentMessage", phase: "commentary", text: "Checking the criteria." } } });
+          send({ method: "item/completed", params: { threadId: "root", item: {
+            id: "tool", type: "dynamicToolCall", tool: "task_review_diff", status: "completed" } } });
+        }
         send({ method: "thread/started", params: { thread: { id: "child", parentThreadId: "root", model: "child-model" } } });
         send({ method: "turn/started", params: { threadId: "child", turn: { id: "child-turn" } } });
         if (outcome !== "unknown") send({ method: "thread/tokenUsage/updated", params: { threadId: "child", turnId: "child-turn", tokenUsage: { total: counts, last: counts } } });
         send({ method: "turn/completed", params: { threadId: "child", turn: { id: "child-turn", status: "completed" } } });
-        send({ method: "item/completed", params: { threadId: "root", item: { type: "agentMessage", text: "Reply" } } });
+        const text = outcome.startsWith("review") ? JSON.stringify({ summary: "Verified", findings: [], evidence: ["Checked"], needsHuman: false, verifyRisk: false }) : "Reply";
+        send({ method: "item/completed", params: { threadId: "root", item: { id: "final", type: "agentMessage", phase: "final_answer", text } } });
         send({ method: "turn/completed", params: { threadId: "root", turn: { id: "turn-1", status: outcome === "failed" ? "failed" : "completed", error: { message: "Provider failed" } } } });
         return;
       }
@@ -44,14 +89,34 @@ test("task discussion streams task usage before success, provider failure, or a 
   `);
   const source = readFileSync(new URL("../src/desktop/codex-chat.ts", import.meta.url), "utf8")
     .replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "");
-  for (const outcome of ["ok", "unknown", "failed", "closed", "storage-failed"]) {
+  for (const outcome of ["ok", "unknown", "failed", "closed", "storage-failed", "review", "review-storage-failed"]) {
     const reports: TokenUsageReport[] = [];
-    const runtime = runInNewContext(stripTypeScriptTypes(source) + "\n({ replyToTask })", {
-      spawn, codexRpc, CodexTokenUsage, setTimeout, clearTimeout,
+    const runtime = runInNewContext(stripTypeScriptTypes(source) + "\n({ replyToTask, reviewWithCodex })", {
+      spawn, codexRpc, CodexTokenUsage, boardAgentInstructions, boardCodexArgs, boardWorklog, worklogReminder, worklogTool, withBoardMcp, process, setTimeout, clearTimeout, runActivity, runLog,
       configuredCodex: async () => ({ path: process.execPath, args: [stub, outcome] }),
       chatTools: [], saveChatImages: async () => [],
       cliFailure: (code: string, message: string) => ({ ok: false, error: { code, message } }),
     });
+    if (outcome.startsWith("review")) {
+      let activity: RunActivity[] = [];
+      const review = await runtime.reviewWithCodex("profile", folder, { model: "selected", effort: "low" },
+        "Review prompt", [], async () => ({ ok: true }), new AbortController().signal,
+        async (report: TokenUsageReport) => {
+          if (outcome === "review-storage-failed") throw new Error("Usage storage denied");
+          reports.push(report);
+        }, "T-0001", (items: RunActivity[]) => { activity = items; });
+      assert.equal(review.summary, "Verified");
+      assert.equal(review.verifyRisk, false);
+      assert.deepEqual(Array.from(activity, item => item.id), ["commentary", "tool", "final"]);
+      assert.equal(activity[1]?.title, "task_review_diff");
+      if (outcome === "review") {
+        const diaryPath = readFileSync(join(folder, "worklog-path"), "utf8");
+        assert.match(readFileSync(diaryPath, "utf8"), /Reviewed the task[\s\S]*<!-- ai-taskboard-role:reviewer T-0001 -->/);
+        assert.equal(reports.length, 1);
+        assert.deepEqual(Array.from(reports[0].records, record => record.totalTokens), [120, 120]);
+      }
+      continue;
+    }
     const reply = runtime.replyToTask("profile", folder, { model: "selected", effort: "low" }, "Prompt", [],
       () => {}, async () => ({ ok: true }), folder, 1024, async (report: TokenUsageReport) => {
         if (outcome === "storage-failed") throw new Error("Usage storage denied");

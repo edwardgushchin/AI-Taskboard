@@ -63,9 +63,9 @@ export function runActivity(entries: Map<string, RunActivity>, method: string, p
   return { ...previous, text: bounded(previous.text + separator + delta) };
 }
 
-export function runLog(entries: Map<string, RunActivity>): RunActivity[] {
+export function runLog(entries: Map<string, RunActivity>, maxBytes = 900_000): RunActivity[] {
   const result: RunActivity[] = [];
-  let remaining = 900_000;
+  let remaining = maxBytes;
   for (const item of Array.from(entries.values()).reverse()) {
     if (!item.text && !item.title) continue;
     remaining -= Buffer.byteLength(JSON.stringify(item)) + 1;

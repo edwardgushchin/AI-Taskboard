@@ -1,4 +1,6 @@
-import { lstat, opendir, realpath, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { constants } from "node:fs";
+import { lstat, open, opendir, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { TaskboardError } from "../cli/model.ts";
 
@@ -78,5 +80,37 @@ export async function inspectProjectPath(project: string, input: unknown, list: 
     if (error instanceof TaskboardError) throw error;
     const code = (error as NodeJS.ErrnoException).code;
     throw new TaskboardError("PROJECT_PATH_UNAVAILABLE", "Could not inspect the project path" + (code ? " (" + code + ")." : "."));
+  }
+}
+
+export async function projectSha256(project: string, input: unknown, signal: AbortSignal) {
+  const unreadable = () => new TaskboardError("FILE_HASH_UNAVAILABLE", "Could not read a regular file at that project path.");
+  try {
+    const { root, requested, label } = await projectPath(project, input);
+    if (requested === root) throw new TaskboardError("INVALID_INPUT", "Choose a file inside the current project.");
+    const path = requireProjectPath(root, await realpath(requested));
+    if (path === root) throw new TaskboardError("INVALID_INPUT", "Choose a file inside the current project.");
+    const before = await stat(path, { bigint: true });
+    if (!before.isFile()) throw unreadable();
+    const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
+    const file = await open(path, flags);
+    try {
+      const opened = await file.stat({ bigint: true });
+      if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino ||
+          !insideProject(root, await realpath(path))) throw unreadable();
+      const hash = createHash("sha256");
+      for await (const chunk of file.createReadStream({ autoClose: false, signal })) hash.update(chunk);
+      const after = await file.stat({ bigint: true });
+      if (opened.size !== after.size || opened.mtimeNs !== after.mtimeNs || opened.ctimeNs !== after.ctimeNs) {
+        throw new TaskboardError("FILE_CHANGED", "The file changed while it was being hashed. Retry after it stops changing.");
+      }
+      return { path: label, sha256: hash.digest("hex") };
+    } finally {
+      await file.close();
+    }
+  } catch (error) {
+    signal.throwIfAborted();
+    if (error instanceof TaskboardError) throw error;
+    throw unreadable();
   }
 }

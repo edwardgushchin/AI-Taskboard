@@ -30,7 +30,6 @@
     <symbol id="icon-filter" viewBox="0 0 16 16"><path d="M2.5 3.5h11l-4 4.75v3.25l-3 1.5V8.25Z"/></symbol>
     <symbol id="icon-plus" viewBox="0 0 16 16"><path d="M8 3.5v9m-4.5-4.5h9"/></symbol>
     <symbol id="icon-chevron" viewBox="0 0 16 16"><path d="m3.5 10 4.5-4.5 4.5 4.5"/></symbol>
-    <symbol id="icon-checklist" viewBox="0 0 16 16"><path d="m2 5 1.25 1.25L5.5 4M7.5 5H14M2 10h3v3H2zm5.5 1.5H14"/></symbol>
     <symbol id="icon-dependency" viewBox="0 0 16 16"><path d="m6.5 9.5 3-3m-1.25 5.25-1.5 1.5a2.83 2.83 0 0 1-4-4l1.5-1.5m3.5-3.5 1.5-1.5a2.83 2.83 0 0 1 4 4l-1.5 1.5"/></symbol>
     <symbol id="icon-error" viewBox="0 0 16 16"><path d="m8 2 6.25 11H1.75ZM8 6v3m0 1.75v.25"/></symbol>
     <symbol id="icon-attachment" viewBox="0 0 16 16"><path d="m9.75 5-4 4a1.4 1.4 0 0 0 2 2l4.6-4.6a2.65 2.65 0 0 0-3.75-3.75L3.75 7.5a3.9 3.9 0 0 0 5.5 5.5l3-3"/></symbol>
@@ -41,7 +40,6 @@
     <symbol id="icon-git-tag" viewBox="0 0 16 16"><path d="M2.5 2.5H8l5.5 5.5L8 13.5 2.5 8Z"/><circle cx="5.5" cy="5.5" r=".75"/></symbol>
     <symbol id="icon-check" viewBox="0 0 16 16"><path d="m3 8 3.25 3.25L13 4.5"/></symbol>
     <symbol id="icon-more" viewBox="0 0 16 16"><circle cx="3" cy="8" r=".75"/><circle cx="8" cy="8" r=".75"/><circle cx="13" cy="8" r=".75"/></symbol>
-    <symbol id="icon-flag" viewBox="0 0 16 16"><path d="M3 14V2m0 1c3-3 6 3 10 0v6c-4 3-7-3-10 0"/></symbol>
     <symbol id="icon-chat" viewBox="0 0 16 16"><path d="M13 10a6 6 0 1 0-9 3l-2 1 1-3m1 2a6 6 0 0 0 9-3"/></symbol>
     <symbol id="icon-send" viewBox="0 0 16 16"><path d="m2 2 12 6-12 6 3-6Zm3 6h9"/></symbol>
     <symbol id="icon-arrow-left" viewBox="0 0 16 16"><path d="M13 8H3m4-4L3 8l4 4"/></symbol>
@@ -54,8 +52,17 @@
     </div>
   </header>
   <nav id="project-tabs" class="project-tabs" role="tablist" aria-label="Projects" aria-orientation="vertical" hidden></nav>
+  <button id="app-settings" class="button quiet app-settings" type="button" aria-label="Application settings" title="Application settings">
+    <i class="icon codicon codicon-settings-gear" aria-hidden="true"></i>
+  </button>
+  <div id="board-tab-menu" class="app-menu-popup board-tab-menu" role="menu" popover></div>
   <main id="app-content">
-    <div id="notice" class="notice" role="status" hidden></div>
+    <div id="notice" class="notice" hidden>
+      <div class="notice-content" role="status"><strong id="notice-context"></strong><span id="notice-message"></span></div>
+      <button type="button" id="notice-close" class="button quiet" aria-label="Dismiss notification" title="Dismiss notification">
+        <i class="icon codicon codicon-close" aria-hidden="true"></i>
+      </button>
+    </div>
     <section id="loading" class="welcome" role="status">Loading projects…</section>
     <section id="welcome" class="welcome" hidden>
       <div class="welcome-content">
@@ -81,14 +88,18 @@
   <footer class="status-bar">
     <div class="status-repository">
       <button id="status-branch" type="button" class="button quiet status-git" popovertarget="git-branches" hidden><i class="icon codicon codicon-git-branch" aria-hidden="true"></i><span></span></button>
+      <button id="status-tracking" type="button" class="button quiet status-tracking" hidden><i class="icon codicon codicon-sync" aria-hidden="true"></i><span></span></button>
       <button id="status-publish" type="button" class="button quiet" aria-label="Publish to GitHub" hidden><i class="icon codicon codicon-cloud-upload" aria-hidden="true"></i></button>
     </div>
     <section id="git-branches" class="git-branches" popover aria-label="Branches and tags"></section>
     <span id="status-user" class="status-git" hidden><svg class="icon" aria-hidden="true"><use href="#icon-git-user"/></svg><span></span></span>
-    <button id="status-notifications" type="button" class="button quiet" popovertarget="notifications" aria-label="Notifications">
-      <svg class="icon" aria-hidden="true"><use href="#icon-notifications"/></svg><span class="count" aria-hidden="true" hidden></span>
-    </button>
-    <section id="notifications" class="notifications" popover aria-label="Notifications"></section>
+    <div class="status-activity">
+      <span id="status-agents" role="img" hidden><i class="icon codicon codicon-hubot" aria-hidden="true"></i><span aria-hidden="true"></span></span>
+      <button id="status-notifications" type="button" class="button quiet" popovertarget="notifications" aria-label="Review queue">
+        <svg class="icon" aria-hidden="true"><use href="#icon-notifications"/></svg><span class="count" aria-hidden="true" hidden></span>
+      </button>
+    </div>
+    <section id="notifications" class="notifications" popover aria-label="Review queue"></section>
   </footer>
   <dialog id="sheet" class="sheet" aria-labelledby="sheet-title" closedby="closerequest">
     <div class="sheet-header">

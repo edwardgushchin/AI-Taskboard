@@ -11,7 +11,6 @@ const action = (id: string, type = "commandExecution", status = "completed", tit
 
 // Verify renderer state and content independently of Chromium layout (scripts/check-chat.mjs).
 function fixture(russian = true) {
-  const document: { activeElement?: Node } = {};
   class Node {
     tag: string;
     className: string;
@@ -24,6 +23,7 @@ function fixture(russian = true) {
     click?: () => unknown;
     constructor(tag: string, text = "", className = "") { this.tag = tag; this.value = text; this.className = className; }
     get textContent(): string { return this.value + this.children.map(child => child.textContent).join(""); }
+    classList = { add: (name: string) => { this.className += " " + name; } };
     set innerText(text: string) { this.value = text; }
     append(...nodes: Node[]) { for (const node of nodes) { node.parent = this; this.children.push(node); } }
     replaceChildren(...nodes: Node[]) { this.children.forEach(child => { child.parent = undefined; }); this.children = []; this.append(...nodes); }
@@ -38,24 +38,117 @@ function fixture(russian = true) {
     addEventListener() {}
     setAttribute() {}
   }
+  const document = { activeElement: new Node("body") };
   const frame = { russian };
   const previews: unknown[][] = [];
   const reads: string[] = [];
   const saves: string[] = [];
-  const render = runInNewContext(source + ";renderRunActivity", {
+  const openedTasks: string[] = [];
+  const { renderRunActivity, boardWaitStatus } = runInNewContext(source + ";({ renderRunActivity, boardWaitStatus })", {
     window: {}, document, frame, taskInSheet: undefined,
     language: (english: string, translated: string) => frame.russian ? translated : english,
     element: (tag: string, text?: string, className?: string) => new Node(tag, text, className),
     icon: (name: string) => new Node("svg", name),
     button: (text: string, click: () => unknown, className: string) => Object.assign(new Node("button", text, className), { click }),
     openImagePreview: (...args: unknown[]) => previews.push(args),
+    showTask: (id: string) => openedTasks.push(id),
     api: { runImagePreview: (_id: string, path: string) => reads.push(path), saveRunImage: (_id: string, path: string) => saves.push(path) },
     IntersectionObserver: class { observe() {} },
-  }) as (container: Node, items: RunActivity[], completed?: boolean, durationMs?: number, taskId?: string) => void;
+  }) as {
+    renderRunActivity: (container: Node, items: RunActivity[], completed?: boolean, durationMs?: number, taskId?: string) => void;
+    boardWaitStatus: (item?: RunActivity) => string | undefined;
+  };
   const container = new Node("li");
   const row = (id: string) => container.querySelectorAll("details").find(node => node.dataset.item === "item:" + id)!;
-  return { render: (items: RunActivity[], completed = false, durationMs?: number) => render(container, items, completed, durationMs, "T-0042"), container, document, row, frame, previews, reads, saves };
+  return { render: (items: RunActivity[], completed = false, durationMs?: number) => renderRunActivity(container, items, completed, durationMs, "T-0042"), boardWaitStatus, container, document, row, frame, previews, reads, saves, openedTasks };
 }
+
+test("only the running Taskboard wait has a board status", () => {
+  const { boardWaitStatus, frame } = fixture();
+  const waiting = action("wait", "mcpToolCall", "inProgress", "ai_taskboard / task_wait");
+  assert.equal(boardWaitStatus(waiting), "Жду обновления на доске…");
+  frame.russian = false;
+  assert.equal(boardWaitStatus(waiting), "Waiting for a board update…");
+  assert.equal(boardWaitStatus({ ...waiting, status: "completed" }), undefined);
+  assert.equal(boardWaitStatus({ ...waiting, title: "other / task_wait" }), undefined);
+  assert.equal(boardWaitStatus(undefined), undefined);
+});
+
+test("a reviewer return appears in the manager chat with its findings", () => {
+  const view = fixture();
+  const notice = { id: "T-0027", sequence: 44, kind: "request-changes", actor: "reviewer", text: "Уточни правила записи." };
+  view.render(["inbox", "wait"].map(id => ({
+    ...action(id, "mcpToolCall"), messages: [notice], messagesOnly: true,
+  })));
+  const entries = view.container.querySelectorAll(".chat-coordination");
+  assert.equal(entries.length, 1);
+  assert.match(entries[0].querySelector(".chat-coordination-header").textContent, /Ревьюер → Менеджер/);
+  assert.equal(entries[0].querySelector(".chat-review-status").textContent, "Возврат на доработку");
+  assert.match(entries[0].textContent, /Уточни правила записи\./);
+  entries[0].querySelector("button").click?.();
+  assert.deepEqual(view.openedTasks, ["T-0027"]);
+});
+
+test("confirmed task transitions and comments remain in the timeline when work details are collapsed", () => {
+  const view = fixture();
+  const items = [
+    action("before", "agentMessage", "completed", "", "Проверю задачу"),
+    { ...action("unblock", "dynamicToolCall", "completed", "task_unblock"),
+      taskChanges: [{ id: "T-0002", title: "Удалить старый taskboard", action: "unblock" }] },
+    action("review", "mcpToolCall", "completed", "ai_taskboard / task_review"),
+    action("git", "mcpToolCall", "completed", "ai_taskboard / project_git"),
+    { ...action("accept", "mcpToolCall", "completed", "ai_taskboard / task_accept"),
+      taskChanges: [{ id: "T-0002", title: "Удалить старый taskboard", action: "accept" }] },
+    { ...action("start", "mcpToolCall", "completed", "ai_taskboard / task_start"),
+      taskChanges: [{ id: "T-0003", title: "Следующая задача", action: "start" }] },
+    { ...action("comment", "mcpToolCall", "completed", "ai_taskboard / task_comment"),
+      taskChanges: [{ id: "T-0035", title: "Упорядочить нативные DLL", action: "comment" }] },
+    action("wait", "mcpToolCall", "completed", "ai_taskboard / task_wait"),
+    { ...action("final", "agentMessage", "completed", "", "Задача закрыта"), phase: "final_answer" as const },
+  ];
+  view.render(items);
+  const group = view.container.querySelector(".chat-run-group");
+  assert.equal(view.container.children[2], group);
+  assert.equal(group.querySelectorAll(".chat-run-item").length, 2);
+  assert.equal(view.row("unblock").parent, view.container);
+  assert.equal(view.row("accept").parent, view.container);
+  assert.equal(view.row("start").parent, view.container);
+  assert.equal(view.row("comment").parent, view.container);
+  assert.match(view.row("unblock").querySelector("summary").textContent, /Задача разблокирована T-0002/);
+  assert.match(view.row("accept").querySelector("summary").textContent, /Задача принята T-0002/);
+  view.row("accept").open = true;
+  const link = view.row("accept").querySelector("button");
+  link.focus();
+  link.click!();
+  assert.deepEqual(view.openedTasks, ["T-0002"]);
+  view.render(items);
+  assert.equal(view.document.activeElement, view.row("accept").querySelector("button"));
+  view.render(items, true);
+  assert.ok(view.row("review").closest(".chat-work"));
+  assert.equal(view.container.children[3], view.row("accept"));
+  assert.equal(view.container.children[4], view.row("start"));
+  const comment = view.container.children[5];
+  assert.equal(comment, view.row("comment"));
+  assert.match(comment.querySelector("summary").textContent, /Комментарий добавлен T-0035/);
+  assert.equal(comment.open, false);
+  assert.equal(view.row("wait").closest(".chat-work")?.open, false);
+  assert.equal(view.container.children.at(-1)?.textContent, "Задача закрыта");
+});
+
+test("a manager cancellation reason is visible without expanding its tool details", () => {
+  const view = fixture();
+  const reason = "Те же исправления уже включены в T-0007.";
+  const cancellation = { ...action("cancel", "mcpToolCall", "completed", "ai_taskboard / task_cancel"),
+    taskChanges: [{ id: "T-0009", title: "Форматирование", action: "cancel", reason }] };
+  for (const completed of [false, true]) {
+    view.render([action("read", "mcpToolCall"), cancellation, action("ack", "mcpToolCall")], completed);
+    const row = view.row("cancel");
+    assert.equal(row.parent, view.container);
+    assert.equal(row.open, false);
+    assert.match(row.querySelector("summary").textContent, /Задача отменена T-0009/);
+    assert.equal(view.container.children[view.container.children.indexOf(row) + 1].textContent, reason);
+  }
+});
 
 test("saved and live image views replace service JSON with clickable previews of every image", () => {
   const view = fixture(false);

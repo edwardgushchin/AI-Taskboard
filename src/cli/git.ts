@@ -1,5 +1,6 @@
-import { spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, realpathSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { TaskboardError } from "./model.ts";
 
@@ -23,7 +24,7 @@ export interface Repository {
   bare: boolean;
 }
 
-export function invokeGit(cwd: string, args: string[], overrides?: NodeJS.ProcessEnv): GitResult {
+export function gitEnvironment(): NodeJS.ProcessEnv {
   const env = { ...process.env, LC_ALL: "C", GIT_TERMINAL_PROMPT: "0" };
   for (const key of [
     "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX",
@@ -31,8 +32,28 @@ export function invokeGit(cwd: string, args: string[], overrides?: NodeJS.Proces
   ]) {
     delete (env as NodeJS.ProcessEnv)[key];
   }
+  return env;
+}
+
+export const skipAutoMaintenance = ["-c", "maintenance.auto=false"];
+
+export function scheduleGitMaintenance(root: string): void {
+  try {
+    const setting = invokeGit(root, ["config", "--type=bool", "--default=true", "--get", "maintenance.auto"]);
+    if (setting.code !== 0 || setting.stdout.trim() !== "true") return;
+    const child = spawn("git", ["maintenance", "run", "--auto", "--quiet"], {
+      cwd: root, env: gitEnvironment(), detached: true, stdio: "ignore", windowsHide: true,
+    });
+    child.on("error", () => { /* Maintenance can run after the next Git operation. */ });
+    child.unref();
+  } catch {
+    // A maintenance failure cannot undo a completed board operation.
+  }
+}
+
+export function invokeGit(cwd: string, args: string[], overrides?: NodeJS.ProcessEnv): GitResult {
   const result = spawnSync("git", args, {
-    cwd, env: { ...env, ...overrides }, encoding: "utf8", windowsHide: true, maxBuffer: 64 * 1024 * 1024,
+    cwd, env: { ...gitEnvironment(), ...overrides }, encoding: "utf8", windowsHide: true, maxBuffer: 64 * 1024 * 1024,
   });
   if (result.error) {
     if ((result.error as NodeJS.ErrnoException).code === "ENOENT" && existsSync(cwd)) {
@@ -46,7 +67,8 @@ export function invokeGit(cwd: string, args: string[], overrides?: NodeJS.Proces
 export function git(cwd: string, args: string[], overrides?: NodeJS.ProcessEnv): string {
   const result = invokeGit(cwd, args, overrides);
   if (result.code !== 0) {
-    throw new TaskboardError("GIT_FAILED", "Git failed while running " + args[0] + ".", {
+    const command = args[0] === "-c" ? args[2] : args[0];
+    throw new TaskboardError("GIT_FAILED", "Git failed while running " + command + ".", {
       output: [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n"),
       exitCode: result.code,
     });
@@ -60,8 +82,8 @@ export function isAncestor(path: string, older: string, newer: string): boolean 
   throw new TaskboardError("GIT_FAILED", "Git could not compare commits.", { output: result.stderr.trim() });
 }
 
-export function mergeTree(path: string, targetHead: string, submitted: string): string {
-  const result = invokeGit(path, ["merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", targetHead, submitted]);
+export function mergeTree(path: string, targetHead: string, submitted: string, env?: NodeJS.ProcessEnv): string {
+  const result = invokeGit(path, ["merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", targetHead, submitted], env);
   const [tree, ...paths] = result.stdout.split("\0").filter(Boolean);
   if (result.code === 1) {
     throw new TaskboardError("MERGE_CONFLICT", "Resolve the conflicts in the task worktree and submit the result again.", {
@@ -72,6 +94,35 @@ export function mergeTree(path: string, targetHead: string, submitted: string): 
     throw new TaskboardError("GIT_FAILED", "Git could not calculate the merge result.", { output: result.stderr.trim() });
   }
   return tree;
+}
+
+export function inspectMergeTree(path: string, targetHead: string, submitted: string) {
+  const env = { GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "" };
+  // Passive review must not run commands configured as custom merge drivers.
+  const drivers = invokeGit(path, ["config", "--get-regexp", "^merge\\..*\\.driver$"], env);
+  if (drivers.code !== 1) return { status: "unchecked" as const };
+  const objects = git(path, ["rev-parse", "--path-format=absolute", "--git-path", "objects"], env).trimEnd();
+  const parent = realpathSync(tmpdir());
+  const scratch = mkdtempSync(join(parent, "ai-taskboard-merge-"));
+  try {
+    mergeTree(path, targetHead, submitted, { ...env, GIT_OBJECT_DIRECTORY: scratch,
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: JSON.stringify(objects) });
+    return { status: "clean" as const };
+  } catch (error) {
+    if (!(error instanceof TaskboardError)) throw error;
+    if (error.code !== "MERGE_CONFLICT") return { status: "unchecked" as const };
+    const { paths } = error.details as { paths: string[] };
+    return { status: "conflict" as const, paths };
+  } finally {
+    if (dirname(realpathSync(scratch)) !== parent) throw new Error("Unexpected temporary Git object directory.");
+    // Git writes read-only loose objects. Electron on Windows cannot remove them until they are writable.
+    if (process.platform === "win32") {
+      for (const entry of readdirSync(scratch, { recursive: true, withFileTypes: true })) {
+        if (entry.isFile()) chmodSync(join(entry.parentPath, entry.name), 0o600);
+      }
+    }
+    rmSync(scratch, { recursive: true, maxRetries: 5, retryDelay: 100 });
+  }
 }
 
 const listWorktrees = ["worktree", "list", "--porcelain", "-z"];

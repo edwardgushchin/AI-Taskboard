@@ -156,8 +156,7 @@ function reviewMetrics(task: Task) {
   return rounds;
 }
 
-function timeByStatus(task: Task, accepted: TaskEvent | undefined) {
-  if (!accepted) return null;
+function timeByStatus(task: Task, accepted: TaskEvent | undefined, now: number) {
   const totals: Partial<Record<TaskState, number>> = {};
   let status: TaskState = "draft";
   let since = Date.parse(task.createdAt);
@@ -170,7 +169,10 @@ function timeByStatus(task: Task, accepted: TaskEvent | undefined) {
     status = event.to;
     since = at;
   }
-  return null;
+  if (accepted || status !== task.status || status === "done" || status === "cancelled" ||
+      !Number.isFinite(now) || !Number.isFinite(since) || now < since) return null;
+  totals[status] = (totals[status] ?? 0) + now - since;
+  return totals;
 }
 
 export function summarizeTokenUsage(models: ModelTokenUsage[]) {
@@ -181,9 +183,13 @@ export function summarizeTokenUsage(models: ModelTokenUsage[]) {
   };
 }
 
-export function taskMetrics(task: Task) {
+export function taskMetrics(task: Task, now = Date.now()) {
   const accepted = task.history.findLast(event => event.action === "accept" && event.to === "done");
+  const timeByStatusMs = timeByStatus(task, accepted, now);
+  const returns = task.history.filter(event => event.action === "request-changes");
   const starts = task.history.flatMap(({ at, startTiming }) => startTiming ? [{ at, ...startTiming }] : []);
+  const runLogs = task.history.filter(event => event.action === "run-log");
+  const durations = runLogs.flatMap(({ durationMs }) => durationMs === undefined ? [] : [durationMs]);
   const byRole: Record<string, ModelTokenUsage[]> = {};
   for (const role of [...taskUsageRoles, "unattributed"] as const) {
     const records = (task.tokenUsage?.reports ?? [])
@@ -195,10 +201,16 @@ export function taskMetrics(task: Task) {
     id: task.id, status: task.status, createdAt: task.createdAt,
     completedAt: accepted?.at ?? null, acceptedBy: accepted?.actor ?? null,
     cycleMs: accepted ? Date.parse(accepted.at) - Date.parse(task.createdAt) : null,
-    timeByStatusMs: timeByStatus(task, accepted),
+    timeByStatusMs,
+    ...(timeByStatusMs && !accepted ? { observedAt: new Date(now).toISOString() } : {}),
     submissions: task.history.filter(event => event.action === "submit" && event.to === "review").length,
-    returns: task.history.filter(event => event.action === "request-changes").length,
+    returns: returns.length,
+    reviewerReturns: returns.filter(event => event.actor === "reviewer").length,
     ...(starts.length ? { starts } : {}),
+    ...(runLogs.length ? { executorRuns: {
+      recorded: runLogs.length, timed: durations.length,
+      durationMs: durations.length ? durations.reduce((total, duration) => total + duration, 0) : null,
+    } } : {}),
     reviews: reviewMetrics(task),
     tokens: {
       ...summarizeTokenUsage(task.tokenUsage?.byModel ?? []),

@@ -35,7 +35,6 @@ async function run() {
     const sample = 'Agent reply: Latin text.\n\nОтвет агента: Съешь ещё этих мягких французских булок. Ёжик и ёлка.\n\n**Жирный текст Bold** и *курсив Italic*.\n\n- Проверка списка\n- [Ссылка](https://example.com) и `code код`\n\n```text\nconst ответ = "Привет";\n```';
     await evaluate(`
       frame = { ...frame, project: 'font-fixture', russian: true, runActivity: {} };
-      chatCatalog = Promise.resolve({ ok: true, data: [{ id: 'test', name: 'Codex', efforts: ['high'], effort: 'high' }] });
       const sample = ${JSON.stringify(sample)};
       const activity = [
         { id: 'progress', type: 'agentMessage', phase: 'commentary', text: sample, status: 'completed' },

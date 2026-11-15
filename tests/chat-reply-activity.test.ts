@@ -7,12 +7,14 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { createTask } from "../src/cli/tasks.ts";
 import { projectLabels } from "../src/desktop/project-tabs.ts";
+import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 
 const source = readFileSync(new URL("../src/desktop/main.ts", import.meta.url), "utf8");
 const parsed = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, true);
 const names = new Set([
   "activeAgents", "stopChat", "beginOperation", "projectOperations", "closingProjects", "frame", "send", "notifyRunChange", "sendChat", "saveTaskTokenUsage", "windowStates", "chatRuns", "replyingTasks",
   "launchingTasks", "runningTasks", "runActivityByTask", "imageExtensions", "imageTypes", "recentBoards", "russian", "theme",
+  "managerQuestion", "executorLimit",
 ]);
 // Exercise the main-process lifecycle without starting Electron or a real provider.
 const activitySource = parsed.statements.filter(node => {
@@ -29,9 +31,12 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   const delivered: string[] = [];
   const writes: { actor?: string; replyTo?: number }[] = [];
   const started = Promise.withResolvers<void>();
+  const slots = createAgentSlots();
   const runtime = runInNewContext(stripTypeScriptTypes(activitySource) +
     "\n({ sendChat, stopChat, activeAgents, frame, windowStates, runningTasks, launchingTasks })", {
-    basename, extname, join, performance, projectLabels, AbortController,
+    basename, extname, join, performance, projectLabels, AbortController, subscriptions: new Map(),
+    reserveAgent: slots.acquire,
+    boardRequests: new Map(), boardWorkRequests: new Map(), boardUnread: () => [], projectIdentity: (path: string) => path,
     app: { getPath: () => "profile" },
     lang: (english: string) => english,
     tmpdir: () => "scratch",
@@ -70,7 +75,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   });
   const windows = ["project-a", "project-a", "project-b"].map((project, index) => {
     const updates: string[][] = [];
-    const state = { project, board: { tasks: [task, { ...task, id: "T-0002" }] }, window: {
+    const state = { project, board: { project, tasks: [task, { ...task, id: "T-0002" }] }, window: {
       isDestroyed: () => false, setTitle: () => {}, webContents: {
         id: index,
         send: (channel: string, frame: { runningTasks: string[] }) => {
@@ -90,7 +95,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   const run = (retry = false) => runtime.sendChat("project-a", task.id,
     { ...request, ...(retry ? { retryAt: task.history.length - 1 } : {}) }, () => {});
   const active = (index = 0): string[] => Array.from(runtime.frame(windows[index].state).runningTasks);
-  return { task, runtime, windows, run, active, response, delivered, writes, started: started.promise };
+  return { task, runtime, windows, run, active, response, delivered, writes, slots, started: started.promise };
 }
 
 test("chat replies publish the existing task activity in every window of their board", async () => {
@@ -188,6 +193,11 @@ test("a delivery rejection keeps the saved user message and does not start anoth
 
 test("messages and stop target a board execution in the same project and task", async () => {
   const f = fixture({ controlled: true });
+  const occupied = Array.from({ length: 3 }, () => f.slots.acquire("project-a", "executor"));
+  const blocked = await f.run();
+  assert.equal(blocked.result.error.code, "EXECUTOR_LIMIT");
+  assert.equal(blocked.saved, false);
+  assert.equal(f.writes.length, 0);
   let interrupted = false;
   f.runtime.runningTasks.add("project-a\0T-0001");
   f.runtime.activeAgents.set("project-a\0T-0001", { directories: new Set(), control: {
@@ -200,6 +210,7 @@ test("messages and stop target a board execution in the same project and task", 
   assert.equal((await f.runtime.stopChat("project-b", "T-0001")).error.code, "CHAT_NOT_RUNNING");
   assert.equal((await f.runtime.stopChat("project-a", "T-0001")).ok, true);
   assert.equal(interrupted, true);
+  for (const release of occupied) release?.();
 });
 
 test("a task being launched never starts a competing chat provider", async () => {

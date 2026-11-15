@@ -5,10 +5,7 @@
     "output": "release"
   },
   "files": [
-    "src/**/*",
-    "codex/marketplace/**/*",
-    "codex/marketplace/.agents/**/*",
-    "codex/marketplace/plugins/ai-taskboard/.codex-plugin/**/*"
+    "src/**/*"
   ],
   "extraResources": [
     {

@@ -9,7 +9,7 @@ interface ModelPage {
 
 export async function executionModels(profile: string, project: string) {
   const client = await configuredCodex(profile);
-  if (!client) throw new Error("Connect Codex in AI Taskboard settings.");
+  if (!client) throw new Error("Choose the Codex executable in AI Taskboard settings.");
   const child = spawn(client.path, [...client.args, "app-server"], {
     cwd: project, env: client.env, windowsHide: true, stdio: ["pipe", "pipe", "ignore"],
   });

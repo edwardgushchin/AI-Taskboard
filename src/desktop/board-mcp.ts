@@ -13,8 +13,9 @@ export async function withBoardMcp<T>(
   tools: BoardMcpTool[],
   call: (name: string, args: unknown) => Promise<CliReply>,
   run: (config: string, env: Record<string, string>) => Promise<T>,
+  toolTimeoutSeconds?: number,
 ): Promise<T> {
-  const mcp = await openBoardMcp(tools, call);
+  const mcp = await openBoardMcp(tools, call, toolTimeoutSeconds);
   try {
     return await run(mcp.config, mcp.env);
   } finally {
@@ -39,7 +40,7 @@ export async function openBoardMcp(
       request.setEncoding("utf8");
       for await (const part of request) {
         body += part;
-        if (body.length > 16_384) {
+        if (Buffer.byteLength(body) > 65 * 1024) {
           end(413);
           return;
         }

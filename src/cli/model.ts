@@ -1,7 +1,14 @@
 export const taskStates = ["draft", "ready", "in_progress", "blocked", "review", "done", "cancelled"] as const;
 export const priorities = ["low", "normal", "high", "urgent"] as const;
-export const tagColors = ["purple", "blue", "cyan", "pink", "green"] as const;
-export const hexTagColor = /^#[0-9a-f]{6}$/i;
+export const legacyTagColors = {
+  purple: "#C0A5F4",
+  blue: "#91B6F9",
+  cyan: "#7FC8D6",
+  pink: "#F196B2",
+  green: "#86CFAD",
+} as const;
+const tagColors = Object.values(legacyTagColors);
+export const hexTagColor = /^#[0-9a-fA-F]{6}$/;
 export const maxAttachmentBytes = 64 * 1024 * 1024;
 export const codexThreadPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 export const imageAttachmentPattern = /\.(png|jpe?g|webp|gif)$/i;
@@ -10,19 +17,16 @@ export type TaskState = typeof taskStates[number];
 export type Priority = typeof priorities[number];
 export type Actor = "agent" | "user" | "manager" | "reviewer";
 export type IntegrationMode = "merge" | "squash";
-export type TagColor = typeof tagColors[number];
-
 export interface BoardTag {
   name: string;
-  color: TagColor;
-  customColor?: string;
+  color: string;
 }
 
 export function tagKey(name: string): string {
   return name.trim().normalize().toLowerCase();
 }
 
-function defaultTagColor(name: string): TagColor {
+function defaultTagColor(name: string): string {
   let color = 0;
   for (const character of name) color = (color * 31 + character.codePointAt(0)!) % tagColors.length;
   return tagColors[color];
@@ -65,6 +69,19 @@ export interface ChatSettings {
   effort: string;
 }
 
+export const boardAgentRoles = ["manager", "executor", "reviewer"] as const;
+export type AgentLimits = Record<typeof boardAgentRoles[number], number>;
+
+export function validAgentLimitOverrides(value: unknown): value is Partial<AgentLimits> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) &&
+    Object.entries(value).every(([role, limit]) => boardAgentRoles.some(key => key === role) &&
+      typeof limit === "number" && Number.isSafeInteger(limit) && limit >= 0);
+}
+
+export type BoardAgentSettings = ChatSettings & { provider?: "codex" };
+export const reviewModes = ["human", "manager", "reviewer"] as const;
+export type ReviewMode = typeof reviewModes[number];
+
 export interface ChatUsage {
   used: number;
   limit: number;
@@ -81,16 +98,75 @@ export interface RunActivity {
 
 export interface TaskEvent {
   at: string;
-  startTiming?: { lockWaitMs: number; prepareMs: number; gitWorktreeAddMs?: number };
   durationMs?: number;
+  startTiming?: { lockWaitMs: number; prepareMs: number; gitWorktreeAddMs?: number };
   actor: Actor;
   action: string;
   text?: string;
+  messageKind?: "question" | "update" | "decision";
+  reviewApproval?: { revision: number; targetHead: string | null; evidence: string[] };
+  replyToMessage?: number;
   attachment?: string;
   from?: TaskState;
   to?: TaskState;
   chat?: ChatSettings & { files?: string[]; usage?: ChatUsage; commentary?: string[] };
   run?: RunActivity[];
+}
+
+export const githubRepositoryPattern = /^[a-z0-9][a-z0-9-]*\/(?!\.{1,2}$)[a-z0-9_.-]+$/i;
+export interface GitHubMilestone {
+  repository: string;
+  number: number;
+  title: string;
+}
+
+export const scheduleTimePattern = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+
+export type TaskScheduleRule =
+  | ({ time: string; everyMinutes?: never } & (
+    { weekday?: number; dayOfMonth?: never; month?: never } |
+    { weekday?: never; dayOfMonth: number; month?: number }))
+  | { everyMinutes: number; time?: never; weekday?: never; dayOfMonth?: never; month?: never };
+export type TaskSchedule = TaskScheduleRule & { nextAt: string };
+
+export function validScheduleDate(day: unknown, month: unknown): boolean {
+  return typeof day === "number" && Number.isInteger(day) && day >= 1 && (month === undefined ? day <= 31 :
+    typeof month === "number" && Number.isInteger(month) && month >= 1 && month <= 12 &&
+    day <= new Date(2024, month, 0).getDate());
+}
+
+export function nextScheduledRun(rule: TaskScheduleRule, after: Date, previous?: string): string {
+  if (rule.everyMinutes !== undefined) {
+    const interval = rule.everyMinutes * 60_000;
+    const now = after.getTime();
+    const anchor = previous ? Date.parse(previous) : now;
+    const next = new Date(anchor > now ? anchor : anchor + (Math.floor((now - anchor) / interval) + 1) * interval);
+    if (!Number.isFinite(next.getTime())) throw new TaskboardError("INVALID_INPUT", "The recurring interval is too long.");
+    return next.toISOString();
+  }
+  const { time, weekday, dayOfMonth, month } = rule;
+  const hour = Number(time.slice(0, 2));
+  const minute = Number(time.slice(3));
+  if (dayOfMonth !== undefined) {
+    const year = after.getFullYear();
+    const currentMonth = month === undefined ? after.getMonth() : month - 1;
+    const occurrence = (offset: number) => {
+      const nextMonth = currentMonth + offset;
+      const lastDay = new Date(year, nextMonth + 1, 0).getDate();
+      return new Date(year, nextMonth, Math.min(dayOfMonth, lastDay), hour, minute);
+    };
+    const next = occurrence(0);
+    return (next > after ? next : occurrence(month === undefined ? 1 : 12)).toISOString();
+  }
+  const next = new Date(after);
+  const days = weekday === undefined ? 0 : (weekday - after.getDay() + 7) % 7;
+  next.setDate(after.getDate() + days);
+  next.setHours(hour, minute, 0, 0);
+  if (next <= after) {
+    next.setDate(next.getDate() + (weekday === undefined ? 1 : 7));
+    next.setHours(hour, minute, 0, 0);
+  }
+  return next.toISOString();
 }
 
 export interface Task {
@@ -108,6 +184,7 @@ export interface Task {
   status: TaskState;
   codexThreadId?: string;
   goalThreadId?: string;
+  managerReadThrough?: number;
   revision: number;
   createdAt: string;
   updatedAt: string;
@@ -115,18 +192,40 @@ export interface Task {
   summary: string;
   nextStep: string;
   dependencies?: string[];
+  milestone?: GitHubMilestone;
   execution?: { model: string; effort?: string };
+  workingDirectory?: string;
+  schedule?: TaskSchedule;
   blocked?: { reason: string; condition: string; previousStatus?: "draft" | "ready" };
-  result?: { summary: string; checks: string[]; limitations: string[]; noChanges?: { head: string } };
+  result?: { summary: string; checks: string[]; limitations: string[]; noChanges?: { head: string | null } };
+  artifacts?: { source: string; file: string; sha256: string }[];
   git?: TaskGit;
   history: TaskEvent[];
 }
 
 export interface BoardSettings {
+  name?: string;
   archiveAfterDays: number | null;
   integrationMode: IntegrationMode;
   showCardPreviews?: boolean;
-  manager?: ChatSettings | null;
+  manager?: BoardAgentSettings | null;
+  executor?: BoardAgentSettings | null;
+  reviewer?: BoardAgentSettings | null;
+  agentLimits?: Partial<AgentLimits>;
+  reviewMode?: ReviewMode;
+  autoReview?: boolean;
+}
+
+export const defaultBoardAgents = {
+  manager: { provider: "codex", model: "gpt-6.1-sol", effort: "medium" },
+  executor: { provider: "codex", model: "gpt-6.1-sol", effort: "high" },
+  reviewer: { provider: "codex", model: "gpt-6.1-terra", effort: "high" },
+} satisfies Record<typeof boardAgentRoles[number], BoardAgentSettings>;
+
+export const reviewVerifier = { model: defaultBoardAgents.manager.model, effort: "xhigh" } satisfies ChatSettings;
+
+export function boardReviewMode(settings: Pick<BoardSettings, "reviewMode" | "autoReview">): ReviewMode {
+  return settings.reviewMode ?? (settings.autoReview === true ? "reviewer" : "human");
 }
 
 export interface ArchiveLink {
@@ -135,7 +234,10 @@ export interface ArchiveLink {
   status: "done" | "cancelled";
   closedAt: string;
   archivedAt: string;
+  updatedAt?: string;
   tags?: string[];
+  milestone?: GitHubMilestone;
+  tagOverride?: { tags: string[]; history: TaskEvent[] };
 }
 
 export interface BoardIndex {
@@ -230,6 +332,9 @@ export function record(
   }
   return {
     ...task,
+    ...(task.schedule && next === "ready" && task.status !== "ready"
+      ? { schedule: { ...task.schedule, nextAt: nextScheduledRun(task.schedule, new Date(at),
+        task.status === "in_progress" ? task.schedule.nextAt : undefined) } } : {}),
     status: next,
     revision: task.revision + 1,
     updatedAt: at,

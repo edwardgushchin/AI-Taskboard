@@ -9,14 +9,29 @@
   -webkit-font-smoothing: antialiased; user-select: none;
 }
 .codicon-git-branch::before { content: "\ec6f"; }
+.codicon-sync::before { content: "\ea77"; }
+.codicon-circle-filled::before { content: "\ea71"; }
+.codicon-settings-gear::before { content: "\eb51"; }
+.codicon-hubot::before { content: "\eb08"; }
 .codicon-cloud-upload::before { content: "\eac3"; }
 .codicon-close::before { content: "\ea76"; }
+.codicon-copy::before { content: "\ebcc"; }
+.codicon-check::before { content: "\eab2"; }
 .codicon-add::before { content: "\ea60"; }
 .codicon-file::before { content: "\ea7b"; }
 .codicon-arrow-up::before { content: "\eaa1"; }
 .codicon-debug-stop::before { content: "\ead7"; }
+.codicon-stop-circle::before { content: "\eba5"; }
 .codicon-tasklist::before { content: "\eb67"; }
+.codicon-symbol-number::before { content: "\ea90"; }
+.codicon-milestone::before { content: "\eb20"; }
+.codicon-link::before { content: "\eb15"; }
+.codicon-checklist::before { content: "\eab3"; }
+.codicon-attach::before { content: "\ec34"; }
 .codicon-target::before { content: "\ebf8"; }
 .codicon-mic::before { content: "\ec12"; }
 .codicon-pin::before { content: "\eb2b"; }
 .codicon-pinned::before { content: "\eba0"; }
+.codicon-chevron-right::before { content: "\eab6"; }
+.codicon-terminal::before { content: "\ea85"; }
+.codicon-trash::before { content: "\ea81"; }

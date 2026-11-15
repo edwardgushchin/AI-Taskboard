@@ -1,16 +1,17 @@
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { git } from "../cli/git.ts";
 import { codexThreadPattern } from "../cli/model.ts";
 import type { RunActivity, Task } from "../cli/model.ts";
 import { runActivity } from "./run-activity.ts";
+import { boardAgentInstructions, boardCodexArgs, boardWorklog, worklogReminder, worklogTool } from "./board-agent-hooks.ts";
 import { openBoardMcp } from "./board-mcp.ts";
 import { checkWaitInstructions, checkWaitTool, executorToolTimeoutSeconds, waitForCheck } from "./check-wait.ts";
+import { bundled, entry } from "./cli.ts";
+import { taskboardCliLaunch } from "./codex.ts";
 import type { configuredCodex } from "./codex.ts";
-import { codexProject } from "./codex-project.ts";
 import { codexRpc, turnControl } from "./codex-rpc.ts";
 import type { AgentControl } from "./codex-rpc.ts";
 import { CodexTokenUsage } from "./codex-token-usage.ts";
@@ -18,16 +19,28 @@ import type { TokenUsageReport } from "../cli/token-usage.ts";
 
 type Client = NonNullable<Awaited<ReturnType<typeof configuredCodex>>>;
 type Turn = { id: string; status: string; error?: { message?: string } | null };
-type Run = AgentControl & { threadId: string; completion: Promise<string | undefined> };
+type RunFailure = { reason: string; disconnected?: boolean; interrupted?: boolean };
+type Run = AgentControl & { threadId: string; completion: Promise<RunFailure | undefined> };
 const profile = "ai-taskboard";
+const instructions = new URL("./agent-instructions/", import.meta.url);
 
-function accessPaths(project: string, cwd: string, branch: string): string[] {
+function executorInstructions() {
+  const readInstructions = (name: string) => readFileSync(new URL(name + ".md", instructions), "utf8").trim();
+  return boardAgentInstructions("executor", [
+    "AI Taskboard has already started this card and assigned its working directory. Read the current card, then work in that directory. Pass --project with the board root in every CLI invocation.",
+    checkWaitInstructions,
+    readInstructions("executor").replace("__AI_TASKBOARD_CLI__", () => JSON.stringify(taskboardCliLaunch(bundled, entry))),
+    readInstructions("task-writing"),
+  ].join("\n\n"));
+}
+
+function gitAccessPaths(cwd: string, branch: string): string[] {
   const resolveGitPath = (...args: string[]) =>
     realpathSync(git(cwd, ["rev-parse", "--path-format=absolute", ...args]).trim());
   const common = resolveGitPath("--git-common-dir");
   const refs = branch.split("/");
   return [
-    realpathSync(cwd), realpathSync(join(project, ".tasks")), resolveGitPath("--git-dir"),
+    resolveGitPath("--git-dir"),
     join(common, "objects"), dirname(join(common, ...refs)),
     dirname(join(common, "logs", ...refs)), join(common, "reftable"),
   ].filter(existsSync);
@@ -43,26 +56,40 @@ const verifyWrite = [
   "}",
 ].join("\n");
 
-export async function startCodexRun(client: Client, project: string, cwd: string, task: Task,
-  onActivity?: (item: RunActivity) => void, onTokenUsage?: (report: TokenUsageReport) => Promise<void>, signal?: AbortSignal): Promise<Run> {
+export type ExecutorTask = Pick<Task, "id" | "title" | "description" | "criteria" | "execution" | "git" | "codexThreadId" | "workingDirectory" | "schedule"> &
+  { feedback?: string };
+
+export function missingCodexThread(message: string | undefined, threadId: string | undefined) {
+  return Boolean(threadId && message === "no rollout found for thread id " + threadId);
+}
+
+export async function startCodexRun(client: Client, project: string, cwd: string, task: ExecutorTask,
+  onActivity?: (item: RunActivity) => void, onTokenUsage?: (report: TokenUsageReport) => Promise<void>, signal?: AbortSignal,
+  beforeTurn?: (threadId: string) => Promise<void>): Promise<Run> {
   signal?.throwIfAborted();
-  if (!task.git) throw new Error("The task has no prepared Git worktree.");
-  const paths = [...new Set(accessPaths(project, cwd, task.git.branch))];
-  const codexHome = (client.env ?? process.env).CODEX_HOME || join(homedir(), ".codex");
-  const worklogSessions = resolve(project, codexHome, "plugins", "data", "codex-worklog-codex-worklog", "sessions-v2");
+  if (!task.git && !task.workingDirectory) throw new Error("The task has no prepared working directory.");
+  const runDirectory = realpathSync(cwd);
+  if (task.workingDirectory && runDirectory !== task.workingDirectory) {
+    throw new Error("The task's working directory now points somewhere else.");
+  }
+  const boardData = realpathSync(join(project, ".tasks"));
+  const paths = [...new Set([runDirectory, boardData, ...(task.git ? gitAccessPaths(cwd, task.git.branch) : [])])];
+  const developerInstructions = executorInstructions();
+  const worklog = boardWorklog(project, "executor", task.id);
   const filesystem = [
     '":root" = "read"',
     ...paths.map(path => JSON.stringify(path) + ' = "write"'),
-    JSON.stringify(worklogSessions) + ' = "write"',
-    JSON.stringify(join(paths[1], "worktrees")) + ' = "read"',
+    JSON.stringify(join(boardData, "worktrees")) + ' = "read"',
   ].join(", ");
-  const mcp = await openBoardMcp([checkWaitTool], (_name, args, requestSignal) =>
-    waitForCheck(paths[0], args, signal ? AbortSignal.any([signal, requestSignal]) : requestSignal), executorToolTimeoutSeconds);
+  const mcp = await openBoardMcp([worklogTool, checkWaitTool], async (name, args, requestSignal) => name === checkWaitTool.name
+    ? worklog.remind(await waitForCheck(runDirectory, args, signal ? AbortSignal.any([signal, requestSignal]) : requestSignal))
+    : worklog.submit(args), executorToolTimeoutSeconds);
   let child: ChildProcessWithoutNullStreams;
   try {
     signal?.throwIfAborted();
     child = spawn(client.path, [
-      ...client.args, "app-server", "-c", mcp.config,
+      ...client.args, ...boardCodexArgs, "-c", mcp.config,
+      "-c", 'web_search="live"',
       "-c", "permissions." + profile + "={filesystem={" + filesystem + "}}",
       "-c", "default_permissions=" + JSON.stringify(profile),
       ...(process.platform === "win32" ? ["-c", 'windows.sandbox="mxc"'] : []),
@@ -78,9 +105,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   let activeThreadId: string | undefined;
   let control: AgentControl | undefined;
   let interruptTimeout: NodeJS.Timeout | undefined;
-  let lastError = "";
   const timeout = setTimeout(() => {
-    lastError = "Codex did not start the task in time.";
+    rpc.fail(new Error("Codex did not start the task in time."));
     child.kill();
     rpc.close();
   }, 60_000);
@@ -93,11 +119,12 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     child.kill();
     await Promise.all([exited, mcp.close()]);
   };
-  child.stderr.setEncoding("utf8").on("data", chunk => { lastError = (lastError + chunk).slice(-1500); });
+  child.stderr.resume();
   const rpc = codexRpc(child, message => {
     tokens.queue(tokens.observe(message), onTokenUsage);
     const params = message.params as { threadId?: string; turn: Turn };
     if (activeThreadId && params?.threadId === activeThreadId) {
+      worklog.observe(message, activeThreadId);
       if (onActivity && message.method?.startsWith("item/")) {
         const item = runActivity(activity, message.method, params);
         if (item) {
@@ -110,25 +137,34 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   });
   const { request, send } = rpc;
   function interrupt() {
-    lastError = signal?.reason instanceof Error ? signal.reason.message : "The task run was interrupted.";
+    const reason = signal?.reason instanceof Error ? signal.reason : new Error("The task run was interrupted.");
     if (control) void control.interrupt().catch(error => { rpc.fail(error); child.kill(); });
-    else { rpc.fail(new Error(lastError)); child.kill(); }
-    interruptTimeout = setTimeout(() => { rpc.fail(new Error(lastError)); child.kill(); }, 5000);
+    else { rpc.fail(reason); child.kill(); }
+    interruptTimeout = setTimeout(() => { rpc.fail(reason); child.kill(); }, 5000);
   }
   signal?.addEventListener("abort", interrupt, { once: true });
   async function monitor(turnId: string) {
-    let failure: string | undefined;
+    let failure: RunFailure | undefined;
     try {
       while (!turns.has(turnId)) await rpc.receive();
       const turn = turns.get(turnId)!;
-      if (turn.status !== "completed") failure = signal?.aborted ? lastError
-        : turn.error?.message || "Codex ended the task run: " + turn.status + ".";
+      if (turn.status !== "completed") failure = {
+        reason: turn.error?.message || "Codex ended the task run: " + turn.status + ".",
+        ...(turn.status === "interrupted" ? { interrupted: true } : {}),
+      };
     } catch (error) {
-      failure = lastError.trim() || (error as Error).message;
+      const message = (error as Error).message;
+      failure = {
+        reason: message,
+        disconnected: !signal?.aborted && message === "The Codex process closed.",
+      };
     } finally {
-      await tokens.save(tokens.finish(Boolean(failure)), onTokenUsage);
+      worklog.finish();
       await close();
+      await tokens.save(tokens.finish(Boolean(failure)), onTokenUsage);
     }
+    if (failure && signal?.aborted) return { reason: signal.reason instanceof Error
+      ? signal.reason.message : "The task run was interrupted." };
     return failure;
   }
 
@@ -145,22 +181,28 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       });
       if (probe.exitCode !== 0) throw new Error((probe.stderr || probe.stdout).trim());
     } catch (error) {
-      throw new Error("Codex cannot write to the task worktree, board or Git directories. " + (error as Error).message);
+      throw new Error("Codex cannot write to the directories required for this task. " + (error as Error).message);
     }
-    const existing = task.codexThreadId;
-    const projectId = existing ? undefined : await codexProject(request, project).catch(error => {
-      throw new Error("Codex could not open or create the project for this board. " + (error as Error).message);
-    });
-    const started = await request<{
-      thread: { id: string; projectId: string | null; model?: string }; model?: string; activePermissionProfile?: { id: string };
+    let existing = task.codexThreadId;
+    type ThreadReply = {
+      thread: { id: string; model?: string }; model?: string; activePermissionProfile?: { id: string };
       approvalPolicy?: string; approvalsReviewer?: string;
-    }>(existing ? "thread/resume" : "thread/start", {
-      cwd, projectId, threadId: existing, model: task.execution?.model, permissions: profile,
-      approvalPolicy: "on-request", approvalsReviewer: "auto_review",
-    });
-    if (projectId && started.thread.projectId !== projectId) {
-      throw new Error("Codex did not attach the task chat to the board project.");
+    };
+    const threadOptions = {
+      cwd, model: task.execution?.model, permissions: profile,
+      approvalPolicy: "on-request", approvalsReviewer: "auto_review", developerInstructions,
+    };
+    let started: ThreadReply | undefined;
+    if (existing) {
+      try {
+        started = await request<ThreadReply>("thread/resume", { ...threadOptions, threadId: existing });
+      } catch (error) {
+        if (!missingCodexThread((error as Error).message, existing)) throw error;
+        signal?.throwIfAborted();
+        existing = undefined;
+      }
     }
+    started ??= await request<ThreadReply>("thread/start", threadOptions);
     if (started.activePermissionProfile?.id !== profile) {
       throw new Error("Codex did not apply the write permissions for this task.");
     }
@@ -169,31 +211,45 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     }
     const threadId = started.thread.id;
     if (!codexThreadPattern.test(threadId) || (existing && threadId !== existing)) throw new Error("Codex returned an unexpected thread ID.");
-    const feedback = task.history.findLast(event => event.action === "request-changes")?.text;
+    signal?.throwIfAborted();
+    await beforeTurn?.(threadId);
+    signal?.throwIfAborted();
+    timeout.refresh();
     const prompt = [
-      checkWaitInstructions,
-      "Выполни задачу AI Taskboard " + task.id + " в подготовленной рабочей копии.",
+      "Выполни задачу AI Taskboard " + task.id + " в назначенной рабочей папке.",
       "Корень доски: " + project,
-      "Используй навык ai-taskboard:work-task и прочитай актуальную карточку по номеру.",
-      "Заверши проход командой сдачи, записи прогресса, паузы или блокировки в AI Taskboard.",
-      "Пока общие сводки или другие общие файлы ждут очереди, проверь независимые критерии по указанному публичному API и обязательным профилям. Сообщи менеджеру, какие критерии подтверждены и какие шаги ждут общего файла.",
-      'Если работа выполнена вне Git и preview вернул пустой diff, передай в submit токен preview, noChanges: true, итог и результаты проверок без поля message.',
+      ...(task.workingDirectory ? [
+        "Папка задачи: " + cwd,
+        "У задачи нет отдельной ветки или worktree. Используй сценарий сдачи результата вне Git из инструкции.",
+      ] : []),
+      "Прочитай актуальную карточку через show " + task.id + " --compact.",
+      "Для чтения истории используй show --compact с historyLimit. Повторно используй прочитанные изменения, если снимок совпадает.",
+      "Команды, которые должен запускать читатель, оформляй отдельными блоками кода Markdown. Пояснения пиши отдельными абзацами.",
+      task.schedule
+        ? "Это очередной запуск повторяющейся задачи. Выполни один проход по текущим условиям и запиши результат через progress с summary и nextStep. Карточка вернётся в готовые до следующего запуска. Не используй submit. Если без посторонней помощи выполнить задачу нельзя, используй block."
+        : "Заверши работу в карточке командой сдачи, записи прогресса, паузы или блокировки в AI Taskboard.",
+      "После записи результата в карточку и перед итоговым ответом вызови mcp__ai_taskboard__worklog_record с языком и массивом entries. " +
+        "Инструмент подключён к текущему ходу. Команды Worklog из истории относятся к прошлым ходам.",
+      "Перед сдачей сопоставь каждый критерий с результатом в diff или проверке. Для изменённого поведения перечисли существенно разные условия, в которых действует один критерий, и проверь сочетания, где результат может различаться. Например, для изменений поставки это чистая и повторная сборка, сборка и публикация, настройки по умолчанию и переопределения. После возврата проверь другие затронутые сценарии того же критерия. Если проверка выполнена на более ранней ревизии, покажи, почему она ещё применима, либо повтори затронутую проверку.",
       "Если доступ отклонён, продолжай разрешённым способом. Если без доступа нельзя выполнить обязательный шаг, заблокируй задачу. В причине укажи шаг, нужный ресурс и причину отказа, в условии разблокировки — конкретное действие для продолжения.",
-      "Рабочая копия: " + cwd,
+      "Рабочая папка: " + cwd,
       JSON.stringify({ title: task.title, description: task.description, criteria: task.criteria }),
-      ...(feedback ? ["Замечание к последней сдаче: " + feedback] : []),
+      ...(task.feedback ? ["Замечание к последней сдаче: " + task.feedback] : []),
     ].join("\n");
     activeThreadId = threadId;
     tokens.track(threadId, started.model ?? started.thread.model ?? null, true);
     const { turn } = await request<{ turn: Turn }>("turn/start", {
       threadId, effort: task.execution?.effort, input: [{ type: "text", text: prompt, text_elements: [] }],
+      additionalContext: { ai_taskboard_worklog: { value: worklogReminder, kind: "application" } },
     });
+    worklog.start(threadId, turn.id);
     control = turnControl(request, threadId, turn.id);
     tokens.save(tokens.begin(threadId, turn.id), onTokenUsage);
     clearTimeout(timeout);
     if (turn.status !== "inProgress") turns.set(turn.id, turn);
     return { threadId, completion: monitor(turn.id), ...control };
   } catch (error) {
+    worklog.finish();
     await close();
     await tokens.save(tokens.finish(true), onTokenUsage);
     if (error instanceof Error && /already has an active writer/i.test(error.message)) {

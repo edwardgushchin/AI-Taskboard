@@ -20,14 +20,16 @@ export function projectPath(path: string): string {
   catch { return resolve(path); }
 }
 
-export function projectLabels(paths: string[]) {
-  return paths.map(path => {
-    const name = basename(path) || path;
-    const duplicates = paths.filter(other => other !== path && basename(other) === name);
+export function projectLabels(projects: { path: string; name?: string }[]) {
+  const labels = projects.map(({ path, name }) => ({ path, name: name?.trim() || basename(path) || path }));
+  return labels.map(({ path, name }) => {
+    const duplicates = labels.filter(other => other.path !== path && other.name === name);
     let detail = "";
     if (duplicates.length) {
-      detail = basename(dirname(path));
-      if (duplicates.some(other => basename(dirname(other)) === detail)) detail = dirname(path);
+      const parent = dirname(path);
+      detail = basename(parent);
+      if (duplicates.some(other => dirname(other.path) === parent)) detail = path;
+      else if (duplicates.some(other => basename(dirname(other.path)) === detail)) detail = parent;
     }
     return { path, name, detail };
   });

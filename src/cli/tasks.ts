@@ -1,9 +1,10 @@
 import {
-  member, number, object, priorities, reasoningEffortPattern, record, requireRevision, requireState, strings, taskIdPattern,
-  TaskboardError, text,
+  member, nextScheduledRun, number, object, priorities, reasoningEffortPattern, record, requireRevision, requireState, scheduleTimePattern, strings, taskIdPattern,
+  TaskboardError, text, validScheduleDate,
 } from "./model.ts";
 import { codexThreadPattern } from "./model.ts";
-import type { Actor, Task, TaskState } from "./model.ts";
+import type { Actor, Task, TaskScheduleRule, TaskState } from "./model.ts";
+import { taskWorkingDirectory } from "./storage.ts";
 
 const activeStates = ["draft", "ready", "in_progress", "blocked", "review"] as const;
 
@@ -15,6 +16,40 @@ function fields(task: Task, input: Record<string, unknown>): Task {
     if (input[key] !== undefined) updated[key] = strings(input[key], key);
   }
   if (input.priority !== undefined) updated.priority = member(input.priority, priorities, "priority");
+  if (input.schedule !== undefined) {
+    requireState(task, ["draft", "ready", "blocked"]);
+    if (input.schedule === null) delete updated.schedule;
+    else {
+      const schedule = object(input.schedule);
+      let rule: TaskScheduleRule;
+      if (schedule.everyMinutes !== undefined) {
+        if (schedule.time !== undefined || schedule.weekday !== undefined || schedule.dayOfMonth !== undefined || schedule.month !== undefined) {
+          throw new TaskboardError("INVALID_INPUT", "Choose a recurring interval or a time of day.");
+        }
+        rule = { everyMinutes: number(schedule.everyMinutes, "everyMinutes", 1) };
+      } else {
+        const time = text(schedule.time, "schedule time", true);
+        if (!scheduleTimePattern.test(time)) throw new TaskboardError("INVALID_INPUT", "Use a schedule time in HH:MM format.");
+        if (schedule.dayOfMonth !== undefined || schedule.month !== undefined) {
+          const dayOfMonth = number(schedule.dayOfMonth, "dayOfMonth", 1);
+          const month = schedule.month === undefined ? undefined : number(schedule.month, "month", 1);
+          if (schedule.weekday !== undefined || !validScheduleDate(dayOfMonth, month)) {
+            throw new TaskboardError("INVALID_INPUT", "Choose a valid calendar day for the recurring task.");
+          }
+          rule = { time, dayOfMonth, month };
+        } else {
+          const weekday = schedule.weekday === undefined ? undefined : number(schedule.weekday, "weekday", 0);
+          if (weekday !== undefined && weekday > 6) throw new TaskboardError("INVALID_INPUT", "Use a weekday from 0 to 6.");
+          rule = { time, weekday };
+        }
+      }
+      const previous = task.schedule;
+      if (previous?.time !== rule.time || previous?.weekday !== rule.weekday || previous?.everyMinutes !== rule.everyMinutes ||
+          previous?.dayOfMonth !== rule.dayOfMonth || previous?.month !== rule.month) {
+        updated.schedule = { ...rule, nextAt: nextScheduledRun(rule, new Date()) };
+      }
+    }
+  }
   if (input.dependencies !== undefined) {
     requireState(task, ["draft", "ready"]);
     const dependencies = [...new Set(strings(input.dependencies, "dependencies"))];
@@ -37,6 +72,14 @@ function fields(task: Task, input: Record<string, unknown>): Task {
       }
       updated.execution = { model, effort };
     }
+  }
+  if (input.workingDirectory !== undefined) {
+    requireState(task, ["draft", "ready"]);
+    if (task.git || task.codexThreadId || task.history.some(event => event.action === "start")) {
+      throw new TaskboardError("INVALID_TRANSITION", "Choose the working directory before starting the task.");
+    }
+    if (input.workingDirectory === null) delete updated.workingDirectory;
+    else updated.workingDirectory = taskWorkingDirectory(text(input.workingDirectory, "working directory", true));
   }
   if (input.subtasks !== undefined) {
     if (!Array.isArray(input.subtasks)) throw new TaskboardError("INVALID_INPUT", "subtasks must be an array.");
@@ -76,6 +119,7 @@ export function createTask(id: string, input: Record<string, unknown>): Task {
 }
 
 export function recordRunLog(task: Task, input: Record<string, unknown>): Task {
+  if (task.status === "done" || task.status === "cancelled") return task;
   if (!Array.isArray(input.entries) || !input.entries.length || Buffer.byteLength(JSON.stringify(input.entries)) > 1_000_000) {
     throw new TaskboardError("INVALID_INPUT", "Expected a run log of at most 1 MB.");
   }
@@ -91,11 +135,24 @@ export function recordRunLog(task: Task, input: Record<string, unknown>): Task {
   const updated = record(task, "run-log", "agent");
   updated.history.at(-1)!.run = entries;
   if (input.durationMs !== undefined) updated.history.at(-1)!.durationMs = number(input.durationMs, "durationMs", 0);
-  return { ...updated, closedAt: task.closedAt };
+  return { ...updated, revision: task.revision, closedAt: task.closedAt };
+}
+
+export function withoutVerification(task: Task): Task {
+  if (!task.result?.checks.length && !task.result?.limitations.length && !task.history.some(event => event.run)) return task;
+  return {
+    ...task,
+    result: task.result && { ...task.result, checks: [], limitations: [] },
+    // Keep event positions for linked messages and keep the chat itself.
+    history: task.history.map(event => event.action === "run-log" ? { ...event, run: undefined } : event),
+  };
 }
 
 export function changeTask(task: Task, action: string, input: Record<string, unknown>): Task {
   requireRevision(task, input.revision);
+  if (action === "comment" && task.status === "done") {
+    return { ...record(task, action, boardActor(input), task.status, text(input.text, "text", true)), closedAt: task.closedAt };
+  }
   requireState(task, activeStates);
   switch (action) {
     case "approve":
@@ -109,7 +166,8 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
       return record(task, action, "user", "draft");
     case "request-changes":
       requireState(task, ["review"]);
-      return record(task, action, boardActor(input, "user"), "in_progress", text(input.reason, "reason", true));
+      return record(task, action, input.actor === "reviewer" ? "reviewer" : boardActor(input, "user"),
+        "in_progress", text(input.reason, "reason", true));
     case "pause":
       requireState(task, ["in_progress"]);
       return record(task, action, "agent", "ready");
@@ -143,7 +201,8 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
       const updated = fields(task, input);
       if (input.codexThreadId !== undefined) {
         const id = text(input.codexThreadId, "codexThreadId", true);
-        if (!codexThreadPattern.test(id) || (task.codexThreadId && task.codexThreadId !== id)) {
+        const replacing = input.actor === "user" && input.previousCodexThreadId === task.codexThreadId;
+        if (!codexThreadPattern.test(id) || (task.codexThreadId && task.codexThreadId !== id && !replacing)) {
           throw new TaskboardError("INVALID_INPUT", "Expected a valid Codex thread ID for this task.");
         }
         updated.codexThreadId = id;

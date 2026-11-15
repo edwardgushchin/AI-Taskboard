@@ -7,7 +7,8 @@ import { imageAttachmentPattern, maxAttachmentBytes, number, object, record, reg
 import type { ArchiveLink, Attachment, BoardTag, Task } from "./model.ts";
 import { directory, exists, readBinary, removeFile, validateCard, writeAtomic } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
-import { actorFor } from "./tasks.ts";
+import { managerInbox } from "./task-messages.ts";
+import { actorFor, withoutVerification } from "./tasks.ts";
 
 const maxCard = 16 * 1024 * 1024;
 const day = 24 * 60 * 60 * 1000;
@@ -101,7 +102,12 @@ export function isArchived(store: BoardStore, id: string): boolean {
 }
 
 export function readTask(store: BoardStore, id: string): Task {
-  return isArchived(store, id) ? openArchive(store, id, store.index.archive[id]).task : store.card(id);
+  if (!isArchived(store, id)) return store.card(id);
+  const link = store.index.archive[id];
+  const { task } = openArchive(store, id, link);
+  const edit = link.tagOverride;
+  return edit ? { ...task, tags: edit.tags, history: [...task.history, ...edit.history],
+    revision: task.revision + edit.history.length, updatedAt: edit.history.at(-1)!.at } : task;
 }
 
 export function setAttachmentCover(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
@@ -116,7 +122,7 @@ export function setAttachmentCover(store: BoardStore, task: Task, input: Record<
   return store.save({ ...updated, closedAt: task.closedAt });
 }
 
-export function upgradeTagCatalog(store: BoardStore): BoardTag[] {
+export function upgradeTagCatalog(store: BoardStore, persist = true): BoardTag[] {
   if (store.index.tags !== undefined) return store.index.tags;
   const names = Object.keys(store.index.tasks).flatMap(id => store.card(id).tags);
   for (const [id, link] of Object.entries(store.index.archive)) {
@@ -128,12 +134,12 @@ export function upgradeTagCatalog(store: BoardStore): BoardTag[] {
         continue;
       }
     }
-    for (const name of link.tags) names.push(name);
+    for (const name of link.tagOverride?.tags ?? link.tags) names.push(name);
   }
   const tags: BoardTag[] = [];
   registerTags(tags, names);
   store.index.tags = tags;
-  store.saveIndex();
+  if (persist) store.saveIndex();
   return tags;
 }
 
@@ -320,7 +326,9 @@ function archiveTask(store: BoardStore, task: Task, now: Date, closure: string):
   const link: ArchiveLink = {
     path: "archive/" + task.id + (task.attachments.length ? ".zip" : ".json.gz"),
     title: task.title, status: task.status, closedAt: closure, archivedAt: now.toISOString(),
+    updatedAt: task.updatedAt,
     tags: task.tags,
+    milestone: task.milestone,
   };
   let compressed: Uint8Array;
   if (task.attachments.length) {
@@ -371,10 +379,13 @@ export function sweepArchives(store: BoardStore, now = new Date()) {
   if (afterDays === null) return { archived, cleaned, issues };
   for (const id of Object.keys(store.index.tasks)) {
     try {
-      const task = store.card(id);
+      let task = store.card(id);
       if (task.status !== "done" && task.status !== "cancelled") continue;
+      const compact = withoutVerification(task);
+      if (compact !== task && !exists(store.pendingPath(id))) task = store.save(compact);
       const closure = closedAt(task);
       if (!closure || !(now.getTime() - Date.parse(closure) >= afterDays * day)) continue;
+      if (managerInbox([task]).some(message => message.kind === "accept")) continue;
       archiveTask(store, task, now, closure);
       archived.push(id);
     } catch (error) {

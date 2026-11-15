@@ -3,11 +3,11 @@ import {
   renameSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { discoverRepository, excludeBoard, git } from "./git.ts";
 import type { Repository } from "./git.ts";
-import { hexTagColor, reasoningEffortPattern, registerTags, tagColors, tagKey, TaskboardError, taskIdPattern, taskStates } from "./model.ts";
+import { boardAgentRoles, defaultBoardAgents, githubRepositoryPattern, hexTagColor, legacyTagColors, reasoningEffortPattern, registerTags, reviewModes, scheduleTimePattern, tagKey, TaskboardError, taskIdPattern, taskStates, validAgentLimitOverrides, validScheduleDate } from "./model.ts";
 import type { BoardIndex, Task } from "./model.ts";
 import { parseUsageReport, tokenFields, totalTokenUsage } from "./token-usage.ts";
 
@@ -34,6 +34,20 @@ export function directory(path: string, create = false): void {
   }
   if (!stat(path)?.isDirectory()) {
     throw new TaskboardError("INVALID_STORAGE_PATH", "Expected a real directory at " + path + ".");
+  }
+}
+
+export function taskWorkingDirectory(path: string, pinned = false): string {
+  if (!isAbsolute(path) || /[\x00-\x1f\x7f]/.test(path)) {
+    throw new TaskboardError("INVALID_INPUT", "Choose an absolute path for the task's working directory.");
+  }
+  try {
+    const actual = realpathSync(path);
+    if (pinned && actual !== path) throw new Error();
+    directory(actual);
+    return actual;
+  } catch {
+    throw new TaskboardError("WORKING_DIRECTORY_UNAVAILABLE", "The task's working directory is unavailable or now points somewhere else.", { path });
   }
 }
 
@@ -181,20 +195,38 @@ function isTagList(value: unknown): value is string[] {
   return Array.isArray(value) && value.every(name => typeof name === "string" && name.trim());
 }
 
+function validRoleSettings(value: unknown): boolean {
+  return value == null || (isRecord(value) && (value.provider === undefined || value.provider === "codex") &&
+    typeof value.model === "string" && Boolean(value.model.trim()) &&
+    typeof value.effort === "string" && reasoningEffortPattern.test(value.effort));
+}
+
+function validTaskSchedule(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.nextAt !== "string" || !Number.isFinite(Date.parse(value.nextAt))) return false;
+  if (value.everyMinutes !== undefined) {
+    return value.time === undefined && value.weekday === undefined && value.dayOfMonth === undefined && value.month === undefined &&
+      Number.isSafeInteger(value.everyMinutes) && Number(value.everyMinutes) >= 1;
+  }
+  if (typeof value.time !== "string" || !scheduleTimePattern.test(value.time)) return false;
+  if (value.dayOfMonth !== undefined || value.month !== undefined) {
+    return value.weekday === undefined && validScheduleDate(value.dayOfMonth, value.month);
+  }
+  return value.weekday === undefined || (Number.isSafeInteger(value.weekday) && Number(value.weekday) >= 0 && Number(value.weekday) <= 6);
+}
+
 function readIndex(path: string): BoardIndex {
   const index = readJson(path);
   if (!isRecord(index) || index.version !== 1 || typeof index.nextId !== "number" ||
       !Number.isSafeInteger(index.nextId) || index.nextId < 1 || !isRecord(index.tasks) ||
       !isRecord(index.archive) || !isRecord(index.settings) ||
-      (index.tags !== undefined && (!Array.isArray(index.tags) || index.tags.some(tag =>
-        !isRecord(tag) || typeof tag.name !== "string" || !tag.name.trim() || !tagColors.some(color => color === tag.color) ||
-        (tag.customColor !== undefined && (typeof tag.customColor !== "string" || !hexTagColor.test(tag.customColor)))) ||
-        new Set(index.tags.map(tag => tagKey(tag.name))).size !== index.tags.length)) ||
+      (index.tags !== undefined && !Array.isArray(index.tags)) ||
       !["merge", "squash"].includes(String(index.settings.integrationMode)) ||
+      (index.settings.name !== undefined && typeof index.settings.name !== "string") ||
       (index.settings.showCardPreviews !== undefined && typeof index.settings.showCardPreviews !== "boolean") ||
-      (index.settings.manager != null && (!isRecord(index.settings.manager) ||
-        typeof index.settings.manager.model !== "string" || !index.settings.manager.model.trim() ||
-        typeof index.settings.manager.effort !== "string" || !reasoningEffortPattern.test(index.settings.manager.effort))) ||
+      (index.settings.autoReview !== undefined && typeof index.settings.autoReview !== "boolean") ||
+      (index.settings.reviewMode !== undefined && !reviewModes.some(mode => mode === (index.settings as Record<string, unknown>).reviewMode)) ||
+      (index.settings.agentLimits !== undefined && !validAgentLimitOverrides(index.settings.agentLimits)) ||
+      !boardAgentRoles.every(role => validRoleSettings((index.settings as Record<string, unknown>)[role])) ||
       !(index.settings.archiveAfterDays === null ||
         (Number.isSafeInteger(index.settings.archiveAfterDays) && Number(index.settings.archiveAfterDays) >= 0))) {
     throw new TaskboardError("CORRUPT_STORAGE", "Unsupported or invalid board index at " + path + ".");
@@ -209,11 +241,38 @@ function readIndex(path: string): BoardIndex {
         !["archive/" + id + ".json.gz", "archive/" + id + ".zip"].includes(String(entry.path)) ||
         typeof entry.title !== "string" || !["done", "cancelled"].includes(String(entry.status)) ||
         typeof entry.closedAt !== "string" || typeof entry.archivedAt !== "string" ||
+        (entry.updatedAt !== undefined && typeof entry.updatedAt !== "string") ||
         (entry.tags !== undefined && !isTagList(entry.tags))) {
       throw new TaskboardError("CORRUPT_STORAGE", "Invalid archive link in the board index.", { id });
     }
+    const edit = entry.tagOverride;
+    if (edit !== undefined && (!isRecord(edit) || !isTagList(edit.tags) ||
+        !Array.isArray(edit.history) || !edit.history.length || edit.history.some(event =>
+          !isRecord(event) || event.action !== "update" || typeof event.at !== "string" ||
+          !["agent", "user", "manager"].includes(String(event.actor)) ||
+          (event.text !== undefined && typeof event.text !== "string")))) {
+      throw new TaskboardError("CORRUPT_STORAGE", "Invalid archived task tag history.", { id });
+    }
   }
-  return index as unknown as BoardIndex;
+  if (Array.isArray(index.tags)) {
+    const names = new Set<string>();
+    index.tags = index.tags.map(tag => {
+      if (!isRecord(tag) || typeof tag.name !== "string" || !tag.name.trim() || typeof tag.color !== "string") {
+        throw new TaskboardError("CORRUPT_STORAGE", "Invalid tag in the board index.");
+      }
+      const key = tagKey(tag.name);
+      const baseColor = Object.hasOwn(legacyTagColors, tag.color)
+        ? legacyTagColors[tag.color as keyof typeof legacyTagColors]
+        : tag.color;
+      const color = tag.customColor === undefined ? baseColor : tag.customColor;
+      if (names.has(key) || !hexTagColor.test(baseColor) || typeof color !== "string" || !hexTagColor.test(color)) {
+        throw new TaskboardError("CORRUPT_STORAGE", "Invalid tag in the board index.", { name: tag.name });
+      }
+      names.add(key);
+      return { name: tag.name, color: color.toUpperCase() };
+    });
+  }
+  return { ...index, settings: { ...defaultBoardAgents, ...index.settings } } as unknown as BoardIndex;
 }
 
 export function validateCard(value: unknown, id: string): Task {
@@ -222,8 +281,13 @@ export function validateCard(value: unknown, id: string): Task {
       Number(value.revision) < 1 || typeof value.createdAt !== "string" || typeof value.updatedAt !== "string" ||
       typeof value.description !== "string" || typeof value.summary !== "string" ||
       typeof value.nextStep !== "string" || !Array.isArray(value.history) ||
+      (value.milestone !== undefined && (!isRecord(value.milestone) ||
+        typeof value.milestone.repository !== "string" || !githubRepositoryPattern.test(value.milestone.repository) ||
+        !Number.isSafeInteger(value.milestone.number) || Number(value.milestone.number) < 1 ||
+        typeof value.milestone.title !== "string" || !value.milestone.title.trim())) ||
       (value.dependencies !== undefined && (!Array.isArray(value.dependencies) ||
         value.dependencies.some(entry => typeof entry !== "string" || !taskIdPattern.test(entry)))) ||
+      (value.schedule !== undefined && !validTaskSchedule(value.schedule)) ||
       (value.execution !== undefined && (!isRecord(value.execution) ||
         typeof value.execution.model !== "string" || !value.execution.model.trim() ||
         (value.execution.effort !== undefined &&
@@ -366,8 +430,14 @@ export class BoardStore {
       settings: this.index.settings,
       tags: this.index.tags ?? [],
       tasks: Object.keys(this.index.tasks).map(id => this.card(id)),
-      archived: Object.entries(this.index.archive).map(([id, entry]) => ({ id, ...entry })),
+      archived: this.archivedCards(),
     };
+  }
+
+  archivedCards() {
+    return Object.entries(this.index.archive).map(([id, { tagOverride, ...entry }]) =>
+      ({ id, ...entry, tags: tagOverride?.tags ?? entry.tags,
+        updatedAt: tagOverride?.history.at(-1)?.at ?? entry.updatedAt }));
   }
 
   doctor(repair: boolean) {
@@ -421,7 +491,9 @@ export function initializeBoard<T>(location: BoardLocation, snapshot: (store: Bo
         directory(join(location.directory, name), true);
       }
       const board: BoardIndex = {
-        version: 1, nextId: 1, settings: { archiveAfterDays: 90, integrationMode: "merge" }, tags: [], tasks: {}, archive: {},
+        version: 1, nextId: 1,
+        settings: { archiveAfterDays: 90, integrationMode: "merge", reviewMode: "reviewer", ...defaultBoardAgents },
+        tags: [], tasks: {}, archive: {},
       };
       writeJson(path, board);
     }

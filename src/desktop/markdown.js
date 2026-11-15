@@ -1,18 +1,22 @@
 const chatMarkdown = window.markdownit?.({ breaks: true, linkify: true, html: false });
 
-function localMarkdownLink(value) {
+const sourceLocation = /\.(?:cs|fs|vb|[cm]?js|[cm]?ts|jsx|tsx|py|rs|go|java|kt|swift|[ch]|cc|cpp|cxx|hh|hpp|hxx|rb|php|lua|gd|sh|ps1):[1-9]\d*(?::\d+)?$/i;
+const fullDigest = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+const reportSentences = new Intl.Segmenter(undefined, { granularity: "sentence" });
+
+function localDocumentLink(value) {
   try {
     const path = decodeURIComponent(value);
     return !/[\0-\x1f\x7f]/.test(path) &&
       (!/^[a-z][a-z\d+.-]*:/i.test(path) || /^(?:file:|[a-z]:[\\/])/i.test(path)) &&
-      /\.(?:md|markdown)(?::\d+(?::\d+)?)?(?:#.*)?$/i.test(path);
+      (/\.(?:md|markdown|txt|log|json)(?::\d+(?::\d+)?)?(?:#.*)?$/i.test(path) || sourceLocation.test(path));
   } catch { return false; }
 }
 
 if (chatMarkdown) {
   const web = url => /^https?:\/\//i.test(url);
   const inlineImage = url => /^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$/i.test(url);
-  chatMarkdown.validateLink = url => web(url) || /^mailto:/i.test(url) || inlineImage(url) || localMarkdownLink(url);
+  chatMarkdown.validateLink = url => web(url) || /^mailto:/i.test(url) || inlineImage(url) || localDocumentLink(url);
   const parseDestination = chatMarkdown.helpers.parseLinkDestination;
   chatMarkdown.helpers = { ...chatMarkdown.helpers };
   chatMarkdown.helpers.parseLinkDestination = (text, start, max) => {
@@ -27,7 +31,7 @@ if (chatMarkdown) {
       if (!angle && char === ")" && depth-- === 0) break;
     }
     const path = text.slice(start + (angle ? 1 : 0), end).trimEnd();
-    if (depth <= 0 && (!angle || text[end] === ">") && localMarkdownLink(path)) {
+    if (depth <= 0 && (!angle || text[end] === ">") && localDocumentLink(path)) {
       return { ok: true, str: path, pos: angle ? end + 1 : start + path.length };
     }
     return parseDestination(text, start, max);
@@ -41,9 +45,23 @@ if (chatMarkdown) {
     token.attrSet("referrerpolicy", "no-referrer");
     return image(tokens, index, options, env, renderer);
   };
+  chatMarkdown.core.ruler.before("text_join", "restore_markdown_paths", state => {
+    for (const block of state.tokens) {
+      if (block.type !== "inline") continue;
+      const tokens = block.children;
+      for (let index = tokens.length - 3; index >= 0; index--) {
+        const link = tokens[index];
+        if (link.type !== "link_open" || link.markup !== "linkify" || !/^mailto:/i.test(link.attrGet("href"))) continue;
+        const label = tokens[index + 1];
+        if (!/[\\/].*\.(?:md|markdown)$/i.test(label.content) || !localDocumentLink(label.content)) continue;
+        // Rejoin the plain path with adjacent text before the local link pass.
+        tokens.splice(index, 3, label);
+      }
+    }
+  });
   chatMarkdown.core.ruler.after("text_join", "local_markdown_links", state => {
     // Match unquoted paths in prose, with optional line/column and heading suffixes.
-    const references = /(^|[\s([{<>"'«“‘;,])((?:file:\/\/\/(?:[a-z]:\/)?|[a-z]:[\\/])?[\p{L}\p{M}\p{N}_.%+@~\\/-]+\.(?:markdown|md)(?::\d+(?::\d+)?)?(?:#[\p{L}\p{M}\p{N}_%.~-]*[\p{L}\p{M}\p{N}_%~-])?)(?=$|[\s)\]}<>"'»”’,;!?]|[.:](?=$|[\s)\]}<>"'»”’,;!?]))/giu;
+    const references = /(^|[\s([{<>"'«“‘;,])((?:file:\/\/\/(?:[a-z]:\/)?|[a-z]:[\\/])?[\p{L}\p{M}\p{N}_.%+@~\\/-]+\.(?:markdown|md|txt|log|json)(?::\d+(?::\d+)?)?(?:#[\p{L}\p{M}\p{N}_%.~-]*[\p{L}\p{M}\p{N}_%~-])?)(?=$|[\s)\]}<>"'»”’,;!?]|[.:](?=$|[\s)\]}<>"'»”’,;!?]))/giu;
     for (const block of state.tokens) {
       if (block.type !== "inline") continue;
       let inLink = false;
@@ -62,7 +80,9 @@ if (chatMarkdown) {
         let cursor = 0;
         for (const match of token.content.matchAll(references)) {
           const [, prefix, path] = match;
-          if (!localMarkdownLink(path)) continue;
+          if (!/\.(?:md|markdown)(?:[:#]|$)/i.test(path) &&
+              !(state.env.coordination && /[\\/]/.test(path))) continue;
+          if (!localDocumentLink(path)) continue;
           const target = decodeURIComponent(path.split("#", 1)[0]).replace(/:\d+(?::\d+)?$/, "");
           if (/^(?:file:\/\/)?[\\/]{2}/i.test(target)) continue;
           appendText(token.content.slice(cursor, match.index + prefix.length));
@@ -77,6 +97,54 @@ if (chatMarkdown) {
         if (cursor === 0) return [token];
         appendText(token.content.slice(cursor));
         return parts;
+      });
+    }
+  });
+  const location = String.raw`(?:[a-zA-Z]:[\\/]|\/)?(?:[\p{L}\p{N}_.@%-]+[\\/])*[\p{L}\p{N}_.@%-]+\.[a-zA-Z][a-zA-Z0-9]*:\d+(?::\d+)?`;
+  const identifier = String.raw`[a-zA-Z_]\w*`;
+  const generic = String.raw`<[\w., ?]+>`;
+  const patterns = [
+    `(?<location>${location})`,
+    String.raw`T-\d{4,}`,
+    String.raw`(?:${identifier}\.)*${identifier}(?:${generic})?\([\w., ?-]*\)`,
+    String.raw`(?:${identifier}\.)+${identifier}(?:${generic})?`,
+    String.raw`[A-Z]\w*(?:${generic}|\?)`,
+    String.raw`null|true|false|undefined|0x[\da-fA-F]+`,
+  ];
+  const agentReferences = new RegExp(String.raw`(?<![\p{L}\p{N}_.\\/:])(?:${patterns.join("|")})(?![\p{L}\p{N}_\\/])`, "gu");
+  const digest = /(?<![\p{L}\p{N}_.%/\\-])(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{40})(?![\p{L}\p{N}_%/\\-]|\.[\p{L}\p{N}])/u;
+  const reportReferences = new RegExp(digest.source + "|" + agentReferences.source, "gu");
+  chatMarkdown.core.ruler.after("local_markdown_links", "agent_inline_code", state => {
+    if (!state.env.agent) return;
+    for (const block of state.tokens) {
+      if (block.type !== "inline") continue;
+      let inLink = false;
+      block.children = block.children.flatMap(token => {
+        if (token.type === "link_open") inLink = true;
+        if (token.type === "link_close") inLink = false;
+        if (token.type !== "text" || inLink) return [token];
+        const parts = [];
+        let cursor = 0;
+        for (const match of token.content.matchAll(state.env.report ? reportReferences : agentReferences)) {
+          const [value] = match;
+          const before = new state.Token("text", "", 0);
+          before.content = token.content.slice(cursor, match.index);
+          const code = new state.Token("code_inline", "code", 0);
+          code.content = value;
+          parts.push(before);
+          if (match.groups.location && /[\\/]/.test(value) && sourceLocation.test(value) && localDocumentLink(value)) {
+            const link = new state.Token("link_open", "a", 1);
+            link.attrSet("href", chatMarkdown.normalizeLink(value));
+            link.attrSet("title", value);
+            code.content = decodeURIComponent(value).split(/[\\/]/).pop();
+            parts.push(link, code, new state.Token("link_close", "a", -1));
+          } else parts.push(code);
+          cursor = match.index + value.length;
+        }
+        if (!parts.length) return [token];
+        const after = new state.Token("text", "", 0);
+        after.content = token.content.slice(cursor);
+        return [...parts, after];
       });
     }
   });
@@ -98,19 +166,174 @@ if (chatMarkdown) {
     "<input type=\"checkbox\" disabled" + (tokens[index].markup === " " ? "" : " checked") + "> ";
 }
 
+function showCoordinationCommands(block) {
+  const shellCommand = /^(?:&[ \t]+(?:['"$.]|\w)|(?:pwsh|powershell|dotnet|git|npm|node|python3?|bash|sh|cmd)(?:\.exe)?[ \t]+\S)/i;
+  for (const code of block.querySelectorAll("p > code")) {
+    const before = code.previousSibling;
+    const after = code.nextSibling;
+    const introduced = before?.nodeType === Node.TEXT_NODE && before.textContent.trimEnd().endsWith(":");
+    const onOwnLine = (!before || before.nodeName === "BR") &&
+      (!after || after.nodeName === "BR" || (after.nodeType === Node.TEXT_NODE && /^[.!?]?[ \t]*$/.test(after.textContent)));
+    if (!(introduced || onOwnLine) || !shellCommand.test(code.textContent.trimStart())) continue;
+    const paragraph = code.parentElement;
+    const rest = element("p");
+    while (code.nextSibling) rest.append(code.nextSibling);
+    // A sentence-ending period after inline code belongs to the prose, not the command.
+    if (rest.firstChild?.nodeType === Node.TEXT_NODE) {
+      rest.firstChild.textContent = rest.firstChild.textContent.replace(/^(?:[.!?](?=\s|$))?[ \t]*/, "");
+      if (!rest.firstChild.textContent) rest.firstChild.remove();
+    }
+    if (rest.firstChild?.nodeName === "BR") rest.firstChild.remove();
+    if (before?.nodeName === "BR") before.remove();
+    const pre = element("pre");
+    paragraph.after(pre);
+    pre.append(code);
+    if (rest.hasChildNodes()) pre.after(rest);
+    if (!paragraph.textContent.trim()) paragraph.remove();
+  }
+}
+
+function addCodeCopy(pre, code) {
+  const wrapper = element("div", undefined, "chat-code-block");
+  const toolbar = element("div", undefined, "chat-code-toolbar");
+  const copy = button("", async () => {
+    try {
+      await navigator.clipboard.writeText(code.textContent);
+      copyIcon.classList.replace("codicon-copy", "codicon-check");
+      controlLabelForIcon(copy, language("Copied. Copy code again", "Скопировано. Скопировать код ещё раз"));
+    } catch {
+      controlLabelForIcon(copy, language("Could not copy. Select the code or retry.", "Не удалось скопировать. Выделите код или повторите."));
+      copyIcon.classList.replace("codicon-check", "codicon-copy");
+    }
+  }, "quiet chat-code-copy");
+  const copyIcon = element("i", undefined, "icon codicon codicon-copy");
+  copyIcon.setAttribute("aria-hidden", "true");
+  copy.append(copyIcon);
+  controlLabelForIcon(copy, language("Copy code", "Скопировать код"));
+  toolbar.append(copy);
+  pre.before(wrapper);
+  wrapper.append(toolbar, pre);
+}
+
+function showCoordinationEvidence(block) {
+  block.normalize();
+  // Start a new paragraph at an explicit evidence label followed by a file and checksum.
+  for (const link of block.querySelectorAll(":scope > p > a")) {
+    const before = link.previousSibling;
+    const after = link.nextSibling;
+    const checksum = after?.nextSibling;
+    if (before?.nodeType !== Node.TEXT_NODE || !/^,\s*SHA-?256\s+/i.test(after?.textContent ?? "") ||
+        checksum?.nodeName !== "CODE" || checksum.textContent.length !== 64 || !fullDigest.test(checksum.textContent)) continue;
+    const label = /(?:^|[.!?]\s+)((?:Журнал|Дневник|Отч[её]т|Log|Worklog|Report)\s[^.!?]*$)/iu.exec(before.textContent);
+    if (!label) continue;
+    const offset = before.length - label[1].length;
+    if (!offset && !before.previousSibling) continue;
+    const paragraph = link.parentElement;
+    const start = before.splitText(offset);
+    const evidence = element("p");
+    while (start.nextSibling) evidence.append(start.nextSibling);
+    evidence.prepend(start);
+    paragraph.after(evidence);
+  }
+}
+
+function formatReportReferences(block) {
+  for (const code of block.querySelectorAll(":not(pre, a) > code")) {
+    const value = code.textContent;
+    if (/^T-\d{4,}$/.test(value)) code.classList.add("chat-task-reference");
+    if (!fullDigest.test(value) || code.closest("a")) continue;
+    const label = language("Copy full hash", "Скопировать полный хеш");
+    const copy = button("", async () => {
+      try {
+        await navigator.clipboard.writeText(value);
+        icon.classList.replace("codicon-copy", "codicon-check");
+        copy.setAttribute("aria-label", language("Copied. ", "Скопировано. ") + label);
+      } catch {
+        icon.classList.replace("codicon-check", "codicon-copy");
+        copy.setAttribute("aria-label", language("Copy failed. Retry.", "Не удалось скопировать. Повторить."));
+      }
+    }, "quiet chat-digest");
+    const icon = element("i", undefined, "icon codicon codicon-copy");
+    icon.setAttribute("aria-hidden", "true");
+    copy.title = value;
+    copy.setAttribute("aria-label", label + " " + value);
+    code.textContent = value.slice(0, 12) + "…";
+    code.replaceWith(copy);
+    copy.append(code, icon);
+  }
+}
+
+function foldTechnicalDetails(block) {
+  for (const heading of block.querySelectorAll(":scope > :is(h1, h2, h3, h4, h5, h6)")) {
+    if (heading.parentElement !== block || !heading.previousElementSibling ||
+        !/^(?:Technical details|Технические детали)$/i.test(heading.textContent.trim())) continue;
+    const level = Number(heading.tagName[1]);
+    const details = element("details", undefined, "chat-report-details");
+    const content = element("div", undefined, "chat-report-body");
+    while (heading.nextElementSibling) {
+      const next = heading.nextElementSibling;
+      const nextHeading = /^H([1-6])$/.exec(next.tagName);
+      if (nextHeading && Number(nextHeading[1]) <= level) break;
+      content.append(next);
+    }
+    if (!content.childElementCount) continue;
+    details.append(element("summary", heading.textContent.trim()), content);
+    heading.replaceWith(details);
+  }
+}
+
+function splitLongReportParagraphs(block) {
+  for (const paragraph of block.querySelectorAll(":scope > p")) {
+    const text = paragraph.textContent;
+    if (text.length < 360 || paragraph.querySelector("br, img, input")) continue;
+    let endOfBlock = text.length;
+    for (const { index } of [...reportSentences.segment(text)].reverse()) {
+      if (index < 160 || endOfBlock - index < 160) continue;
+      let offset = index;
+      const node = [...paragraph.childNodes].find(child => {
+        if (offset < child.textContent.length) return true;
+        offset -= child.textContent.length;
+        return false;
+      });
+      if (!node || (offset > 0 && node.nodeType !== Node.TEXT_NODE)) continue;
+      const range = document.createRange();
+      if (offset === 0) range.setStartBefore(node);
+      else range.setStart(node, offset);
+      range.setEnd(paragraph, paragraph.childNodes.length);
+      const next = element("p");
+      next.append(range.extractContents());
+      paragraph.after(next);
+      endOfBlock = index;
+    }
+  }
+}
+
 function chatText(text, context = { taskId: taskInSheet?.id }) {
   const block = element("div", undefined, "chat-text");
   if (!chatMarkdown) {
     block.innerText = text;
     return block;
   }
-  block.innerHTML = chatMarkdown.render(text);
+  const agent = context.agent || context.coordination;
+  const report = agent && !context.source;
+  block.classList.toggle("chat-agent-text", Boolean(report));
+  block.innerHTML = chatMarkdown.render(text, { agent, report: report || context.coordination, coordination: context.coordination });
+  if (context.coordination) {
+    showCoordinationCommands(block);
+    showCoordinationEvidence(block);
+  }
+  if (report) {
+    foldTechnicalDetails(block);
+    splitLongReportParagraphs(block);
+  }
+  if (report || context.coordination) formatReportReferences(block);
+  for (const code of block.querySelectorAll("pre > code")) addCodeCopy(code.parentElement, code);
   block.addEventListener("click", event => {
     const link = event.target.closest("a");
     if (!link) return;
     event.preventDefault();
     const href = link.getAttribute("href");
-    if (localMarkdownLink(href)) {
+    if (localDocumentLink(href)) {
       void protect(() => openMarkdownPreview(href, context))();
     } else {
       void protect(() => api.openLink(href))();
@@ -122,9 +345,10 @@ function chatText(text, context = { taskId: taskInSheet?.id }) {
 async function openMarkdownPreview(value, context) {
   const focus = document.activeElement;
   const dialog = element("dialog", undefined, "markdown-preview");
-  dialog.setAttribute("aria-label", language("Markdown document", "Документ Markdown"));
+  const label = language("Document preview", "Просмотр документа");
+  dialog.setAttribute("aria-label", label);
   const header = element("header", undefined, "sheet-header");
-  const title = element("h2", language("Markdown document", "Документ Markdown"));
+  const title = element("h2", label);
   const close = button("×", () => dialog.close(), "quiet");
   controlLabelForIcon(close, language("Close preview", "Закрыть просмотр"));
   header.append(title, close);
@@ -147,9 +371,25 @@ async function openMarkdownPreview(value, context) {
     const file = result.data;
     title.textContent = file.name;
     title.title = file.path;
-    dialog.setAttribute("aria-label", file.name);
     const path = element("p", file.path, "markdown-preview-path muted");
-    content.replaceChildren(path, chatText(file.text, { ...context, source: file.path }));
+    const markdown = /\.(?:md|markdown)$/i.test(file.name);
+    const preview = markdown ? chatText(file.text, { ...context, source: file.path }) : element("div", undefined, "chat-text");
+    let target;
+    if (!markdown) {
+      const lines = file.line ? file.text.split("\n") : [];
+      const pre = element("pre");
+      if (file.line && file.line <= lines.length) {
+        const index = file.line - 1;
+        target = element("mark", lines[index], "source-line");
+        pre.append(index ? lines.slice(0, index).join("\n") + "\n" : "", target,
+          index + 1 < lines.length ? "\n" + lines.slice(index + 1).join("\n") : "");
+        title.textContent += ":" + file.line;
+      } else pre.textContent = file.text;
+      preview.append(pre);
+    }
+    dialog.setAttribute("aria-label", title.textContent);
+    content.replaceChildren(path, preview);
+    target?.scrollIntoView({ block: "center", inline: "nearest" });
   } catch (error) {
     if (dialog.open) status.textContent = error.message;
   }

@@ -1,13 +1,16 @@
 import { join, relative } from "node:path";
-import { git, isAncestor, localBranch, mergeTree, requireRepository, resolveCommit } from "./git.ts";
-import type { Repository } from "./git.ts";
-import { object, record, requireRevision, requireState, TaskboardError, text } from "./model.ts";
+import { artifactFiles } from "./artifacts.ts";
+import { git, inspectMergeTree, isAncestor, localBranch, mergeTree, requireRepository, resolveCommit, skipAutoMaintenance, worktrees } from "./git.ts";
+import type { Repository, Worktree } from "./git.ts";
+import { member, number, object, record, requireRevision, requireState, TaskboardError, text } from "./model.ts";
 import type { IntegrationMode, Task, TaskGit } from "./model.ts";
 import { checkPreserveChanges, describeSavedChanges, inspectLocalChanges, restoreSavedChanges, saveLocalChanges } from "./saved-changes.ts";
 import { exists, readJson, removeFile, writeJson } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
 import { conventionalMessage, noChangesReviewIsStale } from "./submission.ts";
 import { checkProtectedPaths, cleanTaskWorktree, collidingPaths, findWorktree, gitStatus, requireNoGitOperation, usableWorktree } from "./worktree.ts";
+import { withoutVerification } from "./tasks.ts";
+import { currentReviewApproval } from "./task-messages.ts";
 
 interface AcceptIntent {
   action: "accept";
@@ -18,7 +21,7 @@ interface AcceptIntent {
   tree: string;
   mode: IntegrationMode;
   message: string;
-  actor?: "manager";
+  actor?: "manager" | "reviewer";
   restoreLocalChanges?: true;
 }
 
@@ -45,33 +48,139 @@ function targetHead(repo: Repository, target: string): string {
   return head;
 }
 
-export function inspectReview(store: BoardStore, task: Task) {
+function reviewWorktreePath(item: Worktree | undefined): string | undefined {
+  return item && !item.prunable && exists(item.path) ? usableWorktree(item) : undefined;
+}
+
+function submissionIsStale(item: Worktree | undefined, submitted: string): boolean {
+  const path = item?.head === submitted ? reviewWorktreePath(item) : undefined;
+  return !path || Boolean(gitStatus(path));
+}
+
+function reviewMerge(path: string, base: string, head: string, submitted: string) {
+  if (base === submitted) return { status: "integrated" as const };
+  return base === head ? { status: "clean" as const } : inspectMergeTree(path, head, submitted);
+}
+
+export function inspectReviewQueue(store: BoardStore, tasks: Task[]) {
+  const repo = store.location.repository;
+  const entries = repo && tasks.some(task => !task.result?.noChanges) ? worktrees(repo.root) : [];
+  const targets = new Map<string, { branch: string; head: string; path: string }>();
+  return tasks.map(task => {
+    const { id, title, revision, history } = task;
+    const submittedAt = history.findLast(event => event.action === "submit" && event.to === "review")?.at;
+    const entry = { id, title, revision, submittedAt, summary: task.result?.summary ?? task.summary,
+      ...(currentReviewApproval(task) ? { reviewerApproved: true } : {}) };
+    try {
+      if (exists(store.pendingPath(id))) return { ...entry, status: "pending" as const };
+      if (task.result?.noChanges) {
+        const stale = noChangesReviewIsStale(store, task, task.result.noChanges.head);
+        return { ...entry, status: stale ? "stale" as const : "noChanges" as const };
+      }
+      const { target, branch, submission: { sha } } = reviewed(task);
+      const repository = requireRepository(repo);
+      let snapshot = targets.get(target);
+      if (!snapshot) {
+        const targetBranch = localBranch(repository, target);
+        snapshot = { branch: targetBranch, head: targetHead(repository, targetBranch),
+          path: reviewWorktreePath(findWorktree(repository, targetBranch, entries)) ?? repository.root };
+        targets.set(target, snapshot);
+      }
+      const gitEntry = { ...entry, target: snapshot.branch, targetHead: snapshot.head };
+      if (submissionIsStale(findWorktree(repository, branch, entries), sha)) return { ...gitEntry, status: "stale" as const };
+      const base = git(repository.root, ["merge-base", snapshot.head, sha]).trim();
+      return { ...gitEntry, ...reviewMerge(snapshot.path, base, snapshot.head, sha) };
+    } catch (error) {
+      if (!(error instanceof TaskboardError)) throw error;
+      return { ...entry, status: "unchecked" as const, error: { code: error.code, message: error.message } };
+    }
+  });
+}
+
+export function reviewDetails(store: BoardStore, task: Task, compact: boolean) {
   requireState(task, ["review"]);
-  if (task.result?.noChanges) {
-    return {
-      noChanges: true, revision: task.revision, targetHead: null, paths: [], diff: "",
-      stale: noChangesReviewIsStale(store, task, task.result.noChanges.head), result: task.result,
-    };
-  }
+  const path = store.pendingPath(task.id);
+  const pending = exists(path);
+  const fullGitReview = !compact && !task.result?.noChanges;
+  return {
+    pending,
+    artifacts: compact ? artifactFiles(store, task.id) : [],
+    intent: fullGitReview && pending ? readJson(path) : undefined,
+    savedChanges: fullGitReview ? describeSavedChanges(store, task) : undefined,
+  };
+}
+
+function reviewGitState(store: BoardStore, task: Task) {
   const context = reviewed(task);
   const repo = requireRepository(store.location.repository);
   const target = localBranch(repo, context.target);
   const head = targetHead(repo, target);
   const submitted = context.submission.sha;
+  const stale = submissionIsStale(findWorktree(repo, context.branch), submitted);
+  return { context, repo, target, head, submitted, stale };
+}
+
+export function verifyReviewDecision(store: BoardStore, task: Task, expectedHead: unknown) {
+  requireState(task, ["review"]);
+  const noChanges = task.result?.noChanges;
+  const { stale, head } = noChanges
+    ? { stale: noChangesReviewIsStale(store, task, noChanges.head), head: null }
+    : reviewGitState(store, task);
+  if (stale || expectedHead !== head) {
+    throw new TaskboardError(stale ? "STALE_SUBMISSION" : "TARGET_CHANGED",
+      "Review the current submission and target branch before recording the result.");
+  }
+  return head;
+}
+
+export function inspectReview(store: BoardStore, task: Task, snapshot: ReturnType<typeof reviewDetails>,
+  compact: boolean, previousTargetHead?: unknown, previousSubmitted?: unknown) {
+  const approval = compact ? currentReviewApproval(task) : undefined;
+  const details = compact ? { title: task.title, description: task.description, criteria: task.criteria,
+    artifacts: snapshot.artifacts,
+    submissionSequence: task.history.findLastIndex(event => event.action === "submit" && event.to === "review") + 1,
+    ...(approval?.reviewApproval ? { reviewerApproval: { summary: approval.text, ...approval.reviewApproval } } : {}),
+  } : undefined;
+  if (task.result?.noChanges) {
+    return {
+      noChanges: true as const, revision: task.revision, targetHead: null, paths: [],
+      stale: noChangesReviewIsStale(store, task, task.result.noChanges.head), result: task.result,
+      ...(details ?? { diff: "" }),
+    };
+  }
+  const { context, repo, target, head, submitted, stale } = reviewGitState(store, task);
   const base = git(repo.root, ["merge-base", head, submitted]).trim();
-  const item = findWorktree(repo, context.branch);
-  const stale = !item || item.prunable || item.head !== submitted || !exists(item.path) ||
-    Boolean(gitStatus(usableWorktree(item)));
   const paths = splitPaths(git(repo.root, ["diff", "--no-renames", "--name-only", "-z", base, submitted]));
-  const checkout = findWorktree(repo, target);
-  const local = checkout && !checkout.prunable && exists(checkout.path)
-    ? inspectLocalChanges(usableWorktree(checkout), head) : undefined;
-  const savedChanges = describeSavedChanges(store, task);
-  const retry = readIntent(store.pendingPath(task.id), task, target, submitted);
+  const canCheckMerge = !stale && !snapshot.pending;
+  const diverged = base !== head && base !== submitted;
+  const checkout = !details || (canCheckMerge && diverged) ? findWorktree(repo, target) : undefined;
+  const checkoutPath = reviewWorktreePath(checkout);
+  const merge = canCheckMerge ? reviewMerge(checkoutPath ?? repo.root, base, head, submitted) : undefined;
+  const summary = { revision: task.revision, targetHead: head, submitted, stale, paths, result: task.result, merge };
+  if (details) {
+    const targetChanges = base !== head && paths.length
+      ? new Set(splitPaths(git(repo.root, ["diff", "--no-renames", "--name-only", "-z", base, head]))) : undefined;
+    previousTargetHead ??= approval?.reviewApproval?.targetHead;
+    const previous = typeof previousTargetHead === "string" && oid.test(previousTargetHead) &&
+      previousTargetHead !== head ? resolveCommit(repo.root, previousTargetHead) : undefined;
+    const changesSinceReview = previous && splitPaths(git(repo.root, ["diff", "--no-renames", "--name-only", "-z", previous, head]));
+    const previousSubmission = typeof previousSubmitted === "string" && oid.test(previousSubmitted) &&
+      previousSubmitted !== submitted ? resolveCommit(repo.root, previousSubmitted) : undefined;
+    const submissionChanges = previousSubmission &&
+      splitPaths(git(repo.root, ["diff", "--no-renames", "--name-only", "-z", previousSubmission, submitted]));
+    return {
+      ...summary, ...details, target, mode: store.index.settings.integrationMode,
+      mergeBase: base, targetOverlaps: paths.filter(path => targetChanges?.has(path)),
+      ...(changesSinceReview ? { targetChangesSinceReview: { paths: changesSinceReview.slice(0, 100), total: changesSinceReview.length } } : {}),
+      ...(submissionChanges ? { submissionChangesSinceReview: { paths: submissionChanges.slice(0, 100), total: submissionChanges.length } } : {}),
+    };
+  }
+  const retry = snapshot.pending ? parseIntent(snapshot.intent, task, target, submitted) : undefined;
+  const local = checkoutPath ? inspectLocalChanges(checkoutPath, head) : undefined;
   return {
-    target, targetHead: head, submitted, stale, revision: task.revision, message: retry?.message ?? context.submission.message,
+    ...summary, target, message: retry?.message ?? context.submission.message,
     mode: store.index.settings.integrationMode,
-    paths, savedChanges,
+    savedChanges: snapshot.savedChanges,
     localChanges: local && {
       path: local.path, paths: local.paths, token: local.token,
       overlaps: collidingPaths(local.path, local.paths, paths),
@@ -79,6 +188,104 @@ export function inspectReview(store: BoardStore, task: Task) {
     pending: Boolean(retry),
     diff: git(repo.root, ["diff", ...diffOptions, "--binary", base, submitted]),
   };
+}
+
+function reviewHunkAtLine(diff: string, line: number, radius?: number): string {
+  if ([...diff.matchAll(/^diff --git /gm)].length > 1) {
+    throw new TaskboardError("INVALID_INPUT", "Select a single file diff when reading by line.");
+  }
+  const hunks = [...diff.matchAll(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@([^\r\n]*)$/gm)];
+  const selected = hunks.findIndex(([, , , start, count]) => {
+    const first = Number(start);
+    return line >= first && line < first + Math.max(1, Number(count ?? 1));
+  });
+  if (selected < 0) return "";
+  const header = diff.slice(0, hunks[0].index);
+  const hunk = hunks[selected];
+  const end = hunks[selected + 1]?.index;
+  if (radius === undefined) return header + diff.slice(hunk.index, end);
+
+  const [, oldStart, oldCount, newStart, newCount, label] = hunk;
+  let oldLine = Number(oldStart) + (oldCount === "0" ? 1 : 0);
+  let newLine = Number(newStart) + (newCount === "0" ? 1 : 0);
+  let beginning: { old: number; new: number } | undefined;
+  let oldLines = 0;
+  let newLines = 0;
+  const rows: string[] = [];
+  let keep = false;
+  for (const text of diff.slice(hunk.index + hunk[0].length + 1, end).split(/(?<=\n)/)) {
+    const kind = text[0];
+    if (kind === " " || kind === "-" || kind === "+") {
+      const anchor = newCount === "0" ? Number(newStart) : newLine;
+      if (anchor > line + radius) break;
+      keep = anchor >= line - radius;
+      if (keep) {
+        beginning ??= { old: oldLine, new: newLine };
+        oldLines += kind === "+" ? 0 : 1;
+        newLines += kind === "-" ? 0 : 1;
+      }
+      oldLine += kind === "+" ? 0 : 1;
+      newLine += kind === "-" ? 0 : 1;
+    }
+    if (keep && text) rows.push(text);
+  }
+  if (!beginning) return "";
+  const oldRange = oldLines ? beginning.old : beginning.old - 1;
+  const newRange = newLines ? beginning.new : beginning.new - 1;
+  return header + `@@ -${oldRange},${oldLines} +${newRange},${newLines} @@${label}\n` + rows.join("");
+}
+
+export function inspectReviewDiff(repository: Repository | null, task: Task, input: Record<string, unknown>) {
+  requireState(task, ["review"]);
+  requireRevision(task, input.revision, true);
+  const paths = input.paths;
+  if (!Array.isArray(paths) || !paths.length || !paths.every(path => typeof path === "string" && path.length > 0) ||
+      new Set(paths).size !== paths.length || typeof input.targetHead !== "string" || !oid.test(input.targetHead)) {
+    throw new TaskboardError("INVALID_INPUT", "Supply the reviewed target HEAD and distinct changed paths.");
+  }
+  const line = input.line === undefined ? undefined : number(input.line, "line", 1);
+  const radius = input.lineRadius === undefined ? undefined : number(input.lineRadius, "lineRadius", 0);
+  if (radius !== undefined && (line === undefined || radius > 100)) {
+    throw new TaskboardError("INVALID_INPUT", "Use lineRadius between 0 and 100 with a line number.");
+  }
+  if (line !== undefined && paths.length !== 1) {
+    throw new TaskboardError("INVALID_INPUT", "Select exactly one changed file when reading by line.");
+  }
+  const { target, submission: { sha: submitted } } = reviewed(task);
+  const repo = requireRepository(repository);
+  const head = input.pinnedTarget === true ? resolveCommit(repo.root, input.targetHead) : targetHead(repo, localBranch(repo, target));
+  if (head !== input.targetHead) {
+    throw new TaskboardError("TARGET_CHANGED", "The target branch advanced. Review the changes again.", { head });
+  }
+  const compareTarget = input.previousTargetHead !== undefined;
+  if (compareTarget && input.previousSubmitted !== undefined) {
+    throw new TaskboardError("INVALID_INPUT", "Select only one previous commit for comparison.");
+  }
+  const previous = compareTarget ? input.previousTargetHead : input.previousSubmitted;
+  const compared = compareTarget ? head : submitted;
+  const base = previous === undefined ? git(repo.root, ["merge-base", head, submitted]).trim() :
+    typeof previous === "string" && oid.test(previous) && previous !== compared
+      ? resolveCommit(repo.root, previous) : undefined;
+  if (!base) throw new TaskboardError("INVALID_INPUT", "Supply a distinct previous commit for this comparison.");
+  const changed = new Set(splitPaths(git(repo.root, ["diff", "--no-renames", "--name-only", "-z", base, compared])));
+  if (paths.some(path => !changed.has(path))) {
+    throw new TaskboardError("INVALID_INPUT", "Select exact paths returned by the review.");
+  }
+  const offset = input.offset === undefined ? 0 : number(input.offset, "offset", 0);
+  const contextLines = input.contextLines === undefined ? undefined : number(input.contextLines, "contextLines", 0);
+  if (contextLines !== undefined && contextLines > 100) {
+    throw new TaskboardError("INVALID_INPUT", "Use between 0 and 100 context lines.");
+  }
+  const context = contextLines === undefined ? [] : ["--unified=" + contextLines];
+  const format = line !== undefined ? ["--no-renames", "--submodule=short"] : compareTarget ? [] : ["--binary"];
+  const fullDiff = git(repo.root, ["--literal-pathspecs", "diff", ...diffOptions, ...format, "--no-color", ...context, base, compared, "--", ...paths]);
+  const diff = line === undefined ? fullDiff : reviewHunkAtLine(fullDiff, line, radius);
+  if (offset > diff.length || /[\uDC00-\uDFFF]/.test(diff.charAt(offset))) {
+    throw new TaskboardError("INVALID_INPUT", "Use the nextOffset returned for these paths.");
+  }
+  let end = offset + 16_000;
+  if (/[\uDC00-\uDFFF]/.test(diff.charAt(end))) end--;
+  return { paths, diff: diff.slice(offset, end), ...(end < diff.length ? { nextOffset: end } : {}) };
 }
 
 export function reopenConflictingReview(store: BoardStore, task: Task, input: Record<string, unknown>) {
@@ -169,8 +376,11 @@ function recoverCommit(repo: Repository, head: string, intent: AcceptIntent): st
 }
 
 function readIntent(path: string, task: Task, target: string, submitted: string): AcceptIntent | undefined {
-  if (!exists(path)) return undefined;
-  const pending = object(readJson(path));
+  return exists(path) ? parseIntent(readJson(path), task, target, submitted) : undefined;
+}
+
+function parseIntent(value: unknown, task: Task, target: string, submitted: string): AcceptIntent {
+  const pending = object(value);
   if (pending.action !== "accept" || pending.revision !== task.revision || pending.target !== target ||
       pending.submitted !== submitted) {
     throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation first.");
@@ -179,14 +389,14 @@ function readIntent(path: string, task: Task, target: string, submitted: string)
       typeof pending.tree !== "string" || !oid.test(pending.tree) ||
       (pending.mode !== "merge" && pending.mode !== "squash") ||
       (pending.restoreLocalChanges !== undefined && pending.restoreLocalChanges !== true) ||
-      (pending.actor !== undefined && pending.actor !== "manager") ||
+      (pending.actor !== undefined && pending.actor !== "manager" && pending.actor !== "reviewer") ||
       typeof pending.message !== "string" || conventionalMessage(pending.message, task.id) !== pending.message) {
     throw new TaskboardError("CORRUPT_STORAGE", "Invalid acceptance recovery record.");
   }
   return pending as unknown as AcceptIntent;
 }
 
-function finish(store: BoardStore, task: Task, sha: string, restoreLocalChanges = false, actor: "user" | "manager" = "user") {
+function finish(store: BoardStore, task: Task, sha: string, restoreLocalChanges = false, actor: "user" | "manager" | "reviewer" = "user") {
   let localChangesWarning;
   if (restoreLocalChanges) {
     try {
@@ -199,7 +409,7 @@ function finish(store: BoardStore, task: Task, sha: string, restoreLocalChanges 
     }
   }
   const context = reviewed(task);
-  const completed = store.save(record({ ...task, git: { ...context, accepted: sha } }, "accept", actor, "done", sha));
+  const completed = store.save(withoutVerification(record({ ...task, git: { ...context, accepted: sha } }, "accept", actor, "done", sha)));
   removeFile(store.pendingPath(task.id));
   return { ...completed, localChangesWarning };
 }
@@ -239,35 +449,51 @@ export function acceptTask(store: BoardStore, task: Task, input: Record<string, 
   }
 }
 
+export function compareAcceptedTree(repository: Repository | null, context: Task["git"]): boolean | undefined {
+  const { accepted, submission } = context ?? {};
+  if (!repository || !accepted || !submission) return;
+  try {
+    const [acceptedTree, submittedTree] = git(repository.root, ["--no-replace-objects", "rev-parse", "--revs-only", "--end-of-options",
+      accepted + "^{tree}", submission.sha + "^{tree}"]).trim().split(/\s+/);
+    if (oid.test(acceptedTree) && oid.test(submittedTree)) return acceptedTree === submittedTree;
+  } catch {
+    // A missing comparison must not turn a completed acceptance into a failure.
+  }
+}
+
 export function cleanAcceptedTask(store: BoardStore, task: Task) {
+  const result = { ...task, acceptedTreeMatchesSubmission: compareAcceptedTree(store.location.repository, task.git) };
   try {
     cleanTaskWorktree(store, task);
-    return task;
+    return result;
   } catch (error) {
     const cleanupWarning = error instanceof TaskboardError
       ? { code: error.code, message: error.message, details: error.details }
       : { code: "CLEANUP_FAILED", message: String(error) };
-    return { ...task, cleanupWarning };
+    return { ...result, cleanupWarning };
   }
 }
 
 function integrateTask(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
+  const actor = input.actor === "manager" || input.actor === "reviewer" ? input.actor : undefined;
   const pendingPath = store.pendingPath(task.id);
   if (task.status === "done" && (task.git?.accepted || task.result?.noChanges)) {
     if (exists(pendingPath) && object(readJson(pendingPath)).action === "accept") removeFile(pendingPath);
-    return task;
+    const compact = withoutVerification(task);
+    return compact === task ? task : store.save(compact);
   }
   requireState(task, ["review"]);
   if (task.result?.noChanges) {
     requireRevision(task, input.revision, true);
     if (exists(pendingPath)) throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation first.");
-    if (input.commit !== undefined || input.message !== undefined || (input.targetHead !== undefined && input.targetHead !== null)) {
+    if (input.commit !== undefined || input.message !== undefined || input.integrationMode !== undefined ||
+        (input.targetHead !== undefined && input.targetHead !== null)) {
       throw new TaskboardError("INVALID_INPUT", "This submission does not need an acceptance commit.");
     }
     if (noChangesReviewIsStale(store, task, task.result.noChanges.head)) {
       throw new TaskboardError("STALE_SUBMISSION", "The task worktree changed. Submit the task again.");
     }
-    return store.save(record(task, "accept", input.actor === "manager" ? "manager" : "user", "done"));
+    return store.save(withoutVerification(record(task, "accept", actor ?? "user", "done")));
   }
   const context = reviewed(task);
   const repo = requireRepository(store.location.repository);
@@ -275,9 +501,14 @@ function integrateTask(store: BoardStore, task: Task, input: Record<string, unkn
   const submitted = context.submission.sha;
   const head = targetHead(repo, target);
   let intent = readIntent(pendingPath, task, target, submitted);
+  const mode = input.integrationMode === undefined ? intent?.mode ?? store.index.settings.integrationMode :
+    member(input.integrationMode, ["merge", "squash"], "integration mode");
   if (!intent || input.revision !== undefined) requireRevision(task, input.revision, !intent);
   if (intent && input.commit !== undefined) {
     throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted local acceptance first.");
+  }
+  if (intent && mode !== intent.mode) {
+    throw new TaskboardError("PENDING_OPERATION", "Retry with the originally confirmed integration mode.");
   }
   if (intent && head !== intent.parent) return finish(store, task, recoverCommit(repo, head, intent), intent.restoreLocalChanges, intent.actor);
   if (!intent && input.commit !== undefined) return finish(store, task, verifyExternal(repo, task, head, submitted, input.commit));
@@ -309,13 +540,13 @@ function integrateTask(store: BoardStore, task: Task, input: Record<string, unkn
   if (!intent) {
     const message = conventionalMessage(input.message ?? context.submission.message, task.id);
     const tree = mergeTree(path, head, submitted);
-    if (store.index.settings.integrationMode === "squash" && commitInfo(path, head).tree === tree) {
+    if (mode === "squash" && commitInfo(path, head).tree === tree) {
       throw new TaskboardError("ALREADY_INTEGRATED", "The target branch already contains the submitted changes.");
     }
     intent = {
       action: "accept", revision: task.revision, target, parent: head, submitted, tree,
-      mode: store.index.settings.integrationMode, message,
-      ...(input.actor === "manager" ? { actor: "manager" as const } : {}),
+      mode, message,
+      ...(actor ? { actor } : {}),
     };
   } else {
     if (input.message !== undefined && conventionalMessage(input.message, task.id) !== intent.message) {
@@ -354,14 +585,14 @@ function integrateTask(store: BoardStore, task: Task, input: Record<string, unkn
 
   try {
     if (intent.mode === "merge") {
-      git(path, ["merge", ...mergeOptions, "--no-squash", "--no-ff", "--no-edit", "--no-log",
+      git(path, [...skipAutoMaintenance, "merge", ...mergeOptions, "--no-squash", "--no-ff", "--no-edit", "--no-log",
         "--cleanup=verbatim", "-m", intent.message, submitted]);
     } else {
       if (!resumedSquash) git(path, ["merge", ...mergeOptions, "--squash", "--ff", submitted]);
       if (git(path, ["write-tree"]).trim() !== intent.tree) {
         throw new TaskboardError("ACCEPTANCE_MISMATCH", "The prepared squash differs from the reviewed merge tree.", { path });
       }
-      git(path, ["commit", "--cleanup=verbatim", "-m", intent.message]);
+      git(path, [...skipAutoMaintenance, "commit", "--cleanup=verbatim", "-m", intent.message]);
     }
   } catch (error) {
     const beforeMerge = preserve ? local.untracked.map(name => "? " + name + "\0").join("") : direct && saveToken === undefined ? status : "";

@@ -4,17 +4,21 @@ import type { BoardMcpTool } from "./board-mcp.ts";
 import { cliFailure } from "./cli.ts";
 import { inspectProjectPath } from "./project-files.ts";
 
-const maxWaitSeconds = 300;
+const maxWaitSeconds = 20 * 60;
 export const executorToolTimeoutSeconds = maxWaitSeconds + 20;
-export const checkWaitInstructions = "For a long check that can run in the background, save its result and create a unique marker in the working directory only after the check exits, even if it fails. When waiting is the only work left, call check_wait with that marker and omit timeoutSeconds to use the five-minute default. Through functions.exec, use a 60000 ms yield and keep waiting on the same cell if it is still running. Read the saved exit code and report when the marker appears.";
+export const checkWaitInstructions = [
+  "For a long check launched with exec_command, keep its session_id and use write_stdin with empty chars to wait for the exit code and output on that session. When waiting is the only work left, use a 60000 ms yield. Inspect partial logs only to answer a specific diagnostic question.",
+  "For a detached or delegated check without a session_id, arrange before launch to save the exit code and create a unique marker in the working directory after exit, including on failure. When waiting is the only work left, call check_wait with that marker and omit timeoutSeconds. If the wait times out while the check is still running, wait on the same marker again. Read the saved exit code and report when the marker appears.",
+  "In functions.exec, use a 60000 ms yield when waiting is your only action. If it returns a running cell, continue waiting on that cell with functions.wait.",
+].join(" ");
 
 export const checkWaitTool: BoardMcpTool = {
   name: "check_wait",
-  description: "Wait for a fresh completion marker in the assigned working directory while a check runs. Set up the check to create a unique marker after it exits, including on failure. The marker only means the check ended. Read the saved exit code and report separately. When waiting is the only remaining work, omit timeoutSeconds to wait up to five minutes. The result returns early when the marker arrives.",
+  description: "Wait for a fresh completion marker in the assigned working directory while a check runs. Set up the check to create a unique marker after it exits, including on failure. Read the saved exit code and report separately. When waiting is the only remaining work, omit timeoutSeconds to use the full wait. The result returns early when the marker arrives.",
   inputSchema: { type: "object", required: ["path"], additionalProperties: false, properties: {
     path: { type: "string", description: "Relative path to the completion marker for this run." },
     timeoutSeconds: { type: "integer", minimum: 1, maximum: maxWaitSeconds,
-      description: "Defaults to 300 seconds. Set a shorter timeout only if you need to return to other work before then." },
+      description: `Defaults to ${maxWaitSeconds} seconds. Set a shorter timeout if you need to return to other work before then.` },
   } },
 };
 
@@ -23,7 +27,7 @@ export async function waitForCheck(cwd: string, args: unknown, signal: AbortSign
     const { path, timeoutSeconds = maxWaitSeconds, ...extra } = object(args);
     const seconds = number(timeoutSeconds, "timeoutSeconds", 1);
     if (Object.keys(extra).length || seconds > maxWaitSeconds) {
-      return cliFailure("INVALID_INPUT", "Choose a marker path and a wait of at most five minutes.");
+      return cliFailure("INVALID_INPUT", `Choose a marker path and a wait of at most ${maxWaitSeconds} seconds.`);
     }
     const deadline = performance.now() + seconds * 1000;
     while (true) {

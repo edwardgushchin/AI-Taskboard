@@ -1,13 +1,56 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
+import { setTimeout as delay } from "node:timers/promises";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { startCodexRun } from "../src/desktop/codex-run.ts";
+import { codexRpc } from "../src/desktop/codex-rpc.ts";
+import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { createTask } from "../src/cli/tasks.ts";
 import type { RunActivity } from "../src/cli/model.ts";
 import type { TokenUsageReport } from "../src/cli/token-usage.ts";
+
+test("closing the Codex connection does not wait for a descendant's output pipe", async () => {
+  const child = spawn(process.execPath, ["-e", `
+    const { spawn } = require("node:child_process");
+    const helper = spawn(process.execPath, ["-e", "setTimeout(() => {}, 10000)"], {
+      stdio: ["ignore", "inherit", "inherit"], windowsHide: true, detached: true,
+    });
+    console.log(JSON.stringify({ method: "helper/started", params: helper.pid }));
+    helper.unref();
+    process.stdin.resume();
+  `], { stdio: "pipe", windowsHide: true });
+  const closed = once(child, "close");
+  const helper = Promise.withResolvers<number>();
+  const rpc = codexRpc(child, message => { helper.resolve(message.params as number); });
+  const deadline = new AbortController();
+  let pid: number | undefined;
+  try {
+    pid = await Promise.race([
+      helper.promise,
+      delay(3_000, undefined, { signal: deadline.signal }).then(() => { throw new Error("Helper did not start"); }),
+    ]);
+    rpc.close();
+    child.stdin.end();
+    await Promise.race([
+      closed,
+      delay(3_000, undefined, { signal: deadline.signal }).then(() => { throw new Error("Codex output pipe stayed open"); }),
+    ]);
+    assert.doesNotThrow(() => process.kill(pid!, 0));
+  } finally {
+    deadline.abort();
+    if (pid) {
+      try { process.kill(pid); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+    }
+    child.kill();
+    await closed;
+  }
+});
 
 test("the Codex launch probes access, applies settings, and monitors the turn", async t => {
   const folder = realpathSync(mkdtempSync(join(tmpdir(), "ai-taskboard-codex-run-")));
@@ -36,15 +79,15 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '  let result = {};',
     '  if (method === "command/exec") {',
     '    result = outcome === "denied" ? { exitCode: 1, stderr: "EACCES: permission denied" } : { exitCode: 0 };',
-    '  } else if (method === "project/list") {',
-    '    result = { data: [{ id: "board-project", roots: [{ path: require("node:path").dirname(capture) }] }], nextCursor: null };',
     '  } else if (method === "thread/start" || method === "thread/resume") {',
     '    if (outcome === "busy") { send({ id, error: { message: "thread " + thread + " already has an active writer" } }); return; }',
-    '    result = { model: "resolved-model", thread: { id: params.threadId ?? thread, projectId: outcome === "wrong-project" ? null : params.projectId },',
+    '    if (outcome === "missing" && method === "thread/resume") { send({ id, error: { message: "no rollout found for thread id " + params.threadId } }); return; }',
+    '    result = { model: "resolved-model", thread: { id: params.threadId ?? thread },',
     '      approvalPolicy: params.approvalPolicy, approvalsReviewer: outcome === "manual-review" ? "user" : params.approvalsReviewer,',
     '      activePermissionProfile: { id: outcome === "readonly" ? ":read-only" : params.permissions } };',
     '  } else if (method === "turn/start") {',
-    '    result = { turn: { id: "turn-1", status: "inProgress" } };',
+    '    const turnId = outcome === "resumed" || outcome === "legacy-worklog" ? outcome + "-turn" : "turn-1";',
+    '    result = { turn: { id: turnId, status: "inProgress" } };',
     '  }',
     '  if (method === "turn/steer") {',
     '    send({ method: "item/agentMessage/delta", params: { threadId: thread, itemId: "live", delta: params.input[0].text } });',
@@ -52,9 +95,21 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '    setTimeout(() => send({ id, result: { turnId: params.expectedTurnId } }), params.input[0].text === "first" ? 20 : 0); return;',
     '  }',
     '  send({ id, result });',
-    '  if (method === "turn/interrupt") send({ method: "turn/completed", params: { threadId: thread, turn: { id: params.turnId, status: "interrupted" } } });',
+    '  if (method === "turn/interrupt") send({ method: "turn/completed", params: { threadId: thread, turn: { id: params.turnId, status: "interrupted", error: { message: "Turn interrupted" } } } });',
 
     '  if (method === "turn/start") {',
+    '    if (outcome === "authored-worklog") {',
+    '      send({ method: "turn/started", params: { threadId: thread, turn: { id: "turn-1", status: "inProgress" } } });',
+    '      const url = flags.find(flag => flag.startsWith("mcp_servers=")).match(/http[^"]+/)[0];',
+    '      const entry = { title: "Исполнитель записал результат", timeline: [{ time: null, items: ["Проверил файлы."] }] };',
+    '      for (const field of ["context", "changes", "decisions", "checks", "next_steps"]) entry[field] = ["Проверка пройдена."];',
+    '      const args = { language: "ru", entries: [entry] };',
+    '      const response = await fetch(url, { method: "POST", headers: { authorization: "Bearer " + process.env.AI_TASKBOARD_MCP_TOKEN },',
+    '        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "worklog_record", arguments: args } }) });',
+    '      const reply = JSON.parse((await response.json()).result.content[0].text);',
+    '      if (!reply.ok) throw new Error(JSON.stringify(reply));',
+    '      fs.writeFileSync(capture + ".worklog", reply.data.path);',
+    '    }',
     '    if (outcome === "check-wait") {',
     '      const url = flags.find(flag => flag.startsWith("mcp_servers=")).match(/http[^\"]+/)[0];',
     '      const headers = { authorization: "Bearer " + process.env.AI_TASKBOARD_MCP_TOKEN };',
@@ -65,14 +120,21 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '      fs.writeFileSync(capture + ".check", (await response.json()).result.content[0].text);',
     '    }',
     '    if (outcome === "control") return;',
-    '    if (outcome === "closed") { process.stdin.destroy(); return; }',
+    '    if (outcome === "closed") { console.error(JSON.stringify({ level: "WARN", message: "example diagnostic" })); process.stdin.destroy(); return; }',
     '    if (outcome.startsWith("usage")) {',
     '      send({ method: "turn/started", params: { threadId: thread, turn: { id: "turn-1" } } });',
     '      const counts = { totalTokens: 120, inputTokens: 100, cachedInputTokens: 50, cacheWriteInputTokens: 0, outputTokens: 20, reasoningOutputTokens: 10 };',
     '      send({ method: "thread/tokenUsage/updated", params: { threadId: thread, turnId: "turn-1", tokenUsage: { total: counts, last: counts } } });',
     '      if (outcome === "usage-closed") { process.stdin.destroy(); return; }',
     '    }',
+    '    const turnId = result.turn.id;',
     '    const itemEvent = (method, params) => send({ method: "item/" + method, params: { threadId: thread, ...params } });',
+    '    if (outcome === "legacy-worklog") {',
+    '      itemEvent("completed", { turnId, item: { id: "check", type: "commandExecution",',
+    '        command: "git status", status: "completed", aggregatedOutput: "private output", exitCode: 0 } });',
+    '      itemEvent("completed", { turnId, item: { id: "result", type: "agentMessage", phase: "final_answer",',
+    '        text: "Проверил рабочую копию. Незакоммиченных изменений нет.\\n\\nWorklog недоступен — команда текущего хода не предоставлена." } });',
+    '    }',
     '    if (["review-denied", "review-approved"].includes(outcome)) {',
     '      const review = { reviewId: "access-1", action: { type: "networkAccess", target: "docs.example.com:443" } };',
     '      itemEvent("autoApprovalReview/started", { ...review, review: { status: "inProgress" } });',
@@ -91,7 +153,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '    itemEvent("agentMessage/delta", { threadId: "unrelated", itemId: "note", delta: "unrelated" });',
     '    const failed = outcome === "failed" || outcome === "usage-failed";',
     '    send({ method: "turn/completed", params: { threadId: thread, turn: {',
-    '      id: "turn-1", status: failed ? "failed" : "completed", error: failed ? { message: "Provider disconnected" } : null,',
+    '      id: turnId, status: failed ? "failed" : "completed", error: failed ? { message: "Provider disconnected" } : null,',
     '    } } });',
     '  }',
     '});',
@@ -108,7 +170,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   });
   const activity: RunActivity[] = [];
   const launch = (outcome: string) => startCodexRun(client(outcome), folder, worktree, task, item => activity.push(item));
-  const run = await launch("ok");
+  const run = await launch("authored-worklog");
   assert.equal(run.threadId, thread);
   assert.equal(await run.completion, undefined);
   assert.deepEqual(activity.map(item => [item.id, item.status, item.text]), [
@@ -118,16 +180,19 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   ]);
   const launched = JSON.parse(readFileSync(capture, "utf8"));
   assert.equal(launched.cwd, folder);
-  assert.equal(launched.flags[0], "app-server");
-  assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers=") && flag.includes("check_wait") && flag.includes("tool_timeout_sec=320")));
+  assert.deepEqual(launched.flags.slice(0, 5), ["app-server", "--disable", "hooks", "--disable", "plugins"]);
+  assert.ok(launched.flags.includes('web_search="live"'));
   assert.equal(launched.flags.includes('windows.sandbox="mxc"'), process.platform === "win32");
-  const worklogData = join(codexHome, "plugins", "data", "codex-worklog-codex-worklog");
-  const permissionsFlag = launched.flags.find((flag: string) => flag.startsWith("permissions."));
-  assert.ok(permissionsFlag.includes(JSON.stringify(join(worklogData, "sessions-v2")) + ' = "write"'));
-  assert.ok(!permissionsFlag.includes(JSON.stringify(worklogData) + ' = "write"'));
+  assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers=") && flag.includes("worklog_record")));
+  assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers=") && flag.includes("check_wait") && flag.includes("tool_timeout_sec=1220")));
+  assert.ok(!launched.flags.some((flag: string) => flag.includes("codex-worklog-codex-worklog")));
+  const diaryPath = readFileSync(capture + ".worklog", "utf8");
+  assert.ok(diaryPath.startsWith(join(folder, ".tasks", "worklog")));
+  assert.match(readFileSync(diaryPath, "utf8"), /ai-taskboard-role:executor T-0001/);
+  assert.equal(existsSync(join(worktree, ".dev-diary")), false);
   assert.deepEqual(launched.requests.map((req: { method: string }) => req.method),
-    ["initialize", "command/exec", "project/list", "thread/start", "turn/start"]);
-  const [, probe, , started, turn] = launched.requests;
+    ["initialize", "command/exec", "thread/start", "turn/start"]);
+  const [, probe, started, turn] = launched.requests;
   assert.equal(probe.params.cwd, worktree);
   assert.equal(probe.params.permissionProfile, started.params.permissions);
   assert.ok(probe.params.command.includes(join(folder, ".git", "objects")));
@@ -135,17 +200,32 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(started.params.model, "test-model");
   assert.equal(started.params.approvalPolicy, "on-request");
   assert.equal(started.params.approvalsReviewer, "auto_review");
-  assert.equal(started.params.projectId, "board-project");
+  assert.ok(!("projectId" in started.params));
   assert.equal(started.params.cwd, worktree);
   assert.equal(turn.params.effort, "high");
-  assert.match(turn.params.input[0].text, /call check_wait with that marker/);
   assert.match(turn.params.input[0].text, /T-0001.*Проверка/s);
+  assert.match(turn.params.input[0].text, /После записи результата в карточку и перед итоговым ответом.*mcp__ai_taskboard__worklog_record/);
+  assert.ok(started.params.developerInstructions.includes(russianWriting));
+  assert.match(started.params.developerInstructions, /Ponytail.*worklog_record/s);
+  assert.match(started.params.developerInstructions, /Use built-in web search for relevant public sources/);
+  assert.match(started.params.developerInstructions, /CLI launch array.*\[.+--disable-warning|CLI launch array.*ai-taskboard(?:\.exe)?"/);
+  assert.doesNotMatch(started.params.developerInstructions, /__AI_TASKBOARD_CLI__/);
+  assert.match(started.params.developerInstructions, /Exercise the specified public API, scenario and runtime profile.*SDK and dependencies.*clean environment/);
+  assert.match(turn.params.input[0].text, /сопоставь каждый критерий.*на более ранней ревизии.*повтори затронутую проверку/);
+  assert.match(started.params.developerInstructions, /report the submission.*then finish the current turn/);
+  assert.match(started.params.developerInstructions, /wait for tests.*separate output directory/);
+  assert.match(started.params.developerInstructions, /specific evidence after acceptance.*paths and SHA-256/);
   assert.match(turn.params.input[0].text, /обязательный шаг, заблокируй задачу/);
+  assert.match(started.params.developerInstructions, /progress <id> --compact.*block <id> --compact.*pause <id> --compact/);
+  await assert.rejects(startCodexRun(client("ok"), folder, worktree, task, undefined, undefined, undefined, async threadId => {
+    assert.equal(threadId, thread);
+    assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
+    throw new Error("Board busy");
+  }), /Board busy/);
+  assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
   await assert.rejects(launch("denied"), /Codex cannot write.*EACCES/s);
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "command/exec");
   await assert.rejects(launch("readonly"), /did not apply the write permissions/);
-  assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
-  await assert.rejects(launch("wrong-project"), /did not attach the task chat/);
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
   await assert.rejects(launch("manual-review"), /did not enable automatic approval review/);
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
@@ -158,34 +238,79 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     ]);
     assert.ok(activity.some(item => item.id === "cmd" && item.status === "completed"));
   }
-  assert.equal(await (await launch("failed")).completion, "Provider disconnected");
-  assert.match((await (await launch("closed")).completion) ?? "", /Codex process closed/);
+  assert.deepEqual(await (await launch("failed")).completion, { reason: "Provider disconnected" });
+  const closed = await (await launch("closed")).completion;
+  assert.deepEqual(closed, { reason: "The Codex process closed.", disconnected: true });
   const controlled = await launch("control");
   await Promise.all([controlled.steer("first", ["extra.png"]), controlled.steer("second", [])]);
   await assert.rejects(controlled.steer("reject", []), /No active turn/);
   assert.ok(activity.some(item => item.id === "live" && item.text.includes("first")));
   await controlled.interrupt();
-  assert.match((await controlled.completion) ?? "", /interrupted/);
+  assert.match((await controlled.completion)?.reason ?? "", /interrupted/);
   const controls = JSON.parse(readFileSync(capture, "utf8")).requests.filter((entry: { method: string }) => entry.method.startsWith("turn/"));
   assert.deepEqual(controls.map((entry: { method: string }) => entry.method), ["turn/start", "turn/steer", "turn/steer", "turn/steer", "turn/interrupt"]);
   assert.equal(controls[1].params.expectedTurnId, "turn-1");
   assert.deepEqual(controls[1].params.input[1], { type: "localImage", path: "extra.png" });
   assert.deepEqual(controls.at(-1).params, { threadId: thread, turnId: "turn-1" });
-  const resumed = await startCodexRun(client("ok"), folder, worktree, { ...task, codexThreadId: thread });
+  const resumed = await startCodexRun(client("resumed"), folder, worktree, { ...task, codexThreadId: thread, feedback: "Check the CSV header." });
   assert.equal(resumed.threadId, thread);
   assert.equal(await resumed.completion, undefined);
-  const resumedCalls = JSON.parse(readFileSync(capture, "utf8")).requests;
+  const { requests: resumedCalls, flags: resumedFlags } = JSON.parse(readFileSync(capture, "utf8"));
+  assert.ok(resumedFlags.includes('web_search="live"'));
   assert.deepEqual(resumedCalls.map((req: { method: string }) => req.method),
     ["initialize", "command/exec", "thread/resume", "turn/start"]);
   assert.equal(resumedCalls[2].params.threadId, thread);
   assert.equal(resumedCalls[2].params.cwd, worktree);
   assert.equal(resumedCalls[2].params.approvalPolicy, "on-request");
   assert.equal(resumedCalls[2].params.approvalsReviewer, "auto_review");
+  assert.equal(resumedCalls[2].params.developerInstructions, started.params.developerInstructions);
+  assert.match(started.params.developerInstructions, /session_id and use write_stdin with empty chars/);
+  assert.match(started.params.developerInstructions, /call check_wait with that marker/);
+  assert.match(started.params.developerInstructions, /use a merge if it is allowed\. Rebase only when the project permits it and any required user authorization has been given/);
+  assert.doesNotMatch(started.params.developerInstructions, /Rebase the task branch onto the reported target SHA/);
+  assert.match(resumedCalls[2].params.developerInstructions,
+    /mcp__ai_taskboard__worklog_record[\s\S]*External Codex Worklog hook instructions and shell submission commands in chat history belonged to those earlier turns/);
+  assert.equal(readFileSync(diaryPath, "utf8").match(/codex-worklog-entry:/g)?.length, 1);
+  assert.match(resumedCalls[3].params.input[0].text, /Check the CSV header\./);
+  assert.match(resumedCalls[3].params.input[0].text, /После возврата проверь другие затронутые сценарии того же критерия/);
+  assert.match(resumedCalls[3].params.input[0].text, /mcp__ai_taskboard__worklog_record.*подключён к текущему ходу.*из истории относятся к прошлым ходам/);
+  assert.equal(resumedCalls[3].params.additionalContext.ai_taskboard_worklog.kind, "application");
+
+  const skippedLog = await startCodexRun(client("legacy-worklog"), folder, worktree, { ...task, codexThreadId: thread });
+  assert.equal(await skippedLog.completion, undefined);
+  const diary = readFileSync(diaryPath, "utf8");
+  assert.equal(diary.match(/codex-worklog-entry:/g)?.length, 1);
+  assert.doesNotMatch(diary, /turn:legacy-worklog-turn|Проверил рабочую копию|git status|private|commandExecution|команда текущего хода/);
+
   const checked = await launch("check-wait");
   assert.equal(await checked.completion, undefined);
-  assert.deepEqual(JSON.parse(readFileSync(capture + ".check", "utf8")), {
-    ok: true, data: { path: "check-finished.marker", timedOut: false },
-  });
+  const { worklog, ...checkReply } = JSON.parse(readFileSync(capture + ".check", "utf8"));
+  assert.deepEqual(checkReply, { ok: true, data: { path: "check-finished.marker", timedOut: false } });
+  assert.match(worklog, /mcp__ai_taskboard__worklog_record.*entries/);
+  const unavailable = "01234567-1234-5678-1234-000000000001";
+  const recovered = await startCodexRun(client("missing"), folder, worktree, { ...task, codexThreadId: unavailable },
+    undefined, undefined, undefined, async id => assert.equal(id, thread));
+  assert.equal(recovered.threadId, thread);
+  assert.equal(await recovered.completion, undefined);
+  const recoveredCalls = JSON.parse(readFileSync(capture, "utf8")).requests;
+  assert.deepEqual(recoveredCalls.map((req: { method: string }) => req.method),
+    ["initialize", "command/exec", "thread/resume", "thread/start", "turn/start"]);
+  assert.equal(recoveredCalls[2].params.threadId, unavailable);
+  assert.equal(recoveredCalls[3].params.cwd, worktree);
+  assert.ok(!("projectId" in recoveredCalls[3].params));
+  const externalFolder = join(folder, "external");
+  mkdirSync(externalFolder);
+  const external = await startCodexRun(client("ok"), folder, externalFolder,
+    { ...task, git: undefined, workingDirectory: externalFolder });
+  assert.equal(await external.completion, undefined);
+  const externalRun = JSON.parse(readFileSync(capture, "utf8"));
+  const externalProbe = externalRun.requests.find((req: { method: string }) => req.method === "command/exec");
+  assert.equal(externalProbe.params.cwd, externalFolder);
+  assert.deepEqual(externalProbe.params.command.slice(-2), [externalFolder, join(folder, ".tasks")]);
+  const externalThread = externalRun.requests.find((req: { method: string }) => req.method === "thread/start");
+  assert.equal(externalThread.params.cwd, externalFolder);
+  assert.equal(externalThread.params.approvalsReviewer, "auto_review");
+  assert.match(externalThread.params.developerInstructions, /Pass --project with the board root in every CLI invocation/);
   await assert.rejects(startCodexRun(client("busy"), folder, worktree, { ...task, codexThreadId: thread }),
     (error: Error & { code?: string }) => error.code === "CODEX_THREAD_BUSY" && /active writer/.test(error.message));
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/resume");
@@ -202,14 +327,24 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     assert.equal(record.cachedInputTokens, 50);
     assert.equal(record.incomplete, outcome !== "usage");
   }
-  const storageFailure = await startCodexRun(client("usage"), folder, worktree, task, undefined, async report => {
-    if (report.records.some(record => record.totalTokens !== null)) throw new Error("Usage storage denied");
-  });
-  assert.equal(await storageFailure.completion, undefined);
+  for (const outcome of ["usage", "usage-failed", "usage-closed"]) {
+    const measured = await startCodexRun(client(outcome), folder, worktree, task, undefined, async () => {
+      throw new Error("Usage storage denied");
+    });
+    assert.deepEqual(await measured.completion, outcome === "usage" ? undefined :
+      outcome === "usage-failed" ? { reason: "Provider disconnected" } :
+        { reason: "The Codex process closed.", disconnected: true });
+  }
+  const interrupted = await launch("control");
+  await interrupted.interrupt();
+  assert.deepEqual(await interrupted.completion, { reason: "Turn interrupted", interrupted: true });
   const controller = new AbortController();
   const waiting = await startCodexRun(client("control"), folder, worktree, task, undefined, undefined, controller.signal);
   controller.abort();
-  assert.match((await waiting.completion) ?? "", /aborted/i);
+  assert.match((await waiting.completion)?.reason ?? "", /aborted/i);
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "turn/interrupt");
   await assert.rejects(startCodexRun(client("ok"), folder, worktree, task, undefined, undefined, controller.signal), /aborted/i);
+  assert.equal(realpathSync(worktree), worktree);
+  git("worktree", "remove", "--force", worktree);
+  assert.match(readFileSync(diaryPath, "utf8"), /Исполнитель записал результат/);
 });

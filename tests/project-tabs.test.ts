@@ -17,7 +17,7 @@ test("project tabs distinguish folder names and restore only valid unique paths"
   assert.equal(projectIdentity(first), projectIdentity(alias));
   assert.notEqual(projectIdentity(first), projectIdentity(second));
   if (process.platform === "win32") assert.equal(projectIdentity(first), projectIdentity(first.toUpperCase()));
-  assert.deepEqual(projectLabels([first, second]), [
+  assert.deepEqual(projectLabels([{ path: first }, { path: second }]), [
     { path: first, name: "Project", detail: "first" }, { path: second, name: "Project", detail: "second" },
   ]);
   assert.deepEqual(savedWindows([
@@ -29,5 +29,12 @@ test("project tabs distinguish folder names and restore only valid unique paths"
   ]);
   assert.deepEqual(savedWindows({ projects: [first] }), []);
   const nested = join(root, "other", "first", "Project");
-  assert.equal(projectLabels([first, nested])[0].detail, join(root, "first"));
+  assert.equal(projectLabels([{ path: first }, { path: nested }])[0].detail, join(root, "first"));
+  assert.deepEqual(projectLabels([{ path: first, name: "  Выпуск  " }, { path: second, name: " " }]), [
+    { path: first, name: "Выпуск", detail: "" }, { path: second, name: "Project", detail: "" },
+  ]);
+  const sibling = join(root, "first", "Other");
+  assert.deepEqual(projectLabels([{ path: first }, { path: sibling, name: "Project" }]), [
+    { path: first, name: "Project", detail: first }, { path: sibling, name: "Project", detail: sibling },
+  ]);
 });

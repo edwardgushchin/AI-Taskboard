@@ -1,5 +1,6 @@
 import { realpathSync, rmSync, rmdirSync } from "node:fs";
 import { availableParallelism } from "node:os";
+import { artifactFiles, discardTaskArtifacts, removeSavedSource, saveArtifacts } from "./artifacts.ts";
 import { dependencyStatus, unfinishedDependencies } from "./dependencies.ts";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import {
@@ -7,12 +8,12 @@ import {
 } from "./git.ts";
 import type { Repository, Worktree } from "./git.ts";
 import { object, record, requireRevision, requireState, TaskboardError, text } from "./model.ts";
-import type { Task } from "./model.ts";
-import { directory, exists, locateBoard, readJson, removeFile, taskStartInProgress, writeJson } from "./storage.ts";
+import type { Task, TaskGit } from "./model.ts";
+import { directory, exists, locateBoard, readBinary, readJson, removeFile, taskStartInProgress, taskWorkingDirectory, writeJson } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
 
-export function findWorktree(repo: Repository, branch: string): Worktree | undefined {
-  const matches = worktrees(repo.root).filter(item => item.branch === branch);
+export function findWorktree(repo: Repository, branch: string, entries = worktrees(repo.root)): Worktree | undefined {
+  const matches = entries.filter(item => item.branch === branch);
   if (matches.length > 1) {
     throw new TaskboardError("AMBIGUOUS_WORKTREE", "Git reports multiple worktrees for " + branch + ".");
   }
@@ -27,12 +28,29 @@ export function usableWorktree(item: Worktree | undefined): string {
   return realpathSync(item.path);
 }
 
+export function findTaskWorktree(repo: Repository, { branch, worktree: recorded }: TaskGit): Worktree | undefined {
+  const entries = worktrees(repo.root);
+  const attached = findWorktree(repo, branch, entries);
+  if (attached || !recorded || !isAbsolute(recorded)) return attached;
+  const detached = entries.find(item => !item.branch && item.head && !item.prunable && !relative(recorded, item.path));
+  if (!detached || !exists(detached.path)) return undefined;
+  const gitDir = git(usableWorktree(detached), ["rev-parse", "--absolute-git-dir"]).trimEnd();
+  for (const operation of ["rebase-merge", "rebase-apply"]) {
+    const state = join(gitDir, operation);
+    if (!exists(state)) continue;
+    directory(state);
+    const original = join(state, "head-name");
+    if (exists(original) && readBinary(original).toString("utf8").trimEnd() === branch) return detached;
+  }
+  return undefined;
+}
+
 export function taskWithCurrentWorktree(store: BoardStore, task: Task): Task & { cleanupAvailable?: boolean } {
   if (!task.git) return task;
   const repo = store.location.repository;
-  const item = repo && findWorktree(repo, task.git.branch);
-  const worktree = item && !item.prunable && exists(item.path) ? usableWorktree(item) : undefined;
   const closed = task.status === "done" || task.status === "cancelled";
+  const item = repo && (closed ? findWorktree(repo, task.git.branch) : findTaskWorktree(repo, task.git));
+  const worktree = item && !item.prunable && exists(item.path) ? usableWorktree(item) : undefined;
   const cleanupAvailable = closed && Boolean(item || (repo && (
     orphanedTaskWorktree(store, repo, task) || (task.status === "done" && resolveCommit(repo.root, task.git.branch))
   )));
@@ -113,7 +131,7 @@ export function hasPending(store: BoardStore, task: Task): boolean {
   return false;
 }
 
-type StartedTask = { task: Task; worktree: string };
+type StartedTask = { task: Task } & ({ worktree: string } | { cwd: string });
 type StartIntent = { action: "start"; revision: number; target: string; base: string };
 type TaskCheckout = {
   id: string; repo: Repository; branch: string; managedPath: string; intent: StartIntent;
@@ -139,6 +157,16 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
     }
   }
   requireRevision(task, input.revision);
+  if (task.workingDirectory) {
+    if (task.git || input.target !== undefined || input.resolveConflicts === true) {
+      throw new TaskboardError("INVALID_INPUT", "This task uses an existing directory and has no task branch.");
+    }
+    if (exists(store.pendingPath(task.id))) {
+      throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted operation before starting.");
+    }
+    const cwd = taskWorkingDirectory(task.workingDirectory, true);
+    return { task: task.status === "in_progress" ? task : save(task), cwd };
+  }
   const branch = worktreeBranch(task);
   const managedPath = join(store.subdirectory("worktrees"), task.id);
   const pendingPath = store.pendingPath(task.id);
@@ -156,7 +184,7 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
         throw new TaskboardError("INVALID_INPUT", "Resume the task on its original target branch.");
       }
     }
-    const worktree = usableWorktree(findWorktree(repo, branch));
+    const worktree = usableWorktree(findTaskWorktree(repo, task.git));
     if (pending) removeFile(pendingPath);
     if (task.status === "in_progress") return { task, worktree };
     return { task: save({ ...task, git: { ...task.git, worktree } }), worktree };
@@ -241,9 +269,36 @@ export function finishTaskStart(store: BoardStore, plan: TaskCheckout, checkout:
   return { task: updated, worktree };
 }
 
-export function cleanTaskWorktree(store: BoardStore, task: Task) {
+export function inspectCleanup(store: BoardStore, task: Task) {
   requireState(task, ["done", "cancelled"]);
-  if (!task.git || task.git.branch !== worktreeBranch(task)) return { removed: false };
+  const current = taskWithCurrentWorktree(store, task);
+  const path = current.git?.worktree;
+  const repo = store.location.repository;
+  const item = repo && current.git ? findWorktree(repo, current.git.branch) : undefined;
+  const submitted = task.git?.submission?.sha ?? task.result?.noChanges?.head;
+  const entries = path ? cleanupEntries(path) : [];
+  const reason = !current.cleanupAvailable ? undefined
+    : item?.locked ? "WORKTREE_LOCKED"
+    : item && submitted && item.head !== submitted ? "TASK_BRANCH_CHANGED"
+    : entries.length ? "DIRTY_WORKTREE" : undefined;
+  return {
+    pending: current.cleanupAvailable ?? false,
+    path, reason, entries,
+  };
+}
+
+function cleanupEntries(path: string): string[] {
+  return git(path, ["-c", "core.quotepath=false", "status", "--short", "--no-renames",
+    "--untracked-files=normal", "--ignored=traditional", "--ignore-submodules=none"]).trimEnd().split("\n").filter(Boolean);
+}
+
+export function cleanTaskWorktree(store: BoardStore, task: Task, artifacts?: unknown) {
+  requireState(task, ["done", "cancelled"]);
+  if (artifacts !== undefined) requireState(task, ["done"]);
+  if (!task.git || task.git.branch !== worktreeBranch(task)) {
+    discardTaskArtifacts(store, task.id);
+    return { removed: false };
+  }
   const repo = requireRepository(store.location.repository);
   const item = findWorktree(repo, task.git.branch);
   const submitted = task.status === "done" ? task.git.submission?.sha ?? task.result?.noChanges?.head : undefined;
@@ -253,12 +308,19 @@ export function cleanTaskWorktree(store: BoardStore, task: Task) {
   }
   let removed = false;
   if (item) {
-    removeTaskWorktree(store, repo, item, Boolean(submitted && task.git.accepted));
+    try {
+      removeTaskWorktree(store, task, repo, item, Boolean(submitted && (task.git.accepted || task.result?.noChanges)), artifacts);
+    } catch (error) {
+      // The remaining local files stay in the worktree. Copies used during review can expire.
+      if (error instanceof TaskboardError && error.code === "DIRTY_WORKTREE") discardTaskArtifacts(store, task.id);
+      throw error;
+    }
     removed = true;
   } else {
     const orphan = orphanedTaskWorktree(store, repo, task);
     if (orphan) removed = removeEmptyWorktree(orphan);
   }
+  discardTaskArtifacts(store, task.id);
   if (!tip) return { removed };
   if (findWorktree(repo, task.git.branch)) {
     throw new TaskboardError("WORKTREE_LOCKED", "The task branch is still checked out.");
@@ -324,7 +386,7 @@ function removeTaskOutput(path: string, changes: string[]): boolean {
   return true;
 }
 
-function removeTaskWorktree(store: BoardStore, repo: Repository, item: Worktree, accepted: boolean): void {
+function removeTaskWorktree(store: BoardStore, task: Task, repo: Repository, item: Worktree, accepted: boolean, artifacts?: unknown): void {
   if (item.locked) throw new TaskboardError("WORKTREE_LOCKED", "The task worktree is locked.");
   const path = usableWorktree(item);
   const managedRoot = realpathSync(store.subdirectory("worktrees"));
@@ -333,17 +395,27 @@ function removeTaskWorktree(store: BoardStore, repo: Repository, item: Worktree,
     throw new TaskboardError("UNMANAGED_WORKTREE", "Only worktrees in the managed directory can be removed.");
   }
   requireNoGitOperation(path);
+  if (artifacts !== undefined) saveArtifacts(store, task.id, path, artifacts, true);
+  const saved = accepted ? artifactFiles(store, task.id) : [];
+  const retainedArtifacts = new Set<string>();
+  if (saved.length) {
+    const ignored = new Set(git(path, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard"]).split("\0"));
+    for (const artifact of saved.toReversed()) {
+      if (ignored.has(artifact.source) && removeSavedSource(path, artifact)) ignored.delete(artifact.source);
+    }
+    for (const { source } of saved) {
+      if (ignored.has(source)) retainedArtifacts.add(source);
+    }
+  }
   let changes = gitStatus(path, true);
-  if (accepted && changes && removeTaskOutput(path, changes.split("\0").filter(Boolean))) {
+  if (accepted && changes && !retainedArtifacts.size && removeTaskOutput(path, changes.split("\0").filter(Boolean))) {
     changes = gitStatus(path, true);
   }
   if (changes.length) {
+    const entries = changes.split("\0").filter(Boolean);
     throw new TaskboardError("DIRTY_WORKTREE", "The task worktree still contains local files or changes.", {
-      path, changes: changes.split("\0").filter(Boolean),
-      output: git(path, [
-        "-c", "core.quotepath=false", "status", "--short", "--no-renames",
-        "--untracked-files=all", "--ignore-submodules=none", "--ignored=traditional",
-      ]).trimEnd(),
+      path, changes: entries.slice(0, 30), count: entries.length,
+      output: cleanupEntries(path).slice(0, 30).join("\n"),
     });
   }
   try {

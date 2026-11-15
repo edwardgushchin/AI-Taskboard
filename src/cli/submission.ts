@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { copyFileSync } from "node:fs";
 import { join } from "node:path";
-import { git, isAncestor, mergeTree, requireRepository, resolveCommit } from "./git.ts";
-import { object, record, requireRevision, requireState, strings, TaskboardError, text } from "./model.ts";
+import { git, isAncestor, mergeTree, requireRepository, resolveCommit, skipAutoMaintenance } from "./git.ts";
+import { number, object, record, requireRevision, requireState, strings, TaskboardError, text } from "./model.ts";
 import type { Task, TaskGit } from "./model.ts";
-import { exists, readJson, removeFile, writeJson } from "./storage.ts";
+import { exists, readJson, removeFile, taskWorkingDirectory, writeJson } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
-import { findWorktree, gitStatus, requireNoGitOperation, usableWorktree } from "./worktree.ts";
+import { findTaskWorktree, gitStatus, requireNoGitOperation, usableWorktree } from "./worktree.ts";
+import { saveArtifacts } from "./artifacts.ts";
 
 interface Snapshot {
   head: string;
@@ -29,7 +30,7 @@ function taskCheckout(store: BoardStore, task: Task): { path: string; context: T
   if (!context || context.branch !== "refs/heads/ai-taskboard/" + task.id) {
     throw new TaskboardError("CORRUPT_STORAGE", "The task has no matching Git branch.");
   }
-  const path = usableWorktree(findWorktree(repo, context.branch));
+  const path = usableWorktree(findTaskWorktree(repo, context));
   requireNoGitOperation(path);
   if (git(path, ["symbolic-ref", "HEAD"]).trim() !== context.branch) {
     throw new TaskboardError("WORKTREE_BRANCH_CHANGED", "Check out the task branch in its worktree first.");
@@ -68,7 +69,7 @@ function capture(store: BoardStore, task: Task, path: string, includeDiff: boole
     const token = createHash("sha256").update(JSON.stringify(identity)).digest("hex");
     const diff = includeDiff
       ? git(path, ["diff", "--no-ext-diff", "--no-textconv", "--binary", ...range], env) : undefined;
-    return { head, tree, token, paths, diff, commitMessage };
+    return { head, tree, token, paths, diff, commitMessage, base };
   } finally {
     removeFile(temporary);
     removeFile(temporary + ".lock");
@@ -109,15 +110,44 @@ function resultOf(input: Record<string, unknown>): SubmitIntent["result"] {
   };
 }
 
-export function previewSubmission(store: BoardStore, task: Task) {
+export function previewTask(store: BoardStore, id: string, revision?: number): Task {
+  const task = store.card(id);
+  requireRevision(task, revision);
   requireState(task, ["in_progress"]);
-  if (exists(store.pendingPath(task.id))) {
+  if (exists(store.pendingPath(id))) {
     throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before preparing a new submission.");
   }
+  return task;
+}
+
+export function previewSubmission(store: BoardStore, task: Task, compact: boolean, input: Record<string, unknown>) {
+  if (task.workingDirectory && !task.git) {
+    if (input.paths !== undefined) throw new TaskboardError("INVALID_INPUT", "This task has no Git diff.");
+    return { token: directorySubmissionToken(task), paths: [], targetHead: null, noChanges: true, ...(compact ? {} : { diff: "" }) };
+  }
   const { path, context } = taskCheckout(store, task);
-  const snapshot = capture(store, task, path, true);
+  const page = input.paths !== undefined;
+  const { base, ...snapshot } = capture(store, task, path, !compact && !page);
   requireCleanIndex(path, snapshot.head);
-  return { ...snapshot, target: context.target, targetHead: checkSubmissionMerge(path, context, snapshot) };
+  if (!page) return { ...snapshot, target: context.target, targetHead: checkSubmissionMerge(path, context, snapshot) };
+  if (snapshot.token !== text(input.token, "token", true)) {
+    throw new TaskboardError("STALE_SNAPSHOT", "The worktree changed. Prepare a new submission.", { paths: snapshot.paths });
+  }
+  const paths = input.paths;
+  const changed = new Set(snapshot.paths);
+  if (!Array.isArray(paths) || !paths.length || new Set(paths).size !== paths.length ||
+      paths.some(name => typeof name !== "string" || !changed.has(name))) {
+    throw new TaskboardError("INVALID_INPUT", "Select distinct paths returned by the preview.");
+  }
+  const diff = git(path, ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
+    "--binary", "--no-color", base ?? snapshot.head, snapshot.tree, "--", ...paths]);
+  const offset = input.offset === undefined ? 0 : number(input.offset, "offset", 0);
+  if (offset > diff.length || /[\uDC00-\uDFFF]/.test(diff.charAt(offset))) {
+    throw new TaskboardError("INVALID_INPUT", "Use the nextOffset returned for these paths.");
+  }
+  let end = offset + 16_000;
+  if (/[\uDC00-\uDFFF]/.test(diff.charAt(end))) end--;
+  return { token: snapshot.token, paths, diff: diff.slice(offset, end), ...(end < diff.length ? { nextOffset: end } : {}) };
 }
 
 function checkSubmissionMerge(path: string, context: TaskGit, snapshot: Snapshot & { commitMessage?: string }): string {
@@ -165,11 +195,32 @@ function verifyCommit(path: string, head: string, intent: SubmitIntent, id: stri
   return message;
 }
 
+function directorySubmissionToken(task: Task) {
+  return createHash("sha256").update(JSON.stringify([task.id, task.revision, task.workingDirectory])).digest("hex");
+}
+
 export function submitTask(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
+  if (task.schedule) throw new TaskboardError("INVALID_TRANSITION", "Record the recurring task result with progress instead of submitting it for review.");
   const pendingPath = store.pendingPath(task.id);
   let intent = readIntent(pendingPath, task);
   if (!intent) requireRevision(task, input.revision);
   if (task.status !== "review" || !intent) requireState(task, ["in_progress"]);
+  if (task.workingDirectory && !task.git) {
+    if (intent) throw new TaskboardError("PENDING_OPERATION", "This task has an unfinished Git operation.");
+    if (input.noChanges !== true || input.message !== undefined) {
+      throw new TaskboardError("INVALID_INPUT", "Submit this result with noChanges: true and without a commit message.");
+    }
+    if (directorySubmissionToken(task) !== text(input.token, "token", true)) {
+      throw new TaskboardError("STALE_SNAPSHOT", "The task changed. Prepare a new submission.");
+    }
+    const result = resultOf(input);
+    if (!result.checks.length) throw new TaskboardError("CHECKS_REQUIRED", "Report how you verified the result outside Git.");
+    if (input.artifacts !== undefined) {
+      saveArtifacts(store, task.id, taskWorkingDirectory(task.workingDirectory, true), input.artifacts);
+    }
+    return store.save(record({ ...task, result: { ...result, noChanges: { head: null } } },
+      "submit", "agent", "review", result.summary));
+  }
   const { path, context } = taskCheckout(store, task);
   let head = resolveCommit(path, "HEAD");
   if (!head) throw new TaskboardError("GIT_FAILED", "The task branch has no commit.");
@@ -193,6 +244,7 @@ export function submitTask(store: BoardStore, task: Task, input: Record<string, 
       if (snapshot.paths.length || gitStatus(path).length) {
         throw new TaskboardError("CHANGES_PRESENT", "Submit the Git changes with a commit message.");
       }
+      if (input.artifacts !== undefined) saveArtifacts(store, task.id, path, input.artifacts);
       return store.save(record({
         ...task, git: { ...context, submission: undefined }, result: { ...result, noChanges: { head: snapshot.head } },
       }, "submit", "agent", "review", result.summary));
@@ -202,6 +254,7 @@ export function submitTask(store: BoardStore, task: Task, input: Record<string, 
       if (snapshot.commitMessage !== message) {
         throw new TaskboardError("INVALID_COMMIT_MESSAGE", "Confirm the existing Conventional Commit message with this task's trailer.");
       }
+      if (input.artifacts !== undefined) saveArtifacts(store, task.id, path, input.artifacts);
       return store.save(record({
         ...task, result, git: { ...context, submission: { sha: snapshot.head, message } },
       }, "submit", "agent", "review", result.summary));
@@ -209,6 +262,7 @@ export function submitTask(store: BoardStore, task: Task, input: Record<string, 
     if (!snapshot.paths.length) {
       throw new TaskboardError("NO_CHANGES", "Use noChanges: true to submit a completed result without Git changes.");
     }
+    if (input.artifacts !== undefined) saveArtifacts(store, task.id, path, input.artifacts);
     intent = { action: "submit", revision: task.revision, snapshot, message, result };
     writeJson(pendingPath, intent);
   }
@@ -230,7 +284,7 @@ export function submitTask(store: BoardStore, task: Task, input: Record<string, 
       throw new TaskboardError("STALE_SNAPSHOT", "The Git index changed during submission.", { path });
     }
     try {
-      git(path, ["commit", "--cleanup=verbatim", "-m", intent.message]);
+      git(path, [...skipAutoMaintenance, "commit", "--cleanup=verbatim", "-m", intent.message]);
     } catch (error) {
       if (resolveCommit(path, "HEAD") === head && indexTree(path) === intent.snapshot.tree) {
         git(path, ["reset", "--mixed", "--quiet", head]);
@@ -254,7 +308,8 @@ export function submitTask(store: BoardStore, task: Task, input: Record<string, 
   return updated;
 }
 
-export function noChangesReviewIsStale(store: BoardStore, task: Task, head: string): boolean {
+export function noChangesReviewIsStale(store: BoardStore, task: Task, head: string | null): boolean {
+  if (head === null) return !task.workingDirectory || Boolean(task.git);
   try {
     const { path } = taskCheckout(store, task);
     return resolveCommit(path, "HEAD") !== head || Boolean(gitStatus(path));

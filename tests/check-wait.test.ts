@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -17,7 +17,11 @@ test("a check wait times out and rejects paths outside the work directory", asyn
   assert.deepEqual(await waitForCheck(cwd, { path: "missing.marker", timeoutSeconds: 1 }, signal), {
     ok: true, data: { path: "missing.marker", timedOut: true },
   });
-  for (const input of [{ path: "../outside.marker" }, { path: "missing.marker", timeoutSeconds: 301 }, { path: "." }]) {
+  await writeFile(join(cwd, "finished.marker"), "");
+  assert.deepEqual(await waitForCheck(cwd, { path: "finished.marker", timeoutSeconds: 1200 }, signal), {
+    ok: true, data: { path: "finished.marker", timedOut: false },
+  });
+  for (const input of [{ path: "../outside.marker" }, { path: "missing.marker", timeoutSeconds: 1201 }, { path: "." }]) {
     const result = await waitForCheck(cwd, input, signal);
     assert.equal(result.ok ? undefined : result.error.code, "INVALID_INPUT");
   }

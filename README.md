@@ -1,19 +1,19 @@
 # AI Taskboard
 
-An agent-native Kanban task board for software projects. The Electron app and Codex share one local board and one CLI. Task work stays in a separate Git worktree until you accept it.
+An agent-native Kanban task board for software projects. The Electron app manages local cards, chats, and review. Agents use the board's tools, and Codex App Server runs the models. Git task work stays in a separate worktree until you accept it.
 
 ## Use the app
 
 The first version targets Windows x64. Run `ai-taskboard-0.1.0-win-x64.exe`, then start AI Taskboard from the Start menu.
 
 1. Open AI Taskboard and choose a project folder. Select **Create board** if the project has no board yet.
-2. Open **Settings → Codex integration → Connect Codex**. Open a new local Codex chat for the project after the app confirms installation.
-3. Select **Create task** and describe the change. Codex fills in the draft fields and AI Taskboard opens the saved draft. Review and approve it, then ask Codex in the project chat to work on its task number. A second chat can resume the same task and worktree.
+2. Sign in with your subscription using `codex login`. AI Taskboard detects the Codex executable automatically. To choose it yourself, use **Settings → Codex model provider → Choose executable…**.
+3. Describe the change to the project manager in AI Taskboard. Review the draft on the board and approve it. Start or resume the executor from the card.
 4. Review the submitted diff in the app. **Accept** creates or verifies the acceptance commit in the target branch.
 
 Use **Settings → Appearance** to follow the system or select a built-in theme. The setting applies to every window.
 
-The board lives in the project's `.tasks` folder. Git operations require Git 2.38 or newer. Codex may ask for approval to run `start`, `preview`, or `submit` because Git writes to the protected `.git` directory. Use the approval request for the specific Taskboard command. [Protected paths in Codex](https://learn.chatgpt.com/docs/agent-approvals-security#protected-paths-in-writable-roots)
+The board lives in the project's `.tasks` folder. Git operations require Git 2.38 or newer.
 
 ## Develop and package
 

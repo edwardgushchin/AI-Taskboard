@@ -33,7 +33,7 @@ class Element {
 const { readableRunCommand, renderRunActivity } = runInNewContext(source.slice(start, end) +
   "\n({ readableRunCommand, renderRunActivity })", {
   element: (tag: string, text?: string, className?: string) => new Element(tag, text, className),
-  document: {}, frame: { russian: true },
+  document: { activeElement: { matches: () => false } }, frame: { russian: true }, taskInSheet: undefined,
   icon: () => new Element("svg"),
   language: (_english: string, russian: string) => russian,
   chatText: (text: string) => new Element("div", text),

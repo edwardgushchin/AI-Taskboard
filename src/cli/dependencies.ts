@@ -7,7 +7,7 @@ export function dependencyStatus(store: BoardStore, id: string): TaskState | und
     Object.hasOwn(store.index.tasks, id) ? store.card(id).status : undefined;
 }
 
-export function unfinishedDependencies(task: Task, status: (id: string) => TaskState | undefined): string[] {
+export function unfinishedDependencies(task: Pick<Task, "dependencies">, status: (id: string) => TaskState | undefined): string[] {
   return (task.dependencies ?? []).filter(id => status(id) !== "done");
 }
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, statSync, utimesSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -18,25 +18,46 @@ const counts = (input: number, output: number, cached = 0, reasoning = 0) => ({
 const usage = (collector: CodexTokenUsage, threadId: string, turnId: string, total: object, last: object) =>
   collector.observe({ method: "thread/tokenUsage/updated", params: { threadId, turnId, tokenUsage: { total, last } } });
 
-test("completed task metrics sum time spent in each status across returns", () => {
+test("task metrics sum time spent in each status across returns and through the current observation", () => {
   const createdAt = "2026-01-01T12:00:00.000Z";
   const task = { ...createTask("T-0001", { title: "Cycle phases" }), createdAt, status: "done" as const };
   task.history = [
     { at: createdAt, action: "create", actor: "manager" },
     { at: "2026-01-01T12:00:01.000Z", action: "approve", actor: "manager", from: "draft", to: "ready" },
     { at: "2026-01-01T12:00:03.000Z", action: "start", actor: "agent", from: "ready", to: "in_progress" },
-    { at: "2026-01-01T12:00:04.000Z", action: "coordination", actor: "agent" },
+    { at: "2026-01-01T12:00:04.000Z", action: "coordination", actor: "agent", durationMs: 2000 },
     { at: "2026-01-01T12:00:07.000Z", action: "submit", actor: "agent", from: "in_progress", to: "review" },
+    { at: "2026-01-01T12:00:08.000Z", action: "run-log", actor: "agent", durationMs: 3_500 },
     { at: "2026-01-01T12:00:10.000Z", action: "request-changes", actor: "reviewer", from: "review", to: "in_progress" },
     { at: "2026-01-01T12:00:13.000Z", action: "block", actor: "agent", from: "in_progress", to: "blocked" },
     { at: "2026-01-01T12:00:18.000Z", action: "resume", actor: "agent", from: "blocked", to: "in_progress" },
     { at: "2026-01-01T12:00:20.000Z", action: "submit", actor: "agent", from: "in_progress", to: "review" },
+    { at: "2026-01-01T12:00:21.000Z", action: "run-log", actor: "agent" },
     { at: "2026-01-01T12:00:22.000Z", action: "accept", actor: "reviewer", from: "review", to: "done" },
     { at: "2026-01-01T12:00:30.000Z", action: "update", actor: "user" },
   ];
   const metrics = taskMetrics(task);
   assert.equal(metrics.cycleMs, 22_000);
+  assert.equal(metrics.reviewerReturns, 1);
   assert.deepEqual(metrics.timeByStatusMs, { draft: 1_000, ready: 2_000, in_progress: 9_000, review: 5_000, blocked: 5_000 });
+  assert.equal(metrics.observedAt, undefined);
+  assert.deepEqual(metrics.executorRuns, { recorded: 2, timed: 1, durationMs: 3_500 });
+  const reviewing = { ...task, status: "review" as const, history: task.history.slice(0, -2) };
+  const observedAt = "2026-01-01T12:00:25.000Z";
+  const pending = taskMetrics(reviewing, Date.parse(observedAt));
+  assert.equal(pending.cycleMs, null);
+  assert.equal(pending.observedAt, observedAt);
+  assert.deepEqual(pending.executorRuns, metrics.executorRuns);
+  const legacy = { ...reviewing, history: reviewing.history.filter(event => event.action !== "run-log" || event.durationMs === undefined) };
+  assert.deepEqual(taskMetrics(legacy).executorRuns, { recorded: 1, timed: 0, durationMs: null });
+  assert.deepEqual(pending.timeByStatusMs, { draft: 1_000, ready: 2_000, in_progress: 9_000, review: 8_000, blocked: 5_000 });
+  assert.equal(taskMetrics(reviewing, Date.parse(createdAt)).timeByStatusMs, null);
+  assert.equal(taskMetrics({ ...reviewing, status: "cancelled", history: [...reviewing.history,
+    { at: observedAt, action: "cancel", actor: "manager", from: "review", to: "cancelled" }] }).timeByStatusMs, null);
+  const mixedReturns = taskMetrics({ ...task, history: [...task.history,
+    { at: "2026-01-01T12:00:21.000Z", action: "request-changes", actor: "manager" }] });
+  assert.equal(mixedReturns.returns, 2);
+  assert.equal(mixedReturns.reviewerReturns, 1);
   assert.equal(taskMetrics({ ...task, history: task.history.filter(event => event.action !== "start") }).timeByStatusMs, null);
 });
 
@@ -213,11 +234,13 @@ test("turn changes retain the thread baseline and a route before usage leaves on
 });
 
 test("CLI persists idempotent reports per task, validates counters and preserves them through archive", t => {
-  const root = mkdtempSync(join(tmpdir(), "ai-taskboard-usage-"));
+  const temp = realpathSync(tmpdir());
+  const root = mkdtempSync(join(temp, "ai-taskboard-usage-"));
+  const env = { ...process.env, GIT_CEILING_DIRECTORIES: temp };
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const cli = (args: string[], input?: unknown, error?: string) => {
     const reply = spawnSync(process.execPath, ["--disable-warning=ExperimentalWarning", "src/cli/main.ts", "--project", root, "--json",
-      ...args, ...(input === undefined ? [] : ["--stdin"])], { input: JSON.stringify(input), encoding: "utf8", windowsHide: true });
+      ...args, ...(input === undefined ? [] : ["--stdin"])], { env, input: JSON.stringify(input), encoding: "utf8", windowsHide: true });
     const result = JSON.parse(reply.stdout);
     assert.equal(result.ok, !error, reply.stdout + reply.stderr);
     if (error) assert.equal(result.error.code, error);
@@ -251,7 +274,10 @@ test("CLI persists idempotent reports per task, validates counters and preserves
   const oldTime = new Date(1_000_000);
   utimesSync(cardPath, oldTime, oldTime);
   const modifiedAt = statSync(cardPath).mtimeMs;
-  assert.equal(save(report).id, first.id);
+  const receipt = cli(["token-usage", first.id, "--compact"], report);
+  assert.equal(receipt.id, first.id);
+  assert.equal(receipt.history, undefined);
+  assert.equal(receipt.tokenUsage, undefined);
   assert.equal(statSync(cardPath).mtimeMs, modifiedAt);
   save({ ...report, sequence: 0, records: [{ ...record, ...counts(1, 1) }] });
   save({ ...report, sequence: 2, records: [{ ...record, ...counts(200, 30, 80, 15) }] });
@@ -261,15 +287,20 @@ test("CLI persists idempotent reports per task, validates counters and preserves
   assert.equal(current.history.length, first.history.length);
   assert.equal(current.updatedAt, first.updatedAt);
   assert.equal(cli(["show", second.id]).tokenUsage, undefined);
-  assert.deepEqual(cli(["metrics", first.id]), {
+  const { observedAt, ...openMetrics } = cli(["metrics", first.id]);
+  const draftAge = Date.parse(observedAt) - Date.parse(first.createdAt);
+  assert.ok(draftAge >= 0);
+  assert.deepEqual(openMetrics, {
     id: first.id, status: "draft", createdAt: first.createdAt, completedAt: null, acceptedBy: null,
-    cycleMs: null, timeByStatusMs: null, submissions: 0, returns: 0, reviews: [],
+    cycleMs: null, timeByStatusMs: { draft: draftAge }, submissions: 0, returns: 0, reviewerReturns: 0, reviews: [],
     tokens: { total: 350, incomplete: false, byRole: {
       reviewer: [{ ...counts(100, 20, 50, 10), model: "model-a", incomplete: false }],
       unattributed: [{ ...counts(200, 30, 80, 15), model: "model-a", incomplete: false }],
     } },
   });
   assert.equal(cli(["metrics", second.id]).tokens.total, null);
+  const boardMetrics = cli(["metrics"]);
+  assert.equal(new Set(boardMetrics.map((item: { observedAt: string }) => item.observedAt)).size, 1);
   cli(["token-usage", first.id], { ...report, role: "manager" }, "INVALID_INPUT");
   for (const invalid of [{ inputTokens: -1 }, { cachedInputTokens: 101 }, { outputTokens: 1.5 }, { model: "" }, { incomplete: false, totalTokens: null }]) {
     cli(["token-usage", first.id], { ...report, sequence: 3, records: [{ ...record, ...invalid }] }, "INVALID_INPUT");

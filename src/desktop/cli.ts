@@ -36,7 +36,13 @@ export function cliChild(project: string, args: string[], input?: unknown): Chil
   return child;
 }
 
-export function callCli<T>(project: string, args: string[], input?: unknown): Promise<CliReply<T>> {
+export async function callCli<T>(project: string, args: string[], input?: unknown): Promise<CliReply<T>> {
+  const result = await callCliOnce<T>(project, args, input);
+  // BOARD_BUSY is returned before the CLI starts the operation.
+  return !result.ok && result.error.code === "BOARD_BUSY" ? callCliOnce<T>(project, args, input) : result;
+}
+
+function callCliOnce<T>(project: string, args: string[], input?: unknown): Promise<CliReply<T>> {
   return new Promise(resolve => {
     const child = cliChild(project, args, input);
     child.stdout.setEncoding("utf8");
