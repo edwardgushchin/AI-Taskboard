@@ -704,7 +704,9 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 }
 .chat-digest.button:hover { color: var(--text); }
 .chat-digest.button > code { padding: 1px 0; background: transparent; }
-.chat-digest.button > .icon { font-size: 11px; }
+.chat-digest.button { font: inherit; }
+.chat-digest.button > code { font-size: inherit; }
+.chat-digest.button > .icon, .chat-code-copy.button > .icon { font-size: 1em; }
 .chat-text, .chat-action { overflow-wrap: anywhere; line-height: 1.7; }
 /* Codex content typography; see docs/chat-typography.md for the source. */
 .chat-entry:is([data-actor="agent"], .chat-coordination) .chat-text, .chat-run .chat-text, .chat-turn .chat-text {
@@ -731,12 +733,13 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .chat-text.chat-agent-text > :is(h1, h2, h3, h4, h5, h6) + * { margin-block-start: .35em; }
 .chat-text :is(pre, code) { background: var(--lane); border-radius: 4px; }
 .chat-text code { padding: 1px 4px; }
-.chat-task-reference { white-space: nowrap; }
+.chat-task-reference, .chat-version { white-space: nowrap; }
+.chat-task-reference > .icon, .chat-version > .icon { font-size: 1em; margin-inline-end: .25em; }
 .chat-text pre { max-width: 100%; padding: 8px; overflow: auto; margin-block-end: 0; }
 .chat-text pre code { padding: 0; }
 .chat-code-block { min-width: 0; border-radius: 4px; background: var(--lane); }
 .chat-code-toolbar { display: flex; justify-content: end; padding: 2px 4px 0; }
-.chat-code-copy.button { min-height: 24px; width: 26px; padding: 0; color: var(--muted); }
+.chat-code-copy.button { min-height: 24px; width: 26px; padding: 0; color: var(--muted); font: inherit; }
 .chat-code-block pre { margin: 0; padding-block-start: 2px; white-space: pre; overflow-wrap: normal; user-select: text; }
 .chat-text table { display: block; max-width: 100%; overflow: auto; border-collapse: collapse; }
 .chat-text :is(th, td) { padding: 3px 7px; border: 1px solid var(--border); }

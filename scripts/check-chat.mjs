@@ -106,6 +106,100 @@ app.whenReady().then(async () => {
     const firstGroup = () => saved.querySelector('.chat-run-group');
     const row = id => [...saved.querySelectorAll('details')].find(node => node.dataset.item === 'item:' + id);
   `);
+  if (process.argv.includes("--references-only")) {
+    await evaluate(`
+      const hash = 'bc68941b378733bf3fd03ef354fe2fa0d0539659';
+      const checksum = 'a'.repeat(64);
+      const tick = String.fromCharCode(96);
+      const sample = 'T-0051 ' + tick + 'T-0051' + tick + ' · 0.3.0-alpha ' + tick + 'v0.3.0-alpha' + tick +
+        ' · Commit ' + hash + '\\n\\nSHA-256 ' + checksum + '\\n\\n[Existing T-0051](https://example.com)\\n\\n' +
+        tick.repeat(3) + '\\nT-0051 0.3.0-alpha ' + hash + '\\n' + tick.repeat(3);
+      body.replaceChildren();
+      for (const [label, context] of [
+        ['Manager live', { agent: true }], ['Manager saved', { agent: true }],
+        ['Executor live', { agent: true, taskId: 'T-0063' }], ['Executor saved', { agent: true, taskId: 'T-0063' }],
+        ['Manager to executor', { coordination: true }], ['Executor to manager', { coordination: true }],
+        ['Reviewer to manager', { coordination: true }], ['Plain message', {}]
+      ]) {
+        const section = element('section');
+        section.append(element('h3', label));
+        if (context.agent || context.coordination) {
+          const run = element('div', undefined, 'chat-run');
+          const items = context.coordination ? [{ ...action('reference-message', 'mcpToolCall'), messagesOnly: true,
+            messages: [{ id: 'T-0063', sequence: 1, actor: label.startsWith('Reviewer') ? 'reviewer' : label.startsWith('Manager') ? 'manager' : 'agent', text: sample }] }] :
+            [{ ...action('reference-answer', 'agentMessage', '', label.endsWith('live') ? 'inProgress' : 'completed', sample), phase: 'final_answer' }];
+          renderRunActivity(run, items, label.endsWith('saved'), undefined, context.taskId,
+            label.startsWith('Manager') && !context.coordination ? { dialogue: true } : undefined);
+          section.append(run);
+        } else section.append(chatText(sample, context));
+        body.append(section);
+      }
+    `);
+    for (const theme of ['dark', 'light']) {
+      nativeTheme.themeSource = theme;
+      await check(`(async () => {
+        await document.fonts.ready;
+        const copied = [];
+        Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async value => copied.push(value) } });
+        try {
+          for (const message of body.querySelectorAll('.chat-text')) {
+            if (message.querySelectorAll('.chat-task-reference').length !== 2 ||
+                message.querySelectorAll('.codicon-milestone').length !== 2 ||
+                message.querySelector('a[href="https://example.com"]').textContent !== 'Existing T-0051' ||
+                message.querySelector('pre code').textContent !== 'T-0051 0.3.0-alpha ' + hash + '\\n') return false;
+            const digests = [...message.querySelectorAll('.chat-digest')];
+            if (digests[0].textContent !== hash.slice(0, 7) || digests[0].title !== hash ||
+                digests[1].textContent !== checksum) return false;
+            for (const control of message.querySelectorAll('.chat-digest, .chat-code-copy')) {
+              const glyph = control.querySelector('.icon');
+              if (getComputedStyle(glyph).fontSize !== getComputedStyle(control).fontSize) return false;
+              control.click();
+              await new Promise(resolve => setTimeout(resolve, 0));
+              if (!glyph.matches('.codicon-check') || getComputedStyle(glyph).fontSize !== getComputedStyle(control).fontSize) return false;
+            }
+          }
+          return copied.length === 24 && copied[0] === hash && copied[1] === checksum;
+        } finally { delete navigator.clipboard; }
+      })()`, theme + ' references, versions, full copy, confirmation sizes, fences and existing links');
+      // A hidden Electron window paints its updated surface on capture.
+      await window.webContents.capturePage();
+      await evaluate(`new Promise(resolve => setTimeout(resolve, 100))`);
+      await capture('references-' + theme + '.png');
+    }
+    await check(`(async () => {
+      const text = 'SHA-1 ' + tick + hash + tick + '\\n\\nCommit ' + tick + checksum + tick;
+      const message = chatText(text);
+      const buttons = [...message.querySelectorAll('.chat-digest')];
+      if (buttons[0].textContent !== hash || buttons[1].textContent !== checksum.slice(0, 7) || buttons[1].title !== checksum) return false;
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async () => { throw new Error('Denied'); } } });
+      try {
+        buttons[1].click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        return buttons[1].querySelector('.codicon-copy') && buttons[1].getAttribute('aria-label').includes('Не удалось');
+      } finally { delete navigator.clipboard; }
+    })().then(Boolean)`, 'SHA-1 stays exact, explicit SHA-256 commit shortens, clipboard rejection offers retry');
+    await evaluate(`
+      const taskBeforeNavigation = taskInSheet;
+      const navigations = [];
+      api.command = async (command, id) => {
+        navigations.push([frame.project, command, id]);
+        return { ok: true, data: { ...taskBeforeNavigation, id, history: [], attachments: [] } };
+      };
+      body.querySelector('.chat-task-reference').click();
+    `);
+    await check(`taskInSheet.id === 'T-0051' && navigations[0].join('/') === 'fixture/show/T-0051'`, 'mouse opens the task on the current board');
+    await evaluate(`body.append(chatText('T-0052')); body.querySelector('.chat-task-reference').focus()`);
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await check(`new Promise(resolve => setTimeout(() => resolve(taskInSheet.id === 'T-0052' && navigations.at(-1).join('/') === 'fixture/show/T-0052'), 100))`, 'Enter opens the task on the current board');
+    await evaluate(`
+      api.command = async () => ({ ok: false, error: { code: 'TASK_NOT_FOUND', message: 'Task T-9999 not found' } });
+      body.append(chatText('T-9999')); body.querySelector('.chat-task-reference').click();
+    `);
+    await check(`!byId('sheet-notice').hidden && byId('sheet-notice').textContent.includes('T-9999') && body.textContent.includes('Повторить загрузку')`, 'missing task explains the error and offers retry');
+    console.log('Chat reference Chromium checks passed');
+    return;
+  }
   if (process.argv.includes("--composer-only")) {
     await evaluate(`
       frame.board = { settings: { executor: { model: 'board', effort: 'high' } } };
@@ -280,12 +374,12 @@ app.whenReady().then(async () => {
     const logLink = report?.querySelector('a');
     if (!summary?.textContent.endsWith('SHA main совпал. ') ||
         logLink?.getAttribute('href') !== path || logLink.textContent !== 'main-bc68941b-gates.log' ||
-        diary?.querySelector('a')?.textContent !== '2026-11-15.md' || digests.length !== 3 ||
-        !digests.every((button, i) => button.title === expected[i] && button.textContent === expected[i].slice(0, 12) + '…')) return false;
+        diary?.querySelector('a:not(.chat-task-reference)')?.textContent !== '2026-11-15.md' || digests.length !== 3 ||
+        !digests.every((button, i) => button.title === expected[i] && button.textContent === (i === 0 ? expected[i].slice(0, 7) : expected[i]))) return false;
     const tick = String.fromCharCode(96);
     const fenced = chatText(tick.repeat(3) + '\\n' + logHash + '\\n' + tick.repeat(3), { coordination: true });
     if (fenced.querySelector('pre code')?.textContent !== logHash + '\\n' || fenced.querySelector('.chat-digest')) return false;
-    if (chatText(text, {}).querySelector('.chat-digest')) return false;
+    if (chatText(text, {}).querySelectorAll('.chat-digest').length !== 3) return false;
     const copied = [];
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async value => copied.push(value) } });
     try {
