@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -6,6 +7,8 @@ import { git } from "../cli/git.ts";
 import { codexThreadPattern } from "../cli/model.ts";
 import type { RunActivity, Task } from "../cli/model.ts";
 import { runActivity } from "./run-activity.ts";
+import { openBoardMcp } from "./board-mcp.ts";
+import { checkWaitInstructions, checkWaitTool, executorToolTimeoutSeconds, waitForCheck } from "./check-wait.ts";
 import type { configuredCodex } from "./codex.ts";
 import { codexProject } from "./codex-project.ts";
 import { codexRpc, turnControl } from "./codex-rpc.ts";
@@ -53,11 +56,21 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     JSON.stringify(worklogSessions) + ' = "write"',
     JSON.stringify(join(paths[1], "worktrees")) + ' = "read"',
   ].join(", ");
-  const child = spawn(client.path, [
-    ...client.args, "app-server", "-c", "permissions." + profile + "={filesystem={" + filesystem + "}}",
-    "-c", "default_permissions=" + JSON.stringify(profile),
-    ...(process.platform === "win32" ? ["-c", 'windows.sandbox="mxc"'] : []),
-  ], { cwd: project, env: client.env, windowsHide: true, stdio: "pipe" });
+  const mcp = await openBoardMcp([checkWaitTool], (_name, args, requestSignal) =>
+    waitForCheck(paths[0], args, signal ? AbortSignal.any([signal, requestSignal]) : requestSignal), executorToolTimeoutSeconds);
+  let child: ChildProcessWithoutNullStreams;
+  try {
+    signal?.throwIfAborted();
+    child = spawn(client.path, [
+      ...client.args, "app-server", "-c", mcp.config,
+      "-c", "permissions." + profile + "={filesystem={" + filesystem + "}}",
+      "-c", "default_permissions=" + JSON.stringify(profile),
+      ...(process.platform === "win32" ? ["-c", 'windows.sandbox="mxc"'] : []),
+    ], { cwd: project, env: { ...(client.env ?? process.env), ...mcp.env }, windowsHide: true, stdio: "pipe" });
+  } catch (error) {
+    await mcp.close();
+    throw error;
+  }
   const exited = new Promise<void>(resolve => child.once("close", resolve));
   const turns = new Map<string, Turn>();
   const activity = new Map<string, RunActivity>();
@@ -71,14 +84,14 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     child.kill();
     rpc.close();
   }, 60_000);
-  const close = () => {
+  const close = async () => {
     clearTimeout(timeout);
     clearTimeout(interruptTimeout);
     signal?.removeEventListener("abort", interrupt);
     rpc.close();
     child.stdin.end();
     child.kill();
-    return exited;
+    await Promise.all([exited, mcp.close()]);
   };
   child.stderr.setEncoding("utf8").on("data", chunk => { lastError = (lastError + chunk).slice(-1500); });
   const rpc = codexRpc(child, async message => {
@@ -164,6 +177,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     if (!codexThreadPattern.test(threadId) || (existing && threadId !== existing)) throw new Error("Codex returned an unexpected thread ID.");
     const feedback = task.history.findLast(event => event.action === "request-changes")?.text;
     const prompt = [
+      checkWaitInstructions,
       "Выполни задачу AI Taskboard " + task.id + " в подготовленной рабочей копии.",
       "Корень доски: " + project,
       "Используй навык ai-taskboard:work-task и прочитай актуальную карточку по номеру.",

@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
 export const entry = fileURLToPath(new URL("../cli/main.ts", import.meta.url));
-export const bundled = join(process.resourcesPath, "bin", process.platform === "win32" ? "ai-taskboard.exe" : "ai-taskboard");
+export const bundled = join(process.resourcesPath ?? dirname(process.execPath), "bin", process.platform === "win32" ? "ai-taskboard.exe" : "ai-taskboard");
 
 export interface CliError {
   code: string;

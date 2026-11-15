@@ -28,7 +28,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     'const thread = ' + JSON.stringify(thread) + ';',
     'const requests = [];',
     'const send = value => console.log(JSON.stringify(value));',
-    'require("node:readline").createInterface({ input: process.stdin }).on("line", line => {',
+    'require("node:readline").createInterface({ input: process.stdin }).on("line", async line => {',
     '  const { id, method, params } = JSON.parse(line);',
     '  if (id === undefined) return;',
     '  requests.push({ method, params });',
@@ -55,6 +55,15 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '  if (method === "turn/interrupt") send({ method: "turn/completed", params: { threadId: thread, turn: { id: params.turnId, status: "interrupted" } } });',
 
     '  if (method === "turn/start") {',
+    '    if (outcome === "check-wait") {',
+    '      const url = flags.find(flag => flag.startsWith("mcp_servers=")).match(/http[^\"]+/)[0];',
+    '      const headers = { authorization: "Bearer " + process.env.AI_TASKBOARD_MCP_TOKEN };',
+    '      const cwd = requests.find(request => request.method === "thread/start" || request.method === "thread/resume").params.cwd;',
+    '      setTimeout(() => fs.writeFileSync(require("node:path").join(cwd, "check-finished.marker"), ""), 30);',
+    '      const response = await fetch(url, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call",',
+    '        params: { name: "check_wait", arguments: { path: "check-finished.marker", timeoutSeconds: 3 } } }) });',
+    '      fs.writeFileSync(capture + ".check", (await response.json()).result.content[0].text);',
+    '    }',
     '    if (outcome === "control") return;',
     '    if (outcome === "closed") { process.stdin.destroy(); return; }',
     '    if (outcome.startsWith("usage")) {',
@@ -110,10 +119,12 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   const launched = JSON.parse(readFileSync(capture, "utf8"));
   assert.equal(launched.cwd, folder);
   assert.equal(launched.flags[0], "app-server");
+  assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers=") && flag.includes("check_wait") && flag.includes("tool_timeout_sec=320")));
   assert.equal(launched.flags.includes('windows.sandbox="mxc"'), process.platform === "win32");
   const worklogData = join(codexHome, "plugins", "data", "codex-worklog-codex-worklog");
-  assert.ok(launched.flags[2].includes(JSON.stringify(join(worklogData, "sessions-v2")) + ' = "write"'));
-  assert.ok(!launched.flags[2].includes(JSON.stringify(worklogData) + ' = "write"'));
+  const permissionsFlag = launched.flags.find((flag: string) => flag.startsWith("permissions."));
+  assert.ok(permissionsFlag.includes(JSON.stringify(join(worklogData, "sessions-v2")) + ' = "write"'));
+  assert.ok(!permissionsFlag.includes(JSON.stringify(worklogData) + ' = "write"'));
   assert.deepEqual(launched.requests.map((req: { method: string }) => req.method),
     ["initialize", "command/exec", "project/list", "thread/start", "turn/start"]);
   const [, probe, , started, turn] = launched.requests;
@@ -127,6 +138,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(started.params.projectId, "board-project");
   assert.equal(started.params.cwd, worktree);
   assert.equal(turn.params.effort, "high");
+  assert.match(turn.params.input[0].text, /call check_wait with that marker/);
   assert.match(turn.params.input[0].text, /T-0001.*Проверка/s);
   assert.match(turn.params.input[0].text, /обязательный шаг, заблокируй задачу/);
   await assert.rejects(launch("denied"), /Codex cannot write.*EACCES/s);
@@ -169,6 +181,11 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(resumedCalls[2].params.cwd, worktree);
   assert.equal(resumedCalls[2].params.approvalPolicy, "on-request");
   assert.equal(resumedCalls[2].params.approvalsReviewer, "auto_review");
+  const checked = await launch("check-wait");
+  assert.equal(await checked.completion, undefined);
+  assert.deepEqual(JSON.parse(readFileSync(capture + ".check", "utf8")), {
+    ok: true, data: { path: "check-finished.marker", timedOut: false },
+  });
   await assert.rejects(startCodexRun(client("busy"), folder, worktree, { ...task, codexThreadId: thread }),
     (error: Error & { code?: string }) => error.code === "CODEX_THREAD_BUSY" && /active writer/.test(error.message));
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/resume");

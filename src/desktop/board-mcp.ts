@@ -14,6 +14,18 @@ export async function withBoardMcp<T>(
   call: (name: string, args: unknown) => Promise<CliReply>,
   run: (config: string, env: Record<string, string>) => Promise<T>,
 ): Promise<T> {
+  const mcp = await openBoardMcp(tools, call);
+  try {
+    return await run(mcp.config, mcp.env);
+  } finally {
+    await mcp.close();
+  }
+}
+
+export async function openBoardMcp(
+  tools: BoardMcpTool[], call: (name: string, args: unknown, signal: AbortSignal) => Promise<CliReply>,
+  toolTimeoutSeconds = 140,
+) {
   const token = randomBytes(32).toString("hex");
   const tokenVariable = "AI_TASKBOARD_MCP_TOKEN";
   const server = createServer((request, response) => {
@@ -43,8 +55,17 @@ export async function withBoardMcp<T>(
       } else if (message.method === "tools/list") {
         result = { tools };
       } else if (message.method === "tools/call" && tools.some(tool => tool.name === message.params?.name)) {
-        const reply = await call(message.params.name, message.params.arguments);
-        result = { content: [{ type: "text", text: JSON.stringify(reply) }], isError: !reply.ok };
+        if (response.destroyed) return;
+        const lifetime = new AbortController();
+        const closed = () => lifetime.abort();
+        response.once("close", closed);
+        try {
+          const reply = await call(message.params.name, message.params.arguments, lifetime.signal);
+          if (response.destroyed) return;
+          result = { content: [{ type: "text", text: JSON.stringify(reply) }], isError: !reply.ok };
+        } finally {
+          response.removeListener("close", closed);
+        }
       } else if (message.method === "ping") {
         result = {};
       }
@@ -61,16 +82,15 @@ export async function withBoardMcp<T>(
       resolve();
     });
   });
-  try {
-    const { port } = server.address() as AddressInfo;
-    // These tools are hosted and authorized by AI Taskboard. Leave all other Codex approval settings intact.
-    const policies = tools.map(tool => `${tool.name}={approval_mode="approve"}`).join(",");
-    return await run(`mcp_servers={ai_taskboard={url="http://127.0.0.1:${port}/mcp",bearer_token_env_var="${tokenVariable}",required=true,tool_timeout_sec=140,tools={${policies}}}}`,
-      { [tokenVariable]: token });
-  } finally {
-    await new Promise<void>(resolve => {
+  const { port } = server.address() as AddressInfo;
+  // AI Taskboard authorizes these tools within the scope of the current chat.
+  const policies = tools.map(tool => `${tool.name}={approval_mode="approve"}`).join(",");
+  return {
+    config: `mcp_servers={ai_taskboard={url="http://127.0.0.1:${port}/mcp",bearer_token_env_var="${tokenVariable}",required=true,tool_timeout_sec=${toolTimeoutSeconds},tools={${policies}}}}`,
+    env: { [tokenVariable]: token },
+    close: () => new Promise<void>(resolve => {
       server.close(() => resolve());
       server.closeAllConnections();
-    });
-  }
+    }),
+  };
 }
