@@ -89,6 +89,7 @@ const titleBarHeight = 36;
 const windowStates = new Map<number, WindowState>();
 const subscriptions = new Map<string, BoardWatch>();
 const commands = new Map<string, string[]>([
+  ["project-usage", ["project-usage"]],
   ["init", ["init", "--compact"]], ["list", ["list", "--compact"]], ["show", ["show"]], ["update", ["update"]],
   ["comment", ["comment"]],
   ["git-refs", ["git", "refs"]], ["git-switch", ["git", "switch"]],
