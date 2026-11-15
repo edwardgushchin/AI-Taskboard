@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createTask, recordRunLog } from "../src/cli/tasks.ts";
 import { runActivity } from "../src/desktop/run-activity.ts";
 
 test("nonzero command exit codes remain visible as failures in collapsed activity groups", () => {
@@ -34,4 +35,31 @@ test("streamed reasoning keeps new summary sections on separate lines", () => {
   update("summaryPartAdded", { summaryIndex: 1 });
   const next = update("summaryTextDelta", { summaryIndex: 1, delta: "**Preparing the answer**" });
   assert.equal(next.text, "**Checking the board**\n\n**Preparing the answer**");
+});
+
+
+test("first event time survives deltas, completion and journal validation", () => {
+  const entries = new Map();
+  const at = "2026-11-14T21:59:00.000Z";
+  const update = (method: string, params: Record<string, unknown>, time?: string) => {
+    const item = runActivity(entries, method, params, time)!;
+    entries.set(item.id, item);
+    return item;
+  };
+  update("item/started", { item: { id: "message", type: "agentMessage" } }, at);
+  assert.equal(update("item/agentMessage/delta", { itemId: "message", delta: "Part" }, "2026-11-14T22:00:00.000Z").at, at);
+  const completed = update("item/completed", { item: { id: "message", type: "agentMessage", text: "Done" } }, "2026-11-14T22:01:00.000Z");
+  assert.equal(completed.at, at);
+  const task = createTask("T-0001", { title: "Timestamp" });
+  const saved = JSON.parse(JSON.stringify(recordRunLog(task, { entries: [completed] })));
+  assert.equal(saved.history.at(-1).run[0].at, at);
+  const deltaFirst = runActivity(new Map(), "item/agentMessage/delta", { itemId: "delta-first", delta: "First" }, at)!;
+  assert.equal(deltaFirst.at, at);
+  const completedFirst = runActivity(new Map(), "item/completed", { item: { id: "complete-first", type: "agentMessage", text: "Only completion" } }, at)!;
+  assert.equal(completedFirst.at, at);
+  const legacy = { ...completed, at: undefined };
+  assert.equal(recordRunLog(task, { entries: [legacy] }).history.at(-1)!.run![0]!.at, undefined);
+  for (const invalid of [null, 123, "", "invalid"]) assert.throws(() => recordRunLog(task, {
+    entries: [{ ...completed, at: invalid }],
+  }), /valid item timestamp/);
 });

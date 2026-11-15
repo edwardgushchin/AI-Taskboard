@@ -30,7 +30,7 @@ class Element {
   querySelector(selector: string) { return this.querySelectorAll(selector)[0]; }
   contains() { return false; }
 }
-const { readableRunCommand, renderRunActivity } = runInNewContext(source.slice(start, end) +
+const { readableRunCommand, renderRunActivity } = runInNewContext(source.slice(0, source.indexOf("const chatDrafts")) + source.slice(start, end) +
   "\n({ readableRunCommand, renderRunActivity })", {
   element: (tag: string, text?: string, className?: string) => new Element(tag, text, className),
   document: { activeElement: { matches: () => false } }, frame: { russian: true }, taskInSheet: undefined,

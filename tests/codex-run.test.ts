@@ -182,6 +182,9 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     ["cmd", "inProgress", ""], ["cmd", "inProgress", "clean"], ["cmd", "completed", "clean\nExit code: 0"],
     ["reason", "completed", "Public summary"],
   ]);
+  const noteTimes = activity.filter(item => item.id === "note").map(item => item.at);
+  assert.ok(Number.isFinite(Date.parse(noteTimes[0] ?? "")));
+  assert.equal(new Set(noteTimes).size, 1);
   const launched = JSON.parse(readFileSync(capture, "utf8"));
   assert.equal(launched.cwd, folder);
   assert.deepEqual(launched.flags.slice(0, 5), ["app-server", "--disable", "hooks", "--disable", "plugins"]);
@@ -238,7 +241,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   for (const [status, rationale] of [["denied", "This destination is outside the project scope."], ["approved", "Read public documentation."]]) {
     activity.length = 0;
     assert.equal(await (await launch("review-" + status)).completion, undefined);
-    assert.deepEqual(activity.filter(item => item.type === "autoApprovalReview"), [
+    assert.deepEqual(activity.filter(item => item.type === "autoApprovalReview").map(({ at, ...item }) => item), [
       { id: "approval:access-1", type: "autoApprovalReview", title: "docs.example.com:443", text: "", status: "inProgress" },
       { id: "approval:access-1", type: "autoApprovalReview", title: "docs.example.com:443", text: rationale, status },
     ]);

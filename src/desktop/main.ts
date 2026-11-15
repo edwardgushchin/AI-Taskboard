@@ -1297,7 +1297,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   const deliveredMessages = new Set<string>();
   let waitWork = new AbortController();
   let items: BoardActivity[] = [];
-  let historyMessage: { text: string; files: { url: string; name: string }[]; clientId?: string } | undefined;
+  let historyMessage: { at?: string; text: string; files: { url: string; name: string }[]; clientId?: string } | undefined;
   let historyModel: string | undefined;
   let historyAccepted = false;
   const saveHistory = () => {
@@ -1319,7 +1319,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   let goalSet = false;
   let activeGoal: BoardGoal | undefined;
   let goalWork = new AbortController();
-  const notify = (type: string, details: { items?: RunActivity[]; model?: string; goal?: BoardGoal | null; goalRunning?: boolean } = {}) => {
+  const notify = (type: string, details: { at?: string; items?: RunActivity[]; model?: string; goal?: BoardGoal | null; goalRunning?: boolean } = {}) => {
     if (lane === "work" && type !== "orchestrator-goal") return;
     if (!sender.isDestroyed()) sender.send("chat:update", { project: board.project, type, ...details });
   };
@@ -1330,8 +1330,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   function publishGoalNotice(text: string, actor: "agent" | "user" = "agent") {
     const id = randomUUID();
     const changed = saveManagerHistory(project, Date.now(), id, actor === "user" ? { lane: "notice", goalId, items: [],
-      message: { text, files: [] } } : { lane: "notice", goalId,
-      items: [{ id, type: "agentMessage", title: "", phase: "final_answer", text, status: "completed" }] });
+      message: { text, files: [], at: new Date().toISOString() } } : { lane: "notice", goalId,
+      items: [{ id, at: new Date().toISOString(), type: "agentMessage", title: "", phase: "final_answer", text, status: "completed" }] });
     if (changed) publishManagerUnread(project);
     broadcastBoardChat(project, "orchestrator-history");
   }
@@ -1425,6 +1425,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     const attachments = await prepareBoardAttachments(files, scratch);
     if (!reviewIds && goal !== "resume") {
       historyMessage = {
+        at: new Date().toISOString(),
         text: requestText,
         files: attachments.flatMap(file => file.image ? [{ url: file.image, name: file.name }] : []),
         clientId: typeof messageId === "string" ? messageId : undefined,
@@ -1578,6 +1579,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
             acceptedMessage = true;
             historyAccepted = true;
             saveHistory();
+            notify("orchestrator-message-time", { at: historyMessage?.at });
             delivered();
             if (typeof messageId === "string") broadcastBoardChat(project, "orchestrator-work-accepted", { id: messageId });
           }
@@ -1588,6 +1590,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
             acceptedMessage = true;
             historyAccepted = true;
             saveHistory();
+            notify("orchestrator-message-time", { at: historyMessage?.at });
             delivered();
           }
           steering.get(id)?.resolve(true);
@@ -1719,7 +1722,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     historyAccepted = true;
     historyModel = response.model ?? historyModel;
     if (response.text && !items.some(item => item.type === "agentMessage" && item.phase !== "commentary")) {
-      items = [...items, { id: managerRun.id, type: "agentMessage", title: "", phase: "final_answer",
+      items = [...items, { id: managerRun.id, at: new Date().toISOString(), type: "agentMessage", title: "", phase: "final_answer",
         text: response.text, status: "completed" }];
     }
     if (!error) delivered();

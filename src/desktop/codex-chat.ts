@@ -289,10 +289,10 @@ interface BoardSession {
   mcpTools: BoardMcpTool[];
 }
 
-type BoardMessage = { id: string; sequence: number; actor: "manager" | "agent" | "reviewer"; text: string;
+type BoardMessage = { at?: string; id: string; sequence: number; actor: "manager" | "agent" | "reviewer"; text: string;
   kind?: "request-changes" };
 export type BoardActivity = RunActivity & { taskChanges?: BoardChange[]; messages?: BoardMessage[]; messagesOnly?: boolean;
-  userMessage?: ReturnType<typeof boardMessage> };
+  userMessage?: ReturnType<typeof boardMessage> & { at?: string } };
 
 export function updateBoardGoal(profile: string, project: string, threadId: string, action: BoardGoalAction) {
   return withServer(profile, project, async ({ request }) => {
@@ -328,10 +328,10 @@ export function readTaskRunHistory(profile: string, project: string, threadId: s
         await request("thread/items/list", { threadId, cursor, limit: 100, sortDirection: "asc" });
       for (const { item, startedAtMs, completedAtMs } of page.data) {
         const at = startedAtMs ?? completedAtMs;
-        if (typeof at !== "number" || item.type === "userMessage") continue;
+        if (typeof at !== "number" || !Number.isFinite(at) || item.type === "userMessage") continue;
         const run = runs.findLast(entry => at >= entry.start && at <= entry.end);
         if (!run) continue;
-        const activity = runActivity(run.items, "item/completed", { item });
+        const activity = runActivity(run.items, "item/completed", { item }, new Date(at).toISOString());
         if (activity) run.items.set(activity.id, activity);
       }
       cursor = page.nextCursor;
@@ -348,7 +348,7 @@ export function readBoardHistory(profile: string, project: string, threadId: str
     const page = await request<{ data: {
       turnId: string; item: Record<string, unknown>; startedAtMs?: number | null; completedAtMs?: number | null;
     }[]; nextCursor: string | null }>("thread/items/list", { threadId, cursor, limit: 60, sortDirection: "desc" });
-    type Turn = { messages: (ReturnType<typeof boardMessage> & { clientId?: string })[];
+    type Turn = { messages: (ReturnType<typeof boardMessage> & { clientId?: string; at?: string })[];
       items: BoardActivity[]; start?: number; end?: number };
     const turns = new Map<string, Turn>();
     const segments: Turn[] = [];
@@ -363,12 +363,15 @@ export function readBoardHistory(profile: string, project: string, threadId: str
       }
       if (typeof startedAtMs === "number") turn.start = Math.min(turn.start ?? startedAtMs, startedAtMs);
       if (typeof completedAtMs === "number") turn.end = Math.max(turn.end ?? completedAtMs, completedAtMs);
+      const at = startedAtMs ?? completedAtMs;
+      const savedAt = typeof at === "number" && Number.isFinite(at) ? new Date(at).toISOString() : undefined;
       if (userMessage) {
-        turn.messages.push({ ...userMessage, clientId: typeof item.clientId === "string" ? item.clientId : undefined });
+        turn.messages.push({ ...userMessage, at: savedAt, clientId: typeof item.clientId === "string" ? item.clientId : undefined });
       } else {
         const activity = boardActivity(new Map(), "item/completed", { item });
         if (activity) {
           if (activity.type === "agentMessage" && typeof item.text === "string") activity.text = item.text;
+          activity.at = savedAt;
           turn.items.push(activity);
         }
       }
@@ -380,8 +383,8 @@ export function readBoardHistory(profile: string, project: string, threadId: str
   }, async () => undefined);
 }
 
-function boardActivity(entries: Map<string, BoardActivity>, method: string, params: Record<string, unknown>): BoardActivity | undefined {
-  const activity: BoardActivity | undefined = runActivity(entries, method, params);
+function boardActivity(entries: Map<string, BoardActivity>, method: string, params: Record<string, unknown>, at?: string): BoardActivity | undefined {
+  const activity: BoardActivity | undefined = runActivity(entries, method, params, at);
   if (!activity || method !== "item/completed") return activity;
   const item = params.item as Record<string, unknown>;
   const data = boardToolResult(item);
@@ -414,12 +417,12 @@ function boardActivity(entries: Map<string, BoardActivity>, method: string, para
   return activity;
 }
 
-function coordinationMessage(entry: { id?: unknown; sequence?: unknown } | undefined,
+function coordinationMessage(entry: { id?: unknown; sequence?: unknown; at?: unknown } | undefined,
   actor: BoardMessage["actor"], text: unknown, kind?: BoardMessage["kind"]): BoardMessage[] {
   const { id, sequence } = entry ?? {};
   if (typeof id !== "string" || !taskIdPattern.test(id) || typeof sequence !== "number" ||
       !Number.isSafeInteger(sequence) || sequence < 1 || typeof text !== "string" || !text.trim()) return [];
-  return [{ id, sequence, actor, text: text.trim(), ...(kind ? { kind } : {}) }];
+  return [{ id, sequence, actor, text: text.trim(), ...(typeof entry?.at === "string" ? { at: entry.at } : {}), ...(kind ? { kind } : {}) }];
 }
 
 function boardToolResult(item: Record<string, unknown>) {
@@ -585,7 +588,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
       if (data?.threadId !== thread.id) return;
       const itemMethod = message.method;
       const activityItem: BoardActivity | undefined = itemMethod?.startsWith("item/") && (session || onActivity) ?
-        (session ? boardActivity : runActivity)(activity, itemMethod, message.params as Record<string, unknown>) : undefined;
+        (session ? boardActivity : runActivity)(activity, itemMethod, message.params as Record<string, unknown>, new Date().toISOString()) : undefined;
       options.worklog?.observe(message, thread.id);
       if (message.method === "item/completed" && data.item?.type === "userMessage") {
         const user = data.item as { clientId?: string; content?: unknown };
@@ -594,7 +597,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
           const userMessage = id !== session.messageId && boardUserMessage(user);
           if (userMessage) {
             activity.set("user:" + id, { id, type: "userMessage", title: "", text: userMessage.text,
-              status: "completed", userMessage });
+              status: "completed", userMessage: { ...userMessage, at: activity.get("user:" + id)?.userMessage?.at ?? new Date().toISOString() } });
             clearTimeout(activityTimer);
             publish();
           }

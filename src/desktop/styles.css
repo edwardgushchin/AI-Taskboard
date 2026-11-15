@@ -757,6 +757,7 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .chat-text table { display: block; max-width: 100%; overflow: auto; border-collapse: collapse; }
 .chat-text :is(th, td) { padding: 3px 7px; border: 1px solid var(--border); }
 .chat-time { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.board-manager-message > .chat-time { text-align: end; }
 .chat-entry[data-actor="user"] .chat-time { text-align: end; }
 .chat-day, .chat-entry.chat-event { align-self: center; color: var(--muted); text-align: center; font-size: 12px; }
 .chat-day span { display: inline-block; padding: 3px 10px; }

@@ -115,3 +115,24 @@ test("saved automatic review turns stay in the work view without masquerading as
   assert.deepEqual(readManagerHistory(project, null, "work")!.turns.map(turn => ({ messages: turn.messages, items: turn.items })),
     [{ messages: [], items: [review] }]);
 });
+
+
+test("message timestamps survive saved streaming updates, reopening and older pages", t => {
+  const project = fixture(t);
+  const at = "2026-11-14T21:59:00.000Z";
+  const id = randomUUID();
+  const message = { text: "Request", files: [], at };
+  const item = { id: "answer", type: "agentMessage", title: "", text: "Part", status: "inProgress", at };
+  saveManagerHistory(project, 1, id, { message, items: [item] });
+  saveManagerHistory(project, 1, id, { message, items: [{ ...item, text: "Done", status: "completed" }] });
+  for (let i = 0; i < 21; i++) saveManagerHistory(project, 2 + i, randomUUID(), {
+    message: { text: "Legacy", files: [] }, items: [],
+  });
+  const recent = readManagerHistory(project)!;
+  assert.equal(recent.turns.at(-1)!.messages[0]!.at, undefined);
+  const older = readManagerHistory(project, recent.nextCursor)!;
+  assert.equal(older.turns[0]!.messages[0]!.at, at);
+  assert.equal(older.turns[0]!.items[0]!.at, at);
+  assert.equal(older.turns[0]!.items[0]!.text, "Done");
+  assert.deepEqual(readManagerHistory(project, recent.nextCursor), older);
+});
