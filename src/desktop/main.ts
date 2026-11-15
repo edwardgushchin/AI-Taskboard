@@ -34,7 +34,7 @@ import { startWindowsDictation } from "./windows-dictation.ts";
 import { needsManagerAttention } from "../cli/task-messages.ts";
 import { readReviewReports, saveReviewReports } from "./review-history.ts";
 import { readReviewerChat, reviewerActivity, withReviewerChat } from "./reviewer-chat.ts";
-import { goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryForView, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, saveManagerHistory } from "./manager-history.ts";
+import { goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryForView, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, saveManagerHistory, syncTaskStatusNotices } from "./manager-history.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
 import { createAgentSlots, parseAgentLimits } from "./agent-limits.ts";
 import type { AgentRole } from "./agent-limits.ts";
@@ -248,6 +248,7 @@ function releaseWatch(project: string, watch: BoardWatch): void {
 }
 
 function subscribe(project: string, board: Board): BoardWatch {
+  syncTaskStatusNotices(project, russian);
   const tabs = new Set<ProjectTab>();
   let child: ReturnType<typeof cliChild> | undefined;
   let retry: NodeJS.Timeout | undefined;
@@ -276,6 +277,16 @@ function subscribe(project: string, board: Board): BoardWatch {
       let result: CliReply<Board>;
       try { result = JSON.parse(line); }
       catch { result = cliFailure("CLI_UNAVAILABLE", "The CLI returned an invalid board snapshot."); }
+      if (result.ok) {
+        try {
+          if (syncTaskStatusNotices(project, russian)) {
+            publishManagerUnread(project);
+            broadcastBoardChat(project, "orchestrator-history");
+          }
+        } catch (error) {
+          result = cliFailure("STATUS_NOTICE_FAILED", (error as Error).message);
+        }
+      }
       if (result.ok) {
         const previousLimits = watch.board.settings.agentLimits;
         watch.board = result.data;
@@ -1014,18 +1025,27 @@ ipcMain.handle("board:history", async (event, project?: string, cursor: unknown 
     } };
     const background = readBoardThread(boardThreadPath(project));
     const loadHistory = async () => {
-      if (isLocalManagerCursor(cursor)) return readManagerHistory(project, cursor, view);
+      let historyCursor = cursor as string | null;
       let thread: ReturnType<typeof readBoardThread>;
       try {
-        if (view === "work" && cursor === null) {
+        if (view === "work" && historyCursor === null) {
           const local = readManagerHistory(project, null, view);
           if (local) return local;
         }
         thread = view === "work" ? background : readBoardThread(boardThreadPath(project, "chat")) ?? background;
-        if (!thread || thread.history === "local") return readManagerHistory(project, cursor, view);
-        const legacy = await readBoardHistory(app.getPath("userData"), project, thread.id, cursor);
+        if (view === "chat" && thread && thread.history !== "local") {
+          // Local notices exist even when the conversation still lives at the
+          // provider. Page them before continuing the legacy conversation.
+          if (!historyCursor?.startsWith("provider:")) {
+            const local = readManagerHistory(project, historyCursor, view, true);
+            if (local?.turns.length) return { ...local, nextCursor: local.nextCursor ?? "provider:" };
+          } else historyCursor = historyCursor.slice("provider:".length) || null;
+        } else if (isLocalManagerCursor(historyCursor)) return readManagerHistory(project, historyCursor, view);
+        if (!thread || thread.history === "local") return readManagerHistory(project, historyCursor, view);
+        const legacy = await readBoardHistory(app.getPath("userData"), project, thread.id, historyCursor);
         if (!legacy) return;
-        return { ...legacy, turns: managerHistoryForView(legacy.turns, view) };
+        return { ...legacy, turns: managerHistoryForView(legacy.turns, view),
+          nextCursor: view === "chat" && legacy.nextCursor ? "provider:" + legacy.nextCursor : legacy.nextCursor };
       } catch (error) {
         const local = cursor === null && thread?.history !== "local" && readManagerHistory(project, null, view);
         if (local) return local;

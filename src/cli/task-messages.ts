@@ -1,6 +1,20 @@
 import { member, number, requireState, TaskboardError, text } from "./model.ts";
 import type { Task, TaskEvent } from "./model.ts";
 
+export function statusNotice(task: Task, event: TaskEvent, russian = true) {
+  if (!event.from || !event.to || event.from === event.to) return;
+  const labels = russian ? {
+    draft: "возвращена в черновики", ready: "готова к работе", in_progress: "в работе",
+    blocked: "заблокирована", review: "сдана на проверку", done: "завершена", cancelled: "отменена",
+  } : {
+    draft: "draft", ready: "ready", in_progress: "in progress", blocked: "blocked",
+    review: "submitted for review", done: "completed", cancelled: "cancelled",
+  };
+  // Acceptance stores a Git SHA in event.text, not a user-facing outcome.
+  const detail = event.action === "accept" ? task.result?.summary : event.text;
+  return `${task.id} «${task.title}» — ${labels[event.to]}${detail?.trim() ? ": " + detail.trim() : "."}`;
+}
+
 export function executorOutcome(event: TaskEvent | undefined) {
   return event?.actor === "agent" && ["submit", "block", "progress", "pause"].includes(event.action);
 }
