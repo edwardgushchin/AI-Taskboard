@@ -14,7 +14,7 @@ const parsed = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, tr
 const names = new Set([
   "activeAgents", "stopChat", "beginOperation", "projectOperations", "closingProjects", "frame", "send", "notifyRunChange", "sendChat", "saveTaskTokenUsage", "windowStates", "chatRuns", "replyingTasks",
   "launchingTasks", "runningTasks", "runActivityByTask", "imageExtensions", "imageTypes", "recentBoards", "russian", "theme",
-  "managerQuestion", "executorLimit",
+  "managerQuestion", "executorLimit", "deferredExecutors",
 ]);
 // Exercise the main-process lifecycle without starting Electron or a real provider.
 const activitySource = parsed.statements.filter(node => {
@@ -33,7 +33,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   const started = Promise.withResolvers<void>();
   const slots = createAgentSlots();
   const runtime = runInNewContext(stripTypeScriptTypes(activitySource) +
-    "\n({ sendChat, stopChat, activeAgents, frame, windowStates, runningTasks, launchingTasks })", {
+    "\n({ sendChat, stopChat, activeAgents, frame, windowStates, runningTasks, launchingTasks, deferredExecutors, notifyRunChange })", {
     basename, extname, join, performance, projectLabels, AbortController, subscriptions: new Map(),
     reserveAgent: slots.acquire,
     boardRequests: new Map(), boardWorkRequests: new Map(), boardUnread: () => [], projectIdentity: (path: string) => path,
@@ -97,6 +97,28 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   const active = (index = 0): string[] => Array.from(runtime.frame(windows[index].state).runningTasks);
   return { task, runtime, windows, run, active, response, delivered, writes, slots, started: started.promise };
 }
+
+test("confirmed queue snapshots agree across board windows and exclude interrupted or stale tasks", () => {
+  const f = fixture();
+  f.task.status = "in_progress";
+  f.task.codexThreadId = "interrupted-thread";
+  const waiting = (index: number) => Array.from(f.runtime.frame(f.windows[index].state).waitingTasks);
+  assert.deepEqual(waiting(0), []);
+  f.runtime.deferredExecutors.set("project-a\0T-0001", { project: "project-a", id: f.task.id, revision: f.task.revision });
+  assert.deepEqual(waiting(0), [f.task.id]);
+  assert.deepEqual(waiting(1), [f.task.id]);
+  assert.deepEqual(waiting(2), []);
+  f.runtime.runningTasks.add("project-a\0T-0001");
+  assert.deepEqual(waiting(0), []);
+  f.runtime.runningTasks.clear();
+  f.task.revision++;
+  assert.deepEqual(waiting(0), []);
+  f.task.revision--;
+  f.task.status = "blocked";
+  assert.deepEqual(waiting(1), []);
+  f.runtime.deferredExecutors.clear();
+  assert.deepEqual(waiting(0), []);
+});
 
 test("chat replies publish the existing task activity in every window of their board", async () => {
   const f = fixture();

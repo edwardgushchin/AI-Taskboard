@@ -20,7 +20,7 @@ import { taskChatActions } from "./chat-actions.ts";
 import type { CliReply } from "./cli.ts";
 import { executionModels } from "./codex-models.ts";
 import type { ArchiveLink, BoardSettings, BoardTag, ReviewMode, RunActivity, Task } from "../cli/model.ts";
-import { boardAgentRoles, boardReviewMode, codexThreadPattern, defaultBoardAgents, maxAttachmentBytes, reviewVerifier, taskIdPattern } from "../cli/model.ts";
+import { boardReviewMode, codexThreadPattern, defaultBoardAgents, maxAttachmentBytes, reviewVerifier, taskIdPattern } from "../cli/model.ts";
 import { directory as storageDirectory, readJson, writeJson } from "../cli/storage.ts";
 import { missingCodexThread, startCodexRun } from "./codex-run.ts";
 import type { ExecutorTask } from "./codex-run.ts";
@@ -196,6 +196,11 @@ function frame(state: ProjectTab) {
       const key = state.project + "\0" + task.id;
       return runningTasks.has(key) || replyingTasks.has(key);
     }).map(task => task.id),
+    waitingTasks: state.board?.tasks.filter(task => {
+      const key = state.project + "\0" + task.id;
+      return task.status === "in_progress" && deferredExecutors.get(key)?.revision === task.revision &&
+        !runningTasks.has(key) && !replyingTasks.has(key);
+    }).map(task => task.id),
     reviewingTasks: Object.fromEntries(state.board?.tasks.flatMap(task => {
       if (task.status !== "review") return [];
       if (reviewerRuns?.has(task.id)) return [[task.id, "reviewer"]];
@@ -288,12 +293,9 @@ function subscribe(project: string, board: Board): BoardWatch {
         }
       }
       if (result.ok) {
-        const previousLimits = watch.board.settings.agentLimits;
         watch.board = result.data;
         for (const listener of watch.listeners) listener(result.data);
-        const nextLimits = watch.board.settings.agentLimits;
-        if (boardAgentRoles.some(role => previousLimits?.[role] !== nextLimits?.[role])) scheduleAgentWork();
-        else scheduleAutoReview(watch);
+        scheduleAgentWork();
       }
       for (const state of tabs) {
         if (result.ok) state.board = result.data;
@@ -842,12 +844,17 @@ function scheduleAgentWork() {
     schedulingAgentWork = false;
     for (const [key, { project, id, revision }] of deferredExecutors) {
       const watch = subscriptions.get(project);
-      if (!watch || closingProjects.has(project)) {
+      const task = watch?.board.tasks.find(task => task.id === id);
+      // request-changes can finish before the watch receives its new revision.
+      if (watch && task && task.revision < revision) continue;
+      if (!watch || closingProjects.has(project) || !task || task.status !== "in_progress" || task.revision !== revision) {
         deferredExecutors.delete(key);
+        notifyRunChange(project);
         continue;
       }
       if (!agentSlots.available(projectIdentity(project), "executor", watch.board.settings?.agentLimits) || executorBusy(project, id)) continue;
       deferredExecutors.delete(key);
+      notifyRunChange(project);
       const failed = (error: string) => broadcastBoardChat(project, "orchestrator-review-error", { error: id + " · " + error });
       void launchTask(project, id, undefined, false, revision).then(result => {
         if (!result.ok && !["REVISION_CONFLICT", "INVALID_TRANSITION"].includes(result.error.code)) failed(result.error.message);
