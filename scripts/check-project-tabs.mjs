@@ -101,7 +101,7 @@ if (!process.versions.electron) {
         };
         sampleStartup();
         window.startupObserver = new MutationObserver(sampleStartup);
-        window.startupObserver.observe(document.body, { subtree: true, attributes: true, attributeFilter: ['hidden'] });
+        window.startupObserver.observe(document.body, { subtree: true, attributes: true, attributeFilter: ['hidden', 'aria-busy'] });
         void 0;
       `));
     });
@@ -238,6 +238,7 @@ if (!process.versions.electron) {
       await open(unavailable);
       check((await frame()).error.code === "PROJECT_UNAVAILABLE" && (await frame()).tabs.length === 3, "missing folder retains a closable error tab");
       await select(second);
+      await waitFor(() => evaluate("document.querySelector('.project-tab:has([aria-selected=true])')?.dataset.project === " + JSON.stringify(second)), "selected tab rendered before drag");
       const order = async expected => {
         await waitFor(() => evaluate("[...document.querySelectorAll('.project-tab')].map(tab => tab.dataset.project).join('|') === " + JSON.stringify(expected.join("|"))), "reordered DOM");
         check((await frame()).tabs.map(tab => tab.path).join("|") === expected.join("|"), "main process and rendered order agree");
@@ -258,6 +259,8 @@ if (!process.versions.electron) {
         })()`);
       };
       await drag(unavailable, second, false, true);
+      check(await evaluate("Boolean(document.querySelector('.drop-before'))"), "drag shows the insertion marker");
+      await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
       writeFileSync(join(artifacts, "project-tabs-drop.png"), (await window.webContents.capturePage()).toPNG());
       await evaluate("window.cancelTestDrag()");
       await order([second, first, unavailable]);
