@@ -8,7 +8,7 @@ export const imageAttachmentPattern = /\.(png|jpe?g|webp|gif)$/i;
 
 export type TaskState = typeof taskStates[number];
 export type Priority = typeof priorities[number];
-export type Actor = "agent" | "user" | "manager";
+export type Actor = "agent" | "user" | "manager" | "reviewer";
 export type IntegrationMode = "merge" | "squash";
 export type TagColor = typeof tagColors[number];
 

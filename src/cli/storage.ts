@@ -438,6 +438,11 @@ function requireBoard(location: BoardLocation): void {
   }
 }
 
+export function readBoardSettings(location: BoardLocation): BoardIndex["settings"] {
+  requireBoard(location);
+  return readIndex(join(location.directory, "board.json")).settings;
+}
+
 export function onBoard<T>(location: BoardLocation, callback: (store: BoardStore, lockWaitMs: number) => T): T {
   requireBoard(location);
   return withLock(location.directory, lockWaitMs => callback(new BoardStore(location), lockWaitMs));

@@ -1,5 +1,5 @@
-import { number, object, text, TaskboardError } from "./model.ts";
-import type { Task } from "./model.ts";
+import { member, number, object, text, TaskboardError } from "./model.ts";
+import type { Task, TaskEvent, TaskState } from "./model.ts";
 
 // Input includes cache reads/writes; output includes reasoning. These subsets
 // must not be added to totalTokens a second time.
@@ -9,7 +9,11 @@ export const tokenFields = [
 export type TokenCounts = Record<typeof tokenFields[number], number | null>;
 export type ModelTokenUsage = TokenCounts & { model: string | null; incomplete: boolean };
 export type TokenUsageRecord = ModelTokenUsage & { threadId: string; turnId: string };
-export type TokenUsageReport = { id: string; sequence: number; records: TokenUsageRecord[] };
+const taskUsageRoles = ["executor", "discussion", "reviewer"] as const;
+export type TaskUsageRole = typeof taskUsageRoles[number];
+export type ReviewDecisionTiming = { lockWaitMs: number; verificationMs: number };
+type ReviewTiming = { submissionSequence: number; startedAtMs: number; durationMs: number; decisionTiming?: ReviewDecisionTiming };
+export type TokenUsageReport = { id: string; sequence: number; records: TokenUsageRecord[]; role?: TaskUsageRole; reviewTiming?: ReviewTiming };
 export type TaskTokenUsage = { reports: TokenUsageReport[]; byModel: ModelTokenUsage[] };
 
 export function emptyTokenCounts(): TokenCounts {
@@ -45,7 +49,26 @@ export function parseUsageReport(value: unknown): TokenUsageReport {
   if (new Set(records.map(usageKey)).size !== records.length) {
     throw new TaskboardError("INVALID_INPUT", "Duplicate token usage record.");
   }
-  return { id: text(report.id, "id", true), sequence: number(report.sequence, "sequence", 0), records };
+  const role = report.role === undefined ? undefined : member(report.role, taskUsageRoles, "role");
+  let reviewTiming: ReviewTiming | undefined;
+  if (report.reviewTiming !== undefined) {
+    if (role !== "reviewer") throw new TaskboardError("INVALID_INPUT", "Review timing requires the reviewer role.");
+    const timing = object(report.reviewTiming);
+    reviewTiming = {
+      submissionSequence: number(timing.submissionSequence, "submissionSequence"),
+      startedAtMs: number(timing.startedAtMs, "startedAtMs", 0),
+      durationMs: number(timing.durationMs, "durationMs", 0),
+    };
+    if (timing.decisionTiming !== undefined) {
+      const decision = object(timing.decisionTiming);
+      reviewTiming.decisionTiming = {
+        lockWaitMs: number(decision.lockWaitMs, "lockWaitMs", 0),
+        verificationMs: number(decision.verificationMs, "verificationMs", 0),
+      };
+    }
+  }
+  return { id: text(report.id, "id", true), sequence: number(report.sequence, "sequence", 0), records,
+    ...(role ? { role } : {}), ...(reviewTiming ? { reviewTiming } : {}) };
 }
 
 export function totalTokenUsage(records: TokenUsageRecord[]): ModelTokenUsage[] {
@@ -67,6 +90,12 @@ export function totalTokenUsage(records: TokenUsageRecord[]): ModelTokenUsage[] 
 
 export function recordTokenUsage(task: Task, input: Record<string, unknown>): Task {
   const report = parseUsageReport(input);
+  if (report.reviewTiming) {
+    const submission = task.history[report.reviewTiming.submissionSequence - 1];
+    if (submission?.action !== "submit" || submission.to !== "review") {
+      throw new TaskboardError("INVALID_INPUT", "Review timing requires a recorded submission.");
+    }
+  }
   const reports = new Map((task.tokenUsage?.reports ?? []).map(entry => [entry.id, entry]));
   // Retrying a write or delivering an older snapshot cannot count it twice.
   const previous = reports.get(report.id);
@@ -75,4 +104,105 @@ export function recordTokenUsage(task: Task, input: Record<string, unknown>): Ta
   const entries = [...reports.values()];
   // Telemetry does not change the content revision or invalidate a submission preview.
   return { ...task, tokenUsage: { reports: entries, byModel: totalTokenUsage(entries.flatMap(entry => entry.records)) } };
+}
+
+function reviewMetrics(task: Task) {
+  const attempts = new Map<number, (ReviewTiming & { tokens: number | null; tokensIncomplete: boolean })[]>();
+  for (const { reviewTiming, records } of task.tokenUsage?.reports ?? []) {
+    if (!reviewTiming) continue;
+    const totals = records.flatMap(entry => entry.totalTokens === null ? [] : [entry.totalTokens]);
+    const entries = attempts.get(reviewTiming.submissionSequence) ?? [];
+    entries.push({ ...reviewTiming, tokens: totals.length ? totals.reduce((sum, value) => sum + value, 0) : null,
+      tokensIncomplete: records.some(entry => entry.incomplete || entry.totalTokens === null) });
+    attempts.set(reviewTiming.submissionSequence, entries);
+  }
+  const rounds: { submissionSequence: number; submittedAt: string; submissionToReviewerMs: number | null;
+    reviewerAttempts: { durationMs: number; tokens: number | null; tokensIncomplete: boolean; decisionTiming?: ReviewDecisionTiming }[];
+    submissionToApprovalMs: number | null; approvalToAcceptanceMs: number | null;
+    decision: string | null; decisionActor: string | null; submissionToDecisionMs: number | null }[] = [];
+  let current: typeof rounds[number] | undefined;
+  for (const [index, event] of task.history.entries()) {
+    if (event.action === "submit" && event.to === "review") {
+      const submissionSequence = index + 1;
+      const runs = (attempts.get(submissionSequence) ?? []).sort((a, b) => a.startedAtMs - b.startedAtMs);
+      const untilReviewer = runs.length ? runs[0].startedAtMs - Date.parse(event.at) : null;
+      current = { submissionSequence, submittedAt: event.at,
+        submissionToReviewerMs: untilReviewer !== null && untilReviewer >= 0 ? untilReviewer : null,
+        reviewerAttempts: runs.map(({ durationMs, tokens, tokensIncomplete, decisionTiming }) =>
+          ({ durationMs, tokens, tokensIncomplete, ...(decisionTiming ? { decisionTiming } : {}) })),
+        submissionToApprovalMs: null, approvalToAcceptanceMs: null,
+        decision: null, decisionActor: null, submissionToDecisionMs: null };
+      rounds.push(current);
+    } else if (current) {
+      const leftReview = event.from === "review" && event.to && event.to !== "review";
+      const elapsed = Date.parse(event.at) - Date.parse(current.submittedAt);
+      if (event.action === "review-approve" && event.actor === "reviewer") {
+        current.submissionToApprovalMs = elapsed >= 0 ? elapsed : null;
+      }
+      if (current.decision === null && (event.action === "review-note" || leftReview)) {
+        current.decision = event.action;
+        current.decisionActor = event.actor;
+        current.submissionToDecisionMs = elapsed >= 0 ? elapsed : null;
+      }
+      if (leftReview) {
+        const approval = current.submissionToApprovalMs;
+        if (event.action === "accept" && event.to === "done" && approval !== null && elapsed >= approval) {
+          current.approvalToAcceptanceMs = elapsed - approval;
+        }
+        current = undefined;
+      }
+    }
+  }
+  return rounds;
+}
+
+function timeByStatus(task: Task, accepted: TaskEvent | undefined) {
+  if (!accepted) return null;
+  const totals: Partial<Record<TaskState, number>> = {};
+  let status: TaskState = "draft";
+  let since = Date.parse(task.createdAt);
+  for (const event of task.history) {
+    if (!event.to || event.to === status) continue;
+    const at = Date.parse(event.at);
+    if (event.from !== status || !Number.isFinite(since) || !Number.isFinite(at) || at < since) return null;
+    totals[status] = (totals[status] ?? 0) + at - since;
+    if (event === accepted) return totals;
+    status = event.to;
+    since = at;
+  }
+  return null;
+}
+
+export function summarizeTokenUsage(models: ModelTokenUsage[]) {
+  const counted = models.filter(model => model.totalTokens !== null);
+  return {
+    total: counted.length ? counted.reduce((sum, model) => sum + model.totalTokens!, 0) : null,
+    incomplete: !models.length || models.some(model => model.incomplete || model.totalTokens === null),
+  };
+}
+
+export function taskMetrics(task: Task) {
+  const accepted = task.history.findLast(event => event.action === "accept" && event.to === "done");
+  const starts = task.history.flatMap(({ at, startTiming }) => startTiming ? [{ at, ...startTiming }] : []);
+  const byRole: Record<string, ModelTokenUsage[]> = {};
+  for (const role of [...taskUsageRoles, "unattributed"] as const) {
+    const records = (task.tokenUsage?.reports ?? [])
+      .filter(report => (report.role ?? "unattributed") === role)
+      .flatMap(report => report.records);
+    if (records.length) byRole[role] = totalTokenUsage(records);
+  }
+  return {
+    id: task.id, status: task.status, createdAt: task.createdAt,
+    completedAt: accepted?.at ?? null, acceptedBy: accepted?.actor ?? null,
+    cycleMs: accepted ? Date.parse(accepted.at) - Date.parse(task.createdAt) : null,
+    timeByStatusMs: timeByStatus(task, accepted),
+    submissions: task.history.filter(event => event.action === "submit" && event.to === "review").length,
+    returns: task.history.filter(event => event.action === "request-changes").length,
+    ...(starts.length ? { starts } : {}),
+    reviews: reviewMetrics(task),
+    tokens: {
+      ...summarizeTokenUsage(task.tokenUsage?.byModel ?? []),
+      byRole,
+    },
+  };
 }

@@ -11,13 +11,14 @@ import {
 } from "./archive.ts";
 import { hexTagColor, member, number, object, reasoningEffortPattern, record, registerTags, requireRevision, strings, tagColors, tagKey, TaskboardError, text } from "./model.ts";
 import type { Task } from "./model.ts";
-import { initializeBoard, locateBoard, onBoard, withTaskStartLock } from "./storage.ts";
+import { initializeBoard, locateBoard, onBoard, readBoardSettings, withTaskStartLock } from "./storage.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
 import { discoverRepository, invokeGit } from "./git.ts";
 import { changeRepository, inspectRepository, publishRepository, repositoryRefs } from "./repository.ts";
 import { previewSubmission, submitTask } from "./submission.ts";
 import { changeTask, createTask, recordRunLog } from "./tasks.ts";
-import { recordTokenUsage } from "./token-usage.ts";
+import { recordTokenUsage, taskMetrics } from "./token-usage.ts";
+import { managerUsage } from "./manager-usage.ts";
 import { dependencyStatus, unfinishedDependencies, validateDependencies } from "./dependencies.ts";
 import { checkoutTaskWorktree, cleanTaskWorktree, finishTaskStart, hasPending, prepareTaskStart, taskWithCurrentWorktree } from "./worktree.ts";
 import packageInfo from "../../package.json" with { type: "json" };
@@ -30,6 +31,8 @@ const help = [
   "          list --archived, archive sweep, chat TASK-ID, attachment add TASK-ID, attachment read TASK-ID",
   "          attachment cover TASK-ID --stdin (file and revision)",
   "          token-usage TASK-ID --stdin (id, sequence and records with threadId, turnId, model and token breakdown)",
+  "          metrics [TASK-ID] (cycle time, submissions, returns, and known token usage)",
+  "          manager-usage (known board manager token usage) or manager-usage --stdin (record a run snapshot)",
   "          attachment restore-reply TASK-ID --stdin (replyAt, revision and attachmentSources)",
   "          list --tag NAME, tag ensure --stdin, tag set --stdin (name and color), tag assign TASK-ID --stdin (tags)",
   "          git refs, git inspect, git switch, git create, git detach, git publish --stdin",
@@ -187,6 +190,9 @@ function run(
   input: Record<string, unknown>,
   filters: { archived?: boolean; tag?: string },
 ) {
+  if (command === "metrics") {
+    return id ? taskMetrics(readTask(store, id)) : store.snapshot().tasks.map(taskMetrics);
+  }
   if (command === "list") {
     const key = filters.tag === undefined ? undefined : tagKey(text(filters.tag, "tag", true));
     const matches = (entry: { tags?: string[] }) => key === undefined || entry.tags?.some(name => tagKey(name) === key);
@@ -292,7 +298,10 @@ function run(
   if (command === "restore-changes") return restoreSavedChanges(store, readTask(store, id), input);
   if (command === "cleanup" && isArchived(store, id)) return cleanTaskWorktree(store, readTask(store, id));
   const task = store.card(id);
-  if (command === "token-usage") return store.save(recordTokenUsage(task, input));
+  if (command === "token-usage") {
+    const recorded = recordTokenUsage(task, input);
+    return recorded === task ? task : store.save(recorded);
+  }
   if (command === "preview") return previewSubmission(store, task);
   if (command === "submit") return submitTask(store, task, input);
   if (command === "review") return inspectReview(store, task);
@@ -362,7 +371,11 @@ try {
       watchBoard(location);
     } else {
       let data;
-      if (command === "start") {
+      if (command === "manager-usage") {
+        if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "Manager usage takes no task ID.");
+        readBoardSettings(location);
+        data = managerUsage(location.directory, input);
+      } else if (command === "start") {
         if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
         data = startTask(location, id, input);
       } else if (command === "git") {
