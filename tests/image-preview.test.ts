@@ -95,6 +95,7 @@ function preview(count = 5, initialSrc: string | null = "image-0") {
       node.click = click;
       return node;
     },
+    icon: () => new PreviewElement("i"),
     controlLabelForIcon: (node: PreviewElement, label: string) => node.setAttribute("aria-label", label),
     language: (english: string) => english,
     boardError: (error: Error) => error.message,
@@ -118,7 +119,7 @@ function preview(count = 5, initialSrc: string | null = "image-0") {
     image: () => stage.children.find(node => node.tag === "img")!,
     title: () => nodes.find(node => node.tag === "strong")!.textContent,
     position: () => nodes.filter(node => node.tag === "output")[1].value,
-    click: (text: string) => nodes.find(node => node.tag === "button" && node.textContent === text)!.click!(),
+    click: (text: string) => nodes.find(node => node.tag === "button" && (node.attributes.get("aria-label") ?? node.textContent) === text)!.click!(),
     key: (key: string) => dialog.events.get("keydown")?.({ key, preventDefault() {} }),
     async ready(file: string) {
       requests.get(file)?.resolve("image-" + file);
@@ -134,7 +135,7 @@ test("preview retains the visible image and save target until the next image is 
   await view.ready("0");
   const first = view.image();
   assert.deepEqual(view.reads, ["1", "4"]);
-  view.click("→");
+  view.click("Next image");
   assert.equal(view.image(), first);
   assert.equal(first.hidden, false);
   assert.equal(view.title(), "variant-0.png");
@@ -189,15 +190,15 @@ test("missing, rejected and corrupt images keep the visible image and navigation
   const view = preview();
   await view.ready("0");
   const first = view.image();
-  view.click("→");
+  view.click("Next image");
   view.requests.get("1")!.resolve(null);
   await settle();
   assert.match(view.status.textContent, /unavailable.*variant-1.png/);
-  view.click("→");
+  view.click("Next image");
   view.requests.get("2")!.reject(new Error("unreadable"));
   await settle();
   assert.match(view.status.textContent, /unavailable.*variant-2.png/);
-  view.click("→");
+  view.click("Next image");
   view.requests.get("3")!.resolve("corrupt");
   await settle();
   view.decodes.get("corrupt")!.reject(new Error("decode failed"));
@@ -207,10 +208,10 @@ test("missing, rejected and corrupt images keep the visible image and navigation
   assert.equal(first.hidden, false);
   await view.click("Save");
   assert.deepEqual(view.saves, ["0"]);
-  view.click("→");
+  view.click("Next image");
   await view.ready("4");
   assert.equal(view.image().alt, "variant-4.png");
-  view.click("→");
+  view.click("Next image");
   assert.equal(view.image(), first);
 });
 
@@ -219,12 +220,12 @@ test("an unavailable initial image can be skipped and closing invalidates pendin
   view.requests.get("0")!.resolve(null);
   await settle();
   assert.match(view.status.textContent, /unavailable/);
-  view.click("→");
+  view.click("Next image");
   await view.ready("1");
   assert.equal(view.image().alt, "variant-1.png");
   const other = preview(2);
   await other.ready("0");
-  other.click("→");
+  other.click("Next image");
   other.requests.get("1")!.resolve("image-1");
   await settle();
   const before = other.image();

@@ -51,11 +51,14 @@ function openImagePreview(taskId, files, initialIndex, initialSrc, source = {
     resize(Math.min(16, Math.max(minimum, scale * factor)), x, y);
   }
 
-  const zoomOut = button("−", () => zoom(1 / 1.25), "quiet");
+  const zoomOut = button("", () => zoom(1 / 1.25), "quiet");
+  zoomOut.append(icon("zoom-out"));
   controlLabelForIcon(zoomOut, language("Zoom out", "Уменьшить"));
-  const zoomIn = button("+", () => zoom(1.25), "quiet");
+  const zoomIn = button("", () => zoom(1.25), "quiet");
+  zoomIn.append(icon("zoom-in"));
   controlLabelForIcon(zoomIn, language("Zoom in", "Увеличить"));
-  const close = button("×", () => dialog.close(), "quiet");
+  const close = button("", () => dialog.close(), "quiet");
+  close.append(icon("close"));
   controlLabelForIcon(close, language("Close preview", "Закрыть просмотр"));
   const original = button("1:1", () => { fitted = false; resize(1); }, "quiet");
   controlLabelForIcon(original, language("Actual size", "Исходный размер"));
@@ -71,8 +74,10 @@ function openImagePreview(taskId, files, initialIndex, initialSrc, source = {
   const move = delta => show((index + delta + files.length) % files.length);
   toolbar.append(title);
   if (files.length > 1) {
-    const previous = button("←", () => move(-1), "quiet");
-    const next = button("→", () => move(1), "quiet");
+    const previous = button("", () => move(-1), "quiet");
+    previous.append(icon("arrow-left"));
+    const next = button("", () => move(1), "quiet");
+    next.append(icon("arrow-right"));
     controlLabelForIcon(previous, language("Previous image", "Предыдущее изображение"));
     controlLabelForIcon(next, language("Next image", "Следующее изображение"));
     toolbar.append(previous, position, next);

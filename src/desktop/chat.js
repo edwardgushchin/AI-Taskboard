@@ -864,13 +864,14 @@ function taskChat(task) {
     pendingFiles.replaceChildren(...draft.files.map((file, index) => {
       const row = element("li", undefined, "chat-attachment");
       row.title = file.name;
-      const remove = button("×", () => {
+      const remove = button("", () => {
         draft.files.splice(index, 1);
         renderPendingFiles();
         sync();
         input.focus();
       }, "quiet");
       remove.disabled = Boolean(draft.saving);
+      remove.append(icon("close"));
       remove.setAttribute("aria-label", language("Remove ", "Удалить ") + file.name);
       row.append(icon("attachment"), element("span", file.name), remove);
       if (/^image\/(png|jpeg|webp|gif)$/.test(file.type)) showChatPreview(row, URL.createObjectURL(file));
