@@ -53,6 +53,8 @@ async function withServer<T>(
     "-c", mcp?.config ?? "mcp_servers={}",
     "-c", webSearch ? 'web_search="live"' : 'web_search="disabled"',
     ...(research ? [
+      // Native SSH needs direct TCP; the optional command proxy only serves proxy-aware clients.
+      "--disable", "network_proxy",
       "-c", 'permissions.' + managerResearchProfile + '={filesystem={":root"="read"},network={enabled=true}}',
       "-c", "default_permissions=" + JSON.stringify(managerResearchProfile),
       ...(process.platform === "win32" ? ["-c", 'windows.sandbox="mxc"'] : []),

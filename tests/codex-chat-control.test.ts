@@ -356,6 +356,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.ok(flags().includes('web_search="live"'));
   assert.ok(flags().includes('permissions.ai-taskboard-manager={filesystem={":root"="read"},network={enabled=true}}'));
   assert.ok(flags().includes('default_permissions="ai-taskboard-manager"'));
+  assert.ok(flags().includes("network_proxy"));
   assert.equal(flags().includes('windows.sandbox="mxc"'), process.platform === "win32");
   assert.deepEqual(requests.map(({ method }: { method: string }) => method), [
     "initialize", "model/list", ...Array(5).fill("thread/resume"), "thread/goal/set", "turn/start", "thread/unsubscribe",
@@ -434,6 +435,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
   });
   assert.equal(continued.text, "Resumed the goal");
   assert.equal(continued.goalStatus, "complete");
+  assert.ok(flags().includes("network_proxy"));
   assert.deepEqual([...new Set(statuses)], ["active", "complete"]);
   const continuedRequests = JSON.parse(readFileSync(captured, "utf8"));
   assert.match(flags().find(flag => flag.startsWith("mcp_servers="))!, /tool_timeout_sec=320,/);
@@ -476,6 +478,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
   const newRequests: { method: string; params: Record<string, unknown> }[] = JSON.parse(readFileSync(captured, "utf8"));
   const start = newRequests.find(({ method }) => method === "thread/start");
   assert.equal(savedThread, threadId);
+  assert.ok(flags().includes("network_proxy"));
   assert.equal(start?.params.cwd, directory);
   assert.equal(start?.params.permissions, "ai-taskboard-manager");
   assert.equal(Object.hasOwn(start!.params, "projectId"), false);
@@ -487,6 +490,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
   const reviewRequests: typeof newRequests = JSON.parse(readFileSync(captured, "utf8"));
   assert.match(flags().find(flag => flag.startsWith("mcp_servers="))!, /tool_timeout_sec=140,/);
   assert.ok(flags().includes('web_search="disabled"'));
+  assert.ok(!flags().includes("network_proxy"));
   const reviewThread = reviewRequests.find(({ method }) => method === "thread/start");
   assert.equal(reviewThread?.params.ephemeral, true);
   assert.equal(reviewThread?.params.historyMode, undefined);
