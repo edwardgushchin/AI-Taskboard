@@ -38,6 +38,7 @@ import { goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryFor
 import type { BoardMcpTool } from "./board-mcp.ts";
 import { createAgentSlots, parseAgentLimits } from "./agent-limits.ts";
 import type { AgentRole } from "./agent-limits.ts";
+import { checkForUpdates } from "./updates.ts";
 
 interface Board {
   project: string;
@@ -1933,6 +1934,14 @@ ipcMain.handle("board:recent", async (event, path: unknown) => {
   const state = stateOf(event);
   if (typeof path !== "string" || !recentBoards.includes(path)) throw new Error("Unknown recent board.");
   await openProject(state, path);
+});
+ipcMain.handle("app:checkUpdates", async event => {
+  stateOf(event);
+  try {
+    return { ok: true, data: await checkForUpdates(app.getVersion()) };
+  } catch (error) {
+    return cliFailure("UPDATE_CHECK_FAILED", error instanceof Error ? error.message : String(error));
+  }
 });
 ipcMain.handle("appearance:themes", event => {
   stateOf(event);

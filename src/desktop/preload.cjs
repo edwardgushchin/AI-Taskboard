@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld("taskboard", {
   reorderTab: (project, target, after) => ipcRenderer.invoke("board:reorderTab", project, target, after),
   closeTab: project => ipcRenderer.invoke("board:closeTab", project),
   menuAction: action => ipcRenderer.invoke("menu:action", action),
+  checkUpdates: () => ipcRenderer.invoke("app:checkUpdates"),
   customTitleBar: process.platform === "win32",
   isMac: process.platform === "darwin",
   isWindows: process.platform === "win32",
