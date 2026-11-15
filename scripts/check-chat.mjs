@@ -345,7 +345,7 @@ app.whenReady().then(async () => {
   await check(`firstGroup().querySelector('.chat-run-label').textContent.includes('3 действия')`, "group count is localized");
   await check(`row('cmd-1').querySelector('.chat-run-command').textContent === longCommand`, "full long command is retained");
   await check(`saved.querySelector('[data-state=failed] > summary').textContent.includes('Ошибок: 1') && saved.querySelector('[data-state=failed] > summary').textContent.includes('Выполняется: 1')`, "collapsed groups expose failed and running operations");
-  await check(`row('image').querySelector('use').getAttribute('href') === '#icon-images'`, "image operations have their own icon");
+  await check(`!!row('image').querySelector('.codicon-files')`, "image operations have their own icon");
   await check(`row('unknown').querySelector('script') === null && row('unknown').querySelector('pre').textContent.includes('<script>')`, "tool payloads are rendered as text");
   await check(`saved.querySelector('.chat-run-error').textContent === 'Provider disconnected' && saved.lastChild.textContent.includes('журнал')`, "errors and truncation notices remain visible");
   await evaluate(`log.scrollTop = 0`);
@@ -569,25 +569,25 @@ app.whenReady().then(async () => {
     };
     void 0;
   `);
-  await check(`body.querySelector('.chat-send use').getAttribute('href') === '#icon-play' && body.querySelector('.chat-send').disabled && !body.querySelector('.chat-send').textContent`, "idle composer uses an accessible play icon");
+  await check(`!!body.querySelector('.chat-send .codicon-play') && body.querySelector('.chat-send').disabled && !body.querySelector('.chat-send').textContent`, "idle composer uses an accessible play icon");
   await evaluate(`window.typeMessage('Первое сообщение'); body.querySelector('.chat-composer').requestSubmit()`);
-  await check(`body.querySelector('.chat-log').textContent.includes('Первое сообщение') && body.querySelector('.chat-send use').getAttribute('href') === '#icon-stop' && !body.querySelector('.chat-send').disabled`, "saved message is visible and empty input switches to stop before the reply");
+  await check(`body.querySelector('.chat-log').textContent.includes('Первое сообщение') && !!body.querySelector('.chat-send .codicon-debug-stop') && !body.querySelector('.chat-send').disabled`, "saved message is visible and empty input switches to stop before the reply");
   await capture('chat-stop-thinking.png');
   await evaluate(`window.typeMessage('Новые данные во время размышления')`);
-  await check(`body.querySelector('.chat-send use').getAttribute('href') === '#icon-play' && !body.querySelector('.chat-send').disabled`, "typing during a reply switches stop to enabled play");
+  await check(`!!body.querySelector('.chat-send .codicon-play') && !body.querySelector('.chat-send').disabled`, "typing during a reply switches stop to enabled play");
   await capture('chat-play-steering.png');
   await evaluate(`body.querySelector('#task-chat-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }))`);
-  await check(`window.sentMessages.length === 2 && window.pendingReplies.length === 1 && body.querySelector('.chat-log').textContent.includes('Новые данные во время размышления') && body.querySelector('#task-chat-input').value === '' && body.querySelector('.chat-send use').getAttribute('href') === '#icon-stop'`, "Ctrl+Enter sends new input immediately, shows it, and leaves the first reply running");
+  await check(`window.sentMessages.length === 2 && window.pendingReplies.length === 1 && body.querySelector('.chat-log').textContent.includes('Новые данные во время размышления') && body.querySelector('#task-chat-input').value === '' && !!body.querySelector('.chat-send .codicon-debug-stop')`, "Ctrl+Enter sends new input immediately, shows it, and leaves the first reply running");
   await capture('chat-steering-saved.png');
   await evaluate(`body.querySelector('.chat-send').click()`);
-  await check(`window.stopCalls === 1 && body.querySelector('.chat-send use').getAttribute('href') === '#icon-play' && body.querySelector('.chat-send').disabled`, "stop interrupts the running reply and resets the composer");
+  await check(`window.stopCalls === 1 && !!body.querySelector('.chat-send .codicon-play') && body.querySelector('.chat-send').disabled`, "stop interrupts the running reply and resets the composer");
   await evaluate(`
     frame.runningTasks = ['T-0032'];
     body.querySelector('.task-chat').syncAgentState();
   `);
-  await check(`body.querySelector('.chat-send use').getAttribute('href') === '#icon-stop' && !body.querySelector('.chat-send').disabled`, "activity from another window enables stop without a local pending reply");
+  await check(`!!body.querySelector('.chat-send .codicon-debug-stop') && !body.querySelector('.chat-send').disabled`, "activity from another window enables stop without a local pending reply");
   await evaluate(`window.typeMessage('Сохранить черновик'); frame.runningTasks = []; body.querySelector('.task-chat').syncAgentState()`);
-  await check(`body.querySelector('#task-chat-input').value === 'Сохранить черновик' && body.querySelector('.chat-send use').getAttribute('href') === '#icon-play'`, "completion retains a new draft");
+  await check(`body.querySelector('#task-chat-input').value === 'Сохранить черновик' && !!body.querySelector('.chat-send .codicon-play')`, "completion retains a new draft");
   await evaluate(`api.chatSend = async () => ({ saved: false, result: { ok: false, error: { message: 'Write failed' } } }); body.querySelector('.chat-composer').requestSubmit()`);
   await check(`body.querySelector('#task-chat-input').value === 'Сохранить черновик' && body.querySelector('.chat-status').textContent.includes('Write failed')`, "a save failure retains the draft and displays the error");
   await evaluate(`

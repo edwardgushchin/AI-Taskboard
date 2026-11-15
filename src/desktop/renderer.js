@@ -33,19 +33,14 @@ function element(tag, text, className) {
 }
 
 function icon(name) {
-  if (["git-branch", "cloud-upload", "close", "add", "file", "arrow-up", "debug-stop", "stop-circle", "tasklist", "target", "mic", "pin", "pinned", "terminal", "trash", "link", "checklist", "attach", "symbol-number", "milestone"].includes(name)) {
-    const item = element("i", undefined, "icon codicon codicon-" + name);
-    item.setAttribute("aria-hidden", "true");
-    return item;
-  }
-  const namespace = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(namespace, "svg");
-  const use = document.createElementNS(namespace, "use");
-  svg.setAttribute("class", "icon");
-  svg.setAttribute("aria-hidden", "true");
-  use.setAttribute("href", "#icon-" + name);
-  svg.append(use);
-  return svg;
+  const aliases = {
+    images: "files", thought: "lightbulb", tool: "tools", board: "layout",
+    plus: "add", chevron: "chevron-up", dependency: "link", attachment: "attach",
+    stop: "debug-stop", microphone: "mic", "git-user": "account", notifications: "bell", "git-tag": "tag", chat: "comment-discussion",
+  };
+  const item = element("i", undefined, "icon codicon codicon-" + (aliases[name] ?? name));
+  item.setAttribute("aria-hidden", "true");
+  return item;
 }
 
 let displayedBoardError;
@@ -461,7 +456,7 @@ function section(title, content, target = body) {
     const list = element("ul");
     for (const value of content) {
       const item = element("li");
-      item.append(chatText(value));
+      item.append(value instanceof Node ? value : chatText(value));
       list.append(item);
     }
     area.append(list);
@@ -3271,7 +3266,7 @@ function draftComposer() {
       const row = element("li", undefined, "board-attachment");
       const url = previewSource(file) ? pendingPreviews.get(file) ?? URL.createObjectURL(file) : undefined;
       if (url) pendingPreviews.set(file, url);
-      const remove = button("×", () => {
+      const remove = button("", () => {
         files.splice(files.indexOf(file), 1);
         if (!files.includes(file)) releasePreview(file);
         row.remove();
@@ -3280,6 +3275,7 @@ function draftComposer() {
         message("");
         input.focus();
       }, "quiet");
+      remove.append(icon("close"));
       remove.setAttribute("aria-label", language("Remove ", "Удалить ") + file.name);
       row.title = file.name;
       if (url) {
@@ -3633,7 +3629,16 @@ async function showTask(id) {
   }
   section(language("Description", "Описание"), task.description);
   section(language("Acceptance criteria", "Критерии приёмки"), task.criteria);
-  section(language("Subtasks", "Подзадачи"), task.subtasks.map(item => (item.done ? "✓ " : "○ ") + item.title));
+  const stateLabel = (done, text) => {
+    const label = element("div", undefined, "task-state-label");
+    const state = icon(done ? "check" : "circle");
+    state.removeAttribute("aria-hidden");
+    state.setAttribute("role", "img");
+    state.setAttribute("aria-label", done ? language("Completed", "Выполнено") : language("Pending", "Ожидает"));
+    label.append(state, chatText(text));
+    return label;
+  };
+  section(language("Subtasks", "Подзадачи"), task.subtasks.map(item => stateLabel(item.done, item.title)));
   if (task.status === "in_progress") section(language("Submission", "Сдача"), language("Result not submitted", "Результат не сдан"));
   section(language("Progress", "Ход работы"), task.summary);
   section(language("Next step", "Следующий шаг"), task.nextStep);
@@ -3643,8 +3648,8 @@ async function showTask(id) {
       .map(entry => [entry.id, entry.title]));
     const label = waiting.size ? language("Blocked by dependencies", "Заблокировано зависимостями") :
       language("Task dependencies", "Зависимости задачи");
-    section(label, task.dependencies.map(id => (waiting.has(id) ? "○ " : "✓ ") +
-      id + (names.has(id) ? " · " + names.get(id) : "")));
+    section(label, task.dependencies.map(id => stateLabel(!waiting.has(id),
+      id + (names.has(id) ? " · " + names.get(id) : ""))));
   }
   if (task.execution) {
     section(language("Execution settings", "Параметры запуска"), task.execution.model + " · " +
@@ -3862,10 +3867,12 @@ async function showCleanup(task, draft = "", error) {
 }
 
 function taskAttachmentButton(id, attachment, kind) {
-  return button("↓ " + attachment.name, async () => {
+  const download = button(attachment.name, async () => {
     const result = await api.saveAttachment(id, attachment.file, attachment.name);
     if (!result.ok) notice(boardError(result.error));
   }, kind);
+  download.prepend(icon("cloud-download"));
+  return download;
 }
 
 function noteTask(task, action) {

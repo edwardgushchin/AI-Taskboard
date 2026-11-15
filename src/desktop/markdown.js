@@ -349,7 +349,8 @@ async function openMarkdownPreview(value, context) {
   dialog.setAttribute("aria-label", label);
   const header = element("header", undefined, "sheet-header");
   const title = element("h2", label);
-  const close = button("×", () => dialog.close(), "quiet");
+  const close = button("", () => dialog.close(), "quiet");
+  close.append(icon("close"));
   controlLabelForIcon(close, language("Close preview", "Закрыть просмотр"));
   header.append(title, close);
   const content = element("div", undefined, "markdown-preview-content");
