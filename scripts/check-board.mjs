@@ -9,7 +9,8 @@ import { electronCheck } from "./electron-check.mjs";
 const script = fileURLToPath(import.meta.url);
 const root = resolve(dirname(script), "..");
 const require = createRequire(import.meta.url);
-const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "board", 180_000);
+const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "board",
+  process.argv.includes("--settings-only") ? 300_000 : 180_000);
 const { app, BrowserWindow, nativeTheme } = await import("electron");
 const profile = join(scratch, "profile");
 mkdirSync(profile);
@@ -184,6 +185,67 @@ app.whenReady().then(async () => {
     console.log("Agent count Chromium checks passed: " + checks);
     return;
   }
+  if (process.argv.includes("--updates-only")) {
+    window.setContentSize(360, 700);
+    for (const russian of [true, false]) for (const theme of ['light', 'dark']) {
+      nativeTheme.themeSource = theme;
+      await evaluate(`window.pushBoard({ russian: ${russian}, theme: '${theme}' });
+        window.updateCalls = 0;
+        window.updateOutcome = 'empty';
+        window.releaseUrl = 'https://github.com/edwardgushchin/AI-Taskboard/releases/tag/v0.2.0';
+        window.openedUpdateUrl = undefined;
+        window.taskboard.openLink = async url => { openedUpdateUrl = url; };
+        window.taskboard.checkUpdates = async () => {
+          updateCalls++;
+          if (updateOutcome === 'network') throw new Error('Offline');
+          if (updateOutcome === 'http') return { ok: false, error: { message: 'GitHub HTTP 429' } };
+          return { ok: true, data: { currentVersion: '0.1.0', sourceUrl: 'https://github.com/edwardgushchin/AI-Taskboard/releases',
+            status: updateOutcome, latest: updateOutcome === 'available' ? { version: '0.2.0', prerelease: false, url: releaseUrl } : null } };
+        }; void 0`);
+      await click('#app-settings');
+      await click('#settings-menu-updates');
+      await evaluate(`waitFor(() => !byId('updates-retry').disabled)`);
+      await check(`sheet.open && updateCalls === 1 && !byId('updates-open-release') &&
+        body.textContent.includes(${JSON.stringify(russian ? 'пока нет опубликованных' : 'No releases are published')})`,
+        `empty repository is distinct from a network error: ${russian}/${theme}`);
+      if (keepArtifacts) await capture(`updates-empty-${theme}-${russian ? 'ru' : 'en'}.png`);
+      for (const failure of ['network', 'http']) {
+        await evaluate(`updateOutcome = '${failure}'; void 0`);
+        await click('#updates-retry');
+        await check(`!byId('updates-open-release') && !byId('updates-retry').disabled &&
+          body.textContent.includes(${JSON.stringify(russian ? 'Не удалось проверить' : 'Could not check')})`, 'network and API errors allow retry');
+      }
+      if (keepArtifacts && theme === 'dark') await capture(`updates-error-${russian ? 'ru' : 'en'}.png`);
+      await evaluate(`updateOutcome = 'available'; void 0`);
+      await click('#updates-retry');
+      await check(`updateCalls === 4 && !!byId('updates-open-release') && body.textContent.includes('0.2.0') && body.textContent.includes('0.1.0')`,
+        'retry after an error finds a newer version and displays the installed version');
+      if (keepArtifacts) await capture(`updates-available-${theme}-${russian ? 'ru' : 'en'}.png`);
+      await click('#updates-open-release');
+      await check(`openedUpdateUrl === releaseUrl && updateCalls === 4`, 'a new version opens its release page without installation');
+      await evaluate(`window.taskboard.checkUpdates = async () => ({ ok: true, data: { currentVersion: '0.2.0-beta.2', status: 'available',
+        latest: { version: '0.2.0-beta.10', prerelease: true, url: releaseUrl }, sourceUrl: releaseUrl } }); void 0`);
+      await click('#updates-retry');
+      await check(`body.textContent.includes('0.2.0-beta.10') && body.textContent.includes(${JSON.stringify(russian ? 'предварительная' : 'prerelease')})`,
+        'prerelease updates are explicitly identified');
+      await evaluate(`window.taskboard.checkUpdates = async () => ({ ok: true, data: {
+        currentVersion: '0.2.0', status: 'current', latest: { version: '0.2.0' }, sourceUrl: releaseUrl } }); void 0`);
+      await click('#updates-retry');
+      await check(`!byId('updates-open-release') && body.textContent.includes(${JSON.stringify(russian ? 'последняя версия' : 'latest version')})`,
+        'no update removes the previous download action');
+      await evaluate(`window.taskboard.checkUpdates = () => new Promise(resolve => { window.finishUpdate = resolve; });
+        byId('updates-retry').click(); void 0`);
+      await check(`byId('updates-retry').disabled && !byId('updates-open-release')`, 'loading disables repeat checks and removes stale results');
+      await evaluate(`sheet.close(); openSheet('other', 'Other panel'); body.textContent = 'Unchanged panel';
+        window.finishUpdate({ ok: true, data: { status: 'empty', currentVersion: '0.1.0' } }); settle()`);
+      await check(`body.textContent === 'Unchanged panel'`, 'a late check cannot replace a different panel');
+      await evaluate(`sheet.close(); settle()`);
+      await evaluate(`settle()`);
+      await check(`document.activeElement === byId('app-settings')`, 'closing updates returns focus to the gear');
+    }
+    console.log("Updates Chromium checks passed: " + checks);
+    return;
+  }
   if (process.argv.includes("--settings-only")) {
     await evaluate(`
       const projects = [{ path: 'board-fixture', name: 'Первая доска' }, { path: 'other-board', name: 'Вторая доска' }];
@@ -233,9 +295,13 @@ app.whenReady().then(async () => {
     await check(`createProjectCalls.length === 1 && createProjectCalls[0] === null`,
       "File invokes project creation from the welcome screen");
     await click('#app-settings');
+    await check(`byId('settings-menu').matches(':popover-open') && !sheet.open &&
+      byId('settings-menu-board').disabled && byId('settings-menu').querySelectorAll('[role="menuitem"]').length === 3`,
+      "the gear opens three menu actions without a board and disables board settings");
+    await click('#settings-menu-app');
     await evaluate(`waitFor(() => limitFields()[0].value === '3')`);
     await check(`limitFields().map(input => input.value).join(',') === '3,1,1' &&
-      !!body.querySelector('.provider-panel') && !byId('tag-settings')`, "the gear opens shared settings even without an open board");
+      !!body.querySelector('.provider-panel') && !byId('tag-settings')`, "the gear menu opens shared settings even without an open board");
     await evaluate(`limitFields()[0].value = '0'; byId('agent-limits').requestSubmit(); waitFor(() => !sheet.open)`);
     await click('#app-menu .app-menu-trigger');
     await click('#app-settings-menu-item');
@@ -292,6 +358,92 @@ app.whenReady().then(async () => {
     await evaluate(`boardLimit('executor').value = ''; boardLimit('reviewer').value = '';
       boardNameInput().form.requestSubmit(); waitFor(() => !sheet.open)`);
     await check(`Object.keys(savedLimits.get('board-fixture')).length === 0`, "clearing overrides restores inheritance");
+    await evaluate(`sheet.close(); void 0`);
+    const key = async keyCode => {
+      keyCode = keyCode.replace(/^Arrow/, '');
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode });
+      if (keyCode === 'Return') window.webContents.sendInputEvent({ type: 'char', keyCode: '\r' });
+      if (keyCode === 'Space') window.webContents.sendInputEvent({ type: 'char', keyCode: ' ' });
+      window.webContents.sendInputEvent({ type: 'keyUp', keyCode });
+      await evaluate(`settle()`);
+    };
+    for (const theme of ['light', 'dark']) for (const russian of [false, true]) {
+      nativeTheme.themeSource = theme;
+      for (const width of [1380, 360]) for (const hasBoard of [false, true]) {
+        window.setContentSize(width, 700);
+        await evaluate(hasBoard ? `openBoard('board-fixture'); window.pushBoard({ ...frame, theme: '${theme}', russian: ${russian} }); void 0`
+          : `window.pushBoard({ theme: '${theme}', russian: ${russian} }); void 0`);
+        await click('#app-settings');
+        await check(`byId('settings-menu').matches(':popover-open') &&
+          byId('app-settings').getAttribute('aria-expanded') === 'true' &&
+          document.activeElement === byId('settings-menu-app') &&
+          byId('settings-menu-board').disabled === ${!hasBoard} &&
+          !byId('settings-menu-updates').disabled &&
+          byId('settings-menu-app').textContent === ${JSON.stringify(russian ? 'Настройки AI Taskboard…' : 'AI Taskboard settings…')} &&
+          byId('settings-menu').querySelectorAll('[role="separator"]').length === 1`,
+          `gear actions, labels and focus: ${theme}/${russian}/${width}/${hasBoard}`);
+        await check(`(() => { const menu = byId('settings-menu'); const r = menu.getBoundingClientRect();
+          const anchor = byId('app-settings').getBoundingClientRect();
+          return r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight &&
+            Math.abs(r.bottom - anchor.bottom) <= 4 && menu.scrollWidth <= menu.clientWidth; })()`,
+          `the anchored gear menu fits the viewport: ${theme}/${russian}/${width}/${hasBoard}`);
+        if (keepArtifacts && width === 360) await capture(`settings-${theme}-${russian ? 'ru' : 'en'}-${hasBoard ? 'board' : 'welcome'}.png`);
+        if (theme !== 'light' || russian || width !== 1380) {
+          await evaluate(`byId('settings-menu').hidePopover(); settle()`);
+          continue;
+        }
+        await key('End');
+        await check(`document.activeElement === byId('settings-menu-updates')`,
+          'End skips disabled menu actions');
+        await key('ArrowDown');
+        await check(`document.activeElement === byId('settings-menu-app')`, 'ArrowDown wraps to the first enabled action');
+        await key('Escape');
+        await check(`!byId('settings-menu').matches(':popover-open') && document.activeElement === byId('app-settings') &&
+          byId('app-settings').getAttribute('aria-expanded') === 'false'`, 'Escape closes the menu and returns focus to the gear');
+        await key('ArrowUp');
+        await check(`document.activeElement === byId('settings-menu-updates')`,
+          'ArrowUp opens the menu at its last enabled action');
+        await key('Home');
+        await key('ArrowDown');
+        await check(`document.activeElement === byId('${hasBoard ? 'settings-menu-board' : 'settings-menu-updates'}')`,
+          'ArrowDown skips board settings without a board');
+        await key('ArrowUp');
+        await check(`document.activeElement === byId('settings-menu-app')`, 'arrow navigation returns to the first action');
+        await key('Tab');
+        await check(`!byId('settings-menu').matches(':popover-open')`, 'Tab leaves and closes the menu');
+        await click('#app-settings');
+        window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, x: width - 12, y: 45 });
+        window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: width - 12, y: 45 });
+        await evaluate(`settle()`);
+        await check(`!byId('settings-menu').matches(':popover-open') && document.activeElement === byId('app-settings')`,
+          'clicking outside on a nonfocusable area closes the menu and restores focus');
+        await evaluate(`byId('app-settings').focus(); void 0`);
+        await key('Space');
+        await check(`byId('settings-menu').matches(':popover-open')`, 'Space opens the gear menu');
+        await key('Escape');
+        await key('Return');
+        await check(`byId('settings-menu').matches(':popover-open')`, 'Enter opens the gear menu');
+        if (hasBoard) {
+          await key('ArrowDown');
+          await key('Return');
+          await check(`sheet.open && !!byId('tag-settings') && !byId('agent-limits') && frame.project === 'board-fixture'`,
+            'keyboard selection opens settings for the active board');
+          await evaluate(`sheet.close(); settle()`);
+          await check(`document.activeElement === byId('app-settings')`, 'closing board settings restores focus to the gear');
+        } else {
+          await key('Return');
+          await evaluate(`waitFor(() => !!byId('agent-limits'))`);
+          await check(`sheet.open && !byId('tag-settings')`, 'keyboard selection opens application settings without a board');
+          await evaluate(`sheet.close(); settle()`);
+        }
+      }
+    }
+    await evaluate(`openBoard('board-fixture'); byId('app-settings').click(); openBoard('other-board'); void 0`);
+    await check(`!byId('settings-menu').matches(':popover-open')`, 'switching tabs closes a menu for the previous board');
+    await click('#app-settings');
+    await click('#settings-menu-board');
+    await check(`sheet.textContent.includes('Вторая доска') && frame.project === 'other-board'`,
+      'reopening the gear menu uses the newly active board');
     console.log("Settings Chromium checks passed: " + checks);
     return;
   }
@@ -891,6 +1043,28 @@ app.whenReady().then(async () => {
     `);
     await check(`stopCalls === 1 && managerButton().dataset.action === 'send'`,
       "stopping a restored run calls the manager and clears its activity when it ends");
+    await clickBoard();
+    for (const russian of [true, false]) {
+      await evaluate(`fixture.russian = ${russian}; fixture.managerRun = null;
+        fixture.managerWork = { id: 'goal-run', phase: 'running', startedAt: Date.now() }; push(); void 0`);
+      for (const [item, expected] of [
+        [{ type: 'mcpToolCall', title: 'ai_taskboard / task_set_milestone', text: '', status: 'inProgress' },
+          russian ? 'Вызов инструмента ai_taskboard / task_set_milestone' : 'Using tool ai_taskboard / task_set_milestone'],
+        [{ type: 'agentMessage', title: '', text: '', status: 'inProgress' },
+          russian ? 'Пишу ответ…' : 'Writing a reply…'],
+      ]) {
+        await evaluate(`fixture.managerWork.item = ${JSON.stringify(item)}; push(); void 0`);
+        await check(`document.querySelector('.draft-placeholder').textContent === ${JSON.stringify(expected)}`,
+          "background activity updates without a goal prefix in " + (russian ? "Russian" : "English"));
+      }
+      await evaluate(`fixture.managerWork = null; push(); void 0`);
+      await check(`document.querySelector('.draft-placeholder').textContent === ${JSON.stringify(russian ? 'Напишите менеджеру проекта…' : 'Write to the project manager…')}`,
+        "finishing background activity restores the ordinary prompt");
+      await evaluate(`fixture.managerWork = { id: 'goal-run', phase: 'running', startedAt: Date.now(),
+        item: { type: 'mcpToolCall', title: 'ai_taskboard / task_wait', text: '', status: 'inProgress' } }; push(); void 0`);
+    }
+    await evaluate(`fixture.russian = true; push(); void 0`);
+    if (keepArtifacts) await capture("board-manager-status.png");
     console.log("Goal controls Chromium checks passed: " + checks);
     return;
   }

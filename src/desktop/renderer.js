@@ -174,6 +174,89 @@ function button(label, click, kind = "") {
   return item;
 }
 
+async function checkUpdates() {
+  openSheet("updates", language("AI Taskboard updates", "Обновления AI Taskboard"));
+  const status = element("p", language("Checking for updates…", "Проверяем наличие обновлений…"));
+  status.setAttribute("role", "status");
+  const retry = button(language("Check again", "Проверить снова"), run);
+  retry.id = "updates-retry";
+  const content = element("section", undefined, "sheet-section");
+  content.id = "updates-result";
+  body.append(status, content, retry);
+  async function run() {
+    retry.disabled = true;
+    content.replaceChildren();
+    status.textContent = language("Checking for updates…", "Проверяем наличие обновлений…");
+    try {
+      const result = await api.checkUpdates();
+      if (!content.isConnected) return;
+      if (!result.ok) throw new Error(result.error.message);
+      const { currentVersion, sourceUrl, status: outcome, latest } = result.data;
+      content.append(element("p", language("Installed version: ", "Установленная версия: ") + currentVersion));
+      status.textContent = outcome === "available"
+        ? language("A new version is available: ", "Доступна новая версия: ") + latest.version +
+          (latest.prerelease ? language(" (prerelease)", " (предварительная)") : "")
+        : outcome === "empty" ? language("No releases are published for this update channel yet.", "Для этого канала обновлений пока нет опубликованных выпусков.")
+          : language("You have the latest version of AI Taskboard.", "У вас последняя версия AI Taskboard.");
+      if (outcome === "available") {
+        const release = button(language("Open release…", "Открыть выпуск…"), () => api.openLink(latest.url), "primary");
+        release.id = "updates-open-release";
+        content.append(release, element("p", language("Choose a download for your system on the release page. Install it manually.",
+          "Выберите пакет для своей системы на странице выпуска и установите его вручную."), "muted"));
+      }
+      content.append(button(language("All releases…", "Все выпуски…"), () => api.openLink(sourceUrl), "quiet"));
+    } catch {
+      if (!content.isConnected) return;
+      status.textContent = language("Could not check for updates. Check your connection and try again.",
+        "Не удалось проверить обновления. Проверьте соединение и повторите попытку.");
+    } finally {
+      if (retry.isConnected) retry.disabled = false;
+    }
+  }
+  await run();
+}
+
+function openSettingsMenu(last = false) {
+  const trigger = byId("app-settings");
+  const menu = byId("settings-menu");
+  if (menu.matches(":popover-open")) {
+    menu.hidePopover();
+    return;
+  }
+  const app = button(language("AI Taskboard settings…", "Настройки AI Taskboard…"), () => {
+    menu.hidePopover();
+    trigger.focus();
+    settings();
+  });
+  const board = button(language("Board settings…", "Настройки доски…"), () => {
+    menu.hidePopover();
+    trigger.focus();
+    boardSettings();
+  });
+  board.disabled = !frame.board;
+  const updates = button(language("Check for updates…", "Проверить наличие обновлений…"), () => {
+    menu.hidePopover();
+    trigger.focus();
+    return checkUpdates();
+  });
+  for (const [index, item] of [app, board, updates].entries()) {
+    item.className = "app-menu-item";
+    item.id = ["settings-menu-app", "settings-menu-board", "settings-menu-updates"][index];
+    item.setAttribute("role", "menuitem");
+    item.setAttribute("aria-disabled", String(item.disabled));
+    item.tabIndex = -1;
+  }
+  const separator = element("hr");
+  separator.setAttribute("role", "separator");
+  menu.setAttribute("aria-label", language("Settings and updates", "Настройки и обновления"));
+  menu.replaceChildren(app, board, separator, updates);
+  menu.showPopover({ source: trigger });
+  const anchor = trigger.getBoundingClientRect();
+  menu.style.left = Math.max(4, Math.min(anchor.right, innerWidth - menu.offsetWidth - 4)) + "px";
+  menu.style.top = Math.max(4, Math.min(anchor.bottom - menu.offsetHeight, innerHeight - menu.offsetHeight - 4)) + "px";
+  (last ? updates : app).focus();
+}
+
 function mountAppMenu() {
   const bar = byId("app-menu");
   bar.setAttribute("aria-label", language("Application menu", "Меню приложения"));
@@ -1140,7 +1223,7 @@ function render(previousBoard) {
   byId("workspace").hidden = noBoard;
   byId("archive-menu-item").setAttribute("aria-disabled", String(noBoard));
   byId("board-settings-menu-item").setAttribute("aria-disabled", String(noBoard));
-  controlLabelForIcon(byId("app-settings"), language("Application settings", "Настройки приложения"));
+  controlLabelForIcon(byId("app-settings"), language("Settings and updates", "Настройки и обновления"));
   byId("archive-menu-item").setAttribute("aria-checked", String(archiveView));
   if (!board) {
     resetBoardRendering();
@@ -2270,7 +2353,7 @@ function draftComposer() {
   let promptAnimation;
   const showPrompt = () => {
     const status = !editor.matches("[data-open], [data-pinned]") && (active?.thinking.textContent || (managerWork &&
-      language("Goal · ", "Цель · ") + runningLabel(managerWork.item).status));
+      runningLabel(managerWork.item).status));
     const suggestion = document.activeElement === input ? defaultPrompt() :
       promptAnimation ? promptAnimation.characters.slice(0, promptAnimation.length).join("") : currentPrompt();
     const text = status || (goalMode ? language("Describe the goal…", "Опишите цель…") : suggestion);
@@ -4796,6 +4879,8 @@ function update(next) {
   const projectChanged = frame.project !== next.project;
   const previousBoard = projectChanged ? undefined : frame.board;
   const tagsChanged = JSON.stringify(frame.board?.tags) !== JSON.stringify(next.board?.tags);
+  if ((projectChanged || frame.russian !== next.russian || Boolean(frame.board) !== Boolean(next.board)) &&
+      byId("settings-menu").matches(":popover-open")) byId("settings-menu").hidePopover();
   frame = next;
   if (byId("app-header").hidden) {
     byId("app-header").classList.toggle("titlebar", api.customTitleBar);
@@ -4854,7 +4939,44 @@ byId("git-branches").addEventListener("toggle", protect(event => {
 }));
 byId("status-publish").addEventListener("click", protect(publishToGitHub));
 byId("status-tracking").addEventListener("click", protect(pushTrackedBranch));
-byId("app-settings").addEventListener("click", settings);
+byId("app-settings").setAttribute("aria-haspopup", "menu");
+byId("app-settings").setAttribute("aria-controls", "settings-menu");
+byId("app-settings").setAttribute("aria-expanded", "false");
+byId("app-settings").addEventListener("click", () => openSettingsMenu());
+byId("app-settings").addEventListener("keydown", event => {
+  if (!["ArrowDown", "ArrowUp"].includes(event.key)) return;
+  event.preventDefault();
+  openSettingsMenu(event.key === "ArrowUp");
+});
+byId("settings-menu").addEventListener("beforetoggle", event => {
+  byId("app-settings").setAttribute("aria-expanded", String(event.newState === "open"));
+});
+byId("settings-menu").addEventListener("toggle", event => {
+  if (event.newState === "closed" && (document.activeElement === document.body ||
+      event.currentTarget.contains(document.activeElement))) byId("app-settings").focus();
+});
+byId("settings-menu").addEventListener("keydown", event => {
+  const menu = event.currentTarget;
+  if (event.key === "Escape" || event.key === "Tab") {
+    menu.hidePopover();
+    byId("app-settings").focus();
+    if (event.key === "Tab") return;
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+  const items = [...menu.querySelectorAll("button:not(:disabled)")];
+  const index = items.indexOf(document.activeElement);
+  const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
+    : (index + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+  event.preventDefault();
+  items[next].focus();
+});
+window.addEventListener("resize", () => {
+  const menu = byId("settings-menu");
+  if (menu.matches(":popover-open")) menu.hidePopover();
+});
 byId("notifications").addEventListener("toggle", event => {
   if (event.newState === "open") void refreshReviewNotifications();
   else reviewNotificationRequest++;

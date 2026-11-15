@@ -28,7 +28,8 @@
     "@huggingface/transformers": "4.3.2",
     "fflate": "0.8.3",
     "markdown-it": "15.0.3",
-    "prismjs": "1.30.0"
+    "prismjs": "1.30.0",
+    "semver": "7.8.6"
   },
   "main": "src/desktop/main.ts"
 }
