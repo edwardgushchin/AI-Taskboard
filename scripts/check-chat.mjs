@@ -1029,19 +1029,22 @@ app.whenReady().then(async () => {
   assert.deepEqual(await evaluate(`(async () => {
     const panel = manager.querySelector('.board-chat');
     const pin = panel.querySelector('.board-chat-pin');
-    const bounds = panel.getBoundingClientRect();
+    const bounds = panel.querySelector('.board-chat-bar').getBoundingClientRect();
     const button = pin.getBoundingClientRect();
     const resize = panel.querySelector('.board-chat-resize').getBoundingClientRect();
+    const tabs = panel.querySelector('.board-chat-views').getBoundingClientRect();
     pin.click();
     await Promise.resolve();
     manager.closeChat();
     const pinned = manager.hasAttribute('data-pinned') && manager.hasAttribute('data-open') && pin.getAttribute('aria-pressed') === 'true';
     pin.click();
     await Promise.resolve();
-    return { right: bounds.right - button.right, top: button.top - bounds.top,
+    return { inside: button.width > 0 && button.height > 0 && button.left >= bounds.left && button.right <= bounds.right &&
+        button.top >= bounds.top && button.bottom <= bounds.bottom,
+      separate: tabs.right <= resize.left && resize.right <= button.left && button.left > (bounds.left + bounds.right) / 2,
       centered: Math.abs((resize.left + resize.right - bounds.left - bounds.right) / 2) < .1,
       pinned, unpinned: pin.getAttribute('aria-pressed') === 'false' };
-  })()`), { right: 5, top: 5, centered: true, pinned: true, unpinned: true },
+  })()`), { inside: true, separate: true, centered: true, pinned: true, unpinned: true },
   "manager pin sits in the top corner and remains separate from the centered resize handle");
   await check(`(() => {
     const status = manager.querySelector('.chat-thinking > span');
@@ -1099,6 +1102,83 @@ app.whenReady().then(async () => {
   await check(`stopCallsForManager === 1 && actionButton.matches('[data-action="send"]') && !!actionButton.querySelector('.codicon-arrow-up')`,
     "the same manager button stops the reply and returns to send");
   await evaluate(`manager.dispose()`);
+  // Use the production projection, also asserted at all request exits by the
+  // orchestrator test. Observe added nodes, including ones removed before paint.
+  const projection = spawnSync(process.env.TASKBOARD_CHECK_NODE, ['--input-type=module', '-e', `
+    import { managerChatItems } from ${JSON.stringify(new URL('../src/desktop/manager-history.ts', import.meta.url).href)};
+    const raw = ['manager_inbox', 'task_wait', 'task_message'].map((tool, index) => ({
+      id: tool, type: 'mcpToolCall', title: 'ai_taskboard / ' + tool, text: 'PRIVATE RESULT', status: 'completed',
+      messagesOnly: tool !== 'task_wait', messages: [{ id: 'T-0072', sequence: index + 1,
+        actor: ['agent', 'reviewer', 'manager'][index], text: 'PRIVATE MESSAGE' }]
+    }));
+    console.log(JSON.stringify({ raw, chat: managerChatItems(raw) }));
+  `], { encoding: 'utf8', windowsHide: true });
+  assert.equal(projection.status, 0, projection.stderr);
+  await evaluate(`
+    const routed = ${projection.stdout};
+    let finishCoordination = Promise.withResolvers();
+    const coordinationReady = Promise.withResolvers();
+    let savedCoordination = false;
+    api.boardRequest = () => { coordinationManager.enableStop(); coordinationReady.resolve(); return finishCoordination.promise; };
+    api.boardHistory = async (_project, _cursor, view) => ({ ok: true, data: view === 'live'
+      ? { work: [], chat: routed.raw } : { turns: view === 'work' && savedCoordination
+        ? [{ messages: [], items: routed.raw }] : [], nextCursor: null } });
+    const coordinationManager = draftComposer();
+    body.replaceChildren(coordinationManager);
+    byId('sheet-title').textContent = 'T-0072 · Переписка агентов';
+    // The task-sheet fixture needs room above the composer for its popup panel.
+    body.style.paddingTop = '410px';
+    coordinationManager.querySelector('.board-chat-pin').click();
+    const dialogue = coordinationManager.querySelector('.board-chat-log:not(.board-work)');
+    let leaks = [];
+    const observer = new MutationObserver(records => {
+      for (const record of records) for (const node of record.addedNodes) {
+        if (node.nodeType === 1 && (node.matches('.chat-coordination') || node.querySelector('.chat-coordination') ||
+            node.textContent.includes('PRIVATE'))) leaks.push(node.textContent);
+      }
+    });
+    observer.observe(dialogue, { childList: true, subtree: true });
+    coordinationManager.querySelector('.draft-input textarea').value = 'Проверь сообщения агентов';
+    coordinationManager.dispatchEvent(new Event('submit', { cancelable: true }));
+    Promise.race([coordinationReady.promise, new Promise((_, reject) => setTimeout(() =>
+      reject(new Error('Coordination request did not start: ' + coordinationManager.textContent)), 5000))]).then(() => true);
+  `);
+  for (const completed of [false, true]) {
+    await evaluate(`coordinationManager.updateActivity(routed.chat); void 0`);
+    await check(`leaks.length === 0`, 'streamed coordination never inserts dialogue DOM nodes');
+    if (completed) await evaluate(`finishCoordination.resolve({ ok: true, data: {
+      answer: 'Сообщения агентов доступны в ходе работы.', items: [...routed.chat,
+        { ...action('public', 'agentMessage', '', 'completed', 'Сообщения агентов доступны в ходе работы.'), phase: 'final_answer' }]
+    } }); finishCoordination.promise.then(() => new Promise(resolve => requestAnimationFrame(() => resolve(true))))`);
+  }
+  await check(`leaks.length === 0 && dialogue.textContent.includes('Сообщения агентов доступны')`,
+    'completed reply preserves public text without intermediate coordination insertions');
+  await capture('coordination-dialogue.png');
+  await evaluate(`coordinationManager.querySelector('.board-work-toggle').click(); void 0`);
+  await check(`coordinationManager.querySelector('.board-work').querySelectorAll('.chat-coordination').length === 3 && leaks.length === 0`,
+    'all three directions remain in live work without leaking into dialogue');
+  await evaluate(`savedCoordination = true; coordinationManager.invalidateWork(); void 0`);
+  await check(`coordinationManager.querySelector('.board-work').querySelectorAll('.chat-coordination').length === 3`,
+    'saved work replaces live work without duplicates');
+  await capture('coordination-work.png');
+  await evaluate(`coordinationManager.querySelector('.board-dialogue-toggle').click(); void 0`);
+  await check(`leaks.length === 0 && dialogue.textContent.includes('Сообщения агентов доступны')`,
+    'switching back preserves dialogue and never inserts coordination');
+  await evaluate(`
+    const lateWork = Promise.withResolvers();
+    api.boardHistory = async (_project, _cursor, view) => view === 'work' ? lateWork.promise :
+      { ok: true, data: view === 'live' ? { work: [], chat: [] } : { turns: [] } };
+    coordinationManager.querySelector('.board-work-toggle').click();
+    coordinationManager.dispose();
+    frame.project = 'other-fixture';
+    const otherManager = draftComposer();
+    body.replaceChildren(otherManager);
+    lateWork.resolve({ ok: true, data: { turns: [{ messages: [], items: routed.raw }], nextCursor: null } });
+    lateWork.promise.then(() => new Promise(resolve => requestAnimationFrame(() => resolve(true))));
+  `);
+  await check(`!otherManager.textContent.includes('PRIVATE') && !otherManager.querySelector('.chat-coordination') && leaks.length === 0`,
+    'late history after disposal and project switch cannot mix streams');
+  await evaluate(`observer.disconnect(); otherManager.dispose()`);
   console.log("Chat Chromium checks passed");
   if (keepArtifacts) console.log("Screenshots: " + artifacts);
 }).catch(error => {

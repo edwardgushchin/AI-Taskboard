@@ -740,6 +740,34 @@ test("reviewers agree to submissions or return defects, and the manager controls
 
 const file = (name: string, type: string, content: string) => ({ name, type, bytes: new TextEncoder().encode(content).buffer });
 
+test("dialogue results filter coordination on completion, interruption and partial failure while history retains work", async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"])).ok, true);
+  for (const outcome of ["complete", "interrupt", "failure"]) {
+    const { data: messageId } = await f.queue("add", undefined, outcome, false, []);
+    const items = ["manager_inbox", "task_wait", "task_message"].map((tool, index) => ({
+      id: outcome + tool, type: "mcpToolCall", title: "ai_taskboard / " + tool, text: "PRIVATE RESULT", status: "completed",
+      messagesOnly: tool !== "task_wait",
+      messages: [{ id: "T-0001", sequence: index + 1, actor: index === 0 ? "agent" : index === 1 ? "reviewer" : "manager", text: "PRIVATE MESSAGE" }],
+    }));
+    const result = await f.run(outcome, async (_act, _prompt, _images, _id, _context, _waiting, _signal, session) => {
+      session!.delivered(messageId);
+      session!.activity(items);
+      if (outcome === "interrupt") return { interrupted: true };
+      if (outcome === "failure") throw new Error("Provider disconnected");
+      return { text: "Public reply" };
+    }, [], false, messageId);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.data.items.some((item: any) => item.messages?.length || item.messagesOnly || item.text.includes("PRIVATE")), false);
+    if (outcome === "complete") assert.equal(result.data.items.at(-1).text, "Public reply");
+  }
+  const chat = (await f.history(undefined, "chat")).data.turns;
+  assert.equal(chat.flatMap((turn: any) => turn.items).some((item: any) => item.messages?.length || item.text.includes("PRIVATE")), false);
+  const work = (await f.history(undefined, "work")).data.turns.flatMap((turn: any) => turn.items);
+  assert.equal(work.length, 9);
+  assert.equal(work.flatMap((item: any) => item.messages).length, 9);
+});
+
 test("an interrupted manager request preserves the durable queue until Codex records the message", async t => {
   const f = fixture(t);
   await f.cli(["init"]);
