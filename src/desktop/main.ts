@@ -1675,7 +1675,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     await pendingAction;
     signal.throwIfAborted();
     if ("interrupted" in response) return { ok: true as const, data: {
-      answer: "", items, changes, error: lang("Reply stopped.", "Ответ остановлен."), id: threadId,
+      answer: "", items: lane === "chat" ? managerChatItems(items) : items, changes, error: lang("Reply stopped.", "Ответ остановлен."), id: threadId,
       keepQueued: Boolean(queuedPath && !acceptedMessage),
     } };
     const goalNotice = {
@@ -1695,7 +1695,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         text: response.text, status: "completed" }];
     }
     if (!error) delivered();
-    return { ok: true as const, data: { answer: response.text, items, changes, model: response.model, error, id: threadId,
+    return { ok: true as const, data: { answer: response.text, items: lane === "chat" ? managerChatItems(items) : items, changes, model: response.model, error, id: threadId,
       keepQueued: Boolean(queuedPath && error && !acceptedMessage) } };
   } catch (error) {
     await pendingAction;
@@ -1706,7 +1706,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     ) + "\n" + (error instanceof Error ? error.message : String(error)).slice(0, 1500);
     if (goalSet || changes.length || acceptedMessage) {
       if (changes.length) delivered();
-      return { ok: true as const, data: { answer: "", items, changes, error: goalSet ? lang(
+      return { ok: true as const, data: { answer: "", items: lane === "chat" ? managerChatItems(items) : items, changes, error: goalSet ? lang(
         "The goal is saved in the Codex chat. This run ended before the goal finished.",
         "Цель сохранена в чате Codex. Этот запуск прервался до её завершения.",
       ) + "\n" + message : message, id: threadId, keepQueued: Boolean(queuedPath && !acceptedMessage && !changes.length) } };
