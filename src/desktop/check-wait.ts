@@ -6,14 +6,15 @@ import { inspectProjectPath } from "./project-files.ts";
 
 const maxWaitSeconds = 300;
 export const executorToolTimeoutSeconds = maxWaitSeconds + 20;
-export const checkWaitInstructions = "For a long check that can run in the background, save its result and create a unique marker in the working directory only after the check exits, even if it fails. When waiting is the only work left, call check_wait with that marker instead of repeatedly reading progress. Read the saved exit code and report when the marker appears.";
+export const checkWaitInstructions = "For a long check that can run in the background, save its result and create a unique marker in the working directory only after the check exits, even if it fails. When waiting is the only work left, call check_wait with that marker and omit timeoutSeconds to use the five-minute default. Through functions.exec, use a 60000 ms yield and keep waiting on the same cell if it is still running. Read the saved exit code and report when the marker appears.";
 
 export const checkWaitTool: BoardMcpTool = {
   name: "check_wait",
-  description: "Wait for a fresh completion marker in the assigned working directory while a check runs. Set up the check to create a unique marker after it exits, including on failure. The marker only means the check ended. Read the saved exit code and report separately. Use one wait when waiting is the only remaining work. Returns early on arrival or times out after at most five minutes.",
+  description: "Wait for a fresh completion marker in the assigned working directory while a check runs. Set up the check to create a unique marker after it exits, including on failure. The marker only means the check ended. Read the saved exit code and report separately. When waiting is the only remaining work, omit timeoutSeconds to wait up to five minutes. The result returns early when the marker arrives.",
   inputSchema: { type: "object", required: ["path"], additionalProperties: false, properties: {
     path: { type: "string", description: "Relative path to the completion marker for this run." },
-    timeoutSeconds: { type: "integer", minimum: 1, maximum: maxWaitSeconds },
+    timeoutSeconds: { type: "integer", minimum: 1, maximum: maxWaitSeconds,
+      description: "Defaults to 300 seconds. Set a shorter timeout only if you need to return to other work before then." },
   } },
 };
 
