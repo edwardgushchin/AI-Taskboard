@@ -49,8 +49,10 @@ const actions = {
     required: ["id", "revision", "targetHead", "evidence"] },
   task_request_changes: { description: "Return a task in review to its executor with actionable feedback and start the follow-up run.",
     properties: { ...taskReference, reason }, required: ["id", "revision", "reason"] },
-  project_git: { description: "Read the project's Git status (current branch and changed files), recent commit log, unstaged diff, or staged diff.",
-    properties: { view: { ...string, enum: ["status", "log", "diff", "staged_diff"] } }, required: ["view"] },
+  project_git: { description: "Read Git status, recent log or working-tree and staged diffs. Use commit_diff to compare two full commit IDs for selected literal paths. Pass nextOffset as offset with the same commits and paths to continue.",
+    properties: { view: { ...string, enum: ["status", "log", "diff", "staged_diff", "commit_diff"] },
+      from: reason, to: reason, paths: { type: "array", minItems: 1, maxItems: 64, uniqueItems: true, items: reason },
+      offset: { type: "integer", minimum: 0 } }, required: ["view"] },
   project_disk: { description: "Read free and total disk space on the volume containing the current project.",
     properties: {}, required: [] },
   project_sha256: { description: "Compute the SHA-256 checksum of a file. Pass its path relative to the current project, including spaces literally.",
@@ -69,6 +71,7 @@ export const boardInstructions = [
   "You are the project manager for this AI Taskboard. Answer questions about the project and take responsibility for keeping its board accurate. Reply in the user's language.",
   "Inspect files and documentation anywhere inside the current project with read-only commands when relevant. Cite project-relative paths in your answers. Do not read outside the project, edit files, run project code, or change Git state yourself.",
   "Use the read-only tools from the ai_taskboard MCP server for project data: project_git for Git status, log and diffs, project_disk for disk space, and project_sha256 to compute or verify a file checksum. Use project_sha256 directly for SHA-256, with the project-relative path.",
+  "If the target moved since the last review, use project_git with view commit_diff, the previously reviewed and current target HEADs, and the relevant paths. Reuse evidence that still applies and recheck the affected criteria before accepting.",
   "Use board_list with activeOnly: true when you only need the open queue. Use task_show to inspect a task and get its current revision before making changes.",
   "Decide whether a board change is useful from the user's feedback, decisions, and the conversation. Act on clear implications without waiting for a direct command or confirmation. Answer informational questions and discuss tentative options without changing the board unless the conversation establishes a reason to act.",
   'Update the matching task, including approved descriptions and acceptance criteria, when feedback clarifies the desired outcome. Reassess blockers when requirements or circumstances change. For example, "Задача 55 не актуальна" is enough to cancel T-0055. In ordinary chat, create a draft for genuinely new work. A failed update is not a reason to create a duplicate task.',
@@ -112,7 +115,7 @@ export function boardActions(project: string, attachments: { path: string; name:
         required.some(key => !Object.hasOwn(input, key))) {
       return cliFailure("INVALID_INPUT", "Use the parameters defined for this board action.");
     }
-    if (action === "project_git") return callCli(project, ["git", "inspect"], { view: input.view });
+    if (action === "project_git") return callCli(project, ["git", "inspect"], input);
     if (action === "project_sha256") {
       try {
         return { ok: true, data: await projectSha256(project, input.path, signal) };

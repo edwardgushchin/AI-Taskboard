@@ -115,11 +115,17 @@ test("manager reads Git and disk information without modifying the repository", 
   const git = (...args: string[]) => {
     const result = spawnSync("git", ["-C", project, ...args], { encoding: "utf8", windowsHide: true });
     assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
   };
   git("init", "-b", "main");
   await writeFile(join(project, "tracked.txt"), "Original\n");
   git("add", "tracked.txt");
   git("-c", "user.name=Taskboard", "-c", "user.email=taskboard@example.invalid", "commit", "-m", "Initial commit");
+  const from = git("rev-parse", "HEAD");
+  await writeFile(join(project, "tracked.txt"), "Committed edit\n");
+  git("add", "tracked.txt");
+  git("-c", "user.name=Taskboard", "-c", "user.email=taskboard@example.invalid", "commit", "-m", "Commit for comparison");
+  const to = git("rev-parse", "HEAD");
   await writeFile(join(project, "tracked.txt"), "Staged edit\n");
   git("add", "tracked.txt");
   await writeFile(join(project, "tracked.txt"), "Working edit\n");
@@ -139,6 +145,10 @@ test("manager reads Git and disk information without modifying the repository", 
     assert.match((await act("project_git", { view: "log" })).data.output, /Initial commit/);
     assert.match((await act("project_git", { view: "diff" })).data.output, /\+Working edit/);
     assert.match((await act("project_git", { view: "staged_diff" })).data.output, /\+Staged edit/);
+    const commit = await act("project_git", { view: "commit_diff", from, to, paths: ["tracked.txt"] });
+    assert.equal(commit.ok, true);
+    assert.match(commit.data.output, /\+Committed edit/);
+    assert.doesNotMatch(commit.data.output, /Staged edit|Working edit/);
     assert.equal((await act("project_git", { view: "reset" })).error.code, "INVALID_INPUT");
     assert.equal((await act("project_git", { view: "status", path: ".." })).error.code, "INVALID_INPUT");
     const disk = (await act("project_disk", {})).data;

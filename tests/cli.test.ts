@@ -104,6 +104,33 @@ test("repository Git menu lists commit metadata and changes only the main worktr
   assert.equal(git(worktree, "rev-parse", "HEAD"), base);
 });
 
+test("Git commit diff reads pinned revisions and literal paths in bounded pages", t => {
+  const root = fixture(t, true);
+  cli(root, ["init"]);
+  const from = git(root, "rev-parse", "HEAD");
+  const selected = "literal[1].txt";
+  writeFileSync(join(root, selected), "Unicode " + "😀".repeat(10_000) + "\n");
+  writeFileSync(join(root, "literal1.txt"), "Unselected committed change\n");
+  git(root, "add", "--all");
+  git(root, "commit", "-m", "test: add committed content");
+  const to = git(root, "rev-parse", "HEAD");
+  writeFileSync(join(root, selected), "Working tree edit\n");
+  const args = { view: "commit_diff", from, to, paths: [selected] };
+  const first = cli(root, ["git", "inspect"], args);
+  assert.equal(first.truncated, true);
+  assert.ok(first.nextOffset <= 16_000);
+  assert.notEqual(first.output.at(-1)?.charCodeAt(0) ?? 0, 0xd83d);
+  const last = cli(root, ["git", "inspect"], { ...args, offset: first.nextOffset });
+  assert.equal(last.truncated, false);
+  assert.equal(last.nextOffset, undefined);
+  const output = first.output + last.output;
+  assert.ok(output.includes("Unicode " + "😀".repeat(10_000)));
+  assert.doesNotMatch(output, /Unselected committed change|Working tree edit/);
+  cli(root, ["git", "inspect"], { ...args, from: "HEAD" }, "INVALID_INPUT");
+  cli(root, ["git", "inspect"], { ...args, paths: ["../outside"] }, "INVALID_INPUT");
+  cli(root, ["git", "inspect"], { ...args, offset: output.length + 1 }, "INVALID_INPUT");
+});
+
 test("repository Git menu preserves conflicting edits and rejects invalid or stale actions", t => {
   const root = fixture(t, true);
   cli(root, ["init"]);

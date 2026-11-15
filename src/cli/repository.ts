@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { git, invokeGit, requireRepository, resolveCommit } from "./git.ts";
-import { member, TaskboardError, text } from "./model.ts";
+import { member, number, TaskboardError, text } from "./model.ts";
 import type { BoardLocation } from "./storage.ts";
 import { onBoard } from "./storage.ts";
 import { requireNoGitOperation } from "./worktree.ts";
@@ -46,8 +46,33 @@ export function repositoryRefs(location: BoardLocation) {
   return { ...currentRevision(root), refs };
 }
 
+function commitDiff(root: string, input: Record<string, unknown>) {
+  const { from, to, paths } = input;
+  const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+  if (typeof from !== "string" || !oid.test(from) || typeof to !== "string" || !oid.test(to)) {
+    throw new TaskboardError("INVALID_INPUT", "Use the two full Git commit IDs.");
+  }
+  if (!Array.isArray(paths) || !paths.length || paths.length > 64 || new Set(paths).size !== paths.length ||
+      !paths.every(path => typeof path === "string" && !/[\0\\]/.test(path) &&
+        path.split("/").every(part => part !== "" && part !== "." && part !== ".."))) {
+    throw new TaskboardError("INVALID_INPUT", "Use 1 to 64 distinct literal paths relative to the repository.");
+  }
+  const offset = input.offset === undefined ? 0 : number(input.offset, "offset", 0);
+  const output = git(root, ["--no-optional-locks", "--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv",
+    "--no-color", "--no-renames", "--ignore-submodules=none", "--submodule=short", "--unified=0",
+    from + "^{commit}", to + "^{commit}", "--", ...paths], { GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "" });
+  if (offset > output.length || /[\uDC00-\uDFFF]/.test(output.charAt(offset))) {
+    throw new TaskboardError("INVALID_INPUT", "Use the nextOffset returned for these commits and paths.");
+  }
+  let end = offset + 16_000;
+  if (/[\uDC00-\uDFFF]/.test(output.charAt(end))) end--;
+  const truncated = end < output.length;
+  return { output: output.slice(offset, end), truncated, ...(truncated ? { nextOffset: end } : {}) };
+}
+
 export function inspectRepository(location: BoardLocation, input: Record<string, unknown>) {
   const root = repositoryPath(location);
+  if (input.view === "commit_diff") return commitDiff(root, input);
   const view = member(input.view, ["status", "log", "diff", "staged_diff"], "view");
   const commands = {
     status: ["status", "--porcelain=v1", "--branch", "--untracked-files=normal", "--ignore-submodules=dirty"],
