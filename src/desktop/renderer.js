@@ -1139,8 +1139,6 @@ function render(previousBoard) {
   const noBoard = !board;
   const loading = Boolean(frame.loading || frame.restoring);
   byId("welcome").hidden = !noBoard || loading;
-  byId("loading").hidden = !noBoard || !loading;
-  byId("loading").textContent = language("Loading projects…", "Загрузка проектов…");
   byId("app-content").setAttribute("aria-busy", String(noBoard && loading));
   byId("workspace").hidden = noBoard;
   byId("archive-menu-item").setAttribute("aria-disabled", String(noBoard));
@@ -4858,4 +4856,4 @@ api.onTheme(theme => {
   frame.theme = theme;
   applyTheme(theme);
 });
-api.bootstrap().then(update).catch(error => notice(error.message, language("Loading projects", "Загрузка проектов")));
+api.bootstrap().then(update).catch(error => notice(error.message, language("Application startup", "Запуск приложения")));

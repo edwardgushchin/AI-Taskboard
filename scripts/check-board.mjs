@@ -56,6 +56,7 @@ app.whenReady().then(async () => {
     checks++;
   };
   await check(`document.querySelector('#welcome').hidden`, "welcome is hidden before the first project snapshot");
+  await check(`!/Загрузка проектов|Loading projects/.test(document.body.innerText)`, "initial HTML has no projects loading label");
   await evaluate(`
     window.previewCalls = 0;
     const savedQueue = new Map();
@@ -78,7 +79,7 @@ app.whenReady().then(async () => {
       boardSuggestions: async project => project === "design-board" ? new Promise(resolve => { window.releaseSuggestions = () => resolve([
         "Создай задачу на локализацию AI Taskboard", "Какие изменения нужны карточкам AI Taskboard?",
       ]); }) : [],
-      bootstrap: () => new Promise(() => {}),
+      bootstrap: () => new Promise((_resolve, reject) => { window.rejectBootstrap = reject; }),
       attachmentPreview: async (_task, file) => {
         window.previewCalls++;
         if (file === 'missing.png') throw new Error('Unavailable preview');
@@ -116,11 +117,27 @@ app.whenReady().then(async () => {
     window.pushBoard({ russian: true, restoring: true });
     void 0;
   `);
-  await check(`byId('welcome').hidden && !byId('loading').hidden && byId('app-content').getAttribute('aria-busy') === 'true'`, "session restoration shows loading without flashing welcome");
+  for (const russian of [true, false]) {
+    for (const state of [{ restoring: true }, { loading: true }]) {
+      await evaluate(`window.pushBoard(${JSON.stringify({ russian, ...state })}); void 0`);
+      await check(`byId('welcome').hidden && byId('workspace').hidden &&
+        !/Загрузка проектов|Loading projects/.test(byId('app-content').innerText) &&
+        byId('app-content').getAttribute('aria-busy') === 'true'`,
+        `loading stays blank without flashing welcome (${russian ? 'ru' : 'en'}, ${Object.keys(state)[0]})`);
+    }
+    await evaluate(`window.pushBoard({ russian: ${russian} }); void 0`);
+    await check(`!byId('welcome').hidden && byId('workspace').hidden &&
+      byId('app-content').getAttribute('aria-busy') === 'false'`, "welcome appears after confirming no board is open");
+  }
+  await evaluate(`window.pushBoard({ russian: true, restoring: true }); void 0`);
   await evaluate(`settle()`);
   writeFileSync(join(artifacts, "project-tabs-loading.png"), (await window.webContents.capturePage()).toPNG());
+  await evaluate(`window.rejectBootstrap(new Error('Bootstrap fixture failure')); settle()`);
+  await check(`!byId('notice').hidden && byId('notice-message').textContent === 'Bootstrap fixture failure' &&
+    byId('notice-context').textContent.includes('Запуск приложения')`, "startup failure keeps its message with the application context");
+  await evaluate(`byId('notice-close').click(); void 0`);
   await evaluate(`push(); void 0`);
-  await check(`byId('welcome').hidden && byId('loading').hidden && byId('app-content').getAttribute('aria-busy') === 'false'`, "a restored board replaces the loading state");
+  await check(`byId('welcome').hidden && !byId('workspace').hidden && byId('app-content').getAttribute('aria-busy') === 'false'`, "a restored board replaces the loading state");
   if (process.argv.includes("--agent-count-only")) {
     await evaluate(`
       const indicator = byId('status-agents');
