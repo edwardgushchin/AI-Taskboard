@@ -67,6 +67,18 @@ test("only delivered dialogue replies become unread and repeated saves preserve 
   assert.deepEqual(JSON.parse(readFileSync(join(project, ".tasks", "manager-unread.json"), "utf8")), ["second"]);
 });
 
+test("legacy provider conversations page local notices without duplicating mirrored chat runs", t => {
+  const project = fixture(t);
+  const at = Date.now();
+  for (let i = 0; i < 25; i++) saveManagerHistory(project, at + i, randomUUID(), {
+    lane: i % 2 ? "notice" : "chat", items: [{ id: String(i), type: "agentMessage", title: "", text: String(i), status: "completed" }],
+  });
+  const notices = readManagerHistory(project, null, "chat", true)!;
+  assert.equal(notices.turns.length, 12);
+  assert.ok(notices.turns.every(turn => turn.lane === "notice"));
+  assert.deepEqual(notices.turns.map(turn => turn.items[0]!.text), Array.from({ length: 12 }, (_, i) => String(2 * i + 1)));
+});
+
 test("review reports move into board storage and a cleared board cache supersedes old profile data", t => {
   const project = fixture(t);
   const profile = join(project, "old-profile");
