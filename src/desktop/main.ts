@@ -562,6 +562,18 @@ ipcMain.handle("board:selectTab", (event, project: unknown) => {
   if (!tab || owner.closing) return;
   activateTab(owner, tab);
 });
+ipcMain.handle("board:reorderTab", (event, project: unknown, target: unknown, after: unknown) => {
+  const current = stateOf(event);
+  const owner = windowStates.get(current.window.webContents.id)!;
+  if (owner.closing || typeof after !== "boolean") return;
+  const tab = owner.tabs.find(tab => tab.project === project);
+  const destination = owner.tabs.find(tab => tab.project === target);
+  if (!tab?.project || !destination?.project || tab === destination) return;
+  owner.tabs.splice(owner.tabs.indexOf(tab), 1);
+  owner.tabs.splice(owner.tabs.indexOf(destination) + Number(after), 0, tab);
+  send(owner.active);
+  saveSession();
+});
 ipcMain.handle("board:closeTab", async (event, project: unknown) => {
   const current = stateOf(event);
   const owner = windowStates.get(current.window.webContents.id)!;
