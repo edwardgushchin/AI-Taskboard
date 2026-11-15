@@ -140,6 +140,111 @@ app.whenReady().then(async () => {
   await evaluate(`byId('notice-close').click(); void 0`);
   await evaluate(`push(); void 0`);
   await check(`byId('welcome').hidden && !byId('workspace').hidden && byId('app-content').getAttribute('aria-busy') === 'false'`, "a restored board replaces the loading state");
+  if (process.argv.includes("--covers-only")) {
+    await evaluate(`
+      const sizes = [[400, 8000], [800, 200], [40, 30]];
+      const sources = sizes.map(([width, height]) => {
+        const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#e15858'; ctx.fillRect(0, 0, width, height);
+        ctx.fillStyle = '#428bca'; ctx.fillRect(0, height / 2, width, height / 2);
+        ctx.fillStyle = '#fff'; ctx.font = '20px sans-serif'; ctx.fillText(width + ' × ' + height + ' · TOP', 8, 24);
+        ctx.strokeStyle = '#fff'; ctx.strokeRect(8, 36, 40, 40);
+        return canvas.toDataURL();
+      });
+      window.taskboard.attachmentPreview = async (_task, file) => {
+        window.previewCalls++;
+        return new Promise(resolve => { window.releaseCover = () => resolve(sources[Number(file[0])]); });
+      };
+      fixture.tabs = [{ path: fixture.project, name: 'Covers' }, { path: 'cover-other', name: 'Other' }];
+      const bounded = image => image.hidden || image.getBoundingClientRect().height <= 180;
+      void 0;
+    `);
+    for (const theme of ['dark', 'light']) for (const width of [1380, 900]) {
+      nativeTheme.themeSource = theme;
+      window.setContentSize(width, 900);
+      await evaluate(`waitFor(() => matchMedia('(prefers-color-scheme: dark)').matches === ${theme === 'dark'})`);
+      for (let shape = 0; shape < 3; shape++) {
+        await evaluate(`
+          fixture.theme = '${theme}';
+          fixture.board.tasks = [task('T-0001', '${['Длинный скриншот', 'Широкое изображение', 'Маленькое изображение'][shape]}', {
+            attachments: [{ file: '${shape}-${theme}-${width}.png', name: 'image.png' }]
+          })];
+          window.releaseCover = null; push();
+          waitFor(() => window.releaseCover);
+        `);
+        await check(`findCard('T-0001').querySelector('img').hidden && bounded(findCard('T-0001').querySelector('img'))`, 'delayed cover remains hidden and bounded');
+        await evaluate(`
+          window.oversizedFrame = false;
+          window.monitorCover = () => {
+            if (!bounded(findCard('T-0001').querySelector('img'))) window.oversizedFrame = true;
+            if (!window.stopMonitor) requestAnimationFrame(window.monitorCover);
+          };
+          window.stopMonitor = false; window.monitorCover(); window.releaseCover();
+          waitFor(() => !findCard('T-0001').querySelector('img').hidden);
+        `);
+        await evaluate(`settle()`);
+        await check(`(() => {
+          const image = findCard('T-0001').querySelector('img'), rect = image.getBoundingClientRect(), css = getComputedStyle(image);
+          const parentCSS = getComputedStyle(image.parentElement);
+          const expectedWidth = Math.min(image.naturalWidth, image.parentElement.clientWidth - parseFloat(parentCSS.paddingLeft) - parseFloat(parentCSS.paddingRight));
+          return !window.oversizedFrame && bounded(image) && Math.abs(rect.width - expectedWidth) < 1 &&
+            Math.abs(rect.height - Math.min(180, expectedWidth * image.naturalHeight / image.naturalWidth)) < 2 &&
+            css.objectFit === 'cover' && css.objectPosition === '50% 0%' && css.borderRadius === '7px' &&
+            findCard('T-0001').querySelector('.task-meta').getBoundingClientRect().top >= rect.bottom;
+        })()`, 'native width, proportional cover crop at top, rounded border and footer (' + theme + ', ' + width + ', ' + shape + ')');
+        await evaluate(`
+          window.stopMonitor = true;
+          window.savedCover = findCard('T-0001').querySelector('img'); window.savedCalls = window.previewCalls;
+          fixture.board.tasks[0].title += ' · обновлено'; push();
+          window.pushBoard({ ...fixture, project: 'cover-other', board: { ...fixture.board, tasks: [] } }); push();
+          void 0;
+        `);
+        await check(`findCard('T-0001').querySelector('img') === window.savedCover && !window.savedCover.hidden &&
+          bounded(window.savedCover) && window.previewCalls === window.savedCalls`, 'refresh and tab cache keep the decoded bounded cover without another request');
+        if (keepArtifacts) await capture(`cover-${theme}-${width}-${shape}.png`);
+      }
+    }
+    await evaluate(`
+      openImagePreview('T-0001', [{ file: 'original.png', name: 'original.png' }], 0, sources[0]);
+      waitFor(() => document.querySelector('.image-preview-stage img')?.naturalHeight === 8000);
+    `);
+    await evaluate(`document.querySelector('.image-preview-toolbar button[aria-label="Исходный размер"]').click(); settle()`);
+    await check(`document.querySelector('.image-preview-stage img').getBoundingClientRect().height === 8000`, 'existing viewer still exposes the entire original at 1:1');
+    await evaluate(`document.querySelector('.image-preview').close(); void 0`);
+    await evaluate(`
+      window.taskboard.attachmentPreview = async () => sources[0];
+      fixture.project = 'cover-count';
+      fixture.board.tasks = Array.from({ length: 20 }, (_, index) => task('T-' + String(index + 1).padStart(4, '0'), 'Card', {
+        createdAt: index === 0 ? '2026-11-02T12:00:00.000Z' : '2026-11-01T12:00:00.000Z',
+        attachments: index === 0 ? [{ file: 'long.png', name: 'long.png' }] : []
+      }));
+      push(); waitFor(() => !findCard('T-0001').querySelector('img').hidden);
+    `);
+    await evaluate(`settle()`);
+    await check(`(() => {
+      const content = lane('ready').querySelector('.task-card').parentElement;
+      const board = byId('lanes');
+      const available = board.getBoundingClientRect().bottom - 8 - content.getBoundingClientRect().top;
+      return content.querySelectorAll('.task-card').length > 1 &&
+        content.getBoundingClientRect().height <= available * 1.5 && bounded(findCard('T-0001').querySelector('img'));
+    })()`, 'lane fitting uses the cropped height after asynchronous image loading');
+    await evaluate(`
+      window.taskboard.command = async () => ({ ok: true, data: fixture.board.tasks[0] });
+      findCard('T-0001').focus(); void 0;
+    `);
+    await check(`document.activeElement === findCard('T-0001') && document.activeElement.tagName === 'BUTTON' &&
+      document.activeElement.querySelector('img').alt === ''`, 'cover stays decorative inside the focusable card button');
+    window.webContents.focus();
+    await evaluate(`findCard('T-0001').focus(); settle()`);
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    window.webContents.sendInputEvent({ type: 'char', keyCode: '\r' });
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await evaluate(`waitFor(() => sheet.open)`);
+    await check(`sheet.open && taskInSheet?.id === 'T-0001'`, 'Enter opens the covered card');
+    console.log('Cover Chromium checks passed: ' + checks);
+    return;
+  }
   if (process.argv.includes("--agent-count-only")) {
     await evaluate(`
       const indicator = byId('status-agents');

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { worklogInstructions } from "./board-worklog.ts";
 import { russianWriting } from "./russian-writing.ts";
 
@@ -14,7 +15,8 @@ const roleRules: Record<Role, string> = {
 };
 
 export function boardAgentInstructions(role: Role, instructions = "", { dialogue = false } = {}) {
-  return [instructions, ponytail, roleRules[role], instructions.includes(russianWriting) ? "" : russianWriting,
+  return [instructions, role === "manager" ? readFileSync(new URL("./agent-instructions/task-writing.md", import.meta.url), "utf8").trim() : "",
+    ponytail, roleRules[role], instructions.includes(russianWriting) ? "" : russianWriting,
     role === "reviewer" ? "" : "Start replies and messages with the result in plain language. State the consequence and the next action or decision if needed. Use short paragraphs. Preserve exact technical values and use fenced code for standalone commands.",
     role === "reviewer" ? "" : "Format substantial progress updates in Markdown. Lead with the current result and the key figures. Separate distinct topics with short, specific headings (for example, Progress, In progress, Blocked, Next) and give each task or result its own bullet when listing several. Bold key figures or short labels and use inline code for task IDs, branches, commits and error codes. Report the latest figure once unless the comparison matters. Leave out incidental diagnostics. Keep a short answer in plain paragraphs.",
     role === "reviewer" ? "" : dialogue ?

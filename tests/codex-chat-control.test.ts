@@ -423,6 +423,8 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.equal(resumed.goalStatus, "complete");
   assert.equal(resumed.text, "First turn\n\nDone");
   const resumedRequests = JSON.parse(readFileSync(captured, "utf8"));
+  const writingRules = readFileSync(new URL("../src/desktop/agent-instructions/task-writing.md", import.meta.url), "utf8").trim();
+  assert.ok(resumedRequests.find(({ method }: { method: string }) => method === "thread/resume").params.developerInstructions.includes(writingRules));
   assert.equal(resumed.model, "default-model");
   assert.equal(resumedRequests.find(({ method }: { method: string }) => method === "thread/resume").params.model, "default-model");
   assert.equal(resumedRequests.at(-2).params.effort, "medium");
@@ -441,6 +443,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.ok(flags().includes("network_proxy"));
   assert.deepEqual([...new Set(statuses)], ["active", "complete"]);
   const continuedRequests = JSON.parse(readFileSync(captured, "utf8"));
+  assert.ok(continuedRequests.find(({ method }: { method: string }) => method === "thread/resume").params.developerInstructions.includes(writingRules));
   assert.match(flags().find(flag => flag.startsWith("mcp_servers.ai_taskboard="))!, /tool_timeout_sec=320,/);
   assert.deepEqual(continuedRequests.find(({ method }: { method: string }) => method === "thread/resume").params.config,
     { model_reasoning_effort: "high" });
@@ -483,6 +486,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.equal(savedThread, threadId);
   assert.ok(flags().includes("network_proxy"));
   assert.equal(start?.params.cwd, directory);
+  assert.ok((start?.params.developerInstructions as string).includes(writingRules));
   assert.equal(start?.params.permissions, "ai-taskboard-manager");
   assert.equal(Object.hasOwn(start!.params, "projectId"), false);
   assert.equal(newRequests.some(({ method }) => method.startsWith("project/")), false);
