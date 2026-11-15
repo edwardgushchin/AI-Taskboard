@@ -21,7 +21,7 @@ import type { CliReply } from "./cli.ts";
 import { executionModels } from "./codex-models.ts";
 import type { ArchiveLink, BoardSettings, BoardTag, ReviewMode, RunActivity, Task } from "../cli/model.ts";
 import { boardReviewMode, codexThreadPattern, defaultBoardAgents, maxAttachmentBytes, reviewVerifier, taskIdPattern } from "../cli/model.ts";
-import { directory as storageDirectory, readJson, writeJson } from "../cli/storage.ts";
+import { directory as storageDirectory, locateBoard, readBoardSettings, readJson, writeJson } from "../cli/storage.ts";
 import { missingCodexThread, startCodexRun } from "./codex-run.ts";
 import type { ExecutorTask } from "./codex-run.ts";
 import { runLog } from "./run-activity.ts";
@@ -39,6 +39,7 @@ import type { BoardMcpTool } from "./board-mcp.ts";
 import { createAgentSlots, parseAgentLimits } from "./agent-limits.ts";
 import type { AgentRole } from "./agent-limits.ts";
 import { checkForUpdates } from "./updates.ts";
+import { settingsDelivery, syncSettingsNotices } from "./settings-notices.ts";
 
 interface Board {
   project: string;
@@ -253,6 +254,7 @@ function releaseWatch(project: string, watch: BoardWatch): void {
 }
 
 function subscribe(project: string, board: Board): BoardWatch {
+  syncSettingsNotices(project, agentSlots.limits);
   syncTaskStatusNotices(project, russian);
   const tabs = new Set<ProjectTab>();
   let child: ReturnType<typeof cliChild> | undefined;
@@ -294,6 +296,10 @@ function subscribe(project: string, board: Board): BoardWatch {
       }
       if (result.ok) {
         watch.board = result.data;
+        syncSettingsNotices(project, agentSlots.limits);
+        const key = projectIdentity(project);
+        boardRequests.get(key)?.settingsChanged?.();
+        boardWorkRequests.get(key)?.settingsChanged?.();
         for (const listener of watch.listeners) listener(result.data);
         scheduleAgentWork();
       }
@@ -819,6 +825,7 @@ type ManagerRun = {
   item?: Pick<RunActivity, "type" | "title" | "text" | "status">;
 };
 type ManagerRequest = {
+  settingsChanged?: () => void;
   managerRun?: ManagerRun;
   stop?: () => Promise<void>;
   sendNow?: (text: string, files: PastedFile[], messageId?: string) => Promise<void>;
@@ -864,8 +871,9 @@ function scheduleAgentWork() {
   });
 }
 
-function reserveAgent(project: string, role: AgentRole,
-  overrides = subscriptions.get(project)?.board.settings?.agentLimits) {
+function reserveAgent(project: string, role: AgentRole) {
+  // A tool call can race the watch snapshot after CLI settings were saved.
+  const overrides = readBoardSettings(locateBoard(project)).agentLimits;
   const release = agentSlots.acquire(projectIdentity(project), role, overrides);
   if (!release) return;
   return () => {
@@ -1249,7 +1257,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   }
   if (current) return cliFailure("BOARD_REQUEST_IN_PROGRESS", lang("The agent is already handling a request.", "Агент уже обрабатывает запрос."));
   if (closingProjects.has(board.project)) return cliFailure("PROJECT_CLOSING", lang("The project is closing.", "Проект закрывается."));
-  const release = lane === "work" ? reserveAgent(board.project, "manager", board.settings?.agentLimits) : undefined;
+  const release = lane === "work" ? reserveAgent(board.project, "manager") : undefined;
   if (lane === "work" && !release) return cliFailure("MANAGER_LIMIT", lang(
     "All background manager slots on this board are occupied. Retry when a goal or automatic review ends.",
     "На этой доске все места для фоновой работы менеджера заняты. Повторите запуск после завершения цели или автоматической проверки."));
@@ -1391,6 +1399,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     if (goal === "resume" && !threadId) return cliFailure("INVALID_INPUT", lang("There is no saved goal.", "Сохранённой цели нет."));
     const settings = await callCli<BoardSettings>(board.project, ["settings"]);
     if (!settings.ok) return settings;
+    const settingsNotices = settingsDelivery(project, lane, () => syncSettingsNotices(project, agentSlots.limits));
+    const initialSettings = settingsNotices.initial();
     const reviewMode = boardReviewMode(settings.data);
     const managerReviews = reviewMode === "manager";
     if (expectedReviewMode && reviewMode !== expectedReviewMode) {
@@ -1551,7 +1561,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
             action: "Read manager_inbox for executor questions, blockers, submissions and review decisions.",
           } } : result;
         });
-      }, reviewIds ? [] : boardTools, instructions, signal, {
+      }, reviewIds ? [] : boardTools, instructions + "\n" + initialSettings.text, signal, {
         id: threadId,
         settings: settings.data.manager,
         attachmentContext,
@@ -1626,6 +1636,16 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           setRunPhase(waiting ? "waiting" : "starting");
         },
         onControl: (control, model) => {
+          settingsNotices.acknowledge(initialSettings.sequence);
+          running.settingsChanged = () => {
+            void settingsNotices.flush(async text => {
+              await control.steer(text + "\nМодель текущего запуска: " + JSON.stringify(model ?? "определяется провайдером") +
+                "; рассуждение этого запуска: " + JSON.stringify(settings.data.manager?.effort ?? "по умолчанию провайдера") + ".", []);
+              waitWork.abort();
+              waitWork = new AbortController();
+            }).catch(error => console.warn("Settings delivery deferred until next run.", (error as Error).message));
+          };
+          running.settingsChanged();
           historyModel = model;
           running.stop = () => control.interrupt();
           setRunPhase("running");
@@ -1790,7 +1810,7 @@ function scheduleAutoReview(watch: BoardWatch) {
   let prompt: string;
   if (mode === "reviewer") {
     for (const id of ids) {
-      const release = reserveAgent(project, "reviewer", overrides);
+      const release = reserveAgent(project, "reviewer");
       if (!release) break;
       watch.reviewerRuns.set(id, reviewSubmission(watch, id, 4).finally(() => {
         watch.reviewerRuns.delete(id);
@@ -1988,6 +2008,12 @@ ipcMain.handle("agents:limits", (event, value: unknown) => {
     return cliFailure("STORAGE_ERROR", lang("Could not save agent limits.", "Не удалось сохранить лимиты агентов."));
   }
   agentSlots.configure(limits);
+  for (const project of subscriptions.keys()) {
+    syncSettingsNotices(project, limits);
+    const key = projectIdentity(project);
+    boardRequests.get(key)?.settingsChanged?.();
+    boardWorkRequests.get(key)?.settingsChanged?.();
+  }
   scheduleAgentWork();
   return { ok: true, data: limits };
 });
