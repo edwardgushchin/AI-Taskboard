@@ -1365,7 +1365,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       "For user instructions affecting its running work, use goal_send and report them as queued until the goal confirms. " +
       "The goal handles its incoming executor and reviewer mail. Use board tools for the user's direct requests.");
     const reviewTaskTools = reviewMode === "reviewer"
-      ? new Set([...autoReviewTaskTools, "manager_ack", "task_cancel"]) : autoReviewTaskTools;
+      ? new Set([...autoReviewTaskTools, "manager_ack", "task_cancel", "task_start"]) : autoReviewTaskTools;
     const mcpTools: BoardMcpTool[] = boardMcpTools.filter(({ name }) =>
       (!reviewIds || autoReviewReadTools.has(name) || reviewTaskTools.has(name)) &&
       (name !== "task_accept" || reviewMode !== "human") &&
@@ -1395,9 +1395,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       previousConversation: priorChat?.length ? priorChat : undefined,
     }) : undefined;
     const runAction = boardActions(board.project, attachments, changes, signal,
-      (id, revision, { reason, targetHead, reviewMode, newThread } = {}) => reason ?
+      (id, revision, { reason, targetHead, reviewMode, newThread, resolveConflicts } = {}) => reason ?
         launchTask(board.project, id, { input: { revision, reason, targetHead, reviewMode, actor: "manager" } }) :
-        launchTask(board.project, id, undefined, newThread ? "manager" : false, revision),
+        launchTask(board.project, id, undefined, newThread ? "manager" : false, revision, true, false, resolveConflicts),
       () => activeGoal && threadId ? { threadId, objective: activeGoal.objective, signal: goalWork.signal } : undefined,
       id => executorBusy(board.project, id), listener => observeBoardTasks(board, listener), async (id, sequence) => {
         const agent = activeAgents.get(board.project + "\0" + id);
@@ -2195,7 +2195,7 @@ type LaunchState = Pick<Task, "id" | "title" | "status" | "revision" | "codexThr
 
 async function launchTask(project: string, id: string, revisionRequest?: { input: Record<string, unknown> },
   newThread: false | "user" | "manager" = false, revision?: number,
-  retryDisconnect = true, scheduled = false): Promise<CliReply<LaunchState>> {
+  retryDisconnect = true, scheduled = false, resolveConflicts = false): Promise<CliReply<LaunchState>> {
   const key = project + "\0" + id;
   if (launchingTasks.has(key)) return cliFailure("LAUNCH_IN_PROGRESS", "This task is already being launched.");
   if (executorBusy(project, id)) return cliFailure("CHAT_BUSY", lang("Wait for the chat reply or stop the agent first.", "Дождитесь ответа в чате или остановите агента."));
@@ -2302,7 +2302,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     }
     signal.throwIfAborted();
     const started = await callCli<{ task: LaunchState & ExecutorTask } & ({ worktree: string } | { cwd: string })>(project, ["start", id, "--compact"],
-      { revision: revision ?? current.data.revision, launchDetails: true, ...(scheduled ? { scheduled } : {}) });
+      { revision: revision ?? current.data.revision, launchDetails: true, ...(scheduled ? { scheduled } : {}), ...(resolveConflicts ? { resolveConflicts } : {}) });
     if (!started.ok) {
       if (prepared && started.error.code !== "BOARD_BUSY") throw new Error(started.error.message);
       return started;
