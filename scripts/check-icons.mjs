@@ -58,7 +58,7 @@ try {
   await window.webContents.executeJavaScript(`
     window.taskboard = { subscribe() {}, onChatUpdate() {}, onTheme() {}, bootstrap: () => new Promise(() => {}) };
     ${readFileSync(require.resolve("markdown-it/browser"), "utf8")}
-    ${["image-preview.js", "markdown.js", "chat.js", "review-diff.js", "renderer.js"].map(f => read("src/desktop/" + f)).join("\n")}
+    ${["image-preview.js", "source-files.cjs", "markdown.js", "chat.js", "review-diff.js", "renderer.js"].map(f => read("src/desktop/" + f)).join("\n")}
     void 0;
   `);
   const evaluate = code => window.webContents.executeJavaScript(code);

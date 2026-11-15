@@ -1,16 +1,17 @@
 // Real Chromium checks for the chat renderer, without opening a board or contacting Codex.
 // Optional: --references <task attachment directory> --artifacts <screenshot directory>
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { electronCheck } from "./electron-check.mjs";
 
 const script = fileURLToPath(import.meta.url);
 const root = resolve(dirname(script), "..");
 const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "chat", 90_000);
-const { app, BrowserWindow, nativeTheme } = await import("electron");
+const { app, BrowserWindow, nativeTheme, ipcMain } = await import("electron");
 const option = name => { const index = process.argv.indexOf(name); return index < 0 ? undefined : process.argv[index + 1]; };
 const profile = join(scratch, "profile");
 mkdirSync(profile);
@@ -22,12 +23,34 @@ const images = references ? readdirSync(references).filter(name => !name.startsW
   "data:image/png;base64," + readFileSync(join(references, name)).toString("base64")) :
   ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII="];
 const require = createRequire(import.meta.url);
+const sourcePreload = join(scratch, "source-preload.cjs");
+writeFileSync(sourcePreload, `const { contextBridge, ipcRenderer } = require('electron');
+contextBridge.exposeInMainWorld('readSourceFixture', (id, link, source) => ipcRenderer.invoke('check:source', id, link, source));`);
+ipcMain.handle("check:source", (_event, _id, link, source) => {
+  // Run the production reader with Node's TypeScript support; Electron's loader differs.
+  const result = spawnSync(process.env.TASKBOARD_CHECK_NODE, ["--input-type=module", "-e",
+    `import { readMarkdownFile } from ${JSON.stringify(new URL("../src/desktop/markdown-files.ts", import.meta.url).href)};
+try { console.log(JSON.stringify({ok:true,data:await readMarkdownFile(process.argv[1],process.argv[2],process.argv[3])})); }
+catch { console.log(JSON.stringify({ok:false,error:{code:'MARKDOWN_UNAVAILABLE',message:'Не удалось открыть файл. Проверьте путь и права доступа.'}})); }`,
+    root, link, ...(source ? [source] : [])], { encoding: "utf8", windowsHide: true });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
+});
 let window;
 app.whenReady().then(async () => {
   window = new BrowserWindow({
     width: 850, height: 960, show: false,
-    webPreferences: { sandbox: true, contextIsolation: true, backgroundThrottling: false },
+    webPreferences: { preload: sourcePreload, sandbox: true, contextIsolation: true, backgroundThrottling: false },
   });
+  const smoke = new BrowserWindow({ show: false, webPreferences: { sandbox: true } });
+  try {
+    const page = join(scratch, "source-scripts.html");
+    const paths = [require.resolve("markdown-it/browser"), ...["source-files.cjs", "markdown.js"].map(name => join(root, "src/desktop", name))];
+    writeFileSync(page, paths.map(path => `<script src="${pathToFileURL(path).href}"></script>`).join("\n"));
+    await smoke.loadFile(page);
+    assert.equal(await smoke.webContents.executeJavaScript(`chatMarkdown.render('[styles.css](src/desktop/styles.css:582)')`),
+      '<p><a href="src/desktop/styles.css:582">styles.css</a></p>\n');
+  } finally { smoke.destroy(); }
   window.webContents.on("console-message", details => {
     if (details.level === "error") console.error(details.message);
   });
@@ -47,6 +70,7 @@ app.whenReady().then(async () => {
     };
     ${readFileSync(require.resolve("markdown-it/browser"), "utf8")}
     ${read("image-preview.js")}
+    ${read("source-files.cjs")}
     ${read("markdown.js")}
     ${read("chat.js")}
     ${read("review-diff.js")}
@@ -670,6 +694,41 @@ app.whenReady().then(async () => {
     !document.querySelector('.markdown-preview script') && !window.unsafe`,
     "Windows report links open in chat with literal text and inert HTML");
   await evaluate(`document.querySelector('.markdown-preview').close()`);
+
+  // Exercise real filesystem reads after a DOM click, including live/saved manager renders.
+  await evaluate(`
+    const mockMarkdownReader = api.readMarkdown;
+    api.readMarkdown = window.readSourceFixture;
+    body.replaceChildren();
+    const cssExample = '[styles.css](src/desktop/styles.css:582)';
+    for (const saved of [false, true]) {
+      const run = element('div', undefined, 'chat-run');
+      renderRunActivity(run, [{ id: 'css-message', type: 'agentMessage', status: saved ? 'completed' : 'inProgress',
+        phase: 'final_answer', text: cssExample }], saved, undefined, undefined, { dialogue: true });
+      body.append(run);
+    }
+    for (const context of [{}, { agent: true }, { coordination: true }, { source: ${JSON.stringify(join(root, "README.md"))} }]) {
+      body.append(chatText(cssExample, context));
+    }
+    const sourceOrigins = [...body.querySelectorAll('a')];
+  `);
+  assert.equal(await evaluate("sourceOrigins.length"), 6);
+  for (let i = 0; i < 6; i++) {
+    await evaluate(`sourceOrigins[${i}].focus(); sourceOrigins[${i}].click(); waitMarkdown('.markdown-preview .source-line')`, true);
+    await check(`document.querySelector('.markdown-preview h2').textContent === 'styles.css:582' &&
+      document.querySelector('.markdown-preview mark').textContent === document.querySelector('.markdown-preview pre').textContent.split('\\n')[581] &&
+      !document.querySelector('.markdown-preview textarea, .markdown-preview [contenteditable], .markdown-preview script') &&
+      sourceOrigins[${i}].textContent === 'styles.css'`, "CSS click reads the real file and selects line 582 as read-only text");
+    if (i === 0) await capture("css-source-preview.png");
+    await evaluate("document.querySelector('.markdown-preview').close(); new Promise(resolve => requestAnimationFrame(resolve))");
+  }
+  await evaluate(`body.append(chatText('[missing](src/desktop/missing.css:582)'));
+    body.lastElementChild.querySelector('a').click();
+    new Promise(resolve => { const poll = () => document.querySelector('.markdown-preview [role="status"]')?.textContent.includes('Проверьте путь') ? resolve() : requestAnimationFrame(poll); poll(); })`);
+  await check(`document.querySelector('.markdown-preview [role="status"]').textContent.includes('права доступа')`, "missing CSS shows a readable error");
+  await evaluate(`document.querySelector('.markdown-preview').close(); api.readMarkdown = mockMarkdownReader; void 0;`);
+  console.log("Source links Chromium checks passed: native scripts, six CSS surfaces, real reader, line 582, missing file; task/hash regressions passed");
+  if (process.argv.includes("--source-links-only")) return;
 
   await evaluate(`
     sheetKind = 'task';

@@ -9,8 +9,47 @@ import { runInNewContext } from "node:vm";
 import MarkdownIt from "markdown-it";
 import { readMarkdownFile } from "../src/desktop/markdown-files.ts";
 
-const source = readFileSync(new URL("../src/desktop/markdown.js", import.meta.url), "utf8");
+const source = ["source-files.cjs", "markdown.js"].map(name =>
+  readFileSync(new URL("../src/desktop/" + name, import.meta.url), "utf8")).join("\n");
 const markdown = runInNewContext(source + ";chatMarkdown", { window: { markdownit: MarkdownIt } }) as ReturnType<typeof MarkdownIt>;
+
+test("rendered source and document destinations open the same real file without changing captions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "taskboard-source-links-"));
+  try {
+    await mkdir(join(root, "src/desktop"), { recursive: true });
+    const text = Array.from({ length: 600 }, (_, i) => `/* строка ${i + 1} */`).join("\n");
+    const extensions = ["css", "cs", "fs", "vb", "js", "mjs", "cjs", "ts", "mts", "cts", "jsx", "tsx",
+      "py", "rs", "go", "java", "kt", "swift", "c", "h", "cc", "cpp", "cxx", "hh", "hpp", "hxx",
+      "rb", "php", "lua", "gd", "sh", "ps1", "md", "markdown", "txt", "log", "json"];
+    for (const extension of extensions) {
+      for (const name of ["styles." + extension, "стили (final)." + extension]) {
+        const relative = "src/desktop/" + name;
+        const absolute = join(root, relative);
+        await writeFile(absolute, text);
+        const paths = [relative, relative.replaceAll("/", "\\"), absolute, absolute.replaceAll("\\", "/"),
+          encodeURI(relative), pathToFileURL(absolute).href];
+        if (process.platform === "win32") paths.push("/" + absolute.replaceAll("\\", "/"));
+        for (const path of paths) for (const suffix of [":582", ":582:3"]) for (const caption of [name, "`" + name + "`", "Открыть файл"]) {
+          const html = markdown.render(`[${caption}](${path}${suffix})`, { agent: true });
+          const match = /<a href="([^"]+)">([\s\S]*?)<\/a>/.exec(html);
+          assert.ok(match, html);
+          assert.equal(match[2], caption.startsWith("`") ? `<code>${name}</code>` : caption);
+          assert.equal(decodeURIComponent(match[1]), decodeURIComponent(path + suffix));
+          const file = await readMarkdownFile(root, match[1]);
+          assert.equal(file.path, absolute);
+          assert.equal(file.text, text);
+          assert.equal(file.line, /^(md|markdown|txt|log|json)$/.test(extension) ? undefined : 582);
+        }
+      }
+    }
+    assert.equal(markdown.render("[styles.css](src/desktop/styles.css:582)"),
+      '<p><a href="src/desktop/styles.css:582">styles.css</a></p>\n');
+    assert.match(markdown.render("src/desktop/styles.css:582", { agent: true }), /<a [^>]*><code>styles.css:582<\/code><\/a>/);
+    for (const value of ["`src/desktop/styles.css:582`", "styles.css:582", "src/desktop/styles.css:0"]) {
+      assert.doesNotMatch(markdown.render(value, { agent: true }), /<a /);
+    }
+  } finally { await rm(root, { recursive: true }); }
+});
 
 test("Markdown links preserve captions and local paths with spaces, slashes and parentheses", () => {
   const paths = [
@@ -140,12 +179,19 @@ test("Markdown reader rejects invalid, absent, non-file and oversized sources", 
     await mkdir(join(root, "directory.md"));
     await writeFile(join(root, "large.md"), "");
     await truncate(join(root, "large.md"), 4 * 1024 * 1024 + 1);
+    await writeFile(join(root, "large.css"), "");
+    await truncate(join(root, "large.css"), 4 * 1024 * 1024 + 1);
     for (const link of ["javascript:test.md", "https://example.com/file.md", "bad%00.md", "bad\0.md", "bad%0A.md", "file.html", "%zz.md"]) {
       await assert.rejects(readMarkdownFile(root, link), /INVALID_MARKDOWN_LINK/, link);
     }
     await assert.rejects(readMarkdownFile(root, "missing.md"), /ENOENT/);
     await assert.rejects(readMarkdownFile(root, "directory.md"));
     await assert.rejects(readMarkdownFile(root, "large.md"), /MARKDOWN_TOO_LARGE/);
+    await assert.rejects(readMarkdownFile(root, "large.css:582"), /MARKDOWN_TOO_LARGE/);
+    await assert.rejects(readMarkdownFile(root, "missing.css:582"), /ENOENT/);
+    for (const link of ["javascript:styles.css:1", "https://example.com/styles.css:1", "styles.css", "styles.css:0", "styles.css:9007199254740992", "bad%00.css:1", "bad%0A.css:1"]) {
+      await assert.rejects(readMarkdownFile(root, link), /INVALID_MARKDOWN_LINK/);
+    }
   } finally { await rm(root, { recursive: true }); }
 });
 
@@ -158,9 +204,10 @@ test("local text links cannot read reports outside the project through paths or 
     await mkdir(outside);
     await writeFile(join(outside, "report.txt"), "Outside");
     await writeFile(join(outside, "Private.cs"), "Outside");
+    await writeFile(join(outside, "styles.css"), "Outside");
     await symlink(outside, join(workspace, "linked"), process.platform === "win32" ? "junction" : "dir");
     for (const link of ["../outside/report.txt", "linked/report.txt", "file:///C:/report.txt",
-      "../outside/Private.cs:1", "linked/Private.cs:1", "linked/Private.cs", "linked/Private.cs:0"]) {
+      "../outside/styles.css:1", "linked/styles.css:1", "../outside/Private.cs:1", "linked/Private.cs:1", "linked/Private.cs", "linked/Private.cs:0"]) {
       await assert.rejects(readMarkdownFile(workspace, link), /INVALID_MARKDOWN_LINK/);
     }
   } finally { await rm(root, { recursive: true }); }

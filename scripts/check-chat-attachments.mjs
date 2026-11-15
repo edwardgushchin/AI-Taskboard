@@ -81,6 +81,7 @@ app.whenReady().then(async () => {
     };
     ${readFileSync(require.resolve("markdown-it/browser"), "utf8")}
     ${read("image-preview.js")}
+    ${read("source-files.cjs")}
     ${read("markdown.js")}
     ${read("chat.js")}
     ${read("renderer.js")}
