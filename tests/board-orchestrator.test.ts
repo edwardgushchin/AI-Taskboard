@@ -559,3 +559,28 @@ test("two windows sharing a board cannot start separate orchestrator chats", asy
     assert.equal((await first).data.id, f.threadId);
   }
 });
+
+test("the manager can read the open queue without closed or archived cards", async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"])).ok, true);
+  const { data: archived } = await f.cli(["create"], { title: "Archived work" });
+  assert.equal((await f.cli(["cancel", archived.id], { reason: "Obsolete" })).ok, true);
+  assert.equal((await f.cli(["settings"], { archiveAfterDays: 0 })).ok, true);
+  assert.equal((await f.cli(["archive", "sweep"])).ok, true);
+
+  const { data: closed } = await f.cli(["create"], { title: "Closed work" });
+  assert.equal((await f.cli(["cancel", closed.id], { reason: "Obsolete" })).ok, true);
+  const { data: open } = await f.cli(["create"], { title: "Open work", tags: ["Runtime"] });
+  const result = await f.run("Show the open queue", async act => {
+    assert.equal((await act("board_list", { activeOnly: "true" })).error.code, "INVALID_INPUT");
+    const full = (await act("board_list", {})).data;
+    const active = (await act("board_list", { activeOnly: true })).data;
+    assert.deepEqual(Array.from(full.tasks, task => task.id), [closed.id, open.id]);
+    assert.deepEqual(Array.from(full.archived, task => task.id), [archived.id]);
+    assert.deepEqual(Array.from(active.tasks), Array.from(full.tasks).filter(task => task.id === open.id));
+    assert.equal(active.archived.length, 0);
+    assert.deepEqual(Array.from(active.tags), Array.from(full.tags));
+    return { text: "Open queue read." };
+  });
+  assert.equal(result.data?.answer, "Open queue read.", JSON.stringify(result.error ?? result.data?.error));
+});

@@ -19,7 +19,8 @@ const managerTaskFields = {
   questions: { ...taskFields.questions, description: "Include unresolved decisions only when they affect this task." },
 };
 const actions = {
-  board_list: { description: "List the tasks and tags on this board, including archived tasks.", properties: {}, required: [] },
+  board_list: { description: "List tasks and tags. Use activeOnly when planning, dispatching or checking the open queue. Omit it to include completed, cancelled and archived tasks.",
+    properties: { activeOnly: { type: "boolean" } }, required: [] },
   task_show: { description: "Read a task's details and current revision by its exact ID.",
     properties: { id: taskReference.id }, required: ["id"] },
   task_create: { description: "Create a focused draft for one deliverable. Select relevant attachments from the latest message by their numeric IDs.",
@@ -68,7 +69,7 @@ export const boardInstructions = [
   "You are the project manager for this AI Taskboard. Answer questions about the project and take responsibility for keeping its board accurate. Reply in the user's language.",
   "Inspect files and documentation anywhere inside the current project with read-only commands when relevant. Cite project-relative paths in your answers. Do not read outside the project, edit files, run project code, or change Git state yourself.",
   "Use the read-only tools from the ai_taskboard MCP server for project data: project_git for Git status, log and diffs, project_disk for disk space, and project_sha256 to compute or verify a file checksum. Use project_sha256 directly for SHA-256, with the project-relative path.",
-  "Use board_list to find tasks or understand the board. Use task_show to inspect a task and get its current revision before making changes.",
+  "Use board_list with activeOnly: true when you only need the open queue. Use task_show to inspect a task and get its current revision before making changes.",
   "Decide whether a board change is useful from the user's feedback, decisions, and the conversation. Act on clear implications without waiting for a direct command or confirmation. Answer informational questions and discuss tentative options without changing the board unless the conversation establishes a reason to act.",
   'Update the matching task, including approved descriptions and acceptance criteria, when feedback clarifies the desired outcome. Reassess blockers when requirements or circumstances change. For example, "Задача 55 не актуальна" is enough to cancel T-0055. In ordinary chat, create a draft for genuinely new work. A failed update is not a reason to create a duplicate task.',
   "Before creating a card or rewriting its description, check that each sentence helps the executor deliver or the reviewer verify this task. Keep the problem, expected behavior, necessary constraints and relevant references. Put verifiable outcomes in acceptance criteria. Leave general repository instructions in their source files. Keep incidental branch status, commit IDs, free disk space, tool logs and unrelated work out of the brief. Include such details only if they define a requirement or are needed to reproduce this task's problem.",
@@ -128,13 +129,17 @@ export function boardActions(project: string, attachments: { path: string; name:
       }
     }
     if (action === "board_list") {
+      if (input.activeOnly !== undefined && typeof input.activeOnly !== "boolean") {
+        return cliFailure("INVALID_INPUT", "Set activeOnly to true or false.");
+      }
       const result = await callCli<{ tags: BoardTag[]; tasks: Task[]; archived: (ArchiveLink & { id: string })[] }>(project, ["list"]);
       if (!result.ok) return result;
       const { tags, tasks, archived } = result.data;
+      const active = input.activeOnly ? tasks.filter(({ status }) => status !== "done" && status !== "cancelled") : tasks;
       return { ok: true, data: { tags: tags.map(tag => tag.name),
-        tasks: tasks.map(({ id, title, status, tags, priority, dependencies, goalThreadId }) =>
+        tasks: active.map(({ id, title, status, tags, priority, dependencies, goalThreadId }) =>
           ({ id, title, status, tags, priority, dependencies, ...(goalThreadId ? { goalTask: goalThreadId === goal?.threadId } : {}) })),
-        archived: archived.map(({ id, title, status }) => ({ id, title, status })),
+        archived: input.activeOnly ? [] : archived.map(({ id, title, status }) => ({ id, title, status })),
       } };
     }
     const { id, attachmentIds: selected, ...fields } = input;
