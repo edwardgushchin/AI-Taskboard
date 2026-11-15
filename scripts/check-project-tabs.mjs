@@ -97,7 +97,7 @@ if (!process.versions.electron) {
         window.startupView = { welcomeSeen: false, loadingSeen: false };
         const sampleStartup = () => {
           window.startupView.welcomeSeen ||= !document.querySelector('#welcome').hidden;
-          window.startupView.loadingSeen ||= !document.querySelector('#loading').hidden;
+          window.startupView.loadingSeen ||= document.querySelector('#app-content').getAttribute('aria-busy') === 'true';
         };
         sampleStartup();
         window.startupObserver = new MutationObserver(sampleStartup);
@@ -215,6 +215,8 @@ if (!process.versions.electron) {
       operation.controller.signal.addEventListener("abort", () => { interrupted = true; setTimeout(operation.finish, 10); }, { once: true });
       await select(second);
       check(!interrupted, "switching preserves a background operation");
+      await evaluate("window.taskboard.reorderTab(" + JSON.stringify(first) + ", " + JSON.stringify(second) + ", true)");
+      check(!interrupted && (await frame()).project === second, "reordering preserves the background operation and active project");
       await evaluate("window.taskboard.menuAction('quit')");
       await waitFor(() => warnings.length > 0, "quit confirmation");
       check(!interrupted && !window.isDestroyed(), "canceling quit preserves running operations and windows");
@@ -284,8 +286,8 @@ if (!process.versions.electron) {
         const snapshot = await frame();
         return snapshot.tabs.length === 3 && snapshot.project === second && Boolean(snapshot.board);
       }, "restored projects");
-      check(await evaluate("window.startupView.loadingSeen && !window.startupView.welcomeSeen"), "restoring a saved session shows loading without exposing the welcome screen");
-      check(await evaluate("document.querySelector('#welcome').hidden && document.querySelector('#loading').hidden"), "the active restored board replaces loading");
+      check(await evaluate("window.startupView.loadingSeen && !window.startupView.welcomeSeen"), "restoring a saved session reports aria-busy without exposing the welcome screen");
+      check(await evaluate("document.querySelector('#welcome').hidden && !document.querySelector('#loading') && document.querySelector('#app-content').getAttribute('aria-busy') === 'false'"), "the active restored board clears aria-busy without a loading label");
       await evaluate("window.startupObserver.disconnect()");
       check((await frame()).tabs.map(tab => tab.path).join("|") === [unavailable, first, second].join("|"), "relaunch restores tab order");
       check((await frame()).project === second, "relaunch restores the active project");

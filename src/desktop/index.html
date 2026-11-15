@@ -18,36 +18,9 @@
   <script src="./renderer.js" defer></script>
 </head>
 <body>
-  <svg class="icon-library" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
-    <symbol id="icon-terminal" viewBox="0 0 16 16"><rect x="1.5" y="2" width="13" height="12" rx="2"/><path d="m4 5 2.5 2.5L4 10m4-.5h3"/></symbol>
-    <symbol id="icon-edit" viewBox="0 0 16 16"><path d="m10 2 4 4-7.5 7.5-5 1 1-5Zm-6.5 7.5 4 4M8.5 3.5l4 4"/></symbol>
-    <symbol id="icon-images" viewBox="0 0 16 16"><rect x="5" y="2" width="9" height="10" rx="1.5"/><path d="M11 12v1a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h2m0 5 3-3 3 3 1-1 2 2"/></symbol>
-    <symbol id="icon-thought" viewBox="0 0 16 16"><path d="M5 11c0-2-2-2.5-2-5a5 5 0 0 1 10 0c0 2.5-2 3-2 5Zm0 2h6m-5 2h4"/></symbol>
-    <symbol id="icon-tool" viewBox="0 0 16 16"><path d="M9 2a4 4 0 0 0-5 5L1.5 9.5a2 2 0 0 0 3 3L7 10a4 4 0 0 0 5-5L9.5 7.5 7 5Z"/></symbol>
-    <symbol id="icon-board" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M6 3v10m4-10v10"/></symbol>
-    <symbol id="icon-folder" viewBox="0 0 16 16"><path d="M2 5V4a1 1 0 0 1 1-1h3l1.5 2H13a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1Z"/></symbol>
-    <symbol id="icon-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.25"/><path d="m10.25 10.25 3 3"/></symbol>
-    <symbol id="icon-filter" viewBox="0 0 16 16"><path d="M2.5 3.5h11l-4 4.75v3.25l-3 1.5V8.25Z"/></symbol>
-    <symbol id="icon-plus" viewBox="0 0 16 16"><path d="M8 3.5v9m-4.5-4.5h9"/></symbol>
-    <symbol id="icon-chevron" viewBox="0 0 16 16"><path d="m3.5 10 4.5-4.5 4.5 4.5"/></symbol>
-    <symbol id="icon-dependency" viewBox="0 0 16 16"><path d="m6.5 9.5 3-3m-1.25 5.25-1.5 1.5a2.83 2.83 0 0 1-4-4l1.5-1.5m3.5-3.5 1.5-1.5a2.83 2.83 0 0 1 4 4l-1.5 1.5"/></symbol>
-    <symbol id="icon-error" viewBox="0 0 16 16"><path d="m8 2 6.25 11H1.75ZM8 6v3m0 1.75v.25"/></symbol>
-    <symbol id="icon-attachment" viewBox="0 0 16 16"><path d="m9.75 5-4 4a1.4 1.4 0 0 0 2 2l4.6-4.6a2.65 2.65 0 0 0-3.75-3.75L3.75 7.5a3.9 3.9 0 0 0 5.5 5.5l3-3"/></symbol>
-    <symbol id="icon-play" viewBox="0 0 16 16"><path d="m5 2.5 8 5.5-8 5.5Z" fill="currentColor" stroke="none"/></symbol>
-    <symbol id="icon-stop" viewBox="0 0 16 16"><rect x="3" y="3" width="10" height="10" rx="1" fill="currentColor" stroke="none"/></symbol>
-    <symbol id="icon-microphone" viewBox="0 0 16 16"><rect x="6" y="2" width="4" height="7" rx="2"/><path d="M4 7a4 4 0 0 0 8 0M8 11v3m-2 0h4"/></symbol>
-    <symbol id="icon-git-user" viewBox="0 0 16 16"><circle cx="8" cy="5" r="2.5"/><path d="M3 14v-1a5 4 0 0 1 10 0v1"/></symbol>
-    <symbol id="icon-git-tag" viewBox="0 0 16 16"><path d="M2.5 2.5H8l5.5 5.5L8 13.5 2.5 8Z"/><circle cx="5.5" cy="5.5" r=".75"/></symbol>
-    <symbol id="icon-check" viewBox="0 0 16 16"><path d="m3 8 3.25 3.25L13 4.5"/></symbol>
-    <symbol id="icon-more" viewBox="0 0 16 16"><circle cx="3" cy="8" r=".75"/><circle cx="8" cy="8" r=".75"/><circle cx="13" cy="8" r=".75"/></symbol>
-    <symbol id="icon-chat" viewBox="0 0 16 16"><path d="M13 10a6 6 0 1 0-9 3l-2 1 1-3m1 2a6 6 0 0 0 9-3"/></symbol>
-    <symbol id="icon-send" viewBox="0 0 16 16"><path d="m2 2 12 6-12 6 3-6Zm3 6h9"/></symbol>
-    <symbol id="icon-arrow-left" viewBox="0 0 16 16"><path d="M13 8H3m4-4L3 8l4 4"/></symbol>
-    <symbol id="icon-notifications" viewBox="0 0 16 16"><path d="M5.5 13.5a2.5 2.5 0 0 0 5 0M8 2c-2.5 0-4 1.5-4 4v3l-1.5 2.5h11L12 9V6c0-2.5-1.5-4-4-4Z"/></symbol>
-  </svg>
   <header id="app-header" class="app-menu-bar" hidden>
     <div class="app-menu-start">
-      <svg class="icon" aria-hidden="true"><use href="#icon-board"/></svg>
+      <i class="icon codicon codicon-layout" aria-hidden="true"></i>
       <nav id="app-menu" class="app-menu" role="menubar" hidden></nav>
     </div>
   </header>
@@ -63,14 +36,13 @@
         <i class="icon codicon codicon-close" aria-hidden="true"></i>
       </button>
     </div>
-    <section id="loading" class="welcome" role="status">Loading projects…</section>
     <section id="welcome" class="welcome" hidden>
       <div class="welcome-content">
         <h1>AI Taskboard</h1>
         <section class="welcome-section" aria-labelledby="welcome-start">
           <h2 id="welcome-start">Start</h2>
-          <button id="welcome-create" class="welcome-link" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-plus"/></svg><span>Create board</span></button>
-          <button id="welcome-open" class="welcome-link" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-folder"/></svg><span>Open existing board</span></button>
+          <button id="welcome-create" class="welcome-link" type="button"><i class="icon codicon codicon-add" aria-hidden="true"></i><span>Create board</span></button>
+          <button id="welcome-open" class="welcome-link" type="button"><i class="icon codicon codicon-folder" aria-hidden="true"></i><span>Open existing board</span></button>
         </section>
         <section class="welcome-section" aria-labelledby="welcome-recent">
           <h2 id="welcome-recent">Recent boards</h2>
@@ -92,11 +64,11 @@
       <button id="status-publish" type="button" class="button quiet" aria-label="Publish to GitHub" hidden><i class="icon codicon codicon-cloud-upload" aria-hidden="true"></i></button>
     </div>
     <section id="git-branches" class="git-branches" popover aria-label="Branches and tags"></section>
-    <span id="status-user" class="status-git" hidden><svg class="icon" aria-hidden="true"><use href="#icon-git-user"/></svg><span></span></span>
+    <span id="status-user" class="status-git" hidden><i class="icon codicon codicon-account" aria-hidden="true"></i><span></span></span>
     <div class="status-activity">
       <span id="status-agents" role="img" hidden><i class="icon codicon codicon-hubot" aria-hidden="true"></i><span aria-hidden="true"></span></span>
       <button id="status-notifications" type="button" class="button quiet" popovertarget="notifications" aria-label="Review queue">
-        <svg class="icon" aria-hidden="true"><use href="#icon-notifications"/></svg><span class="count" aria-hidden="true" hidden></span>
+        <i class="icon codicon codicon-bell" aria-hidden="true"></i><span class="count" aria-hidden="true" hidden></span>
       </button>
     </div>
     <section id="notifications" class="notifications" popover aria-label="Review queue"></section>
@@ -104,7 +76,7 @@
   <dialog id="sheet" class="sheet" aria-labelledby="sheet-title" closedby="closerequest">
     <div class="sheet-header">
       <h2 id="sheet-title"></h2>
-      <button id="close-sheet" class="button quiet" aria-label="Close">×</button>
+      <button id="close-sheet" class="button quiet" aria-label="Close"><i class="icon codicon codicon-close" aria-hidden="true"></i></button>
     </div>
     <div id="sheet-notice" class="notice" role="status" hidden></div>
     <div id="sheet-body" class="sheet-body" tabindex="0"></div>

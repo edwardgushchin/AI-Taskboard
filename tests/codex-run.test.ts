@@ -182,6 +182,8 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(launched.cwd, folder);
   assert.deepEqual(launched.flags.slice(0, 5), ["app-server", "--disable", "hooks", "--disable", "plugins"]);
   assert.ok(launched.flags.includes('web_search="live"'));
+  assert.ok(launched.flags.includes("network_proxy"));
+  assert.ok(launched.flags.some((flag: string) => flag.startsWith("permissions.ai-taskboard=") && flag.endsWith(",network={enabled=true}}")));
   assert.equal(launched.flags.includes('windows.sandbox="mxc"'), process.platform === "win32");
   assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers=") && flag.includes("worklog_record")));
   assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers=") && flag.includes("check_wait") && flag.includes("tool_timeout_sec=1220")));
@@ -257,6 +259,8 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(await resumed.completion, undefined);
   const { requests: resumedCalls, flags: resumedFlags } = JSON.parse(readFileSync(capture, "utf8"));
   assert.ok(resumedFlags.includes('web_search="live"'));
+  assert.ok(resumedFlags.includes("network_proxy"));
+  assert.ok(resumedFlags.some((flag: string) => flag.startsWith("permissions.ai-taskboard=") && flag.endsWith(",network={enabled=true}}")));
   assert.deepEqual(resumedCalls.map((req: { method: string }) => req.method),
     ["initialize", "command/exec", "thread/resume", "turn/start"]);
   assert.equal(resumedCalls[2].params.threadId, thread);

@@ -135,7 +135,7 @@ function fixture(t: TestContext) {
       idleGoalActions.push(action);
       return null;
     },
-    launchTask: async (cwd: string, id: string, review?: { input: unknown }, newThread?: false | "manager", revision?: number) => {
+    launchTask: async (cwd: string, id: string, review?: { input: unknown }, newThread?: false | "manager", revision?: number, _retryDisconnect?: boolean, _scheduled?: boolean, resolveConflicts?: boolean) => {
       if (review) {
         const revised = await callCli(cwd, ["request-changes", id], review.input);
         if (!revised.ok) return revised;
@@ -146,7 +146,7 @@ function fixture(t: TestContext) {
         if (!resumed.ok) return resumed;
         revision = resumed.data.revision;
       }
-      const result = await callCli(cwd, ["start", id], { revision });
+      const result = await callCli(cwd, ["start", id], { revision, resolveConflicts });
       return result.ok ? { ok: true, data: result.data.task } : result;
     },
     tmpdir: () => folder, stateOf: () => ({ project, board: { project, settings: {} } }), app: { getPath: () => folder }, cliFailure, lang: (english: string) => english,
@@ -184,7 +184,7 @@ function fixture(t: TestContext) {
         [...expectedTools.filter(name => (name !== "task_accept" || mode !== "human") &&
           (name !== "task_request_changes" || mode === "manager")),
         ...(!session.separateTurn ? (session.goal || session.resumeGoal ? ["goal_inbox", "goal_report"] : ["goal_read", "goal_send"]) : []),
-        ...(session.separateTurn && mode === "reviewer" ? ["manager_ack"] : [])].sort());
+        ...(session.separateTurn && mode === "reviewer" ? ["manager_ack", "task_cancel", "task_start"] : [])].sort());
       if (session.separateTurn) {
         assert.doesNotMatch(instructions, /manager_inbox|task_cleanup_status/);
         assert.equal(session.attachmentContext, undefined);
@@ -1964,4 +1964,66 @@ test("the manager can read the open queue without closed or archived cards", asy
     return { text: "Open queue read." };
   });
   assert.equal(result.data?.answer, "Open queue read.", JSON.stringify(result.error ?? result.data?.error));
+});
+
+test("manager reopens a conflicting approved submission and integrates its reviewed repair", async t => {
+  const f = fixture(t);
+  const git = (cwd: string, ...args: string[]) => {
+    const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8", windowsHide: true });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  git(f.project, "init", "-b", "main");
+  git(f.project, "config", "core.autocrlf", "false");
+  git(f.project, "config", "user.name", "Taskboard");
+  git(f.project, "config", "user.email", "taskboard@example.invalid");
+  await writeFile(join(f.project, "source.txt"), "base\n");
+  git(f.project, "add", ".");
+  git(f.project, "commit", "-m", "Initial");
+  await f.cli(["init"]);
+  await f.cli(["settings"], { reviewMode: "reviewer" });
+  const { data: card } = await f.cli(["create"], { title: "Conflict repair", criteria: ["Both changes preserved"] });
+  await f.cli(["approve", card.id]);
+  const { data: started } = await f.cli(["start", card.id]);
+  const cwd = started.worktree;
+  await writeFile(join(cwd, "source.txt"), "task\n");
+  const { data: preview } = await f.cli(["preview", card.id]);
+  const { data: submitted } = await f.cli(["submit", card.id], { token: preview.token, message: "fix: change source", summary: "Changed", checks: [] });
+  const approve = async (revision: number) => {
+    const { data: review } = await f.cli(["review", card.id]);
+    assert.equal((await f.cli(["review-approve", card.id], { revision, targetHead: review.targetHead, summary: "Verified", evidence: ["Content checked"] })).ok, true);
+  };
+  await approve(submitted.revision);
+  await f.run("Check clean submission", async act => {
+    assert.equal((await act("task_start", { id: card.id, revision: submitted.revision, resolveConflicts: true })).error.code, "NO_MERGE_CONFLICT");
+    return { text: "Clean submission retained" };
+  });
+  await writeFile(join(f.project, "source.txt"), "target\n");
+  git(f.project, "commit", "-am", "Target change");
+  const result = await f.run("Repair and integrate", async act => {
+    const args = { id: card.id, revision: submitted.revision, resolveConflicts: true };
+    assert.equal((await act("task_start", { ...args, resolveConflicts: "true" })).error.code, "INVALID_INPUT");
+    assert.equal((await act("task_start", { ...args, revision: submitted.revision - 1 })).error.code, "REVISION_CONFLICT");
+    assert.equal((await act("task_start", { id: card.id, revision: submitted.revision })).error.code, "INVALID_TRANSITION");
+    const reopened = await act("task_start", args);
+    assert.equal(reopened.data.status, "in_progress");
+    assert.equal((await f.cli(["show", card.id])).data.git.worktree, cwd);
+    const conflict = spawnSync("git", ["-C", cwd, "merge", "main"], { encoding: "utf8", windowsHide: true });
+    assert.equal(conflict.status, 1, conflict.stderr);
+    await writeFile(join(cwd, "source.txt"), "target\ntask\n");
+    git(cwd, "add", "source.txt");
+    git(cwd, "commit", "-m", "fix: resolve integration conflict", "-m", "Task: " + card.id);
+    const { data: next } = await f.cli(["preview", card.id]);
+    const resubmitted = await f.cli(["submit", card.id], { token: next.token, message: next.commitMessage ?? "fix: preserve both changes", summary: "Combined", checks: ["Both lines present"] });
+    assert.equal(resubmitted.ok, true, JSON.stringify(resubmitted));
+    let review = (await act("task_review", { id: card.id })).data;
+    assert.equal(review.reviewerApproval, undefined);
+    assert.equal((await act("task_accept", { id: card.id, revision: review.revision, targetHead: review.targetHead })).error.code, "REVIEW_REQUIRED");
+    await approve(review.revision);
+    review = (await act("task_review", { id: card.id })).data;
+    assert.equal((await act("task_accept", { id: card.id, revision: review.revision, targetHead: review.targetHead })).data.status, "done");
+    return { text: "Integrated reviewed repair" };
+  });
+  assert.equal(result.data?.error, undefined, JSON.stringify(result));
+  assert.equal(readFileSync(join(f.project, "source.txt"), "utf8"), "target\ntask\n");
 });
