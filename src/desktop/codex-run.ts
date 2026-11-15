@@ -90,7 +90,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     child = spawn(client.path, [
       ...client.args, ...boardCodexArgs, "-c", mcp.config,
       "-c", 'web_search="live"',
-      "-c", "permissions." + profile + "={filesystem={" + filesystem + "}}",
+      "--disable", "network_proxy",
+      "-c", "permissions." + profile + "={filesystem={" + filesystem + "},network={enabled=true}}",
       "-c", "default_permissions=" + JSON.stringify(profile),
       ...(process.platform === "win32" ? ["-c", 'windows.sandbox="mxc"'] : []),
     ], { cwd: project, env: { ...(client.env ?? process.env), ...mcp.env }, windowsHide: true, stdio: "pipe" });
