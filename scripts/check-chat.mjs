@@ -454,6 +454,80 @@ app.whenReady().then(async () => {
         digests.every(button => button.querySelector('.codicon-check'));
     } finally { delete navigator.clipboard; }
   })()`, "coordination evidence separates the summary and reports, with links and full hashes on copy");
+  await evaluate(`
+    window.foldOpenedLinks = [];
+    window.foldOriginalOpenLink = api.openLink;
+    api.openLink = async href => { foldOpenedLinks.push(href); };
+    window.foldFixture = chatText('Введение.\\n\\n### [**Технические** *детали*](https://example.com/report?a=1&b=2)\\n\\nТело.\\n\\n#### Вложенный раздел\\n\\nПродолжение.\\n\\n### Дальше\\n\\nСледующий раздел.', { agent: true });
+    window.foldDialog = element('dialog');
+    foldDialog.style.width = '600px';
+    foldDialog.append(foldFixture);
+    document.body.append(foldDialog);
+    foldDialog.showModal();
+    window.foldDetails = foldFixture.querySelector('details');
+    window.foldSummary = foldDetails.querySelector('summary');
+  `);
+  await check(`foldSummary.querySelector('a')?.getAttribute('href') === 'https://example.com/report?a=1&b=2' &&
+    !!foldSummary.querySelector('strong') && !!foldSummary.querySelector('em')`,
+    "folded heading retains the full link and safe inline markup");
+  await check(`!foldDetails.open && foldDetails.querySelector('.chat-report-body').textContent.includes('Продолжение.') &&
+    foldDetails.nextElementSibling.textContent === 'Дальше' && !foldDetails.textContent.includes('Следующий раздел.')`,
+    "folding retains nested content and stops before the next peer heading");
+  const foldClick = async selector => {
+    const point = await evaluate(`(() => { const el = ${selector}; el.scrollIntoView({ block: 'center' });
+      const r = el.getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()`);
+    window.webContents.sendInputEvent({ type: "mouseDown", ...point, button: "left", clickCount: 1 });
+    window.webContents.sendInputEvent({ type: "mouseUp", ...point, button: "left", clickCount: 1 });
+    await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+  };
+  await foldClick("foldSummary.querySelector('a')");
+  await check(`foldOpenedLinks.length === 1 && foldOpenedLinks[0] === 'https://example.com/report?a=1&b=2' && !foldDetails.open`,
+    "mouse activation opens the full URL through the shared handler without toggling details");
+  await evaluate("foldSummary.querySelector('a').focus()");
+  const foldKey = async keyCode => {
+    window.webContents.sendInputEvent({ type: "keyDown", keyCode });
+    window.webContents.sendInputEvent({ type: "char", keyCode: keyCode === "Enter" ? "\r" : " " });
+    window.webContents.sendInputEvent({ type: "keyUp", keyCode });
+    await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+  };
+  await foldKey("Enter");
+  await check("foldOpenedLinks.length === 2 && !foldDetails.open", "Enter on the link opens its URL and leaves details closed");
+  await evaluate("foldSummary.focus()");
+  await foldKey("Enter");
+  await check("foldDetails.open && document.activeElement === foldSummary", "Enter on summary expands native details");
+  await foldKey("Space");
+  await check("!foldDetails.open", "Space on summary collapses native details");
+  await foldClick("foldSummary");
+  await check("foldDetails.open", "mouse activation of summary expands native details");
+  await check(`(() => {
+    const tick = String.fromCharCode(96);
+    const code = chatText('Введение.\\n\\n### Технические ' + tick + 'детали' + tick + '\\n\\nТело.', { agent: true });
+    const bad = chatText('Введение.\\n\\n### [Технические детали](javascript:alert(1))\\n\\nТело.', { agent: true });
+    const raw = chatText('Введение.\\n\\n### Технические детали\\n\\n<script>alert(1)</script>', { agent: true });
+    const first = chatText('### Технические детали\\n\\nТело.', { agent: true });
+    const empty = chatText('Введение.\\n\\n### Технические детали', { agent: true });
+    return code.querySelector('summary code')?.textContent === 'детали' && !bad.querySelector('a') &&
+      !raw.querySelector('script') && !first.querySelector('details') && !empty.querySelector('details');
+  })()`, "inline code survives; URL and raw HTML restrictions and folding eligibility remain intact");
+  await evaluate("foldDialog.close(); foldDialog.remove(); api.openLink = foldOriginalOpenLink");
+  await check(`(() => {
+    // Compose this fix with T-0073's parameterization without importing its other changes.
+    const source = foldTechnicalDetails.toString()
+      .replace('function foldTechnicalDetails(block)', 'function foldTechnicalDetails(block, title = /^(?:Technical details|Технические детали)$/i, className = "chat-report-details", requirePrevious = true)')
+      .replace('!heading.previousElementSibling', '(requirePrevious && !heading.previousElementSibling)')
+      .replace('!/^(?:Technical details|Технические детали)$/i.test', '!title.test')
+      .replace('"chat-report-details");', 'className);');
+    const fold = new Function('element', 'return (' + source + ')')(element);
+    const block = element('div');
+    block.innerHTML = chatMarkdown.render('### [Диагностика и связанные файлы](https://example.com/report?a=1&b=2)\\n\\nТело.\\n\\n### Дальше\\n\\nСледующий раздел.');
+    fold(block, /^Диагностика и связанные файлы$/i, 'task-description-details', false);
+    const details = block.querySelector('details.task-description-details');
+    return !!details && !details.open &&
+      details.querySelector('summary a')?.getAttribute('href') === 'https://example.com/report?a=1&b=2' &&
+      details.querySelector('.chat-report-body').textContent.trim() === 'Тело.' &&
+      details.nextElementSibling.textContent === 'Дальше';
+  })()`, "T-0073 parameterized composition preserves diagnostic heading links and boundaries");
+  console.log("Folded heading link, markup, boundaries, mouse, keyboard and safety checks passed");
   await check(`(() => {
     const tick = String.fromCharCode(96);
     const text = 'Полный прогон остановился до проверки интерфейса из-за ошибки кодировки. Целевые проверки прошли.\\n\\n' +
