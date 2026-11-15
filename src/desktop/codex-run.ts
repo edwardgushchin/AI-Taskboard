@@ -94,9 +94,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     await Promise.all([exited, mcp.close()]);
   };
   child.stderr.setEncoding("utf8").on("data", chunk => { lastError = (lastError + chunk).slice(-1500); });
-  const rpc = codexRpc(child, async message => {
-    const usage = tokens.observe(message);
-    if (usage) await onTokenUsage?.(usage);
+  const rpc = codexRpc(child, message => {
+    tokens.queue(tokens.observe(message), onTokenUsage);
     const params = message.params as { threadId?: string; turn: Turn };
     if (activeThreadId && params?.threadId === activeThreadId) {
       if (onActivity && message.method?.startsWith("item/")) {
@@ -127,12 +126,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     } catch (error) {
       failure = lastError.trim() || (error as Error).message;
     } finally {
-      try {
-        const usage = tokens.finish(Boolean(failure));
-        if (usage) await onTokenUsage?.(usage);
-      } catch (error) {
-        failure = [failure, (error as Error).message].filter(Boolean).join("\n");
-      }
+      await tokens.save(tokens.finish(Boolean(failure)), onTokenUsage);
       await close();
     }
     return failure;
@@ -194,15 +188,13 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       threadId, effort: task.execution?.effort, input: [{ type: "text", text: prompt, text_elements: [] }],
     });
     control = turnControl(request, threadId, turn.id);
-    const usage = tokens.begin(threadId, turn.id);
-    if (usage) await onTokenUsage?.(usage);
+    tokens.save(tokens.begin(threadId, turn.id), onTokenUsage);
     clearTimeout(timeout);
     if (turn.status !== "inProgress") turns.set(turn.id, turn);
     return { threadId, completion: monitor(turn.id), ...control };
   } catch (error) {
     await close();
-    const usage = tokens.finish(true);
-    if (usage) await onTokenUsage?.(usage);
+    await tokens.save(tokens.finish(true), onTokenUsage);
     if (error instanceof Error && /already has an active writer/i.test(error.message)) {
       throw Object.assign(error, { code: "CODEX_THREAD_BUSY" });
     }

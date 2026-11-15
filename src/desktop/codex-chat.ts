@@ -371,8 +371,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
       if (data?.threadId === thread.id && /^(?:item\/|turn\/|thread\/(?:goal\/|tokenUsage\/))/.test(message.method ?? "")) {
         refreshTimeout();
       }
-      const report = tokens.observe(message);
-      if (report) await onTokenUsage?.(report);
+      tokens.queue(tokens.observe(message), onTokenUsage);
       if (data?.threadId !== thread.id) return;
       if (message.method === "thread/goal/updated" && data.goal) updateGoal(data.goal);
       if (message.method === "thread/goal/cleared") updateGoal(null);
@@ -432,8 +431,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
         }, notify);
         turn = response.turn;
         refreshTimeout();
-        const report = tokens.begin(thread.id, turn.id);
-        if (report) await onTokenUsage?.(report);
+        tokens.save(tokens.begin(thread.id, turn.id), onTokenUsage);
       }
       let stopping = false;
       const interrupt = async () => {
@@ -519,7 +517,6 @@ function reply(profile: string, project: string, prompt: string, images: string[
     const result = await pending;
     return { success: result.ok, contentItems: [{ type: "inputText", text: JSON.stringify(result) }] };
   }, signal, options.mcp).finally(async () => {
-    const report = tokens.finish(!completed);
-    if (report) await onTokenUsage?.(report);
+    await tokens.save(tokens.finish(!completed), onTokenUsage);
   });
 }

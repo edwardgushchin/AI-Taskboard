@@ -205,7 +205,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   const storageFailure = await startCodexRun(client("usage"), folder, worktree, task, undefined, async report => {
     if (report.records.some(record => record.totalTokens !== null)) throw new Error("Usage storage denied");
   });
-  assert.match((await storageFailure.completion) ?? "", /Usage storage denied/);
+  assert.equal(await storageFailure.completion, undefined);
   const controller = new AbortController();
   const waiting = await startCodexRun(client("control"), folder, worktree, task, undefined, undefined, controller.signal);
   controller.abort();

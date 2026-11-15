@@ -57,8 +57,8 @@ test("task discussion streams task usage before success, provider failure, or a 
         if (outcome === "storage-failed") throw new Error("Usage storage denied");
         reports.push(report);
       });
-    if (["failed", "closed", "storage-failed"].includes(outcome)) {
-      await assert.rejects(reply, /Provider failed|process closed|Usage storage denied/);
+    if (["failed", "closed"].includes(outcome)) {
+      await assert.rejects(reply, /Provider failed|process closed/);
     } else {
       const answer = await reply;
       assert.equal(answer.text, "Reply");

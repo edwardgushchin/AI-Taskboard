@@ -24,6 +24,37 @@ export class CodexTokenUsage {
   private threads = new Map<string, ThreadUsage>();
   private records = new Map<string, TokenUsageRecord>();
   private root?: string;
+  private pending?: TokenUsageReport;
+  private saving?: Promise<void>;
+  private checkpoint?: NodeJS.Timeout;
+
+  queue(report: TokenUsageReport | undefined, write?: (report: TokenUsageReport) => Promise<void>): void {
+    if (!report || !write) return;
+    this.pending = report;
+    this.checkpoint ??= setTimeout(() => { void this.save(undefined, write); }, 5_000);
+  }
+
+  save(report: TokenUsageReport | undefined, write?: (report: TokenUsageReport) => Promise<void>): Promise<void> | undefined {
+    if (!write) return;
+    clearTimeout(this.checkpoint);
+    this.checkpoint = undefined;
+    if (report) this.pending = report;
+    if (!this.saving && this.pending) {
+      this.saving = Promise.resolve().then(async () => {
+        while (this.pending) {
+          const snapshot = this.pending;
+          this.pending = undefined;
+          try {
+            await write(snapshot);
+          } catch {
+            console.warn("Could not save Codex token usage.");
+          }
+        }
+        this.saving = undefined;
+      });
+    }
+    return this.saving;
+  }
 
   track(threadId: string, model: string | null, root = false): boolean {
     if (root) this.root = threadId;

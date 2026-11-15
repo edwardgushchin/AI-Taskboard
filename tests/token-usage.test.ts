@@ -92,6 +92,56 @@ test("review metrics track approval and acceptance even after an earlier review 
   assert.equal(accepted.approvalToAcceptanceMs, 6_000);
 });
 
+test("a slow usage write keeps only the latest pending snapshot", async () => {
+  const collector = new CodexTokenUsage();
+  collector.track("root", "model", true);
+  const release = Promise.withResolvers<void>();
+  const writes: TokenUsageReport[] = [];
+  const write = async (report: TokenUsageReport) => {
+    writes.push(report);
+    if (writes.length === 1) await release.promise;
+  };
+  collector.save(collector.begin("root", "turn"), write);
+  await Promise.resolve();
+  collector.save(usage(collector, "root", "turn", counts(10, 1), counts(10, 1)), write);
+  collector.save(usage(collector, "root", "turn", counts(20, 2), counts(10, 1)), write);
+  const final = collector.finish()!;
+  const flushed = collector.save(final, write);
+  assert.equal(writes.length, 1);
+  release.resolve();
+  await flushed;
+  assert.equal(writes.length, 2);
+  assert.equal(writes[1], final);
+  assert.equal(writes[1].records[0].totalTokens, 22);
+});
+
+test("usage checkpoints coalesce notifications and flush the final snapshot immediately", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const collector = new CodexTokenUsage();
+  collector.track("root", "model", true);
+  const writes: TokenUsageReport[] = [];
+  const write = async (report: TokenUsageReport) => { writes.push(report); };
+  await collector.save(collector.begin("root", "turn"), write);
+
+  collector.queue(usage(collector, "root", "turn", counts(10, 1), counts(10, 1)), write);
+  t.mock.timers.tick(4_000);
+  collector.queue(usage(collector, "root", "turn", counts(20, 2), counts(10, 1)), write);
+  assert.equal(writes.length, 1);
+  t.mock.timers.tick(1_000);
+  await Promise.resolve();
+  assert.equal(writes.length, 2);
+  assert.equal(writes[1].records[0].totalTokens, 22);
+
+  collector.queue(usage(collector, "root", "turn", counts(30, 3), counts(10, 1)), write);
+  await collector.save(collector.finish(true), write);
+  assert.equal(writes.length, 3);
+  assert.equal(writes[2].records[0].totalTokens, 33);
+  assert.equal(writes[2].records[0].incomplete, true);
+  t.mock.timers.tick(5_000);
+  await Promise.resolve();
+  assert.equal(writes.length, 3);
+});
+
 test("thread deltas exclude resumed history and duplicates, sum models, children, and reroutes", () => {
   const collector = new CodexTokenUsage();
   collector.track("root", "model-a", true);
