@@ -667,7 +667,8 @@ test("watch streams the initial board and updates from another process", { timeo
     cli(root, ["start", task.id], { revision: ready.revision - 1 }, "REVISION_CONFLICT");
     assert.ok(!existsSync(join(root, ".git")));
     const started = cli(root, ["start", task.id]);
-    const updated = (await frame()).data;
+    let updated = (await frame()).data;
+    while (updated.tasks[0].status === "ready") updated = (await frame()).data;
     assert.equal(updated.tasks[0].status, "in_progress");
     assert.equal(updated.gitInfo.head, started.task.git.base);
     assert.equal(updated.gitInfo.branch, git(root, "branch", "--show-current"));
@@ -729,6 +730,47 @@ function submitFixture(root: string, edit: (worktree: string) => void, target?: 
   });
   return { task: reviewed, worktree };
 }
+
+test("acceptance publishes completion and releases the board before worktree cleanup", t => {
+  const root = fixture(t, true);
+  const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "result.txt"), "delivered\n"));
+  const checked = join(root, ".git", "cleanup-locks-checked");
+  const preload = `
+    import assert from "node:assert/strict";
+    import child from "node:child_process";
+    import { readFileSync, writeFileSync } from "node:fs";
+    import { syncBuiltinESMExports } from "node:module";
+    import { DatabaseSync } from "node:sqlite";
+    const spawnSync = child.spawnSync;
+    child.spawnSync = (command, args, options) => {
+      if (command === "git" && args[0] === "worktree" && args[1] === "remove") {
+        const card = JSON.parse(readFileSync(${JSON.stringify(join(root, ".tasks", "tasks", task.id + ".json"))}, "utf8"));
+        assert.equal(card.status, "done");
+        const board = new DatabaseSync(${JSON.stringify(join(root, ".tasks", ".lock.sqlite"))});
+        try { board.exec("BEGIN IMMEDIATE"); }
+        finally { board.close(); }
+        const taskLock = new DatabaseSync(${JSON.stringify(join(root, ".tasks", "pending", task.id + ".start.sqlite"))});
+        try { assert.throws(() => taskLock.exec("BEGIN IMMEDIATE"), { errcode: 5 }); }
+        finally { taskLock.close(); }
+        writeFileSync(${JSON.stringify(checked)}, "");
+      }
+      return spawnSync(command, args, options);
+    };
+    syncBuiltinESMExports();
+  `;
+  const input = { revision: task.revision };
+  const result = spawnSync(process.execPath, [
+    "--import=data:text/javascript;base64," + Buffer.from(preload).toString("base64"),
+    ...commandArgs(root, ["accept", task.id], input),
+  ], { env, encoding: "utf8", input: JSON.stringify(input), windowsHide: true, timeout: 40_000 });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const accepted = JSON.parse(result.stdout).data;
+  assert.equal(accepted.status, "done");
+  assert.equal(accepted.cleanupWarning, undefined);
+  assert.ok(existsSync(checked));
+  assert.ok(!existsSync(worktree));
+});
 
 test("completed work outside Git can be submitted and accepted without a commit", t => {
   const root = fixture(t, true);

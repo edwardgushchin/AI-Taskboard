@@ -233,18 +233,21 @@ function preparedSquash(path: string, head: string, tree: string, status: string
 
 export function acceptTask(store: BoardStore, task: Task, input: Record<string, unknown>) {
   try {
-    const completed = integrateTask(store, task, input);
-    try {
-      cleanTaskWorktree(store, completed);
-      return completed;
-    } catch (error) {
-      const cleanupWarning = error instanceof TaskboardError
-        ? { code: error.code, message: error.message, details: error.details }
-        : { code: "CLEANUP_FAILED", message: String(error) };
-      return { ...completed, cleanupWarning };
-    }
+    return integrateTask(store, task, input);
   } finally {
     releaseTemporaryTarget(store, task);
+  }
+}
+
+export function cleanAcceptedTask(store: BoardStore, task: Task) {
+  try {
+    cleanTaskWorktree(store, task);
+    return task;
+  } catch (error) {
+    const cleanupWarning = error instanceof TaskboardError
+      ? { code: error.code, message: error.message, details: error.details }
+      : { code: "CLEANUP_FAILED", message: String(error) };
+    return { ...task, cleanupWarning };
   }
 }
 

@@ -3,7 +3,7 @@ import { existsSync, readFileSync, watch } from "node:fs";
 import type { FSWatcher } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { acceptTask, inspectReview, reopenConflictingReview } from "./acceptance.ts";
+import { acceptTask, cleanAcceptedTask, inspectReview, reopenConflictingReview } from "./acceptance.ts";
 import { describeSavedChanges, restoreSavedChanges } from "./saved-changes.ts";
 import {
   addAttachment, addChatMessage, archiveDiagnostics, createWithAttachments, isArchived, readAttachment, readTask, restoreReplyImages, sweepArchives,
@@ -117,12 +117,13 @@ function watchBoard(location: BoardLocation): void {
         const repo = discoverRepository(location.root);
         if (repo?.root === location.root) location.repository = repo;
       }
-      if (location.repository && Date.now() >= nextCleanup) {
-        nextCleanup = Date.now() + 15_000;
-        for (const id of retryAcceptedCleanup(store, location.repository.root)) cleanedTasks.add(id);
-      }
       return snapshotBoard(store);
     });
+    if (location.repository && Date.now() >= nextCleanup) {
+      nextCleanup = Date.now() + 15_000;
+      const completedIds = new Set([...board.tasks, ...board.archived].filter(task => task.status === "done").map(task => task.id));
+      for (const id of retryAcceptedCleanup(location, location.repository.root, completedIds)) cleanedTasks.add(id);
+    }
     return { ok: true, data: { ...board, gitInfo: boardGitInfo(location), cleanedTasks: [...cleanedTasks] } };
   };
   let previous = JSON.stringify(read());
@@ -171,7 +172,8 @@ function watchBoard(location: BoardLocation): void {
   process.once("SIGTERM", stop);
 }
 
-function retryAcceptedCleanup(store: BoardStore, root: string): string[] {
+function retryAcceptedCleanup(location: BoardLocation, root: string, completedIds: ReadonlySet<string>): string[] {
+  if (!completedIds.size) return [];
   const prefix = "refs/heads/ai-taskboard/";
   let branches: string[];
   try {
@@ -184,12 +186,19 @@ function retryAcceptedCleanup(store: BoardStore, root: string): string[] {
   const cleaned: string[] = [];
   for (const branch of branches) {
     const id = branch.slice(prefix.length);
-    if (!Object.hasOwn(store.index.tasks, id) && store.index.archive[id]?.status !== "done") continue;
+    if (!completedIds.has(id)) continue;
     try {
-      const task = readTask(store, id);
-      if (task.status !== "done" || task.git?.branch !== branch ||
-          (!task.git.accepted && !task.result?.noChanges) || hasPending(store, task)) continue;
-      if (cleanTaskWorktree(store, task).branchRemoved) cleaned.push(id);
+      const removed = withTaskStartLock(location, id, () => {
+        const snapshot = onBoard(location, store => {
+          if (!Object.hasOwn(store.index.tasks, id) && store.index.archive[id]?.status !== "done") return;
+          const task = readTask(store, id);
+          if (task.status !== "done" || task.git?.branch !== branch ||
+              (!task.git.accepted && !task.result?.noChanges) || hasPending(store, task)) return;
+          return { store, task };
+        });
+        return snapshot && cleanTaskWorktree(snapshot.store, snapshot.task).branchRemoved;
+      }, 0);
+      if (removed) cleaned.push(id);
     } catch {
       // A lock or local files can keep the worktree in place until the next pass.
     }
@@ -311,7 +320,6 @@ function run(
     };
   }
   if (command === "restore-changes") return restoreSavedChanges(store, readTask(store, id), input);
-  if (command === "cleanup" && isArchived(store, id)) return cleanTaskWorktree(store, readTask(store, id));
   const task = store.card(id);
   if (command === "token-usage") {
     const recorded = recordTokenUsage(task, input);
@@ -324,7 +332,6 @@ function run(
   if (hasPending(store, task)) {
     throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before modifying the task.");
   }
-  if (command === "cleanup") return cleanTaskWorktree(store, task);
   if (command === "chat") return addChatMessage(store, task, input);
   if (command === "run-log") return store.save(recordRunLog(task, input));
   const updated = changeTask(task, command, input);
@@ -394,6 +401,26 @@ try {
       } else if (command === "start") {
         if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
         data = startTask(location, id, input);
+      } else if (command === "accept") {
+        if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
+        data = withTaskStartLock(location, id, () => {
+          const { store, task } = onBoard(location, store => ({
+            store, task: run(store, command, id, extra, input, values) as Task,
+          }));
+          return cleanAcceptedTask(store, task);
+        });
+      } else if (command === "cleanup") {
+        if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
+        data = withTaskStartLock(location, id, () => {
+          const { store, task } = onBoard(location, store => {
+            const task = readTask(store, id);
+            if (!isArchived(store, id) && hasPending(store, task)) {
+              throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before modifying the task.");
+            }
+            return { store, task };
+          });
+          return cleanTaskWorktree(store, task);
+        });
       } else if (command === "git") {
         const action = member(id, ["refs", "inspect", "switch", "create", "detach", "publish"], "action");
         data = action === "inspect" ? inspectRepository(location, input) :

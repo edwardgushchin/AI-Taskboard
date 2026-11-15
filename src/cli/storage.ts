@@ -155,9 +155,10 @@ function taskStartLockPath(location: BoardLocation, id: string): string {
   return join(pending, id + ".start.sqlite");
 }
 
-export function withTaskStartLock<T>(location: BoardLocation, id: string, callback: (waitMs: number) => T): T {
+export function withTaskStartLock<T>(location: BoardLocation, id: string, callback: (waitMs: number) => T,
+  timeoutMs: 0 | 15_000 = 15_000): T {
   requireBoard(location);
-  return withSqliteLock(taskStartLockPath(location, id), 15_000, callback);
+  return withSqliteLock(taskStartLockPath(location, id), timeoutMs, callback);
 }
 
 export function taskStartInProgress(location: BoardLocation, id: string): boolean {
