@@ -74,10 +74,12 @@ export function mergeTree(path: string, targetHead: string, submitted: string): 
   return tree;
 }
 
-export function worktrees(cwd: string): Worktree[] {
+const listWorktrees = ["worktree", "list", "--porcelain", "-z"];
+
+function parseWorktrees(output: string): Worktree[] {
   const records: Worktree[] = [];
   let record: Worktree | undefined;
-  for (const field of git(cwd, ["worktree", "list", "--porcelain", "-z"]).split("\0")) {
+  for (const field of output.split("\0")) {
     const space = field.indexOf(" ");
     const key = space === -1 ? field : field.slice(0, space);
     const value = space === -1 ? "" : field.slice(space + 1);
@@ -93,10 +95,14 @@ export function worktrees(cwd: string): Worktree[] {
   return records;
 }
 
+export function worktrees(cwd: string): Worktree[] {
+  return parseWorktrees(git(cwd, listWorktrees));
+}
+
 export function discoverRepository(cwd: string): Repository | null {
   let result: GitResult;
   try {
-    result = invokeGit(cwd, ["rev-parse", "--git-common-dir"]);
+    result = invokeGit(cwd, listWorktrees);
   } catch (error) {
     if (error instanceof TaskboardError && error.code === "GIT_UNAVAILABLE") {
       for (let cursor = cwd; ; cursor = dirname(cursor)) {
@@ -112,7 +118,7 @@ export function discoverRepository(cwd: string): Repository | null {
   if (result.code !== 0) {
     throw new TaskboardError("GIT_FAILED", "Could not discover the Git repository.", { output: result.stderr.trim() });
   }
-  const main = worktrees(cwd)[0];
+  const main = parseWorktrees(result.stdout)[0];
   if (!main) throw new TaskboardError("GIT_FAILED", "Git did not identify the main worktree.");
   return { root: realpathSync(main.path), bare: main.bare === true };
 }
