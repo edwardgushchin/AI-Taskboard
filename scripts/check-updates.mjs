@@ -36,13 +36,13 @@ try {
   assert.equal(live.ok, true);
   assert.equal(live.data.currentVersion, app.getVersion());
   assert.equal(live.data.status, "empty");
-  assert.equal(live.data.sourceUrl, "https://github.com/edwardgushchin/AI-Taskboard-releases/releases");
+  assert.equal(live.data.sourceUrl, "https://github.com/edwardgushchin/AI-Taskboard/releases");
   writeFileSync(join(artifacts, "updates-ipc-live.json"), JSON.stringify({ checkedAt: new Date().toISOString(), versions: process.versions, live }, null, 2));
   app.getVersion = () => "0.1.0";
   let response = [];
   let offline = false;
   globalThis.fetch = async url => {
-    assert.match(String(url), /^https:\/\/api.github.com\/repos\/edwardgushchin\/AI-Taskboard-releases\/releases\?/);
+    assert.match(String(url), /^https:\/\/api.github.com\/repos\/edwardgushchin\/AI-Taskboard\/releases\?/);
     if (offline) throw new TypeError("Offline");
     return Response.json(response);
   };
