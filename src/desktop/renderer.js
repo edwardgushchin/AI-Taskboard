@@ -216,6 +216,87 @@ async function checkUpdates() {
   await run();
 }
 
+async function projectStatistics() {
+  if (!frame.board) return;
+  openSheet("statistics", language("Project statistics", "Статистика проекта"));
+  const generation = projectGeneration;
+  const content = element("section", undefined, "sheet-section");
+  content.id = "project-statistics";
+  const status = element("p");
+  status.setAttribute("role", "status");
+  const retry = button(language("Retry", "Повторить"), run);
+  let timer;
+  let loading = false;
+  const current = () => generation === projectGeneration && sheet.open && content.isConnected;
+  const stop = () => { clearTimeout(timer); sheet.removeEventListener("close", stop); };
+  sheet.addEventListener("close", stop);
+  body.append(element("p", projectName()), element("p", language(
+    "All available project records, including closed and archived tasks and the manager. This is not account usage. Cache is included in input; reasoning is included in output.",
+    "Весь доступный учёт проекта: закрытые и архивные задачи и менеджер. Это не расход аккаунта. Кеш входит во входные токены, reasoning — в выходные."), "muted"), status, content, retry);
+  const fields = [
+    ["totalTokens", "Total", "Всего"], ["inputTokens", "Input", "Входные"],
+    ["outputTokens", "Output", "Выходные"], ["cachedInputTokens", "Cache read", "Чтение кеша"],
+    ["cacheWriteInputTokens", "Cache write", "Запись кеша"], ["reasoningOutputTokens", "Reasoning", "Reasoning"],
+  ];
+  const counts = (target, entry) => {
+    const list = element("dl", undefined, "statistics-counts");
+    for (const [key, en, ru] of fields) {
+      const value = entry[key];
+      list.append(element("dt", language(en, ru)), element("dd", value == null
+        ? language("No data", "Нет данных") : value.toLocaleString(frame.russian ? "ru-RU" : "en-US")));
+    }
+    target.append(list);
+    if (entry.incomplete) target.append(element("p", language("Partial records: known tokens only.", "Неполный учёт: показаны известные токены."), "muted"));
+  };
+  async function run() {
+    if (!current() || loading) return;
+    clearTimeout(timer);
+    loading = true;
+    retry.disabled = true;
+    status.textContent = language("Loading…", "Загрузка…");
+    try {
+      const result = await api.command("project-usage");
+      if (!current()) return;
+      if (!result.ok) throw result.error;
+      const data = result.data;
+      content.replaceChildren();
+      status.textContent = data.total === null ? language("No token data", "Нет данных о токенах")
+        : data.incomplete ? language("Partial accounting", "Неполный учёт") : language("Recorded usage", "Учтённый расход");
+      content.append(element("h3", language("Known total", "Известный итог")), element("p", data.total === null
+        ? language("No data", "Нет данных") : data.total.toLocaleString(frame.russian ? "ru-RU" : "en-US")));
+      content.append(element("p", language("Tasks without reports: ", "Задач без отчётов: ") + data.missingTasks + " / " + data.tasks));
+      content.append(element("p", language("Manager reports: ", "Отчётов менеджера: ") + data.managerReports));
+      content.append(element("p", language("Usage before telemetry or outside the board is unknown.", "Расход до включения учёта и вне доски неизвестен."), "muted"));
+      for (const [title, models] of [[language("By model", "По моделям"), data.byModel],
+        ...Object.entries(data.byRole).map(([role, models]) => [{ manager: language("Manager", "Менеджер"),
+          executor: language("Executors", "Исполнители"), reviewer: language("Reviewers", "Ревьюеры"),
+          discussion: language("Task discussions", "Обсуждения задач"), unattributed: language("Unattributed role", "Роль не указана") }[role], models])]) {
+        const group = element("section", undefined, "sheet-section");
+        group.append(element("h3", title));
+        if (!models.length) group.append(element("p", language("No data", "Нет данных")));
+        for (const model of models) {
+          group.append(element("h4", model.model ?? language("Unknown model", "Неизвестная модель")));
+          counts(group, model);
+        }
+        content.append(group);
+      }
+      retry.hidden = true;
+    } catch (error) {
+      if (!current()) return;
+      content.replaceChildren();
+      status.textContent = language("Could not load statistics. ", "Не удалось загрузить статистику. ") + boardError(error);
+      retry.hidden = false;
+    } finally {
+      loading = false;
+      if (current()) {
+        retry.disabled = false;
+        timer = setTimeout(run, 5000);
+      } else stop();
+    }
+  }
+  await run();
+}
+
 function openSettingsMenu(last = false) {
   const trigger = byId("app-settings");
   const menu = byId("settings-menu");
@@ -234,14 +315,20 @@ function openSettingsMenu(last = false) {
     boardSettings();
   });
   board.disabled = !frame.board;
+  const statistics = button(language("Statistics", "Статистика"), () => {
+    menu.hidePopover();
+    trigger.focus();
+    return projectStatistics();
+  });
+  statistics.disabled = !frame.board;
   const updates = button(language("Check for updates…", "Проверить наличие обновлений…"), () => {
     menu.hidePopover();
     trigger.focus();
     return checkUpdates();
   });
-  for (const [index, item] of [app, board, updates].entries()) {
+  for (const [index, item] of [app, board, statistics, updates].entries()) {
     item.className = "app-menu-item";
-    item.id = ["settings-menu-app", "settings-menu-board", "settings-menu-updates"][index];
+    item.id = ["settings-menu-app", "settings-menu-board", "settings-menu-statistics", "settings-menu-updates"][index];
     item.setAttribute("role", "menuitem");
     item.setAttribute("aria-disabled", String(item.disabled));
     item.tabIndex = -1;
@@ -249,7 +336,7 @@ function openSettingsMenu(last = false) {
   const separator = element("hr");
   separator.setAttribute("role", "separator");
   menu.setAttribute("aria-label", language("Settings and updates", "Настройки и обновления"));
-  menu.replaceChildren(app, board, separator, updates);
+  menu.replaceChildren(app, board, statistics, separator, updates);
   menu.showPopover({ source: trigger });
   const anchor = trigger.getBoundingClientRect();
   menu.style.left = Math.max(4, Math.min(anchor.right, innerWidth - menu.offsetWidth - 4)) + "px";
