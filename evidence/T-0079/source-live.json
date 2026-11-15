@@ -1,0 +1,20 @@
+{
+  "checkedAt": "2026-11-15T18:40:29.612Z",
+  "node": "v24.14.0",
+  "platform": "win32",
+  "arch": "x64",
+  "requests": [
+    {
+      "url": "https://api.github.com/repos/edwardgushchin/AI-Taskboard/releases?per_page=100&page=1",
+      "authorization": false,
+      "status": 200,
+      "body": []
+    }
+  ],
+  "result": {
+    "currentVersion": "0.1.0",
+    "sourceUrl": "https://github.com/edwardgushchin/AI-Taskboard/releases",
+    "status": "empty",
+    "latest": null
+  }
+}

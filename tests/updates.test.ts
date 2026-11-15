@@ -6,6 +6,8 @@ const release = (tag_name: string, extra = {}) => ({ tag_name, draft: false, pre
 const source = (releases: unknown): typeof fetch => async () => Response.json(releases);
 
 test("updates use the fixed application source and numeric SemVer precedence", async () => {
+  assert.equal(releaseRepository, "edwardgushchin/AI-Taskboard");
+  assert.equal(releasesUrl, "https://github.com/edwardgushchin/AI-Taskboard/releases");
   let requested = "";
   const result = await checkForUpdates("0.9.0", async (url, options) => {
     requested = String(url);

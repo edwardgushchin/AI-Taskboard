@@ -192,14 +192,14 @@ app.whenReady().then(async () => {
       await evaluate(`window.pushBoard({ russian: ${russian}, theme: '${theme}' });
         window.updateCalls = 0;
         window.updateOutcome = 'empty';
-        window.releaseUrl = 'https://github.com/edwardgushchin/AI-Taskboard-releases/releases/tag/v0.2.0';
+        window.releaseUrl = 'https://github.com/edwardgushchin/AI-Taskboard/releases/tag/v0.2.0';
         window.openedUpdateUrl = undefined;
         window.taskboard.openLink = async url => { openedUpdateUrl = url; };
         window.taskboard.checkUpdates = async () => {
           updateCalls++;
           if (updateOutcome === 'network') throw new Error('Offline');
           if (updateOutcome === 'http') return { ok: false, error: { message: 'GitHub HTTP 429' } };
-          return { ok: true, data: { currentVersion: '0.1.0', sourceUrl: 'https://github.com/edwardgushchin/AI-Taskboard-releases/releases',
+          return { ok: true, data: { currentVersion: '0.1.0', sourceUrl: 'https://github.com/edwardgushchin/AI-Taskboard/releases',
             status: updateOutcome, latest: updateOutcome === 'available' ? { version: '0.2.0', prerelease: false, url: releaseUrl } : null } };
         }; void 0`);
       await click('#app-settings');
