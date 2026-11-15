@@ -1,4 +1,5 @@
 import { realpathSync, rmSync, rmdirSync } from "node:fs";
+import { availableParallelism } from "node:os";
 import { dependencyStatus, unfinishedDependencies } from "./dependencies.ts";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import {
@@ -203,6 +204,10 @@ export function checkoutTaskWorktree({ repo, branch, managedPath, intent: { base
     const args = existingCommit
       ? ["worktree", "add", "--no-guess-remote", managedPath, name]
       : ["worktree", "add", "--no-guess-remote", "-b", name, managedPath, base];
+    if (process.platform === "win32" && availableParallelism() >= 4 &&
+        invokeGit(repo.root, ["config", "--get", "checkout.workers"]).code === 1) {
+      args.unshift("-c", "checkout.workers=4");
+    }
     const checkout = performance.now();
     git(repo.root, args);
     gitWorktreeAddMs = Math.round(performance.now() - checkout);

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import childProcess, { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { availableParallelism, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { syncBuiltinESMExports } from "node:module";
 import { promisify } from "node:util";
@@ -546,7 +546,8 @@ test("a new worktree checkout releases the board while its own start remains res
       input: JSON.stringify(input), encoding: "utf8", windowsHide: true, timeout: 10000,
     }).stdout);
     child.spawnSync = (command, args, options) => {
-      if (command === "git" && args[0] === "worktree" && args[1] === "add") {
+      const gitArgs = args?.[0] === "-c" ? args.slice(2) : args;
+      if (command === "git" && gitArgs[0] === "worktree" && gitArgs[1] === "add") {
         assert.ok(existsSync(${JSON.stringify(pending)}));
         const lock = new DatabaseSync(${JSON.stringify(startLock)});
         try { assert.throws(() => lock.exec("BEGIN IMMEDIATE"), { errcode: 5 }); }
@@ -571,6 +572,32 @@ test("a new worktree checkout releases the board while its own start remains res
   assert.equal(cli(root, ["start", task.id]).worktree, started.worktree);
   assert.equal(cli(root, ["show", task.id]).history.filter((event: { action: string }) => event.action === "start").length, 1);
   assert.ok(!existsSync(pending));
+});
+
+test("new worktrees use the Windows checkout default and honor an explicit Git setting", t => {
+  const root = fixture(t, true);
+  cli(root, ["init"]);
+  for (const configured of [false, true]) {
+    if (configured) git(root, "config", "--local", "checkout.workers", "1");
+    const draft = cli(root, ["create"], { title: "Verify checkout options", criteria: ["Worktree ready"] });
+    const ready = cli(root, ["approve", draft.id]);
+    const trace = join(root, ".tasks", ready.id + "-checkout.jsonl");
+    const started = spawnSync(process.execPath, commandArgs(root, ["start", ready.id]), {
+      env: { ...env, GIT_TRACE2_EVENT: trace }, encoding: "utf8", windowsHide: true,
+    });
+    assert.ifError(started.error);
+    assert.equal(started.status, 0, started.stdout + started.stderr);
+    const worktree = JSON.parse(started.stdout).data.worktree;
+    const events = readFileSync(trace, "utf8").trim().split("\n")
+      .map(line => JSON.parse(line) as { event: string; argv?: string[] });
+    const checkout = events.find(event => event.event === "start" &&
+      event.argv?.includes("worktree") && event.argv.includes("add"));
+    assert.ok(checkout?.argv);
+    assert.equal(checkout.argv.includes("checkout.workers=4"),
+      process.platform === "win32" && availableParallelism() >= 4 && !configured);
+    assert.equal(git(worktree, "status", "--porcelain"), "");
+  }
+  assert.equal(git(root, "config", "--get", "checkout.workers"), "1");
 });
 
 test("parallel processes receive unique task IDs and share one catalog entry per tag", async t => {
