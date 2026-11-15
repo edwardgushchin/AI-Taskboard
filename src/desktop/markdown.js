@@ -334,7 +334,9 @@ function foldTechnicalDetails(block) {
       content.append(next);
     }
     if (!content.childElementCount) continue;
-    details.append(element("summary", heading.textContent.trim()), content);
+    const summary = element("summary");
+    summary.append(...heading.childNodes);
+    details.append(summary, content);
     heading.replaceWith(details);
   }
 }
