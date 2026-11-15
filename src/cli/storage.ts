@@ -2,7 +2,7 @@ import {
   closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync,
   renameSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { discoverRepository, excludeBoard, git } from "./git.ts";
@@ -137,9 +137,13 @@ export function locateBoard(path: string, initializing = false, initializeGit = 
   return { root, directory: join(root, ".tasks"), repository };
 }
 
-function withSqliteLock<T>(lockPath: string, timeoutMs: 0 | 15_000, callback: (lockWaitMs: number) => T): T {
+function withSqliteLock<T>(lockPath: string, timeoutMs: 0 | 15_000, callback: (lockWaitMs: number, release: () => void) => T): T {
   requireRegular(lockPath);
   const lock = new DatabaseSync(lockPath);
+  let closed = false;
+  const release = () => {
+    if (!closed) { lock.close(); closed = true; }
+  };
   try {
     lock.exec("PRAGMA busy_timeout=" + timeoutMs);
     const waiting = performance.now();
@@ -152,9 +156,9 @@ function withSqliteLock<T>(lockPath: string, timeoutMs: 0 | 15_000, callback: (l
       }
       throw error;
     }
-    return callback(Math.round(performance.now() - waiting));
+    return callback(Math.round(performance.now() - waiting), release);
   } finally {
-    lock.close();
+    release();
   }
 }
 
@@ -172,7 +176,24 @@ function taskStartLockPath(location: BoardLocation, id: string): string {
 export function withTaskStartLock<T>(location: BoardLocation, id: string, callback: (waitMs: number) => T,
   timeoutMs: 0 | 15_000 = 15_000): T {
   requireBoard(location);
-  return withSqliteLock(taskStartLockPath(location, id), timeoutMs, callback);
+  // Recovery holds this stable gate while checking and removing pending files.
+  // Release it once the task lock is acquired: different tasks can still start in parallel.
+  return withSqliteLock(join(location.directory, ".start-gate.sqlite"), timeoutMs, (gateWaitMs, releaseGate) => {
+    const index = readIndex(join(location.directory, "board.json"));
+    if (!Object.hasOwn(index.tasks, id) && !Object.hasOwn(index.archive, id)) {
+      throw new TaskboardError("TASK_NOT_FOUND", "Unknown task " + id + ".", { id });
+    }
+    return withSqliteLock(taskStartLockPath(location, id), timeoutMs, lockWaitMs => {
+      releaseGate();
+      return callback(gateWaitMs + lockWaitMs);
+    });
+  });
+}
+
+export function withTaskRecoveryLock<T>(location: BoardLocation, callback: () => T): T {
+  // The caller holds the board lock. Never wait for a gate held by a start
+  // that may itself be waiting for this board lock or another task lock.
+  return withSqliteLock(join(location.directory, ".start-gate.sqlite"), 0, callback);
 }
 
 export function taskStartInProgress(location: BoardLocation, id: string): boolean {
@@ -518,5 +539,41 @@ export function readBoardSettings(location: BoardLocation): BoardIndex["settings
 
 export function onBoard<T>(location: BoardLocation, callback: (store: BoardStore, lockWaitMs: number) => T): T {
   requireBoard(location);
-  return withLock(location.directory, lockWaitMs => callback(new BoardStore(location), lockWaitMs));
+  return withLock(location.directory, lockWaitMs => {
+    finishTestRecovery(location);
+    return callback(new BoardStore(location), lockWaitMs);
+  });
+}
+
+export function sha256(data: Uint8Array): string {
+  return createHash("sha256").update(data).digest("hex");
+}
+
+// The index replacement is the commit point. Before it, no originals are removed.
+// After it, every board command finishes deletion before doctor can rediscover an orphan.
+export function finishTestRecovery(location: BoardLocation, startGateHeld = false): void {
+  const journalPath = join(location.directory, "test-recovery.json");
+  if (!exists(journalPath)) return;
+  if (!startGateHeld) return withTaskRecoveryLock(location, () => finishTestRecovery(location, true));
+  const journal = readJson(journalPath) as {
+    root: string; before: string; after: string; files: { path: string; sha256: string }[];
+  };
+  const fail = () => { throw new TaskboardError("RECOVERY_CONFLICT", "Recovery journal requires inspection; no further board changes are allowed."); };
+  if (journal.root !== location.root || !Array.isArray(journal.files) ||
+      !journal.files.every(file => /^(tasks\/T-[0-9]{4,}\.json|pending\/T-[0-9]{4,}\.start\.sqlite)$/.test(file.path) && /^[a-f0-9]{64}$/.test(file.sha256))) fail();
+  const ids = new Set(journal.files.map(file => /T-[0-9]{4,}/.exec(file.path)![0]));
+  for (const id of ids) {
+    if (taskStartInProgress(location, id)) {
+      throw new TaskboardError("BOARD_BUSY", "A selected task start is active; recovery has not changed any files.");
+    }
+  }
+  const current = sha256(readBinary(join(location.directory, "board.json")));
+  if (current === journal.before) { removeFile(journalPath); return; }
+  if (current !== journal.after) fail();
+  for (const file of journal.files) {
+    const path = join(location.directory, file.path);
+    if (exists(path) && sha256(readBinary(path)) !== file.sha256) fail();
+  }
+  for (const file of journal.files) removeFile(join(location.directory, file.path));
+  removeFile(journalPath);
 }
