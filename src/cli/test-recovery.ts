@@ -7,7 +7,14 @@ import type { BoardStore } from "./storage.ts";
 
 interface Fingerprint { path: string; bytes: number; sha256: string }
 
-// Deliberately restricted to cancelled fixtures without retained execution resources. This is
+// Exact original bytes include identity, history and the sole test usage report.
+const ipcIncidentCards: Record<string, string> = {
+  "T-0014": "6a5798aedf9e34a8210d7161ee91b96671465b2730a43102d5c4509afd2bcb48",
+  "T-0015": "0e12fb1d8232ed550e2528fc0a1d180133694dda342cdcfca6d3ab9e16bdacd2",
+  "T-0016": "45fbf7e7686619dd4197671c3a0c83d29069096b4a9baddb26cae6a251490524",
+};
+
+// Deliberately restricted to proven fixtures without retained execution resources. This is
 // not a general task deletion API: histories and execution resources need review.
 export function recoverTestData(store: BoardStore, input: Record<string, unknown>) {
   return withTaskRecoveryLock(store.location, () => recoverTestDataLocked(store, input));
@@ -20,6 +27,9 @@ function recoverTestDataLocked(store: BoardStore, input: Record<string, unknown>
       realpathSync(store.location.root) !== manifest.targetRoot) fail("Manifest must name the exact canonical project root.");
   if (input.apply !== undefined && typeof input.apply !== "boolean") fail("apply must be boolean; omission means dry-run.");
   if (!Array.isArray(manifest.cards) || !manifest.cards.length || !Array.isArray(manifest.pending)) fail("Specify cards and pending fingerprints.");
+  if (manifest.incident !== undefined && manifest.incident !== "T-0082") fail("Unknown incident profile.");
+  const ipcIncident = manifest.incident === "T-0082";
+  if (ipcIncident && ((manifest.cards as unknown[]).length !== 3 || store.index.nextId < 17)) fail("Incomplete IPC incident selection.");
   const check = (value: unknown, path: string): Fingerprint => {
     const file = object(value);
     if (file.path !== path || !Number.isSafeInteger(file.bytes) || Number(file.bytes) < 0 ||
@@ -45,10 +55,14 @@ function recoverTestDataLocked(store: BoardStore, input: Record<string, unknown>
     const task = store.card(id);
     if (Object.hasOwn(store.index.archive, id)) fail("Task is also archived: " + id);
     if (Object.entries(identity).some(([key, value]) => (task as unknown as Record<string, unknown>)[key] !== value)) fail("Identity changed: " + id);
-    if (task.status !== "cancelled" || task.codexThreadId || task.goalThreadId || task.git || task.schedule ||
-        task.attachments.length || task.artifacts?.length || task.tokenUsage ||
-        !task.workingDirectory || exists(task.workingDirectory)) fail("Task has execution resources: " + id);
-    if (!/^(First|Second)$/.test(task.title) || !/[/\\]T-0068-live-[^/\\]+$/.test(task.workingDirectory!)) fail("Task is not an incident fixture: " + id);
+    if (ipcIncident) {
+      if (!Object.hasOwn(ipcIncidentCards, id) || entry.sha256 !== ipcIncidentCards[id]) fail("IPC incident bytes changed: " + id);
+    } else {
+      if (task.status !== "cancelled" || task.codexThreadId || task.goalThreadId || task.git || task.schedule ||
+          task.attachments.length || task.artifacts?.length || task.tokenUsage ||
+          !task.workingDirectory || exists(task.workingDirectory)) fail("Task has execution resources: " + id);
+      if (!/^(First|Second)$/.test(task.title) || !/[/\\]T-0068-live-[^/\\]+$/.test(task.workingDirectory!)) fail("Task is not an incident fixture: " + id);
+    }
     if (taskStartInProgress(store.location, id)) fail("Task start is active: " + id);
     const pending = readdirSync(store.subdirectory("pending")).filter(name => name.startsWith(id + "."));
     if (pending.some(name => name !== id + ".start.sqlite")) fail("Pending operation: " + id);

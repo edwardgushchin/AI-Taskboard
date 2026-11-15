@@ -12,6 +12,7 @@ import {
 import { boardAgentRoles, boardReviewMode, hexTagColor, member, number, object, reasoningEffortPattern, record, registerTags, requireRevision, requireState, reviewModes, strings, tagKey, taskIdPattern, TaskboardError, text, validAgentLimitOverrides } from "./model.ts";
 import type { GitHubMilestone, Task } from "./model.ts";
 import { exists, initializeBoard, locateBoard, onBoard, readBoardSettings, withTaskStartLock } from "./storage.ts";
+import { recordSettings } from "./settings-notices.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
 import { discoverRepository, invokeGit, scheduleGitMaintenance } from "./git.ts";
 import { changeRepository, githubMilestones, githubRepository, inspectRepository, publishRepository, pushRepositoryBranch, repositoryRefs } from "./repository.ts";
@@ -430,6 +431,7 @@ function run(
     return { issues: [...active.issues, ...archive.issues], recovered: active.recovered, cleanedArchives: archive.cleaned };
   }
   if (command === "settings") {
+    const settingsJournal = store.index.managerSettings ?? recordSettings(store.index.settings);
     if (input.name !== undefined) {
       const name = text(input.name, "Board name");
       if (/[\r\n\0]/.test(name)) throw new TaskboardError("INVALID_INPUT", "Board name must be a single line.");
@@ -477,6 +479,7 @@ function run(
         store.index.settings[role] = provider ? { provider, model, effort } : { model, effort };
       }
     }
+    store.index.managerSettings = recordSettings(store.index.settings, settingsJournal);
     store.saveIndex();
     return store.index.settings;
   }

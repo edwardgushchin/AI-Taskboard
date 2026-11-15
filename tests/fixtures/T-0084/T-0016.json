@@ -1,0 +1,68 @@
+{
+  "id": "T-0016",
+  "title": "IPC statistics",
+  "description": "",
+  "criteria": [],
+  "questions": [],
+  "tags": [],
+  "priority": "normal",
+  "subtasks": [],
+  "attachments": [],
+  "status": "cancelled",
+  "revision": 2,
+  "createdAt": "2026-11-15T20:03:50.418Z",
+  "updatedAt": "2026-11-15T20:03:51.048Z",
+  "summary": "",
+  "nextStep": "",
+  "history": [
+    {
+      "at": "2026-11-15T20:03:50.418Z",
+      "actor": "agent",
+      "action": "create"
+    },
+    {
+      "at": "2026-11-15T20:03:51.048Z",
+      "actor": "user",
+      "action": "cancel",
+      "text": "Fixture",
+      "from": "draft",
+      "to": "cancelled"
+    }
+  ],
+  "tokenUsage": {
+    "reports": [
+      {
+        "id": "test",
+        "sequence": 1,
+        "records": [
+          {
+            "totalTokens": 120,
+            "inputTokens": 100,
+            "cachedInputTokens": 50,
+            "cacheWriteInputTokens": 5,
+            "outputTokens": 20,
+            "reasoningOutputTokens": 10,
+            "threadId": "test",
+            "turnId": "test",
+            "model": "future-model",
+            "incomplete": false
+          }
+        ],
+        "role": "executor"
+      }
+    ],
+    "byModel": [
+      {
+        "totalTokens": 120,
+        "inputTokens": 100,
+        "cachedInputTokens": 50,
+        "cacheWriteInputTokens": 5,
+        "outputTokens": 20,
+        "reasoningOutputTokens": 10,
+        "model": "future-model",
+        "incomplete": false
+      }
+    ]
+  },
+  "closedAt": "2026-11-15T20:03:51.048Z"
+}

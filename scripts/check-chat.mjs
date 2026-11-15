@@ -454,6 +454,80 @@ app.whenReady().then(async () => {
         digests.every(button => button.querySelector('.codicon-check'));
     } finally { delete navigator.clipboard; }
   })()`, "coordination evidence separates the summary and reports, with links and full hashes on copy");
+  await evaluate(`
+    window.foldOpenedLinks = [];
+    window.foldOriginalOpenLink = api.openLink;
+    api.openLink = async href => { foldOpenedLinks.push(href); };
+    window.foldFixture = chatText('Введение.\\n\\n### [**Технические** *детали*](https://example.com/report?a=1&b=2)\\n\\nТело.\\n\\n#### Вложенный раздел\\n\\nПродолжение.\\n\\n### Дальше\\n\\nСледующий раздел.', { agent: true });
+    window.foldDialog = element('dialog');
+    foldDialog.style.width = '600px';
+    foldDialog.append(foldFixture);
+    document.body.append(foldDialog);
+    foldDialog.showModal();
+    window.foldDetails = foldFixture.querySelector('details');
+    window.foldSummary = foldDetails.querySelector('summary');
+  `);
+  await check(`foldSummary.querySelector('a')?.getAttribute('href') === 'https://example.com/report?a=1&b=2' &&
+    !!foldSummary.querySelector('strong') && !!foldSummary.querySelector('em')`,
+    "folded heading retains the full link and safe inline markup");
+  await check(`!foldDetails.open && foldDetails.querySelector('.chat-report-body').textContent.includes('Продолжение.') &&
+    foldDetails.nextElementSibling.textContent === 'Дальше' && !foldDetails.textContent.includes('Следующий раздел.')`,
+    "folding retains nested content and stops before the next peer heading");
+  const foldClick = async selector => {
+    const point = await evaluate(`(() => { const el = ${selector}; el.scrollIntoView({ block: 'center' });
+      const r = el.getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()`);
+    window.webContents.sendInputEvent({ type: "mouseDown", ...point, button: "left", clickCount: 1 });
+    window.webContents.sendInputEvent({ type: "mouseUp", ...point, button: "left", clickCount: 1 });
+    await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+  };
+  await foldClick("foldSummary.querySelector('a')");
+  await check(`foldOpenedLinks.length === 1 && foldOpenedLinks[0] === 'https://example.com/report?a=1&b=2' && !foldDetails.open`,
+    "mouse activation opens the full URL through the shared handler without toggling details");
+  await evaluate("foldSummary.querySelector('a').focus()");
+  const foldKey = async keyCode => {
+    window.webContents.sendInputEvent({ type: "keyDown", keyCode });
+    window.webContents.sendInputEvent({ type: "char", keyCode: keyCode === "Enter" ? "\r" : " " });
+    window.webContents.sendInputEvent({ type: "keyUp", keyCode });
+    await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+  };
+  await foldKey("Enter");
+  await check("foldOpenedLinks.length === 2 && !foldDetails.open", "Enter on the link opens its URL and leaves details closed");
+  await evaluate("foldSummary.focus()");
+  await foldKey("Enter");
+  await check("foldDetails.open && document.activeElement === foldSummary", "Enter on summary expands native details");
+  await foldKey("Space");
+  await check("!foldDetails.open", "Space on summary collapses native details");
+  await foldClick("foldSummary");
+  await check("foldDetails.open", "mouse activation of summary expands native details");
+  await check(`(() => {
+    const tick = String.fromCharCode(96);
+    const code = chatText('Введение.\\n\\n### Технические ' + tick + 'детали' + tick + '\\n\\nТело.', { agent: true });
+    const bad = chatText('Введение.\\n\\n### [Технические детали](javascript:alert(1))\\n\\nТело.', { agent: true });
+    const raw = chatText('Введение.\\n\\n### Технические детали\\n\\n<script>alert(1)</script>', { agent: true });
+    const first = chatText('### Технические детали\\n\\nТело.', { agent: true });
+    const empty = chatText('Введение.\\n\\n### Технические детали', { agent: true });
+    return code.querySelector('summary code')?.textContent === 'детали' && !bad.querySelector('a') &&
+      !raw.querySelector('script') && !first.querySelector('details') && !empty.querySelector('details');
+  })()`, "inline code survives; URL and raw HTML restrictions and folding eligibility remain intact");
+  await evaluate("foldDialog.close(); foldDialog.remove(); api.openLink = foldOriginalOpenLink");
+  await check(`(() => {
+    // Compose this fix with T-0073's parameterization without importing its other changes.
+    const source = foldTechnicalDetails.toString()
+      .replace('function foldTechnicalDetails(block)', 'function foldTechnicalDetails(block, title = /^(?:Technical details|Технические детали)$/i, className = "chat-report-details", requirePrevious = true)')
+      .replace('!heading.previousElementSibling', '(requirePrevious && !heading.previousElementSibling)')
+      .replace('!/^(?:Technical details|Технические детали)$/i.test', '!title.test')
+      .replace('"chat-report-details");', 'className);');
+    const fold = new Function('element', 'return (' + source + ')')(element);
+    const block = element('div');
+    block.innerHTML = chatMarkdown.render('### [Диагностика и связанные файлы](https://example.com/report?a=1&b=2)\\n\\nТело.\\n\\n### Дальше\\n\\nСледующий раздел.');
+    fold(block, /^Диагностика и связанные файлы$/i, 'task-description-details', false);
+    const details = block.querySelector('details.task-description-details');
+    return !!details && !details.open &&
+      details.querySelector('summary a')?.getAttribute('href') === 'https://example.com/report?a=1&b=2' &&
+      details.querySelector('.chat-report-body').textContent.trim() === 'Тело.' &&
+      details.nextElementSibling.textContent === 'Дальше';
+  })()`, "T-0073 parameterized composition preserves diagnostic heading links and boundaries");
+  console.log("Folded heading link, markup, boundaries, mouse, keyboard and safety checks passed");
   await check(`(() => {
     const tick = String.fromCharCode(96);
     const text = 'Полный прогон остановился до проверки интерфейса из-за ошибки кодировки. Целевые проверки прошли.\\n\\n' +
@@ -972,19 +1046,22 @@ app.whenReady().then(async () => {
   assert.deepEqual(await evaluate(`(async () => {
     const panel = manager.querySelector('.board-chat');
     const pin = panel.querySelector('.board-chat-pin');
-    const bounds = panel.getBoundingClientRect();
+    const bounds = panel.querySelector('.board-chat-bar').getBoundingClientRect();
     const button = pin.getBoundingClientRect();
     const resize = panel.querySelector('.board-chat-resize').getBoundingClientRect();
+    const tabs = panel.querySelector('.board-chat-views').getBoundingClientRect();
     pin.click();
     await Promise.resolve();
     manager.closeChat();
     const pinned = manager.hasAttribute('data-pinned') && manager.hasAttribute('data-open') && pin.getAttribute('aria-pressed') === 'true';
     pin.click();
     await Promise.resolve();
-    return { right: bounds.right - button.right, top: button.top - bounds.top,
+    return { inside: button.width > 0 && button.height > 0 && button.left >= bounds.left && button.right <= bounds.right &&
+        button.top >= bounds.top && button.bottom <= bounds.bottom,
+      separate: tabs.right <= resize.left && resize.right <= button.left && button.left > (bounds.left + bounds.right) / 2,
       centered: Math.abs((resize.left + resize.right - bounds.left - bounds.right) / 2) < .1,
       pinned, unpinned: pin.getAttribute('aria-pressed') === 'false' };
-  })()`), { right: 5, top: 5, centered: true, pinned: true, unpinned: true },
+  })()`), { inside: true, separate: true, centered: true, pinned: true, unpinned: true },
   "manager pin sits in the top corner and remains separate from the centered resize handle");
   await check(`(() => {
     const status = manager.querySelector('.chat-thinking > span');
@@ -1042,6 +1119,166 @@ app.whenReady().then(async () => {
   await check(`stopCallsForManager === 1 && actionButton.matches('[data-action="send"]') && !!actionButton.querySelector('.codicon-arrow-up')`,
     "the same manager button stops the reply and returns to send");
   await evaluate(`manager.dispose()`);
+  // Use the production projection, also asserted at all request exits by the
+  // orchestrator test. Observe added nodes, including ones removed before paint.
+  const projection = spawnSync(process.env.TASKBOARD_CHECK_NODE, ['--input-type=module', '-e', `
+    import { managerChatItems } from ${JSON.stringify(new URL('../src/desktop/manager-history.ts', import.meta.url).href)};
+    const raw = ['manager_inbox', 'task_wait', 'task_message'].map((tool, index) => ({
+      id: tool, type: 'mcpToolCall', title: 'ai_taskboard / ' + tool, text: 'PRIVATE RESULT', status: 'completed',
+      messagesOnly: tool !== 'task_wait', messages: [{ id: 'T-0072', sequence: index + 1,
+        actor: ['agent', 'reviewer', 'manager'][index], text: 'PRIVATE MESSAGE' }]
+    }));
+    console.log(JSON.stringify({ raw, chat: managerChatItems(raw) }));
+  `], { encoding: 'utf8', windowsHide: true });
+  assert.equal(projection.status, 0, projection.stderr);
+  await evaluate(`
+    const routed = ${projection.stdout};
+    let finishCoordination = Promise.withResolvers();
+    const coordinationReady = Promise.withResolvers();
+    let savedCoordination = false;
+    api.boardRequest = () => { coordinationManager.enableStop(); coordinationReady.resolve(); return finishCoordination.promise; };
+    api.boardHistory = async (_project, _cursor, view) => ({ ok: true, data: view === 'live'
+      ? { work: [], chat: routed.raw } : { turns: view === 'work' && savedCoordination
+        ? [{ messages: [], items: routed.raw }] : [], nextCursor: null } });
+    const coordinationManager = draftComposer();
+    body.replaceChildren(coordinationManager);
+    byId('sheet-title').textContent = 'T-0072 · Переписка агентов';
+    // The task-sheet fixture needs room above the composer for its popup panel.
+    body.style.paddingTop = '410px';
+    coordinationManager.querySelector('.board-chat-pin').click();
+    const dialogue = coordinationManager.querySelector('.board-chat-log:not(.board-work)');
+    let leaks = [];
+    const observer = new MutationObserver(records => {
+      for (const record of records) for (const node of record.addedNodes) {
+        if (node.nodeType === 1 && (node.matches('.chat-coordination') || node.querySelector('.chat-coordination') ||
+            node.textContent.includes('PRIVATE'))) leaks.push(node.textContent);
+      }
+    });
+    observer.observe(dialogue, { childList: true, subtree: true });
+    coordinationManager.querySelector('.draft-input textarea').value = 'Проверь сообщения агентов';
+    coordinationManager.dispatchEvent(new Event('submit', { cancelable: true }));
+    Promise.race([coordinationReady.promise, new Promise((_, reject) => setTimeout(() =>
+      reject(new Error('Coordination request did not start: ' + coordinationManager.textContent)), 5000))]).then(() => true);
+  `);
+  for (const completed of [false, true]) {
+    await evaluate(`coordinationManager.updateActivity(routed.chat); void 0`);
+    await check(`leaks.length === 0`, 'streamed coordination never inserts dialogue DOM nodes');
+    if (completed) await evaluate(`finishCoordination.resolve({ ok: true, data: {
+      answer: 'Сообщения агентов доступны в ходе работы.', items: [...routed.chat,
+        { ...action('public', 'agentMessage', '', 'completed', 'Сообщения агентов доступны в ходе работы.'), phase: 'final_answer' }]
+    } }); finishCoordination.promise.then(() => new Promise(resolve => requestAnimationFrame(() => resolve(true))))`);
+  }
+  await check(`leaks.length === 0 && dialogue.textContent.includes('Сообщения агентов доступны')`,
+    'completed reply preserves public text without intermediate coordination insertions');
+  await capture('coordination-dialogue.png');
+  await evaluate(`coordinationManager.querySelector('.board-work-toggle').click(); void 0`);
+  await check(`coordinationManager.querySelector('.board-work').querySelectorAll('.chat-coordination').length === 3 && leaks.length === 0`,
+    'all three directions remain in live work without leaking into dialogue');
+  await evaluate(`savedCoordination = true; coordinationManager.invalidateWork(); void 0`);
+  await check(`coordinationManager.querySelector('.board-work').querySelectorAll('.chat-coordination').length === 3`,
+    'saved work replaces live work without duplicates');
+  await capture('coordination-work.png');
+  await evaluate(`coordinationManager.querySelector('.board-dialogue-toggle').click(); void 0`);
+  await check(`leaks.length === 0 && dialogue.textContent.includes('Сообщения агентов доступны')`,
+    'switching back preserves dialogue and never inserts coordination');
+  await evaluate(`
+    const lateWork = Promise.withResolvers();
+    api.boardHistory = async (_project, _cursor, view) => view === 'work' ? lateWork.promise :
+      { ok: true, data: view === 'live' ? { work: [], chat: [] } : { turns: [] } };
+    coordinationManager.querySelector('.board-work-toggle').click();
+    coordinationManager.dispose();
+    frame.project = 'other-fixture';
+    const otherManager = draftComposer();
+    body.replaceChildren(otherManager);
+    lateWork.resolve({ ok: true, data: { turns: [{ messages: [], items: routed.raw }], nextCursor: null } });
+    lateWork.promise.then(() => new Promise(resolve => requestAnimationFrame(() => resolve(true))));
+  `);
+  await check(`!otherManager.textContent.includes('PRIVATE') && !otherManager.querySelector('.chat-coordination') && leaks.length === 0`,
+    'late history after disposal and project switch cannot mix streams');
+  await evaluate(`observer.disconnect(); otherManager.dispose()`);
+  // Exercise reasons through the same live/history composer paths as real task actions.
+  await evaluate(`
+    frame.project = 'fixture';
+    const reasonActions = ['unblock', 'approve', 'start', 'block', 'request_changes', 'accept', 'cancel', 'comment', 'update'];
+    const reasonItems = reasonActions.map((name, index) => ({
+      ...action('reason-' + name, 'mcpToolCall', 'ai_taskboard / task_' + name),
+      taskChanges: [{ id: 'T-0078', action: name, reason: name + ': Пояснение менеджера.\\nВторая строка с подробностями действия и дальнейшей проверки.' }]
+    }));
+    const publicReply = { ...action('reason-final', 'agentMessage', '', 'completed', 'Пояснения сохранены.'), phase: 'final_answer' };
+    const reasonFinish = Promise.withResolvers();
+    const reasonReady = Promise.withResolvers();
+    let reasonsSaved = false;
+    api.boardRequest = () => { reasonManager.enableStop(); reasonReady.resolve(); return reasonFinish.promise; };
+    api.boardHistory = async (_project, _cursor, view) => {
+      return { ok: true, data: view === 'live'
+        ? { work: [], chat: reasonItems } : { turns: reasonsSaved ? [{ messages: [], items: [...reasonItems, publicReply] }] : [], nextCursor: null } };
+    };
+    const reasonManager = draftComposer();
+    body.replaceChildren(reasonManager);
+    byId('sheet-title').textContent = 'T-0080 · Пояснения менеджера';
+    reasonManager.querySelector('.board-chat-pin').click();
+    let reasonLog = reasonManager.querySelector('.board-chat-log:not(.board-work)');
+    const bareReasons = [];
+    const reasonObserver = new MutationObserver(records => {
+      for (const record of records) for (const node of record.addedNodes) {
+        if (node.nodeType !== 1) continue;
+        const notes = [...node.querySelectorAll('[data-item^="reason:"]'), ...(node.matches('[data-item^="reason:"]') ? [node] : [])];
+        for (const note of notes) if (!note.matches('.board-manager-message')) bareReasons.push(note.textContent);
+      }
+    });
+    reasonObserver.observe(reasonLog, { childList: true, subtree: true });
+    reasonManager.querySelector('.draft-input textarea').value = 'Проверь пояснения действий';
+    reasonManager.dispatchEvent(new Event('submit', { cancelable: true }));
+    reasonReady.promise.then(() => true);
+  `);
+  const reasonsIntact = `reasonItems.every(item => {
+    const notes = reasonLog.querySelectorAll('[data-item="reason:' + item.id + '"]');
+    return notes.length === 1 && notes[0].matches('.board-manager-message') &&
+      notes[0].firstElementChild.matches('p.chat-text') && notes[0].textContent === item.taskChanges[0].reason;
+  }) && bareReasons.length === 0`;
+  await evaluate(`reasonManager.updateActivity(reasonItems); void 0`);
+  await check(reasonsIntact, 'all action reasons are bubbles immediately during live updates, with exact multiline text');
+  await evaluate(`reasonManager.updateActivity(reasonItems); void 0`);
+  await check(reasonsIntact, 'repeated live updates do not duplicate reasons');
+  await evaluate(`reasonFinish.resolve({ ok: true, data: { answer: publicReply.text, items: [...reasonItems, publicReply] } });
+    reasonFinish.promise.then(() => new Promise(resolve => requestAnimationFrame(() => resolve(true))))`);
+  await check(reasonsIntact, 'completion preserves reasons and their bubbles');
+  await evaluate(`reasonManager.querySelector('.board-work-toggle').click(); void 0`);
+  await check(`!reasonManager.querySelector('.board-work .board-manager-message') &&
+    reasonManager.querySelectorAll('.board-work p[data-item^="reason:"]').length === reasonItems.length`, 'work view retains plain reasons without dialogue bubble wrappers');
+  await evaluate(`reasonManager.querySelector('.board-dialogue-toggle').click(); void 0`);
+  await check(reasonsIntact, 'switching views preserves the dialogue reasons');
+  await evaluate(`reasonObserver.disconnect(); reasonManager.dispose(); reasonsSaved = true;
+    const restoredReasons = draftComposer(); body.replaceChildren(restoredReasons);
+    restoredReasons.querySelector('.board-chat-pin').click();
+    restoredReasons.querySelector('.draft-input textarea').focus();
+    reasonLog = restoredReasons.querySelector('.board-chat-log:not(.board-work)');
+    reasonObserver.observe(reasonLog, { childList: true, subtree: true });
+    new Promise(resolve => setTimeout(() => resolve(true), 250));`);
+  await evaluate(`restoredReasons.invalidateHistory(); new Promise(resolve => setTimeout(() => resolve(true), 250));`);
+  await check(reasonsIntact, 'history reload restores each reason once without intermediate bare text');
+  await check(`reasonItems.every(item => {
+    const row = reasonLog.querySelector('[data-item="item:' + item.id + '"]');
+    const note = reasonLog.querySelector('[data-item="reason:' + item.id + '"]');
+    return !!row && row.nextElementSibling === note && !row.matches('.board-manager-message');
+  }) && !!reasonLog.querySelector('.chat-work')`, 'history retains action rows, reason order and folded work');
+  for (const width of [850, 480]) {
+    window.setSize(width, 960);
+    for (const theme of ['light', 'dark']) {
+      nativeTheme.themeSource = theme;
+      await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+      await check(`(() => {
+        const note = reasonLog.querySelector('[data-item="reason:reason-unblock"]');
+        const normal = reasonLog.querySelector('.chat-run-final');
+        const a = getComputedStyle(note), b = getComputedStyle(normal);
+        return a.padding === b.padding && a.borderRadius === b.borderRadius && a.backgroundColor === b.backgroundColor &&
+          getComputedStyle(note.firstElementChild).whiteSpace === 'pre-wrap' && note.scrollWidth <= note.clientWidth;
+      })()`, 'reason matches ordinary manager bubble styling and wraps at ' + width + ' / ' + theme);
+      await evaluate(`reasonLog.scrollTop = 0`);
+      await capture('reasons-' + width + '-' + theme + '.png');
+    }
+  }
+  await evaluate(`reasonObserver.disconnect(); restoredReasons.dispose()`);
   console.log("Chat Chromium checks passed");
   if (keepArtifacts) console.log("Screenshots: " + artifacts);
 }).catch(error => {
