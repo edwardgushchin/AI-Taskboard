@@ -1,3 +1,4 @@
+import { activeRunSummary, observeActiveRuns } from "./active-runs.ts";
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, Notification, protocol, session, shell } from "electron";
 import type { IpcMainInvokeEvent } from "electron";
 import { randomUUID } from "node:crypto";
@@ -191,6 +192,8 @@ function frame(state: ProjectTab) {
     tabs: projectLabels(openTabs.flatMap(tab =>
       tab.project ? [{ path: tab.project, name: tab.board?.settings?.name }] : []))
       .map(tab => ({ ...tab, unread: unreadTabs.has(tab.path) })),
+    activeAgents: activeRunSummary([...subscriptions.values()].map(watch => ({
+      path: watch.board.project, name: watch.board.settings.name }))),
     managerUnread: boardUnread(state.board?.project),
     project: state.project, board: state.board, error: state.error, loading: state.loading, russian, theme,
     managerQuestion: key ? managerQuestion(key)?.view : undefined,
@@ -230,6 +233,10 @@ function send(state: ProjectTab): void {
     state.window.setTitle(state.project ? basename(state.project) + " · AI Taskboard" : "AI Taskboard");
   }
 }
+
+observeActiveRuns(() => {
+  for (const { active } of windowStates.values()) send(active);
+});
 
 function publishReviewActivity(project: string) {
   for (const { active } of windowStates.values()) {

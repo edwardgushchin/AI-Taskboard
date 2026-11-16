@@ -1028,3 +1028,8 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 .statistics-counts { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 16px; margin: 8px 0 16px; }
 .statistics-counts dd { margin: 0; font-variant-numeric: tabular-nums; }
 #project-statistics { min-width: 0; overflow-wrap: anywhere; }
+
+#status-agents { position: relative; }
+#status-agents-tooltip { display: none; position: absolute; bottom: 100%; right: 0; z-index: 100; width: max-content; max-width: calc(100vw - 16px); white-space: pre-wrap; overflow-wrap: anywhere; padding: 8px; background: var(--bg); color: var(--text); border: 1px solid currentColor; border-radius: 4px; }
+#status-agents:hover #status-agents-tooltip, #status-agents:focus #status-agents-tooltip { display: block; }
+#status-agents:focus-visible { outline: 1px solid currentColor; }

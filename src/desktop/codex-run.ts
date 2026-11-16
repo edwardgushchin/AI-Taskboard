@@ -1,3 +1,4 @@
+import { trackActiveRun } from "./active-runs.ts";
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, realpathSync } from "node:fs";
@@ -218,6 +219,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   }
   signal?.addEventListener("abort", interrupt, { once: true });
   async function monitor(turnId: string) {
+    const finishRun = turns.has(turnId) ? () => {} : trackActiveRun(project);
     let failure: RunFailure | undefined;
     try {
       while (!turns.has(turnId)) {
@@ -239,6 +241,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
         disconnected: !signal?.aborted && message === "The Codex process closed.",
       };
     } finally {
+      finishRun();
       worklog.finish();
       await close();
       await tokens.save(tokens.finish(Boolean(failure)), onTokenUsage);
