@@ -1,4 +1,4 @@
-import { realpathSync, rmSync, rmdirSync } from "node:fs";
+import { lstatSync, realpathSync, rmSync, rmdirSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { artifactFiles, discardTaskArtifacts, removeSavedSource, saveArtifacts } from "./artifacts.ts";
 import { dependencyStatus, unfinishedDependencies } from "./dependencies.ts";
@@ -431,6 +431,20 @@ function removeTaskOutput(path: string, changes: string[]): boolean {
   return true;
 }
 
+function removeCrashpadDebugLog(path: string): boolean {
+  const file = join(path, "debug.log");
+  const before = lstatSync(file, { throwIfNoEntry: false });
+  if (!before?.isFile() || !before.size || before.size > 64 * 1024) return false;
+  const registrationError = /^\[\d{4}\/\d{6}\.\d{3}:ERROR:third_party[\\/]crashpad[\\/]crashpad[\\/]util[\\/]win[\\/]registration_protocol_win\.cc:\d+\] CreateFile: [^\x00-\x1f]+ \(0x5\)$/;
+  const lines = readBinary(file).toString("utf8").trimEnd().split(/\r?\n/);
+  if (!lines.every(line => registrationError.test(line))) return false;
+  const after = lstatSync(file, { throwIfNoEntry: false });
+  if (!after?.isFile() || after.dev !== before.dev || after.ino !== before.ino ||
+      after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) return false;
+  removeFile(file);
+  return true;
+}
+
 function removeTaskWorktree(store: BoardStore, task: Task, repo: Repository, item: Worktree, accepted: boolean, artifacts?: unknown): void {
   if (item.locked) throw new TaskboardError("WORKTREE_LOCKED", "The task worktree is locked.");
   const path = usableWorktree(item);
@@ -453,6 +467,10 @@ function removeTaskWorktree(store: BoardStore, task: Task, repo: Repository, ite
     }
   }
   let changes = gitStatus(path, "all");
+  if (accepted && changes.split("\0").some(entry => entry === "? debug.log" || entry === "! debug.log") &&
+      removeCrashpadDebugLog(path)) {
+    changes = gitStatus(path, "all");
+  }
   if (accepted && changes && !retainedArtifacts.size && removeTaskOutput(path, changes.split("\0").filter(Boolean))) {
     changes = gitStatus(path, "all");
   }

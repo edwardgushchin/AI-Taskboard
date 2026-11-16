@@ -115,11 +115,12 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   };
   try {
     signal?.throwIfAborted();
-    const env = { ...(client.env ?? process.env), ...mcp.env };
+    const env: NodeJS.ProcessEnv = { ...(client.env ?? process.env), ...mcp.env };
     if (process.platform === "win32") {
       runTemp = mkdtempSync(join(realpathSync(tmpdir()), "ai-taskboard-executor-temp-"));
       paths.push(runTemp);
       Object.assign(env, { TEMP: runTemp, TMP: runTemp, TMPDIR: runTemp });
+      env.ELECTRON_LOG_FILE ??= join(runTemp, "electron_debug.log");
     }
     const filesystem = [
       '":root" = "read"',

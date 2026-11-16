@@ -1777,6 +1777,8 @@ test("resubmission verifies the actual Conventional Commit after an external reb
   assert.equal(cli(root, ["accept", task.id], { revision: submitted.revision }).status, "done");
 });
 
+const crashpadOutput = "[1116/134653.421:ERROR:third_party\\crashpad\\crashpad\\util\\win\\registration_protocol_win.cc:108] CreateFile: Access is denied. (0x5)\r\n";
+
 test("review and acceptance preserve a local file that became untracked after submission", t => {
   const root = fixture(t, true);
   const exclude = join(root, ".git", "info", "exclude");
@@ -1785,7 +1787,7 @@ test("review and acceptance preserve a local file that became untracked after su
   const { task, worktree } = submitFixture(root, path => {
     original = readFileSync(exclude, "utf8");
     writeFileSync(exclude, original + "\n/" + log + "\n");
-    writeFileSync(join(path, log), "local verification output\n");
+    writeFileSync(join(path, log), crashpadOutput + "local verification output\n");
     writeFileSync(join(path, "result.txt"), "verified result\n");
   });
   writeFileSync(exclude, original);
@@ -1804,7 +1806,7 @@ test("review and acceptance preserve a local file that became untracked after su
   assert.equal(done.cleanupWarning.code, "DIRTY_WORKTREE");
   assert.equal(readFileSync(join(root, "result.txt"), "utf8"), "verified result\n");
   assert.equal(existsSync(join(root, log)), false);
-  assert.equal(readFileSync(join(worktree, log), "utf8"), "local verification output\n");
+  assert.equal(readFileSync(join(worktree, log), "utf8"), crashpadOutput + "local verification output\n");
   assert.deepEqual(cli(root, ["cleanup-status", task.id]).entries, ["?? " + log]);
 });
 
@@ -2107,11 +2109,12 @@ test("artifact retention is bounded until cleanup and changed or unknown origina
   assert.deepEqual(cli(root, ["show", draft.id]).artifacts, final.artifacts);
 });
 
-test("accept discards ignored worktree output and preserves the project diary and task attachments", t => {
+test("accept discards Crashpad and ignored worktree output and preserves the project diary and task attachments", t => {
   const root = fixture(t, true);
   const exclude = join(root, ".git", "info", "exclude");
   writeFileSync(exclude, readFileSync(exclude, "utf8") + "\n/.dev-diary/\n");
   const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "result.txt"), "delivered\n"));
+  writeFileSync(join(worktree, "debug.log"), crashpadOutput + crashpadOutput);
   const diary = join(".dev-diary", "2026", "11");
   const qa = join(".tasks", "qa");
   const projectDiary = join(root, diary, "2026-11-12.md");

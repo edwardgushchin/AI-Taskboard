@@ -77,7 +77,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '  const { id, method, params } = JSON.parse(line);',
     '  if (id === undefined) return;',
     '  requests.push({ method, params });',
-    '  fs.writeFileSync(capture, JSON.stringify({ cwd: process.cwd(), flags, requests, temp: process.env.TEMP, tmp: process.env.TMP, tmpdir: require("node:os").tmpdir() }));',
+    '  fs.writeFileSync(capture, JSON.stringify({ cwd: process.cwd(), flags, requests, temp: process.env.TEMP, tmp: process.env.TMP, tmpdir: require("node:os").tmpdir(), electronLog: process.env.ELECTRON_LOG_FILE }));',
     '  let result = {};',
     '  if (method === "command/exec") {',
     '    result = outcome === "denied" ? { exitCode: 1, stderr: "EACCES: permission denied" } : { exitCode: 0 };',
@@ -236,6 +236,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     assert.match(launched.temp, /ai-taskboard-executor-temp-[^/\\]+$/);
     assert.equal(launched.tmp, launched.temp);
     assert.equal(launched.tmpdir, launched.temp);
+    assert.equal(launched.electronLog, process.env.ELECTRON_LOG_FILE ?? join(launched.temp, "electron_debug.log"));
     assert.ok(probe.params.command.includes(launched.temp));
     assert.ok(launched.flags.some((flag: string) => flag.includes(JSON.stringify(launched.temp) + ' = "write"')));
     assert.ok(!existsSync(launched.temp));

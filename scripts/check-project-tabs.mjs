@@ -20,7 +20,7 @@ if (!process.versions.electron) {
   symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), join(artifacts, "node_modules"), process.platform === "win32" ? "junction" : "dir");
   for (const stage of ["open", "restore"]) {
     const result = spawnSync(require("electron"), [script, stage, artifacts], {
-      cwd: root, encoding: "utf8", windowsHide: true, timeout: 90_000,
+      cwd: artifacts, encoding: "utf8", windowsHide: true, timeout: 90_000,
       env: environment,
     });
     process.stdout.write(result.stdout ?? "");
