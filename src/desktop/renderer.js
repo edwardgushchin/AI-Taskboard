@@ -1959,7 +1959,7 @@ function draftComposer() {
       rows.push(row);
     }
     const reviewing = frame.reviewingTasks ?? {};
-    const ids = new Set([...(frame.runningTasks ?? []), ...Object.keys(reviewing)]);
+    const ids = new Set([...(frame.runningTasks ?? []), ...(frame.replyingTasks ?? []), ...Object.keys(reviewing)]);
     for (const id of ids) {
       const title = frame.board?.tasks.find(task => task.id === id)?.title;
       const link = button(id + (title ? " · " + title : ""), protect(async () => {
@@ -1973,6 +1973,7 @@ function draftComposer() {
       }), "quiet board-chat-task");
       const status = reviewing[id] === "reviewer" ? language("Reviewer", "Ревьюер") + " · " + workStatus(activeReviewers[id]?.item) :
         reviewing[id] === "manager" ? language("Manager is reviewing", "Менеджер проверяет") :
+        frame.replyingTasks?.includes(id) ? language("Task discussion", "Обсуждение задачи") :
           language("Executor", "Исполнитель") + " · " + workStatus(frame.runActivity?.[id]?.findLast(item => item.status === "inProgress"));
       const row = element("div", undefined, "board-work-row");
       row.dataset.chatAnchor = "overview:" + id;
@@ -4859,9 +4860,10 @@ function renderActiveAgents() {
   if (indicator.hidden) return;
   const reviewers = Object.values(frame.reviewingTasks ?? {}).filter(role => role === "reviewer").length;
   const managers = Number(Boolean(frame.managerRun)) + Number(Boolean(frame.managerWork));
-  const count = (frame.runningTasks?.length ?? 0) + reviewers + managers;
+  const count = (frame.runningTasks?.length ?? 0) + (frame.replyingTasks?.length ?? 0) + reviewers + managers;
   indicator.querySelector("span").textContent = count;
-  indicator.title = language("Active agents", "Активные агенты") + " · " + count;
+  indicator.title = language("Active agents", "Активные агенты") + " · " + count +
+    " · " + language("Task discussions", "Обсуждения задач") + ": " + (frame.replyingTasks?.length ?? 0);
   indicator.setAttribute("aria-label", indicator.title);
 }
 

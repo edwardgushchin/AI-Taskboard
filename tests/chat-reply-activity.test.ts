@@ -29,19 +29,21 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   task.history.push({ at: new Date().toISOString(), actor: "user", action: "comment", text: "Discuss", chat: { model: "test", effort: "low", files: [] } });
   const response = Promise.withResolvers<{ text: string } | { interrupted: true }>();
   const delivered: string[] = [];
+  const removed: string[] = [];
+  const scheduled: boolean[] = [];
   const writes: { actor?: string; replyTo?: number }[] = [];
   const started = Promise.withResolvers<void>();
   const slots = createAgentSlots();
   const runtime = runInNewContext(stripTypeScriptTypes(activitySource) +
-    "\n({ sendChat, stopChat, activeAgents, frame, windowStates, runningTasks, launchingTasks, deferredExecutors, notifyRunChange })", {
+    "\n({ sendChat, stopChat, activeAgents, frame, windowStates, runningTasks, launchingTasks, deferredExecutors, notifyRunChange, chatRuns, replyingTasks })", {
     basename, extname, join, performance, projectLabels, AbortController, subscriptions: new Map(),
-    reserveAgent: slots.acquire,
+    scheduleAgentWork: () => { scheduled.push(true); }, reserveAgent: slots.acquire, managerFullAccess: () => false,
     boardRequests: new Map(), boardWorkRequests: new Map(), boardUnread: () => [], projectIdentity: (path: string) => path,
     app: { getPath: () => "profile" }, managerFullAccess: () => false,
     lang: (english: string) => english,
     tmpdir: () => "scratch",
     mkdtemp: async () => "scratch/chat",
-    rm: async () => {},
+    rm: async (path: string) => { removed.push(path); },
     writeFile: async () => {},
     cliFailure: (code: string, message: string) => ({ ok: false, error: { code, message } }),
     taskChatActions: () => ({}),
@@ -78,9 +80,9 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
     const state = { project, board: { project, tasks: [task, { ...task, id: "T-0002" }] }, window: {
       isDestroyed: () => false, setTitle: () => {}, webContents: {
         id: index,
-        send: (channel: string, frame: { runningTasks: string[] }) => {
+        send: (channel: string, frame: { replyingTasks: string[] }) => {
           assert.equal(channel, "board:changed");
-          updates.push(Array.from(frame.runningTasks));
+          updates.push(Array.from(frame.replyingTasks));
         },
       },
     } };
@@ -94,8 +96,8 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   const request = { model: "test", effort: "low", text: "Discuss", files: [] };
   const run = (retry = false) => runtime.sendChat("project-a", task.id,
     { ...request, ...(retry ? { retryAt: task.history.length - 1 } : {}) }, () => {});
-  const active = (index = 0): string[] => Array.from(runtime.frame(windows[index].state).runningTasks);
-  return { task, runtime, windows, run, active, response, delivered, writes, slots, started: started.promise };
+  const active = (index = 0): string[] => Array.from(runtime.frame(windows[index].state).replyingTasks);
+  return { task, runtime, windows, run, active, request, response, delivered, writes, slots, removed, scheduled, started: started.promise };
 }
 
 test("confirmed queue snapshots agree across board windows and exclude interrupted or stale tasks", () => {
@@ -120,7 +122,7 @@ test("confirmed queue snapshots agree across board windows and exclude interrupt
   assert.deepEqual(waiting(0), []);
 });
 
-test("chat replies publish the existing task activity in every window of their board", async () => {
+test("chat replies publish discussion activity in every window of their board", async () => {
   const f = fixture();
   assert.deepEqual(f.active(), []);
   const pending = f.run();
@@ -146,7 +148,8 @@ test("a failed retry clears chat activity while a concurrent board run stays act
   f.response.reject(new Error("Provider disconnected"));
   const reply = await pending;
   assert.equal(reply.result.error.code, "CHAT_FAILED");
-  assert.deepEqual(f.active(), ["T-0001"]);
+  assert.deepEqual(f.active(), []);
+  assert.deepEqual(Array.from(f.runtime.frame(f.windows[0].state).runningTasks), ["T-0001"]);
   f.runtime.runningTasks.clear();
   assert.deepEqual(f.active(), []);
 });
@@ -160,6 +163,9 @@ test("provider and reply-storage errors remove the activity indicator", async ()
     else f.response.reject(new Error("Provider disconnected"));
     assert.equal((await pending).result.ok, false);
     assert.deepEqual(f.active(), []);
+    assert.equal(f.runtime.chatRuns.size, 0);
+    assert.equal(f.runtime.activeAgents.size, 0);
+    assert.deepEqual(f.removed, ["scratch/chat"]);
     assert.deepEqual(f.windows[0].updates, [["T-0001"], []]);
   }
 });
@@ -196,6 +202,9 @@ test("stop interrupts the discussion without saving a completed reply", async ()
   assert.equal(f.writes.filter(write => write.actor === "agent").length, 0);
   assert.deepEqual(f.active(), []);
   assert.equal((await f.runtime.stopChat("project-a", "T-0001")).error.code, "CHAT_NOT_RUNNING");
+  assert.equal(f.runtime.chatRuns.size, 0);
+  assert.equal(f.runtime.activeAgents.size, 0);
+  assert.deepEqual(f.removed, ["scratch/chat"]);
 });
 
 test("a delivery rejection keeps the saved user message and does not start another reply", async () => {
@@ -216,10 +225,6 @@ test("a delivery rejection keeps the saved user message and does not start anoth
 test("messages and stop target a board execution in the same project and task", async () => {
   const f = fixture({ controlled: true });
   const occupied = Array.from({ length: 3 }, () => f.slots.acquire("project-a", "executor"));
-  const blocked = await f.run();
-  assert.equal(blocked.result.error.code, "EXECUTOR_LIMIT");
-  assert.equal(blocked.saved, false);
-  assert.equal(f.writes.length, 0);
   let interrupted = false;
   f.runtime.runningTasks.add("project-a\0T-0001");
   f.runtime.activeAgents.set("project-a\0T-0001", { directories: new Set(), control: {
@@ -228,7 +233,8 @@ test("messages and stop target a board execution in the same project and task", 
   } });
   assert.equal((await f.run()).result.ok, true);
   assert.deepEqual(f.delivered, ["Discuss"]);
-  assert.deepEqual(f.active(), ["T-0001"]);
+  assert.deepEqual(f.active(), []);
+  assert.deepEqual(Array.from(f.runtime.frame(f.windows[0].state).runningTasks), ["T-0001"]);
   assert.equal((await f.runtime.stopChat("project-b", "T-0001")).error.code, "CHAT_NOT_RUNNING");
   assert.equal((await f.runtime.stopChat("project-a", "T-0001")).ok, true);
   assert.equal(interrupted, true);
@@ -242,4 +248,46 @@ test("a task being launched never starts a competing chat provider", async () =>
   assert.equal(reply.saved, false);
   assert.equal(reply.result.error.code, "CHAT_BUSY");
   assert.equal(f.writes.length, 0);
+});
+
+test("discussions bypass every role limit, preserve free executor slots and run independently", async () => {
+  const f = fixture();
+  const occupied = [f.slots.acquire("project-a", "executor")!, f.slots.acquire("project-a", "executor")!,
+    f.slots.acquire("project-a", "executor")!, f.slots.acquire("project-a", "manager")!, f.slots.acquire("project-a", "reviewer")!];
+  const first = f.run();
+  await f.started;
+  const second = f.runtime.sendChat("project-a", "T-0002", f.request, () => {});
+  for (let i = 0; i < 100 && !f.runtime.activeAgents.has("project-a\0T-0002"); i++) await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.active().sort(), ["T-0001", "T-0002"]);
+  assert.deepEqual(Array.from(f.runtime.frame(f.windows[0].state).runningTasks), []);
+  assert.equal(f.slots.available("project-a", "executor"), 0);
+  occupied[0]();
+  assert.equal(f.slots.available("project-a", "executor"), 1);
+  const executor = f.slots.acquire("project-a", "executor");
+  assert.ok(executor);
+  f.response.resolve({ text: "Reply" });
+  assert.equal((await first).result.ok, true);
+  assert.equal((await second).result.ok, true);
+  assert.equal(f.runtime.activeAgents.size, 0);
+  assert.equal(f.runtime.chatRuns.size, 0);
+  assert.equal(f.runtime.replyingTasks.size, 0);
+  assert.equal(f.scheduled.length, 2);
+  executor();
+  for (const release of occupied.slice(1)) release();
+});
+
+test("discussion ignores status and unfinished dependencies and never starts execution", async () => {
+  for (const status of ["draft", "ready", "in_progress", "blocked", "review", "done", "cancelled"] as const) {
+    const f = fixture();
+    f.task.status = status;
+    f.task.dependencies = ["T-9999"];
+    const pending = f.run();
+    await f.started;
+    assert.equal(f.slots.available("project-a", "executor"), 3);
+    assert.deepEqual(Array.from(f.runtime.frame(f.windows[0].state).runningTasks), []);
+    f.response.resolve({ text: "Reply" });
+    assert.equal((await pending).result.ok, true);
+    assert.equal(f.task.status, status);
+    assert.equal(f.runtime.chatRuns.size, 0);
+  }
 });

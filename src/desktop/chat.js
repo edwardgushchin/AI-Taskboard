@@ -824,10 +824,6 @@ function taskChat(task) {
   list.addEventListener("scroll", () => {
     draft.scroll = list.scrollHeight - list.clientHeight - list.scrollTop > 8 ? list.scrollTop : undefined;
   });
-  if (["done", "cancelled"].includes(task.status)) {
-    if (latestReply) header.append(element("span", latestReply.model, "muted"));
-    return area;
-  }
 
   const composer = element("form", undefined, "chat-composer");
   const input = element("textarea");
@@ -862,7 +858,7 @@ function taskChat(task) {
   composer.append(pendingFiles, input, fileInput, controls, feedback);
   area.append(composer);
 
-  function working() { return Boolean(draft.pending || frame.runningTasks?.includes(task.id)); }
+  function working() { return Boolean(draft.pending || frame.runningTasks?.includes(task.id) || frame.replyingTasks?.includes(task.id)); }
   function stopping() { return working() && !draft.text.trim() && !draft.files.length; }
   function sync() {
     input.readOnly = Boolean(draft.saving);
