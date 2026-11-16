@@ -823,7 +823,8 @@ function renderAgentRunStatus(target, task) {
     spinner.title = label;
     if (!spinner.parentNode) target.replaceChildren(spinner);
   } else {
-    const text = frame.waitingTasks?.includes(task.id) ?
+    const repair = frame.board?.tasks.find(card => card.id === task.id)?.acceptanceRepair;
+    const text = repair ? ({ queued: t("ui.waiting_for_a_reviewer_slot_8918dd95"), running: t("ui.resolving_acceptance_conflict"), checking: t("ui.accepting_task_39473c27"), failed: repair.reason }[repair.phase]) : frame.waitingTasks?.includes(task.id) ?
       (task.mergeRepair || frame.board?.tasks.find(card => card.id === task.id)?.mergeRepair
         ? t("ui.waiting_for_a_reviewer_slot_8918dd95")
         : t("ui.waiting_for_an_available_executor_cc0934a8")) :
@@ -890,7 +891,7 @@ function card(task) {
   const signature = JSON.stringify([frame.localization?.locale, task.title, task.description,
     task.tags?.map(name => boardTags.get(tagKey(name)) ?? { name }), cover?.file,
     frame.runningTasks?.includes(task.id) ?? false, frame.waitingTasks?.includes(task.id) ?? false,
-    frame.reviewingTasks?.[task.id], task.status, task.mergeRepair, Boolean(task.codexThreadId),
+    frame.reviewingTasks?.[task.id], task.status, task.mergeRepair, task.acceptanceRepair, Boolean(task.codexThreadId),
     task.unfinishedDependencies, task.blocked, task.subtasks?.map(entry => entry.done),
     task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule]);
   const previous = boardCards.get(task.id);
@@ -4126,6 +4127,16 @@ async function showAcceptedTask(task) {
 }
 
 async function showReview(task, messageDraft, acceptanceError) {
+  if (task.acceptanceRepair) {
+    taskInSheet = task;
+    const editor = form("review", () => t("ui.review_result_29ed25fb"), [], () => t("ui.cancel_4c6dcc32"), async () => {
+      const cancelled = await command("accept", task.id, { revision: task.revision, cancelRepair: true });
+      if (cancelled) sheet.close();
+    });
+    editor.before(element("p", task.acceptanceRepair.reason ?? ({ queued: t("ui.waiting_for_a_reviewer_slot_8918dd95"), running: t("ui.resolving_acceptance_conflict"), checking: t("ui.accepting_task_39473c27") }[task.acceptanceRepair.phase]), "muted"));
+    body.append(button(() => t("ui.work_activity_e01957b7"), () => showTask(task.id)));
+    return;
+  }
   const generation = projectGeneration;
   const review = await command("review", task.id);
   if (!review || generation !== projectGeneration) return;
@@ -4156,7 +4167,9 @@ async function showReview(task, messageDraft, acceptanceError) {
     });
     if (generation !== projectGeneration) return;
     if (result.ok) {
-      await showAcceptedTask(result.data);
+      if (result.data.status === "review") {
+        await showTask(task.id);
+      } else await showAcceptedTask(result.data);
     } else {
       if (sheetKind === "review" && taskInSheet?.id === task.id) await showReview(task, message, result.error);
       else notice(boardError(result.error), [t("ui.accepting_task_39473c27"), task.id, projectName()].join(" · "));
@@ -5072,6 +5085,13 @@ function update(next) {
   syncBoardNotice(projectChanged);
   const tagSettings = byId("tag-settings");
   if (tagsChanged && sheet.open && tagSettings) renderTagSettings(tagSettings);
+  if (sheetKind === "review" && sheet.open && taskInSheet?.acceptanceRepair) {
+    const current = frame.board?.tasks.find(task => task.id === taskInSheet.id);
+    if (current && (current.revision !== taskInSheet.revision || JSON.stringify(current.acceptanceRepair) !== JSON.stringify(taskInSheet.acceptanceRepair))) {
+      if (current.acceptanceRepair) void showReview({ ...taskInSheet, ...current });
+      else void showTask(current.id);
+    }
+  }
   if (sheetKind === "task" && sheet.open && taskInSheet) {
     body.querySelector(".task-chat")?.syncAgentState?.();
     const runStatus = byId("task-agent-run");

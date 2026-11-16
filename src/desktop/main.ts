@@ -917,7 +917,7 @@ function scheduleAutoBoard(watch: BoardWatch) {
       if (!board.settings.autoMode) return;
       const key = projectIdentity(project);
       if (boardReviewMode(board.settings) === "reviewer") {
-        const task = board.tasks.find(task => task.status === "review" && task.reviewApproved && !executorBusy(project, task.id) &&
+        const task = board.tasks.find(task => task.status === "review" && !task.acceptanceRepair && task.reviewApproved && !executorBusy(project, task.id) &&
           !watch.reviewerRuns.has(task.id) && !queue.integrations.has(task.id + ":" + task.revision));
         if (task) {
           const attempt = task.id + ":" + task.revision;
@@ -1067,9 +1067,38 @@ function taskRunLimit(role: "executor" | "reviewer") {
   return cliFailure("EXECUTOR_LIMIT", t("ui.all_executor_slots_on_this_board_are_occupied_re_59a47721"));
 }
 
+const acceptanceWork = new Set<string>();
+async function continueAcceptance(project: string, task: Task) {
+  const key = project + "\0" + task.id;
+  if (acceptanceWork.has(key) || executorBusy(project, task.id)) return;
+  acceptanceWork.add(key);
+  try {
+    let result: CliReply<unknown>;
+    if (task.acceptanceRepair?.phase === "queued") {
+      result = await launchTask(project, task.id, undefined, false, task.revision, {}, false, true);
+    } else if (task.acceptanceRepair?.phase === "checking") {
+      const review = await callCli<{ targetHead: string; revision: number }>(project, ["review", task.id, "--compact"]);
+      if (!review.ok) result = review;
+      else result = await callCli(project, ["accept", task.id, "--compact"], {
+        actor: "user", continueRepair: true, revision: review.data.revision, targetHead: review.data.targetHead,
+      });
+    } else if (task.acceptanceRepair?.phase === "running") {
+      result = await callCli(project, ["accept", task.id], { revision: task.revision,
+        repairFailure: "The repair process ended before submitting checked results. Inspect its saved activity and worktree before retrying." });
+    } else return;
+    if (!result.ok && !["BOARD_BUSY", "TARGET_CHANGED", "REVISION_CONFLICT", "CHAT_BUSY", "LAUNCH_IN_PROGRESS", "REVIEWER_LIMIT"].includes(result.error.code)) {
+      await callCli(project, ["accept", task.id], { revision: task.revision, repairFailure: result.error.message });
+      broadcastBoardChat(project, "orchestrator-review-error", { error: task.id + ": " + result.error.message });
+    }
+  } finally { acceptanceWork.delete(key); }
+}
+
 function scheduleRecurringTasks(now = Date.now()) {
   for (const [project, watch] of subscriptions) {
     if (!watch.tabs.size || closingProjects.has(project)) continue;
+    for (const task of watch.board.tasks) {
+      if (task.status === "review" && ["queued", "checking", "running"].includes(task.acceptanceRepair?.phase ?? "")) void continueAcceptance(project, task).catch(error => console.error("Could not continue acceptance", task.id, error));
+    }
     if (watch.board.settings?.autoMode) { scheduleAutoBoard(watch); continue; }
     const projectKey = projectIdentity(project);
     for (const task of watch.board.tasks) {
@@ -1978,7 +2007,7 @@ function scheduleAutoReview(watch: BoardWatch) {
   if (!tab) return;
   const managerBatchSize = 4;
   const available = mode === "reviewer" ? agentSlots.available(projectKey, "reviewer", overrides) : managerBatchSize;
-  const ready = submissions.filter(task => !watch.reviewerRuns.has(task.id) &&
+  const ready = submissions.filter(task => !task.acceptanceRepair && !watch.reviewerRuns.has(task.id) &&
     (mode !== "reviewer" || !task.reviewApproved) &&
     watch.reviewAttempts.get(task.id) !== mode + ":" + task.revision &&
     ((mode === "reviewer" && task.reviewHasCommit) || !executorBusy(project, task.id))).slice(0, available);
@@ -2472,7 +2501,7 @@ async function recordRunFailure(project: string, id: string, reason: string, con
   if (!result.ok && result.error.code !== "INVALID_TRANSITION" && result.error.code !== "REVISION_CONFLICT") return result.error.message;
 }
 
-type LaunchState = Pick<Task, "id" | "title" | "status" | "revision" | "createdAt" | "codexThreadId" | "blocked" | "summary" | "nextStep"> & { mergeRepair?: true };
+type LaunchState = Pick<Task, "acceptanceRepair" | "id" | "title" | "status" | "revision" | "createdAt" | "codexThreadId" | "blocked" | "summary" | "nextStep"> & { mergeRepair?: true };
 
 async function launchTask(project: string, id: string, revisionRequest?: { input: Record<string, unknown> },
   newThread: false | "user" | "manager" = false, revision?: number,
@@ -2609,7 +2638,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     const run = await releaseSlot.run(() => startCodexRun(client, project, cwd, task, item => {
       activity.set(item.id, item);
       updateTimer ??= setTimeout(publish, 80);
-    }, report => saveTaskTokenUsage(project, id, "executor", report), signal, async codexThreadId => {
+    }, report => saveTaskTokenUsage(project, id, role, report), signal, async codexThreadId => {
       if (linked.codexThreadId === codexThreadId) return;
       const previousCodexThreadId = linked.codexThreadId;
       // Preserve edits made while Codex was starting and link the chat before it can run.
@@ -2653,6 +2682,11 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       if ((accessGranted || reconnect || (!outcome && !task.schedule)) && !signal.aborted && !stopRequested && (!rejected || accessGranted)) {
         const current = await callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
         if (current.ok) {
+          if (current.data.status === "review" && current.data.acceptanceRepair?.phase === "running" && current.data.codexThreadId === codexThreadId) {
+            await callCli(project, ["accept", id], { revision: current.data.revision, repairFailure: reason ?? detail ?? incomplete });
+            await saveActivity();
+            return;
+          }
           if (current.data.status !== "in_progress" || current.data.codexThreadId !== codexThreadId) {
             await saveActivity();
             return;

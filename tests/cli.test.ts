@@ -2804,3 +2804,64 @@ test("doctor recovers archive cleanup after an index switch and preserves change
   assert.ok(!existsSync(folder));
   assert.equal(cli(root, ["show", task.id]).status, "cancelled");
 });
+
+
+test("user acceptance repairs remain review and continue only after checked submission", t => {
+  for (const outcome of ["accept", "cancel", "advance", "fail"]) {
+    const root = fixture(t, true);
+    const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "source.txt"), "task version\n"));
+    cli(root, ["settings"], { autoMode: false, reviewMode: "human", reviewer: { provider: "codex", model: "review-model", effort: "high" } });
+    writeFileSync(join(root, "source.txt"), "target version\n");
+    git(root, "commit", "-am", "fix: update target");
+    const head = git(root, "rev-parse", "HEAD");
+    const input = { actor: "user", revision: task.revision, targetHead: head, message: "fix: integrate checked result" };
+    const queued = cli(root, ["accept", task.id], input);
+    assert.equal(queued.status, "review"); assert.equal(queued.acceptanceRepair.phase, "queued");
+    const repeated = cli(root, ["accept", task.id], { ...input, revision: queued.revision });
+    assert.equal(repeated.revision, queued.revision);
+    const run = cli(root, ["start", task.id, "--compact"], { revision: queued.revision, resolveConflicts: true, launchDetails: true });
+    assert.equal(run.worktree, worktree); assert.equal(run.task.status, "review");
+    assert.equal(run.task.execution.model, "review-model");
+    const running = cli(root, ["show", task.id]);
+    cli(root, ["start", task.id], { revision: running.revision, resolveConflicts: true }, "REPAIR_UNFINISHED");
+    if (outcome === "fail") {
+      const failed = cli(root, ["block", task.id], { reason: "Required check failed", condition: "Fix check" });
+      assert.equal(failed.status, "review");
+      assert.equal(cli(root, ["show", task.id]).acceptanceRepair.phase, "failed");
+      assert.ok(cli(root, ["manager-inbox"]).some((item: any) => item.kind === "question"));
+      continue;
+    }
+    assert.throws(() => git(worktree, "merge", "--no-edit", head));
+    writeFileSync(join(worktree, "source.txt"), "combined\n");
+    git(worktree, "add", "source.txt"); git(worktree, "commit", "-m", "fix: combine versions\n\nTask: " + task.id);
+    const preview = cli(root, ["preview", task.id]);
+    const submit = { token: preview.token, message: preview.commitMessage, summary: "Combined", checks: ["Required checks passed"] };
+    cli(root, ["submit", task.id], { ...submit, limitations: ["Failed test"] }, "CHECKS_REQUIRED");
+    const checked = cli(root, ["submit", task.id], submit);
+    const current = cli(root, ["show", task.id]);
+    assert.equal(current.status, "review"); assert.equal(current.acceptanceRepair.phase, "checking");
+    if (outcome === "cancel") {
+      const cancelled = cli(root, ["accept", task.id], { actor: "user", revision: checked.revision, cancelRepair: true });
+      cli(root, ["accept", task.id], { actor: "user", revision: cancelled.revision, continueRepair: true, targetHead: head }, "REPAIR_CANCELLED");
+      assert.equal(cli(root, ["show", task.id]).status, "review");
+    } else if (outcome === "advance") {
+      writeFileSync(join(root, "other.txt"), "new target\n"); git(root, "add", "other.txt"); git(root, "commit", "-m", "fix: advance target");
+      const next = cli(root, ["accept", task.id], { actor: "user", revision: checked.revision, continueRepair: true, targetHead: git(root, "rev-parse", "HEAD") });
+      assert.equal(next.status, "review"); assert.equal(next.acceptanceRepair.phase, "queued");
+      const second = cli(root, ["start", task.id], { revision: next.revision, resolveConflicts: true });
+      assert.equal(second.worktree, worktree); assert.equal(second.task.acceptanceRepair.attempts, 2);
+      git(worktree, "merge", "--no-commit", "--no-ff", git(root, "rev-parse", "HEAD"));
+      git(worktree, "commit", "-m", "fix: check advanced target\n\nTask: " + task.id);
+      const fresh = cli(root, ["preview", task.id]);
+      const again = cli(root, ["submit", task.id], { ...submit, token: fresh.token, message: fresh.commitMessage });
+      writeFileSync(join(root, "third.txt"), "changed again\n"); git(root, "add", "third.txt"); git(root, "commit", "-m", "fix: advance again");
+      const stopped = cli(root, ["accept", task.id], { actor: "user", revision: again.revision, continueRepair: true, targetHead: git(root, "rev-parse", "HEAD") });
+      assert.equal(stopped.status, "review"); assert.equal(stopped.acceptanceRepair.phase, "failed");
+      assert.ok(cli(root, ["manager-inbox"]).some((item: any) => item.kind === "question"));
+    } else {
+      const accepted = cli(root, ["accept", task.id], { actor: "user", revision: checked.revision, continueRepair: true, targetHead: head });
+      assert.equal(accepted.status, "done"); assert.equal(accepted.acceptanceRepair, undefined);
+      assert.equal(readFileSync(join(root, "source.txt"), "utf8"), "combined\n");
+    }
+  }
+});

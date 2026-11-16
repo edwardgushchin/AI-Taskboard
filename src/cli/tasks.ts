@@ -187,13 +187,17 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
     case "comment":
       return record(task, action, boardActor(input), task.status, text(input.text, "text", true));
     case "progress": {
-      requireState(task, ["in_progress", "blocked"]);
+      requireState(task, task.acceptanceRepair?.phase === "running" ? ["review"] : ["in_progress", "blocked"]);
       const summary = text(input.summary, "summary", true);
       const nextStep = input.nextStep === undefined ? task.nextStep : text(input.nextStep, "nextStep");
       const status = task.schedule && task.status === "in_progress" ? "ready" : task.status;
       return record({ ...task, summary, nextStep }, action, "agent", status, summary);
     }
     case "block": {
+      if (task.acceptanceRepair && task.status === "review") {
+        const reason = text(input.reason, "reason", true);
+        return record({ ...task, acceptanceRepair: { ...task.acceptanceRepair, phase: "failed", reason } }, "acceptance-failed", "agent", "review", reason);
+      }
       requireState(task, input.allowUnstarted === true ? ["draft", "ready", "in_progress"] : ["in_progress"]);
       const reason = text(input.reason, "reason", true);
       const condition = text(input.condition, "condition", true);

@@ -82,14 +82,14 @@ function readInput(fromStdin: boolean | undefined, file: string | undefined): Re
 type CompactTask = ReturnType<typeof compactTask>;
 
 function isMergeRepair(task: Task) {
-  return Boolean(task.git?.submission && ["ready", "in_progress", "blocked"].includes(task.status) &&
+  return Boolean(task.acceptanceRepair && task.status === "review" || task.git?.submission && ["ready", "in_progress", "blocked"].includes(task.status) &&
     task.history.findLast(event => event.action === "resolve-conflicts" || event.to === "review" || event.to === "draft")?.action === "resolve-conflicts");
 }
 
 function compactTask(task: Task) {
   const { id, title, description, status, revision, tags, priority, attachments, coverAttachment, codexThreadId,
     createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep, dependencies, milestone, workingDirectory, schedule } = task;
-  return { id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
+  return { acceptanceRepair: task.acceptanceRepair, id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
     coverAttachment, codexThreadId, createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep,
     dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, historyLength: task.history.length,
     ...(status === "review" && task.git?.submission && !task.result?.noChanges ? { reviewHasCommit: true } : {}),
@@ -107,7 +107,7 @@ function taskReceipt({ id, status, revision, git, result }: Task) {
 
 function taskLaunchState(task: Task) {
   const { id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep } = task;
-  return { id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep,
+  return { acceptanceRepair: task.acceptanceRepair, id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep,
     ...(isMergeRepair(task) ? { mergeRepair: true as const } : {}) };
 }
 
@@ -607,7 +607,30 @@ function run(
     const submitted = submitTask(store, task, input);
     return filters.compact ? taskReceipt(submitted) : submitted;
   }
+  if (command === "accept" && input.cancelRepair === true && input.actor === "user") {
+    requireRevision(task, input.revision, true);
+    return store.save(record({ ...task, acceptanceRepair: undefined }, "acceptance-cancelled", "user"));
+  }
+  if (command === "accept" && input.repairFailure !== undefined && task.acceptanceRepair) {
+    requireRevision(task, input.revision, true);
+    const reason = text(input.repairFailure, "repairFailure", true);
+    return store.save(sendTaskMessage(record({ ...task, acceptanceRepair: { ...task.acceptanceRepair, phase: "failed", reason } },
+      "acceptance-failed", "agent"), { kind: "question", text: reason }, "agent"));
+  }
   if (command === "accept") {
+    if (task.acceptanceRepair) {
+      requireRevision(task, input.revision, true);
+      if (input.continueRepair !== true) return task;
+      if (task.acceptanceRepair.phase !== "checking") throw new TaskboardError("REPAIR_UNFINISHED", "Conflict repair has not passed its checks.");
+      if (input.targetHead !== task.acceptanceRepair.targetHead) {
+        const reason = "The target advanced after repair checks. Verify the new target before accepting.";
+        if (task.acceptanceRepair.attempts < 2) return store.save(record({ ...task, acceptanceRepair: {
+          ...task.acceptanceRepair, phase: "queued" } }, "acceptance-target-changed", "agent"));
+        return store.save(sendTaskMessage(record({ ...task, acceptanceRepair: { ...task.acceptanceRepair, phase: "failed", reason } },
+          "acceptance-failed", "agent"), { kind: "question", text: reason }, "agent"));
+      }
+      input = { ...input, actor: "user", message: task.acceptanceRepair.message };
+    } else if (input.continueRepair === true) throw new TaskboardError("REPAIR_CANCELLED", "Acceptance was cancelled.");
     if (input.autoMode === true && (!store.index.settings.autoMode || boardReviewMode(store.index.settings) !== "reviewer")) {
       throw new TaskboardError("AUTO_MODE_DISABLED", "Automatic integration is disabled.");
     }
@@ -617,6 +640,17 @@ function run(
     try {
       return acceptTask(store, task, input);
     } catch (error) {
+      if (input.actor === "user" && error instanceof TaskboardError && error.code === "MERGE_CONFLICT") {
+        const review = inspectReview(store, task, reviewDetails(store, task, true), true);
+        const previous = task.acceptanceRepair;
+        const exhausted = previous && previous.attempts >= 2;
+        const requested = record({ ...task, acceptanceRepair: {
+          phase: exhausted ? "failed" as const : "queued" as const, attempts: previous?.attempts ?? 0,
+          targetHead: review.targetHead!, message: text(input.message, "message", true),
+          ...(exhausted ? { reason: "Repeated merge conflict; a decision is required." } : {}),
+        } }, "acceptance-requested", "user");
+        return store.save(exhausted ? sendTaskMessage(requested, { kind: "question", text: requested.acceptanceRepair!.reason }, "agent") : requested);
+      }
       if (store.index.settings.autoMode && error instanceof TaskboardError &&
           !["AUTO_REVIEW_DISABLED", "REVIEW_MODE_CHANGED", "REVISION_CONFLICT", "REVIEW_REQUIRED"].includes(error.code)) {
         const message = "AI Taskboard integration: " + error.code + "\n" + error.message + "\n" + JSON.stringify(error.details ?? {}).slice(0, 1800);
@@ -638,7 +672,14 @@ function run(
     if (logged !== task) store.save(logged);
     return filters.compact ? taskReceipt(logged) : logged;
   }
-  const updated = changeTask(task, command, input);
+  let updated = changeTask(task, command, input);
+  if (command === "update" && task.acceptanceRepair &&
+      ["title", "description", "criteria", "questions", "subtasks", "dependencies", "execution"].some(key => input[key] !== undefined)) {
+    updated = { ...updated, acceptanceRepair: undefined };
+  }
+  if (command === "block" && updated.acceptanceRepair?.phase === "failed") {
+    updated = sendTaskMessage(updated, { kind: "question", text: updated.acceptanceRepair.reason }, "agent");
+  }
   if (command === "cancel") {
     if (input.mergedInto !== undefined) {
       const target = readTask(store, text(input.mergedInto, "mergedInto", true));
@@ -667,7 +708,7 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
     if (input.launchDetails !== true) return { ...started, task: taskReceipt(started.task) };
     const { description, criteria, dueDate, execution, git, history, workingDirectory, schedule, toolGrants } = started.task;
     return { ...started, task: { ...taskLaunchState(started.task), description, criteria,
-      execution: execution ?? store.index.settings.executor ?? undefined, git, dueDate, workingDirectory, schedule, toolGrants,
+      execution: isMergeRepair(started.task) ? store.index.settings.reviewer : execution ?? store.index.settings.executor ?? undefined, git, dueDate, workingDirectory, schedule, toolGrants,
       feedback: history.findLast(event => event.action === "request-changes")?.text } };
   };
   return withTaskStartLock(location, id, startLockWaitMs => {

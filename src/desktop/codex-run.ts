@@ -68,7 +68,7 @@ const verifyWrite = [
   "}",
 ].join("\n");
 
-export type ExecutorTask = Pick<Task, "id" | "title" | "description" | "criteria" | "dueDate" | "summary" | "nextStep" | "execution" | "git" | "codexThreadId" | "workingDirectory" | "schedule" | "toolGrants"> &
+export type ExecutorTask = Pick<Task, "acceptanceRepair" | "id" | "title" | "description" | "criteria" | "dueDate" | "summary" | "nextStep" | "execution" | "git" | "codexThreadId" | "workingDirectory" | "schedule" | "toolGrants"> &
   { feedback?: string; fullAccess?: boolean };
 
 export function missingCodexThread(message: string | undefined, threadId: string | undefined) {
@@ -92,7 +92,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   const paths = [...new Set([runDirectory, boardData, ...(task.git ? gitAccessPaths(cwd, task.git.branch) : [])])];
   const settings = await callCli<BoardSettings>(project, ["settings"]);
   if (!settings.ok) throw new Error(settings.error.message);
-  const developerInstructions = executorInstructions() + "\nCurrent board reviewMode: " + boardReviewMode(settings.data) + ". Read settings again if it changes.";
+  const repairInstructions = task.acceptanceRepair ? "\nThis is conflict repair for a user's pending acceptance. Keep the card in review. Merge the recorded target in the assigned worktree, resolve conflicts without changing requirements, run all required project checks and submit evidence. Report any failed check, missing access or product decision with block; never claim success with unresolved limitations. Successful submission continues the user's acceptance automatically. " : "";
+  const developerInstructions = repairInstructions + executorInstructions() + "\nCurrent board reviewMode: " + boardReviewMode(settings.data) + ". Read settings again if it changes.";
   const worklog = boardWorklog(project, "executor", task.id);
   const readOnlyWorktrees = [join(boardData, "worktrees")];
   const isolatedRoot = join(dirname(boardData), isolatedWorktreesDirectory);

@@ -138,6 +138,24 @@ app.whenReady().then(async () => {
   await evaluate(`byId('notice-close').click(); void 0`);
   await evaluate(`push(); void 0`);
   await check(`byId('welcome').hidden && !byId('workspace').hidden && byId('app-content').getAttribute('aria-busy') === 'false'`, "a restored board replaces the loading state");
+  if (process.argv.includes("--repair-only")) {
+    for (const theme of ["dark", "light"]) for (const phase of ["queued", "running", "checking", "failed"]) {
+      nativeTheme.themeSource = theme;
+      await evaluate(`
+        fixture.theme = ${JSON.stringify(theme)};
+        fixture.board.tasks = [task('T-0001', 'Ремонт приёмки', { status: 'review', mergeRepair: true,
+          acceptanceRepair: { phase: ${JSON.stringify(phase)}, targetHead: 'a'.repeat(40), attempts: 1,
+            message: 'fix: integrate result', reason: ${phase === "failed" ? "'Required check failed'" : "undefined"} } })];
+        push(); void 0;
+      `);
+      await evaluate(`showReview(fixture.board.tasks[0]); settle()`);
+      await check(`sheet.open && sheetKind === 'review' && body.querySelector('form button[type=submit]') !== null`, 'repair phase shows cancellation');
+      await check(`lane('review').querySelectorAll('.task-card').length === 1 && lane('in_progress').querySelectorAll('.task-card').length === 0`, 'repair remains in review');
+      await capture(`repair-${theme}-${phase}.png`);
+    }
+    console.log(`Acceptance repair Chromium checks passed: ${checks}`);
+    return;
+  }
   if (process.argv.includes("--scroll-only")) {
     await evaluate(`
       fixture.board.tasks = Array.from({ length: 40 }, (_, i) => task('S-' + i, 'Scroll task ' + i,

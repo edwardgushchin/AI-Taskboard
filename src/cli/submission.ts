@@ -113,7 +113,7 @@ function resultOf(input: Record<string, unknown>): SubmitIntent["result"] {
 export function previewTask(store: BoardStore, id: string, revision?: number): Task {
   const task = store.card(id);
   requireRevision(task, revision);
-  requireState(task, ["in_progress"]);
+  requireState(task, task.acceptanceRepair?.phase === "running" ? ["review"] : ["in_progress"]);
   if (exists(store.pendingPath(id))) {
     throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before preparing a new submission.");
   }
@@ -168,7 +168,7 @@ function readIntent(path: string, task: Task): SubmitIntent | undefined {
   if (!exists(path)) return undefined;
   const data = object(readJson(path));
   if (data.action !== "submit") throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation first.");
-  if ((task.status === "review" ? task.revision - 1 : task.revision) !== data.revision) {
+  if ((task.status === "review" && task.acceptanceRepair?.phase !== "running" ? task.revision - 1 : task.revision) !== data.revision) {
     throw new TaskboardError("PENDING_OPERATION", "The interrupted submission does not match the task revision.");
   }
   const snapshot = object(data.snapshot);
@@ -201,10 +201,21 @@ function directorySubmissionToken(task: Task) {
 
 export function submitTask(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
   if (task.schedule) throw new TaskboardError("INVALID_TRANSITION", "Record the recurring task result with progress instead of submitting it for review.");
+  if (task.acceptanceRepair?.phase === "running") {
+    if (input.noChanges === true) throw new TaskboardError("INVALID_INPUT", "Submit the repaired Git commit with its evidence.");
+    if (!strings(input.checks, "checks").length || strings(input.limitations ?? [], "limitations").length) {
+      throw new TaskboardError("CHECKS_REQUIRED", "Report successful required checks without unresolved limitations before continuing acceptance.");
+    }
+    const repo = requireRepository(store.location.repository);
+    const head = resolveCommit(repo.root, task.git!.branch)!;
+    if (!isAncestor(repo.root, task.acceptanceRepair.targetHead, head)) {
+      throw new TaskboardError("TARGET_CHANGED", "Merge the repair target and run the required checks before submitting.");
+    }
+  }
   const pendingPath = store.pendingPath(task.id);
   let intent = readIntent(pendingPath, task);
   if (!intent) requireRevision(task, input.revision);
-  if (task.status !== "review" || !intent) requireState(task, ["in_progress"]);
+  if (task.status !== "review" || !intent) requireState(task, task.acceptanceRepair?.phase === "running" ? ["review"] : ["in_progress"]);
   if (task.workingDirectory && !task.git) {
     if (intent) throw new TaskboardError("PENDING_OPERATION", "This task has an unfinished Git operation.");
     if (input.noChanges !== true || input.message !== undefined) {

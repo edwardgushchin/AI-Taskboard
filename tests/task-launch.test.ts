@@ -16,7 +16,7 @@ const parsed = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, tr
 const names = new Set(["launchTask", "recordRunFailure", "publishRunActivity", "notifyRunChange", "saveTaskTokenUsage",
   "beginOperation", "confirmProjectClose", "projectOperations", "closingProjects", "launchingTasks", "runningTasks", "runActivityByTask",
   "activeAgents", "chatRuns", "windowStates", "executorBusy", "reserveAgent", "scheduleAgentWork", "scheduleRecurringTasks",
-  "deferredExecutors", "schedulingAgentWork", "taskRunLimit"]);
+  "deferredExecutors", "schedulingAgentWork", "taskRunLimit", "acceptanceWork", "continueAcceptance"]);
 const lifecycle = parsed.statements.filter(node => {
   if (ts.isFunctionDeclaration(node)) return node.name && names.has(node.name.text);
   return ts.isVariableStatement(node) && node.declarationList.declarations.some(declaration =>
@@ -76,12 +76,22 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
         if (input.revision !== task.revision) return failure("REVISION_CONFLICT", "The task changed.");
         if (input.scheduled) { task.status = "in_progress"; task.revision++; }
         if (input.resolveConflicts && task.status === "review") {
-          task.status = "in_progress";
+          task.status = task.acceptanceRepair ? "review" : "in_progress";
+          if (task.acceptanceRepair) task.acceptanceRepair.phase = "running";
           task.revision++;
           task.mergeRepair = true;
         }
         const execution = task.execution ?? { provider: "codex", model: "executor-model", effort: "low" };
         return { ok: true, data: { task: { ...structuredClone(task), execution }, worktree: task.git!.worktree } };
+      }
+      if (args[0] === "review") return { ok: true, data: { revision: task.revision, targetHead: task.acceptanceRepair?.targetHead } };
+      if (args[0] === "accept") {
+        if (input.revision !== task.revision) return failure("REVISION_CONFLICT", "Changed");
+        if (input.repairFailure && task.acceptanceRepair) {
+          task.acceptanceRepair.phase = "failed"; task.acceptanceRepair.reason = input.repairFailure; task.revision++;
+        } else if (input.continueRepair && task.acceptanceRepair?.phase === "checking") {
+          task.status = "done"; delete task.acceptanceRepair; task.revision++;
+        }
       }
       if (args[0] === "block") {
         if (task.status !== "in_progress") return failure("INVALID_TRANSITION", "The task is no longer in progress.");
@@ -633,4 +643,48 @@ test("new-chat continuation requires an explicit confirmation and a matching blo
   task.status = "review";
   assert.equal((await handler!({}, "T-0001", { newThread: true })).error.code, "INVALID_INPUT");
   assert.equal(launches, 1);
+});
+
+
+test("pending user acceptance waits for the shared reviewer pool with auto mode off", async () => {
+  const f = fixture("started");
+  f.task.acceptanceRepair = { phase: "queued", targetHead: "a".repeat(40), attempts: 0, message: "fix: integrate result" };
+  f.task.mergeRepair = true;
+  const agentLimits = { executor: 1, reviewer: 1 };
+  f.savedSettings.set("project", { agentLimits });
+  f.subscriptions.set("project", { board: { tasks: [f.task], settings: { autoMode: false, agentLimits } }, listeners: [], tabs: new Set([1, 2]) });
+  const release = f.slots.acquire("project", "reviewer", agentLimits, "review:other")!;
+  f.runtime.scheduleRecurringTasks();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.launched.length, 0);
+  assert.equal(f.task.status, "review");
+  assert.equal(f.slots.available("project", "executor", agentLimits), 1);
+  release();
+  f.runtime.scheduleRecurringTasks(); f.runtime.scheduleRecurringTasks();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.launched.length, 1);
+  assert.equal(f.slots.available("project", "reviewer", agentLimits), 0);
+  assert.equal(f.slots.available("project", "executor", agentLimits), 1);
+  assert.equal(f.task.status, "review");
+  delete f.task.acceptanceRepair;
+  f.completion.resolve(undefined);
+  await new Promise(resolve => setImmediate(resolve));
+});
+
+
+test("restored acceptance completes checked results once and stops an orphaned repair", async () => {
+  for (const phase of ["checking", "running"] as const) {
+    const f = fixture("started");
+    f.task.acceptanceRepair = { phase, targetHead: "a".repeat(40), attempts: 1, message: "fix: integrate result" };
+    f.subscriptions.set("project", { board: { tasks: [f.task], settings: { autoMode: false } }, listeners: [], tabs: new Set([1, 2]) });
+    f.runtime.scheduleRecurringTasks(); f.runtime.scheduleRecurringTasks();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.launched.length, 0);
+    assert.equal(f.calls.filter(call => call.args[0] === "accept").length, 1);
+    assert.equal(f.task.status, phase === "checking" ? "done" : "review");
+    if (phase === "running") assert.equal(f.task.acceptanceRepair?.phase, "failed");
+    f.runtime.scheduleRecurringTasks();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.calls.filter(call => call.args[0] === "accept").length, 1);
+  }
 });
