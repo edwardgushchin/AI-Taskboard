@@ -43,6 +43,8 @@ contextBridge.exposeInMainWorld("taskboard", {
   themes: () => ipcRenderer.invoke("appearance:themes"),
   setTheme: theme => ipcRenderer.invoke("appearance:theme", theme),
   onTheme: listener => { ipcRenderer.on("appearance:changed", (_event, theme) => listener(theme)); },
+  onProviderLimitsChanged: listener => { ipcRenderer.on("providers:changed", () => listener()); },
+  providerLimits: () => ipcRenderer.invoke("providers:limits"),
   codexStatus: () => ipcRenderer.invoke("codex:status"),
   executionModels: () => ipcRenderer.invoke("codex:executionModels"),
   setTaskAccess: (project, id, createdAt, fullAccess) => ipcRenderer.invoke("codex:taskAccess", project, id, createdAt, fullAccess),

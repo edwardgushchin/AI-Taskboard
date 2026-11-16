@@ -1033,3 +1033,10 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 #status-agents-tooltip { display: none; position: absolute; bottom: 100%; right: 0; z-index: 100; width: max-content; max-width: calc(100vw - 16px); white-space: pre-wrap; overflow-wrap: anywhere; padding: 8px; background: var(--bg); color: var(--text); border: 1px solid currentColor; border-radius: 4px; }
 #status-agents:hover #status-agents-tooltip, #status-agents:focus #status-agents-tooltip { display: block; }
 #status-agents:focus-visible { outline: 1px solid currentColor; }
+#status-limits { flex: 0 1 150px; min-width: 36px; max-width: 150px; min-height: 22px; height: 24px; padding: 0 4px; border: 0; border-radius: 3px; background: transparent; color: inherit; font: inherit; }
+#status-limits span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#status-limits.quota-low { font-weight: bold; text-decoration: underline dotted; }
+#provider-limits { position: fixed; inset: auto 8px 42px auto; margin: 0; width: min(390px, calc(100vw - 24px)); max-height: min(65vh, 500px); overflow: auto; padding: 16px; color: var(--text); background: var(--toolbar); border: 1px solid var(--muted); border-radius: 5px; }
+#provider-limits h3, #provider-limits h4 { margin: 8px 0; }
+#provider-limits p { overflow-wrap: anywhere; }
+#provider-limits meter { width: 100%; }
