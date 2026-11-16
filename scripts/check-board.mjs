@@ -676,6 +676,21 @@ app.whenReady().then(async () => {
     await evaluate(`fixture.board.gitInfo = { branch: 'main', head: '0123456789abcdef' }; push(); void 0`);
     await check(`byId('status-branch').textContent === 'main' && !byId('status-publish').hidden && byId('status-tracking').hidden`,
       "a branch without tracking shows the publication control");
+    await evaluate(`
+      const publicationCalls = [];
+      window.taskboard.command = async (action, _id, input) => {
+        if (action === 'git-refs') return { ok: true, data: fixture.board.gitInfo };
+        publicationCalls.push({ action, input });
+        return { ok: true, data: { remote: 'https://github.com/example/project' } };
+      };
+      byId('status-publish').click(); waitFor(() => sheet.open);
+    `);
+    await check(`body.querySelector('form input').value && body.textContent.includes('main')`,
+      "publication still opens its repository form for the current branch");
+    await evaluate(`body.querySelector('form').requestSubmit(); waitFor(() => !sheet.open)`);
+    await check(`publicationCalls.length === 1 && publicationCalls[0].action === 'git-publish' &&
+      publicationCalls[0].input.branch === 'main' && !byId('status-publish').disabled`,
+      "publication submits the branch and restores its button without a user element");
     await evaluate(`fixture.board.gitInfo.tracking = { behind: 0, ahead: 19 }; push(); void 0`);
     await check(`!byId('status-tracking').hidden && byId('status-publish').hidden &&
       byId('status-tracking').textContent === '0↓ 19↑' &&
@@ -746,6 +761,38 @@ app.whenReady().then(async () => {
     await evaluate(`delete fixture.board.gitInfo.branch; push(); void 0`);
     await check(`byId('status-branch').textContent === '01234567' && byId('status-publish').hidden && byId('status-tracking').hidden`,
       "detached HEAD shows the commit hash and keeps the Git menu available");
+    for (const theme of ["dark", "github-light"]) {
+      for (const width of [1380, 760]) {
+        window.setContentSize(width, 760);
+        await evaluate(`fixture.theme = '${theme}'; void 0`);
+        for (const git of [undefined, { branch: 'main' },
+          { branch: 'main', head: '0123456789abcdef' },
+          { head: '0123456789abcdef' },
+          { branch: 'main', head: '0123456789abcdef', tracking: { behind: 1, ahead: 2 } }]) {
+          await evaluate(`
+            fixture.board.gitInfo = ${JSON.stringify(git)};
+            if (fixture.board.gitInfo) fixture.board.gitInfo.user = 'Developer';
+            push();
+            window.pushBoard({ ...fixture, project: 'other-board' });
+            push(); settle();
+          `);
+          await check(`document.documentElement.dataset.theme === '${theme}' &&
+            !byId('status-user') && !document.querySelector('.status-bar .codicon-account') &&
+            !document.querySelector('.status-bar').textContent.includes('Developer') &&
+            document.querySelector('.status-activity').previousElementSibling.id === 'git-branches' &&
+            (() => {
+              const bar = document.querySelector('.status-bar').getBoundingClientRect();
+              const group = document.querySelector('.status-repository').getBoundingClientRect();
+              const bell = byId('status-notifications').getBoundingClientRect();
+              return bar.bottom === innerHeight && bell.right <= innerWidth &&
+                bell.left >= group.right && Math.abs(bell.top + bell.height / 2 - (bar.top + bar.height / 2)) <= 1;
+            })()`, theme + ' ' + width + ': refresh and project switches retain aligned controls without a user or its spacing');
+        }
+        await capture('status-bar-' + theme + '-' + width + '.png');
+      }
+    }
+    await evaluate(`byId('status-notifications').click(); settle()`);
+    await check(`byId('notifications').matches(':popover-open')`, "the review notification menu still opens after refresh and project switches");
     console.log("Git status Chromium checks passed: " + checks);
     return;
   }
@@ -2279,7 +2326,7 @@ app.whenReady().then(async () => {
     !questionPopup()`, "the user can reopen the popup and send a custom answer");
   await check(`!byId('search') && !byId('filters') && !byId('create') && !byId('board-actions')`, "top search, global filters and creation button are removed");
   await check(`byId('lanes').children.length === 7 && getComputedStyle(lane('ready')).backgroundColor === 'rgba(0, 0, 0, 0)'`, "reference composition uses seven open columns");
-  await check(`!byId('status-branch').hidden && byId('status-branch').textContent === 'main' && !byId('status-user').hidden && byId('status-user').textContent === 'Developer' && !byId('status-notifications').hidden && document.querySelector('.status-bar').getBoundingClientRect().bottom === innerHeight`, "status bar retains Git branch, user and notifications at the bottom of the window");
+  await check(`!byId('status-branch').hidden && byId('status-branch').textContent === 'main' && !byId('status-user') && !document.querySelector('.status-bar .codicon-account') && !byId('status-notifications').hidden && document.querySelector('.status-bar').getBoundingClientRect().bottom === innerHeight`, "status bar retains Git branch and notifications without a user block at the bottom of the window");
   await check(`document.fonts.check('16px codicon') && ['.codicon-git-branch', '.codicon-cloud-upload'].every(selector => { const node = document.querySelector(selector); return getComputedStyle(node).fontFamily === 'codicon' && getComputedStyle(node, '::before').content.length > 2 && node.getBoundingClientRect().width === 16; })`, "status Git branch and publication icons load the actual Codicons font and glyphs");
   await check(`byId('project-tabs').getAttribute('aria-orientation') === 'vertical' && byId('project-tabs').getBoundingClientRect().right <= byId('app-content').getBoundingClientRect().left`, "project tabs form a vertical rail to the left of the board");
   await check(`getComputedStyle(byId('project-tabs').querySelector('[role=tab]')).writingMode === 'vertical-rl'`, "project names are rotated vertically");

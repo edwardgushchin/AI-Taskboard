@@ -974,7 +974,6 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 @media (prefers-reduced-motion: no-preference) {
   .status-tracking[aria-busy="true"] .codicon { animation: agent-spin .8s linear infinite; }
 }
-#status-user { margin-inline-start: 6px; }
 .status-activity { margin-inline-start: auto; flex: none; display: flex; align-items: center; gap: 4px; }
 #status-agents { display: flex; align-items: center; gap: 4px; padding-inline: 4px; font-variant-numeric: tabular-nums; }
 .git-branches {
