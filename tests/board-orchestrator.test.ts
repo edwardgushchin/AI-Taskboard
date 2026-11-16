@@ -26,7 +26,8 @@ import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import { settingsDelivery, syncSettingsNotices } from "../src/desktop/settings-notices.ts";
 import { githubReadTool } from "../src/desktop/github-read.ts";
-import { executorFullAccess, managerFullAccess, setTaskExecutorAccess } from "../src/desktop/codex.ts";
+import { executorFullAccess, managerAccess, setTaskExecutorAccess } from "../src/desktop/codex.ts";
+import type { ManagerAccess } from "../src/desktop/codex.ts";
 
 process.env.GIT_CEILING_DIRECTORIES = realpathSync(tmpdir());
 process.env.GIT_CONFIG_NOSYSTEM = "1";
@@ -74,7 +75,8 @@ function fixture(t: TestContext) {
   type GoalControl = (action: BoardGoalAction) => Promise<BoardGoal | null>;
   type GoalRequest = { objective?: string; resume?: boolean; accepted: () => void; delivered: (id: string) => void; controls: (control: GoalControl) => void;
     update: (goal: BoardGoal | null) => void; activity: (items: RunActivity[]) => void; settings?: ChatSettings | null;
-    enableNotifications: (steer?: (text: string, images: string[]) => Promise<void>) => void; endTurn: () => void };
+    enableNotifications: (steer?: (text: string, images: string[]) => Promise<void>) => void; endTurn: () => void;
+    access?: ManagerAccess; confirmApproval?: (details: string) => Promise<boolean> };
   type Reply = (action: RunAction, prompt: string, images: string[], id?: string, context?: any,
     waiting?: (waiting: boolean) => void, signal?: AbortSignal, goal?: GoalRequest) => Promise<{ text: string } | { interrupted: true }>;
   let respond: Reply;
@@ -104,7 +106,7 @@ function fixture(t: TestContext) {
     activeRunSummary, runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
     AbortSignal, AbortController, ArrayBuffer, Buffer, Error, basename, dirname, extname, join, mkdtemp, rm, writeFile, maxAttachmentBytes, boardActions, boardInstructions, boardTools, callCli,
     githubReadTool, readBoardGitHub: (cwd: string, args: unknown) => callCli(cwd, ["github-read"], args),
-    executorFullAccess, managerFullAccess, setTaskExecutorAccess,
+    executorFullAccess, managerAccess, setTaskExecutorAccess,
     autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, defaultBoardAgents, reviewVerifier,
     existsSync, storageDirectory, readdirSync, rmSync, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
     goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryForView, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, saveManagerHistory,
@@ -169,7 +171,7 @@ function fixture(t: TestContext) {
     replyToBoard: async (_profile: string, cwd: string, prompt: string, images: string[], action: RunAction,
       _tools: unknown, instructions: string, _signal: AbortSignal,
       session: { id?: string; title: string; save: (id: string) => void; attachmentContext?: string; mcpTools: { name: string; description: string }[];
-        separateTurn?: boolean;
+        separateTurn?: boolean; access?: ManagerAccess; confirmApproval?: (details: string) => Promise<boolean>;
         onWaiting: (waiting: boolean) => void; onTurnEnded: () => void; goal?: string; resumeGoal?: boolean; onGoalSet: () => void;
         onControl: (control: { steer: (text: string, images: string[], id?: string) => Promise<void>; interrupt: () => Promise<void> }) => void;
         onMessage: (id: string) => void; onActivity: (items: RunActivity[]) => void;
@@ -210,7 +212,7 @@ function fixture(t: TestContext) {
       return respond(action, prompt, images, session.id, session.attachmentContext && JSON.parse(session.attachmentContext),
         session.onWaiting, _signal, { objective: session.goal, resume: session.resumeGoal, accepted: session.onGoalSet, delivered: session.onMessage,
           controls: session.onGoalControl, update: session.onGoal, activity: session.onActivity,
-          settings: session.settings, endTurn: session.onTurnEnded,
+          settings: session.settings, endTurn: session.onTurnEnded, access: session.access, confirmApproval: session.confirmApproval,
           enableNotifications: steer => session.onControl({
             steer: async (text, images, id) => {
               if (steer) await steer(text, images);
@@ -443,6 +445,28 @@ test("a manager question returns the user's answer to the active request exactly
   const result = await request;
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(result.data.answer, "Understood.");
+  assert.equal(f.pendingQuestion(), undefined);
+});
+
+test("manager manual approval asks the user and accepts only one of the displayed decisions", async t => {
+  const f = fixture(t);
+  await f.cli(["init"]);
+  managerAccess(f.folder, f.project, "ask");
+  const shown = Promise.withResolvers<void>();
+  const request = f.run("Check the project", async (_action, _prompt, _images, _id, _context, _waiting, _signal, manager) => {
+    assert.equal(manager?.access, "ask");
+    const decision = manager!.confirmApproval!("Get-ChildItem");
+    shown.resolve();
+    assert.equal(await decision, true);
+    return { text: "Done." };
+  });
+  await shown.promise;
+  const question = f.pendingQuestion();
+  assert.equal(question.approval, true);
+  assert.equal(question.text, "Get-ChildItem");
+  assert.equal((await f.answerQuestion(question.id, "yes")).error.code, "INVALID_INPUT");
+  assert.equal((await f.answerQuestion(question.id, "Allow once")).ok, true);
+  assert.equal((await request).ok, true);
   assert.equal(f.pendingQuestion(), undefined);
 });
 
