@@ -13,6 +13,7 @@ import { recordSettings, settingsContext } from "../src/cli/settings-notices.ts"
 import { checkWaitInstructions } from "../src/desktop/check-wait.ts";
 import { managerCliContext } from "../src/desktop/manager-cli.ts";
 import { readOnlyGitOptions } from "../src/cli/repository.ts";
+import { githubReadTool } from "../src/desktop/github-read.ts";
 
 const baseline = process.argv[2] ?? "91ebf597d98532c9cf26da9e80e4828f019428cf";
 const variant = process.argv[3] ?? "fallback";
@@ -39,7 +40,7 @@ for (const before of [true, false]) {
       const settings = settingsContext(recordSettings({ reviewMode }));
       const measured = runInNewContext(board + "\n" + stripTypeScriptTypes(goals + assembly) +
         "\n({ instructions, tools: [...(reviewIds ? [] : boardTools), ...mcpTools] })", {
-        ...model, taskFields, russianWriting, reviewMode, managerReviews: reviewMode === "manager",
+        ...model, taskFields, russianWriting, githubReadTool, reviewMode, managerReviews: reviewMode === "manager",
         reviewIds: role === "automatic" ? ["T-0001"] : undefined, goal: role === "goal",
       });
       const context = before || role === "automatic" ? undefined : managerCliContext(measured.tools, availability);
@@ -54,7 +55,7 @@ for (const before of [true, false]) {
     }
   }
 }
-// These two roles are unchanged by T-0087. Evaluate their real instruction expressions.
+// Evaluate the independent reviewer's and executor's instruction expressions.
 const chat = read("src/desktop/codex-chat.ts", false);
 const reviewerStart = chat.indexOf('boardAgentInstructions("reviewer", [');
 const reviewerEnd = chat.indexOf('].join(" "))', reviewerStart) + '].join(" "))'.length;
@@ -69,8 +70,13 @@ const executor = runInNewContext(stripTypeScriptTypes(executorFunction) + "\nexe
   taskboardCliLaunch: () => [process.execPath, "--disable-warning=ExperimentalWarning",
     fileURLToPath(new URL("../src/cli/main.ts", import.meta.url))],
 });
-for (const [role, instructions, schemas] of [["reviewer", reviewer, 5], ["executor", executor, 3]] as const) {
-  for (const version of [baseline, "working-tree"]) results.push({ version, role, reviewMode: "n/a", schemas,
-    characters: instructions.length, utf8Bytes: Buffer.byteLength(instructions), names: [] });
+for (const before of [true, false]) {
+  const definitions = /openBoardMcp\(\[([^\]]+)\]/.exec(before ? read("src/desktop/codex-run.ts", true) : run);
+  if (!definitions) throw new Error("Could not find the executor's MCP tools.");
+  const executorSchemas = definitions[1]!.split(",").length;
+  for (const [role, instructions, schemas] of [["reviewer", reviewer, 5], ["executor", executor, executorSchemas]] as const) {
+    results.push({ version: before ? baseline : "working-tree", role, reviewMode: "n/a", schemas,
+      characters: instructions.length, utf8Bytes: Buffer.byteLength(instructions), names: [] });
+  }
 }
 console.log(JSON.stringify({ method: "UTF-16 code units and UTF-8 bytes; main.ts assembly + default settingsContext + boardAgentInstructions + verified-tool variant; no settings history; no token estimate; provider builtins/apps excluded", variant, results }, null, 2));

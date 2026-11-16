@@ -11,6 +11,7 @@ import { directory } from "../cli/storage.ts";
 import { runActivity } from "./run-activity.ts";
 import { boardAgentInstructions, boardCodexArgs, boardWorklog, worklogReminder, worklogTool } from "./board-agent-hooks.ts";
 import { openBoardMcp } from "./board-mcp.ts";
+import { githubReadTool, readBoardGitHub } from "./github-read.ts";
 import { checkWaitInstructions, checkWaitTool, executorToolTimeoutSeconds, waitForCheck } from "./check-wait.ts";
 import { executorToolConfig, verifyExecutorTools } from "./provider-tools.ts";
 import { callCli } from "./cli.ts";
@@ -92,11 +93,14 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   }
   const requestTool = { name: "task_tool_request", description: "Request a missing provider MCP tool for this task. The manager receives a question. Assignment requires a restarted task run; provider permissions still apply.",
     inputSchema: { type: "object", properties: { server: { type: "string" }, tool: { type: "string" }, reason: { type: "string" } }, required: ["server", "tool", "reason"], additionalProperties: false } };
-  const mcp = await openBoardMcp([worklogTool, checkWaitTool, requestTool], async (name, args, requestSignal) => name === requestTool.name
-    ? worklog.remind(await callCli(project, ["tool-request", task.id, "--compact"], args))
-    : name === checkWaitTool.name
-    ? worklog.remind(await waitForCheck(runDirectory, args, signal ? AbortSignal.any([signal, requestSignal]) : requestSignal))
-    : worklog.submit(args), executorToolTimeoutSeconds);
+  const mcp = await openBoardMcp([worklogTool, checkWaitTool, requestTool, githubReadTool], async (name, args, requestSignal) => {
+    if (name === requestTool.name) return worklog.remind(await callCli(project, ["tool-request", task.id, "--compact"], args));
+    if (name === checkWaitTool.name) {
+      return worklog.remind(await waitForCheck(runDirectory, args, signal ? AbortSignal.any([signal, requestSignal]) : requestSignal));
+    }
+    if (name === githubReadTool.name) return worklog.remind(await readBoardGitHub(project, args));
+    return worklog.submit(args);
+  }, executorToolTimeoutSeconds);
   let child: ChildProcessWithoutNullStreams;
   let runTemp: string | undefined;
   const removeRunTemp = async () => {

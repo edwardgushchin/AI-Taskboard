@@ -5,6 +5,7 @@ import { githubRepositoryPattern, member, number, object, TaskboardError, text }
 import type { BoardLocation } from "./storage.ts";
 import { onBoard } from "./storage.ts";
 import { requireNoGitOperation } from "./worktree.ts";
+import { githubApi } from "./github-cli.ts";
 
 const execute = promisify(execFile);
 const commitId = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -27,21 +28,9 @@ export async function githubMilestones(location: BoardLocation, selected?: { rep
   if (!repository || (selected && selected.repository !== repository)) {
     throw new TaskboardError("GITHUB_REMOTE_REQUIRED", "Choose a milestone from the GitHub repository configured as origin.");
   }
-  const args = selected ? ["api", "--hostname", "github.com", "repos/" + repository + "/milestones/" + selected.number] :
-    githubMilestoneArgs(repository);
-  let response: unknown;
-  try {
-    const { stdout } = await execute("gh", args, {
-      cwd: location.root, env: { ...process.env, GH_PROMPT_DISABLED: "1" },
-      windowsHide: true, timeout: 20_000, maxBuffer: 8 * 1024 * 1024,
-    });
-    response = JSON.parse(stdout);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      throw new TaskboardError("GITHUB_UNAVAILABLE", "Install GitHub CLI (gh) and sign in.");
-    }
-    throw new TaskboardError("GITHUB_MILESTONES_FAILED", "Could not read GitHub milestones. Check access, connection and whether the milestone still exists.");
-  }
+  const args = selected ? ["repos/" + repository + "/milestones/" + selected.number] : githubMilestoneArgs(repository).slice(3);
+  const endpoint = args.pop()!;
+  const response = await githubApi(location.root)(endpoint, args, "GITHUB_MILESTONES_FAILED");
   const entries: unknown[] = selected ? [response] : Array.isArray(response) ? response.flat() : [];
   if (!selected && !Array.isArray(response)) throw new TaskboardError("GITHUB_MILESTONES_FAILED", "Invalid milestone response.");
   return { repository, milestones: entries.map(entry => {
@@ -49,6 +38,23 @@ export async function githubMilestones(location: BoardLocation, selected?: { rep
     const state = member(fields.state, ["open", "closed"] as const, "state");
     return { number: number(fields.number, "milestone number", 1), title: text(fields.title, "milestone title", true), state };
   }) };
+}
+
+export async function readGitHub(location: BoardLocation, input: Record<string, unknown>) {
+  if (Object.keys(input).some(key => key !== "view")) {
+    throw new TaskboardError("INVALID_INPUT", "Use only the view field.");
+  }
+  const view = member(input.view, ["account", "repository"], "GitHub view");
+  if (view === "account") {
+    const account = object(await githubApi(location.root)("user"));
+    return { login: text(account.login, "GitHub login") };
+  }
+  const repository = githubRepository(location);
+  if (!repository) throw new TaskboardError("GITHUB_REMOTE_REQUIRED", "The board's origin must identify a GitHub repository.");
+  const fields = object(await githubApi(location.root)("repos/" + repository));
+  if (typeof fields.private !== "boolean") throw new TaskboardError("GITHUB_READ_FAILED", "GitHub returned invalid repository metadata.");
+  return { repository: text(fields.full_name, "GitHub repository"), private: fields.private,
+    defaultBranch: text(fields.default_branch, "default branch") };
 }
 
 function repositoryPath(location: BoardLocation): string {

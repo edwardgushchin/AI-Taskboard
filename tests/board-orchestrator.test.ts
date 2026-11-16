@@ -24,6 +24,7 @@ import { goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryFor
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import { settingsDelivery, syncSettingsNotices } from "../src/desktop/settings-notices.ts";
+import { githubReadTool } from "../src/desktop/github-read.ts";
 
 process.env.GIT_CEILING_DIRECTORIES = realpathSync(tmpdir());
 process.env.GIT_CONFIG_NOSYSTEM = "1";
@@ -99,6 +100,7 @@ function fixture(t: TestContext) {
   const runtime = runInNewContext(handlerSource + "\n({ frame, scheduleAutoReview, boardRequests, boardWorkRequests, managerQuestion })", {
     runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
     AbortSignal, AbortController, ArrayBuffer, Buffer, Error, basename, dirname, extname, join, mkdtemp, rm, writeFile, maxAttachmentBytes, boardActions, boardInstructions, boardTools, callCli,
+    githubReadTool, readBoardGitHub: (cwd: string, args: unknown) => callCli(cwd, ["github-read"], args),
     autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, defaultBoardAgents, reviewVerifier,
     existsSync, storageDirectory, readdirSync, rmSync, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
     goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryForView, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, saveManagerHistory,
@@ -185,7 +187,7 @@ function fixture(t: TestContext) {
         "task_cancel", "provider_tools", "task_tool_grant", "task_tool_revoke", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_approve", "task_wait", "task_review_queue", "task_review", "task_review_diff",
         "task_review_artifact", "task_accept", "task_request_changes",
         "task_cleanup_status", "task_cleanup", "project_git", "project_git_push",
-        "milestones_list", "task_set_milestone", "tag_set_color",
+        "milestones_list", "task_set_milestone", "tag_set_color", "github_read",
       ];
       const mode = boardReviewMode((await callCli(project, ["settings"], undefined, false)).data);
       assert.deepEqual(Array.from(session.mcpTools, tool => tool.name).sort(),
@@ -347,6 +349,21 @@ test("manager milestone tools use the board origin and return per-card results",
     return { text: "No milestone is set." };
   });
   assert.equal(result.data?.answer, "No milestone is set.", JSON.stringify(result.error ?? result.data?.error));
+});
+
+test("GitHub read is routed to the board host on new and continued manager requests", async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"])).ok, true);
+  for (const goal of [false, false, true]) {
+    const reply = await f.run("Read origin", async (act, _prompt, _images, _id, _context, _waiting, _signal, work) => {
+      if (goal) work!.accepted();
+      const result = await act("github_read", { view: "repository" });
+      assert.equal(result.error.code, "GITHUB_REMOTE_REQUIRED");
+      return { text: "No GitHub origin." };
+    }, [], goal);
+    assert.ok(reply.ok, JSON.stringify(reply.error));
+  }
+  assert.equal(f.cliCalls.filter(([name]) => name === "github-read").length, 3);
 });
 
 test("a manager question returns the user's answer to the active request exactly once", async t => {

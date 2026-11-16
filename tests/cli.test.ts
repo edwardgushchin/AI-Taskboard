@@ -3,7 +3,7 @@ import childProcess, { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, rmdirSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { syncBuiltinESMExports } from "node:module";
 import { promisify } from "node:util";
 import { createInterface } from "node:readline";
@@ -279,6 +279,9 @@ test("GitHub publication validates input, preserves partial results and pins pus
 
 test("GitHub milestones can be listed, assigned and cleared on local tasks", t => {
   const root = fixture(t, true);
+  const tools = fixture(t);
+  const executable = join(tools, process.platform === "win32" ? "gh.exe" : "gh");
+  writeFileSync(executable, "");
   cli(root, ["init"]);
   const task = cli(root, ["create"], { title: "Prepare the release" });
   cli(root, ["milestones"], undefined, "GITHUB_REMOTE_REQUIRED");
@@ -290,7 +293,7 @@ test("GitHub milestones can be listed, assigned and cleared on local tasks", t =
     import { promisify } from 'node:util';
     let requests = 0;
     cp.execFile = Object.assign(() => {}, { [promisify.custom]: async (cmd, args) => {
-      assert.equal(cmd, 'gh');
+      assert.equal(cmd, ${JSON.stringify(executable)});
       assert.equal(++requests, 1);
       assert.deepEqual(args.slice(0, 3), ['api', '--hostname', 'github.com']);
       const open = { number: 5, title: 'Версия 1.0', state: 'open' };
@@ -309,7 +312,8 @@ test("GitHub milestones can be listed, assigned and cleared on local tasks", t =
   const call = (args: string[], input?: unknown) => {
     const result = spawnSync(process.execPath, ["--import", "data:text/javascript," + encodeURIComponent(mock),
       ...commandArgs(root, args, input)], {
-      env, encoding: "utf8", input: input === undefined ? undefined : JSON.stringify(input), windowsHide: true,
+      env: { ...env, PATH: tools + delimiter + process.env.PATH }, encoding: "utf8",
+      input: input === undefined ? undefined : JSON.stringify(input), windowsHide: true,
     });
     assert.ok(result.stdout, result.stderr);
     return JSON.parse(result.stdout);
@@ -353,6 +357,86 @@ test("GitHub milestones can be listed, assigned and cleared on local tasks", t =
   git(root, "remote", "remove", "origin");
   cli(root, ["milestone", task.id], { revision: saved.revision, milestone: null });
   assert.equal(cli(root, ["show", task.id]).milestone, undefined);
+});
+
+test("GitHub read uses fixed host requests and distinguishes credentials from repository access", t => {
+  const project = fixture(t, true);
+  const tools = fixture(t);
+  const executable = join(tools, process.platform === "win32" ? "gh.exe" : "gh");
+  writeFileSync(executable, "");
+  writeFileSync(join(project, process.platform === "win32" ? "gh.exe" : "gh"), "");
+  cli(project, ["init"]);
+  git(project, "remote", "add", "origin", "git@github.com:Owner/Example.git");
+  const worktree = join(tools, "linked");
+  git(project, "worktree", "add", "-b", "linked", worktree);
+  const mock = `
+    import cp from 'node:child_process';
+    import assert from 'node:assert/strict';
+    import { syncBuiltinESMExports } from 'node:module';
+    import { homedir } from 'node:os';
+    import { join } from 'node:path';
+    import { promisify } from 'node:util';
+    const mode = process.env.TASKBOARD_TEST_GITHUB;
+    let checkedIdentity = false;
+    cp.execFile = Object.assign(() => {}, { [promisify.custom]: async (cmd, args, options) => {
+      assert.equal(cmd, ${JSON.stringify(executable)});
+      assert.equal(options.cwd, homedir());
+      assert.equal(options.env.GH_CONFIG_DIR, join(homedir(), 'gh-test-profile'));
+      assert.equal(options.env.GH_PROMPT_DISABLED, '1');
+      assert.equal(options.env.GH_DEBUG, undefined);
+      const fail = stderr => { throw Object.assign(new Error('fixture-output'), { stderr, stdout: 'fixture-output' }); };
+      if (args[0] === 'auth') {
+        assert.equal(checkedIdentity, true);
+        assert.ok(args.includes('--json') && !args.includes('--show-token'));
+        assert.ok(!mode.startsWith('override'));
+        const source = ['keyring', 'unconfigured'].includes(mode) ? '' : 'keyring';
+        return { stdout: JSON.stringify([{ configured: mode !== 'unconfigured', tokenSource: source }]) };
+      }
+      assert.deepEqual(args.slice(0, 3), ['api', '--hostname', 'github.com']);
+      assert.equal(args.length, 4);
+      if (args[3] === 'user') {
+        checkedIdentity = true;
+        if (['keyring', 'expired', 'override', 'override-legacy', 'unconfigured', 'hidden-and-unauthorized'].includes(mode)) {
+          if (mode === 'override') assert.equal(options.env.GH_TOKEN, 'fixture-output');
+          if (mode === 'override-legacy') assert.equal(options.env.GITHUB_TOKEN, 'fixture-output');
+          fail('gh: Bad credentials (HTTP 401)');
+        }
+        return { stdout: JSON.stringify({ login: 'test-user', unrelated: 'fixture-output' }) };
+      }
+      assert.equal(args[3], 'repos/owner/example');
+      if (['hidden', 'hidden-and-unauthorized'].includes(mode)) fail('gh: Not Found (HTTP 404)');
+      if (mode === 'scope') fail('gh: Resource not accessible by personal access token (HTTP 403)');
+      return { stdout: JSON.stringify({ full_name: 'Owner/Example', default_branch: 'main', private: true, unrelated: 'fixture-output' }) };
+    } });
+    syncBuiltinESMExports();
+  `;
+  const read = (input: unknown, mode = "success", selected = project) => {
+    const child = spawnSync(process.execPath, ["--import", "data:text/javascript," + encodeURIComponent(mock),
+      ...commandArgs(selected, ["github-read"], input)], {
+      env: { ...env, PATH: [project, tools, process.env.PATH].join(delimiter), GH_CONFIG_DIR: "gh-test-profile",
+        GH_DEBUG: "api", GH_TOKEN: mode === "override" ? "fixture-output" : "",
+        GITHUB_TOKEN: mode === "override-legacy" ? "fixture-output" : "",
+        TASKBOARD_TEST_GITHUB: mode },
+      input: JSON.stringify(input), encoding: "utf8", windowsHide: true,
+    });
+    assert.ok(child.stdout, child.stderr);
+    assert.doesNotMatch(child.stdout, /fixture-output/);
+    return JSON.parse(child.stdout);
+  };
+  assert.deepEqual(read({ view: "account" }).data, { login: "test-user" });
+  assert.deepEqual(read({ view: "repository" }, "success", worktree).data,
+    { repository: "Owner/Example", defaultBranch: "main", private: true });
+  assert.equal(read({ view: "repository", endpoint: "user/emails" }).error.code, "INVALID_INPUT");
+  assert.equal(read({ view: "account" }, "keyring").error.code, "GITHUB_AUTH_STORAGE");
+  assert.equal(read({ view: "account" }, "unconfigured").error.code, "GITHUB_AUTH_REQUIRED");
+  assert.equal(read({ view: "account" }, "expired").error.code, "GITHUB_AUTH_REJECTED");
+  assert.equal(read({ view: "account" }, "override").error.code, "GITHUB_AUTH_OVERRIDE");
+  const legacy = read({ view: "account" }, "override-legacy");
+  assert.equal(legacy.error.code, "GITHUB_AUTH_OVERRIDE");
+  assert.match(legacy.error.message, /^GITHUB_TOKEN /);
+  assert.equal(read({ view: "repository" }, "scope").error.code, "GITHUB_AUTH_SCOPE");
+  assert.equal(read({ view: "repository" }, "hidden").error.code, "GITHUB_RESOURCE_ACCESS");
+  assert.equal(read({ view: "repository" }, "hidden-and-unauthorized").error.code, "GITHUB_AUTH_REJECTED");
 });
 
 test("dependencies prevent worktree creation until every dependency is completed", t => {

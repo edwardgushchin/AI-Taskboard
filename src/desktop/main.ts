@@ -9,6 +9,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { callCli, cliChild, cliFailure } from "./cli.ts";
+import { githubReadTool, readBoardGitHub } from "./github-read.ts";
 import { codexStatus, configuredCodex, setCodexExecutable, setCodexWindowsSandbox } from "./codex.ts";
 import { boardSuggestions, chatModels, readBoardHistory, readLastTaskTurn, readTaskRunHistory, replyToBoard, replyToTask, reviewWithCodex, updateBoardGoal } from "./codex-chat.ts";
 import type { BoardActivity, BoardGoal, BoardGoalAction } from "./codex-chat.ts";
@@ -1422,7 +1423,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       (!reviewIds || autoReviewReadTools.has(name) || reviewTaskTools.has(name)) &&
       (name !== "task_accept" || reviewMode !== "human") &&
       (name !== "task_request_changes" || managerReviews));
-    if (!reviewIds) mcpTools.push(...(goal ? goalWorkTools : goalChatTools));
+    if (!reviewIds) mcpTools.push(...(goal ? goalWorkTools : goalChatTools), githubReadTool);
     const attachments = await prepareBoardAttachments(files, scratch);
     if (!reviewIds && goal !== "resume") {
       historyMessage = {
@@ -1533,6 +1534,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           }
         }
         if (name === "ask_user") return askUser(args);
+        if (name === githubReadTool.name) return readBoardGitHub(board.project, args);
         if (name.startsWith("goal_")) {
           try { return goalAction(name, args) ?? cliFailure("INVALID_INPUT", "This goal tool is unavailable in this session."); }
           catch (error) { return cliFailure("ACTION_FAILED", (error as Error).message); }
