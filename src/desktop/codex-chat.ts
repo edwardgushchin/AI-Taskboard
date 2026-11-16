@@ -145,7 +145,7 @@ export async function reviewWithCodex(profile: string, project: string, settings
   let usage: TokenUsageReport | undefined;
   const worklog = boardWorklog(project, "reviewer", taskId);
   const options = {
-    settings, tools, signal, onActivity, onTokenUsage: async (report: TokenUsageReport) => { usage = report; }, finalAnswerSchema: {
+    role: "reviewer" as const, settings, tools, signal, onActivity, onTokenUsage: async (report: TokenUsageReport) => { usage = report; }, finalAnswerSchema: {
       type: "object", additionalProperties: false, required: ["summary", "findings", "evidence", "needsHuman", "verifyRisk"],
       properties: {
         summary: { type: "string" },
@@ -270,7 +270,7 @@ export async function requestExecutorAccess(profile: string, project: string, id
       task: { id: task.id, title: task.title, description: task.description, criteria: task.criteria },
       executorRequest: reason.trim(),
     }), [], async () => cliFailure("INVALID_INPUT", "Return the access decision in the response."), {
-      settings, tools: [], signal: AbortSignal.any([signal, AbortSignal.timeout(90_000)]),
+      role: "manager", settings, tools: [], signal: AbortSignal.any([signal, AbortSignal.timeout(90_000)]),
       instructions: [
         "You are the AI Taskboard project manager deciding whether this executor needs the host user's full OS access for the assigned card.",
         "The board applies your structured decision to the executor. Your read-only shell does not limit that decision. Use the supplied evidence and return the decision directly.",
@@ -544,6 +544,7 @@ function boardMessage(content: { type: string; text?: string; url?: string }[]) 
 }
 
 function reply(profile: string, project: string, prompt: string, images: string[], runAction: RunAction, options: {
+  role?: "manager" | "executor" | "reviewer";
   settings?: ChatSettings | null; tools: object[]; instructions: string;
   onCommentary?: (text: string) => void; onTokenUsage?: (report: TokenUsageReport) => Promise<void>;
   onActivity?: (items: RunActivity[]) => void;
@@ -766,7 +767,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
         return goalChange;
       };
       const publishControl = () => {
-        if (turn?.status === "inProgress") finishRun ??= trackActiveRun(project);
+        if (turn?.status === "inProgress") finishRun ??= trackActiveRun(project, options.role ?? (session ? "manager" : "executor"));
         session?.onGoalControl?.(runGoalChange);
         const control = {
           async steer(text: string, images: string[], clientUserMessageId?: string) {
@@ -800,7 +801,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
             publishControl();
           } else if (followingGoal && turn.status === "completed") {
             turn = data.turn;
-            if (turn?.status === "inProgress") finishRun ??= trackActiveRun(project);
+            if (turn?.status === "inProgress") finishRun ??= trackActiveRun(project, options.role ?? (session ? "manager" : "executor"));
           }
         }
         if (method === "turn/completed" && data.turn && data.turn.id === turn?.id) {

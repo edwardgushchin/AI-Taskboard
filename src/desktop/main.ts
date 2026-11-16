@@ -192,13 +192,14 @@ function frame(state: ProjectTab) {
   const openTabs = windowStates.get(state.window.webContents.id)?.tabs ?? [];
   const unreadTabs = new Set(openTabs.flatMap(tab =>
     tab.project && boardUnread(tab.board?.project).length ? [tab.project] : []));
+  const activity = activeRunSummary([...subscriptions.values()].map(watch => ({
+    path: watch.board.project, name: watch.board.settings.name })));
   return {
     restoring: windowStates.get(state.window.webContents.id)?.restoring ?? false,
     tabs: projectLabels(openTabs.flatMap(tab =>
       tab.project ? [{ path: tab.project, name: tab.board?.settings?.name }] : []))
-      .map(tab => ({ ...tab, unread: unreadTabs.has(tab.path) })),
-    activeAgents: activeRunSummary([...subscriptions.values()].map(watch => ({
-      path: watch.board.project, name: watch.board.settings.name }))),
+      .map(tab => ({ ...tab, unread: unreadTabs.has(tab.path), activity: activity.boards.find(board => board.path === tab.path) })),
+    activeAgents: activity,
     managerUnread: boardUnread(state.board?.project),
     project: state.project, board: state.board, error: state.error, loading: state.loading, localization: localization.state(), theme,
     managerQuestion: key ? managerQuestion(key)?.view : undefined,
