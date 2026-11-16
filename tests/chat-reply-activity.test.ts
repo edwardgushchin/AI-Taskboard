@@ -37,9 +37,9 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   const runtime = runInNewContext(stripTypeScriptTypes(activitySource) +
     "\n({ sendChat, stopChat, activeAgents, frame, windowStates, runningTasks, launchingTasks, deferredExecutors, notifyRunChange, chatRuns, replyingTasks })", {
     basename, extname, join, performance, projectLabels, AbortController, subscriptions: new Map(),
-    scheduleAgentWork: () => { scheduled.push(true); }, reserveAgent: slots.acquire, managerFullAccess: () => false,
+    scheduleAgentWork: () => { scheduled.push(true); }, reserveAgent: slots.acquire,
     boardRequests: new Map(), boardWorkRequests: new Map(), boardUnread: () => [], projectIdentity: (path: string) => path,
-    app: { getPath: () => "profile" }, managerFullAccess: () => false,
+    app: { getPath: () => "profile" }, managerAccess: () => "auto",
     lang: (english: string) => english,
     tmpdir: () => "scratch",
     mkdtemp: async () => "scratch/chat",

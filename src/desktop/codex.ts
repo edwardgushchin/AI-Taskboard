@@ -56,8 +56,37 @@ export function executorFullAccess(dataDirectory: string, project: string, task:
   return fullAccessSetting(dataDirectory, "executor-full-access.json", JSON.stringify([projectIdentity(project), task.id, task.createdAt]), enabled);
 }
 
-export function managerFullAccess(dataDirectory: string, project: string, enabled?: boolean): boolean {
-  return fullAccessSetting(dataDirectory, "manager-full-access.json", projectIdentity(project), enabled);
+export type ManagerAccess = "ask" | "auto" | "full";
+
+export function isManagerAccess(value: unknown): value is ManagerAccess {
+  return value === "ask" || value === "auto" || value === "full";
+}
+
+export function managerAccess(dataDirectory: string, project: string, mode?: ManagerAccess): ManagerAccess {
+  const file = join(dataDirectory, "manager-access.json");
+  const legacy = join(dataDirectory, "manager-full-access.json");
+  let selected: Map<string, ManagerAccess>;
+  if (existsSync(file)) {
+    const value = readJson(file);
+    if (!value || typeof value !== "object" || Array.isArray(value) || !Object.values(value).every(isManagerAccess)) {
+      throw new Error("Invalid manager access settings.");
+    }
+    selected = new Map(Object.entries(value));
+  } else {
+    const value = existsSync(legacy) ? readJson(legacy) : [];
+    if (!Array.isArray(value) || value.some(entry => typeof entry !== "string")) {
+      throw new Error("Invalid manager access settings.");
+    }
+    selected = new Map(value.map(key => [key, "full"]));
+  }
+  const key = projectIdentity(project);
+  const current = selected.get(key) ?? "auto";
+  if (mode === undefined || mode === current) return current;
+  if (mode === "auto") selected.delete(key);
+  else selected.set(key, mode);
+  directory(dataDirectory, true);
+  writeJson(file, Object.fromEntries(selected));
+  return mode;
 }
 
 function fullAccessSetting(dataDirectory: string, filename: string, key: string, enabled?: boolean): boolean {

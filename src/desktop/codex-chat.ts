@@ -3,6 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { codexRpc, turnControl } from "./codex-rpc.ts";
 import type { AgentControl, RpcMessage } from "./codex-rpc.ts";
 import { configuredCodex, executorFullAccess, setTaskExecutorAccess } from "./codex.ts";
+import type { ManagerAccess } from "./codex.ts";
 import { codexThreadPattern, taskIdPattern } from "../cli/model.ts";
 import { chatTools } from "./chat-actions.ts";
 import type { BoardChange } from "./board-actions.ts";
@@ -315,16 +316,20 @@ export function replyToBoard(
     ? providerAction?.(name, args) ?? Promise.resolve(cliFailure("PROVIDER_TOOLS_UNAVAILABLE", "Wait for the provider session to initialize."))
     : runAction(name, args);
   const dialogue = !session.goal && !session.resumeGoal && !session.separateTurn;
-  const fullAccess = dialogue && session.fullAccess === true;
+  const fullAccess = !session.separateTurn && session.access === "full";
   const permissionProfile = fullAccess ? hostPermissionProfile : managerResearchProfile;
-  const accessInstructions = fullAccess ? "\nThe user enabled full shell access for this board dialogue. Commands use the host user's environment. " +
-    "Use existing credentials for authorized operations without exposing them. Keep SSH host key checking enabled and report server authentication failures separately from local permission failures." : "";
+  const accessInstructions = session.separateTurn ? "" : fullAccess
+    ? "\nFull access is enabled for this board. Commands run as the host user. "
+    : "\nThe board's manager access mode is " + (session.access === "ask" ? "Ask for approval" : "Approve for me") + ". " +
+      "Use Codex's native approval request when the sandbox blocks a required operation. If the operation needs the regular OS user, " +
+      "tell the user that Full access is available under Board settings, Project manager, Access mode. ";
   const mcpTools = [...session.mcpTools, worklogTool];
   return withBoardMcp(mcpTools,
     async (name, args) => name === worklogTool.name ? worklog.submit(args) : worklog.remind(await dispatch(name, args)),
     (config, env) => reply(profile, project, prompt, images, dispatch, {
-      tools, instructions: boardAgentInstructions("manager", instructions + accessInstructions, { dialogue }), signal, session, worklog,
-      onTokenUsage: session.onTokenUsage, mcp: { config, env }, fullAccess,
+      tools, instructions: boardAgentInstructions("manager", instructions + accessInstructions + (accessInstructions ?
+        "Use existing credentials for authorized operations without exposing them. Keep SSH host key checking enabled and report server authentication failures separately from local permission failures." : ""), { dialogue }),
+      signal, session, worklog, onTokenUsage: session.onTokenUsage, mcp: { config, env },
       prepareResearch: async (request, client) => {
         const launchKey = JSON.stringify([profile, client.path, client.args, client.version, client.windowsSandbox, permissionProfile]);
         const availability = await probeManagerCli(project, launchKey, mcpTools, (cwd, command, env) =>
@@ -341,7 +346,8 @@ export function replyToBoard(
 
 interface BoardSession {
   id?: string;
-  fullAccess?: boolean;
+  access?: ManagerAccess;
+  confirmApproval?: (details: string) => Promise<boolean>;
   settings?: ChatSettings | null;
   save: (id: string) => void;
   title: string;
@@ -556,7 +562,6 @@ function reply(profile: string, project: string, prompt: string, images: string[
   onControl?: (control: AgentControl) => void; signal?: AbortSignal; imageDirectory?: string; imageLimit?: number;
   session?: BoardSession;
   finalAnswerSchema?: object;
-  fullAccess?: boolean;
   webSearch?: boolean;
   mcp?: BoardMcpConnection;
   prepareResearch?: (request: RpcRequest, client: CodexClient) => Promise<string>;
@@ -566,8 +571,13 @@ function reply(profile: string, project: string, prompt: string, images: string[
   const { onCommentary, onTokenUsage, onControl, onActivity, signal, imageDirectory, imageLimit = 0, session } = options;
   const settings = session ? session.settings : options.settings;
   const research = Boolean(session && !session.separateTurn);
-  const fullAccess = research && options.fullAccess === true;
+  const fullAccess = research && session?.access === "full";
+  const approvalPolicy = research && !fullAccess ? "on-request" : "never";
+  const approvalsReviewer = session?.access === "ask" || fullAccess ? "user" : "auto_review";
+  const permissionProfile = fullAccess ? hostPermissionProfile : managerResearchProfile;
   let threadId: string | undefined;
+  const activity = new Map<string, BoardActivity>();
+  let approvalQueue = Promise.resolve();
   const calls = new Map<string, Promise<CliReply>>();
   const tokens = new CodexTokenUsage();
   let completed = false;
@@ -597,13 +607,14 @@ function reply(profile: string, project: string, prompt: string, images: string[
         ephemeral: !session || session.separateTurn === true, dynamicTools: options.tools,
         ...(session && !session.separateTurn ? { historyMode: "paginated" } : {}),
       }),
-      cwd: project, model: modelId, approvalPolicy: "never",
+      cwd: project, model: modelId, approvalPolicy,
+      ...(research ? { approvalsReviewer } : {}),
       developerInstructions: researchInstructions ? options.instructions + "\n\n" + researchInstructions : options.instructions,
-      ...(research ? { permissions: fullAccess ? hostPermissionProfile : managerResearchProfile } : { sandbox: "read-only" }),
+      ...(research ? { permissions: permissionProfile } : { sandbox: "read-only" }),
       ...(session && effort ? { config: { model_reasoning_effort: effort } } : {}),
     };
     type StartedThread = { thread: { id: string; name?: string | null; model?: string }; model?: string;
-      activePermissionProfile?: { id: string }; approvalPolicy?: string };
+      activePermissionProfile?: { id: string }; approvalPolicy?: string; approvalsReviewer?: string };
     let started: StartedThread;
     let waiting = false;
     let retryDelay = 1000;
@@ -624,8 +635,9 @@ function reply(profile: string, project: string, prompt: string, images: string[
       }
     }
     const { thread } = started;
-    if (fullAccess && (started.activePermissionProfile?.id !== hostPermissionProfile || started.approvalPolicy !== "never")) {
-      throw new Error("Codex did not apply full access for the manager dialogue.");
+    if (research && (started.activePermissionProfile?.id !== permissionProfile || started.approvalPolicy !== approvalPolicy ||
+        (!fullAccess && started.approvalsReviewer !== approvalsReviewer))) {
+      throw new Error("Codex did not apply the selected manager access mode.");
     }
     options.onProviderReady?.(request, thread.id);
     if (session) {
@@ -644,7 +656,6 @@ function reply(profile: string, project: string, prompt: string, images: string[
     const answers: string[] = [];
     const commentary: string[] = [];
     const generated = new Map<string, ChatImage>();
-    const activity = new Map<string, BoardActivity>();
     let activityTimer: NodeJS.Timeout | undefined;
     const publish = () => {
       activityTimer = undefined;
@@ -830,8 +841,31 @@ function reply(profile: string, project: string, prompt: string, images: string[
   }, async message => {
     const params = message.params as {
       threadId?: string; callId?: string; namespace?: string | null; tool?: string; arguments?: unknown;
+      itemId?: string; command?: string; cwd?: string; reason?: string; grantRoot?: string;
+      availableDecisions?: unknown[]; networkApprovalContext?: object; additionalPermissions?: object; permissions?: object;
     } | undefined;
-    if (message.method !== "item/tool/call" || !threadId || params?.threadId !== threadId || params.namespace ||
+    if (!threadId || params?.threadId !== threadId) return undefined;
+    const command = message.method === "item/commandExecution/requestApproval";
+    const fileChange = message.method === "item/fileChange/requestApproval";
+    const permissions = message.method === "item/permissions/requestApproval";
+    if (research && !fullAccess && (command || fileChange || permissions)) {
+      const changes = fileChange && params.itemId ? activity.get(params.itemId)?.text : undefined;
+      const scope = permissions ? params.permissions : params.additionalPermissions;
+      const details = [params.command, params.cwd, params.grantRoot, changes,
+        params.networkApprovalContext && JSON.stringify(params.networkApprovalContext, null, 2),
+        scope && JSON.stringify(scope, null, 2), params.reason].filter(Boolean).join("\n\n");
+      const supported = command ? params.availableDecisions?.includes("accept") ?? true :
+        permissions ? Boolean(scope) : Boolean(changes || params.grantRoot || params.reason);
+      const agreed = approvalQueue.then(() =>
+        details && supported && !signal?.aborted ? session?.confirmApproval?.(details) : false);
+      approvalQueue = agreed.then(() => {}, () => {});
+      const approved = await agreed && !signal?.aborted;
+      return permissions ? { permissions: approved ? scope : {}, scope: "turn" } : {
+        decision: approved ? "accept" : command && params.availableDecisions && !params.availableDecisions.includes("decline") &&
+          params.availableDecisions.includes("cancel") ? "cancel" : "decline",
+      };
+    }
+    if (message.method !== "item/tool/call" || params.namespace ||
         typeof params.callId !== "string" || typeof params.tool !== "string") return undefined;
     let pending = calls.get(params.callId);
     if (!pending) {

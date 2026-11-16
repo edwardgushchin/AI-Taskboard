@@ -19,25 +19,30 @@ import { codexThreadPattern, taskIdPattern } from "../src/cli/model.ts";
 import { runActivity, runLog } from "../src/desktop/run-activity.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { managerCliContext } from "../src/desktop/manager-cli.ts";
-import { managerFullAccess } from "../src/desktop/codex.ts";
+import { managerAccess } from "../src/desktop/codex.ts";
+import { projectIdentity } from "../src/desktop/project-tabs.ts";
 import { githubReadTool } from "../src/desktop/github-read.ts";
 
 const source = readFileSync(new URL("../src/desktop/codex-chat.ts", import.meta.url), "utf8")
   .replace(/^import[\s\S]*?;\r?\n/gm, "").replace(/^export /gm, "");
 
-test("manager dialogue access is persisted in the desktop profile for the selected board", t => {
+test("manager access defaults to auto and preserves old full-access choices per board", t => {
   const directory = mkdtempSync(join(tmpdir(), "ai-taskboard-manager-access-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const first = join(directory, "first");
   const second = join(directory, "second");
   mkdirSync(first);
   mkdirSync(second);
-  assert.equal(managerFullAccess(directory, first), false);
-  assert.equal(managerFullAccess(directory, first, true), true);
-  assert.equal(managerFullAccess(directory, first), true);
-  assert.equal(managerFullAccess(directory, second), false);
-  assert.equal(managerFullAccess(directory, first, false), false);
-  assert.equal(managerFullAccess(directory, first), false);
+  assert.equal(managerAccess(directory, first), "auto");
+  writeFileSync(join(directory, "manager-full-access.json"), JSON.stringify([projectIdentity(first)]));
+  assert.equal(managerAccess(directory, first), "full");
+  assert.equal(managerAccess(directory, second), "auto");
+  assert.equal(managerAccess(directory, second, "ask"), "ask");
+  assert.equal(managerAccess(directory, second), "ask");
+  assert.equal(managerAccess(directory, first), "full");
+  assert.equal(managerAccess(directory, first, "auto"), "auto");
+  assert.equal(managerAccess(directory, first), "auto");
+  assert.equal(managerAccess(directory, second), "ask");
 });
 
 test("an executor access request gets an independent manager decision scoped to its card", async () => {
@@ -284,10 +289,16 @@ test("board chat keeps a goal streaming across turns and times out only after in
     const requests = [];
     let retries = 0;
     let goal = { objective: "Read this", status: "active" };
+    const approvalReplies = new Map();
     const threadId = ${JSON.stringify(threadId)};
     const send = value => console.log(JSON.stringify(value));
     require("node:readline").createInterface({ input: process.stdin }).on("line", async line => {
-      const { id, method, params } = JSON.parse(line);
+      const { id, method, params, result, error } = JSON.parse(line);
+      if (approvalReplies.has(id) && !method) {
+        approvalReplies.get(id)(error ?? result);
+        approvalReplies.delete(id);
+        return;
+      }
       if (id === undefined) return;
       requests.push({ method, params });
       if (method === "thread/resume" && retries++ < 4) {
@@ -303,7 +314,8 @@ test("board chat keeps a goal streaming across turns and times out only after in
         send({ id, result: { config: { model: "default-model", model_reasoning_effort: "medium" } } });
       } else if (method === "thread/resume" || method === "thread/start") {
         send({ id, result: { thread: { id: threadId, name: "Project manager" }, model: params.model,
-          activePermissionProfile: { id: process.argv[2] === "wrong-access" ? ":read-only" : params.permissions }, approvalPolicy: params.approvalPolicy } });
+          activePermissionProfile: { id: process.argv[2] === "wrong-access" ? ":read-only" : params.permissions },
+          approvalPolicy: params.approvalPolicy, approvalsReviewer: params.approvalsReviewer } });
       } else if (method === "thread/goal/set") {
         goal = { objective: params.objective ?? goal.objective, status: params.status ?? goal.status };
         send({ id, result: { goal } });
@@ -344,6 +356,16 @@ test("board chat keeps a goal streaming across turns and times out only after in
         }
         send({ id, result: { turn: { id: "reply", status: "inProgress" } } });
         send({ method: "turn/started", params: { threadId, turn: { id: "reply", status: "inProgress" } } });
+        if (process.argv[2] === "manual-access") {
+          const approve = (kind, extra) => new Promise(resolve => {
+            approvalReplies.set(kind, resolve);
+            send({ id: kind, method: "item/" + kind + "/requestApproval", params: { threadId, turnId: "reply", ...extra } });
+          });
+          const command = await approve("commandExecution", { command: "Get-ChildItem", cwd: process.cwd(), availableDecisions: ["accept", "decline"] });
+          if (command?.decision !== "accept") throw Error("One-time command approval was not applied");
+          const permission = await approve("permissions", { permissions: { network: { enabled: true } } });
+          if (permission?.scope !== "turn" || Object.keys(permission.permissions).length) throw Error("Denied permissions were granted");
+        }
         const usage = { totalTokens: 120, inputTokens: 100, cachedInputTokens: 80, cacheWriteInputTokens: 0, outputTokens: 20, reasoningOutputTokens: 10 };
         send({ method: "thread/tokenUsage/updated", params: { threadId, turnId: "reply", tokenUsage: { total: usage, last: usage } } });
         send({ method: "item/completed", params: { threadId, elapsed: 120_000, item: { id: "first", type: "agentMessage", phase: "final_answer", text: "First turn" } } });
@@ -594,6 +616,9 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.ok((start?.params.developerInstructions as string).includes(writingRules));
   assert.match(start?.params.developerInstructions as string, /git --no-pager --literal-pathspecs/);
   assert.equal(start?.params.permissions, "ai-taskboard-manager");
+  assert.equal(start?.params.approvalPolicy, "on-request");
+  assert.equal(start?.params.approvalsReviewer, "auto_review");
+  assert.match(start?.params.developerInstructions as string, /Board settings, Project manager, Access mode/);
   assert.equal(Object.hasOwn(start!.params, "projectId"), false);
   assert.equal(newRequests.some(({ method }) => method.startsWith("project/")), false);
   const nativeResume = await runtime("profile", directory, "Continue", [], () => ({ ok: true }), [], "", controller.signal, {
@@ -603,10 +628,26 @@ test("board chat keeps a goal streaming across turns and times out only after in
   const nativeRequests: typeof newRequests = JSON.parse(readFileSync(captured, "utf8"));
   assert.match(nativeRequests.find(({ method }) => method === "thread/resume")?.params.developerInstructions as string,
     /git --no-pager --literal-pathspecs/);
+  assert.equal(nativeRequests.find(({ method }) => method === "thread/resume")?.params.approvalsReviewer, "auto_review");
 
+  providerMode = "manual-access";
+  const prompts: string[] = [];
+  await runtime("profile", directory, "Check access", [], () => ({ ok: true }), [], "", controller.signal, {
+    ...session, goal: undefined, access: "ask",
+    confirmApproval: async (details: string) => { prompts.push(details); return prompts.length === 1; },
+  });
+  const manualRequests: typeof newRequests = JSON.parse(readFileSync(captured, "utf8"));
+  const manual = manualRequests.find(({ method }) => method === "thread/resume")?.params;
+  assert.equal(manual?.approvalPolicy, "on-request");
+  assert.equal(manual?.approvalsReviewer, "user");
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[0], /Get-ChildItem/);
+  assert.match(prompts[1], /"enabled": true/);
+
+  providerMode = "cli-ready";
   for (const id of [undefined, savedThread]) {
     await runtime("profile", directory, "Check SSH", [], () => ({ ok: true }), [], "", controller.signal, {
-      ...session, id, goal: undefined, fullAccess: true, save: (id: string) => assert.equal(id, threadId),
+      ...session, id, goal: undefined, access: "full", save: (id: string) => assert.equal(id, threadId),
     });
     const fullRequests: typeof newRequests = JSON.parse(readFileSync(captured, "utf8"));
     const full = fullRequests.find(({ method }) => method === (id ? "thread/resume" : "thread/start"))!;
@@ -620,12 +661,12 @@ test("board chat keeps a goal streaming across turns and times out only after in
   }
   providerMode = "wrong-access";
   await assert.rejects(runtime("profile", directory, "Check SSH", [], () => ({ ok: true }), [], "", controller.signal, {
-    ...session, id: undefined, goal: undefined, fullAccess: true,
-  }), /did not apply full access/);
+    ...session, id: undefined, goal: undefined, access: "full",
+  }), /did not apply the selected manager access mode/);
 
   providerMode = "";
   await runtime("profile", directory, "Review submissions", [], () => ({ ok: true }), [], "", controller.signal, {
-    ...session, goal: undefined, separateTurn: true, fullAccess: true, save: (id: string) => assert.equal(id, threadId),
+    ...session, goal: undefined, separateTurn: true, access: "full", save: (id: string) => assert.equal(id, threadId),
   });
   const reviewRequests: typeof newRequests = JSON.parse(readFileSync(captured, "utf8"));
   assert.match(flags().find(flag => flag.startsWith("mcp_servers.ai_taskboard="))!, /tool_timeout_sec=140,/);
