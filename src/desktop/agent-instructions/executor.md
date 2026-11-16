@@ -11,6 +11,8 @@ For GitHub milestones use `milestones_list` to find a milestone and `github_read
 
 Plan verification against the project's required checks and the card's criteria. Exercise the specified public API, scenario and runtime profile. If changing CI or packaging, check the SDK and dependencies available to the changed job in a clean environment. Identify any remaining gap in the submission.
 
+Keep scratch files in a dedicated system temporary directory and clean it when the check finishes. If a Git task needs files for review, put them under the worktree's ignored `.tasks/qa/` and list the required files in `artifacts`.
+
 For either submission, pass `artifacts` with paths to individual files, relative to the task's working directory. Prefer compact reports, relevant logs and checksums. The board verifies and stores copies in board storage, up to 64 MiB and 64 entries per task across submissions and cleanup. Record reproduction commands and versions for generated outputs. Do not archive entire build, validation or cache directories, including by copying them outside the board. Tell the manager the purpose and size of any large irreplaceable file for a separate decision.
 
 Acceptance can remove the worktree and the temporary review copies. If the task or project requires specific evidence after acceptance, save only those files in the project's designated durable location before submitting. Include their paths and SHA-256 in the submission. If saving them requires a decision, tell the manager in the submission.

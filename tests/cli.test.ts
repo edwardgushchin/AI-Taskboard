@@ -1963,12 +1963,14 @@ test("review pages can omit unchanged context without losing edits", t => {
   assert.equal(JSON.parse(changed.stdout).error?.code, "REVISION_CONFLICT", changed.stdout + changed.stderr);
 });
 
-test("accepted task cleanup preserves local files and refuses to delete a changed branch", t => {
+test("accepted task cleanup preserves unrelated attachment files and refuses to delete a changed branch", t => {
   const root = fixture(t, true);
   const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "result.txt"), "delivered\n"));
   const exclude = join(root, ".git", "info", "exclude");
-  writeFileSync(exclude, readFileSync(exclude, "utf8") + "\n/ignored.local\n");
-  const ignored = join(worktree, "ignored.local");
+  writeFileSync(exclude, readFileSync(exclude, "utf8") + "\n/.codex-attachments/\n");
+  const sibling = join(worktree, ".codex-attachments", "another-session");
+  mkdirSync(sibling, { recursive: true });
+  const ignored = join(sibling, "keep.png");
   writeFileSync(ignored, "keep this file");
   mkdirSync(join(worktree, ".tasks", "qa"), { recursive: true });
   writeFileSync(join(worktree, ".tasks", "qa", "report.txt"), "keep this report");
@@ -2109,10 +2111,10 @@ test("artifact retention is bounded until cleanup and changed or unknown origina
   assert.deepEqual(cli(root, ["show", draft.id]).artifacts, final.artifacts);
 });
 
-test("accept discards Crashpad and ignored worktree output and preserves the project diary and task attachments", t => {
+test("accept discards Crashpad and temporary worktree attachments and preserves the project diary and task attachments", t => {
   const root = fixture(t, true);
   const exclude = join(root, ".git", "info", "exclude");
-  writeFileSync(exclude, readFileSync(exclude, "utf8") + "\n/.dev-diary/\n");
+  writeFileSync(exclude, readFileSync(exclude, "utf8") + "\n/.dev-diary/\n/.codex-attachments/\n");
   const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "result.txt"), "delivered\n"));
   writeFileSync(join(worktree, "debug.log"), crashpadOutput + crashpadOutput);
   const diary = join(".dev-diary", "2026", "11");
@@ -2123,7 +2125,11 @@ test("accept discards Crashpad and ignored worktree output and preserves the pro
   mkdirSync(join(worktree, diary), { recursive: true });
   mkdirSync(join(worktree, qa), { recursive: true });
   writeFileSync(join(worktree, diary, "2026-11-12.md"), "Task diary\n");
-  const report = join(worktree, qa, "results.bin");
+  writeFileSync(join(worktree, qa, "check.log"), "Temporary check output\n");
+  const stagedAttachments = join(worktree, ".codex-attachments", task.id);
+  mkdirSync(stagedAttachments, { recursive: true });
+  writeFileSync(join(stagedAttachments, "startup-error.txt"), "Earlier startup failure\n");
+  const report = join(stagedAttachments, "results.bin");
   const bytes = Buffer.from([0, 255, 128]);
   writeFileSync(report, bytes);
   if (process.platform === "win32") chmodSync(report, 0o444);

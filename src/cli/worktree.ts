@@ -410,8 +410,9 @@ function removeEmptyWorktree(path: string): boolean {
   }
 }
 
-function removeTaskOutput(path: string, changes: string[]): boolean {
-  const roots = [".dev-diary", ".tasks/qa"].filter(root => changes.some(change => change.startsWith("! " + root + "/")));
+function removeTaskOutput(path: string, id: string, changes: string[]): boolean {
+  const roots = [".dev-diary", ".tasks/qa", `.codex-attachments/${id}`]
+    .filter(root => changes.some(change => change.startsWith("! " + root + "/")));
   if (!roots.length || changes.some(change => !roots.some(root => change.startsWith("! " + root + "/")))) return false;
   if (git(path, ["ls-files", "-z", "--", ...roots])) return false;
   for (const root of roots) {
@@ -471,7 +472,7 @@ function removeTaskWorktree(store: BoardStore, task: Task, repo: Repository, ite
       removeCrashpadDebugLog(path)) {
     changes = gitStatus(path, "all");
   }
-  if (accepted && changes && !retainedArtifacts.size && removeTaskOutput(path, changes.split("\0").filter(Boolean))) {
+  if (accepted && changes && !retainedArtifacts.size && removeTaskOutput(path, task.id, changes.split("\0").filter(Boolean))) {
     changes = gitStatus(path, "all");
   }
   if (changes.length) {
