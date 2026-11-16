@@ -15,7 +15,7 @@ import { exists, initializeBoard, locateBoard, onBoard, readBoardSettings, withT
 import { recordSettings } from "./settings-notices.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
 import { discoverRepository, invokeGit, scheduleGitMaintenance } from "./git.ts";
-import { changeRepository, createGitHubMilestone, githubMilestones, githubRepository, inspectRepository, publishRepository, pushRepositoryBranch, readGitHub, repositoryRefs, setGitHubMilestoneDueDate } from "./repository.ts";
+import { boardGitInfo, changeRepository, createGitHubMilestone, githubMilestones, githubRepository, inspectRepository, publishRepository, pushRepositoryBranch, readGitHub, repositoryRefs, setGitHubMilestoneDueDate } from "./repository.ts";
 import { previewSubmission, previewTask, submitTask } from "./submission.ts";
 import { changeTask, createTask, recordRunLog, withoutVerification } from "./tasks.ts";
 import { recordTokenUsage, taskMetrics } from "./token-usage.ts";
@@ -187,30 +187,6 @@ function changeTags(store: BoardStore, task: Task, input: Record<string, unknown
   store.saveIndex();
   return updated;
 }
-
-function boardGitInfo(location: BoardLocation) {
-  if (!location.repository || location.repository.bare) return {};
-  const value = (args: string[], env?: NodeJS.ProcessEnv) => {
-    try {
-      const result = invokeGit(location.root, args, env);
-      return result.code === 0 ? result.stdout.trim() || undefined : undefined;
-    } catch {
-      return undefined;
-    }
-  };
-  const branch = value(["symbolic-ref", "--quiet", "--short", "HEAD"]);
-  const head = value(["rev-parse", "--verify", "--quiet", "HEAD"]);
-  const counts = branch && head ? value(["rev-list", "--left-right", "--count", "--end-of-options",
-    head + "..." + branch + "@{upstream}"], { GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "" }) : undefined;
-  const divergence = /^(\d+)\s+(\d+)$/.exec(counts ?? "");
-  return {
-    branch, head,
-    tracking: divergence ? { ahead: Number(divergence[1]), behind: Number(divergence[2]) } : undefined,
-    user: value(["config", "--get", "user.name"]),
-    githubRepository: githubRepository(location),
-  };
-}
-
 function watchBoard(location: BoardLocation, compact: boolean): void {
   const cards = new Map<string, CachedCard>();
   const cleanedTasks = new Set<string>();

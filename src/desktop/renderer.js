@@ -4567,7 +4567,10 @@ async function gitCommand(action, input, project) {
 function updateGitRevision(data) {
   const git = frame.board.gitInfo;
   const tracking = git?.branch === data.branch && git?.head === data.head ? git?.tracking : undefined;
-  frame.board.gitInfo = { ...git, branch: data.branch, head: data.head, tracking };
+  const sameBranch = git?.branch === data.branch;
+  frame.board.gitInfo = { ...git, branch: data.branch, head: data.head, tracking,
+    pushTarget: sameBranch ? git?.pushTarget : undefined,
+    pushError: sameBranch ? git?.pushError : "destination" };
   renderStatusBar(false);
 }
 
@@ -4698,8 +4701,8 @@ const gitPushes = new Map();
 
 async function pushTrackedBranch() {
   const project = frame.project;
-  const { branch, head, tracking } = frame.board?.gitInfo ?? {};
-  if (!project || !branch || !head || !tracking || gitPushes.has(project)) return;
+  const { branch, head, pushTarget } = frame.board?.gitInfo ?? {};
+  if (!project || !branch || !head || !pushTarget || gitPushes.has(project)) return;
   gitPushes.set(project, branch);
   renderStatusBar(false);
   try {
@@ -4812,7 +4815,7 @@ function renderActiveAgents() {
 
 function renderStatusBar(projectChanged) {
   renderActiveAgents();
-  const { branch, head, tracking } = frame.board?.gitInfo ?? {};
+  const { branch, head, tracking, remotes, pushTarget, pushError, trackingError, gitError } = frame.board?.gitInfo ?? {};
   const revision = head ? branch ?? head.slice(0, 8) : branch && language("Before the first commit", "До первого коммита");
   const item = byId("status-branch");
   const branchLabel = head && branch ? language("Git branch", "Ветка Git") : "Git";
@@ -4820,22 +4823,28 @@ function renderStatusBar(projectChanged) {
   item.title = revision ? branchLabel + " · " + revision : "";
   item.querySelector("span").textContent = revision ?? "";
   const status = byId("status-tracking");
-  status.hidden = !branch || !head || !tracking;
+  status.hidden = !gitError && (!branch || !head || !remotes?.length);
   const pushingBranch = gitPushes.get(frame.project);
-  status.disabled = pushingBranch !== undefined;
+  status.disabled = pushingBranch !== undefined || !pushTarget;
   const pushing = !status.hidden && pushingBranch === branch;
   status.setAttribute("aria-busy", String(pushing));
   if (!status.hidden) {
-    const { behind, ahead } = tracking;
-    status.querySelector("span").textContent = behind + "↓ " + ahead + "↑";
+    const { behind, ahead } = tracking ?? {};
+    const reason = gitError ? language("Git state unavailable", "Не удалось определить состояние Git") :
+      pushError ? language("Configure the upstream remote and branch", "Настройте удалённую ветку и её отслеживание") :
+      trackingError ? language("Upstream counts unavailable", "Счётчики отслеживаемой ветки недоступны") :
+      language("No upstream configured", "Отслеживаемая ветка не настроена");
+    status.querySelector("span").textContent = tracking ? behind + "↓ " + ahead + "↑" : language("Branch", "Ветка");
     status.title = (pushing ? language("Pushing commits…", "Отправка коммитов…") :
       status.disabled ? language("Another branch is being pushed", "Отправляется другая ветка") :
         language("Push to the upstream branch", "Отправить коммиты в отслеживаемую ветку")) + " · " +
       language("Behind ", "Отставание ") + behind + " · " + language("Ahead ", "Опережение ") + ahead;
+    if (!tracking || !pushTarget) status.title = reason + (pushTarget ? " · " +
+      language("Push branch to ", "Отправить ветку в ") + pushTarget.remote + "/" + pushTarget.remoteRef.slice(11) : "");
     status.setAttribute("aria-label", status.title);
   }
   const publish = byId("status-publish");
-  publish.hidden = !branch || !head || Boolean(tracking);
+  publish.hidden = !branch || !head || !remotes || remotes.length > 0 || Boolean(gitError);
   publish.title = language("Publish to GitHub", "Опубликовать в GitHub");
   publish.setAttribute("aria-label", publish.title);
   if (projectChanged) {

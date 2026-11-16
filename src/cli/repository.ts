@@ -282,6 +282,61 @@ export function changeRepository(location: BoardLocation, action: string, input:
   return repositoryRefs(location);
 }
 
+// Use the same destination rules for the status bar and the actual push.
+function repositoryPushTarget(root: string, branch: string) {
+  const setting = (name: string) => {
+    const result = invokeGit(root, ["config", "--get-all", "branch." + branch + "." + name]);
+    if (result.code === 1) return undefined;
+    const value = result.stdout.trimEnd();
+    if (result.code !== 0 || !value || value.includes("\n")) {
+      throw new TaskboardError("GIT_REMOTE_REQUIRED", "Configure a single upstream remote and branch before pushing.");
+    }
+    return value;
+  };
+  const configuredRemote = setting("remote");
+  const merge = setting("merge");
+  if (Boolean(configuredRemote) !== Boolean(merge)) {
+    throw new TaskboardError("GIT_REMOTE_REQUIRED", "Complete the upstream remote and branch configuration before pushing.");
+  }
+  const remote = configuredRemote ?? "origin";
+  const remoteRef = merge ?? "refs/heads/" + branch;
+  if (!git(root, ["remote"]).split(/\r?\n/).includes(remote) || !remoteRef.startsWith("refs/heads/") ||
+      invokeGit(root, ["check-ref-format", remoteRef]).code !== 0) {
+    throw new TaskboardError("GIT_REMOTE_REQUIRED", "Configure a remote branch upstream or an origin remote before pushing.");
+  }
+  return { remote, remoteRef };
+}
+
+export function boardGitInfo(location: BoardLocation) {
+  if (!location.repository || location.repository.bare) return {};
+  const root = location.root;
+  try {
+    const value = (args: string[]) => {
+      const result = invokeGit(root, args, { GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "" });
+      return result.code === 0 ? result.stdout.trim() || undefined : undefined;
+    };
+    const branch = value(["symbolic-ref", "--quiet", "--short", "HEAD"]);
+    const head = value(["rev-parse", "--verify", "--quiet", "HEAD"]);
+    const remotes = git(root, ["remote"]).split(/\r?\n/).filter(Boolean);
+    let pushTarget: { remote: string; remoteRef: string } | undefined;
+    let pushError: string | undefined;
+    if (branch && head && remotes.length) {
+      try { pushTarget = repositoryPushTarget(root, branch); }
+      catch { pushError = "destination"; }
+    }
+    const upstream = branch && value(["config", "--get", "branch." + branch + ".merge"]);
+    const counts = branch && head && upstream ? value(["rev-list", "--left-right", "--count", "--end-of-options",
+      head + "..." + branch + "@{upstream}"]) : undefined;
+    const divergence = /^(\d+)\s+(\d+)$/.exec(counts ?? "");
+    return { branch, head, remotes, pushTarget, pushError,
+      upstream: upstream || undefined, trackingError: Boolean(upstream && head && !divergence),
+      tracking: divergence ? { ahead: Number(divergence[1]), behind: Number(divergence[2]) } : undefined,
+      user: value(["config", "--get", "user.name"]), githubRepository: githubRepository(location) };
+  } catch {
+    return { gitError: true };
+  }
+}
+
 export async function pushRepositoryBranch(location: BoardLocation, input: Record<string, unknown>) {
   const root = repositoryPath(location);
   const branch = text(input.branch, "branch", true);
@@ -295,22 +350,7 @@ export async function pushRepositoryBranch(location: BoardLocation, input: Recor
     const tip = resolveCommit(root, source);
     if (!tip) throw new TaskboardError("GIT_BRANCH_REQUIRED", "The local branch does not exist.");
     if (tip !== head) throw new TaskboardError("STALE_REPOSITORY", "The branch tip changed. Read its current commit before pushing.");
-    const setting = (name: string) => {
-      const result = invokeGit(root, ["config", "--get-all", "branch." + branch + "." + name]);
-      if (result.code === 1) return undefined;
-      const value = result.stdout.trimEnd();
-      if (result.code !== 0 || !value || value.includes("\n")) {
-        throw new TaskboardError("GIT_REMOTE_REQUIRED", "Configure a single upstream remote and branch before pushing.");
-      }
-      return value;
-    };
-    const remote = setting("remote") ?? "origin";
-    const remoteRef = setting("merge") ?? source;
-    if (!git(root, ["remote"]).split(/\r?\n/).includes(remote) || !remoteRef.startsWith("refs/heads/") ||
-        invokeGit(root, ["check-ref-format", remoteRef]).code !== 0) {
-      throw new TaskboardError("GIT_REMOTE_REQUIRED", "Configure a remote branch upstream or an origin remote before pushing.");
-    }
-    return { remote, remoteRef };
+    return repositoryPushTarget(root, branch);
   });
   try {
     // A pinned refspec keeps a concurrent local commit out of this push.
@@ -340,8 +380,8 @@ export async function publishRepository(location: BoardLocation, input: Record<s
     requireNoGitOperation(root);
     const current = requireCurrentRevision(root, input);
     if (!current.branch || !current.head) throw new TaskboardError("GIT_COMMIT_REQUIRED", "Select a branch with at least one commit before publishing.");
-    if (git(root, ["remote"]).split(/\r?\n/).includes("origin")) {
-      throw new TaskboardError("REMOTE_EXISTS", "The origin remote already exists. Manage this remote with your Git tools.");
+    if (git(root, ["remote"]).trim()) {
+      throw new TaskboardError("REMOTE_EXISTS", "A remote already exists. Manage this remote with your Git tools.");
     }
     return current;
   });

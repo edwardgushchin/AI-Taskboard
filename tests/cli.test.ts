@@ -11,6 +11,8 @@ import { test } from "node:test";
 import type { TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { nextScheduledRun } from "../src/cli/model.ts";
+import { boardGitInfo } from "../src/cli/repository.ts";
+import { locateBoard } from "../src/cli/storage.ts";
 import type { Task } from "../src/cli/model.ts";
 
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
@@ -1418,6 +1420,45 @@ test("watch streams compact cards and sees new messages without a revision chang
   }
 });
 
+test("Git publication state and safe push are independent of tracking counts", async t => {
+  const root = fixture(t, true);
+  cli(root, ["init"]);
+  const info = () => boardGitInfo(locateBoard(root));
+  const head = git(root, "rev-parse", "HEAD");
+  assert.deepEqual(info().remotes, []);
+  assert.equal(boardGitInfo({ ...locateBoard(root), root: join(root, "missing") }).gitError, true);
+  const remote = fixture(t);
+  git(remote, "init", "--bare");
+  git(root, "remote", "add", "origin", remote);
+  assert.equal(info().githubRepository, undefined);
+  assert.equal(info().tracking, undefined);
+  assert.deepEqual(info().pushTarget, { remote: "origin", remoteRef: "refs/heads/main" });
+  cli(root, ["git", "push"], { branch: "main", head });
+  assert.equal(git(remote, "rev-parse", "refs/heads/main"), head);
+  assert.equal(info().upstream, undefined); // Sending does not rewrite user configuration.
+  git(root, "branch", "--set-upstream-to", "origin/main");
+  assert.deepEqual(info().tracking, { ahead: 0, behind: 0 });
+  git(root, "commit", "--allow-empty", "-m", "Local advance");
+  assert.deepEqual(info().tracking, { ahead: 1, behind: 0 });
+  cli(root, ["git", "push"], { branch: "main", head }, "STALE_REPOSITORY");
+  git(root, "update-ref", "-d", "refs/remotes/origin/main");
+  assert.equal(info().trackingError, true);
+  assert.ok(info().pushTarget);
+  git(root, "config", "--unset", "branch.main.merge");
+  assert.equal(info().pushError, "destination");
+  cli(root, ["git", "push"], { branch: "main", head: git(root, "rev-parse", "HEAD") }, "GIT_REMOTE_REQUIRED");
+  git(root, "remote", "set-url", "origin", "https://github.com/example/published.git");
+  assert.equal(info().githubRepository, "example/published");
+  cli(root, ["git", "publish"], { branch: "main", head: git(root, "rev-parse", "HEAD"), name: "duplicate", visibility: "private" }, "REMOTE_EXISTS");
+  git(root, "switch", "--detach");
+  assert.equal(info().branch, undefined);
+  assert.equal(info().pushTarget, undefined);
+  git(root, "switch", "--orphan", "unborn");
+  assert.equal(info().branch, "unborn");
+  assert.equal(info().head, undefined);
+  assert.equal(info().pushTarget, undefined);
+});
+
 test("watch reports Git tracking counts when only the upstream reference moves", { timeout: 20000 }, async t => {
   const root = fixture(t, true);
   cli(root, ["init"]);
@@ -1451,7 +1492,20 @@ test("watch reports Git tracking counts when only the upstream reference moves",
     git(root, "update-ref", upstream, head);
     assert.deepEqual((await gitInfo()).tracking, { ahead: 0, behind: 0 });
     git(root, "update-ref", "-d", upstream);
-    assert.equal((await gitInfo()).tracking, undefined);
+    const missing = await gitInfo();
+    assert.equal(missing.tracking, undefined);
+    assert.equal(missing.trackingError, true);
+    assert.ok(missing.pushTarget);
+    git(root, "branch", "--unset-upstream");
+    const untracked = await gitInfo();
+    assert.equal(untracked.upstream, undefined);
+    assert.equal(untracked.pushError, "destination");
+    git(root, "remote", "add", "origin", "https://github.com/example/published.git");
+    const published = await gitInfo();
+    assert.equal(published.githubRepository, "example/published");
+    assert.equal(published.pushTarget.remote, "origin");
+    git(root, "remote", "remove", "origin");
+    assert.equal((await gitInfo()).githubRepository, undefined);
   } finally {
     reader.close();
     child.kill();
