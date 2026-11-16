@@ -16,7 +16,8 @@ import { boardReviewMode, codexThreadPattern, defaultBoardAgents, hexTagColor, m
 import { managerInbox, needsManagerAttention } from "../src/cli/task-messages.ts";
 import type { RunActivity, Task } from "../src/cli/model.ts";
 import type { ChatSettings } from "../src/cli/model.ts";
-import { directory as storageDirectory, locateBoard, readBoardSettings, readJson, writeJson } from "../src/cli/storage.ts";
+import { directory as storageDirectory, readBoardSettings, readJson, writeJson } from "../src/cli/storage.ts";
+import { runtimeLocation } from "../src/desktop/board-runtime.ts";
 import type { BoardGoal, BoardGoalAction } from "../src/desktop/codex-chat.ts";
 import { inspectProjectPath, projectSha256 } from "../src/desktop/project-files.ts";
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
@@ -124,7 +125,7 @@ function fixture(t: TestContext) {
     activateTab: (owner: { active: unknown }, tab: unknown) => { owner.active = tab; },
     launchingTasks: new Set(), runningTasks, chatRuns: new Map(), activeAgents, managerInbox, needsManagerAttention, subscriptions, reviewerTools,
     closingProjects: new Set(), setImmediate, setTimeout, clearTimeout, performance, console, agentSlots,
-    locateBoard, readBoardSettings, settingsDelivery, syncSettingsNotices,
+    runtimeLocation, readBoardSettings, settingsDelivery, syncSettingsNotices,
     reviewWithCodex: async (_profile: string, cwd: string, settings: ChatSettings | null, context: string,
       tools: { name: string }[], call: RunAction, _signal: AbortSignal,
       onUsage: (report: import("../src/cli/token-usage.ts").TokenUsageReport) => Promise<void>) => {

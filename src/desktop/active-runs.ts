@@ -1,12 +1,12 @@
 import { projectIdentity, projectLabels } from "./project-tabs.ts";
-import { registerRuntime, runtimeEntries } from "./board-runtime.ts";
-import { exists, locateBoard } from "../cli/storage.ts";
+import { registerRuntime, runtimeEntries, runtimeLocation } from "./board-runtime.ts";
+import { exists } from "../cli/storage.ts";
 import { join } from "node:path";
 
 let shared = false;
 export function enableSharedRuns() { shared = true; }
 export function trackProvider(project: string, pid?: number) {
-  if (!shared || !pid || !exists(join(locateBoard(project).directory, "board.json"))) return Object.assign(() => {}, { run: <T>(callback: () => T) => callback() });
+  if (!shared || !pid || !exists(join(runtimeLocation(project).directory, "board.json"))) return Object.assign(() => {}, { run: <T>(callback: () => T) => callback() });
   return registerRuntime(project, { kind: "provider", pid })!;
 }
 export function claimDiscussion(project: string, task?: string) {

@@ -1,8 +1,8 @@
 import type { AgentLimits } from "../cli/model.ts";
 import { inheritedLimits } from "../cli/settings-notices.ts";
-import { registerRuntime, runtimeEntries, runtimeTransaction } from "./board-runtime.ts";
+import { registerRuntime, runtimeEntries, runtimeLocation, runtimeTransaction } from "./board-runtime.ts";
 import { projectIdentity } from "./project-tabs.ts";
-import { locateBoard, readBoardSettings } from "../cli/storage.ts";
+import { readBoardSettings } from "../cli/storage.ts";
 
 export const defaultAgentLimits: AgentLimits = inheritedLimits;
 export type AgentRole = keyof AgentLimits;
@@ -28,15 +28,20 @@ export function createAgentSlots(shared = false) {
   const available = (project: string, role: AgentRole, overrides?: Partial<AgentLimits>) => {
     if (sharedProject) {
       const path = sharedProject(project);
-      const limit = readBoardSettings(locateBoard(path)).agentLimits?.[role] ?? inherited(path)[role];
-      return limit === 0 ? Infinity : Math.max(0, limit - runtimeEntries(path).filter(entry => entry.kind === "slot" && entry.role === role).length);
+      const entries = runtimeEntries(path);
+      const limit = readBoardSettings(runtimeLocation(path)).agentLimits?.[role] ??
+        entries.find(entry => entry.kind === "defaults")?.limits?.[role] ?? limits[role];
+      return limit === 0 ? Infinity : Math.max(0, limit - entries.filter(entry => entry.kind === "slot" && entry.role === role).length);
     }
     const limit = overrides?.[role] ?? limits[role];
     return limit === 0 ? Infinity : Math.max(0, limit - (active.get(project)?.[role] ?? 0));
   };
   return {
     remember(project: string) {
-      if (shared) { projects.set(projectIdentity(project), project); persistDefaults(project); }
+      if (shared) {
+        projects.set(projectIdentity(project), project);
+        if (!runtimeEntries(project).some(entry => entry.kind === "defaults")) persistDefaults(project);
+      }
     },
     claim(project: string, task: string) {
       if (sharedProject) return registerRuntime(sharedProject(project), { kind: "task", task },
@@ -71,7 +76,7 @@ export function createAgentSlots(shared = false) {
       if (sharedProject) {
         const path = sharedProject(project);
         return registerRuntime(path, { kind: "slot", role, task }, entries => {
-          const limit = readBoardSettings(locateBoard(path)).agentLimits?.[role] ?? entries.find(entry => entry.kind === "defaults")?.limits?.[role] ?? limits[role];
+          const limit = readBoardSettings(runtimeLocation(path)).agentLimits?.[role] ?? entries.find(entry => entry.kind === "defaults")?.limits?.[role] ?? limits[role];
           return (!task || !entries.some(entry => entry.kind !== "queue" && entry.task === task)) &&
             (limit === 0 || entries.filter(entry => entry.kind === "slot" && entry.role === role).length < limit);
         });

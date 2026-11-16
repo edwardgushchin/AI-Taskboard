@@ -8,6 +8,7 @@ import { dirname, join, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
+import { DatabaseSync } from "node:sqlite";
 const require = createRequire(import.meta.url);
 const root = fileURLToPath(new URL("../", import.meta.url));
 const script = fileURLToPath(import.meta.url);
@@ -70,6 +71,19 @@ if (!process.versions.electron) {
     for (let i = 0; i < 6; i++) { const task = cli(project, ["create"], { title: "Isolated concurrency " + i, criteria: ["Fixture completes"], workingDirectory: project }); cli(project, ["approve", task.id]); tasks.push(task.id); }
     const a = await start("profile-a"), b = await start("profile-b");
     await a.ask({ action: "newWindow" });
+    const boardLock = new DatabaseSync(join(project, ".tasks", ".lock.sqlite"));
+    try {
+      boardLock.exec("PRAGMA busy_timeout=2000");
+      boardLock.exec("BEGIN IMMEDIATE");
+      const check = Promise.all([a.ask({ action: "checkInput" }), b.ask({ action: "checkInput" })]);
+      let timer;
+      try {
+        await Promise.race([check, new Promise((_, reject) => {
+          timer = setTimeout(() => reject(Error("Board lock delayed window input or bootstrap IPC")), 2000);
+        })]);
+      } finally { clearTimeout(timer); }
+    } finally { boardLock.close(); }
+    record("PASS: focus, click and board IPC stay responsive while the board transaction lock is held");
     const frames = async () => [...await a.ask({ action: "frames" }), ...await b.ask({ action: "frames" })];
     const expectCount = async total => {
       let latest;
@@ -98,6 +112,8 @@ if (!process.versions.electron) {
     await owner.ask({ action: "stop", id: runningId });
     await wait(async () => (await frames()).every(frame => frame.runningTasks.includes(queued) && !frame.waitingTasks.includes(queued)), "queue continues after release");
     await expectCount(1);
+    await wait(async () => (await Promise.all([a, b].map(worker => worker.ask({ action: "canStop", id: queued })))).some(Boolean),
+      "queued agent has registered its stop control");
     await Promise.all([a.ask({ action: "stop", id: queued }), b.ask({ action: "stop", id: queued })]); await expectCount(0);
     record("PASS: shared waiting state and continuation queue drain after release");
     for (const role of ["manager", "reviewer"]) {
@@ -207,7 +223,24 @@ if (!process.versions.electron) {
       if (command.action === "newWindow") { const state = qa.createWindow([project]); await state.ready; data = true; }
       if (command.action === "dom") data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript(`({ count: Number(document.querySelector('#status-agents span')?.textContent), waiting: document.body.innerText.includes('Ожидает свободного исполнителя') || document.body.innerText.includes('Waiting for an available executor') })`)));
       if (command.action === "frames") data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript("window.taskboard.bootstrap()")));
+      if (command.action === "checkInput") {
+        for (const win of BrowserWindow.getAllWindows()) {
+          assert.equal(await win.webContents.executeJavaScript(`(async () => {
+            const snapshot = await window.taskboard.bootstrap();
+            const button = document.querySelector("#app-settings");
+            button.focus();
+            const focused = document.activeElement === button;
+            button.click();
+            const menu = document.querySelector("#settings-menu");
+            const opened = menu.matches(":popover-open");
+            if (opened) menu.hidePopover();
+            return Boolean(snapshot.board) && focused && opened;
+          })()`), true);
+        }
+        data = true;
+      }
       if (command.action === "launch") data = await qa.launchTask(project, command.id, undefined, false, undefined, undefined, false, false, false, false, true);
+      if (command.action === "canStop") data = qa.activeAgents.has(project + "\0" + command.id);
       if (command.action === "stop") { await qa.activeAgents.get(project + "\0" + command.id)?.control.interrupt(); data = true; }
       if (command.action === "stopWatches") { for (const watch of qa.subscriptions.values()) watch.stop(); data = true; }
       if (command.action === "stopAll") { for (const agent of qa.activeAgents.values()) await agent.control.interrupt(); data = true; }

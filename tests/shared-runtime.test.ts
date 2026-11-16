@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { initializeBoard, locateBoard, onBoard } from "../src/cli/storage.ts";
+import { initializeBoard, locateBoard, onBoard, withLock } from "../src/cli/storage.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import { projectIdentity } from "../src/desktop/project-tabs.ts";
 import { runtimeEntries } from "../src/desktop/board-runtime.ts";
@@ -32,4 +32,21 @@ test("shared defaults, overrides and canonical aliases use one pool without inte
   assert.equal(b.available(other, "manager"), 1);
   discussion();
   assert.equal(runtimeEntries(project).filter(entry => entry.kind === "slot" || entry.kind === "task").length, 0);
+});
+
+test("runtime snapshots and reservations stay responsive during a board transaction", t => {
+  const project = mkdtempSync(join(tmpdir(), "taskboard-runtime-lock-"));
+  t.after(() => rmSync(project, { recursive: true, maxRetries: 5 }));
+  const location = locateBoard(project, true);
+  initializeBoard(location, () => {});
+  const slots = createAgentSlots(true);
+  slots.remember(project);
+  withLock(location.directory, () => {
+    assert.equal(slots.available(project, "executor"), 3);
+    const release = slots.acquire(project, "executor", undefined, "T-0001")!;
+    assert.ok(release);
+    assert.equal(runtimeEntries(project).some(entry => entry.task === "T-0001"), true);
+    release();
+    assert.equal(runtimeEntries(project).some(entry => entry.task === "T-0001"), false);
+  });
 });

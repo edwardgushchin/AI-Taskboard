@@ -173,6 +173,10 @@ export function withLock<T>(directoryPath: string, callback: (lockWaitMs: number
   return withSqliteLock(join(directoryPath, ".lock.sqlite"), 15_000, callback);
 }
 
+export function withRuntimeLock<T>(directoryPath: string, callback: () => T): T {
+  return withSqliteLock(join(directoryPath, ".runtime.sqlite"), 15_000, callback);
+}
+
 function taskStartLockPath(location: BoardLocation, id: string): string {
   if (!taskIdPattern.test(id)) throw new TaskboardError("TASK_NOT_FOUND", "Invalid task ID.");
   const pending = join(location.directory, "pending");

@@ -1,7 +1,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { exists, locateBoard, readJson, withLock, writeJson } from "../cli/storage.ts";
+import { directory, exists, locateBoard, readJson, withRuntimeLock, writeJson } from "../cli/storage.ts";
+import type { BoardLocation } from "../cli/storage.ts";
 import type { AgentLimits } from "../cli/model.ts";
 
 const context = new AsyncLocalStorage<string>();
@@ -26,25 +27,44 @@ function alive(pid: number) {
   catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
 }
 
-// All readers and writers use the board's existing transaction lock. A live
-// provider protects only its own ancestors after the desktop has died.
-export function runtimeTransaction<T>(project: string, action: (entries: RuntimeEntry[]) => T): T {
-  const { directory } = locateBoard(project);
-  return withLock(directory, () => {
-    const path = join(directory, "runtime.json");
-    const entries = (exists(path) ? readJson(path) : []) as RuntimeEntry[];
-    const providers = entries.filter(entry => entry.kind === "provider" && entry.pid && alive(entry.pid));
-    const protectedIds = new Set(providers.map(entry => entry.id));
-    for (const provider of providers) {
-      let entry: RuntimeEntry | undefined = provider;
-      while (entry?.parent && !protectedIds.has(entry.parent)) {
-        protectedIds.add(entry.parent);
-        entry = entries.find(candidate => candidate.id === entry!.parent);
-      }
+export function runtimeLocation(project: string): BoardLocation {
+  const path = join(project, ".tasks");
+  if (!exists(join(path, "board.json"))) return locateBoard(project);
+  directory(path);
+  return { root: project, directory: path, repository: null };
+}
+
+function readEntries(path: string) {
+  return (exists(path) ? readJson(path) : []) as RuntimeEntry[];
+}
+
+function liveEntries(entries: RuntimeEntry[]) {
+  const processes = new Map<number, boolean>();
+  const isAlive = (pid: number) => {
+    if (!processes.has(pid)) processes.set(pid, alive(pid));
+    return processes.get(pid);
+  };
+  // A surviving provider protects its reservation and its turns after desktop exit.
+  const providers = new Set(entries.filter(entry => entry.kind === "provider" && entry.pid && isAlive(entry.pid)));
+  const protectedIds = new Set([...providers].map(entry => entry.id));
+  for (const provider of providers) {
+    let entry: RuntimeEntry | undefined = provider;
+    while (entry?.parent && !protectedIds.has(entry.parent)) {
+      protectedIds.add(entry.parent);
+      entry = entries.find(candidate => candidate.id === entry!.parent);
     }
-    const kept = entries.filter(entry => entry.kind === "defaults" || entry.kind === "queue" ? true : entry.kind === "provider"
-      ? providers.includes(entry)
-      : alive(entry.owner) || protectedIds.has(entry.id) || (entry.parent && protectedIds.has(entry.parent)));
+  }
+  return entries.filter(entry => entry.kind === "defaults" || entry.kind === "queue" ? true : entry.kind === "provider"
+    ? providers.has(entry)
+    : isAlive(entry.owner) || protectedIds.has(entry.id) || (entry.parent && protectedIds.has(entry.parent)));
+}
+
+export function runtimeTransaction<T>(project: string, action: (entries: RuntimeEntry[]) => T): T {
+  const { directory } = runtimeLocation(project);
+  const path = join(directory, "runtime.json");
+  return withRuntimeLock(directory, () => {
+    const entries = readEntries(path);
+    const kept = liveEntries(entries);
     const before = JSON.stringify(entries);
     const result = action(kept);
     if (JSON.stringify(kept) !== before) writeJson(path, kept);
@@ -53,7 +73,8 @@ export function runtimeTransaction<T>(project: string, action: (entries: Runtime
 }
 
 export function runtimeEntries(project: string) {
-  return runtimeTransaction(project, entries => [...entries]);
+  // Atomic replacement gives readers a complete snapshot without waiting for writers.
+  return liveEntries(readEntries(join(runtimeLocation(project).directory, "runtime.json")));
 }
 
 export function registerRuntime(project: string, value: Omit<RuntimeEntry, "id" | "owner">,

@@ -44,7 +44,7 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
   const slots = createAgentSlots();
   const runtime = runInNewContext(stripTypeScriptTypes(lifecycle) + "\n({launchTask, scheduleAgentWork, scheduleRecurringTasks, confirmProjectClose, projectOperations, runningTasks, activeAgents, deferredExecutors})", {
     AbortController, performance, setTimeout, clearTimeout, setImmediate, subscriptions, agentSlots: slots,
-    locateBoard: (project: string) => project,
+    runtimeLocation: (project: string) => project,
     readBoardSettings: (project: string) => savedSettings.get(project) ?? subscriptions.get(project)?.board.settings ?? {},
     scheduleAutoReview: () => {}, scheduleAutoBoard: () => {}, projectIdentity: (project: string) => project,
     broadcastBoardChat: () => {},

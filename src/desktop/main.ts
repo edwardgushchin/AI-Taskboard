@@ -1,4 +1,5 @@
 import { activeRunSummary, observeActiveRuns, enableSharedRuns } from "./active-runs.ts";
+import { runtimeLocation } from "./board-runtime.ts";
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, Notification, protocol, session, shell } from "electron";
 import type { IpcMainInvokeEvent } from "electron";
 import { randomUUID } from "node:crypto";
@@ -23,7 +24,7 @@ import type { CliReply } from "./cli.ts";
 import { executionModels } from "./codex-models.ts";
 import type { ArchiveLink, BoardSettings, BoardTag, ReviewMode, RunActivity, Task } from "../cli/model.ts";
 import { boardReviewMode, codexThreadPattern, defaultBoardAgents, maxAttachmentBytes, reviewVerifier, taskIdPattern } from "../cli/model.ts";
-import { directory as storageDirectory, locateBoard, readBoardSettings, readJson, writeJson } from "../cli/storage.ts";
+import { directory as storageDirectory, readBoardSettings, readJson, writeJson } from "../cli/storage.ts";
 import { missingCodexThread, startCodexRun } from "./codex-run.ts";
 import type { ExecutorTask } from "./codex-run.ts";
 import { runLog } from "./run-activity.ts";
@@ -1025,7 +1026,7 @@ function scheduleAgentWork() {
 function reserveAgent(project: string, role: AgentRole, task?: string) {
   agentSlots.remember(project);
   // A tool call can race the watch snapshot after CLI settings were saved.
-  const overrides = readBoardSettings(locateBoard(project)).agentLimits;
+  const overrides = readBoardSettings(runtimeLocation(project)).agentLimits;
   const release = agentSlots.acquire(projectIdentity(project), role, overrides, task);
   if (!release) return;
   return Object.assign(() => {
