@@ -648,7 +648,8 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
     if (!prepared.checkout) return prepared.started;
     const plan = prepared.checkout;
     const worktree = checkoutTaskWorktree(plan);
-    return onBoard(location, (store, lockWaitMs) => reply(store, finishTaskStart(store, plan, worktree, lockWaitMs)));
+    return onBoard(location, (store, lockWaitMs) =>
+      reply(store, finishTaskStart(store, plan, worktree, lockWaitMs, input.isolatedWorktree === true)));
   });
 }
 

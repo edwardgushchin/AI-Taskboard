@@ -4224,12 +4224,20 @@ function codexSettings() {
   const choose = button(language("Choose executable…", "Выбрать файл…"), () => update(api.chooseCodex));
   const auto = button(language("Detect automatically", "Найти автоматически"), () => update(api.autoDetectCodex));
   const refresh = button(language("Refresh status", "Обновить статус"), () => update(api.codexStatus));
+  const sandboxLabel = element("label", language("Windows sandbox", "Песочница Windows"));
+  const sandbox = element("select");
+  sandbox.append(new Option("MXC", "mxc"), new Option("Elevated", "elevated"));
+  sandboxLabel.append(sandbox);
+  sandboxLabel.hidden = true;
+  sandbox.addEventListener("change", () => update(() => api.setCodexWindowsSandbox(sandbox.value)));
   actions.append(choose, auto, refresh);
-  section.append(status, details, actions);
+  section.append(status, details, actions, sandboxLabel);
   body.append(section);
 
+  let savedSandbox;
   async function update(load) {
     for (const item of actions.children) item.disabled = true;
+    sandbox.disabled = true;
     status.textContent = language("Checking Codex…", "Проверяем Codex…");
     try {
       const result = await load();
@@ -4242,11 +4250,15 @@ function codexSettings() {
       details.textContent = [result.clientPath ?? result.selectedPath, result.clientVersion ? "Codex " + result.clientVersion : "",
         result.error].filter(Boolean).join(" · ");
       auto.hidden = !result.selectedPath;
+      savedSandbox = result.windowsSandbox;
+      sandboxLabel.hidden = !savedSandbox;
     } catch (error) {
       status.textContent = language("Could not check Codex.", "Не удалось проверить Codex.");
       details.textContent = error.message;
     } finally {
       for (const item of actions.children) item.disabled = false;
+      if (savedSandbox) sandbox.value = savedSandbox;
+      sandbox.disabled = false;
     }
   }
 

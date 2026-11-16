@@ -8,7 +8,7 @@ import { checkPreserveChanges, describeSavedChanges, inspectLocalChanges, restor
 import { exists, readJson, removeFile, writeJson } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
 import { conventionalMessage, noChangesReviewIsStale } from "./submission.ts";
-import { checkProtectedPaths, cleanTaskWorktree, collidingPaths, findWorktree, gitStatus, requireNoGitOperation, usableWorktree } from "./worktree.ts";
+import { checkProtectedPaths, cleanTaskWorktree, collidingPaths, findWorktree, gitStatus, isolateTaskWorktree, requireNoGitOperation, usableWorktree } from "./worktree.ts";
 import { withoutVerification } from "./tasks.ts";
 import { currentReviewApproval } from "./task-messages.ts";
 
@@ -298,12 +298,13 @@ export function reopenConflictingReview(store: BoardStore, task: Task, input: Re
   const repo = requireRepository(store.location.repository);
   const target = localBranch(repo, context.target);
   const head = targetHead(repo, target);
-  const worktree = usableWorktree(findWorktree(repo, context.branch));
+  const currentPath = usableWorktree(findWorktree(repo, context.branch));
   try {
     mergeTree(repo.root, head, context.submission.sha);
   } catch (error) {
     if (!(error instanceof TaskboardError) || error.code !== "MERGE_CONFLICT") throw error;
-    const updated = store.save(record(task, "resolve-conflicts", "agent", "in_progress"));
+    const worktree = input.isolatedWorktree === true ? isolateTaskWorktree(store, repo, task.id, currentPath) : currentPath;
+    const updated = store.save(record({ ...task, git: { ...context, worktree } }, "resolve-conflicts", "agent", "in_progress"));
     return { task: updated, worktree, target, targetHead: head, conflict: error.details };
   }
   throw new TaskboardError("NO_MERGE_CONFLICT", "The reviewed submission can be merged into the current target.");

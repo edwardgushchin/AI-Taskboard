@@ -4,10 +4,11 @@ import { artifactFiles, discardTaskArtifacts, removeSavedSource, saveArtifacts }
 import { dependencyStatus, unfinishedDependencies } from "./dependencies.ts";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import {
-  createInitialCommit, excludeBoard, git, invokeGit, isAncestor, localBranch, requireRepository, resolveCommit, worktrees,
+  createInitialCommit, excludeBoard, git, invokeGit, isAncestor, isolatedWorktreesDirectory, localBranch,
+  requireRepository, resolveCommit, worktrees,
 } from "./git.ts";
 import type { Repository, Worktree } from "./git.ts";
-import { object, record, requireRevision, requireState, TaskboardError, text } from "./model.ts";
+import { object, record, requireRevision, requireState, taskIdPattern, TaskboardError, text } from "./model.ts";
 import type { Task, TaskGit } from "./model.ts";
 import { directory, exists, locateBoard, readBinary, readJson, removeFile, taskStartInProgress, taskWorkingDirectory, writeJson } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
@@ -32,7 +33,14 @@ export function findTaskWorktree(repo: Repository, { branch, worktree: recorded 
   const entries = worktrees(repo.root);
   const attached = findWorktree(repo, branch, entries);
   if (attached || !recorded || !isAbsolute(recorded)) return attached;
-  const detached = entries.find(item => !item.branch && item.head && !item.prunable && !relative(recorded, item.path));
+  let expected = recorded;
+  const id = branch.slice("refs/heads/ai-taskboard/".length);
+  if (branch.startsWith("refs/heads/ai-taskboard/") && taskIdPattern.test(id) &&
+      insideDirectory(join(repo.root, ".tasks", "worktrees"), recorded) && !exists(recorded)) {
+    // Recover a detached rebase if Git moved the worktree before the card was saved.
+    expected = join(isolatedRoot(repo), id);
+  }
+  const detached = entries.find(item => !item.branch && item.head && !item.prunable && !relative(expected, item.path));
   if (!detached || !exists(detached.path)) return undefined;
   const gitDir = git(usableWorktree(detached), ["rev-parse", "--absolute-git-dir"]).trimEnd();
   for (const operation of ["rebase-merge", "rebase-apply"]) {
@@ -112,6 +120,20 @@ function worktreeBranch(task: Task): string {
   return "refs/heads/ai-taskboard/" + task.id;
 }
 
+function insideDirectory(parent: string, path: string): boolean {
+  const inside = relative(parent, path);
+  return Boolean(inside && inside !== ".." && !inside.startsWith(".." + sep) && !isAbsolute(inside));
+}
+
+function isolatedRoot(repo: Repository, create = false): string {
+  const path = join(repo.root, isolatedWorktreesDirectory);
+  if (create) {
+    excludeBoard(repo, isolatedWorktreesDirectory);
+    directory(path, true);
+  }
+  return path;
+}
+
 export function hasPending(store: BoardStore, task: Task): boolean {
   const path = store.pendingPath(task.id);
   if (!exists(path)) return false;
@@ -122,7 +144,8 @@ export function hasPending(store: BoardStore, task: Task): boolean {
   if (taskStartInProgress(store.location, task.id)) return true;
 
   const branch = worktreeBranch(task);
-  const managedPath = join(store.subdirectory("worktrees"), task.id);
+  const folder = pending.isolatedWorktree === true ? isolatedRoot(repo) : store.subdirectory("worktrees");
+  const managedPath = join(folder, task.id);
   if (exists(managedPath) || resolveCommit(repo.root, branch) ||
       worktrees(repo.root).some(item => item.branch === branch || relative(managedPath, item.path) === "")) return true;
 
@@ -132,7 +155,7 @@ export function hasPending(store: BoardStore, task: Task): boolean {
 }
 
 type StartedTask = { task: Task } & ({ worktree: string } | { cwd: string });
-type StartIntent = { action: "start"; revision: number; target: string; base: string };
+type StartIntent = { action: "start"; revision: number; target: string; base: string; isolatedWorktree?: true };
 type TaskCheckout = {
   id: string; repo: Repository; branch: string; managedPath: string; intent: StartIntent;
   preparing: number; lockWaitMs: number;
@@ -168,7 +191,6 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
     return { task: task.status === "in_progress" ? task : save(task), cwd };
   }
   const branch = worktreeBranch(task);
-  const managedPath = join(store.subdirectory("worktrees"), task.id);
   const pendingPath = store.pendingPath(task.id);
   const pending = exists(pendingPath) ? object(readJson(pendingPath)) : undefined;
   if (pending && pending.action !== "start") {
@@ -184,15 +206,19 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
         throw new TaskboardError("INVALID_INPUT", "Resume the task on its original target branch.");
       }
     }
-    const worktree = usableWorktree(findTaskWorktree(repo, task.git));
+    const currentPath = usableWorktree(findTaskWorktree(repo, task.git));
+    const worktree = input.isolatedWorktree === true ? isolateTaskWorktree(store, repo, task.id, currentPath) : currentPath;
+    const updated = { ...task, git: { ...task.git, worktree } };
     if (pending) removeFile(pendingPath);
-    if (task.status === "in_progress") return { task, worktree };
-    return { task: save({ ...task, git: { ...task.git, worktree } }), worktree };
+    if (task.status === "in_progress") return { task: worktree === task.git.worktree ? task : store.save(updated), worktree };
+    return { task: save(updated), worktree };
   }
 
   const requested = input.target === undefined ? undefined : text(input.target, "target", true);
   const repo = store.location.repository ?? requireRepository(locateBoard(store.location.root, true, true).repository);
   excludeBoard(repo);
+  const isolatedWorktree = (pending ?? input).isolatedWorktree === true;
+  const managedPath = join(isolatedWorktree ? isolatedRoot(repo, true) : store.subdirectory("worktrees"), task.id);
   let target: string;
   let base: string;
   if (pending) {
@@ -212,12 +238,13 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
     }
     base = resolveCommit(repo.root, target) ?? createInitialCommit(repo, target);
   }
-  const intent: StartIntent = { action: "start", revision: task.revision, target, base };
+  const intent: StartIntent = { action: "start", revision: task.revision, target, base,
+    ...(isolatedWorktree ? { isolatedWorktree: true } : {}) };
   if (!pending) writeJson(pendingPath, intent);
   return { id: task.id, repo, branch, managedPath, intent, preparing, lockWaitMs };
 }
 
-export function checkoutTaskWorktree({ repo, branch, managedPath, intent: { base } }: TaskCheckout) {
+export function checkoutTaskWorktree({ id, repo, branch, managedPath, intent: { base, isolatedWorktree } }: TaskCheckout) {
   const existing = findWorktree(repo, branch);
   let gitWorktreeAddMs: number | undefined;
   if (!existing) {
@@ -243,13 +270,17 @@ export function checkoutTaskWorktree({ repo, branch, managedPath, intent: { base
 
   const item = existing ?? findWorktree(repo, branch);
   const worktree = usableWorktree(item);
-  if (item?.head !== base || !exists(managedPath) || realpathSync(managedPath) !== worktree) {
+  const matches = exists(managedPath) && realpathSync(managedPath) === worktree;
+  // A previous Elevated start may have moved a legacy pending checkout before the card was saved.
+  const moved = !isolatedWorktree && !relative(join(isolatedRoot(repo), id), worktree);
+  if (item?.head !== base || (!matches && !moved)) {
     throw new TaskboardError("WORKTREE_COLLISION", "The task worktree does not match the pending checkout.");
   }
   return { worktree, gitWorktreeAddMs };
 }
 
-export function finishTaskStart(store: BoardStore, plan: TaskCheckout, checkout: ReturnType<typeof checkoutTaskWorktree>, finalLockWaitMs: number) {
+export function finishTaskStart(store: BoardStore, plan: TaskCheckout, checkout: ReturnType<typeof checkoutTaskWorktree>,
+  finalLockWaitMs: number, isolate: boolean) {
   const { id, branch, intent, preparing, lockWaitMs } = plan;
   const task = store.card(id);
   requireState(task, ["ready"]);
@@ -258,15 +289,25 @@ export function finishTaskStart(store: BoardStore, plan: TaskCheckout, checkout:
   const pending = exists(pendingPath) && object(readJson(pendingPath));
   const { target, base } = intent;
   if (!pending || pending.action !== intent.action || pending.revision !== intent.revision ||
-      pending.target !== target || pending.base !== base) {
+      pending.target !== target || pending.base !== base || pending.isolatedWorktree !== intent.isolatedWorktree) {
     throw new TaskboardError("PENDING_OPERATION", "The pending task checkout changed.");
   }
-  const { worktree, gitWorktreeAddMs } = checkout;
+  const { gitWorktreeAddMs } = checkout;
+  const worktree = isolate ? isolateTaskWorktree(store, plan.repo, id, checkout.worktree) : checkout.worktree;
   const prepareMs = Math.max(0, Math.round(performance.now() - preparing) - finalLockWaitMs);
   const updated = saveStart(store, { ...task, git: { target, base, branch, worktree } },
     lockWaitMs + finalLockWaitMs, prepareMs, gitWorktreeAddMs);
   removeFile(pendingPath);
   return { task: updated, worktree };
+}
+
+// Move only the assigned, registered Git worktree, under the task's start lock.
+export function isolateTaskWorktree(store: BoardStore, repo: Repository, id: string, worktree: string): string {
+  if (!insideDirectory(store.subdirectory("worktrees"), worktree)) return worktree;
+  const target = join(isolatedRoot(repo, true), id);
+  if (exists(target)) throw new TaskboardError("WORKTREE_COLLISION", "The isolated worktree path already contains files.", { path: target });
+  git(repo.root, ["worktree", "move", "--", worktree, target]);
+  return realpathSync(target);
 }
 
 export function inspectCleanup(store: BoardStore, task: Task) {
@@ -337,8 +378,10 @@ export function cleanTaskWorktree(store: BoardStore, task: Task, artifacts?: unk
 function orphanedTaskWorktree(store: BoardStore, repo: Repository, task: Task): string | undefined {
   const recorded = task.git?.worktree;
   if (!recorded || !isAbsolute(recorded)) return undefined;
-  const expected = join(store.subdirectory("worktrees"), task.id);
-  if (relative(expected, recorded) || !exists(expected)) return undefined;
+  const expected = [store.subdirectory("worktrees"), isolatedRoot(repo)].map(root => join(root, task.id))
+    .find(path => !relative(path, recorded) && exists(path));
+  if (!expected) return undefined;
+  directory(dirname(expected));
   // Git for Windows can remove the registration while the directory itself is still in use.
   if (worktrees(repo.root).some(item => !relative(expected, item.path))) return undefined;
   return expected;
@@ -389,11 +432,11 @@ function removeTaskOutput(path: string, changes: string[]): boolean {
 function removeTaskWorktree(store: BoardStore, task: Task, repo: Repository, item: Worktree, accepted: boolean, artifacts?: unknown): void {
   if (item.locked) throw new TaskboardError("WORKTREE_LOCKED", "The task worktree is locked.");
   const path = usableWorktree(item);
-  const managedRoot = realpathSync(store.subdirectory("worktrees"));
-  const inside = relative(managedRoot, path);
-  if (!inside || inside === ".." || inside.startsWith(".." + sep) || isAbsolute(inside)) {
+  const managedRoot = [store.subdirectory("worktrees"), isolatedRoot(repo)].find(root => insideDirectory(root, path));
+  if (!managedRoot) {
     throw new TaskboardError("UNMANAGED_WORKTREE", "Only worktrees in the managed directory can be removed.");
   }
+  directory(managedRoot);
   requireNoGitOperation(path);
   if (artifacts !== undefined) saveArtifacts(store, task.id, path, artifacts, true);
   const saved = accepted ? artifactFiles(store, task.id) : [];

@@ -317,7 +317,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
       signal.throwIfAborted();
       waits.push(ms);
     },
-    configuredCodex: async () => ({ path: process.execPath, args: [script, providerMode] }),
+    configuredCodex: async () => ({ path: process.execPath, args: [script, providerMode], windowsSandbox: "elevated" }),
     runActivity,
   });
   const controller = new AbortController();
@@ -363,7 +363,9 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.ok(flags().includes('permissions.ai-taskboard-manager={filesystem={":root"="read"},network={enabled=true}}'));
   assert.ok(flags().includes('default_permissions="ai-taskboard-manager"'));
   assert.ok(flags().includes("network_proxy"));
-  assert.equal(flags().includes('windows.sandbox="mxc"'), process.platform === "win32");
+  assert.equal(flags().includes("prefer_mxc"), process.platform === "win32");
+  assert.deepEqual(flags().filter(flag => flag.startsWith("windows.sandbox=")),
+    process.platform === "win32" ? ['windows.sandbox="elevated"'] : []);
   assert.deepEqual(requests.map(({ method }: { method: string }) => method), [
     "initialize", "model/list", ...Array(5).fill("thread/resume"), "thread/goal/set", "turn/start", "thread/unsubscribe",
   ]);

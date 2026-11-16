@@ -363,6 +363,8 @@ app.whenReady().then(async () => {
           name: savedNames.get(project), agentLimits: savedLimits.get(project) } } });
       const createProjectCalls = [];
       let limits = { executor: 3, manager: 1, reviewer: 1 };
+      let windowsSandbox = 'mxc';
+      const codexStatus = async () => ({ state: 'unavailable', windowsSandbox });
       Object.assign(window.taskboard, {
         createBoard: async () => { createProjectCalls.push(frame.project ?? null); },
         selectTab: async project => openBoard(project),
@@ -375,10 +377,12 @@ app.whenReady().then(async () => {
         },
         agentLimits: async value => ({ ok: true, data: value ? limits = value : limits }),
         themes: async () => [],
-        codexStatus: async () => ({ state: 'unavailable' }),
+        codexStatus,
+        setCodexWindowsSandbox: async mode => { windowsSandbox = mode; return codexStatus(); },
         chatModels: async () => ({ ok: true, data: [] }),
       });
       const limitFields = () => [...byId('agent-limits').querySelectorAll('input')];
+      const sandboxSelect = () => body.querySelector('.provider-panel select');
       const boardNameInput = () => byId('sheet-body').querySelector('form input[type="text"]');
       const boardLimit = role => body.querySelector('[name="' + role + 'Limit"]');
       const gearBackground = () => getComputedStyle(byId('app-settings')).backgroundColor;
@@ -402,17 +406,22 @@ app.whenReady().then(async () => {
       "File invokes project creation from the welcome screen");
     await click('#app-settings');
     await check(`byId('settings-menu').matches(':popover-open') && !sheet.open &&
-      byId('settings-menu-board').disabled && byId('settings-menu').querySelectorAll('[role="menuitem"]').length === 3`,
-      "the gear opens three menu actions without a board and disables board settings");
+      byId('settings-menu-board').disabled && byId('settings-menu').querySelectorAll('[role="menuitem"]').length === 4`,
+      "the gear opens the settings menu without a board and disables board settings");
     await click('#settings-menu-app');
     await evaluate(`waitFor(() => limitFields()[0].value === '3')`);
     await check(`limitFields().map(input => input.value).join(',') === '3,1,1' &&
       !!body.querySelector('.provider-panel') && !byId('tag-settings')`, "the gear menu opens shared settings even without an open board");
+    await evaluate(`waitFor(() => !sandboxSelect().disabled && !sandboxSelect().parentElement.hidden)`);
+    await check(`sandboxSelect().value === 'mxc'`, "Codex settings show the current Windows sandbox");
+    await evaluate(`sandboxSelect().value = 'elevated'; sandboxSelect().dispatchEvent(new Event('change'));
+      waitFor(() => !sandboxSelect().disabled && windowsSandbox === 'elevated')`);
     await evaluate(`limitFields()[0].value = '0'; byId('agent-limits').requestSubmit(); waitFor(() => !sheet.open)`);
     await click('#app-menu .app-menu-trigger');
     await click('#app-settings-menu-item');
     await evaluate(`waitFor(() => limitFields()[0].value === '0')`);
     await check(`limits.executor === 0 && limitFields()[1].value === '1'`, "File opens the same settings and zero is saved");
+    await check(`sandboxSelect().value === 'elevated'`, "the Windows sandbox selection persists when settings reopen");
     await evaluate(`sheet.close(); openBoard('board-fixture'); void 0`);
     await check(`(() => {
       const tabs = byId('project-tabs');

@@ -2,7 +2,8 @@ import { readdirSync, realpathSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { TaskboardError, object } from "./model.ts";
 import { readTask } from "./archive.ts";
-import { exists, finishTestRecovery, readBinary, readJson, sha256, taskStartInProgress, withTaskRecoveryLock, writeAtomic, writeJson } from "./storage.ts";
+import { isolatedWorktreesDirectory } from "./git.ts";
+import { directory, exists, finishTestRecovery, readBinary, readJson, sha256, taskStartInProgress, withTaskRecoveryLock, writeAtomic, writeJson } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
 
 interface Fingerprint { path: string; bytes: number; sha256: string }
@@ -66,8 +67,14 @@ function recoverTestDataLocked(store: BoardStore, input: Record<string, unknown>
     if (taskStartInProgress(store.location, id)) fail("Task start is active: " + id);
     const pending = readdirSync(store.subdirectory("pending")).filter(name => name.startsWith(id + "."));
     if (pending.some(name => name !== id + ".start.sqlite")) fail("Pending operation: " + id);
-    for (const name of ["attachments", "worktrees"]) {
-      if (readdirSync(store.subdirectory(name as "attachments" | "worktrees")).some(file => file === id || file.startsWith(id + "."))) fail("Task has extra storage: " + id);
+    const roots = [store.subdirectory("attachments"), store.subdirectory("worktrees")];
+    const isolated = join(store.location.root, isolatedWorktreesDirectory);
+    if (exists(isolated)) {
+      directory(isolated);
+      roots.push(isolated);
+    }
+    for (const root of roots) {
+      if (readdirSync(root).some(file => file === id || file.startsWith(id + "."))) fail("Task has extra storage: " + id);
     }
   }
   const pendingPaths = new Set<string>();

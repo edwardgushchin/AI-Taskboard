@@ -898,8 +898,8 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 }
 .provider-panel p { line-height: 1.45; overflow-wrap: anywhere; }
 .appearance-panel { padding-top: 0; padding-bottom: 14px; border-top: 0; border-bottom: 1px solid var(--border); }
-.appearance-panel label { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.appearance-panel select { min-width: 175px; }
+.appearance-panel label, .provider-panel label:not([hidden]) { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.appearance-panel select, .provider-panel select { min-width: 175px; }
 .tag-setting { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .lane-header {
   position: relative; display: flex; align-items: center; gap: 6px; min-height: 55px; padding: 7px 0 12px;

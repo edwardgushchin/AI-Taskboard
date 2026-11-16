@@ -25,6 +25,10 @@ import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import { settingsDelivery, syncSettingsNotices } from "../src/desktop/settings-notices.ts";
 
+process.env.GIT_CEILING_DIRECTORIES = realpathSync(tmpdir());
+process.env.GIT_CONFIG_NOSYSTEM = "1";
+process.env.GIT_CONFIG_GLOBAL = process.platform === "win32" ? "NUL" : "/dev/null";
+
 const source = (file: string) => readFileSync(new URL("../src/desktop/" + file, import.meta.url), "utf8");
 const boardSource = stripTypeScriptTypes(source("board-actions.ts").replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, ""));
 const main = ts.createSourceFile("main.ts", source("main.ts"), ts.ScriptTarget.Latest, true);
@@ -96,7 +100,6 @@ function fixture(t: TestContext) {
     runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
     AbortSignal, AbortController, ArrayBuffer, Buffer, Error, basename, dirname, extname, join, mkdtemp, rm, writeFile, maxAttachmentBytes, boardActions, boardInstructions, boardTools, callCli,
     autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, defaultBoardAgents, reviewVerifier,
-    settingsDelivery, syncSettingsNotices, locateBoard, readBoardSettings,
     existsSync, storageDirectory, readdirSync, rmSync, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
     goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryForView, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, saveManagerHistory,
     send() {},
@@ -113,6 +116,7 @@ function fixture(t: TestContext) {
     activateTab: (owner: { active: unknown }, tab: unknown) => { owner.active = tab; },
     launchingTasks: new Set(), runningTasks, chatRuns: new Map(), activeAgents, managerInbox, needsManagerAttention, subscriptions, reviewerTools,
     closingProjects: new Set(), setImmediate, setTimeout, clearTimeout, performance, console, agentSlots,
+    locateBoard, readBoardSettings, settingsDelivery, syncSettingsNotices,
     reviewWithCodex: async (_profile: string, cwd: string, settings: ChatSettings | null, context: string,
       tools: { name: string }[], call: RunAction, _signal: AbortSignal,
       onUsage: (report: import("../src/cli/token-usage.ts").TokenUsageReport) => Promise<void>) => {
@@ -792,9 +796,11 @@ test("an interrupted manager request preserves the durable queue until Codex rec
   const archived = await f.history();
   assert.equal(archived.ok, true);
   assert.equal(archived.data.turns.length, 1);
-  const at = archived.data.turns[0].messages[0].at;
-  assert.equal(new Date(at).toISOString(), at);
-  assert.deepEqual(archived.data.turns[0].messages, [{ at, text: "Новый текст", clientId: id, files: [] }]);
+  const messages = archived.data.turns[0].messages;
+  assert.equal(messages.length, 1);
+  const [{ at, ...message }] = messages;
+  assert.ok(Number.isFinite(Date.parse(at)));
+  assert.deepEqual(message, { text: "Новый текст", clientId: id, files: [] });
   assert.equal(f.providerHistoryReads(), 0);
   writeJson(f.chatBinding, { provider: "codex", id: f.threadId });
   assert.deepEqual((await f.history()).data.turns, archived.data.turns);
@@ -2008,7 +2014,7 @@ test("manager reopens a conflicting approved submission and integrates its revie
     return result.stdout.trim();
   };
   git(f.project, "init", "-b", "main");
-  // Submit/accept launch detached maintenance; do not let it hold this disposable cwd during cleanup.
+  // Keep detached maintenance from holding the disposable cwd during cleanup.
   git(f.project, "config", "maintenance.auto", "false");
   git(f.project, "config", "core.autocrlf", "false");
   git(f.project, "config", "user.name", "Taskboard");

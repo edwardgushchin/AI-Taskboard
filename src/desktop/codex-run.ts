@@ -2,9 +2,10 @@ import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { git } from "../cli/git.ts";
+import { git, gitSafeDirectoryEnvironment, isolatedWorktreesDirectory } from "../cli/git.ts";
 import { codexThreadPattern } from "../cli/model.ts";
 import type { RunActivity, Task } from "../cli/model.ts";
+import { directory } from "../cli/storage.ts";
 import { runActivity } from "./run-activity.ts";
 import { boardAgentInstructions, boardCodexArgs, boardWorklog, worklogReminder, worklogTool } from "./board-agent-hooks.ts";
 import { openBoardMcp } from "./board-mcp.ts";
@@ -18,6 +19,7 @@ import { codexRpc, turnControl } from "./codex-rpc.ts";
 import type { AgentControl } from "./codex-rpc.ts";
 import { CodexTokenUsage } from "./codex-token-usage.ts";
 import type { TokenUsageReport } from "../cli/token-usage.ts";
+import { insideProject } from "./project-files.ts";
 
 type Client = NonNullable<Awaited<ReturnType<typeof configuredCodex>>>;
 type Turn = { id: string; status: string; error?: { message?: string } | null };
@@ -79,10 +81,17 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   const paths = [...new Set([runDirectory, boardData, ...(task.git ? gitAccessPaths(cwd, task.git.branch) : [])])];
   const developerInstructions = executorInstructions();
   const worklog = boardWorklog(project, "executor", task.id);
+  const readOnlyWorktrees = [join(boardData, "worktrees")];
+  const isolatedRoot = join(dirname(boardData), isolatedWorktreesDirectory);
+  if (insideProject(runDirectory, isolatedRoot)) {
+    if (runDirectory === isolatedRoot) throw new Error("Choose an individual worktree, not the shared worktree directory.");
+    directory(isolatedRoot, true);
+    readOnlyWorktrees.push(isolatedRoot);
+  }
   const filesystem = [
     '":root" = "read"',
     ...paths.map(path => JSON.stringify(path) + ' = "write"'),
-    JSON.stringify(join(boardData, "worktrees")) + ' = "read"',
+    ...readOnlyWorktrees.map(path => JSON.stringify(path) + ' = "read"'),
   ].join(", ");
   const requestTool = { name: "task_tool_request", description: "Request a missing provider MCP tool for this task. The manager receives a question. Assignment requires a restarted task run; provider permissions still apply.",
     inputSchema: { type: "object", properties: { server: { type: "string" }, tool: { type: "string" }, reason: { type: "string" } }, required: ["server", "tool", "reason"], additionalProperties: false } };
@@ -94,14 +103,18 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   let child: ChildProcessWithoutNullStreams;
   try {
     signal?.throwIfAborted();
+    const env = { ...(client.env ?? process.env), ...mcp.env };
+    const runEnv = process.platform === "win32" && client.windowsSandbox === "elevated"
+      ? gitSafeDirectoryEnvironment(env, dirname(boardData), ...(task.git ? [runDirectory] : []))
+      : env;
     child = spawn(client.path, [
       ...client.args, ...boardCodexArgs, "-c", mcp.config,
       "-c", 'web_search="live"',
       "--disable", "network_proxy",
       "-c", "permissions." + profile + "={filesystem={" + filesystem + "},network={enabled=true}}",
       "-c", "default_permissions=" + JSON.stringify(profile),
-      ...(process.platform === "win32" ? ["-c", 'windows.sandbox="mxc"'] : []),
-    ], { cwd: project, env: { ...(client.env ?? process.env), ...mcp.env }, windowsHide: true, stdio: "pipe" });
+      ...(process.platform === "win32" ? ["--disable", "prefer_mxc", "-c", "windows.sandbox=" + JSON.stringify(client.windowsSandbox ?? "mxc")] : []),
+    ], { cwd: project, env: runEnv, windowsHide: true, stdio: "pipe" });
   } catch (error) {
     await mcp.close();
     throw error;

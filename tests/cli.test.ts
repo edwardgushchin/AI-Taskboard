@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import childProcess, { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, rmdirSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { syncBuiltinESMExports } from "node:module";
@@ -666,6 +666,44 @@ test("the board tag catalog migrates older tasks and shares names and colors acr
   assert.equal(readFileSync(indexPath, "utf8"), legacyCatalog);
   cli(root, ["tag", "set"], { name, color: "#12AB34" });
   assert.deepEqual(JSON.parse(readFileSync(indexPath, "utf8")).tags, migrated);
+});
+
+test("Elevated worktree paths preserve files, isolate sibling tasks and support cleanup", t => {
+  const root = fixture(t, true);
+  cli(root, ["init"]);
+  const legacy = cli(root, ["create"], { title: "Already started", criteria: ["Keep local files."] });
+  const next = cli(root, ["create"], { title: "Start in Elevated", criteria: ["Create a worktree."] });
+  cli(root, ["approve", legacy.id]);
+  cli(root, ["approve", next.id]);
+  const old = cli(root, ["start", legacy.id]).worktree;
+  writeFileSync(join(old, "source.txt"), "staged\n");
+  git(old, "add", "source.txt");
+  writeFileSync(join(old, "notes.local"), "unsaved notes\n");
+  const before = git(old, "status", "--porcelain", "--ignored");
+  cli(root, ["pause", legacy.id]);
+
+  const other = cli(root, ["start", next.id], { isolatedWorktree: true });
+  const target = join(root, ".taskboard-worktrees", legacy.id);
+  mkdirSync(target);
+  cli(root, ["start", legacy.id], { isolatedWorktree: true }, "WORKTREE_COLLISION");
+  assert.equal(cli(root, ["show", legacy.id]).status, "ready");
+  assert.equal(git(old, "status", "--porcelain", "--ignored"), before);
+  rmdirSync(target);
+
+  const moved = cli(root, ["start", legacy.id], { isolatedWorktree: true });
+  assert.equal(moved.worktree, realpathSync(target));
+  assert.equal(other.worktree, realpathSync(join(root, ".taskboard-worktrees", next.id)));
+  assert.ok(!existsSync(old));
+  assert.equal(cli(moved.worktree, ["show", legacy.id]).git.worktree, moved.worktree);
+  assert.equal(cli(root, ["start", legacy.id]).worktree, moved.worktree);
+  assert.equal(git(moved.worktree, "status", "--porcelain", "--ignored"), before);
+  assert.equal(readFileSync(join(moved.worktree, "notes.local"), "utf8"), "unsaved notes\n");
+  assert.equal(git(root, "status", "--porcelain"), "");
+
+  cli(root, ["cancel", next.id], { reason: "Check cleanup" });
+  assert.equal(cli(root, ["cleanup", next.id]).removed, true);
+  assert.ok(!existsSync(other.worktree));
+  assert.ok(existsSync(moved.worktree));
 });
 
 test("linked worktrees share the board and cleanup preserves local files and the branch", t => {
@@ -1472,7 +1510,16 @@ test("an executor can resume its own unfinished rebase in the registered worktre
   assert.equal(cli(root, ["show", card.id]).git.worktree, worktree);
   cli(root, ["preview", card.id], undefined, "GIT_OPERATION_IN_PROGRESS");
   assert.equal(git(worktree, "status", "--porcelain"), status);
-  git(worktree, "rebase", "--abort");
+
+  // Git finished the move, but the task still records the legacy location.
+  const relocated = join(root, ".taskboard-worktrees", card.id);
+  mkdirSync(dirname(relocated));
+  git(root, "worktree", "move", worktree, relocated);
+  const recovered = cli(root, ["start", card.id, "--compact"], { revision: task.revision, isolatedWorktree: true, launchDetails: true });
+  assert.equal(recovered.worktree, realpathSync(relocated));
+  assert.equal(recovered.task.git.worktree, recovered.worktree);
+  assert.equal(git(relocated, "status", "--porcelain"), status);
+  git(relocated, "rebase", "--abort");
 });
 
 test("resubmission verifies the actual Conventional Commit after an external rebase", t => {

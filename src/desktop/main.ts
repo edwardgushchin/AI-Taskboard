@@ -9,7 +9,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { callCli, cliChild, cliFailure } from "./cli.ts";
-import { codexStatus, configuredCodex, setCodexExecutable } from "./codex.ts";
+import { codexStatus, configuredCodex, setCodexExecutable, setCodexWindowsSandbox } from "./codex.ts";
 import { boardSuggestions, chatModels, readBoardHistory, readLastTaskTurn, readTaskRunHistory, replyToBoard, replyToTask, reviewWithCodex, updateBoardGoal } from "./codex-chat.ts";
 import type { BoardActivity, BoardGoal, BoardGoalAction } from "./codex-chat.ts";
 import { autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools } from "./board-actions.ts";
@@ -2381,7 +2381,9 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     }
     signal.throwIfAborted();
     const started = await callCli<{ task: LaunchState & ExecutorTask } & ({ worktree: string } | { cwd: string })>(project, ["start", id, "--compact"],
-      { revision: revision ?? current.data.revision, launchDetails: true, ...(scheduled ? { scheduled } : {}), ...(resolveConflicts ? { resolveConflicts } : {}) });
+      { revision: revision ?? current.data.revision, launchDetails: true, ...(scheduled ? { scheduled } : {}),
+        ...(resolveConflicts ? { resolveConflicts } : {}),
+        ...(process.platform === "win32" && client.windowsSandbox === "elevated" ? { isolatedWorktree: true } : {}) });
     if (!started.ok) {
       if (prepared && started.error.code !== "BOARD_BUSY") throw new Error(started.error.message);
       return started;
@@ -2572,6 +2574,12 @@ ipcMain.handle("codex:auto", event => {
   stateOf(event);
   setCodexExecutable(app.getPath("userData"));
   return codexStatus(app.getPath("userData"));
+});
+ipcMain.handle("codex:windowsSandbox", (event, mode: unknown) => {
+  stateOf(event);
+  const profile = app.getPath("userData");
+  setCodexWindowsSandbox(profile, mode);
+  return codexStatus(profile);
 });
 app.setName("AI Taskboard");
 if (!app.requestSingleInstanceLock()) app.quit();

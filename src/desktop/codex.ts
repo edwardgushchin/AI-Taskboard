@@ -16,13 +16,17 @@ interface Launch {
 
 interface Client extends Launch {
   version: string;
+  windowsSandbox?: WindowsSandbox;
 }
+
+type WindowsSandbox = "mxc" | "elevated";
 
 export interface CodexStatus {
   state: "unavailable" | "ready" | "error";
   selectedPath?: string;
   clientPath?: string;
   clientVersion?: string;
+  windowsSandbox?: WindowsSandbox;
   error?: string;
 }
 
@@ -36,11 +40,12 @@ function isFile(path: string): boolean {
   catch { return false; }
 }
 
-function preference(directory: string): string | undefined {
+function preferences(directory: string) {
   const path = join(directory, "codex.json");
-  if (!existsSync(path)) return undefined;
-  const value = readJson(path) as { executable?: unknown };
-  return typeof value?.executable === "string" && isAbsolute(value.executable) ? value.executable : undefined;
+  const value = existsSync(path) ? readJson(path) as { executable?: unknown; windowsSandbox?: unknown } : undefined;
+  const executable = typeof value?.executable === "string" && isAbsolute(value.executable) ? value.executable : undefined;
+  const windowsSandbox: WindowsSandbox = value?.windowsSandbox === "elevated" ? "elevated" : "mxc";
+  return { executable, windowsSandbox: process.platform === "win32" ? windowsSandbox : undefined };
 }
 
 export function setCodexExecutable(dataDirectory: string, path?: string): void {
@@ -48,7 +53,16 @@ export function setCodexExecutable(dataDirectory: string, path?: string): void {
     throw new Error("Select the Codex executable.");
   }
   directory(dataDirectory, true);
-  writeJson(join(dataDirectory, "codex.json"), { executable: path });
+  writeJson(join(dataDirectory, "codex.json"), { ...preferences(dataDirectory), executable: path });
+  configuredClients.delete(dataDirectory);
+}
+
+export function setCodexWindowsSandbox(dataDirectory: string, value: unknown): void {
+  if (process.platform !== "win32" || (value !== "mxc" && value !== "elevated")) {
+    throw new Error("Select MXC or Elevated for the Windows sandbox.");
+  }
+  directory(dataDirectory, true);
+  writeJson(join(dataDirectory, "codex.json"), { ...preferences(dataDirectory), windowsSandbox: value });
   configuredClients.delete(dataDirectory);
 }
 
@@ -120,7 +134,7 @@ async function invoke(client: Launch, args: string[], cwd: string): Promise<stri
   }
 }
 
-async function findClient(dataDirectory: string, selectedPath?: string): Promise<Client | undefined> {
+async function findClient(dataDirectory: string, selectedPath?: string, windowsSandbox?: WindowsSandbox): Promise<Client | undefined> {
   const probe = async (choices: Launch[]) => {
     const checked = new Set<string>();
     for (const choice of choices) {
@@ -131,7 +145,7 @@ async function findClient(dataDirectory: string, selectedPath?: string): Promise
         const version = /^codex-cli (\S+)/m.exec(await invoke(choice, ["--version"], dataDirectory))?.[1];
         if (!version) continue;
         await invoke(choice, ["app-server", "--help"], dataDirectory);
-        return { ...choice, version };
+        return { ...choice, version, windowsSandbox };
       } catch {
         // A stale wrapper or old binary should not hide a working installation.
       }
@@ -142,14 +156,14 @@ async function findClient(dataDirectory: string, selectedPath?: string): Promise
   return await probe(candidates()) ?? (process.platform === "win32" ? await probe(await windowsDesktopClients()) : undefined);
 }
 
-const configuredClients = new Map<string, { selected?: string; expires: number; client: Promise<Client | undefined> }>();
+const configuredClients = new Map<string, { selected?: string; windowsSandbox?: WindowsSandbox; expires: number; client: Promise<Client | undefined> }>();
 
 export function configuredCodex(dataDirectory: string) {
-  const selected = preference(dataDirectory);
+  const { executable: selected, windowsSandbox } = preferences(dataDirectory);
   const cached = configuredClients.get(dataDirectory);
-  if (cached && cached.selected === selected && cached.expires > Date.now()) return cached.client;
-  const client = findClient(dataDirectory, selected);
-  const entry = { selected, expires: Date.now() + 60_000, client };
+  if (cached && cached.selected === selected && cached.windowsSandbox === windowsSandbox && cached.expires > Date.now()) return cached.client;
+  const client = findClient(dataDirectory, selected, windowsSandbox);
+  const entry = { selected, windowsSandbox, expires: Date.now() + 60_000, client };
   configuredClients.set(dataDirectory, entry);
   const forget = () => { if (configuredClients.get(dataDirectory) === entry) configuredClients.delete(dataDirectory); };
   void client.then(found => { if (!found) forget(); }, forget);
@@ -158,14 +172,15 @@ export function configuredCodex(dataDirectory: string) {
 
 export async function codexStatus(dataDirectory: string): Promise<CodexStatus> {
   let selectedPath: string | undefined;
+  let windowsSandbox: WindowsSandbox | undefined;
   try {
-    selectedPath = preference(dataDirectory);
-    const client = await findClient(dataDirectory, selectedPath);
+    ({ executable: selectedPath, windowsSandbox } = preferences(dataDirectory));
+    const client = await findClient(dataDirectory, selectedPath, windowsSandbox);
     return client
-      ? { state: "ready", selectedPath, clientPath: client.path, clientVersion: client.version }
-      : { state: "unavailable", selectedPath };
+      ? { state: "ready", selectedPath, clientPath: client.path, clientVersion: client.version, windowsSandbox }
+      : { state: "unavailable", selectedPath, windowsSandbox };
   } catch (error) {
-    return { state: "error", selectedPath, error: (error as Error).message };
+    return { state: "error", selectedPath, windowsSandbox, error: (error as Error).message };
   }
 }
 
