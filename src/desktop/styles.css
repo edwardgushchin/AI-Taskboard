@@ -100,6 +100,7 @@ h1, h2, h3, p { margin: 0; }
 .settings-menu .app-menu-item:disabled { color: var(--muted); cursor: default; background: transparent; }
 .settings-menu hr { border: 0; border-top: 1px solid var(--border); margin: 4px; }
 .project-tab {
+  position: relative;
   --project-tab-background: var(--toolbar);
   display: flex; flex-direction: column-reverse; align-items: center; flex: 0 0 auto;
   min-height: 0; max-height: 260px; min-width: 0; width: 100%; padding-bottom: 4px;
@@ -110,6 +111,16 @@ h1, h2, h3, p { margin: 0; }
 .project-tab:has([aria-selected="true"]) {
   --project-tab-background: color-mix(in srgb, var(--accent) 14%, var(--bg));
   border-inline-start-color: var(--accent); color: var(--text);
+}
+/* Activity is on the opposite edge from selection and never takes layout space. */
+.project-tab.has-active-agents::after {
+  content: ""; position: absolute; inset-block: 3px; inset-inline-end: 0; width: 2px;
+  background: var(--green); border-radius: 2px; pointer-events: none;
+  animation: project-agent-pulse 2.4s ease-in-out infinite;
+}
+@keyframes project-agent-pulse { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .project-tab.has-active-agents::after { animation: none; opacity: 1; }
 }
 .project-tab button { border: 0; background: transparent; cursor: pointer; color: inherit; }
 .project-tab-button {

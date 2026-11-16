@@ -4873,11 +4873,30 @@ function clearTabDrop() {
   });
 }
 
+function updateProjectTabActivity(container, tab, select = container.querySelector(".project-tab-button")) {
+  const activity = tab.activity?.count ? language("Active agents", "Работают агенты") + ": " +
+    [["manager", language("Manager", "Менеджер")], ["executor", language("Executor", "Исполнитель")],
+      ["reviewer", language("Reviewer", "Ревьюер")]]
+      .filter(([role]) => tab.activity.roles?.[role])
+      .map(([role, name]) => name + " " + tab.activity.roles[role]).join(", ") : "";
+  container.classList.toggle("has-active-agents", Boolean(activity));
+  const description = [activity, tab.unread && language("New manager messages", "Новые сообщения менеджера")].filter(Boolean).join(". ");
+  select.title = [tab.path, description].filter(Boolean).join("\n");
+  if (description) select.setAttribute("aria-description", description);
+  else select.removeAttribute("aria-description");
+}
+
 function renderProjectTabs() {
   const bar = byId("project-tabs");
   const tabs = frame.tabs ?? [];
-  const signature = JSON.stringify([tabs, frame.project, frame.russian]);
-  if (signature === tabsSignature) return;
+  const signature = JSON.stringify([tabs.map(({ activity, ...tab }) => tab), frame.project, frame.russian]);
+  if (signature === tabsSignature) {
+    for (const tab of tabs) {
+      const container = [...bar.children].find(item => item.dataset.project === tab.path);
+      if (container) updateProjectTabActivity(container, tab);
+    }
+    return;
+  }
   tabsSignature = signature;
   const focused = bar.contains(document.activeElement) ? document.activeElement : undefined;
   const focusedPath = focused?.closest(".project-tab")?.dataset.project;
@@ -4924,7 +4943,7 @@ function renderProjectTabs() {
       const after = event.clientY >= rect.top + rect.height / 2;
       protect(() => api.reorderTab(project, tab.path, after))();
     });
-    select.title = tab.path;
+    updateProjectTabActivity(container, tab, select);
     select.setAttribute("role", "tab");
     select.setAttribute("aria-selected", String(tab.path === frame.project));
     select.setAttribute("aria-controls", "workspace");
@@ -4932,7 +4951,6 @@ function renderProjectTabs() {
     select.tabIndex = tab.path === frame.project ? 0 : -1;
     select.append(element("span", tab.name, "project-tab-name"));
     if (tab.unread) {
-      select.setAttribute("aria-description", language("New manager messages", "Новые сообщения менеджера"));
       const dot = element("i", undefined, "icon codicon codicon-circle-filled project-tab-unread");
       dot.setAttribute("aria-hidden", "true");
       select.append(dot);
