@@ -25,6 +25,7 @@ import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import { settingsDelivery, syncSettingsNotices } from "../src/desktop/settings-notices.ts";
 import { githubReadTool } from "../src/desktop/github-read.ts";
+import { executorFullAccess, setTaskExecutorAccess } from "../src/desktop/codex.ts";
 
 process.env.GIT_CEILING_DIRECTORIES = realpathSync(tmpdir());
 process.env.GIT_CONFIG_NOSYSTEM = "1";
@@ -101,6 +102,7 @@ function fixture(t: TestContext) {
     runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
     AbortSignal, AbortController, ArrayBuffer, Buffer, Error, basename, dirname, extname, join, mkdtemp, rm, writeFile, maxAttachmentBytes, boardActions, boardInstructions, boardTools, callCli,
     githubReadTool, readBoardGitHub: (cwd: string, args: unknown) => callCli(cwd, ["github-read"], args),
+    executorFullAccess, setTaskExecutorAccess,
     autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, defaultBoardAgents, reviewVerifier,
     existsSync, storageDirectory, readdirSync, rmSync, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
     goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryForView, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, saveManagerHistory,
@@ -184,7 +186,7 @@ function fixture(t: TestContext) {
       const expectedTools = session.separateTurn ? [
         "task_review", "task_review_diff", "task_review_artifact", "task_accept", "task_request_changes", "project_git", "project_path", "project_sha256",
       ] : [
-        "task_cancel", "provider_tools", "task_tool_grant", "task_tool_revoke", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_approve", "task_wait", "task_review_queue", "task_review", "task_review_diff",
+        "task_cancel", "provider_tools", "task_tool_grant", "task_tool_revoke", "task_set_executor_access", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_approve", "task_wait", "task_review_queue", "task_review", "task_review_diff",
         "task_review_artifact", "task_accept", "task_request_changes",
         "task_cleanup_status", "task_cleanup", "project_git", "project_git_push",
         "milestones_list", "github_create_milestone", "github_set_milestone_due", "task_set_milestone", "tag_set_color", "github_read",
@@ -330,6 +332,34 @@ test("manager can set and read the board tag palette in HEX", async t => {
     return { text: "Tag color saved." };
   });
   assert.equal(result.data?.answer, "Tag color saved.", JSON.stringify(result.error ?? result.data?.error));
+});
+
+test("manager grants and revokes executor access for a task", async t => {
+  const f = fixture(t);
+  const initialized = await f.cli(["init"]);
+  assert.ok(initialized.ok);
+  const card = (await f.cli(["create"], { title: "Run an Electron check", criteria: ["The window loads."],
+    workingDirectory: initialized.data.project })).data;
+  const accepted = (await f.cli(["approve", card.id])).data;
+  const started = (await f.cli(["start", card.id])).data.task;
+  assert.equal(started.status, "in_progress");
+  const request = await f.cli(["message", card.id], { kind: "question", text: "Electron fails its sandbox startup check. Can I use full access?" });
+  assert.ok(request.ok);
+  const reply = await f.run("Handle executor requests", async act => {
+    const inbox = await act("manager_inbox", { replay: true });
+    assert.match(JSON.stringify(inbox), /Electron fails its sandbox startup check/);
+    const args = { id: card.id, revision: started.revision, fullAccess: true };
+    const rejected = await act("task_set_executor_access", { ...args, revision: accepted.revision });
+    assert.equal(rejected.error.code, "REVISION_CONFLICT");
+    const granted = await act("task_set_executor_access", args);
+    assert.deepEqual(granted.data, { ...args, appliesOn: "next-run" });
+    assert.equal((await act("task_show", { id: card.id })).data.executorFullAccess, true);
+    const revoked = await act("task_set_executor_access", { ...args, fullAccess: false });
+    assert.equal(revoked.data.fullAccess, false);
+    assert.equal((await act("task_show", { id: card.id })).data.executorFullAccess, false);
+    return { text: "Executor settings verified." };
+  });
+  assert.ok(reply.ok, JSON.stringify(reply.error));
 });
 
 test("manager milestone tools use the board origin and return per-card results", async t => {

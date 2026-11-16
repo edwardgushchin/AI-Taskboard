@@ -1033,14 +1033,17 @@ function codexTaskAction(task) {
   const newThread = task.status === "blocked" && /already has an active writer/i.test(task.blocked?.reason ?? "");
   const missingThread = task.status === "blocked" && task.codexThreadId &&
     task.blocked?.reason === "no rollout found for thread id " + task.codexThreadId;
-  if (task.status !== "ready" && task.status !== "in_progress" && !newThread && !missingThread) return null;
-  const label = newThread ? language("Continue in a new chat", "Продолжить в новом чате") : missingThread || task.status === "in_progress" || task.git
+  const resumeWithFullAccess = task.status === "blocked" && task.executorFullAccess && !newThread && !missingThread;
+  if (task.status !== "ready" && task.status !== "in_progress" && !newThread && !missingThread && !resumeWithFullAccess) return null;
+  const label = resumeWithFullAccess ? language("Continue with full access", "Продолжить с полным доступом")
+    : newThread ? language("Continue in a new chat", "Продолжить в новом чате") : missingThread || task.status === "in_progress" || task.git
     ? language("Continue", "Продолжить")
     : language("Send to work", "Передать в работу");
   const launch = button(label, async () => {
     launch.disabled = true;
     try {
-      const result = await api.launchTask(task.id, newThread ? { newThread: true } : undefined);
+      const result = await api.launchTask(task.id, newThread ? { newThread: true }
+        : resumeWithFullAccess ? { resumeWithFullAccess: true } : undefined);
       if (generation !== projectGeneration) return;
       if (!result.ok) notice(boardError(result.error),
         [language("Starting task", "Запуск задачи"), task.id, projectName()].join(" · "));
@@ -3761,6 +3764,24 @@ async function editExecution(task) {
   if (!result.ok) notice(boardError(result.error));
 }
 
+function editTaskAccess(task) {
+  const project = frame.project;
+  const title = language("Executor access", "Доступ исполнителя");
+  const editor = form("task-access", title, [{
+    name: "mode", label: language("Mode", "Режим"), value: task.executorFullAccess ? "full" : "auto",
+    options: [["auto", language("Approve for me", "Подтверждать за меня")], ["full", language("Full access", "Полный доступ")]],
+  }], language("Save", "Сохранить"), async ({ mode }) => {
+    const result = await api.setTaskAccess(project, task.id, task.createdAt, mode === "full");
+    if (frame.project !== project || sheetKind !== "task-access" || !editor.isConnected) return;
+    if (result.ok) await showTask(task.id);
+    else notice(boardError(result.error));
+  });
+  editor.prepend(element("p", language(
+    "Full access runs commands with your operating-system permissions. The selection applies on the next start or resume.",
+    "При полном доступе команды выполняются с вашими правами в системе. Режим применяется при следующем запуске или возобновлении."
+  ), "muted"));
+}
+
 function editTaskTags(task) {
   const editor = form("task-tags", language("Edit tags", "Изменить теги") + " · " + task.id, [
     { name: "tags", label: language("Tags, comma separated", "Теги через запятую"), value: task.tags.join(", ") },
@@ -3818,6 +3839,7 @@ async function showTask(id) {
   taskInSheet = task;
   openTaskSheet(task);
   if (task.status === "blocked" && task.blocked) body.append(blockerBanner(task.blocked));
+  if (task.executorFullAccess) body.append(element("p", language("Launch mode: Full access", "Режим запуска: полный доступ"), "task-state-label"));
   if (task.status === "done" && task.cleanupAvailable) {
     body.append(element("p", language("Accepted · worktree retained", "Принято · рабочая копия сохранена"), "muted"));
   }
@@ -3921,6 +3943,9 @@ async function showTask(id) {
   if (["draft", "ready"].includes(task.status)) {
     actions.append(button(language("Dependencies…", "Зависимости…"), () => editDependencies(task)));
     actions.append(button(language("Execution settings…", "Параметры запуска…"), () => editExecution(task)));
+  }
+  if (!["done", "cancelled"].includes(task.status) && !frame.runningTasks?.includes(task.id)) {
+    actions.append(button(language("Executor access…", "Доступ исполнителя…"), () => editTaskAccess(task)));
   }
   if (task.workingDirectory) {
     const directory = element("section", undefined, "sheet-section");

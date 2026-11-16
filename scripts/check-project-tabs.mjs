@@ -168,6 +168,21 @@ if (!process.versions.electron) {
       check(await evaluate("[...document.querySelectorAll('.project-tab-detail')].map(item => item.textContent).join(',') === 'first,second'"), "same names have parent paths");
       await select(first);
       check(await evaluate("document.querySelector('.task-card strong').textContent === 'First project task'"), "switching tabs renders the matching task");
+      await evaluate("showTask('T-0001')");
+      await evaluate("[...document.querySelectorAll('#sheet-body button')].find(button => button.textContent === 'Доступ исполнителя…').click()");
+      check(await evaluate("document.querySelector('select[name=mode]').value === 'auto'"), "executor access defaults to auto-review");
+      await evaluate(`(() => {
+        const mode = document.querySelector('select[name=mode]');
+        mode.value = 'full';
+        mode.form.requestSubmit();
+      })()`);
+      await waitFor(() => evaluate("document.querySelector('#sheet-body').textContent.includes('Режим запуска: полный доступ')"), "full access label");
+      check((await evaluate("window.taskboard.command('show','T-0001')")).data.executorFullAccess, "full access is saved from the task settings");
+      await evaluate("document.querySelector('dialog[open]').close()");
+      await select(second);
+      check(!(await evaluate("window.taskboard.command('show','T-0001')")).data.executorFullAccess,
+        "a task with the same ID in another project uses its own access");
+      await select(first);
       if (!process.env.TASKBOARD_TAB_REORDER_ONLY) await checkAppearance("dark");
       window.setSize(760, 700);
       if (!process.env.TASKBOARD_TAB_REORDER_ONLY) await checkAppearance("light");
@@ -302,6 +317,7 @@ if (!process.versions.electron) {
       await evaluate("document.querySelector('[aria-selected=true]').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }))");
       await waitFor(async () => (await frame()).project === first, "keyboard tab switch");
       check(await evaluate("document.activeElement.getAttribute('aria-selected') === 'true'"), "keyboard switch focuses selected tab");
+      check((await evaluate("window.taskboard.command('show','T-0001')")).data.executorFullAccess, "the executor access setting survives relaunch");
       for (const path of [second, first]) await evaluate("window.taskboard.closeTab(" + JSON.stringify(path) + ")");
       check(await evaluate("!document.querySelector('#welcome').hidden && document.querySelector('#project-tabs').hidden"), "closing the last tab returns to project selection");
     }

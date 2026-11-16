@@ -29,7 +29,7 @@ type Client = NonNullable<Awaited<ReturnType<typeof configuredCodex>>>;
 type Turn = { id: string; status: string; error?: { message?: string } | null };
 type RunFailure = { reason: string; disconnected?: boolean; interrupted?: boolean };
 type Run = AgentControl & { threadId: string; completion: Promise<RunFailure | undefined> };
-const profile = "ai-taskboard";
+const taskProfile = "ai-taskboard";
 const instructions = new URL("./agent-instructions/", import.meta.url);
 
 function executorInstructions() {
@@ -66,7 +66,7 @@ const verifyWrite = [
 ].join("\n");
 
 export type ExecutorTask = Pick<Task, "id" | "title" | "description" | "criteria" | "execution" | "git" | "codexThreadId" | "workingDirectory" | "schedule" | "toolGrants"> &
-  { feedback?: string };
+  { feedback?: string; fullAccess?: boolean };
 
 export function missingCodexThread(message: string | undefined, threadId: string | undefined) {
   return Boolean(threadId && message === "no rollout found for thread id " + threadId);
@@ -76,6 +76,10 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   onActivity?: (item: RunActivity) => void, onTokenUsage?: (report: TokenUsageReport) => Promise<void>, signal?: AbortSignal,
   beforeTurn?: (threadId: string) => Promise<void>): Promise<Run> {
   signal?.throwIfAborted();
+  const fullAccess = task.fullAccess === true;
+  const profile = fullAccess ? ":danger-full-access" : taskProfile;
+  const approvalPolicy = fullAccess ? "never" : "on-request";
+  const approvalsReviewer = fullAccess ? "user" : "auto_review";
   if (!task.git && !task.workingDirectory) throw new Error("The task has no prepared working directory.");
   const runDirectory = realpathSync(cwd);
   if (task.workingDirectory && runDirectory !== task.workingDirectory) {
@@ -127,16 +131,17 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       ...paths.map(path => JSON.stringify(path) + ' = "write"'),
       ...readOnlyWorktrees.map(path => JSON.stringify(path) + ' = "read"'),
     ].join(", ");
-    const runEnv = process.platform === "win32" && client.windowsSandbox === "elevated"
+    const runEnv = !fullAccess && process.platform === "win32" && client.windowsSandbox === "elevated"
       ? gitSafeDirectoryEnvironment(env, dirname(boardData), ...(task.git ? [runDirectory] : []))
       : env;
     child = spawn(client.path, [
       ...client.args, ...boardCodexArgs, "-c", mcp.config,
       "-c", 'web_search="live"',
       "--disable", "network_proxy",
-      "-c", "permissions." + profile + "={filesystem={" + filesystem + "},network={enabled=true}}",
+      ...(fullAccess ? ["-c", 'approval_policy="never"'] :
+        ["-c", "permissions." + profile + "={filesystem={" + filesystem + "},network={enabled=true}}"]),
       "-c", "default_permissions=" + JSON.stringify(profile),
-      ...(process.platform === "win32" ? ["--disable", "prefer_mxc", "-c", "windows.sandbox=" + JSON.stringify(client.windowsSandbox ?? "mxc")] : []),
+      ...(!fullAccess && process.platform === "win32" ? ["--disable", "prefer_mxc", "-c", "windows.sandbox=" + JSON.stringify(client.windowsSandbox ?? "mxc")] : []),
     ], { cwd: project, env: runEnv, windowsHide: true, stdio: "pipe" });
   } catch (error) {
     try { await mcp.close(); } finally { await removeRunTemp(); }
@@ -235,7 +240,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     };
     const threadOptions = {
       cwd, model: task.execution?.model, permissions: profile,
-      approvalPolicy: "on-request", approvalsReviewer: "auto_review", developerInstructions,
+      approvalPolicy, approvalsReviewer, developerInstructions,
       config: await executorToolConfig(request, cwd, task.toolGrants),
     };
     let started: ThreadReply | undefined;
@@ -250,10 +255,11 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     }
     started ??= await request<ThreadReply>("thread/start", threadOptions);
     if (started.activePermissionProfile?.id !== profile) {
-      throw new Error("Codex did not apply the write permissions for this task.");
+      throw new Error(fullAccess ? "Codex did not apply full access for this task." : "Codex did not apply the write permissions for this task.");
     }
-    if (started.approvalPolicy !== "on-request" || started.approvalsReviewer !== "auto_review") {
-      throw new Error("Codex did not enable automatic approval review. Check the connected Codex version and its approval policy.");
+    if (started.approvalPolicy !== approvalPolicy || (!fullAccess && started.approvalsReviewer !== approvalsReviewer)) {
+      throw new Error(fullAccess ? "Codex did not apply the full-access approval policy." :
+        "Codex did not enable automatic approval review. Check the connected Codex version and its approval policy.");
     }
     const threadId = started.thread.id;
     const localTools = await verifyExecutorTools(request, threadId, task.toolGrants);
@@ -266,6 +272,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     const prompt = [
       "Выполни задачу AI Taskboard " + task.id + " в назначенной рабочей папке.",
       "Корень доски: " + project,
+      ...(fullAccess ? ["Для этого сеанса исполнителя включён полный доступ с правами текущего пользователя системы. Выполняй действия в рамках карточки."] : []),
       ...(task.workingDirectory ? [
         "Папка задачи: " + cwd,
         "У задачи нет отдельной ветки или worktree. Используй сценарий сдачи результата вне Git из инструкции.",

@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { callCli, cliChild, cliFailure } from "./cli.ts";
 import { githubReadTool, readBoardGitHub } from "./github-read.ts";
-import { codexStatus, configuredCodex, setCodexExecutable, setCodexWindowsSandbox } from "./codex.ts";
+import { codexStatus, configuredCodex, executorFullAccess, setCodexExecutable, setCodexWindowsSandbox, setTaskExecutorAccess } from "./codex.ts";
 import { boardSuggestions, chatModels, readBoardHistory, readLastTaskTurn, readTaskRunHistory, replyToBoard, replyToTask, reviewWithCodex, updateBoardGoal } from "./codex-chat.ts";
 import type { BoardActivity, BoardGoal, BoardGoalAction } from "./codex-chat.ts";
 import { autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools } from "./board-actions.ts";
@@ -1459,8 +1459,17 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           `If no prior sequence is known, run messages ${id}.`, []);
         return true;
       }, deliveredMessages, () => waitWork.signal);
-    const run = (name: string, args: unknown) => runAction(name, args)
-      .catch(error => cliFailure("ACTION_FAILED", (error as Error).message));
+    const run = async (name: string, args: unknown): Promise<CliReply> => {
+      try {
+        if (name === "task_set_executor_access") return await setTaskExecutorAccess(app.getPath("userData"), board.project, args);
+        const result = await runAction(name, args);
+        if (name === "task_show" && result.ok && !reviewIds) {
+          const task = result.data as Task;
+          return { ok: true, data: { ...task, executorFullAccess: executorFullAccess(app.getPath("userData"), board.project, task) } };
+        }
+        return result;
+      } catch (error) { return cliFailure("ACTION_FAILED", (error as Error).message); }
+    };
     function goalAction(name: string, args: unknown): CliReply | undefined {
       if (reviewIds || !(goal ? goalWorkTools : goalChatTools).some(tool => tool.name === name)) return;
       const { text, id, status, reply } = (args ?? {}) as Record<string, unknown>;
@@ -2102,6 +2111,12 @@ ipcMain.handle("board:command", async (event, command: unknown, id: unknown, inp
       return cliFailure("CHAT_BUSY", "Wait for the executor to finish before cleaning its worktree.");
     }
   }
+  if (command === "show" && typeof id === "string") {
+    const project = state.project;
+    const result = await callCli<Task>(project, [...args, id], input);
+    if (!result.ok) return result;
+    return { ok: true, data: { ...result.data, executorFullAccess: executorFullAccess(app.getPath("userData"), project, result.data) } };
+  }
   const selection = state.selection;
   const result = await callCli<Board>(state.project, id === undefined ? args : [...args, id], input);
   if (command === "init" && result.ok && selection === state.selection && !state.window.isDestroyed()) {
@@ -2120,6 +2135,22 @@ ipcMain.handle("codex:executionModels", async event => {
   } catch (error) {
     return cliFailure("CODEX_MODELS_UNAVAILABLE", (error as Error).message);
   }
+});
+
+ipcMain.handle("codex:taskAccess", async (event, project: unknown, id: unknown, createdAt: unknown, fullAccess: unknown) => {
+  const state = stateOf(event);
+  if (!state.project || project !== state.project || typeof id !== "string" || !taskIdPattern.test(id) ||
+      typeof createdAt !== "string" || typeof fullAccess !== "boolean") {
+    return cliFailure("INVALID_INPUT", "Choose a task and an executor access mode.");
+  }
+  const current = await callCli<Task>(state.project, ["show", id, "--compact"]);
+  if (!current.ok) return current;
+  if (stateOf(event).project !== project || current.data.createdAt !== createdAt ||
+      ["done", "cancelled"].includes(current.data.status)) {
+    return cliFailure("INVALID_INPUT", lang("Reopen the current task before changing access.", "Откройте актуальную карточку, чтобы изменить режим доступа."));
+  }
+  if (executorBusy(project, id)) return cliFailure("CHAT_BUSY", lang("Stop the agent before changing access.", "Остановите агента перед сменой режима доступа."));
+  return { ok: true, data: executorFullAccess(app.getPath("userData"), project, current.data, fullAccess) };
 });
 
 ipcMain.handle("board:saveAttachment", async (event, id: unknown, file: unknown, name: unknown) => {
@@ -2270,11 +2301,11 @@ async function recordRunFailure(project: string, id: string, reason: string, con
   if (!result.ok && result.error.code !== "INVALID_TRANSITION" && result.error.code !== "REVISION_CONFLICT") return result.error.message;
 }
 
-type LaunchState = Pick<Task, "id" | "title" | "status" | "revision" | "codexThreadId" | "blocked">;
+type LaunchState = Pick<Task, "id" | "title" | "status" | "revision" | "createdAt" | "codexThreadId" | "blocked">;
 
 async function launchTask(project: string, id: string, revisionRequest?: { input: Record<string, unknown> },
   newThread: false | "user" | "manager" = false, revision?: number,
-  retryDisconnect = true, scheduled = false, resolveConflicts = false): Promise<CliReply<LaunchState>> {
+  retryDisconnect = true, scheduled = false, resolveConflicts = false, resumeWithFullAccess = false): Promise<CliReply<LaunchState>> {
   const key = project + "\0" + id;
   if (launchingTasks.has(key)) return cliFailure("LAUNCH_IN_PROGRESS", "This task is already being launched.");
   if (executorBusy(project, id)) return cliFailure("CHAT_BUSY", lang("Wait for the chat reply or stop the agent first.", "Дождитесь ответа в чате или остановите агента."));
@@ -2364,12 +2395,19 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     }
     const missingThread = current.data.status === "blocked" &&
       missingCodexThread(current.data.blocked?.reason, current.data.codexThreadId);
+    if (resumeWithFullAccess && (current.data.status !== "blocked" ||
+        !executorFullAccess(app.getPath("userData"), project, current.data))) {
+      return cliFailure("INVALID_INPUT", lang("Choose full access in the blocked task before continuing.",
+        "Выберите полный доступ в заблокированной карточке перед продолжением."));
+    }
     signal.throwIfAborted();
-    if (newThread || missingThread) {
+    if (newThread || missingThread || resumeWithFullAccess) {
       current = await callCli<LaunchState>(project, ["resume", id, "--compact"], {
         launchDetails: true,
         revision: revision ?? current.data.revision,
-        reason: missingThread
+        reason: resumeWithFullAccess
+          ? lang("The user continued the task with full access.", "Пользователь продолжил задачу с полным доступом.")
+          : missingThread
           ? lang("Retrying after Codex could not find the saved chat.", "Повторный запуск после ошибки поиска сохранённого чата Codex.")
           : newThread === "manager"
             ? lang("The project manager requested continuation in a new Codex chat.", "Менеджер проекта запросил продолжение в новом чате Codex.")
@@ -2390,7 +2428,8 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     }
     prepared = true;
     signal.throwIfAborted();
-    const task = { ...started.data.task, ...(newThread ? { codexThreadId: undefined } : {}) };
+    const task = { ...started.data.task, fullAccess: executorFullAccess(app.getPath("userData"), project, started.data.task),
+      ...(newThread ? { codexThreadId: undefined } : {}) };
     let linked: LaunchState = started.data.task;
     const cwd = "cwd" in started.data ? started.data.cwd : started.data.worktree;
     const run = await startCodexRun(client, project, cwd, task, item => {
@@ -2531,9 +2570,11 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
 
 ipcMain.handle("board:launchTask", async (event, id: unknown, options: unknown = {}) => {
   const { project, window } = stateOf(event);
-  const input = options as { newThread?: unknown } | null;
+  const input = options as { newThread?: unknown; resumeWithFullAccess?: unknown } | null;
   if (!project || typeof id !== "string" || !taskIdPattern.test(id) || !input || typeof input !== "object" ||
-      (input.newThread !== undefined && typeof input.newThread !== "boolean")) {
+      (input.newThread !== undefined && typeof input.newThread !== "boolean") ||
+      (input.resumeWithFullAccess !== undefined && typeof input.resumeWithFullAccess !== "boolean") ||
+      (input.newThread && input.resumeWithFullAccess)) {
     return cliFailure("INVALID_INPUT", "Choose a task.");
   }
   if (input.newThread) {
@@ -2553,7 +2594,7 @@ ipcMain.handle("board:launchTask", async (event, id: unknown, options: unknown =
     });
     if (choice.response !== 1) return { ok: true, data: null };
   }
-  return launchTask(project, id, undefined, input.newThread ? "user" : false);
+  return launchTask(project, id, undefined, input.newThread ? "user" : false, undefined, true, false, false, input.resumeWithFullAccess === true);
 });
 
 ipcMain.handle("codex:status", event => {

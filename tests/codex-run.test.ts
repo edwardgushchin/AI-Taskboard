@@ -8,11 +8,29 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { startCodexRun } from "../src/desktop/codex-run.ts";
+import { executorFullAccess } from "../src/desktop/codex.ts";
 import { codexRpc } from "../src/desktop/codex-rpc.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { createTask } from "../src/cli/tasks.ts";
 import type { RunActivity } from "../src/cli/model.ts";
 import type { TokenUsageReport } from "../src/cli/token-usage.ts";
+
+test("executor full access is saved for the selected board and card only", t => {
+  const folder = realpathSync(mkdtempSync(join(tmpdir(), "ai-taskboard-executor-access-")));
+  t.after(() => rmSync(folder, { recursive: true }));
+  const profile = join(folder, "settings");
+  const project = join(folder, "board");
+  mkdirSync(project);
+  const task = { id: "T-0001", createdAt: "2026-11-16T10:00:00Z" };
+  assert.equal(executorFullAccess(profile, project, task), false);
+  assert.equal(executorFullAccess(profile, project, task, true), true);
+  assert.equal(executorFullAccess(profile, project, task), true);
+  assert.equal(executorFullAccess(profile, folder, task), false);
+  assert.equal(executorFullAccess(profile, project, { ...task, id: "T-0002" }), false);
+  assert.equal(executorFullAccess(profile, project, { ...task, createdAt: "2026-11-16T10:00:01Z" }), false);
+  assert.equal(executorFullAccess(profile, project, task, false), false);
+  assert.equal(executorFullAccess(profile, project, task), false);
+});
 
 test("closing the Codex connection does not wait for a descendant's output pipe", async () => {
   const child = spawn(process.execPath, ["-e", `
@@ -280,6 +298,23 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   await assert.rejects(launch("readonly"), /did not apply the write permissions/);
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
   await assert.rejects(launch("manual-review"), /did not enable automatic approval review/);
+  assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
+  const fullTask = { ...task, fullAccess: true };
+  for (const existing of [undefined, thread]) {
+    const full = await startCodexRun({ ...client(existing ? "resumed" : "ok"), windowsSandbox: "elevated" },
+      folder, worktree, { ...fullTask, codexThreadId: existing });
+    assert.equal(await full.completion, undefined);
+    const { flags, requests } = JSON.parse(readFileSync(capture, "utf8"));
+    assert.ok(flags.includes('default_permissions=":danger-full-access"'));
+    assert.ok(flags.includes('approval_policy="never"'));
+    assert.ok(!flags.some((flag: string) => flag.startsWith("windows.sandbox=") || flag.startsWith("permissions.ai-taskboard=")));
+    assert.equal(requests[1].params.permissionProfile, ":danger-full-access");
+    assert.equal(requests[3].method, existing ? "thread/resume" : "thread/start");
+    assert.equal(requests[3].params.permissions, ":danger-full-access");
+    assert.equal(requests[3].params.approvalPolicy, "never");
+    assert.match(requests.at(-1).params.input[0].text, /полный доступ/);
+  }
+  await assert.rejects(startCodexRun(client("readonly"), folder, worktree, fullTask), /did not apply full access/);
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
   for (const [status, rationale] of [["denied", "This destination is outside the project scope."], ["approved", "Read public documentation."]]) {
     activity.length = 0;

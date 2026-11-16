@@ -4,7 +4,11 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
+import type { Task } from "../cli/model.ts";
+import { taskIdPattern } from "../cli/model.ts";
 import { directory, readJson, writeJson } from "../cli/storage.ts";
+import { callCli, cliFailure } from "./cli.ts";
+import { projectIdentity } from "./project-tabs.ts";
 
 const run = promisify(execFile);
 
@@ -46,6 +50,40 @@ function preferences(directory: string) {
   const executable = typeof value?.executable === "string" && isAbsolute(value.executable) ? value.executable : undefined;
   const windowsSandbox: WindowsSandbox = value?.windowsSandbox === "elevated" ? "elevated" : "mxc";
   return { executable, windowsSandbox: process.platform === "win32" ? windowsSandbox : undefined };
+}
+
+export function executorFullAccess(dataDirectory: string, project: string, task: Pick<Task, "id" | "createdAt">, enabled?: boolean): boolean {
+  const file = join(dataDirectory, "executor-full-access.json");
+  const value = existsSync(file) ? readJson(file) : [];
+  if (!Array.isArray(value) || value.some(entry => typeof entry !== "string")) {
+    throw new Error("Invalid executor access settings.");
+  }
+  const selected = new Set<string>(value);
+  const key = JSON.stringify([projectIdentity(project), task.id, task.createdAt]);
+  if (enabled === undefined || enabled === selected.has(key)) return selected.has(key);
+  if (enabled) selected.add(key);
+  else selected.delete(key);
+  directory(dataDirectory, true);
+  writeJson(file, [...selected]);
+  return enabled;
+}
+
+export async function setTaskExecutorAccess(dataDirectory: string, project: string, args: unknown) {
+  if (!args || typeof args !== "object" || Array.isArray(args) ||
+      Object.keys(args).some(key => !["id", "revision", "fullAccess"].includes(key))) {
+    return cliFailure("INVALID_INPUT", "Use id, revision and fullAccess.");
+  }
+  const { id, revision, fullAccess } = args as Record<string, unknown>;
+  if (typeof id !== "string" || !taskIdPattern.test(id) || typeof revision !== "number" ||
+      !Number.isSafeInteger(revision) || revision < 1 || typeof fullAccess !== "boolean") {
+    return cliFailure("INVALID_INPUT", "Choose a task, its current revision and an executor access mode.");
+  }
+  const current = await callCli<Task>(project, ["show", id, "--compact"]);
+  if (!current.ok) return current;
+  if (current.data.revision !== revision) return cliFailure("REVISION_CONFLICT", "Read the current revision before changing access.");
+  if (["done", "cancelled"].includes(current.data.status)) return cliFailure("INVALID_TRANSITION", "Choose an open task.");
+  executorFullAccess(dataDirectory, project, current.data, fullAccess);
+  return { ok: true as const, data: { id, revision, fullAccess, appliesOn: "next-run" } };
 }
 
 export function setCodexExecutable(dataDirectory: string, path?: string): void {

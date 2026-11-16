@@ -99,8 +99,8 @@ function taskReceipt({ id, status, revision, git, result }: Task) {
   return { id, status, revision, git, result };
 }
 
-function taskLaunchState({ id, title, status, revision, codexThreadId, blocked }: Task) {
-  return { id, title, status, revision, codexThreadId, blocked };
+function taskLaunchState({ id, title, status, revision, createdAt, codexThreadId, blocked }: Task) {
+  return { id, title, status, revision, createdAt, codexThreadId, blocked };
 }
 
 function reviewWithSettings(store: BoardStore, review: ReturnType<typeof inspectReview>, input: Record<string, unknown>) {

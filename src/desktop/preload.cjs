@@ -46,6 +46,7 @@ contextBridge.exposeInMainWorld("taskboard", {
   onTheme: listener => { ipcRenderer.on("appearance:changed", (_event, theme) => listener(theme)); },
   codexStatus: () => ipcRenderer.invoke("codex:status"),
   executionModels: () => ipcRenderer.invoke("codex:executionModels"),
+  setTaskAccess: (project, id, createdAt, fullAccess) => ipcRenderer.invoke("codex:taskAccess", project, id, createdAt, fullAccess),
   chooseCodex: () => ipcRenderer.invoke("codex:choose"),
   autoDetectCodex: () => ipcRenderer.invoke("codex:auto"),
   setCodexWindowsSandbox: mode => ipcRenderer.invoke("codex:windowsSandbox", mode),

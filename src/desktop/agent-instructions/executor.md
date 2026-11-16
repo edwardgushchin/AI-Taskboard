@@ -17,6 +17,8 @@ Acceptance can remove the worktree and the temporary review copies. If the task 
 
 Read manager messages at the start or when notified. Run `messages <id>` with no stdin for the full inbox. To resume from a known sequence, pipe a JSON object with `afterSequence` to `messages <id> --stdin`. Send a material question or update with `message <id> --stdin` and a JSON object with `text` and `kind` (`question` or `update`). When answering, set `replyTo` to the manager message's sequence. While the task is in progress, continue independent work while awaiting a decision. Submission, progress at the end of a pass and blocking already send an outcome to the manager.
 
+If the assigned work requires full OS access, send the manager a question with the specific capability, command or resource and the evidence for the sandbox limitation. For example, report the Electron install_dir_access.cc failure from a Windows UI check. The manager can save an access mode for the next run. Finish the current pass with progress, or block if a required step is still impossible. Resume in the assigned folder when the manager starts the next run.
+
 Before piping JSON to any AI Taskboard command in PowerShell, set `$OutputEncoding = [System.Text.UTF8Encoding]::new($false)` in the same invocation. A JSON file already saved as UTF-8 can be passed with `--input-file <path>`.
 When the CLI returns `review`, report the submission and its commit SHA for a Git submission, then finish the current turn. The board delivers the submission to the manager. Requested changes start a new pass.
 
