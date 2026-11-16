@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { callCli, cliChild, cliFailure } from "./cli.ts";
 import { githubReadTool, readBoardGitHub } from "./github-read.ts";
-import { codexStatus, configuredCodex, executorFullAccess, managerFullAccess, setCodexExecutable, setCodexWindowsSandbox, setTaskExecutorAccess } from "./codex.ts";
+import { codexStatus, configuredCodex, executorFullAccess, isManagerAccess, managerAccess, setCodexExecutable, setCodexWindowsSandbox, setTaskExecutorAccess } from "./codex.ts";
 import { boardSuggestions, chatModels, readBoardHistory, readLastTaskTurn, readTaskRunHistory, replyToBoard, replyToTask, reviewWithCodex, updateBoardGoal } from "./codex-chat.ts";
 import type { BoardActivity, BoardGoal, BoardGoalAction } from "./codex-chat.ts";
 import { autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools } from "./board-actions.ts";
@@ -194,7 +194,7 @@ function frame(state: ProjectTab) {
     managerUnread: boardUnread(state.board?.project),
     project: state.project, board: state.board, error: state.error, loading: state.loading, russian, theme,
     managerQuestion: key ? managerQuestion(key)?.view : undefined,
-    managerFullAccess: state.project ? managerFullAccess(app.getPath("userData"), state.project) : false,
+    managerAccess: state.project ? managerAccess(app.getPath("userData"), state.project) : "auto",
     managerRun: request?.managerRun ?? null,
     managerWork: work?.managerRun ?? null,
     runningTasks: state.board?.tasks.filter(task => {
@@ -820,7 +820,7 @@ ipcMain.handle("chat:send", async (event, id: unknown, request: unknown) => {
   });
 });
 
-type ManagerQuestion = { id: string; text: string; options: string[] };
+type ManagerQuestion = { id: string; text: string; options: string[]; approval?: true };
 type ManagerRun = {
   id: string;
   startedAt: number;
@@ -1275,6 +1275,9 @@ ipcMain.handle("board:answerQuestion", (event, id: unknown, answer: unknown) => 
   const pending = project && typeof id === "string" ? managerQuestion(projectIdentity(project), id) : undefined;
   if (!pending || id !== pending.view.id) return cliFailure("QUESTION_CLOSED",
     lang("This question is closed.", "Вопрос уже закрыт."));
+  if (pending.view.approval && answer !== null && !pending.view.options.some(option => option === answer)) {
+    return cliFailure("INVALID_INPUT", lang("Choose an approval decision.", "Выберите решение по запросу доступа."));
+  }
   if (answer !== null && (typeof answer !== "string" || !answer.trim() || answer.length > 4000)) {
     return cliFailure("INVALID_INPUT", lang("Enter an answer up to 4,000 characters.", "Введите ответ длиной до 4000 символов."));
   }
@@ -1448,17 +1451,18 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     if (changed) publishManagerUnread(project);
     broadcastBoardChat(project, "orchestrator-history");
   }
-  async function askUser(args: unknown): Promise<CliReply> {
+  async function askUser(args: unknown, approval = false): Promise<CliReply> {
     signal.throwIfAborted();
     if (running.changingGoal) return cliFailure("QUESTION_CLOSED", "The manager is stopping or changing the goal.");
     const { question, options = [] } = (args ?? {}) as { question?: unknown; options?: unknown };
-    if (typeof question !== "string" || !question.trim() || question.length > 2000 ||
+    if (typeof question !== "string" || !question.trim() || question.length > (approval ? 24_000 : 2000) ||
         !Array.isArray(options) || options.length > 4 ||
         !options.every(option => typeof option === "string" && option.trim() && option.length <= 200)) {
       return cliFailure("INVALID_INPUT", "Provide one question and up to four short options.");
     }
     if (running.question) return cliFailure("QUESTION_PENDING", "Wait for the outstanding question before asking another.");
-    const view = { id: randomUUID(), text: question.trim(), options: [...new Set(options.map(option => option.trim()))] };
+    const view: ManagerQuestion = { id: randomUUID(), text: question.trim(), options: [...new Set(options.map(option => option.trim()))],
+      ...(approval ? { approval: true } : {}) };
     const response = Promise.withResolvers<string | null>();
     let notification: Notification | undefined;
     function settle(answer: string | null) {
@@ -1474,7 +1478,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     const aborted = () => settle(null);
     signal.addEventListener("abort", aborted, { once: true });
     try {
-      if (goal) publishGoalNotice(lang("Question from the goal", "Вопрос по цели") + "\n\n" + view.text);
+      if (goal && !approval) publishGoalNotice(lang("Question from the goal", "Вопрос по цели") + "\n\n" + view.text);
       broadcastBoardChat(project, "orchestrator-question", { question: managerQuestion(projectKey)?.view ?? null });
       const windows = [...windowStates.values()].filter(({ window, tabs }) =>
         !window.isDestroyed() && tabs.some(tab => tab.board?.project === project));
@@ -1496,7 +1500,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         notification.show();
       }
       const answer = await response.promise;
-      if (goal && answer) publishGoalNotice(answer, "user");
+      if (goal && answer && !approval) publishGoalNotice(answer, "user");
       return { ok: true, data: { question: view.text, answer } };
     } finally {
       settle(null);
@@ -1691,7 +1695,13 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         });
       }, reviewIds ? [] : boardTools, instructions + "\n" + initialSettings.text, signal, {
         id: threadId,
-        fullAccess: lane === "chat" && managerFullAccess(app.getPath("userData"), project),
+        access: reviewIds ? undefined : managerAccess(app.getPath("userData"), project),
+        confirmApproval: reviewIds ? undefined : async details => {
+          if (signal.aborted || requests.get(projectKey) !== running) return false;
+          const allow = lang("Allow once", "Разрешить один раз");
+          const result = await askUser({ question: details, options: [allow, lang("Deny", "Отклонить")] }, true);
+          return !signal.aborted && result.ok && (result.data as { answer: string | null }).answer === allow;
+        },
         settings: settings.data.manager,
         attachmentContext,
         mcpTools,
@@ -2739,16 +2749,16 @@ ipcMain.handle("codex:status", event => {
   stateOf(event);
   return codexStatus(app.getPath("userData"));
 });
-ipcMain.handle("codex:managerAccess", (event, project: unknown, enabled: unknown) => {
+ipcMain.handle("codex:managerAccess", (event, project: unknown, mode: unknown) => {
   const state = stateOf(event);
-  if (!state.project || project !== state.project || typeof enabled !== "boolean") {
+  if (!state.project || project !== state.project || !isManagerAccess(mode)) {
     return cliFailure("INVALID_INPUT", "Choose the manager access mode on the active board.");
   }
-  const fullAccess = managerFullAccess(app.getPath("userData"), state.project, enabled);
+  const selected = managerAccess(app.getPath("userData"), state.project, mode);
   for (const window of windowStates.values()) {
     if (window.active.project === state.project) send(window.active);
   }
-  return { ok: true as const, data: fullAccess };
+  return { ok: true as const, data: selected };
 });
 ipcMain.handle("codex:choose", async event => {
   const state = stateOf(event);
