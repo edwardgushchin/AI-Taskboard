@@ -84,6 +84,54 @@ app.whenReady().then(async () => {
     await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
     writeFileSync(join(artifacts, name), (await window.webContents.capturePage()).toPNG());
   };
+  if (process.argv.includes("--unicode-only")) {
+    const fixture = spawnSync(process.env.TASKBOARD_CHECK_NODE, ["--input-type=module", "-e", `
+      import { mkdirSync } from 'node:fs';
+      import { callCli } from ${JSON.stringify(new URL('../src/desktop/cli.ts', import.meta.url).href)};
+      import { recordExecutorResult } from ${JSON.stringify(new URL('../src/desktop/executor-results.ts', import.meta.url).href)};
+      import { syncTaskStatusNotices, readManagerHistory } from ${JSON.stringify(new URL('../src/desktop/manager-history.ts', import.meta.url).href)};
+      const root = process.argv[1]; mkdirSync(root);
+      const cli = async (args, input) => { const r = await callCli(root, args, input); if (!r.ok) throw Error(JSON.stringify(r)); return r.data; };
+      await cli(['init']);
+      const task = await cli(['create'], { title: 'Unicode fixture', criteria: ['Exact text'], workingDirectory: root });
+      await cli(['approve', task.id]); await cli(['start', task.id]); syncTaskStatusNotices(root);
+      const sample = 'Результат: ёж, English; «готово» — да? C:\\\\Проект\\\\file.ts abc1234 ??? literal \\\\u041F';
+      const preview = await cli(['preview', task.id]);
+      const r = await recordExecutorResult(root, task.id, { action: 'submit', input: {
+        token: preview.token, noChanges: true, summary: sample, checks: [sample], limitations: [sample] } });
+      if (!r.ok) throw Error(JSON.stringify(r));
+      syncTaskStatusNotices(root);
+      console.log(JSON.stringify({ sample, history: readManagerHistory(root, null, 'chat') }));
+    `, join(scratch, "unicode-board")], { encoding: "utf8", windowsHide: true });
+    assert.equal(fixture.status, 0, fixture.stderr);
+    const unicodeData = JSON.parse(fixture.stdout);
+    assert.ok(unicodeData.history.turns.some(turn => turn.items.some(item => item.text.includes(unicodeData.sample))), fixture.stdout);
+    await evaluate(`frame = { project: 'fixture', russian: true }; sheetKind = 'task'; sheet.showModal();
+      const unicodeFixture = ${fixture.stdout};
+      api.boardQueue = async () => ({ ok: true, data: [] });
+      body.style.paddingTop = '410px';
+      api.boardHistory = async () => ({ ok: true, data: unicodeFixture.history }); void 0;`);
+    for (const theme of ["light", "dark"]) {
+      nativeTheme.themeSource = theme;
+      for (const reopened of [false, true]) {
+        await evaluate(`window.unicodeManager?.dispose(); window.unicodeManager = draftComposer();
+          body.replaceChildren(window.unicodeManager);
+          if (!window.unicodeManager.hasAttribute('data-pinned')) window.unicodeManager.querySelector('.board-chat-pin').click();
+          window.unicodeManager.revealPinned(); window.unicodeManager.querySelector('.draft-input').click();
+          window.unicodeManager.invalidateHistory();
+          new Promise((resolve, reject) => { const started = performance.now(); const check = () => {
+            const log = window.unicodeManager.querySelector('.board-chat-log:not(.board-work)');
+            if (log?.textContent.includes(unicodeFixture.sample) && log.getBoundingClientRect().height > 50) return resolve(true);
+            if (performance.now() - started > 5000) return reject(Error('Unicode dialogue differs: ' + log?.textContent));
+            requestAnimationFrame(check); }; check(); });`);
+        console.log(`Unicode dialogue ${theme}, reopened=${reopened}: exact text passed`);
+      }
+      await capture(`unicode-${theme}.png`);
+    }
+    await evaluate(`window.unicodeManager.dispose()`);
+    console.log("Unicode Chromium checks passed");
+    return;
+  }
   await evaluate(`
     frame = { project: 'fixture', russian: true };
     sheetKind = 'task';

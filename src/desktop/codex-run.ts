@@ -17,6 +17,7 @@ import { githubReadTool, readBoardGitHub } from "./github-read.ts";
 import { checkWaitInstructions, checkWaitTool, executorToolTimeoutSeconds, waitForCheck } from "./check-wait.ts";
 import { executorToolConfig, verifyExecutorTools } from "./provider-tools.ts";
 import { callCli } from "./cli.ts";
+import { executorResultTool, recordExecutorResult } from "./executor-results.ts";
 import { bundled, entry } from "./cli.ts";
 import { taskboardCliLaunch } from "./codex.ts";
 import type { configuredCodex } from "./codex.ts";
@@ -105,11 +106,12 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     inputSchema: { type: "object", properties: { server: { type: "string" }, tool: { type: "string" }, reason: { type: "string" } }, required: ["server", "tool", "reason"], additionalProperties: false } };
   const accessTool = { name: "task_request_executor_access", description: "Request full host access for the current execution. Describe the required operation and the sandbox error. On approval the board applies access and continues the same work automatically.",
     inputSchema: { type: "object", properties: { reason: { type: "string", minLength: 1, maxLength: 3000 } }, required: ["reason"], additionalProperties: false } };
-  const tools = [worklogTool, checkWaitTool, requestTool, githubReadTool, milestonesListTool, githubCreateMilestoneTool, githubSetMilestoneDueTool];
+  const tools = [worklogTool, checkWaitTool, requestTool, executorResultTool, githubReadTool, milestonesListTool, githubCreateMilestoneTool, githubSetMilestoneDueTool];
   if (desktopProfile && !fullAccess) tools.push(accessTool);
   let accessDecision: Promise<CliReply> | undefined;
   let accessChange: "approved" | "ready" | "switching" | undefined;
   const mcp = await openBoardMcp(tools, async (name, args, requestSignal) => {
+    if (name === executorResultTool.name) return worklog.remind(await recordExecutorResult(project, task.id, args));
     if (name === accessTool.name && desktopProfile) {
       const pending = accessDecision ??= requestExecutorAccess(desktopProfile, project, task.id, args, settings.data.manager,
         signal ? AbortSignal.any([signal, requestSignal]) : requestSignal);

@@ -72,10 +72,6 @@ export function managerInbox(tasks: Task[]) {
 export function sendTaskMessage(task: Task, input: Record<string, unknown>, sender: "manager" | "agent"): Task {
   requireState(task, sender === "manager" ? ["ready", "in_progress", "blocked", "review"] : ["in_progress", "blocked", "review"]);
   const message = text(input.text, "text", true);
-  if (/\?{3,}/u.test(message) && !/\p{Script=Cyrillic}/u.test(message) &&
-      (message.match(/\?/g)?.length ?? 0) > message.length / 5) {
-    throw new TaskboardError("INVALID_INPUT", "The message appears to have lost Unicode characters. Send the original text using a UTF-8 JSON file with --input-file or set PowerShell $OutputEncoding to UTF-8 before piping to --stdin.");
-  }
   if (message.length > 4000) throw new TaskboardError("INVALID_INPUT", "Keep coordination messages within 4000 characters.");
   const kind = input.kind === undefined ? "update" : member(input.kind, ["question", "update", "decision"], "kind");
   const replyTo = input.replyTo === undefined ? undefined : number(input.replyTo, "replyTo", 1);

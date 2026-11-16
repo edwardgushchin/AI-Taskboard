@@ -254,6 +254,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.ok(launched.flags.some((flag: string) => flag.startsWith("permissions.ai-taskboard=") && flag.endsWith(",network={enabled=true}}")));
   assert.equal(launched.flags.includes('windows.sandbox="mxc"'), process.platform === "win32");
   assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers.ai_taskboard=") && flag.includes("worklog_record")));
+  assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers.ai_taskboard=") && flag.includes("task_record_result")));
   assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers.ai_taskboard=") && flag.includes("github_read")));
   assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers.ai_taskboard=") && flag.includes("check_wait") && flag.includes("tool_timeout_sec=1220")));
   assert.ok(!launched.flags.some((flag: string) => flag.includes("codex-worklog-codex-worklog")));
