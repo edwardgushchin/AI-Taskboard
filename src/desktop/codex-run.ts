@@ -19,6 +19,8 @@ import { callCli } from "./cli.ts";
 import { bundled, entry } from "./cli.ts";
 import { taskboardCliLaunch } from "./codex.ts";
 import type { configuredCodex } from "./codex.ts";
+import { requestExecutorAccess } from "./codex-chat.ts";
+import type { CliReply } from "./cli.ts";
 import { codexRpc, turnControl } from "./codex-rpc.ts";
 import type { AgentControl } from "./codex-rpc.ts";
 import { CodexTokenUsage } from "./codex-token-usage.ts";
@@ -36,7 +38,7 @@ function executorInstructions() {
   const readInstructions = (name: string) => readFileSync(new URL(name + ".md", instructions), "utf8").trim();
   return boardAgentInstructions("executor", [
     "AI Taskboard has already started this card and assigned its working directory. Read the current card, then work in that directory. Pass --project with the board root in every CLI invocation.",
-    "If a provider MCP tool is missing, use task_tool_request with server, tool and a reason. The request is bound to this task. The manager discovers tools with provider_tools and saves an assignment with task_tool_grant. Assignments apply on the next task run, including a resumed chat; finish the current pass with progress before restarting. Do not claim hot connection or successful authorization from a saved assignment.",
+    "If a provider MCP tool is missing, use task_tool_request with server, tool and a reason. The manager discovers tools with provider_tools and saves an assignment with task_tool_grant. Assignments apply on the next task run. Keep working on independent steps. If the missing tool prevents further work on a required step, record that blocker and the condition for resuming.",
     checkWaitInstructions,
     readInstructions("executor").replace("__AI_TASKBOARD_CLI__", () => JSON.stringify(taskboardCliLaunch(bundled, entry))),
     readInstructions("task-writing"),
@@ -65,7 +67,7 @@ const verifyWrite = [
   "}",
 ].join("\n");
 
-export type ExecutorTask = Pick<Task, "id" | "title" | "description" | "criteria" | "dueDate" | "execution" | "git" | "codexThreadId" | "workingDirectory" | "schedule" | "toolGrants"> &
+export type ExecutorTask = Pick<Task, "id" | "title" | "description" | "criteria" | "dueDate" | "summary" | "nextStep" | "execution" | "git" | "codexThreadId" | "workingDirectory" | "schedule" | "toolGrants"> &
   { feedback?: string; fullAccess?: boolean };
 
 export function missingCodexThread(message: string | undefined, threadId: string | undefined) {
@@ -74,7 +76,7 @@ export function missingCodexThread(message: string | undefined, threadId: string
 
 export async function startCodexRun(client: Client, project: string, cwd: string, task: ExecutorTask,
   onActivity?: (item: RunActivity) => void, onTokenUsage?: (report: TokenUsageReport) => Promise<void>, signal?: AbortSignal,
-  beforeTurn?: (threadId: string) => Promise<void>): Promise<Run> {
+  beforeTurn?: (threadId: string) => Promise<void>, desktopProfile?: string): Promise<Run> {
   signal?.throwIfAborted();
   const fullAccess = task.fullAccess === true;
   const profile = fullAccess ? ":danger-full-access" : taskProfile;
@@ -100,7 +102,19 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   }
   const requestTool = { name: "task_tool_request", description: "Request a missing provider MCP tool for this task. The manager receives a question. Assignment requires a restarted task run; provider permissions still apply.",
     inputSchema: { type: "object", properties: { server: { type: "string" }, tool: { type: "string" }, reason: { type: "string" } }, required: ["server", "tool", "reason"], additionalProperties: false } };
-  const mcp = await openBoardMcp([worklogTool, checkWaitTool, requestTool, githubReadTool, milestonesListTool, githubCreateMilestoneTool, githubSetMilestoneDueTool], async (name, args, requestSignal) => {
+  const accessTool = { name: "task_request_executor_access", description: "Ask the board manager immediately for full host access for this task. Explain the required operation and the sandbox error. On approval, finish this turn with the card still in progress so the board restarts the same chat with the granted access.",
+    inputSchema: { type: "object", properties: { reason: { type: "string", minLength: 1, maxLength: 3000 } }, required: ["reason"], additionalProperties: false } };
+  const tools = [worklogTool, checkWaitTool, requestTool, githubReadTool, milestonesListTool, githubCreateMilestoneTool, githubSetMilestoneDueTool];
+  if (desktopProfile && !fullAccess) tools.push(accessTool);
+  let accessDecision: Promise<CliReply> | undefined;
+  const mcp = await openBoardMcp(tools, async (name, args, requestSignal) => {
+    if (name === accessTool.name && desktopProfile) {
+      const pending = accessDecision ??= requestExecutorAccess(desktopProfile, project, task.id, args, settings.data.manager,
+        signal ? AbortSignal.any([signal, requestSignal]) : requestSignal);
+      const result = await pending;
+      if (!result.ok && accessDecision === pending) accessDecision = undefined;
+      return worklog.remind(result);
+    }
     if (name === requestTool.name) return worklog.remind(await callCli(project, ["tool-request", task.id, "--compact"], args));
     if (name === checkWaitTool.name) {
       return worklog.remind(await waitForCheck(runDirectory, args, signal ? AbortSignal.any([signal, requestSignal]) : requestSignal));
@@ -278,6 +292,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
         "У задачи нет отдельной ветки или worktree. Используй сценарий сдачи результата вне Git из инструкции.",
       ] : []),
       "Прочитай актуальную карточку через show " + task.id + " --compact.",
+      ...(localTools.includes(accessTool.name) ? ["Если обязательный шаг требует полного доступа ОС, вызови mcp__ai_taskboard__task_request_executor_access. При approved: true запиши контрольную точку и завершай текущий ход с карточкой «В работе». Доска сама запустит следующий ход с выданным доступом."] : []),
       ...(githubTools.length ? ["Хостовые инструменты GitHub, подтверждённые для текущего хода: " +
         githubTools.map(name => "mcp__ai_taskboard__" + name).join(", ") +
         ". Для поддерживаемых операций обращайся к ним напрямую. Статус gh из оболочки не проверяет авторизацию доски."] : []),
@@ -285,13 +300,13 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       "Команды, которые должен запускать читатель, оформляй отдельными блоками кода Markdown. Пояснения пиши отдельными абзацами.",
       task.schedule
         ? "Это очередной запуск повторяющейся задачи. Выполни один проход по текущим условиям и запиши результат через progress с summary и nextStep. Карточка вернётся в готовые до следующего запуска. Не используй submit. Если без посторонней помощи выполнить задачу нельзя, используй block."
-        : "Заверши работу в карточке командой сдачи, записи прогресса, паузы или блокировки в AI Taskboard.",
+        : "Продолжай работу по всем критериям до сдачи через submit. Если сохранён прогресс, возобнови работу с указанного следующего шага и проверь актуальное состояние. Запись progress сохраняет промежуточный результат. Заверши ход только после сдачи, при подтверждённой смене режима доступа, при блокировке с конкретным условием продолжения или по команде пользователя.",
       "После записи результата в карточку и перед итоговым ответом вызови mcp__ai_taskboard__worklog_record с языком и массивом entries. " +
         "Инструмент подключён к текущему ходу. Команды Worklog из истории относятся к прошлым ходам.",
       "Перед сдачей сопоставь каждый критерий с результатом в diff или проверке. Для изменённого поведения перечисли существенно разные условия, в которых действует один критерий, и проверь сочетания, где результат может различаться. Например, для изменений поставки это чистая и повторная сборка, сборка и публикация, настройки по умолчанию и переопределения. После возврата проверь другие затронутые сценарии того же критерия. Если проверка выполнена на более ранней ревизии, покажи, почему она ещё применима, либо повтори затронутую проверку.",
-      "Если доступ отклонён, продолжай разрешённым способом. Если без доступа нельзя выполнить обязательный шаг, заблокируй задачу. В причине укажи шаг, нужный ресурс и причину отказа, в условии разблокировки — конкретное действие для продолжения.",
+      "Если доступ отклонён, продолжай разрешённым способом и запроси у менеджера смену режима, если она нужна для обязательного шага. При исчерпании доступных способов заблокируй задачу. В причине укажи шаг, нужный ресурс и причину отказа, в условии разблокировки — конкретное действие для продолжения.",
       "Рабочая папка: " + cwd,
-      JSON.stringify({ title: task.title, description: task.description, criteria: task.criteria }),
+      JSON.stringify({ title: task.title, description: task.description, criteria: task.criteria, summary: task.summary, nextStep: task.nextStep }),
       ...(task.feedback ? ["Замечание к последней сдаче: " + task.feedback] : []),
     ].join("\n");
     activeThreadId = threadId;

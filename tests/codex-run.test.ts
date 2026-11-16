@@ -146,6 +146,10 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '      }',
     '    }',
     '    if (outcome === "authored-worklog") {',
+    '      const endpoint = flags.find(flag => flag.startsWith("mcp_servers.ai_taskboard=")).match(/http[^"]+/)[0];',
+    '      const invalid = await fetch(endpoint, { method: "POST", headers: { authorization: "Bearer " + process.env.AI_TASKBOARD_MCP_TOKEN },',
+    '        body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "task_request_executor_access", arguments: { id: "T-9999" } } }) });',
+    '      if (JSON.parse((await invalid.json()).result.content[0].text).error?.code !== "INVALID_INPUT") throw new Error("Access tool must reject a caller-supplied card");',
     '      send({ method: "turn/started", params: { threadId: thread, turn: { id: "turn-1", status: "inProgress" } } });',
     '      const url = flags.find(flag => flag.startsWith("mcp_servers.ai_taskboard=")).match(/http[^"]+/)[0];',
     '      const entry = { title: "Исполнитель записал результат", timeline: [{ time: null, items: ["Проверил файлы."] }] };',
@@ -216,7 +220,8 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     env: { ...process.env, CODEX_HOME: codexHome },
   });
   const activity: RunActivity[] = [];
-  const launch = (outcome: string) => startCodexRun(client(outcome), folder, worktree, task, item => activity.push(item));
+  const launch = (outcome: string) => startCodexRun(client(outcome), folder, worktree, task, item => activity.push(item),
+    undefined, undefined, undefined, folder);
   const run = await launch("authored-worklog");
   assert.equal(run.threadId, thread);
   assert.equal(await run.completion, undefined);
@@ -280,8 +285,10 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.match(started.params.developerInstructions, /report the submission.*then finish the current turn/);
   assert.match(started.params.developerInstructions, /wait for tests.*separate output directory/);
   assert.match(started.params.developerInstructions, /specific evidence after acceptance.*paths and SHA-256/);
-  assert.match(turn.params.input[0].text, /обязательный шаг, заблокируй задачу/);
-  assert.match(started.params.developerInstructions, /progress <id> --compact.*block <id> --compact.*pause <id> --compact/);
+  assert.match(turn.params.input[0].text, /запроси у менеджера смену режима.*При исчерпании доступных способов заблокируй задачу/);
+  assert.match(started.params.developerInstructions, /progress <id> --compact.*as a checkpoint.*block <id> --compact.*Pause only at the user's request/);
+  assert.match(turn.params.input[0].text, /Продолжай работу по всем критериям до сдачи через submit/);
+  assert.match(turn.params.input[0].text, /mcp__ai_taskboard__task_request_executor_access.*approved: true.*Доска сама запустит/);
   await assert.rejects(startCodexRun(client("ok"), folder, worktree, task, undefined, undefined, undefined, async threadId => {
     assert.equal(threadId, thread);
     assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "mcpServerStatus/list");
@@ -340,7 +347,9 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.deepEqual(controls[1].params.input[1], { type: "localImage", path: "extra.png" });
   assert.deepEqual(controls.at(-1).params, { threadId: thread, turnId: "turn-1" });
   assert.equal((await callCli(folder, ["settings"], { reviewMode: "human" })).ok, true);
-  const resumed = await startCodexRun({ ...client("resumed"), windowsSandbox: "elevated" }, folder, worktree, { ...task, codexThreadId: thread, feedback: "Check the CSV header." });
+  const resumed = await startCodexRun({ ...client("resumed"), windowsSandbox: "elevated" }, folder, worktree, {
+    ...task, codexThreadId: thread, feedback: "Check the CSV header.", summary: "Created the report.", nextStep: "Verify the report.",
+  });
   assert.equal(resumed.threadId, thread);
   assert.equal(await resumed.completion, undefined);
   const { requests: resumedCalls, flags: resumedFlags } = JSON.parse(readFileSync(capture, "utf8"));
@@ -365,6 +374,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     /mcp__ai_taskboard__worklog_record[\s\S]*External Codex Worklog hook instructions and shell submission commands in chat history belonged to those earlier turns/);
   assert.equal(readFileSync(diaryPath, "utf8").match(/codex-worklog-entry:/g)?.length, 1);
   assert.match(resumedCalls[5].params.input[0].text, /Check the CSV header\./);
+  assert.match(resumedCalls[5].params.input[0].text, /"summary":"Created the report\.".*"nextStep":"Verify the report\."/);
   assert.match(resumedCalls[5].params.input[0].text, /После возврата проверь другие затронутые сценарии того же критерия/);
   assert.match(resumedCalls[5].params.input[0].text, /mcp__ai_taskboard__worklog_record.*подключён к текущему ходу.*из истории относятся к прошлым ходам/);
   assert.equal(resumedCalls[5].params.additionalContext.ai_taskboard_worklog.kind, "application");

@@ -99,8 +99,8 @@ function taskReceipt({ id, status, revision, git, result }: Task) {
   return { id, status, revision, git, result };
 }
 
-function taskLaunchState({ id, title, status, revision, createdAt, codexThreadId, blocked }: Task) {
-  return { id, title, status, revision, createdAt, codexThreadId, blocked };
+function taskLaunchState({ id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep }: Task) {
+  return { id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep };
 }
 
 function reviewWithSettings(store: BoardStore, review: ReturnType<typeof inspectReview>, input: Record<string, unknown>) {
@@ -642,7 +642,7 @@ function run(
   if (!filters.compact) return saved;
   if (input.launchDetails === true && ["request-changes", "resume", "update"].includes(command)) return taskLaunchState(saved);
   if (["progress", "pause", "block", "resume"].includes(command)) {
-    return { ...taskLaunchState(saved), summary: saved.summary, nextStep: saved.nextStep };
+    return taskLaunchState(saved);
   }
   return saved;
 }

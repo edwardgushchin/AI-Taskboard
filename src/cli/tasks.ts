@@ -190,7 +190,8 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
       requireState(task, ["in_progress", "blocked"]);
       const summary = text(input.summary, "summary", true);
       const nextStep = input.nextStep === undefined ? task.nextStep : text(input.nextStep, "nextStep");
-      return record({ ...task, summary, nextStep }, action, "agent", task.status === "blocked" ? "blocked" : "ready", summary);
+      const status = task.schedule && task.status === "in_progress" ? "ready" : task.status;
+      return record({ ...task, summary, nextStep }, action, "agent", status, summary);
     }
     case "block": {
       requireState(task, input.allowUnstarted === true ? ["draft", "ready", "in_progress"] : ["in_progress"]);
