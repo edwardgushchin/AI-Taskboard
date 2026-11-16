@@ -5177,7 +5177,7 @@ sheet.addEventListener("close", () => {
   taskInSheet = undefined;
   byId("app-content").inert = false;
   document.querySelector(".status-bar").inert = false;
-  if (document.activeElement === document.body || sheet.contains(document.activeElement)) focusBeforeSheet?.focus();
+  if (document.activeElement === document.body || sheet.contains(document.activeElement)) focusBeforeSheet?.focus({ preventScroll: true });
   focusBeforeSheet = undefined;
 });
 api.subscribe(update);
