@@ -87,6 +87,39 @@ async function run() {
         writeFileSync(join(artifacts, `${before?'before':'after'}-${theme}-${width}.png`), (await window.webContents.capturePage()).toPNG());
       }
     }
+    // Cover the cascade outside the board dialogue, including description code backgrounds.
+    report.alignment = [];
+    for (const theme of ['light', 'dark']) for (const width of [480, 1100]) for (const zoom of [1, 1.25, 1.5]) for (const context of ['task', 'description', 'coordination']) for (const state of ['copy', 'check']) {
+      nativeTheme.themeSource = theme;
+      window.setSize(width, 900);
+      window.webContents.setZoomFactor(zoom);
+      await evaluate(`(() => {
+        applyTheme('${theme}');
+        const log = document.querySelector('.board-chat-log');
+        const wrapper = element('section', undefined, '${context}' === 'description' ? 'sheet-section task-sheet-description' : '${context}' === 'coordination' ? 'chat-entry chat-coordination' : 'chat-entry');
+        wrapper.dataset.actor = 'agent';
+        log.replaceChildren(wrapper);
+        wrapper.append(chatText(digestSample, {agent:${context !== 'description'}, coordination:${context === 'coordination'}}));
+        if ('${state}' === 'check') wrapper.querySelectorAll('.codicon-copy').forEach(n=>n.classList.replace('codicon-copy','codicon-check'));
+      })()`);
+      await evaluate('document.fonts.ready.then(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))))');
+      const rows = await evaluate(`(() => [...document.querySelectorAll('.chat-digest')].map(b => {
+        const c=b.querySelector('code'), i=b.querySelector('.icon'), s=getComputedStyle(b), cs=getComputedStyle(c);
+        const cr=c.getBoundingClientRect(), ir=i.getBoundingClientRect(), br=b.getBoundingClientRect();
+        return {text:c.textContent, lineHeight:parseFloat(getComputedStyle(c).lineHeight), topDelta:ir.top-cr.top, iconHeight:ir.height, height:br.height, gap:ir.left-cr.right, left:cr.left-br.left, right:br.right-ir.right, codePadding:cs.padding, background:cs.backgroundColor};
+      }))()`);
+      report.alignment.push({theme,width,zoom,context,state,rows});
+      if (!before) for (const r of rows) {
+        assert.ok(Math.abs(r.topDelta) < 1, JSON.stringify(r));
+        assert.ok(Math.abs(r.iconHeight-r.lineHeight) < 1, JSON.stringify(r));
+        assert.ok(Math.abs(r.left-r.right) < 1, JSON.stringify(r));
+        assert.ok(r.gap > 2 && r.gap < 6, JSON.stringify(r));
+        assert.equal(r.codePadding, '0px');
+        assert.equal(r.background, 'rgba(0, 0, 0, 0)');
+        if(r.text.length===7) assert.ok(r.height <= r.lineHeight+1);
+      }
+      if (zoom===1 && context==='description') writeFileSync(join(artifacts, `${before?'before':'after'}-alignment-${theme}-${width}-${state}.png`), (await window.webContents.capturePage()).toPNG());
+    }
     if (!before) {
       window.webContents.setZoomFactor(1);
       await evaluate(`renderDigestFixture('history')`);

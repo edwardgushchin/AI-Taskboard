@@ -711,16 +711,18 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .chat-review-finding-heading + p { margin-block-start: 0; }
 .chat-coordination :not(pre) > code { font-size: .9em; }
 .chat-digest.button {
-  display: inline-flex; align-items: baseline; gap: .2em; vertical-align: baseline;
-  max-width: 100%; min-width: 0; min-height: 0; padding: 0 1px; border: 0; border-radius: 3px;
+  display: inline-flex; align-items: baseline; gap: .3em; vertical-align: baseline;
+  max-width: 100%; min-width: 0; min-height: 0; padding: 0 .2em; border: 0; border-radius: 3px;
   color: var(--blue); background: transparent; font: inherit; line-height: inherit; white-space: normal;
 }
 .chat-digest.button:is(:hover, :focus-visible) { color: var(--text); background: color-mix(in srgb, var(--text) 5%, transparent); }
-.chat-digest.button > code {
+.chat-text .chat-digest.button > code {
   min-width: 0; padding: 0; background: transparent; font-size: inherit;
   white-space: normal; overflow-wrap: anywhere; text-align: start;
 }
-.chat-digest.button > .icon { width: 1em; height: 1em; font-size: 1em; line-height: 1; }
+.chat-digest.button > .icon {
+  align-self: flex-start; width: 1em; height: 1lh; font-size: 1em; line-height: inherit;
+}
 .chat-code-copy.button > .icon { font-size: 1em; }
 .chat-text, .chat-action { overflow-wrap: anywhere; line-height: 1.7; }
 /* Codex content typography; see docs/chat-typography.md for the source. */
