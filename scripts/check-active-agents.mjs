@@ -96,6 +96,7 @@ try {
     return { active: el.classList.contains('has-active-agents'), selected: b.getAttribute('aria-selected'),
       unread: !!el.querySelector('.project-tab-unread'), title: b.title, description: b.getAttribute('aria-description'),
       animation: stripe.animationName, color: stripe.backgroundColor, width: stripe.width, opacity: Number(stripe.opacity),
+      image: stripe.backgroundImage, position: stripe.backgroundPositionY, duration: stripe.animationDuration,
       accent: getComputedStyle(el).getPropertyValue('--accent').trim(),
       pointer: stripe.pointerEvents, selection: getComputedStyle(el).borderInlineStartColor };
   })`);
@@ -111,11 +112,13 @@ try {
       assert.equal(tabs.length, 2);
       for (const tab of tabs) {
         assert.equal(tab.active, true); assert.equal(tab.unread, true);
-        assert.equal(tab.animation, motion === 'reduce' ? 'none' : 'project-agent-pulse');
+        assert.equal(tab.animation, motion === 'reduce' ? 'none' : 'project-agent-glint');
         assert.equal(tab.width, '1px'); assert.equal(tab.pointer, 'none');
         assert.notEqual(tab.color, 'rgba(0, 0, 0, 0)');
-        assert.equal(await evaluate(`(() => { const el = document.createElement('span'); el.style.color = ${JSON.stringify(tab.accent)}; document.body.append(el); const color = getComputedStyle(el).color; el.remove(); return color; })()`), tab.color);
-        if (motion === 'reduce') assert.equal(tab.opacity, 1);
+        assert.equal(await evaluate(`(() => { const el = document.createElement('span'); el.style.backgroundColor = ${JSON.stringify(motion === 'reduce' ? tab.accent : 'color-mix(in srgb, ' + tab.accent + ' 25%, transparent)')}; document.body.append(el); const color = getComputedStyle(el).backgroundColor; el.remove(); return color; })()`), tab.color);
+        assert.equal(tab.opacity, 1, 'the whole stripe does not pulse');
+        if (motion === 'reduce') assert.equal(tab.image, 'none');
+        else { assert.ok(tab.image.includes('linear-gradient')); assert.equal(tab.duration, '3.6s'); }
         assert.ok(tab.title.includes(tab.description));
       }
       assert.match(tabs[0].description, /Менеджер 1.*Ревьюер 1/);
@@ -133,13 +136,13 @@ try {
           recorder.start();
         })()`);
         const samples = [];
-        for (let frame = 0; frame < 30; frame++) {
+        for (let frame = 0; frame < 40; frame++) {
           const capture = (await window.webContents.capturePage(clip)).toDataURL();
           await evaluate(`(async () => {
             const image = new Image(); image.src = ${JSON.stringify(capture)}; await image.decode();
             activityRecording.canvas.getContext('2d').drawImage(image, 0, 0);
           })()`);
-          samples.push((await tabState())[0].opacity);
+          samples.push((await tabState())[0]);
           await new Promise(resolve => setTimeout(resolve, 100));
         }
         const base64 = await evaluate(`new Promise(resolve => {
@@ -152,8 +155,9 @@ try {
           };
           recorder.stop();
         })`);
-        writeFileSync(join(artifacts, 'pulse-' + theme + '.webm'), Buffer.from(base64, 'base64'));
-        assert.ok(Math.min(...samples) < .2 && Math.max(...samples) > .95, 'visible full pulse range');
+        writeFileSync(join(artifacts, 'glint-' + theme + '.webm'), Buffer.from(base64, 'base64'));
+        assert.ok(new Set(samples.map(tab => tab.position)).size > 30, 'glint travels along the stripe');
+        assert.ok(samples.every(tab => tab.opacity === 1 && tab.color === tabs[0].color), 'base line remains constant');
         // Decode in an isolated blank window: the app deliberately disallows media via CSP.
         const decoder = new BrowserWindow({ show: false });
         let playback;
@@ -167,13 +171,19 @@ try {
         })`);
         } finally { decoder.destroy(); }
         assert.deepEqual(playback, { width: 100, height: 560 });
-        matrix.push({ theme, motion, opacitySamples: samples, playback });
+        matrix.push({ theme, motion, positionSamples: samples.map(tab => tab.position), playback });
       } else {
         await new Promise(resolve => setTimeout(resolve, 300));
-        assert.equal((await tabState())[0].opacity, 1, 'reduced motion remains static');
+        const staticTab = (await tabState())[0];
+        assert.equal(staticTab.opacity, 1);
+        assert.equal(staticTab.image, 'none');
+        assert.equal(staticTab.position, tabs[0].position, 'reduced motion remains static');
       }
       matrix.push({ theme, motion, tabs });
+      // Still images show the glint halfway along the line; video above uses real time.
+      await evaluate("document.getAnimations().filter(a => a.animationName === 'project-agent-glint').forEach(a => { a.pause(); a.currentTime = 1800; })");
       writeFileSync(join(artifacts, `tabs-${theme}-${motion}.png`), (await window.webContents.capturePage()).toPNG());
+      await evaluate("document.getAnimations().filter(a => a.animationName === 'project-agent-glint').forEach(a => a.play())");
     }
   }
   window.webContents.debugger.detach();
