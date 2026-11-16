@@ -347,7 +347,6 @@ function renderRunActivity(container, items, completed = false, durationMs, task
     }
     if (item.messagesOnly) continue;
     const showTaskEvent = item.taskChanges?.some(({ action }) => visibleTaskActions.has(action));
-    const reason = item.taskChanges?.[0]?.reason;
     if (["agentMessage", "plan", "truncated", "error", "reasoning"].includes(item.type)) {
       flush();
       if (item.type === "agentMessage" || item.type === "plan") {
@@ -363,19 +362,11 @@ function renderRunActivity(container, items, completed = false, durationMs, task
       }
       else if (item.type === "reasoning") nodes.push(operation(item));
       else nodes.push(element("p", item.type === "error" ? item.text : language("Earlier activity exceeded the log limit.", "Ранние события не поместились в журнал."), item.type === "error" ? "chat-run-error" : "muted"));
-    } else if (showTaskEvent || reason) {
+    } else if (showTaskEvent) {
       flush();
       const row = operation(item);
       nodes.push(row);
-      if (showTaskEvent) taskEventRows.add(row);
-      if (reason) {
-        const text = element("p", reason, "chat-text");
-        const note = context?.dialogue ? element("div", undefined, "board-manager-message") : text;
-        if (note !== text) { note.append(text); appendChatTime(note, item.at); }
-        note.dataset.item = "reason:" + item.id;
-        nodes.push(note);
-        if (showTaskEvent) taskEventRows.add(note);
-      }
+      taskEventRows.add(row);
     } else operations.push(item);
   }
   flush();

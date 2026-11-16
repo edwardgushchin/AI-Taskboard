@@ -9,6 +9,7 @@ import {
 } from "./git.ts";
 import type { Repository, Worktree } from "./git.ts";
 import { object, record, requireRevision, requireState, taskIdPattern, TaskboardError, text } from "./model.ts";
+import { boardActor } from "./tasks.ts";
 import type { Task, TaskGit } from "./model.ts";
 import { directory, exists, locateBoard, readBinary, readJson, removeFile, taskStartInProgress, taskWorkingDirectory, writeJson } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
@@ -157,14 +158,14 @@ export function hasPending(store: BoardStore, task: Task): boolean {
 }
 
 type StartedTask = { task: Task } & ({ worktree: string } | { cwd: string });
-type StartIntent = { action: "start"; revision: number; target: string; base: string; isolatedWorktree?: true };
+type StartIntent = { action: "start"; revision: number; target: string; base: string; actor?: "user" | "agent" | "manager"; isolatedWorktree?: true };
 type TaskCheckout = {
   id: string; repo: Repository; branch: string; managedPath: string; intent: StartIntent;
   preparing: number; lockWaitMs: number;
 };
 
-function saveStart(store: BoardStore, task: Task, lockWaitMs: number, prepareMs: number, gitWorktreeAddMs?: number) {
-  const updated = record(task, "start", "agent", "in_progress");
+function saveStart(store: BoardStore, task: Task, lockWaitMs: number, prepareMs: number, gitWorktreeAddMs?: number, actor: "user" | "agent" | "manager" = "agent") {
+  const updated = record(task, "start", actor, "in_progress");
   updated.history.at(-1)!.startTiming = {
     lockWaitMs, prepareMs, ...(gitWorktreeAddMs !== undefined ? { gitWorktreeAddMs } : {}),
   };
@@ -173,7 +174,7 @@ function saveStart(store: BoardStore, task: Task, lockWaitMs: number, prepareMs:
 
 export function prepareTaskStart(store: BoardStore, task: Task, input: Record<string, unknown>, lockWaitMs: number): StartedTask | TaskCheckout {
   const preparing = performance.now();
-  const save = (card: Task) => saveStart(store, card, lockWaitMs, Math.round(performance.now() - preparing));
+  const save = (card: Task) => saveStart(store, card, lockWaitMs, Math.round(performance.now() - preparing), undefined, boardActor(input));
   requireState(task, ["ready", "in_progress"]);
   if (task.status === "ready") {
     const dependencies = unfinishedDependencies(task, id => dependencyStatus(store, id));
@@ -243,7 +244,7 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
     }
     base = resolveCommit(repo.root, target) ?? createInitialCommit(repo, target);
   }
-  const intent: StartIntent = { action: "start", revision: task.revision, target, base,
+  const intent: StartIntent = { action: "start", revision: task.revision, target, base, actor: boardActor(pending || input),
     ...(isolatedWorktree ? { isolatedWorktree: true } : {}) };
   if (!pending) writeJson(pendingPath, intent);
   return { id: task.id, repo, branch, managedPath, intent, preparing, lockWaitMs };
@@ -301,7 +302,7 @@ export function finishTaskStart(store: BoardStore, plan: TaskCheckout, checkout:
   const worktree = isolate ? isolateTaskWorktree(store, plan.repo, id, checkout.worktree) : checkout.worktree;
   const prepareMs = Math.max(0, Math.round(performance.now() - preparing) - finalLockWaitMs);
   const updated = saveStart(store, { ...task, git: { target, base, branch, worktree } },
-    lockWaitMs + finalLockWaitMs, prepareMs, gitWorktreeAddMs);
+    lockWaitMs + finalLockWaitMs, prepareMs, gitWorktreeAddMs, intent.actor);
   removeFile(pendingPath);
   return { task: updated, worktree };
 }

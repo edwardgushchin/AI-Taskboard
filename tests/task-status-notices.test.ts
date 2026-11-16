@@ -43,13 +43,13 @@ test("CLI transitions replay in order without goals, windows or a running manage
   cli(["accept", task.id], { revision: cli(["show", task.id]).revision });
   assert.equal(syncTaskStatusNotices(root), true);
   const texts = messages();
-  assert.equal(texts.length, 7);
-  for (const [i, label] of ["в работе.", "заблокирована: нужен доступ к серверу", "в работе: доступ выдан",
-    "сдана на проверку: доступ к SSH проверен", "в работе: проверь повторно",
-    "сдана на проверку: доступ к SSH проверен", "завершена: доступ к SSH проверен"].entries()) {
+  assert.equal(texts.length, 5);
+  for (const [i, label] of ["в работе.", "заблокирована: нужен доступ к серверу", "в работе.",
+    "сдана на проверку: доступ к SSH проверен",
+    "сдана на проверку: доступ к SSH проверен"].entries()) {
     assert.ok(texts[i]!.includes(`T-0001 «Доступ к SSH» — ${label}`), texts[i]);
   }
-  assert.equal(managerUnread(root).length, 7);
+  assert.equal(managerUnread(root).length, 5);
   readManagerMessages(root, [...managerUnread(root)]);
   assert.equal(syncTaskStatusNotices(root), false);
   assert.deepEqual(messages(), texts);
@@ -65,20 +65,111 @@ test("CLI transitions replay in order without goals, windows or a running manage
   assert.equal(restart.status, 0, restart.stderr);
   assert.deepEqual(messages(), texts);
   const cancelled = cli(["create"], { title: "Отмена" });
-  cli(["cancel", cancelled.id], { reason: "больше не требуется" });
+  cli(["cancel", cancelled.id], { actor: "manager", reason: "больше не требуется" });
   cli(["settings"], { archiveAfterDays: 0 });
   cli(["archive", "sweep"]);
   assert.ok(cli(["list"]).archived.some((task: Task) => task.id === cancelled.id));
   assert.equal(syncTaskStatusNotices(root), true);
-  assert.ok(messages().at(-1)!.includes("отменена: больше не требуется"));
+  assert.ok(messages().at(-1)!.includes("отменена."));
 });
 
 test("review approval is not completion; absent reasons stay absent; boards remain isolated", t => {
   const task = { id: "T-0002", title: "Пример" } as Task;
   assert.equal(statusNotice(task, { at: "", actor: "reviewer", action: "review-approve" }), undefined);
   assert.equal(statusNotice(task, { at: "", actor: "user", action: "update", from: "ready", to: "ready" }), undefined);
-  assert.equal(statusNotice(task, { at: "", actor: "user", action: "accept", from: "review", to: "done", text: "abc123" }), "T-0002 «Пример» — завершена.");
+  assert.equal(statusNotice(task, { at: "", actor: "reviewer", action: "accept", from: "review", to: "done", text: "abc123" }), "T-0002 «Пример» — завершена.");
   const root = mkdtempSync(join(tmpdir(), "taskboard-isolated-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   assert.deepEqual(managerUnread(root), []);
+});
+
+
+test("manual lifecycle actions retain audit history without notices; agents still notify afterwards", t => {
+  const root = mkdtempSync(join(tmpdir(), "taskboard-manual-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const cli = (args: string[], input?: unknown, success = true) => {
+    const result = spawnSync(process.execPath, ["--disable-warning=ExperimentalWarning",
+      fileURLToPath(new URL("../src/cli/main.ts", import.meta.url)), "--project", root, "--json", ...args,
+      ...(input === undefined ? [] : ["--stdin"])], { encoding: "utf8", windowsHide: true,
+      input: input === undefined ? undefined : JSON.stringify(input) });
+    assert.equal(result.status === 0, success, result.stdout + result.stderr);
+    return JSON.parse(result.stdout).data;
+  };
+  cli(["init"]);
+  syncTaskStatusNotices(root);
+  const task = cli(["create"], { title: "Manual", criteria: ["Checked"], workingDirectory: root });
+  const manual = (action: string, input = {}) => {
+    cli([action, task.id], { ...input, actor: "user" });
+    assert.equal(syncTaskStatusNotices(root), false, action);
+    assert.deepEqual(managerUnread(root), []);
+    assert.equal(cli(["show", task.id]).history.at(-1).actor, "user");
+  };
+  manual("approve"); manual("return-to-draft"); manual("approve"); manual("start");
+  cli(["block", task.id], { reason: "useful blocker", condition: "access" });
+  assert.equal(syncTaskStatusNotices(root), true);
+  readManagerMessages(root, [...managerUnread(root)]);
+  manual("resume", { reason: "internal manual reason" });
+  cli(["block", task.id], { actor: "manager", reason: "useful blocker", condition: "access" });
+  assert.equal(syncTaskStatusNotices(root), true);
+  readManagerMessages(root, [...managerUnread(root)]);
+  const reason = "Пользователь поручил ещё одну попытку…";
+  cli(["unblock", task.id], { actor: "manager", reason });
+  assert.equal(cli(["show", task.id]).history.at(-1).text, reason);
+  assert.equal(syncTaskStatusNotices(root), true);
+  const texts = readManagerHistory(root, null, "chat")!.turns.flatMap(turn => turn.items.map(item => item.text));
+  assert.ok(texts.some(text => text.includes("useful blocker")));
+  assert.ok(!texts.some(text => text.includes(reason)));
+  readManagerMessages(root, [...managerUnread(root)]);
+  manual("start");
+  const submit = () => cli(["submit", task.id], { token: cli(["preview", task.id]).token,
+    noChanges: true, summary: "result", checks: ["checked"] });
+  submit(); syncTaskStatusNotices(root); readManagerMessages(root, [...managerUnread(root)]);
+  manual("request-changes", { reason: "feedback" });
+  submit(); syncTaskStatusNotices(root); readManagerMessages(root, [...managerUnread(root)]);
+  manual("accept", { revision: cli(["show", task.id]).revision });
+  const source = cli(["create"], { title: "Source", criteria: ["Checked"] });
+  const target = cli(["create"], { title: "Main", criteria: ["Checked"] });
+  cli(["cancel", source.id], { actor: "manager", reason, mergedInto: source.id, transferred: "hash wrapping" }, false);
+  assert.equal(cli(["show", source.id]).status, "draft");
+  cli(["cancel", source.id], { actor: "manager", reason, mergedInto: target.id, transferred: "hash wrapping" });
+  assert.equal(syncTaskStatusNotices(root), true);
+  const text = readManagerHistory(root, null, "chat")!.turns.at(-1)!.items[0]!.text;
+  assert.ok(text.includes(source.id) && text.includes(target.id) && text.includes("Source") && text.includes("Main") && text.includes("hash wrapping"));
+  assert.ok(!text.includes(reason));
+  const cancelled = cli(["create"], { title: "Manual cancel" });
+  cli(["cancel", cancelled.id], { actor: "user", reason });
+  assert.equal(syncTaskStatusNotices(root), false);
+  const restart = spawnSync(process.execPath, ["--input-type=module", "-e",
+    `import {syncTaskStatusNotices} from ${JSON.stringify(new URL("../src/desktop/manager-history.ts", import.meta.url).href)};if(syncTaskStatusNotices(process.argv[1]))process.exit(1);`, root], { encoding: "utf8", windowsHide: true });
+  assert.equal(restart.status, 0, restart.stderr);
+});
+
+
+test("manual Git checkout and resumed checkout preserve the actor of each start", t => {
+  const root = mkdtempSync(join(tmpdir(), "taskboard-git-source-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const cli = (args: string[], input?: unknown) => {
+    const result = spawnSync(process.execPath, ["--disable-warning=ExperimentalWarning",
+      fileURLToPath(new URL("../src/cli/main.ts", import.meta.url)), "--project", root, "--json", ...args,
+      ...(input === undefined ? [] : ["--stdin"])], { encoding: "utf8", windowsHide: true,
+      input: input === undefined ? undefined : JSON.stringify(input) });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    return JSON.parse(result.stdout).data;
+  };
+  cli(["init"], { git: true });
+  const task = cli(["create"], { title: "Git source", criteria: ["Checked"] });
+  cli(["approve", task.id], { actor: "user" });
+  syncTaskStatusNotices(root);
+  cli(["start", task.id], { actor: "user" });
+  assert.equal(cli(["show", task.id]).history.at(-1).actor, "user");
+  assert.equal(syncTaskStatusNotices(root), false);
+  cli(["pause", task.id]);
+  syncTaskStatusNotices(root); readManagerMessages(root, [...managerUnread(root)]);
+  cli(["start", task.id], { actor: "user" });
+  assert.equal(syncTaskStatusNotices(root), false);
+  cli(["pause", task.id]);
+  syncTaskStatusNotices(root); readManagerMessages(root, [...managerUnread(root)]);
+  cli(["start", task.id], { actor: "manager" });
+  assert.equal(cli(["show", task.id]).history.at(-1).actor, "manager");
+  assert.equal(syncTaskStatusNotices(root), true);
 });

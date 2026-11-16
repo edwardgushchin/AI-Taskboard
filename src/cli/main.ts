@@ -640,6 +640,12 @@ function run(
   }
   const updated = changeTask(task, command, input);
   if (command === "cancel") {
+    if (input.mergedInto !== undefined) {
+      const target = readTask(store, text(input.mergedInto, "mergedInto", true));
+      if (target.id === task.id || target.status === "cancelled") throw new TaskboardError("INVALID_INPUT", "Choose another surviving card.");
+      updated.history.at(-1)!.mergedInto = { id: target.id, title: target.title,
+        transferred: text(input.transferred, "transferred", true) };
+    }
     const closed = store.save(withoutVerification(updated));
     discardTaskArtifacts(store, id);
     return closed;

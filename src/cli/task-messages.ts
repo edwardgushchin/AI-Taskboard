@@ -2,6 +2,7 @@ import { member, number, requireState, TaskboardError, text } from "./model.ts";
 import type { Task, TaskEvent } from "./model.ts";
 
 export function statusNotice(task: Task, event: TaskEvent, russian = true) {
+  if (event.actor === "user") return;
   if (!event.from || !event.to || event.from === event.to) return;
   const labels = russian ? {
     draft: "возвращена в черновики", ready: "готова к работе", in_progress: "в работе",
@@ -11,7 +12,14 @@ export function statusNotice(task: Task, event: TaskEvent, russian = true) {
     review: "submitted for review", done: "completed", cancelled: "cancelled",
   };
   // Acceptance stores a Git SHA in event.text, not a user-facing outcome.
-  const detail = event.action === "accept" ? task.result?.summary : event.text;
+  if (event.mergedInto) {
+    const target = event.mergedInto;
+    return russian
+      ? `Требования ${task.id} «${task.title}» включены в ${target.id} «${target.title}»: ${target.transferred}. ${target.id} остаётся основной, ${task.id} отменена как объединённая.`
+      : `Requirements from ${task.id} “${task.title}” were included in ${target.id} “${target.title}”: ${target.transferred}. ${target.id} remains the main card; ${task.id} was cancelled as merged.`;
+  }
+  const detail = event.action === "accept" ? task.result?.summary :
+    ["block", "submit", "progress", "request-changes"].includes(event.action) ? event.text : undefined;
   return `${task.id} «${task.title}» — ${labels[event.to]}${detail?.trim() ? ": " + detail.trim() : "."}`;
 }
 
