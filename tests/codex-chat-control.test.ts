@@ -17,6 +17,7 @@ import { CodexTokenUsage } from "../src/desktop/codex-token-usage.ts";
 import { codexThreadPattern, taskIdPattern } from "../src/cli/model.ts";
 import { runActivity, runLog } from "../src/desktop/run-activity.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
+import { managerCliContext } from "../src/desktop/manager-cli.ts";
 
 const source = readFileSync(new URL("../src/desktop/codex-chat.ts", import.meta.url), "utf8")
   .replace(/^import[\s\S]*?;\r?\n/gm, "").replace(/^export /gm, "");
@@ -228,8 +229,9 @@ test("board chat keeps a goal streaming across turns and times out only after in
         send({ method: "thread/goal/cleared", params: { threadId } });
       } else if (method === "turn/start") {
         const config = process.argv.find(value => value.startsWith("mcp_servers.ai_taskboard="));
+        const native = process.argv[2] === "cli-ready";
         const url = config.match(/http[^"]+/)[0];
-        for (const name of ["task_start", "project_git", "project_disk", "project_path"]) {
+        for (const name of ["task_start", "project_git", "task_review_queue", "project_path"]) {
           if (!config.includes(name + '={approval_mode="approve"}')) throw new Error("Missing board tool policy for " + name);
         }
         const token = process.env.AI_TASKBOARD_MCP_TOKEN;
@@ -240,9 +242,11 @@ test("board chat keeps a goal streaming across turns and times out only after in
           return (await response.json()).result;
         };
         const { tools } = await invoke("tools/list");
-        if (tools.map(tool => tool.name).join(",") !== "task_start,project_git,project_disk,project_path,worklog_record") throw new Error("Missing board tools");
+        if (tools.map(tool => tool.name).join(",") !== (native ? "task_start,task_review_queue,project_path,worklog_record" :
+          "task_start,project_git,task_review_queue,project_path,worklog_record")) throw new Error("Unexpected board tools");
         for (const [name, args] of [["task_start", { id: "T-0001", revision: 2 }], ["project_git", { view: "status" }],
-          ["project_disk", {}], ["project_path", { path: ".", list: true }]]) {
+          ["task_review_queue", {}], ["project_path", { path: ".", list: true }]]) {
+          if (native && name === "project_git") continue;
           const result = await invoke("tools/call", { name, arguments: args });
           if (result.isError) throw new Error("Board tool failed");
         }
@@ -298,6 +302,8 @@ test("board chat keeps a goal streaming across turns and times out only after in
   let providerMode = "";
   const { replyToBoard: runtime, updateBoardGoal } = runInNewContext(stripTypeScriptTypes(source) + "\n({ replyToBoard, updateBoardGoal })", {
     spawn, turnControl, CodexTokenUsage, codexThreadPattern, Error, process, withBoardMcp, goalTaskWaitSeconds,
+    managerCliContext, probeManagerCli: async () => providerMode === "cli-ready"
+      ? { gitOptions: ["--no-optional-locks", "-c", "core.fsmonitor=false"] } : {},
     boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
     codexRpc: (child: Parameters<typeof codexRpc>[0], notify: Parameters<typeof codexRpc>[1], onRequest: Parameters<typeof codexRpc>[2]) =>
       codexRpc(child, (message: RpcMessage) => {
@@ -331,7 +337,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
     id: threadId, title: "Project manager", save: () => assert.fail("Thread ID must be preserved"),
     settings: { model: "manager-model", effort: "high" },
     goal: "Read this",
-    mcpTools: ["task_start", "project_git", "project_disk", "project_path"].map(name => ({ name, description: name, inputSchema: { type: "object" } })),
+    mcpTools: ["task_start", "project_git", "task_review_queue", "project_path"].map(name => ({ name, description: name, inputSchema: { type: "object" } })),
     onGoalSet: () => accepted++, onActivity() {}, onControl: (value: AgentControl) => { control = value; },
     onWaiting: (value: boolean) => waiting.push(value),
     onTokenUsage: async (report: import("../src/cli/token-usage.ts").TokenUsageReport) => { reports.push(report); },
@@ -349,7 +355,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.deepEqual(launched, [
     { name: "task_start", args: { id: "T-0001", revision: 2 } },
     { name: "project_git", args: { view: "status" } },
-    { name: "project_disk", args: {} },
+    { name: "task_review_queue", args: {} },
     { name: "project_path", args: { path: ".", list: true } },
   ]);
   assert.deepEqual(waiting, [true, false]);
@@ -484,6 +490,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.equal(await updateBoardGoal("profile", directory, threadId, { kind: "clear" }), null);
 
   let savedThread: string | undefined;
+  providerMode = "cli-ready";
   await runtime("profile", directory, "Start", [], () => ({ ok: true }), [], "", controller.signal, {
     ...session, id: undefined, goal: undefined, save: (id: string) => { savedThread = id; },
   });
@@ -493,10 +500,19 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.ok(flags().includes("network_proxy"));
   assert.equal(start?.params.cwd, directory);
   assert.ok((start?.params.developerInstructions as string).includes(writingRules));
+  assert.match(start?.params.developerInstructions as string, /git --no-pager --literal-pathspecs/);
   assert.equal(start?.params.permissions, "ai-taskboard-manager");
   assert.equal(Object.hasOwn(start!.params, "projectId"), false);
   assert.equal(newRequests.some(({ method }) => method.startsWith("project/")), false);
+  const nativeResume = await runtime("profile", directory, "Continue", [], () => ({ ok: true }), [], "", controller.signal, {
+    ...session, id: savedThread, goal: undefined,
+  });
+  assert.equal(nativeResume.text, "First turn\n\nDone");
+  const nativeRequests: typeof newRequests = JSON.parse(readFileSync(captured, "utf8"));
+  assert.match(nativeRequests.find(({ method }) => method === "thread/resume")?.params.developerInstructions as string,
+    /git --no-pager --literal-pathspecs/);
 
+  providerMode = "";
   await runtime("profile", directory, "Review submissions", [], () => ({ ok: true }), [], "", controller.signal, {
     ...session, goal: undefined, separateTurn: true, save: (id: string) => assert.equal(id, threadId),
   });

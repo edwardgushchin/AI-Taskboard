@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
-import { mkdtemp, rm, statfs, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join } from "node:path";
@@ -63,7 +63,7 @@ function fixture(t: TestContext) {
   };
   const { autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools } = runInNewContext(
     boardSource + "\n({ autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools })",
-    { AbortSignal, boardReviewMode, callCli, cliFailure, defaultBoardAgents, hexTagColor, inspectProjectPath, managerInbox, needsManagerAttention, projectSha256, reviewVerifier, russianWriting, statfs, TaskboardError, taskIdPattern,
+    { AbortSignal, boardReviewMode, callCli, cliFailure, defaultBoardAgents, hexTagColor, inspectProjectPath, managerInbox, needsManagerAttention, projectSha256, reviewVerifier, russianWriting, TaskboardError, taskIdPattern,
       taskFields: { title: {}, description: {}, criteria: {}, tags: {} },
     },
   );
@@ -184,8 +184,8 @@ function fixture(t: TestContext) {
       ] : [
         "task_cancel", "provider_tools", "task_tool_grant", "task_tool_revoke", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_approve", "task_wait", "task_review_queue", "task_review", "task_review_diff",
         "task_review_artifact", "task_accept", "task_request_changes",
-        "task_cleanup_status", "task_cleanup", "project_git", "project_git_push", "project_disk",
-        "project_path", "project_sha256", "milestones_list", "task_set_milestone", "tag_set_color",
+        "task_cleanup_status", "task_cleanup", "project_git", "project_git_push",
+        "milestones_list", "task_set_milestone", "tag_set_color",
       ];
       const mode = boardReviewMode((await callCli(project, ["settings"], undefined, false)).data);
       assert.deepEqual(Array.from(session.mcpTools, tool => tool.name).sort(),
@@ -879,7 +879,7 @@ test("send now steers the active manager with attachments and releases its execu
   assert.equal(f.boardListeners.size, 0);
 });
 
-test("manager reads Git and disk information without modifying the repository", async t => {
+test("manager reads Git information without modifying the repository", async t => {
   const f = fixture(t);
   assert.equal((await f.cli(["init"])).ok, true);
   const project = join(f.folder, "project");
@@ -924,8 +924,6 @@ test("manager reads Git and disk information without modifying the repository", 
     assert.doesNotMatch(commit.data.output, /Staged edit|Working edit/);
     assert.equal((await act("project_git", { view: "reset" })).error.code, "INVALID_INPUT");
     assert.equal((await act("project_git", { view: "status", path: ".." })).error.code, "INVALID_INPUT");
-    const disk = (await act("project_disk", {})).data;
-    assert.ok(disk.availableBytes >= 0 && disk.totalBytes > 0 && disk.availableBytes <= disk.totalBytes);
     return { text: "Проверил." };
   });
   assert.equal(reply.ok, true, JSON.stringify(reply.error));
@@ -2014,6 +2012,8 @@ test("manager reopens a conflicting approved submission and integrates its revie
     return result.stdout.trim();
   };
   git(f.project, "init", "-b", "main");
+  // Keep detached maintenance from holding the disposable cwd during cleanup.
+  git(f.project, "config", "maintenance.auto", "false");
   git(f.project, "config", "core.autocrlf", "false");
   git(f.project, "config", "user.name", "Taskboard");
   git(f.project, "config", "user.email", "taskboard@example.invalid");

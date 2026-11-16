@@ -20,6 +20,7 @@ import { CodexTokenUsage } from "./codex-token-usage.ts";
 import { runActivity, runLog } from "./run-activity.ts";
 import type { RunActivity, TaskEvent } from "../cli/model.ts";
 import type { TokenUsageReport } from "../cli/token-usage.ts";
+import { managerCliContext, probeManagerCli } from "./manager-cli.ts";
 
 interface ModelEntry {
   model: string;
@@ -34,12 +35,15 @@ type Notification = (message: RpcMessage) => void | Promise<void>;
 type ServerRequest = (message: RpcMessage) => Promise<object | undefined>;
 type RunAction = (name: string, args: unknown) => Promise<CliReply>;
 type BoardMcpConnection = { config: string; env: Record<string, string> };
+type CodexClient = NonNullable<Awaited<ReturnType<typeof configuredCodex>>>;
+type RpcRequest = <R>(method: string, params: object) => Promise<R>;
 const idleTimeoutMs = 180_000;
 const goalIdleTimeoutMs = 600_000;
 const managerResearchProfile = "ai-taskboard-manager";
 
 async function withServer<T>(
   profile: string, cwd: string, callback: (server: {
+    client: CodexClient;
     request: <R>(method: string, params: object, notify?: Notification) => Promise<R>;
     receive: (notify?: Notification) => Promise<RpcMessage>;
     refreshTimeout: (ms?: number) => void;
@@ -93,7 +97,7 @@ async function withServer<T>(
       ...(onRequest ? { capabilities: { experimentalApi: true, requestAttestation: false } } : {}),
     });
     send({ method: "initialized" });
-    return await callback({ request, receive, refreshTimeout });
+    return await callback({ client, request, receive, refreshTimeout });
   } finally {
     clearTimeout(timeout);
     child.stdin.end();
@@ -258,11 +262,22 @@ export function replyToBoard(
     ? providerAction?.(name, args) ?? Promise.resolve(cliFailure("PROVIDER_TOOLS_UNAVAILABLE", "Wait for the provider session to initialize."))
     : runAction(name, args);
   const dialogue = !session.goal && !session.resumeGoal && !session.separateTurn;
-  return withBoardMcp([...session.mcpTools, worklogTool],
+  const mcpTools = [...session.mcpTools, worklogTool];
+  return withBoardMcp(mcpTools,
     async (name, args) => name === worklogTool.name ? worklog.submit(args) : worklog.remind(await dispatch(name, args)),
     (config, env) => reply(profile, project, prompt, images, dispatch, {
       tools, instructions: boardAgentInstructions("manager", instructions, { dialogue }), signal, session, worklog,
       onTokenUsage: session.onTokenUsage, mcp: { config, env },
+      prepareResearch: async (request, client) => {
+        const launchKey = JSON.stringify([profile, client.path, client.args, client.version, client.windowsSandbox, managerResearchProfile]);
+        const availability = await probeManagerCli(project, launchKey, mcpTools, (cwd, command, env) =>
+          request("command/exec", { cwd, command, env, permissionProfile: managerResearchProfile, timeoutMs: 5000 }));
+        signal.throwIfAborted();
+        const native = managerCliContext(mcpTools, availability);
+        // The local MCP serves this list before the thread discovers its tools.
+        mcpTools.splice(0, mcpTools.length, ...native.tools);
+        return native.instructions;
+      },
       onProviderReady: (request, id) => { providerAction = providerActions(project, request, id); },
     }), session.goal || session.resumeGoal ? goalTaskWaitSeconds + 20 : undefined);
 }
@@ -485,6 +500,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
   finalAnswerSchema?: object;
   webSearch?: boolean;
   mcp?: BoardMcpConnection;
+  prepareResearch?: (request: RpcRequest, client: CodexClient) => Promise<string>;
   onProviderReady?: (request: import("./provider-tools.ts").ProviderRequest, threadId: string) => void;
   worklog?: ReturnType<typeof boardWorklog>;
 }) {
@@ -495,7 +511,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
   const calls = new Map<string, Promise<CliReply>>();
   const tokens = new CodexTokenUsage();
   let completed = false;
-  return withServer(profile, project, async ({ request, receive, refreshTimeout }) => {
+  return withServer(profile, project, async ({ client, request, receive, refreshTimeout }) => {
     const [models, defaults] = await Promise.all([
       settings !== undefined ? listModels(request) : [],
       settings === null ? request<{ config: { model?: string | null; model_reasoning_effort?: string | null } }>(
@@ -515,12 +531,14 @@ function reply(profile: string, project: string, prompt: string, images: string[
     }
     const existing = session?.separateTurn ? undefined : session?.id;
     const method = existing ? "thread/resume" : "thread/start";
+    const researchInstructions = research ? await options.prepareResearch?.(request, client) : undefined;
     const params = {
       ...(existing ? { threadId: existing, excludeTurns: true } : {
         ephemeral: !session || session.separateTurn === true, dynamicTools: options.tools,
         ...(session && !session.separateTurn ? { historyMode: "paginated" } : {}),
       }),
-      cwd: project, model: modelId, approvalPolicy: "never", developerInstructions: options.instructions,
+      cwd: project, model: modelId, approvalPolicy: "never",
+      developerInstructions: researchInstructions ? options.instructions + "\n\n" + researchInstructions : options.instructions,
       ...(research ? { permissions: managerResearchProfile } : { sandbox: "read-only" }),
       ...(session && effort ? { config: { model_reasoning_effort: effort } } : {}),
     };
