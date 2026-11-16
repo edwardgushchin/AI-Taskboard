@@ -21,6 +21,7 @@ import { runActivity, runLog } from "./run-activity.ts";
 import type { RunActivity, TaskEvent } from "../cli/model.ts";
 import type { TokenUsageReport } from "../cli/token-usage.ts";
 import { managerCliContext, probeManagerCli } from "./manager-cli.ts";
+import { githubReadTool, readBoardGitHub } from "./github-read.ts";
 
 interface ModelEntry {
   model: string;
@@ -247,7 +248,9 @@ export function replyToTask(
     ].join(" ")),
     onCommentary, onTokenUsage, onControl, signal, imageDirectory, imageLimit,
   };
-  return withBoardMcp([worklogTool], (_name, args) => worklog.submit(args), (config, env) =>
+  return withBoardMcp([worklogTool, githubReadTool], async (name, args) => name === githubReadTool.name
+    ? worklog.remind(await readBoardGitHub(project, args))
+    : worklog.submit(args), (config, env) =>
     reply(profile, project, prompt, images, runAction, { ...options, worklog, mcp: { config, env } }));
 }
 
