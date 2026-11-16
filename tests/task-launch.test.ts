@@ -329,13 +329,14 @@ test("a manager grant continues a sandboxed executor with full access without bl
   assert.equal((await f.runtime.launchTask("project", f.task.id)).ok, true);
   assert.equal(f.launched[0].fullAccess, false);
   f.access.full = true;
-  f.completion.resolve(undefined);
+  f.completion.resolve({ interrupted: true, reason: "The board interrupted the old turn." });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.launched.length, 2);
   assert.equal(f.launched[1].fullAccess, true);
   assert.equal(f.launched[1].codexThreadId, previousThread);
   assert.equal(f.launched[1].git.worktree, "worktree");
   assert.equal(f.task.status, "in_progress");
+  assert.ok(f.calls.every(call => !call.input?.entries?.some((entry: RunActivity) => entry.id === "codex-interrupted")));
   f.task.status = "review";
   f.retryCompletion.resolve(undefined);
   await new Promise(resolve => setImmediate(resolve));

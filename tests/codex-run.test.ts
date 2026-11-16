@@ -171,6 +171,18 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '      fs.writeFileSync(capture + ".check", (await response.json()).result.content[0].text);',
     '    }',
     '    if (outcome === "control") return;',
+    '    if (outcome === "access-switch") {',
+    '      const url = flags.find(flag => flag.startsWith("mcp_servers.ai_taskboard=")).match(/http[^"]+/)[0];',
+    '      const headers = { authorization: "Bearer " + process.env.AI_TASKBOARD_MCP_TOKEN };',
+    '      const response = await fetch(url, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call",',
+    '        params: { name: "task_request_executor_access", arguments: { reason: "Repeat the mandatory local UI check." } } }) });',
+    '      const { result } = await response.json();',
+    '      const access = JSON.parse(result.content[0].text);',
+    '      if (!access.data?.approved || access.data.appliesOn !== "current-execution") throw new Error("Unexpected access decision");',
+    '      send({ method: "item/completed", params: { threadId: thread, turnId: "turn-1", item: { id: "approved-access",',
+    '        type: "mcpToolCall", server: "ai_taskboard", tool: "task_request_executor_access", status: "completed", result } } });',
+    '      return;',
+    '    }',
     '    if (outcome === "closed") { console.error(JSON.stringify({ level: "WARN", message: "example diagnostic" })); process.stdin.destroy(); return; }',
     '    if (outcome.startsWith("usage")) {',
     '      send({ method: "turn/started", params: { threadId: thread, turn: { id: "turn-1" } } });',
@@ -288,7 +300,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.match(turn.params.input[0].text, /запроси у менеджера смену режима.*При исчерпании доступных способов заблокируй задачу/);
   assert.match(started.params.developerInstructions, /progress <id> --compact.*as a checkpoint.*block <id> --compact.*Pause only at the user's request/);
   assert.match(turn.params.input[0].text, /Продолжай работу по всем критериям до сдачи через submit/);
-  assert.match(turn.params.input[0].text, /mcp__ai_taskboard__task_request_executor_access.*approved: true.*Доска сама запустит/);
+  assert.match(turn.params.input[0].text, /mcp__ai_taskboard__task_request_executor_access.*сразу применяет доступ к текущему выполнению/);
   await assert.rejects(startCodexRun(client("ok"), folder, worktree, task, undefined, undefined, undefined, async threadId => {
     assert.equal(threadId, thread);
     assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "mcpServerStatus/list");
@@ -443,6 +455,26 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   const interrupted = await launch("control");
   await interrupted.interrupt();
   assert.deepEqual(await interrupted.completion, { reason: "Turn interrupted", interrupted: true });
+  const card = await callCli<{ id: string; createdAt: string }>(folder, ["create"], {
+    title: "Verify UI", criteria: ["Run the required UI check."], workingDirectory: folder,
+  });
+  assert.ok(card.ok);
+  assert.equal(card.data.id, task.id);
+  assert.equal((await callCli(folder, ["approve", card.data.id])).ok, true);
+  assert.equal((await callCli(folder, ["start", card.data.id])).ok, true);
+  executorFullAccess(folder, folder, card.data, true);
+  const switching = await launch("access-switch");
+  const deadline = new AbortController();
+  try {
+    const outcome = await Promise.race([switching.completion,
+      delay(5000, undefined, { signal: deadline.signal }).then(() => { throw new Error("Approval did not interrupt the active turn"); })]);
+    assert.deepEqual(outcome, { reason: "Turn interrupted", interrupted: true });
+    assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "turn/interrupt");
+  } finally {
+    deadline.abort();
+    await switching.interrupt().catch(() => {});
+    await switching.completion;
+  }
   const controller = new AbortController();
   const waiting = await startCodexRun(client("control"), folder, worktree, task, undefined, undefined, controller.signal);
   controller.abort();

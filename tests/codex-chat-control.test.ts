@@ -62,7 +62,7 @@ test("an executor access request gets an independent manager decision scoped to 
   assert.equal(grants.length, 0);
   const approved = await run();
   assert.equal(approved.data.approved, true);
-  assert.equal(approved.data.appliesOn, "next-run");
+  assert.equal(approved.data.appliesOn, "current-execution");
   assert.deepEqual(JSON.parse(JSON.stringify(grants)), [{ id: task.id, revision: task.revision, fullAccess: true }]);
 });
 
