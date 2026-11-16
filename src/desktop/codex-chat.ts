@@ -516,15 +516,11 @@ function boardChanges(item: Record<string, unknown>, data: {
 } & Partial<BoardChange>): BoardChange[] {
   const action = item.tool === "task_start_batch" ? "start" :
     item.tool === "task_set_milestone" ? "milestone" : String(item.tool).slice(5);
-  const args = item.arguments as { reason?: unknown } | undefined;
-  const reason = ["cancel", "block", "unblock", "request_changes"].includes(action) && typeof args?.reason === "string" ?
-    args.reason.trim() : "";
   const tasks = item.tool === "task_start_batch" || item.tool === "task_set_milestone" ?
     (Array.isArray(data?.tasks) ? data.tasks.flatMap(task => task?.ok === true && task.data?.changed !== false ? [task.data] : []) : []) : [data];
   return tasks.flatMap(task => typeof task?.id === "string" && taskIdPattern.test(task.id) && typeof task.title === "string" &&
     task.status !== undefined && typeof task.revision === "number" ?
-    [{ id: task.id, title: task.title, status: task.status, revision: task.revision, action,
-      ...(reason ? { reason } : {}) }] : []);
+    [{ id: task.id, title: task.title, status: task.status, revision: task.revision, action }] : []);
 }
 
 function boardUserMessage(item: { content?: unknown }) {

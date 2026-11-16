@@ -2221,7 +2221,7 @@ ipcMain.handle("board:command", async (event, command: unknown, id: unknown, inp
   }
   if (command === "request-changes" && typeof id === "string") {
     if (!input || typeof input !== "object" || Array.isArray(input)) return cliFailure("INVALID_INPUT", "Supply task feedback.");
-    return launchTask(state.project, id, { input: input as Record<string, unknown> });
+    return launchTask(state.project, id, { input: { ...input as Record<string, unknown>, actor: "user" } });
   }
   if (command === "cleanup" && typeof id === "string") {
     const key = state.project + "\0" + id;
@@ -2235,6 +2235,7 @@ ipcMain.handle("board:command", async (event, command: unknown, id: unknown, inp
     if (!result.ok) return result;
     return { ok: true, data: { ...result.data, executorFullAccess: executorFullAccess(app.getPath("userData"), project, result.data) } };
   }
+  input = { ...(input as Record<string, unknown> ?? {}), actor: "user" };
   const selection = state.selection;
   const result = await callCli<Board>(state.project, id === undefined ? args : [...args, id], input);
   if (command === "init" && result.ok && selection === state.selection && !state.window.isDestroyed()) {
@@ -2423,7 +2424,7 @@ type LaunchState = Pick<Task, "id" | "title" | "status" | "revision" | "createdA
 
 async function launchTask(project: string, id: string, revisionRequest?: { input: Record<string, unknown> },
   newThread: false | "user" | "manager" = false, revision?: number,
-  continuation: ExecutorContinuation = {}, scheduled = false, resolveConflicts = false, resumeWithFullAccess = false, autoMode = false): Promise<CliReply<LaunchState>> {
+  continuation: ExecutorContinuation = {}, scheduled = false, resolveConflicts = false, resumeWithFullAccess = false, autoMode = false, manual = false): Promise<CliReply<LaunchState>> {
   const key = project + "\0" + id;
   if (launchingTasks.has(key)) return cliFailure("LAUNCH_IN_PROGRESS", "This task is already being launched.");
   if (executorBusy(project, id)) return cliFailure("CHAT_BUSY", lang("Wait for the chat reply or stop the agent first.", "Дождитесь ответа в чате или остановите агента."));
@@ -2521,7 +2522,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     signal.throwIfAborted();
     if (newThread || missingThread || resumeWithFullAccess) {
       current = await callCli<LaunchState>(project, ["resume", id, "--compact"], {
-        launchDetails: true,
+        launchDetails: true, actor: manual ? "user" : "agent",
         revision: revision ?? current.data.revision,
         reason: resumeWithFullAccess
           ? lang("The user continued the task with full access.", "Пользователь продолжил задачу с полным доступом.")
@@ -2537,7 +2538,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     }
     signal.throwIfAborted();
     const started = await callCli<{ task: LaunchState & ExecutorTask } & ({ worktree: string } | { cwd: string })>(project, ["start", id, "--compact"],
-      { revision: revision ?? current.data.revision, launchDetails: true, ...(scheduled ? { scheduled } : {}),
+      { revision: revision ?? current.data.revision, actor: manual ? "user" : "agent", launchDetails: true, ...(scheduled ? { scheduled } : {}),
         ...(autoMode ? { autoMode: true } : {}),
         ...(resolveConflicts ? { resolveConflicts } : {}),
         ...(process.platform === "win32" && client.windowsSandbox === "elevated" ? { isolatedWorktree: true } : {}) });
@@ -2732,7 +2733,7 @@ ipcMain.handle("board:launchTask", async (event, id: unknown, options: unknown =
     });
     if (choice.response !== 1) return { ok: true, data: null };
   }
-  return launchTask(project, id, undefined, input.newThread ? "user" : false, undefined, undefined, false, false, input.resumeWithFullAccess === true);
+  return launchTask(project, id, undefined, input.newThread ? "user" : false, undefined, undefined, false, false, input.resumeWithFullAccess === true, false, true);
 });
 
 ipcMain.handle("codex:status", event => {

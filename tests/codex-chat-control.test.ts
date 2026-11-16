@@ -124,6 +124,15 @@ test("board activity extracts actual coordination messages from successful calls
     result: { content: [{ type: "text", text: JSON.stringify({ ok: true, data }) }] }, ...options,
   });
   const activity = (item: ReturnType<typeof make>) => boardActivity(new Map(), "item/completed", { item });
+  for (const tool of ["task_unblock", "task_cancel", "task_comment", "task_update"]) {
+    const reason = "Пользователь поручил ещё одну попытку…";
+    const item = make(tool, { id: "T-0115", title: "Проверка", status: "ready", revision: 4 }, { arguments: { reason } });
+    for (const result of [activity(item), activity(JSON.parse(JSON.stringify(item)))]) {
+      assert.equal(result.messages, undefined);
+      assert.equal(result.taskChanges[0].reason, undefined);
+      assert.ok(result.text.includes(reason)); // Audit data stays inside tool details.
+    }
+  }
   const inbox = activity(make("manager_inbox", [question]));
   assert.equal(inbox.messages[0].actor, "agent");
   assert.equal(inbox.messages[0].text, question.text);

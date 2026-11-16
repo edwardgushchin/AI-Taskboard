@@ -135,7 +135,7 @@ test("confirmed task transitions and comments remain in the timeline when work d
   assert.equal(view.container.children.at(-1)?.textContent, "Задача закрыта");
 });
 
-test("a manager cancellation reason is visible without expanding its tool details", () => {
+test("tool audit reasons never become separate messages during streaming or replay", () => {
   const view = fixture();
   const reason = "Те же исправления уже включены в T-0007.";
   const cancellation = { ...action("cancel", "mcpToolCall", "completed", "ai_taskboard / task_cancel"),
@@ -146,7 +146,7 @@ test("a manager cancellation reason is visible without expanding its tool detail
     assert.equal(row.parent, view.container);
     assert.equal(row.open, false);
     assert.match(row.querySelector("summary").textContent, /Задача отменена T-0009/);
-    assert.equal(view.container.children[view.container.children.indexOf(row) + 1].textContent, reason);
+    assert.ok(!view.container.querySelectorAll(".chat-text").some(node => node.textContent === reason));
   }
 });
 

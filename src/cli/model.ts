@@ -108,6 +108,7 @@ export interface TaskEvent {
   actor: Actor;
   action: string;
   text?: string;
+  mergedInto?: { id: string; title: string; transferred: string };
   messageKind?: "question" | "update" | "decision";
   reviewApproval?: { revision: number; targetHead: string | null; evidence: string[] };
   replyToMessage?: number;

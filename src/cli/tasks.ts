@@ -105,7 +105,7 @@ export function actorFor(input: Record<string, unknown>, fallback: "agent" | "us
   return input.actor === undefined ? fallback : member(input.actor, ["agent", "user"], "actor");
 }
 
-function boardActor(input: Record<string, unknown>, fallback: "agent" | "user" = "agent"): Actor {
+export function boardActor(input: Record<string, unknown>, fallback: "agent" | "user" = "agent"): "agent" | "user" | "manager" {
   return input.actor === "manager" ? "manager" : actorFor(input, fallback);
 }
 
@@ -207,7 +207,7 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
       const status = blocked?.previousStatus ?? (action === "resume" ? "in_progress" : "ready");
       const updated = action === "unblock" && input.dependencies !== undefined
         ? fields({ ...rest, status }, { dependencies: input.dependencies }) : rest;
-      return record(updated, action, action === "unblock" ? boardActor(input) : "agent", status, text(input.reason, "reason", true));
+      return record(updated, action, boardActor(input), status, text(input.reason, "reason", true));
     }
     case "update": {
       const updated = fields(task, input);
