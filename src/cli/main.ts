@@ -86,7 +86,7 @@ function compactTask(task: Task) {
     createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep, dependencies, milestone, workingDirectory, schedule } = task;
   return { id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
     coverAttachment, codexThreadId, createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep,
-    dependencies, milestone, workingDirectory, schedule, historyLength: task.history.length,
+    dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, historyLength: task.history.length,
     ...(status === "review" && task.git?.submission && !task.result?.noChanges ? { reviewHasCommit: true } : {}),
     ...(currentReviewApproval(task) ? { reviewApproved: true } : {}),
     initialAttachments: attachments.length - task.history.reduce((total, event) =>
@@ -458,6 +458,10 @@ function run(
       store.index.settings.reviewMode = input.autoReview ? "reviewer" : "human";
       delete store.index.settings.autoReview;
     }
+    if (input.autoMode !== undefined) {
+      if (typeof input.autoMode !== "boolean") throw new TaskboardError("INVALID_INPUT", "autoMode must be a boolean.");
+      store.index.settings.autoMode = input.autoMode;
+    }
     if (input.reviewMode !== undefined) {
       store.index.settings.reviewMode = member(input.reviewMode, reviewModes, "review mode");
       delete store.index.settings.autoReview;
@@ -567,7 +571,7 @@ function run(
               evidence.some(entry => typeof entry !== "string" || !entry.trim())) {
             throw new TaskboardError("VERIFICATION_REQUIRED", "Provide evidence for each criterion.");
           }
-          if (currentReviewApproval(task)) {
+          if (currentReviewApproval(task)?.reviewApproval?.targetHead === targetHead) {
             const recorded = withReviewerUsage(task);
             if (recorded !== task) store.save(recorded);
             return filters.compact ? taskReceipt(recorded) : recorded;
@@ -595,7 +599,28 @@ function run(
     const submitted = submitTask(store, task, input);
     return filters.compact ? taskReceipt(submitted) : submitted;
   }
-  if (command === "accept") return acceptTask(store, task, input);
+  if (command === "accept") {
+    if (input.autoMode === true && (!store.index.settings.autoMode || boardReviewMode(store.index.settings) !== "reviewer")) {
+      throw new TaskboardError("AUTO_MODE_DISABLED", "Automatic integration is disabled.");
+    }
+    if (input.autoMode === true && currentReviewApproval(task)?.reviewApproval?.targetHead !== input.targetHead) {
+      throw new TaskboardError("REVIEW_REQUIRED", "Automatic integration requires reviewer approval for the current target.");
+    }
+    try {
+      return acceptTask(store, task, input);
+    } catch (error) {
+      if (store.index.settings.autoMode && error instanceof TaskboardError &&
+          !["AUTO_REVIEW_DISABLED", "REVIEW_MODE_CHANGED", "REVISION_CONFLICT", "REVIEW_REQUIRED"].includes(error.code)) {
+        const message = "AI Taskboard integration: " + error.code + "\n" + error.message + "\n" + JSON.stringify(error.details ?? {}).slice(0, 1800);
+        const latest = store.card(task.id);
+        const submitted = latest.history.findLastIndex(event => event.action === "submit");
+        if (latest.status === "review" && !latest.history.slice(submitted + 1).some(event => event.action === "coordination" && event.text === message)) {
+          store.save(sendTaskMessage(latest, { kind: "question", text: message }, "agent"));
+        }
+      }
+      throw error;
+    }
+  }
   if (hasPending(store, task)) {
     throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before modifying the task.");
   }
@@ -626,14 +651,17 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
   const reply = <T extends { task: Task }>(store: BoardStore, started: T) => {
     if (!compact) return started;
     if (input.launchDetails !== true) return { ...started, task: taskReceipt(started.task) };
-    const { description, criteria, execution, git, history, workingDirectory, schedule, toolGrants } = started.task;
+    const { description, criteria, dueDate, execution, git, history, workingDirectory, schedule, toolGrants } = started.task;
     return { ...started, task: { ...taskLaunchState(started.task), description, criteria,
-      execution: execution ?? store.index.settings.executor ?? undefined, git, workingDirectory, schedule, toolGrants,
+      execution: execution ?? store.index.settings.executor ?? undefined, git, dueDate, workingDirectory, schedule, toolGrants,
       feedback: history.findLast(event => event.action === "request-changes")?.text } };
   };
   return withTaskStartLock(location, id, startLockWaitMs => {
     const prepared = onBoard(location, (store, lockWaitMs) => {
       const task = store.card(id);
+      if (input.autoMode === true && !store.index.settings.autoMode) {
+        throw new TaskboardError("AUTO_MODE_DISABLED", "Automatic starts are disabled.");
+      }
       if (input.scheduled === true) {
         requireRevision(task, input.revision, true);
         requireState(task, ["ready"]);

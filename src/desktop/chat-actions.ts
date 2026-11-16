@@ -14,6 +14,7 @@ const authorization = {
 export const taskFields = {
   title: string, description: string, criteria: strings, questions: strings,
   tags: strings, dependencies: strings, priority: { ...string, enum: priorities },
+  dueDate: { type: ["string", "null"], description: "Task deadline in YYYY-MM-DD format. Null removes it. This is not a scheduled start." },
   subtasks: { type: "array", items: {
     type: "object", properties: { title: string, done: boolean }, required: ["title"], additionalProperties: false,
   } },

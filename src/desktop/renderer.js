@@ -805,10 +805,6 @@ function renderAgentRunStatus(target, task) {
   target.hidden = !target.childNodes.length;
 }
 
-function shownStatus(task) {
-  return task.status === "ready" && task.unfinishedDependencies?.length ? "blocked" : task.status;
-}
-
 function taskIndicator(name, count, label, className) {
   const indicator = element("span", undefined, "task-stat " + className);
   indicator.title = label + " · " + count;
@@ -869,7 +865,7 @@ function card(task) {
     frame.runningTasks?.includes(task.id) ?? false, frame.waitingTasks?.includes(task.id) ?? false,
     frame.reviewingTasks?.[task.id], task.status, Boolean(task.codexThreadId),
     task.unfinishedDependencies, task.blocked, task.subtasks?.map(entry => entry.done),
-    task.attachments?.length, task.priority, task.milestone, task.schedule]);
+    task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule]);
   const previous = boardCards.get(task.id);
   if (previous?.signature === signature) return previous.node;
   const card = previous?.node ?? button("", () => showTask(task.id));
@@ -940,6 +936,11 @@ function card(task) {
     const badge = element("span", task.schedule.time ?? scheduleInterval(task.schedule.everyMinutes, "short"), "task-schedule");
     badge.title = scheduleLabel(task.schedule);
     badge.setAttribute("aria-label", badge.title);
+    identity.append(badge);
+  }
+  if (task.dueDate) {
+    const badge = element("span", task.dueDate, "task-stat");
+    badge.title = language("Due date", "Срок сдачи");
     identity.append(badge);
   }
   meta.append(identity);
@@ -1288,8 +1289,8 @@ function cardLayoutChanges(previousBoard, tasks) {
   const added = [];
   for (const task of tasks) {
     const previous = previousTasks.get(task.id);
-    const from = previous && shownStatus(previous);
-    const to = shownStatus(task);
+    const from = previous?.status;
+    const to = task.status;
     if (from === to) {
       if (taskChangeTime(previous) !== taskChangeTime(task)) affected.add(to);
       continue;
@@ -1340,6 +1341,13 @@ function render(previousBoard) {
   document.documentElement.lang = frame.russian ? "ru" : "en";
   const board = frame.board;
   const noBoard = !board;
+  const autoMode = byId("status-auto-mode");
+  autoMode.hidden = noBoard;
+  const enabled = board?.settings.autoMode === true;
+  autoMode.setAttribute("aria-pressed", String(enabled));
+  autoMode.querySelector("span").textContent = enabled ? language("Auto: on", "Авторежим: вкл.") : language("Auto: off", "Авторежим: выкл.");
+  autoMode.title = enabled ? language("Stop new automatic starts", "Остановить новые автоматические запуски") :
+    language("Automatically run ready tasks", "Автоматически запускать готовые задачи");
   const loading = Boolean(frame.loading || frame.restoring);
   byId("welcome").hidden = !noBoard || loading;
   byId("app-content").setAttribute("aria-busy", String(noBoard && loading));
@@ -1391,7 +1399,7 @@ function render(previousBoard) {
   const focused = document.activeElement;
   const toolsKey = JSON.stringify([frame.russian, [...boardTags]]);
   const columns = lanes.map(([state, english, russian]) => {
-    const tasks = visible.filter(task => shownStatus(task) === state);
+    const tasks = visible.filter(task => task.status === state);
     let lane = boardLanes.get(state);
     if (!lane) {
       const column = element("section", undefined, "lane");
@@ -3588,6 +3596,7 @@ function taskEditor(task) {
     { name: "tags", label: language("Tags, comma separated", "Теги через запятую"), value: task.tags.join(", ") },
     { name: "priority", label: language("Priority", "Приоритет"), value: task.priority,
       options: ["low", "normal", "high", "urgent"].map(value => [value, priorityName(value)]) },
+    { name: "dueDate", label: language("Due date", "Срок сдачи"), type: "date", value: task.dueDate ?? "" },
     ...(canSetSchedule ? [
       { name: "scheduleMode", label: language("Schedule", "Расписание"), value: mode, options: [
         ["none", language("No schedule", "Без расписания")], ["hourly", language("Every hour", "Каждый час")],
@@ -3608,6 +3617,7 @@ function taskEditor(task) {
     const data = {
       title: values.title, description: values.description, criteria: lineList(values.criteria),
       tags: values.tags.split(",").map(tag => tag.trim()).filter(Boolean), priority: values.priority,
+      dueDate: values.dueDate || null,
       actor: "user", revision: task.revision, ...(values.note ? { note: values.note } : {}),
     };
     if (canSetSchedule) {
@@ -3800,7 +3810,7 @@ function openTaskSheet(task) {
   runStatus.id = "task-agent-run";
   renderAgentRunStatus(runStatus, task);
   byId("sheet-title").append(runStatus);
-  const lane = lanes.find(([state]) => state === shownStatus(task));
+  const lane = lanes.find(([state]) => state === task.status);
   const status = lane ? language(lane[1], lane[2]) : task.status;
   const metadata = [status, task.priority && priorityName(task.priority), task.updatedAt && shortDate(task.updatedAt)].filter(Boolean);
   if (metadata.length) body.append(element("p", metadata.join(" · "), "muted"));
@@ -5096,6 +5106,12 @@ byId("git-branches").addEventListener("toggle", protect(event => {
 }));
 byId("status-publish").addEventListener("click", protect(publishToGitHub));
 byId("status-tracking").addEventListener("click", protect(pushTrackedBranch));
+byId("status-auto-mode").addEventListener("click", protect(async () => {
+  const control = byId("status-auto-mode");
+  control.disabled = true;
+  try { await command("settings", undefined, { autoMode: frame.board.settings.autoMode !== true }); }
+  finally { control.disabled = false; }
+}));
 byId("app-settings").setAttribute("aria-haspopup", "menu");
 byId("app-settings").setAttribute("aria-controls", "settings-menu");
 byId("app-settings").setAttribute("aria-expanded", "false");

@@ -40,10 +40,11 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
   const retryCompletion = Promise.withResolvers<Completion>();
   const slots = createAgentSlots();
   const runtime = runInNewContext(stripTypeScriptTypes(lifecycle) + "\n({launchTask, scheduleAgentWork, scheduleRecurringTasks, confirmProjectClose, projectOperations, runningTasks, activeAgents, deferredExecutors})", {
-    AbortController, performance, setTimeout, clearTimeout, setImmediate, subscriptions, agentSlots: slots,
+    AbortController, performance, process, setTimeout, clearTimeout, setImmediate, subscriptions, agentSlots: slots,
+    executorFullAccess: () => false,
     locateBoard: (project: string) => project,
     readBoardSettings: (project: string) => savedSettings.get(project) ?? subscriptions.get(project)?.board.settings ?? {},
-    scheduleAutoReview: () => {}, projectIdentity: (project: string) => project,
+    scheduleAutoReview: () => {}, scheduleAutoBoard: () => {}, projectIdentity: (project: string) => project,
     broadcastBoardChat: () => {},
     lang: (english: string) => english, cliFailure: failure, missingCodexThread,
     app: { getPath: () => "profile" }, dialog: { showMessageBox: async () => ({ response: 1 }) },

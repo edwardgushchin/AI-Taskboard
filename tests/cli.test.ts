@@ -296,7 +296,7 @@ test("GitHub milestones can be listed, assigned and cleared on local tasks", t =
       assert.equal(cmd, ${JSON.stringify(executable)});
       assert.equal(++requests, 1);
       assert.deepEqual(args.slice(0, 3), ['api', '--hostname', 'github.com']);
-      const open = { number: 5, title: 'Версия 1.0', state: 'open' };
+      const open = { number: 5, title: 'Версия 1.0', state: 'open', due_on: '2026-11-20T00:00:00Z' };
       const closed = { number: 3, title: 'Earlier release', state: 'closed' };
       switch (args.at(-1)) {
         case 'repos/owner/example/milestones?state=all&per_page=100':
@@ -319,7 +319,8 @@ test("GitHub milestones can be listed, assigned and cleared on local tasks", t =
     return JSON.parse(result.stdout);
   };
   assert.deepEqual(call(["milestones"]).data, { repository: "owner/example", milestones: [
-    { number: 5, title: "Версия 1.0", state: "open" }, { number: 3, title: "Earlier release", state: "closed" },
+    { number: 5, title: "Версия 1.0", state: "open", due_on: "2026-11-20T00:00:00Z" },
+    { number: 3, title: "Earlier release", state: "closed", due_on: null },
   ] });
   const select = (number: number, revision = task.revision, repository = "owner/example") =>
     call(["milestone", task.id], { revision, milestone: { repository, number } });
@@ -619,6 +620,121 @@ test("dependencies prevent worktree creation until every dependency is completed
   assert.equal(started.task.status, "in_progress");
   assert.deepEqual(started.task.execution, { model: "test-model", effort: "high" });
   assert.ok(existsSync(started.worktree));
+});
+
+test("cancelled dependencies keep an existing-directory task ready and unavailable, including after archival", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const dependency = cli(root, ["create"], { title: "Cancelled prerequisite", criteria: ["Verified"] });
+  cli(root, ["cancel", dependency.id], { reason: "No longer planned" });
+  const task = cli(root, ["create"], {
+    title: "Waiting task", criteria: ["Verified"], workingDirectory: root, dependencies: [dependency.id],
+  });
+  const ready = cli(root, ["approve", task.id]);
+  for (const archived of [false, true]) {
+    if (archived) {
+      cli(root, ["settings"], { archiveAfterDays: 0 });
+      cli(root, ["archive", "sweep"]);
+    }
+    for (const input of [undefined, { revision: ready.revision }]) {
+      const error = cli(root, ["start", task.id], input, "DEPENDENCIES_INCOMPLETE");
+      assert.deepEqual(error.details.dependencies, [dependency.id]);
+    }
+    const current = cli(root, ["show", task.id]);
+    assert.equal(current.status, "ready");
+    assert.equal(current.revision, ready.revision);
+    assert.equal(current.blocked, undefined);
+    assert.deepEqual(current.unfinishedDependencies, [dependency.id]);
+  }
+});
+
+test("manual start respects the next scheduled time for both worktrees and existing directories", t => {
+  for (const existingDirectory of [false, true]) {
+    const root = fixture(t, true);
+    cli(root, ["init"]);
+    const task = cli(root, ["create"], {
+      title: "Scheduled task", criteria: ["Verified"], schedule: { everyMinutes: 60 },
+      ...(existingDirectory ? { workingDirectory: root } : {}),
+    });
+    const ready = cli(root, ["approve", task.id]);
+    cli(root, ["start", task.id], { revision: ready.revision }, "INVALID_TRANSITION");
+    assert.equal(cli(root, ["show", task.id]).status, "ready");
+    assert.ok(!existsSync(join(root, ".taskboard-worktrees", task.id)));
+    ready.schedule.nextAt = "2000-01-01T00:00:00.000Z";
+    writeFileSync(join(root, ".tasks", "tasks", task.id + ".json"), JSON.stringify(ready));
+    const started = cli(root, ["start", task.id], { revision: ready.revision });
+    assert.equal(started.task.status, "in_progress");
+    const continued = cli(root, ["start", task.id]);
+    assert.equal(continued.task.revision, started.task.revision);
+    assert.equal(continued.worktree ?? continued.cwd, started.worktree ?? started.cwd);
+  }
+});
+
+test("automatic settings and task deadlines survive CLI restarts and guard start and acceptance", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  cli(root, ["settings"], { autoMode: "true" }, "INVALID_INPUT");
+  const task = cli(root, ["create"], { title: "External result", criteria: ["Verified"], workingDirectory: root, dueDate: "2026-11-20" });
+  assert.equal(cli(root, ["list", "--compact"]).tasks[0].dueDate, "2026-11-20");
+  for (const dueDate of ["2026-02-30", "tomorrow", 123]) cli(root, ["update", task.id], { dueDate }, "INVALID_INPUT");
+  cli(root, ["update", task.id], { dueDate: null });
+  assert.equal(cli(root, ["show", task.id]).dueDate, undefined);
+  cli(root, ["update", task.id], { dueDate: "2028-02-29" });
+  const ready = cli(root, ["approve", task.id]);
+  cli(root, ["start", task.id], { revision: ready.revision, autoMode: true }, "AUTO_MODE_DISABLED");
+  cli(root, ["settings"], { autoMode: true, reviewMode: "human" });
+  assert.equal(cli(root, ["settings"]).autoMode, true);
+  cli(root, ["start", task.id], { revision: ready.revision, autoMode: true });
+  const preview = cli(root, ["preview", task.id]);
+  const submitted = cli(root, ["submit", task.id], { token: preview.token, noChanges: true, summary: "Verified external result", checks: ["Checked"] });
+  const input = { revision: submitted.revision, targetHead: null, actor: "manager", reviewMode: "reviewer", autoMode: true };
+  cli(root, ["accept", task.id], input, "AUTO_REVIEW_DISABLED");
+  cli(root, ["settings"], { reviewMode: "reviewer" });
+  cli(root, ["accept", task.id], input, "REVIEW_REQUIRED");
+  cli(root, ["review-approve", task.id], { revision: submitted.revision, targetHead: null, summary: "Verified", evidence: ["External result checked"] });
+  cli(root, ["settings"], { autoMode: false });
+  cli(root, ["accept", task.id], input, "AUTO_MODE_DISABLED");
+  assert.equal(cli(root, ["show", task.id]).status, "review");
+  cli(root, ["settings"], { autoMode: true });
+  assert.equal(cli(root, ["accept", task.id], input).status, "done");
+});
+
+test("automatic integration reports conflicts once and repaired submissions require the selected acceptance again", t => {
+  for (const reviewMode of ["human", "reviewer"]) {
+    const root = fixture(t, true);
+    const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "source.txt"), "task version\n"));
+    cli(root, ["settings"], { autoMode: true, reviewMode });
+    writeFileSync(join(root, "source.txt"), "target version\n");
+    git(root, "commit", "-am", "fix: update target");
+    const head = git(root, "rev-parse", "HEAD");
+    const approval = { revision: task.revision, targetHead: head, summary: "Verified", evidence: ["Checked task result"] };
+    if (reviewMode === "reviewer") cli(root, ["review-approve", task.id], approval);
+    const accept = { revision: task.revision, targetHead: head,
+      ...(reviewMode === "reviewer" ? { autoMode: true, actor: "manager", reviewMode } : {}) };
+    for (let attempt = 0; attempt < 2; attempt++) cli(root, ["accept", task.id], accept, "MERGE_CONFLICT");
+    const notices = cli(root, ["manager-inbox"]).filter((entry: any) => entry.id === task.id && entry.kind === "question");
+    assert.equal(notices.length, 1); assert.match(notices[0].text, /MERGE_CONFLICT/);
+    assert.equal(cli(root, ["show", task.id]).status, "review");
+    const dependent = cli(root, ["create"], { title: "After integration", criteria: ["Verified"], dependencies: [task.id] });
+    cli(root, ["approve", dependent.id]);
+    cli(root, ["start", dependent.id], undefined, "DEPENDENCIES_INCOMPLETE");
+    const reopened = cli(root, ["start", task.id], { revision: task.revision, resolveConflicts: true });
+    assert.equal(reopened.worktree, worktree);
+    assert.throws(() => git(worktree, "merge", "--no-edit", head));
+    writeFileSync(join(worktree, "source.txt"), "target version\ntask version\n");
+    git(worktree, "add", "source.txt"); git(worktree, "commit", "-m", "fix: resolve integration conflict\n\nTask: " + task.id);
+    const preview = cli(worktree, ["preview", task.id]);
+    const repaired = cli(worktree, ["submit", task.id], { token: preview.token, message: preview.commitMessage ?? "fix: combine task and target",
+      summary: "Combined", checks: ["Checked combined result"] });
+    const repairedInput = { ...accept, revision: repaired.revision };
+    if (reviewMode === "reviewer") {
+      cli(root, ["accept", task.id], repairedInput, "REVIEW_REQUIRED");
+      cli(root, ["review-approve", task.id], { ...approval, revision: repaired.revision });
+    } else assert.equal(cli(root, ["show", task.id]).status, "review");
+    assert.equal(cli(root, ["accept", task.id], repairedInput).status, "done");
+    assert.deepEqual(cli(root, ["show", dependent.id]).unfinishedDependencies, []);
+    assert.equal(readFileSync(join(root, "source.txt"), "utf8"), "target version\ntask version\n");
+  }
 });
 
 test("create saves attachments with the draft and rejects incomplete batches", t => {

@@ -487,8 +487,8 @@ export function boardActions(project: string, attachments: { path: string; name:
       const active = input.activeOnly ? tasks.filter(({ status }) => status !== "done" && status !== "cancelled") : tasks;
       return { ok: true, data: { tags: tags.map(tag => tag.name),
         tagColors: Object.fromEntries(tags.map(({ name, color }) => [name, color])),
-        tasks: active.map(({ id, title, status, revision, tags, priority, dependencies, unfinishedDependencies, readySince, goalThreadId, milestone, schedule }) =>
-          ({ id, title, status, revision, tags, priority, dependencies, unfinishedDependencies, readySince, running: isTaskRunning(id),
+        tasks: active.map(({ id, title, status, revision, tags, priority, dueDate, dependencies, unfinishedDependencies, readySince, goalThreadId, milestone, schedule }) =>
+          ({ id, title, status, revision, tags, priority, dueDate, dependencies, unfinishedDependencies, readySince, running: isTaskRunning(id),
             ...(goalThreadId ? { goalTask: goalThreadId === goal?.threadId } : {}), milestone, ...(schedule ? { schedule } : {}) })),
         archived: input.activeOnly ? [] : archived.map(({ id, title, status, tags, milestone }) => ({ id, title, status, tags, milestone })),
       } };

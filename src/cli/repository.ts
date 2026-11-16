@@ -40,7 +40,9 @@ async function listGitHubMilestones(request: ReturnType<typeof githubApi>, repos
   return { repository, milestones: entries.map(entry => {
     const fields = object(entry);
     const state = member(fields.state, ["open", "closed"] as const, "state");
-    return { number: number(fields.number, "milestone number"), title: text(fields.title, "milestone title", true), state };
+    const due_on = fields.due_on == null ? null : text(fields.due_on, "milestone due_on", true);
+    if (due_on !== null && !Number.isFinite(Date.parse(due_on))) throw new TaskboardError("GITHUB_MILESTONES_FAILED", "Invalid milestone due_on.");
+    return { number: number(fields.number, "milestone number"), title: text(fields.title, "milestone title", true), state, due_on };
   }) };
 }
 
