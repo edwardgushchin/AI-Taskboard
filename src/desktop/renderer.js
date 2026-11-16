@@ -4846,17 +4846,13 @@ function renderActiveAgents() {
 
 function renderStatusBar(projectChanged) {
   renderActiveAgents();
-  const { branch, head, user, tracking } = frame.board?.gitInfo ?? {};
+  const { branch, head, tracking } = frame.board?.gitInfo ?? {};
   const revision = head ? branch ?? head.slice(0, 8) : branch && language("Before the first commit", "До первого коммита");
-  for (const [id, value, label] of [
-    ["status-branch", revision, head && branch ? language("Git branch", "Ветка Git") : "Git"],
-    ["status-user", user, language("Git user", "Пользователь Git")],
-  ]) {
-    const item = byId(id);
-    item.hidden = !value;
-    item.title = value ? label + " · " + value : "";
-    item.querySelector("span").textContent = value ?? "";
-  }
+  const item = byId("status-branch");
+  const branchLabel = head && branch ? language("Git branch", "Ветка Git") : "Git";
+  item.hidden = !revision;
+  item.title = revision ? branchLabel + " · " + revision : "";
+  item.querySelector("span").textContent = revision ?? "";
   const status = byId("status-tracking");
   status.hidden = !branch || !head || !tracking;
   const pushingBranch = gitPushes.get(frame.project);
