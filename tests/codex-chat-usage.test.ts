@@ -10,7 +10,7 @@ import { codexRpc } from "../src/desktop/codex-rpc.ts";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import { CodexTokenUsage } from "../src/desktop/codex-token-usage.ts";
-import { boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "../src/desktop/board-agent-hooks.ts";
+import { responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "../src/desktop/board-agent-hooks.ts";
 import { withBoardMcp } from "../src/desktop/board-mcp.ts";
 import { githubReadTool } from "../src/desktop/github-read.ts";
 import { runActivity, runLog } from "../src/desktop/run-activity.ts";
@@ -98,7 +98,7 @@ test("task discussion streams task usage before success, provider failure, or a 
   for (const outcome of ["ok", "unknown", "failed", "closed", "storage-failed", "review", "review-storage-failed"]) {
     const reports: TokenUsageReport[] = [];
     const runtime = runInNewContext(stripTypeScriptTypes(source) + "\n({ replyToTask, reviewWithCodex })", {
-      trackActiveRun, trackProvider, claimDiscussion, spawn, codexRpc, CodexTokenUsage, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogReminder, worklogTool, withBoardMcp, process, setTimeout, clearTimeout, runActivity, runLog,
+      trackActiveRun, trackProvider, claimDiscussion, spawn, codexRpc, CodexTokenUsage, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogReminder, worklogTool, withBoardMcp, process, setTimeout, clearTimeout, runActivity, runLog,
       githubReadTool,
       configuredCodex: async () => ({ path: process.execPath, args: [stub, outcome] }),
       chatTools: [], saveChatImages: async () => [],

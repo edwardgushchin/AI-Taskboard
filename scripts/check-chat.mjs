@@ -6,7 +6,7 @@ import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { electronCheck } from "./electron-check.mjs";
+import { electronCheck, localizationFixture } from "./electron-check.mjs";
 
 const script = fileURLToPath(import.meta.url);
 const root = resolve(dirname(script), "..");
@@ -74,6 +74,7 @@ app.whenReady().then(async () => {
     ${read("markdown.js")}
     ${read("chat.js")}
     ${read("review-diff.js")}
+    ${localizationFixture()}
     ${read("renderer.js")}
     void 0;
   `);
@@ -650,7 +651,7 @@ app.whenReady().then(async () => {
     await evaluate(`new Promise(resolve => { const poll = () => document.querySelector('.image-preview-toolbar strong').textContent === 'reference-${index}.png' ? resolve() : requestAnimationFrame(poll); poll(); })`);
     await check(`document.querySelector('.image-preview-stage img').src === window.testImages[${index}]`, "reference images can be navigated in order");
   }
-  await evaluate(`document.querySelector('.image-preview').close(); frame.russian = false; renderRunActivity(saved, activity)`);
+  await evaluate(`document.querySelector('.image-preview').close(); localization.select("en"); renderRunActivity(saved, activity)`);
   await check(`firstGroup().querySelector('.chat-run-label').textContent.includes('3 actions')`, "English activity labels are available");
   await evaluate(`const testDraft = chatDrafts.get('fixture' + String.fromCharCode(0) + 'T-0032');
     testDraft.pending = 'replying'; testDraft.commentary = ['Live discussion update']; renderChatTurn(log, testDraft)`);
@@ -664,7 +665,7 @@ app.whenReady().then(async () => {
   // Native imageView results, including old saved JSON, use the same viewer as attachments.
   await evaluate(`
     const imageReads = [], imageSaves = [];
-    frame.russian = true;
+    localization.select("ru");
     api.runImagePreview = async (_task, path) => {
       imageReads.push(path);
       if (path === 'missing.png') return null;
@@ -887,7 +888,7 @@ app.whenReady().then(async () => {
   await evaluate(`
     sheet.close();
     showTask = originalShowTask;
-    frame.russian = true;
+    localization.select("ru");
     const reviewFiles = ['bin/verification.json', 'qa/build.log', 'bin/build.log', 'bin/build.log', 'bin/check.ps1',
       'bin/hashes.sha256', 'bin/' + 'a'.repeat(300) + '.bin'].map((source, index) => ({
         source, sha256: String(index).repeat(64),
