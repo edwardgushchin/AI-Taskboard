@@ -539,11 +539,11 @@ function run(
   if (reviewerReport || ((input.actor === "manager" || input.actor === "reviewer") &&
       (command === "accept" || command === "request-changes"))) {
     const mode = boardReviewMode(store.index.settings);
-    if (mode === "human") {
+    if (mode === "human" && !(command === "request-changes" && input.actor === "manager")) {
       throw new TaskboardError("AUTO_REVIEW_DISABLED", "This board uses manual acceptance.");
     }
     const actor = reviewerReport ? "reviewer" : input.actor;
-    const decisionActor = command === "accept" ? "manager" : mode;
+    const decisionActor = command === "accept" || input.actor === "manager" ? "manager" : mode;
     if (actor !== decisionActor || (input.reviewMode !== undefined && input.reviewMode !== mode)) {
       throw new TaskboardError("REVIEW_MODE_CHANGED", "The board's review mode changed. Review the submission again.");
     }

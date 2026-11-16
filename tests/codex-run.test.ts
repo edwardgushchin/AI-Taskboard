@@ -249,6 +249,8 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.match(turn.params.input[0].text, /T-0001.*Проверка/s);
   assert.match(turn.params.input[0].text, /После записи результата в карточку и перед итоговым ответом.*mcp__ai_taskboard__worklog_record/);
   assert.ok(started.params.developerInstructions.includes(russianWriting));
+  assert.match(started.params.developerInstructions, /Current board reviewMode: reviewer/);
+  assert.match(started.params.developerInstructions, /no drag-and-drop.*task_request_changes.*only tools actually supplied.*successful tool result/s);
   assert.match(started.params.developerInstructions, /Ponytail.*worklog_record/s);
   assert.match(started.params.developerInstructions, /Use built-in web search for relevant public sources/);
   assert.match(started.params.developerInstructions, /github_create_milestone.*github_set_milestone_due.*without a shell `gh auth status` preflight/);
@@ -301,6 +303,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(controls[1].params.expectedTurnId, "turn-1");
   assert.deepEqual(controls[1].params.input[1], { type: "localImage", path: "extra.png" });
   assert.deepEqual(controls.at(-1).params, { threadId: thread, turnId: "turn-1" });
+  assert.equal((await callCli(folder, ["settings"], { reviewMode: "human" })).ok, true);
   const resumed = await startCodexRun({ ...client("resumed"), windowsSandbox: "elevated" }, folder, worktree, { ...task, codexThreadId: thread, feedback: "Check the CSV header." });
   assert.equal(resumed.threadId, thread);
   assert.equal(await resumed.completion, undefined);
@@ -317,7 +320,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(resumedCalls[3].params.cwd, worktree);
   assert.equal(resumedCalls[3].params.approvalPolicy, "on-request");
   assert.equal(resumedCalls[3].params.approvalsReviewer, "auto_review");
-  assert.equal(resumedCalls[3].params.developerInstructions, started.params.developerInstructions);
+  assert.equal(resumedCalls[3].params.developerInstructions, started.params.developerInstructions.replace("Current board reviewMode: reviewer", "Current board reviewMode: human"));
   assert.match(started.params.developerInstructions, /session_id and use write_stdin with empty chars/);
   assert.match(started.params.developerInstructions, /call check_wait with that marker/);
   assert.match(started.params.developerInstructions, /use a merge if it is allowed\. Rebase only when the project permits it and any required user authorization has been given/);

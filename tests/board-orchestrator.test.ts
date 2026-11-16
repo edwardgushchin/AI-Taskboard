@@ -191,8 +191,7 @@ function fixture(t: TestContext) {
       ];
       const mode = boardReviewMode((await callCli(project, ["settings"], undefined, false)).data);
       assert.deepEqual(Array.from(session.mcpTools, tool => tool.name).sort(),
-        [...expectedTools.filter(name => (name !== "task_accept" || mode !== "human") &&
-          (name !== "task_request_changes" || mode === "manager")),
+        [...expectedTools.filter(name => (name !== "task_accept" || mode !== "human")),
         ...(!session.separateTurn ? (session.goal || session.resumeGoal ? ["goal_inbox", "goal_report"] : ["goal_read", "goal_send"]) : []),
         ...(session.separateTurn && mode === "reviewer" ? ["manager_ack", "task_cancel", "task_start"] : [])].sort());
       if (session.separateTurn) {
@@ -1418,7 +1417,7 @@ test("a goal delegates a bounded slice, waits for submission, and reviews before
     assert.equal((await act("task_review_artifact", { ...artifact, revision: ref.revision + 1 })).error.code, "REVIEW_REQUIRED");
     assert.equal((await act("task_review_artifact", { ...artifact, sha256: "0".repeat(64) })).error.code, "REVIEW_REQUIRED");
     assert.equal((await act("task_accept", { ...ref, evidence: ["Verified manually."] })).error.code, "AUTO_REVIEW_DISABLED");
-    assert.equal((await act("task_request_changes", { id: sliceId, revision: ref.revision, reason: "Return for review." })).error.code, "AUTO_REVIEW_DISABLED");
+    assert.equal((await act("task_request_changes", { id: sliceId, revision: ref.revision + 1, reason: "Return for review." })).error.code, "REVIEW_REQUIRED");
     f.setRunning(sliceId, true);
     const refreshed = await act("task_review", { id: sliceId, knownRevision: review.revision });
     assert.equal(refreshed.ok, true, JSON.stringify(refreshed.error));
@@ -1528,7 +1527,7 @@ test("a reviewer leaves gaps on review and wakes the waiting manager on approval
     assert.equal(review.reviewer, undefined);
     const reference = { id: task.id, revision: review.revision };
     assert.equal((await act("task_accept", { ...reference, targetHead: null, evidence: ["Checked."] })).error.code, "AUTO_REVIEW_DISABLED");
-    assert.equal((await act("task_request_changes", { ...reference, reason: "Try again." })).error.code, "AUTO_REVIEW_DISABLED");
+    assert.equal((await act("task_request_changes", { ...reference, revision: reference.revision + 1, reason: "Try again." })).error.code, "REVIEW_REQUIRED");
     assert.equal((await f.cli(["accept", task.id], { revision: review.revision, actor: "manager" })).error.code, "AUTO_REVIEW_DISABLED");
     return { text: "Awaiting human acceptance." };
   });
@@ -2101,4 +2100,47 @@ test("manager reopens a conflicting approved submission and integrates its revie
   });
   assert.equal(result.data?.error, undefined, JSON.stringify(result));
   assert.equal(readFileSync(join(f.project, "source.txt"), "utf8"), "target\ntask\n");
+});
+
+
+test("manager returns the same card in every review mode and preserves human acceptance", { timeout: 150_000 }, async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"])).ok, true);
+  for (const mode of ["human", "manager", "reviewer"] as const) {
+    assert.equal((await f.cli(["settings"], { reviewMode: mode })).ok, true);
+    const { data: task } = await f.cli(["create"], { title: "T-0115 return scenario", criteria: ["Feedback reaches executor"] });
+    await f.cli(["approve", task.id]);
+    await f.cli(["start", task.id]);
+    const { data: preview } = await f.cli(["preview", task.id]);
+    assert.equal((await f.cli(["submit", task.id], { token: preview.token, noChanges: true, summary: "Check return", checks: ["Fixture result inspected"] })).ok, true);
+    const run = await f.run("Return work with feedback", async act => {
+      const { data: review } = await act("task_review", { id: task.id });
+      const ref = { id: task.id, revision: review.revision, reason: "Fix the validation failure and preserve the report." };
+      if (mode === "human") {
+        assert.equal((await act("task_accept", { id: ref.id, revision: ref.revision, targetHead: null })).error.code, "AUTO_REVIEW_DISABLED");
+        assert.equal((await f.cli(["accept", task.id], { revision: ref.revision, actor: "manager" })).error.code, "AUTO_REVIEW_DISABLED");
+      }
+      assert.equal((await f.cli(["request-changes", task.id], { ...ref, revision: ref.revision - 1, actor: "manager", reviewMode: mode, targetHead: null })).error.code, "REVISION_CONFLICT");
+      const otherMode = mode === "human" ? "manager" : "human";
+      await f.cli(["settings"], { reviewMode: otherMode });
+      assert.equal((await act("task_request_changes", ref)).error.code, "REVIEW_REQUIRED");
+      await f.cli(["settings"], { reviewMode: mode });
+      await act("task_review", { id: task.id });
+      const returned = await act("task_request_changes", ref);
+      assert.equal(returned.ok, true, JSON.stringify(returned.error));
+      const current = (await f.cli(["show", task.id])).data;
+      assert.equal(current.status, "in_progress");
+      const events = current.history.filter((event: any) => event.action === "request-changes");
+      assert.equal(events.length, 1);
+      assert.equal(events[0].actor, "manager");
+      assert.equal(events[0].text, ref.reason);
+      const launch = await f.cli(["start", task.id, "--compact"], { launchDetails: true });
+      assert.equal(launch.data.task.feedback, ref.reason);
+      assert.equal((await f.cli(["request-changes", task.id], { ...ref, revision: current.revision, actor: "manager", reviewMode: mode, targetHead: null })).error.code, "INVALID_TRANSITION");
+      assert.equal((await f.cli(["show", task.id])).data.history.filter((event: any) => event.action === "request-changes").length, 1);
+      return { text: "Returned after the successful tool result." };
+    });
+    assert.equal(run.ok, true, JSON.stringify(run.error ?? run.data?.error));
+    await f.cli(["cancel", task.id], { reason: "Fixture complete" });
+  }
 });
