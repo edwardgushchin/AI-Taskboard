@@ -102,17 +102,22 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   }
   const requestTool = { name: "task_tool_request", description: "Request a missing provider MCP tool for this task. The manager receives a question. Assignment requires a restarted task run; provider permissions still apply.",
     inputSchema: { type: "object", properties: { server: { type: "string" }, tool: { type: "string" }, reason: { type: "string" } }, required: ["server", "tool", "reason"], additionalProperties: false } };
-  const accessTool = { name: "task_request_executor_access", description: "Ask the board manager immediately for full host access for this task. Explain the required operation and the sandbox error. On approval, finish this turn with the card still in progress so the board restarts the same chat with the granted access.",
+  const accessTool = { name: "task_request_executor_access", description: "Request full host access for the current execution. Describe the required operation and the sandbox error. On approval the board applies access and continues the same work automatically.",
     inputSchema: { type: "object", properties: { reason: { type: "string", minLength: 1, maxLength: 3000 } }, required: ["reason"], additionalProperties: false } };
   const tools = [worklogTool, checkWaitTool, requestTool, githubReadTool, milestonesListTool, githubCreateMilestoneTool, githubSetMilestoneDueTool];
   if (desktopProfile && !fullAccess) tools.push(accessTool);
   let accessDecision: Promise<CliReply> | undefined;
+  let accessChange: "approved" | "ready" | "switching" | undefined;
   const mcp = await openBoardMcp(tools, async (name, args, requestSignal) => {
     if (name === accessTool.name && desktopProfile) {
       const pending = accessDecision ??= requestExecutorAccess(desktopProfile, project, task.id, args, settings.data.manager,
         signal ? AbortSignal.any([signal, requestSignal]) : requestSignal);
       const result = await pending;
       if (!result.ok && accessDecision === pending) accessDecision = undefined;
+      if (result.ok && (result.data as { approved?: boolean })?.approved === true) {
+        accessChange ??= "approved";
+        return result;
+      }
       return worklog.remind(result);
     }
     if (name === requestTool.name) return worklog.remind(await callCli(project, ["tool-request", task.id, "--compact"], args));
@@ -186,9 +191,14 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   child.stderr.resume();
   const rpc = codexRpc(child, message => {
     tokens.queue(tokens.observe(message), onTokenUsage);
-    const params = message.params as { threadId?: string; turn: Turn };
+    const params = message.params as { threadId?: string; turn: Turn; item?: { type?: string; server?: string; tool?: string; status?: string } };
     if (activeThreadId && params?.threadId === activeThreadId) {
       worklog.observe(message, activeThreadId);
+      const item = params.item;
+      if (accessChange === "approved" && message.method === "item/completed" && item?.type === "mcpToolCall" &&
+          item.server === "ai_taskboard" && item.tool === accessTool.name && item.status === "completed") {
+        accessChange = "ready";
+      }
       if (onActivity && message.method?.startsWith("item/")) {
         const item = runActivity(activity, message.method, params, new Date().toISOString());
         if (item) {
@@ -210,7 +220,13 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   async function monitor(turnId: string) {
     let failure: RunFailure | undefined;
     try {
-      while (!turns.has(turnId)) await rpc.receive();
+      while (!turns.has(turnId)) {
+        if (accessChange === "ready" && !signal?.aborted) {
+          accessChange = "switching";
+          interrupt();
+        }
+        await rpc.receive();
+      }
       const turn = turns.get(turnId)!;
       if (turn.status !== "completed") failure = {
         reason: turn.error?.message || "Codex ended the task run: " + turn.status + ".",
@@ -292,7 +308,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
         "У задачи нет отдельной ветки или worktree. Используй сценарий сдачи результата вне Git из инструкции.",
       ] : []),
       "Прочитай актуальную карточку через show " + task.id + " --compact.",
-      ...(localTools.includes(accessTool.name) ? ["Если обязательный шаг требует полного доступа ОС, вызови mcp__ai_taskboard__task_request_executor_access. При approved: true запиши контрольную точку и завершай текущий ход с карточкой «В работе». Доска сама запустит следующий ход с выданным доступом."] : []),
+      ...(localTools.includes(accessTool.name) ? ["Если обязательный шаг требует полного доступа ОС, вызови mcp__ai_taskboard__task_request_executor_access и укажи, какую операцию нужно повторить. При одобрении доска сразу применяет доступ к текущему выполнению и продолжает в том же чате."] : []),
       ...(githubTools.length ? ["Хостовые инструменты GitHub, подтверждённые для текущего хода: " +
         githubTools.map(name => "mcp__ai_taskboard__" + name).join(", ") +
         ". Для поддерживаемых операций обращайся к ним напрямую. Статус gh из оболочки не проверяет авторизацию доски."] : []),
@@ -300,7 +316,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       "Команды, которые должен запускать читатель, оформляй отдельными блоками кода Markdown. Пояснения пиши отдельными абзацами.",
       task.schedule
         ? "Это очередной запуск повторяющейся задачи. Выполни один проход по текущим условиям и запиши результат через progress с summary и nextStep. Карточка вернётся в готовые до следующего запуска. Не используй submit. Если без посторонней помощи выполнить задачу нельзя, используй block."
-        : "Продолжай работу по всем критериям до сдачи через submit. Если сохранён прогресс, возобнови работу с указанного следующего шага и проверь актуальное состояние. Запись progress сохраняет промежуточный результат. Заверши ход только после сдачи, при подтверждённой смене режима доступа, при блокировке с конкретным условием продолжения или по команде пользователя.",
+        : "Продолжай работу по всем критериям до сдачи через submit. Если сохранён прогресс, возобнови работу с указанного следующего шага и проверь актуальное состояние. Запись progress сохраняет промежуточный результат. Заверши ход только после сдачи, при блокировке с конкретным условием продолжения или по команде пользователя.",
       "После записи результата в карточку и перед итоговым ответом вызови mcp__ai_taskboard__worklog_record с языком и массивом entries. " +
         "Инструмент подключён к текущему ходу. Команды Worklog из истории относятся к прошлым ходам.",
       "Перед сдачей сопоставь каждый критерий с результатом в diff или проверке. Для изменённого поведения перечисли существенно разные условия, в которых действует один критерий, и проверь сочетания, где результат может различаться. Например, для изменений поставки это чистая и повторная сборка, сборка и публикация, настройки по умолчанию и переопределения. После возврата проверь другие затронутые сценарии того же критерия. Если проверка выполнена на более ранней ревизии, покажи, почему она ещё применима, либо повтори затронутую проверку.",

@@ -2510,7 +2510,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
           });
         }
       }
-      if (outcome?.interrupted && !signal.aborted && !stopRequested && !rejected) {
+      if (outcome?.interrupted && !accessGranted && !signal.aborted && !stopRequested && !rejected) {
         activity.set("codex-interrupted", {
           id: "codex-interrupted", type: "error", status: "interrupted", title: "",
           text: lang("Codex interrupted the run.", "Codex прервал работу.") + "\n\n" + outcome.reason,

@@ -264,7 +264,7 @@ export async function requestExecutorAccess(profile: string, project: string, id
   if (!current.ok) return current;
   const task = current.data;
   if (task.status !== "in_progress") return cliFailure("INVALID_TRANSITION", "This executor is no longer working on the card.");
-  if (executorFullAccess(profile, project, task)) return { ok: true, data: { approved: true, appliesOn: "next-run" } };
+  if (executorFullAccess(profile, project, task)) return { ok: true, data: { approved: true, appliesOn: "current-execution" } };
 
   try {
     const result = await reply(profile, project, JSON.stringify({
@@ -292,7 +292,7 @@ export async function requestExecutorAccess(profile: string, project: string, id
       if (!grant.ok) return grant;
     }
     return { ok: true, data: { approved: decision.approved, reason: decision.reason.trim().slice(0, 2000),
-      ...(decision.approved ? { appliesOn: "next-run" } : {}) } };
+      ...(decision.approved ? { appliesOn: "current-execution" } : {}) } };
   } catch (error) {
     return cliFailure("ACCESS_DECISION_FAILED", (error as Error).message);
   }
