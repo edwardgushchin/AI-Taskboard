@@ -5,8 +5,8 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { git, gitSafeDirectoryEnvironment, isolatedWorktreesDirectory } from "../cli/git.ts";
-import { codexThreadPattern } from "../cli/model.ts";
-import type { RunActivity, Task } from "../cli/model.ts";
+import { boardReviewMode, codexThreadPattern } from "../cli/model.ts";
+import type { BoardSettings, RunActivity, Task } from "../cli/model.ts";
 import { directory } from "../cli/storage.ts";
 import { runActivity } from "./run-activity.ts";
 import { boardAgentInstructions, boardCodexArgs, boardWorklog, worklogReminder, worklogTool } from "./board-agent-hooks.ts";
@@ -83,7 +83,9 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   }
   const boardData = realpathSync(join(project, ".tasks"));
   const paths = [...new Set([runDirectory, boardData, ...(task.git ? gitAccessPaths(cwd, task.git.branch) : [])])];
-  const developerInstructions = executorInstructions();
+  const settings = await callCli<BoardSettings>(project, ["settings"]);
+  if (!settings.ok) throw new Error(settings.error.message);
+  const developerInstructions = executorInstructions() + "\nCurrent board reviewMode: " + boardReviewMode(settings.data) + ". Read settings again if it changes.";
   const worklog = boardWorklog(project, "executor", task.id);
   const readOnlyWorktrees = [join(boardData, "worktrees")];
   const isolatedRoot = join(dirname(boardData), isolatedWorktreesDirectory);

@@ -1379,8 +1379,10 @@ test("submission commits the confirmed snapshot and rejects changed or incomplet
   const launchState = cli(root, ["show", task.id, "--compact"], { launchDetails: true });
   assert.equal(launchState.revision, edited.revision);
   assert.equal(launchState.history, undefined);
+  cli(root, ["settings"], { reviewMode: "human" });
   const returned = cli(root, ["request-changes", task.id, "--compact"], {
-    revision: edited.revision, reason: "Verify the CSV header", actor: "user", launchDetails: true,
+    revision: edited.revision, reason: "Verify the CSV header", actor: "manager", launchDetails: true,
+    reviewMode: "human", targetHead: cli(root, ["review", task.id]).targetHead,
   });
   assert.equal(returned.status, "in_progress");
   assert.equal(returned.history, undefined);

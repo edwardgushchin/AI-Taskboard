@@ -1404,7 +1404,6 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     const settingsNotices = settingsDelivery(project, lane, () => syncSettingsNotices(project, agentSlots.limits));
     const initialSettings = settingsNotices.initial();
     const reviewMode = boardReviewMode(settings.data);
-    const managerReviews = reviewMode === "manager";
     if (expectedReviewMode && reviewMode !== expectedReviewMode) {
       return cliFailure("REVIEW_MODE_CHANGED", "The board's review mode changed.");
     }
@@ -1421,8 +1420,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     const mcpTools: BoardMcpTool[] = boardMcpTools.filter(({ name }) =>
       (reviewIds || !["project_path", "project_sha256"].includes(name)) &&
       (!reviewIds || autoReviewReadTools.has(name) || reviewTaskTools.has(name)) &&
-      (name !== "task_accept" || reviewMode !== "human") &&
-      (name !== "task_request_changes" || managerReviews));
+      (name !== "task_accept" || reviewMode !== "human"));
     if (!reviewIds) mcpTools.push(...(goal ? goalWorkTools : goalChatTools), githubReadTool);
     const attachments = await prepareBoardAttachments(files, scratch);
     if (!reviewIds && goal !== "resume") {

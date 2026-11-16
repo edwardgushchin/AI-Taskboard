@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { test } from "node:test";
-import { boardWorklog } from "../src/desktop/board-agent-hooks.ts";
+import { boardAgentInstructions, boardWorklog } from "../src/desktop/board-agent-hooks.ts";
 
 test("Worklog writes only complete authored blocks and recovers a staged turn after reopening", async t => {
   const project = mkdtempSync(join(tmpdir(), "ai-taskboard-worklog-"));
@@ -93,4 +93,18 @@ test("Worklog writes only complete authored blocks and recovers a staged turn af
   assert.doesNotMatch(retried, /syntheticSecretForTest/);
   assert.equal(retried.match(/codex-worklog-entry:/g)?.length, 1);
   assert.equal(readdirSync(stagedDir).filter(name => name.endsWith(".json")).length, 0);
+});
+
+
+test("all board roles receive the same action boundaries on every instruction build", () => {
+  for (const role of ["manager", "executor", "reviewer"] as const) {
+    for (let turn = 0; turn < 2; turn++) {
+      const instructions = boardAgentInstructions(role);
+      assert.match(instructions, /no drag-and-drop or arbitrary manual status movement/);
+      assert.match(instructions, /human review mode only the human accepts/);
+      assert.match(instructions, /only tools actually supplied in this run/);
+      assert.match(instructions, /send limitations or questions to the manager with message/);
+      assert.match(instructions, /Confirm a transition only after a successful tool result/);
+    }
+  }
 });
