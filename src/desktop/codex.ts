@@ -68,7 +68,7 @@ export function executorFullAccess(dataDirectory: string, project: string, task:
   return enabled;
 }
 
-export async function setTaskExecutorAccess(dataDirectory: string, project: string, args: unknown) {
+export async function setTaskExecutorAccess(dataDirectory: string, project: string, args: unknown, signal?: AbortSignal) {
   if (!args || typeof args !== "object" || Array.isArray(args) ||
       Object.keys(args).some(key => !["id", "revision", "fullAccess"].includes(key))) {
     return cliFailure("INVALID_INPUT", "Use id, revision and fullAccess.");
@@ -82,6 +82,7 @@ export async function setTaskExecutorAccess(dataDirectory: string, project: stri
   if (!current.ok) return current;
   if (current.data.revision !== revision) return cliFailure("REVISION_CONFLICT", "Read the current revision before changing access.");
   if (["done", "cancelled"].includes(current.data.status)) return cliFailure("INVALID_TRANSITION", "Choose an open task.");
+  signal?.throwIfAborted();
   executorFullAccess(dataDirectory, project, current.data, fullAccess);
   return { ok: true as const, data: { id, revision, fullAccess, appliesOn: "next-run" } };
 }

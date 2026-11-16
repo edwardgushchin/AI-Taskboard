@@ -2435,7 +2435,8 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     }
     prepared = true;
     signal.throwIfAborted();
-    const task = { ...started.data.task, fullAccess: executorFullAccess(app.getPath("userData"), project, started.data.task),
+    const desktopProfile = app.getPath("userData");
+    const task = { ...started.data.task, fullAccess: executorFullAccess(desktopProfile, project, started.data.task),
       ...(newThread ? { codexThreadId: undefined } : {}) };
     let linked: LaunchState = started.data.task;
     const cwd = "cwd" in started.data ? started.data.cwd : started.data.worktree;
@@ -2458,7 +2459,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         code: saved.error.code === "BOARD_BUSY" ? "BOARD_BUSY" : "CODEX_LINK_FAILED",
       });
       linked = saved.data;
-    });
+    }, desktopProfile);
     const { threadId: codexThreadId, completion } = run;
     const directories = new Set<string>();
     let stopRequested = false;
@@ -2483,8 +2484,9 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       const reviewOutcome = timedOut ? lang("Access review timed out", "Истекло время проверки доступа") :
         lang("Access denied by Auto-review", "Auto-review отклонил доступ");
       const reconnect = outcome?.disconnected && !continuation.afterDisconnect;
+      const accessGranted = !task.fullAccess && !signal.aborted && !stopRequested && executorFullAccess(desktopProfile, project, task);
       let unfinishedRevision: number | undefined;
-      if ((reconnect || (!outcome && !task.schedule)) && !signal.aborted && !stopRequested && !rejected) {
+      if ((accessGranted || reconnect || (!outcome && !task.schedule)) && !signal.aborted && !stopRequested && (!rejected || accessGranted)) {
         const current = await callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
         if (current.ok) {
           if (current.data.status !== "in_progress" || current.data.codexThreadId !== codexThreadId) {
@@ -2493,12 +2495,14 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
           }
           unfinishedRevision = current.data.revision;
           const progressed = current.data.summary !== task.summary || current.data.nextStep !== task.nextStep;
-          if (!stopRequested && !signal.aborted && (reconnect || progressed || !continuation.withoutProgress)) {
-            retry = { revision: unfinishedRevision, reason: reason ?? incomplete, continuation: reconnect
-              ? { ...continuation, afterDisconnect: true } : { withoutProgress: !progressed } };
+          if (!stopRequested && !signal.aborted && (accessGranted || reconnect || progressed || !continuation.withoutProgress)) {
+            const nextContinuation = accessGranted ? {} : reconnect
+              ? { ...continuation, afterDisconnect: true } : { withoutProgress: !progressed };
+            retry = { revision: unfinishedRevision, continuation: nextContinuation,
+              reason: accessGranted ? lang("Continuing with access granted by the board.", "Продолжение с доступом, выданным на доске.") : reason ?? incomplete };
           }
         }
-        if (retry && reconnect) {
+        if (retry && reconnect && !accessGranted) {
           activity.set("connection-lost", {
             id: "connection-lost", type: "error", status: "failed", title: "",
             text: lang("The Codex connection closed. The board will try to continue in the same chat.",

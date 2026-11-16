@@ -22,6 +22,50 @@ import { managerCliContext } from "../src/desktop/manager-cli.ts";
 const source = readFileSync(new URL("../src/desktop/codex-chat.ts", import.meta.url), "utf8")
   .replace(/^import[\s\S]*?;\r?\n/gm, "").replace(/^export /gm, "");
 
+test("an executor access request gets an independent manager decision scoped to its card", async () => {
+  const task = { id: "T-0118", revision: 13, title: "Verify Electron", status: "in_progress", criteria: ["Run the UI check"] };
+  const grants: unknown[] = [];
+  let answer = "";
+  let calls = 0;
+  const request = runInNewContext(stripTypeScriptTypes(source) + "\nreply = managerReply; requestExecutorAccess", {
+    AbortSignal, cliFailure: (code: string, message: string) => ({ ok: false, error: { code, message } }),
+    callCli: async (_project: string, argv: string[]) => {
+      assert.equal(argv[1], task.id);
+      return { ok: true, data: task };
+    },
+    executorFullAccess: () => false,
+    setTaskExecutorAccess: async (_profile: string, _project: string, args: unknown) => {
+      grants.push(args);
+      return { ok: true };
+    },
+    managerReply: async (_profile: string, _project: string, input: string, _images: string[], _action: unknown, options: any) => {
+      calls++;
+      assert.equal(JSON.parse(input).task.id, task.id);
+      assert.match(JSON.parse(input).executorRequest, /install_dir_access\.cc/);
+      assert.equal(options.tools.length, 0);
+      assert.equal(options.finalAnswerSchema.properties.approved.type, "boolean");
+      assert.match(options.instructions, /read-only shell does not limit that decision/);
+      return { text: answer };
+    },
+  });
+  const args = { reason: "Required UI check fails with Electron install_dir_access.cc:52." };
+  const run = (input: unknown = args, signal = new AbortController().signal) => request("profile", "project", task.id, input, undefined, signal);
+  assert.equal((await run({ ...args, id: "T-9999" })).error.code, "INVALID_INPUT");
+  assert.equal(calls, 0);
+  answer = JSON.stringify({ approved: false, reason: "Use the scripted check." });
+  assert.equal((await run()).data.approved, false);
+  assert.equal(grants.length, 0);
+  answer = "No structured decision";
+  assert.equal((await run()).error.code, "ACCESS_DECISION_FAILED");
+  answer = JSON.stringify({ approved: true, reason: "The required local check needs host access." });
+  assert.equal((await run(args, AbortSignal.abort())).error.code, "ACCESS_DECISION_FAILED");
+  assert.equal(grants.length, 0);
+  const approved = await run();
+  assert.equal(approved.data.approved, true);
+  assert.equal(approved.data.appliesOn, "next-run");
+  assert.deepEqual(JSON.parse(JSON.stringify(grants)), [{ id: task.id, revision: task.revision, fullAccess: true }]);
+});
+
 test("task run history restores paginated activity in the empty run slots", async () => {
   const row = (id: string, at: number, type = "commandExecution") => ({
     startedAtMs: at, item: { id, type, command: "git status" },

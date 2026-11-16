@@ -32,6 +32,7 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
     git: { target: "refs/heads/main", base: "a".repeat(40), branch: "refs/heads/ai-taskboard/T-0001", worktree: "worktree" } };
   const calls: { args: string[]; input: any }[] = [];
   const launched: any[] = [];
+  const access = { full: false };
   const subscriptions = new Map();
   const savedSettings = new Map<string, { agentLimits: { executor: number } }>();
   const previousTurn = { status: "completed", completedAt: 1 as number | null, reads: 0 };
@@ -49,7 +50,7 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
     broadcastBoardChat: () => {},
     lang: (english: string) => english, cliFailure: failure, missingCodexThread,
     app: { getPath: () => "profile" }, dialog: { showMessageBox: async () => ({ response: 1 }) },
-    executorFullAccess: () => false, process: { platform: process.platform },
+    executorFullAccess: () => access.full, process: { platform: process.platform },
     configuredCodex: async () => ({}), runLog: (items: Map<string, unknown>) => [...items.values()], rm: async () => {},
     readLastTaskTurn: async (_profile: string, _project: string, threadId: string) => {
       assert.equal(threadId, previousThread);
@@ -87,7 +88,7 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
       if (args[0] === "progress") Object.assign(task, changeTask(task, "progress", input));
       return { ok: true, data: structuredClone(task) };
     },
-    startCodexRun: async (_client: unknown, _project: string, _cwd: string, snapshot: { codexThreadId?: string },
+    startCodexRun: async (_client: unknown, _project: string, _cwd: string, snapshot: { codexThreadId?: string; fullAccess?: boolean },
       onActivity: (item: RunActivity) => void, _usage: unknown, signal: AbortSignal, beforeTurn?: (threadId: string) => Promise<void>) => {
       launched.push(snapshot);
       const launchNumber = launched.length;
@@ -98,13 +99,13 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
       });
       const threadId = outcome === "missing" ? nextThread : snapshot.codexThreadId ?? nextThread;
       await beforeTurn?.(threadId);
-      if (activity) onActivity(activity);
+      if (activity && (!snapshot.fullAccess || activity.type !== "autoApprovalReview")) onActivity(activity);
       return { threadId,
         completion: completions[launchNumber - 1]!.promise,
         steer: async () => {}, interrupt: async () => {} };
     },
   });
-  return { runtime, task, calls, launched, previousTurn, completion, retryCompletion, finalCompletion, subscriptions, slots, savedSettings };
+  return { runtime, task, calls, launched, previousTurn, completion, retryCompletion, finalCompletion, subscriptions, slots, savedSettings, access };
 }
 
 test("launch uses saved limits when the watch still has the previous value", async () => {
@@ -320,6 +321,26 @@ test("a completed turn respects a blocker, an explicit stop and an access denial
     assert.equal(f.task.status, "blocked");
     assert.match(f.task.blocked!.reason, kind === "blocker" ? /Missing input/ : kind === "stop" ? /The user stopped/ : /Access denied/);
   }
+});
+
+test("a manager grant continues a sandboxed executor with full access without blocking the card", async () => {
+  const f = fixture("started", { id: "approval", type: "autoApprovalReview", status: "denied", title: "Sandbox access", text: "Denied" });
+  f.task.status = "in_progress";
+  assert.equal((await f.runtime.launchTask("project", f.task.id)).ok, true);
+  assert.equal(f.launched[0].fullAccess, false);
+  f.access.full = true;
+  f.completion.resolve(undefined);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.launched.length, 2);
+  assert.equal(f.launched[1].fullAccess, true);
+  assert.equal(f.launched[1].codexThreadId, previousThread);
+  assert.equal(f.launched[1].git.worktree, "worktree");
+  assert.equal(f.task.status, "in_progress");
+  f.task.status = "review";
+  f.retryCompletion.resolve(undefined);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(!f.calls.some(call => call.args[0] === "block"));
+  assert.equal(f.task.status, "review");
 });
 
 test("automatic continuation waits for a slot if the board limit falls during work", async () => {
