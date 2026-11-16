@@ -4928,7 +4928,6 @@ function renderProjectTabs() {
     select.setAttribute("role", "tab");
     select.setAttribute("aria-selected", String(tab.path === frame.project));
     select.setAttribute("aria-controls", "workspace");
-    select.setAttribute("aria-haspopup", "true");
     select.tabIndex = tab.path === frame.project ? 0 : -1;
     select.append(element("span", tab.name, "project-tab-name"));
     if (tab.unread) {
@@ -4938,24 +4937,6 @@ function renderProjectTabs() {
       select.append(dot);
     }
     if (tab.detail) select.append(element("span", tab.detail, "project-tab-detail"));
-    container.addEventListener("contextmenu", event => {
-      event.preventDefault();
-      const menu = byId("board-tab-menu");
-      if (menu.matches(":popover-open")) menu.hidePopover();
-      const open = button(language("Board settings…", "Настройки доски…"), protect(async () => {
-        menu.hidePopover();
-        if (frame.project !== tab.path) await api.selectTab(tab.path);
-        if (frame.project === tab.path) boardSettings();
-      }), "app-menu-item");
-      menu.setAttribute("aria-label", language("Board menu", "Меню доски"));
-      open.setAttribute("role", "menuitem");
-      open.setAttribute("autofocus", "");
-      menu.replaceChildren(open);
-      menu.showPopover({ source: select });
-      const anchor = select.getBoundingClientRect();
-      menu.style.left = Math.max(0, Math.min(event.clientX || anchor.right, innerWidth - menu.offsetWidth)) + "px";
-      menu.style.top = Math.max(0, Math.min(event.clientY || anchor.top, innerHeight - menu.offsetHeight)) + "px";
-    });
     select.addEventListener("keydown", protect(async event => {
       const index = tabs.findIndex(entry => entry.path === tab.path);
       if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {

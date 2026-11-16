@@ -488,12 +488,12 @@ app.whenReady().then(async () => {
       boardNameInput().form.requestSubmit(); waitFor(() => !sheet.open)`);
     await check(`JSON.stringify(savedLimits.get('board-fixture')) === '{"executor":2,"reviewer":0}' &&
       limits.executor === 0 && limits.reviewer === 1`, "board overrides save without changing application defaults");
-    await evaluate(`sheet.close(); byId('project-tabs').querySelector('[aria-selected="false"]')
-      .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 25, clientY: 150 })); void 0`);
-    await click('#board-tab-menu button');
+    await evaluate(`sheet.close(); byId('project-tabs').querySelector('[aria-selected="false"]').click(); settle()`);
+    await click('#app-menu .app-menu-trigger');
+    await click('#board-settings-menu-item');
     await check(`frame.project === 'other-board' && sheet.textContent.includes('Вторая доска') &&
       !!body.querySelector('.board-agent-settings') && !byId('agent-limits') &&
-      boardLimit('executor').value === '' && boardLimit('reviewer').value === ''`, "the project tab opens settings for that board");
+      boardLimit('executor').value === '' && boardLimit('reviewer').value === ''`, "File opens settings for the selected board");
     await check(`savedManagerAccess.get('board-fixture') === 'full' && managerAccess().value === 'auto'`,
       "manager full access saves for the selected board only");
     await evaluate(`boardNameInput().value = 'Выпуск 0.3'; boardNameInput().form.requestSubmit(); waitFor(() => !sheet.open)`);
