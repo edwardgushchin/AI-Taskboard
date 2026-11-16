@@ -976,7 +976,7 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 }
 .status-activity { margin-inline-start: auto; flex: none; display: flex; align-items: center; gap: 4px; }
 #status-agents { display: flex; align-items: center; gap: 4px; padding-inline: 4px; font-variant-numeric: tabular-nums; }
-#status-auto-mode { display: flex; align-items: center; gap: 4px; }
+#status-auto-mode { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
 #status-auto-mode[aria-pressed="true"] { color: var(--focus); background: color-mix(in srgb, var(--focus) 15%, var(--toolbar)); }
 .git-branches {
   inset: auto auto 42px 8px; margin: 0; width: min(600px, calc(100vw - 16px)); max-height: min(70vh, 480px);
