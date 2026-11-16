@@ -77,9 +77,6 @@ app.whenReady().then(async () => {
         else if (action === 'remove') jobs.delete(id);
         return { ok: true, data: id };
       },
-      boardSuggestions: async project => project === "design-board" ? new Promise(resolve => { window.releaseSuggestions = () => resolve([
-        "Создай задачу на локализацию AI Taskboard", "Какие изменения нужны карточкам AI Taskboard?",
-      ]); }) : [],
       bootstrap: () => new Promise((_resolve, reject) => { window.rejectBootstrap = reject; }),
       attachmentPreview: async (_task, file) => {
         window.previewCalls++;
@@ -844,63 +841,6 @@ app.whenReady().then(async () => {
   const emulateMotion = value => window.webContents.debugger.sendCommand("Emulation.setEmulatedMedia", {
     features: value ? [{ name: "prefers-reduced-motion", value }] : [],
   });
-  if (process.argv.includes("--suggestions-only")) {
-    await emulateMotion("reduce");
-    await evaluate(`
-      const projects = [
-        { path: 'septic-board', name: 'Говновоз' }, { path: 'engine-board', name: 'Electron2D' },
-        { path: 'typing-board', name: 'Typing fixture' },
-      ];
-      const suggestionRequests = [];
-      const pendingSuggestions = new Map();
-      const placeholder = () => document.querySelector('.draft-placeholder').textContent;
-      const openBoard = project => window.pushBoard({ ...fixture, project, tabs: projects,
-        board: { ...fixture.board, project } });
-      window.taskboard.selectTab = async project => openBoard(project);
-      window.taskboard.boardSuggestions = project => new Promise(resolve => {
-        suggestionRequests.push(project);
-        pendingSuggestions.set(project, resolve);
-      });
-      openBoard('engine-board');
-      void 0;
-    `);
-    await click('#project-tabs [aria-selected="false"]');
-    await check(`suggestionRequests.join(',') === 'engine-board,septic-board'`, "each composer requests suggestions for its own project");
-    await evaluate(`pendingSuggestions.get('engine-board')(['Проверь фокус в TabContainer']); settle()`);
-    await check(`placeholder() === 'Напишите менеджеру проекта…'`, "a late response from the previous board leaves the current placeholder alone");
-    await evaluate(`pendingSuggestions.get('septic-board')(['Уточни требования к приёму заявок']); settle()`);
-    await check(`placeholder() === 'Уточни требования к приёму заявок'`, "the new board shows its own suggestions");
-    await click('#project-tabs [aria-selected="false"]');
-    await check(`placeholder() === 'Проверь фокус в TabContainer' && suggestionRequests.length === 2`, "switching back restores only that board's cached suggestions");
-    await emulateMotion("no-preference");
-    await evaluate(`
-      openBoard('typing-board');
-      const typedPrompt = 'Проверь сценарий загрузки проекта с длинным названием';
-      pendingSuggestions.get('typing-board')([typedPrompt]);
-      void 0;
-    `);
-    await check(`(async () => {
-      await waitFor(() => placeholder().length >= 3 && placeholder() !== typedPrompt && typedPrompt.startsWith(placeholder()));
-      const partial = placeholder();
-      for (let i = 0; i < 3; i++) openBoard('typing-board');
-      if (placeholder() !== partial) throw new Error('Refresh changed the suggestion: ' + partial + ' → ' + placeholder());
-      const field = document.querySelector('.draft-input textarea');
-      field.focus();
-      openBoard('typing-board');
-      await waitFor(() => document.activeElement === field && placeholder() === 'Напишите менеджеру проекта…');
-      field.value = 'Вопрос';
-      field.dispatchEvent(new Event('input'));
-      if (getComputedStyle(document.querySelector('.draft-placeholder')).visibility !== 'hidden') return false;
-      field.value = '';
-      field.dispatchEvent(new Event('input'));
-      field.blur();
-      openBoard('typing-board');
-      if (placeholder() !== partial) throw new Error('Blur restored ' + placeholder() + ' after ' + partial + ', active ' + document.activeElement?.tagName);
-      return true;
-    })()`, "board refreshes preserve the partial suggestion and field focus pauses it without flashing the full phrase");
-    console.log("Manager suggestions Chromium checks passed: " + checks);
-    return;
-  }
   await emulateMotion("no-preference");
   await check(`!byId('lanes').getAnimations({ subtree: true }).some(animation => animation.id === 'task-card-enter')`,
     "restoring a board shows its existing cards immediately");
@@ -2306,7 +2246,7 @@ app.whenReady().then(async () => {
     sheet.close();
     fixture.project = 'design-board'; fixture.theme = 'dark'; fixture.runningTasks = [];
     fixture.tabs = [{ path: 'design-board', name: 'AI Taskboard' }, { path: 'design-other', name: 'Electron2D' }];
-    fixture.board = { gitInfo: { branch: 'main', head: '0123456789abcdef', user: 'Developer' }, tags: [{ name: 'интерфейс', color: '#91B6F9' }, { name: 'карточки', color: '#C0A5F4' }],
+    fixture.board = { settings: { autoMode: false }, gitInfo: { branch: 'main', head: '0123456789abcdef', user: 'Developer' }, tags: [{ name: 'интерфейс', color: '#91B6F9' }, { name: 'карточки', color: '#C0A5F4' }],
       archived: [task('T-0580', 'Похожий номер', { status: 'done' }), task('T-0058', 'Настроить порядок вкладок', { status: 'done' })], tasks: [
       task('T-0056', 'Убрать надпись «Загрузка проектов»', { tags: ['интерфейс'], createdAt: '2026-11-05' }),
       task('T-0055', 'Исправить обрезку превью по скруглению карточки', { tags: ['интерфейс', 'карточки'], priority: 'high', attachments: [{ file: 'cover.png', name: 'cover.png' }] }),
@@ -2319,7 +2259,7 @@ app.whenReady().then(async () => {
         attachments: index === 0 ? [{ file: 'cover.png', name: 'cover.png' }] : [] }))
     ] };
     const designBoard = structuredClone(fixture.board);
-    const designOther = { tags: [], archived: [], tasks: [task('T-0001', 'Другая доска', { description: 'Описание другой задачи' })] };
+    const designOther = { settings: { autoMode: false }, tags: [], archived: [], tasks: [task('T-0001', 'Другая доска', { description: 'Описание другой задачи' })] };
     const draftCalls = [];
     window.taskboard.command = async (_name, id) => ({ ok: true, data: { ...fixture.board.tasks.find(task => task.id === id), criteria: [] } });
     window.taskboard.selectTab = async project => {
@@ -2466,20 +2406,23 @@ app.whenReady().then(async () => {
   await evaluate(`byId('lanes').scrollTop = 0; void 0`);
   await check(`draftForm().querySelector('.board-chat').getBoundingClientRect().height === 0 &&
     draftForm().querySelector('.draft-placeholder').textContent === 'Напишите менеджеру проекта…' &&
-    draftText().getAttribute('aria-label') === 'Сообщение менеджеру проекта'`, "collapsed composer addresses the project manager while suggestions are pending");
-  await evaluate(`
-    const draftPrompt = () => draftForm().querySelector('.draft-placeholder').textContent;
-    const initialPrompt = draftPrompt();
-    const projectPrompt = 'Создай задачу на локализацию AI Taskboard';
-    window.releaseSuggestions();
-    void 0;
-  `);
+    draftText().getAttribute('aria-label') === 'Сообщение менеджеру проекта'`, "collapsed composer addresses the project manager with a static localized hint");
+  for (const russian of [false, true]) {
+    await evaluate(`fixture.russian = ${russian}; push(); settle()`);
+    await check(`draftForm().querySelector('.draft-placeholder').textContent === ${JSON.stringify(russian ?
+      "Напишите менеджеру проекта…" : "Write to the project manager…")}`, "empty composer immediately follows the interface language");
+  }
   await check(`(async () => {
-    await waitFor(() => draftPrompt() && draftPrompt() !== initialPrompt && initialPrompt.startsWith(draftPrompt()));
-    await waitFor(() => draftPrompt() && draftPrompt() !== projectPrompt && projectPrompt.startsWith(draftPrompt()));
-    await waitFor(() => draftPrompt() === projectPrompt);
-    return !draftText().value;
-  })()`, "the empty composer erases its hint and types a generated project prompt");
+    const hint = draftForm().querySelector('.draft-placeholder');
+    const changes = [];
+    const observer = new MutationObserver(() => changes.push(hint.textContent));
+    observer.observe(hint, { childList: true, characterData: true, subtree: true });
+    draftText().focus(); push(); draftText().blur(); push();
+    await new Promise(resolve => setTimeout(resolve, 11000));
+    observer.disconnect();
+    return changes.length === 0 && hint.textContent === 'Напишите менеджеру проекта…';
+  })()`, "focus, refresh and idle leave the static hint unchanged without a typing flash");
+  await capture("manager-static-hint.png");
   await evaluate(`
     const draftBounds = () => JSON.stringify(draftForm().querySelector('.board-draft-field').getBoundingClientRect());
     draftText().value = 'Первая строка\\nВторая строка';

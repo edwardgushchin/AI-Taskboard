@@ -1055,7 +1055,6 @@ app.whenReady().then(async () => {
     let stopCallsForManager = 0;
     api.boardHistory = async () => ({ ok: true, data: { turns: [] } });
     api.boardQueue = async (_project, action) => ({ ok: true, data: action === 'list' ? [] : 'request' });
-    api.boardSuggestions = async () => [];
     api.boardRequest = () => { manager.enableStop(); ready.resolve(true); return turn.promise; };
     api.stopOrchestrator = async () => {
       stopCallsForManager++;

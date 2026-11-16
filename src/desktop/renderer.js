@@ -1382,7 +1382,6 @@ function render(previousBoard) {
   composer.updateManagerWork(frame.managerWork);
   composer.syncManagerUnread(frame.managerUnread);
   if (!archiveView) {
-    composer.loadSuggestions();
     composer.revealPinned();
   }
   composer.syncPrompt();
@@ -1704,9 +1703,6 @@ function draftComposer() {
   try { preferences = JSON.parse(localStorage.getItem(preferencesKey)); } catch {}
   let pinned = preferences?.pinned === true;
   let height = Number.isFinite(preferences?.height) ? preferences.height : undefined;
-  let prompts = [];
-  let promptIndex = -1;
-  let suggestionsLanguage;
   let waitingForChat = false;
   let canStop = false;
   let stopping = false;
@@ -2490,79 +2486,14 @@ function draftComposer() {
   const progress = element("p", undefined, "draft-progress muted");
   progress.hidden = true;
   progress.setAttribute("role", "status");
-  const defaultPrompt = () => language("Write to the project manager…", "Напишите менеджеру проекта…");
-  const currentPrompt = () => prompts[promptIndex] ?? defaultPrompt();
-  let promptAnimation;
-  const showPrompt = () => {
+  const syncPrompt = () => {
     const status = !editor.matches("[data-open], [data-pinned]") && (active?.thinking.textContent || (managerWork &&
       runningLabel(managerWork.item).status));
-    const suggestion = document.activeElement === input ? defaultPrompt() :
-      promptAnimation ? promptAnimation.characters.slice(0, promptAnimation.length).join("") : currentPrompt();
-    const text = status || (goalMode ? language("Describe the goal…", "Опишите цель…") : suggestion);
+    const text = status || (goalMode ? language("Describe the goal…", "Опишите цель…") :
+      language("Write to the project manager…", "Напишите менеджеру проекта…"));
     if (prompt.textContent !== text) prompt.textContent = text;
   };
-  const canAnimatePrompt = () => prompts.length > 0 && !reducedMotion.matches && !document.hidden &&
-    editor.isConnected && editor.checkVisibility() && !goalMode && !input.value && !active &&
-    !(managerWork && !editor.matches("[data-open], [data-pinned]")) && document.activeElement !== input;
-  const segmenter = new Intl.Segmenter();
-  const promptCharacters = () => Array.from(segmenter.segment(currentPrompt()), part => part.segment);
-  let promptTimer;
-  const pausePrompt = () => {
-    clearTimeout(promptTimer);
-    promptTimer = undefined;
-    showPrompt();
-  };
-  const animatePrompt = () => {
-    if (!canAnimatePrompt()) return pausePrompt();
-    if (!promptAnimation) {
-      const characters = promptCharacters();
-      promptAnimation = { characters, length: characters.length, erasing: true };
-    }
-    const step = promptAnimation;
-    step.length += step.erasing ? -1 : 1;
-    let delay = step.erasing ? 16 : 26;
-    if (step.erasing && step.length === 0) {
-      promptIndex = (promptIndex + 1) % prompts.length;
-      step.characters = promptCharacters();
-      step.erasing = false;
-      delay = 180;
-    } else if (!step.erasing && step.length === step.characters.length) {
-      promptAnimation = promptTimer = undefined;
-      syncPrompt();
-      return;
-    }
-    showPrompt();
-    promptTimer = setTimeout(animatePrompt, delay);
-  };
-  const syncPrompt = () => {
-    if (!canAnimatePrompt()) {
-      if (reducedMotion.matches) {
-        promptAnimation = undefined;
-        if (promptIndex < 0 && prompts.length) promptIndex = 0;
-      }
-      pausePrompt();
-      return;
-    }
-    if (promptTimer === undefined && (promptAnimation || promptIndex < 0 || prompts.length > 1)) {
-      promptTimer = setTimeout(animatePrompt, promptAnimation ? 26 : promptIndex < 0 ? 3000 : 10000);
-    }
-    showPrompt();
-  };
   editor.syncPrompt = syncPrompt;
-  const loadSuggestions = () => {
-    const locale = Boolean(frame.russian);
-    if (suggestionsLanguage === locale) return;
-    suggestionsLanguage = locale;
-    prompts = [];
-    promptIndex = -1;
-    promptAnimation = undefined;
-    pausePrompt();
-    void api.boardSuggestions(project).then(result => {
-      if (disposed || suggestionsLanguage !== locale) return;
-      prompts = result;
-      syncPrompt();
-    }).catch(() => {});
-  };
   const hasDraft = () => Boolean(input.value.trim() || (!goalMode && files.length));
   function setGoalMode(value) {
     goalMode = value;
@@ -2585,7 +2516,7 @@ function draftComposer() {
       language("Stop reply", "Остановить ответ")) : language("Send request", "Отправить запрос"));
   };
   editor.localize = () => {
-    if (promptTimer === undefined) showPrompt();
+    syncPrompt();
     updatePin();
     dialogueToggle.textContent = language("Dialogue", "Диалог");
     unreadDivider.textContent = language("New messages", "Новые сообщения");
@@ -2694,7 +2625,6 @@ function draftComposer() {
   };
   editor.reviewError = error => message(language("Automatic review was interrupted.", "Авторевью прервалось.") + "\n" + error);
   const busy = value => {
-    if (!value) showPrompt();
     syncPrompt();
     editor.setAttribute("aria-busy", String(value));
     waitingForChat = false;
@@ -2713,7 +2643,7 @@ function draftComposer() {
     if (label.textContent === text && Boolean(label.querySelector(".codicon-terminal")) === command) return;
     label.replaceChildren(element("span", text, "chat-thinking-text"));
     if (command) label.prepend(icon("terminal"));
-    showPrompt();
+    syncPrompt();
     if (!reducedMotion.matches) {
       active.statusAnimation?.cancel();
       active.statusAnimation = label.animate([{ opacity: .35, transform: "translateY(2px)" }, { opacity: 1, transform: "translateY(0)" }], {
@@ -2845,7 +2775,6 @@ function draftComposer() {
     editor.closeQuestion();
     editor.cancelDictation();
     queued.length = 0;
-    pausePrompt();
     for (const url of previewUrls.splice(0)) URL.revokeObjectURL(url);
     for (const file of pendingPreviews.keys()) releasePreview(file);
   };
@@ -3030,7 +2959,6 @@ function draftComposer() {
   input.addEventListener("input", syncAction);
   for (const event of ["input", "select", "click", "compositionend"]) input.addEventListener(event, syncMentions);
   input.addEventListener("blur", closeMentions);
-  editor.loadSuggestions = loadSuggestions;
   const renderTurn = (turn, items, completed) => {
     turn.items = items;
     const timeline = turn.deliveries.size ? [...items] : items;
@@ -5218,14 +5146,11 @@ window.addEventListener("focus", () => {
   composer?.invalidateHistory?.();
   composer?.syncManagerUnread?.(frame.managerUnread);
 });
-const syncBoardPrompt = () => byId("board-composer").firstChild?.syncPrompt?.();
 const syncManagerRead = () => byId("board-composer").firstChild?.syncManagerUnread?.(frame.managerUnread);
 document.addEventListener("visibilitychange", () => {
-  syncBoardPrompt();
   syncManagerRead();
 });
 document.addEventListener("close", syncManagerRead, true);
-reducedMotion.addEventListener("change", syncBoardPrompt);
 reducedMotion.addEventListener("change", () => {
   if (!reducedMotion.matches) return;
   for (const animation of byId("lanes").getAnimations({ subtree: true })) {
