@@ -9,7 +9,7 @@ import { requireNoGitOperation } from "./worktree.ts";
 const execute = promisify(execFile);
 const commitId = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
-export function githubRepository(location: BoardLocation): string | undefined {
+export function githubRepository(location: Pick<BoardLocation, "repository">): string | undefined {
   if (!location.repository || location.repository.bare) return;
   const remote = invokeGit(location.repository.root, ["remote", "get-url", "origin"]);
   if (remote.code !== 0) return;
@@ -18,17 +18,20 @@ export function githubRepository(location: BoardLocation): string | undefined {
   if (repository && githubRepositoryPattern.test(repository)) return repository;
 }
 
+export function githubMilestoneArgs(repository: string) {
+  return ["api", "--hostname", "github.com", "--paginate", "--slurp", "repos/" + repository + "/milestones?state=all&per_page=100"];
+}
+
 export async function githubMilestones(location: BoardLocation, selected?: { repository: string; number: number }) {
   const repository = githubRepository(location);
   if (!repository || (selected && selected.repository !== repository)) {
     throw new TaskboardError("GITHUB_REMOTE_REQUIRED", "Choose a milestone from the GitHub repository configured as origin.");
   }
-  const endpoint = "repos/" + repository + "/milestones";
-  const args = selected ? [endpoint + "/" + selected.number] :
-    ["--paginate", "--slurp", endpoint + "?state=all&per_page=100"];
+  const args = selected ? ["api", "--hostname", "github.com", "repos/" + repository + "/milestones/" + selected.number] :
+    githubMilestoneArgs(repository);
   let response: unknown;
   try {
-    const { stdout } = await execute("gh", ["api", "--hostname", "github.com", ...args], {
+    const { stdout } = await execute("gh", args, {
       cwd: location.root, env: { ...process.env, GH_PROMPT_DISABLED: "1" },
       windowsHide: true, timeout: 20_000, maxBuffer: 8 * 1024 * 1024,
     });
@@ -109,6 +112,9 @@ function commitDiff(root: string, input: Record<string, unknown>) {
   return { output: output.slice(offset, end), truncated, ...(truncated ? { nextOffset: end } : {}) };
 }
 
+export const gitContentFilterPattern = "^filter\\..*\\.(clean|process|required)$";
+export const readOnlyGitOptions = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
+
 export function inspectRepository(location: BoardLocation, input: Record<string, unknown>) {
   const root = repositoryPath(location);
   if (input.view === "commit_diff") return commitDiff(root, input);
@@ -120,11 +126,11 @@ export function inspectRepository(location: BoardLocation, input: Record<string,
     staged_diff: ["diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", "--ignore-submodules=dirty", "--submodule=short"],
   };
   const env = { GIT_NO_LAZY_FETCH: "1" };
-  const args = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
+  const args = [...readOnlyGitOptions];
   const disabledFilters = new Set<string>();
   if (view === "status" || view === "diff") {
     // Worktree inspection may otherwise run repository-defined content filters.
-    const filters = invokeGit(root, ["config", "--null", "--name-only", "--get-regexp", "^filter\\..*\\.(clean|process|required)$"], env);
+    const filters = invokeGit(root, ["config", "--null", "--name-only", "--get-regexp", gitContentFilterPattern], env);
     if (filters.code !== 0 && filters.code !== 1) throw new TaskboardError("GIT_FAILED", "Git could not read filter configuration.");
     for (const key of new Set(filters.stdout.split("\0").filter(Boolean))) {
       if (key.includes("=")) throw new TaskboardError("GIT_FAILED", "Git cannot disable this content filter for inspection.");

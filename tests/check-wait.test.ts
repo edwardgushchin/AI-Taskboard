@@ -1,10 +1,36 @@
 import assert from "node:assert/strict";
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { openBoardMcp } from "../src/desktop/board-mcp.ts";
 import { checkWaitTool, waitForCheck } from "../src/desktop/check-wait.ts";
+
+test("a detached check records its failure before publishing its completion marker", async t => {
+  const parent = await realpath(tmpdir());
+  const cwd = await mkdtemp(join(parent, "ai-taskboard-check-wait-"));
+  const helper = spawn(process.execPath, ["-e", [
+    "const {spawnSync}=require('node:child_process'),fs=require('node:fs');",
+    "setTimeout(()=>{const r=spawnSync(process.execPath,['-e','process.exit(7)']);",
+    "fs.writeFileSync('exit-code.txt',String(r.status));fs.writeFileSync('unique-completion.marker','');},1200);",
+  ].join("")], { cwd, detached: true, stdio: "ignore", windowsHide: true });
+  const closed = once(helper, "close");
+  t.after(async () => {
+    if (helper.exitCode === null) helper.kill();
+    await closed;
+    assert.equal(dirname(await realpath(cwd)), parent);
+    await rm(cwd, { recursive: true });
+  });
+  const signal = new AbortController().signal;
+  const first = await waitForCheck(cwd, { path: "unique-completion.marker", timeoutSeconds: 1 }, signal);
+  assert.equal(first.ok && first.data.timedOut, true);
+  const completed = await waitForCheck(cwd, { path: "unique-completion.marker", timeoutSeconds: 5 }, signal);
+  assert.equal(completed.ok && completed.data.timedOut, false);
+  assert.equal(await readFile(join(cwd, "exit-code.txt"), "utf8"), "7");
+  await closed;
+});
 
 test("a check wait times out and rejects paths outside the work directory", async t => {
   const parent = await realpath(tmpdir());

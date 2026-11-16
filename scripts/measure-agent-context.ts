@@ -11,8 +11,16 @@ import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { boardAgentInstructions } from "../src/desktop/board-agent-hooks.ts";
 import { recordSettings, settingsContext } from "../src/cli/settings-notices.ts";
 import { checkWaitInstructions } from "../src/desktop/check-wait.ts";
+import { managerCliContext } from "../src/desktop/manager-cli.ts";
+import { readOnlyGitOptions } from "../src/cli/repository.ts";
 
 const baseline = process.argv[2] ?? "91ebf597d98532c9cf26da9e80e4828f019428cf";
+const variant = process.argv[3] ?? "fallback";
+if (!["fallback", "git", "git+gh"].includes(variant)) throw new Error("Use fallback, git, or git+gh.");
+const availability = variant === "fallback" ? {} : {
+  gitOptions: [...readOnlyGitOptions, "-c", "filter.lfs.clean=", "-c", "filter.lfs.process=", "-c", "filter.lfs.required=false"],
+  ...(variant === "git+gh" ? { github: "fixture-owner/fixture-repo" } : {}),
+};
 const read = (path: string, before: boolean) => before
   ? execFileSync("git", ["show", `${baseline}:${path}`], { encoding: "utf8" })
   : readFileSync(new URL("../" + path, import.meta.url), "utf8");
@@ -34,12 +42,15 @@ for (const before of [true, false]) {
         ...model, taskFields, russianWriting, reviewMode, managerReviews: reviewMode === "manager",
         reviewIds: role === "automatic" ? ["T-0001"] : undefined, goal: role === "goal",
       });
-      const instructions = boardAgentInstructions("manager", measured.instructions + "\n" + settings,
+      const context = before || role === "automatic" ? undefined : managerCliContext(measured.tools, availability);
+      const tools = context?.tools ?? measured.tools;
+      const base = boardAgentInstructions("manager", measured.instructions + "\n" + settings,
         { dialogue: role === "dialogue" });
+      const instructions = context?.instructions ? base + "\n\n" + context.instructions : base;
       results.push({ version: before ? baseline : "working-tree", role, reviewMode,
-        schemas: measured.tools.length + 1, // Worklog is appended by replyToBoard.
+        schemas: tools.length + 1, // Worklog is appended by replyToBoard.
         characters: instructions.length, utf8Bytes: Buffer.byteLength(instructions),
-        names: [...measured.tools.map((tool: { name: string }) => tool.name), "worklog_record"] });
+        names: [...tools.map((tool: { name: string }) => tool.name), "worklog_record"] });
     }
   }
 }
@@ -62,4 +73,4 @@ for (const [role, instructions, schemas] of [["reviewer", reviewer, 5], ["execut
   for (const version of [baseline, "working-tree"]) results.push({ version, role, reviewMode: "n/a", schemas,
     characters: instructions.length, utf8Bytes: Buffer.byteLength(instructions), names: [] });
 }
-console.log(JSON.stringify({ method: "UTF-16 code units and UTF-8 bytes; main.ts assembly + default settingsContext + boardAgentInstructions; no settings history; no token estimate; provider builtins/apps excluded", results }, null, 2));
+console.log(JSON.stringify({ method: "UTF-16 code units and UTF-8 bytes; main.ts assembly + default settingsContext + boardAgentInstructions + verified-tool variant; no settings history; no token estimate; provider builtins/apps excluded", variant, results }, null, 2));

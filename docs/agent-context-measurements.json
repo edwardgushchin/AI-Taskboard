@@ -1,8 +1,9 @@
 {
-  "method": "UTF-16 code units and UTF-8 bytes; main.ts assembly + default settingsContext + boardAgentInstructions; no settings history; no token estimate; provider builtins/apps excluded",
+  "method": "UTF-16 code units and UTF-8 bytes; main.ts assembly + default settingsContext + boardAgentInstructions + verified-tool variant; no settings history; no token estimate; provider builtins/apps excluded",
+  "variant": "fallback",
   "results": [
     {
-      "version": "91ebf597d98532c9cf26da9e80e4828f019428cf",
+      "version": "cd8595f",
       "role": "dialogue",
       "reviewMode": "human",
       "schemas": 36,
@@ -48,7 +49,7 @@
       ]
     },
     {
-      "version": "91ebf597d98532c9cf26da9e80e4828f019428cf",
+      "version": "cd8595f",
       "role": "goal",
       "reviewMode": "human",
       "schemas": 36,
@@ -94,7 +95,7 @@
       ]
     },
     {
-      "version": "91ebf597d98532c9cf26da9e80e4828f019428cf",
+      "version": "cd8595f",
       "role": "automatic",
       "reviewMode": "human",
       "schemas": 7,
@@ -111,7 +112,7 @@
       ]
     },
     {
-      "version": "91ebf597d98532c9cf26da9e80e4828f019428cf",
+      "version": "cd8595f",
       "role": "dialogue",
       "reviewMode": "manager",
       "schemas": 38,
@@ -159,7 +160,7 @@
       ]
     },
     {
-      "version": "91ebf597d98532c9cf26da9e80e4828f019428cf",
+      "version": "cd8595f",
       "role": "goal",
       "reviewMode": "manager",
       "schemas": 38,
@@ -207,7 +208,7 @@
       ]
     },
     {
-      "version": "91ebf597d98532c9cf26da9e80e4828f019428cf",
+      "version": "cd8595f",
       "role": "automatic",
       "reviewMode": "manager",
       "schemas": 9,
@@ -226,7 +227,7 @@
       ]
     },
     {
-      "version": "91ebf597d98532c9cf26da9e80e4828f019428cf",
+      "version": "cd8595f",
       "role": "dialogue",
       "reviewMode": "reviewer",
       "schemas": 37,
@@ -273,7 +274,7 @@
       ]
     },
     {
-      "version": "91ebf597d98532c9cf26da9e80e4828f019428cf",
+      "version": "cd8595f",
       "role": "goal",
       "reviewMode": "reviewer",
       "schemas": 37,
@@ -320,7 +321,7 @@
       ]
     },
     {
-      "version": "91ebf597d98532c9cf26da9e80e4828f019428cf",
+      "version": "cd8595f",
       "role": "automatic",
       "reviewMode": "reviewer",
       "schemas": 11,
@@ -345,8 +346,8 @@
       "role": "dialogue",
       "reviewMode": "human",
       "schemas": 33,
-      "characters": 25995,
-      "utf8Bytes": 27693,
+      "characters": 25945,
+      "utf8Bytes": 27643,
       "names": [
         "board_list",
         "task_show",
@@ -388,8 +389,8 @@
       "role": "goal",
       "reviewMode": "human",
       "schemas": 33,
-      "characters": 25922,
-      "utf8Bytes": 27620,
+      "characters": 25872,
+      "utf8Bytes": 27570,
       "names": [
         "board_list",
         "task_show",
@@ -448,8 +449,8 @@
       "role": "dialogue",
       "reviewMode": "manager",
       "schemas": 35,
-      "characters": 25161,
-      "utf8Bytes": 26859,
+      "characters": 25111,
+      "utf8Bytes": 26809,
       "names": [
         "board_list",
         "task_show",
@@ -493,8 +494,8 @@
       "role": "goal",
       "reviewMode": "manager",
       "schemas": 35,
-      "characters": 25088,
-      "utf8Bytes": 26786,
+      "characters": 25038,
+      "utf8Bytes": 26736,
       "names": [
         "board_list",
         "task_show",
@@ -557,8 +558,8 @@
       "role": "dialogue",
       "reviewMode": "reviewer",
       "schemas": 34,
-      "characters": 25162,
-      "utf8Bytes": 26860,
+      "characters": 25112,
+      "utf8Bytes": 26810,
       "names": [
         "board_list",
         "task_show",
@@ -601,8 +602,8 @@
       "role": "goal",
       "reviewMode": "reviewer",
       "schemas": 34,
-      "characters": 25089,
-      "utf8Bytes": 26787,
+      "characters": 25039,
+      "utf8Bytes": 26737,
       "names": [
         "board_list",
         "task_show",
@@ -662,7 +663,7 @@
       ]
     },
     {
-      "version": "91ebf597d98532c9cf26da9e80e4828f019428cf",
+      "version": "cd8595f",
       "role": "reviewer",
       "reviewMode": "n/a",
       "schemas": 5,
@@ -680,7 +681,7 @@
       "names": []
     },
     {
-      "version": "91ebf597d98532c9cf26da9e80e4828f019428cf",
+      "version": "cd8595f",
       "role": "executor",
       "reviewMode": "n/a",
       "schemas": 3,
