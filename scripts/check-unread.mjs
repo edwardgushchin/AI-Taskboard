@@ -1,5 +1,5 @@
 // Real Chromium checks for the chat renderer, without opening a board or contacting Codex.
-// Optional: --artifacts <screenshot directory>; --baseline reproduces the retry failure at HEAD.
+// Optional: --artifacts <screenshot directory>; --baseline <revision> reproduces the retry failure at that revision.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -18,7 +18,7 @@ mkdirSync(profile);
 app.setPath("userData", profile);
 app.disableHardwareAcceleration();
 const read = name => process.argv.includes("--baseline") && ["chat.js", "renderer.js"].includes(name)
-  ? spawnSync("git", ["show", "HEAD:src/desktop/" + name], { cwd: root, encoding: "utf8", windowsHide: true }).stdout
+  ? spawnSync("git", ["show", (option("--baseline") ?? "HEAD") + ":src/desktop/" + name], { cwd: root, encoding: "utf8", windowsHide: true }).stdout
   : readFileSync(join(root, "src", "desktop", name), "utf8");
 const require = createRequire(import.meta.url);
 let window;
