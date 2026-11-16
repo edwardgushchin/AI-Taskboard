@@ -751,7 +751,15 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .chat-text :is(pre, code) { background: var(--lane); border-radius: 4px; }
 .chat-text code { padding: 1px 4px; }
 .chat-task-reference, .chat-version { white-space: nowrap; }
-.chat-task-reference > .icon, .chat-version > .icon { font-size: 1em; margin-inline-end: .25em; }
+.chat-task-reference > .icon, .chat-version > .icon {
+  width: 1em; height: 1em; font-size: 1em; vertical-align: -.125em; margin-inline-end: .25em;
+}
+/* A single underline includes the inline-block Codicon and its gap. */
+.chat-text .chat-task-reference {
+  text-decoration: none; border-block-end: 1px solid transparent;
+  transition: border-color var(--hover-time) ease;
+}
+.chat-text .chat-task-reference:is(:hover, :focus-visible) { border-block-end-color: currentColor; }
 .chat-text pre { max-width: 100%; padding: 8px; overflow: auto; margin-block-end: 0; }
 .chat-text pre code { padding: 0; }
 .chat-code-block { min-width: 0; border-radius: 4px; background: var(--lane); }
