@@ -39,13 +39,21 @@ function githubCli(project: string) {
 }
 
 export function githubApi(project: string) {
+  return githubRequests(project).request;
+}
+
+export function githubRequests(project: string) {
   const { call, env } = githubCli(project);
   const identityEndpoint = "user";
 
-  async function request(endpoint: string, flags: string[] = [], failureCode = "GITHUB_READ_FAILED"): Promise<unknown> {
+  function request(endpoint: string, flags: string[] = [], failureCode = "GITHUB_READ_FAILED"): Promise<unknown> {
+    return read(["api", "--hostname", host, ...flags, endpoint], JSON.parse, failureCode, endpoint === identityEndpoint);
+  }
+
+  async function read<T>(args: string[], parse: (stdout: string) => T, failureCode: string, identity = false): Promise<T> {
     try {
-      const { stdout } = await call(["api", "--hostname", host, ...flags, endpoint]);
-      return JSON.parse(stdout);
+      const { stdout } = await call(args);
+      return parse(stdout);
     } catch (error) {
       // Command output can contain account data and URLs. Return only known error categories.
       const failure = error as { code?: string; stdout?: string; stderr?: string; killed?: boolean };
@@ -81,16 +89,24 @@ export function githubApi(project: string) {
       if (status === "403" && /scope|resource not accessible|saml|single.sign.on|\bsso\b/i.test(message)) {
         throw new TaskboardError("GITHUB_AUTH_SCOPE", "GitHub denied the request because of credential permissions or organization authorization.");
       }
-      if (status === "404" && endpoint !== identityEndpoint) {
+      if (status === "404" && !identity) {
         await request(identityEndpoint);
         throw new TaskboardError("GITHUB_RESOURCE_ACCESS", "The GitHub login works, but the requested resource is missing or is not accessible to that account.");
       }
       if (status === "403") throw new TaskboardError("GITHUB_RESOURCE_ACCESS", "GitHub denied access to the requested resource.");
+      if (failure.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+        throw new TaskboardError(failureCode, "GitHub CLI returned more data than the board can read.");
+      }
       throw new TaskboardError(failureCode, failure.killed
         ? "GitHub CLI did not finish in time."
         : "GitHub CLI could not complete the request. Check the host's connection to GitHub.");
     }
   }
 
-  return request;
+  return {
+    request,
+    failedLog: (repository: string, runId: number) => read(
+      ["run", "view", String(runId), "--repo", host + "/" + repository, "--log-failed"],
+      stdout => stdout, "GITHUB_RUN_LOG_FAILED"),
+  };
 }

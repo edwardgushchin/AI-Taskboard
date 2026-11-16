@@ -37,7 +37,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
     basename, extname, join, performance, projectLabels, AbortController, subscriptions: new Map(),
     reserveAgent: slots.acquire,
     boardRequests: new Map(), boardWorkRequests: new Map(), boardUnread: () => [], projectIdentity: (path: string) => path,
-    app: { getPath: () => "profile" },
+    app: { getPath: () => "profile" }, managerFullAccess: () => false,
     lang: (english: string) => english,
     tmpdir: () => "scratch",
     mkdtemp: async () => "scratch/chat",

@@ -1,6 +1,7 @@
 import { providerActions } from "../src/desktop/provider-tools.ts";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import type { SpawnOptions } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
@@ -19,6 +20,7 @@ import { runActivity, runLog } from "../src/desktop/run-activity.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { managerCliContext } from "../src/desktop/manager-cli.ts";
 import { managerFullAccess } from "../src/desktop/codex.ts";
+import { githubReadTool } from "../src/desktop/github-read.ts";
 
 const source = readFileSync(new URL("../src/desktop/codex-chat.ts", import.meta.url), "utf8")
   .replace(/^import[\s\S]*?;\r?\n/gm, "").replace(/^export /gm, "");
@@ -198,13 +200,32 @@ test("discussion steering and interruption share the streaming connection, inclu
   const script = join(directory, "provider.cjs");
   writeFileSync(script, `
     const send = value => console.log(JSON.stringify(value));
-    require('node:readline').createInterface({ input: process.stdin }).on('line', line => {
+    const assert = require('node:assert/strict');
+    const url = process.argv.find(value => value.startsWith('mcp_servers={ai_taskboard=')).match(/http[^"]+/)[0];
+    const invoke = async (method, params) => {
+      const response = await fetch(url, { method: 'POST',
+        headers: { authorization: 'Bearer ' + process.env.AI_TASKBOARD_MCP_TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
+      return response.json();
+    };
+    require('node:readline').createInterface({ input: process.stdin }).on('line', async line => {
       const { id, method, params } = JSON.parse(line);
       if (id === undefined || !method) return;
       let result = {};
       if (method === 'model/list') result = { data: [{ model: 'test', defaultReasoningEffort: 'low', supportedReasoningEfforts: [] }], nextCursor: null };
-      if (method === 'thread/start') result = { thread: { id: 'thread' } };
-      if (method === 'turn/start') result = { turn: { id: 'turn', status: 'inProgress' } };
+      if (method === 'thread/start') {
+        assert.equal(params.sandbox, 'read-only');
+        result = { thread: { id: 'thread' } };
+      }
+      if (method === 'turn/start') {
+        const { result: { tools } } = await invoke('tools/list');
+        assert.deepEqual(tools.map(tool => tool.name).sort(), ['github_read', 'worklog_record']);
+        const github = await invoke('tools/call', { name: 'github_read', arguments: { view: 'run-failed-log', runId: 43816168554 } });
+        assert.equal(JSON.parse(github.result.content[0].text).data.log, 'Dependency resolution failed');
+        const write = await invoke('tools/call', { name: 'github_set_milestone_due', arguments: {} });
+        assert.equal(write.error.code, -32601);
+        result = { turn: { id: 'turn', status: 'inProgress' } };
+      }
       if (method === 'turn/steer') {
         if (params.expectedTurnId !== 'turn') throw new Error('Wrong turn');
         if (params.input[0].text === 'reject') { send({ id, error: { message: 'No active turn' } }); return; }
@@ -216,7 +237,17 @@ test("discussion steering and interruption share the streaming connection, inclu
     });
   `);
   const runtime = runInNewContext(stripTypeScriptTypes(source) + "\nreplyToTask", {
-    spawn, codexRpc, turnControl, CodexTokenUsage, withBoardMcp, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
+    spawn: (command: string, args: string[], options: SpawnOptions) => {
+      const child = spawn(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] });
+      child.stderr.pipe(process.stderr);
+      return child;
+    },
+    codexRpc, turnControl, CodexTokenUsage, withBoardMcp, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
+    githubReadTool, readBoardGitHub: async (project: string, args: unknown) => {
+      assert.equal(project, directory);
+      assert.deepEqual(args, { view: "run-failed-log", runId: 43816168554 });
+      return { ok: true, data: { log: "Dependency resolution failed" } };
+    },
     process, setTimeout, clearTimeout,
     configuredCodex: async () => ({ path: process.execPath, args: [script] }),
     chatTools: [], cliFailure: () => ({ ok: false }), saveChatImages: async () => [],

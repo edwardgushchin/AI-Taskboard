@@ -11,6 +11,7 @@ import { goalTaskWaitSeconds } from "./board-actions.ts";
 import { boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "./board-agent-hooks.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
 import { callCli, cliFailure } from "./cli.ts";
+import { githubReadTool, readBoardGitHub } from "./github-read.ts";
 import { providerActions } from "./provider-tools.ts";
 import { saveChatImages } from "./chat-images.ts";
 import type { ChatImage } from "./chat-images.ts";
@@ -246,11 +247,13 @@ export function replyToTask(
       "For each change quote the exact authorizing request from latestUserMessage.text. Questions about an action do not authorize it.",
       "The user handles task status and acceptance on the board. If an edit would change the status, propose the wording in chat for the user to apply on the board.",
       "Report actual results and failures. On a retry do not repeat a change already recorded.",
+      "Use github_read for GitHub checks, including run-failed-log for Actions logs. The board uses its host login. Try the tool before asking the user to copy a log.",
       "Read explicitly attached files when relevant. Do not edit project files or run project tasks.",
     ].join(" ")),
     onCommentary, onTokenUsage, onControl, signal, imageDirectory, imageLimit,
   };
-  return withBoardMcp([worklogTool], (_name, args) => worklog.submit(args), (config, env) =>
+  return withBoardMcp([worklogTool, githubReadTool], async (name, args) => name === githubReadTool.name
+    ? worklog.remind(await readBoardGitHub(project, args)) : worklog.submit(args), (config, env) =>
     reply(profile, project, prompt, images, runAction, { ...options, worklog, mcp: { config, env } }));
 }
 

@@ -393,6 +393,11 @@ test("GitHub read uses fixed host requests and distinguishes credentials from re
         const source = ['keyring', 'unconfigured'].includes(mode) ? '' : 'keyring';
         return { stdout: JSON.stringify([{ configured: mode !== 'unconfigured', tokenSource: source }]) };
       }
+      if (args[0] === 'run') {
+        assert.deepEqual(args, ['run', 'view', '43816168554', '--repo', 'github.com/owner/example', '--log-failed']);
+        if (mode === 'hidden') fail('gh: Not Found (HTTP 404)');
+        return { stdout: 'token=fixture-output\\n' + 'x'.repeat(16_000) };
+      }
       assert.deepEqual(args.slice(0, 3), ['api', '--hostname', 'github.com']);
       assert.equal(args.length, 4);
       if (args[3] === 'user') {
@@ -428,6 +433,14 @@ test("GitHub read uses fixed host requests and distinguishes credentials from re
   assert.deepEqual(read({ view: "repository" }, "success", worktree).data,
     { repository: "Owner/Example", defaultBranch: "main", private: true });
   assert.equal(read({ view: "repository", endpoint: "user/emails" }).error.code, "INVALID_INPUT");
+  const runId = 43816168554;
+  const latest = read({ view: "run-failed-log", runId }, "success", worktree).data;
+  assert.deepEqual(latest, { repository: "owner/example", runId, log: "x".repeat(16_000), nextBefore: 17 });
+  assert.deepEqual(read({ view: "run-failed-log", runId, before: latest.nextBefore }).data,
+    { repository: "owner/example", runId, log: "token=[redacted]\n" });
+  assert.equal(read({ view: "run-failed-log", runId, repository: "other/repo" }).error.code, "INVALID_INPUT");
+  assert.equal(read({ view: "run-failed-log", runId: "--help" }).error.code, "INVALID_INPUT");
+  assert.equal(read({ view: "run-failed-log", runId }, "hidden").error.code, "GITHUB_RESOURCE_ACCESS");
   assert.equal(read({ view: "account" }, "keyring").error.code, "GITHUB_AUTH_STORAGE");
   assert.equal(read({ view: "account" }, "unconfigured").error.code, "GITHUB_AUTH_REQUIRED");
   assert.equal(read({ view: "account" }, "expired").error.code, "GITHUB_AUTH_REJECTED");

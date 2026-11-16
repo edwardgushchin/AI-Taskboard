@@ -5,7 +5,8 @@ import { githubRepositoryPattern, member, number, object, TaskboardError, text }
 import type { BoardLocation } from "./storage.ts";
 import { onBoard } from "./storage.ts";
 import { requireNoGitOperation } from "./worktree.ts";
-import { githubApi } from "./github-cli.ts";
+import { githubApi, githubRequests } from "./github-cli.ts";
+import { redactSecrets } from "./redact.ts";
 
 const execute = promisify(execFile);
 const commitId = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -47,9 +48,10 @@ async function listGitHubMilestones(request: ReturnType<typeof githubApi>, repos
 }
 
 export async function readGitHub(location: BoardLocation, input: Record<string, unknown>) {
-  const view = member(input.view, ["account", "repository", "milestone"], "GitHub view");
-  if (Object.keys(input).some(key => key !== "view" && !(view === "milestone" && key === "number"))) {
-    throw new TaskboardError("INVALID_INPUT", "Use view and, for a milestone, its number.");
+  const view = member(input.view, ["account", "repository", "milestone", "run-failed-log"], "GitHub view");
+  const fieldsByView: Record<typeof view, string[]> = { account: [], repository: [], milestone: ["number"], "run-failed-log": ["runId", "before"] };
+  if (Object.keys(input).some(key => key !== "view" && !fieldsByView[view].includes(key))) {
+    throw new TaskboardError("INVALID_INPUT", "Use view with its supported arguments.");
   }
   if (view === "account") {
     const account = object(await githubApi(location.root)("user"));
@@ -60,6 +62,14 @@ export async function readGitHub(location: BoardLocation, input: Record<string, 
   if (view === "milestone") {
     const milestoneNumber = number(input.number, "milestone number");
     return readGitHubMilestone(githubApi(location.root), repository, milestoneNumber);
+  }
+  if (view === "run-failed-log") {
+    const runId = number(input.runId, "workflow run ID");
+    const before = input.before === undefined ? undefined : number(input.before, "before");
+    const output = redactSecrets(await githubRequests(location.root).failedLog(repository, runId));
+    const end = Math.min(before ?? output.length, output.length);
+    const start = Math.max(0, end - 16_000);
+    return { repository, runId, log: output.slice(start, end), ...(start ? { nextBefore: start } : {}) };
   }
   const fields = object(await githubApi(location.root)("repos/" + repository));
   if (typeof fields.private !== "boolean") throw new TaskboardError("GITHUB_READ_FAILED", "GitHub returned invalid repository metadata.");
