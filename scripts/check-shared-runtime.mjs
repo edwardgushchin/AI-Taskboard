@@ -90,6 +90,11 @@ if (!process.versions.electron) {
       try { await wait(async () => { latest = await frames(); return latest.every(frame => frame.activeAgents.total === total) && [...await a.ask({action:"dom"}), ...await b.ask({action:"dom"})].every(view => view.count === total); }, "all windows count " + total); }
       catch (error) { console.error(JSON.stringify(latest.map(frame => ({ count: frame.activeAgents, error: frame.error, tasks: frame.board.tasks.map(task => ({id:task.id,status:task.status,blocked:task.blocked})), settings: frame.board.settings })), null, 2)); throw error; }
     };
+    await a.ask({ action: "restoreBoards" });
+    await delay(11000);
+    await expectCount(0);
+    await a.ask({ action: "closeRestored" });
+    record("PASS: restored boards with autoMode off and no goals stay at zero while idle");
     const race = await Promise.all([a.ask({ action: "launch", id: tasks[0] }), b.ask({ action: "launch", id: tasks[1] })]);
     assert.equal(race.filter(result => result.ok).length, 1, JSON.stringify(race));
     const owner = race[0].ok ? a : b, peer = owner === a ? b : a, runningId = race[0].ok ? tasks[0] : tasks[1];
@@ -204,9 +209,8 @@ if (!process.versions.electron) {
   const sourceUrl = new URL("../src/desktop/main.ts", import.meta.url);
   let source = readFileSync(sourceUrl, "utf8").replace('missingCodexThread, startCodexRun', 'missingCodexThread')
     .replace('codexStatus, configuredCodex,', 'codexStatus, configuredCodex as unusedConfiguredCodex,')
-    .replace('replyToBoard, replyToTask', 'replyToBoard as unusedReplyToBoard, replyToTask')
-    .replace('boardSuggestions, chatModels', 'boardSuggestions as unusedBoardSuggestions, chatModels');
-  source = 'const boardSuggestions = async () => []; const configuredCodex = async () => ({}); const startCodexRun = globalThis.runtimeCheckStart; const replyToBoard = async () => ({text: "Isolated manager fixture"});\n' + source;
+    .replace('replyToBoard, replyToTask', 'replyToBoard as unusedReplyToBoard, replyToTask');
+  source = 'const configuredCodex = async () => ({}); const startCodexRun = globalThis.runtimeCheckStart; const replyToBoard = async () => ({text: "Isolated manager fixture"});\n' + source;
   source = source.replaceAll("import.meta.url", JSON.stringify(sourceUrl.href)).replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, sourceUrl).href));
   const entry = join(scratch, name + ".mjs");
   writeFileSync(entry, transformSync(source + "\nglobalThis.sharedCheck = {createWindow,launchTask,agentSlots,reserveAgent,scheduleAgentWork,activeAgents,subscriptions};", { loader: "ts", format: "esm" }).code);
@@ -220,6 +224,8 @@ if (!process.versions.electron) {
       const qa = globalThis.sharedCheck; let data;
       const board = command.other ? other : project, key = command.role + (command.other ? ":other" : "");
       if (command.action === "ready") data = true;
+      if (command.action === "restoreBoards") { const state = qa.createWindow([project, other]); await state.ready; globalThis.restoredCheckWindow = state.window; data = true; }
+      if (command.action === "closeRestored") { globalThis.restoredCheckWindow.close(); data = true; }
       if (command.action === "newWindow") { const state = qa.createWindow([project]); await state.ready; data = true; }
       if (command.action === "dom") data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript(`({ count: Number(document.querySelector('#status-agents span')?.textContent), waiting: document.body.innerText.includes('Ожидает свободного исполнителя') || document.body.innerText.includes('Waiting for an available executor') })`)));
       if (command.action === "frames") data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript("window.taskboard.bootstrap()")));

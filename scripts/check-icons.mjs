@@ -160,7 +160,6 @@ try {
         window.iconStopCalls = 0;
         api.boardHistory = async () => ({ ok: true, data: { turns: [] } });
         api.boardQueue = async (_project, action) => ({ ok: true, data: action === 'list' ? [] : 'request' });
-        api.boardSuggestions = async () => [];
         api.boardRequest = () => { iconManager.enableStop(); ready.resolve(); return turn.promise; };
         api.stopOrchestrator = async () => { iconStopCalls++; turn.resolve({ ok: true, data: {} }); return { ok: true }; };
         window.iconManager = draftComposer();

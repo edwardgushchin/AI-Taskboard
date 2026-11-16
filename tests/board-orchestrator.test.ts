@@ -293,33 +293,6 @@ function fixture(t: TestContext) {
   };
 }
 
-test("manager suggestions use the requested open board even after the active tab changes", async () => {
-  const suggestionHandler = main.statements.map(node => node.getText(main))
-    .filter(text => /^(?:const suggestions =|ipcMain\.handle\("board:suggestions",)/.test(text)).join("\n");
-  const active = { board: { project: "engine", tasks: [{ title: "Fix TabContainer", status: "ready" }] },
-    window: { webContents: { id: 1 } } };
-  const background = { board: { project: "dispatch", tasks: [{ title: "Route service requests", status: "draft" }] } };
-  const generated: { project: string; snapshot: unknown }[] = [];
-  const handle = runInNewContext(stripTypeScriptTypes(suggestionHandler), {
-    AbortSignal, basename, stateOf: () => active, app: { getPath: () => "profile" }, lang: (en: string) => en,
-    windowStates: new Map([[1, { tabs: [active, background] }]]),
-    ipcMain: { handle: (_name: string, callback: unknown) => callback },
-    boardSuggestions: async (_profile: string, project: string, context: string) => {
-      generated.push({ project, snapshot: JSON.parse(context) });
-      return [project];
-    },
-  });
-  assert.deepEqual(Array.from(await handle({}, "dispatch")), ["dispatch"]);
-  assert.deepEqual(Array.from(await handle({}, "engine")), ["engine"]);
-  assert.deepEqual(Array.from(await handle({}, "dispatch")), ["dispatch"]);
-  assert.deepEqual(Array.from(await handle({}, "unopened")), []);
-  assert.deepEqual(Array.from(await handle({})), []);
-  assert.deepEqual(generated, [
-    { project: "dispatch", snapshot: background.board },
-    { project: "engine", snapshot: active.board },
-  ]);
-});
-
 test("manager can set and read the board tag palette in HEX", async t => {
   const f = fixture(t);
   assert.equal((await f.cli(["init"])).ok, true);

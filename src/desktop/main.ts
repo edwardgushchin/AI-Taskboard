@@ -13,7 +13,7 @@ import { createRequire } from "node:module";
 import { callCli, cliChild, cliFailure } from "./cli.ts";
 import { githubReadTool, readBoardGitHub } from "./github-read.ts";
 import { codexStatus, configuredCodex, executorFullAccess, isManagerAccess, managerAccess, setCodexExecutable, setCodexWindowsSandbox, setTaskExecutorAccess } from "./codex.ts";
-import { boardSuggestions, chatModels, readBoardHistory, readLastTaskTurn, readTaskRunHistory, replyToBoard, replyToTask, reviewWithCodex, updateBoardGoal } from "./codex-chat.ts";
+import { chatModels, readBoardHistory, readLastTaskTurn, readTaskRunHistory, replyToBoard, replyToTask, reviewWithCodex, updateBoardGoal } from "./codex-chat.ts";
 import type { BoardActivity, BoardGoal, BoardGoalAction } from "./codex-chat.ts";
 import { autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools } from "./board-actions.ts";
 import type { BoardChange, ReviewedSubmission, ReviewReport } from "./board-actions.ts";
@@ -1269,30 +1269,6 @@ ipcMain.handle("board:reviewerChat", (event, id: unknown) => {
   } catch (error) {
     return cliFailure("REVIEWER_CHAT_FAILED", (error as Error).message);
   }
-});
-
-const suggestions = new Map<string, Promise<string[]>>();
-ipcMain.handle("board:suggestions", async (event, project: unknown) => {
-  const state = stateOf(event);
-  if (typeof project !== "string") return [];
-  const board = state.board?.project === project ? state.board :
-    windowStates.get(state.window.webContents.id)?.tabs.find(tab => tab.board?.project === project)?.board;
-  if (!board) return [];
-  const language = lang("English", "Russian");
-  const key = board.project + "\0" + language;
-  let pending = suggestions.get(key);
-  if (!pending) {
-    const snapshot = JSON.stringify({
-      project: basename(board.project),
-      tasks: board.tasks.slice(-100).map(({ title, status }) => ({ title: title.slice(0, 140), status })),
-    });
-    pending = boardSuggestions(app.getPath("userData"), board.project, snapshot, language, AbortSignal.timeout(60_000))
-      .catch(() => []);
-    suggestions.set(key, pending);
-  }
-  const result = await pending;
-  if (!result.length) suggestions.delete(key);
-  return result;
 });
 
 ipcMain.handle("board:stopOrchestrator", async event => {
