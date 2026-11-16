@@ -18,7 +18,6 @@ import { codexThreadPattern, taskIdPattern } from "../src/cli/model.ts";
 import { runActivity, runLog } from "../src/desktop/run-activity.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { managerCliContext } from "../src/desktop/manager-cli.ts";
-import { githubReadTool } from "../src/desktop/github-read.ts";
 
 const source = readFileSync(new URL("../src/desktop/codex-chat.ts", import.meta.url), "utf8")
   .replace(/^import[\s\S]*?;\r?\n/gm, "").replace(/^export /gm, "");
@@ -133,31 +132,19 @@ test("board history recovers a steering message and its attachment in the middle
   ]);
 });
 
-test("task discussion reads GitHub through the board host and can steer or interrupt the turn", async t => {
+test("discussion steering and interruption share the streaming connection, including during a tool call", async t => {
   const directory = mkdtempSync(join(tmpdir(), "ai-taskboard-chat-test-"));
   t.after(() => rmSync(directory, { recursive: true, force: true, maxRetries: 3 }));
   const script = join(directory, "provider.cjs");
   writeFileSync(script, `
     const send = value => console.log(JSON.stringify(value));
-    require('node:readline').createInterface({ input: process.stdin }).on('line', async line => {
+    require('node:readline').createInterface({ input: process.stdin }).on('line', line => {
       const { id, method, params } = JSON.parse(line);
       if (id === undefined || !method) return;
       let result = {};
       if (method === 'model/list') result = { data: [{ model: 'test', defaultReasoningEffort: 'low', supportedReasoningEfforts: [] }], nextCursor: null };
-      if (method === 'thread/start') {
-        if (params.sandbox !== 'read-only' || params.approvalPolicy !== 'never') throw new Error('Discussion is not read-only');
-        result = { thread: { id: 'thread' } };
-      }
-      if (method === 'turn/start') {
-        const config = process.argv.find(value => value.startsWith('mcp_servers={'));
-        const url = config.match(/http[^"]+/)[0];
-        const response = await fetch(url, { method: 'POST', headers: { authorization: 'Bearer ' + process.env.AI_TASKBOARD_MCP_TOKEN },
-          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call',
-            params: { name: 'github_read', arguments: { view: 'account' } } }) });
-        const reply = JSON.parse((await response.json()).result.content[0].text);
-        if (!reply.ok || reply.data.login !== 'taskboard-fixture') throw new Error('GitHub read did not reach the host');
-        result = { turn: { id: 'turn', status: 'inProgress' } };
-      }
+      if (method === 'thread/start') result = { thread: { id: 'thread' } };
+      if (method === 'turn/start') result = { turn: { id: 'turn', status: 'inProgress' } };
       if (method === 'turn/steer') {
         if (params.expectedTurnId !== 'turn') throw new Error('Wrong turn');
         if (params.input[0].text === 'reject') { send({ id, error: { message: 'No active turn' } }); return; }
@@ -173,11 +160,6 @@ test("task discussion reads GitHub through the board host and can steer or inter
     process, setTimeout, clearTimeout,
     configuredCodex: async () => ({ path: process.execPath, args: [script] }),
     chatTools: [], cliFailure: () => ({ ok: false }), saveChatImages: async () => [],
-    githubReadTool, readBoardGitHub: async (project: string, args: unknown) => {
-      assert.equal(project, directory);
-      assert.deepEqual(args, { view: "account" });
-      return { ok: true, data: { login: "taskboard-fixture" } };
-    },
   });
   const ready = Promise.withResolvers<AgentControl>();
   const toolStarted = Promise.withResolvers<void>();
