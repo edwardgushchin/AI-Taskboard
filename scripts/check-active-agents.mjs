@@ -6,6 +6,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { electronCheck } from "./electron-check.mjs";
+import { saveManagerHistory } from "../src/desktop/manager-history.ts";
 
 const { scratch, artifacts } = electronCheck(import.meta.url, "active-agents", 120_000);
 void (async () => {
@@ -45,7 +46,8 @@ try {
     mkdirSync(board);
     cli(board, ["init"], { git: false });
     cli(board, ["settings"], { name: "Shared board" });
-    writeFileSync(join(board, ".tasks", "manager-unread.json"), JSON.stringify(["qa-unread"]));
+    saveManagerHistory(board, Date.now(), "11111111-1111-4111-8111-111111111111", { lane: "notice",
+      items: [{ id: "qa-unread", type: "agentMessage", title: "", text: "QA notice", phase: "final_answer", status: "completed" }] });
   }
   const sourceUrl = new URL("../src/desktop/main.ts", import.meta.url);
   const source = ('import { trackActiveRun } from "./active-runs.ts";\n' + readFileSync(sourceUrl, "utf8")).replaceAll("import.meta.url", JSON.stringify(sourceUrl.href))
@@ -63,6 +65,7 @@ try {
     await evaluate("window.taskboard.menuAction('open-project')");
     await wait(() => evaluate("window.taskboard.bootstrap().then(f => !f.loading && Boolean(f.board))"));
   };
+  await evaluate("window.taskboard.setLanguage('ru')");
   await open(boards[0]);
   await open(boards[1]);
   const second = globalThis.agentCheck.createWindow([boards[0]]).window;
@@ -100,6 +103,12 @@ try {
       accent: getComputedStyle(el).getPropertyValue('--accent').trim(),
       pointer: stripe.pointerEvents, selection: getComputedStyle(el).borderInlineStartColor };
   })`);
+  await evaluate("window.taskboard.setLanguage('en')");
+  await wait(async () => (await tabState())[0].description.includes('Manager 1'));
+  assert.match((await tabState())[0].description, /Manager 1.*Reviewer 1/);
+  assert.equal((await tabState())[0].active, true);
+  await evaluate("window.taskboard.setLanguage('ru')");
+  await wait(async () => (await tabState())[0].description.includes('Менеджер 1'));
   const matrix = [];
   window.webContents.debugger.attach('1.3');
   for (const theme of ['light', 'dark']) {

@@ -1,3 +1,4 @@
+import { responseLanguageInstructions } from "./board-agent-hooks.ts";
 import { trackActiveRun, trackProvider, claimDiscussion } from "./active-runs.ts";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
@@ -598,7 +599,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
       }),
       cwd: project, model: modelId, approvalPolicy,
       ...(research ? { approvalsReviewer } : {}),
-      developerInstructions: researchInstructions ? options.instructions + "\n\n" + researchInstructions : options.instructions,
+      developerInstructions: [options.instructions, researchInstructions, responseLanguageInstructions()].filter(Boolean).join("\n\n"),
       ...(research ? { permissions: permissionProfile } : { sandbox: "read-only" }),
       ...(session && effort ? { config: { model_reasoning_effort: effort } } : {}),
     };

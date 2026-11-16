@@ -1,3 +1,4 @@
+import localization from "../src/desktop/localization.cjs";
 import { trackActiveRun, trackProvider, claimDiscussion } from "../src/desktop/active-runs.ts";
 import { providerActions } from "../src/desktop/provider-tools.ts";
 import assert from "node:assert/strict";
@@ -11,7 +12,7 @@ import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import { withBoardMcp } from "../src/desktop/board-mcp.ts";
 import { goalTaskWaitSeconds } from "../src/desktop/board-actions.ts";
-import { boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "../src/desktop/board-agent-hooks.ts";
+import { responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "../src/desktop/board-agent-hooks.ts";
 import { codexRpc, turnControl } from "../src/desktop/codex-rpc.ts";
 import type { AgentControl, RpcMessage } from "../src/desktop/codex-rpc.ts";
 import type { BoardGoal, BoardGoalAction } from "../src/desktop/codex-chat.ts";
@@ -257,7 +258,7 @@ test("discussion steering and interruption share the streaming connection, inclu
       child.stderr.pipe(process.stderr);
       return child;
     },
-    trackActiveRun, trackProvider, claimDiscussion, codexRpc, turnControl, CodexTokenUsage, withBoardMcp, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
+    trackActiveRun, trackProvider, claimDiscussion, codexRpc, turnControl, CodexTokenUsage, withBoardMcp, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
     githubReadTool, readBoardGitHub: async (project: string, args: unknown) => {
       assert.equal(project, directory);
       assert.deepEqual(args, { view: "run-failed-log", runId: 43816168554 });
@@ -428,7 +429,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
     spawn, turnControl, CodexTokenUsage, codexThreadPattern, Error, process, withBoardMcp, goalTaskWaitSeconds,
     managerCliContext, probeManagerCli: async () => providerMode === "cli-ready"
       ? { gitOptions: ["--no-optional-locks", "-c", "core.fsmonitor=false"] } : {},
-    boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
+    responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
     trackActiveRun, trackProvider, claimDiscussion, codexRpc: (child: Parameters<typeof codexRpc>[0], notify: Parameters<typeof codexRpc>[1], onRequest: Parameters<typeof codexRpc>[2]) =>
       codexRpc(child, (message: RpcMessage) => {
         elapsed += (message.params as { elapsed?: number })?.elapsed ?? 0;
@@ -615,11 +616,14 @@ test("board chat keeps a goal streaming across turns and times out only after in
 
   let savedThread: string | undefined;
   providerMode = "cli-ready";
+  localization.select("ja");
+  t.after(() => localization.select("en"));
   await runtime("profile", directory, "Start", [], () => ({ ok: true }), [], "", controller.signal, {
     ...session, id: undefined, goal: undefined, save: (id: string) => { savedThread = id; },
   });
   const newRequests: { method: string; params: Record<string, unknown> }[] = JSON.parse(readFileSync(captured, "utf8"));
   const start = newRequests.find(({ method }) => method === "thread/start");
+  assert.match(start?.params.developerInstructions as string, /Default response language: 日本語 \(ja\)/);
   assert.equal(savedThread, threadId);
   assert.ok(flags().includes("network_proxy"));
   assert.equal(start?.params.cwd, directory);
@@ -631,11 +635,16 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.match(start?.params.developerInstructions as string, /Board settings, Project manager, Access mode/);
   assert.equal(Object.hasOwn(start!.params, "projectId"), false);
   assert.equal(newRequests.some(({ method }) => method.startsWith("project/")), false);
-  const nativeResume = await runtime("profile", directory, "Continue", [], () => ({ ok: true }), [], "", controller.signal, {
+  localization.select("pl");
+  const nativeResume = await runtime("profile", directory, "Reply in Spanish: Continue", [], () => ({ ok: true }), [], "", controller.signal, {
     ...session, id: savedThread, goal: undefined,
   });
   assert.equal(nativeResume.text, "First turn\n\nDone");
   const nativeRequests: typeof newRequests = JSON.parse(readFileSync(captured, "utf8"));
+  const languageRules = nativeRequests.find(({method}) => method === "thread/resume")?.params.developerInstructions as string;
+  assert.match(languageRules, /Default response language: Polski \(pl\)/);
+  assert.match(languageRules, /explicit language requested by the user/);
+  assert.equal((nativeRequests.find(({method}) => method === "turn/start")?.params.input as any[])[0].text, "Reply in Spanish: Continue");
   assert.match(nativeRequests.find(({ method }) => method === "thread/resume")?.params.developerInstructions as string,
     /git --no-pager --literal-pathspecs/);
   assert.equal(nativeRequests.find(({ method }) => method === "thread/resume")?.params.approvalsReviewer, "auto_review");

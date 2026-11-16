@@ -1,3 +1,4 @@
+import localization from "../src/desktop/localization.cjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -18,7 +19,7 @@ class Element {
   tag: string;
   text: string;
   className: string;
-  constructor(tag: string, text = "", className = "") { this.tag = tag; this.text = text; this.className = className; }
+  constructor(tag: string, text = "", className = "") { this.tag = tag; this.text = typeof text === "function" ? (text as () => string)() : text; this.className = className; }
   append(...children: Element[]) { this.children.push(...children); }
   replaceChildren(...children: Element[]) { this.children = children; }
   querySelectorAll(selector: string): Element[] {
@@ -35,7 +36,7 @@ const { readableRunCommand, renderRunActivity } = runInNewContext(source.slice(0
   element: (tag: string, text?: string, className?: string) => new Element(tag, text, className),
   document: { activeElement: { matches: () => false } }, frame: { russian: true }, taskInSheet: undefined,
   icon: () => new Element("svg"),
-  language: (_english: string, russian: string) => russian,
+  t: (key: string, parameters = {}) => localization.text(key, parameters, "ru"), localization, bindLocalized: (node: any, property: string, render: () => string, attribute = false) => { const value = render(); if (attribute) node.setAttribute(property, value); else node[property] = value; return value; },
   chatText: (text: string) => new Element("div", text),
 }) as {
   readableRunCommand: (command: string) => string;

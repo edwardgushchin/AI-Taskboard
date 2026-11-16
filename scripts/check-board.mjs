@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { electronCheck } from "./electron-check.mjs";
+import { electronCheck, localizationFixture } from "./electron-check.mjs";
 
 const script = fileURLToPath(import.meta.url);
 const root = resolve(dirname(script), "..");
@@ -62,7 +62,7 @@ app.whenReady().then(async () => {
     window.previewCalls = 0;
     const savedQueue = new Map();
     window.taskboard = {
-      subscribe(callback) { window.pushBoard = callback; }, onChatUpdate(callback) { window.pushChat = callback; }, onTheme() {},
+      subscribe(callback) { window.pushBoard = next => { window.taskboardLocalization.select(next.russian === false ? 'en' : 'ru'); callback({...next, localization: window.taskboardLocalization.state()}); }; }, onChatUpdate(callback) { window.pushChat = callback; }, onTheme() {},
       boardHistory: async (_project, _cursor, view) => ({ ok: true, data: view === 'live'
         ? { work: [], chat: [] } : { turns: [], model: "gpt-board-test" } }),
       agentLimits: async () => ({ ok: true, data: { executor: 3, manager: 1, reviewer: 1 } }),
@@ -91,6 +91,7 @@ app.whenReady().then(async () => {
     ${read("source-files.cjs")}
     ${read("markdown.js")}
     ${read("chat.js")}
+    ${localizationFixture()}
     ${read("renderer.js")}
     void 0;
   `);
@@ -137,6 +138,48 @@ app.whenReady().then(async () => {
   await evaluate(`byId('notice-close').click(); void 0`);
   await evaluate(`push(); void 0`);
   await check(`byId('welcome').hidden && !byId('workspace').hidden && byId('app-content').getAttribute('aria-busy') === 'false'`, "a restored board replaces the loading state");
+  if (process.argv.includes("--scroll-only")) {
+    await evaluate(`
+      fixture.board.tasks = Array.from({ length: 40 }, (_, i) => task('S-' + i, 'Scroll task ' + i,
+        { description: Array(80).fill('Long task content.').join('\\n\\n'), criteria: [] }));
+      window.taskboard.command = async (_action, id) => ({ ok: true,
+        data: structuredClone(fixture.board.tasks.find(task => task.id === id)) });
+      push();
+      void 0;
+    `);
+    await evaluate(`(async () => {
+      while (lane('ready').querySelector('.lane-more')) {
+        lane('ready').querySelector('.lane-more').click();
+        await settle();
+      }
+    })()`);
+    for (const close of ['button', 'Escape']) for (const scroll of [false, true]) for (const refresh of [false, true]) {
+      await evaluate(`
+        findCard('S-0').focus();
+        byId('lanes').scrollTop = 400;
+        window.scrollBaseline = byId('lanes').scrollTop;
+        showTask('S-5');
+        waitFor(() => taskInSheet?.id === 'S-5').then(settle);
+      `);
+      await check(`scrollBaseline > 0 && byId('lanes').scrollTop === scrollBaseline`, 'opening retains board scroll');
+      if (scroll) {
+        await evaluate(`body.scrollTop = body.scrollHeight; settle()`);
+        await check(`body.scrollTop > 0 && byId('lanes').scrollTop === scrollBaseline`, 'sheet scroll is independent');
+      }
+      if (refresh) await evaluate(`fixture.board.tasks[6].title += '!'; fixture.board.tasks[6].revision++; push(); settle()`);
+      if (close === 'button') await click('#close-sheet');
+      else {
+        window.webContents.focus();
+        window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+        window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+      }
+      await evaluate(`waitFor(() => !sheet.open).then(settle)`);
+      await check(`byId('lanes').scrollTop === scrollBaseline && document.activeElement === findCard('S-0')`,
+        `close restores focus without scrolling: ${close}, sheet scroll=${scroll}, refresh=${refresh}`);
+    }
+    console.log('Sheet scroll Chromium checks passed: ' + checks + ' (8 combinations)');
+    return;
+  }
   if (process.argv.includes("--auto-only")) {
     await evaluate(`window.taskboard.command = async (action, id, input) => {
       if (action === 'settings') { Object.assign(fixture.board.settings, input); push(); return {ok:true,data:fixture.board.settings}; }

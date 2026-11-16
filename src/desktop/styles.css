@@ -727,15 +727,19 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .chat-review-finding-heading + p { margin-block-start: 0; }
 .chat-coordination :not(pre) > code { font-size: .9em; }
 .chat-digest.button {
-  display: inline-flex; align-items: center; gap: 4px; vertical-align: baseline;
-  min-height: 0; padding: 0 3px; border: 0; border-radius: 4px;
-  color: var(--blue); background: var(--lane); line-height: 1.4; white-space: nowrap;
+  display: inline-flex; align-items: baseline; gap: .3em; vertical-align: baseline;
+  max-width: 100%; min-width: 0; min-height: 0; padding: 0 .2em; border: 0; border-radius: 3px;
+  color: var(--blue); background: transparent; font: inherit; line-height: inherit; white-space: normal;
 }
-.chat-digest.button:hover { color: var(--text); }
-.chat-digest.button > code { padding: 1px 0; background: transparent; }
-.chat-digest.button { font: inherit; }
-.chat-digest.button > code { font-size: inherit; }
-.chat-digest.button > .icon, .chat-code-copy.button > .icon { font-size: 1em; }
+.chat-digest.button:is(:hover, :focus-visible) { color: var(--text); background: color-mix(in srgb, var(--text) 5%, transparent); }
+.chat-text .chat-digest.button > code {
+  min-width: 0; padding: 0; background: transparent; font-size: inherit;
+  white-space: normal; overflow-wrap: anywhere; text-align: start;
+}
+.chat-digest.button > .icon {
+  align-self: flex-start; width: 1em; height: 1lh; font-size: 1em; line-height: inherit;
+}
+.chat-code-copy.button > .icon { font-size: 1em; }
 .chat-text, .chat-action { overflow-wrap: anywhere; line-height: 1.7; }
 /* Codex content typography; see docs/chat-typography.md for the source. */
 .chat-entry:is([data-actor="agent"], .chat-coordination) .chat-text, .chat-run .chat-text, .chat-turn .chat-text {
@@ -763,7 +767,15 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .chat-text :is(pre, code) { background: var(--lane); border-radius: 4px; }
 .chat-text code { padding: 1px 4px; }
 .chat-task-reference, .chat-version { white-space: nowrap; }
-.chat-task-reference > .icon, .chat-version > .icon { font-size: 1em; margin-inline-end: .25em; }
+.chat-task-reference > .icon, .chat-version > .icon {
+  width: 1em; height: 1em; font-size: 1em; vertical-align: -.125em; margin-inline-end: .25em;
+}
+/* A single underline includes the inline-block Codicon and its gap. */
+.chat-text .chat-task-reference {
+  text-decoration: none; border-block-end: 1px solid transparent;
+  transition: border-color var(--hover-time) ease;
+}
+.chat-text .chat-task-reference:is(:hover, :focus-visible) { border-block-end-color: currentColor; }
 .chat-text pre { max-width: 100%; padding: 8px; overflow: auto; margin-block-end: 0; }
 .chat-text pre code { padding: 0; }
 .chat-code-block { min-width: 0; border-radius: 4px; background: var(--lane); }
@@ -960,11 +972,11 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 .status-git { min-width: 0; display: flex; align-items: center; gap: 4px; }
 .status-git span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .status-bar .icon { width: 16px; height: 16px; }
-.status-activity > .button, .status-repository > .button, #status-auto-mode {
+.status-activity > .button, .status-repository > .button, #status-auto-mode, #status-limits {
   flex: none; min-height: 22px; height: 22px; border: 0; border-radius: 3px; padding: 0 4px;
   color: inherit; background: transparent; font: inherit;
 }
-.status-activity > .button:hover:not(:disabled), .status-repository > .button:hover:not(:disabled), #status-auto-mode:hover:not(:disabled) {
+.status-activity > .button:hover:not(:disabled), .status-repository > .button:hover:not(:disabled), #status-auto-mode:hover:not(:disabled), #status-limits:hover:not(:disabled) {
   color: inherit; background: color-mix(in srgb, var(--text) 20%, var(--toolbar));
 }
 .status-repository {
@@ -1049,3 +1061,26 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 #status-agents-tooltip { display: none; position: absolute; bottom: 100%; right: 0; z-index: 100; width: max-content; max-width: calc(100vw - 16px); white-space: pre-wrap; overflow-wrap: anywhere; padding: 8px; background: var(--bg); color: var(--text); border: 1px solid currentColor; border-radius: 4px; }
 #status-agents:hover #status-agents-tooltip, #status-agents:focus #status-agents-tooltip { display: block; }
 #status-agents:focus-visible { outline: 1px solid currentColor; }
+#status-limits { anchor-name: --provider-limits; flex: 0 1 auto; min-width: 36px; max-width: 150px; }
+#status-limits span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#status-limits.quota-low { font-weight: bold; text-decoration: underline dotted; }
+#provider-limits {
+  position: fixed; position-anchor: --provider-limits;
+  inset: auto auto calc(anchor(top) + 8px) clamp(8px, anchor(left), calc(100vw - 398px));
+  margin: 0; width: min(390px, calc(100vw - 16px)); max-height: min(65vh, 500px);
+  overflow: auto; padding: 12px; border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); background: var(--panel); box-shadow: 0 6px 20px #0004;
+  font-size: 13px; line-height: 1.5; opacity: 0; transform: translateY(4px);
+  transition: opacity var(--hover-time) ease, transform var(--hover-time) ease,
+    display var(--hover-time) allow-discrete, overlay var(--hover-time) allow-discrete;
+}
+#provider-limits:popover-open { opacity: 1; transform: translateY(0); }
+@starting-style { #provider-limits:popover-open { opacity: 0; transform: translateY(4px); } }
+#provider-limits section + section { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+#provider-limits h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+#provider-limits p { overflow-wrap: anywhere; }
+#provider-limits .limits-overview { margin-bottom: 12px; color: var(--muted); }
+#provider-limits .limits-window + .limits-window { margin-top: 12px; }
+#provider-limits .limits-reset { margin-top: 4px; color: var(--muted); font-size: 12px; }
+#provider-limits meter { display: block; width: 100%; height: 8px; margin-top: 6px; }
+#provider-limits:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
