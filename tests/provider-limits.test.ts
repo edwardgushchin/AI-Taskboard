@@ -43,3 +43,13 @@ test('explicit absence of windows differs from missing or malformed data',()=>{
  assert.equal(codexLimitState({}),'unknown');
  assert.equal(codexLimitState({rateLimits:{primary:{usedPercent:null},secondary:null}}),'unknown');
 });
+test('window labels use readable durations in Russian and English without plan assumptions',()=>{
+ const label=(globalThis as any).providerLimitWindowLabel;
+ assert.equal(label(10080,'ru-RU'),'Недельный лимит');
+ assert.equal(label(10080,'en-US'),'Weekly limit');
+ assert.match(label(300,'ru-RU'),/5 часов/);
+ assert.match(label(90,'ru-RU'),/90 минут/);
+ assert.match(label(2880,'ru-RU'),/2 дня/);
+ assert.equal(label(undefined,'ru-RU'),'Лимит');
+ assert.equal(codexLimitWindows({rateLimits:{primary:{usedPercent:53,windowDurationMins:10080}}})[0].durationMins,10080);
+});

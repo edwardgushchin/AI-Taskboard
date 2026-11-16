@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { configuredCodex } from "./codex.ts";
 import { codexRpc } from "./codex-rpc.ts";
 
-export interface LimitWindow { name: string; remaining: number; resetsAt?: number }
+export interface LimitWindow { name: string; remaining: number; durationMins?: number; resetsAt?: number }
 export interface ProviderLimits {
   provider: string;
   state: "ready" | "unknown" | "no_windows" | "unsupported" | "auth" | "error" | "stale";
@@ -18,9 +18,9 @@ export function codexLimitWindows(value: any): LimitWindow[] {
     const used = window?.usedPercent;
     if (typeof used !== "number" || !Number.isFinite(used) || used < 0 || used > 100) return [];
     const minutes = window.windowDurationMins;
-    const duration = typeof minutes === "number" && minutes > 0 ? `${minutes} min` : key;
-    return [{ name: `${bucket.limitName || bucket.limitId || "Codex"} · ${duration}`,
+    return [{ name: bucket.limitName || bucket.limitId || "Codex",
       remaining: 100 - used,
+      ...(typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0 ? { durationMins: minutes } : {}),
       ...(typeof window.resetsAt === "number" && Number.isFinite(window.resetsAt) ? { resetsAt: window.resetsAt * 1000 } : {}) }];
   }));
 }
