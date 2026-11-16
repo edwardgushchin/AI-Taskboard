@@ -1143,5 +1143,20 @@
   "activity.file": {
     "one": "{count} fichier",
     "other": "{count} fichiers"
-  }
+  },
+  "limits.label": "Limites",
+  "limits.weekly": "Limite hebdomadaire",
+  "limits.daily": "Limite quotidienne",
+  "limits.duration": "Limite sur {duration}",
+  "limits.window": "Limite",
+  "limits.unknown": "Aucune donnée",
+  "limits.no_windows": "Le fournisseur ne signale aucune période de quota",
+  "limits.unsupported": "Quotas indisponibles pour cette connexion",
+  "limits.auth": "Connexion requise",
+  "limits.error": "Impossible de lire les limites",
+  "limits.stale": "Données périmées ; mise à jour en attente",
+  "limits.low": "Quota bientôt épuisé",
+  "limits.summary": "{count} connectés ; {unavailable} sans données actuelles",
+  "limits.remaining": "{percent}% restant",
+  "limits.reset": "Réinitialisation {time}"
 }

@@ -1143,5 +1143,20 @@
   "activity.file": {
     "one": "{count} archivo",
     "other": "{count} archivos"
-  }
+  },
+  "limits.label": "Límites",
+  "limits.weekly": "Límite semanal",
+  "limits.daily": "Límite diario",
+  "limits.duration": "Límite de {duration}",
+  "limits.window": "Límite",
+  "limits.unknown": "Sin datos",
+  "limits.no_windows": "El proveedor no indica períodos de cuota",
+  "limits.unsupported": "Cuotas no disponibles con esta conexión",
+  "limits.auth": "Inicia sesión",
+  "limits.error": "No se pudieron leer los límites",
+  "limits.stale": "Datos desactualizados; esperando actualización",
+  "limits.low": "Cuota baja",
+  "limits.summary": "{count} conectados; {unavailable} sin datos actuales",
+  "limits.remaining": "queda {percent}%",
+  "limits.reset": "Se restablece {time}"
 }

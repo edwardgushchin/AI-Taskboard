@@ -1143,5 +1143,20 @@
   "activity.file": {
     "one": "{count} Datei",
     "other": "{count} Dateien"
-  }
+  },
+  "limits.label": "Limits",
+  "limits.weekly": "Wochenlimit",
+  "limits.daily": "Tageslimit",
+  "limits.duration": "Limit für {duration}",
+  "limits.window": "Limit",
+  "limits.unknown": "Keine Daten",
+  "limits.no_windows": "Anbieter meldet keine Kontingentzeiträume",
+  "limits.unsupported": "Kontingente für diese Verbindung nicht verfügbar",
+  "limits.auth": "Anmeldung erforderlich",
+  "limits.error": "Limits konnten nicht gelesen werden",
+  "limits.stale": "Daten veraltet; Aktualisierung ausstehend",
+  "limits.low": "Kontingent fast aufgebraucht",
+  "limits.summary": "{count} verbunden; {unavailable} ohne aktuelle Daten",
+  "limits.remaining": "{percent}% verbleibend",
+  "limits.reset": "Zurücksetzung {time}"
 }

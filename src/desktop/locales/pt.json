@@ -1143,5 +1143,20 @@
   "activity.file": {
     "one": "{count} arquivo",
     "other": "{count} arquivos"
-  }
+  },
+  "limits.label": "Limites",
+  "limits.weekly": "Limite semanal",
+  "limits.daily": "Limite diário",
+  "limits.duration": "Limite de {duration}",
+  "limits.window": "Limite",
+  "limits.unknown": "Sem dados",
+  "limits.no_windows": "O provedor não informa períodos de cota",
+  "limits.unsupported": "Cotas indisponíveis nesta conexão",
+  "limits.auth": "É necessário entrar",
+  "limits.error": "Não foi possível ler os limites",
+  "limits.stale": "Dados desatualizados; aguardando atualização",
+  "limits.low": "Cota quase esgotada",
+  "limits.summary": "{count} conectados; {unavailable} sem dados atuais",
+  "limits.remaining": "restam {percent}%",
+  "limits.reset": "Redefinição {time}"
 }

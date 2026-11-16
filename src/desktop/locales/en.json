@@ -1143,5 +1143,20 @@
   "activity.file": {
     "one": "{count} file",
     "other": "{count} files"
-  }
+  },
+  "limits.label": "Limits",
+  "limits.weekly": "Weekly limit",
+  "limits.daily": "Daily limit",
+  "limits.duration": "Limit over {duration}",
+  "limits.window": "Limit",
+  "limits.unknown": "No data",
+  "limits.no_windows": "Provider reports no quota windows",
+  "limits.unsupported": "Quota windows unavailable in this connection",
+  "limits.auth": "Sign in required",
+  "limits.error": "Could not read limits",
+  "limits.stale": "Stale data; waiting for update",
+  "limits.low": "Low quota",
+  "limits.summary": "{count} connected; {unavailable} without current data",
+  "limits.remaining": "remaining {percent}%",
+  "limits.reset": "Resets {time}"
 }

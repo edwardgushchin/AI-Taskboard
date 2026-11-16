@@ -17,6 +17,7 @@
   <script src="./source-files.cjs" defer></script>
   <script src="./markdown.js" defer></script>
   <script src="./chat.js" defer></script>
+  <script src="./provider-limits.js" defer></script>
   <script src="./renderer.js" defer></script>
 </head>
 <body>
@@ -68,6 +69,8 @@
     </div>
     <button id="status-auto-mode" type="button" class="button quiet" aria-pressed="false" hidden><i class="icon codicon codicon-play" aria-hidden="true"></i><span></span></button>
     <section id="git-branches" class="git-branches" popover aria-label="Branches and tags" data-i18n-aria-label="ui.branches_and_tags_c785cf53"></section>
+    <button id="status-limits" type="button" class="button quiet" popovertarget="provider-limits"><i class="icon codicon codicon-target" aria-hidden="true"></i><span>Limits</span></button>
+    <section id="provider-limits" popover aria-label="Provider limits"></section>
     <div class="status-activity">
       <span id="status-agents" role="img" tabindex="0" aria-describedby="status-agents-tooltip" hidden><i class="icon codicon codicon-hubot" aria-hidden="true"></i><span aria-hidden="true"></span><span id="status-agents-tooltip" role="tooltip"></span></span>
       <button id="status-notifications" type="button" class="button quiet" popovertarget="notifications" aria-label="Review queue" data-i18n-aria-label="ui.review_queue_df5dcbe5">

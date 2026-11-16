@@ -1,3 +1,4 @@
+import { providerLimitSource, readCodexLimits } from "./provider-limits.ts";
 import localization from "./localization.cjs";
 import { activeRunSummary, observeActiveRuns, enableSharedRuns } from "./active-runs.ts";
 import { runtimeLocation } from "./board-runtime.ts";
@@ -2782,6 +2783,12 @@ ipcMain.handle("board:launchTask", async (event, id: unknown, options: unknown =
   return launchTask(project, id, undefined, input.newThread ? "user" : false, undefined, undefined, false, false, input.resumeWithFullAccess === true, false, true);
 });
 
+const readProviderLimits = providerLimitSource(() => readCodexLimits(app.getPath("userData")));
+function resetProviderLimits() {
+  readProviderLimits.invalidate();
+  for (const window of BrowserWindow.getAllWindows()) window.webContents.send("providers:changed");
+}
+ipcMain.handle("providers:limits", event => { stateOf(event); return readProviderLimits(); });
 ipcMain.handle("codex:status", event => {
   stateOf(event);
   return codexStatus(app.getPath("userData"));
@@ -2804,12 +2811,16 @@ ipcMain.handle("codex:choose", async event => {
     properties: ["openFile"],
     ...(process.platform === "win32" ? { filters: [{ name: "Codex", extensions: ["exe"] }] } : {}),
   });
-  if (!choice.canceled && choice.filePaths[0]) setCodexExecutable(app.getPath("userData"), choice.filePaths[0]);
+  if (!choice.canceled && choice.filePaths[0]) {
+    setCodexExecutable(app.getPath("userData"), choice.filePaths[0]);
+    resetProviderLimits();
+  }
   return codexStatus(app.getPath("userData"));
 });
 ipcMain.handle("codex:auto", event => {
   stateOf(event);
   setCodexExecutable(app.getPath("userData"));
+  resetProviderLimits();
   return codexStatus(app.getPath("userData"));
 });
 ipcMain.handle("codex:windowsSandbox", (event, mode: unknown) => {

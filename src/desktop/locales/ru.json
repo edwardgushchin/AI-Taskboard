@@ -1159,5 +1159,20 @@
     "other": "{count} файла",
     "few": "{count} файла",
     "many": "{count} файлов"
-  }
+  },
+  "limits.label": "Лимиты",
+  "limits.weekly": "Недельный лимит",
+  "limits.daily": "Суточный лимит",
+  "limits.duration": "Лимит на {duration}",
+  "limits.window": "Лимит",
+  "limits.unknown": "Нет данных",
+  "limits.no_windows": "Провайдер не сообщает окон лимитов",
+  "limits.unsupported": "Окна лимитов недоступны в этом подключении",
+  "limits.auth": "Нужно войти в аккаунт",
+  "limits.error": "Ошибка чтения лимитов",
+  "limits.stale": "Данные устарели; ожидается обновление",
+  "limits.low": "Лимит заканчивается",
+  "limits.summary": "{count} подключено; {unavailable} без актуальных данных",
+  "limits.remaining": "осталось {percent}%",
+  "limits.reset": "Сброс {time}"
 }

@@ -1143,5 +1143,20 @@
   "activity.file": {
     "one": "{count} ファイル",
     "other": "{count} ファイル"
-  }
+  },
+  "limits.label": "上限",
+  "limits.weekly": "週間上限",
+  "limits.daily": "日次上限",
+  "limits.duration": "{duration}の上限",
+  "limits.window": "上限",
+  "limits.unknown": "データなし",
+  "limits.no_windows": "プロバイダーから上限期間の情報がありません",
+  "limits.unsupported": "この接続では上限情報を利用できません",
+  "limits.auth": "ログインが必要です",
+  "limits.error": "上限を取得できませんでした",
+  "limits.stale": "古いデータです。更新を待っています",
+  "limits.low": "残り枠が少なくなっています",
+  "limits.summary": "接続数 {count}、最新データなし {unavailable}",
+  "limits.remaining": "残り {percent}%",
+  "limits.reset": "リセット {time}"
 }

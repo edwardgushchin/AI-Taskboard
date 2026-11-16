@@ -5032,6 +5032,7 @@ function update(next) {
   if ((projectChanged || frame.localization?.locale !== next.localization?.locale || Boolean(frame.board) !== Boolean(next.board)) &&
       byId("settings-menu").matches(":popover-open")) byId("settings-menu").hidePopover();
   if (next.localization) localization.install(next.localization);
+  window.renderProviderLimits?.();
   frame = next;
   const languageSelect = byId("language-select");
   if (languageSelect) languageSelect.value = next.localization?.preference ?? "system";

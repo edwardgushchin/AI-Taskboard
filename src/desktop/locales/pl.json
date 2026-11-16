@@ -1159,5 +1159,20 @@
     "other": "{count} pliki",
     "few": "{count} pliki",
     "many": "{count} plików"
-  }
+  },
+  "limits.label": "Limity",
+  "limits.weekly": "Limit tygodniowy",
+  "limits.daily": "Limit dzienny",
+  "limits.duration": "Limit na {duration}",
+  "limits.window": "Limit",
+  "limits.unknown": "Brak danych",
+  "limits.no_windows": "Dostawca nie zgłasza okresów limitów",
+  "limits.unsupported": "Limity niedostępne dla tego połączenia",
+  "limits.auth": "Wymagane logowanie",
+  "limits.error": "Nie udało się odczytać limitów",
+  "limits.stale": "Nieaktualne dane; oczekiwanie na aktualizację",
+  "limits.low": "Limit bliski wyczerpania",
+  "limits.summary": "Połączono: {count}; bez aktualnych danych: {unavailable}",
+  "limits.remaining": "pozostało {percent}%",
+  "limits.reset": "Odnowienie {time}"
 }

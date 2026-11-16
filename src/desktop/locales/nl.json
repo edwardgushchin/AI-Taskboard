@@ -1143,5 +1143,20 @@
   "activity.file": {
     "one": "{count} bestand",
     "other": "{count} bestanden"
-  }
+  },
+  "limits.label": "Limieten",
+  "limits.weekly": "Weeklimiet",
+  "limits.daily": "Daglimiet",
+  "limits.duration": "Limiet voor {duration}",
+  "limits.window": "Limiet",
+  "limits.unknown": "Geen gegevens",
+  "limits.no_windows": "Provider meldt geen quotaperiodes",
+  "limits.unsupported": "Quota niet beschikbaar voor deze verbinding",
+  "limits.auth": "Aanmelden vereist",
+  "limits.error": "Limieten konden niet worden gelezen",
+  "limits.stale": "Verouderde gegevens; wachten op update",
+  "limits.low": "Quotum bijna op",
+  "limits.summary": "{count} verbonden; {unavailable} zonder actuele gegevens",
+  "limits.remaining": "{percent}% resterend",
+  "limits.reset": "Herstel {time}"
 }
