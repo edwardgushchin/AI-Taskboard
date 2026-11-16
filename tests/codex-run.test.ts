@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { callCli } from "../src/desktop/cli.ts";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
@@ -62,6 +63,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   git("-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--allow-empty", "--no-gpg-sign", "-m", "Initial");
   const base = git("rev-parse", "HEAD");
   git("worktree", "add", "-b", "ai-taskboard/T-0001", worktree);
+  assert.equal((await callCli(folder, ["init"])).ok, true);
   const stub = join(folder, "codex.cjs");
   const capture = join(folder, "captured.json");
   const thread = "01234567-1234-5678-1234-123456789012";
@@ -102,6 +104,14 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '  if (method === "turn/interrupt") send({ method: "turn/completed", params: { threadId: thread, turn: { id: params.turnId, status: "interrupted", error: { message: "Turn interrupted" } } } });',
 
     '  if (method === "turn/start") {',
+    '    if (outcome === "authored-worklog" || outcome === "resumed") {',
+    '      const url = flags.find(flag => flag.startsWith("mcp_servers.ai_taskboard=")).match(/http[^"]+/)[0];',
+    '      const headers = { authorization: "Bearer " + process.env.AI_TASKBOARD_MCP_TOKEN };',
+    '      const response = await fetch(url, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call",',
+    '        params: { name: "github_read", arguments: { view: "repository" } } }) });',
+    '      const payload = JSON.parse((await response.json()).result.content[0].text);',
+    '      if (payload.error?.code !== "GITHUB_REMOTE_REQUIRED") throw new Error("Unexpected GitHub read reply");',
+    '    }',
     '    if (outcome === "authored-worklog") {',
     '      send({ method: "turn/started", params: { threadId: thread, turn: { id: "turn-1", status: "inProgress" } } });',
     '      const url = flags.find(flag => flag.startsWith("mcp_servers.ai_taskboard=")).match(/http[^"]+/)[0];',
@@ -193,6 +203,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.ok(launched.flags.some((flag: string) => flag.startsWith("permissions.ai-taskboard=") && flag.endsWith(",network={enabled=true}}")));
   assert.equal(launched.flags.includes('windows.sandbox="mxc"'), process.platform === "win32");
   assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers.ai_taskboard=") && flag.includes("worklog_record")));
+  assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers.ai_taskboard=") && flag.includes("github_read")));
   assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers.ai_taskboard=") && flag.includes("check_wait") && flag.includes("tool_timeout_sec=1220")));
   assert.ok(!launched.flags.some((flag: string) => flag.includes("codex-worklog-codex-worklog")));
   const diaryPath = readFileSync(capture + ".worklog", "utf8");
