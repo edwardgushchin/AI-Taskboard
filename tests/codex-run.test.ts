@@ -107,10 +107,17 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '    if (outcome === "authored-worklog" || outcome === "resumed") {',
     '      const url = flags.find(flag => flag.startsWith("mcp_servers.ai_taskboard=")).match(/http[^"]+/)[0];',
     '      const headers = { authorization: "Bearer " + process.env.AI_TASKBOARD_MCP_TOKEN };',
-    '      const response = await fetch(url, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call",',
-    '        params: { name: "github_read", arguments: { view: "repository" } } }) });',
-    '      const payload = JSON.parse((await response.json()).result.content[0].text);',
-    '      if (payload.error?.code !== "GITHUB_REMOTE_REQUIRED") throw new Error("Unexpected GitHub read reply");',
+    '      const githubCalls = [',
+    '        ["github_read", { view: "repository" }],',
+    '        ["milestones_list", {}],',
+    '        ["github_set_milestone_due", { repository: "owner/fixture", number: 1, dueDate: "2026-11-20" }],',
+    '      ];',
+    '      for (const [name, args] of githubCalls) {',
+    '        const response = await fetch(url, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call",',
+    '          params: { name, arguments: args } }) });',
+    '        const payload = JSON.parse((await response.json()).result.content[0].text);',
+    '        if (payload.error?.code !== "GITHUB_REMOTE_REQUIRED") throw new Error("Unexpected GitHub reply for " + name);',
+    '      }',
     '    }',
     '    if (outcome === "authored-worklog") {',
     '      send({ method: "turn/started", params: { threadId: thread, turn: { id: "turn-1", status: "inProgress" } } });',
@@ -236,6 +243,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.ok(started.params.developerInstructions.includes(russianWriting));
   assert.match(started.params.developerInstructions, /Ponytail.*worklog_record/s);
   assert.match(started.params.developerInstructions, /Use built-in web search for relevant public sources/);
+  assert.match(started.params.developerInstructions, /github_set_milestone_due.*without a shell `gh auth status` preflight/);
   assert.match(started.params.developerInstructions, /CLI launch array.*\[.+--disable-warning|CLI launch array.*ai-taskboard(?:\.exe)?"/);
   assert.doesNotMatch(started.params.developerInstructions, /__AI_TASKBOARD_CLI__/);
   assert.match(started.params.developerInstructions, /Exercise the specified public API, scenario and runtime profile.*SDK and dependencies.*clean environment/);

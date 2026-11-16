@@ -128,6 +128,8 @@ const reviewActions = new Set(["task_approve", "task_accept", "task_request_chan
 const mcpNames = new Set(["task_cancel", "task_tool_revoke", "provider_tools", "task_tool_grant", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_wait", ...reviewActions, "task_review_queue", "task_review", "task_review_diff", "task_review_artifact", "task_cleanup_status", "task_cleanup", "project_git", "project_git_push", "project_path", "project_sha256", "milestones_list", "github_set_milestone_due", "task_set_milestone", "tag_set_color"]);
 export const boardTools = tools.filter(tool => !mcpNames.has(tool.name));
 export const boardMcpTools = tools.filter(tool => mcpNames.has(tool.name));
+export const milestonesListTool = boardMcpTools.find(tool => tool.name === "milestones_list")!;
+export const githubSetMilestoneDueTool = boardMcpTools.find(tool => tool.name === "github_set_milestone_due")!;
 export const reviewerTools = tools.filter(tool => ["task_review_diff", "task_review_artifact", "project_path", "project_sha256"].includes(tool.name))
   .map(tool => tool.name === "task_review_diff" ? {
     ...tool,
