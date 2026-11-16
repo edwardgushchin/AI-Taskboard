@@ -439,6 +439,70 @@ test("GitHub read uses fixed host requests and distinguishes credentials from re
   assert.equal(read({ view: "repository" }, "hidden-and-unauthorized").error.code, "GITHUB_AUTH_REJECTED");
 });
 
+test("GitHub milestone deadline is pinned to origin and verified after writing", t => {
+  const root = fixture(t, true);
+  const tools = fixture(t);
+  const executable = join(tools, process.platform === "win32" ? "gh.exe" : "gh");
+  writeFileSync(executable, "");
+  cli(root, ["init"]);
+  git(root, "remote", "add", "origin", "git@github.com:Owner/Example.git");
+  const mock = `
+    import cp from 'node:child_process';
+    import assert from 'node:assert/strict';
+    import { syncBuiltinESMExports } from 'node:module';
+    import { promisify } from 'node:util';
+    const mode = process.env.TASKBOARD_TEST_MILESTONE;
+    const milestone = { number: 1, title: 'Existing', state: 'closed', due_on: null };
+    if (mode === 'same') milestone.due_on = '2026-11-20T00:00:00Z';
+    const base = ['api', '--hostname', 'github.com'];
+    const endpoint = 'repos/owner/example/milestones/1';
+    let reads = 0;
+    let writes = 0;
+    cp.execFile = Object.assign(() => {}, { [promisify.custom]: async (cmd, args) => {
+      assert.equal(cmd, ${JSON.stringify(executable)});
+      assert.ok(!['invalid', 'wrong-origin'].includes(mode));
+      if (args.includes('PATCH')) {
+        assert.deepEqual(args, [...base, '--method', 'PATCH', '-f', 'due_on=2026-11-20T00:00:00Z', endpoint]);
+        writes++;
+        assert.equal(reads, 1);
+        if (mode === 'denied') {
+          throw Object.assign(new Error('fixture-only'), { stderr: 'gh: Resource not accessible by personal access token (HTTP 403)' });
+        }
+        if (mode !== 'unverified') milestone.due_on = '2026-11-20T00:00:00Z';
+        return { stdout: '{}' };
+      }
+      assert.deepEqual(args, [...base, endpoint]);
+      reads++;
+      return { stdout: JSON.stringify(milestone) };
+    } });
+    process.on('exit', () => {
+      if (mode === 'same') assert.deepEqual([reads, writes], [1, 0]);
+      if (['success', 'unverified'].includes(mode)) assert.deepEqual([reads, writes], [2, 1]);
+      if (mode === 'denied') assert.deepEqual([reads, writes], [1, 1]);
+      if (['invalid', 'wrong-origin'].includes(mode)) assert.deepEqual([reads, writes], [0, 0]);
+    });
+    syncBuiltinESMExports();
+  `;
+  const input = { repository: "OWNER/Example", number: 1, dueDate: "2026-11-20" };
+  const run = (mode: string, args = input) => {
+    const result = spawnSync(process.execPath, ["--import", "data:text/javascript," + encodeURIComponent(mock),
+      ...commandArgs(root, ["github-milestone-due"], args)], {
+      env: { ...env, PATH: tools + delimiter + process.env.PATH, TASKBOARD_TEST_MILESTONE: mode },
+      input: JSON.stringify(args), encoding: "utf8", windowsHide: true,
+    });
+    assert.equal(result.stderr, "");
+    assert.doesNotMatch(result.stdout, /fixture-only/);
+    return JSON.parse(result.stdout);
+  };
+  assert.deepEqual(run("success").data, { repository: "owner/example", number: 1, title: "Existing", state: "closed",
+    dueDate: "2026-11-20", url: "https://github.com/owner/example/milestone/1", changed: true });
+  assert.equal(run("same").data.changed, false);
+  assert.equal(run("unverified").error.code, "GITHUB_MILESTONE_VERIFY_FAILED");
+  assert.equal(run("denied").error.code, "GITHUB_AUTH_SCOPE");
+  assert.equal(run("wrong-origin", { ...input, repository: "Other/Example" }).error.code, "GITHUB_REMOTE_REQUIRED");
+  assert.equal(run("invalid", { ...input, dueDate: "2026-02-29" }).error.code, "INVALID_INPUT");
+});
+
 test("dependencies prevent worktree creation until every dependency is completed", t => {
   const root = fixture(t, true);
   cli(root, ["init"]);

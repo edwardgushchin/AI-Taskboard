@@ -42,7 +42,7 @@ export function githubApi(project: string) {
   const { call, env } = githubCli(project);
   const identityEndpoint = "user";
 
-  async function get(endpoint: string, flags: string[] = [], failureCode = "GITHUB_READ_FAILED"): Promise<unknown> {
+  async function request(endpoint: string, flags: string[] = [], failureCode = "GITHUB_READ_FAILED"): Promise<unknown> {
     try {
       const { stdout } = await call(["api", "--hostname", host, ...flags, endpoint]);
       return JSON.parse(stdout);
@@ -82,15 +82,15 @@ export function githubApi(project: string) {
         throw new TaskboardError("GITHUB_AUTH_SCOPE", "GitHub denied the request because of credential permissions or organization authorization.");
       }
       if (status === "404" && endpoint !== identityEndpoint) {
-        await get(identityEndpoint);
+        await request(identityEndpoint);
         throw new TaskboardError("GITHUB_RESOURCE_ACCESS", "The GitHub login works, but the requested resource is missing or is not accessible to that account.");
       }
       if (status === "403") throw new TaskboardError("GITHUB_RESOURCE_ACCESS", "GitHub denied access to the requested resource.");
       throw new TaskboardError(failureCode, failure.killed
         ? "GitHub CLI did not finish in time."
-        : "GitHub CLI could not complete the read. Check the host's connection to GitHub.");
+        : "GitHub CLI could not complete the request. Check the host's connection to GitHub.");
     }
   }
 
-  return get;
+  return request;
 }

@@ -24,7 +24,7 @@ test("manager replaces only verified shell tools and invalidates cached Git conf
     writeFileSync(join(path, ".gitattributes"), "sample.txt filter=audit\n");
     writeFileSync(join(path, "sample.txt"), "modified\n");
   }
-  const tools = ["project_git", "project_git_push", "task_review_diff", "milestones_list", "task_set_milestone"]
+  const tools = ["project_git", "project_git_push", "task_review_diff", "milestones_list", "task_set_milestone", "github_set_milestone_due"]
     .map(name => ({ name, description: "", inputSchema: {} }));
   const calls: string[][] = [];
   const run = async (cwd: string, [file, ...args]: string[], env?: Record<string, string>) => {
@@ -42,7 +42,7 @@ test("manager replaces only verified shell tools and invalidates cached Git conf
   assert.ok(native.gitOptions?.includes("filter.audit.clean="));
   assert.equal(native.github, "test-owner/test-repo");
   const available = managerCliContext(tools, native);
-  assert.deepEqual(available.tools.map(tool => tool.name), ["project_git_push", "task_review_diff", "task_set_milestone"]);
+  assert.deepEqual(available.tools.map(tool => tool.name), ["project_git_push", "task_review_diff", "task_set_milestone", "github_set_milestone_due"]);
   assert.match(available.instructions, /--no-ext-diff --no-textconv/);
   assert.match(available.instructions, /gh api --hostname github.com --paginate --slurp/);
   assert.ok(calls.some(command => command.includes("--cached")));

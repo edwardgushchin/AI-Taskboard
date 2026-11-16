@@ -57,6 +57,45 @@ export async function readGitHub(location: BoardLocation, input: Record<string, 
     defaultBranch: text(fields.default_branch, "default branch") };
 }
 
+export async function setGitHubMilestoneDueDate(location: BoardLocation, input: Record<string, unknown>) {
+  if (Object.keys(input).some(key => !["repository", "number", "dueDate"].includes(key))) {
+    throw new TaskboardError("INVALID_INPUT", "Use only repository, number and dueDate.");
+  }
+  const repository = githubRepository(location);
+  if (!repository || text(input.repository, "repository", true).toLowerCase() !== repository) {
+    throw new TaskboardError("GITHUB_REMOTE_REQUIRED", "Use the GitHub repository configured as the board's origin.");
+  }
+  const milestoneNumber = number(input.number, "milestone number");
+  if (!Number.isSafeInteger(milestoneNumber)) throw new TaskboardError("INVALID_INPUT", "Use a valid milestone number.");
+  const dueDate = text(input.dueDate, "due date", true);
+  const dueOn = dueDate + "T00:00:00Z";
+  const timestamp = new Date(dueOn);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate) || Number.isNaN(timestamp.getTime()) || timestamp.toISOString().slice(0, 10) !== dueDate) {
+    throw new TaskboardError("INVALID_INPUT", "Use an existing calendar date in YYYY-MM-DD format.");
+  }
+  const endpoint = "repos/" + repository + "/milestones/" + milestoneNumber;
+  const request = githubApi(location.root);
+  const read = async () => {
+    const fields = object(await request(endpoint));
+    if (fields.number !== milestoneNumber || (fields.due_on !== null &&
+        (typeof fields.due_on !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(fields.due_on)))) {
+      throw new TaskboardError("GITHUB_MILESTONE_VERIFY_FAILED", "GitHub returned unexpected milestone data.");
+    }
+    return { repository, number: milestoneNumber, title: text(fields.title, "milestone title", true),
+      state: member(fields.state, ["open", "closed"], "milestone state"),
+      dueDate: fields.due_on === null ? null : fields.due_on.slice(0, 10),
+      url: "https://github.com/" + repository + "/milestone/" + milestoneNumber };
+  };
+  const before = await read();
+  if (before.dueDate === dueDate) return { ...before, changed: false };
+  await request(endpoint, ["--method", "PATCH", "-f", "due_on=" + dueOn], "GITHUB_MILESTONE_UPDATE_FAILED");
+  const after = await read();
+  if (after.dueDate !== dueDate || after.title !== before.title || after.state !== before.state) {
+    throw new TaskboardError("GITHUB_MILESTONE_VERIFY_FAILED", "Reading the milestone after the update did not confirm the requested result.");
+  }
+  return { ...after, changed: true };
+}
+
 function repositoryPath(location: BoardLocation): string {
   const repository = requireRepository(location.repository);
   if (repository.bare) throw new TaskboardError("GIT_WORKTREE_REQUIRED", "Open a repository with a main worktree.");

@@ -187,7 +187,7 @@ function fixture(t: TestContext) {
         "task_cancel", "provider_tools", "task_tool_grant", "task_tool_revoke", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_approve", "task_wait", "task_review_queue", "task_review", "task_review_diff",
         "task_review_artifact", "task_accept", "task_request_changes",
         "task_cleanup_status", "task_cleanup", "project_git", "project_git_push",
-        "milestones_list", "task_set_milestone", "tag_set_color", "github_read",
+        "milestones_list", "github_set_milestone_due", "task_set_milestone", "tag_set_color", "github_read",
       ];
       const mode = boardReviewMode((await callCli(project, ["settings"], undefined, false)).data);
       assert.deepEqual(Array.from(session.mcpTools, tool => tool.name).sort(),
@@ -349,6 +349,21 @@ test("manager milestone tools use the board origin and return per-card results",
     return { text: "No milestone is set." };
   });
   assert.equal(result.data?.answer, "No milestone is set.", JSON.stringify(result.error ?? result.data?.error));
+});
+
+test("manager routes a GitHub milestone deadline change through the board host", async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"])).ok, true);
+  for (const goal of [false, true]) {
+    const reply = await f.run("Set the deadline of GitHub milestone #1 to 2026-11-20", async (act, _prompt, _images, _id, _context, _waiting, _signal, work) => {
+      if (goal) work!.accepted();
+      const result = await act("github_set_milestone_due", { repository: "owner/example", number: 1, dueDate: "2026-11-20" });
+      assert.equal(result.error.code, "GITHUB_REMOTE_REQUIRED");
+      return { text: "No GitHub origin." };
+    }, [], goal);
+    assert.ok(reply.ok, JSON.stringify(reply.error));
+  }
+  assert.equal(f.cliCalls.filter(([name]) => name === "github-milestone-due").length, 2);
 });
 
 test("GitHub read is routed to the board host on new and continued manager requests", async t => {
