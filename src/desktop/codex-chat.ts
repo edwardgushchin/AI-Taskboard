@@ -40,6 +40,7 @@ type RpcRequest = <R>(method: string, params: object) => Promise<R>;
 const idleTimeoutMs = 180_000;
 const goalIdleTimeoutMs = 600_000;
 const managerResearchProfile = "ai-taskboard-manager";
+const hostPermissionProfile = ":danger-full-access";
 
 async function withServer<T>(
   profile: string, cwd: string, callback: (server: {
@@ -48,8 +49,8 @@ async function withServer<T>(
     receive: (notify?: Notification) => Promise<RpcMessage>;
     refreshTimeout: (ms?: number) => void;
   }) => Promise<T>, onRequest?: ServerRequest, signal?: AbortSignal,
-  { mcp, research, webSearch = research, providerTools = true }: {
-    mcp?: BoardMcpConnection; research?: boolean; webSearch?: boolean; providerTools?: boolean;
+  { mcp, research, fullAccess, webSearch = research, providerTools = true }: {
+    mcp?: BoardMcpConnection; research?: boolean; fullAccess?: boolean; webSearch?: boolean; providerTools?: boolean;
   } = {},
 ): Promise<T> {
   const client = await configuredCodex(profile);
@@ -63,9 +64,11 @@ async function withServer<T>(
     ...(research ? [
       // Native SSH needs direct TCP; the optional command proxy only serves proxy-aware clients.
       "--disable", "network_proxy",
-      "-c", 'permissions.' + managerResearchProfile + '={filesystem={":root"="read"},network={enabled=true}}',
-      "-c", "default_permissions=" + JSON.stringify(managerResearchProfile),
-      ...(process.platform === "win32" ? ["--disable", "prefer_mxc", "-c", "windows.sandbox=" + JSON.stringify(client.windowsSandbox ?? "mxc")] : []),
+      ...(fullAccess ? ["-c", 'approval_policy="never"', "-c", "default_permissions=" + JSON.stringify(hostPermissionProfile)] : [
+        "-c", 'permissions.' + managerResearchProfile + '={filesystem={":root"="read"},network={enabled=true}}',
+        "-c", "default_permissions=" + JSON.stringify(managerResearchProfile),
+        ...(process.platform === "win32" ? ["--disable", "prefer_mxc", "-c", "windows.sandbox=" + JSON.stringify(client.windowsSandbox ?? "mxc")] : []),
+      ]),
     ] : []),
   ], { cwd, env: mcp ? { ...(client.env ?? process.env), ...mcp.env } : client.env, windowsHide: true, stdio: ["pipe", "pipe", "ignore"], signal });
   const exited = new Promise<void>(resolve => child.once("close", resolve));
@@ -309,16 +312,20 @@ export function replyToBoard(
     ? providerAction?.(name, args) ?? Promise.resolve(cliFailure("PROVIDER_TOOLS_UNAVAILABLE", "Wait for the provider session to initialize."))
     : runAction(name, args);
   const dialogue = !session.goal && !session.resumeGoal && !session.separateTurn;
+  const fullAccess = dialogue && session.fullAccess === true;
+  const permissionProfile = fullAccess ? hostPermissionProfile : managerResearchProfile;
+  const accessInstructions = fullAccess ? "\nThe user enabled full shell access for this board dialogue. Commands use the host user's environment. " +
+    "Use existing credentials for authorized operations without exposing them. Keep SSH host key checking enabled and report server authentication failures separately from local permission failures." : "";
   const mcpTools = [...session.mcpTools, worklogTool];
   return withBoardMcp(mcpTools,
     async (name, args) => name === worklogTool.name ? worklog.submit(args) : worklog.remind(await dispatch(name, args)),
     (config, env) => reply(profile, project, prompt, images, dispatch, {
-      tools, instructions: boardAgentInstructions("manager", instructions, { dialogue }), signal, session, worklog,
-      onTokenUsage: session.onTokenUsage, mcp: { config, env },
+      tools, instructions: boardAgentInstructions("manager", instructions + accessInstructions, { dialogue }), signal, session, worklog,
+      onTokenUsage: session.onTokenUsage, mcp: { config, env }, fullAccess,
       prepareResearch: async (request, client) => {
-        const launchKey = JSON.stringify([profile, client.path, client.args, client.version, client.windowsSandbox, managerResearchProfile]);
+        const launchKey = JSON.stringify([profile, client.path, client.args, client.version, client.windowsSandbox, permissionProfile]);
         const availability = await probeManagerCli(project, launchKey, mcpTools, (cwd, command, env) =>
-          request("command/exec", { cwd, command, env, permissionProfile: managerResearchProfile, timeoutMs: 5000 }));
+          request("command/exec", { cwd, command, env, permissionProfile, timeoutMs: 5000 }));
         signal.throwIfAborted();
         const native = managerCliContext(mcpTools, availability);
         // The local MCP serves this list before the thread discovers its tools.
@@ -331,6 +338,7 @@ export function replyToBoard(
 
 interface BoardSession {
   id?: string;
+  fullAccess?: boolean;
   settings?: ChatSettings | null;
   save: (id: string) => void;
   title: string;
@@ -545,6 +553,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
   onControl?: (control: AgentControl) => void; signal?: AbortSignal; imageDirectory?: string; imageLimit?: number;
   session?: BoardSession;
   finalAnswerSchema?: object;
+  fullAccess?: boolean;
   webSearch?: boolean;
   mcp?: BoardMcpConnection;
   prepareResearch?: (request: RpcRequest, client: CodexClient) => Promise<string>;
@@ -554,6 +563,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
   const { onCommentary, onTokenUsage, onControl, onActivity, signal, imageDirectory, imageLimit = 0, session } = options;
   const settings = session ? session.settings : options.settings;
   const research = Boolean(session && !session.separateTurn);
+  const fullAccess = research && options.fullAccess === true;
   let threadId: string | undefined;
   const calls = new Map<string, Promise<CliReply>>();
   const tokens = new CodexTokenUsage();
@@ -586,10 +596,11 @@ function reply(profile: string, project: string, prompt: string, images: string[
       }),
       cwd: project, model: modelId, approvalPolicy: "never",
       developerInstructions: researchInstructions ? options.instructions + "\n\n" + researchInstructions : options.instructions,
-      ...(research ? { permissions: managerResearchProfile } : { sandbox: "read-only" }),
+      ...(research ? { permissions: fullAccess ? hostPermissionProfile : managerResearchProfile } : { sandbox: "read-only" }),
       ...(session && effort ? { config: { model_reasoning_effort: effort } } : {}),
     };
-    type StartedThread = { thread: { id: string; name?: string | null; model?: string }; model?: string };
+    type StartedThread = { thread: { id: string; name?: string | null; model?: string }; model?: string;
+      activePermissionProfile?: { id: string }; approvalPolicy?: string };
     let started: StartedThread;
     let waiting = false;
     let retryDelay = 1000;
@@ -610,6 +621,9 @@ function reply(profile: string, project: string, prompt: string, images: string[
       }
     }
     const { thread } = started;
+    if (fullAccess && (started.activePermissionProfile?.id !== hostPermissionProfile || started.approvalPolicy !== "never")) {
+      throw new Error("Codex did not apply full access for the manager dialogue.");
+    }
     options.onProviderReady?.(request, thread.id);
     if (session) {
       if (!codexThreadPattern.test(thread.id) || (existing && existing !== thread.id)) {
@@ -826,7 +840,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
     const reply = options.worklog?.remind(result) ?? result;
     return { success: result.ok, contentItems: [{ type: "inputText", text: JSON.stringify(reply) }] };
   }, signal, {
-    mcp: options.mcp, research, webSearch: options.webSearch ?? Boolean(session), providerTools: Boolean(session),
+    mcp: options.mcp, research, fullAccess, webSearch: options.webSearch ?? Boolean(session), providerTools: Boolean(session),
   }).finally(async () => {
     options.worklog?.finish();
     await tokens.save(tokens.finish(!completed), onTokenUsage);

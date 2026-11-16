@@ -47,6 +47,7 @@ contextBridge.exposeInMainWorld("taskboard", {
   codexStatus: () => ipcRenderer.invoke("codex:status"),
   executionModels: () => ipcRenderer.invoke("codex:executionModels"),
   setTaskAccess: (project, id, createdAt, fullAccess) => ipcRenderer.invoke("codex:taskAccess", project, id, createdAt, fullAccess),
+  setManagerAccess: (project, fullAccess) => ipcRenderer.invoke("codex:managerAccess", project, fullAccess),
   chooseCodex: () => ipcRenderer.invoke("codex:choose"),
   autoDetectCodex: () => ipcRenderer.invoke("codex:auto"),
   setCodexWindowsSandbox: mode => ipcRenderer.invoke("codex:windowsSandbox", mode),

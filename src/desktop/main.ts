@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { callCli, cliChild, cliFailure } from "./cli.ts";
 import { githubReadTool, readBoardGitHub } from "./github-read.ts";
-import { codexStatus, configuredCodex, executorFullAccess, setCodexExecutable, setCodexWindowsSandbox, setTaskExecutorAccess } from "./codex.ts";
+import { codexStatus, configuredCodex, executorFullAccess, managerFullAccess, setCodexExecutable, setCodexWindowsSandbox, setTaskExecutorAccess } from "./codex.ts";
 import { boardSuggestions, chatModels, readBoardHistory, readLastTaskTurn, readTaskRunHistory, replyToBoard, replyToTask, reviewWithCodex, updateBoardGoal } from "./codex-chat.ts";
 import type { BoardActivity, BoardGoal, BoardGoalAction } from "./codex-chat.ts";
 import { autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools } from "./board-actions.ts";
@@ -194,6 +194,7 @@ function frame(state: ProjectTab) {
     managerUnread: boardUnread(state.board?.project),
     project: state.project, board: state.board, error: state.error, loading: state.loading, russian, theme,
     managerQuestion: key ? managerQuestion(key)?.view : undefined,
+    managerFullAccess: state.project ? managerFullAccess(app.getPath("userData"), state.project) : false,
     managerRun: request?.managerRun ?? null,
     managerWork: work?.managerRun ?? null,
     runningTasks: state.board?.tasks.filter(task => {
@@ -1691,6 +1692,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         });
       }, reviewIds ? [] : boardTools, instructions + "\n" + initialSettings.text, signal, {
         id: threadId,
+        fullAccess: lane === "chat" && managerFullAccess(app.getPath("userData"), project),
         settings: settings.data.manager,
         attachmentContext,
         mcpTools,
@@ -2737,6 +2739,17 @@ ipcMain.handle("board:launchTask", async (event, id: unknown, options: unknown =
 ipcMain.handle("codex:status", event => {
   stateOf(event);
   return codexStatus(app.getPath("userData"));
+});
+ipcMain.handle("codex:managerAccess", (event, project: unknown, enabled: unknown) => {
+  const state = stateOf(event);
+  if (!state.project || project !== state.project || typeof enabled !== "boolean") {
+    return cliFailure("INVALID_INPUT", "Choose the manager access mode on the active board.");
+  }
+  const fullAccess = managerFullAccess(app.getPath("userData"), state.project, enabled);
+  for (const window of windowStates.values()) {
+    if (window.active.project === state.project) send(window.active);
+  }
+  return { ok: true as const, data: fullAccess };
 });
 ipcMain.handle("codex:choose", async event => {
   const state = stateOf(event);

@@ -18,9 +18,25 @@ import { codexThreadPattern, taskIdPattern } from "../src/cli/model.ts";
 import { runActivity, runLog } from "../src/desktop/run-activity.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { managerCliContext } from "../src/desktop/manager-cli.ts";
+import { managerFullAccess } from "../src/desktop/codex.ts";
 
 const source = readFileSync(new URL("../src/desktop/codex-chat.ts", import.meta.url), "utf8")
   .replace(/^import[\s\S]*?;\r?\n/gm, "").replace(/^export /gm, "");
+
+test("manager dialogue access is persisted in the desktop profile for the selected board", t => {
+  const directory = mkdtempSync(join(tmpdir(), "ai-taskboard-manager-access-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const first = join(directory, "first");
+  const second = join(directory, "second");
+  mkdirSync(first);
+  mkdirSync(second);
+  assert.equal(managerFullAccess(directory, first), false);
+  assert.equal(managerFullAccess(directory, first, true), true);
+  assert.equal(managerFullAccess(directory, first), true);
+  assert.equal(managerFullAccess(directory, second), false);
+  assert.equal(managerFullAccess(directory, first, false), false);
+  assert.equal(managerFullAccess(directory, first), false);
+});
 
 test("an executor access request gets an independent manager decision scoped to its card", async () => {
   const task = { id: "T-0118", revision: 13, title: "Verify Electron", status: "in_progress", criteria: ["Run the UI check"] };
@@ -255,7 +271,8 @@ test("board chat keeps a goal streaming across turns and times out only after in
       } else if (method === "config/read") {
         send({ id, result: { config: { model: "default-model", model_reasoning_effort: "medium" } } });
       } else if (method === "thread/resume" || method === "thread/start") {
-        send({ id, result: { thread: { id: threadId, name: "Project manager" }, model: params.model } });
+        send({ id, result: { thread: { id: threadId, name: "Project manager" }, model: params.model,
+          activePermissionProfile: { id: process.argv[2] === "wrong-access" ? ":read-only" : params.permissions }, approvalPolicy: params.approvalPolicy } });
       } else if (method === "thread/goal/set") {
         goal = { objective: params.objective ?? goal.objective, status: params.status ?? goal.status };
         send({ id, result: { goal } });
@@ -556,9 +573,28 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.match(nativeRequests.find(({ method }) => method === "thread/resume")?.params.developerInstructions as string,
     /git --no-pager --literal-pathspecs/);
 
+  for (const id of [undefined, savedThread]) {
+    await runtime("profile", directory, "Check SSH", [], () => ({ ok: true }), [], "", controller.signal, {
+      ...session, id, goal: undefined, fullAccess: true, save: (id: string) => assert.equal(id, threadId),
+    });
+    const fullRequests: typeof newRequests = JSON.parse(readFileSync(captured, "utf8"));
+    const full = fullRequests.find(({ method }) => method === (id ? "thread/resume" : "thread/start"))!;
+    assert.ok(flags().includes('default_permissions=":danger-full-access"'));
+    assert.ok(!flags().some(flag => flag.startsWith("windows.sandbox=")));
+    assert.equal(full.params.permissions, ":danger-full-access");
+    assert.equal(full.params.approvalPolicy, "never");
+    assert.match(full.params.developerInstructions as string, /Keep SSH host key checking enabled/);
+    assert.ok(fullRequests.filter(({ method }) => method === "command/exec")
+      .every(({ params }) => params.permissionProfile === ":danger-full-access"));
+  }
+  providerMode = "wrong-access";
+  await assert.rejects(runtime("profile", directory, "Check SSH", [], () => ({ ok: true }), [], "", controller.signal, {
+    ...session, id: undefined, goal: undefined, fullAccess: true,
+  }), /did not apply full access/);
+
   providerMode = "";
   await runtime("profile", directory, "Review submissions", [], () => ({ ok: true }), [], "", controller.signal, {
-    ...session, goal: undefined, separateTurn: true, save: (id: string) => assert.equal(id, threadId),
+    ...session, goal: undefined, separateTurn: true, fullAccess: true, save: (id: string) => assert.equal(id, threadId),
   });
   const reviewRequests: typeof newRequests = JSON.parse(readFileSync(captured, "utf8"));
   assert.match(flags().find(flag => flag.startsWith("mcp_servers.ai_taskboard="))!, /tool_timeout_sec=140,/);

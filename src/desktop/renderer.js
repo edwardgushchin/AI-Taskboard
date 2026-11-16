@@ -4418,6 +4418,7 @@ function boardSettings() {
   if (!frame.board) return;
   chatCatalog = undefined;
   const current = frame.board.settings;
+  const { project, managerFullAccess = false } = frame;
   const reviewMode = current.reviewMode ?? (current.autoReview === true ? "reviewer" : "human");
   const defaultModel = language("Codex default", "По умолчанию в Codex");
   const roles = [
@@ -4455,6 +4456,8 @@ function boardSettings() {
         ["manager", language("Project manager", "Менеджер проекта")],
         ["reviewer", language("Reviewer", "Ревьюер")],
       ] },
+    { name: "managerFullAccess", label: language("Full access for the manager dialogue on this computer", "Полный доступ для диалога менеджера на этом компьютере"),
+      type: "checkbox", value: managerFullAccess },
     ...agentFields.flat(),
   ], language("Save settings", "Сохранить настройки"), async values => {
     const agents = {};
@@ -4477,7 +4480,13 @@ function boardSettings() {
       ...(values.reviewMode !== reviewMode ? { reviewMode: values.reviewMode } : {}),
       ...(roles.some(([role]) => agentLimits[role] !== current.agentLimits?.[role]) ? { agentLimits } : {}),
       ...agents,
-    })) sheet.close();
+    })) {
+      if (values.managerFullAccess !== managerFullAccess) {
+        const result = await api.setManagerAccess(project, values.managerFullAccess);
+        if (!result.ok) return notice(boardError(result.error));
+      }
+      sheet.close();
+    }
   });
   const [, review, ...selects] = editor.querySelectorAll("select");
   const reviewHint = element("small", undefined, "muted");
@@ -4505,6 +4514,7 @@ function boardSettings() {
     provider.parentElement.before(group);
     group.append(element("legend", title), provider.parentElement, model.parentElement, effort.parentElement,
       limits[index].parentElement);
+    if (role === "manager") group.append(editor.elements.namedItem("managerFullAccess").parentElement);
     const savedModel = current[role]?.model ?? "";
     const savedEffort = current[role]?.effort ?? "";
     const showEfforts = (saved = "") => {

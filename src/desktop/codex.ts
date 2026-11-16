@@ -53,13 +53,20 @@ function preferences(directory: string) {
 }
 
 export function executorFullAccess(dataDirectory: string, project: string, task: Pick<Task, "id" | "createdAt">, enabled?: boolean): boolean {
-  const file = join(dataDirectory, "executor-full-access.json");
+  return fullAccessSetting(dataDirectory, "executor-full-access.json", JSON.stringify([projectIdentity(project), task.id, task.createdAt]), enabled);
+}
+
+export function managerFullAccess(dataDirectory: string, project: string, enabled?: boolean): boolean {
+  return fullAccessSetting(dataDirectory, "manager-full-access.json", projectIdentity(project), enabled);
+}
+
+function fullAccessSetting(dataDirectory: string, filename: string, key: string, enabled?: boolean): boolean {
+  const file = join(dataDirectory, filename);
   const value = existsSync(file) ? readJson(file) : [];
   if (!Array.isArray(value) || value.some(entry => typeof entry !== "string")) {
-    throw new Error("Invalid executor access settings.");
+    throw new Error("Invalid access settings in " + filename + ".");
   }
   const selected = new Set<string>(value);
-  const key = JSON.stringify([projectIdentity(project), task.id, task.createdAt]);
   if (enabled === undefined || enabled === selected.has(key)) return selected.has(key);
   if (enabled) selected.add(key);
   else selected.delete(key);

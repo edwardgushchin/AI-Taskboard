@@ -384,7 +384,9 @@ app.whenReady().then(async () => {
       const projects = [{ path: 'board-fixture', name: 'Первая доска' }, { path: 'other-board', name: 'Вторая доска' }];
       const savedNames = new Map();
       const savedLimits = new Map();
+      const savedManagerAccess = new Map();
       const openBoard = project => window.pushBoard({ ...fixture, project,
+        managerFullAccess: savedManagerAccess.get(project) ?? false,
         tabs: projects.map(tab => ({ ...tab, name: savedNames.get(tab.path) || tab.name })),
         board: { ...fixture.board, project, settings: { ...fixture.board.settings,
           name: savedNames.get(project), agentLimits: savedLimits.get(project) } } });
@@ -395,6 +397,11 @@ app.whenReady().then(async () => {
       Object.assign(window.taskboard, {
         createBoard: async () => { createProjectCalls.push(frame.project ?? null); },
         selectTab: async project => openBoard(project),
+        setManagerAccess: async (project, enabled) => {
+          savedManagerAccess.set(project, enabled);
+          openBoard(project);
+          return { ok: true, data: enabled };
+        },
         command: async (action, _id, values) => {
           if (action !== 'settings') throw Error('Unexpected command: ' + action);
           if (typeof values.name === 'string') savedNames.set(frame.project, values.name.trim());
@@ -412,6 +419,7 @@ app.whenReady().then(async () => {
       const sandboxSelect = () => body.querySelector('.provider-panel select');
       const boardNameInput = () => byId('sheet-body').querySelector('form input[type="text"]');
       const boardLimit = role => body.querySelector('[name="' + role + 'Limit"]');
+      const managerAccess = () => body.querySelector('[name="managerFullAccess"]');
       const gearBackground = () => getComputedStyle(byId('app-settings')).backgroundColor;
       const gearMatchesRail = () => gearBackground() === getComputedStyle(byId('project-tabs')).backgroundColor;
       const createProjectItem = () => [...byId('app-menu').querySelectorAll('.app-menu-item')]
@@ -475,7 +483,10 @@ app.whenReady().then(async () => {
     await evaluate(`waitFor(() => boardLimit('executor').placeholder === '0')`);
     await check(`boardLimit('executor').value === '' && boardLimit('reviewer').placeholder === '1'`,
       "board limits inherit per-role application defaults");
+    await check(`!managerAccess().checked && managerAccess().closest('fieldset').textContent.includes('Менеджер проекта')`,
+      "manager full access starts off and is shown in manager settings");
     await evaluate(`boardLimit('executor').value = '2'; boardLimit('reviewer').value = '0';
+      managerAccess().click();
       boardNameInput().form.requestSubmit(); waitFor(() => !sheet.open)`);
     await check(`JSON.stringify(savedLimits.get('board-fixture')) === '{"executor":2,"reviewer":0}' &&
       limits.executor === 0 && limits.reviewer === 1`, "board overrides save without changing application defaults");
@@ -485,6 +496,8 @@ app.whenReady().then(async () => {
     await check(`frame.project === 'other-board' && sheet.textContent.includes('Вторая доска') &&
       !!body.querySelector('.board-agent-settings') && !byId('agent-limits') &&
       boardLimit('executor').value === '' && boardLimit('reviewer').value === ''`, "the project tab opens settings for that board");
+    await check(`savedManagerAccess.get('board-fixture') === true && !managerAccess().checked`,
+      "manager full access saves for the selected board only");
     await evaluate(`boardNameInput().value = 'Выпуск 0.3'; boardNameInput().form.requestSubmit(); waitFor(() => !sheet.open)`);
     await check(`byId('project-tabs').querySelector('[aria-selected=true] .project-tab-name').textContent === 'Выпуск 0.3' &&
       byId('project-tabs').querySelector('[aria-selected=false] .project-tab-name').textContent === 'Первая доска'`,
@@ -497,9 +510,12 @@ app.whenReady().then(async () => {
     await evaluate(`openBoard('board-fixture'); boardSettings(); void 0`);
     await check(`boardLimit('executor').value === '2' && boardLimit('manager').value === '' &&
       boardLimit('reviewer').value === '0'`, "saved overrides reopen including zero");
+    await check(`managerAccess().checked`, "saved manager full access reopens enabled");
     await evaluate(`boardLimit('executor').value = ''; boardLimit('reviewer').value = '';
+      managerAccess().click();
       boardNameInput().form.requestSubmit(); waitFor(() => !sheet.open)`);
     await check(`Object.keys(savedLimits.get('board-fixture')).length === 0`, "clearing overrides restores inheritance");
+    await check(`savedManagerAccess.get('board-fixture') === false`, "manager full access can be disabled again");
     await evaluate(`sheet.close(); void 0`);
     const key = async keyCode => {
       keyCode = keyCode.replace(/^Arrow/, '');
