@@ -941,7 +941,7 @@ test("linked worktrees share the board and cleanup preserves local files and the
   const progress = cli(worktree, ["progress", task.id, "--compact"], { summary: "Started", nextStep: "Edit the source" });
   assert.equal(progress.summary, "Started");
   assert.equal(progress.nextStep, "Edit the source");
-  assert.equal(progress.status, "ready");
+  assert.equal(progress.status, "in_progress");
   assert.equal(progress.history, undefined);
   assert.equal(cli(root, ["start", task.id]).worktree, worktree);
   const paused = cli(root, ["pause", task.id, "--compact"]);

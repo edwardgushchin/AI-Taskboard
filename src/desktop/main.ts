@@ -843,7 +843,8 @@ type ManagerRequest = {
 const boardRequests = new Map<string, ManagerRequest>();
 const boardWorkRequests = new Map<string, ManagerRequest>();
 const agentSlots = createAgentSlots();
-const deferredExecutors = new Map<string, { project: string; id: string; revision: number }>();
+type ExecutorContinuation = { afterDisconnect?: boolean; withoutProgress?: boolean };
+const deferredExecutors = new Map<string, { project: string; id: string; revision: number; continuation?: ExecutorContinuation }>();
 let schedulingAgentWork = false;
 
 function scheduleAgentWork() {
@@ -851,7 +852,8 @@ function scheduleAgentWork() {
   schedulingAgentWork = true;
   setImmediate(() => {
     schedulingAgentWork = false;
-    for (const [key, { project, id, revision }] of deferredExecutors) {
+    for (const [key, pending] of deferredExecutors) {
+      const { project, id, revision, continuation } = pending;
       const watch = subscriptions.get(project);
       const task = watch?.board.tasks.find(task => task.id === id);
       // request-changes can finish before the watch receives its new revision.
@@ -865,7 +867,12 @@ function scheduleAgentWork() {
       deferredExecutors.delete(key);
       notifyRunChange(project);
       const failed = (error: string) => broadcastBoardChat(project, "orchestrator-review-error", { error: id + " · " + error });
-      void launchTask(project, id, undefined, false, revision).then(result => {
+      void launchTask(project, id, undefined, false, revision, continuation).then(result => {
+        if (!result.ok && result.error.code === "EXECUTOR_LIMIT") {
+          deferredExecutors.set(key, pending);
+          notifyRunChange(project);
+          return;
+        }
         if (!result.ok && !["REVISION_CONFLICT", "INVALID_TRANSITION"].includes(result.error.code)) failed(result.error.message);
       }).catch(error => failed((error as Error).message));
     }
@@ -898,7 +905,7 @@ function scheduleRecurringTasks(now = Date.now()) {
       if (task.status !== "ready" || !task.schedule || !(Date.parse(task.schedule.nextAt) <= now) ||
           task.unfinishedDependencies?.length || launchingTasks.has(project + "\0" + task.id) || executorBusy(project, task.id)) continue;
       const { id, revision } = task;
-      void launchTask(project, id, undefined, false, revision, true, true).then(async result => {
+      void launchTask(project, id, undefined, false, revision, undefined, true).then(async result => {
         if (result.ok || ["BOARD_BUSY", "REVISION_CONFLICT", "INVALID_TRANSITION", "LAUNCH_IN_PROGRESS",
           "CHAT_BUSY", "EXECUTOR_LIMIT", "PROJECT_CLOSING", "DEPENDENCIES_INCOMPLETE"].includes(result.error.code)) return;
         await callCli(project, ["block", id], {
@@ -1449,7 +1456,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     const runAction = boardActions(board.project, attachments, changes, signal,
       (id, revision, { reason, targetHead, reviewMode, newThread, resolveConflicts } = {}) => reason ?
         launchTask(board.project, id, { input: { revision, reason, targetHead, reviewMode, actor: "manager" } }) :
-        launchTask(board.project, id, undefined, newThread ? "manager" : false, revision, true, false, resolveConflicts),
+        launchTask(board.project, id, undefined, newThread ? "manager" : false, revision, undefined, false, resolveConflicts),
       () => activeGoal && threadId ? { threadId, objective: activeGoal.objective, signal: goalWork.signal } : undefined,
       id => executorBusy(board.project, id), listener => observeBoardTasks(board, listener), async (id, sequence) => {
         const agent = activeAgents.get(board.project + "\0" + id);
@@ -2301,11 +2308,11 @@ async function recordRunFailure(project: string, id: string, reason: string, con
   if (!result.ok && result.error.code !== "INVALID_TRANSITION" && result.error.code !== "REVISION_CONFLICT") return result.error.message;
 }
 
-type LaunchState = Pick<Task, "id" | "title" | "status" | "revision" | "createdAt" | "codexThreadId" | "blocked">;
+type LaunchState = Pick<Task, "id" | "title" | "status" | "revision" | "createdAt" | "codexThreadId" | "blocked" | "summary" | "nextStep">;
 
 async function launchTask(project: string, id: string, revisionRequest?: { input: Record<string, unknown> },
   newThread: false | "user" | "manager" = false, revision?: number,
-  retryDisconnect = true, scheduled = false, resolveConflicts = false, resumeWithFullAccess = false): Promise<CliReply<LaunchState>> {
+  continuation: ExecutorContinuation = {}, scheduled = false, resolveConflicts = false, resumeWithFullAccess = false): Promise<CliReply<LaunchState>> {
   const key = project + "\0" + id;
   if (launchingTasks.has(key)) return cliFailure("LAUNCH_IN_PROGRESS", "This task is already being launched.");
   if (executorBusy(project, id)) return cliFailure("CHAT_BUSY", lang("Wait for the chat reply or stop the agent first.", "Дождитесь ответа в чате или остановите агента."));
@@ -2462,31 +2469,41 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     monitoring = true;
     runningTasks.add(key);
     notifyRunChange(project);
-    let retry: { revision: number; reason: string } | undefined;
+    let retry: { revision: number; reason: string; continuation: ExecutorContinuation } | undefined;
     void completion.then(async outcome => {
       const reason = outcome?.reason;
       const items = [...activity.values()];
       // Some tool rejections reach the agent's reply but do not fail the App Server turn.
       const detail = items.findLast(item => item.type === "agentMessage" && item.status === "completed" && item.text.trim())?.text
         ?? items.findLast(item => item.type === "commandExecution" && ["failed", "declined"].includes(item.status))?.text;
-      const incomplete = lang("The agent finished without submitting the task or recording progress.",
-        "Агент завершил сеанс без сдачи задачи или записи прогресса.");
+      const incomplete = lang("The executor ended the turn without submitting or changing the saved progress.",
+        "Исполнитель завершил ход без сдачи или обновления сохранённого прогресса.");
       const rejected = items.findLast(item => item.type === "autoApprovalReview" && ["denied", "timedOut"].includes(item.status));
       const timedOut = rejected?.status === "timedOut";
       const reviewOutcome = timedOut ? lang("Access review timed out", "Истекло время проверки доступа") :
         lang("Access denied by Auto-review", "Auto-review отклонил доступ");
-      if (retryDisconnect && outcome?.disconnected && !signal.aborted && !stopRequested && !rejected) {
-        const current = await callCli<Task>(project, ["show", id, "--compact"]);
-        if (current.ok && current.data.status === "in_progress" && current.data.codexThreadId === codexThreadId &&
-            !stopRequested && !signal.aborted) {
-          retry = { revision: current.data.revision, reason: outcome.reason };
+      const reconnect = outcome?.disconnected && !continuation.afterDisconnect;
+      let unfinishedRevision: number | undefined;
+      if ((reconnect || (!outcome && !task.schedule)) && !signal.aborted && !stopRequested && !rejected) {
+        const current = await callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
+        if (current.ok) {
+          if (current.data.status !== "in_progress" || current.data.codexThreadId !== codexThreadId) {
+            await saveActivity();
+            return;
+          }
+          unfinishedRevision = current.data.revision;
+          const progressed = current.data.summary !== task.summary || current.data.nextStep !== task.nextStep;
+          if (!stopRequested && !signal.aborted && (reconnect || progressed || !continuation.withoutProgress)) {
+            retry = { revision: unfinishedRevision, reason: reason ?? incomplete, continuation: reconnect
+              ? { ...continuation, afterDisconnect: true } : { withoutProgress: !progressed } };
+          }
+        }
+        if (retry && reconnect) {
           activity.set("connection-lost", {
             id: "connection-lost", type: "error", status: "failed", title: "",
             text: lang("The Codex connection closed. The board will try to continue in the same chat.",
               "Соединение с Codex закрылось. Доска попробует продолжить работу в том же чате."),
           });
-          await saveActivity();
-          return;
         }
       }
       if (outcome?.interrupted && !signal.aborted && !stopRequested && !rejected) {
@@ -2496,7 +2513,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         });
       }
       await saveActivity();
-      if (signal.aborted || (outcome?.interrupted && !stopRequested && !rejected)) return;
+      if (retry || signal.aborted || (outcome?.interrupted && !stopRequested && !rejected)) return;
       if (task.schedule && !outcome && !stopRequested && !rejected) {
         const current = await callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
         if (current.ok && current.data.status === "in_progress" && current.data.codexThreadId === codexThreadId) {
@@ -2517,7 +2534,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       const diagnostic = stopRequested ? lang("The user stopped the agent.", "Пользователь остановил работу агента.") : rejected ? [
         [reviewOutcome, rejected.title.slice(0, 1000)].filter(Boolean).join(" — "), rejected.text.slice(0, 1500), reason, summary,
       ].filter(Boolean).join("\n\n") : reason ?? [incomplete, summary].filter(Boolean).join("\n\n");
-      const failure = await recordRunFailure(project, id, diagnostic, condition);
+      const failure = await recordRunFailure(project, id, diagnostic, condition, unfinishedRevision);
       if (failure) publishRunActivity(project, id, [
         { id: "block-error", type: "error", title: "", text: failure, status: "failed" },
       ]);
@@ -2527,12 +2544,16 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       runningTasks.delete(key);
       launchingTasks.delete(key);
       release();
-      notifyRunChange(project);
       try {
         if (retry && !signal.aborted && !stopRequested && !closingProjects.has(project)) {
-          const resumed = await launchTask(project, id, undefined, false, retry.revision, false);
-          if (!signal.aborted && !resumed.ok && !["REVISION_CONFLICT", "CHAT_BUSY", "LAUNCH_IN_PROGRESS", "BOARD_BUSY", "EXECUTOR_LIMIT"].includes(resumed.error.code)) {
-            await recordRunFailure(project, id, retry.reason + "\n\n" + resumed.error.message, undefined, retry.revision);
+          const resumed = await launchTask(project, id, undefined, false, retry.revision, retry.continuation);
+          if (!signal.aborted && !resumed.ok) {
+            if (resumed.error.code === "EXECUTOR_LIMIT" && subscriptions.has(project)) {
+              deferredExecutors.set(key, { project, id, revision: retry.revision, continuation: retry.continuation });
+              scheduleAgentWork();
+            } else if (!["REVISION_CONFLICT", "CHAT_BUSY", "LAUNCH_IN_PROGRESS", "BOARD_BUSY", "EXECUTOR_LIMIT"].includes(resumed.error.code)) {
+              await recordRunFailure(project, id, retry.reason + "\n\n" + resumed.error.message, undefined, retry.revision);
+            }
           }
         } else if (retry && !signal.aborted) {
           const reason = stopRequested ? lang("The user stopped the agent.", "Пользователь остановил работу агента.") :
@@ -2540,6 +2561,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
           await recordRunFailure(project, id, reason, undefined, retry.revision);
         }
       } finally {
+        notifyRunChange(project);
         operation.finish();
       }
     });
@@ -2594,7 +2616,7 @@ ipcMain.handle("board:launchTask", async (event, id: unknown, options: unknown =
     });
     if (choice.response !== 1) return { ok: true, data: null };
   }
-  return launchTask(project, id, undefined, input.newThread ? "user" : false, undefined, true, false, false, input.resumeWithFullAccess === true);
+  return launchTask(project, id, undefined, input.newThread ? "user" : false, undefined, undefined, false, false, input.resumeWithFullAccess === true);
 });
 
 ipcMain.handle("codex:status", event => {

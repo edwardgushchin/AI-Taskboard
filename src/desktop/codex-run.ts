@@ -36,7 +36,7 @@ function executorInstructions() {
   const readInstructions = (name: string) => readFileSync(new URL(name + ".md", instructions), "utf8").trim();
   return boardAgentInstructions("executor", [
     "AI Taskboard has already started this card and assigned its working directory. Read the current card, then work in that directory. Pass --project with the board root in every CLI invocation.",
-    "If a provider MCP tool is missing, use task_tool_request with server, tool and a reason. The request is bound to this task. The manager discovers tools with provider_tools and saves an assignment with task_tool_grant. Assignments apply on the next task run, including a resumed chat; finish the current pass with progress before restarting. Do not claim hot connection or successful authorization from a saved assignment.",
+    "If a provider MCP tool is missing, use task_tool_request with server, tool and a reason. The manager discovers tools with provider_tools and saves an assignment with task_tool_grant. Assignments apply on the next task run. Keep working on independent steps. If the missing tool prevents further work on a required step, record that blocker and the condition for resuming.",
     checkWaitInstructions,
     readInstructions("executor").replace("__AI_TASKBOARD_CLI__", () => JSON.stringify(taskboardCliLaunch(bundled, entry))),
     readInstructions("task-writing"),
@@ -65,7 +65,7 @@ const verifyWrite = [
   "}",
 ].join("\n");
 
-export type ExecutorTask = Pick<Task, "id" | "title" | "description" | "criteria" | "execution" | "git" | "codexThreadId" | "workingDirectory" | "schedule" | "toolGrants"> &
+export type ExecutorTask = Pick<Task, "id" | "title" | "description" | "criteria" | "summary" | "nextStep" | "execution" | "git" | "codexThreadId" | "workingDirectory" | "schedule" | "toolGrants"> &
   { feedback?: string; fullAccess?: boolean };
 
 export function missingCodexThread(message: string | undefined, threadId: string | undefined) {
@@ -285,13 +285,13 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       "Команды, которые должен запускать читатель, оформляй отдельными блоками кода Markdown. Пояснения пиши отдельными абзацами.",
       task.schedule
         ? "Это очередной запуск повторяющейся задачи. Выполни один проход по текущим условиям и запиши результат через progress с summary и nextStep. Карточка вернётся в готовые до следующего запуска. Не используй submit. Если без посторонней помощи выполнить задачу нельзя, используй block."
-        : "Заверши работу в карточке командой сдачи, записи прогресса, паузы или блокировки в AI Taskboard.",
+        : "Продолжай работу по всем критериям до сдачи через submit. Если сохранён прогресс, возобнови работу с указанного следующего шага и проверь актуальное состояние. Запись progress сохраняет промежуточный результат. Заверши ход только после сдачи, при блокировке с конкретным условием продолжения или по команде пользователя.",
       "После записи результата в карточку и перед итоговым ответом вызови mcp__ai_taskboard__worklog_record с языком и массивом entries. " +
         "Инструмент подключён к текущему ходу. Команды Worklog из истории относятся к прошлым ходам.",
       "Перед сдачей сопоставь каждый критерий с результатом в diff или проверке. Для изменённого поведения перечисли существенно разные условия, в которых действует один критерий, и проверь сочетания, где результат может различаться. Например, для изменений поставки это чистая и повторная сборка, сборка и публикация, настройки по умолчанию и переопределения. После возврата проверь другие затронутые сценарии того же критерия. Если проверка выполнена на более ранней ревизии, покажи, почему она ещё применима, либо повтори затронутую проверку.",
       "Если доступ отклонён, продолжай разрешённым способом. Если без доступа нельзя выполнить обязательный шаг, заблокируй задачу. В причине укажи шаг, нужный ресурс и причину отказа, в условии разблокировки — конкретное действие для продолжения.",
       "Рабочая папка: " + cwd,
-      JSON.stringify({ title: task.title, description: task.description, criteria: task.criteria }),
+      JSON.stringify({ title: task.title, description: task.description, criteria: task.criteria, summary: task.summary, nextStep: task.nextStep }),
       ...(task.feedback ? ["Замечание к последней сдаче: " + task.feedback] : []),
     ].join("\n");
     activeThreadId = threadId;
