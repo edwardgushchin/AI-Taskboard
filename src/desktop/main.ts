@@ -2380,7 +2380,9 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     }
     signal.throwIfAborted();
     const started = await callCli<{ task: LaunchState & ExecutorTask } & ({ worktree: string } | { cwd: string })>(project, ["start", id, "--compact"],
-      { revision: revision ?? current.data.revision, launchDetails: true, ...(scheduled ? { scheduled } : {}), ...(resolveConflicts ? { resolveConflicts } : {}) });
+      { revision: revision ?? current.data.revision, launchDetails: true, ...(scheduled ? { scheduled } : {}),
+        ...(resolveConflicts ? { resolveConflicts } : {}),
+        ...(process.platform === "win32" && client.windowsSandbox === "elevated" ? { isolatedWorktree: true } : {}) });
     if (!started.ok) {
       if (prepared && started.error.code !== "BOARD_BUSY") throw new Error(started.error.message);
       return started;

@@ -174,17 +174,33 @@ export function discoverRepository(cwd: string): Repository | null {
   return { root: realpathSync(main.path), bare: main.bare === true };
 }
 
-export function excludeBoard(repo: Repository): void {
-  if (repo.bare) return;
-  if (git(repo.root, ["ls-files", "-z", "--", ".tasks"]).length) {
-    throw new TaskboardError("TRACKED_BOARD", "Git already tracks files under .tasks.");
+export const isolatedWorktreesDirectory = ".taskboard-worktrees";
+
+export function gitSafeDirectoryEnvironment(env: NodeJS.ProcessEnv, ...paths: string[]): NodeJS.ProcessEnv {
+  const entries = [...new Set(paths)];
+  const count = Number(env.GIT_CONFIG_COUNT || "0");
+  if (!Number.isSafeInteger(count) || count < 0 || !Number.isSafeInteger(count + entries.length)) {
+    throw new TaskboardError("INVALID_GIT_CONFIG", "GIT_CONFIG_COUNT must be a nonnegative integer.");
   }
-  if (invokeGit(repo.root, ["check-ignore", "-q", "--", ".tasks/"]).code === 0) return;
+  const result: NodeJS.ProcessEnv = { ...env, GIT_CONFIG_COUNT: String(count + entries.length) };
+  for (const [index, path] of entries.entries()) {
+    result["GIT_CONFIG_KEY_" + (count + index)] = "safe.directory";
+    result["GIT_CONFIG_VALUE_" + (count + index)] = path.replaceAll("\\", "/");
+  }
+  return result;
+}
+
+export function excludeBoard(repo: Repository, directory: ".tasks" | typeof isolatedWorktreesDirectory = ".tasks"): void {
+  if (repo.bare) return;
+  if (git(repo.root, ["ls-files", "-z", "--", directory]).length) {
+    throw new TaskboardError("TRACKED_BOARD", "Git already tracks files under " + directory + ".");
+  }
+  if (invokeGit(repo.root, ["check-ignore", "-q", "--", directory + "/"]).code === 0) return;
   const path = git(repo.root, ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"]).trimEnd();
   mkdirSync(dirname(path), { recursive: true });
-  appendFileSync(path, "\n/.tasks/\n");
-  if (invokeGit(repo.root, ["check-ignore", "-q", "--", ".tasks/"]).code !== 0) {
-    throw new TaskboardError("BOARD_NOT_IGNORED", "Git ignore rules prevent excluding .tasks.");
+  appendFileSync(path, "\n/" + directory + "/\n");
+  if (invokeGit(repo.root, ["check-ignore", "-q", "--", directory + "/"]).code !== 0) {
+    throw new TaskboardError("BOARD_NOT_IGNORED", "Git ignore rules prevent excluding " + directory + ".");
   }
 }
 
