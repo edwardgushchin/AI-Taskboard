@@ -114,11 +114,11 @@ h1, h2, h3, p { margin: 0; }
 }
 /* Activity is on the opposite edge from selection and never takes layout space. */
 .project-tab.has-active-agents::after {
-  content: ""; position: absolute; inset-block: 3px; inset-inline-end: 0; width: 2px;
-  background: var(--green); border-radius: 2px; pointer-events: none;
+  content: ""; position: absolute; inset-block: 3px; inset-inline-end: 0; width: 1px;
+  background: var(--accent); border-radius: 1px; pointer-events: none;
   animation: project-agent-pulse 2.4s ease-in-out infinite;
 }
-@keyframes project-agent-pulse { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+@keyframes project-agent-pulse { 0%, 100% { opacity: .12; } 50% { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) {
   .project-tab.has-active-agents::after { animation: none; opacity: 1; }
 }

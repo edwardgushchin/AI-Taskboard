@@ -95,7 +95,8 @@ try {
     const b = el.querySelector('[role=tab]'), stripe = getComputedStyle(el, '::after');
     return { active: el.classList.contains('has-active-agents'), selected: b.getAttribute('aria-selected'),
       unread: !!el.querySelector('.project-tab-unread'), title: b.title, description: b.getAttribute('aria-description'),
-      animation: stripe.animationName, color: stripe.backgroundColor, width: stripe.width,
+      animation: stripe.animationName, color: stripe.backgroundColor, width: stripe.width, opacity: Number(stripe.opacity),
+      accent: getComputedStyle(el).getPropertyValue('--accent').trim(),
       pointer: stripe.pointerEvents, selection: getComputedStyle(el).borderInlineStartColor };
   })`);
   const matrix = [];
@@ -111,13 +112,66 @@ try {
       for (const tab of tabs) {
         assert.equal(tab.active, true); assert.equal(tab.unread, true);
         assert.equal(tab.animation, motion === 'reduce' ? 'none' : 'project-agent-pulse');
-        assert.equal(tab.width, '2px'); assert.equal(tab.pointer, 'none');
+        assert.equal(tab.width, '1px'); assert.equal(tab.pointer, 'none');
         assert.notEqual(tab.color, 'rgba(0, 0, 0, 0)');
+        assert.equal(await evaluate(`(() => { const el = document.createElement('span'); el.style.color = ${JSON.stringify(tab.accent)}; document.body.append(el); const color = getComputedStyle(el).color; el.remove(); return color; })()`), tab.color);
+        if (motion === 'reduce') assert.equal(tab.opacity, 1);
         assert.ok(tab.title.includes(tab.description));
       }
       assert.match(tabs[0].description, /Менеджер 1.*Ревьюер 1/);
       assert.match(tabs[1].description, /Менеджер 1.*Исполнитель 1/);
       assert.deepEqual(tabs.map(t => t.selected), ['false', 'true']);
+      if (motion === 'no-preference') {
+        // Record actual Chromium frames with native canvas/MediaRecorder, no extra encoder.
+        const clip = { x: 0, y: 0, width: 100, height: 560 };
+        await evaluate(`(() => {
+          const canvas = document.createElement('canvas'); canvas.width = 100; canvas.height = 560;
+          const stream = canvas.captureStream(10), chunks = [];
+          const recorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp9' });
+          globalThis.activityRecording = { canvas, recorder, stream, chunks };
+          recorder.ondataavailable = event => chunks.push(event.data);
+          recorder.start();
+        })()`);
+        const samples = [];
+        for (let frame = 0; frame < 30; frame++) {
+          const capture = (await window.webContents.capturePage(clip)).toDataURL();
+          await evaluate(`(async () => {
+            const image = new Image(); image.src = ${JSON.stringify(capture)}; await image.decode();
+            activityRecording.canvas.getContext('2d').drawImage(image, 0, 0);
+          })()`);
+          samples.push((await tabState())[0].opacity);
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        const base64 = await evaluate(`new Promise(resolve => {
+          const { recorder, stream, chunks } = activityRecording;
+          recorder.onstop = async () => {
+            const buffer = await new Blob(chunks, { type: recorder.mimeType }).arrayBuffer();
+            stream.getTracks().forEach(track => track.stop());
+            delete globalThis.activityRecording;
+            resolve(btoa(String.fromCharCode(...new Uint8Array(buffer))));
+          };
+          recorder.stop();
+        })`);
+        writeFileSync(join(artifacts, 'pulse-' + theme + '.webm'), Buffer.from(base64, 'base64'));
+        assert.ok(Math.min(...samples) < .2 && Math.max(...samples) > .95, 'visible full pulse range');
+        // Decode in an isolated blank window: the app deliberately disallows media via CSP.
+        const decoder = new BrowserWindow({ show: false });
+        let playback;
+        try {
+          await decoder.loadURL('about:blank');
+          playback = await decoder.webContents.executeJavaScript(`new Promise((resolve, reject) => {
+          const video = document.createElement('video');
+          video.onloadeddata = () => { resolve({ width: video.videoWidth, height: video.videoHeight }); video.removeAttribute('src'); video.load(); };
+          video.onerror = () => reject(new Error('Recorded clip could not be decoded'));
+          video.src = 'data:video/webm;base64,' + ${JSON.stringify(base64)};
+        })`);
+        } finally { decoder.destroy(); }
+        assert.deepEqual(playback, { width: 100, height: 560 });
+        matrix.push({ theme, motion, opacitySamples: samples, playback });
+      } else {
+        await new Promise(resolve => setTimeout(resolve, 300));
+        assert.equal((await tabState())[0].opacity, 1, 'reduced motion remains static');
+      }
       matrix.push({ theme, motion, tabs });
       writeFileSync(join(artifacts, `tabs-${theme}-${motion}.png`), (await window.webContents.capturePage()).toPNG());
     }
