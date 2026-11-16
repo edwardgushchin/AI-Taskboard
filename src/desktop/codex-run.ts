@@ -67,7 +67,7 @@ const verifyWrite = [
   "}",
 ].join("\n");
 
-export type ExecutorTask = Pick<Task, "id" | "title" | "description" | "criteria" | "summary" | "nextStep" | "execution" | "git" | "codexThreadId" | "workingDirectory" | "schedule" | "toolGrants"> &
+export type ExecutorTask = Pick<Task, "id" | "title" | "description" | "criteria" | "dueDate" | "summary" | "nextStep" | "execution" | "git" | "codexThreadId" | "workingDirectory" | "schedule" | "toolGrants"> &
   { feedback?: string; fullAccess?: boolean };
 
 export function missingCodexThread(message: string | undefined, threadId: string | undefined) {

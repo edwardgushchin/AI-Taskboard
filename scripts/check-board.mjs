@@ -140,6 +140,33 @@ app.whenReady().then(async () => {
   await evaluate(`byId('notice-close').click(); void 0`);
   await evaluate(`push(); void 0`);
   await check(`byId('welcome').hidden && !byId('workspace').hidden && byId('app-content').getAttribute('aria-busy') === 'false'`, "a restored board replaces the loading state");
+  if (process.argv.includes("--auto-only")) {
+    await evaluate(`window.taskboard.command = async (action, id, input) => {
+      if (action === 'settings') { Object.assign(fixture.board.settings, input); push(); return {ok:true,data:fixture.board.settings}; }
+      if (action === 'show') return {ok:true,data:{...fixture.board.tasks.find(task => task.id === id), criteria:[]}};
+      if (action === 'update') { Object.assign(fixture.board.tasks.find(task => task.id === id), input); push(); return {ok:true,data:fixture.board.tasks.find(task => task.id === id)}; }
+      throw new Error('Unexpected action: ' + action);
+    }; void 0`);
+    await check(`byId('status-auto-mode').getAttribute('aria-pressed') === 'false'`, "automatic mode is visibly off by default");
+    await click('#status-auto-mode');
+    await check(`byId('status-auto-mode').getAttribute('aria-pressed') === 'true' && fixture.board.settings.autoMode === true`, "the toggle persists the enabled setting through the board command");
+    await capture('auto-mode-on.png');
+    await evaluate(`push(); void 0`);
+    await check(`byId('status-auto-mode').getAttribute('aria-pressed') === 'true'`, "a restored board snapshot retains the mode");
+    await click('#status-auto-mode');
+    await check(`byId('status-auto-mode').getAttribute('aria-pressed') === 'false'`, "the toggle turns automatic mode off");
+    await evaluate(`fixture.board.tasks[1].unfinishedDependencies = ['T-0001']; push(); void 0`);
+    await check(`lane('ready').contains(findCard('T-0002')) && findCard('T-0002').querySelector('.task-dependency-message').textContent.includes('T-0001')`, "dependency waiting retains the ready column and explanation");
+    await evaluate(`showTask('T-0002')`);
+    await check(`byId('task-launch').disabled`, "manual launch is disabled while dependencies are unfinished");
+    await evaluate(`taskEditor({...fixture.board.tasks[1],criteria:[]}); void 0`);
+    await check(`document.querySelector('input[name="dueDate"]').type === 'date'`, "task editing exposes a calendar deadline");
+    await evaluate(`(() => { const input = document.querySelector('input[name="dueDate"]'); input.value = '2026-11-20'; input.form.requestSubmit(); })()`);
+    await evaluate(`waitFor(() => fixture.board.tasks[1].dueDate === '2026-11-20')`);
+    await check(`findCard('T-0002').textContent.includes('2026-11-20')`, "saving a deadline updates the visible card");
+    console.log('Automatic mode Chromium checks passed: ' + checks);
+    return;
+  }
   if (process.argv.includes("--covers-only")) {
     await evaluate(`
       const sizes = [[400, 8000], [800, 200], [40, 30]];
@@ -1850,10 +1877,10 @@ app.whenReady().then(async () => {
   await evaluate(`fixture.board.tags[0].color = '#AB1234'; push(); void 0`);
   await check(`findCard('T-0002').querySelector('.tag').style.getPropertyValue('--tag-color') === '#AB1234'`, "tag color changes reach existing cards");
   await evaluate(`fixture.board.tasks[1].unfinishedDependencies = ['T-0001']; push(); void 0`);
-  await check(`lane('blocked').contains(findCard('T-0002')) && findCard('T-0002').dataset.state === 'ready' &&
+  await check(`lane('ready').contains(findCard('T-0002')) && findCard('T-0002').dataset.state === 'ready' &&
     findCard('T-0002').querySelector('.task-dependency-message').textContent === 'Ожидает T-0001' &&
     getComputedStyle(findCard('T-0002').querySelector('.task-dependency-message')).justifySelf === 'start'`,
-    "a ready task waiting for a dependency shows a compact badge in the blocked lane");
+    "a ready task waiting for a dependency shows a compact badge in the ready lane");
   await evaluate(`fixture.board.tasks[1].unfinishedDependencies = ['T-0003']; push(); void 0`);
   await check(`findCard('T-0002').querySelector('.task-dependency-message').textContent === 'Ожидает T-0003'`,
     "the displayed dependency updates even when the count stays the same");
@@ -2028,7 +2055,7 @@ app.whenReady().then(async () => {
   await evaluate(`fixture.board.tasks.find(task => task.id === 'T-0102').priority = 'high'; fixture.board.tasks.find(task => task.id === 'T-0000').priority = 'high'; push(); const sortingFilter = lane('ready').querySelector('select'); sortingFilter.value = 'high'; sortingFilter.dispatchEvent(new Event('change', { bubbles: true })); void 0`);
   await check(`laneIds('ready') === 'T-0000,T-0102'`, "column filters preserve newest-first order for the matching subset");
   await evaluate(`lane('ready').querySelector('.lane-filter-options button').click(); fixture.board.tasks.find(task => task.id === 'T-0103').unfinishedDependencies = ['T-0100']; push(); settle()`);
-  await check(`laneIds('blocked') === 'T-0106,T-0107,T-0103'`, "dependency-blocked tasks use the same last-change order in the blocked column");
+  await check(`laneIds('blocked') === 'T-0106,T-0107' && laneIds('ready') === 'T-0000,T-0102,T-0103'`, "dependency waiting retains the ready column and its last-change order");
   await evaluate(`fixture.board.tasks.push(task('T-9999', 'Совпадающая дата', { createdAt: '2026-11-05T12:00:00.000Z', updatedAt: 'invalid' })); push(); settle()`);
   await evaluate(`const tiedOrder = laneIds('ready'); fixture.board.tasks.reverse(); push(); settle()`);
   await check(`laneIds('ready') === tiedOrder && tiedOrder.startsWith('T-9999,T-0000,')`, "invalid updatedAt falls back to creation and equal dates use a stable task-number tie-breaker");

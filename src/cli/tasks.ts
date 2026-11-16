@@ -1,6 +1,6 @@
 import {
   member, nextScheduledRun, number, object, priorities, reasoningEffortPattern, record, requireRevision, requireState, scheduleTimePattern, strings, taskIdPattern,
-  TaskboardError, text, validScheduleDate,
+  TaskboardError, text, validScheduleDate, validDueDate,
 } from "./model.ts";
 import { codexThreadPattern } from "./model.ts";
 import type { Actor, Task, TaskScheduleRule, TaskState } from "./model.ts";
@@ -16,6 +16,13 @@ function fields(task: Task, input: Record<string, unknown>): Task {
     if (input[key] !== undefined) updated[key] = strings(input[key], key);
   }
   if (input.priority !== undefined) updated.priority = member(input.priority, priorities, "priority");
+  if (input.dueDate !== undefined) {
+    if (input.dueDate === null) delete updated.dueDate;
+    else {
+      if (!validDueDate(input.dueDate)) throw new TaskboardError("INVALID_INPUT", "dueDate must be a calendar date in YYYY-MM-DD format.");
+      updated.dueDate = input.dueDate;
+    }
+  }
   if (input.schedule !== undefined) {
     requireState(task, ["draft", "ready", "blocked"]);
     if (input.schedule === null) delete updated.schedule;

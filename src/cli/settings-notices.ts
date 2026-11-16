@@ -17,6 +17,7 @@ export function effectiveSettings(settings: BoardSettings, defaults: AgentLimits
     "Интеграция Git": settings.integrationMode,
     "Превью карточек": settings.showCardPreviews ?? true,
     "Режим ревью": boardReviewMode(settings),
+    "Авторежим": settings.autoMode ?? false,
   };
   for (const [role, label] of [["executor", "исполнителей"], ["manager", "менеджеров"], ["reviewer", "ревьюеров"]] as const) {
     values[`Лимит ${label}`] = settings.agentLimits?.[role] ?? defaults[role];

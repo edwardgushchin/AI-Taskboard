@@ -46,7 +46,7 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
     AbortController, performance, setTimeout, clearTimeout, setImmediate, subscriptions, agentSlots: slots,
     locateBoard: (project: string) => project,
     readBoardSettings: (project: string) => savedSettings.get(project) ?? subscriptions.get(project)?.board.settings ?? {},
-    scheduleAutoReview: () => {}, projectIdentity: (project: string) => project,
+    scheduleAutoReview: () => {}, scheduleAutoBoard: () => {}, projectIdentity: (project: string) => project,
     broadcastBoardChat: () => {},
     lang: (english: string) => english, cliFailure: failure, missingCodexThread,
     app: { getPath: () => "profile" }, dialog: { showMessageBox: async () => ({ response: 1 }) },

@@ -90,7 +90,7 @@ if (!process.versions.electron) {
       .replace(/from "(\.\.?\/[^"\n]+)"/g, (_match, path) => "from " + JSON.stringify(new URL(path, sourceUrl).href));
     const code = transformSync(source, { loader: "ts", format: "esm" }).code;
     const entry = join(artifacts, "main-under-test.mjs");
-    writeFileSync(entry, code + "\nglobalThis.tabTest = { beginOperation, windowStates };\n");
+    writeFileSync(entry, code + "\nglobalThis.tabTest = { beginOperation, windowStates, subscriptions, autoBoards };\n");
     app.on("web-contents-created", (_event, contents) => {
       contents.setBackgroundThrottling(false);
       contents.on("dom-ready", () => void contents.executeJavaScript(`
@@ -168,6 +168,8 @@ if (!process.versions.electron) {
       check(await evaluate("[...document.querySelectorAll('.project-tab-detail')].map(item => item.textContent).join(',') === 'first,second'"), "same names have parent paths");
       await select(first);
       check(await evaluate("document.querySelector('.task-card strong').textContent === 'First project task'"), "switching tabs renders the matching task");
+      await evaluate("window.taskboard.command('settings', undefined, {autoMode:true})");
+      await waitFor(() => evaluate("document.querySelector('#status-auto-mode').getAttribute('aria-pressed') === 'true'"), "saved automatic mode");
       await evaluate("showTask('T-0001')");
       await evaluate("[...document.querySelectorAll('#sheet-body button')].find(button => button.textContent === 'Доступ исполнителя…').click()");
       check(await evaluate("document.querySelector('select[name=mode]').value === 'auto'"), "executor access defaults to auto-review");
@@ -180,6 +182,12 @@ if (!process.versions.electron) {
       check((await evaluate("window.taskboard.command('show','T-0001')")).data.executorFullAccess, "full access is saved from the task settings");
       await evaluate("document.querySelector('dialog[open]').close()");
       await select(second);
+      check(await evaluate("document.querySelector('#status-auto-mode').getAttribute('aria-pressed') === 'false'"), "automatic mode is isolated between boards");
+      await waitFor(() => {
+        const watch = globalThis.tabTest.subscriptions.get(first);
+        return watch && globalThis.tabTest.autoBoards.has(watch);
+      }, "automatic dispatch on the background board");
+      check((await frame()).project === second, "background automatic dispatch does not select its board");
       check(!(await evaluate("window.taskboard.command('show','T-0001')")).data.executorFullAccess,
         "a task with the same ID in another project uses its own access");
       await select(first);
@@ -309,6 +317,11 @@ if (!process.versions.electron) {
       await evaluate("window.startupObserver.disconnect()");
       check((await frame()).tabs.map(tab => tab.path).join("|") === [unavailable, first, second].join("|"), "relaunch restores tab order");
       check((await frame()).project === second, "relaunch restores the active project");
+      check(await evaluate("document.querySelector('#status-auto-mode').getAttribute('aria-pressed') === 'false'"), "relaunch keeps automatic mode off on the second board");
+      await waitFor(() => {
+        const watch = globalThis.tabTest.subscriptions.get(first);
+        return watch?.board.settings.autoMode === true && globalThis.tabTest.autoBoards.has(watch);
+      }, "restored background automatic dispatch");
       check((await frame()).runningTasks.length === 0, "relaunch does not restart agents");
       await select(unavailable);
       check((await frame()).error.code === "PROJECT_UNAVAILABLE", "unavailable restored project shows its own error");
@@ -316,6 +329,7 @@ if (!process.versions.electron) {
       await select(second);
       await evaluate("document.querySelector('[aria-selected=true]').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }))");
       await waitFor(async () => (await frame()).project === first, "keyboard tab switch");
+      check(await evaluate("document.querySelector('#status-auto-mode').getAttribute('aria-pressed') === 'true'"), "automatic mode survives the Electron relaunch for its board");
       check(await evaluate("document.activeElement.getAttribute('aria-selected') === 'true'"), "keyboard switch focuses selected tab");
       check((await evaluate("window.taskboard.command('show','T-0001')")).data.executorFullAccess, "the executor access setting survives relaunch");
       for (const path of [second, first]) await evaluate("window.taskboard.closeTab(" + JSON.stringify(path) + ")");

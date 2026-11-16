@@ -180,6 +180,9 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
     if (dependencies.length) {
       throw new TaskboardError("DEPENDENCIES_INCOMPLETE", "Complete the task dependencies before starting.", { dependencies });
     }
+    if (task.schedule && !(Date.parse(task.schedule.nextAt) <= Date.now())) {
+      throw new TaskboardError("INVALID_TRANSITION", "The task is not due to run.", { nextAt: task.schedule.nextAt });
+    }
   }
   requireRevision(task, input.revision);
   if (task.workingDirectory) {

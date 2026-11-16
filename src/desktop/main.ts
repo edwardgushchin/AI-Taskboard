@@ -38,6 +38,7 @@ import { readReviewerChat, reviewerActivity, withReviewerChat } from "./reviewer
 import { goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryForView, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, saveManagerHistory, syncTaskStatusNotices } from "./manager-history.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
 import { createAgentSlots, parseAgentLimits } from "./agent-limits.ts";
+import { nextReadyTask } from "./auto-queue.ts";
 import type { AgentRole } from "./agent-limits.ts";
 import { checkForUpdates } from "./updates.ts";
 import { settingsDelivery, syncSettingsNotices } from "./settings-notices.ts";
@@ -845,7 +846,107 @@ const boardWorkRequests = new Map<string, ManagerRequest>();
 const agentSlots = createAgentSlots();
 type ExecutorContinuation = { afterDisconnect?: boolean; withoutProgress?: boolean };
 const deferredExecutors = new Map<string, { project: string; id: string; revision: number; continuation?: ExecutorContinuation }>();
+const autoBoards = new WeakMap<BoardWatch, {
+  running: boolean; milestonesAt: number; dates: Map<number, string | null>; milestonesError?: string;
+  launches: Set<string>; integrations: Set<string>; notices: Set<string>;
+}>();
 let schedulingAgentWork = false;
+
+function scheduleAutoBoard(watch: BoardWatch) {
+  const { project } = watch.board;
+  if (!watch.board.settings.autoMode || subscriptions.get(project) !== watch || closingProjects.has(project)) return;
+  let state = autoBoards.get(watch);
+  if (!state) {
+    state = { running: false, milestonesAt: 0, dates: new Map(), launches: new Set(), integrations: new Set(), notices: new Set() };
+    autoBoards.set(watch, state);
+  }
+  if (state.running) return;
+  state.running = true;
+  const queue = state;
+  const failed = (error: string) => broadcastBoardChat(project, "orchestrator-review-error", { error });
+  void (async () => {
+    // Read again before every decision; watch snapshots can lag a CLI write.
+    for (;;) {
+      if (closingProjects.has(project) || subscriptions.get(project) !== watch) return;
+      const current = await callCli<Board>(project, ["list", "--compact"]);
+      if (!current.ok) { failed(current.error.message); return; }
+      const board = current.data;
+      if (!board.settings.autoMode) return;
+      const key = projectIdentity(project);
+      if (boardReviewMode(board.settings) === "reviewer") {
+        const task = board.tasks.find(task => task.status === "review" && task.reviewApproved && !executorBusy(project, task.id) &&
+          !watch.reviewerRuns.has(task.id) && !queue.integrations.has(task.id + ":" + task.revision));
+        if (task) {
+          const attempt = task.id + ":" + task.revision;
+          queue.integrations.add(attempt);
+          const review = await callCli<{ revision: number; targetHead: string | null; message?: string; stale: boolean;
+            reviewerApproval?: { targetHead: string | null } }>(project, ["review", task.id, "--compact"]);
+          if (!review.ok) { failed(review.error.message); continue; }
+          if (review.data.stale) { failed(task.id + ": submission changed"); continue; }
+          if (review.data.reviewerApproval?.targetHead !== review.data.targetHead) {
+            const release = reserveAgent(project, "reviewer");
+            if (!release) { queue.integrations.delete(attempt); return; }
+            watch.reviewerRuns.set(task.id, reviewSubmission(watch, task.id, 4).finally(async () => {
+              try {
+                const checked = await callCli<{ targetHead: string | null; reviewerApproval?: { targetHead: string | null } }>(project, ["review", task.id, "--compact"]);
+                if (checked.ok && checked.data.reviewerApproval?.targetHead === checked.data.targetHead) queue.integrations.delete(attempt);
+              } finally {
+                watch.reviewerRuns.delete(task.id); release(); publishReviewActivity(project);
+              }
+            }));
+            continue;
+          }
+          const accepted = await callCli(project, ["accept", task.id, "--compact"], {
+            autoMode: true, actor: "manager", reviewMode: "reviewer", revision: review.data.revision,
+            targetHead: review.data.targetHead, ...(review.data.message ? { message: review.data.message } : {}),
+          });
+          if (!accepted.ok) {
+            if (["BOARD_BUSY", "TARGET_CHANGED", "AUTO_MODE_DISABLED", "AUTO_REVIEW_DISABLED", "REVIEW_MODE_CHANGED"].includes(accepted.error.code)) queue.integrations.delete(attempt);
+            else failed(task.id + ": " + accepted.error.message);
+            if (["BOARD_BUSY", "AUTO_MODE_DISABLED", "AUTO_REVIEW_DISABLED", "REVIEW_MODE_CHANGED"].includes(accepted.error.code)) return;
+          }
+          continue;
+        }
+      }
+      // Address exceptions only. Routine dispatch and successful integration never need a manager turn.
+      const notices = (board.managerInbox ?? []).filter(message => ["question", "block"].includes(message.kind) &&
+        !queue.notices.has(message.id + ":" + message.sequence));
+      const tab = [...watch.tabs].find(tab => !tab.window.isDestroyed());
+      if (notices.length && tab && !boardWorkRequests.has(key) && agentSlots.available(key, "manager", board.settings.agentLimits)) {
+        for (const notice of notices) queue.notices.add(notice.id + ":" + notice.sequence);
+        const prompt = "AI Taskboard automatic mode: handle these addressed notices without a goal. " + JSON.stringify(notices);
+        void runBoardRequest(tab.window.webContents, board, prompt, [], false, false, undefined, undefined, undefined, true)
+          .then(result => { if (!result.ok) failed(result.error.message); else if (result.data?.error) failed(result.data.error); })
+          .catch(error => failed((error as Error).message));
+      }
+      if (!agentSlots.available(key, "executor", board.settings.agentLimits)) return;
+      if (board.tasks.some(task => task.status === "ready" && task.milestone) && Date.now() - queue.milestonesAt >= 60_000) {
+        queue.milestonesAt = Date.now();
+        const milestones = await callCli<{ repository: string; milestones: { number: number; due_on: string | null }[] }>(project, ["milestones"]);
+        if (!milestones.ok) { queue.milestonesError = milestones.error.message; failed(milestones.error.message); return; }
+        queue.milestonesError = undefined;
+        queue.dates = new Map(milestones.data.milestones.map(entry => [entry.number, entry.due_on]));
+        continue; // A deadline, setting or card may have changed during the network request.
+      }
+      if (queue.milestonesError && board.tasks.some(task => task.status === "ready" && task.milestone)) return;
+      const task = nextReadyTask(board.tasks, queue.dates, id => executorBusy(project, id) ||
+        queue.launches.has(id + ":" + board.tasks.find(task => task.id === id)!.revision));
+      if (!task) return;
+      const attempt = task.id + ":" + task.revision;
+      queue.launches.add(attempt);
+      const result = await launchTask(project, task.id, undefined, false, task.revision, undefined, Boolean(task.schedule), false, false, true);
+      if (!result.ok) {
+        if (["BOARD_BUSY", "REVISION_CONFLICT", "INVALID_TRANSITION", "LAUNCH_IN_PROGRESS", "CHAT_BUSY", "EXECUTOR_LIMIT",
+            "PROJECT_CLOSING", "DEPENDENCIES_INCOMPLETE", "AUTO_MODE_DISABLED"].includes(result.error.code)) {
+          queue.launches.delete(attempt);
+          return; // Retry on the next event/tick, never spin on the same snapshot.
+        }
+        await callCli(project, ["block", task.id, "--compact"], { revision: task.revision, allowUnstarted: true,
+          reason: result.error.message, condition: lang("Fix the launch error and unblock the task.", "Устраните ошибку запуска и разблокируйте задачу.") });
+      }
+    }
+  })().catch(error => failed((error as Error).message)).finally(() => { queue.running = false; });
+}
 
 function scheduleAgentWork() {
   if (schedulingAgentWork) return;
@@ -876,7 +977,10 @@ function scheduleAgentWork() {
         if (!result.ok && !["REVISION_CONFLICT", "INVALID_TRANSITION"].includes(result.error.code)) failed(result.error.message);
       }).catch(error => failed((error as Error).message));
     }
-    for (const watch of subscriptions.values()) scheduleAutoReview(watch);
+    for (const watch of subscriptions.values()) {
+      scheduleAutoReview(watch);
+      scheduleAutoBoard(watch);
+    }
   });
 }
 
@@ -899,6 +1003,7 @@ function executorLimit() {
 function scheduleRecurringTasks(now = Date.now()) {
   for (const [project, watch] of subscriptions) {
     if (!watch.tabs.size || closingProjects.has(project)) continue;
+    if (watch.board.settings?.autoMode) { scheduleAutoBoard(watch); continue; }
     const projectKey = projectIdentity(project);
     for (const task of watch.board.tasks) {
       if (!agentSlots.available(projectKey, "executor", watch.board.settings?.agentLimits)) break;
@@ -1219,7 +1324,7 @@ ipcMain.handle("board:request", async (event, request: unknown, files: unknown =
 });
 
 async function runBoardRequest(sender: Electron.WebContents, board: Board | undefined, request: unknown, files: unknown = [],
-  goal: unknown = false, immediate: unknown = false, messageId?: unknown, reviewIds?: string[], expectedReviewMode?: ReviewMode) {
+  goal: unknown = false, immediate: unknown = false, messageId?: unknown, reviewIds?: string[], expectedReviewMode?: ReviewMode, autoNotice = false) {
   if (!board || typeof request !== "string" || typeof immediate !== "boolean" || (immediate && goal !== false) || !Array.isArray(files) ||
       (messageId !== undefined && (typeof messageId !== "string" || !codexThreadPattern.test(messageId))) ||
       !files.every(isPastedFile) || (goal === "resume" ? Boolean(request.trim() || files.length) :
@@ -1237,7 +1342,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     }
   };
   const projectKey = projectIdentity(board.project);
-  const lane = goal || reviewIds ? "work" : "chat";
+  const lane = goal || reviewIds || autoNotice ? "work" : "chat";
   const requests = lane === "work" ? boardWorkRequests : boardRequests;
   if (files.reduce((total, file) => total + file.bytes.byteLength, 0) > maxAttachmentBytes) {
     return cliFailure("ATTACHMENT_LIMIT", lang("Attachments are limited to 64 MiB per task.", "Лимит вложений на задачу — 64 МиБ."));
@@ -1273,7 +1378,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   const project = board.project;
   const operation = beginOperation(project);
   const signal = operation.controller.signal;
-  const automaticDone = reviewIds ? Promise.withResolvers<void>() : undefined;
+  const automaticDone = reviewIds || autoNotice ? Promise.withResolvers<void>() : undefined;
   const startedAt = Date.now();
   const managerRun: ManagerRun = { id: randomUUID(), phase: "starting", startedAt };
   const running: ManagerRequest = { automaticDone: automaticDone?.promise, managerRun };
@@ -1414,7 +1519,11 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     if (expectedReviewMode && reviewMode !== expectedReviewMode) {
       return cliFailure("REVIEW_MODE_CHANGED", "The board's review mode changed.");
     }
-    const instructions = reviewIds ? autoReviewInstructions : boardInstructions + (
+    const instructions = reviewIds ? autoReviewInstructions : boardInstructions + (autoNotice ?
+      " Handle only the addressed executor questions, blockers or integration failures in this short run. Do not create or resume a goal. " +
+      "Read manager_inbox, handle the specified notices and acknowledge them with manager_ack. Do not retry an unchanged blocker. " +
+      "For a merge conflict, organize repair with task_start resolveConflicts:true in the same card and worktree without asking permission to start repair. " +
+      "Require a new submission and review after repair; human acceptance stays with the user. Do not perform routine dispatch or accept human-mode submissions. " : "") + (
       reviewMode === "human" ? " " + manualReviewInstructions : "") + (goal ?
       " You run the board goal in the background. Read goal_inbox at the start of each turn, before waiting, " +
       "and when notified. Apply user directions, then confirm or decline with goal_inbox and a factual reply. " +
@@ -1840,6 +1949,7 @@ function scheduleAutoReview(watch: BoardWatch) {
       }));
     }
     if (ready.length) publishReviewActivity(project);
+    if (watch.board.settings.autoMode) { scheduleAutoBoard(watch); return; }
     if (!managerAvailable) return;
     const approvals = (watch.board.managerInbox ?? []).filter(({ id, kind, sequence }) =>
       kind === "review-approve" && watch.integrationAttempts.get(id) !== sequence).slice(0, managerBatchSize);
@@ -2312,7 +2422,7 @@ type LaunchState = Pick<Task, "id" | "title" | "status" | "revision" | "createdA
 
 async function launchTask(project: string, id: string, revisionRequest?: { input: Record<string, unknown> },
   newThread: false | "user" | "manager" = false, revision?: number,
-  continuation: ExecutorContinuation = {}, scheduled = false, resolveConflicts = false, resumeWithFullAccess = false): Promise<CliReply<LaunchState>> {
+  continuation: ExecutorContinuation = {}, scheduled = false, resolveConflicts = false, resumeWithFullAccess = false, autoMode = false): Promise<CliReply<LaunchState>> {
   const key = project + "\0" + id;
   if (launchingTasks.has(key)) return cliFailure("LAUNCH_IN_PROGRESS", "This task is already being launched.");
   if (executorBusy(project, id)) return cliFailure("CHAT_BUSY", lang("Wait for the chat reply or stop the agent first.", "Дождитесь ответа в чате или остановите агента."));
@@ -2427,6 +2537,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     signal.throwIfAborted();
     const started = await callCli<{ task: LaunchState & ExecutorTask } & ({ worktree: string } | { cwd: string })>(project, ["start", id, "--compact"],
       { revision: revision ?? current.data.revision, launchDetails: true, ...(scheduled ? { scheduled } : {}),
+        ...(autoMode ? { autoMode: true } : {}),
         ...(resolveConflicts ? { resolveConflicts } : {}),
         ...(process.platform === "win32" && client.windowsSandbox === "elevated" ? { isolatedWorktree: true } : {}) });
     if (!started.ok) {
