@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import { electronCheck } from "./electron-check.mjs";
+import { electronCheck, localizationFixture } from "./electron-check.mjs";
 
 const { scratch, artifacts } = electronCheck(import.meta.url, "task-description", 90_000);
 const { app, BrowserWindow, clipboard, nativeTheme } = await import("electron");
@@ -36,6 +36,7 @@ app.whenReady().then(async () => {
     ${read("source-files.cjs")}
     ${read("markdown.js")}
     ${read("chat.js")}
+    ${localizationFixture()}
     ${read("renderer.js")}
     void 0;`);
   const description = '### Проблема\nДлинная **карточка** со [ссылкой](https://example.com/full?q=value) и `inline code`.\n\n' +

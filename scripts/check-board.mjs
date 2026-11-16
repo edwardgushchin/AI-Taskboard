@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { electronCheck } from "./electron-check.mjs";
+import { electronCheck, localizationFixture } from "./electron-check.mjs";
 
 const script = fileURLToPath(import.meta.url);
 const root = resolve(dirname(script), "..");
@@ -62,7 +62,7 @@ app.whenReady().then(async () => {
     window.previewCalls = 0;
     const savedQueue = new Map();
     window.taskboard = {
-      subscribe(callback) { window.pushBoard = callback; }, onChatUpdate(callback) { window.pushChat = callback; }, onTheme() {},
+      subscribe(callback) { window.pushBoard = next => { window.taskboardLocalization.select(next.russian === false ? 'en' : 'ru'); callback({...next, localization: window.taskboardLocalization.state()}); }; }, onChatUpdate(callback) { window.pushChat = callback; }, onTheme() {},
       boardHistory: async (_project, _cursor, view) => ({ ok: true, data: view === 'live'
         ? { work: [], chat: [] } : { turns: [], model: "gpt-board-test" } }),
       agentLimits: async () => ({ ok: true, data: { executor: 3, manager: 1, reviewer: 1 } }),
@@ -91,6 +91,7 @@ app.whenReady().then(async () => {
     ${read("source-files.cjs")}
     ${read("markdown.js")}
     ${read("chat.js")}
+    ${localizationFixture()}
     ${read("renderer.js")}
     void 0;
   `);

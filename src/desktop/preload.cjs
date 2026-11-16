@@ -41,6 +41,7 @@ contextBridge.exposeInMainWorld("taskboard", {
   launchTask: (id, options) => ipcRenderer.invoke("board:launchTask", id, options),
   subscribe: listener => { ipcRenderer.on("board:changed", (_event, frame) => listener(frame)); },
   themes: () => ipcRenderer.invoke("appearance:themes"),
+  setLanguage: language => ipcRenderer.invoke("appearance:language", language),
   setTheme: theme => ipcRenderer.invoke("appearance:theme", theme),
   onTheme: listener => { ipcRenderer.on("appearance:changed", (_event, theme) => listener(theme)); },
   codexStatus: () => ipcRenderer.invoke("codex:status"),

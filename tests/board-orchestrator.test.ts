@@ -1,3 +1,4 @@
+import localization from "../src/desktop/localization.cjs";
 import { activeRunSummary } from "../src/desktop/active-runs.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -166,7 +167,7 @@ function fixture(t: TestContext) {
       const result = await callCli(cwd, ["start", id], { revision, resolveConflicts });
       return result.ok ? { ok: true, data: result.data.task } : result;
     },
-    tmpdir: () => folder, stateOf: () => ({ project, board: { project, settings: {} } }), app: { getPath: () => folder }, cliFailure, lang: (english: string) => english,
+    tmpdir: () => folder, stateOf: () => ({ project, board: { project, settings: {} } }), app: { getPath: () => folder }, cliFailure, t: (key: string, parameters = {}) => localization.text(key, parameters, "en"), localization,
     beginOperation: () => ({ controller: new AbortController(), finish() {} }),
     ipcMain: { handle: (name: string, callback: (...args: unknown[]) => Promise<any>) => { handlers.set(name, callback); } },
     replyToBoard: async (_profile: string, cwd: string, prompt: string, images: string[], action: RunAction,

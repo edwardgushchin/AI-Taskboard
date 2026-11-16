@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createRequire } from "node:module";
-import { electronCheck } from "./electron-check.mjs";
+import { electronCheck, localizationFixture } from "./electron-check.mjs";
 const { scratch, artifacts } = electronCheck(import.meta.url, "statistics", 90000);
 const require = createRequire(import.meta.url);
 const { app, BrowserWindow } = await import("electron");
@@ -20,6 +20,7 @@ try {
   await evaluate(`
     window.taskboard = { subscribe() {}, onChatUpdate() {}, onTheme() {}, bootstrap: () => new Promise(() => {}), command: async () => window.response };
     ${readFileSync(require.resolve("markdown-it/browser"), "utf8")}
+    ${localizationFixture()}
     ${["image-preview.js", "source-files.cjs", "markdown.js", "chat.js", "renderer.js"].map(read).join("\n")}
     frame = { project: 'fixture', russian: true, board: {} };
     const model = { model: 'future-model', totalTokens: 712, inputTokens: 610, outputTokens: 102, cachedInputTokens: 260, cacheWriteInputTokens: null, reasoningOutputTokens: 50, incomplete: true };

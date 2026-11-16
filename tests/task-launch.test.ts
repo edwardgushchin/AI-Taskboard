@@ -1,3 +1,4 @@
+import localization from "../src/desktop/localization.cjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
@@ -48,7 +49,7 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
     readBoardSettings: (project: string) => savedSettings.get(project) ?? subscriptions.get(project)?.board.settings ?? {},
     scheduleAutoReview: () => {}, scheduleAutoBoard: () => {}, projectIdentity: (project: string) => project,
     broadcastBoardChat: () => {},
-    lang: (english: string) => english, cliFailure: failure, missingCodexThread,
+    t: (key: string, parameters = {}) => localization.text(key, parameters, "en"), localization, cliFailure: failure, missingCodexThread,
     app: { getPath: () => "profile" }, dialog: { showMessageBox: async () => ({ response: 1 }) },
     executorFullAccess: () => access.full, process: { platform: process.platform },
     configuredCodex: async () => ({}), runLog: (items: Map<string, unknown>) => [...items.values()], rm: async () => {},
@@ -616,7 +617,7 @@ test("new-chat continuation requires an explicit confirmation and a matching blo
   runInNewContext(stripTypeScriptTypes(handlerNode.getText(parsed)), {
     ipcMain: { handle: (_name: string, callback: typeof handler) => { handler = callback; } },
     stateOf: () => ({ project: "project", window: {} }), taskIdPattern, cliFailure: failure,
-    lang: (english: string) => english, callCli: async () => ({ ok: true, data: task }),
+    t: (key: string, parameters = {}) => localization.text(key, parameters, "en"), localization, callCli: async () => ({ ok: true, data: task }),
     dialog: { showMessageBox: async (_window: unknown, options: { defaultId: number; cancelId: number }) => {
       assert.equal(options.defaultId, 0); assert.equal(options.cancelId, 0); return { response };
     } },

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createRequire } from "node:module";
-import { electronCheck } from "./electron-check.mjs";
+import { electronCheck, localizationFixture } from "./electron-check.mjs";
 
 const root = new URL("../", import.meta.url);
 const read = file => readFileSync(new URL(file, root), "utf8");
@@ -58,6 +58,7 @@ try {
   await window.webContents.executeJavaScript(`
     window.taskboard = { subscribe() {}, onChatUpdate() {}, onTheme() {}, bootstrap: () => new Promise(() => {}) };
     ${readFileSync(require.resolve("markdown-it/browser"), "utf8")}
+    ${localizationFixture()}
     ${["image-preview.js", "source-files.cjs", "markdown.js", "chat.js", "review-diff.js", "renderer.js"].map(f => read("src/desktop/" + f)).join("\n")}
     void 0;
   `);
@@ -97,7 +98,7 @@ try {
     await evaluate(`document.getElementById('icon-gallery').remove()`);
   }
   for (const russian of [false, true]) {
-    await evaluate(`frame = { russian: ${russian} }; openImagePreview('test', [{name:'one.png'}, {name:'two.png'}], 0, null, {preview: async () => null, save: async () => ({ok:true})}); void 0`);
+    await evaluate(`localization.select(${russian} ? 'ru' : 'en'); frame = { russian: ${russian} }; openImagePreview('test', [{name:'one.png'}, {name:'two.png'}], 0, null, {preview: async () => null, save: async () => ({ok:true})}); void 0`);
     assert.deepEqual(await evaluate(`(() => {
       const dialog = document.querySelector('.image-preview');
       const controls = [...dialog.querySelectorAll('button:has(.icon)')];
@@ -154,7 +155,7 @@ try {
     for (const russian of [false, true]) {
       console.log(`Checking manager Stop: ${theme}/${russian ? "ru" : "en"}`);
       await evaluate(`(async () => {
-        frame = { project: 'icon-fixture', russian: ${russian}, runningTasks: [] };
+        localization.select(${russian} ? 'ru' : 'en'); frame = { project: 'icon-fixture', russian: ${russian}, runningTasks: [] };
         const turn = Promise.withResolvers();
         const ready = Promise.withResolvers();
         window.iconStopCalls = 0;
