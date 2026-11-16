@@ -72,6 +72,7 @@ interface WindowState {
   closing?: boolean;
   ready?: Promise<void>;
   restoring: boolean;
+  restoredActive?: ProjectTab;
 }
 
 interface BoardWatch {
@@ -185,7 +186,7 @@ function frame(state: ProjectTab) {
   const request = key ? boardRequests.get(key) : undefined;
   const work = key ? boardWorkRequests.get(key) : undefined;
   const reviewerRuns = state.project ? subscriptions.get(state.project)?.reviewerRuns : undefined;
-  const sharedRuns = state.project ? agentSlots.entries(state.project) : [];
+  const sharedRuns = state.board ? agentSlots.entries(state.board.project) : [];
   const openTabs = windowStates.get(state.window.webContents.id)?.tabs ?? [];
   const unreadTabs = new Set(openTabs.flatMap(tab =>
     tab.project && boardUnread(tab.board?.project).length ? [tab.project] : []));
@@ -378,6 +379,7 @@ function observeBoardTasks(board: Board, listener: (board: Board, runChanged?: b
 }
 
 function activateTab(owner: WindowState, tab: ProjectTab): void {
+  owner.restoredActive = undefined;
   owner.active = tab;
   send(tab);
   saveSession();
@@ -394,11 +396,18 @@ async function openProject(current: ProjectTab, project: string, create = false)
   }
   const state = existing ?? (owner.tabs.find(tab => !tab.project) || { window: owner.window, selection: 0 });
   if (!owner.tabs.includes(state)) owner.tabs.push(state);
-  const selection = ++state.selection;
   state.project = project;
   state.error = undefined;
   state.loading = true;
   activateTab(owner, state);
+  await loadProject(owner, state, project, create);
+}
+
+async function loadProject(owner: WindowState, state: ProjectTab, project: string, create = false): Promise<void> {
+  const selection = ++state.selection;
+  state.project = project;
+  state.error = undefined;
+  state.loading = true;
   const result = existsSync(project) ? await callCli<Board>(project, [create ? "init" : "list", "--compact"], create ? { git: true } : undefined)
     : cliFailure("PROJECT_UNAVAILABLE", lang("The folder is unavailable.", "Папка недоступна."));
   if (state.selection !== selection || owner.window.isDestroyed() || !owner.tabs.includes(state)) return;
@@ -411,6 +420,18 @@ async function openProject(current: ProjectTab, project: string, create = false)
       if (owner.active === state) owner.active = duplicate;
     } else bind(state, result.data);
   } else state.error = { ...result.error, operation: create ? "create" : "open" };
+  // Only an untouched startup selection may fall back after a failed load.
+  // User selection/closure cancels this even when its request is still pending.
+  if (owner.restoredActive === owner.active) {
+    if (owner.active.board) owner.restoredActive = undefined;
+    else if (owner.active.error) {
+      const available = owner.tabs.find(tab => tab.board);
+      if (available) {
+        owner.active = available;
+        owner.restoredActive = undefined;
+      }
+    }
+  }
   send(state);
   saveSession();
 }
@@ -490,6 +511,7 @@ async function closeTab(owner: WindowState, tab: ProjectTab): Promise<void> {
     if (!await confirmProjectClose(owner, [tab]) || owner.window.isDestroyed()) return;
     const index = owner.tabs.indexOf(tab);
     if (index < 0) return;
+    owner.restoredActive = undefined;
     unbind(tab);
     tab.selection++;
     owner.tabs.splice(index, 1);
@@ -527,6 +549,11 @@ function createWindow(initial: string[] = [], selected?: string): WindowState {
   const id = window.webContents.id;
   const active: ProjectTab = { window, selection: 0 };
   const state: WindowState = { window, tabs: [active], active, restoring: initial.length > 0 };
+  if (initial.length) {
+    state.tabs = initial.map(project => ({ window, project: projectPath(project), selection: 0, loading: true }));
+    state.active = state.tabs.find(tab => selected && projectIdentity(tab.project!) === projectIdentity(selected)) ?? state.tabs[0];
+    state.restoredActive = state.active;
+  }
   windowStates.set(id, state);
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-navigate", event => event.preventDefault());
@@ -547,9 +574,9 @@ function createWindow(initial: string[] = [], selected?: string): WindowState {
     saveSession();
   });
   state.ready = window.loadFile(fileURLToPath(html)).then(async () => {
-    for (const project of initial) await openProject(state.active, project);
-    const selectedTab = state.tabs.find(tab => tab.project && selected && projectIdentity(tab.project) === projectIdentity(selected));
-    if (selectedTab) activateTab(state, selectedTab);
+    state.restoring = false;
+    send(state.active);
+    await Promise.all(state.tabs.filter(tab => tab.project).map(tab => loadProject(state, tab, tab.project!)));
     saveSession();
   }).finally(() => {
     state.restoring = false;
