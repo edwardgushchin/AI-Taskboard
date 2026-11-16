@@ -1,4 +1,4 @@
-import { trackActiveRun } from "./active-runs.ts";
+import { trackActiveRun, trackProvider } from "./active-runs.ts";
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, realpathSync } from "node:fs";
@@ -168,6 +168,15 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     throw error;
   }
   const exited = new Promise<void>(resolve => child.once("close", resolve));
+  let releaseProvider: ReturnType<typeof trackProvider>;
+  try { releaseProvider = trackProvider(project, child.pid); }
+  catch (error) {
+    child.kill();
+    await exited;
+    try { await mcp.close(); } finally { await removeRunTemp(); }
+    throw error;
+  }
+  child.once("close", releaseProvider);
   const turns = new Map<string, Turn>();
   const activity = new Map<string, RunActivity>();
   const tokens = new CodexTokenUsage();
@@ -339,7 +348,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     tokens.save(tokens.begin(threadId, turn.id), onTokenUsage);
     clearTimeout(timeout);
     if (turn.status !== "inProgress") turns.set(turn.id, turn);
-    return { threadId, completion: monitor(turn.id), ...control };
+    return { threadId, completion: releaseProvider.run(() => monitor(turn.id)), ...control };
   } catch (error) {
     worklog.finish();
     await close();

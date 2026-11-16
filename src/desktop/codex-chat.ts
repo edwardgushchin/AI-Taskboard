@@ -1,4 +1,4 @@
-import { trackActiveRun } from "./active-runs.ts";
+import { trackActiveRun, trackProvider, claimDiscussion } from "./active-runs.ts";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { codexRpc, turnControl } from "./codex-rpc.ts";
@@ -75,6 +75,10 @@ async function withServer<T>(
     ] : []),
   ], { cwd, env: mcp ? { ...(client.env ?? process.env), ...mcp.env } : client.env, windowsHide: true, stdio: ["pipe", "pipe", "ignore"], signal });
   const exited = new Promise<void>(resolve => child.once("close", resolve));
+  let releaseProvider: ReturnType<typeof trackProvider>;
+  try { releaseProvider = trackProvider(cwd, child.pid); }
+  catch (error) { child.kill(); await exited; throw error; }
+  child.once("close", releaseProvider);
   let notify: Notification | undefined;
   const rpc = codexRpc(child, message => notify?.(message), onRequest);
   let timeoutMs = idleTimeoutMs;
@@ -103,7 +107,7 @@ async function withServer<T>(
       ...(onRequest ? { capabilities: { experimentalApi: true, requestAttestation: false } } : {}),
     });
     send({ method: "initialized" });
-    return await callback({ client, request, receive, refreshTimeout });
+    return await releaseProvider.run(() => callback({ client, request, receive, refreshTimeout }));
   } finally {
     clearTimeout(timeout);
     child.stdin.end();
@@ -254,9 +258,10 @@ export function replyToTask(
     ].join(" ")),
     onCommentary, onTokenUsage, onControl, signal, imageDirectory, imageLimit,
   };
-  return withBoardMcp([worklogTool, githubReadTool], async (name, args) => name === githubReadTool.name
+  const release = claimDiscussion(project, taskId);
+  return release.run(() => withBoardMcp([worklogTool, githubReadTool], async (name, args) => name === githubReadTool.name
     ? worklog.remind(await readBoardGitHub(project, args)) : worklog.submit(args), (config, env) =>
-    reply(profile, project, prompt, images, runAction, { ...options, worklog, mcp: { config, env } }));
+    reply(profile, project, prompt, images, runAction, { ...options, worklog, mcp: { config, env } }))).finally(release);
 }
 
 export async function requestExecutorAccess(profile: string, project: string, id: string, args: unknown,

@@ -37,7 +37,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   const slots = createAgentSlots();
   const runtime = runInNewContext(stripTypeScriptTypes(activitySource) +
     "\n({ sendChat, stopChat, activeAgents, frame, windowStates, runningTasks, launchingTasks, deferredExecutors, notifyRunChange, chatRuns, replyingTasks })", {
-    activeRunSummary, basename, extname, join, performance, projectLabels, AbortController, subscriptions: new Map(),
+    agentSlots: slots, activeRunSummary, basename, extname, join, performance, projectLabels, AbortController, subscriptions: new Map(),
     scheduleAgentWork: () => { scheduled.push(true); }, reserveAgent: slots.acquire,
     boardRequests: new Map(), boardWorkRequests: new Map(), boardUnread: () => [], projectIdentity: (path: string) => path,
     app: { getPath: () => "profile" }, managerAccess: () => "auto",

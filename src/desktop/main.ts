@@ -1,4 +1,4 @@
-import { activeRunSummary, observeActiveRuns } from "./active-runs.ts";
+import { activeRunSummary, observeActiveRuns, enableSharedRuns } from "./active-runs.ts";
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, Notification, protocol, session, shell } from "electron";
 import type { IpcMainInvokeEvent } from "electron";
 import { randomUUID } from "node:crypto";
@@ -184,6 +184,7 @@ function frame(state: ProjectTab) {
   const request = key ? boardRequests.get(key) : undefined;
   const work = key ? boardWorkRequests.get(key) : undefined;
   const reviewerRuns = state.project ? subscriptions.get(state.project)?.reviewerRuns : undefined;
+  const sharedRuns = state.project ? agentSlots.entries(state.project) : [];
   const openTabs = windowStates.get(state.window.webContents.id)?.tabs ?? [];
   const unreadTabs = new Set(openTabs.flatMap(tab =>
     tab.project && boardUnread(tab.board?.project).length ? [tab.project] : []));
@@ -198,22 +199,22 @@ function frame(state: ProjectTab) {
     project: state.project, board: state.board, error: state.error, loading: state.loading, russian, theme,
     managerQuestion: key ? managerQuestion(key)?.view : undefined,
     managerAccess: state.project ? managerAccess(app.getPath("userData"), state.project) : "auto",
-    managerRun: request?.managerRun ?? null,
-    managerWork: work?.managerRun ?? null,
+    managerRun: request?.managerRun ?? sharedRuns.find(entry => entry.task === "manager:chat")?.state ?? null,
+    managerWork: work?.managerRun ?? sharedRuns.find(entry => entry.task === "manager:work")?.state ?? null,
     runningTasks: state.board?.tasks.filter(task => {
       const key = state.project + "\0" + task.id;
-      return runningTasks.has(key);
+      return runningTasks.has(key) || sharedRuns.some(entry => entry.kind === "slot" && entry.task === task.id);
     }).map(task => task.id),
-    replyingTasks: state.board?.tasks.filter(task => replyingTasks.has(state.project + "\0" + task.id)).map(task => task.id),
+    replyingTasks: state.board?.tasks.filter(task => (replyingTasks.has(state.project + "\0" + task.id) || sharedRuns.some(entry => entry.kind === "task" && entry.task === task.id))).map(task => task.id),
     waitingTasks: state.board?.tasks.filter(task => {
       const key = state.project + "\0" + task.id;
-      return task.status === "in_progress" && deferredExecutors.get(key)?.revision === task.revision &&
-        !runningTasks.has(key) && !replyingTasks.has(key);
+      return task.status === "in_progress" && (deferredExecutors.get(key)?.revision === task.revision || sharedRuns.some(entry => entry.kind === "queue" && entry.task === task.id && entry.revision === task.revision)) &&
+        !runningTasks.has(key) && !replyingTasks.has(key) && !sharedRuns.some(entry => entry.kind === "slot" && entry.task === task.id);
     }).map(task => task.id),
     reviewingTasks: Object.fromEntries(state.board?.tasks.flatMap(task => {
       if (task.status !== "review") return [];
-      if (reviewerRuns?.has(task.id)) return [[task.id, "reviewer"]];
-      if (request?.reviewing?.has(task.id) || work?.reviewing?.has(task.id)) return [[task.id, "manager"]];
+      if (reviewerRuns?.has(task.id) || sharedRuns.some(entry => entry.kind === "slot" && entry.role === "reviewer" && entry.task === "review:" + task.id)) return [[task.id, "reviewer"]];
+      if (request?.reviewing?.has(task.id) || work?.reviewing?.has(task.id) || sharedRuns.some(entry => entry.state?.reviewing?.includes(task.id))) return [[task.id, "manager"]];
       return [];
     }) ?? []),
     runActivity: Object.fromEntries(state.board?.tasks.flatMap(task => {
@@ -239,6 +240,11 @@ observeActiveRuns(() => {
 });
 
 function publishReviewActivity(project: string) {
+  for (const [lane, requests] of [["chat", boardRequests], ["work", boardWorkRequests]] as const) {
+    const request = requests.get(projectIdentity(project));
+    if (request?.managerRun) agentSlots.update(project, "manager:" + lane,
+      { ...request.managerRun, reviewing: [...request.reviewing ?? []] });
+  }
   for (const { active } of windowStates.values()) {
     if (active.project === project) send(active);
   }
@@ -266,7 +272,8 @@ function releaseWatch(project: string, watch: BoardWatch): void {
 }
 
 function subscribe(project: string, board: Board): BoardWatch {
-  syncSettingsNotices(project, agentSlots.limits);
+  agentSlots.remember(project);
+  syncSettingsNotices(project, agentSlots.inherited(project));
   syncTaskStatusNotices(project, russian);
   const tabs = new Set<ProjectTab>();
   let child: ReturnType<typeof cliChild> | undefined;
@@ -308,7 +315,7 @@ function subscribe(project: string, board: Board): BoardWatch {
       }
       if (result.ok) {
         watch.board = result.data;
-        syncSettingsNotices(project, agentSlots.limits);
+        syncSettingsNotices(project, agentSlots.inherited(project));
         const key = projectIdentity(project);
         boardRequests.get(key)?.settingsChanged?.();
         boardWorkRequests.get(key)?.settingsChanged?.();
@@ -850,7 +857,8 @@ type ManagerRequest = {
 };
 const boardRequests = new Map<string, ManagerRequest>();
 const boardWorkRequests = new Map<string, ManagerRequest>();
-const agentSlots = createAgentSlots();
+enableSharedRuns();
+const agentSlots = createAgentSlots(true);
 type ExecutorContinuation = { afterDisconnect?: boolean; withoutProgress?: boolean };
 const deferredExecutors = new Map<string, { project: string; id: string; revision: number; continuation?: ExecutorContinuation }>();
 const autoBoards = new WeakMap<BoardWatch, {
@@ -891,9 +899,9 @@ function scheduleAutoBoard(watch: BoardWatch) {
           if (!review.ok) { failed(review.error.message); continue; }
           if (review.data.stale) { failed(task.id + ": submission changed"); continue; }
           if (review.data.reviewerApproval?.targetHead !== review.data.targetHead) {
-            const release = reserveAgent(project, "reviewer");
+            const release = reserveAgent(project, "reviewer", "review:" + task.id);
             if (!release) { queue.integrations.delete(attempt); return; }
-            watch.reviewerRuns.set(task.id, reviewSubmission(watch, task.id, 4).finally(async () => {
+            watch.reviewerRuns.set(task.id, release.run(() => reviewSubmission(watch, task.id, 4)).finally(async () => {
               try {
                 const checked = await callCli<{ targetHead: string | null; reviewerApproval?: { targetHead: string | null } }>(project, ["review", task.id, "--compact"]);
                 if (checked.ok && checked.data.reviewerApproval?.targetHead === checked.data.targetHead) queue.integrations.delete(attempt);
@@ -967,47 +975,63 @@ function scheduleAgentWork() {
   schedulingAgentWork = true;
   setImmediate(() => {
     schedulingAgentWork = false;
-    for (const [key, pending] of deferredExecutors) {
-      const { project, id, revision, continuation } = pending;
-      const watch = subscriptions.get(project);
-      const task = watch?.board.tasks.find(task => task.id === id);
-      // request-changes can finish before the watch receives its new revision.
-      if (watch && task && task.revision < revision) continue;
-      if (!watch || closingProjects.has(project) || !task || task.status !== "in_progress" || task.revision !== revision) {
+    try {
+      for (const watch of subscriptions.values()) {
+        for (const entry of agentSlots.entries(watch.board.project)) {
+          if (entry.kind === "queue" && entry.task && entry.revision !== undefined)
+            deferredExecutors.set(watch.board.project + "\0" + entry.task, {
+              project: watch.board.project, id: entry.task, revision: entry.revision, continuation: entry.continuation });
+        }
+      }
+      for (const [key, pending] of deferredExecutors) {
+        const { project, id, revision, continuation } = pending;
+        const watch = subscriptions.get(project);
+        const task = watch?.board.tasks.find(task => task.id === id);
+        // request-changes can finish before the watch receives its new revision.
+        if (watch && task && task.revision < revision) continue;
+        if (!watch || closingProjects.has(project)) {
+          deferredExecutors.delete(key);
+          continue;
+        }
+        if (!task || task.status !== "in_progress" || task.revision !== revision) {
+          deferredExecutors.delete(key);
+          agentSlots.defer(project, id);
+          notifyRunChange(project);
+          continue;
+        }
+        const role = task.mergeRepair ? "reviewer" : "executor";
+        if (!agentSlots.available(projectIdentity(project), role, watch.board.settings?.agentLimits) || executorBusy(project, id)) continue;
         deferredExecutors.delete(key);
         notifyRunChange(project);
-        continue;
+        const failed = (error: string) => broadcastBoardChat(project, "orchestrator-review-error", { error: id + " · " + error });
+        void launchTask(project, id, undefined, false, revision, continuation).then(result => {
+          if (!result.ok && ["EXECUTOR_LIMIT", "REVIEWER_LIMIT"].includes(result.error.code)) {
+            deferredExecutors.set(key, pending);
+            agentSlots.defer(project, id, pending);
+            notifyRunChange(project);
+            return;
+          }
+          if (!result.ok && !["REVISION_CONFLICT", "INVALID_TRANSITION"].includes(result.error.code)) failed(result.error.message);
+        }).catch(error => failed((error as Error).message));
       }
-      const role = task.mergeRepair ? "reviewer" : "executor";
-      if (!agentSlots.available(projectIdentity(project), role, watch.board.settings?.agentLimits) || executorBusy(project, id)) continue;
-      deferredExecutors.delete(key);
-      notifyRunChange(project);
-      const failed = (error: string) => broadcastBoardChat(project, "orchestrator-review-error", { error: id + " · " + error });
-      void launchTask(project, id, undefined, false, revision, continuation).then(result => {
-        if (!result.ok && ["EXECUTOR_LIMIT", "REVIEWER_LIMIT"].includes(result.error.code)) {
-          deferredExecutors.set(key, pending);
-          notifyRunChange(project);
-          return;
-        }
-        if (!result.ok && !["REVISION_CONFLICT", "INVALID_TRANSITION"].includes(result.error.code)) failed(result.error.message);
-      }).catch(error => failed((error as Error).message));
-    }
-    for (const watch of subscriptions.values()) {
-      scheduleAutoReview(watch);
-      scheduleAutoBoard(watch);
-    }
+      for (const watch of subscriptions.values()) {
+        scheduleAutoReview(watch);
+        scheduleAutoBoard(watch);
+      }
+    } catch (error) { console.error(error); }
   });
 }
 
-function reserveAgent(project: string, role: AgentRole) {
+function reserveAgent(project: string, role: AgentRole, task?: string) {
+  agentSlots.remember(project);
   // A tool call can race the watch snapshot after CLI settings were saved.
   const overrides = readBoardSettings(locateBoard(project)).agentLimits;
-  const release = agentSlots.acquire(projectIdentity(project), role, overrides);
+  const release = agentSlots.acquire(projectIdentity(project), role, overrides, task);
   if (!release) return;
-  return () => {
+  return Object.assign(() => {
     release();
     scheduleAgentWork();
-  };
+  }, { run: release.run });
 }
 
 function taskRunLimit(role: "executor" | "reviewer") {
@@ -1391,8 +1415,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   }
   if (current) return cliFailure("BOARD_REQUEST_IN_PROGRESS", lang("The agent is already handling a request.", "Агент уже обрабатывает запрос."));
   if (closingProjects.has(board.project)) return cliFailure("PROJECT_CLOSING", lang("The project is closing.", "Проект закрывается."));
-  const release = lane === "work" ? reserveAgent(board.project, "manager") : undefined;
-  if (lane === "work" && !release) return cliFailure("MANAGER_LIMIT", lang(
+  const release = lane === "work" ? reserveAgent(board.project, "manager", "manager:work") : agentSlots.claim(board.project, "manager:chat");
+  if (!release) return cliFailure("MANAGER_LIMIT", lang(
     "All background manager slots on this board are occupied. Retry when a goal or automatic review ends.",
     "На этой доске все места для фоновой работы менеджера заняты. Повторите запуск после завершения цели или автоматической проверки."));
   const project = board.project;
@@ -1403,8 +1427,12 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   const managerRun: ManagerRun = { id: randomUUID(), phase: "starting", startedAt };
   const running: ManagerRequest = { automaticDone: automaticDone?.promise, managerRun };
   requests.set(projectKey, running);
-  const publishRun = () => broadcastBoardChat(project, "orchestrator-run", lane === "work"
-    ? { managerWork: running.managerRun ?? null } : { managerRun: running.managerRun ?? null });
+  const publishRun = () => {
+    agentSlots.update(project, "manager:" + lane, running.managerRun
+      ? { ...running.managerRun, reviewing: [...running.reviewing ?? []] } : undefined);
+    broadcastBoardChat(project, "orchestrator-run", lane === "work"
+      ? { managerWork: running.managerRun ?? null } : { managerRun: running.managerRun ?? null });
+  };
   const setRunPhase = (phase: ManagerRun["phase"]) => {
     if (managerRun.phase === phase) return;
     managerRun.phase = phase;
@@ -1534,7 +1562,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     if (goal === "resume" && !threadId) return cliFailure("INVALID_INPUT", lang("There is no saved goal.", "Сохранённой цели нет."));
     const settings = await callCli<BoardSettings>(board.project, ["settings"]);
     if (!settings.ok) return settings;
-    const settingsNotices = settingsDelivery(project, lane, () => syncSettingsNotices(project, agentSlots.limits));
+    const settingsNotices = settingsDelivery(project, lane, () => syncSettingsNotices(project, agentSlots.inherited(project)));
     const initialSettings = settingsNotices.initial();
     const reviewMode = boardReviewMode(settings.data);
     if (expectedReviewMode && reviewMode !== expectedReviewMode) {
@@ -1665,7 +1693,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       if (work?.goalRunning) work.wakeGoal?.();
       return { ok: true, data: message };
     }
-    const response = await replyToBoard(app.getPath("userData"), board.project,
+    const response = await release.run(() => replyToBoard(app.getPath("userData"), board.project,
       goal === "resume" ? "" : requestText || lang("See attachments.", "См. вложения."),
       attachments.flatMap(file => file.image ? [file.image] : []),
       async (name, args) => {
@@ -1856,7 +1884,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           };
           notify("orchestrator-ready", { model });
         },
-      });
+      }));
     await pendingAction;
     signal.throwIfAborted();
     if ("interrupted" in response) return { ok: true as const, data: {
@@ -1968,9 +1996,9 @@ function scheduleAutoReview(watch: BoardWatch) {
   let prompt: string;
   if (mode === "reviewer") {
     for (const id of ids) {
-      const release = reserveAgent(project, "reviewer");
-      if (!release) break;
-      watch.reviewerRuns.set(id, reviewSubmission(watch, id, 4).finally(() => {
+      const release = reserveAgent(project, "reviewer", "review:" + id);
+      if (!release) { watch.reviewAttempts.delete(id); continue; }
+      watch.reviewerRuns.set(id, release.run(() => reviewSubmission(watch, id, 4)).finally(() => {
         watch.reviewerRuns.delete(id);
         release();
         publishReviewActivity(project);
@@ -1997,7 +2025,9 @@ function scheduleAutoReview(watch: BoardWatch) {
   const failed = (error: string) => broadcastBoardChat(project, "orchestrator-review-error", { error });
   void runBoardRequest(tab.window.webContents, watch.board, prompt, [], false, false, undefined, ids, mode).then(result => {
     if (!result.ok) {
-      if (result.error.code !== "REVIEW_MODE_CHANGED") failed(result.error.message);
+      if (result.error.code === "MANAGER_LIMIT") {
+        for (const id of ids) { watch.reviewAttempts.delete(id); watch.integrationAttempts.delete(id); }
+      } else if (result.error.code !== "REVIEW_MODE_CHANGED") failed(result.error.message);
     } else if (result.data?.error) failed(result.data.error);
   }).catch(error => failed((error as Error).message));
 }
@@ -2155,7 +2185,10 @@ ipcMain.handle("appearance:themes", event => {
 });
 ipcMain.handle("agents:limits", (event, value: unknown) => {
   stateOf(event);
-  if (value === undefined) return { ok: true, data: agentSlots.limits };
+  if (value === undefined) {
+    const project = stateOf(event).project;
+    return { ok: true, data: project ? agentSlots.inherited(project) : agentSlots.limits };
+  }
   const limits = parseAgentLimits(value);
   if (!limits) return cliFailure("INVALID_INPUT", lang("Enter non-negative whole numbers for the limits.",
     "Укажите целые неотрицательные числа для лимитов."));
@@ -2413,7 +2446,7 @@ const runActivityByTask = new Map<string, RunActivity[]>();
 
 function executorBusy(project: string, id: string) {
   const key = project + "\0" + id;
-  return launchingTasks.has(key) || runningTasks.has(key) || chatRuns.has(key);
+  return launchingTasks.has(key) || runningTasks.has(key) || chatRuns.has(key) || agentSlots.busy(project, id);
 }
 
 function publishRunActivity(project: string, id: string, items: RunActivity[]) {
@@ -2497,15 +2530,17 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     if (!current.ok) return current;
     prepared = Boolean(revisionRequest);
     const role = current.data.mergeRepair || (resolveConflicts && current.data.status === "review") ? "reviewer" : "executor";
-    const releaseSlot = reserveAgent(project, role);
+    const releaseSlot = reserveAgent(project, role, id);
     release = releaseSlot;
     if (!releaseSlot) {
       if (!revisionRequest) return taskRunLimit(role);
       deferredExecutors.set(key, { project, id, revision: current.data.revision });
+      agentSlots.defer(project, id, { revision: current.data.revision });
       scheduleAgentWork();
       return current;
     }
     deferredExecutors.delete(key);
+    agentSlots.defer(project, id);
     const client = await configuredCodex(app.getPath("userData"));
     if (!client) {
       const reason = lang("Choose the Codex executable in settings.", "Выберите исполняемый файл Codex в настройках.");
@@ -2583,7 +2618,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       ...(newThread ? { codexThreadId: undefined } : {}) };
     let linked: LaunchState = started.data.task;
     const cwd = "cwd" in started.data ? started.data.cwd : started.data.worktree;
-    const run = await startCodexRun(client, project, cwd, task, item => {
+    const run = await releaseSlot.run(() => startCodexRun(client, project, cwd, task, item => {
       activity.set(item.id, item);
       updateTimer ??= setTimeout(publish, 80);
     }, report => saveTaskTokenUsage(project, id, "executor", report), signal, async codexThreadId => {
@@ -2602,7 +2637,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         code: saved.error.code === "BOARD_BUSY" ? "BOARD_BUSY" : "CODEX_LINK_FAILED",
       });
       linked = saved.data;
-    }, desktopProfile);
+    }, desktopProfile));
     const { threadId: codexThreadId, completion } = run;
     const directories = new Set<string>();
     let stopRequested = false;
@@ -2697,6 +2732,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
           if (!signal.aborted && !resumed.ok) {
             if (["EXECUTOR_LIMIT", "REVIEWER_LIMIT"].includes(resumed.error.code) && subscriptions.has(project)) {
               deferredExecutors.set(key, { project, id, revision: retry.revision, continuation: retry.continuation });
+              agentSlots.defer(project, id, retry);
               scheduleAgentWork();
             } else if (!["REVISION_CONFLICT", "CHAT_BUSY", "LAUNCH_IN_PROGRESS", "BOARD_BUSY", "EXECUTOR_LIMIT", "REVIEWER_LIMIT"].includes(resumed.error.code)) {
               await recordRunFailure(project, id, retry.reason + "\n\n" + resumed.error.message, undefined, retry.revision);
@@ -2839,6 +2875,23 @@ else {
     loadRecentBoards();
     Menu.setApplicationMenu(null);
     setInterval(scheduleRecurringTasks, 10_000).unref();
+    // Runtime changes do not change card revisions. Poll as a fallback across
+    // profiles and after owner death, then wake the ordinary queues.
+    const runtimeSnapshots = new Map<string, string>();
+    setInterval(() => {
+      for (const watch of subscriptions.values()) {
+        const project = watch.board.project;
+        try {
+          const snapshot = JSON.stringify(agentSlots.entries(project));
+          if (runtimeSnapshots.get(project) !== snapshot) {
+            runtimeSnapshots.set(project, snapshot);
+            notifyRunChange(project);
+          }
+        } catch (error) { console.error(error); }
+      }
+      for (const project of runtimeSnapshots.keys()) if (!subscriptions.has(project)) runtimeSnapshots.delete(project);
+      scheduleAgentWork();
+    }, 1000).unref();
     if (customTitleBar) {
       nativeTheme.on("updated", () => {
         for (const { window } of windowStates.values()) {
