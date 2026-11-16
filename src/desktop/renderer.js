@@ -1863,6 +1863,7 @@ function draftComposer() {
   const unreadDivider = element("div", undefined, "board-chat-unread");
   let unread = new Set(frame.managerUnread ?? []);
   let readFrame;
+  let readRetry;
   let readingMessages = false;
   function updateUnreadMessages() {
     let first;
@@ -1872,9 +1873,11 @@ function draftComposer() {
       if (!read && !first) first = bubble;
     }
     if (first && unreadDivider.nextElementSibling !== first) first.before(unreadDivider);
+    if (!first) unreadDivider.remove();
     return first;
   }
   function readVisibleMessages() {
+    clearTimeout(readRetry);
     if (!api.readManagerMessages || !unread.size || readFrame || readingMessages) return;
     readFrame = requestAnimationFrame(async () => {
       readFrame = undefined;
@@ -1883,8 +1886,9 @@ function draftComposer() {
           !log.checkVisibility({ visibilityProperty: true }) || !log.clientHeight) return;
       const viewport = log.getBoundingClientRect();
       const ids = [...log.querySelectorAll('.board-manager-message[data-read="false"]')].filter(bubble => {
+        if (!bubble.checkVisibility({ visibilityProperty: true })) return false;
         const bounds = bubble.getBoundingClientRect();
-        return bounds.top >= viewport.top - 1 && bounds.top + Math.min(bounds.height, 28) <= viewport.bottom;
+        return bounds.height > 0 && bounds.top >= viewport.top - 1 && bounds.top + Math.min(bounds.height, 28) <= viewport.bottom;
       }).slice(0, 200).map(bubble => bubble.dataset.messageId);
       if (!ids.length) return;
       readingMessages = true;
@@ -1898,6 +1902,9 @@ function draftComposer() {
         // Leave the messages unread so the next viewport update can retry.
       } finally {
         readingMessages = false;
+        // Updates and scrolls during the IPC call may have exposed another reply.
+        // Retry failures as well, without requiring another user gesture.
+        if (!disposed && unread.size) readRetry = setTimeout(readVisibleMessages, 500);
       }
     });
   }
@@ -2830,6 +2837,8 @@ function draftComposer() {
   };
   editor.dispose = () => {
     disposed = true;
+    clearTimeout(readRetry);
+    cancelAnimationFrame(readFrame);
     readObserver.disconnect();
     dialogueViewport.dispose();
     workViewport.dispose();

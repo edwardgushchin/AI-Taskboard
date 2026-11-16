@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -135,4 +135,23 @@ test("message timestamps survive saved streaming updates, reopening and older pa
   assert.equal(older.turns[0]!.items[0]!.at, at);
   assert.equal(older.turns[0]!.items[0]!.text, "Done");
   assert.deepEqual(readManagerHistory(project, recent.nextCursor), older);
+});
+
+
+test("failed unread persistence retries without losing a concurrent arrival", t => {
+  const project = fixture(t);
+  const reply = (id: string) => ({ id, type: "agentMessage", title: "", text: "Fixture", phase: "final_answer", status: "completed" } as const);
+  saveManagerHistory(project, 1, randomUUID(), { lane: "chat", items: [reply("seen")] });
+  const path = join(project, ".tasks", "manager-unread.json");
+  const backup = path + ".backup";
+  renameSync(path, backup);
+  mkdirSync(path);
+  assert.throws(() => readManagerMessages(project, ["seen"]));
+  assert.deepEqual(managerUnread(project), ["seen"]);
+  rmSync(path, { recursive: true });
+  renameSync(backup, path);
+  saveManagerHistory(project, 2, randomUUID(), { lane: "notice", items: [reply("arrival")] });
+  assert.equal(readManagerMessages(project, ["seen"]), true);
+  assert.deepEqual(managerUnread(project), ["arrival"]);
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), ["arrival"]);
 });
