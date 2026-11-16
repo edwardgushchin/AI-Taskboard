@@ -328,7 +328,30 @@ app.whenReady().then(async () => {
       composerForm().querySelector('.chat-status').textContent.includes('Провайдер недоступен')`, "a catalog failure keeps the draft and shows the error");
     await evaluate(`modelFailure = false; composerForm().requestSubmit(); waitForSend()`);
     await check(`chats[4].text === 'Черновик останется' && composerInput().value === ''`, "sending again retries catalog loading and clears the saved draft");
-    console.log("Executor composer Chromium checks passed: 7");
+    await evaluate(`new Promise(resolve => setTimeout(resolve, 100))`);
+    await evaluate(`
+      frame.runningTasks = [];
+      frame.replyingTasks = [taskInSheet.id];
+      showTask();
+      composerInput().value = '';
+      composerInput().dispatchEvent(new Event('input'));
+      renderActiveAgents();
+    `);
+    await check(`!!composerForm().querySelector('.chat-send .codicon-debug-stop') &&
+      byId('status-agents').querySelector('span').textContent === '1' &&
+      byId('status-agents').title.includes('Обсуждения задач: 1') && frame.runningTasks.length === 0`,
+      "discussion has stop and a separate role in the total count without an executor");
+    await evaluate(`new Promise(resolve => setTimeout(resolve, 200))`);
+    window.setSize(850, 961);
+    await capture('task-discussion.png');
+    await evaluate(`frame.replyingTasks = []; taskInSheet.status = 'done'; showTask(); renderActiveAgents()`);
+    await check(`!!composerForm() && !!composerForm().querySelector('.codicon-play') &&
+      byId('status-agents').querySelector('span').textContent === '0'`,
+      "finished discussion clears the count and a completed card keeps its composer");
+    await evaluate(`taskInSheet.status = 'cancelled'; showTask()`);
+    await check(`!!composerForm() && !!composerForm().querySelector('.codicon-play')`,
+      "cancelled card keeps discussion available");
+    console.log("Executor composer Chromium checks passed: 10");
     return;
   }
   await check(`!completedWork.open && completedWork.querySelector('summary').textContent.includes('Выполнено за 7 мин 13 с')`, "completed chronology is folded with its measured duration");

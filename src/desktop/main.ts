@@ -199,8 +199,9 @@ function frame(state: ProjectTab) {
     managerWork: work?.managerRun ?? null,
     runningTasks: state.board?.tasks.filter(task => {
       const key = state.project + "\0" + task.id;
-      return runningTasks.has(key) || replyingTasks.has(key);
+      return runningTasks.has(key);
     }).map(task => task.id),
+    replyingTasks: state.board?.tasks.filter(task => replyingTasks.has(state.project + "\0" + task.id)).map(task => task.id),
     waitingTasks: state.board?.tasks.filter(task => {
       const key = state.project + "\0" + task.id;
       return task.status === "in_progress" && deferredExecutors.get(key)?.revision === task.revision &&
@@ -682,8 +683,6 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
   }
   if (closingProjects.has(project)) return { saved: false, result: cliFailure("PROJECT_CLOSING",
     lang("The project is closing.", "Проект закрывается.")) };
-  const release = active ? undefined : reserveAgent(project, "executor");
-  if (!active && !release) return { saved: false, result: executorLimit() };
   const operation = beginOperation(project);
   const signal = operation.controller.signal;
   if (!active) chatRuns.add(key);
@@ -716,7 +715,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     const task = reply.data;
     const last = task.history.findLastIndex(entry => entry.chat);
     const message = task.history[last];
-    if (["done", "cancelled"].includes(task.status) || message?.actor !== "user" ||
+    if (message?.actor !== "user" ||
         (retryAt !== undefined && last !== retryAt)) {
       return { saved, result: cliFailure("CHAT_CHANGED", lang("This message is no longer awaiting a reply.", "Это сообщение больше не ожидает ответа.")) };
     }
@@ -794,7 +793,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       const wasReplying = replyingTasks.delete(key);
       for (const directory of directories) await rm(directory, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
       chatRuns.delete(key);
-      release?.();
+      scheduleAgentWork();
       if (wasReplying) notifyRunChange(project);
     } else if (scratch && activeAgents.get(key) !== active) {
       await rm(scratch, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
