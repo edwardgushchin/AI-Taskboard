@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { git, gitSafeDirectoryEnvironment, isolatedWorktreesDirectory } from "../cli/git.ts";
 import { codexThreadPattern } from "../cli/model.ts";
@@ -88,11 +90,6 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     directory(isolatedRoot, true);
     readOnlyWorktrees.push(isolatedRoot);
   }
-  const filesystem = [
-    '":root" = "read"',
-    ...paths.map(path => JSON.stringify(path) + ' = "write"'),
-    ...readOnlyWorktrees.map(path => JSON.stringify(path) + ' = "read"'),
-  ].join(", ");
   const requestTool = { name: "task_tool_request", description: "Request a missing provider MCP tool for this task. The manager receives a question. Assignment requires a restarted task run; provider permissions still apply.",
     inputSchema: { type: "object", properties: { server: { type: "string" }, tool: { type: "string" }, reason: { type: "string" } }, required: ["server", "tool", "reason"], additionalProperties: false } };
   const mcp = await openBoardMcp([worklogTool, checkWaitTool, requestTool], async (name, args, requestSignal) => name === requestTool.name
@@ -101,9 +98,24 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     ? worklog.remind(await waitForCheck(runDirectory, args, signal ? AbortSignal.any([signal, requestSignal]) : requestSignal))
     : worklog.submit(args), executorToolTimeoutSeconds);
   let child: ChildProcessWithoutNullStreams;
+  let runTemp: string | undefined;
+  const removeRunTemp = async () => {
+    if (runTemp) await rm(runTemp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+      .catch(error => console.warn("Could not remove the executor's temporary directory.", runTemp, error.message));
+  };
   try {
     signal?.throwIfAborted();
     const env = { ...(client.env ?? process.env), ...mcp.env };
+    if (process.platform === "win32") {
+      runTemp = mkdtempSync(join(realpathSync(tmpdir()), "ai-taskboard-executor-temp-"));
+      paths.push(runTemp);
+      Object.assign(env, { TEMP: runTemp, TMP: runTemp, TMPDIR: runTemp });
+    }
+    const filesystem = [
+      '":root" = "read"',
+      ...paths.map(path => JSON.stringify(path) + ' = "write"'),
+      ...readOnlyWorktrees.map(path => JSON.stringify(path) + ' = "read"'),
+    ].join(", ");
     const runEnv = process.platform === "win32" && client.windowsSandbox === "elevated"
       ? gitSafeDirectoryEnvironment(env, dirname(boardData), ...(task.git ? [runDirectory] : []))
       : env;
@@ -116,7 +128,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       ...(process.platform === "win32" ? ["--disable", "prefer_mxc", "-c", "windows.sandbox=" + JSON.stringify(client.windowsSandbox ?? "mxc")] : []),
     ], { cwd: project, env: runEnv, windowsHide: true, stdio: "pipe" });
   } catch (error) {
-    await mcp.close();
+    try { await mcp.close(); } finally { await removeRunTemp(); }
     throw error;
   }
   const exited = new Promise<void>(resolve => child.once("close", resolve));
@@ -138,7 +150,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     rpc.close();
     child.stdin.end();
     child.kill();
-    await Promise.all([exited, mcp.close()]);
+    await exited;
+    try { await mcp.close(); } finally { await removeRunTemp(); }
   };
   child.stderr.resume();
   const rpc = codexRpc(child, message => {

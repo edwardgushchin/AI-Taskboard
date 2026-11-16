@@ -75,7 +75,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '  const { id, method, params } = JSON.parse(line);',
     '  if (id === undefined) return;',
     '  requests.push({ method, params });',
-    '  fs.writeFileSync(capture, JSON.stringify({ cwd: process.cwd(), flags, requests }));',
+    '  fs.writeFileSync(capture, JSON.stringify({ cwd: process.cwd(), flags, requests, temp: process.env.TEMP, tmp: process.env.TMP, tmpdir: require("node:os").tmpdir() }));',
     '  let result = {};',
     '  if (method === "command/exec") {',
     '    result = outcome === "denied" ? { exitCode: 1, stderr: "EACCES: permission denied" } : { exitCode: 0 };',
@@ -206,6 +206,14 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(probe.params.permissionProfile, started.params.permissions);
   assert.ok(probe.params.command.includes(join(folder, ".git", "objects")));
   assert.ok(probe.params.command.includes(join(folder, ".git", "worktrees", "T-0001")));
+  if (process.platform === "win32") {
+    assert.match(launched.temp, /ai-taskboard-executor-temp-[^/\\]+$/);
+    assert.equal(launched.tmp, launched.temp);
+    assert.equal(launched.tmpdir, launched.temp);
+    assert.ok(probe.params.command.includes(launched.temp));
+    assert.ok(launched.flags.some((flag: string) => flag.includes(JSON.stringify(launched.temp) + ' = "write"')));
+    assert.ok(!existsSync(launched.temp));
+  }
   assert.equal(started.params.model, "test-model");
   assert.equal(started.params.approvalPolicy, "on-request");
   assert.equal(started.params.approvalsReviewer, "auto_review");
@@ -233,7 +241,12 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   }), /Board busy/);
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "mcpServerStatus/list");
   await assert.rejects(launch("denied"), /Codex cannot write.*EACCES/s);
-  assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "command/exec");
+  const denied = JSON.parse(readFileSync(capture, "utf8"));
+  assert.equal(denied.requests.at(-1).method, "command/exec");
+  if (process.platform === "win32") {
+    assert.notEqual(denied.temp, launched.temp);
+    assert.ok(!existsSync(denied.temp));
+  }
   await assert.rejects(launch("readonly"), /did not apply the write permissions/);
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
   await assert.rejects(launch("manual-review"), /did not enable automatic approval review/);
@@ -320,7 +333,9 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   const externalRun = JSON.parse(readFileSync(capture, "utf8"));
   const externalProbe = externalRun.requests.find((req: { method: string }) => req.method === "command/exec");
   assert.equal(externalProbe.params.cwd, externalFolder);
-  assert.deepEqual(externalProbe.params.command.slice(-2), [externalFolder, join(folder, ".tasks")]);
+  assert.deepEqual(externalProbe.params.command.slice(3), [
+    externalFolder, join(folder, ".tasks"), ...(process.platform === "win32" ? [externalRun.temp] : []),
+  ]);
   const externalThread = externalRun.requests.find((req: { method: string }) => req.method === "thread/start");
   assert.equal(externalThread.params.cwd, externalFolder);
   assert.equal(externalThread.params.approvalsReviewer, "auto_review");
