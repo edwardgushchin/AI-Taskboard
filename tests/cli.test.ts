@@ -503,6 +503,73 @@ test("GitHub milestone deadline is pinned to origin and verified after writing",
   assert.equal(run("invalid", { ...input, dueDate: "2026-02-29" }).error.code, "INVALID_INPUT");
 });
 
+test("GitHub milestone creation is retryable and both deadlines can be read separately", t => {
+  const root = fixture(t, true);
+  const tools = fixture(t);
+  const executable = join(tools, process.platform === "win32" ? "gh.exe" : "gh");
+  writeFileSync(executable, "");
+  cli(root, ["init"]);
+  git(root, "remote", "add", "origin", "git@github.com:Owner/Example.git");
+  const state = join(tools, "milestones.json");
+  writeFileSync(state, JSON.stringify([{ number: 1, title: "First", state: "open", due_on: "2026-11-20T00:00:00Z" }]));
+  const mock = `
+    import cp from 'node:child_process';
+    import assert from 'node:assert/strict';
+    import { readFileSync, writeFileSync } from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    import { promisify } from 'node:util';
+    const mode = process.env.TASKBOARD_TEST_MILESTONE;
+    const path = ${JSON.stringify(state)};
+    const base = ['api', '--hostname', 'github.com'];
+    const endpoint = 'repos/owner/example/milestones';
+    cp.execFile = Object.assign(() => {}, { [promisify.custom]: async (cmd, args) => {
+      assert.equal(cmd, ${JSON.stringify(executable)});
+      assert.deepEqual(args.slice(0, 3), base);
+      const milestones = JSON.parse(readFileSync(path, 'utf8'));
+      if (args.includes('POST')) {
+        assert.ok(mode === 'create' || mode === 'race');
+        assert.deepEqual(args, [...base, '--method', 'POST', '-f', 'title=Next', '-f', 'due_on=2026-11-27T00:00:00Z', endpoint]);
+        assert.ok(!milestones.some(row => row.title === 'Next'));
+        const next = { number: 2, title: 'Next', state: 'open', due_on: '2026-11-27T00:00:00Z' };
+        writeFileSync(path, JSON.stringify([...milestones, next]));
+        if (mode === 'race') throw Object.assign(new Error('fixture-only'), { stderr: 'gh: Validation Failed (HTTP 422)' });
+        return { stdout: JSON.stringify({ number: next.number }) };
+      }
+      if (args.includes('--paginate')) {
+        assert.deepEqual(args, [...base, '--paginate', '--slurp', endpoint + '?state=all&per_page=100']);
+        return { stdout: JSON.stringify([milestones]) };
+      }
+      assert.equal(args.length, 4);
+      const selected = milestones.find(row => args[3] === endpoint + '/' + row.number);
+      assert.ok(selected);
+      return { stdout: JSON.stringify(selected) };
+    } });
+    syncBuiltinESMExports();
+  `;
+  const run = (command: string, args: unknown, mode = "read") => {
+    const result = spawnSync(process.execPath, ["--import", "data:text/javascript," + encodeURIComponent(mock),
+      ...commandArgs(root, [command], args)], {
+      env: { ...env, PATH: tools + delimiter + process.env.PATH, TASKBOARD_TEST_MILESTONE: mode },
+      input: JSON.stringify(args), encoding: "utf8", windowsHide: true,
+    });
+    assert.equal(result.stderr, "");
+    assert.doesNotMatch(result.stdout, /fixture-only/);
+    return JSON.parse(result.stdout);
+  };
+  const input = { repository: "owner/example", title: "Next", dueDate: "2026-11-27" };
+  const first = readFileSync(state, "utf8");
+  const created = run("github-milestone-create", input, "create");
+  assert.deepEqual(created.data, { repository: "owner/example", number: 2, title: "Next", state: "open",
+    dueDate: "2026-11-27", url: "https://github.com/owner/example/milestone/2", created: true });
+  assert.deepEqual(run("github-milestone-create", { ...input, dueDate: "2026-12-01" }).data,
+    { ...created.data, created: false });
+  assert.equal(run("github-read", { view: "milestone", number: 1 }).data.dueDate, "2026-11-20");
+  assert.equal(run("github-read", { view: "milestone", number: 2 }).data.dueDate, "2026-11-27");
+  assert.equal(run("github-milestone-create", { ...input, repository: "other/repo" }).error.code, "GITHUB_REMOTE_REQUIRED");
+  writeFileSync(state, first);
+  assert.deepEqual(run("github-milestone-create", input, "race").data, { ...created.data, created: false });
+});
+
 test("dependencies prevent worktree creation until every dependency is completed", t => {
   const root = fixture(t, true);
   cli(root, ["init"]);

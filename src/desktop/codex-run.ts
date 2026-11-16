@@ -10,7 +10,7 @@ import type { RunActivity, Task } from "../cli/model.ts";
 import { directory } from "../cli/storage.ts";
 import { runActivity } from "./run-activity.ts";
 import { boardAgentInstructions, boardCodexArgs, boardWorklog, worklogReminder, worklogTool } from "./board-agent-hooks.ts";
-import { githubSetMilestoneDueTool, milestonesListTool } from "./board-actions.ts";
+import { githubCreateMilestoneTool, githubSetMilestoneDueTool, milestonesListTool } from "./board-actions.ts";
 import { openBoardMcp } from "./board-mcp.ts";
 import { githubReadTool, readBoardGitHub } from "./github-read.ts";
 import { checkWaitInstructions, checkWaitTool, executorToolTimeoutSeconds, waitForCheck } from "./check-wait.ts";
@@ -94,13 +94,14 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   }
   const requestTool = { name: "task_tool_request", description: "Request a missing provider MCP tool for this task. The manager receives a question. Assignment requires a restarted task run; provider permissions still apply.",
     inputSchema: { type: "object", properties: { server: { type: "string" }, tool: { type: "string" }, reason: { type: "string" } }, required: ["server", "tool", "reason"], additionalProperties: false } };
-  const mcp = await openBoardMcp([worklogTool, checkWaitTool, requestTool, githubReadTool, milestonesListTool, githubSetMilestoneDueTool], async (name, args, requestSignal) => {
+  const mcp = await openBoardMcp([worklogTool, checkWaitTool, requestTool, githubReadTool, milestonesListTool, githubCreateMilestoneTool, githubSetMilestoneDueTool], async (name, args, requestSignal) => {
     if (name === requestTool.name) return worklog.remind(await callCli(project, ["tool-request", task.id, "--compact"], args));
     if (name === checkWaitTool.name) {
       return worklog.remind(await waitForCheck(runDirectory, args, signal ? AbortSignal.any([signal, requestSignal]) : requestSignal));
     }
     if (name === githubReadTool.name) return worklog.remind(await readBoardGitHub(project, args));
     if (name === milestonesListTool.name) return worklog.remind(await callCli(project, ["milestones"]));
+    if (name === githubCreateMilestoneTool.name) return worklog.remind(await callCli(project, ["github-milestone-create"], args));
     if (name === githubSetMilestoneDueTool.name) return worklog.remind(await callCli(project, ["github-milestone-due"], args));
     return worklog.submit(args);
   }, executorToolTimeoutSeconds);
@@ -252,7 +253,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       throw new Error("Codex did not enable automatic approval review. Check the connected Codex version and its approval policy.");
     }
     const threadId = started.thread.id;
-    await verifyExecutorTools(request, threadId, task.toolGrants);
+    const localTools = await verifyExecutorTools(request, threadId, task.toolGrants);
+    const githubTools = localTools.filter(name => name.startsWith("github_") || name === milestonesListTool.name);
     if (!codexThreadPattern.test(threadId) || (existing && threadId !== existing)) throw new Error("Codex returned an unexpected thread ID.");
     signal?.throwIfAborted();
     await beforeTurn?.(threadId);
@@ -266,6 +268,9 @@ export async function startCodexRun(client: Client, project: string, cwd: string
         "У задачи нет отдельной ветки или worktree. Используй сценарий сдачи результата вне Git из инструкции.",
       ] : []),
       "Прочитай актуальную карточку через show " + task.id + " --compact.",
+      ...(githubTools.length ? ["Хостовые инструменты GitHub, подтверждённые для текущего хода: " +
+        githubTools.map(name => "mcp__ai_taskboard__" + name).join(", ") +
+        ". Для поддерживаемых операций обращайся к ним напрямую. Статус gh из оболочки не проверяет авторизацию доски."] : []),
       "Для чтения истории используй show --compact с historyLimit. Повторно используй прочитанные изменения, если снимок совпадает.",
       "Команды, которые должен запускать читатель, оформляй отдельными блоками кода Markdown. Пояснения пиши отдельными абзацами.",
       task.schedule

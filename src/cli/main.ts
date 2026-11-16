@@ -15,7 +15,7 @@ import { exists, initializeBoard, locateBoard, onBoard, readBoardSettings, withT
 import { recordSettings } from "./settings-notices.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
 import { discoverRepository, invokeGit, scheduleGitMaintenance } from "./git.ts";
-import { changeRepository, githubMilestones, githubRepository, inspectRepository, publishRepository, pushRepositoryBranch, readGitHub, repositoryRefs, setGitHubMilestoneDueDate } from "./repository.ts";
+import { changeRepository, createGitHubMilestone, githubMilestones, githubRepository, inspectRepository, publishRepository, pushRepositoryBranch, readGitHub, repositoryRefs, setGitHubMilestoneDueDate } from "./repository.ts";
 import { previewSubmission, previewTask, submitTask } from "./submission.ts";
 import { changeTask, createTask, recordRunLog, withoutVerification } from "./tasks.ts";
 import { recordTokenUsage, taskMetrics } from "./token-usage.ts";
@@ -49,7 +49,8 @@ const help = [
   "          manager-ack [TASK-ID] --stdin (through for one card, messages with id and through for a batch)",
   "          attachment restore-reply TASK-ID --stdin (replyAt, revision and attachmentSources)",
   "          list --tag NAME, tag ensure --stdin, tag set --stdin (name and #RRGGBB color), tag assign TASK-ID --stdin (tags)",
-  "          github-read --stdin (view: account or repository), milestones, milestone TASK-ID --stdin (revision, milestone: {repository, number} or null)",
+  "          github-read --stdin (view: account, repository or milestone with number), milestones, milestone TASK-ID --stdin (revision, milestone: {repository, number} or null)",
+  "          github-milestone-create --stdin (repository, title, optional dueDate as YYYY-MM-DD)",
   "          github-milestone-due --stdin (repository, number, dueDate as YYYY-MM-DD)",
   "          milestone-batch --stdin (tasks: [{id, revision}], milestone: {repository, number} or null)",
   "          git refs, git inspect, git switch, git create, git detach, git publish --stdin, git push --stdin (branch and head)",
@@ -711,10 +712,10 @@ async function main() {
         if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "GitHub read takes no task ID.");
         readBoardSettings(location);
         data = await readGitHub(location, input);
-      } else if (command === "github-milestone-due") {
+      } else if (command === "github-milestone-create" || command === "github-milestone-due") {
         if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "GitHub milestone changes take no task ID.");
         readBoardSettings(location);
-        data = await setGitHubMilestoneDueDate(location, input);
+        data = await (command === "github-milestone-create" ? createGitHubMilestone : setGitHubMilestoneDueDate)(location, input);
       } else if (command === "milestones") {
         if (id !== undefined || Object.keys(input).length) throw new TaskboardError("INVALID_INPUT", "Milestones takes no arguments.");
         data = await githubMilestones(location);

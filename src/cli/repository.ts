@@ -28,68 +28,120 @@ export async function githubMilestones(location: BoardLocation, selected?: { rep
   if (!repository || (selected && selected.repository !== repository)) {
     throw new TaskboardError("GITHUB_REMOTE_REQUIRED", "Choose a milestone from the GitHub repository configured as origin.");
   }
-  const args = selected ? ["repos/" + repository + "/milestones/" + selected.number] : githubMilestoneArgs(repository).slice(3);
+  return listGitHubMilestones(githubApi(location.root), repository, selected?.number);
+}
+
+async function listGitHubMilestones(request: ReturnType<typeof githubApi>, repository: string, selected?: number) {
+  const args = selected === undefined ? githubMilestoneArgs(repository).slice(3) : ["repos/" + repository + "/milestones/" + selected];
   const endpoint = args.pop()!;
-  const response = await githubApi(location.root)(endpoint, args, "GITHUB_MILESTONES_FAILED");
-  const entries: unknown[] = selected ? [response] : Array.isArray(response) ? response.flat() : [];
-  if (!selected && !Array.isArray(response)) throw new TaskboardError("GITHUB_MILESTONES_FAILED", "Invalid milestone response.");
+  const response = await request(endpoint, args, "GITHUB_MILESTONES_FAILED");
+  const entries: unknown[] = selected === undefined ? Array.isArray(response) ? response.flat() : [] : [response];
+  if (selected === undefined && !Array.isArray(response)) throw new TaskboardError("GITHUB_MILESTONES_FAILED", "Invalid milestone response.");
   return { repository, milestones: entries.map(entry => {
     const fields = object(entry);
     const state = member(fields.state, ["open", "closed"] as const, "state");
-    return { number: number(fields.number, "milestone number", 1), title: text(fields.title, "milestone title", true), state };
+    return { number: number(fields.number, "milestone number"), title: text(fields.title, "milestone title", true), state };
   }) };
 }
 
 export async function readGitHub(location: BoardLocation, input: Record<string, unknown>) {
-  if (Object.keys(input).some(key => key !== "view")) {
-    throw new TaskboardError("INVALID_INPUT", "Use only the view field.");
+  const view = member(input.view, ["account", "repository", "milestone"], "GitHub view");
+  if (Object.keys(input).some(key => key !== "view" && !(view === "milestone" && key === "number"))) {
+    throw new TaskboardError("INVALID_INPUT", "Use view and, for a milestone, its number.");
   }
-  const view = member(input.view, ["account", "repository"], "GitHub view");
   if (view === "account") {
     const account = object(await githubApi(location.root)("user"));
     return { login: text(account.login, "GitHub login") };
   }
   const repository = githubRepository(location);
   if (!repository) throw new TaskboardError("GITHUB_REMOTE_REQUIRED", "The board's origin must identify a GitHub repository.");
+  if (view === "milestone") {
+    const milestoneNumber = number(input.number, "milestone number");
+    return readGitHubMilestone(githubApi(location.root), repository, milestoneNumber);
+  }
   const fields = object(await githubApi(location.root)("repos/" + repository));
   if (typeof fields.private !== "boolean") throw new TaskboardError("GITHUB_READ_FAILED", "GitHub returned invalid repository metadata.");
   return { repository: text(fields.full_name, "GitHub repository"), private: fields.private,
     defaultBranch: text(fields.default_branch, "default branch") };
 }
 
-export async function setGitHubMilestoneDueDate(location: BoardLocation, input: Record<string, unknown>) {
-  if (Object.keys(input).some(key => !["repository", "number", "dueDate"].includes(key))) {
-    throw new TaskboardError("INVALID_INPUT", "Use only repository, number and dueDate.");
-  }
+function milestoneRepository(location: BoardLocation, value: unknown) {
   const repository = githubRepository(location);
-  if (!repository || text(input.repository, "repository", true).toLowerCase() !== repository) {
+  if (!repository || text(value, "repository", true).toLowerCase() !== repository) {
     throw new TaskboardError("GITHUB_REMOTE_REQUIRED", "Use the GitHub repository configured as the board's origin.");
   }
-  const milestoneNumber = number(input.number, "milestone number");
-  if (!Number.isSafeInteger(milestoneNumber)) throw new TaskboardError("INVALID_INPUT", "Use a valid milestone number.");
-  const dueDate = text(input.dueDate, "due date", true);
+  return repository;
+}
+
+function milestoneDueOn(value: unknown) {
+  const dueDate = text(value, "due date", true);
   const dueOn = dueDate + "T00:00:00Z";
   const timestamp = new Date(dueOn);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate) || Number.isNaN(timestamp.getTime()) || timestamp.toISOString().slice(0, 10) !== dueDate) {
     throw new TaskboardError("INVALID_INPUT", "Use an existing calendar date in YYYY-MM-DD format.");
   }
+  return dueOn;
+}
+
+async function readGitHubMilestone(request: ReturnType<typeof githubApi>, repository: string, milestoneNumber: number) {
+  const fields = object(await request("repos/" + repository + "/milestones/" + milestoneNumber));
+  if (fields.number !== milestoneNumber || (fields.due_on !== null &&
+      (typeof fields.due_on !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(fields.due_on)))) {
+    throw new TaskboardError("GITHUB_MILESTONE_VERIFY_FAILED", "GitHub returned unexpected milestone data.");
+  }
+  return { repository, number: milestoneNumber, title: text(fields.title, "milestone title", true),
+    state: member(fields.state, ["open", "closed"], "milestone state"),
+    dueDate: fields.due_on === null ? null : fields.due_on.slice(0, 10),
+    url: "https://github.com/" + repository + "/milestone/" + milestoneNumber };
+}
+
+export async function createGitHubMilestone(location: BoardLocation, input: Record<string, unknown>) {
+  if (Object.keys(input).some(key => !["repository", "title", "dueDate"].includes(key))) {
+    throw new TaskboardError("INVALID_INPUT", "Use only repository, title and dueDate.");
+  }
+  const repository = milestoneRepository(location, input.repository);
+  const title = text(input.title, "milestone title", true);
+  const dueOn = input.dueDate === undefined ? undefined : milestoneDueOn(input.dueDate);
+  const request = githubApi(location.root);
+  const find = async () => (await listGitHubMilestones(request, repository)).milestones.find(milestone => milestone.title === title);
+  const confirm = async (milestoneNumber: number, created: boolean) => {
+    const milestone = await readGitHubMilestone(request, repository, milestoneNumber);
+    if (milestone.title !== title || (created && dueOn && milestone.dueDate !== dueOn.slice(0, 10))) {
+      throw new TaskboardError("GITHUB_MILESTONE_VERIFY_FAILED", "Reading the milestone did not confirm the requested result.");
+    }
+    return { ...milestone, created };
+  };
+  const existing = await find();
+  if (existing) return confirm(existing.number, false);
+
+  const flags = ["--method", "POST", "-f", "title=" + title, ...(dueOn ? ["-f", "due_on=" + dueOn] : [])];
+  let response: unknown;
+  try {
+    response = await request("repos/" + repository + "/milestones", flags, "GITHUB_MILESTONE_CREATE_FAILED");
+  } catch (error) {
+    if (error instanceof TaskboardError && error.code === "GITHUB_MILESTONE_CREATE_FAILED") {
+      const appeared = await find().catch(() => undefined);
+      if (appeared) return confirm(appeared.number, false);
+    }
+    throw error;
+  }
+  return confirm(number(object(response).number, "milestone number"), true);
+}
+
+export async function setGitHubMilestoneDueDate(location: BoardLocation, input: Record<string, unknown>) {
+  if (Object.keys(input).some(key => !["repository", "number", "dueDate"].includes(key))) {
+    throw new TaskboardError("INVALID_INPUT", "Use only repository, number and dueDate.");
+  }
+  const repository = milestoneRepository(location, input.repository);
+  const milestoneNumber = number(input.number, "milestone number");
+  const dueOn = milestoneDueOn(input.dueDate);
+  const dueDate = dueOn.slice(0, 10);
   const endpoint = "repos/" + repository + "/milestones/" + milestoneNumber;
   const request = githubApi(location.root);
-  const read = async () => {
-    const fields = object(await request(endpoint));
-    if (fields.number !== milestoneNumber || (fields.due_on !== null &&
-        (typeof fields.due_on !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(fields.due_on)))) {
-      throw new TaskboardError("GITHUB_MILESTONE_VERIFY_FAILED", "GitHub returned unexpected milestone data.");
-    }
-    return { repository, number: milestoneNumber, title: text(fields.title, "milestone title", true),
-      state: member(fields.state, ["open", "closed"], "milestone state"),
-      dueDate: fields.due_on === null ? null : fields.due_on.slice(0, 10),
-      url: "https://github.com/" + repository + "/milestone/" + milestoneNumber };
-  };
-  const before = await read();
+  const before = await readGitHubMilestone(request, repository, milestoneNumber);
   if (before.dueDate === dueDate) return { ...before, changed: false };
   await request(endpoint, ["--method", "PATCH", "-f", "due_on=" + dueOn], "GITHUB_MILESTONE_UPDATE_FAILED");
-  const after = await read();
+  const after = await readGitHubMilestone(request, repository, milestoneNumber);
   if (after.dueDate !== dueDate || after.title !== before.title || after.state !== before.state) {
     throw new TaskboardError("GITHUB_MILESTONE_VERIFY_FAILED", "Reading the milestone after the update did not confirm the requested result.");
   }

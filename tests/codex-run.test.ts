@@ -84,7 +84,11 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '  } else if (method === "config/read") {',
     '    result = { config: { mcp_servers: { ai_taskboard: { url: "http://127.0.0.1/mcp" } } } };',
     '  } else if (method === "mcpServerStatus/list") {',
-    '    result = { data: [{ name: "ai_taskboard", tools: { worklog_record: {} } }] };',
+    '    const url = flags.find(flag => flag.startsWith("mcp_servers.ai_taskboard=")).match(/http[^"]+/)[0];',
+    '    const response = await fetch(url, { method: "POST", headers: { authorization: "Bearer " + process.env.AI_TASKBOARD_MCP_TOKEN },',
+    '      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });',
+    '    const { tools } = (await response.json()).result;',
+    '    result = { data: [{ name: "ai_taskboard", tools: Object.fromEntries(tools.map(tool => [tool.name, tool])) }] };',
     '  } else if (method === "thread/start" || method === "thread/resume") {',
     '    if (outcome === "busy") { send({ id, error: { message: "thread " + thread + " already has an active writer" } }); return; }',
     '    if (outcome === "missing" && method === "thread/resume") { send({ id, error: { message: "no rollout found for thread id " + params.threadId } }); return; }',
@@ -109,9 +113,13 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '      const headers = { authorization: "Bearer " + process.env.AI_TASKBOARD_MCP_TOKEN };',
     '      const githubCalls = [',
     '        ["github_read", { view: "repository" }],',
+    '        ["github_read", { view: "milestone", number: 1 }],',
     '        ["milestones_list", {}],',
+    '        ["github_create_milestone", { repository: "owner/fixture", title: "Next", dueDate: "2026-11-27" }],',
     '        ["github_set_milestone_due", { repository: "owner/fixture", number: 1, dueDate: "2026-11-20" }],',
     '      ];',
+    '      const prompt = params.input[0].text;',
+    '      if (githubCalls.some(([name]) => !prompt.includes("mcp__ai_taskboard__" + name))) throw new Error("Missing live GitHub tools in executor prompt");',
     '      for (const [name, args] of githubCalls) {',
     '        const response = await fetch(url, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call",',
     '          params: { name, arguments: args } }) });',
@@ -243,7 +251,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.ok(started.params.developerInstructions.includes(russianWriting));
   assert.match(started.params.developerInstructions, /Ponytail.*worklog_record/s);
   assert.match(started.params.developerInstructions, /Use built-in web search for relevant public sources/);
-  assert.match(started.params.developerInstructions, /github_set_milestone_due.*without a shell `gh auth status` preflight/);
+  assert.match(started.params.developerInstructions, /github_create_milestone.*github_set_milestone_due.*without a shell `gh auth status` preflight/);
   assert.match(started.params.developerInstructions, /CLI launch array.*\[.+--disable-warning|CLI launch array.*ai-taskboard(?:\.exe)?"/);
   assert.doesNotMatch(started.params.developerInstructions, /__AI_TASKBOARD_CLI__/);
   assert.match(started.params.developerInstructions, /Exercise the specified public API, scenario and runtime profile.*SDK and dependencies.*clean environment/);
