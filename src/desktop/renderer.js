@@ -915,8 +915,6 @@ function card(task) {
       image.dataset.task = task.id;
       image.dataset.file = cover.file;
       image.onload = () => {
-        // Keep small covers at their native width; CSS crops tall covers before they become visible.
-        image.style.width = image.naturalWidth + "px";
         image.hidden = false;
       };
     }

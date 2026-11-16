@@ -169,7 +169,7 @@ app.whenReady().then(async () => {
   }
   if (process.argv.includes("--covers-only")) {
     await evaluate(`
-      const sizes = [[400, 8000], [800, 200], [40, 30]];
+      const sizes = [[400, 8000], [800, 200], [40, 30], [80, 80]];
       const sources = sizes.map(([width, height]) => {
         const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
         const ctx = canvas.getContext('2d');
@@ -191,10 +191,10 @@ app.whenReady().then(async () => {
       nativeTheme.themeSource = theme;
       window.setContentSize(width, 900);
       await evaluate(`waitFor(() => matchMedia('(prefers-color-scheme: dark)').matches === ${theme === 'dark'})`);
-      for (let shape = 0; shape < 3; shape++) {
+      for (let shape = 0; shape < 4; shape++) {
         await evaluate(`
           fixture.theme = '${theme}';
-          fixture.board.tasks = [task('T-0001', '${['Длинный скриншот', 'Широкое изображение', 'Маленькое изображение'][shape]}', {
+          fixture.board.tasks = [task('T-0001', '${['Длинный скриншот', 'Широкое изображение', 'Маленькое изображение', 'Квадратное изображение'][shape]}', {
             attachments: [{ file: '${shape}-${theme}-${width}.png', name: 'image.png' }]
           })];
           window.releaseCover = null; push();
@@ -214,12 +214,12 @@ app.whenReady().then(async () => {
         await check(`(() => {
           const image = findCard('T-0001').querySelector('img'), rect = image.getBoundingClientRect(), css = getComputedStyle(image);
           const parentCSS = getComputedStyle(image.parentElement);
-          const expectedWidth = Math.min(image.naturalWidth, image.parentElement.clientWidth - parseFloat(parentCSS.paddingLeft) - parseFloat(parentCSS.paddingRight));
+          const expectedWidth = image.parentElement.clientWidth - parseFloat(parentCSS.paddingLeft) - parseFloat(parentCSS.paddingRight);
           return !window.oversizedFrame && bounded(image) && Math.abs(rect.width - expectedWidth) < 1 &&
             Math.abs(rect.height - Math.min(180, expectedWidth * image.naturalHeight / image.naturalWidth)) < 2 &&
             css.objectFit === 'cover' && css.objectPosition === '50% 0%' && css.borderRadius === '7px' &&
             findCard('T-0001').querySelector('.task-meta').getBoundingClientRect().top >= rect.bottom;
-        })()`, 'native width, proportional cover crop at top, rounded border and footer (' + theme + ', ' + width + ', ' + shape + ')');
+        })()`, 'full inner width, proportional cover crop at top, rounded border and footer (' + theme + ', ' + width + ', ' + shape + ')');
         await evaluate(`
           window.stopMonitor = true;
           window.savedCover = findCard('T-0001').querySelector('img'); window.savedCalls = window.previewCalls;
