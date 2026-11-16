@@ -357,6 +357,8 @@ function renderRunActivity(container, items, completed = false, durationMs, task
         if (entry !== message) entry.append(message);
         if (item.type === "agentMessage") appendChatTime(entry, item.at);
         entry.dataset.item = "message:" + item.id;
+        if (context?.dialogue && item.type === "agentMessage" && item.phase === "final_answer" &&
+            item.status === "completed" && item.text.trim()) entry.dataset.messageId = item.id;
         nodes.push(entry);
       }
       else if (item.type === "reasoning") nodes.push(operation(item));
@@ -377,7 +379,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
     } else operations.push(item);
   }
   flush();
-  const boundaryKey = node => node.dataset.coordinationKey ||
+  const boundaryKey = node => node.dataset.messageId || node.dataset.coordinationKey ||
     (node.dataset.actor === "user" || taskEventRows.has(node) ? node.dataset.item : undefined);
   const hasBoundaries = nodes.some(boundaryKey);
   function foldWork(batch, key, label) {

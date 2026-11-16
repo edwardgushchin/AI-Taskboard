@@ -39,7 +39,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
     basename, extname, join, performance, projectLabels, AbortController, subscriptions: new Map(),
     scheduleAgentWork: () => { scheduled.push(true); }, reserveAgent: slots.acquire, managerFullAccess: () => false,
     boardRequests: new Map(), boardWorkRequests: new Map(), boardUnread: () => [], projectIdentity: (path: string) => path,
-    app: { getPath: () => "profile" }, managerFullAccess: () => false,
+    app: { getPath: () => "profile" },
     lang: (english: string) => english,
     tmpdir: () => "scratch",
     mkdtemp: async () => "scratch/chat",
