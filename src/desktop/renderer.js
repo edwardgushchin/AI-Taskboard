@@ -1345,6 +1345,7 @@ function render(previousBoard) {
   autoMode.hidden = noBoard;
   const enabled = board?.settings.autoMode === true;
   autoMode.setAttribute("aria-pressed", String(enabled));
+  autoMode.querySelector("i").className = `icon codicon codicon-${enabled ? "sync" : "play"}`;
   autoMode.querySelector("span").textContent = enabled ? language("Auto: on", "Авторежим: вкл.") : language("Auto: off", "Авторежим: выкл.");
   autoMode.title = enabled ? language("Stop new automatic starts", "Остановить новые автоматические запуски") :
     language("Automatically run ready tasks", "Автоматически запускать готовые задачи");

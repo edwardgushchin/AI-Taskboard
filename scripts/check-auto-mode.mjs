@@ -50,6 +50,7 @@ try {
     .replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, sourceUrl).href));
   const entry = join(scratch, "main-under-test.mjs");
   writeFileSync(entry, transformSync(source, { loader: "ts", format: "esm" }).code);
+  app.on("web-contents-created", (_event, contents) => contents.setBackgroundThrottling(false));
   require(entry);
   await wait(() => BrowserWindow.getAllWindows().length === 1);
   window = BrowserWindow.getAllWindows()[0];
@@ -61,8 +62,11 @@ try {
     await wait(() => evaluate("window.taskboard.bootstrap().then(f => !f.loading && Boolean(f.board))"));
   };
   const enabled = () => evaluate("document.querySelector('#status-auto-mode').getAttribute('aria-pressed')");
+  const checkIcon = async on => assert.equal(await evaluate("document.querySelector('#status-auto-mode i').className"),
+    `icon codicon codicon-${on ? "sync" : "play"}`);
   await open(boards[0]);
   assert.equal(await enabled(), "false");
+  await checkIcon(false);
   // Native mouse/keyboard input goes through the existing renderer listener and IPC.
   const click = async () => {
     const point = await evaluate(`(() => { const r = document.querySelector('#status-auto-mode').getBoundingClientRect(); return { x: Math.round(r.x+r.width/2), y: Math.round(r.y+r.height/2) }; })()`);
@@ -70,6 +74,7 @@ try {
   };
   await click();
   await wait(async () => await enabled() === "true");
+  await checkIcon(true);
   assert.equal(cli(boards[0], ["list"]).settings.autoMode, true);
   await open(boards[1]);
   assert.equal(await enabled(), "false");
@@ -80,10 +85,12 @@ try {
   await evaluate("document.querySelector('#status-auto-mode').focus()");
   for (const type of ["keyDown", "char", "keyUp"]) window.webContents.sendInputEvent({ type, keyCode: " " });
   await wait(async () => await enabled() === "true");
+  await checkIcon(true);
   await wait(() => evaluate("!document.querySelector('#status-auto-mode').disabled"));
   await evaluate("document.querySelector('#status-auto-mode').focus()");
   for (const type of ["keyDown", "char", "keyUp"]) window.webContents.sendInputEvent({ type, keyCode: "Return" });
   await wait(async () => await enabled() === "false");
+  await checkIcon(false);
   assert.equal(cli(boards[0], ["list"]).settings.autoMode, true);
   assert.equal(cli(boards[1], ["list"]).settings.autoMode === true, false);
   await evaluate("location.reload()");
@@ -91,43 +98,88 @@ try {
   assert.equal(await enabled(), "false");
   await evaluate("window.taskboard.selectTab(" + JSON.stringify(boards[0]) + ")");
   await wait(async () => await enabled() === "true");
+  await checkIcon(true);
   const results = [];
+  window.webContents.debugger.attach("1.3");
+  const paint = () => evaluate("document.fonts.ready.then(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))))");
+  const move = async selector => {
+    const point = await evaluate(`(() => { const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return { x: Math.round(r.x+r.width/2), y: Math.round(r.y+r.height/2) }; })()`);
+    point.x = Math.round(point.x * window.webContents.getZoomFactor());
+    point.y = Math.round(point.y * window.webContents.getZoomFactor());
+    window.webContents.sendInputEvent({ type: "mouseMove", ...point });
+    await paint();
+  };
+  const gitStyle = () => evaluate(`(() => { const g = document.querySelector('.status-repository'), s = getComputedStyle(g); return [s.backgroundColor, s.borderTopColor]; })()`);
   // Git presentations are renderer fixtures; settings and activation above use real empty boards.
+  for (const motion of ["no-preference", "reduce"]) {
+  await window.webContents.debugger.sendCommand("Emulation.setEmulatedMedia", {
+    features: [{ name: "prefers-reduced-motion", value: motion }],
+  });
   for (const theme of ["light", "dark"]) for (const width of [1200, 800]) for (const zoom of [1, 1.25, 1.5]) {
+    console.log(`Checking auto mode: ${motion}/${theme}/${width}/${zoom}`);
     window.setSize(width, 700);
     window.webContents.setZoomFactor(zoom);
     await evaluate("window.taskboard.setTheme(" + JSON.stringify(theme) + ")");
     for (const git of ["publish", "tracking", "branch", "hidden"]) for (const on of [false, true]) {
+      await evaluate(`window.taskboard.command('settings', undefined, { autoMode: ${on} })`);
+      await wait(async () => await enabled() === String(on));
+      await checkIcon(on);
       await evaluate(`(() => {
-        const auto = document.querySelector('#status-auto-mode');
-        auto.setAttribute('aria-pressed', '${on}');
-        auto.querySelector('span').textContent = ${JSON.stringify(on ? "Авторежим: вкл." : "Авторежим: выкл.")};
+        for (const button of document.querySelectorAll('.status-repository button')) button.disabled = false;
         document.querySelector('#status-branch').hidden = ${git === "hidden"};
         document.querySelector('#status-branch span').textContent = 'main';
         document.querySelector('#status-publish').hidden = ${git !== "publish"};
         document.querySelector('#status-tracking').hidden = ${git !== "tracking"};
         document.querySelector('#status-tracking span').textContent = '0↓ 1↑';
       })()`);
-      await evaluate("document.fonts.ready.then(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))))");
+      await evaluate("document.activeElement.blur()");
+      window.webContents.sendInputEvent({ type: "mouseMove", x: 500, y: 100 });
+      await paint();
+      const baseline = await gitStyle();
+      await move('#status-auto-mode');
+      assert.equal(await evaluate("document.querySelector('#status-auto-mode').matches(':hover')"), true);
+      assert.deepEqual(await gitStyle(), baseline, "Auto hover leaves Git background and border unchanged");
       const result = await evaluate(`(() => {
         const b = document.querySelector('#status-auto-mode'), i = b.querySelector('i');
         const r = b.getBoundingClientRect(), ir = i.getBoundingClientRect();
-        const before = [...b.parentElement.children].filter(x => !x.hidden && x !== b).at(-1);
+        const before = document.querySelector('.status-repository');
+        const style = getComputedStyle(i);
         return { content: getComputedStyle(i, '::before').content, font: getComputedStyle(i).fontFamily,
           width: ir.width, height: ir.height, left: r.left, right: r.right, viewport: innerWidth,
-          previousRight: before?.getBoundingClientRect().right, parent: b.parentElement.className,
+          previousRight: before.getBoundingClientRect().right, parent: b.parentElement.className,
+          animation: style.animationName, duration: style.animationDuration, transform: style.transform,
+          gitHover: before.matches(':hover'),
           hit: b.contains(document.elementFromPoint(ir.x+8, ir.y+8)), label: b.textContent.trim() };
       })()`);
-      assert.equal(result.content, '"\ueb2c"');
+      assert.equal(result.content, on ? '"\uea77"' : '"\ueb2c"');
       assert.match(result.font, /codicon/);
-      assert.equal(result.parent, "status-repository");
+      assert.equal(result.parent, "status-bar");
+      assert.equal(result.gitHover, false);
       assert.ok(result.width >= 16 && result.height >= 16 && result.hit);
       assert.ok(result.left >= 0 && result.right <= result.viewport);
-      if (result.previousRight) assert.ok(Math.abs(result.left - result.previousRight) <= 1);
+      if (git !== "hidden") assert.ok(Math.abs(result.left - result.previousRight - 12) <= 1, "12px separation from Git");
+      else assert.equal(result.left, 8, "no extra leading gap without Git");
+      assert.equal(result.animation, on && motion === "no-preference" ? "agent-spin" : "none");
+      if (on && motion === "no-preference") {
+        await new Promise(resolve => setTimeout(resolve, 60));
+        assert.notEqual(await evaluate("getComputedStyle(document.querySelector('#status-auto-mode i')).transform"), result.transform, "sync really rotates");
+      }
       assert.ok(result.label.length > 0);
-      results.push({ theme, width, zoom, git, on, ...result });
-      if (width === 800 && git === "publish") writeFileSync(join(artifacts, `auto-${theme}-${zoom}-${on}.png`), (await window.webContents.capturePage()).toPNG());
+      results.push({ motion, theme, width, zoom, git, on, ...result });
+      if (motion === "no-preference" && width === 800 && git === "publish") writeFileSync(join(artifacts, `auto-${theme}-${zoom}-${on}.png`), (await window.webContents.capturePage()).toPNG());
+      if (git !== "hidden") {
+        await move('#status-branch');
+        assert.notDeepEqual(await gitStyle(), baseline, "Git still has its own hover feedback");
+        assert.equal(await evaluate("document.querySelector('#status-auto-mode').matches(':hover')"), false);
+      }
+      await evaluate("document.querySelector('#status-auto-mode').focus()");
+      if (git !== "hidden") {
+        window.webContents.sendInputEvent({ type: "mouseMove", x: 500, y: 100 });
+        await paint();
+        assert.deepEqual(await gitStyle(), baseline, "Auto keyboard focus leaves Git unchanged");
+      }
     }
+  }
   }
   writeFileSync(join(artifacts, "auto-mode.json"), JSON.stringify({ versions: process.versions, scenarios: results.length,
     activation: "mouse, Space, Enter; board isolation; renderer reload and fresh CLI reads passed", results }, null, 2));

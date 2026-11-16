@@ -944,11 +944,11 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 .status-git { min-width: 0; display: flex; align-items: center; gap: 4px; }
 .status-git span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .status-bar .icon { width: 16px; height: 16px; }
-.status-activity > .button, .status-repository > .button {
+.status-activity > .button, .status-repository > .button, #status-auto-mode {
   flex: none; min-height: 22px; height: 22px; border: 0; border-radius: 3px; padding: 0 4px;
   color: inherit; background: transparent; font: inherit;
 }
-.status-activity > .button:hover:not(:disabled), .status-repository > .button:hover:not(:disabled) {
+.status-activity > .button:hover:not(:disabled), .status-repository > .button:hover:not(:disabled), #status-auto-mode:hover:not(:disabled) {
   color: inherit; background: color-mix(in srgb, var(--text) 20%, var(--toolbar));
 }
 .status-repository {
@@ -973,10 +973,12 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 .status-tracking[aria-busy="true"] { opacity: 1; }
 @media (prefers-reduced-motion: no-preference) {
   .status-tracking[aria-busy="true"] .codicon { animation: agent-spin .8s linear infinite; }
+  #status-auto-mode[aria-pressed="true"] .codicon { animation: agent-spin .8s linear infinite; }
 }
 .status-activity { margin-inline-start: auto; flex: none; display: flex; align-items: center; gap: 4px; }
 #status-agents { display: flex; align-items: center; gap: 4px; padding-inline: 4px; font-variant-numeric: tabular-nums; }
 #status-auto-mode { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+.status-repository:has(button:not([hidden])) + #status-auto-mode { margin-inline-start: 8px; }
 #status-auto-mode[aria-pressed="true"] { color: var(--focus); background: color-mix(in srgb, var(--focus) 15%, var(--toolbar)); }
 .git-branches {
   inset: auto auto 42px 8px; margin: 0; width: min(600px, calc(100vw - 16px)); max-height: min(70vh, 480px);
