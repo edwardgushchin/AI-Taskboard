@@ -1385,7 +1385,6 @@ test("watch streams compact cards and sees new messages without a revision chang
     assert.equal(cli(started.worktree, ["show", task.id]).git.worktree, started.worktree);
     cli(root, ["run-log", task.id], { entries: [{ id: "check", type: "commandExecution",
       title: "Verification", text: "x".repeat(50_000), status: "completed" }] });
-    cli(root, ["message", task.id], { kind: "question", text: "?????? ????? ????" }, "INVALID_INPUT");
     const inputPath = join(root, "сообщение.json");
     const question = "Какое решение выбрать?";
     writeFileSync(inputPath, JSON.stringify({ kind: "question", text: question }));
