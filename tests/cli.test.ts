@@ -1633,6 +1633,9 @@ test("completed work outside Git can be submitted and accepted without a commit"
   assert.equal(review.stale, false);
   assert.deepEqual(review.result.checks, input.checks);
 
+  const log = join(worktree, "debug.log");
+  writeFileSync(log, "local verification output\n");
+  assert.equal(cli(root, ["review", task.id]).stale, false);
   writeFileSync(source, "modified after submission\n");
   assert.equal(cli(root, ["review", task.id]).stale, true);
   cli(root, ["accept", task.id], { revision: review.revision }, "STALE_SUBMISSION");
@@ -1640,6 +1643,8 @@ test("completed work outside Git can be submitted and accepted without a commit"
   cli(root, ["accept", task.id], { revision: review.revision - 1 }, "REVISION_CONFLICT");
   const done = cli(root, ["accept", task.id], { revision: review.revision });
   assert.equal(done.status, "done");
+  assert.equal(done.cleanupWarning.code, "DIRTY_WORKTREE");
+  assert.equal(readFileSync(log, "utf8"), "local verification output\n");
   assert.equal(done.git.accepted, undefined);
   assert.equal(Object.hasOwn(done, "acceptedTreeMatchesSubmission"), false);
   assert.equal(Object.hasOwn(cli(root, ["show", task.id, "--compact"]), "acceptedTreeMatchesSubmission"), false);
@@ -1648,11 +1653,13 @@ test("completed work outside Git can be submitted and accepted without a commit"
   assert.equal(metrics.cycleMs, Date.parse(done.closedAt) - Date.parse(task.createdAt));
   assert.equal(metrics.submissions, 1);
   assert.equal(metrics.returns, 0);
-  assert.equal(done.cleanupWarning, undefined);
+  rmSync(log);
+  const retried = cli(root, ["accept", task.id], { revision: review.revision });
+  assert.equal(retried.cleanupWarning, undefined);
+  assert.equal(retried.revision, done.revision);
   assert.equal(existsSync(worktree), false);
   assert.equal(git(root, "branch", "--list", "ai-taskboard/" + task.id), "");
   assert.equal(git(root, "rev-parse", "HEAD"), head);
-  assert.equal(cli(root, ["accept", task.id], { revision: review.revision }).revision, done.revision);
 });
 
 test("interrupted start and submit recover the existing worktree and commit", t => {
@@ -1768,6 +1775,37 @@ test("resubmission verifies the actual Conventional Commit after an external reb
   assert.equal(cli(root, ["accept", task.id], { revision: submitted.revision }).status, "done");
 });
 
+test("review and acceptance preserve a local file that became untracked after submission", t => {
+  const root = fixture(t, true);
+  const exclude = join(root, ".git", "info", "exclude");
+  let original = "";
+  const log = "debug.log";
+  const { task, worktree } = submitFixture(root, path => {
+    original = readFileSync(exclude, "utf8");
+    writeFileSync(exclude, original + "\n/" + log + "\n");
+    writeFileSync(join(path, log), "local verification output\n");
+    writeFileSync(join(path, "result.txt"), "verified result\n");
+  });
+  writeFileSync(exclude, original);
+  assert.equal(git(root, "status", "--porcelain"), "");
+  cli(root, ["settings"], { reviewMode: "reviewer" });
+
+  const review = cli(root, ["review", task.id]);
+  assert.equal(review.stale, false);
+  assert.deepEqual(review.paths, ["result.txt"]);
+  const [queued] = cli(root, ["review-queue"]);
+  assert.equal(queued.status, "clean");
+  cli(root, ["review-approve", task.id], { revision: task.revision, targetHead: review.targetHead,
+    summary: "Reviewed the submitted result.", evidence: task.criteria.map(() => "Verified result.txt.") });
+  const done = cli(root, ["accept", task.id], { revision: task.revision, targetHead: review.targetHead });
+  assert.equal(done.status, "done");
+  assert.equal(done.cleanupWarning.code, "DIRTY_WORKTREE");
+  assert.equal(readFileSync(join(root, "result.txt"), "utf8"), "verified result\n");
+  assert.equal(existsSync(join(root, log)), false);
+  assert.equal(readFileSync(join(worktree, log), "utf8"), "local verification output\n");
+  assert.deepEqual(cli(root, ["cleanup-status", task.id]).entries, ["?? " + log]);
+});
+
 test("accept creates a merge commit and protects the source and ignored files", t => {
   const root = fixture(t, true);
   const initial = git(root, "rev-parse", "HEAD");
@@ -1805,9 +1843,11 @@ test("accept creates a merge commit and protects the source and ignored files", 
   cli(root, ["review-approve", task.id], { ...decision, revision: task.revision - 1 }, "REVISION_CONFLICT");
   cli(root, ["review-approve", task.id], { ...decision, targetHead: task.git.submission.sha }, "TARGET_CHANGED");
   writeFileSync(join(worktree, "unsubmitted.txt"), "new edit");
+  git(worktree, "add", "--", "unsubmitted.txt");
   assert.equal(cli(root, ["review", task.id]).stale, true);
   cli(root, ["review-approve", task.id], decision, "STALE_SUBMISSION");
   cli(root, ["accept", task.id], { revision: task.revision }, "STALE_SUBMISSION");
+  git(worktree, "reset", "--", "unsubmitted.txt");
   rmSync(join(worktree, "unsubmitted.txt"));
   const approved = cli(root, ["review-approve", task.id], decision);
   assert.equal(approved.revision, task.revision);

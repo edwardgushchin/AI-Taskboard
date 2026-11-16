@@ -54,7 +54,7 @@ function reviewWorktreePath(item: Worktree | undefined): string | undefined {
 
 function submissionIsStale(item: Worktree | undefined, submitted: string): boolean {
   const path = item?.head === submitted ? reviewWorktreePath(item) : undefined;
-  return !path || Boolean(gitStatus(path));
+  return !path || Boolean(gitStatus(path, "tracked"));
 }
 
 function reviewMerge(path: string, base: string, head: string, submitted: string) {
@@ -328,7 +328,7 @@ function releaseTemporaryTarget(store: BoardStore, task: Task): void {
     if (!item || item.locked || relative(expected, item.path)) return;
     const path = usableWorktree(item);
     requireNoGitOperation(path);
-    if (!gitStatus(path, true)) git(repo.root, ["worktree", "remove", path]);
+    if (!gitStatus(path, "all")) git(repo.root, ["worktree", "remove", path]);
   } catch {
     // Keep the checkout if it cannot be safely inspected or removed.
   }
@@ -519,7 +519,7 @@ function integrateTask(store: BoardStore, task: Task, input: Record<string, unkn
 
   const source = usableWorktree(findWorktree(repo, context.branch));
   requireNoGitOperation(source);
-  if (resolveCommit(source, "HEAD") !== submitted || gitStatus(source).length) {
+  if (resolveCommit(source, "HEAD") !== submitted || gitStatus(source, "tracked").length) {
     throw new TaskboardError("STALE_SUBMISSION", "The task worktree changed. Submit the task again.", { path: source });
   }
   if (!intent && isAncestor(repo.root, submitted, head)) {

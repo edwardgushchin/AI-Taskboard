@@ -65,10 +65,12 @@ export function taskWithCurrentWorktree(store: BoardStore, task: Task): Task & {
   return { ...task, git: { ...task.git, worktree }, cleanupAvailable };
 }
 
-export function gitStatus(path: string, ignored = false): string {
+export function gitStatus(path: string, files: "unignored" | "tracked" | "all" = "unignored"): string {
   return git(path, [
-    "status", "--porcelain=v2", "-z", "--no-renames", "--untracked-files=all", "--ignore-submodules=none",
-    ignored ? "--ignored=traditional" : "--ignored=no",
+    "status", "--porcelain=v2", "-z", "--no-renames",
+    files === "tracked" ? "--untracked-files=no" : "--untracked-files=all",
+    files === "tracked" ? "--ignore-submodules=untracked" : "--ignore-submodules=none",
+    files === "all" ? "--ignored=traditional" : "--ignored=no",
   ]);
 }
 
@@ -450,9 +452,9 @@ function removeTaskWorktree(store: BoardStore, task: Task, repo: Repository, ite
       if (ignored.has(source)) retainedArtifacts.add(source);
     }
   }
-  let changes = gitStatus(path, true);
+  let changes = gitStatus(path, "all");
   if (accepted && changes && !retainedArtifacts.size && removeTaskOutput(path, changes.split("\0").filter(Boolean))) {
-    changes = gitStatus(path, true);
+    changes = gitStatus(path, "all");
   }
   if (changes.length) {
     const entries = changes.split("\0").filter(Boolean);
