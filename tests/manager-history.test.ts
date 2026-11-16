@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { test } from "node:test";
 import { writeJson } from "../src/cli/storage.ts";
 import { managerUnread, readManagerHistory, readManagerMessages, saveManagerHistory } from "../src/desktop/manager-history.ts";
@@ -64,7 +65,7 @@ test("only delivered dialogue replies become unread and repeated saves preserve 
   assert.equal(readManagerMessages(project, ["unknown", "first"]), true);
   assert.equal(saveManagerHistory(project, at, id, { ...run, items: [reply] }), false);
   assert.deepEqual(managerUnread(project), ["second"]);
-  assert.deepEqual(JSON.parse(readFileSync(join(project, ".tasks", "manager-unread.json"), "utf8")), ["second"]);
+  assert.deepEqual(JSON.parse(readFileSync(join(project, ".tasks", "manager-unread.json"), "utf8")).unread, ["second"]);
 });
 
 test("legacy provider conversations page local notices without duplicating mirrored chat runs", t => {
@@ -153,5 +154,46 @@ test("failed unread persistence retries without losing a concurrent arrival", t 
   saveManagerHistory(project, 2, randomUUID(), { lane: "notice", items: [reply("arrival")] });
   assert.equal(readManagerMessages(project, ["seen"]), true);
   assert.deepEqual(managerUnread(project), ["arrival"]);
-  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), ["arrival"]);
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).unread, ["arrival"]);
+});
+
+test("read position covers unloaded pages, late delivery and restart but preserves newer replies", t => {
+  const project = fixture(t);
+  const other = fixture(t);
+  const reply = (id: string) => ({ id, type: "agentMessage", title: "", text: id, phase: "final_answer", status: "completed" } as const);
+  const run = randomUUID();
+  for (let i = 1; i <= 25; i++) saveManagerHistory(project, i, randomUUID(), { lane: "chat", items: [reply(String(i))] });
+  saveManagerHistory(project, 26, run, { lane: "chat", items: [reply("seen"), reply("newer")] });
+  saveManagerHistory(other, 1, randomUUID(), { lane: "chat", items: [reply("other")] });
+  assert.ok(readManagerHistory(project)!.nextCursor);
+  assert.equal(readManagerMessages(project, ["unknown"]), false);
+  assert.equal(managerUnread(project).length, 27);
+  readManagerMessages(project, ["seen"]);
+  assert.deepEqual(managerUnread(project), ["newer"]);
+  saveManagerHistory(project, 100, randomUUID(), { lane: "notice", items: [{ ...reply("late-old"), at: new Date(10).toISOString() }] });
+  saveManagerHistory(project, 26, run, { lane: "chat", items: [reply("seen"), reply("newer"), reply("arrival")] });
+  readManagerMessages(project, ["1"]);
+  assert.deepEqual(managerUnread(project), ["newer", "arrival"]);
+  assert.deepEqual(managerUnread(other), ["other"]);
+  const module = new URL("../src/desktop/manager-history.ts", import.meta.url).href;
+  const result = execFileSync(process.execPath, ["--input-type=module", "-e",
+    `import {managerUnread, saveManagerHistory} from ${JSON.stringify(module)}; const project = ${JSON.stringify(project)};
+     saveManagerHistory(project, 0, ${JSON.stringify(randomUUID())}, {lane:'notice',items:[${JSON.stringify(reply("late-after-restart"))}]});
+     console.log(JSON.stringify(managerUnread(project)));`], { encoding: "utf8", windowsHide: true });
+  assert.deepEqual(JSON.parse(result), ["newer", "arrival"]);
+  readManagerMessages(project, ["arrival"]);
+  assert.deepEqual(managerUnread(project), []);
+  assert.equal(readManagerMessages(project, ["seen"]), false);
+});
+
+test("legacy unread arrays migrate when a later reply is read", t => {
+  const project = fixture(t);
+  writeJson(join(project, ".tasks", "manager-unread.json"), ["legacy"]);
+  const reply = (id: string) => ({ id, type: "agentMessage", title: "", text: id, phase: "final_answer", status: "completed" } as const);
+  saveManagerHistory(project, 1, randomUUID(), { lane: "notice", items: [reply("legacy")] });
+  saveManagerHistory(project, 2, randomUUID(), { lane: "chat", items: [reply("later")] });
+  readManagerMessages(project, ["later"]);
+  const saved = JSON.parse(readFileSync(join(project, ".tasks", "manager-unread.json"), "utf8"));
+  assert.deepEqual(saved.unread, []);
+  assert.equal(saved.through.at, 2);
 });

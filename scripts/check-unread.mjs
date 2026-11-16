@@ -142,8 +142,68 @@ app.whenReady().then(async () => {
   await evaluate(`frame.managerUnread.push('new-unseen'); manager.syncManagerUnread(frame.managerUnread); held.resolve()`);
   await new Promise(resolve => setTimeout(resolve, 700));
   await check(`frame.managerUnread.length === 1 && frame.managerUnread[0] === 'new-unseen'`, 'arrival during acknowledgement is preserved');
+  await evaluate(`
+    api.readManagerMessages = async (_project, ids) => {
+      calls++;
+      if (!ids.includes('answer')) throw new Error('Read boundary missing');
+      frame.managerUnread = [];
+      frame.tabs[0].unread = false; renderProjectTabs();
+      return {ok:true,data:[]};
+    };
+    // The remaining ID has no bubble in this page. A later, already read
+    // reply must still acknowledge the earlier unread history.
+    frame.managerUnread = ['older-outside-page'];
+    manager.syncManagerUnread(frame.managerUnread);
+    manager.updateManagerRun({id:'running',phase:'running',startedAt:Date.now()});
+    const tool = {id:'tool',type:'mcpToolCall',title:'fixture tool',text:'Expanded result',status:'completed'};
+    renderRunActivity(run, [tool, reply], true, undefined, undefined, {dialogue:true});
+    for (const detail of run.querySelectorAll('details')) detail.open = true;
+    bubble.remove(); log.prepend(run); log.scrollTop = log.scrollHeight;
+  `);
+  await new Promise(resolve => setTimeout(resolve, 800));
+  await check(`frame.managerUnread.length === 0 && !manager.querySelector('.board-chat-unread') && !document.querySelector('.project-tab-unread')`,
+    'already read visible reply clears earlier unloaded ID during manager run with expanded tools');
+  await capture('prefix-cleared.png');
   await evaluate(`manager.dispose()`);
 
+  await evaluate(`
+    manager.dispose(); manager.remove();
+    const pendingReply = Promise.withResolvers();
+    let historyCalls = 0;
+    let notices = [];
+    frame.managerUnread = [];
+    api.boardHistory = async () => { historyCalls++; return {ok:true,data:{turns:notices.map(item=>({messages:[],items:[item]})),nextCursor:null}}; };
+    api.boardRequest = async () => { await pendingReply.promise; return {ok:true,data:{items:[]}}; };
+    api.readManagerMessages = async (_project, ids) => {
+      const through = Math.max(...ids.map(id=>notices.findIndex(item=>item.id===id)));
+      frame.managerUnread = frame.managerUnread.filter(id=>notices.findIndex(item=>item.id===id)>through);
+      return {ok:true,data:frame.managerUnread};
+    };
+    const local = draftComposer(); byId('board-composer').replaceChildren(local);
+    const input = local.querySelector('.board-draft-field textarea'); input.value = 'Fixture request'; input.dispatchEvent(new Event('input'));
+    local.dispatchEvent(new Event('submit',{cancelable:true}));
+  `);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  await evaluate(`
+    local.updateActivity([reply]);
+    notices = [reply, ...[0,1,2].map(i=>({...reply,id:'notice-'+i,text:'Goal notice '+i}))];
+    frame.managerUnread = notices.map(item=>item.id);
+    local.syncManagerUnread(frame.managerUnread);
+    local.invalidateHistory();
+  `);
+  await new Promise(resolve => setTimeout(resolve, 800));
+  await check(`notices.every(item=>local.querySelector('[data-message-id="'+item.id+'"]')) && historyCalls >= 2`,
+    'notices render while local manager request is pending');
+  await check(`local.querySelectorAll('[data-message-id="answer"]').length === 1`, 'streaming reply is not duplicated by saved history refresh');
+  await evaluate(`
+    const localLog = local.querySelector('.board-chat-log');
+    localLog.scrollTop = localLog.scrollHeight; local.syncManagerUnread(frame.managerUnread);
+  `);
+  await new Promise(resolve => setTimeout(resolve, 800));
+  await check(`frame.managerUnread.length === 0`, 'all displayed notices acknowledged before local run finishes');
+  await evaluate(`pendingReply.resolve()`);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  await evaluate(`local.dispose()`);
   console.log('Unread Chromium checks passed');
 }).catch(error => { console.error(error); process.exitCode = 1; }).finally(() => {
   window?.destroy(); app.exit(process.exitCode ?? 0);
