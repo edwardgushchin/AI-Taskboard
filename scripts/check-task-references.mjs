@@ -14,12 +14,13 @@ app.setPath('userData', join(scratch, 'profile'));
 app.disableHardwareAcceleration();
 app.whenReady().then(async () => {
 try {
-  const win = new BrowserWindow({ show: false, width: 800, height: 650, webPreferences: { sandbox: true, contextIsolation: true, backgroundThrottling: false } });
+  const win = new BrowserWindow({ show: true, width: 800, height: 650, webPreferences: { sandbox: true, contextIsolation: true, backgroundThrottling: false } });
   await win.loadURL('data:text/html,<main id="samples"></main>');
   const font = readFileSync(new URL('../src/desktop/vendor/codicons/codicon.ttf', import.meta.url)).toString('base64');
   await win.webContents.insertCSS(read('themes.css') + read('vendor/codicons/codicon.css').replace('./codicon.ttf', 'data:font/ttf;base64,' + font) + read('styles.css') +
     'body { display:block; overflow:auto; } #samples { padding:24px; } .sample.board-chat { position:static; display:block; visibility:visible; opacity:1; overflow:visible; transition:none; height:auto; width:auto; max-height:none; margin-bottom:16px; }');
   const ev = code => win.webContents.executeJavaScript(code);
+  win.webContents.debugger.attach('1.3');
   await ev(`${readFileSync(require.resolve('markdown-it/browser'), 'utf8')}
     ${read('source-files.cjs')}
     const element = (tag, text, cls) => { const el = document.createElement(tag); if(text) el.textContent=text; if(cls) el.className=cls; return el; };
@@ -41,6 +42,13 @@ try {
     win.webContents.setZoomFactor(zoom);
     await ev(`document.documentElement.dataset.theme='github-${theme}'; document.fonts.ready`);
     await ev('new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))');
+    const { root } = await win.webContents.debugger.sendCommand('DOM.getDocument');
+    const { nodeId } = await win.webContents.debugger.sendCommand('DOM.querySelector', { nodeId:root.nodeId, selector:'.chat-task-reference' });
+    await win.webContents.debugger.sendCommand('CSS.enable');
+    await win.webContents.debugger.sendCommand('CSS.forcePseudoState', { nodeId, forcedPseudoClasses:['hover'] });
+    await ev('new Promise(r=>setTimeout(r,200))');
+    assert.equal(await ev(`document.querySelector('.chat-task-reference').matches(':hover')`), true);
+    if (!before) assert.equal(await ev(`(() => { const a=document.querySelector('.chat-task-reference'), s=getComputedStyle(a); return s.borderBottomStyle==='solid' && s.borderBottomColor===s.color && s.textDecorationLine==='none'; })()`), true);
     const metrics = await ev(`(() => {
       const refs = [...document.querySelectorAll('.chat-task-reference')];
       const icons = [...document.querySelectorAll('.chat-task-reference > .icon, .chat-version > .icon')];
@@ -58,6 +66,11 @@ try {
     if (!before) { assert.equal(metrics.icon.width, metrics.icon.font); assert.equal(metrics.icon.height, metrics.icon.font); assert.equal(metrics.line, metrics.plainLine); }
     results.push({theme,width,zoom,...metrics});
     writeFileSync(join(artifacts, `${theme}-${width}-${zoom}.png`), (await win.webContents.capturePage()).toPNG());
+    await win.webContents.debugger.sendCommand('CSS.forcePseudoState', { nodeId, forcedPseudoClasses:[] });
+    if (!before) {
+      await ev('new Promise(r=>setTimeout(r,200))');
+      assert.equal(await ev(`getComputedStyle(document.querySelector('.chat-task-reference')).borderBottomColor === 'rgba(0, 0, 0, 0)'`), true);
+    }
   }
   win.webContents.setZoomFactor(1);
   win.show();
@@ -68,7 +81,14 @@ try {
   await ev('new Promise(r=>setTimeout(r,50))');
   assert.deepEqual(await ev('opened'), ['T-0071']);
   assert.equal(await ev(`document.activeElement.matches(':focus-visible') && getComputedStyle(document.activeElement).outlineStyle !== 'none'`), true);
-  const point = await ev(`(() => { const r=document.querySelector('.chat-task-reference').getBoundingClientRect(); return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}; })()`);
+  await ev('new Promise(r=>setTimeout(r,200))');
+  if (!before) assert.equal(await ev(`getComputedStyle(document.activeElement).borderBottomColor === getComputedStyle(document.activeElement).color`), true);
+  for (const theme of ['dark', 'light']) {
+    await ev(`document.documentElement.dataset.theme='github-${theme}'; new Promise(r=>setTimeout(r,200))`);
+    writeFileSync(join(artifacts, `focus-${theme}.png`), (await win.webContents.capturePage()).toPNG());
+  }
+  // Click the glyph itself: event.target must route through its enclosing anchor.
+  const point = await ev(`(() => { const r=document.querySelector('.chat-task-reference > .icon').getBoundingClientRect(); return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}; })()`);
   win.webContents.sendInputEvent({type:'mouseDown',...point,button:'left',clickCount:1});
   win.webContents.sendInputEvent({type:'mouseUp',...point,button:'left',clickCount:1});
   await ev('new Promise(r=>setTimeout(r,50))');
