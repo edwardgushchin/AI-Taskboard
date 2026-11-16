@@ -261,12 +261,15 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(controls[1].params.expectedTurnId, "turn-1");
   assert.deepEqual(controls[1].params.input[1], { type: "localImage", path: "extra.png" });
   assert.deepEqual(controls.at(-1).params, { threadId: thread, turnId: "turn-1" });
-  const resumed = await startCodexRun(client("resumed"), folder, worktree, { ...task, codexThreadId: thread, feedback: "Check the CSV header." });
+  const resumed = await startCodexRun({ ...client("resumed"), windowsSandbox: "elevated" }, folder, worktree, { ...task, codexThreadId: thread, feedback: "Check the CSV header." });
   assert.equal(resumed.threadId, thread);
   assert.equal(await resumed.completion, undefined);
   const { requests: resumedCalls, flags: resumedFlags } = JSON.parse(readFileSync(capture, "utf8"));
   assert.ok(resumedFlags.includes('web_search="live"'));
   assert.ok(resumedFlags.includes("network_proxy"));
+  assert.equal(resumedFlags.includes("prefer_mxc"), process.platform === "win32");
+  assert.deepEqual(resumedFlags.filter((flag: string) => flag.startsWith("windows.sandbox=")),
+    process.platform === "win32" ? ['windows.sandbox="elevated"'] : []);
   assert.ok(resumedFlags.some((flag: string) => flag.startsWith("permissions.ai-taskboard=") && flag.endsWith(",network={enabled=true}}")));
   assert.deepEqual(resumedCalls.map((req: { method: string }) => req.method),
     ["initialize", "command/exec", "config/read", "thread/resume", "mcpServerStatus/list", "turn/start"]);

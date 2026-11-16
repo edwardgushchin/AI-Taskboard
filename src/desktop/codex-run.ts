@@ -100,7 +100,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       "--disable", "network_proxy",
       "-c", "permissions." + profile + "={filesystem={" + filesystem + "},network={enabled=true}}",
       "-c", "default_permissions=" + JSON.stringify(profile),
-      ...(process.platform === "win32" ? ["-c", 'windows.sandbox="mxc"'] : []),
+      ...(process.platform === "win32" ? ["--disable", "prefer_mxc", "-c", "windows.sandbox=" + JSON.stringify(client.windowsSandbox ?? "mxc")] : []),
     ], { cwd: project, env: { ...(client.env ?? process.env), ...mcp.env }, windowsHide: true, stdio: "pipe" });
   } catch (error) {
     await mcp.close();

@@ -61,7 +61,7 @@ async function withServer<T>(
       "--disable", "network_proxy",
       "-c", 'permissions.' + managerResearchProfile + '={filesystem={":root"="read"},network={enabled=true}}',
       "-c", "default_permissions=" + JSON.stringify(managerResearchProfile),
-      ...(process.platform === "win32" ? ["-c", 'windows.sandbox="mxc"'] : []),
+      ...(process.platform === "win32" ? ["--disable", "prefer_mxc", "-c", "windows.sandbox=" + JSON.stringify(client.windowsSandbox ?? "mxc")] : []),
     ] : []),
   ], { cwd, env: mcp ? { ...(client.env ?? process.env), ...mcp.env } : client.env, windowsHide: true, stdio: ["pipe", "pipe", "ignore"], signal });
   const exited = new Promise<void>(resolve => child.once("close", resolve));

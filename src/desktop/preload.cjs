@@ -48,4 +48,5 @@ contextBridge.exposeInMainWorld("taskboard", {
   executionModels: () => ipcRenderer.invoke("codex:executionModels"),
   chooseCodex: () => ipcRenderer.invoke("codex:choose"),
   autoDetectCodex: () => ipcRenderer.invoke("codex:auto"),
+  setCodexWindowsSandbox: mode => ipcRenderer.invoke("codex:windowsSandbox", mode),
 });

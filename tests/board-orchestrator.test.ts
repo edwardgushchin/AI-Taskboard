@@ -15,7 +15,7 @@ import { boardReviewMode, codexThreadPattern, defaultBoardAgents, hexTagColor, m
 import { managerInbox, needsManagerAttention } from "../src/cli/task-messages.ts";
 import type { RunActivity, Task } from "../src/cli/model.ts";
 import type { ChatSettings } from "../src/cli/model.ts";
-import { directory as storageDirectory, readJson, writeJson } from "../src/cli/storage.ts";
+import { directory as storageDirectory, locateBoard, readBoardSettings, readJson, writeJson } from "../src/cli/storage.ts";
 import type { BoardGoal, BoardGoalAction } from "../src/desktop/codex-chat.ts";
 import { inspectProjectPath, projectSha256 } from "../src/desktop/project-files.ts";
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
@@ -23,6 +23,11 @@ import { reviewerActivity, withReviewerChat } from "../src/desktop/reviewer-chat
 import { goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryForView, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, saveManagerHistory } from "../src/desktop/manager-history.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
+import { settingsDelivery, syncSettingsNotices } from "../src/desktop/settings-notices.ts";
+
+process.env.GIT_CEILING_DIRECTORIES = realpathSync(tmpdir());
+process.env.GIT_CONFIG_NOSYSTEM = "1";
+process.env.GIT_CONFIG_GLOBAL = process.platform === "win32" ? "NUL" : "/dev/null";
 
 const source = (file: string) => readFileSync(new URL("../src/desktop/" + file, import.meta.url), "utf8");
 const boardSource = stripTypeScriptTypes(source("board-actions.ts").replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, ""));
@@ -111,6 +116,7 @@ function fixture(t: TestContext) {
     activateTab: (owner: { active: unknown }, tab: unknown) => { owner.active = tab; },
     launchingTasks: new Set(), runningTasks, chatRuns: new Map(), activeAgents, managerInbox, needsManagerAttention, subscriptions, reviewerTools,
     closingProjects: new Set(), setImmediate, setTimeout, clearTimeout, performance, console, agentSlots,
+    locateBoard, readBoardSettings, settingsDelivery, syncSettingsNotices,
     reviewWithCodex: async (_profile: string, cwd: string, settings: ChatSettings | null, context: string,
       tools: { name: string }[], call: RunAction, _signal: AbortSignal,
       onUsage: (report: import("../src/cli/token-usage.ts").TokenUsageReport) => Promise<void>) => {
@@ -790,7 +796,11 @@ test("an interrupted manager request preserves the durable queue until Codex rec
   const archived = await f.history();
   assert.equal(archived.ok, true);
   assert.equal(archived.data.turns.length, 1);
-  assert.deepEqual(archived.data.turns[0].messages, [{ text: "Новый текст", clientId: id, files: [] }]);
+  const messages = archived.data.turns[0].messages;
+  assert.equal(messages.length, 1);
+  const [{ at, ...message }] = messages;
+  assert.ok(Number.isFinite(Date.parse(at)));
+  assert.deepEqual(message, { text: "Новый текст", clientId: id, files: [] });
   assert.equal(f.providerHistoryReads(), 0);
   writeJson(f.chatBinding, { provider: "codex", id: f.threadId });
   assert.deepEqual((await f.history()).data.turns, archived.data.turns);
