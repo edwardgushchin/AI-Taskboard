@@ -22,5 +22,7 @@
     "free and total bytes",
     "native commandExecution and local MCP call"
   ],
-  "cleanup": "fixture removed and absence asserted; production launcher closes App Server and MCP"
+  "cleanup": "fixture removed and absence asserted; production launcher closes App Server and MCP",
+  "testedRevision": "c9a81d3224dca40ad63669a47d383280a8671b1f",
+  "repeatedAfterMerge": true
 }
