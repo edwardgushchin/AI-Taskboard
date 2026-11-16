@@ -1881,17 +1881,18 @@ function draftComposer() {
           !document.hasFocus() || document.querySelector("dialog:modal") || !editor.matches("[data-open], [data-pinned]") ||
           !log.checkVisibility({ visibilityProperty: true }) || !log.clientHeight) return;
       const viewport = log.getBoundingClientRect();
-      const ids = [...log.querySelectorAll('.board-manager-message[data-read="false"]')].filter(bubble => {
+      const ids = [...log.querySelectorAll('.board-manager-message[data-message-id]')].filter(bubble => {
         if (!bubble.checkVisibility({ visibilityProperty: true })) return false;
         const bounds = bubble.getBoundingClientRect();
         return bounds.height > 0 && bounds.top >= viewport.top - 1 && bounds.top + Math.min(bounds.height, 28) <= viewport.bottom;
       }).slice(0, 200).map(bubble => bubble.dataset.messageId);
       if (!ids.length) return;
+      const snapshot = new Set(unread);
       readingMessages = true;
       try {
         const result = await api.readManagerMessages(project, ids);
         if (result.ok) {
-          for (const id of ids) unread.delete(id);
+          for (const id of snapshot) if (!result.data.includes(id)) unread.delete(id);
           dialogueViewport.update(updateUnreadMessages);
         }
       } catch {
@@ -2781,14 +2782,15 @@ function draftComposer() {
   function renderHistoryPage(turns) {
     const page = document.createDocumentFragment();
     const delivered = new Set();
+    const liveIds = new Set(active?.items?.map(item => item.id));
     for (const turn of turns) {
       for (const { text, files, clientId, at } of turn.messages) {
-        if (clientId && active?.id === clientId) continue;
+        if (clientId && (active?.id === clientId || liveIds.has(clientId))) continue;
         page.append(chatMessage("user", text, files, false, false, clientId, at));
         if (clientId) delivered.add(clientId);
       }
       const container = element("div", undefined, "chat-run");
-      renderRunActivity(container, turn.items, true, turn.durationMs, undefined, { dialogue: true, seenMessages });
+      renderRunActivity(container, turn.items.filter(item => !liveIds.has(item.id)), true, turn.durationMs, undefined, { dialogue: true, seenMessages });
       rememberMessages(container);
       if (!container.hidden) page.append(container);
     }
@@ -2899,7 +2901,6 @@ function draftComposer() {
       dialogueViewport.update(updateUnreadMessages);
     }
     void restoreQueue().catch(() => {});
-    if (active && !active.shared) return;
     void loadHistory()?.catch(error => message(error.message));
   };
   const openChat = () => {
@@ -2920,10 +2921,6 @@ function draftComposer() {
   };
   editor.revealPinned = () => { if (pinned && !loadingHistory && !historyLoaded) revealHistory(); };
   editor.invalidateHistory = () => {
-    if (active && !active.shared) {
-      historyInvalidated = true;
-      return;
-    }
     if (historyLoaded && !atEndOfHistory() && (olderNodes.length || loadingOlder)) {
       historyInvalidated = true;
       return;
