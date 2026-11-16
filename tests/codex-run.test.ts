@@ -1,3 +1,4 @@
+import { activeRunSummary } from "../src/desktop/active-runs.ts";
 import assert from "node:assert/strict";
 import { callCli } from "../src/desktop/cli.ts";
 import { execFileSync, spawn } from "node:child_process";
@@ -435,6 +436,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     const reports: TokenUsageReport[] = [];
     const measured = await startCodexRun(client(outcome), folder, worktree, task, undefined, async report => { reports.push(report); });
     const failure = await measured.completion;
+    assert.equal(activeRunSummary().total, 0);
     assert.equal(Boolean(failure), outcome !== "usage");
     assert.ok(reports.length >= 2);
     const record = reports.at(-1)!.records[0];
@@ -454,7 +456,9 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   }
   const interrupted = await launch("control");
   await interrupted.interrupt();
+  assert.equal(activeRunSummary().total, 1);
   assert.deepEqual(await interrupted.completion, { reason: "Turn interrupted", interrupted: true });
+  assert.equal(activeRunSummary().total, 0);
   const card = await callCli<{ id: string; createdAt: string }>(folder, ["create"], {
     title: "Verify UI", criteria: ["Run the required UI check."], workingDirectory: folder,
   });

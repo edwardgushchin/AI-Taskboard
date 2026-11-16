@@ -4858,13 +4858,12 @@ function renderActiveAgents() {
   const indicator = byId("status-agents");
   indicator.hidden = !frame.board;
   if (indicator.hidden) return;
-  const reviewers = Object.values(frame.reviewingTasks ?? {}).filter(role => role === "reviewer").length;
-  const managers = Number(Boolean(frame.managerRun)) + Number(Boolean(frame.managerWork));
-  const count = (frame.runningTasks?.length ?? 0) + (frame.replyingTasks?.length ?? 0) + reviewers + managers;
-  indicator.querySelector("span").textContent = count;
-  indicator.title = language("Active agents", "Активные агенты") + " · " + count +
-    " · " + language("Task discussions", "Обсуждения задач") + ": " + (frame.replyingTasks?.length ?? 0);
-  indicator.setAttribute("aria-label", indicator.title);
+  const { total = 0, boards = [] } = frame.activeAgents ?? {};
+  indicator.querySelector("span").textContent = total;
+  const text = language("Active agents", "Активные агенты") + " · " + total +
+    boards.map(board => "\n" + board.name + (board.detail ? " (" + board.detail + ")" : "") + ": " + board.count).join("");
+  byId("status-agents-tooltip").textContent = text;
+  indicator.setAttribute("aria-label", text);
 }
 
 function renderStatusBar(projectChanged) {

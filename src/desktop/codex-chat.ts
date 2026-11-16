@@ -1,3 +1,4 @@
+import { trackActiveRun } from "./active-runs.ts";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { codexRpc, turnControl } from "./codex-rpc.ts";
@@ -571,6 +572,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
   const calls = new Map<string, Promise<CliReply>>();
   const tokens = new CodexTokenUsage();
   let completed = false;
+  let finishRun: (() => void) | undefined;
   return withServer(profile, project, async ({ client, request, receive, refreshTimeout }) => {
     const [models, defaults] = await Promise.all([
       settings !== undefined ? listModels(request) : [],
@@ -766,6 +768,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
         return goalChange;
       };
       const publishControl = () => {
+        if (turn?.status === "inProgress") finishRun ??= trackActiveRun(project);
         session?.onGoalControl?.(runGoalChange);
         const control = {
           async steer(text: string, images: string[], clientUserMessageId?: string) {
@@ -797,7 +800,10 @@ function reply(profile: string, project: string, prompt: string, images: string[
           if (!turn) {
             turn = data.turn;
             publishControl();
-          } else if (followingGoal && turn.status === "completed") turn = data.turn;
+          } else if (followingGoal && turn.status === "completed") {
+            turn = data.turn;
+            if (turn?.status === "inProgress") finishRun ??= trackActiveRun(project);
+          }
         }
         if (method === "turn/completed" && data.turn && data.turn.id === turn?.id) {
           turn = data.turn;
@@ -805,6 +811,8 @@ function reply(profile: string, project: string, prompt: string, images: string[
             clearTimeout(activityTimer);
             publish();
           }
+          finishRun?.();
+          finishRun = undefined;
           session?.onTurnEnded?.();
         }
       }
@@ -845,6 +853,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
   }, signal, {
     mcp: options.mcp, research, fullAccess, webSearch: options.webSearch ?? Boolean(session), providerTools: Boolean(session),
   }).finally(async () => {
+    finishRun?.();
     options.worklog?.finish();
     await tokens.save(tokens.finish(!completed), onTokenUsage);
   });
