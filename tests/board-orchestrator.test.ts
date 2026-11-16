@@ -15,7 +15,7 @@ import { boardReviewMode, codexThreadPattern, defaultBoardAgents, hexTagColor, m
 import { managerInbox, needsManagerAttention } from "../src/cli/task-messages.ts";
 import type { RunActivity, Task } from "../src/cli/model.ts";
 import type { ChatSettings } from "../src/cli/model.ts";
-import { directory as storageDirectory, readJson, writeJson } from "../src/cli/storage.ts";
+import { directory as storageDirectory, locateBoard, readBoardSettings, readJson, writeJson } from "../src/cli/storage.ts";
 import type { BoardGoal, BoardGoalAction } from "../src/desktop/codex-chat.ts";
 import { inspectProjectPath, projectSha256 } from "../src/desktop/project-files.ts";
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
@@ -23,6 +23,7 @@ import { reviewerActivity, withReviewerChat } from "../src/desktop/reviewer-chat
 import { goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryForView, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, saveManagerHistory } from "../src/desktop/manager-history.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
+import { settingsDelivery, syncSettingsNotices } from "../src/desktop/settings-notices.ts";
 
 const source = (file: string) => readFileSync(new URL("../src/desktop/" + file, import.meta.url), "utf8");
 const boardSource = stripTypeScriptTypes(source("board-actions.ts").replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, ""));
@@ -95,6 +96,7 @@ function fixture(t: TestContext) {
     runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
     AbortSignal, AbortController, ArrayBuffer, Buffer, Error, basename, dirname, extname, join, mkdtemp, rm, writeFile, maxAttachmentBytes, boardActions, boardInstructions, boardTools, callCli,
     autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, defaultBoardAgents, reviewVerifier,
+    settingsDelivery, syncSettingsNotices, locateBoard, readBoardSettings,
     existsSync, storageDirectory, readdirSync, rmSync, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
     goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryForView, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, saveManagerHistory,
     send() {},
@@ -178,8 +180,8 @@ function fixture(t: TestContext) {
       ] : [
         "task_cancel", "provider_tools", "task_tool_grant", "task_tool_revoke", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_approve", "task_wait", "task_review_queue", "task_review", "task_review_diff",
         "task_review_artifact", "task_accept", "task_request_changes",
-        "task_cleanup_status", "task_cleanup", "project_git", "project_git_push", "project_disk",
-        "project_path", "project_sha256", "milestones_list", "task_set_milestone", "tag_set_color",
+        "task_cleanup_status", "task_cleanup", "project_git", "project_git_push",
+        "milestones_list", "task_set_milestone", "tag_set_color",
       ];
       const mode = boardReviewMode((await callCli(project, ["settings"], undefined, false)).data);
       assert.deepEqual(Array.from(session.mcpTools, tool => tool.name).sort(),
@@ -790,7 +792,9 @@ test("an interrupted manager request preserves the durable queue until Codex rec
   const archived = await f.history();
   assert.equal(archived.ok, true);
   assert.equal(archived.data.turns.length, 1);
-  assert.deepEqual(archived.data.turns[0].messages, [{ text: "Новый текст", clientId: id, files: [] }]);
+  const at = archived.data.turns[0].messages[0].at;
+  assert.equal(new Date(at).toISOString(), at);
+  assert.deepEqual(archived.data.turns[0].messages, [{ at, text: "Новый текст", clientId: id, files: [] }]);
   assert.equal(f.providerHistoryReads(), 0);
   writeJson(f.chatBinding, { provider: "codex", id: f.threadId });
   assert.deepEqual((await f.history()).data.turns, archived.data.turns);
@@ -2004,6 +2008,8 @@ test("manager reopens a conflicting approved submission and integrates its revie
     return result.stdout.trim();
   };
   git(f.project, "init", "-b", "main");
+  // Submit/accept launch detached maintenance; do not let it hold this disposable cwd during cleanup.
+  git(f.project, "config", "maintenance.auto", "false");
   git(f.project, "config", "core.autocrlf", "false");
   git(f.project, "config", "user.name", "Taskboard");
   git(f.project, "config", "user.email", "taskboard@example.invalid");
