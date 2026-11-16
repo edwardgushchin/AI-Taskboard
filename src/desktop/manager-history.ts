@@ -10,7 +10,7 @@ import { statusNotice } from "../cli/task-messages.ts";
 
 // Run under the board lock, shared by all windows and CLI writers. Persist the
 // delivery batch before writing chat files so an interrupted replay is idempotent.
-export function syncTaskStatusNotices(project: string, russian = true) {
+export function syncTaskStatusNotices(project: string, language: string | boolean = true) {
   return onBoard(locateBoard(project), store => {
     const path = join(project, ".tasks", "manager-status-position.json");
     type Notice = { id: string; at: number; eventAt?: string; text: string };
@@ -36,7 +36,7 @@ export function syncTaskStatusNotices(project: string, russian = true) {
       if (saved) {
         for (let i = position.through[id] ?? 0; i < task.history.length; i++) {
           const event = task.history[i]!;
-          const text = statusNotice(task, event, russian);
+          const text = statusNotice(task, event, language);
           if (text) events.push({ task: id, sequence: i + 1, at: event.at, text });
         }
       }

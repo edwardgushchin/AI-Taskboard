@@ -1,3 +1,4 @@
+import localization from "../src/desktop/localization.cjs";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -22,7 +23,7 @@ class Element {
   value = "";
   text: string;
   className: string;
-  constructor(_tag: string, text = "", className = "") { this.text = text; this.className = className; }
+  constructor(_tag: string, text = "", className = "") { this.text = typeof text === "function" ? (text as () => string)() : text; this.className = className; }
   append(...children: Element[]) { this.children.push(...children); }
   replaceChildren(...children: Element[]) { this.children = children; }
   setAttribute() {}
@@ -41,7 +42,7 @@ function render(task: Task): Element[] {
     controlLabelForIcon: () => {},
     isImageAttachment: (file: { name: string }) => /\.(png|jpe?g|webp|gif)$/i.test(file.name),
     chatPreviews: { observe: () => {} },
-    language: (_english: string, russian: string) => russian,
+    t: (key: string, parameters = {}) => localization.text(key, parameters, "ru"), localization, bindLocalized: (node: any, property: string, render: () => string, attribute = false) => { const value = render(); if (attribute) node.setAttribute(property, value); else node[property] = value; return value; },
     shortDate: (value: string) => value,
     chatText: (text: string) => new Element("div", text, "chat-text"),
     renderRunActivity: () => {}, renderChatTurn: () => {}, requestAnimationFrame: () => {},

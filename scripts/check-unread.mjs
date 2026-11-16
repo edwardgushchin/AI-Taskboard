@@ -6,7 +6,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { electronCheck } from "./electron-check.mjs";
+import { electronCheck, localizationFixture } from "./electron-check.mjs";
 
 const script = fileURLToPath(import.meta.url);
 const root = resolve(dirname(script), "..");
@@ -50,6 +50,7 @@ app.whenReady().then(async () => {
     ${read("markdown.js")}
     ${read("chat.js")}
     ${read("review-diff.js")}
+    ${localizationFixture()}
     ${read("renderer.js")}
     void 0;
   `);

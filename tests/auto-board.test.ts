@@ -1,3 +1,4 @@
+import localization from "../src/desktop/localization.cjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
@@ -27,7 +28,7 @@ function fixture(mode = "human") {
   const runtime = runInNewContext(stripTypeScriptTypes(code) + "\n({scheduleAutoBoard, autoBoards})", {
     subscriptions: new Map([["project", watch]]), closingProjects: new Set(), boardWorkRequests: new Map(),
     nextReadyTask, boardReviewMode, agentSlots: slots, projectIdentity: (path: string) => path,
-    executorBusy: (_: string, id: string) => busy.has(id), lang: (text: string) => text,
+    executorBusy: (_: string, id: string) => busy.has(id), t: (key: string) => localization.text(key, {}, "en"),
     broadcastBoardChat: (_: string, __: string, value: any) => errors.push(value.error),
     reserveAgent: (_: string, role: "reviewer") => slots.acquire("project", role, board.settings.agentLimits),
     publishReviewActivity: () => {},

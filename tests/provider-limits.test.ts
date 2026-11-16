@@ -1,3 +1,5 @@
+import localization from "../src/desktop/localization.cjs";
+(globalThis as any).taskboardLocalization = localization;
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { codexLimitWindows, codexLimitState, providerLimitSource } from '../src/desktop/provider-limits.ts';

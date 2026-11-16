@@ -17,17 +17,55 @@ const sheet = byId("sheet");
 const body = byId("sheet-body");
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
-const language = (english, russian) => frame.russian ? russian : english;
+const localization = window.taskboardLocalization;
+const t = (key, parameters) => localization.text(key, parameters);
+const localizedBindings = new Set();
+const nodeBindings = new WeakMap();
+function bindLocalized(node, property, render, attribute = false) {
+  const bindings = nodeBindings.get(node) ?? new Map();
+  nodeBindings.set(node, bindings);
+  const key = (attribute ? "@" : "") + property;
+  const previous = bindings.get(key);
+  if (previous) localizedBindings.delete(previous);
+  const value = String(render());
+  let target = node;
+  if (property === "textContent" && !attribute) {
+    node.textContent = value;
+    target = node.firstChild ?? node.appendChild(document.createTextNode(""));
+  } else if (attribute) node.setAttribute(property, value); else node[property] = value;
+  const binding = { node, target, property, render, attribute, value };
+  bindings.set(key, binding);
+  localizedBindings.add(binding);
+  return value;
+}
+function refreshLocalizedBindings() {
+  for (const binding of localizedBindings) {
+    const { node, target, property, render, attribute } = binding;
+    if (!node.isConnected || !target.isConnected) { localizedBindings.delete(binding); continue; }
+    const current = target !== node ? target.textContent : attribute ? node.getAttribute(property) : node[property];
+    if (current !== binding.value) { localizedBindings.delete(binding); continue; }
+    const value = String(render());
+    if (target !== node) target.textContent = value; else if (attribute) node.setAttribute(property, value); else node[property] = value;
+    binding.value = value;
+  }
+}
 const lanes = [
-  ["draft", "Draft", "Черновик"], ["ready", "Ready", "Готово к работе"],
-  ["in_progress", "In progress", "В работе"], ["blocked", "Blocked", "Заблокировано"],
-  ["review", "In review", "На проверке"], ["done", "Done", "Завершено"],
-  ["cancelled", "Cancelled", "Отменено"],
+  ["draft", "ui.draft_c685cd08"], ["ready", "ui.ready_83de5408"],
+  ["in_progress", "ui.in_progress_59da65c9"], ["blocked", "ui.blocked_bd8f5170"],
+  ["review", "ui.in_review_65e2fab2"], ["done", "ui.done_8167d158"],
+  ["cancelled", "ui.cancelled_0ec9befc"],
 ];
+
+function localizedOption(label, value) {
+  const option = element("option", label);
+  option.value = value;
+  return option;
+}
 
 function element(tag, text, className) {
   const item = document.createElement(tag);
-  if (text !== undefined) item.textContent = text;
+  if (typeof text === "function") bindLocalized(item, "textContent", text);
+  else if (text !== undefined) item.textContent = text;
   if (className) item.className = className;
   return item;
 }
@@ -51,7 +89,7 @@ function windowNotice(message, context, boardErrorKey) {
   byId("notice-context").textContent = context ?? "";
   byId("notice-message").textContent = message ?? "";
   byId("notice").hidden = !message;
-  controlLabelForIcon(byId("notice-close"), language("Dismiss notification", "Скрыть уведомление"));
+  controlLabelForIcon(byId("notice-close"), () => t("ui.dismiss_notification_9a17797e"));
 }
 
 function notice(message, context) {
@@ -76,7 +114,7 @@ function syncBoardNotice(projectChanged) {
     if (projectChanged || displayedBoardError) windowNotice();
     return;
   }
-  const key = JSON.stringify([project, error.operation, error.code, error.message, frame.russian]);
+  const key = JSON.stringify([project, error.operation, error.code, error.message, frame.localization?.locale]);
   if (key === displayedBoardError) return;
   if (key === dismissedBoardErrors.get(project)) {
     if (projectChanged || displayedBoardError) windowNotice();
@@ -84,14 +122,14 @@ function syncBoardNotice(projectChanged) {
   }
   dismissedBoardErrors.delete(project);
   const operations = {
-    refresh: language("Board refresh", "Обновление доски"),
-    open: language("Opening project", "Открытие проекта"),
-    create: language("Creating board", "Создание доски"),
-    "save-session": language("Saving tabs", "Сохранение вкладок"),
+    refresh: t("ui.board_refresh_4c949d36"),
+    open: t("ui.opening_project_bc49a4b5"),
+    create: t("ui.creating_board_b832d368"),
+    "save-session": t("ui.saving_tabs_30c5a2ed"),
   };
-  const operation = operations[error.operation] ?? language("Project", "Проект");
+  const operation = operations[error.operation] ?? t("ui.project_4bc2b2f8");
   const message = error.operation === "refresh" && error.code === "BOARD_BUSY"
-    ? language("The board is busy. Updates will retry automatically.", "Доска занята. Обновление повторится автоматически.")
+    ? t("ui.the_board_is_busy_updates_will_retry_automatical_235bb58a")
     : boardError(error);
   windowNotice(message, [operation, projectName()].filter(Boolean).join(" · "), key);
 }
@@ -102,71 +140,63 @@ function projectName() {
 
 function boardError(error) {
   if (error.code === "BOARD_BUSY") {
-    return language("The board is busy with another operation. Try again in a moment.",
-      "Доска занята другой операцией. Повторите через несколько секунд.");
+    return t("ui.the_board_is_busy_with_another_operation_try_aga_e9c8de78");
   }
   if (error.code === "ARTIFACT_LIMIT") {
-    return language("This task can keep up to 64 MiB and 64 artifact entries. Select the files needed for review.",
-      "На задачу можно сохранить до 64 МиБ и 64 записей артефактов. Выберите файлы, нужные для проверки.");
+    return t("ui.this_task_can_keep_up_to_64_mib_and_64_artifact__5d7c7c7a");
   }
   if (error.code === "ARTIFACT_DIRECTORY") {
-    return [language("Select individual files needed for review.", "Укажите отдельные файлы, нужные для проверки."),
+    return [t("ui.select_individual_files_needed_for_review_71f19acd"),
       error.details?.path].filter(Boolean).join("\n");
   }
   if (error.code === "ARTIFACT_UNAVAILABLE") {
-    return language("This review file is no longer available.", "Этот файл проверки больше недоступен.");
+    return t("ui.this_review_file_is_no_longer_available_cce7f583");
   }
   const gitMessages = {
-    STALE_REPOSITORY: language("The branch changed. Retry with its current revision.", "Ветка изменилась. Повторите действие для её текущей ревизии."),
-    GIT_WORKTREE_REQUIRED: language("Open a repository with a main worktree.", "Откройте репозиторий с основной рабочей копией."),
-    WORKING_DIRECTORY_UNAVAILABLE: language("The selected working directory is unavailable or points somewhere else.",
-      "Рабочая папка недоступна или теперь указывает на другое место."),
-    GIT_COMMIT_REQUIRED: language("Select a branch with a commit first.", "Сначала выберите ветку хотя бы с одним коммитом."),
-    REMOTE_EXISTS: language("The origin remote already exists. Manage it with your Git tools.", "Удалённый репозиторий origin уже настроен. Используйте свои инструменты Git для работы с ним."),
-    GITHUB_UNAVAILABLE: language("Install GitHub CLI (gh) and sign in with gh auth login.", "Установите GitHub CLI (gh) и войдите в аккаунт командой gh auth login."),
-    GITHUB_CLI_MISSING: language("Install GitHub CLI (gh) on the host and make it available on PATH.", "Установите GitHub CLI (gh) на компьютере и добавьте его в PATH."),
-    GITHUB_AUTH_REQUIRED: language("GitHub CLI has no usable login in the host profile or selected GH_CONFIG_DIR.", "У GitHub CLI нет доступной авторизации в профиле компьютера или выбранном GH_CONFIG_DIR."),
-    GITHUB_AUTH_STORAGE: language("GitHub CLI cannot access the saved credential in the host profile.", "GitHub CLI не может прочитать сохранённые данные авторизации в профиле компьютера."),
-    GITHUB_AUTH_OVERRIDE: language("GitHub rejected the credential supplied by GH_TOKEN or GITHUB_TOKEN.", "GitHub отклонил данные авторизации из GH_TOKEN или GITHUB_TOKEN."),
-    GITHUB_AUTH_REJECTED: language("GitHub rejected the host credential. Check whether it has expired or been revoked.", "GitHub отклонил сохранённые данные авторизации. Проверьте, не истекли и не были ли они отозваны."),
-    GITHUB_AUTH_SCOPE: language("Check the credential permissions and your GitHub organization's authorization requirements.", "Проверьте права токена и требования к авторизации в организации GitHub."),
-    GITHUB_RESOURCE_ACCESS: language("Check that the resource exists and the current GitHub account can access it.", "Проверьте, существует ли ресурс и есть ли к нему доступ у текущего аккаунта GitHub."),
-    GITHUB_RATE_LIMIT: language("GitHub's API rate limit was reached. Retry after it resets.", "Достигнут лимит запросов к GitHub. Повторите после его сброса."),
-    GITHUB_REMOTE_REQUIRED: language("Use a milestone from the GitHub repository configured as origin.", "Выберите веху из репозитория GitHub, настроенного как origin."),
-    GITHUB_MILESTONES_FAILED: language("Could not load GitHub milestones. Check your connection and repository access in GitHub CLI.", "Не удалось загрузить вехи GitHub. Проверьте соединение и доступ к репозиторию в GitHub CLI."),
-    GITHUB_PUBLISH_FAILED: language("GitHub publication failed. Check your connection and permissions. Any created repository and origin were preserved; inspect them before retrying.", "Не удалось опубликовать репозиторий в GitHub. Проверьте соединение и права доступа. Если репозиторий и origin были созданы, они сохранены; проверьте их перед повтором."),
-    GITHUB_PUSH_FAILED: language("The repository and origin were created, but the push failed. Check Git authentication and push the branch with your Git tools.", "Репозиторий и origin созданы, но отправить коммиты не удалось. Проверьте авторизацию Git и отправьте ветку своими инструментами Git."),
+    STALE_REPOSITORY: t("ui.the_branch_changed_retry_with_its_current_revisi_f09480d6"),
+    GIT_WORKTREE_REQUIRED: t("ui.open_a_repository_with_a_main_worktree_31b281c4"),
+    WORKING_DIRECTORY_UNAVAILABLE: t("ui.the_selected_working_directory_is_unavailable_or_43dc81fb"),
+    GIT_COMMIT_REQUIRED: t("ui.select_a_branch_with_a_commit_first_6f14dd57"),
+    REMOTE_EXISTS: t("ui.the_origin_remote_already_exists_manage_it_with__7ec2efff"),
+    GITHUB_UNAVAILABLE: t("ui.install_github_cli_gh_and_sign_in_with_gh_auth_l_a1832f3d"),
+    GITHUB_CLI_MISSING: t("ui.install_github_cli_gh_on_the_host_and_make_it_av_af2f59c3"),
+    GITHUB_AUTH_REQUIRED: t("ui.github_cli_has_no_usable_login_in_the_host_profi_6912b192"),
+    GITHUB_AUTH_STORAGE: t("ui.github_cli_cannot_access_the_saved_credential_in_3651b110"),
+    GITHUB_AUTH_OVERRIDE: t("ui.github_rejected_the_credential_supplied_by_gh_to_45e56c03"),
+    GITHUB_AUTH_REJECTED: t("ui.github_rejected_the_host_credential_check_whethe_bb325ce4"),
+    GITHUB_AUTH_SCOPE: t("ui.check_the_credential_permissions_and_your_github_6cf04c8e"),
+    GITHUB_RESOURCE_ACCESS: t("ui.check_that_the_resource_exists_and_the_current_g_453062ba"),
+    GITHUB_RATE_LIMIT: t("ui.github_s_api_rate_limit_was_reached_retry_after__38f6e72a"),
+    GITHUB_REMOTE_REQUIRED: t("ui.use_a_milestone_from_the_github_repository_confi_3adf5b21"),
+    GITHUB_MILESTONES_FAILED: t("ui.could_not_load_github_milestones_check_your_conn_1a4e6e9b"),
+    GITHUB_PUBLISH_FAILED: t("ui.github_publication_failed_check_your_connection__39a77538"),
+    GITHUB_PUSH_FAILED: t("ui.the_repository_and_origin_were_created_but_the_p_c2c2798f"),
   };
   if (gitMessages[error.code]) return [gitMessages[error.code], error.details?.output].filter(Boolean).join("\n");
   if (error.code === "DEPENDENCIES_INCOMPLETE") {
-    return language("Complete the dependencies first.", "Сначала завершите зависимости.") + " " +
+    return t("ui.complete_the_dependencies_first_4d0beead") + " " +
       (error.details?.dependencies ?? []).join(", ");
   }
   if (error.code === "DEPENDENCY_CYCLE") {
-    return language("A task cannot depend on itself, directly or indirectly.",
-      "Задача не может зависеть от себя напрямую или через другие задачи.");
+    return t("ui.a_task_cannot_depend_on_itself_directly_or_indir_f6bc7702");
   }
   if (error.code === "BOARD_NOT_FOUND") {
-    return language("No board in the selected folder. Choose another folder or create a board.",
-      "В выбранной папке нет доски. Выберите другую папку или создайте доску.");
+    return t("ui.no_board_in_the_selected_folder_choose_another_f_53c0ae51");
   }
   if (error.code === "GIT_UNAVAILABLE") {
-    return language("Install Git 2.38 or newer, then reopen the project.", "Установите Git 2.38 или новее, затем откройте проект снова.");
+    return t("ui.install_git_2_38_or_newer_then_reopen_the_projec_8924b3d7");
   }
   const { output, path, paths } = error.details ?? {};
   const files = Array.isArray(paths) ? paths.join("\n") : undefined;
   const message = error.code === "MERGE_CONFLICT"
-    ? language("The task conflicts with the target branch. Ask the agent to resolve the conflicts and resubmit.",
-      "Изменения задачи конфликтуют с целевой веткой. Поручите агенту разрешить конфликты и повторно сдать задачу.")
+    ? t("ui.the_task_conflicts_with_the_target_branch_ask_th_85368e7a")
     : error.code === "LOCAL_CHANGES_CONFLICT"
-    ? language("The task conflicts with local changes. The target worktree was left untouched.",
-      "Задача конфликтует с локальными правками. Целевая копия осталась без изменений.")
+    ? t("ui.the_task_conflicts_with_local_changes_the_target_612b0994")
     : error.code === "WORKTREE_ACCESS_DENIED"
-    ? language("Close programs using the worktree or restore access, then retry cleanup.",
-      "Закройте программы, использующие рабочую копию, или восстановите доступ, затем повторите уборку.")
+    ? t("ui.close_programs_using_the_worktree_or_restore_acc_487507a0")
     : error.code === "RESTORE_CONFLICT"
-    ? language("Could not restore the changes. The backup is still available.", "Не удалось восстановить правки. Сохранённая копия доступна.")
-    : error.message;
+    ? t("ui.could_not_restore_the_changes_the_backup_is_stil_d85fbca1")
+    : localization.errorText(error.message);
   return [message, path, files, output].filter(value => typeof value === "string" && value.length)
     .join("\n").slice(0, 4000);
 }
@@ -183,10 +213,10 @@ function button(label, click, kind = "") {
 }
 
 async function checkUpdates() {
-  openSheet("updates", language("AI Taskboard updates", "Обновления AI Taskboard"));
-  const status = element("p", language("Checking for updates…", "Проверяем наличие обновлений…"));
+  openSheet("updates", () => t("ui.ai_taskboard_updates_85f012a2"));
+  const status = element("p", () => t("ui.checking_for_updates_9b7efe11"));
   status.setAttribute("role", "status");
-  const retry = button(language("Check again", "Проверить снова"), run);
+  const retry = button(() => t("ui.check_again_8ea75e16"), run);
   retry.id = "updates-retry";
   const content = element("section", undefined, "sheet-section");
   content.id = "updates-result";
@@ -194,29 +224,27 @@ async function checkUpdates() {
   async function run() {
     retry.disabled = true;
     content.replaceChildren();
-    status.textContent = language("Checking for updates…", "Проверяем наличие обновлений…");
+    bindLocalized(status, "textContent", () => t("ui.checking_for_updates_9b7efe11"));
     try {
       const result = await api.checkUpdates();
       if (!content.isConnected) return;
       if (!result.ok) throw new Error(result.error.message);
       const { currentVersion, sourceUrl, status: outcome, latest } = result.data;
-      content.append(element("p", language("Installed version: ", "Установленная версия: ") + currentVersion));
-      status.textContent = outcome === "available"
-        ? language("A new version is available: ", "Доступна новая версия: ") + latest.version +
-          (latest.prerelease ? language(" (prerelease)", " (предварительная)") : "")
-        : outcome === "empty" ? language("No releases are published for this update channel yet.", "Для этого канала обновлений пока нет опубликованных выпусков.")
-          : language("You have the latest version of AI Taskboard.", "У вас последняя версия AI Taskboard.");
+      content.append(element("p", () => t("ui.installed_version_398296ba") + currentVersion));
+      bindLocalized(status, "textContent", () => outcome === "available"
+        ? t("ui.a_new_version_is_available_770c4531") + latest.version +
+          (latest.prerelease ? t("ui.prerelease_57729e95") : "")
+        : outcome === "empty" ? t("ui.no_releases_are_published_for_this_update_channe_ccc2396d")
+          : t("ui.you_have_the_latest_version_of_ai_taskboard_cdd42ce1"));
       if (outcome === "available") {
-        const release = button(language("Open release…", "Открыть выпуск…"), () => api.openLink(latest.url), "primary");
+        const release = button(() => t("ui.open_release_b1c993b5"), () => api.openLink(latest.url), "primary");
         release.id = "updates-open-release";
-        content.append(release, element("p", language("Choose a download for your system on the release page. Install it manually.",
-          "Выберите пакет для своей системы на странице выпуска и установите его вручную."), "muted"));
+        content.append(release, element("p", () => t("ui.choose_a_download_for_your_system_on_the_release_7b98ee8e"), "muted"));
       }
-      content.append(button(language("All releases…", "Все выпуски…"), () => api.openLink(sourceUrl), "quiet"));
+      content.append(button(() => t("ui.all_releases_b5b6002c"), () => api.openLink(sourceUrl), "quiet"));
     } catch {
       if (!content.isConnected) return;
-      status.textContent = language("Could not check for updates. Check your connection and try again.",
-        "Не удалось проверить обновления. Проверьте соединение и повторите попытку.");
+      bindLocalized(status, "textContent", () => t("ui.could_not_check_for_updates_check_your_connectio_dde887d1"));
     } finally {
       if (retry.isConnected) retry.disabled = false;
     }
@@ -226,64 +254,62 @@ async function checkUpdates() {
 
 async function projectStatistics() {
   if (!frame.board) return;
-  openSheet("statistics", language("Project statistics", "Статистика проекта"));
+  openSheet("statistics", () => t("ui.project_statistics_e6a29f59"));
   const generation = projectGeneration;
   const content = element("section", undefined, "sheet-section");
   content.id = "project-statistics";
   const status = element("p");
   status.setAttribute("role", "status");
-  const retry = button(language("Retry", "Повторить"), run);
+  const retry = button(() => t("ui.retry_553b2066"), run);
   let timer;
   let loading = false;
   const current = () => generation === projectGeneration && sheet.open && content.isConnected;
   const stop = () => { clearTimeout(timer); sheet.removeEventListener("close", stop); };
   sheet.addEventListener("close", stop);
-  body.append(element("p", projectName()), element("p", language(
-    "All available project records, including closed and archived tasks and the manager. This is not account usage. Cache is included in input; reasoning is included in output.",
-    "Весь доступный учёт проекта: закрытые и архивные задачи и менеджер. Это не расход аккаунта. Кеш входит во входные токены, reasoning — в выходные."), "muted"), status, content, retry);
+  body.append(element("p", projectName()), element("p", () => t("ui.all_available_project_records_including_closed_a_cae4b7bc"), "muted"), status, content, retry);
   const fields = [
-    ["totalTokens", "Total", "Всего"], ["inputTokens", "Input", "Входные"],
-    ["outputTokens", "Output", "Выходные"], ["cachedInputTokens", "Cache read", "Чтение кеша"],
-    ["cacheWriteInputTokens", "Cache write", "Запись кеша"], ["reasoningOutputTokens", "Reasoning", "Reasoning"],
+    ["totalTokens", "ui.total_3398e3ff"], ["inputTokens", "ui.input_5a192b55"],
+    ["outputTokens", "ui.output_44d9862a"], ["cachedInputTokens", "ui.cache_read_69f0ff95"],
+    ["cacheWriteInputTokens", "ui.cache_write_25ddf881"], ["reasoningOutputTokens", "ui.reasoning"],
   ];
   const counts = (target, entry) => {
     const list = element("dl", undefined, "statistics-counts");
-    for (const [key, en, ru] of fields) {
+    for (const [key, labelKey] of fields) {
       const value = entry[key];
-      list.append(element("dt", language(en, ru)), element("dd", value == null
-        ? language("No data", "Нет данных") : value.toLocaleString(frame.russian ? "ru-RU" : "en-US")));
+      list.append(element("dt", () => t(labelKey)), element("dd", () => value == null
+        ? t("ui.no_data_24fdb418") : value.toLocaleString(localization.locale)));
     }
     target.append(list);
-    if (entry.incomplete) target.append(element("p", language("Partial records: known tokens only.", "Неполный учёт: показаны известные токены."), "muted"));
+    if (entry.incomplete) target.append(element("p", () => t("ui.partial_records_known_tokens_only_0f5f6f9d"), "muted"));
   };
   async function run() {
     if (!current() || loading) return;
     clearTimeout(timer);
     loading = true;
     retry.disabled = true;
-    status.textContent = language("Loading…", "Загрузка…");
+    bindLocalized(status, "textContent", () => t("ui.loading_2ad65fd8"));
     try {
       const result = await api.command("project-usage");
       if (!current()) return;
       if (!result.ok) throw result.error;
       const data = result.data;
       content.replaceChildren();
-      status.textContent = data.total === null ? language("No token data", "Нет данных о токенах")
-        : data.incomplete ? language("Partial accounting", "Неполный учёт") : language("Recorded usage", "Учтённый расход");
-      content.append(element("h3", language("Known total", "Известный итог")), element("p", data.total === null
-        ? language("No data", "Нет данных") : data.total.toLocaleString(frame.russian ? "ru-RU" : "en-US")));
-      content.append(element("p", language("Tasks without reports: ", "Задач без отчётов: ") + data.missingTasks + " / " + data.tasks));
-      content.append(element("p", language("Manager reports: ", "Отчётов менеджера: ") + data.managerReports));
-      content.append(element("p", language("Usage before telemetry or outside the board is unknown.", "Расход до включения учёта и вне доски неизвестен."), "muted"));
-      for (const [title, models] of [[language("By model", "По моделям"), data.byModel],
-        ...Object.entries(data.byRole).map(([role, models]) => [{ manager: language("Manager", "Менеджер"),
-          executor: language("Executors", "Исполнители"), reviewer: language("Reviewers", "Ревьюеры"),
-          discussion: language("Task discussions", "Обсуждения задач"), unattributed: language("Unattributed role", "Роль не указана") }[role], models])]) {
+      bindLocalized(status, "textContent", () => data.total === null ? t("ui.no_token_data_acff9652")
+        : data.incomplete ? t("ui.partial_accounting_3e4cdf56") : t("ui.recorded_usage_02e49032"));
+      content.append(element("h3", () => t("ui.known_total_ba291063")), element("p", () => data.total === null
+        ? t("ui.no_data_24fdb418") : data.total.toLocaleString(localization.locale)));
+      content.append(element("p", () => t("ui.tasks_without_reports_1310f4b1") + data.missingTasks + " / " + data.tasks));
+      content.append(element("p", () => t("ui.manager_reports_ee9f6438") + data.managerReports));
+      content.append(element("p", () => t("ui.usage_before_telemetry_or_outside_the_board_is_u_2cc6c15c"), "muted"));
+      for (const [title, models] of [[t("ui.by_model_e992eced"), data.byModel],
+        ...Object.entries(data.byRole).map(([role, models]) => [{ manager: t("ui.manager_92a95b5c"),
+          executor: t("ui.executors_66276668"), reviewer: t("ui.reviewers_fd4fe839"),
+          discussion: t("ui.task_discussions_6e9601cc"), unattributed: t("ui.unattributed_role_4cbf5f24") }[role], models])]) {
         const group = element("section", undefined, "sheet-section");
         group.append(element("h3", title));
-        if (!models.length) group.append(element("p", language("No data", "Нет данных")));
+        if (!models.length) group.append(element("p", () => t("ui.no_data_24fdb418")));
         for (const model of models) {
-          group.append(element("h4", model.model ?? language("Unknown model", "Неизвестная модель")));
+          group.append(element("h4", () => model.model ?? t("ui.unknown_model_a335af5d")));
           counts(group, model);
         }
         content.append(group);
@@ -292,7 +318,7 @@ async function projectStatistics() {
     } catch (error) {
       if (!current()) return;
       content.replaceChildren();
-      status.textContent = language("Could not load statistics. ", "Не удалось загрузить статистику. ") + boardError(error);
+      bindLocalized(status, "textContent", () => t("ui.could_not_load_statistics_f6605b49") + boardError(error));
       retry.hidden = false;
     } finally {
       loading = false;
@@ -312,24 +338,24 @@ function openSettingsMenu(last = false) {
     menu.hidePopover();
     return;
   }
-  const app = button(language("AI Taskboard settings…", "Настройки AI Taskboard…"), () => {
+  const app = button(() => t("ui.ai_taskboard_settings_35895923"), () => {
     menu.hidePopover();
     trigger.focus();
     settings();
   });
-  const board = button(language("Board settings…", "Настройки доски…"), () => {
+  const board = button(() => t("ui.board_settings_063b85d6"), () => {
     menu.hidePopover();
     trigger.focus();
     boardSettings();
   });
   board.disabled = !frame.board;
-  const statistics = button(language("Statistics", "Статистика"), () => {
+  const statistics = button(() => t("ui.statistics_68cdd4da"), () => {
     menu.hidePopover();
     trigger.focus();
     return projectStatistics();
   });
   statistics.disabled = !frame.board;
-  const updates = button(language("Check for updates…", "Проверить наличие обновлений…"), () => {
+  const updates = button(() => t("ui.check_for_updates_6a5aded8"), () => {
     menu.hidePopover();
     trigger.focus();
     return checkUpdates();
@@ -343,7 +369,7 @@ function openSettingsMenu(last = false) {
   }
   const separator = element("hr");
   separator.setAttribute("role", "separator");
-  menu.setAttribute("aria-label", language("Settings and updates", "Настройки и обновления"));
+  bindLocalized(menu, "aria-label", () => t("ui.settings_and_updates_f9f74584"), true);
   menu.replaceChildren(app, board, statistics, separator, updates);
   menu.showPopover({ source: trigger });
   const anchor = trigger.getBoundingClientRect();
@@ -354,36 +380,36 @@ function openSettingsMenu(last = false) {
 
 function mountAppMenu() {
   const bar = byId("app-menu");
-  bar.setAttribute("aria-label", language("Application menu", "Меню приложения"));
+  bindLocalized(bar, "aria-label", () => t("ui.application_menu_8ee321c8"), true);
   const groups = [
-    ["File", "Файл", [
-      ["new-window", "New window", "Новое окно", "N"],
-      ["create-project", "Create project…", "Создать проект…"],
-      ["open-project", "Open project…", "Открыть проект…", "O"],
-      ["open-recent", "Open recent", "Открыть последнее"],
-      ["close-tab", "Close project", "Закрыть проект", "W"],
-      ["close-window", "Close window", "Закрыть окно", "Shift+W"],
-      ["settings", "Application settings…", "Настройки приложения…", ","],
-      ["board-settings", "Board settings…", "Настройки доски…"],
-      ["quit", "Exit", "Выход"],
+    ["ui.file_e2d36042", [
+      ["new-window", "ui.new_window_894742fe", "N"],
+      ["create-project", "ui.create_project_a0290705"],
+      ["open-project", "ui.open_project_9b4df4b2", "O"],
+      ["open-recent", "ui.open_recent_6bef1497"],
+      ["close-tab", "ui.close_project_8492d519", "W"],
+      ["close-window", "ui.close_window_5cc3b3ba", "Shift+W"],
+      ["settings", "ui.application_settings_908d8b4c", ","],
+      ["board-settings", "ui.board_settings_063b85d6"],
+      ["quit", "ui.exit_522b8be3"],
     ]],
-    ["Edit", "Правка", [
-      ["undo", "Undo", "Отменить", "Z"],
-      ["redo", "Redo", "Повторить", api.isMac ? "Shift+Z" : "Y"],
-      ["cut", "Cut", "Вырезать", "X"],
-      ["copy", "Copy", "Копировать", "C"],
-      ["paste", "Paste", "Вставить", "V"],
-      ["select-all", "Select all", "Выделить всё", "A"],
+    ["ui.edit_876a287f", [
+      ["undo", "ui.undo_70374434", "Z"],
+      ["redo", "ui.redo_616c79e6", api.isMac ? "Shift+Z" : "Y"],
+      ["cut", "ui.cut_faf6b87a", "X"],
+      ["copy", "ui.copy_47162712", "C"],
+      ["paste", "ui.paste_e9f43536", "V"],
+      ["select-all", "ui.select_all_ab174554", "A"],
     ]],
-    ["View", "Вид", [
-      ["archive-view", "Archive", "Архив"],
-      ["zoom-in", "Zoom in", "Увеличить", "+"],
-      ["zoom-out", "Zoom out", "Уменьшить", "-"],
-      ["reset-zoom", "Reset zoom", "Сбросить масштаб", "0"],
-      ["fullscreen", "Full screen", "Полноэкранный режим", "F11"],
+    ["ui.view_5fade440", [
+      ["archive-view", "ui.archive_d036e225"],
+      ["zoom-in", "ui.zoom_in_ee912b88", "+"],
+      ["zoom-out", "ui.zoom_out_f212b60f", "-"],
+      ["reset-zoom", "ui.reset_zoom_2b15b05e", "0"],
+      ["fullscreen", "ui.full_screen_dcbaed24", "F11"],
     ]],
-    ["Help", "Справка", [
-      ["about", "About AI Taskboard", "О программе"],
+    ["ui.help_a6529046", [
+      ["about", "ui.about_ai_taskboard_da4829d7"],
     ]],
   ];
   const shortcuts = new Map();
@@ -423,7 +449,7 @@ function mountAppMenu() {
         popup.append(item);
       }
       if (!popup.childElementCount) {
-        const empty = button(language("No recent projects", "Нет недавних проектов"), () => {});
+        const empty = button(() => t("ui.no_recent_projects_8b05ba12"), () => {});
         empty.className = "app-menu-item";
         empty.setAttribute("role", "menuitem");
         empty.setAttribute("aria-disabled", "true");
@@ -452,11 +478,11 @@ function mountAppMenu() {
     return api.menuAction(action);
   });
 
-  const menus = groups.map(([english, russian, commands], index) => {
+  const menus = groups.map(([labelKey, commands], index) => {
     const group = element("div", undefined, "app-menu-group");
     group.setAttribute("role", "none");
-    const label = language(english, russian);
-    const trigger = element("button", label, "app-menu-trigger");
+    const label = t(labelKey);
+    const trigger = element("button", () => t(labelKey), "app-menu-trigger");
     trigger.type = "button";
     trigger.tabIndex = index === 0 ? 0 : -1;
     trigger.setAttribute("role", "menuitem");
@@ -465,8 +491,8 @@ function mountAppMenu() {
     const popup = element("div", undefined, "app-menu-popup");
     popup.hidden = true;
     popup.setAttribute("role", "menu");
-    popup.setAttribute("aria-label", label);
-    const items = commands.map(([action, en, ru, shortcut]) => {
+    bindLocalized(popup, "aria-label", () => t(labelKey), true);
+    const items = commands.map(([action, labelKey, shortcut]) => {
       const item = button("", () => run(action));
       item.className = "app-menu-item";
       item.tabIndex = -1;
@@ -474,7 +500,7 @@ function mountAppMenu() {
       if (action === "archive-view") item.id = "archive-menu-item";
       if (action === "board-settings") item.id = "board-settings-menu-item";
       if (action === "settings") item.id = "app-settings-menu-item";
-      item.append(element("span", language(en, ru)));
+      item.append(element("span", () => t(labelKey)));
       if (shortcut) {
         shortcuts.set(shortcut, action);
         const prefix = shortcut === "F11" ? "" : api.isMac ? "⌘" : "Ctrl+";
@@ -488,7 +514,7 @@ function mountAppMenu() {
         const submenu = element("div", undefined, "app-menu-popup app-menu-submenu");
         submenu.hidden = true;
         submenu.setAttribute("role", "menu");
-        submenu.setAttribute("aria-label", language(en, ru));
+        bindLocalized(submenu, "aria-label", () => t(labelKey), true);
         container.append(item, submenu);
         popup.append(container);
         recentMenu = { trigger: item, popup: submenu };
@@ -590,19 +616,19 @@ async function command(action, id, input) {
   if (generation !== projectGeneration) return undefined;
   if (!result.ok) {
     const actions = {
-      update: ["Editing task", "Редактирование задачи"], approve: ["Approving task", "Утверждение задачи"],
-      "return-to-draft": ["Returning task to draft", "Возврат задачи в черновик"],
-      "attachment-cover": ["Changing task cover", "Смена обложки задачи"],
-      comment: ["Adding comment", "Добавление комментария"], cancel: ["Cancelling task", "Отмена задачи"],
-      "request-changes": ["Requesting changes", "Возврат на доработку"], review: ["Reviewing task", "Проверка задачи"],
-      accept: ["Accepting task", "Приёмка задачи"], "cleanup-status": ["Checking worktree cleanup", "Проверка уборки рабочей копии"],
-      "restore-changes": ["Restoring changes", "Восстановление правок"], settings: ["Saving board settings", "Сохранение настроек доски"],
-      "tag-create": ["Creating tag", "Создание тега"], "tag-color": ["Changing tag color", "Изменение цвета тега"],
-      "tag-assign": ["Editing tags", "Редактирование тегов"],
-      milestones: ["Loading GitHub milestones", "Загрузка вех GitHub"], milestone: ["Changing GitHub milestone", "Смена вехи GitHub"],
+      update: ["ui.editing_task_56c9ac84"], approve: ["ui.approving_task_68f23ece"],
+      "return-to-draft": ["ui.returning_task_to_draft_a416bf7a"],
+      "attachment-cover": ["ui.changing_task_cover_1c1995c0"],
+      comment: ["ui.adding_comment_a8a9a57d"], cancel: ["ui.cancelling_task_7b10c43e"],
+      "request-changes": ["ui.requesting_changes_936d81b8"], review: ["ui.reviewing_task_2b6829f2"],
+      accept: ["ui.accepting_task_39473c27"], "cleanup-status": ["ui.checking_worktree_cleanup_1f82f9a8"],
+      "restore-changes": ["ui.restoring_changes_b62b21aa"], settings: ["ui.saving_board_settings_0fce259e"],
+      "tag-create": ["ui.creating_tag_33a8fd23"], "tag-color": ["ui.changing_tag_color_d8c15c8d"],
+      "tag-assign": ["ui.editing_tags_adce1553"],
+      milestones: ["ui.loading_github_milestones_17f08928"], milestone: ["ui.changing_github_milestone_81cd8f77"],
     };
-    const label = actions[action] ?? ["Board action", "Действие с доской"];
-    notice(boardError(result.error), [language(...label), id, projectName()].filter(Boolean).join(" · "));
+    const label = actions[action] ?? ["ui.board_action_979b13d5"];
+    notice(boardError(result.error), [t(...label), id, projectName()].filter(Boolean).join(" · "));
     return undefined;
   }
   notice();
@@ -613,7 +639,8 @@ function openSheet(kind, title) {
   if (kind !== "task") taskSheetRequest++;
   chatPreviews.disconnect();
   sheetKind = kind;
-  byId("sheet-title").textContent = title;
+  if (typeof title === "function") bindLocalized(byId("sheet-title"), "textContent", title);
+  else byId("sheet-title").textContent = title;
   body.replaceChildren();
   byId("sheet-notice").hidden = true;
   if (!sheet.open) {
@@ -647,7 +674,7 @@ function taskDescription(text, taskId) {
   const area = element("section", undefined, "sheet-section task-sheet-description");
   const content = chatText(text, { taskId });
   foldTechnicalDetails(content, /^Диагностика и связанные файлы$/, "task-description-details", false);
-  area.append(element("h3", language("Description", "Описание")), content);
+  area.append(element("h3", () => t("ui.description_b4571c10")), content);
   body.append(area);
 }
 
@@ -662,40 +689,40 @@ function cardDescription(text) {
 
 function checkCommandLabel(command) {
   if (/\btools[\\/]wiki[\\/]/i.test(command)) {
-    return /test_generate\.py/i.test(command) ? language("Documentation generator tests", "Тесты генератора документации") :
-      language("Generated documentation", "Сгенерированная документация");
+    return /test_generate\.py/i.test(command) ? t("ui.documentation_generator_tests_9fae4396") :
+      t("ui.generated_documentation_c18e33f9");
   }
-  if (/\btools[\\/]coverage[\\/]/i.test(command)) return language("API coverage", "Покрытие API");
+  if (/\btools[\\/]coverage[\\/]/i.test(command)) return t("ui.api_coverage_d85adcbd");
   if (/^dotnet build\b/i.test(command)) {
     const configuration = command.match(/\s(?:-c|--configuration)\s+([\w.-]+)/i)?.[1];
-    return language("Build", "Сборка") + (configuration ? " · " + configuration : "");
+    return t("ui.build_1daac2f0") + (configuration ? " · " + configuration : "");
   }
   if (/^dotnet format\b/i.test(command)) {
     const project = command.match(/(?:^|[\s"'\\/])([^\s"'\\/]+)\.csproj\b/i)?.[1];
-    return language("Code formatting", "Форматирование кода") + (project ? " · " + project : "");
+    return t("ui.code_formatting_5fd234f0") + (project ? " · " + project : "");
   }
   if (/^git diff --check\b/i.test(command)) return /;\s*rg\b/i.test(command) ?
-    language("Diff and text search", "Проверка diff и поиск по тексту") : language("Diff whitespace", "Пробелы в diff");
+    t("ui.diff_and_text_search_b3bbedcc") : t("ui.diff_whitespace_805b5a39");
   const script = command.match(/(?:^|[\s\\/])([\w.-]+)\.(?:ps1|py|sh)\b/i)?.[1];
-  if (script?.startsWith("test_")) return language("Tests", "Тесты") + " · " + script.slice(5).replaceAll("_", " ");
+  if (script?.startsWith("test_")) return t("ui.tests_f896b694") + " · " + script.slice(5).replaceAll("_", " ");
   const suite = command.match(/\$env:\w+\s*=\s*["']([^"']+)["']/gi);
   if (suite?.length && /\bdotnet\b/i.test(command)) {
     const variants = suite.map(value => value.match(/["']([^"']+)["']/)[1]).filter(value => !/[\\/]/.test(value));
-    return language("Test run", "Прогон тестов") + (variants.length ? " · " + variants.join(" / ") : "");
+    return t("ui.test_run_9f510f80") + (variants.length ? " · " + variants.join(" / ") : "");
   }
-  if (/^dotnet test\b/i.test(command)) return language(".NET tests", "Тесты .NET");
-  if (script) return language("Script", "Скрипт") + " · " + script.replaceAll("_", " ");
+  if (/^dotnet test\b/i.test(command)) return t("ui.net_tests_238a6d60");
+  if (script) return t("ui.script_83c4a42b") + " · " + script.replaceAll("_", " ");
   if (/^(?:\$env:|& |dotnet |git |rg |npm |node |python[3]? |pwsh |powershell |bash |cargo |pytest\b|\.\.?[\\/])/i.test(command)) {
-    return language("Command", "Команда") + " · " + command.split(/\s+/, 2).join(" ").slice(0, 48);
+    return t("ui.command_e66f2e58") + " · " + command.split(/\s+/, 2).join(" ").slice(0, 48);
   }
 }
 
 function showSubmissionResult(result, target = body) {
   if (!result) return;
-  section(language("Result", "Результат"), result.summary, target);
+  section(() => (t("ui.result_817dc3f4")), result.summary, target);
   if (result.checks?.length) {
     const area = element("section", undefined, "sheet-section task-checks");
-    area.append(element("h3", language("Checks", "Проверки")));
+    area.append(element("h3", () => t("ui.checks_33b2cadc")));
     for (const value of result.checks) {
       const parts = value.match(/^([\s\S]+?)\n(?:Command|Команда):\s*([\s\S]+)$/i);
       const statement = (parts?.[1] ?? value).trim();
@@ -718,7 +745,7 @@ function showSubmissionResult(result, target = body) {
       if (outcome?.[4]) copy.append(element("span", outcome[4], "task-check-note"));
       line.append(copy);
       if (status) {
-        const label = passed ? language("Passed", "Пройдено") : failed ? language("Failed", "Не пройдено") : language("Skipped", "Пропущено");
+        const label = passed ? t("ui.passed_68bec83e") : failed ? t("ui.failed_5f8945bd") : t("ui.skipped_8c40ee29");
         const badge = element("span", label, "task-check-status");
         badge.dataset.outcome = passed ? "passed" : failed ? "failed" : "skipped";
         line.append(badge);
@@ -729,7 +756,7 @@ function showSubmissionResult(result, target = body) {
     }
     target.append(area);
   }
-  section(language("Limitations", "Ограничения"), result.limitations, target);
+  section(() => (t("ui.limitations_499c4317")), result.limitations, target);
 }
 
 const cardCovers = new IntersectionObserver(entries => {
@@ -784,9 +811,9 @@ function tagBadges(names) {
 
 function renderAgentRunStatus(target, task) {
   const review = frame.reviewingTasks?.[task.id];
-  const label = review === "reviewer" ? language("Reviewer is reviewing", "Проверяет ревьюер") :
-    review === "manager" ? language("Project manager is reviewing", "Проверяет менеджер проекта") :
-    frame.runningTasks?.includes(task.id) ? language("Agent is working", "Агент работает") : "";
+  const label = review === "reviewer" ? t("ui.reviewer_is_reviewing_d6afb5da") :
+    review === "manager" ? t("ui.project_manager_is_reviewing_730137f9") :
+    frame.runningTasks?.includes(task.id) ? t("ui.agent_is_working_28ccd334") : "";
   if (label) {
     const spinner = target.querySelector(".agent-spinner") ?? icon("sync");
     spinner.classList.add("agent-spinner");
@@ -798,10 +825,10 @@ function renderAgentRunStatus(target, task) {
   } else {
     const text = frame.waitingTasks?.includes(task.id) ?
       (task.mergeRepair || frame.board?.tasks.find(card => card.id === task.id)?.mergeRepair
-        ? language("Waiting for a reviewer slot", "Ожидает свободного места ревьюера")
-        : language("Waiting for an available executor", "Ожидает свободного исполнителя")) :
+        ? t("ui.waiting_for_a_reviewer_slot_8918dd95")
+        : t("ui.waiting_for_an_available_executor_cc0934a8")) :
       task.status === "in_progress" && task.codexThreadId ?
-      language("Board run inactive", "Запуск с доски не активен") : "";
+      t("ui.board_run_inactive_2a932a2f") : "";
     if (target.firstElementChild || target.textContent !== text) target.textContent = text;
   }
   target.hidden = !target.childNodes.length;
@@ -828,11 +855,11 @@ function explicitDependencyWait(reason) {
 }
 
 function dependencyBadge(ids, block) {
-  const name = ids.length ? ids[0] + (ids.length > 1 ? " +" + (ids.length - 1) : "") : language("a task", "задачу");
+  const name = ids.length ? ids[0] + (ids.length > 1 ? " +" + (ids.length - 1) : "") : t("ui.a_task_1d59338e");
   const badge = element("span", undefined, "task-dependency-message dependency-warning");
-  badge.append(element("span", language("Waiting for", "Ожидает") + " " + name));
-  badge.title = block ? block.reason + "\n\n" + block.condition :
-    language("Waiting for completion of", "Ожидает завершения") + " " + ids.join(", ");
+  badge.append(element("span", () => t("ui.waiting_for_dfc25d0d") + " " + name));
+  bindLocalized(badge, "title", () => block ? block.reason + "\n\n" + block.condition :
+    t("ui.waiting_for_completion_of_62637861") + " " + ids.join(", "));
   return badge;
 }
 
@@ -840,18 +867,16 @@ function blockerBanner({ reason, condition }) {
   const tokenUsageReason = legacyTokenUsageFailure(reason);
   if (tokenUsageReason) {
     reason = tokenUsageReason;
-    condition = language("Resume the task in the same chat and worktree.",
-      "Возобновите задачу в том же чате и рабочей копии.");
+    condition = t("ui.resume_the_task_in_the_same_chat_and_worktree_097e40ef");
   } else if (/already has an active writer/i.test(reason)) {
-    reason = language("This Codex chat is already open in another process.", "Этот чат Codex уже открыт в другом процессе.");
-    condition = language("Continue in the existing chat, or stop work there and choose Continue in a new chat.",
-      "Продолжите задачу в открытом чате или остановите там работу и нажмите «Продолжить в новом чате».");
+    reason = t("ui.this_codex_chat_is_already_open_in_another_proce_03a4bf50");
+    condition = t("ui.continue_in_the_existing_chat_or_stop_work_there_635dd251");
   }
   const banner = element("span", undefined, "task-blocker");
   banner.append(
-    element("strong", language("Why it is blocked", "Причина блокировки")),
+    element("strong", () => t("ui.why_it_is_blocked_d0ee1952")),
     element("span", reason, "task-blocker-detail"),
-    element("strong", language("How to continue", "Как продолжить")),
+    element("strong", () => t("ui.how_to_continue_4dfef945")),
     element("span", condition, "task-blocker-detail"),
   );
   banner.title = reason + "\n\n" + condition;
@@ -862,7 +887,7 @@ function card(task) {
   const showCover = archiveView || frame.board.settings?.showCardPreviews !== false;
   const cover = showCover ? selectedCover(task, (task.attachments ?? []).filter(isImageAttachment)) : undefined;
   // Only visible card data belongs in this key: chat/log/revision updates must not rebuild it.
-  const signature = JSON.stringify([frame.russian, task.title, task.description,
+  const signature = JSON.stringify([frame.localization?.locale, task.title, task.description,
     task.tags?.map(name => boardTags.get(tagKey(name)) ?? { name }), cover?.file,
     frame.runningTasks?.includes(task.id) ?? false, frame.waitingTasks?.includes(task.id) ?? false,
     frame.reviewingTasks?.[task.id], task.status, task.mergeRepair, Boolean(task.codexThreadId),
@@ -878,7 +903,7 @@ function card(task) {
   card.dataset.state = task.status;
   if (task.priority && task.priority !== "normal") {
     card.dataset.priority = task.priority;
-    card.setAttribute("aria-description", language("Priority", "Приоритет") + " · " + priorityName(task.priority));
+    bindLocalized(card, "aria-description", () => t("ui.priority_b114c9b5") + " · " + priorityName(task.priority), true);
   } else {
     delete card.dataset.priority;
     card.removeAttribute("aria-description");
@@ -889,7 +914,7 @@ function card(task) {
   if (task.status === "done") {
     const done = element("span", undefined, "task-done");
     done.setAttribute("role", "img");
-    done.setAttribute("aria-label", language("Completed", "Завершено"));
+    bindLocalized(done, "aria-label", () => t("ui.completed_10b5dce8"), true);
     done.append(icon("check"));
     heading.append(done);
   }
@@ -929,7 +954,7 @@ function card(task) {
     const { title, repository, number } = task.milestone;
     const badge = element("span", undefined, "task-milestone task-stat");
     badge.append(icon("milestone"), element("span", title, "task-milestone-label"));
-    badge.title = language("GitHub milestone", "Веха GitHub") + " · " + title + " · " + repository + " #" + number;
+    bindLocalized(badge, "title", () => t("ui.github_milestone_11d33bfa") + " · " + title + " · " + repository + " #" + number);
     identity.append(badge);
   }
   if (task.schedule) {
@@ -940,7 +965,7 @@ function card(task) {
   }
   if (task.dueDate) {
     const badge = element("span", task.dueDate, "task-stat");
-    badge.title = language("Due date", "Срок сдачи");
+    bindLocalized(badge, "title", () => t("ui.due_date_d764b025"));
     identity.append(badge);
   }
   meta.append(identity);
@@ -949,7 +974,7 @@ function card(task) {
   if (!runStatus.hidden) meta.append(runStatus);
   if (task.unfinishedDependencies?.length && task.status === "draft") {
     meta.append(taskIndicator("link", task.unfinishedDependencies.length,
-      language("Unfinished dependencies", "Незавершённые зависимости"), "dependency-warning"));
+      t("ui.unfinished_dependencies_5cfaaab6"), "dependency-warning"));
   }
   if (block && !manualWait) {
     item.append(blockerBanner(block));
@@ -957,13 +982,13 @@ function card(task) {
   if (task.subtasks?.length) {
     const count = task.subtasks.filter(entry => entry.done).length + "/" + task.subtasks.length;
     const subtasks = element("span", undefined, "task-stat");
-    subtasks.title = language("Subtasks", "Подзадачи") + " " + count;
+    bindLocalized(subtasks, "title", () => t("ui.subtasks_b409bda5") + " " + count);
     subtasks.append(icon("checklist"), count);
     meta.append(subtasks);
   }
   if (task.attachments?.length) {
     const attachments = element("span", undefined, "task-stat");
-    attachments.title = language("Attachments", "Вложения") + " " + task.attachments.length;
+    bindLocalized(attachments, "title", () => t("ui.attachments_3b2db3b4") + " " + task.attachments.length);
     attachments.append(icon("attach"), String(task.attachments.length));
     meta.append(attachments);
   }
@@ -1036,10 +1061,10 @@ function codexTaskAction(task) {
     task.blocked?.reason === "no rollout found for thread id " + task.codexThreadId;
   const resumeWithFullAccess = task.status === "blocked" && task.executorFullAccess && !newThread && !missingThread;
   if (task.status !== "ready" && task.status !== "in_progress" && !newThread && !missingThread && !resumeWithFullAccess) return null;
-  const label = resumeWithFullAccess ? language("Continue with full access", "Продолжить с полным доступом")
-    : newThread ? language("Continue in a new chat", "Продолжить в новом чате") : missingThread || task.status === "in_progress" || task.git
-    ? language("Continue", "Продолжить")
-    : language("Send to work", "Передать в работу");
+  const label = resumeWithFullAccess ? t("ui.continue_with_full_access_18d73ae8")
+    : newThread ? t("ui.continue_in_a_new_chat_7364ce62") : missingThread || task.status === "in_progress" || task.git
+    ? t("ui.continue_06e52fca")
+    : t("ui.send_to_work_1c1a04e6");
   const launch = button(label, async () => {
     launch.disabled = true;
     try {
@@ -1047,7 +1072,7 @@ function codexTaskAction(task) {
         : resumeWithFullAccess ? { resumeWithFullAccess: true } : undefined);
       if (generation !== projectGeneration) return;
       if (!result.ok) notice(boardError(result.error),
-        [language("Starting task", "Запуск задачи"), task.id, projectName()].join(" · "));
+        [t("ui.starting_task_1cd51aaa"), task.id, projectName()].join(" · "));
       else if (sheetKind === "task" && taskInSheet?.id === task.id) await showTask(task.id);
     } finally {
       launch.disabled = Boolean(task.unfinishedDependencies?.length);
@@ -1062,9 +1087,15 @@ function codexTaskAction(task) {
 function controlLabel(id, label) {
   const control = byId(id);
   const text = control.querySelector("span");
-  if (text) text.textContent = label;
-  control.title = label;
-  control.setAttribute("aria-label", label);
+  if (typeof label === "function") {
+    if (text) bindLocalized(text, "textContent", label);
+    bindLocalized(control, "title", label);
+    bindLocalized(control, "aria-label", label, true);
+  } else {
+    if (text) text.textContent = label;
+    control.title = label;
+    control.setAttribute("aria-label", label);
+  }
 }
 
 function tagChoices(tags, selected) {
@@ -1122,8 +1153,8 @@ function laneTools(state, title, tasks, total, count, content) {
   const selected = new Set(Array.isArray(saved?.tags) ? saved.tags.filter(key => boardTags.has(key)) : []);
   const priorities = ["low", "normal", "high", "urgent"];
   const priority = element("select");
-  priority.append(new Option(language("Any priority", "Любой приоритет"), ""),
-    ...priorities.map(value => new Option(priorityName(value), value)));
+  priority.append(localizedOption(t("ui.any_priority_369b9b54"), ""),
+    ...priorities.map(value => localizedOption(priorityName(value), value)));
   priority.value = priorities.includes(saved?.priority) ? saved.priority : "";
   let collapsed = saved?.collapsed === true;
   const persist = () => {
@@ -1137,13 +1168,13 @@ function laneTools(state, title, tasks, total, count, content) {
   const toolbar = element("div", undefined, "lane-toolbar");
   const filter = element("details", undefined, "lane-filter");
   const summary = element("summary", undefined, "button quiet");
-  const filterLabel = language("Column menu: ", "Меню колонки: ") + title;
+  const filterLabel = t("ui.column_menu_39181b07") + title;
   const filterCount = element("span", undefined, "count");
   summary.append(icon("more"), filterCount);
   const options = element("div", undefined, "lane-filter-options");
   const priorityLabel = element("label", undefined, "lane-priority");
-  priorityLabel.append(element("span", language("Priority", "Приоритет")), priority);
-  const resetLabel = language("Reset column filter", "Сбросить фильтр колонки");
+  priorityLabel.append(element("span", () => t("ui.priority_b114c9b5")), priority);
+  const resetLabel = t("ui.reset_column_filter_b2d9ca59");
   const reset = button(resetLabel, clearFilters, "quiet");
   options.append(priorityLabel);
   options.append(...tagChoices([...boardTags].sort(([, a], [, b]) => a.name.localeCompare(b.name)), selected));
@@ -1177,11 +1208,11 @@ function laneTools(state, title, tasks, total, count, content) {
   function updateCollapse() {
     content.hidden = collapsed;
     if (!collapsed) scheduleLaneFit();
-    const label = (collapsed ? language("Expand ", "Развернуть колонку ") : language("Collapse ", "Свернуть колонку ")) + title;
+    const label = (collapsed ? t("ui.expand_985005f3") : t("ui.collapse_38e44992")) + title;
     toggle.title = label;
     toggle.setAttribute("aria-label", label);
     toggle.setAttribute("aria-expanded", String(!collapsed));
-    toggleText.textContent = collapsed ? language("Expand column", "Развернуть колонку") : language("Collapse column", "Свернуть колонку");
+    bindLocalized(toggleText, "textContent", () => collapsed ? t("ui.expand_column_a6eb5979") : t("ui.collapse_column_7c12444e"));
   }
   let empty;
   let matching = [];
@@ -1201,7 +1232,7 @@ function laneTools(state, title, tasks, total, count, content) {
     renderBatch();
     scheduleLaneFit();
     const active = selected.size + Number(Boolean(priority.value));
-    const label = matching.length === total ? String(total) : matching.length + language(" of ", " из ") + total;
+    const label = matching.length === total ? String(total) : matching.length + t("ui.of_45303c22") + total;
     if (count.textContent !== label) count.textContent = label;
     if (filterCount.textContent !== String(active)) filterCount.textContent = active;
     filterCount.hidden = active === 0;
@@ -1213,15 +1244,14 @@ function laneTools(state, title, tasks, total, count, content) {
     const children = matching.slice(0, visibleLimit).map(card);
     if (matching.length > visibleLimit) {
       const remaining = matching.length - visibleLimit;
-      const noun = { one: "задача", few: "задачи", many: "задач", other: "задачи" }[new Intl.PluralRules("ru").select(remaining)];
-      more.textContent = language("Show " + remaining + " more tasks", "Ещё " + remaining + " " + noun);
+      bindLocalized(more, "textContent", () => t("tasks.show_more", { count: remaining }));
       children.push(more);
     }
     const filtered = selected.size || priority.value;
     if (!matching.length && (total || filtered)) {
       if (!empty) {
         empty = element("div", undefined, "lane-filter-empty");
-        empty.append(element("p", language("No matching tasks", "Нет подходящих карточек"), "muted"),
+        empty.append(element("p", () => t("ui.no_matching_tasks_5dc41816"), "muted"),
           button(resetLabel, clearFilters, "quiet"));
       }
       empty.querySelector("button").hidden = !filtered;
@@ -1338,7 +1368,7 @@ function animateCardMoves(moves) {
 }
 
 function render(previousBoard) {
-  document.documentElement.lang = frame.russian ? "ru" : "en";
+  document.documentElement.lang = localization.locale;
   const board = frame.board;
   const noBoard = !board;
   const autoMode = byId("status-auto-mode");
@@ -1346,16 +1376,16 @@ function render(previousBoard) {
   const enabled = board?.settings.autoMode === true;
   autoMode.setAttribute("aria-pressed", String(enabled));
   autoMode.querySelector("i").className = `icon codicon codicon-${enabled ? "sync" : "play"}`;
-  autoMode.querySelector("span").textContent = enabled ? language("Auto: on", "Авторежим: вкл.") : language("Auto: off", "Авторежим: выкл.");
-  autoMode.title = enabled ? language("Stop new automatic starts", "Остановить новые автоматические запуски") :
-    language("Automatically run ready tasks", "Автоматически запускать готовые задачи");
+  bindLocalized(autoMode.querySelector("span"), "textContent", () => enabled ? t("ui.auto_on_81371019") : t("ui.auto_off_ef9f409f"));
+  bindLocalized(autoMode, "title", () => enabled ? t("ui.stop_new_automatic_starts_d1a902e4") :
+    t("ui.automatically_run_ready_tasks_d9661d7c"));
   const loading = Boolean(frame.loading || frame.restoring);
   byId("welcome").hidden = !noBoard || loading;
   byId("app-content").setAttribute("aria-busy", String(noBoard && loading));
   byId("workspace").hidden = noBoard;
   byId("archive-menu-item").setAttribute("aria-disabled", String(noBoard));
   byId("board-settings-menu-item").setAttribute("aria-disabled", String(noBoard));
-  controlLabelForIcon(byId("app-settings"), language("Settings and updates", "Настройки и обновления"));
+  controlLabelForIcon(byId("app-settings"), () => t("ui.settings_and_updates_f9f74584"));
   byId("archive-menu-item").setAttribute("aria-checked", String(archiveView));
   if (!board) {
     resetBoardRendering();
@@ -1371,7 +1401,7 @@ function render(previousBoard) {
     boardCards.delete(id);
   }
 
-  byId("workspace").setAttribute("aria-label", archiveView ? language("Archive", "Архив") : language("Task board", "Доска задач"));
+  bindLocalized(byId("workspace"), "aria-label", () => archiveView ? t("ui.archive_d036e225") : t("ui.task_board_063794ec"), true);
   byId("lanes").hidden = archiveView;
   byId("archive-list").hidden = !archiveView;
   byId("board-composer").hidden = archiveView;
@@ -1389,7 +1419,7 @@ function render(previousBoard) {
   if (archiveView) {
     const tasks = [...board.archived].sort(recentlyUpdatedFirst);
     syncChildren(byId("archive-list"), tasks.length ? tasks.map(card) :
-      [element("p", language("No archived tasks found.", "Архивных задач не найдено."), "muted")]);
+      [element("p", () => t("ui.no_archived_tasks_found_7157e9bb"), "muted")]);
     return;
   }
   const visible = [...board.tasks].sort(recentlyUpdatedFirst);
@@ -1397,8 +1427,8 @@ function render(previousBoard) {
     cardLayoutChanges(previousBoard, visible) : { affectedLanes: [], added: [] };
   const moves = captureCardMoves(affectedLanes);
   const focused = document.activeElement;
-  const toolsKey = JSON.stringify([frame.russian, [...boardTags]]);
-  const columns = lanes.map(([state, english, russian]) => {
+  const toolsKey = JSON.stringify([frame.localization?.locale, [...boardTags]]);
+  const columns = lanes.map(([state, labelKey]) => {
     const tasks = visible.filter(task => task.status === state);
     let lane = boardLanes.get(state);
     if (!lane) {
@@ -1411,7 +1441,7 @@ function render(previousBoard) {
       lane = { column, header, content };
       boardLanes.set(state, lane);
     }
-    const title = language(english, russian);
+    const title = t(labelKey);
     const total = tasks.length;
     if (lane.toolsKey !== toolsKey) {
       const heading = element("h2", undefined, "lane-title");
@@ -1444,15 +1474,15 @@ function render(previousBoard) {
 function renderWelcome() {
   const loading = Boolean(frame.loading);
   byId("welcome").setAttribute("aria-busy", String(loading));
-  byId("welcome-start").textContent = language("Start", "Запуск");
-  byId("welcome-recent").textContent = language("Recent boards", "Последние доски");
-  controlLabel("welcome-create", language("Create board", "Создать доску"));
-  controlLabel("welcome-open", language("Open existing board", "Открыть существующую доску"));
+  bindLocalized(byId("welcome-start"), "textContent", () => t("ui.start_803a28bf"));
+  bindLocalized(byId("welcome-recent"), "textContent", () => t("ui.recent_boards_efd567a4"));
+  controlLabel("welcome-create", () => (t("ui.create_board_e02d5c15")));
+  controlLabel("welcome-open", () => (t("ui.open_existing_board_754e46e5")));
   byId("welcome-create").disabled = loading;
   byId("welcome-open").disabled = loading;
   const recent = frame.recentBoards ?? [];
   byId("recent-empty").hidden = recent.length > 0;
-  byId("recent-empty").textContent = language("No recent boards yet.", "Пока нет недавних досок.");
+  bindLocalized(byId("recent-empty"), "textContent", () => t("ui.no_recent_boards_yet_300a7f50"));
   byId("recent-boards").replaceChildren(...recent.map(({ name, path }) => {
     const row = element("li");
     const open = button("", () => api.openRecent(path), "welcome-link recent-board");
@@ -1464,10 +1494,10 @@ function renderWelcome() {
 }
 
 const lineList = value => value.split("\n").map(line => line.trim()).filter(Boolean);
-const shortDate = value => new Date(value).toLocaleString(frame.russian ? "ru" : undefined);
+const shortDate = value => new Date(value).toLocaleString(localization.locale);
 const priorityName = value => ({
-  low: language("Low", "Низкий"), normal: language("Normal", "Обычный"),
-  high: language("High", "Высокий"), urgent: language("Urgent", "Срочный"),
+  low: t("ui.low_9de7ee06"), normal: t("ui.normal_4c9f45d6"),
+  high: t("ui.high_3401144e"), urgent: t("ui.urgent_14496422"),
 })[value] || value;
 
 function form(kind, title, fields, label, submit) {
@@ -1519,13 +1549,13 @@ function form(kind, title, fields, label, submit) {
 
 function managerQuestionDialog(question, trigger) {
   const dialog = element("dialog", undefined, "sheet manager-question");
-  const title = element("h2", question.approval ? language("Manager access request", "Запрос доступа менеджера") :
-    language("Question from the project manager", "Вопрос менеджера проекта"));
+  const title = element("h2", () => question.approval ? t("ui.manager_access_request_24f7039f") :
+    t("ui.question_from_the_project_manager_cf39c2b5"));
   title.id = "manager-question-title";
   dialog.setAttribute("aria-labelledby", title.id);
   const close = button("", () => dialog.close(), "quiet icon-button");
   close.append(icon("close"));
-  controlLabelForIcon(close, language("Close question", "Закрыть вопрос"));
+  controlLabelForIcon(close, () => t("ui.close_question_4ef77ca0"));
   const header = element("header", undefined, "sheet-header");
   header.append(title, close);
   const form = element("form", undefined, "sheet-body form");
@@ -1533,7 +1563,7 @@ function managerQuestionDialog(question, trigger) {
   prompt.id = "manager-question-text";
   dialog.setAttribute("aria-describedby", prompt.id);
   const choices = element("div", undefined, "manager-question-options");
-  const label = element("label", language("Your answer", "Ваш ответ"));
+  const label = element("label", () => t("ui.your_answer_66fd757f"));
   const input = element("textarea");
   input.maxLength = 4000;
   label.append(input);
@@ -1541,9 +1571,9 @@ function managerQuestionDialog(question, trigger) {
   error.setAttribute("role", "alert");
   error.hidden = true;
   const actions = element("div", undefined, "sheet-actions");
-  const submit = element("button", language("Send answer", "Отправить ответ"), "button primary");
+  const submit = element("button", () => t("ui.send_answer_a3fdd777"), "button primary");
   submit.type = "submit";
-  const skip = button(language("Skip question", "Пропустить вопрос"), () => send(null), "quiet");
+  const skip = button(() => t("ui.skip_question_773b15fa"), () => send(null), "quiet");
   actions.append(submit, skip);
   const options = question.options.map(value => button(value, () => send(value), "quiet"));
   choices.append(...options);
@@ -1722,7 +1752,7 @@ function draftComposer() {
     editor.toggleAttribute("data-pinned", pinned);
     pin.setAttribute("aria-pressed", String(pinned));
     pin.replaceChildren(icon(pinned ? "pinned" : "pin"));
-    controlLabelForIcon(pin, pinned ? language("Unpin chat", "Открепить чат") : language("Pin chat", "Закрепить чат"));
+    controlLabelForIcon(pin, () => pinned ? t("ui.unpin_chat_5476c9a7") : t("ui.pin_chat_5352ca60"));
   };
   const resizeChat = next => {
     const limit = Math.max(0, window.innerHeight - 160);
@@ -1800,15 +1830,15 @@ function draftComposer() {
   goalBody.append(goalText, goalActions, goalError);
   goalPanel.append(goalSummary, goalBody);
   const goalLabels = {
-    active: ["Active goal", "Активная цель"], paused: ["Goal paused", "Цель на паузе"],
-    blocked: ["Goal blocked", "Цель заблокирована"], complete: ["Goal completed", "Цель выполнена"],
-    usageLimited: ["Usage limit reached", "Достигнут лимит Codex"], budgetLimited: ["Token budget reached", "Исчерпан бюджет токенов"],
+    active: ["ui.active_goal_4b86aa5f"], paused: ["ui.goal_paused_9030eeb9"],
+    blocked: ["ui.goal_blocked_553f6449"], complete: ["ui.goal_completed_a63116cb"],
+    usageLimited: ["ui.usage_limit_reached_32616e2a"], budgetLimited: ["ui.token_budget_reached_7e820132"],
   };
   const syncGoal = () => {
     if (!currentGoal) return;
     const waitingToResume = currentGoal.status === "active" && !goalRunning;
-    goalStatus.textContent = waitingToResume ? language("Goal awaiting continuation", "Цель ждёт продолжения") :
-      language(...(goalLabels[currentGoal.status] ?? ["Goal", "Цель"]));
+    bindLocalized(goalStatus, "textContent", () => waitingToResume ? t("ui.goal_awaiting_continuation_27d0b1c3") :
+      t(...(goalLabels[currentGoal.status] ?? ["ui.goal_1730d64f"])));
     goalPanel.dataset.status = waitingToResume ? "idle" : currentGoal.status;
     pauseGoal.hidden = currentGoal.status !== "active" || waitingToResume;
     resumeGoal.hidden = currentGoal.status === "complete" || !pauseGoal.hidden;
@@ -1936,7 +1966,7 @@ function draftComposer() {
   const liveChat = element("div", undefined, "chat-run");
   const workError = element("p", undefined, "muted");
   workError.hidden = true;
-  const workOlder = button(language("Earlier activity", "Более ранние события"), () => void loadWork(workCursor), "quiet board-chat-older");
+  const workOlder = button(() => t("ui.earlier_activity_e8606f75"), () => void loadWork(workCursor), "quiet board-chat-older");
   workOlder.hidden = true;
   workLive.append(liveGoal, liveChat);
   work.append(workOverview, workOlder, workSaved, workLive, workError);
@@ -1953,13 +1983,13 @@ function draftComposer() {
   function renderWorkOverview() {
     if (work.hidden || frame.project !== project) return;
     const rows = [];
-    const workStatus = item => item ? runningLabel(item).status : language("Working…", "Работает…");
+    const workStatus = item => item ? runningLabel(item).status : t("ui.working_85aeded8");
     if (managerWork) {
-      const time = managerWork.startedAt ? new Date(managerWork.startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+      const time = managerWork.startedAt ? new Date(managerWork.startedAt).toLocaleTimeString(localization.locale, { hour: "2-digit", minute: "2-digit" }) : "";
       const detail = managerWork.phase === "running" ? workStatus(managerWork.item) :
-        managerWork.phase === "waiting" ? language("Waiting for a session…", "Ждёт освобождения сеанса…") :
-          language("Starting…", "Запускается…");
-      const row = element("div", [language("Manager", "Менеджер"), detail, time].filter(Boolean).join(" · "), "board-work-row");
+        managerWork.phase === "waiting" ? t("ui.waiting_for_a_session_67475e7f") :
+          t("ui.starting_39fd3c7e");
+      const row = element("div", () => [t("ui.manager_92a95b5c"), detail, time].filter(Boolean).join(" · "), "board-work-row");
       row.dataset.chatAnchor = "overview:manager";
       rows.push(row);
     }
@@ -1976,16 +2006,16 @@ function draftComposer() {
           reviewer.scrollIntoView({ block: "nearest" });
         }
       }), "quiet board-chat-task");
-      const status = reviewing[id] === "reviewer" ? language("Reviewer", "Ревьюер") + " · " + workStatus(activeReviewers[id]?.item) :
-        reviewing[id] === "manager" ? language("Manager is reviewing", "Менеджер проверяет") :
-        frame.replyingTasks?.includes(id) ? language("Task discussion", "Обсуждение задачи") :
-          language("Executor", "Исполнитель") + " · " + workStatus(frame.runActivity?.[id]?.findLast(item => item.status === "inProgress"));
+      const status = reviewing[id] === "reviewer" ? t("ui.reviewer_50c42665") + " · " + workStatus(activeReviewers[id]?.item) :
+        reviewing[id] === "manager" ? t("ui.manager_is_reviewing_b8f46e42") :
+        frame.replyingTasks?.includes(id) ? t("ui.task_discussion_97daf76e") :
+          t("ui.executor_92197b27") + " · " + workStatus(frame.runActivity?.[id]?.findLast(item => item.status === "inProgress"));
       const row = element("div", undefined, "board-work-row");
       row.dataset.chatAnchor = "overview:" + id;
       row.append(link, element("span", status));
       rows.push(row);
     }
-    if (!rows.length) rows.push(element("div", language("No active agents", "Сейчас агенты не работают"), "muted"));
+    if (!rows.length) rows.push(element("div", () => t("ui.no_active_agents_599b3f8c"), "muted"));
     if (workOverview.textContent !== rows.map(row => row.textContent).join("")) {
       workViewport.update(() => workOverview.replaceChildren(...rows));
     }
@@ -2218,7 +2248,7 @@ function draftComposer() {
       menu.hidePopover();
       insertDraftText(task.id);
     }, "quiet draft-menu-item")));
-    if (!matches.length) taskResults.append(element("p", language("No tasks found", "Задачи не найдены"), "draft-menu-heading muted"));
+    if (!matches.length) taskResults.append(element("p", () => t("ui.no_tasks_found_3f906b3d"), "draft-menu-heading muted"));
   }
   function insertDraftText(text, range) {
     const { start, end } = range ?? { start: input.selectionStart, end: input.selectionEnd };
@@ -2336,7 +2366,7 @@ function draftComposer() {
     if (recording.windowsSpeech) recording.windowsText = api.windowsSpeech("stop").catch(() => undefined);
     if (document.activeElement === stopVoice) cancelVoice.focus({ preventScroll: true });
     recording.recorder.stop();
-    voiceMessage(language("Transcribing…", "Распознаю речь…"));
+    voiceMessage(t("ui.transcribing_b8676524"));
   }
   function drawWaveform(recording, analyser) {
     const context = waveform.getContext("2d");
@@ -2378,9 +2408,9 @@ function draftComposer() {
     }
     releaseMicrophone(recording);
     stopVoice.disabled = true;
-    voiceMessage(language("Transcribing…", "Распознаю речь…"));
-    const noSpeech = language("No speech detected.", "Речь не обнаружена.");
-    const failed = language("Could not transcribe the recording.", "Не удалось распознать запись.");
+    voiceMessage(t("ui.transcribing_b8676524"));
+    const noSpeech = t("ui.no_speech_detected_42e47e09");
+    const failed = t("ui.could_not_transcribe_the_recording_140782e0");
     try {
       const nativeText = await recording.windowsText;
       if (recording !== dictation) return;
@@ -2412,14 +2442,15 @@ function draftComposer() {
   }
   async function startDictation() {
     if (dictation) return;
-    const recording = { language: frame.russian ? "ru" : "en" };
+    if (!["en", "ru"].includes(localization.locale)) { message(t("speech.unsupported")); return; }
+    const recording = { language: localization.locale };
     dictation = recording;
     closeMentions();
     voiceRow.hidden = false;
     stopVoice.disabled = true;
     editor.setAttribute("data-dictating", "");
     cancelVoice.focus({ preventScroll: true });
-    voiceMessage(language("Opening microphone…", "Подключаю микрофон…"));
+    voiceMessage(t("ui.opening_microphone_fc24ba14"));
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
       if (dictation !== recording) return stream.getTracks().forEach(track => track.stop());
@@ -2433,7 +2464,7 @@ function draftComposer() {
       recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
       recorder.onstop = () => { void finishDictation(recording, chunks); };
       recorder.onerror = () => endDictation(recording,
-        language("Microphone recording failed.", "Не удалось записать звук."), true);
+        t("ui.microphone_recording_failed_75d7cfdd"), true);
       recorder.start();
       if (api.isWindows && api.windowsSpeech) {
         recording.windowsSpeech = true;
@@ -2441,14 +2472,11 @@ function draftComposer() {
       }
       stopVoice.disabled = false;
       stopVoice.focus({ preventScroll: true });
-      voiceMessage(language("Recording…", "Запись…"));
+      voiceMessage(t("ui.recording_c802bab3"));
       drawWaveform(recording, analyser);
       recording.timeout = setTimeout(() => stopDictation(recording), 120_000);
     } catch {
-      endDictation(recording, language(
-        "Could not access the microphone. Check your device and microphone permissions.",
-        "Не удалось открыть микрофон. Проверьте устройство и разрешение на доступ к микрофону.",
-      ), true);
+      endDictation(recording, t("ui.could_not_access_the_microphone_check_your_devic_60f388b4"), true);
     }
   }
   const goalChip = button("", () => {
@@ -2489,8 +2517,8 @@ function draftComposer() {
   const syncPrompt = () => {
     const status = !editor.matches("[data-open], [data-pinned]") && (active?.thinking.textContent || (managerWork &&
       runningLabel(managerWork.item).status));
-    const text = status || (goalMode ? language("Describe the goal…", "Опишите цель…") :
-      language("Write to the project manager…", "Напишите менеджеру проекта…"));
+    const text = status || (goalMode ? t("ui.describe_the_goal_79e3a385") :
+      t("ui.write_to_the_project_manager_49756120"));
     if (prompt.textContent !== text) prompt.textContent = text;
   };
   editor.syncPrompt = syncPrompt;
@@ -2512,44 +2540,44 @@ function draftComposer() {
       send.classList.toggle("primary", !stop);
     }
     send.disabled = stop ? !canStop || stopping : goalMode && !hasDraft();
-    controlLabelForIcon(send, stop ? (waitingForChat ? language("Cancel sending", "Отменить отправку") :
-      language("Stop reply", "Остановить ответ")) : language("Send request", "Отправить запрос"));
+    controlLabelForIcon(send, () => stop ? (waitingForChat ? t("ui.cancel_sending_480e1dd5") :
+      t("ui.stop_reply_fc199c8c")) : t("ui.send_request_b9ccf5ac"));
   };
   editor.localize = () => {
     syncPrompt();
     updatePin();
-    dialogueToggle.textContent = language("Dialogue", "Диалог");
-    unreadDivider.textContent = language("New messages", "Новые сообщения");
-    workToggle.textContent = language("Work activity", "Ход работы");
+    bindLocalized(dialogueToggle, "textContent", () => t("ui.dialogue_e154ab04"));
+    bindLocalized(unreadDivider, "textContent", () => t("ui.new_messages_bb42ec76"));
+    bindLocalized(workToggle, "textContent", () => t("ui.work_activity_e01957b7"));
     work.setAttribute("aria-label", workToggle.textContent);
-    workOlder.textContent = language("Earlier activity", "Более ранние события");
-    goalText.setAttribute("aria-label", language("Goal objective", "Формулировка цели"));
-    saveGoal.textContent = language("Save changes", "Сохранить изменения");
-    pauseGoal.textContent = language("Pause", "Пауза");
-    resumeGoal.textContent = language("Resume", "Возобновить");
-    clearGoal.textContent = language("Clear goal", "Снять цель");
+    bindLocalized(workOlder, "textContent", () => t("ui.earlier_activity_e8606f75"));
+    bindLocalized(goalText, "aria-label", () => t("ui.goal_objective_c057a817"), true);
+    bindLocalized(saveGoal, "textContent", () => t("ui.save_changes_c6c74561"));
+    bindLocalized(pauseGoal, "textContent", () => t("ui.pause_2541bca6"));
+    bindLocalized(resumeGoal, "textContent", () => t("ui.resume_b9681b5e"));
+    bindLocalized(clearGoal, "textContent", () => t("ui.clear_goal_a38efd6d"));
     syncGoal();
-    input.setAttribute("aria-label", language("Message the project manager", "Сообщение менеджеру проекта"));
-    chat.setAttribute("aria-label", language("Project manager chat", "Чат с менеджером проекта"));
-    resize.setAttribute("aria-label", language("Chat height", "Высота чата"));
-    greeting.textContent = language("Ask about the project or discuss what needs to change.", "Спросите о проекте или обсудите, что нужно изменить.");
-    queue.setAttribute("aria-label", language("Message queue", "Очередь сообщений"));
-    olderHistory.textContent = language("Load older messages", "Загрузить предыдущие сообщения");
-    hint.textContent = language("Paste or attach files", "Вставьте или прикрепите файлы") + (api.isMac ? " (⌘V)." : " (Ctrl+V).");
-    controlLabelForIcon(add, language("Add to message", "Добавить к сообщению"));
-    controlLabelForIcon(microphone, language("Voice input", "Голосовой ввод"));
-    controlLabelForIcon(cancelVoice, language("Cancel recording", "Отменить запись"));
-    controlLabelForIcon(stopVoice, language("Stop and transcribe", "Остановить и распознать запись"));
-    menuHeading.textContent = language("Add", "Добавить");
-    pickFiles.lastElementChild.textContent = language("Files", "Файлы");
-    pickTasks.lastElementChild.textContent = language("Tasks", "Задачи");
-    pickGoal.lastElementChild.textContent = goalLabel.textContent = language("Goal mode", "Режим цели");
-    controlLabelForIcon(goalChip, language("Exit goal mode", "Выйти из режима цели"));
-    taskSearch.placeholder = language("Find a task…", "Найти задачу…");
+    bindLocalized(input, "aria-label", () => t("ui.message_the_project_manager_247ec40b"), true);
+    bindLocalized(chat, "aria-label", () => t("ui.project_manager_chat_a425db31"), true);
+    bindLocalized(resize, "aria-label", () => t("ui.chat_height_145da15f"), true);
+    bindLocalized(greeting, "textContent", () => t("ui.ask_about_the_project_or_discuss_what_needs_to_c_b07dfce4"));
+    bindLocalized(queue, "aria-label", () => t("ui.message_queue_e8b641b1"), true);
+    bindLocalized(olderHistory, "textContent", () => t("ui.load_older_messages_72d1e9d5"));
+    bindLocalized(hint, "textContent", () => t("ui.paste_or_attach_files_88444059") + (api.isMac ? " (⌘V)." : " (Ctrl+V)."));
+    controlLabelForIcon(add, () => t("ui.add_to_message_974fafaa"));
+    controlLabelForIcon(microphone, () => t("ui.voice_input_a05b7480"));
+    controlLabelForIcon(cancelVoice, () => t("ui.cancel_recording_4dcdab42"));
+    controlLabelForIcon(stopVoice, () => t("ui.stop_and_transcribe_0b723821"));
+    bindLocalized(menuHeading, "textContent", () => t("ui.add_1e41c69d"));
+    bindLocalized(pickFiles.lastElementChild, "textContent", () => t("ui.files_8f8e0a0c"));
+    bindLocalized(pickTasks.lastElementChild, "textContent", () => t("ui.tasks_ee4354d6"));
+    bindLocalized(pickGoal.lastElementChild, "textContent", () => goalLabel.textContent = t("ui.goal_mode_a3ba3229"));
+    controlLabelForIcon(goalChip, () => t("ui.exit_goal_mode_199fc93b"));
+    bindLocalized(taskSearch, "placeholder", () => t("ui.find_a_task_b0398552"));
     taskSearch.setAttribute("aria-label", taskSearch.placeholder);
-    mentions.setAttribute("aria-label", language("Task suggestions", "Подсказки по задачам"));
+    bindLocalized(mentions, "aria-label", () => t("ui.task_suggestions_3d8854b7"), true);
     syncAction();
-    attachments.setAttribute("aria-label", language("Attachments", "Вложения"));
+    bindLocalized(attachments, "aria-label", () => t("ui.attachments_3b2db3b4"), true);
   };
   editor.localize();
   setGoalMode(false);
@@ -2566,8 +2594,8 @@ function draftComposer() {
     if (question?.id !== next?.id) editor.closeQuestion();
     question = next;
     answer.hidden = !next;
-    answer.textContent = next?.approval ? language("Review access request", "Рассмотреть запрос доступа") :
-      language("Answer the manager", "Ответить менеджеру");
+    bindLocalized(answer, "textContent", () => next?.approval ? t("ui.review_access_request_f6325f6e") :
+      t("ui.answer_the_manager_be5b6afe"));
     if (next && shownQuestionId !== next.id && editor.isConnected) {
       shownQuestionId = next.id;
       openQuestion();
@@ -2603,7 +2631,7 @@ function draftComposer() {
         const tile = file.url ? button("", () => previewImages(images, file), "quiet chat-attachment") :
           element("span", undefined, "chat-attachment");
         if (file.url) {
-          controlLabelForIcon(tile, language("View ", "Просмотреть ") + file.name);
+          controlLabelForIcon(tile, () => t("ui.view_7aa05de3") + file.name);
           const img = element("img");
           img.alt = file.name;
           img.loading = "lazy";
@@ -2623,7 +2651,7 @@ function draftComposer() {
     progress.textContent = text;
     progress.hidden = !text;
   };
-  editor.reviewError = error => message(language("Automatic review was interrupted.", "Авторевью прервалось.") + "\n" + error);
+  editor.reviewError = error => message(t("ui.automatic_review_was_interrupted_2fded29c") + "\n" + error);
   const busy = value => {
     syncPrompt();
     editor.setAttribute("aria-busy", String(value));
@@ -2636,8 +2664,8 @@ function draftComposer() {
     canStop = true;
     syncAction();
   };
-  const thinkingLabel = () => language("Thinking…", "Думаю…");
-  const waitingLabel = () => language("Waiting for the Codex chat to become available…", "Жду освобождения чата Codex…");
+  const thinkingLabel = () => t("ui.thinking_14a886f3");
+  const waitingLabel = () => t("ui.waiting_for_the_codex_chat_to_become_available_ddb2e85f");
   const showActivityStatus = (text, command = false) => {
     const label = active.thinking.firstElementChild;
     if (label.textContent === text && Boolean(label.querySelector(".codicon-terminal")) === command) return;
@@ -2993,27 +3021,27 @@ function draftComposer() {
       const heading = headings.at(-1);
       status = (heading?.[1] ?? heading?.[2])?.trim() || status;
     } else if (running?.type === "agentMessage") {
-      status = language("Writing a reply…", "Пишу ответ…");
+      status = t("ui.writing_a_reply_c232bd87");
     } else if (running?.type === "plan") {
-      status = language("Planning…", "Составляю план…");
+      status = t("ui.planning_d116e766");
     } else if (running?.type === "autoApprovalReview") {
-      status = language("Reviewing access…", "Проверяю доступ…");
+      status = t("ui.reviewing_access_90d4aaaf");
     } else if (running) {
       const kind = activityKind(running);
       const title = (kind === "command" ? readableRunCommand(running.title) : running.title).replace(/\s+/g, " ").trim();
       const labels = {
-        command: ["Running a command…", "Выполняю команду…"],
-        edit: ["Editing files…", "Изменяю файлы…"],
-        image: ["Working with an image…", "Работаю с изображением…"],
-        search: ["Searching the web…", "Ищу в интернете…"],
-        tool: ["Using a tool…", "Использую инструмент…"],
+        command: ["ui.running_a_command_012642be"],
+        edit: ["ui.editing_files_9cbb7893"],
+        image: ["ui.working_with_an_image_a130279c"],
+        search: ["ui.searching_the_web_340a4266"],
+        tool: ["ui.using_a_tool_fb94a28b"],
       };
       const detailed = {
-        command: ["Running ", "Выполняется "],
-        search: ["Searching the web · ", "Поиск в интернете · "],
-        tool: ["Using tool ", "Вызов инструмента "],
+        command: ["ui.running_1d0aaf75"],
+        search: ["ui.searching_the_web_09f32915"],
+        tool: ["ui.using_tool_626395f5"],
       };
-      status = title && detailed[kind] ? language(...detailed[kind]) + title : language(...labels[kind]);
+      status = title && detailed[kind] ? t(...detailed[kind]) + title : t(...labels[kind]);
       command = kind === "command";
     }
     return { status, command };
@@ -3060,16 +3088,16 @@ function draftComposer() {
   function renderQueuedActions(job) {
     const { status } = job;
     status.replaceChildren();
-    if (job.failed) status.append(element("span", language("Not sent", "Не отправлено"), "board-queued-failed"));
-    if (job.failed) status.append(button(language("Retry", "Повторить"), async () => {
+    if (job.failed) status.append(element("span", () => t("ui.not_sent_28bb3764"), "board-queued-failed"));
+    if (job.failed) status.append(button(() => t("ui.retry_553b2066"), async () => {
       await loadHistory()?.catch(() => {});
       if (!queued.includes(job)) return;
       job.failed = false;
       renderQueuedActions(job);
       sendNext();
     }, "quiet"));
-    status.append(button(language("Edit", "Изменить"), () => editQueuedMessage(job), "quiet"));
-    if (!job.goal) status.append(button(language("Send now", "Отправить сейчас"), () => sendQueuedNow(job), "quiet"));
+    status.append(button(() => t("ui.edit_086d59cf"), () => editQueuedMessage(job), "quiet"));
+    if (!job.goal) status.append(button(() => t("ui.send_now_84358b1c"), () => sendQueuedNow(job), "quiet"));
     const remove = button("", async () => {
       if (!queued.includes(job) || job.sending || job.editing) return;
       job.sending = true;
@@ -3089,7 +3117,7 @@ function draftComposer() {
       message("");
       sendNext();
     }, "quiet danger board-queued-remove");
-    controlLabelForIcon(remove, language("Remove", "Удалить"));
+    controlLabelForIcon(remove, () => t("ui.remove_ddae809b"));
     remove.append(icon("trash"));
     status.append(remove);
   }
@@ -3099,7 +3127,7 @@ function draftComposer() {
     job.preview.hidden = true;
     const edit = element("textarea", undefined, "board-queued-edit");
     edit.value = job.draft;
-    edit.setAttribute("aria-label", language("Edit queued message", "Редактировать сообщение в очереди"));
+    bindLocalized(edit, "aria-label", () => t("ui.edit_queued_message_b141f9b1"), true);
     job.status.before(edit);
     let saving = false;
     const finish = async save => {
@@ -3127,8 +3155,8 @@ function draftComposer() {
       sendNext();
       job.status.querySelector("button")?.focus({ preventScroll: true });
     };
-    const saveButton = button(language("Save", "Сохранить"), () => finish(true), "quiet");
-    const cancel = button(language("Cancel", "Отмена"), () => finish(false), "quiet");
+    const saveButton = button(() => t("ui.save_7eea8139"), () => finish(true), "quiet");
+    const cancel = button(() => t("ui.cancel_4c6dcc32"), () => finish(false), "quiet");
     const validate = () => { saveButton.disabled = !edit.value.trim() && (job.goal || !job.submitted.length); };
     edit.addEventListener("input", validate);
     edit.addEventListener("keydown", event => {
@@ -3161,7 +3189,7 @@ function draftComposer() {
     job.sending = true;
     const delivery = { after: turn.lastItem };
     turn.deliveries.set(job.id, delivery);
-    job.status.replaceChildren(element("span", language("Sending…", "Отправляется…")));
+    job.status.replaceChildren(element("span", () => t("ui.sending_15dba7c5")));
     message("");
     try {
       const pasted = await pasteFiles(job.submitted);
@@ -3249,7 +3277,7 @@ function draftComposer() {
     if (disposed || startingWork || managerWork || !next || next.failed || next.editing || next.sending) return;
     startingWork = true;
     next.sending = true;
-    next.status.textContent = language("Starting…", "Запускается…");
+    bindLocalized(next.status, "textContent", () => t("ui.starting_39fd3c7e"));
     syncGoal();
     void (async () => {
       const submitted = await pasteFiles(next.submitted);
@@ -3398,7 +3426,7 @@ function draftComposer() {
     const images = messageFiles.filter(file => file.url);
     if (images.length) {
       const thumbnail = button("", () => previewImages(images, images[0]), "quiet board-queued-thumbnail");
-      controlLabelForIcon(thumbnail, language("View attachments", "Просмотреть вложения") + " · " + images.length);
+      controlLabelForIcon(thumbnail, () => t("ui.view_attachments_8f71404f") + " · " + images.length);
       const image = element("img");
       image.src = images[0].url;
       image.alt = "";
@@ -3419,7 +3447,7 @@ function draftComposer() {
   }
   function addFiles(pasted) {
     if ([...files, ...pasted].reduce((total, file) => total + file.size, 0) > 64 * 1024 * 1024) {
-      message(language("Attachments are limited to 64 MiB per task.", "Лимит вложений на задачу — 64 МиБ."));
+      message(t("ui.attachments_are_limited_to_64_mib_per_task_ae680c16"));
       return;
     }
     message("");
@@ -3438,14 +3466,14 @@ function draftComposer() {
         input.focus();
       }, "quiet");
       remove.append(icon("close"));
-      remove.setAttribute("aria-label", language("Remove ", "Удалить ") + file.name);
+      bindLocalized(remove, "aria-label", () => t("ui.remove_07d1de5b") + file.name, true);
       row.title = file.name;
       if (url) {
         const view = button("", () => {
           const images = files.filter(file => pendingPreviews.has(file)).map(file => ({ name: file.name, url: pendingPreviews.get(file) }));
           previewImages(images, images.find(image => image.url === url));
         }, "quiet board-attachment-preview");
-        controlLabelForIcon(view, language("View ", "Просмотреть ") + file.name);
+        controlLabelForIcon(view, () => t("ui.view_7aa05de3") + file.name);
         const thumbnail = element("img");
         thumbnail.src = url;
         thumbnail.alt = "";
@@ -3500,27 +3528,27 @@ function draftComposer() {
 }
 
 function scheduleDay(weekday) {
-  return new Date(Date.UTC(1970, 0, 4 + weekday)).toLocaleDateString(frame.russian ? "ru" : "en", { weekday: "long", timeZone: "UTC" });
+  return new Date(Date.UTC(1970, 0, 4 + weekday)).toLocaleDateString(localization.locale, { weekday: "long", timeZone: "UTC" });
 }
 
 function scheduleMonth(month, day) {
-  return new Date(Date.UTC(2024, month - 1, day ?? 1)).toLocaleDateString(frame.russian ? "ru" : "en",
+  return new Date(Date.UTC(2024, month - 1, day ?? 1)).toLocaleDateString(localization.locale,
     { month: "long", ...(day === undefined ? {} : { day: "numeric" }), timeZone: "UTC" });
 }
 
 function scheduleInterval(minutes, unitDisplay) {
   const hours = minutes % 60 === 0;
-  return new Intl.NumberFormat(frame.russian ? "ru" : "en", { style: "unit", unit: hours ? "hour" : "minute", unitDisplay })
+  return new Intl.NumberFormat(localization.locale, { style: "unit", unit: hours ? "hour" : "minute", unitDisplay })
     .format(hours ? minutes / 60 : minutes);
 }
 
 function scheduleLabel({ time, weekday, everyMinutes, dayOfMonth, month }) {
-  if (everyMinutes === 60) return language("Every hour", "Каждый час");
-  if (everyMinutes !== undefined) return language("Interval", "Интервал") + " · " + scheduleInterval(everyMinutes, "long");
-  if (month !== undefined) return language("Yearly", "Ежегодно") + " · " + scheduleMonth(month, dayOfMonth) + " · " + time;
-  if (dayOfMonth !== undefined) return language("Monthly", "Ежемесячно") + " · " +
-    language("Day ", "Число ") + dayOfMonth + " · " + time;
-  return (weekday === undefined ? language("Daily", "Ежедневно") : scheduleDay(weekday)) + " · " + time;
+  if (everyMinutes === 60) return t("ui.every_hour_15c9e542");
+  if (everyMinutes !== undefined) return t("ui.interval_e33d1556") + " · " + scheduleInterval(everyMinutes, "long");
+  if (month !== undefined) return t("ui.yearly_8b5f6767") + " · " + scheduleMonth(month, dayOfMonth) + " · " + time;
+  if (dayOfMonth !== undefined) return t("ui.monthly_276a90cb") + " · " +
+    t("ui.day_f258ac8f") + dayOfMonth + " · " + time;
+  return (weekday === undefined ? t("ui.daily_18136c90") : scheduleDay(weekday)) + " · " + time;
 }
 
 function taskEditor(task) {
@@ -3530,32 +3558,32 @@ function taskEditor(task) {
   const today = new Date();
   const mode = !saved ? "none" : every === 60 ? "hourly" : every !== undefined ? (every % 60 === 0 ? "hours" : "minutes") :
     saved.month !== undefined ? "yearly" : saved.dayOfMonth !== undefined ? "monthly" : saved.weekday === undefined ? "daily" : "weekly";
-  const editor = form("editor", language("Edit task", "Редактировать задачу"), [
-    { name: "title", label: language("Title", "Название"), required: true, value: task.title },
-    { name: "description", label: language("Description", "Описание"), type: "area", value: task.description },
-    { name: "criteria", label: language("Acceptance criteria, one per line", "Критерии приёмки, по одному на строку"), type: "area",
+  const editor = form("editor", () => (t("ui.edit_task_9d346400")), [
+    { name: "title", label: () => (t("ui.title_6365986f")), required: true, value: task.title },
+    { name: "description", label: () => (t("ui.description_b4571c10")), type: "area", value: task.description },
+    { name: "criteria", label: () => (t("ui.acceptance_criteria_one_per_line_5b09fa14")), type: "area",
       value: task.criteria.join("\n") },
-    { name: "tags", label: language("Tags, comma separated", "Теги через запятую"), value: task.tags.join(", ") },
-    { name: "priority", label: language("Priority", "Приоритет"), value: task.priority,
+    { name: "tags", label: () => (t("ui.tags_comma_separated_d9e75f27")), value: task.tags.join(", ") },
+    { name: "priority", label: () => (t("ui.priority_b114c9b5")), value: task.priority,
       options: ["low", "normal", "high", "urgent"].map(value => [value, priorityName(value)]) },
-    { name: "dueDate", label: language("Due date", "Срок сдачи"), type: "date", value: task.dueDate ?? "" },
+    { name: "dueDate", label: () => (t("ui.due_date_d764b025")), type: "date", value: task.dueDate ?? "" },
     ...(canSetSchedule ? [
-      { name: "scheduleMode", label: language("Schedule", "Расписание"), value: mode, options: [
-        ["none", language("No schedule", "Без расписания")], ["hourly", language("Every hour", "Каждый час")],
-        ["minutes", language("Every N minutes", "Каждые N минут")], ["hours", language("Every N hours", "Каждые N часов")],
-        ["daily", language("Daily at a set time", "Ежедневно в заданное время")], ["weekly", language("Weekly at a set time", "Еженедельно в заданное время")],
-        ["monthly", language("Monthly", "Ежемесячно")], ["yearly", language("Yearly", "Ежегодно")],
+      { name: "scheduleMode", label: () => (t("ui.schedule_dadf83ce")), value: mode, options: [
+        ["none", t("ui.no_schedule_b2eefabd")], ["hourly", t("ui.every_hour_15c9e542")],
+        ["minutes", t("ui.every_n_minutes_9203a97e")], ["hours", t("ui.every_n_hours_4561039a")],
+        ["daily", t("ui.daily_at_a_set_time_14f74f4e")], ["weekly", t("ui.weekly_at_a_set_time_f22bc85c")],
+        ["monthly", t("ui.monthly_276a90cb")], ["yearly", t("ui.yearly_8b5f6767")],
       ] },
-      { name: "scheduleInterval", label: language("Interval", "Интервал"), type: "number", value: mode === "hours" ? every / 60 : mode === "minutes" ? every : 1 },
-      { name: "scheduleTime", label: language("Local time", "Местное время"), type: "time", value: saved?.time ?? "" },
-      { name: "scheduleDay", label: language("Day of week", "День недели"), value: String(saved?.weekday ?? today.getDay()),
+      { name: "scheduleInterval", label: () => (t("ui.interval_e33d1556")), type: "number", value: mode === "hours" ? every / 60 : mode === "minutes" ? every : 1 },
+      { name: "scheduleTime", label: () => (t("ui.local_time_0e59cd18")), type: "time", value: saved?.time ?? "" },
+      { name: "scheduleDay", label: () => (t("ui.day_of_week_29b15d5a")), value: String(saved?.weekday ?? today.getDay()),
         options: [1, 2, 3, 4, 5, 6, 0].map(day => [String(day), scheduleDay(day)]) },
-      { name: "scheduleMonth", label: language("Month", "Месяц"), value: String(saved?.month ?? today.getMonth() + 1),
+      { name: "scheduleMonth", label: () => (t("ui.month_ac4f9d49")), value: String(saved?.month ?? today.getMonth() + 1),
         options: Array.from({ length: 12 }, (_, index) => [String(index + 1), scheduleMonth(index + 1)]) },
-      { name: "scheduleDate", label: language("Day of month", "Число месяца"), type: "number", value: saved?.dayOfMonth ?? today.getDate() },
+      { name: "scheduleDate", label: () => (t("ui.day_of_month_93059e4b")), type: "number", value: saved?.dayOfMonth ?? today.getDate() },
     ] : []),
-    { name: "note", label: language("Reason for change", "Причина изменения") },
-  ], language("Save", "Сохранить"), async values => {
+    { name: "note", label: () => (t("ui.reason_for_change_148dfb0c")) },
+  ], () => (t("ui.save_7eea8139")), async values => {
     const data = {
       title: values.title, description: values.description, criteria: lineList(values.criteria),
       tags: values.tags.split(",").map(tag => tag.trim()).filter(Boolean), priority: values.priority,
@@ -3604,10 +3632,10 @@ async function editMilestone(task) {
   const generation = projectGeneration;
   const current = task.milestone;
   let repository = frame.board?.gitInfo?.githubRepository;
-  const view = form("milestone", language("GitHub milestone", "Веха GitHub"), [{
-    name: "milestone", label: language("Milestone", "Веха"), value: current ? "current" : "",
-    options: [["", language("No milestone", "Без вехи")], ...(current ? [["current", current.title + " · " + current.repository]] : [])],
-  }], language("Save", "Сохранить"), async values => {
+  const view = form("milestone", () => (t("ui.github_milestone_11d33bfa")), [{
+    name: "milestone", label: () => (t("ui.milestone_82c768da")), value: current ? "current" : "",
+    options: [["", t("ui.no_milestone_e1c29664")], ...(current ? [["current", current.title + " · " + current.repository]] : [])],
+  }], () => (t("ui.save_7eea8139")), async values => {
     if (values.milestone === "current" || (!values.milestone && !current)) return showTask(task.id);
     const milestone = values.milestone ? { repository, number: Number(values.milestone) } : null;
     const saved = await command("milestone", task.id, { revision: task.revision, milestone });
@@ -3619,10 +3647,10 @@ async function editMilestone(task) {
   status.setAttribute("role", "status");
   save.before(status);
   if (!repository) {
-    status.textContent = language("Configure a GitHub origin to choose another milestone.", "Чтобы выбрать другую веху, настройте origin на GitHub.");
+    bindLocalized(status, "textContent", () => t("ui.configure_a_github_origin_to_choose_another_mile_0da284a2"));
     return;
   }
-  status.textContent = language("Loading milestones…", "Загружаю вехи…");
+  bindLocalized(status, "textContent", () => t("ui.loading_milestones_8a984d86"));
   const result = await api.command("milestones").catch(error => ({ ok: false, error }));
   if (!view.isConnected || !sheet.open || projectGeneration !== generation) return;
   if (!result.ok) {
@@ -3630,15 +3658,15 @@ async function editMilestone(task) {
     return;
   }
   repository = result.data.repository;
-  status.textContent = result.data.milestones.length ? repository :
-    language("This repository has no milestones.", "В этом репозитории пока нет вех.");
+  bindLocalized(status, "textContent", () => result.data.milestones.length ? repository :
+    t("ui.this_repository_has_no_milestones_3e24cde2"));
   for (const entry of result.data.milestones) {
     if (current?.repository === repository && current.number === entry.number) {
       select.querySelector('[value="current"]').textContent = entry.title + " · " + repository;
       continue;
     }
-    const closed = entry.state === "closed" ? language(" (closed)", " (закрыта)") : "";
-    select.add(new Option(entry.title + " · #" + entry.number + closed, String(entry.number)));
+    const closed = entry.state === "closed" ? t("ui.closed_e1ef79ba") : "";
+    select.add(localizedOption(entry.title + " · #" + entry.number + closed, String(entry.number)));
   }
 }
 
@@ -3646,15 +3674,15 @@ function editDependencies(task) {
   const dependencies = new Set(task.dependencies ?? []);
   const board = frame.board;
   const entries = [...board.tasks, ...board.archived].filter(candidate => candidate.id !== task.id);
-  const editor = form("dependencies", language("Task dependencies", "Зависимости задачи"), [],
-    language("Save", "Сохранить"), async () => {
+  const editor = form("dependencies", () => (t("ui.task_dependencies_496b3742")), [],
+    () => (t("ui.save_7eea8139")), async () => {
       const saved = await command("update", task.id, {
         dependencies: [...dependencies], revision: task.revision, actor: "user",
       });
       if (saved) await showTask(saved.id);
     });
   const choices = element("fieldset", undefined, "dependency-choices");
-  choices.append(element("legend", language("Complete before starting this task", "Завершить перед запуском задачи")));
+  choices.append(element("legend", () => t("ui.complete_before_starting_this_task_9c7caae7")));
   for (const candidate of entries) {
     const row = element("label", undefined, "dependency-option");
     const checkbox = element("input");
@@ -3667,33 +3695,33 @@ function editDependencies(task) {
     row.append(checkbox, candidate.id + " · " + candidate.title);
     choices.append(row);
   }
-  if (!entries.length) choices.append(element("p", language("No other tasks on this board.", "На доске нет других задач.")));
+  if (!entries.length) choices.append(element("p", () => t("ui.no_other_tasks_on_this_board_6dfc48ad")));
   editor.prepend(choices);
 }
 
 async function editExecution(task) {
-  const title = language("Execution settings", "Параметры запуска");
+  const title = t("ui.execution_settings_aceb50d5");
   openSheet("execution", title);
-  const loading = element("p", language("Loading models…", "Загрузка моделей…"), "muted");
+  const loading = element("p", () => t("ui.loading_models_32c54be2"), "muted");
   body.append(loading);
   const result = await api.executionModels();
   if (!sheet.open || !loading.isConnected) return;
   const models = result.ok ? result.data : [];
   const selected = task.execution?.model ?? "";
-  const defaultLabel = language("Board default", "По умолчанию на доске");
+  const defaultLabel = t("ui.board_default_cdea75f4");
   const canSetDirectory = !task.git && !task.codexThreadId && !task.history.some(event => event.action === "start");
   const modelOptions = [["", defaultLabel], ...models.map(model => [model.id, model.name])];
   if (selected && !models.some(model => model.id === selected)) {
-    modelOptions.push([selected, selected + " · " + language("unavailable", "недоступна")]);
+    modelOptions.push([selected, selected + " · " + t("ui.unavailable_31fb3a55")]);
   }
   const editor = form("execution", title, [
-    { name: "model", label: language("Model", "Модель"), value: selected, options: modelOptions },
-    { name: "effort", label: language("Reasoning effort", "Уровень размышлений"), options: [] },
+    { name: "model", label: () => (t("ui.model_a909c227")), value: selected, options: modelOptions },
+    { name: "effort", label: () => (t("ui.reasoning_effort_cea4174e")), options: [] },
     ...(canSetDirectory ? [{ name: "workingDirectory", value: task.workingDirectory ?? "",
-      label: language("Working directory (empty for a task worktree)", "Рабочая папка (пустое поле для отдельного worktree)") }] : []),
-  ], language("Save", "Сохранить"), async ({ model, effort, workingDirectory }) => {
+      label: () => (t("ui.working_directory_empty_for_a_task_worktree_e8790ed1")) }] : []),
+  ], () => (t("ui.save_7eea8139")), async ({ model, effort, workingDirectory }) => {
     if (model && !models.some(entry => entry.id === model)) {
-      notice(language("Choose an available model.", "Выберите доступную модель."));
+      notice(t("ui.choose_an_available_model_216af4d4"));
       return;
     }
     const saved = await command("update", task.id, {
@@ -3706,8 +3734,8 @@ async function editExecution(task) {
   const [model, effort] = editor.querySelectorAll("select");
   function setEfforts(value) {
     const available = models.find(entry => entry.id === model.value)?.efforts ?? [];
-    effort.replaceChildren(new Option(language("Provider default", "По умолчанию у провайдера"), ""),
-      ...available.map(value => new Option(value, value)));
+    effort.replaceChildren(localizedOption(t("ui.provider_default_69f2d8eb"), ""),
+      ...available.map(value => localizedOption(value, value)));
     effort.disabled = !available.length;
     if (available.includes(value)) effort.value = value;
   }
@@ -3718,26 +3746,23 @@ async function editExecution(task) {
 
 function editTaskAccess(task) {
   const project = frame.project;
-  const title = language("Executor access", "Доступ исполнителя");
+  const title = t("ui.executor_access_7d02bf31");
   const editor = form("task-access", title, [{
-    name: "mode", label: language("Mode", "Режим"), value: task.executorFullAccess ? "full" : "auto",
-    options: [["auto", language("Approve for me", "Подтверждать за меня")], ["full", language("Full access", "Полный доступ")]],
-  }], language("Save", "Сохранить"), async ({ mode }) => {
+    name: "mode", label: () => (t("ui.mode_45d0aa30")), value: task.executorFullAccess ? "full" : "auto",
+    options: [["auto", t("ui.approve_for_me_64ade20f")], ["full", t("ui.full_access_47d69a72")]],
+  }], () => (t("ui.save_7eea8139")), async ({ mode }) => {
     const result = await api.setTaskAccess(project, task.id, task.createdAt, mode === "full");
     if (frame.project !== project || sheetKind !== "task-access" || !editor.isConnected) return;
     if (result.ok) await showTask(task.id);
     else notice(boardError(result.error));
   });
-  editor.prepend(element("p", language(
-    "Full access runs commands with your operating-system permissions. The selection applies on the next start or resume.",
-    "При полном доступе команды выполняются с вашими правами в системе. Режим применяется при следующем запуске или возобновлении."
-  ), "muted"));
+  editor.prepend(element("p", () => t("ui.full_access_runs_commands_with_your_operating_sy_49e76291"), "muted"));
 }
 
 function editTaskTags(task) {
-  const editor = form("task-tags", language("Edit tags", "Изменить теги") + " · " + task.id, [
-    { name: "tags", label: language("Tags, comma separated", "Теги через запятую"), value: task.tags.join(", ") },
-  ], language("Save", "Сохранить"), async ({ tags }) => {
+  const editor = form("task-tags", () => (t("ui.edit_tags_fe276cc0") + " · " + task.id), [
+    { name: "tags", label: () => (t("ui.tags_comma_separated_d9e75f27")), value: task.tags.join(", ") },
+  ], () => (t("ui.save_7eea8139")), async ({ tags }) => {
     const saved = await command("tag-assign", task.id, {
       tags: tags.split(",").map(tag => tag.trim()).filter(Boolean), revision: task.revision,
     });
@@ -3753,7 +3778,7 @@ function openTaskSheet(task) {
   renderAgentRunStatus(runStatus, task);
   byId("sheet-title").append(runStatus);
   const lane = lanes.find(([state]) => state === task.status);
-  const status = lane ? language(lane[1], lane[2]) : task.status;
+  const status = lane ? t(lane[1]) : task.status;
   const metadata = [status, task.priority && priorityName(task.priority), task.updatedAt && shortDate(task.updatedAt)].filter(Boolean);
   if (metadata.length) body.append(element("p", metadata.join(" · "), "muted"));
 }
@@ -3769,7 +3794,7 @@ async function showTask(id) {
     taskInSheet = undefined;
     openTaskSheet(preview);
     taskDescription(preview.description, id);
-    loading = element("p", language("Loading task details…", "Загружаю детали задачи…"), "muted");
+    loading = element("p", () => t("ui.loading_task_details_35f0b01e"), "muted");
     loading.setAttribute("role", "status");
     body.append(loading);
     body.scrollTop = 0;
@@ -3779,7 +3804,7 @@ async function showTask(id) {
   if (!result.ok) {
     notice(boardError(result.error));
     if (loading) {
-      loading.replaceWith(button(language("Retry loading", "Повторить загрузку"), () => showTask(id)));
+      loading.replaceWith(button(() => t("ui.retry_loading_d44dbc69"), () => showTask(id)));
     }
     return;
   }
@@ -3791,9 +3816,9 @@ async function showTask(id) {
   taskInSheet = task;
   openTaskSheet(task);
   if (task.status === "blocked" && task.blocked) body.append(blockerBanner(task.blocked));
-  if (task.executorFullAccess) body.append(element("p", language("Launch mode: Full access", "Режим запуска: полный доступ"), "task-state-label"));
+  if (task.executorFullAccess) body.append(element("p", () => t("ui.launch_mode_full_access_ed7fe948"), "task-state-label"));
   if (task.status === "done" && task.cleanupAvailable) {
-    body.append(element("p", language("Accepted · worktree retained", "Принято · рабочая копия сохранена"), "muted"));
+    body.append(element("p", () => t("ui.accepted_worktree_retained_77cfc2d0"), "muted"));
   }
   savedChangesSection(task, task.savedChanges);
   if (task.tags.length) {
@@ -3804,46 +3829,46 @@ async function showTask(id) {
   }
   if (task.milestone) {
     const { repository, number, title } = task.milestone;
-    body.append(button(language("GitHub milestone", "Веха GitHub") + " · " + title,
+    body.append(button(() => t("ui.github_milestone_11d33bfa") + " · " + title,
       () => api.openLink("https://github.com/" + repository + "/milestone/" + number), "quiet task-milestone-link"));
   }
   taskDescription(task.description, id);
   body.querySelectorAll(".task-description-details").forEach((details, index) => {
     details.open = descriptionOpen[index] ?? false;
   });
-  section(language("Acceptance criteria", "Критерии приёмки"), task.criteria);
+  section(() => (t("ui.acceptance_criteria_7e3779c2")), task.criteria);
   const stateLabel = (done, text) => {
     const label = element("div", undefined, "task-state-label");
     const state = icon(done ? "check" : "circle");
     state.removeAttribute("aria-hidden");
     state.setAttribute("role", "img");
-    state.setAttribute("aria-label", done ? language("Completed", "Выполнено") : language("Pending", "Ожидает"));
+    bindLocalized(state, "aria-label", () => done ? t("ui.completed_a863c619") : t("ui.pending_f3563d6f"), true);
     label.append(state, chatText(text));
     return label;
   };
-  section(language("Subtasks", "Подзадачи"), task.subtasks.map(item => stateLabel(item.done, item.title)));
-  if (task.status === "in_progress") section(language("Submission", "Сдача"), language("Result not submitted", "Результат не сдан"));
-  section(language("Progress", "Ход работы"), task.summary);
-  section(language("Next step", "Следующий шаг"), task.nextStep);
+  section(() => (t("ui.subtasks_b409bda5")), task.subtasks.map(item => stateLabel(item.done, item.title)));
+  if (task.status === "in_progress") section(() => (t("ui.submission_1577a02d")), t("ui.result_not_submitted_61369662"));
+  section(() => (t("ui.progress_d4dff843")), task.summary);
+  section(() => (t("ui.next_step_09895a4d")), task.nextStep);
   if (task.dependencies?.length) {
     const waiting = new Set(task.unfinishedDependencies);
     const names = new Map([...(frame.board?.tasks ?? []), ...(frame.board?.archived ?? [])]
       .map(entry => [entry.id, entry.title]));
-    const label = waiting.size ? language("Blocked by dependencies", "Заблокировано зависимостями") :
-      language("Task dependencies", "Зависимости задачи");
+    const label = waiting.size ? t("ui.blocked_by_dependencies_07f97df3") :
+      t("ui.task_dependencies_496b3742");
     section(label, task.dependencies.map(id => stateLabel(!waiting.has(id),
       id + (names.has(id) ? " · " + names.get(id) : ""))));
   }
   if (task.execution) {
-    section(language("Execution settings", "Параметры запуска"), task.execution.model + " · " +
-      (task.execution.effort ?? language("Provider default", "По умолчанию у провайдера")));
+    section(() => (t("ui.execution_settings_aceb50d5")), task.execution.model + " · " +
+      (task.execution.effort ?? t("ui.provider_default_69f2d8eb")));
   }
   if (task.schedule) {
     const schedule = [scheduleLabel(task.schedule)];
     if (task.status === "ready" && !task.unfinishedDependencies?.length) {
-      schedule.push(language("Next run", "Следующий запуск") + " · " + shortDate(task.schedule.nextAt));
+      schedule.push(t("ui.next_run_c1b8ce6d") + " · " + shortDate(task.schedule.nextAt));
     }
-    section(language("Schedule", "Расписание"), schedule);
+    section(() => (t("ui.schedule_dadf83ce")), schedule);
   }
   showSubmissionResult(task.result);
   showTaskArtifacts(task, body, openDetails.has("task-review-files"));
@@ -3853,14 +3878,14 @@ async function showTask(id) {
     const previous = selectedCover(task, images)?.file ?? "";
     if ((images.length > 1 || (images.length === 1 && !previous)) && !frame.board?.archived.some(entry => entry.id === task.id)) {
       const label = element("label", undefined, "task-cover-setting");
-      label.append(element("span", language("Card cover", "Превью карточки")));
+      label.append(element("span", () => t("ui.card_cover_43d5cce6")));
       const picker = element("select");
       if (!previous) {
-        const none = new Option(language("No cover", "Без превью"), "");
+        const none = localizedOption(t("ui.no_cover_9544aee1"), "");
         none.disabled = true;
         picker.append(none);
       }
-      picker.append(...images.map(file => new Option(file.name, file.file)));
+      picker.append(...images.map(file => localizedOption(file.name, file.file)));
       picker.value = previous;
       picker.addEventListener("change", protect(async () => {
         picker.disabled = true;
@@ -3887,44 +3912,44 @@ async function showTask(id) {
     const result = await command(name, task.id, { revision: task.revision, ...input });
     if (result) await showTask(task.id);
   };
-  if (task.status === "draft") actions.append(button(language("Approve", "Утвердить"), () => act("approve"), "primary"));
+  if (task.status === "draft") actions.append(button(() => t("ui.approve_535c27a7"), () => act("approve"), "primary"));
   if (!frame.board?.archived.some(entry => entry.id === task.id) && (task.milestone || frame.board?.gitInfo?.githubRepository)) {
-    actions.append(button(language("Milestone…", "Веха…"), () => editMilestone(task)));
+    actions.append(button(() => t("ui.milestone_3df16b83"), () => editMilestone(task)));
   }
-  if (task.status === "ready") actions.append(button(language("Return to draft", "Вернуть в черновик"), () => act("return-to-draft")));
+  if (task.status === "ready") actions.append(button(() => t("ui.return_to_draft_ccd17679"), () => act("return-to-draft")));
   if (["draft", "ready"].includes(task.status)) {
-    actions.append(button(language("Dependencies…", "Зависимости…"), () => editDependencies(task)));
-    actions.append(button(language("Execution settings…", "Параметры запуска…"), () => editExecution(task)));
+    actions.append(button(() => t("ui.dependencies_bbf4859b"), () => editDependencies(task)));
+    actions.append(button(() => t("ui.execution_settings_c1ef196e"), () => editExecution(task)));
   }
   if (!["done", "cancelled"].includes(task.status) && !frame.runningTasks?.includes(task.id)) {
-    actions.append(button(language("Executor access…", "Доступ исполнителя…"), () => editTaskAccess(task)));
+    actions.append(button(() => t("ui.executor_access_4c93bc80"), () => editTaskAccess(task)));
   }
   if (task.workingDirectory) {
     const directory = element("section", undefined, "sheet-section");
-    const location = element("p", language("Working directory", "Рабочая папка") + " · ");
+    const location = element("p", () => t("ui.working_directory_b37ab351") + " · ");
     location.append(element("code", task.workingDirectory));
     directory.append(location);
     body.append(directory);
   }
   if (task.status === "review") {
     const reviewLabel = task.result?.noChanges
-      ? language("Review result", "Проверить результат")
-      : language("Review changes", "Проверить изменения");
+      ? t("ui.review_result_74026356")
+      : t("ui.review_changes_da4882b7");
     actions.append(button(reviewLabel, () => showReview(task), "primary"));
-    actions.append(button(language("Request changes", "Вернуть на доработку"), () => noteTask(task, "request-changes")));
+    actions.append(button(() => t("ui.request_changes_d5a65360"), () => noteTask(task, "request-changes")));
   }
-  if (task.git?.worktree) actions.append(button(language("Open worktree", "Открыть worktree"), async () => {
+  if (task.git?.worktree) actions.append(button(() => t("ui.open_worktree_c2f75966"), async () => {
     const result = await api.openWorktree(task.id);
     if (!result.ok) notice(boardError(result.error));
   }));
   if (["done", "cancelled"].includes(task.status)) {
-    actions.append(button(language("Edit tags", "Изменить теги"), () => editTaskTags(task)));
+    actions.append(button(() => t("ui.edit_tags_fe276cc0"), () => editTaskTags(task)));
     if (task.cleanupAvailable) {
-      actions.append(button(language("Worktree cleanup…", "Уборка рабочей копии…"), () => showCleanup(task)));
+      actions.append(button(() => t("ui.worktree_cleanup_2ecfc375"), () => showCleanup(task)));
     }
   } else {
-    actions.append(button(language("Edit", "Редактировать"), () => taskEditor(task)));
-    actions.append(button(language("Cancel task", "Отменить задачу"), () => noteTask(task, "cancel"), "danger"));
+    actions.append(button(() => t("ui.edit_c25be9fb"), () => taskEditor(task)));
+    actions.append(button(() => t("ui.cancel_task_e9e056a5"), () => noteTask(task, "cancel"), "danger"));
   }
   const codexAction = codexTaskAction(task);
   if (codexAction) actions.append(codexAction);
@@ -3955,20 +3980,20 @@ function taskDetails(id, title, hint, open) {
 
 function showTaskArtifacts(task, target = body, open = false) {
   if (!task.artifacts?.length) return;
-  const count = activityCount(task.artifacts.length, ["file", "files"], ["файл", "файла", "файлов"]);
-  const area = taskDetails("task-review-files", language("Review materials", "Материалы проверки"), count, open);
+  const count = () => activityCount(task.artifacts.length, "file");
+  const area = taskDetails("task-review-files", () => t("ui.review_materials_92f4029c"), count, open);
   const content = element("div", undefined, "task-details-content");
   const groups = [
-    [/\.(?:json|xml|html?|md|txt)$/i, language("Reports and documents", "Отчёты и документы")],
-    [/\.(?:log|out)$/i, language("Logs", "Журналы")],
-    [/\.(?:ps1|sh|bat|cmd|py|mjs|js)$/i, language("Scripts", "Скрипты")],
-    [/\.(?:sha256|sha512|sha1|md5)$/i, language("Checksums", "Контрольные суммы")],
-    [/.*/, language("Other files", "Другие файлы")],
+    [/\.(?:json|xml|html?|md|txt)$/i, t("ui.reports_and_documents_5658d1c1")],
+    [/\.(?:log|out)$/i, t("ui.logs_c537772c")],
+    [/\.(?:ps1|sh|bat|cmd|py|mjs|js)$/i, t("ui.scripts_7464d20e")],
+    [/\.(?:sha256|sha512|sha1|md5)$/i, t("ui.checksums_7770b10e")],
+    [/.*/, t("ui.other_files_27b7b593")],
   ];
   const entries = task.artifacts.map(artifact => ({ ...artifact, name: artifact.source.split(/[\\/]/).at(-1) }));
   const byName = Map.groupBy(entries, entry => entry.name);
   const byGroup = Map.groupBy(entries, entry => groups.find(([pattern]) => pattern.test(entry.name)));
-  const reveal = language("Show in folder", "Показать в папке");
+  const reveal = t("ui.show_in_folder_b28477b9");
   for (const group of groups) {
     const files = byGroup.get(group);
     if (!files) continue;
@@ -3999,14 +4024,14 @@ function showTaskArtifacts(task, target = body, open = false) {
 }
 
 function showTaskGit(git, open) {
-  const area = taskDetails("task-git", language("Git details", "Сведения Git"),
+  const area = taskDetails("task-git", t("ui.git_details_fba72c7b"),
     git.target?.replace(/^refs\/heads\//, ""), open);
   const info = element("dl", undefined, "task-details-content task-git-info");
   const fields = [
-    [language("Target branch", "Целевая ветка"), git.target],
-    [language("Task worktree", "Рабочая копия задачи"), git.worktree],
-    [language("Submitted commit", "Сданный коммит"), git.submission?.sha],
-    [language("Acceptance commit", "Коммит приёмки"), git.accepted],
+    [t("ui.target_branch_ee9809a9"), git.target],
+    [t("ui.task_worktree_59613a98"), git.worktree],
+    [t("ui.submitted_commit_7227319d"), git.submission?.sha],
+    [t("ui.acceptance_commit_6a6295e9"), git.accepted],
   ];
   for (const [label, value] of fields) {
     if (!value) continue;
@@ -4027,11 +4052,10 @@ async function showCleanup(task, draft = "", error) {
   if (!status.pending) return showTask(task.id);
   const fields = task.status === "done" && status.path ? [{
     name: "artifacts", type: "area", value: draft,
-    label: language("Temporary evidence files to clear with the worktree (one relative path per line)",
-      "Временные файлы проверки для уборки (один относительный путь на строку)"),
+    label: () => (t("ui.temporary_evidence_files_to_clear_with_the_workt_b473f6a7")),
   }] : [];
-  const editor = form("cleanup", language("Worktree cleanup", "Уборка рабочей копии"), fields,
-    language("Retry cleanup", "Повторить уборку"), async ({ artifacts }) => {
+  const editor = form("cleanup", () => (t("ui.worktree_cleanup_61a92196")), fields,
+    () => (t("ui.retry_cleanup_89298d2d")), async ({ artifacts }) => {
       const paths = artifacts?.split("\n").map(path => path.trim()).filter(Boolean);
       const result = await api.command("cleanup", task.id, paths?.length ? { artifacts: paths } : {});
       if (generation !== projectGeneration || taskInSheet?.id !== task.id || sheetKind !== "cleanup" || !sheet.open) return;
@@ -4041,10 +4065,9 @@ async function showCleanup(task, draft = "", error) {
   const summary = element("section", undefined, "sheet-section");
   if (status.path) summary.append(element("p", status.path, "muted"));
   const reasons = {
-    DIRTY_WORKTREE: language("Local files or changes are keeping this worktree in place.",
-      "Рабочая копия сохранена из-за локальных файлов или изменений."),
-    WORKTREE_LOCKED: language("The worktree is locked.", "Рабочая копия заблокирована."),
-    TASK_BRANCH_CHANGED: language("The task branch changed after submission.", "Ветка задачи изменилась после сдачи."),
+    DIRTY_WORKTREE: t("ui.local_files_or_changes_are_keeping_this_worktree_9892164a"),
+    WORKTREE_LOCKED: t("ui.the_worktree_is_locked_7b7495cc"),
+    TASK_BRANCH_CHANGED: t("ui.the_task_branch_changed_after_submission_a60cbafe"),
   };
   if (reasons[status.reason]) summary.append(element("p", reasons[status.reason]));
   if (status.entries.length) summary.append(element("pre", status.entries.join("\n")));
@@ -4063,9 +4086,9 @@ function taskAttachmentButton(id, attachment, kind) {
 
 function noteTask(task, action) {
   const comment = action === "comment";
-  form("note", comment ? language("Add comment", "Добавить комментарий") : language("Reason", "Причина"), [
-    { name: "note", label: comment ? language("Comment", "Комментарий") : language("Reason", "Причина"), type: "area", required: true },
-  ], language("Save", "Сохранить"), async ({ note }) => {
+  form("note", () => (comment ? t("ui.add_comment_9058117e") : t("ui.reason_927778b8")), [
+    { name: "note", label: () => (comment ? t("ui.comment_15031549") : t("ui.reason_927778b8")), type: "area", required: true },
+  ], () => (t("ui.save_7eea8139")), async ({ note }) => {
     const saved = await command(action, task.id, {
       revision: task.revision, actor: "user", [comment ? "text" : "reason"]: note,
     });
@@ -4076,9 +4099,9 @@ function noteTask(task, action) {
 function savedChangesSection(task, saved, pending = false) {
   if (!saved) return;
   const area = element("section", undefined, "sheet-section");
-  area.append(element("h3", language("Saved local changes", "Сохранённые локальные правки")));
+  area.append(element("h3", () => t("ui.saved_local_changes_3b78b116")));
   if (saved.restored) {
-    area.append(element("p", language("Restored to ", "Восстановлены в папке ") + saved.restored.path));
+    area.append(element("p", () => t("ui.restored_to_a90084ee") + saved.restored.path));
   } else {
     const restore = async destination => {
       const result = await command("restore-changes", task.id, { revision: task.revision, destination });
@@ -4087,9 +4110,9 @@ function savedChangesSection(task, saved, pending = false) {
     const actions = element("div", undefined, "sheet-actions");
     if (!pending) {
       const target = task.git.target.replace(/^refs\/heads\//, "");
-      actions.append(button(language("Restore in ", "Восстановить в ") + target, () => restore("target")));
+      actions.append(button(() => t("ui.restore_in_15dbe6f3") + target, () => restore("target")));
     }
-    actions.append(button(language("Restore in a separate worktree", "Восстановить в отдельной рабочей копии"), () => restore("worktree")));
+    actions.append(button(() => t("ui.restore_in_a_separate_worktree_194c39a7"), () => restore("worktree")));
     area.append(actions);
   }
   body.append(area);
@@ -4100,8 +4123,7 @@ async function showAcceptedTask(task) {
   const messages = [];
   if (task.localChangesWarning) messages.push(boardError(task.localChangesWarning));
   if (task.cleanupWarning && taskInSheet?.id === task.id && taskInSheet.cleanupAvailable) {
-    messages.push(language("The task was accepted. Automatic cleanup is pending.",
-      "Задача принята. Автоматическая уборка пока не завершена.") + "\n" + boardError(task.cleanupWarning));
+    messages.push(t("ui.the_task_was_accepted_automatic_cleanup_is_pendi_da527ab7") + "\n" + boardError(task.cleanupWarning));
   }
   if (messages.length) notice(messages.join("\n"));
 }
@@ -4112,26 +4134,26 @@ async function showReview(task, messageDraft, acceptanceError) {
   if (!review || generation !== projectGeneration) return;
   task = { ...task, revision: review.revision };
   if (review.noChanges) {
-    const editor = form("review", language("Review result", "Проверка результата"), [], language("Accept", "Принять"), async () => {
+    const editor = form("review", () => (t("ui.review_result_29ed25fb")), [], () => (t("ui.accept_e596557e")), async () => {
       const accepted = await command("accept", task.id, { revision: review.revision });
       if (accepted && generation === projectGeneration) await showAcceptedTask(accepted);
     });
-    section(language("Acceptance criteria", "Критерии приёмки"), task.criteria);
+    section(() => (t("ui.acceptance_criteria_7e3779c2")), task.criteria);
     showSubmissionResult(review.result);
     showTaskArtifacts(task);
-    body.prepend(element("p", language("Submitted without Git changes.", "Сдано без изменений в Git."), "muted"));
+    body.prepend(element("p", () => t("ui.submitted_without_git_changes_f0133a15"), "muted"));
     body.append(editor);
     if (review.stale) {
-      notice(language("The task worktree changed. Submit it again.", "Рабочая копия изменилась. Сдайте задачу повторно."));
+      notice(t("ui.the_task_worktree_changed_submit_it_again_6605626c"));
       editor.querySelector("button[type=submit]").disabled = true;
     }
     return;
   }
   const local = review.localChanges;
-  const editor = form("review", language("Review changes", "Проверка изменений"), [
-    { name: "message", label: language("Acceptance commit message", "Сообщение коммита приёмки"), type: "area",
+  const editor = form("review", () => (t("ui.review_changes_07438d12")), [
+    { name: "message", label: () => (t("ui.acceptance_commit_message_dea3218b")), type: "area",
       value: messageDraft ?? review.message, required: true },
-  ], language("Accept", "Принять"), async ({ message }) => {
+  ], () => (t("ui.accept_e596557e")), async ({ message }) => {
     const result = await api.command("accept", task.id, {
       revision: task.revision, targetHead: review.targetHead, message,
     });
@@ -4140,7 +4162,7 @@ async function showReview(task, messageDraft, acceptanceError) {
       await showAcceptedTask(result.data);
     } else {
       if (sheetKind === "review" && taskInSheet?.id === task.id) await showReview(task, message, result.error);
-      else notice(boardError(result.error), [language("Accepting task", "Приёмка задачи"), task.id, projectName()].join(" · "));
+      else notice(boardError(result.error), [t("ui.accepting_task_39473c27"), task.id, projectName()].join(" · "));
     }
   });
   const diff = renderReviewDiff(review.diff);
@@ -4153,17 +4175,16 @@ async function showReview(task, messageDraft, acceptanceError) {
   if (local && !review.pending) {
     const overlap = new Set(local.overlaps);
     const changes = element("section", undefined, "sheet-section");
-    changes.append(element("h3", language("Local changes in the target worktree", "Локальные правки в целевой копии")));
+    changes.append(element("h3", () => t("ui.local_changes_in_the_target_worktree_6c472a81")));
     changes.append(element("p", local.path, "muted"));
     const list = element("ul");
     for (const path of local.paths) {
-      list.append(element("li", path + (overlap.has(path) ? language(" (also changed by the task)", " (затронут задачей)") : "")));
+      list.append(element("li", () => path + (overlap.has(path) ? t("ui.also_changed_by_the_task_f67b08b8") : "")));
     }
     changes.append(list);
-    changes.append(element("p", local.token
-      ? language("Your local changes will remain in the worktree after acceptance.",
-        "После приёмки локальные правки останутся в рабочей копии.")
-      : language("The current Git state prevents automatic preservation.", "Текущее состояние Git мешает автоматически сохранить правки.")));
+    changes.append(element("p", () => local.token
+      ? t("ui.your_local_changes_will_remain_in_the_worktree_a_3fea9d42")
+      : t("ui.the_current_git_state_prevents_automatic_preserv_a9fb58c6")));
     editor.before(changes);
     if (!local.token) editor.querySelector("button[type=submit]").disabled = true;
   }
@@ -4173,25 +4194,24 @@ async function showReview(task, messageDraft, acceptanceError) {
   if (conflict) {
     const input = JSON.stringify({ revision: task.revision, resolveConflicts: true });
     const prompt = [
-      language("Resolve conflicts in task ", "Разреши конфликты в задаче ") + task.id + ".",
-      language("Use AI Taskboard ", "Вызови команду AI Taskboard ") + "start " + task.id + " --stdin " +
-        language("with JSON input ", "с JSON на stdin ") + input + ".",
-      language("Resolve the conflicts in the task worktree, run the checks and resubmit for review.",
-        "Разреши конфликты в рабочей копии задачи, выполни проверки и повторно сдай результат."),
+      t("ui.resolve_conflicts_in_task_ff6b0c1e") + task.id + ".",
+      t("ui.use_ai_taskboard_c846ccf1") + "start " + task.id + " --stdin " +
+        t("ui.with_json_input_e1a266ab") + input + ".",
+      t("ui.resolve_the_conflicts_in_the_task_worktree_run_t_20e7434e"),
     ].join("\n");
-    body.append(button(language("Copy request for agent", "Скопировать запрос для агента"), async () => {
+    body.append(button(() => t("ui.copy_request_for_agent_867df7ad"), async () => {
       await navigator.clipboard.writeText(prompt);
-      notice(language("Request copied.", "Запрос скопирован."));
+      notice(t("ui.request_copied_6c774d2f"));
     }));
   }
   if (review.stale && !review.pending) {
-    notice(language("The task worktree changed. Submit it again.", "Рабочая копия изменилась. Сдайте задачу повторно."));
+    notice(t("ui.the_task_worktree_changed_submit_it_again_6605626c"));
     body.querySelector("button[type=submit]").disabled = true;
   } else if (conflict || acceptanceError) notice(boardError(conflict ?? acceptanceError));
-  body.append(button(language("Use an existing acceptance commit", "Указать существующий коммит приёмки"), () => {
-    form("review", language("Existing acceptance commit", "Существующий коммит приёмки"), [
-      { name: "commit", label: language("Full commit SHA", "Полный SHA коммита"), required: true },
-    ], language("Verify and accept", "Проверить и принять"), async ({ commit }) => {
+  body.append(button(() => t("ui.use_an_existing_acceptance_commit_90cb1c90"), () => {
+    form("review", () => (t("ui.existing_acceptance_commit_d9e22415")), [
+      { name: "commit", label: () => (t("ui.full_commit_sha_79b43d04")), required: true },
+    ], () => (t("ui.verify_and_accept_541b58d4")), async ({ commit }) => {
       const accepted = await command("accept", task.id, { revision: task.revision, commit });
       if (accepted) await showAcceptedTask(accepted);
     });
@@ -4201,17 +4221,17 @@ async function showReview(task, messageDraft, acceptanceError) {
 
 function codexSettings() {
   const section = element("section", undefined, "provider-panel");
-  section.append(element("h3", language("Codex model provider", "Провайдер моделей Codex")));
-  const status = element("p", language("Checking Codex…", "Проверяем Codex…"), "muted");
+  section.append(element("h3", () => t("ui.codex_model_provider_f3e6e4a2")));
+  const status = element("p", () => t("ui.checking_codex_cd8163c2"), "muted");
   status.setAttribute("role", "status");
   const details = element("p", undefined, "muted");
   const actions = element("div", undefined, "sheet-actions");
-  const choose = button(language("Choose executable…", "Выбрать файл…"), () => update(api.chooseCodex));
-  const auto = button(language("Detect automatically", "Найти автоматически"), () => update(api.autoDetectCodex));
-  const refresh = button(language("Refresh status", "Обновить статус"), () => update(api.codexStatus));
-  const sandboxLabel = element("label", language("Windows sandbox", "Песочница Windows"));
+  const choose = button(() => t("ui.choose_executable_f8497481"), () => update(api.chooseCodex));
+  const auto = button(() => t("ui.detect_automatically_5e0e5b8a"), () => update(api.autoDetectCodex));
+  const refresh = button(() => t("ui.refresh_status_33d6f5e4"), () => update(api.codexStatus));
+  const sandboxLabel = element("label", () => t("ui.windows_sandbox_cf9271b6"));
   const sandbox = element("select");
-  sandbox.append(new Option("MXC", "mxc"), new Option("Elevated", "elevated"));
+  sandbox.append(localizedOption("MXC", "mxc"), localizedOption("Elevated", "elevated"));
   sandboxLabel.append(sandbox);
   sandboxLabel.hidden = true;
   sandbox.addEventListener("change", () => update(() => api.setCodexWindowsSandbox(sandbox.value)));
@@ -4223,13 +4243,13 @@ function codexSettings() {
   async function update(load) {
     for (const item of actions.children) item.disabled = true;
     sandbox.disabled = true;
-    status.textContent = language("Checking Codex…", "Проверяем Codex…");
+    bindLocalized(status, "textContent", () => t("ui.checking_codex_cd8163c2"));
     try {
       const result = await load();
       const messages = {
-        unavailable: language("Codex with App Server support was not found.", "Codex с поддержкой App Server не найден."),
-        ready: language("Codex executable found.", "Исполняемый файл Codex найден."),
-        error: language("Could not check Codex.", "Не удалось проверить Codex."),
+        unavailable: t("ui.codex_with_app_server_support_was_not_found_26b78d67"),
+        ready: t("ui.codex_executable_found_e0939b8c"),
+        error: t("ui.could_not_check_codex_a3675ed8"),
       };
       status.textContent = messages[result.state] || messages.error;
       details.textContent = [result.clientPath ?? result.selectedPath, result.clientVersion ? "Codex " + result.clientVersion : "",
@@ -4238,7 +4258,7 @@ function codexSettings() {
       savedSandbox = result.windowsSandbox;
       sandboxLabel.hidden = !savedSandbox;
     } catch (error) {
-      status.textContent = language("Could not check Codex.", "Не удалось проверить Codex.");
+      bindLocalized(status, "textContent", () => t("ui.could_not_check_codex_a3675ed8"));
       details.textContent = error.message;
     } finally {
       for (const item of actions.children) item.disabled = false;
@@ -4282,10 +4302,10 @@ function renderTagSettings(panel) {
   const add = element("form", undefined, "tag-create");
   const name = element("input");
   name.required = true;
-  name.placeholder = language("Tag name", "Название тега");
+  bindLocalized(name, "placeholder", () => t("ui.tag_name_931e4e21"));
   name.setAttribute("aria-label", name.placeholder);
-  const color = tagColorInput("#6747A9", language("New tag color", "Цвет нового тега"));
-  const submit = element("button", language("Add tag", "Добавить тег"), "button");
+  const color = tagColorInput("#6747A9", t("ui.new_tag_color_c25b655d"));
+  const submit = element("button", () => t("ui.add_tag_19f3b654"), "button");
   submit.type = "submit";
   add.append(name, color.control, submit);
   add.addEventListener("submit", event => {
@@ -4297,7 +4317,7 @@ function renderTagSettings(panel) {
       } finally { submit.disabled = false; }
     })();
   });
-  panel.replaceChildren(element("h3", language("Board tags", "Теги доски")), add);
+  panel.replaceChildren(element("h3", () => t("ui.board_tags_3fd0e833")), add);
   const tags = [...boardTags.values()].sort((a, b) => a.name.localeCompare(b.name));
   for (const tag of tags) {
     const row = element("div", undefined, "tag-setting");
@@ -4324,21 +4344,20 @@ function renderTagSettings(panel) {
 
 function settings() {
   const roles = [
-    ["executor", language("Executors", "Исполнители")],
-    ["manager", language("Manager goals and background runs", "Цели и фоновые запуски менеджера")],
-    ["reviewer", language("Reviewers", "Ревьюеры")],
+    ["executor", () => t("ui.executors_66276668")],
+    ["manager", () => t("ui.manager_goals_and_background_runs_e3b2372a")],
+    ["reviewer", () => t("ui.reviewers_fd4fe839")],
   ];
-  const editor = form("settings", language("Application settings", "Настройки приложения"),
+  const editor = form("settings", () => (t("ui.application_settings_b131bcd2")),
     roles.map(([name, label]) => ({ name, label, type: "number", required: true })),
-    language("Save limits", "Сохранить лимиты"), async values => {
+    () => (t("ui.save_limits_5ec81bed")), async values => {
       const result = await api.agentLimits(Object.fromEntries(Object.entries(values).map(([role, value]) => [role, Number(value)])));
       if (!result.ok) return notice(boardError(result.error));
       if (editor.isConnected) sheet.close();
     });
   editor.id = "agent-limits";
-  editor.prepend(element("h3", language("Concurrent agents", "Параллельная работа агентов")),
-    element("p", language("Defaults for each board. Board settings can override them. Use 0 for unlimited.",
-      "Значения по умолчанию для каждой доски. Их можно переопределить в настройках доски. 0 — без ограничений."), "muted"));
+  editor.prepend(element("h3", () => t("ui.concurrent_agents_31683999")),
+    element("p", () => t("ui.defaults_for_each_board_board_settings_can_overr_e97efc09"), "muted"));
   const inputs = [...editor.querySelectorAll('input[type="number"]')];
   const save = editor.querySelector('button[type="submit"]');
   for (const input of inputs) input.disabled = true;
@@ -4362,50 +4381,50 @@ function boardSettings() {
   const current = frame.board.settings;
   const { project, managerAccess = "auto" } = frame;
   const reviewMode = current.reviewMode ?? (current.autoReview === true ? "reviewer" : "human");
-  const defaultModel = language("Codex default", "По умолчанию в Codex");
+  const defaultModel = () => t("ui.codex_default_646ad954");
   const roles = [
-    ["manager", language("Project manager", "Менеджер проекта")],
-    ["executor", language("Executor", "Исполнитель")],
-    ["reviewer", language("Reviewer", "Ревьюер")],
+    ["manager", t("ui.project_manager_48697fa0")],
+    ["executor", t("ui.executor_92197b27")],
+    ["reviewer", t("ui.reviewer_50c42665")],
   ];
   const agentFields = roles.map(([role]) => {
     const model = current[role]?.model ?? "";
     const effort = current[role]?.effort ?? "";
     return [
-      { name: role + "Provider", label: language("Provider", "Провайдер"), value: current[role]?.provider ?? "codex",
+      { name: role + "Provider", label: () => (t("ui.provider_b1139466")), value: current[role]?.provider ?? "codex",
         options: [["codex", "Codex"]] },
-      { name: role + "Model", label: language("Model", "Модель"), value: model,
+      { name: role + "Model", label: () => (t("ui.model_a909c227")), value: model,
         options: model ? [[model, model]] : [["", defaultModel]] },
-      { name: role + "Effort", label: language("Reasoning effort", "Уровень рассуждения"), value: effort,
+      { name: role + "Effort", label: () => (t("ui.reasoning_effort_f0ee1b26")), value: effort,
         options: [[effort, effort ? reasoningName(effort) : defaultModel]] },
       { name: role + "Limit", type: "number", value: current.agentLimits?.[role],
-        label: role === "manager" ? language("Concurrent background runs", "Лимит фоновых запусков")
-          : language("Concurrent agents", "Лимит параллельной работы") },
+        label: () => (role === "manager" ? t("ui.concurrent_background_runs_c8868724")
+          : t("ui.concurrent_agents_06461399")) },
     ];
   });
   let models = [];
-  const editor = form("board-settings", language("Board settings", "Настройки доски") + " · " + projectName(), [
-    { name: "name", label: language("Board name (blank uses folder name)", "Имя доски (пусто — имя папки)"), value: current.name },
-    { name: "archive", label: language("Archive after days (blank disables)", "Архивировать через N дней (пусто — отключено)"),
+  const editor = form("board-settings", () => (t("ui.board_settings_780b5083") + " · " + projectName()), [
+    { name: "name", label: () => (t("ui.board_name_blank_uses_folder_name_1c570f41")), value: current.name },
+    { name: "archive", label: () => (t("ui.archive_after_days_blank_disables_8e341281")),
       type: "number", value: current.archiveAfterDays },
-    { name: "mode", label: language("Acceptance mode", "Режим приёмки"), value: current.integrationMode,
+    { name: "mode", label: () => (t("ui.acceptance_mode_61f390cc")), value: current.integrationMode,
       options: [["merge", "Merge"], ["squash", "Squash"]] },
-    { name: "showCardPreviews", label: language("Show previews on board cards", "Показывать превью на карточках"),
+    { name: "showCardPreviews", label: () => (t("ui.show_previews_on_board_cards_a3f2af17")),
       type: "checkbox", value: current.showCardPreviews !== false },
-    { name: "reviewMode", label: language("Who reviews tasks", "Кто проверяет задачи"),
+    { name: "reviewMode", label: () => (t("ui.who_reviews_tasks_3636b553")),
       value: reviewMode, options: [
-        ["human", language("Human", "Человек")],
-        ["manager", language("Project manager", "Менеджер проекта")],
-        ["reviewer", language("Reviewer", "Ревьюер")],
+        ["human", t("ui.human_56f4a79e")],
+        ["manager", t("ui.project_manager_48697fa0")],
+        ["reviewer", t("ui.reviewer_50c42665")],
       ] },
     ...agentFields.flat(),
-    { name: "managerAccess", label: language("Access mode on this computer", "Режим доступа на этом компьютере"),
+    { name: "managerAccess", label: () => (t("ui.access_mode_on_this_computer_d6a20a28")),
       value: managerAccess, options: [
-        ["ask", language("Ask for approval", "Запрашивать разрешение")],
-        ["auto", language("Approve for me", "Подтверждать за меня")],
-        ["full", language("Full access", "Полный доступ")],
+        ["ask", t("ui.ask_for_approval_cc8bdc3b")],
+        ["auto", t("ui.approve_for_me_64ade20f")],
+        ["full", t("ui.full_access_47d69a72")],
       ] },
-  ], language("Save settings", "Сохранить настройки"), async values => {
+  ], () => (t("ui.save_settings_2173b7d7")), async values => {
     const agents = {};
     const agentLimits = {};
     for (const [role, title] of roles) {
@@ -4414,7 +4433,7 @@ function boardSettings() {
       if (provider === (current[role]?.provider ?? "codex") && model === (current[role]?.model ?? "") &&
           effort === (current[role]?.effort ?? "")) continue;
       if (model && !models.some(entry => entry.id === model && (entry.effort === effort || entry.efforts.includes(effort)))) {
-        notice(title + " · " + language("Choose an available model and reasoning effort.", "Выберите доступную модель и уровень рассуждения."));
+        notice(title + " · " + t("ui.choose_an_available_model_and_reasoning_effort_a7381192"));
         return;
       }
       agents[role] = model ? { provider, model, effort } : null;
@@ -4437,19 +4456,17 @@ function boardSettings() {
   const [, review, ...selects] = editor.querySelectorAll("select");
   const reviewHint = element("small", undefined, "muted");
   const updateReviewHint = () => {
-    reviewHint.textContent = {
-      human: language("You decide whether to accept the task or return it.", "Вы принимаете задачу или возвращаете её на доработку."),
-      manager: language("The project manager checks the submission and decides.", "Менеджер сам проверяет сдачу и принимает решение."),
-      reviewer: language("The reviewer checks submissions. The manager decides when and whether to integrate approved work.", "Ревьюер проверяет сдачи. Менеджер решает, вливать ли согласованные изменения и когда."),
-    }[review.value];
+    bindLocalized(reviewHint, "textContent", () => ({
+      human: t("ui.you_decide_whether_to_accept_the_task_or_return__2b0d5a6d"),
+      manager: t("ui.the_project_manager_checks_the_submission_and_de_c9044678"),
+      reviewer: t("ui.the_reviewer_checks_submissions_the_manager_deci_9b1a5dc9"),
+    }[review.value]));
   };
   review.parentElement.append(reviewHint);
   review.addEventListener("change", updateReviewHint);
   updateReviewHint();
   const limits = roles.map(([role]) => editor.elements.namedItem(role + "Limit"));
-  selects[0].parentElement.before(element("p", language(
-    "An empty limit uses the application default. Use 0 for unlimited.",
-    "Пустое поле лимита берёт значение из настроек приложения. 0 — без ограничений."), "muted"));
+  selects[0].parentElement.before(element("p", () => t("ui.an_empty_limit_uses_the_application_default_use__f19c1da9"), "muted"));
   void api.agentLimits().then(result => {
     if (!result.ok || !editor.isConnected) return;
     roles.forEach(([role], index) => { limits[index].placeholder = String(result.data[role]); });
@@ -4467,35 +4484,35 @@ function boardSettings() {
       const selected = models.find(entry => entry.id === model.value);
       const options = [...new Set([...(selected?.efforts ?? []), selected?.effort].filter(Boolean))];
       if (saved && !options.includes(saved)) options.push(saved);
-      effort.replaceChildren(...(options.length ? options.map(value => new Option(reasoningName(value), value)) :
-        [new Option(defaultModel, "")]));
+      effort.replaceChildren(...(options.length ? options.map(value => localizedOption(reasoningName(value), value)) :
+        [localizedOption(defaultModel, "")]));
       effort.disabled = !selected || !options.length;
       effort.value = saved || selected?.effort || options[0] || "";
     };
     model.disabled = effort.disabled = true;
     model.addEventListener("change", () => showEfforts(model.value === savedModel ? savedEffort : ""));
     return () => {
-      model.replaceChildren(new Option(defaultModel, ""), ...models.map(entry => new Option(entry.name, entry.id)));
+      model.replaceChildren(localizedOption(defaultModel, ""), ...models.map(entry => localizedOption(entry.name, entry.id)));
       if (savedModel && !models.some(entry => entry.id === savedModel)) {
-        model.append(new Option(savedModel + " · " + language("unavailable", "недоступна"), savedModel));
+        model.append(localizedOption(savedModel + " · " + t("ui.unavailable_31fb3a55"), savedModel));
       }
       model.value = savedModel;
       model.disabled = !models.length && !savedModel;
       showEfforts(savedEffort);
     };
   });
-  const modelStatus = element("p", language("Loading Codex models…", "Загрузка моделей Codex…"), "muted");
+  const modelStatus = element("p", () => t("ui.loading_codex_models_284f7ca2"), "muted");
   modelStatus.setAttribute("role", "status");
   editor.lastElementChild.before(modelStatus);
   void Promise.resolve().then(() => api.chatModels()).catch(error => ({ ok: false, error: { message: error.message } })).then(result => {
     if (!editor.isConnected) return;
     models = result.ok ? result.data : [];
     roleControls.forEach(refresh => refresh());
-    modelStatus.textContent = !result.ok ? boardError(result.error) : !models.length ?
-      language("No Codex models available.", "Нет доступных моделей Codex.") : "";
+    bindLocalized(modelStatus, "textContent", () => !result.ok ? boardError(result.error) : !models.length ?
+      t("ui.no_codex_models_available_97612bb5") : "");
     modelStatus.hidden = !modelStatus.textContent;
   });
-  body.append(button(language("Check archives now", "Проверить архивацию"), () => command("archive")));
+  body.append(button(() => t("ui.check_archives_now_511c7ff2"), () => command("archive")));
   const tags = element("section", undefined, "tag-settings");
   tags.id = "tag-settings";
   renderTagSettings(tags);
@@ -4510,21 +4527,32 @@ function applyTheme(theme) {
 
 function appearanceSettings() {
   const panel = element("section", undefined, "appearance-panel");
-  panel.append(element("h3", language("Appearance", "Оформление")));
-  const label = element("label", language("Theme", "Тема"));
+  panel.append(element("h3", () => t("ui.appearance_0dc18b20")));
+  const label = element("label", () => t("ui.theme_9b54a012"));
   const select = element("select");
   select.id = "theme-select";
   select.disabled = true;
   label.append(select);
   panel.append(label);
+  const languageLabel = element("label", () => t("settings.language"));
+  const languageSelect = element("select");
+  languageSelect.id = "language-select";
+  languageSelect.append(localizedOption(() => t("settings.system"), "system"), ...Object.entries(localization.names).map(([id, name]) => localizedOption(name, id)));
+  languageSelect.value = frame.localization?.preference ?? "system";
+  languageSelect.addEventListener("change", protect(async () => {
+    const result = await api.setLanguage(languageSelect.value);
+    if (!result.ok) { languageSelect.value = frame.localization?.preference ?? "system"; notice(boardError(result.error)); }
+  }));
+  languageLabel.append(languageSelect);
+  panel.append(languageLabel);
   body.prepend(panel);
   api.themes().then(themes => {
     const translated = {
-      system: language("System", "Как в системе"),
-      light: language("Light", "Светлая"),
-      dark: language("Dark", "Тёмная"),
+      system: () => t("ui.system_e345d2c2"),
+      light: () => t("ui.light_10ab3a96"),
+      dark: () => t("ui.dark_43d15be6"),
     };
-    select.replaceChildren(...themes.map(([id, label]) => new Option(translated[id] ?? label, id)));
+    select.replaceChildren(...themes.map(([id, label]) => localizedOption(translated[id] ?? label, id)));
     select.value = frame.theme ?? "system";
     select.disabled = false;
   }).catch(error => notice(error.message));
@@ -4549,15 +4577,15 @@ async function gitCommand(action, input, project) {
   if (frame.project !== project) return;
   if (!result.ok) {
     const actions = {
-      refs: ["Loading Git branches", "Загрузка веток Git"],
-      create: ["Creating Git branch", "Создание ветки Git"],
-      switch: ["Switching Git branch", "Переключение ветки Git"],
-      detach: ["Checking out a Git revision", "Переход к ревизии Git"],
-      publish: ["Publishing to GitHub", "Публикация в GitHub"],
-      push: ["Pushing commits", "Отправка коммитов"],
+      refs: ["ui.loading_git_branches_00628ca6"],
+      create: ["ui.creating_git_branch_d3bc3a06"],
+      switch: ["ui.switching_git_branch_3f9946bf"],
+      detach: ["ui.checking_out_a_git_revision_346a017d"],
+      publish: ["ui.publishing_to_github_608d7660"],
+      push: ["ui.pushing_commits_67d32648"],
     };
-    const label = actions[action] ?? ["Git operation", "Операция Git"];
-    notice(boardError(result.error), [language(...label), projectName()].filter(Boolean).join(" · "));
+    const label = actions[action] ?? ["ui.git_operation_fe57178a"];
+    notice(boardError(result.error), [t(...label), projectName()].filter(Boolean).join(" · "));
     return;
   }
   notice();
@@ -4572,36 +4600,36 @@ function updateGitRevision(data) {
 }
 
 function newGitBranch(snapshot, ref, project) {
-  const editor = form("git-branch", language("Create new branch", "Создать новую ветку"), [
-    { name: "name", label: language("Branch name", "Название ветки"), required: true },
-  ], language("Create and switch", "Создать и переключиться"), async ({ name }) => {
+  const editor = form("git-branch", () => (t("ui.create_new_branch_1d92f466")), [
+    { name: "name", label: () => (t("ui.branch_name_3f030859")), required: true },
+  ], () => (t("ui.create_and_switch_f330fba5")), async ({ name }) => {
     const data = await gitCommand("create", { head: snapshot.head, branch: snapshot.branch, ref, name }, project);
     if (!data || !editor.isConnected || frame.project !== project) return;
     updateGitRevision(data);
     sheet.close();
   });
   const source = ref ?? (snapshot.head ? snapshot.branch ?? "HEAD" : undefined);
-  editor.prepend(element("p", source ? language("Create from: ", "Создать из: ") + source :
-    language("Name for the first commit.", "Имя для первого коммита."), "muted"));
+  editor.prepend(element("p", () => source ? t("ui.create_from_1544a833") + source :
+    t("ui.name_for_the_first_commit_95390a29"), "muted"));
   editor.querySelector("input").focus();
 }
 
 function relativeCommitDate(value, now = Date.now()) {
   const seconds = (new Date(value).getTime() - now) / 1000;
   if (!Number.isFinite(seconds)) return "";
-  if (Math.abs(seconds) < 60) return language("just now", "только что");
+  if (Math.abs(seconds) < 60) return t("ui.just_now_b217cbb7");
   const [unit, size] = [["year", 31536000], ["month", 2592000], ["day", 86400], ["hour", 3600], ["minute", 60]]
     .find(([, size]) => Math.abs(seconds) >= size);
-  return new Intl.RelativeTimeFormat(frame.russian ? "ru" : "en", { numeric: "auto", style: "short" })
+  return new Intl.RelativeTimeFormat(localization.locale, { numeric: "auto", style: "short" })
     .format(Math.round(seconds / size), unit);
 }
 
 async function openGitBranches() {
   const menu = byId("git-branches");
-  menu.setAttribute("aria-label", language("Branches and tags", "Ветки и теги"));
+  bindLocalized(menu, "aria-label", () => t("ui.branches_and_tags_c785cf53"), true);
   const project = frame.project;
   const request = ++gitMenuRequest;
-  menu.replaceChildren(element("p", language("Loading branches…", "Загрузка веток…"), "muted"));
+  menu.replaceChildren(element("p", () => t("ui.loading_branches_cd662059"), "muted"));
   const data = await gitCommand("refs", undefined, project);
   if (!data || request !== gitMenuRequest || !menu.matches(":popover-open")) return;
   let mode = "switch";
@@ -4609,26 +4637,26 @@ async function openGitBranches() {
   const search = element("input");
   search.type = "search";
   search.hidden = data.refs.length === 0;
-  search.setAttribute("aria-label", language("Search branches and tags", "Поиск веток и тегов"));
-  const action = (english, russian, symbol, click) => {
+  bindLocalized(search, "aria-label", () => t("ui.search_branches_and_tags_7edd67f8"), true);
+  const action = (labelKey, symbol, click) => {
     const item = button("", click, "quiet git-menu-action");
-    item.append(icon(symbol), element("span", language(english, russian)));
+    item.append(icon(symbol), element("span", () => t(labelKey)));
     return item;
   };
-  const create = action("Create new branch…", "Создать новую ветку…", "plus", () => {
+  const create = action("ui.create_new_branch_f31212fe", "plus", () => {
     if (!busy) newGitBranch(data, undefined, project);
   });
-  const from = action("Create new branch from…", "Создать новую ветку из…", "plus", () => {
+  const from = action("ui.create_new_branch_from_74774417", "plus", () => {
     mode = "create";
     draw();
     search.focus();
   });
-  const detach = action("Checkout detached…", "Извлечь в отключённом режиме…", "git-branch", () => {
+  const detach = action("ui.checkout_detached_8477312a", "git-branch", () => {
     mode = "detach";
     draw();
     search.focus();
   });
-  const back = action("Back to branches", "Назад к веткам", "arrow-left", () => {
+  const back = action("ui.back_to_branches_44e68db0", "arrow-left", () => {
     mode = "switch";
     draw();
     search.focus();
@@ -4651,9 +4679,9 @@ async function openGitBranches() {
     }
   };
   function draw() {
-    search.placeholder = mode === "create" ? language("Choose a starting branch or tag", "Выберите исходную ветку или тег")
-      : mode === "detach" ? language("Choose a branch or tag for detached HEAD", "Выберите ветку или тег для detached HEAD")
-      : language("Search branches and tags…", "Поиск веток и тегов…");
+    bindLocalized(search, "placeholder", () => mode === "create" ? t("ui.choose_a_starting_branch_or_tag_f238af64")
+      : mode === "detach" ? t("ui.choose_a_branch_or_tag_for_detached_head_f98946d5")
+      : t("ui.search_branches_and_tags_8496e76e"));
     create.hidden = mode !== "switch";
     from.hidden = detach.hidden = create.hidden || search.hidden;
     back.hidden = mode === "switch";
@@ -4667,7 +4695,7 @@ async function openGitBranches() {
       const name = element("span", ref.name, "git-ref-name");
       const date = element("time", relativeCommitDate(ref.date), "git-ref-date");
       date.dateTime = ref.date;
-      date.setAttribute("aria-label", new Date(ref.date).toLocaleString(frame.russian ? "ru" : undefined));
+      date.setAttribute("aria-label", new Date(ref.date).toLocaleString(localization.locale));
       heading.append(icon(ref.tag ? "git-tag" : "git-branch"), name);
       if (current) heading.append(icon("check"));
       heading.append(date);
@@ -4676,8 +4704,8 @@ async function openGitBranches() {
         element("span", ref.subject, "git-ref-subject"));
       entry.append(heading, detail);
       return entry;
-    }) : [element("p", search.hidden ? language("No branches or tags yet.", "Веток и тегов пока нет.") :
-      language("No matching branches or tags.", "Подходящих веток и тегов нет."), "muted")]));
+    }) : [element("p", () => search.hidden ? t("ui.no_branches_or_tags_yet_10aea593") :
+      t("ui.no_matching_branches_or_tags_67e760d6"), "muted")]));
   }
   search.addEventListener("input", draw);
   menu.addEventListener("keydown", event => {
@@ -4715,29 +4743,29 @@ async function publishToGitHub() {
   const project = frame.project;
   const snapshot = await gitCommand("refs", undefined, project);
   if (!snapshot) return;
-  const editor = form("git-publish", language("Publish to GitHub", "Опубликовать в GitHub"), [
-    { name: "name", label: language("Repository name (or owner/name)", "Имя репозитория (или владелец/имя)"), required: true,
+  const editor = form("git-publish", () => (t("ui.publish_to_github_5ba684aa")), [
+    { name: "name", label: () => (t("ui.repository_name_or_owner_name_6ab89215")), required: true,
       value: project.split(/[\\/]/).at(-1).replace(/[^A-Za-z0-9_.-]/g, "-") },
-    { name: "visibility", label: language("Visibility", "Доступ"), value: "private", options: [
-      ["private", language("Private", "Приватный")], ["public", language("Public", "Публичный")],
+    { name: "visibility", label: () => (t("ui.visibility_a6c69e21")), value: "private", options: [
+      ["private", t("ui.private_a6676b3c")], ["public", t("ui.public_b76d6d50")],
     ] },
-  ], language("Publish", "Опубликовать"), async ({ name, visibility }) => {
+  ], () => (t("ui.publish_21b4ab90")), async ({ name, visibility }) => {
     publishingGit = true;
     byId("status-publish").disabled = true;
     const status = editor.querySelector("p");
-    status.textContent = language("Publishing…", "Публикация…");
+    bindLocalized(status, "textContent", () => t("ui.publishing_bab966ea"));
     try {
       const result = await gitCommand("publish", { head: snapshot.head, branch: snapshot.branch, name, visibility }, project);
       if (!result || !editor.isConnected || frame.project !== project) return;
       sheet.close();
-      notice(language("Published to GitHub: ", "Опубликовано в GitHub: ") + result.remote);
+      notice(t("ui.published_to_github_2bc4b317") + result.remote);
     } finally {
       publishingGit = false;
       byId("status-publish").disabled = false;
-      if (editor.isConnected) status.textContent = language("Publish branch: ", "Опубликовать ветку: ") + (snapshot.branch ?? "HEAD");
+      if (editor.isConnected) bindLocalized(status, "textContent", () => t("ui.publish_branch_6da974a7") + (snapshot.branch ?? "HEAD"));
     }
   });
-  editor.prepend(element("p", language("Publish branch: ", "Опубликовать ветку: ") + (snapshot.branch ?? "HEAD"), "muted"));
+  editor.prepend(element("p", () => t("ui.publish_branch_6da974a7") + (snapshot.branch ?? "HEAD"), "muted"));
   editor.querySelector("input").focus();
 }
 
@@ -4749,13 +4777,13 @@ function renderReviewNotifications(results = [], message = "") {
   const menu = byId("notifications");
   const statuses = new Map(results.map(entry => [entry.id, entry]));
   const labels = {
-    clean: ["No Git conflicts", "Без конфликтов Git"],
-    conflict: ["Git conflict", "Конфликт Git"],
-    integrated: ["Already integrated in Git", "Уже в целевой ветке"],
-    noChanges: ["Submitted without Git changes", "Сдано без изменений в Git"],
-    pending: ["Git operation pending", "Ожидает завершения операции Git"],
-    stale: ["Submission changed", "Сдача устарела"],
-    unchecked: ["Git compatibility unchecked", "Совместимость Git не проверена"],
+    clean: ["ui.no_git_conflicts_f66aeb42"],
+    conflict: ["ui.git_conflict_48a68f12"],
+    integrated: ["ui.already_integrated_in_git_ee75b991"],
+    noChanges: ["ui.submitted_without_git_changes_8fe2f6e6"],
+    pending: ["ui.git_operation_pending_2ff48571"],
+    stale: ["ui.submission_changed_f579fee3"],
+    unchecked: ["ui.git_compatibility_unchecked_12f6c4b4"],
   };
   const rows = reviewNotifications.map(task => {
     const result = statuses.get(task.id);
@@ -4771,16 +4799,16 @@ function renderReviewNotifications(results = [], message = "") {
       return showTask(task.id);
     }, "quiet notification-entry");
     open.dataset.reviewTask = task.id;
-    const details = [task.status && Object.hasOwn(labels, task.status) && language(...labels[task.status]),
-      task.reviewApproved && language("Approved by reviewer", "Согласовано ревьюером"),
-      task.running && language("Executor still running", "Исполнитель ещё работает"), task.at && relativeCommitDate(task.at)];
+    const details = [task.status && Object.hasOwn(labels, task.status) && t(...labels[task.status]),
+      task.reviewApproved && t("ui.approved_by_reviewer_cb27fd26"),
+      task.running && t("ui.executor_still_running_e4f5841e"), task.at && relativeCommitDate(task.at)];
     const detail = element("span", details.filter(Boolean).join(" · "));
     if (task.at) detail.title = shortDate(task.at);
     open.append(element("strong", task.id + " · " + task.title), detail);
     return open;
   });
   if (message || !items.length) {
-    const status = element("p", message || language("No tasks in review.", "Нет задач на проверке."), "muted");
+    const status = element("p", () => message || t("ui.no_tasks_in_review_a697a250"), "muted");
     status.setAttribute("role", "status");
     items.unshift(status);
   }
@@ -4791,7 +4819,7 @@ function renderReviewNotifications(results = [], message = "") {
 async function refreshReviewNotifications() {
   const request = ++reviewNotificationRequest;
   if (!reviewNotifications.length) return renderReviewNotifications();
-  renderReviewNotifications([], language("Checking Git compatibility…", "Проверяю совместимость с Git…"));
+  renderReviewNotifications([], t("ui.checking_git_compatibility_6eaa5008"));
   const result = await api.command("review-queue").catch(error => ({ ok: false, error }));
   if (request !== reviewNotificationRequest || !byId("notifications").matches(":popover-open")) return;
   if (result.ok) renderReviewNotifications(result.data);
@@ -4804,7 +4832,7 @@ function renderActiveAgents() {
   if (indicator.hidden) return;
   const { total = 0, boards = [] } = frame.activeAgents ?? {};
   indicator.querySelector("span").textContent = total;
-  const text = language("Active agents", "Активные агенты") + " · " + total +
+  const text = t("ui.active_agents_f885023a") + " · " + total +
     boards.map(board => "\n" + board.name + (board.detail ? " (" + board.detail + ")" : "") + ": " + board.count).join("");
   byId("status-agents-tooltip").textContent = text;
   indicator.setAttribute("aria-label", text);
@@ -4813,9 +4841,9 @@ function renderActiveAgents() {
 function renderStatusBar(projectChanged) {
   renderActiveAgents();
   const { branch, head, tracking } = frame.board?.gitInfo ?? {};
-  const revision = head ? branch ?? head.slice(0, 8) : branch && language("Before the first commit", "До первого коммита");
+  const revision = head ? branch ?? head.slice(0, 8) : branch && t("ui.before_the_first_commit_7e00a15b");
   const item = byId("status-branch");
-  const branchLabel = head && branch ? language("Git branch", "Ветка Git") : "Git";
+  const branchLabel = head && branch ? t("ui.git_branch_5fc2f4ee") : "Git";
   item.hidden = !revision;
   item.title = revision ? branchLabel + " · " + revision : "";
   item.querySelector("span").textContent = revision ?? "";
@@ -4828,15 +4856,15 @@ function renderStatusBar(projectChanged) {
   if (!status.hidden) {
     const { behind, ahead } = tracking;
     status.querySelector("span").textContent = behind + "↓ " + ahead + "↑";
-    status.title = (pushing ? language("Pushing commits…", "Отправка коммитов…") :
-      status.disabled ? language("Another branch is being pushed", "Отправляется другая ветка") :
-        language("Push to the upstream branch", "Отправить коммиты в отслеживаемую ветку")) + " · " +
-      language("Behind ", "Отставание ") + behind + " · " + language("Ahead ", "Опережение ") + ahead;
+    bindLocalized(status, "title", () => (pushing ? t("ui.pushing_commits_c457ab7e") :
+      status.disabled ? t("ui.another_branch_is_being_pushed_4961fd8c") :
+        t("ui.push_to_the_upstream_branch_6ed8fc36")) + " · " +
+      t("ui.behind_2ead5b5b") + behind + " · " + t("ui.ahead_10871dc0") + ahead);
     status.setAttribute("aria-label", status.title);
   }
   const publish = byId("status-publish");
   publish.hidden = !branch || !head || Boolean(tracking);
-  publish.title = language("Publish to GitHub", "Опубликовать в GitHub");
+  bindLocalized(publish, "title", () => t("ui.publish_to_github_5ba684aa"));
   publish.setAttribute("aria-label", publish.title);
   if (projectChanged) {
     gitMenuRequest++;
@@ -4846,7 +4874,7 @@ function renderStatusBar(projectChanged) {
   const menu = byId("notifications");
   if (projectChanged && menu.matches(":popover-open")) menu.hidePopover();
   const bell = byId("status-notifications");
-  const label = language("Review queue", "Очередь приёмки");
+  const label = t("ui.review_queue_df5dcbe5");
   const submitted = (frame.board?.tasks ?? []).filter(task => task.status === "review").map(task => {
     const at = task.submittedAt ?? task.history?.findLast(entry => entry.action === "submit" && entry.actor === "agent" && entry.to === "review")?.at;
     return { id: task.id, title: task.title, revision: task.revision, reviewApproved: task.reviewApproved, at };
@@ -4857,7 +4885,7 @@ function renderStatusBar(projectChanged) {
   count.textContent = submitted.length;
   count.hidden = !submitted.length;
   menu.setAttribute("aria-label", label);
-  const key = JSON.stringify([frame.project, frame.russian, head, submitted, submitted.map(task => frame.runningTasks?.includes(task.id))]);
+  const key = JSON.stringify([frame.project, frame.localization?.locale, head, submitted, submitted.map(task => frame.runningTasks?.includes(task.id))]);
   if (reviewNotificationKey === key) return;
   reviewNotificationKey = key;
   reviewNotifications = submitted;
@@ -4876,13 +4904,13 @@ function clearTabDrop() {
 function renderProjectTabs() {
   const bar = byId("project-tabs");
   const tabs = frame.tabs ?? [];
-  const signature = JSON.stringify([tabs, frame.project, frame.russian]);
+  const signature = JSON.stringify([tabs, frame.project, frame.localization?.locale]);
   if (signature === tabsSignature) return;
   tabsSignature = signature;
   const focused = bar.contains(document.activeElement) ? document.activeElement : undefined;
   const focusedPath = focused?.closest(".project-tab")?.dataset.project;
   const closeFocused = focused?.classList.contains("project-tab-close");
-  bar.setAttribute("aria-label", language("Projects", "Проекты"));
+  bindLocalized(bar, "aria-label", () => t("ui.projects_f40f8e75"), true);
   bar.hidden = !tabs.length;
   bar.replaceChildren(...tabs.map(tab => {
     const container = element("div", undefined, "project-tab");
@@ -4932,7 +4960,7 @@ function renderProjectTabs() {
     select.tabIndex = tab.path === frame.project ? 0 : -1;
     select.append(element("span", tab.name, "project-tab-name"));
     if (tab.unread) {
-      select.setAttribute("aria-description", language("New manager messages", "Новые сообщения менеджера"));
+      bindLocalized(select, "aria-description", () => t("ui.new_manager_messages_2ad2832e"), true);
       const dot = element("i", undefined, "icon codicon codicon-circle-filled project-tab-unread");
       dot.setAttribute("aria-hidden", "true");
       select.append(dot);
@@ -4942,12 +4970,12 @@ function renderProjectTabs() {
       event.preventDefault();
       const menu = byId("board-tab-menu");
       if (menu.matches(":popover-open")) menu.hidePopover();
-      const open = button(language("Board settings…", "Настройки доски…"), protect(async () => {
+      const open = button(() => t("ui.board_settings_063b85d6"), protect(async () => {
         menu.hidePopover();
         if (frame.project !== tab.path) await api.selectTab(tab.path);
         if (frame.project === tab.path) boardSettings();
       }), "app-menu-item");
-      menu.setAttribute("aria-label", language("Board menu", "Меню доски"));
+      bindLocalized(menu, "aria-label", () => t("ui.board_menu_4c14bbf6"), true);
       open.setAttribute("role", "menuitem");
       open.setAttribute("autofocus", "");
       menu.replaceChildren(open);
@@ -4983,7 +5011,7 @@ function renderProjectTabs() {
     const close = button("", () => api.closeTab(tab.path), "project-tab-close");
     close.className = "project-tab-close";
     close.append(icon("close"));
-    close.setAttribute("aria-label", language("Close project ", "Закрыть проект ") + tab.name);
+    bindLocalized(close, "aria-label", () => t("ui.close_project_b01a370f") + tab.name, true);
     close.title = close.getAttribute("aria-label");
     container.append(select, close);
     return container;
@@ -4998,13 +5026,27 @@ function renderProjectTabs() {
 }
 
 function update(next) {
+  for (const binding of localizedBindings) if (!binding.node.isConnected) localizedBindings.delete(binding);
+  const languageChanged = frame.localization?.locale !== next.localization?.locale;
   const previousProject = frame.project;
   const projectChanged = frame.project !== next.project;
   const previousBoard = projectChanged ? undefined : frame.board;
   const tagsChanged = JSON.stringify(frame.board?.tags) !== JSON.stringify(next.board?.tags);
-  if ((projectChanged || frame.russian !== next.russian || Boolean(frame.board) !== Boolean(next.board)) &&
+  if ((projectChanged || frame.localization?.locale !== next.localization?.locale || Boolean(frame.board) !== Boolean(next.board)) &&
       byId("settings-menu").matches(":popover-open")) byId("settings-menu").hidePopover();
+  if (next.localization) localization.install(next.localization);
+  window.renderProviderLimits?.();
   frame = next;
+  const languageSelect = byId("language-select");
+  if (languageSelect) languageSelect.value = next.localization?.preference ?? "system";
+  if (languageChanged) {
+    refreshLocalizedBindings();
+    for (const node of document.querySelectorAll("[data-i18n-text]")) node.textContent = t(node.dataset.i18nText);
+    for (const attribute of ["aria-label", "title", "placeholder"]) {
+      for (const node of document.querySelectorAll("[data-i18n-" + attribute + "]")) node.setAttribute(attribute, t(node.getAttribute("data-i18n-" + attribute)));
+    }
+
+  }
   if (byId("app-header").hidden) {
     byId("app-header").classList.toggle("titlebar", api.customTitleBar);
     mountAppMenu();
@@ -5161,4 +5203,4 @@ api.onTheme(theme => {
   frame.theme = theme;
   applyTheme(theme);
 });
-api.bootstrap().then(update).catch(error => notice(error.message, language("Application startup", "Запуск приложения")));
+api.bootstrap().then(update).catch(error => notice(error.message, t("ui.application_startup_a6ae49b2")));

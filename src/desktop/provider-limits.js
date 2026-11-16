@@ -10,39 +10,34 @@ globalThis.providerLimitSummary = (providers, now = Date.now()) => {
 };
 
 globalThis.providerLimitWindowLabel = (minutes, locale) => {
-  const ru = locale.startsWith("ru");
-  if (minutes === 10080) return ru ? "Недельный лимит" : "Weekly limit";
-  if (minutes === 1440) return ru ? "Суточный лимит" : "Daily limit";
-  if (!(minutes > 0)) return ru ? "Лимит" : "Limit";
+  const t = (key, parameters) => globalThis.taskboardLocalization.text(key, parameters, globalThis.taskboardLocalization.resolve([locale]));
+  if (minutes === 10080) return t("limits.weekly");
+  if (minutes === 1440) return t("limits.daily");
+  if (!(minutes > 0)) return t("limits.window");
   const [value, unit] = minutes % 1440 === 0 ? [minutes / 1440, "day"] :
     minutes % 60 === 0 ? [minutes / 60, "hour"] : [minutes, "minute"];
   const duration = new Intl.NumberFormat(locale, { style: "unit", unit, unitDisplay: "long" }).format(value);
-  return ru ? `Лимит на ${duration}` : `Limit over ${duration}`;
+  return t("limits.duration", { duration });
 };
 
 if (typeof document !== "undefined") {
   const control = document.getElementById("status-limits");
   const panel = document.getElementById("provider-limits");
-  const ru = navigator.language.startsWith("ru");
-  const text = (en, russian) => ru ? russian : en;
-  const states = {
-    ready: text("Remaining", "Осталось"), unknown: text("No data", "Нет данных"),
-    no_windows: text("Provider reports no quota windows", "Провайдер не сообщает окон лимитов"),
-    unsupported: text("Quota windows unavailable in this connection", "Окна лимитов недоступны в этом подключении"),
-    auth: text("Sign in required", "Нужно войти в аккаунт"), error: text("Could not read limits", "Ошибка чтения лимитов"),
-    stale: text("Stale data; waiting for update", "Данные устарели; ожидается обновление"),
-  };
-  const label = text("Limits", "Лимиты");
-  panel.setAttribute("aria-label", label);
+  const localization = globalThis.taskboardLocalization;
+  const t = (key, parameters) => localization.text(key, parameters);
   panel.tabIndex = -1;
   let providers = [];
   function render() {
+    if (!localization.state().english) return;
+    const label = t("limits.label");
+    panel.setAttribute("aria-label", label);
     const summary = globalThis.providerLimitSummary(providers);
     const lowest = summary.lowest;
     control.querySelector("span").textContent = lowest ? `${label} ${Math.floor(lowest.remaining)}%` : label + " ?";
-    const warning = lowest && lowest.remaining <= 10 ? text("Low quota", "Лимит заканчивается") : "";
-    const description = `${label}: ${summary.providers.length} ${text("connected", "подключено")}; ${summary.unavailable} ${text("without current data", "без актуальных данных")}. ` +
-      (lowest ? `${lowest.provider}: ${Math.floor(lowest.remaining)}% ${text("remaining", "осталось")}. ` : "") + warning;
+    const warning = lowest && lowest.remaining <= 10 ? t("limits.low") : "";
+    const overviewText = t("limits.summary", { count: summary.providers.length, unavailable: summary.unavailable });
+    const description = `${label}: ${overviewText}. ` +
+      (lowest ? `${lowest.provider}: ${t("limits.remaining", { percent: Math.floor(lowest.remaining) })}. ` : "") + warning;
     control.title = description;
     control.setAttribute("aria-label", description);
     control.classList.toggle("quota-low", Boolean(warning));
@@ -50,7 +45,7 @@ if (typeof document !== "undefined") {
     if (summary.providers.length !== 1) {
       const overview = document.createElement("p");
       overview.className = "limits-overview";
-      overview.textContent = `${summary.providers.length} ${text("connected", "подключено")}; ${summary.unavailable} ${text("without current data", "без актуальных данных")}`;
+      overview.textContent = overviewText;
       content.append(overview);
     }
     for (const provider of summary.providers) {
@@ -61,7 +56,7 @@ if (typeof document !== "undefined") {
       content.append(group);
       if (provider.state !== "ready") {
         const status = document.createElement("p");
-        status.textContent = states[provider.state];
+        status.textContent = t("limits." + provider.state);
         group.append(status);
         continue;
       }
@@ -69,9 +64,9 @@ if (typeof document !== "undefined") {
         const quota = document.createElement("div");
         quota.className = "limits-window";
         const row = document.createElement("p");
-        const windowLabel = globalThis.providerLimitWindowLabel(window.durationMins, navigator.language);
+        const windowLabel = globalThis.providerLimitWindowLabel(window.durationMins, localization.locale);
         const bucket = window.name && window.name.toLowerCase() !== provider.provider.toLowerCase() ? window.name + " · " : "";
-        row.textContent = `${bucket}${windowLabel}: ${text("remaining", "осталось")} ${Math.floor(window.remaining)}%`;
+        row.textContent = `${bucket}${windowLabel}: ${t("limits.remaining", { percent: Math.floor(window.remaining) })}`;
         const meter = document.createElement("meter");
         meter.min = 0; meter.max = 100; meter.value = window.remaining;
         meter.setAttribute("aria-label", row.textContent);
@@ -79,12 +74,12 @@ if (typeof document !== "undefined") {
         if (window.resetsAt) {
           const reset = document.createElement("p");
           reset.className = "limits-reset";
-          reset.textContent = `${text("Resets", "Сброс")} ${new Date(window.resetsAt).toLocaleString()}`;
+          reset.textContent = t("limits.reset", { time: new Date(window.resetsAt).toLocaleString(localization.locale) });
           quota.append(reset);
         }
         if (window.remaining <= 10) {
           const warning = document.createElement("p");
-          warning.textContent = text("Low quota", "Лимит заканчивается");
+          warning.textContent = t("limits.low");
           quota.append(warning);
         }
         group.append(quota);
@@ -105,6 +100,7 @@ if (typeof document !== "undefined") {
   control.setAttribute("aria-controls", panel.id);
   control.setAttribute("aria-expanded", "false");
   window.taskboard.onProviderLimitsChanged(() => { providers = []; render(); void refresh(); });
+  window.renderProviderLimits = render;
   void refresh();
   setInterval(refresh, 60_000);
   setInterval(render, 15_000);
