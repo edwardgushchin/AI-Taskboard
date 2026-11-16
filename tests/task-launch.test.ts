@@ -15,7 +15,7 @@ const parsed = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, tr
 const names = new Set(["launchTask", "recordRunFailure", "publishRunActivity", "notifyRunChange", "saveTaskTokenUsage",
   "beginOperation", "confirmProjectClose", "projectOperations", "closingProjects", "launchingTasks", "runningTasks", "runActivityByTask",
   "activeAgents", "chatRuns", "windowStates", "executorBusy", "reserveAgent", "scheduleAgentWork", "scheduleRecurringTasks",
-  "deferredExecutors", "schedulingAgentWork", "executorLimit"]);
+  "deferredExecutors", "schedulingAgentWork", "taskRunLimit"]);
 const lifecycle = parsed.statements.filter(node => {
   if (ts.isFunctionDeclaration(node)) return node.name && names.has(node.name.text);
   return ts.isVariableStatement(node) && node.declarationList.declarations.some(declaration =>
@@ -27,14 +27,14 @@ const nextThread = "01234567-1234-5678-1234-123456789013";
 
 function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnect" | "closing" | "closing-on-retry" | "board-busy",
   activity?: RunActivity) {
-  const task: Task = { ...createTask("T-0001", { title: "Reviewed task" }), status: "review",
+  const task: Task & { mergeRepair?: true } = { ...createTask("T-0001", { title: "Reviewed task" }), status: "review",
     codexThreadId: outcome === "board-busy" ? undefined : previousThread,
     git: { target: "refs/heads/main", base: "a".repeat(40), branch: "refs/heads/ai-taskboard/T-0001", worktree: "worktree" } };
   const calls: { args: string[]; input: any }[] = [];
   const launched: any[] = [];
   const access = { full: false };
   const subscriptions = new Map();
-  const savedSettings = new Map<string, { agentLimits: { executor: number } }>();
+  const savedSettings = new Map<string, { agentLimits: Partial<import("../src/cli/model.ts").AgentLimits> }>();
   const previousTurn = { status: "completed", completedAt: 1 as number | null, reads: 0 };
   type Completion = { reason: string; disconnected?: boolean; interrupted?: boolean } | undefined;
   const completion = Promise.withResolvers<Completion>();
@@ -74,6 +74,11 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
       if (args[0] === "start") {
         if (input.revision !== task.revision) return failure("REVISION_CONFLICT", "The task changed.");
         if (input.scheduled) { task.status = "in_progress"; task.revision++; }
+        if (input.resolveConflicts && task.status === "review") {
+          task.status = "in_progress";
+          task.revision++;
+          task.mergeRepair = true;
+        }
         const execution = task.execution ?? { provider: "codex", model: "executor-model", effort: "low" };
         return { ok: true, data: { task: { ...structuredClone(task), execution }, worktree: task.git!.worktree } };
       }
@@ -123,6 +128,32 @@ test("launch uses saved limits when the watch still has the previous value", asy
     await new Promise(resolve => setImmediate(resolve));
     for (const release of releases) release();
   }
+});
+
+test("merge conflict repair and its reconnect use reviewer capacity while the executor pool is full", async () => {
+  const f = fixture("disconnect");
+  const agentLimits = { executor: 1, reviewer: 1 };
+  f.savedSettings.set("project", { agentLimits });
+  const executor = f.slots.acquire("project", "executor", agentLimits)!;
+  const reviewer = f.slots.acquire("project", "reviewer", agentLimits)!;
+  const repair = () => f.runtime.launchTask("project", f.task.id, undefined, false, f.task.revision, undefined, false, true);
+  assert.equal((await repair()).error.code, "REVIEWER_LIMIT");
+  assert.equal(f.task.status, "review");
+  assert.equal(f.calls.some(call => call.args[0] === "start"), false);
+  reviewer();
+  assert.equal((await repair()).ok, true);
+  assert.equal(f.slots.available("project", "reviewer", agentLimits), 0);
+  assert.equal(f.slots.available("project", "executor", agentLimits), 0);
+  f.completion.resolve({ disconnected: true, reason: "Connection lost" });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.launched.length, 2);
+  assert.equal(f.slots.available("project", "reviewer", agentLimits), 0);
+  f.task.status = "review";
+  f.retryCompletion.resolve(undefined);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.slots.available("project", "reviewer", agentLimits), 1);
+  assert.equal(f.slots.available("project", "executor", agentLimits), 0);
+  executor();
 });
 
 test("the scheduler launches a due approved card once, waits for an executor slot and returns it to ready", async () => {

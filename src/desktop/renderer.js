@@ -797,7 +797,9 @@ function renderAgentRunStatus(target, task) {
     if (!spinner.parentNode) target.replaceChildren(spinner);
   } else {
     const text = frame.waitingTasks?.includes(task.id) ?
-      language("Waiting for an available executor", "Ожидает свободного исполнителя") :
+      (task.mergeRepair || frame.board?.tasks.find(card => card.id === task.id)?.mergeRepair
+        ? language("Waiting for a reviewer slot", "Ожидает свободного места ревьюера")
+        : language("Waiting for an available executor", "Ожидает свободного исполнителя")) :
       task.status === "in_progress" && task.codexThreadId ?
       language("Board run inactive", "Запуск с доски не активен") : "";
     if (target.firstElementChild || target.textContent !== text) target.textContent = text;
@@ -863,7 +865,7 @@ function card(task) {
   const signature = JSON.stringify([frame.russian, task.title, task.description,
     task.tags?.map(name => boardTags.get(tagKey(name)) ?? { name }), cover?.file,
     frame.runningTasks?.includes(task.id) ?? false, frame.waitingTasks?.includes(task.id) ?? false,
-    frame.reviewingTasks?.[task.id], task.status, Boolean(task.codexThreadId),
+    frame.reviewingTasks?.[task.id], task.status, task.mergeRepair, Boolean(task.codexThreadId),
     task.unfinishedDependencies, task.blocked, task.subtasks?.map(entry => entry.done),
     task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule]);
   const previous = boardCards.get(task.id);

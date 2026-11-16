@@ -62,10 +62,11 @@ function fixture(mode = "human") {
     launchTask: async (_: string, id: string, ...args: any[]) => {
       assert.equal(args.at(-1), true);
       if (launchError) { const error = launchError; launchError = undefined; return fail(error); }
-      const release = slots.acquire("project", "executor", board.settings.agentLimits);
-      assert.ok(release, "dispatch exceeded the executor limit");
+      const task = board.tasks.find((task: any) => task.id === id);
+      const release = slots.acquire("project", task.mergeRepair ? "reviewer" : "executor", board.settings.agentLimits);
+      assert.ok(release, "dispatch exceeded its role limit");
       busy.set(id, release); launches.push(id);
-      board.tasks.find((task: any) => task.id === id).status = "in_progress";
+      task.status = "in_progress";
       afterLaunch?.();
       return { ok: true, data: {} };
     },
@@ -112,6 +113,22 @@ test("off and lowered limits apply before the next decision without interrupting
     await f.tick(); assert.deepEqual(f.launches, ["T-0001"]);
     assert.equal(f.board.tasks[0].status, "in_progress");
   }
+});
+
+test("automatic dispatch resumes a paused merge repair when only reviewer capacity is available", async () => {
+  const f = fixture();
+  f.add("T-0001");
+  await f.tick();
+  f.add("T-0002");
+  f.add("T-0003", { mergeRepair: true });
+  const reviewer = f.slots.acquire("project", "reviewer", f.board.settings.agentLimits)!;
+  await f.tick();
+  assert.deepEqual(f.launches, ["T-0001"]);
+  reviewer();
+  await f.tick();
+  assert.deepEqual(f.launches, ["T-0001", "T-0003"]);
+  f.finish("T-0003");
+  f.finish("T-0001");
 });
 
 test("launch errors notify the manager once and independent work keeps moving", async () => {

@@ -48,7 +48,7 @@ interface Board {
   project: string;
   settings: BoardSettings;
   tags: BoardTag[];
-  tasks: (Task & { reviewApproved?: true; reviewHasCommit?: true; unfinishedDependencies?: string[] })[];
+  tasks: (Task & { reviewApproved?: true; reviewHasCommit?: true; mergeRepair?: true; unfinishedDependencies?: string[] })[];
   managerInbox?: ReturnType<typeof import("../cli/task-messages.ts").managerInbox>;
   archived: (ArchiveLink & { id: string })[];
   cleanedTasks?: string[];
@@ -926,7 +926,11 @@ function scheduleAutoBoard(watch: BoardWatch) {
           .then(result => { if (!result.ok) failed(result.error.message); else if (result.data?.error) failed(result.data.error); })
           .catch(error => failed((error as Error).message));
       }
-      if (!agentSlots.available(key, "executor", board.settings.agentLimits)) return;
+      const available = {
+        executor: agentSlots.available(key, "executor", board.settings.agentLimits),
+        reviewer: agentSlots.available(key, "reviewer", board.settings.agentLimits),
+      };
+      if (!board.tasks.some(task => task.status === "ready" && available[task.mergeRepair ? "reviewer" : "executor"])) return;
       if (board.tasks.some(task => task.status === "ready" && task.milestone) && Date.now() - queue.milestonesAt >= 60_000) {
         queue.milestonesAt = Date.now();
         const milestones = await callCli<{ repository: string; milestones: { number: number; due_on: string | null }[] }>(project, ["milestones"]);
@@ -936,14 +940,17 @@ function scheduleAutoBoard(watch: BoardWatch) {
         continue; // A deadline, setting or card may have changed during the network request.
       }
       if (queue.milestonesError && board.tasks.some(task => task.status === "ready" && task.milestone)) return;
-      const task = nextReadyTask(board.tasks, queue.dates, id => executorBusy(project, id) ||
-        queue.launches.has(id + ":" + board.tasks.find(task => task.id === id)!.revision));
+      const task = nextReadyTask(board.tasks, queue.dates, id => {
+        const candidate = board.tasks.find(task => task.id === id)!;
+        return !available[candidate.mergeRepair ? "reviewer" : "executor"] || executorBusy(project, id) ||
+          queue.launches.has(id + ":" + candidate.revision);
+      });
       if (!task) return;
       const attempt = task.id + ":" + task.revision;
       queue.launches.add(attempt);
       const result = await launchTask(project, task.id, undefined, false, task.revision, undefined, Boolean(task.schedule), false, false, true);
       if (!result.ok) {
-        if (["BOARD_BUSY", "REVISION_CONFLICT", "INVALID_TRANSITION", "LAUNCH_IN_PROGRESS", "CHAT_BUSY", "EXECUTOR_LIMIT",
+        if (["BOARD_BUSY", "REVISION_CONFLICT", "INVALID_TRANSITION", "LAUNCH_IN_PROGRESS", "CHAT_BUSY", "EXECUTOR_LIMIT", "REVIEWER_LIMIT",
             "PROJECT_CLOSING", "DEPENDENCIES_INCOMPLETE", "AUTO_MODE_DISABLED"].includes(result.error.code)) {
           queue.launches.delete(attempt);
           return; // Retry on the next event/tick, never spin on the same snapshot.
@@ -971,12 +978,13 @@ function scheduleAgentWork() {
         notifyRunChange(project);
         continue;
       }
-      if (!agentSlots.available(projectIdentity(project), "executor", watch.board.settings?.agentLimits) || executorBusy(project, id)) continue;
+      const role = task.mergeRepair ? "reviewer" : "executor";
+      if (!agentSlots.available(projectIdentity(project), role, watch.board.settings?.agentLimits) || executorBusy(project, id)) continue;
       deferredExecutors.delete(key);
       notifyRunChange(project);
       const failed = (error: string) => broadcastBoardChat(project, "orchestrator-review-error", { error: id + " · " + error });
       void launchTask(project, id, undefined, false, revision, continuation).then(result => {
-        if (!result.ok && result.error.code === "EXECUTOR_LIMIT") {
+        if (!result.ok && ["EXECUTOR_LIMIT", "REVIEWER_LIMIT"].includes(result.error.code)) {
           deferredExecutors.set(key, pending);
           notifyRunChange(project);
           return;
@@ -1002,7 +1010,9 @@ function reserveAgent(project: string, role: AgentRole) {
   };
 }
 
-function executorLimit() {
+function taskRunLimit(role: "executor" | "reviewer") {
+  if (role === "reviewer") return cliFailure("REVIEWER_LIMIT", lang("All reviewer slots on this board are occupied. Retry when a review or conflict repair finishes.",
+    "Все места ревьюеров на этой доске заняты. Повторите запуск после завершения проверки или исправления конфликта."));
   return cliFailure("EXECUTOR_LIMIT", lang("All executor slots on this board are occupied. Retry when an executor finishes.",
     "На этой доске все места для исполнителей заняты. Повторите запуск, когда один из них завершит работу."));
 }
@@ -1013,13 +1023,13 @@ function scheduleRecurringTasks(now = Date.now()) {
     if (watch.board.settings?.autoMode) { scheduleAutoBoard(watch); continue; }
     const projectKey = projectIdentity(project);
     for (const task of watch.board.tasks) {
-      if (!agentSlots.available(projectKey, "executor", watch.board.settings?.agentLimits)) break;
       if (task.status !== "ready" || !task.schedule || !(Date.parse(task.schedule.nextAt) <= now) ||
           task.unfinishedDependencies?.length || launchingTasks.has(project + "\0" + task.id) || executorBusy(project, task.id)) continue;
+      if (!agentSlots.available(projectKey, task.mergeRepair ? "reviewer" : "executor", watch.board.settings?.agentLimits)) continue;
       const { id, revision } = task;
       void launchTask(project, id, undefined, false, revision, undefined, true).then(async result => {
         if (result.ok || ["BOARD_BUSY", "REVISION_CONFLICT", "INVALID_TRANSITION", "LAUNCH_IN_PROGRESS",
-          "CHAT_BUSY", "EXECUTOR_LIMIT", "PROJECT_CLOSING", "DEPENDENCIES_INCOMPLETE"].includes(result.error.code)) return;
+          "CHAT_BUSY", "EXECUTOR_LIMIT", "REVIEWER_LIMIT", "PROJECT_CLOSING", "DEPENDENCIES_INCOMPLETE"].includes(result.error.code)) return;
         await callCli(project, ["block", id], {
           revision, allowUnstarted: true, reason: result.error.message,
           condition: lang("Fix the launch error and unblock the task to restore its schedule.",
@@ -2436,7 +2446,7 @@ async function recordRunFailure(project: string, id: string, reason: string, con
   if (!result.ok && result.error.code !== "INVALID_TRANSITION" && result.error.code !== "REVISION_CONFLICT") return result.error.message;
 }
 
-type LaunchState = Pick<Task, "id" | "title" | "status" | "revision" | "createdAt" | "codexThreadId" | "blocked" | "summary" | "nextStep">;
+type LaunchState = Pick<Task, "id" | "title" | "status" | "revision" | "createdAt" | "codexThreadId" | "blocked" | "summary" | "nextStep"> & { mergeRepair?: true };
 
 async function launchTask(project: string, id: string, revisionRequest?: { input: Record<string, unknown> },
   newThread: false | "user" | "manager" = false, revision?: number,
@@ -2445,8 +2455,6 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   if (launchingTasks.has(key)) return cliFailure("LAUNCH_IN_PROGRESS", "This task is already being launched.");
   if (executorBusy(project, id)) return cliFailure("CHAT_BUSY", lang("Wait for the chat reply or stop the agent first.", "Дождитесь ответа в чате или остановите агента."));
   if (closingProjects.has(project)) return cliFailure("PROJECT_CLOSING", lang("The project is closing.", "Проект закрывается."));
-  const release = reserveAgent(project, "executor");
-  if (!release && !revisionRequest) return executorLimit();
   const operation = beginOperation(project);
   const signal = operation.controller.signal;
   launchingTasks.add(key);
@@ -2454,6 +2462,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   const runStarted = performance.now();
   let prepared = false;
   let monitoring = false;
+  let release: (() => void) | undefined;
   let updateTimer: NodeJS.Timeout | undefined;
   const publish = () => {
     updateTimer = undefined;
@@ -2486,7 +2495,11 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         : await callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
     if (!current.ok) return current;
     prepared = Boolean(revisionRequest);
-    if (!release) {
+    const role = current.data.mergeRepair || (resolveConflicts && current.data.status === "review") ? "reviewer" : "executor";
+    const releaseSlot = reserveAgent(project, role);
+    release = releaseSlot;
+    if (!releaseSlot) {
+      if (!revisionRequest) return taskRunLimit(role);
       deferredExecutors.set(key, { project, id, revision: current.data.revision });
       scheduleAgentWork();
       return current;
@@ -2676,15 +2689,15 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       for (const directory of directories) await rm(directory, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
       runningTasks.delete(key);
       launchingTasks.delete(key);
-      release();
+      releaseSlot();
       try {
         if (retry && !signal.aborted && !stopRequested && !closingProjects.has(project)) {
           const resumed = await launchTask(project, id, undefined, false, retry.revision, retry.continuation);
           if (!signal.aborted && !resumed.ok) {
-            if (resumed.error.code === "EXECUTOR_LIMIT" && subscriptions.has(project)) {
+            if (["EXECUTOR_LIMIT", "REVIEWER_LIMIT"].includes(resumed.error.code) && subscriptions.has(project)) {
               deferredExecutors.set(key, { project, id, revision: retry.revision, continuation: retry.continuation });
               scheduleAgentWork();
-            } else if (!["REVISION_CONFLICT", "CHAT_BUSY", "LAUNCH_IN_PROGRESS", "BOARD_BUSY", "EXECUTOR_LIMIT"].includes(resumed.error.code)) {
+            } else if (!["REVISION_CONFLICT", "CHAT_BUSY", "LAUNCH_IN_PROGRESS", "BOARD_BUSY", "EXECUTOR_LIMIT", "REVIEWER_LIMIT"].includes(resumed.error.code)) {
               await recordRunFailure(project, id, retry.reason + "\n\n" + resumed.error.message, undefined, retry.revision);
             }
           }

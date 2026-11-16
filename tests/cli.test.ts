@@ -733,12 +733,15 @@ test("automatic integration reports conflicts once and repaired submissions requ
     cli(root, ["start", dependent.id], undefined, "DEPENDENCIES_INCOMPLETE");
     const reopened = cli(root, ["start", task.id], { revision: task.revision, resolveConflicts: true });
     assert.equal(reopened.worktree, worktree);
+    assert.equal(cli(root, ["show", task.id, "--compact"], { launchDetails: true }).mergeRepair, true);
+    assert.equal(cli(root, ["list", "--compact"]).tasks.find((entry: { id: string }) => entry.id === task.id).mergeRepair, true);
     assert.throws(() => git(worktree, "merge", "--no-edit", head));
     writeFileSync(join(worktree, "source.txt"), "target version\ntask version\n");
     git(worktree, "add", "source.txt"); git(worktree, "commit", "-m", "fix: resolve integration conflict\n\nTask: " + task.id);
     const preview = cli(worktree, ["preview", task.id]);
     const repaired = cli(worktree, ["submit", task.id], { token: preview.token, message: preview.commitMessage ?? "fix: combine task and target",
       summary: "Combined", checks: ["Checked combined result"] });
+    assert.equal(cli(root, ["show", task.id, "--compact"], { launchDetails: true }).mergeRepair, undefined);
     const repairedInput = { ...accept, revision: repaired.revision };
     if (reviewMode === "reviewer") {
       cli(root, ["accept", task.id], repairedInput, "REVIEW_REQUIRED");

@@ -81,6 +81,11 @@ function readInput(fromStdin: boolean | undefined, file: string | undefined): Re
 
 type CompactTask = ReturnType<typeof compactTask>;
 
+function isMergeRepair(task: Task) {
+  return Boolean(task.git?.submission && ["ready", "in_progress", "blocked"].includes(task.status) &&
+    task.history.findLast(event => event.action === "resolve-conflicts" || event.to === "review" || event.to === "draft")?.action === "resolve-conflicts");
+}
+
 function compactTask(task: Task) {
   const { id, title, description, status, revision, tags, priority, attachments, coverAttachment, codexThreadId,
     createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep, dependencies, milestone, workingDirectory, schedule } = task;
@@ -89,6 +94,7 @@ function compactTask(task: Task) {
     dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, historyLength: task.history.length,
     ...(status === "review" && task.git?.submission && !task.result?.noChanges ? { reviewHasCommit: true } : {}),
     ...(currentReviewApproval(task) ? { reviewApproved: true } : {}),
+    ...(isMergeRepair(task) ? { mergeRepair: true as const } : {}),
     initialAttachments: attachments.length - task.history.reduce((total, event) =>
       total + (event.action === "attach" ? 1 : event.chat?.files?.length ?? 0), 0),
     readySince: status === "ready" ? task.history.findLast(event => event.to === "ready")?.at : undefined,
@@ -99,8 +105,10 @@ function taskReceipt({ id, status, revision, git, result }: Task) {
   return { id, status, revision, git, result };
 }
 
-function taskLaunchState({ id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep }: Task) {
-  return { id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep };
+function taskLaunchState(task: Task) {
+  const { id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep } = task;
+  return { id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep,
+    ...(isMergeRepair(task) ? { mergeRepair: true as const } : {}) };
 }
 
 function reviewWithSettings(store: BoardStore, review: ReturnType<typeof inspectReview>, input: Record<string, unknown>) {
