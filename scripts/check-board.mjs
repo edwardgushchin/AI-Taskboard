@@ -138,6 +138,30 @@ app.whenReady().then(async () => {
   await evaluate(`byId('notice-close').click(); void 0`);
   await evaluate(`push(); void 0`);
   await check(`byId('welcome').hidden && !byId('workspace').hidden && byId('app-content').getAttribute('aria-busy') === 'false'`, "a restored board replaces the loading state");
+  if (process.argv.includes("--repair-only")) {
+    for (const theme of ["dark", "light"]) for (const phase of ["queued", "running", "checking", "failed"]) {
+      nativeTheme.themeSource = theme;
+      await evaluate(`
+        fixture.theme = ${JSON.stringify(theme)};
+        fixture.board.tasks = [task('T-0001', 'Ремонт приёмки', { status: 'review', mergeRepair: true,
+          acceptanceRepair: { phase: ${JSON.stringify(phase)}, targetHead: 'a'.repeat(40), attempts: 1,
+            message: 'fix: integrate result', reason: ${phase === "failed" ? "'Required check failed'" : "undefined"} } })];
+        push(); void 0;
+      `);
+      await evaluate(`showReview(fixture.board.tasks[0]); settle()`);
+      await check(`sheet.open && sheetKind === 'review' && body.querySelector('form button[type=submit]') !== null`, 'repair phase shows cancellation');
+      await check(`lane('review').querySelectorAll('.task-card').length === 1 && lane('in_progress').querySelectorAll('.task-card').length === 0`, 'repair remains in review');
+      await capture(`repair-${theme}-${phase}.png`);
+    }
+    await evaluate(`Object.assign(window.taskboard, { themes: async () => [], codexStatus: async () => ({ state: "unavailable" }), chatModels: async () => ({ ok: true, data: [] }) }); settings(); settle()`);
+    await check(`!body.querySelector('[name="manager"]') && !!body.querySelector('[name="reviewer"]')`, 'manager has no application limit control');
+    await capture('manager-application-settings.png');
+    await evaluate(`boardSettings(); settle()`);
+    await check(`!body.querySelector('[name="managerLimit"]') && !!body.querySelector('[name="reviewerLimit"]') && !!body.querySelector('[name="managerModel"]')`, 'board retains manager model without manager limit');
+    await capture('manager-board-settings.png');
+    console.log(`Acceptance repair Chromium checks passed: ${checks}`);
+    return;
+  }
   if (process.argv.includes("--run-status-only")) {
     await evaluate(`
       const queuedTask = task('T-0096', 'Проверка ожидания', { status: 'in_progress',
@@ -579,7 +603,7 @@ app.whenReady().then(async () => {
       "the gear opens the settings menu without a board and disables board settings");
     await click('#settings-menu-app');
     await evaluate(`waitFor(() => limitFields()[0].value === '3')`);
-    await check(`limitFields().map(input => input.value).join(',') === '3,1,1' &&
+    await check(`limitFields().map(input => input.value).join(',') === '3,1' &&
       !!body.querySelector('.provider-panel') && !byId('tag-settings')`, "the gear menu opens shared settings even without an open board");
     await evaluate(`waitFor(() => !sandboxSelect().disabled && !sandboxSelect().parentElement.hidden)`);
     await check(`sandboxSelect().value === 'mxc'`, "Codex settings show the current Windows sandbox");

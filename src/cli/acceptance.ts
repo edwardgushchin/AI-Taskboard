@@ -294,6 +294,9 @@ export function reopenConflictingReview(store: BoardStore, task: Task, input: Re
   if (exists(store.pendingPath(task.id))) {
     throw new TaskboardError("PENDING_OPERATION", "Finish the pending Git operation first.");
   }
+  if (task.acceptanceRepair && task.acceptanceRepair.phase !== "queued") {
+    throw new TaskboardError("REPAIR_UNFINISHED", "Conflict repair has already been claimed.");
+  }
   const context = reviewed(task);
   const repo = requireRepository(store.location.repository);
   const target = localBranch(repo, context.target);
@@ -303,9 +306,14 @@ export function reopenConflictingReview(store: BoardStore, task: Task, input: Re
     mergeTree(repo.root, head, context.submission.sha);
   } catch (error) {
     if (!(error instanceof TaskboardError) || error.code !== "MERGE_CONFLICT") throw error;
-    const worktree = input.isolatedWorktree === true ? isolateTaskWorktree(store, repo, task.id, currentPath) : currentPath;
-    const updated = store.save(record({ ...task, git: { ...context, worktree } }, "resolve-conflicts", "agent", "in_progress"));
+    const worktree = input.isolatedWorktree === true && !task.acceptanceRepair ? isolateTaskWorktree(store, repo, task.id, currentPath) : currentPath;
+    const updated = store.save(record({ ...task, ...(task.acceptanceRepair ? { acceptanceRepair: { ...task.acceptanceRepair, phase: "running" as const, targetHead: head, attempts: task.acceptanceRepair.attempts + 1 } } : {}), git: { ...context, worktree } }, "resolve-conflicts", "agent", task.acceptanceRepair ? "review" : "in_progress"));
     return { task: updated, worktree, target, targetHead: head, conflict: error.details };
+  }
+  if (task.acceptanceRepair) {
+    const updated = store.save(record({ ...task, acceptanceRepair: { ...task.acceptanceRepair, phase: "running", targetHead: head,
+      attempts: task.acceptanceRepair.attempts + 1 } }, "resolve-conflicts", "agent"));
+    return { task: updated, worktree: currentPath, target, targetHead: head };
   }
   throw new TaskboardError("NO_MERGE_CONFLICT", "The reviewed submission can be merged into the current target.");
 }

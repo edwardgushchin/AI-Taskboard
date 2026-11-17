@@ -210,8 +210,8 @@ function frame(state: ProjectTab) {
     project: state.project, board: state.board, error: state.error, loading: state.loading, localization: localization.state(), theme,
     managerQuestion: key ? managerQuestion(key)?.view : undefined,
     managerAccess: state.project ? managerAccess(app.getPath("userData"), state.project) : "auto",
-    managerRun: request?.managerRun ?? sharedRuns.find(entry => entry.task === "manager:chat")?.state ?? null,
-    managerWork: work?.managerRun ?? sharedRuns.find(entry => entry.task === "manager:work")?.state ?? null,
+    managerRun: request?.managerRun ?? sharedRuns.find(entry => entry.task === "manager:context")?.state ?? null,
+    managerWork: work?.managerRun ?? sharedRuns.find(entry => entry.task === "manager:context")?.state ?? null,
     runningTasks: state.board?.tasks.filter(task => {
       const key = state.project + "\0" + task.id;
       return runningTasks.has(key) || sharedRuns.some(entry => entry.kind === "slot" && entry.task === task.id);
@@ -253,7 +253,7 @@ observeActiveRuns(() => {
 function publishReviewActivity(project: string) {
   for (const [lane, requests] of [["chat", boardRequests], ["work", boardWorkRequests]] as const) {
     const request = requests.get(projectIdentity(project));
-    if (request?.managerRun) agentSlots.update(project, "manager:" + lane,
+    if (request?.managerRun) agentSlots.update(project, "manager:context",
       { ...request.managerRun, reviewing: [...request.reviewing ?? []] });
   }
   for (const { active } of windowStates.values()) {
@@ -948,7 +948,7 @@ function scheduleAutoBoard(watch: BoardWatch) {
       if (!board.settings.autoMode && !eligibleTasks.some(task => task.status === "ready")) return;
       const key = projectIdentity(project);
       if (board.settings.autoMode && boardReviewMode(board.settings) === "reviewer") {
-        const task = board.tasks.find(task => task.status === "review" && task.reviewApproved && !executorBusy(project, task.id) &&
+        const task = board.tasks.find(task => task.status === "review" && !task.acceptanceRepair && task.reviewApproved && !executorBusy(project, task.id) &&
           !watch.reviewerRuns.has(task.id) && !queue.integrations.has(task.id + ":" + task.revision));
         if (task) {
           const attempt = task.id + ":" + task.revision;
@@ -1099,10 +1099,56 @@ function taskRunLimit(role: "executor" | "reviewer") {
   return cliFailure("EXECUTOR_LIMIT", t("ui.all_executor_slots_on_this_board_are_occupied_re_59a47721"));
 }
 
+const acceptanceWork = new Set<string>();
+async function continueAcceptance(project: string, task: Task) {
+  const key = project + "\0" + task.id;
+  if (acceptanceWork.has(key) || executorBusy(project, task.id)) return;
+  acceptanceWork.add(key);
+  try {
+    let result: CliReply<unknown>;
+    if (task.acceptanceRepair?.phase === "queued") {
+      const watch = subscriptions.get(project);
+      const tab = watch && [...watch.tabs].find(tab => !tab.window.isDestroyed());
+      if (!watch || !tab) return;
+      result = await runBoardRequest(tab.window.webContents, watch.board,
+        "Resolve the pending acceptance conflict yourself in the board manager context. " + JSON.stringify({ id: task.id,
+          worktree: task.git?.worktree, acceptanceRepair: task.acceptanceRepair }) +
+        " Read the current card with show --compact; use the AI Taskboard CLI with --project " + project +
+        " for preview, submit or block. No new agent context is authorized.", [], false, false, undefined, undefined, undefined, false, task);
+      if (result.ok) {
+        const current = await callCli<Task>(project, ["show", task.id]);
+        if (current.ok && current.data.acceptanceRepair?.phase === "running") {
+          const response = result.data as { error?: string; answer?: string } | undefined;
+          await callCli(project, ["accept", task.id], { revision: current.data.revision,
+            repairFailure: response?.error || response?.answer || "The manager ended repair without submitting checked results." });
+        }
+      }
+    } else if (task.acceptanceRepair?.phase === "checking") {
+      const review = await callCli<{ targetHead: string; revision: number }>(project, ["review", task.id, "--compact"]);
+      if (!review.ok) result = review;
+      else result = await callCli(project, ["accept", task.id, "--compact"], {
+        actor: "user", continueRepair: true, revision: review.data.revision, targetHead: review.data.targetHead,
+      });
+    } else if (task.acceptanceRepair?.phase === "running") {
+      result = await callCli(project, ["accept", task.id], { revision: task.revision,
+        repairFailure: "The repair process ended before submitting checked results. Inspect its saved activity and worktree before retrying." });
+    } else return;
+    if (!result.ok && !["BOARD_BUSY", "TARGET_CHANGED", "REVISION_CONFLICT", "CHAT_BUSY", "LAUNCH_IN_PROGRESS", "REVIEWER_LIMIT", "BOARD_REQUEST_IN_PROGRESS"].includes(result.error.code)) {
+      const current = await callCli<Task>(project, ["show", task.id]);
+      if (current.ok && current.data.acceptanceRepair) await callCli(project, ["accept", task.id], {
+        revision: current.data.revision, repairFailure: result.error.message });
+      broadcastBoardChat(project, "orchestrator-review-error", { error: task.id + ": " + result.error.message });
+    }
+  } finally { acceptanceWork.delete(key); }
+}
+
 function scheduleRecurringTasks(now = Date.now()) {
   for (const [project, watch] of subscriptions) {
     if (!watch.tabs.size || closingProjects.has(project)) continue;
     if (isManual(watch.board.settings)) continue;
+    for (const task of watch.board.tasks) {
+      if (task.status === "review" && ["queued", "checking", "running"].includes(task.acceptanceRepair?.phase ?? "")) void continueAcceptance(project, task).catch(error => console.error("Could not continue acceptance", task.id, error));
+    }
     if (watch.board.settings?.autoMode) { scheduleAutoBoard(watch); continue; }
     const projectKey = projectIdentity(project);
     for (const task of watch.board.tasks) {
@@ -1175,7 +1221,9 @@ function broadcastBoardChat(project: string, type: string, details: { id?: strin
 }
 
 function boardThreadPath(project: string, lane: "chat" | "work" = "work") {
-  return join(project, ".tasks", lane === "chat" ? "manager-dialog.json" : "orchestrator.json");
+  const dialog = join(project, ".tasks", "manager-dialog.json");
+  const legacy = join(project, ".tasks", "orchestrator.json");
+  return existsSync(legacy) ? legacy : dialog;
 }
 
 ipcMain.handle("board:queue", async (event, project: string, action: unknown, id?: unknown, draft?: unknown,
@@ -1408,7 +1456,7 @@ ipcMain.handle("board:request", async (event, request: unknown, files: unknown =
 });
 
 async function runBoardRequest(sender: Electron.WebContents, board: Board | undefined, request: unknown, files: unknown = [],
-  goal: unknown = false, immediate: unknown = false, messageId?: unknown, reviewIds?: string[], expectedReviewMode?: ReviewMode, autoNotice = false) {
+  goal: unknown = false, immediate: unknown = false, messageId?: unknown, reviewIds?: string[], expectedReviewMode?: ReviewMode, autoNotice = false, repairTask?: Task) {
   if (!board || typeof request !== "string" || typeof immediate !== "boolean" || (immediate && goal !== false) || !Array.isArray(files) ||
       (messageId !== undefined && (typeof messageId !== "string" || !codexThreadPattern.test(messageId))) ||
       !files.every(isPastedFile) || (goal === "resume" ? Boolean(request.trim() || files.length) :
@@ -1426,12 +1474,12 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     }
   };
   const projectKey = projectIdentity(board.project);
-  const lane = goal || reviewIds || autoNotice ? "work" : "chat";
+  const lane = goal || reviewIds || autoNotice || repairTask ? "work" : "chat";
   const requests = lane === "work" ? boardWorkRequests : boardRequests;
   if (files.reduce((total, file) => total + file.bytes.byteLength, 0) > maxAttachmentBytes) {
     return cliFailure("ATTACHMENT_LIMIT", t("ui.attachments_are_limited_to_64_mib_per_task_ae680c16"));
   }
-  let current = requests.get(projectKey);
+  let current = boardRequests.get(projectKey) ?? boardWorkRequests.get(projectKey);
   if (queuedPath && !existsSync(queuedPath)) {
     return immediate ? { ok: true as const, data: null } :
       { ok: true as const, data: { answer: "", changes: [] } };
@@ -1454,18 +1502,23 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   }
   if (current) return cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_agent_is_already_handling_a_request_72b4da49"));
   if (closingProjects.has(board.project)) return cliFailure("PROJECT_CLOSING", t("ui.the_project_is_closing_beb637fb"));
-  const release = lane === "work" ? reserveAgent(board.project, "manager", "manager:work") : agentSlots.claim(board.project, "manager:chat");
-  if (!release) return cliFailure("MANAGER_LIMIT", t("ui.all_background_manager_slots_on_this_board_are_o_e7983e98"));
+  const writer = agentSlots.claim(board.project, "manager:context");
+  if (!writer) return cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_agent_is_already_handling_a_request_72b4da49"));
+  const repairSlot = repairTask ? reserveAgent(board.project, "reviewer", repairTask.id) : undefined;
+  if (repairTask && !repairSlot) { writer(); return taskRunLimit("reviewer"); }
+  const release = Object.assign(() => { repairSlot?.(); writer(); }, {
+    run: <T>(callback: () => T) => writer.run(() => repairSlot ? repairSlot.run(callback) : callback()),
+  });
   const project = board.project;
   const operation = beginOperation(project);
   const signal = operation.controller.signal;
-  const automaticDone = reviewIds || autoNotice ? Promise.withResolvers<void>() : undefined;
+  const automaticDone = reviewIds || autoNotice || repairTask ? Promise.withResolvers<void>() : undefined;
   const startedAt = Date.now();
   const managerRun: ManagerRun = { id: randomUUID(), phase: "starting", startedAt };
   const running: ManagerRequest = { automaticDone: automaticDone?.promise, managerRun };
   requests.set(projectKey, running);
   const publishRun = () => {
-    agentSlots.update(project, "manager:" + lane, running.managerRun
+    agentSlots.update(project, "manager:context", running.managerRun
       ? { ...running.managerRun, reviewing: [...running.reviewing ?? []] } : undefined);
     broadcastBoardChat(project, "orchestrator-run", lane === "work"
       ? { managerWork: running.managerRun ?? null } : { managerRun: running.managerRun ?? null });
@@ -1487,7 +1540,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     publishReviewActivity(project);
   }
   const changes: BoardChange[] = [];
-  const requestText = request.trim();
+  let requestText = request.trim();
   let pendingAction: Promise<unknown> = Promise.resolve();
   const scratch = new Set<string>();
   let sendingNow: Promise<void> | undefined;
@@ -1592,9 +1645,15 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   }
   try {
     publishRun();
+    if (repairTask) {
+      const started = await callCli(project, ["start", repairTask.id, "--compact"], { revision: repairTask.revision, resolveConflicts: true });
+      if (!started.ok) return started;
+      requestText += "\nAssigned repair context: " + JSON.stringify(started.data);
+      startReview([repairTask.id]);
+    }
     const binding = boardThreadPath(project, lane);
     const stored = readBoardThread(binding);
-    threadId = reviewIds ? undefined : stored?.id;
+    threadId = stored?.id;
     goalId = goal === true ? randomUUID() : stored?.goalId ?? stored?.id;
     if (goal === "resume" && !threadId) return cliFailure("INVALID_INPUT", t("ui.there_is_no_saved_goal_67c98597"));
     const settings = await callCli<BoardSettings>(board.project, ["settings"]);
@@ -1605,7 +1664,12 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     if (expectedReviewMode && reviewMode !== expectedReviewMode) {
       return cliFailure("REVIEW_MODE_CHANGED", t("errors.5842130646fd0b88"));
     }
-    const instructions = reviewIds ? autoReviewInstructions : (isManual(settings.data) ? manualContext(settings.data) + "\n" + russianWriting : boardInstructions) + (autoNotice ?
+    const instructions = repairTask ? boardInstructions.replace("Do not edit files, run project code, or change Git state yourself.", "For this acceptance repair, edit and check only the assigned task worktree.") +
+      " This turn repairs one user's pending acceptance in your existing board manager context. Do the repair yourself; do not launch an executor or reviewer. " +
+      "Work only in the assigned task worktree. Read the current card and acceptanceRepair.targetHead, merge that target without destructive Git operations, " +
+      "resolve conflicts without changing requirements, run required project checks, then preview and submit with the task CLI. Keep review throughout. " +
+      "Use block with a reason and condition for failed checks, missing access, or a product decision. Do not accept directly; the board resumes the persisted user request after checked submission. "
+      : reviewIds ? autoReviewInstructions : (isManual(settings.data) ? manualContext(settings.data) + "\n" + russianWriting : boardInstructions) + (autoNotice ?
       " Handle only the addressed executor questions, blockers or integration failures in this short run. Do not create or resume a goal. " +
       "Read manager_inbox, handle the specified notices and acknowledge them with manager_ack. Do not retry an unchanged blocker. " +
       "For a merge conflict, organize repair with task_start resolveConflicts:true in the same card and worktree without asking permission to start repair. " +
@@ -1614,7 +1678,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       " You run the board goal in the background. Read goal_inbox at the start of each turn, before waiting, " +
       "and when notified. Apply user directions, then confirm or decline with goal_inbox and a factual reply. " +
       "Use goal_report for meaningful decisions and milestones and ask_user when you need a user decision." :
-      " You are the user's conversational manager. When asked about the goal, read goal_read. The goal runs concurrently. " +
+      " You are the user's conversational manager. When asked about the goal, read goal_read. The board uses one manager context; direct messages can steer the active turn. " +
       "For user instructions affecting its running work, use goal_send and report them as queued until the goal confirms. " +
       "The goal handles its incoming executor and reviewer mail. Use board tools for the user's direct requests.");
     const reviewTaskTools = reviewMode === "reviewer"
@@ -1623,7 +1687,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       (!isManual(settings.data) || ["board_list", "task_show", "task_create", "task_update", "task_comment", "tag_set_color", "ask_user"].includes(name)) &&
       (reviewIds || !["project_path", "project_sha256"].includes(name)) &&
       (!reviewIds || autoReviewReadTools.has(name) || reviewTaskTools.has(name)) &&
-      (name !== "task_accept" || reviewMode !== "human"));
+      (name !== "task_accept" || reviewMode !== "human") &&
+      (!repairTask || !["task_start", "task_start_batch", "task_accept", "task_request_changes"].includes(name)));
     if (!reviewIds) mcpTools.push(...(goal ? goalWorkTools : goalChatTools), githubReadTool);
     const attachments = await prepareBoardAttachments(files, scratch);
     if (!reviewIds && goal !== "resume") {
@@ -1789,7 +1854,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         mcpTools,
         goal: goal === true ? requestText : undefined,
         resumeGoal: goal === "resume",
-        separateTurn: Boolean(reviewIds),
+        readOnly: Boolean(reviewIds),
         onGoalSet: () => {
           goalSet = true;
           if (goal === true) {
@@ -1827,12 +1892,13 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         onGoalControl: control => { running.goal = control; },
         onTurnEnded: () => { endReview(); saveHistory(); },
         onTokenUsage: async report => {
+          if (repairTask) return saveTaskTokenUsage(project, repairTask.id, "reviewer", report);
           const saved = await callCli(project, ["manager-usage"], report);
           if (!saved.ok) console.warn("Could not save manager token usage (%s).", saved.error.code);
         },
         title: t("ui.project_manager_for_3f3547d6") + (basename(board.project) || board.project),
         save: id => {
-          if (!reviewIds) writeJson(binding, { provider: "codex", id, history: "local" });
+          writeJson(binding, { ...readBoardThread(binding), provider: "codex", id, history: "local" });
           threadId = id;
         },
         onActivity: activity => {
@@ -1883,7 +1949,6 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
               waitWork = new AbortController();
               void control.steer("AI Taskboard: new user directions are available. Read goal_inbox.", []).catch(() => {});
             };
-            return;
           }
           running.sendNow = (text, files, messageId) => {
             if (sendingNow) throw new Error(t("ui.a_message_is_already_being_sent_ed690319"));
@@ -2019,7 +2084,7 @@ function scheduleAutoReview(watch: BoardWatch) {
   if (!tab) return;
   const managerBatchSize = 4;
   const available = mode === "reviewer" ? agentSlots.available(projectKey, "reviewer", overrides) : managerBatchSize;
-  const ready = submissions.filter(task => !watch.reviewerRuns.has(task.id) &&
+  const ready = submissions.filter(task => !task.acceptanceRepair && !watch.reviewerRuns.has(task.id) &&
     (mode !== "reviewer" || !task.reviewApproved) &&
     watch.reviewAttempts.get(task.id) !== mode + ":" + task.revision &&
     ((mode === "reviewer" && task.reviewHasCommit) || !executorBusy(project, task.id))).slice(0, available);
@@ -2524,7 +2589,7 @@ async function recordRunFailure(project: string, id: string, reason: string, con
   if (!result.ok && result.error.code !== "INVALID_TRANSITION" && result.error.code !== "REVISION_CONFLICT") return result.error.message;
 }
 
-type LaunchState = Pick<Task, "id" | "title" | "status" | "revision" | "createdAt" | "codexThreadId" | "blocked" | "summary" | "nextStep"> & { mergeRepair?: true };
+type LaunchState = Pick<Task, "acceptanceRepair" | "id" | "title" | "status" | "revision" | "createdAt" | "codexThreadId" | "blocked" | "summary" | "nextStep"> & { mergeRepair?: true };
 
 async function launchTask(project: string, id: string, revisionRequest?: { input: Record<string, unknown> },
   newThread: false | "user" | "manager" = false, revision?: number,
@@ -2573,6 +2638,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       : known ? { ok: true, data: known }
         : await callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
     if (!current.ok) return current;
+    if (current.data.acceptanceRepair) return cliFailure("ACCEPTANCE_PENDING", "The board manager handles this pending acceptance in its existing context.");
     prepared = Boolean(revisionRequest);
     const role = current.data.mergeRepair || (resolveConflicts && current.data.status === "review") ? "reviewer" : "executor";
     const releaseSlot = reserveAgent(project, role, id);
@@ -2662,7 +2728,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     const run = await releaseSlot.run(() => startCodexRun(client, project, cwd, task, item => {
       activity.set(item.id, item);
       updateTimer ??= setTimeout(publish, 80);
-    }, report => saveTaskTokenUsage(project, id, "executor", report), signal, async codexThreadId => {
+    }, report => saveTaskTokenUsage(project, id, role, report), signal, async codexThreadId => {
       if (linked.codexThreadId === codexThreadId) return;
       const previousCodexThreadId = linked.codexThreadId;
       // Preserve edits made while Codex was starting and link the chat before it can run.
@@ -2706,6 +2772,11 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       if ((accessGranted || reconnect || (!outcome && !task.schedule)) && !signal.aborted && !stopRequested && (!rejected || accessGranted)) {
         const current = await callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
         if (current.ok) {
+          if (current.data.status === "review" && current.data.acceptanceRepair?.phase === "running" && current.data.codexThreadId === codexThreadId) {
+            await callCli(project, ["accept", id], { revision: current.data.revision, repairFailure: reason ?? detail ?? incomplete });
+            await saveActivity();
+            return;
+          }
           if (current.data.status !== "in_progress" || current.data.codexThreadId !== codexThreadId) {
             await saveActivity();
             return;

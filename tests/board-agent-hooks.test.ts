@@ -101,7 +101,8 @@ test("all board roles receive the same action boundaries on every instruction bu
     for (let turn = 0; turn < 2; turn++) {
       const instructions = boardAgentInstructions(role);
       assert.match(instructions, /no drag-and-drop or arbitrary manual status movement/);
-      assert.match(instructions, /human review mode only the human accepts/);
+      assert.match(instructions, /human review mode only the human requests acceptance/);
+      assert.match(instructions, /persisted user acceptance request can continue automatically/);
       assert.match(instructions, /only tools actually supplied in this run/);
       assert.match(instructions, /send limitations or questions to the manager with message/);
       assert.match(instructions, /Confirm a transition only after a successful tool result/);

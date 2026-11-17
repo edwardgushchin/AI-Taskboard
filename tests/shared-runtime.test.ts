@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -26,10 +27,10 @@ test("shared defaults, overrides and canonical aliases use one pool without inte
   first(); first(); assert.equal(b.available(alias, "executor"), 0);
   second(); assert.equal(b.available(alias, "executor"), 1);
   onBoard(locateBoard(project), store => { store.index.settings.agentLimits = { executor: 0, manager: 2 }; store.saveIndex(); });
-  assert.equal(b.available(alias, "executor"), Infinity); assert.equal(b.available(alias, "manager"), 2);
+  assert.equal(b.available(alias, "executor"), Infinity); assert.equal(b.available(alias, "manager"), Infinity);
   const discussion = a.claim(project, "T-0003")!; assert.ok(discussion);
   assert.equal(b.acquire(alias, "executor", undefined, "T-0003"), undefined);
-  assert.equal(b.available(other, "manager"), 1);
+  assert.equal(b.available(other, "manager"), Infinity);
   discussion();
   assert.equal(runtimeEntries(project).filter(entry => entry.kind === "slot" || entry.kind === "task").length, 0);
 });
@@ -49,4 +50,29 @@ test("runtime snapshots and reservations stay responsive during a board transact
     release();
     assert.equal(runtimeEntries(project).some(entry => entry.task === "T-0001"), false);
   });
+});
+
+
+test("manager context and reviewer capacity are shared with another process", t => {
+  const scratch = mkdtempSync(join(tmpdir(), "taskboard-manager-pool-"));
+  t.after(() => rmSync(scratch, { recursive: true, maxRetries: 5 }));
+  const project = join(scratch, "board"); mkdirSync(project);
+  initializeBoard(locateBoard(project, true), () => {});
+  const slots = createAgentSlots(true); slots.remember(project);
+  slots.configure({ executor: 1, manager: 1, reviewer: 1 });
+  const writer = slots.claim(project, "manager:context")!;
+  const reviewer = slots.acquire(project, "reviewer", undefined, "review:other")!;
+  const source = `import {createAgentSlots} from ${JSON.stringify(new URL("../src/desktop/agent-limits.ts", import.meta.url).href)};
+    const slots=createAgentSlots(true), project=process.argv[1]; slots.remember(project);
+    const writer=slots.claim(project,'manager:context'), reviewer=slots.acquire(project,'reviewer',undefined,'T-0001');
+    console.log(JSON.stringify({writer:Boolean(writer),reviewer:Boolean(reviewer),executor:slots.available(project,'executor'),manager:slots.available(project,'manager')===Infinity}));
+    writer?.(); reviewer?.();`;
+  const probe = () => {
+    const result = spawnSync(process.execPath, ["--disable-warning=ExperimentalWarning", "--input-type=module", "-e", source, project], {
+      encoding: "utf8", windowsHide: true, env: { ...process.env, GIT_CEILING_DIRECTORIES: scratch } });
+    assert.equal(result.status, 0, result.stderr); return JSON.parse(result.stdout);
+  };
+  try { assert.deepEqual(probe(), { writer: false, reviewer: false, executor: 1, manager: true }); }
+  finally { reviewer(); writer(); }
+  assert.deepEqual(probe(), { writer: true, reviewer: true, executor: 1, manager: true });
 });

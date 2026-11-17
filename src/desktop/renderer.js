@@ -825,7 +825,8 @@ function renderAgentRunStatus(target, task) {
     spinner.title = label;
     if (!spinner.parentNode) target.replaceChildren(spinner);
   } else {
-    const text = frame.waitingTasks?.includes(task.id) ?
+    const repair = frame.board?.tasks.find(card => card.id === task.id)?.acceptanceRepair;
+    const text = repair ? ({ queued: t("ui.waiting_for_a_reviewer_slot_8918dd95"), running: t("ui.resolving_acceptance_conflict"), checking: t("ui.accepting_task_39473c27"), failed: repair.reason }[repair.phase]) : frame.waitingTasks?.includes(task.id) ?
       (task.mergeRepair || frame.board?.tasks.find(card => card.id === task.id)?.mergeRepair
         ? t("ui.waiting_for_a_reviewer_slot_8918dd95")
         : t("ui.waiting_for_an_available_executor_cc0934a8")) :
@@ -892,7 +893,7 @@ function card(task) {
   const signature = JSON.stringify([frame.localization?.locale, task.title, task.description,
     task.tags?.map(name => boardTags.get(tagKey(name)) ?? { name }), cover?.file,
     frame.runningTasks?.includes(task.id) ?? false, frame.waitingTasks?.includes(task.id) ?? false,
-    frame.reviewingTasks?.[task.id], task.status, task.mergeRepair, Boolean(task.codexThreadId),
+    frame.reviewingTasks?.[task.id], task.status, task.mergeRepair, task.acceptanceRepair, Boolean(task.codexThreadId),
     task.unfinishedDependencies, task.blocked, task.subtasks?.map(entry => entry.done),
     task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule,
     manualColumns().find(c => c.id === task.status)]);
@@ -4193,6 +4194,16 @@ async function showAcceptedTask(task) {
 }
 
 async function showReview(task, messageDraft, acceptanceError) {
+  if (task.acceptanceRepair) {
+    taskInSheet = task;
+    const editor = form("review", () => t("ui.review_result_29ed25fb"), [], () => t("ui.cancel_4c6dcc32"), async () => {
+      const cancelled = await command("accept", task.id, { revision: task.revision, cancelRepair: true });
+      if (cancelled) sheet.close();
+    });
+    editor.before(element("p", task.acceptanceRepair.reason ?? ({ queued: t("ui.waiting_for_a_reviewer_slot_8918dd95"), running: t("ui.resolving_acceptance_conflict"), checking: t("ui.accepting_task_39473c27") }[task.acceptanceRepair.phase]), "muted"));
+    body.append(button(() => t("ui.work_activity_e01957b7"), () => showTask(task.id)));
+    return;
+  }
   const generation = projectGeneration;
   const review = await command("review", task.id);
   if (!review || generation !== projectGeneration) return;
@@ -4223,7 +4234,9 @@ async function showReview(task, messageDraft, acceptanceError) {
     });
     if (generation !== projectGeneration) return;
     if (result.ok) {
-      await showAcceptedTask(result.data);
+      if (result.data.status === "review") {
+        await showTask(task.id);
+      } else await showAcceptedTask(result.data);
     } else {
       if (sheetKind === "review" && taskInSheet?.id === task.id) await showReview(task, message, result.error);
       else notice(boardError(result.error), [t("ui.accepting_task_39473c27"), task.id, projectName()].join(" · "));
@@ -4409,7 +4422,6 @@ function renderTagSettings(panel) {
 function settings() {
   const roles = [
     ["executor", () => t("ui.executors_66276668")],
-    ["manager", () => t("ui.manager_goals_and_background_runs_e3b2372a")],
     ["reviewer", () => t("ui.reviewers_fd4fe839")],
   ];
   const editor = form("settings", () => (t("ui.application_settings_b131bcd2")),
@@ -4462,9 +4474,9 @@ function boardSettings() {
         options: model ? [[model, model]] : [["", defaultModel]] },
       { name: role + "Effort", label: () => (t("ui.reasoning_effort_f0ee1b26")), value: effort,
         options: [[effort, effort ? reasoningName(effort) : defaultModel]] },
-      { name: role + "Limit", type: "number", value: current.agentLimits?.[role],
+      ...(role === "manager" ? [] : [{ name: role + "Limit", type: "number", value: current.agentLimits?.[role],
         label: () => (role === "manager" ? t("ui.concurrent_background_runs_c8868724")
-          : t("ui.concurrent_agents_06461399")) },
+          : t("ui.concurrent_agents_06461399")) }]),
     ];
   });
   let models = [];
@@ -4493,7 +4505,7 @@ function boardSettings() {
     const agents = {};
     const agentLimits = {};
     for (const [role, title] of roles) {
-      if (values[role + "Limit"] !== "") agentLimits[role] = Number(values[role + "Limit"]);
+      if (role !== "manager" && values[role + "Limit"] !== "") agentLimits[role] = Number(values[role + "Limit"]);
       const { [role + "Provider"]: provider, [role + "Model"]: model, [role + "Effort"]: effort } = values;
       if (provider === (current[role]?.provider ?? "codex") && model === (current[role]?.model ?? "") &&
           effort === (current[role]?.effort ?? "")) continue;
@@ -4534,14 +4546,14 @@ function boardSettings() {
   selects[0].parentElement.before(element("p", () => t("ui.an_empty_limit_uses_the_application_default_use__f19c1da9"), "muted"));
   void api.agentLimits().then(result => {
     if (!result.ok || !editor.isConnected) return;
-    roles.forEach(([role], index) => { limits[index].placeholder = String(result.data[role]); });
+    roles.forEach(([role], index) => { if (limits[index]) limits[index].placeholder = String(result.data[role]); });
   }).catch(() => {});
   const roleControls = roles.map(([role, title], index) => {
     const [provider, model, effort] = selects.slice(index * 3, index * 3 + 3);
     const group = element("fieldset", undefined, "board-agent-settings");
     provider.parentElement.before(group);
     group.append(element("legend", title), provider.parentElement, model.parentElement, effort.parentElement,
-      limits[index].parentElement);
+      ...(limits[index] ? [limits[index].parentElement] : []));
     if (role === "manager") group.append(editor.elements.namedItem("managerAccess").parentElement);
     const savedModel = current[role]?.model ?? "";
     const savedEffort = current[role]?.effort ?? "";
@@ -5139,6 +5151,13 @@ function update(next) {
   syncBoardNotice(projectChanged);
   const tagSettings = byId("tag-settings");
   if (tagsChanged && sheet.open && tagSettings) renderTagSettings(tagSettings);
+  if (sheetKind === "review" && sheet.open && taskInSheet?.acceptanceRepair) {
+    const current = frame.board?.tasks.find(task => task.id === taskInSheet.id);
+    if (current && (current.revision !== taskInSheet.revision || JSON.stringify(current.acceptanceRepair) !== JSON.stringify(taskInSheet.acceptanceRepair))) {
+      if (current.acceptanceRepair) void showReview({ ...taskInSheet, ...current });
+      else void showTask(current.id);
+    }
+  }
   if (sheetKind === "task" && sheet.open && taskInSheet) {
     body.querySelector(".task-chat")?.syncAgentState?.();
     const runStatus = byId("task-agent-run");
