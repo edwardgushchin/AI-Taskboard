@@ -1,3 +1,4 @@
+import { isManual } from "../src/cli/manual-board.ts";
 import localization from "../src/desktop/localization.cjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -27,7 +28,7 @@ function fixture(mode = "human") {
   const fail = (code: string) => ({ ok: false, error: { code, message: code } });
   const runtime = runInNewContext(stripTypeScriptTypes(code) + "\n({scheduleAutoBoard, autoBoards})", {
     subscriptions: new Map([["project", watch]]), closingProjects: new Set(), boardWorkRequests: new Map(),
-    nextReadyTask, boardReviewMode, agentSlots: slots, projectIdentity: (path: string) => path,
+    isManual, nextReadyTask, boardReviewMode, agentSlots: slots, projectIdentity: (path: string) => path,
     executorBusy: (_: string, id: string) => busy.has(id), t: (key: string) => localization.text(key, {}, "en"),
     broadcastBoardChat: (_: string, __: string, value: any) => errors.push(value.error),
     reserveAgent: (_: string, role: "reviewer") => slots.acquire("project", role, board.settings.agentLimits),
@@ -165,4 +166,10 @@ test("a changed target is reviewed again, and missing evidence does not cause re
     assert.deepEqual(f.accepted, needsHuman ? [] : ["T-0001"]);
     assert.equal(f.board.tasks[0].status, needsHuman ? "review" : "done");
   }
+});
+
+test("manual boards never dispatch or review even with stale automatic settings", async () => {
+  const f = fixture("reviewer"); f.board.settings.boardType = "manual";
+  f.add("T-0001"); f.add("T-0002", { status: "review", reviewApproved: true });
+  await f.tick(); assert.deepEqual(f.launches, []); assert.deepEqual(f.reviews, []); assert.deepEqual(f.accepted, []);
 });

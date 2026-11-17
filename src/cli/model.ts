@@ -13,7 +13,8 @@ export const maxAttachmentBytes = 64 * 1024 * 1024;
 export const codexThreadPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 export const imageAttachmentPattern = /\.(png|jpe?g|webp|gif)$/i;
 
-export type TaskState = typeof taskStates[number];
+export type TaskState = typeof taskStates[number] | `manual:${string}`;
+export interface ManualColumn { id: `manual:${string}`; name: string; color: string; terminal: boolean }
 export type Priority = typeof priorities[number];
 export function validDueDate(value: unknown): value is string {
   return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) &&
@@ -212,6 +213,8 @@ export interface Task {
 }
 
 export interface BoardSettings {
+  boardType?: "agent" | "manual";
+  manualColumns?: ManualColumn[];
   name?: string;
   archiveAfterDays: number | null;
   integrationMode: IntegrationMode;

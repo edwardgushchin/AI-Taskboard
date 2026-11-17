@@ -1,3 +1,5 @@
+import { manualContext } from "../cli/manual-board.ts";
+import { readBoardSettings, locateBoard } from "../cli/storage.ts";
 import { responseLanguageInstructions } from "./board-agent-hooks.ts";
 import { trackActiveRun, trackProvider, claimDiscussion } from "./active-runs.ts";
 import { spawn } from "node:child_process";
@@ -241,7 +243,7 @@ export function replyToTask(
       "Report actual results and failures. On a retry do not repeat a change already recorded.",
       "Use github_read for GitHub checks, including run-failed-log for Actions logs. The board uses its host login. Try the tool before asking the user to copy a log.",
       "Read explicitly attached files when relevant. Do not edit project files or run project tasks.",
-    ].join(" ")),
+    ].join(" ") + manualContext(readBoardSettings(locateBoard(project))), { manual: readBoardSettings(locateBoard(project)).boardType === "manual" }),
     onCommentary, onTokenUsage, onControl, signal, imageDirectory, imageLimit,
   };
   const release = claimDiscussion(project, taskId);
@@ -320,7 +322,7 @@ export function replyToBoard(
     async (name, args) => name === worklogTool.name ? worklog.submit(args) : worklog.remind(await dispatch(name, args)),
     (config, env) => reply(profile, project, prompt, images, dispatch, {
       tools, instructions: boardAgentInstructions("manager", instructions + accessInstructions + (accessInstructions ?
-        "Use existing credentials for authorized operations without exposing them. Keep SSH host key checking enabled and report server authentication failures separately from local permission failures." : ""), { dialogue }),
+        "Use existing credentials for authorized operations without exposing them. Keep SSH host key checking enabled and report server authentication failures separately from local permission failures." : ""), { dialogue, manual: readBoardSettings(locateBoard(project)).boardType === "manual" }),
       signal, session, worklog, onTokenUsage: session.onTokenUsage, mcp: { config, env },
       prepareResearch: async (request, client) => {
         const launchKey = JSON.stringify([profile, client.path, client.args, client.version, client.windowsSandbox, permissionProfile]);

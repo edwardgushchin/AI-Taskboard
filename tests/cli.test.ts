@@ -826,7 +826,7 @@ test("board agent defaults apply to new and unset roles while explicit choices k
     reviewer: { provider: "codex", model: "gpt-6.1-terra", effort: "high" },
   };
   assert.deepEqual(cli(root, ["settings"]), {
-    archiveAfterDays: 90, integrationMode: "merge", reviewMode: "reviewer", ...roles,
+    boardType: "agent", archiveAfterDays: 90, integrationMode: "merge", reviewMode: "reviewer", ...roles,
   });
   const path = join(root, ".tasks", "board.json");
   const index = JSON.parse(readFileSync(path, "utf8"));

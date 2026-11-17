@@ -1,4 +1,5 @@
 import localization from "../src/desktop/localization.cjs";
+import { isManual } from "../src/cli/manual-board.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
@@ -35,7 +36,7 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
   const launched: any[] = [];
   const access = { full: false };
   const subscriptions = new Map();
-  const savedSettings = new Map<string, { agentLimits: Partial<import("../src/cli/model.ts").AgentLimits> }>();
+  const savedSettings = new Map<string, Partial<import("../src/cli/model.ts").BoardSettings>>();
   const previousTurn = { status: "completed", completedAt: 1 as number | null, reads: 0 };
   type Completion = { reason: string; disconnected?: boolean; interrupted?: boolean } | undefined;
   const completion = Promise.withResolvers<Completion>();
@@ -45,7 +46,7 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
   const slots = createAgentSlots();
   const runtime = runInNewContext(stripTypeScriptTypes(lifecycle) + "\n({launchTask, scheduleAgentWork, scheduleRecurringTasks, confirmProjectClose, projectOperations, runningTasks, activeAgents, deferredExecutors})", {
     AbortController, performance, setTimeout, clearTimeout, setImmediate, subscriptions, agentSlots: slots,
-    runtimeLocation: (project: string) => project,
+    isManual, runtimeLocation: (project: string) => project,
     readBoardSettings: (project: string) => savedSettings.get(project) ?? subscriptions.get(project)?.board.settings ?? {},
     scheduleAutoReview: () => {}, scheduleAutoBoard: () => {}, projectIdentity: (project: string) => project,
     broadcastBoardChat: () => {},
@@ -113,6 +114,18 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
   });
   return { runtime, task, calls, launched, previousTurn, completion, retryCompletion, finalCompletion, subscriptions, slots, savedSettings, access };
 }
+
+test("manual boards reject direct launches and stale recurring schedules", async () => {
+  const f = fixture("started");
+  f.savedSettings.set("project", { boardType: "manual", autoMode: true });
+  assert.equal((await f.runtime.launchTask("project", f.task.id)).error.code, "MANUAL_BOARD");
+  f.task.status = "ready";
+  f.task.schedule = { everyMinutes: 1, nextAt: new Date(0).toISOString() };
+  f.subscriptions.set("project", { board: { tasks: [f.task], settings: { boardType: "manual" } }, tabs: new Set([{}]) });
+  f.runtime.scheduleRecurringTasks();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.launched.length, 0);
+});
 
 test("launch uses saved limits when the watch still has the previous value", async () => {
   for (const limit of [3, 1, 0]) {

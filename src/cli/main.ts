@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { guardManual, manualAction, isManual } from "./manual-board.ts";
 import { existsSync, lstatSync, readFileSync, watch } from "node:fs";
 import type { FSWatcher, Stats } from "node:fs";
 import { join } from "node:path";
@@ -330,6 +331,8 @@ function run(
   filters: { archived?: boolean; tag?: string; compact?: boolean },
   lockWaitMs: number,
 ) {
+  const manualResult = manualAction(store, command, id, input);
+  if (manualResult !== undefined) return manualResult;
   if (command === "recover-test-data") {
     if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "Recovery takes a manifest, not a task ID.");
     return recoverTestData(store, input);
@@ -354,6 +357,7 @@ function run(
   }
   if (command === "create") {
     const task = createTask(store.allocateId(), input);
+    if (isManual(store.index.settings)) task.status = store.index.settings.manualColumns![0].id;
     validateDependencies(store, task);
     return createWithAttachments(store, task.tags.length ? assignTags(store, task) : task, input.attachmentSources);
   }
@@ -441,6 +445,11 @@ function run(
     return { issues: [...active.issues, ...archive.issues], recovered: active.recovered, cleanedArchives: archive.cleaned };
   }
   if (command === "settings") {
+    if (input.boardType !== undefined && input.boardType !== (store.index.settings.boardType ?? "agent")) {
+      throw new TaskboardError("IMMUTABLE_BOARD_TYPE", "Тип доски выбирается при создании и не может быть изменён.");
+    }
+    if (input.manualColumns !== undefined) throw new TaskboardError("INVALID_INPUT", "Используйте настройку колонок с явным переносом дел.");
+    if (isManual(store.index.settings) && input.autoMode === true) throw new TaskboardError("MANUAL_BOARD", "На обычной доске авторежим недоступен.");
     const settingsJournal = store.index.managerSettings ?? recordSettings(store.index.settings);
     if (input.name !== undefined) {
       const name = text(input.name, "Board name");
@@ -736,7 +745,8 @@ async function main() {
     if (values.archived && command !== "list") throw new TaskboardError("INVALID_INPUT", "Use --archived with list.");
     if (values.tag !== undefined && command !== "list") throw new TaskboardError("INVALID_INPUT", "Use --tag with list.");
     const input = readInput(values.stdin, values["input-file"]);
-    const location = locateBoard(values.project ?? process.cwd(), command === "init", command === "init" && input.git === true);
+    const location = locateBoard(values.project ?? process.cwd(), command === "init", command === "init" && input.git === true && input.boardType !== "manual", command === "init" && input.boardType === "manual");
+    if (command !== "init") guardManual(readBoardSettings(location), command, input);
     if (command === "recover-test-data" && values.project !== location.root) {
       throw new TaskboardError("INVALID_PROJECT", "Recovery requires --project with the exact canonical board root.");
     }
@@ -881,7 +891,7 @@ async function main() {
         else if (action === "push") data = await pushRepositoryBranch(location, input);
         else data = onBoard(location, () => action === "refs" ? repositoryRefs(location) : changeRepository(location, action, input));
       } else {
-        data = command === "init" ? initializeBoard(location, store => snapshotBoard(store, values.compact === true)) :
+        data = command === "init" ? initializeBoard(location, store => snapshotBoard(store, values.compact === true), input.boardType) :
           onBoard(location, (store, lockWaitMs) => run(store, command, id, extra, input, values, lockWaitMs));
       }
       if (command === "show") {

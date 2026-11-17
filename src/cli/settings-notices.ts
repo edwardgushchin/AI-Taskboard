@@ -11,6 +11,13 @@ export type SettingsJournal = {
 
 // Enumerate supported fields: unknown configuration and credentials never enter context.
 export function effectiveSettings(settings: BoardSettings, defaults: AgentLimits): Values {
+  if (settings.boardType === "manual") return {
+    "Тип доски": "Обычная доска",
+    "Имя доски": settings.name ?? "",
+    "Статусы": JSON.stringify(settings.manualColumns),
+    "Процесс": "Статусы меняет пользователь. Помощники редактируют содержимое. Исполнители, ревью и Git недоступны.",
+    "Авторежим": false,
+  };
   const values: Values = {
     "Имя доски": settings.name ?? "",
     "Архивация через дней": settings.archiveAfterDays,
