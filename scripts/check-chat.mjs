@@ -1425,6 +1425,85 @@ app.whenReady().then(async () => {
     }
   }
 
+  // Work pagination uses the same IPC path for local and provider cursors.
+  for (const prefix of ['local:', 'provider-cursor-']) {
+    await evaluate(`
+      var workCalls = [];
+      var workFailure = false;
+      var workDelay;
+      var workRow = id => ({ messages: [], items: [action(id, 'agentMessage', '', 'completed', id)] });
+      api.boardHistory = async (_project, cursor, view) => {
+        if (view !== 'work') return { ok: true, data: view === 'live' ? { work: [], chat: [] } : { turns: [] } };
+        workCalls.push(cursor);
+        if (workDelay) return workDelay.promise;
+        if (workFailure) return { ok: false, error: { code: 'BOARD_HISTORY_FAILED', message: 'History unavailable' } };
+        const pages = {
+          recent: { turns: [], nextCursor: '${prefix}1' },
+          '${prefix}1': { turns: [], nextCursor: '${prefix}2' },
+          '${prefix}2': { turns: Array.from({ length: 30 }, (_, i) => workRow('recent-work-' + i)), nextCursor: '${prefix}3' },
+          '${prefix}3': { turns: [], nextCursor: '${prefix}4' },
+          '${prefix}4': { turns: [workRow('older-work'), workRow('recent-work-0')], nextCursor: null }
+        };
+        return { ok: true, data: pages[cursor ?? 'recent'] };
+      };
+      frame.runningTasks = []; frame.replyingTasks = []; frame.reviewingTasks = {};
+      var workManager = draftComposer(); body.replaceChildren(workManager);
+      workManager.updateGoal({ objective: 'Сохранённая цель', status: 'paused' }, false);
+      if (!workManager.hasAttribute('data-pinned')) workManager.querySelector('.board-chat-pin').click();
+      workManager.querySelector('.board-work-toggle').click();
+      new Promise(resolve => setTimeout(resolve, 150));
+    `);
+    await check(`workCalls.length === 3 && workManager.querySelector('.board-work').textContent.includes('recent-work-29')`, 'work skips initial empty pages: ' + prefix);
+    await evaluate(`
+      var workLog = workManager.querySelector('.board-work');
+      workLog.scrollTop = 100;
+      var workAnchor = [...workLog.querySelectorAll('[data-chat-anchor], [data-item]')].find(row => row.getBoundingClientRect().top >= workLog.getBoundingClientRect().top);
+      var workOffset = workAnchor.getBoundingClientRect().top - workLog.getBoundingClientRect().top;
+      workFailure = true;
+      workLog.querySelector('.board-chat-older').click();
+      new Promise(resolve => setTimeout(resolve, 100));
+    `);
+    await check(`workLog.textContent.includes('History unavailable') && !workLog.querySelector('.board-chat-older').disabled`, 'work error permits retry');
+    await evaluate(`workFailure = false; workLog.querySelector('.board-chat-older').click(); new Promise(resolve => setTimeout(resolve, 100));`);
+    const workResult = await evaluate(`({ older: workLog.textContent.includes('older-work'), hidden: workLog.querySelector('.board-chat-older').hidden,
+      count: workLog.querySelectorAll('[data-item^="message:"]').length,
+      offset: workAnchor.getBoundingClientRect().top - workLog.getBoundingClientRect().top - workOffset,
+      calls: workCalls })`);
+    assert.ok(workResult.older && workResult.hidden && workResult.count === 31 && Math.abs(workResult.offset) <= 1,
+      'older work preserves anchor, deduplicates items and reaches end: ' + JSON.stringify(workResult));
+    await check(`workLog.querySelector('[data-item^="message:"]').dataset.item === 'message:older-work' &&
+      workManager.querySelector('.board-goal-status').textContent === 'Цель на паузе'`, 'older work precedes recent work with paused goal');
+    if (prefix === 'local:') await capture('work-pagination.png');
+    await evaluate(`
+      workLog.scrollTop = workLog.scrollHeight;
+      workLog.dispatchEvent(new Event('scroll'));
+      workDelay = Promise.withResolvers(); var workCallsBefore = workCalls.length; workManager.invalidateWork();
+      workManager.querySelector('.board-dialogue-toggle').click();
+      workDelay.resolve({ ok: true, data: { turns: [workRow('PRIVATE-LATE')], nextCursor: null } });
+      new Promise(resolve => setTimeout(resolve, 100));
+    `);
+    await check(`workCalls.length > workCallsBefore && !workManager.querySelector('.board-chat-log:not(.board-work)').textContent.includes('PRIVATE-LATE')`, 'tab switch during work load cannot leak into dialogue');
+    await evaluate(`workDelay = undefined; workManager.dispose();`);
+  }
+  await evaluate(`
+    workCalls = [];
+    var initialWorkFailure = true;
+    api.boardHistory = async (_project, cursor, view) => {
+      if (view !== 'work') return { ok: true, data: { turns: [], work: [], chat: [] } };
+      if (initialWorkFailure) return { ok: false, error: { code: 'BOARD_HISTORY_FAILED', message: 'Initial history failure' } };
+      workCalls.push(cursor);
+      return { ok: true, data: { turns: [], nextCursor: cursor === 'cycle-a' ? 'cycle-b' : 'cycle-a' } };
+    };
+    var cycleManager = draftComposer(); body.replaceChildren(cycleManager);
+    cycleManager.querySelector('.board-work-toggle').click();
+    new Promise(resolve => setTimeout(resolve, 100));
+  `);
+  await check(`cycleManager.querySelector('.board-work').textContent.includes('Initial history failure') &&
+    !cycleManager.querySelector('.board-work .board-chat-older').hidden`, 'first work history error exposes retry');
+  await evaluate(`initialWorkFailure = false; cycleManager.querySelector('.board-work .board-chat-older').click(); new Promise(resolve => setTimeout(resolve, 100));`);
+  await check(`workCalls.length === 3 && cycleManager.querySelector('.board-work .board-chat-older').hidden`, 'cursor cycle terminates empty history');
+  await evaluate(`cycleManager.dispose()`);
+
   // Measure a real visible anchor while a timestamped, overflowing chat prepends a page.
   const scrollResults = [];
   for (const width of [850, 480]) {
