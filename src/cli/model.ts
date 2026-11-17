@@ -57,6 +57,7 @@ export interface Attachment {
   file: string;
   bytes: number;
   sha256: string;
+  link?: import("./attachment-links.ts").FileLink;
 }
 
 export interface TaskGit {

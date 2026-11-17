@@ -2630,7 +2630,11 @@ function draftComposer() {
       const images = files.filter(file => file.url);
       for (const file of files) {
         const tile = file.url ? button("", () => previewImages(images, file), "quiet chat-attachment") :
-          element("span", undefined, "chat-attachment");
+          file.link ? button("", async () => {
+            const result = await api.openFileLink(file.link);
+            if (!result.ok) message(boardError(result.error));
+          }, "quiet chat-attachment") : element("span", undefined, "chat-attachment");
+        if (file.link) tile.title = file.link.path;
         if (file.url) {
           controlLabelForIcon(tile, () => t("ui.view_7aa05de3") + file.name);
           const img = element("img");
@@ -2638,7 +2642,7 @@ function draftComposer() {
           img.loading = "lazy";
           img.src = file.url;
           tile.append(img);
-        } else tile.append(icon("attachment"), element("span", file.name));
+        } else tile.append(icon("attachment"), element("span", file.name + (file.size !== undefined ? " / " + file.size + " B" : "")));
         tiles.append(tile);
       }
       entry.append(tiles);
@@ -2775,7 +2779,7 @@ function draftComposer() {
   const olderNodes = [];
   const previewUrls = [];
   const pendingPreviews = new Map();
-  const previewSource = file => /^(?:image\/(?:png|jpeg|webp|gif))$/.test(file.type) || isImageAttachment(file);
+  const previewSource = file => !file.link && file.size <= 64 * 1024 * 1024 && (/^(?:image\/(?:png|jpeg|webp|gif))$/.test(file.type) || isImageAttachment(file));
   const releasePreview = file => {
     const url = pendingPreviews.get(file);
     if (url) URL.revokeObjectURL(url);
@@ -3060,9 +3064,7 @@ function draftComposer() {
     });
     readVisibleMessages();
   };
-  const pasteFiles = submitted => Promise.all(submitted.map(async file => ({
-    name: file.name, type: file.type, bytes: await file.arrayBuffer(),
-  })));
+  const pasteFiles = submitted => Promise.all(submitted.map(file => api.filePayload(file)));
   const queueStorage = async (action, id, draft, goal, attachments) => {
     const result = await api.boardQueue(project, action, id, draft, goal, attachments);
     if (!result.ok) throw new Error(boardError(result.error));
@@ -3073,7 +3075,7 @@ function draftComposer() {
     restoredQueue ??= queueStorage("list").then(jobs => {
       if (disposed) return;
       for (const [index, { id, draft, goal, files }] of jobs.entries()) {
-        enqueue(id, draft, goal, files.map(file => new File([file.bytes], file.name, { type: file.type })), index === 0);
+        enqueue(id, draft, goal, files.map(file => file.link ? { ...file, size: file.link.size } : new File([file.bytes], file.name, { type: file.type })), index === 0);
       }
     }).catch(error => {
       restoredQueue = undefined;
@@ -3412,7 +3414,7 @@ function draftComposer() {
   function enqueue(id, draft, goal, submitted, failed = false) {
     const request = draft.trim();
     const messageFiles = submitted.map(file => {
-      if (!previewSource(file)) return { name: file.name };
+      if (!previewSource(file)) return { name: file.name, size: file.size, link: file.link };
       const url = URL.createObjectURL(file);
       previewUrls.push(url);
       return { name: file.name, url };
@@ -3443,15 +3445,11 @@ function draftComposer() {
     renderQueuedActions(job);
   }
   function addFiles(pasted) {
-    if ([...files, ...pasted].reduce((total, file) => total + file.size, 0) > 64 * 1024 * 1024) {
-      message(t("ui.attachments_are_limited_to_64_mib_per_task_ae680c16"));
-      return;
-    }
     message("");
     for (const file of pasted) {
       files.push(file);
       const row = element("li", undefined, "board-attachment");
-      const url = previewSource(file) ? pendingPreviews.get(file) ?? URL.createObjectURL(file) : undefined;
+      const url = !file.link && previewSource(file) ? pendingPreviews.get(file) ?? URL.createObjectURL(file) : undefined;
       if (url) pendingPreviews.set(file, url);
       const remove = button("", () => {
         files.splice(files.indexOf(file), 1);
@@ -3477,7 +3475,7 @@ function draftComposer() {
         view.append(thumbnail);
         row.classList.add("board-attachment-image");
         row.append(view);
-      } else row.append(icon("attachment"), element("span", file.name));
+      } else row.append(icon("attachment"), element("span", file.name + (file.size !== undefined ? " / " + file.size + " B" : "")));
       remove.classList.add("board-attachment-remove");
       row.append(remove);
       attachments.append(row);
@@ -4073,11 +4071,11 @@ async function showCleanup(task, draft = "", error) {
 }
 
 function taskAttachmentButton(id, attachment, kind) {
-  const download = button(attachment.name, async () => {
+  const download = button(attachment.name + " / " + attachment.bytes + " B", async () => {
     const result = await api.saveAttachment(id, attachment.file, attachment.name);
     if (!result.ok) notice(boardError(result.error));
   }, kind);
-  download.prepend(icon("cloud-download"));
+  download.prepend(icon(attachment.link ? "link-external" : "cloud-download"));
   return download;
 }
 

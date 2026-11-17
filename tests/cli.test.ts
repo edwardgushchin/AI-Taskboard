@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import childProcess, { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, rmdirSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, rmdirSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { syncBuiltinESMExports } from "node:module";
@@ -751,6 +751,51 @@ test("automatic integration reports conflicts once and repaired submissions requ
     assert.deepEqual(cli(root, ["show", dependent.id]).unfinishedDependencies, []);
     assert.equal(readFileSync(join(root, "source.txt"), "utf8"), "target version\ntask version\n");
   }
+});
+
+test("linked attachments survive chat, restart and archive without copying large sources", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const path = join(root, "large.bin");
+  writeFileSync(path, "selected part");
+  truncateSync(path, 80 * 1024 * 1024);
+  const task = cli(root, ["create"], { title: "Links", attachmentSources: [{ path, link: true }, { path, link: true }] });
+  assert.equal(task.attachments.length, 2);
+  assert.ok(task.attachments.every((file: Task["attachments"][number]) => file.bytes === 80 * 1024 * 1024 && file.link));
+  for (const file of task.attachments) {
+    assert.ok(!existsSync(join(root, ".tasks", "attachments", task.id, file.file)));
+    const read = cli(root, ["attachment", "read", task.id], { file: file.file });
+    assert.equal(read.path, realpathSync(path));
+    assert.equal(read.base64, undefined);
+  }
+  const sent = cli(root, ["chat", task.id], { model: "fixture", effort: "medium", text: "Read part",
+    attachmentSources: [{ path, link: true }] });
+  assert.equal(cli(root, ["show", task.id]).attachments.length, 3);
+  writeFileSync(path, "updated", { flag: "r+" });
+  cli(root, ["attachment", "read", task.id], { file: sent.attachments[2].file }, "ATTACHMENT_CHANGED");
+  renameSync(path, path + ".moved");
+  cli(root, ["attachment", "read", task.id], { file: sent.attachments[2].file }, "ATTACHMENT_UNAVAILABLE");
+  renameSync(path + ".moved", path);
+  truncateSync(path, 81 * 1024 * 1024);
+  cli(root, ["attachment", "read", task.id], { file: sent.attachments[2].file }, "ATTACHMENT_CHANGED");
+  assert.equal(cli(root, ["show", task.id]).attachments.length, 3);
+  rmSync(path);
+  cli(root, ["attachment", "read", task.id], { file: sent.attachments[0].file }, "ATTACHMENT_UNAVAILABLE");
+  const survivor = join(root, "keep.txt");
+  writeFileSync(survivor, "keep source");
+  const mixed = cli(root, ["chat", task.id], { model: "fixture", effort: "medium", text: "Mixed sources",
+    attachmentSources: [{ path: survivor, link: true }, { path: survivor }] });
+  const copied = mixed.attachments.at(-1);
+  assert.equal(cli(root, ["attachment", "read", task.id], { file: copied.file }).base64,
+    Buffer.from("keep source").toString("base64"));
+  cli(root, ["cancel", task.id], { reason: "Archive links" });
+  cli(root, ["settings"], { archiveAfterDays: 0 });
+  cli(root, ["archive", "sweep"]);
+  assert.equal(cli(root, ["show", task.id]).attachments.length, 5);
+  assert.ok(existsSync(survivor));
+  assert.equal(cli(root, ["attachment", "read", task.id], { file: mixed.attachments.at(-2).file }).path, realpathSync(survivor));
+  assert.equal(cli(root, ["attachment", "read", task.id], { file: copied.file }).base64,
+    Buffer.from("keep source").toString("base64"));
 });
 
 test("create saves attachments with the draft and rejects incomplete batches", t => {
