@@ -43,4 +43,7 @@ test('all roles receive compact documentation rules with an accessible guide and
     if (role === 'executor') assert.match(text, /Before preview\/submit/);
     if (role === 'reviewer') assert.match(text, /keep review read-only/);
   }
+  const personal = boardAgentInstructions('manager', '', { manual: true });
+  assert.match(personal, /Only the user moves personal tasks/);
+  assert.doesNotMatch(personal, /Documentation is part of task completion|Before preview\/submit|bundled guide at/);
 });

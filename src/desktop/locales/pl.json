@@ -571,6 +571,7 @@
   "ui.copied_copy_code_again_b2b609e4": "Skopiowano. Skopiuj kod ponownie",
   "ui.could_not_copy_select_the_code_or_retry_3ed46a84": "Nie udało się skopiować. Wybierz kod lub spróbuj ponownie.",
   "ui.copy_code_968ce1d3": "Skopiuj kod",
+  "ui.copy_hash": "Kopiuj skrót",
   "ui.copy_full_hash_725de55a": "Skopiuj pełny skrót",
   "ui.copied_243d5f98": "Skopiowano. ",
   "ui.copy_failed_retry_eeb3cc51": "Kopiowanie nie powiodło się. Spróbować ponownie.",
@@ -1174,5 +1175,8 @@
   "limits.low": "Limit bliski wyczerpania",
   "limits.summary": "Połączono: {count}; bez aktualnych danych: {unavailable}",
   "limits.remaining": "pozostało {percent}%",
-  "limits.reset": "Odnowienie {time}"
+  "limits.reset": "Odnowienie {time}",
+  "ui.schedule_paused": "Harmonogram wstrzymany",
+  "ui.pause_schedule": "Wstrzymaj harmonogram",
+  "ui.resume_schedule": "Wznów harmonogram"
 }

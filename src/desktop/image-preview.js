@@ -1,4 +1,4 @@
-const isImageAttachment = file => /\.(png|jpe?g|webp|gif)$/i.test(file.name);
+const isImageAttachment = file => !file.link && /\.(png|jpe?g|webp|gif)$/i.test(file.name);
 
 function openImagePreview(taskId, files, initialIndex, initialSrc, source = {
   preview: file => api.attachmentPreview(taskId, file.file),

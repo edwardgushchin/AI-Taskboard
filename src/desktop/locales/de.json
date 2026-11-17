@@ -571,6 +571,7 @@
   "ui.copied_copy_code_again_b2b609e4": "Kopiert. Code erneut kopieren",
   "ui.could_not_copy_select_the_code_or_retry_3ed46a84": "Konnte nicht kopiert werden. Wählen Sie den Code aus oder versuchen Sie es erneut.",
   "ui.copy_code_968ce1d3": "Code kopieren",
+  "ui.copy_hash": "Hash kopieren",
   "ui.copy_full_hash_725de55a": "Vollständigen Hash kopieren",
   "ui.copied_243d5f98": "Kopiert. ",
   "ui.copy_failed_retry_eeb3cc51": "Der Kopiervorgang ist fehlgeschlagen. Wiederholen.",
@@ -1158,5 +1159,8 @@
   "limits.low": "Kontingent fast aufgebraucht",
   "limits.summary": "{count} verbunden; {unavailable} ohne aktuelle Daten",
   "limits.remaining": "{percent}% verbleibend",
-  "limits.reset": "Zurücksetzung {time}"
+  "limits.reset": "Zurücksetzung {time}",
+  "ui.schedule_paused": "Zeitplan pausiert",
+  "ui.pause_schedule": "Zeitplan pausieren",
+  "ui.resume_schedule": "Zeitplan fortsetzen"
 }

@@ -21,7 +21,10 @@ const baseline = process.argv[process.argv.indexOf('--baseline') + 1];
 const before = process.argv.includes('--baseline');
 const digest = '0123456789abcdef'.repeat(4);
 const commit = 'abcdef0123456789'.repeat(2) + 'abcdef01';
-const sample = 'Commit `' + commit + '`, **commit `' + commit + '`**, T-0089 [link](https://example.com).\n\nSHA-256 `' + digest + '` `' + digest + '`.\n\n**SHA-256 `' + digest + '`** and inline `' + 'path_segment_'.repeat(12) + '`.\n\n```text\n' + 'long_code_line_'.repeat(20) + '\n```';
+const shortIds = ['190cb97', 'ABCDEF12', 'abcd', '1'.repeat(39)];
+const sample = 'Commit `' + commit + '`, **commit `' + commit + '`**, T-0089 [link](https://example.com).\n\nSHA-256 `' + digest + '` `' + digest + '`.\n\n**SHA-256 `' + digest + '`** and inline `' + 'path_segment_'.repeat(12) + '`.\n\n```text\n' + 'long_code_line_'.repeat(20) + '\n```' +
+  '\n\nКоммит 190cb97; **commit** `ABCDEF12`; commit abcd; коммит `' + shortIds[3] + '`.\n\n' +
+  '190cb97 1234567 decafbad; commit src/190cb97; commit 190cb97.txt; commit [190cb97](https://example.com); commit `git show 190cb97`.\n\n```text\nКоммит 190cb97\n```';
 const report = { before, electron: process.versions.electron, chromium: process.versions.chrome, node: process.versions.node, cells: [], interactions: [] };
 async function run() {
   try {
@@ -46,16 +49,18 @@ async function run() {
       window.digestSample = ${JSON.stringify(sample)};
       window.renderDigestFixture = mode => {
         log.replaceChildren();
+        const context = mode.startsWith('task-') ? {taskId:'T-0141'} : {dialogue:true};
+        mode = mode.replace('task-', '');
         if (mode === 'history') {
-          renderRunActivity(log, JSON.parse(JSON.stringify([{id:'digest',type:'agentMessage',phase:'final_answer',text:digestSample,status:'completed'}])), true, undefined, undefined, {dialogue:true});
+          renderRunActivity(log, JSON.parse(JSON.stringify([{id:'digest',type:'agentMessage',phase:'final_answer',text:digestSample,status:'completed'}])), true, undefined, undefined, context);
         } else {
-          renderRunActivity(log, [{id:'digest',type:'agentMessage',phase:'final_answer',text:digestSample,status:mode==='live'?'inProgress':'completed'}], mode==='completed', undefined, undefined, {dialogue:true});
-          log.querySelectorAll('details').forEach(n => n.open = true);
+          renderRunActivity(log, [{id:'digest',type:'agentMessage',phase:'final_answer',text:digestSample,status:mode==='live'?'inProgress':'completed'}], mode==='completed', undefined, undefined, context);
         }
+        log.querySelectorAll('details').forEach(n => n.open = true);
       };
       void 0;
     })()`);
-    for (const theme of ['light', 'dark']) for (const width of [480, 1100]) for (const zoom of [1, 1.25, 1.5]) for (const mode of ['live', 'completed', 'history']) {
+    for (const theme of ['light', 'dark']) for (const width of [480, 1100]) for (const zoom of [1, 1.25, 1.5]) for (const mode of ['live', 'completed', 'history', 'task-live', 'task-completed', 'task-history']) {
       nativeTheme.themeSource = theme;
       window.setSize(width, 900);
       window.webContents.setZoomFactor(zoom);
@@ -68,7 +73,7 @@ async function run() {
         const overflow = [...log.querySelectorAll('.chat-digest, .chat-digest code, .chat-digest .icon, .chat-text p, .chat-code-block, pre, .chat-text a')].filter(n => {const r=rect(n);return r.left < bounds.left-1 || r.right > bounds.right+1}).map(n=>({class:n.className,rect:rect(n)}));
         const inline = [...log.querySelectorAll('.chat-text p code:not(.chat-digest code)')].flatMap(n => [...(() => {const r=document.createRange();r.selectNodeContents(n);return r.getClientRects()})()]).every(r=>r.right<=bounds.right+1);
         const buttons=[...log.querySelectorAll('.chat-digest')];
-        return {bounds, overflow, inline, viewport:innerWidth, themeBackground:getComputedStyle(document.body).backgroundColor, scrollWidth:log.scrollWidth, clientWidth:log.clientWidth, digests:buttons.map(b=>({title:b.title,text:b.querySelector('code').textContent,height:rect(b).height,lineHeight:getComputedStyle(b).lineHeight,icon:rect(b.querySelector('.icon')),font:getComputedStyle(b).fontSize,background:getComputedStyle(b).backgroundColor})),preScroll:[...log.querySelectorAll('pre')].every(p=>p.scrollWidth>p.clientWidth)};
+        return {bounds, overflow, inline, viewport:innerWidth, themeBackground:getComputedStyle(document.body).backgroundColor, scrollWidth:log.scrollWidth, clientWidth:log.clientWidth, digests:buttons.map(b=>({title:b.title,text:b.querySelector('code').textContent,height:rect(b).height,lineHeight:getComputedStyle(b).lineHeight,icon:rect(b.querySelector('.icon')),font:getComputedStyle(b).fontSize,background:getComputedStyle(b).backgroundColor})),preScroll:log.querySelector('pre').scrollWidth>log.querySelector('pre').clientWidth};
       })()`);
       report.cells.push({theme,width,zoom,mode,...geometry});
       if (!before) {
@@ -76,7 +81,8 @@ async function run() {
         assert.ok(geometry.inline);
         assert.ok(geometry.scrollWidth <= geometry.clientWidth + 1);
         assert.ok(geometry.preScroll);
-        assert.equal(geometry.digests.length, 5);
+        assert.equal(geometry.digests.length, 9);
+        assert.deepEqual(geometry.digests.slice(5).map(d => [d.text, d.title]), shortIds.map(id => [id.slice(0, 7), id]));
         assert.equal(geometry.digests.filter(d=>d.text===digest && d.title===digest).length, 3);
         assert.equal(geometry.digests.filter(d=>d.text===commit.slice(0,7) && d.title===commit).length, 2);
         assert.ok(geometry.digests[0].height <= parseFloat(geometry.digests[0].lineHeight) + 1);
@@ -109,6 +115,7 @@ async function run() {
         return {text:c.textContent, lineHeight:parseFloat(getComputedStyle(c).lineHeight), topDelta:ir.top-cr.top, iconHeight:ir.height, height:br.height, gap:ir.left-cr.right, left:cr.left-br.left, right:br.right-ir.right, codePadding:cs.padding, background:cs.backgroundColor};
       }))()`);
       report.alignment.push({theme,width,zoom,context,state,rows});
+      if (!before) assert.equal(rows.length, 9);
       if (!before) for (const r of rows) {
         assert.ok(Math.abs(r.topDelta) < 1, JSON.stringify(r));
         assert.ok(Math.abs(r.iconHeight-r.lineHeight) < 1, JSON.stringify(r));
@@ -131,7 +138,7 @@ async function run() {
       await evaluate(`document.querySelector('.chat-code-copy').click(); new Promise(r=>setTimeout(r,50))`);
       assert.equal((await clipboard.readText()).replaceAll('\r\n','\n'), 'long_code_line_'.repeat(20)+'\n');
       await evaluate(`window.originalWrite = navigator.clipboard.writeText.bind(navigator.clipboard); navigator.clipboard.writeText = async () => {throw Error('synthetic denied')}; document.querySelector('.chat-digest').click(); new Promise(r=>setTimeout(r,50))`);
-      assert.match(await evaluate(`document.querySelector('.chat-digest').getAttribute('aria-label')`), /failed/i);
+      assert.equal(await evaluate(`document.querySelector('.chat-digest').getAttribute('aria-label') === t('ui.copy_failed_retry_eeb3cc51')`), true);
       await evaluate(`navigator.clipboard.writeText = originalWrite; document.querySelector('.chat-digest').click(); new Promise(r=>setTimeout(r,50))`);
       assert.equal(await clipboard.readText(),commit);
       assert.ok(await evaluate(`document.querySelector('.chat-digest .codicon-check') !== null`));
@@ -150,6 +157,24 @@ async function run() {
       await evaluate('new Promise(r=>setTimeout(r,50))');
       assert.equal(await clipboard.readText(),commit);
       assert.equal(await evaluate(`document.querySelector('a[data-task="T-0089"]') !== null`),true);
+      for (let index = 0; index < shortIds.length; index++) {
+        const selector = `document.querySelectorAll('.chat-digest')[${index + 5}]`;
+        await evaluate(`${selector}.focus()`);
+        await clipboard.clear();
+        window.webContents.sendInputEvent({type:'keyDown',keyCode:'Enter'});
+        window.webContents.sendInputEvent({type:'char',keyCode:'\r'});
+        window.webContents.sendInputEvent({type:'keyUp',keyCode:'Enter'});
+        await evaluate('new Promise(r=>setTimeout(r,50))');
+        assert.equal(await clipboard.readText(), shortIds[index]);
+        assert.equal(await evaluate(`${selector}.title`), shortIds[index]);
+        assert.equal(await evaluate(`${selector}.getAttribute('aria-label').includes(t('ui.copy_full_hash_725de55a'))`), false);
+        await clipboard.clear();
+        window.webContents.sendInputEvent({type:'keyDown',keyCode:'Space'});
+        window.webContents.sendInputEvent({type:'keyUp',keyCode:'Space'});
+        await evaluate('new Promise(r=>setTimeout(r,50))');
+        assert.equal(await clipboard.readText(), shortIds[index]);
+      }
+      report.interactions.push('short IDs: original tooltip and clipboard, Enter/Space, no full-SHA promise');
       await evaluate(`(() => {const range=document.createRange();range.selectNodeContents(document.querySelectorAll('.chat-digest code')[2]);getSelection().removeAllRanges();getSelection().addRange(range)})()`);
       assert.equal(await evaluate('getSelection().toString()'),digest);
       writeFileSync(join(artifacts, 'after-selection.png'), (await window.webContents.capturePage()).toPNG());

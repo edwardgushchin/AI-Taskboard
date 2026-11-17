@@ -11,6 +11,8 @@ app.setPath('userData', join(scratch, 'profile'));
 try {
   const resources = resolve(process.argv[2], 'resources');
   const { boardAgentInstructions } = await import(pathToFileURL(join(resources, 'app.asar', 'src/desktop/board-agent-hooks.ts')));
+  assert.doesNotMatch(boardAgentInstructions('manager', '', { manual: true }), /Documentation is part of task completion|bundled guide at/);
+  assert.ok(readFileSync(join(resources, 'THIRD_PARTY_NOTICES.md'), 'utf8').includes('Mads Thines'));
   let count = 0;
   for (const role of ['manager', 'executor', 'reviewer']) {
     const instructions = boardAgentInstructions(role);
