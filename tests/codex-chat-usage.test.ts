@@ -12,6 +12,7 @@ import { runInNewContext } from "node:vm";
 import { CodexTokenUsage } from "../src/desktop/codex-token-usage.ts";
 import { responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "../src/desktop/board-agent-hooks.ts";
 import { withBoardMcp } from "../src/desktop/board-mcp.ts";
+import { executorExpertTools, expertCommands, leadInstructions, subagentInstructions } from "../src/desktop/expert-tools.ts";
 import { githubReadTool } from "../src/desktop/github-read.ts";
 import { runActivity, runLog } from "../src/desktop/run-activity.ts";
 import type { RunActivity } from "../src/cli/model.ts";
@@ -34,6 +35,7 @@ test("task discussion streams task usage before success, provider failure, or a 
       if (id === undefined) return;
       let result = {};
       if (method === "model/list") result = { data: [{ model: "selected", defaultReasoningEffort: "low", supportedReasoningEfforts: [] }], nextCursor: null };
+      if (method === "experimentalFeature/list") result = { data: [{ name: "multi_agent", enabled: true }] };
       if (method === "thread/start") {
         const assert = require("node:assert/strict");
         const reviewing = outcome.startsWith("review");
@@ -41,6 +43,9 @@ test("task discussion streams task usage before success, provider failure, or a 
         assert.equal(params.permissions, undefined);
         assert.equal(params.sandbox, "read-only");
         if (reviewing) {
+          assert.match(params.developerInstructions, /Assigned review lead specialization: .*QA lead/);
+          assert.match(params.developerInstructions, /Assigned review plan: .*check-api/);
+          assert.match(params.developerInstructions, /Native subagents are enabled/);
           assert.match(params.developerInstructions, /ready for acceptance in as few revision rounds as possible/);
           assert.match(params.developerInstructions, /Approve with an empty findings list/);
           assert.match(params.developerInstructions, /reuse evidence that is still valid for unaffected criteria/);
@@ -102,8 +107,12 @@ test("task discussion streams task usage before success, provider failure, or a 
   for (const outcome of ["ok", "unknown", "failed", "closed", "storage-failed", "review", "review-storage-failed"]) {
     const reports: TokenUsageReport[] = [];
     const runtime = runInNewContext(stripTypeScriptTypes(source) + "\n({ replyToTask, reviewWithCodex })", {
-      trackActiveRun, trackProvider, claimDiscussion, spawn, codexRpc, CodexTokenUsage, manualContext: () => "", readBoardSettings: () => ({}), locateBoard: (path: string) => path, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogReminder, worklogTool, withBoardMcp, process, setTimeout, clearTimeout, runActivity, runLog,
-      githubReadTool,
+      executorExpertTools, expertCommands, trackActiveRun, trackProvider, claimDiscussion, spawn, codexRpc, CodexTokenUsage, manualContext: () => "", readBoardSettings: () => ({}), locateBoard: (path: string) => path, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogReminder, worklogTool, withBoardMcp, process, setTimeout, clearTimeout, runActivity, runLog,
+      githubReadTool, leadInstructions, subagentInstructions,
+      callCli: async (_project: string, args: string[]) => {
+        assert.equal(args[0], "expert-context");
+        return { ok: true, data: [{ prompt: "QA lead" }] };
+      },
       configuredCodex: async () => ({ path: process.execPath, args: [stub, outcome] }),
       chatTools: [], saveChatImages: async () => [],
       cliFailure: (code: string, message: string) => ({ ok: false, error: { code, message } }),
@@ -115,7 +124,10 @@ test("task discussion streams task usage before success, provider failure, or a 
         async (report: TokenUsageReport) => {
           if (outcome === "review-storage-failed") throw new Error("Usage storage denied");
           reports.push(report);
-        }, "T-0001", (items: RunActivity[]) => { activity = items; });
+        }, "T-0001", (items: RunActivity[]) => { activity = items; }, {
+          lead: "qa-engineer", stages: [{ key: "check-api", expertId: "backend-developer", title: "Check API",
+            description: "Verify the contract", criteria: ["Contract is compatible"], inputs: [], outputs: ["Evidence"], dependsOn: [] }],
+        });
       assert.equal(review.summary, "Verified");
       assert.equal(review.verifyRisk, false);
       assert.deepEqual(Array.from(activity, item => item.id), ["commentary", "tool", "final"]);

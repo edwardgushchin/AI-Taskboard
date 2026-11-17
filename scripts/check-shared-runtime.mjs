@@ -67,7 +67,7 @@ if (!process.versions.electron) {
   };
   checks: try {
     symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), join(scratch, "node_modules"), process.platform === "win32" ? "junction" : "dir");
-    for (const board of [project, other]) { mkdirSync(board); cli(board, ["init"], { git: false }); cli(board, ["settings"], { autoMode: false, reviewMode: "human", agentLimits: { executor: 1, reviewer: 1 } }); }
+    for (const board of [project, other]) { mkdirSync(board); cli(board, ["init"], { git: false }); cli(board, ["settings"], { autoMode: false, reviewMode: "human", taskLimits: { executor: 1, reviewer: 1 } }); }
     const tasks = [];
     for (let i = 0; !managerOnly && i < 6; i++) { const task = cli(project, ["create"], { title: "Isolated concurrency " + i, criteria: ["Fixture completes"], workingDirectory: project }); cli(project, ["approve", task.id]); tasks.push(task.id); }
     const a = await start("profile-a"), b = await start("profile-b");
@@ -190,9 +190,9 @@ if (!process.versions.electron) {
     await b.ask({ action: "release", role: "executor" }); await b.ask({ action: "release", role: "executor", other: true });
     await a.ask({ action: "endDiscussion" }); await expectCount(0);
     record("PASS: manager/reviewer limits cross processes; discussion uses no executor slot; boards isolated");
-    cli(project, ["settings"], { autoMode: false, reviewMode: "reviewer", agentLimits: { executor: 2, reviewer: 2 } });
-    await wait(async () => (await frames()).every(frame => frame.board.settings.reviewMode === "reviewer" && frame.board.settings.agentLimits.executor === 2), "settings propagation");
-    cli(project, ["settings"], { reviewMode: "human", agentLimits: { executor: 1, reviewer: 1 }, autoMode: true });
+    cli(project, ["settings"], { autoMode: false, reviewMode: "reviewer", taskLimits: { executor: 2, reviewer: 2 } });
+    await wait(async () => (await frames()).every(frame => frame.board.settings.reviewMode === "reviewer" && frame.board.settings.taskLimits.executor === 2), "settings propagation");
+    cli(project, ["settings"], { reviewMode: "human", taskLimits: { executor: 1, reviewer: 1 }, autoMode: true });
     await expectCount(1);
     cli(project, ["settings"], { autoMode: false });
     await wait(async () => (await frames()).every(frame => !frame.board.settings.autoMode), "auto false propagation");

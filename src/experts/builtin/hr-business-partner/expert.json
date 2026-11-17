@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "id": "hr-business-partner",
+  "name": "HR бизнес партнёр",
+  "group": "Персонал и развитие людей",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "HR бизнес партнёр",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--human-resources--skills--org-planning",
+      "name": "org-planning",
+      "library": "anthropics--knowledge-work-plugins--human-resources--skills--org-planning"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--human-resources--skills--comp-analysis",
+      "name": "comp-analysis",
+      "library": "anthropics--knowledge-work-plugins--human-resources--skills--comp-analysis"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--human-resources--skills--performance-review",
+      "name": "performance-review",
+      "library": "anthropics--knowledge-work-plugins--human-resources--skills--performance-review"
+    }
+  ],
+  "requirements": [],
+  "limitations": ""
+}

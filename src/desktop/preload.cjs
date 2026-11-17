@@ -19,7 +19,7 @@ contextBridge.exposeInMainWorld("taskboard", {
   boardQueue: (project, action, id, draft, goal, files) => ipcRenderer.invoke("board:queue", project, action, id, draft, goal, files),
   boardGoal: (kind, objective) => ipcRenderer.invoke("board:goal", kind, objective),
   answerBoardQuestion: (id, answer) => ipcRenderer.invoke("board:answerQuestion", id, answer),
-  agentLimits: limits => ipcRenderer.invoke("agents:limits", limits),
+  taskLimits: limits => ipcRenderer.invoke("agents:limits", limits),
   stopOrchestrator: () => ipcRenderer.invoke("board:stopOrchestrator"),
   chatModels: () => ipcRenderer.invoke("chat:models"),
   transcribeVoice: (samples, language) => ipcRenderer.invoke("chat:transcribeVoice", samples, language),

@@ -1088,3 +1088,13 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 #provider-limits .limits-reset { margin-top: 4px; color: var(--muted); font-size: 12px; }
 #provider-limits meter { display: block; width: 100%; height: 8px; margin-top: 6px; }
 #provider-limits:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
+/* Board-owned expert packages and task-scoped collaboration. */
+.expert-search { width: 100%; margin: 8px 0; }
+.expert-list { display: grid; gap: 6px; }
+.expert-list > button { text-align: left; white-space: normal; }
+.expert-skills { display: grid; gap: 12px; margin-bottom: 16px; }
+.expert-skill { display: grid; gap: 6px; padding: 10px; border: 1px solid var(--border); border-radius: 6px; }
+.expert-skill textarea { width: 100%; min-height: 130px; resize: vertical; }
+.expert-team { display: grid; gap: 8px; margin: 12px 0; }
+.expert-mail { padding: 10px; border: 1px solid var(--border); border-radius: 6px; overflow-wrap: anywhere; }
+.expert-mail p { white-space: pre-wrap; }

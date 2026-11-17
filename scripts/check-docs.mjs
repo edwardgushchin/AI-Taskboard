@@ -7,6 +7,8 @@ const md = new MarkdownIt({ html: true });
 const slug = text => text.toLowerCase().replace(/[^\p{L}\p{N}_\-\s]/gu, '').replace(/\s/g, '-');
 const ignored = new Set(['node_modules', '.git', '.tasks', '.worktrees', '.taskboard-worktrees', '.dev-diary', 'dist', 'release']);
 function inventory(root) {
+  // Preserve upstream skill documents verbatim; their repository links are not application documentation.
+  if (root.replaceAll('\\', '/').endsWith('/src/experts/library')) return [];
   return readdirSync(root, { withFileTypes: true }).flatMap(e => ignored.has(e.name) || e.isSymbolicLink() ? [] :
     e.isDirectory() ? inventory(resolve(root, e.name)) : e.name.endsWith('.md') ? [resolve(root, e.name)] : []);
 }

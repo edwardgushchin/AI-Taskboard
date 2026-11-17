@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "id": "browser-extension-developer",
+  "name": "Разработчик расширений браузера",
+  "group": "Веб и серверная разработка",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Разработчик расширений браузера",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "vercel-labs--agent-skills--skills--react-best-practices",
+      "name": "vercel-react-best-practices",
+      "library": "vercel-labs--agent-skills--skills--react-best-practices"
+    },
+    {
+      "id": "vercel-labs--agent-skills--skills--composition-patterns",
+      "name": "vercel-composition-patterns",
+      "library": "vercel-labs--agent-skills--skills--composition-patterns"
+    }
+  ],
+  "requirements": [
+    "Node.js для React проектов"
+  ],
+  "limitations": "Для Vue Svelte Angular подключать скилл выбранного стека; React скиллы не универсальны"
+}

@@ -86,7 +86,15 @@ export function writeAtomic(path: string, contents: string | Uint8Array): void {
     } finally {
       closeSync(file);
     }
-    renameSync(temporary, path);
+    for (let attempt = 0; ; attempt++) {
+      try { renameSync(temporary, path); break; }
+      catch (error) {
+        if (process.platform !== "win32" || attempt >= 4 ||
+            !["EPERM", "EACCES", "EBUSY"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+        // Windows readers or scanners can briefly prevent atomic replacement.
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * (attempt + 1));
+      }
+    }
   } finally {
     removeFile(temporary);
   }
@@ -273,7 +281,7 @@ function readIndex(path: string): BoardIndex {
       (index.settings.autoMode !== undefined && typeof index.settings.autoMode !== "boolean") ||
       (index.settings.autoReview !== undefined && typeof index.settings.autoReview !== "boolean") ||
       (index.settings.reviewMode !== undefined && !reviewModes.some(mode => mode === (index.settings as Record<string, unknown>).reviewMode)) ||
-      (index.settings.agentLimits !== undefined && !validAgentLimitOverrides(index.settings.agentLimits)) ||
+      (index.settings.taskLimits !== undefined && !validAgentLimitOverrides(index.settings.taskLimits)) ||
       !boardAgentRoles.every(role => validRoleSettings((index.settings as Record<string, unknown>)[role])) ||
       !(index.settings.archiveAfterDays === null ||
         (Number.isSafeInteger(index.settings.archiveAfterDays) && Number(index.settings.archiveAfterDays) >= 0))) {
@@ -320,7 +328,12 @@ function readIndex(path: string): BoardIndex {
       return { name: tag.name, color: color.toUpperCase() };
     });
   }
-  return { ...index, settings: { ...defaultBoardAgents, ...index.settings } } as unknown as BoardIndex;
+  const { agentLimits: _legacyLimits, ...settings } = index.settings;
+  const manager = settings.manager;
+  if (isRecord(manager) && manager.model === "gpt-6.1-sol" && manager.effort === "medium") {
+    settings.manager = defaultBoardAgents.manager;
+  }
+  return { ...index, settings: { ...defaultBoardAgents, ...settings } } as unknown as BoardIndex;
 }
 
 export function validateCard(value: unknown, id: string): Task {

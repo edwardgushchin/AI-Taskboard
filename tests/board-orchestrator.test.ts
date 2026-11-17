@@ -33,6 +33,7 @@ import { automationDelivery } from "../src/desktop/automation-delivery.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import { settingsDelivery, syncSettingsNotices } from "../src/desktop/settings-notices.ts";
 import { githubReadTool } from "../src/desktop/github-read.ts";
+import { expertActions, expertCommands, leadInstructions } from "../src/desktop/expert-tools.ts";
 import { executorFullAccess, managerAccess, setTaskExecutorAccess } from "../src/desktop/codex.ts";
 import type { ManagerAccess } from "../src/desktop/codex.ts";
 
@@ -74,7 +75,7 @@ function fixture(t: TestContext) {
   };
   const { autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools } = runInNewContext(
     boardSource + "\n({ autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools })",
-    { AbortSignal, autoQueueSettings, isManual, manualContext, locateBoard, readBoardSettings, boardReviewMode, callCli, cliFailure, defaultBoardAgents, hexTagColor, inspectProjectPath, managerInbox, needsManagerAttention, projectSha256, reviewVerifier, russianWriting, TaskboardError, taskIdPattern,
+    { AbortSignal, expertActions, expertCommands, leadInstructions, autoQueueSettings, isManual, manualContext, locateBoard, readBoardSettings, boardReviewMode, callCli, cliFailure, defaultBoardAgents, hexTagColor, inspectProjectPath, managerInbox, needsManagerAttention, projectSha256, reviewVerifier, russianWriting, TaskboardError, taskIdPattern,
       taskFields: { title: {}, description: {}, criteria: {}, tags: {} },
     },
   );
@@ -200,9 +201,11 @@ function fixture(t: TestContext) {
         assert.match(session.mcpTools.find(tool => tool.name === "task_message")!.description, /only what this executor needs to act/);
       }
       assert.equal(session.title, "Project manager for project");
-      const expectedTools = cleanupTurn ? ["task_cleanup_status", "task_cleanup", "project_path", "project_sha256"] : manualTurn ? ["ask_user", "tag_set_color", "github_read"] : reviewTurn ? [
+      const expectedTools = cleanupTurn ? ["task_cleanup_status", "task_cleanup", "project_path", "project_sha256"] : manualTurn ? ["expert_list", "expert_context", "expert_skill", "ask_user", "tag_set_color", "github_read"] : reviewTurn ? [
+        "expert_list", "expert_context", "expert_skill", "team_inbox", "team_message",
         "task_review", "task_review_diff", "task_review_artifact", "task_accept", "task_request_changes", "project_git", "project_path", "project_sha256",
       ] : [
+        "expert_list", "expert_context", "expert_skill", "expert_plan", "team_inbox", "team_message",
         "board_auto_queue", "task_cancel", "provider_tools", "task_tool_grant", "task_tool_revoke", "task_set_executor_access", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_approve", "task_wait", "task_review_queue", "task_review", "task_review_diff",
         "task_review_artifact", "task_accept", "task_request_changes",
         "task_cleanup_status", "task_cleanup", "project_git", "project_git_push",
@@ -601,7 +604,7 @@ test("a board snapshot with auto-review on wakes the manager once per submitted 
 test("manager has no configurable capacity limit and shares one board context", async t => {
   const f = fixture(t);
   await f.cli(["init"]);
-  const configured = await f.cli(["settings"], { agentLimits: { manager: 1 } });
+  const configured = await f.cli(["settings"], { taskLimits: { manager: 1 } });
   assert.equal(configured.error.code, "INVALID_INPUT");
   f.agentSlots.configure({ executor: 1, manager: 1, reviewer: 1 });
   const release = f.agentSlots.acquire(f.project, "manager")!;
@@ -768,9 +771,9 @@ test("reviewers agree to submissions or return defects, and the manager controls
   f.setRunning(tasks[1].id, true);
   watch.tick();
   assert.deepEqual(Object.entries(watch.reviewing()), [[tasks[0].id, "reviewer"]]);
-  const agentLimits = { reviewer: 4 };
-  assert.equal((await f.cli(["settings"], { agentLimits })).ok, true);
-  board.settings.agentLimits = agentLimits;
+  const taskLimits = { reviewer: 4 };
+  assert.equal((await f.cli(["settings"], { taskLimits })).ok, true);
+  board.settings.taskLimits = taskLimits;
   watch.tick();
   try {
     const startupTimeout = AbortSignal.timeout(10_000);
@@ -1158,6 +1161,36 @@ test("manager pushes a pinned local branch to its configured remote without a co
   assert.ok(reply.ok, JSON.stringify(reply.error));
   assert.equal(reply.data.answer, "Проверил отправку.");
   assert.equal(reply.data.changes.length, 0);
+});
+
+test("manager adopts expert roles, loads a board skill and plans an addressed specialist team", async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"])).ok, true);
+  const parent = (await f.cli(["create"], { title: "Sprint" })).data;
+  const reply = await f.run("Подготовь команду спринта", async act => {
+    const experts = await act("expert_list", {});
+    assert.equal(experts.ok, true); assert.equal(experts.data.length, 220);
+    const context = await act("expert_context", { ids: ["business-analyst", "product-owner"] });
+    assert.equal(context.ok, true); assert.equal(context.data.length, 2);
+    const skill = await act("expert_skill", { expertId: "product-owner", skillId: "workflow" });
+    assert.equal(skill.ok, true); assert.match(skill.data.directory, /experts[\\/]product-owner[\\/]skills/);
+    const planned = await act("expert_plan", { id: parent.id, revision: parent.revision, stages: [
+      { key: "analysis", expertId: "business-analyst", title: "Requirements", criteria: ["Acceptance criteria"], outputs: ["requirements.md"] },
+      { key: "test", expertId: "qa-engineer", title: "Tests", criteria: ["Requirements covered"], inputs: ["requirements.md"], outputs: ["test-plan.md"], dependsOn: ["analysis"] },
+    ] });
+    assert.equal(planned.ok, true, JSON.stringify(planned.error));
+    const stages = planned.data.stages;
+    assert.equal(stages[1].dependsOn[0], stages[0].key);
+    const sent = await act("team_message", { id: parent.id, to: parent.id, kind: "decision", text: "Start with the EU market" });
+    assert.equal(sent.ok, true, JSON.stringify(sent.error));
+    const inbox = await act("team_inbox", { id: parent.id });
+    assert.equal(inbox.ok, true); assert.equal(inbox.data.messages[0].from, "manager");
+    assert.equal(inbox.data.expertTeam.work.stages.length, 2);
+    return { text: "Команда подготовлена." };
+  });
+  assert.equal(reply.ok, true, JSON.stringify(reply.error));
+  assert.equal(existsSync(join(f.project, ".codex")), false);
+  assert.equal(existsSync(join(f.project, ".claude")), false);
 });
 
 test("manager inspects and hashes project paths without access outside the project", async t => {

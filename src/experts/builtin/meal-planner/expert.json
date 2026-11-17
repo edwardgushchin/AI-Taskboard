@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "id": "meal-planner",
+  "name": "Планировщик меню",
+  "group": "Личные дела и бытовые проекты",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Планировщик меню",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--productivity--skills--task-management",
+      "name": "task-management",
+      "library": "anthropics--knowledge-work-plugins--productivity--skills--task-management"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--operations--skills--process-doc",
+      "name": "process-doc",
+      "library": "anthropics--knowledge-work-plugins--operations--skills--process-doc"
+    }
+  ],
+  "requirements": [],
+  "limitations": "Специальные бытовые планы требуют предметного расширения"
+}

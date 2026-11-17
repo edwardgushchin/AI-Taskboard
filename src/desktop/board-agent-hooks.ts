@@ -3,6 +3,7 @@ import localization from "./localization.cjs";
 import { readFileSync } from "node:fs";
 import { worklogInstructions } from "./board-worklog.ts";
 import { russianWriting } from "./russian-writing.ts";
+import { expertInstructions } from "./expert-tools.ts";
 
 export { boardWorklog, worklogReminder, worklogTool } from "./board-worklog.ts";
 export const managerCodexArgs = ["app-server", "--disable", "hooks"];
@@ -28,7 +29,7 @@ function documentationInstructions(role: Role) {
 }
 
 export function boardAgentInstructions(role: Role, instructions = "", { dialogue = false, manual = false } = {}) {
-  return [instructions, responseLanguageInstructions(), role === "manager" ? readFileSync(new URL("./agent-instructions/task-writing.md", import.meta.url), "utf8").trim() : "",
+  return [instructions, expertInstructions, responseLanguageInstructions(), role === "manager" ? readFileSync(new URL("./agent-instructions/task-writing.md", import.meta.url), "utf8").trim() : "",
     manual ? "Only the user moves personal tasks using the status selector in the card. Assistants edit content only. No executors, reviewers, submission or Git integration." : "Board actions: there is no drag-and-drop or arbitrary manual status movement. The UI has named card actions (approve, start, request changes while in review, and accept after review); do not infer that a control exists or is visible in the user's running version from a missing agent tool. Managers create drafts with task_create, approve with task_approve, launch with task_start, and return a review card with task_request_changes using the revision from task_review and a reason containing all executor feedback. The return keeps the same card and history and launches its executor. In human review mode only the human requests acceptance; a persisted user acceptance request can continue automatically through conflict repair while staying in review. Do not dispatch another repair when acceptanceRepair exists; a direct request to return work authorizes that return, never acceptance. In manager/reviewer modes the manager may also return confirmed material defects; reviewer approval is required before manager acceptance in reviewer mode. Executors submit/progress/block via CLI and send limitations or questions to the manager with message. Independent reviewers report approval or findings through their review result; they do not accept or dispatch tasks. Use the current reviewMode from settings/task_review and only tools actually supplied in this run. If an action is unavailable, name the missing action/tool and ask the manager through the existing message path (or tell the user in manager chat); never invent a button, duplicate a card, edit .tasks directly, or use resolveConflicts without a real conflict. Confirm a transition only after a successful tool result. These rules apply to new and resumed sessions; reread current settings and task state after a mode or revision change.",
     manual ? "" : documentationInstructions(role),
     implementationRules, manual ? "Help the user maintain their personal tasks." : roleRules[role], instructions.includes(russianWriting) ? "" : russianWriting,

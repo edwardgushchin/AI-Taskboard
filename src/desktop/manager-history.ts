@@ -71,6 +71,7 @@ const cursorPrefix = "local:";
 const filePattern = /^\d{13}-[0-9a-f-]{36}\.json$/i;
 type ReadPosition = { at: number; file: string; index: number };
 type UnreadState = { unread: string[]; through?: ReadPosition };
+const lastUnread = new Map<string, string[]>();
 
 export const isLocalManagerCursor = (cursor: string | null) => cursor?.startsWith(cursorPrefix) ?? false;
 
@@ -82,11 +83,17 @@ function unreadState(project: string): UnreadState {
       (state.through && (!Number.isFinite(state.through.at) || !filePattern.test(state.through.file) || !Number.isSafeInteger(state.through.index) || state.through.index < 0))) {
     throw new Error("Invalid manager unread messages.");
   }
+  lastUnread.set(project, [...state.unread]);
   return state;
 }
 
 export function managerUnread(project: string): string[] {
-  return unreadState(project).unread;
+  try { return unreadState(project).unread; }
+  catch (error) {
+    const previous = lastUnread.get(project);
+    if (!previous) throw error;
+    return [...previous];
+  }
 }
 
 function updateManagerUnread(project: string, ids: string[], through = unreadState(project).through): boolean {
@@ -95,6 +102,7 @@ function updateManagerUnread(project: string, ids: string[], through = unreadSta
       through?.at === previous.through?.at && through?.file === previous.through?.file && through?.index === previous.through?.index) return false;
   const state = { unread: ids, through };
   writeJson(join(project, ".tasks", "manager-unread.json"), state);
+  lastUnread.set(project, [...ids]);
   return true;
 }
 

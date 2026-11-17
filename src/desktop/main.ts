@@ -104,6 +104,7 @@ const titleBarHeight = 36;
 const windowStates = new Map<number, WindowState>();
 const subscriptions = new Map<string, BoardWatch>();
 const commands = new Map<string, string[]>([
+  ...["experts", "expert-get", "expert-save", "expert-skill", "expert-plan", "expert-inbox", "expert-message"].map(name => [name, [name]] as [string, string[]]),
   ["create", ["create"]],
   ["manual-move", ["manual-move"]], ["manual-columns", ["manual-columns"]],
   ["project-usage", ["project-usage"]],
@@ -1012,10 +1013,10 @@ function scheduleAutoBoard(watch: BoardWatch) {
         }
       }
       // Address exceptions only. Routine dispatch and successful integration never need a manager turn.
-      const notices = (board.managerInbox ?? []).filter(message => ["question", "block"].includes(message.kind) &&
+      const notices = (board.managerInbox ?? []).filter(message => ["question", "decision", "block"].includes(message.kind) &&
         !queue.notices.has(message.id + ":" + message.sequence));
       const tab = [...watch.tabs].find(tab => !tab.window.isDestroyed());
-      if (board.settings.autoMode && notices.length && tab && !boardWorkRequests.has(key) && agentSlots.available(key, "manager", board.settings.agentLimits)) {
+      if (board.settings.autoMode && notices.length && tab && !boardWorkRequests.has(key) && agentSlots.available(key, "manager", board.settings.taskLimits)) {
         for (const notice of notices) queue.notices.add(notice.id + ":" + notice.sequence);
         const prompt = "AI Taskboard automatic mode: handle these addressed notices without a goal. " + JSON.stringify(notices);
         void runBoardRequest(tab.window.webContents, board, prompt, [], false, false, undefined, undefined, undefined, true)
@@ -1024,8 +1025,8 @@ function scheduleAutoBoard(watch: BoardWatch) {
       }
       if (controls?.paused) return;
       const available = {
-        executor: agentSlots.available(key, "executor", board.settings.agentLimits),
-        reviewer: agentSlots.available(key, "reviewer", board.settings.agentLimits),
+        executor: agentSlots.available(key, "executor", board.settings.taskLimits),
+        reviewer: agentSlots.available(key, "reviewer", board.settings.taskLimits),
       };
       if (!eligibleTasks.some(task => task.status === "ready" && available[task.mergeRepair ? "reviewer" : "executor"])) return;
       if (eligibleTasks.some(task => task.status === "ready" && task.milestone) && Date.now() - queue.milestonesAt >= 60_000) {
@@ -1091,7 +1092,7 @@ function scheduleAgentWork() {
           continue;
         }
         const role = task.mergeRepair ? "reviewer" : "executor";
-        if (!agentSlots.available(projectIdentity(project), role, watch.board.settings?.agentLimits) || executorBusy(project, id)) continue;
+        if (!agentSlots.available(projectIdentity(project), role, watch.board.settings?.taskLimits) || executorBusy(project, id)) continue;
         deferredExecutors.delete(key);
         notifyRunChange(project);
         const failed = (error: string) => broadcastBoardChat(project, "orchestrator-review-error", { error: id + " · " + error });
@@ -1116,7 +1117,7 @@ function scheduleAgentWork() {
 function reserveAgent(project: string, role: AgentRole, task?: string) {
   agentSlots.remember(project);
   // A tool call can race the watch snapshot after CLI settings were saved.
-  const overrides = readBoardSettings(runtimeLocation(project)).agentLimits;
+  const overrides = readBoardSettings(runtimeLocation(project)).taskLimits;
   const release = agentSlots.acquire(projectIdentity(project), role, overrides, task);
   if (!release) return;
   return Object.assign(() => {
@@ -1206,7 +1207,7 @@ function scheduleRecurringTasks(now = Date.now()) {
     for (const task of watch.board.tasks) {
       if (task.status !== "ready" || !task.schedule || task.schedule.paused || !(Date.parse(task.schedule.nextAt) <= now) ||
           task.unfinishedDependencies?.length || launchingTasks.has(project + "\0" + task.id) || executorBusy(project, task.id)) continue;
-      if (!agentSlots.available(projectKey, task.mergeRepair ? "reviewer" : "executor", watch.board.settings?.agentLimits)) continue;
+      if (!agentSlots.available(projectKey, task.mergeRepair ? "reviewer" : "executor", watch.board.settings?.taskLimits)) continue;
       const { id, revision } = task;
       void launchTask(project, id, undefined, false, revision, undefined, true).then(async result => {
         if (result.ok || ["BOARD_BUSY", "REVISION_CONFLICT", "INVALID_TRANSITION", "LAUNCH_IN_PROGRESS",
@@ -1606,8 +1607,10 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     writer();
     return cliFailure("BOARD_QUEUE_FAILED", t("ui.not_sent_28bb3764"));
   }
-  const repairSlot = repairTask || cleanupJob ? reserveAgent(board.project, "reviewer", repairTask?.id) : undefined;
-  if ((repairTask || cleanupJob) && !repairSlot) { writer(); return taskRunLimit("reviewer"); }
+  const reviewTask = repairTask?.id ?? (cleanupJob?.task ? "review:" + cleanupJob.task : undefined) ??
+    (expectedReviewMode === "manager" && reviewIds?.[0] ? "review:" + reviewIds[0] : undefined);
+  const repairSlot = reviewTask ? reserveAgent(board.project, "reviewer", reviewTask) : undefined;
+  if (reviewTask && !repairSlot) { writer(); return taskRunLimit("reviewer"); }
   if (cleanupJob) {
     const claim = await callCli<{ claimed: boolean }>(board.project, ["maintenance"], { action: "claim", id: cleanupJob.id, owner: process.pid });
     if (!claim.ok || !claim.data.claimed) { repairSlot?.(); writer(); return cliFailure("MAINTENANCE_BUSY", "Maintenance is already claimed."); }
@@ -1831,7 +1834,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       ? new Set([...autoReviewTaskTools, "manager_ack", "task_cancel", "task_start"]) : autoReviewTaskTools;
     const mcpTools: BoardMcpTool[] = boardMcpTools.filter(({ name }) =>
       (!cleanupJob || ["board_list", "task_show", "task_cleanup_status", "task_cleanup", "project_path", "project_sha256"].includes(name)) &&
-      (!isManual(settings.data) || ["board_list", "task_show", "task_create", "task_update", "task_comment", "tag_set_color", "ask_user"].includes(name)) &&
+      (!isManual(settings.data) || ["expert_list", "expert_context", "expert_skill", "board_list", "task_show", "task_create", "task_update", "task_comment", "tag_set_color", "ask_user"].includes(name)) &&
       (reviewIds || cleanupJob || !["project_path", "project_sha256"].includes(name)) &&
       (!reviewIds || autoReviewReadTools.has(name) || reviewTaskTools.has(name)) &&
       (name !== "task_accept" || reviewMode !== "human") &&
@@ -2267,18 +2270,20 @@ function scheduleAutoReview(watch: BoardWatch) {
     if (!submittedIds.has(id)) watch.integrationAttempts.delete(id);
   }
   const projectKey = projectIdentity(project);
-  const overrides = watch.board.settings?.agentLimits;
+  const overrides = watch.board.settings?.taskLimits;
   const managerAvailable = agentSlots.available(projectKey, "manager", overrides) > 0 && !boardWorkRequests.has(projectKey);
   if (closingProjects.has(project) || (mode === "manager" && (watch.reviewerRuns.size || !managerAvailable))) return;
   const tab = [...watch.tabs].find(tab => !tab.window.isDestroyed());
   if (!tab) return;
   const managerBatchSize = 4;
-  const available = mode === "reviewer" ? agentSlots.available(projectKey, "reviewer", overrides) : managerBatchSize;
+  const capacity = agentSlots.available(projectKey, "reviewer", overrides);
+  const available = mode === "reviewer" ? capacity : Math.min(1, capacity);
+  const reviewAttempt = (task: Task & { reviewDecision?: number }) => mode + ":" + task.revision + ":" + (task.reviewDecision ?? 0);
   const ready = submissions.filter(task => !task.acceptanceRepair && !watch.reviewerRuns.has(task.id) &&
     (mode !== "reviewer" || !task.reviewApproved) &&
-    watch.reviewAttempts.get(task.id) !== mode + ":" + task.revision &&
+    watch.reviewAttempts.get(task.id) !== reviewAttempt(task) &&
     ((mode === "reviewer" && task.reviewHasCommit) || !executorBusy(project, task.id))).slice(0, available);
-  for (const task of ready) watch.reviewAttempts.set(task.id, mode + ":" + task.revision);
+  for (const task of ready) watch.reviewAttempts.set(task.id, reviewAttempt(task));
   let ids = ready.map(task => task.id);
   let prompt: string;
   if (mode === "reviewer") {
@@ -2306,7 +2311,7 @@ function scheduleAutoReview(watch: BoardWatch) {
   const failed = (error: string) => broadcastBoardChat(project, "orchestrator-review-error", { error });
   void runBoardRequest(tab.window.webContents, watch.board, prompt, [], false, false, undefined, ids, mode).then(result => {
     if (!result.ok) {
-      if (result.error.code === "MANAGER_LIMIT") {
+      if (["MANAGER_LIMIT", "REVIEWER_LIMIT", "BOARD_REQUEST_IN_PROGRESS"].includes(result.error.code)) {
         for (const id of ids) { watch.reviewAttempts.delete(id); watch.integrationAttempts.delete(id); }
       } else if (result.error.code !== "REVIEW_MODE_CHANGED") failed(result.error.message);
     } else if (result.data?.error) failed(result.data.error);
@@ -2356,8 +2361,9 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
           };
         };
         let firstPass: RunActivity[] = [];
+        const evidence = JSON.parse(context);
         const initial = await reviewWithCodex(app.getPath("userData"), project, settings, context, reviewerTools, call, reviewSignal,
-          trackUsage, id, items => { firstPass = items; onActivity(items); });
+          trackUsage, id, items => { firstPass = items; onActivity(items); }, evidence.reviewTeam);
         const candidate = initial as Partial<ReviewReport> | null;
         if (settings?.model !== defaultBoardAgents.reviewer.model || candidate?.needsHuman !== false ||
             (!candidate.verifyRisk && !candidate.findings?.length)) return initial;
@@ -2368,8 +2374,8 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
         const previous = [...firstPass, verification];
         onActivity(previous);
         return reviewWithCodex(app.getPath("userData"), project, reviewVerifier,
-          JSON.stringify({ ...JSON.parse(context), candidateReview: candidate }), reviewerTools, call, reviewSignal,
-          trackUsage, id, items => onActivity([...previous, ...items]));
+          JSON.stringify({ ...evidence, candidateReview: candidate }), reviewerTools, call, reviewSignal,
+          trackUsage, id, items => onActivity([...previous, ...items]), evidence.reviewTeam);
       });
     }, reports);
   const notify = (error: string) => {
@@ -2478,7 +2484,7 @@ ipcMain.handle("agents:limits", (event, value: unknown) => {
   try {
     const profile = app.getPath("userData");
     mkdirSync(profile, { recursive: true });
-    writeJson(join(profile, "agent-limits.json"), limits);
+    writeJson(join(profile, "task-limits.json"), limits);
   } catch {
     return cliFailure("STORAGE_ERROR", t("ui.could_not_save_agent_limits_a463f6f4"));
   }
@@ -3173,7 +3179,7 @@ else {
     localization.select("system", app.getPreferredSystemLanguages());
     loadTheme();
     try {
-      const limits = parseAgentLimits(readJson(join(app.getPath("userData"), "agent-limits.json")));
+      const limits = parseAgentLimits(readJson(join(app.getPath("userData"), "task-limits.json")));
       if (limits) agentSlots.configure(limits);
     } catch {
       // The application defaults also cover a missing or unreadable preference.

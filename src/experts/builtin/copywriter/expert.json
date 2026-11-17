@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "id": "copywriter",
+  "name": "Копирайтер",
+  "group": "Тексты и знания",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Копирайтер",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "coreyhaines31--marketingskills--skills--copywriting",
+      "name": "copywriting",
+      "library": "coreyhaines31--marketingskills--skills--copywriting"
+    },
+    {
+      "id": "coreyhaines31--marketingskills--skills--copy-editing",
+      "name": "copy-editing",
+      "library": "coreyhaines31--marketingskills--skills--copy-editing"
+    }
+  ],
+  "requirements": [],
+  "limitations": ""
+}

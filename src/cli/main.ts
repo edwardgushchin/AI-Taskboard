@@ -35,6 +35,8 @@ import { acknowledgeTaskMessages, currentReviewApproval, managerInbox, sendTaskM
 import packageInfo from "../../package.json" with { type: "json" };
 import { grantTaskTool, requestTaskTool } from "./task-tools.ts";
 import { recoverTestData } from "./test-recovery.ts";
+import { expertContext, expertSkill, listExperts, readExpert, saveExpert } from "./experts.ts";
+import { createExpertPlan, reviewDecisionSequence, sendTeamMessage, teamInbox } from "./expert-team.ts";
 
 const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "pause", "block", "resume", "unblock", "update"]);
 const help = [
@@ -98,7 +100,8 @@ function isMergeRepair(task: Task) {
 function compactTask(task: Task) {
   const { id, title, description, status, revision, tags, priority, attachments, coverAttachment, codexThreadId,
     createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep, dependencies, milestone, workingDirectory, schedule, origin, launchRequested } = task;
-  return { acceptanceRepair: task.acceptanceRepair, id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
+  return { expertId: task.expertId, expertTeam: task.expertTeam, expertStage: task.expertStage, expertStages: task.expertStages,
+    reviewDecision: status === "review" ? reviewDecisionSequence(task) : undefined, acceptanceRepair: task.acceptanceRepair, id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
     coverAttachment, codexThreadId, createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep,
     dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, origin, launchRequested, historyLength: task.history.length,
     ...(status === "review" && task.git?.submission && !task.result?.noChanges ? { reviewHasCommit: true } : {}),
@@ -116,13 +119,13 @@ function taskReceipt({ id, status, revision, git, result }: Task) {
 
 function taskLaunchState(task: Task) {
   const { id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep } = task;
-  return { acceptanceRepair: task.acceptanceRepair, id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep,
+  return { expertId: task.expertId, expertTeam: task.expertTeam, expertStage: task.expertStage, expertStages: task.expertStages, acceptanceRepair: task.acceptanceRepair, id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep,
     ...(isMergeRepair(task) ? { mergeRepair: true as const } : {}) };
 }
 
-function reviewWithSettings(store: BoardStore, review: ReturnType<typeof inspectReview>, input: Record<string, unknown>) {
+function reviewWithSettings(store: BoardStore, task: Task, review: ReturnType<typeof inspectReview>, input: Record<string, unknown>) {
   if (input.includeReviewerSettings !== true) return review;
-  return { ...review, settings: {
+  return { ...review, reviewTeam: task.expertTeam?.review, reviewDecision: reviewDecisionSequence(task), settings: {
     reviewMode: boardReviewMode(store.index.settings),
     reviewer: store.index.settings.reviewer,
   } };
@@ -278,6 +281,18 @@ function run(
   filters: { archived?: boolean; tag?: string; compact?: boolean },
   lockWaitMs: number,
 ) {
+  if (command === "experts") return listExperts(store, typeof input.query === "string" ? input.query : "");
+  if (command === "expert-get") return readExpert(store, text(input.expertId, "expert ID", true), false);
+  if (command === "expert-save") return saveExpert(store, input);
+  if (command === "expert-context") return expertContext(store, strings(input.ids, "expert IDs"));
+  if (command === "expert-skill") return expertSkill(store, text(input.expertId, "expert ID", true), text(input.skillId, "skill ID", true));
+  if (command === "expert-plan") return createExpertPlan(store, text(id, "parent task ID", true), input);
+  if (command === "expert-inbox") return teamInbox(store, text(id, "task ID", true),
+    input.actor === "manager" ? "manager" : input.actor === "user" ? "owner" : input.actor === "reviewer" ? "reviewer" : id!,
+    input.afterSequence === undefined ? 0 : number(input.afterSequence, "afterSequence", 0));
+  if (command === "expert-message") return sendTeamMessage(store, text(id, "task ID", true),
+    input.actor === "manager" ? "manager" : input.actor === "user" ? "owner" : input.actor === "reviewer" ? "reviewer" : id!, input);
+  if (["create", "update"].includes(command) && input.expertId != null) readExpert(store, text(input.expertId, "expert ID", true));
   if (command === "worklog-migrate") return migrateWorklog(store.location.root);
   if (command === "maintenance") {
     if (input.action === "claim" && typeof input.id === "string" && Number.isSafeInteger(input.owner))
@@ -492,12 +507,13 @@ function run(
       store.index.settings.reviewMode = member(input.reviewMode, reviewModes, "review mode");
       delete store.index.settings.autoReview;
     }
-    if (input.agentLimits !== undefined) {
-      if (!validAgentLimitOverrides(input.agentLimits) || Object.hasOwn(input.agentLimits, "manager")) {
-        throw new TaskboardError("INVALID_INPUT", "Agent limits must be non-negative whole numbers for known roles.");
+    const taskLimits = input.taskLimits === undefined ? input.agentLimits : input.taskLimits;
+    if (taskLimits !== undefined) {
+      if (!validAgentLimitOverrides(taskLimits) || Object.hasOwn(taskLimits, "manager")) {
+        throw new TaskboardError("INVALID_INPUT", "Task limits must be non-negative whole numbers for work and review.");
       }
-      if (Object.keys(input.agentLimits).length) store.index.settings.agentLimits = input.agentLimits;
-      else delete store.index.settings.agentLimits;
+      if (Object.keys(taskLimits).length) store.index.settings.taskLimits = taskLimits;
+      else delete store.index.settings.taskLimits;
     }
     for (const role of boardAgentRoles) {
       if (input[role] === undefined) continue;
@@ -950,7 +966,7 @@ async function main() {
               throw new TaskboardError("REVISION_CONFLICT", "The submission changed. Open the current review.");
             }
           });
-          data = reviewWithSettings(store, review, input);
+          data = reviewWithSettings(store, task, review, input);
         } else if (command === "git") {
           const action = member(id, ["refs", "inspect", "switch", "create", "detach", "publish", "push"], "action");
           if (action === "inspect") data = inspectRepository(location, input);

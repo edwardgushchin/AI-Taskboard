@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import { withBoardMcp } from "../src/desktop/board-mcp.ts";
+import { executorExpertTools, expertCommands } from "../src/desktop/expert-tools.ts";
 import { goalTaskWaitSeconds } from "../src/desktop/board-actions.ts";
 import { responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "../src/desktop/board-agent-hooks.ts";
 import { codexRpc, turnControl } from "../src/desktop/codex-rpc.ts";
@@ -244,7 +245,7 @@ test("discussion steering and interruption share the streaming connection, inclu
       }
       if (method === 'turn/start') {
         const { result: { tools } } = await invoke('tools/list');
-        assert.deepEqual(tools.map(tool => tool.name).sort(), ['github_read', 'worklog_record']);
+        assert.deepEqual(tools.map(tool => tool.name).sort(), ['expert_context', 'expert_list', 'expert_skill', 'github_read', 'worklog_record']);
         const github = await invoke('tools/call', { name: 'github_read', arguments: { view: 'run-failed-log', runId: 43816168554 } });
         assert.equal(JSON.parse(github.result.content[0].text).data.log, 'Dependency resolution failed');
         const write = await invoke('tools/call', { name: 'github_set_milestone_due', arguments: {} });
@@ -267,7 +268,7 @@ test("discussion steering and interruption share the streaming connection, inclu
       child.stderr.pipe(process.stderr);
       return child;
     },
-    trackActiveRun, trackProvider, claimDiscussion, codexRpc, turnControl, CodexTokenUsage, withBoardMcp, manualContext: () => "", readBoardSettings: () => ({}), locateBoard: (path: string) => path, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
+    executorExpertTools, expertCommands, trackActiveRun, trackProvider, claimDiscussion, codexRpc, turnControl, CodexTokenUsage, withBoardMcp, manualContext: () => "", readBoardSettings: () => ({}), locateBoard: (path: string) => path, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
     githubReadTool, readBoardGitHub: async (project: string, args: unknown) => {
       assert.equal(project, directory);
       assert.deepEqual(args, { view: "run-failed-log", runId: 43816168554 });

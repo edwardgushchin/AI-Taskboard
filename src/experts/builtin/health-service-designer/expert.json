@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "id": "health-service-designer",
+  "name": "Проектировщик медицинских сервисов",
+  "group": "Здоровье и благополучие",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Проектировщик медицинских сервисов",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--design--skills--user-research",
+      "name": "user-research",
+      "library": "anthropics--knowledge-work-plugins--design--skills--user-research"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--design--skills--research-synthesis",
+      "name": "research-synthesis",
+      "library": "anthropics--knowledge-work-plugins--design--skills--research-synthesis"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--design--skills--design-handoff",
+      "name": "design-handoff",
+      "library": "anthropics--knowledge-work-plugins--design--skills--design-handoff"
+    }
+  ],
+  "requirements": [
+    "Доступ к исходникам исследования",
+    "Penpot или Figma для редактируемого прототипа"
+  ],
+  "limitations": ""
+}

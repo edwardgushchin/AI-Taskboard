@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "id": "community-manager",
+  "name": "Менеджер сообщества",
+  "group": "Маркетинг и коммуникации",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Менеджер сообщества",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "coreyhaines31--marketingskills--skills--social",
+      "name": "social",
+      "library": "coreyhaines31--marketingskills--skills--social"
+    },
+    {
+      "id": "coreyhaines31--marketingskills--skills--community-marketing",
+      "name": "community-marketing",
+      "library": "coreyhaines31--marketingskills--skills--community-marketing"
+    }
+  ],
+  "requirements": [],
+  "limitations": ""
+}

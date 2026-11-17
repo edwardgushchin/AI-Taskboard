@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "id": "process-architect",
+  "name": "Архитектор бизнес процессов",
+  "group": "Бизнес процессы и операции",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Архитектор бизнес процессов",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--operations--skills--process-doc",
+      "name": "process-doc",
+      "library": "anthropics--knowledge-work-plugins--operations--skills--process-doc"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--operations--skills--process-optimization",
+      "name": "process-optimization",
+      "library": "anthropics--knowledge-work-plugins--operations--skills--process-optimization"
+    }
+  ],
+  "requirements": [],
+  "limitations": "Нужен локальный скилл трассировки требований и правил конкретного бизнеса"
+}

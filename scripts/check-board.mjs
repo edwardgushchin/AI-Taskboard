@@ -65,7 +65,7 @@ app.whenReady().then(async () => {
       subscribe(callback) { window.pushBoard = next => { window.taskboardLocalization.select(next.russian === false ? 'en' : 'ru'); callback({...next, localization: window.taskboardLocalization.state()}); }; }, onChatUpdate(callback) { window.pushChat = callback; }, onTheme() {},
       boardHistory: async (_project, _cursor, view) => ({ ok: true, data: view === 'live'
         ? { work: [], chat: [] } : { turns: [], model: "gpt-board-test" } }),
-      agentLimits: async () => ({ ok: true, data: { executor: 3, manager: 1, reviewer: 1 } }),
+      taskLimits: async () => ({ ok: true, data: { executor: 3, manager: 1, reviewer: 1 } }),
       boardQueue: async (project, action, id, draft, goal, files) => {
         const jobs = savedQueue.get(project) ?? new Map();
         savedQueue.set(project, jobs);
@@ -566,9 +566,9 @@ app.whenReady().then(async () => {
         managerAccess: savedManagerAccess.get(project) ?? 'auto',
         tabs: projects.map(tab => ({ ...tab, name: savedNames.get(tab.path) || tab.name })),
         board: { ...fixture.board, project, settings: { ...fixture.board.settings,
-          name: savedNames.get(project), agentLimits: savedLimits.get(project) } } });
+          name: savedNames.get(project), taskLimits: savedLimits.get(project) } } });
       const createProjectCalls = [];
-      let limits = { executor: 3, manager: 1, reviewer: 1 };
+      let limits = { executor: 1, reviewer: 1 };
       let windowsSandbox = 'mxc';
       const codexStatus = async () => ({ state: 'unavailable', windowsSandbox });
       Object.assign(window.taskboard, {
@@ -582,11 +582,11 @@ app.whenReady().then(async () => {
         command: async (action, _id, values) => {
           if (action !== 'settings') throw Error('Unexpected command: ' + action);
           if (typeof values.name === 'string') savedNames.set(frame.project, values.name.trim());
-          if (values.agentLimits) savedLimits.set(frame.project, values.agentLimits);
+          if (values.taskLimits) savedLimits.set(frame.project, values.taskLimits);
           openBoard(frame.project);
           return { ok: true, data: frame.board.settings };
         },
-        agentLimits: async value => ({ ok: true, data: value ? limits = value : limits }),
+        taskLimits: async value => ({ ok: true, data: value ? limits = value : limits }),
         themes: async () => [],
         codexStatus,
         setCodexWindowsSandbox: async mode => { windowsSandbox = mode; return codexStatus(); },
@@ -622,8 +622,8 @@ app.whenReady().then(async () => {
       byId('settings-menu-board').disabled && byId('settings-menu').querySelectorAll('[role="menuitem"]').length === 4`,
       "the gear opens the settings menu without a board and disables board settings");
     await click('#settings-menu-app');
-    await evaluate(`waitFor(() => limitFields()[0].value === '3')`);
-    await check(`limitFields().map(input => input.value).join(',') === '3,1' &&
+    await evaluate(`waitFor(() => limitFields()[0].value === '1')`);
+    await check(`limitFields().map(input => input.value).join(',') === '1,1' &&
       !!body.querySelector('.provider-panel') && !byId('tag-settings')`, "the gear menu opens shared settings even without an open board");
     await evaluate(`waitFor(() => !sandboxSelect().disabled && !sandboxSelect().parentElement.hidden)`);
     await check(`sandboxSelect().value === 'mxc'`, "Codex settings show the current Windows sandbox");
@@ -688,7 +688,7 @@ app.whenReady().then(async () => {
     await check(`byId('project-tabs').querySelector('[aria-selected=true] .project-tab-name').textContent === 'Вторая доска'`,
       "clearing the board name restores the folder name");
     await evaluate(`openBoard('board-fixture'); boardSettings(); void 0`);
-    await check(`boardLimit('executor').value === '2' && boardLimit('manager').value === '' &&
+    await check(`boardLimit('executor').value === '2' && boardLimit('manager') === null &&
       boardLimit('reviewer').value === '0'`, "saved overrides reopen including zero");
     await check(`managerAccess().value === 'full'`, "saved manager full access reopens enabled");
     await evaluate(`boardLimit('executor').value = ''; boardLimit('reviewer').value = '';

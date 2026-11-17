@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "id": "hobby-project-mentor",
+  "name": "Наставник по личному проекту",
+  "group": "Личные дела и бытовые проекты",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Наставник по личному проекту",
+      "file": "skills/workflow/SKILL.md"
+    }
+  ],
+  "requirements": [
+    "Цели ученика и критерии освоения"
+  ],
+  "limitations": "Готовый проверенный педагогический скилл в подборку не включён; docx pptx только оформляют материал"
+}

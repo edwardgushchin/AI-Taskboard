@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "id": "personal-budget-planner",
+  "name": "Специалист по личному бюджету",
+  "group": "Личные дела и бытовые проекты",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Специалист по личному бюджету",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--finance--skills--financial-statements",
+      "name": "financial-statements",
+      "library": "anthropics--knowledge-work-plugins--finance--skills--financial-statements"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--finance--skills--variance-analysis",
+      "name": "variance-analysis",
+      "library": "anthropics--knowledge-work-plugins--finance--skills--variance-analysis"
+    }
+  ],
+  "requirements": [
+    "Исходные финансовые данные",
+    "Валюта период и правила учёта"
+  ],
+  "limitations": ""
+}

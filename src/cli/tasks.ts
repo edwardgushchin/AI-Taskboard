@@ -10,6 +10,11 @@ const activeStates = ["draft", "ready", "in_progress", "blocked", "review"] as c
 
 function fields(task: Task, input: Record<string, unknown>): Task {
   const updated = { ...task };
+  if (input.expertId !== undefined) {
+    requireState(task, ["draft", "ready"]);
+    if (input.expertId === null) delete updated.expertId;
+    else updated.expertId = text(input.expertId, "expert ID", true);
+  }
   if (input.title !== undefined) updated.title = text(input.title, "title", true);
   if (input.description !== undefined) updated.description = text(input.description, "description");
   for (const key of ["criteria", "questions", "tags"] as const) {

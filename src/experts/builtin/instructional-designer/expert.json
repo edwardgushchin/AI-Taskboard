@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "id": "instructional-designer",
+  "name": "Педагогический дизайнер",
+  "group": "Образование и обучение",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Педагогический дизайнер",
+      "file": "skills/workflow/SKILL.md"
+    }
+  ],
+  "requirements": [
+    "Цели ученика и критерии освоения"
+  ],
+  "limitations": "Готовый проверенный педагогический скилл в подборку не включён; docx pptx только оформляют материал"
+}

@@ -3978,6 +3978,11 @@ async function showTask(id) {
     return label;
   };
   section(() => (t("ui.subtasks_b409bda5")), task.subtasks.map(item => stateLabel(item.done, item.title)));
+  if (!manualBoard()) {
+    if (task.expertId) section(() => t("experts.assign"), task.expertId);
+    if (task.expertStage) body.append(button(task.expertStage.parentId, () => showTask(task.expertStage.parentId), "quiet"));
+    if (task.expertTeam || task.expertStages?.length || task.expertStage || task.expertId || task.history.some(event => event.expertMessage)) expertTeamSection(task);
+  }
   if (task.status === "in_progress") section(() => (t("ui.submission_1577a02d")), t("ui.result_not_submitted_61369662"));
   section(() => (t("ui.progress_d4dff843")), task.summary);
   section(() => (t("ui.next_step_09895a4d")), task.nextStep);
@@ -4054,8 +4059,17 @@ async function showTask(id) {
   }
   if (task.status === "ready") actions.append(button(() => t("ui.return_to_draft_ccd17679"), () => act("return-to-draft")));
   if (["draft", "ready"].includes(task.status)) {
+    if (!manualBoard()) {
+      actions.append(button(() => t("experts.assign"), () => assignExpert(task)));
+      actions.append(button(() => t("experts.add_stage"), () => addExpertStage(task)));
+    }
     actions.append(button(() => t("ui.dependencies_bbf4859b"), () => editDependencies(task)));
     actions.append(button(() => t("ui.execution_settings_c1ef196e"), () => editExecution(task)));
+  }
+  if (!manualBoard() && (["draft", "ready"].includes(task.status) ||
+      (task.status === "review" && !task.acceptanceRepair && !task.history.some(event => event.reviewApproval?.revision === task.revision)))) {
+    actions.append(button(() => t("experts.review_lead"), () => assignExpert(task, "review")),
+      button(() => t("experts.add_review_stage"), () => addExpertStage(task, "review")));
   }
   if (!manualBoard() && !["done", "cancelled"].includes(task.status) && !frame.runningTasks?.includes(task.id)) {
     actions.append(button(() => t("ui.executor_access_4c93bc80"), () => editTaskAccess(task)));
@@ -4472,26 +4486,190 @@ function renderTagSettings(panel) {
   }
 }
 
+async function expertSettings() {
+  const entries = await command("experts");
+  if (!entries) return;
+  openSheet("experts", () => t("experts.title"));
+  const search = element("input", undefined, "expert-search");
+  search.type = "search"; search.placeholder = t("experts.search"); search.setAttribute("aria-label", t("experts.search"));
+  const list = element("div", undefined, "expert-list");
+  const render = () => {
+    const query = search.value.toLocaleLowerCase();
+    list.replaceChildren(...entries.filter(expert => (expert.name + " " + expert.group + " " + expert.id).toLocaleLowerCase().includes(query))
+      .map(expert => button(expert.name + " · " + expert.group + (expert.enabled ? "" : " · " + t("experts.disabled")), async () => {
+        const full = await command("expert-get", undefined, { expertId: expert.id });
+        if (full) editExpert(full, entries);
+      }, "quiet")));
+  };
+  search.addEventListener("input", render);
+  body.append(button(() => t("experts.new"), () => editExpert(undefined, entries)), search, list);
+  render(); search.focus();
+}
+
+function editExpert(expert, entries) {
+  const skills = structuredClone(expert?.skills ?? []);
+  const expertId = expert?.id ?? "custom-" + crypto.randomUUID();
+  const editor = form("expert-editor", expert?.name ?? (() => t("experts.new")), [
+    { name: "name", label: () => t("experts.name"), value: expert?.name, required: true },
+    { name: "group", label: () => t("experts.group"), value: expert?.group, required: true },
+    { name: "enabled", label: () => t("experts.enabled"), type: "checkbox", value: expert?.enabled ?? true },
+    { name: "prompt", label: () => t("experts.prompt"), type: "area", value: expert?.prompt, required: true },
+  ], () => t("ui.save_settings_2173b7d7"), async values => {
+    if (await command("expert-save", undefined, { ...values, id: expertId, skills,
+      ...(expert ? { revision: expert.revision } : {}), requirements: expert?.requirements ?? [], limitations: expert?.limitations ?? "" })) await expertSettings();
+  });
+  const panel = element("section", undefined, "expert-skills");
+  const render = () => {
+    panel.replaceChildren(element("h3", () => t("experts.skills")));
+    for (const skill of skills) {
+      const row = element("div", undefined, "expert-skill");
+      const label = element("label", () => t("experts.name"));
+      const name = element("input"); name.value = skill.name; name.required = true;
+      name.addEventListener("input", () => { skill.name = name.value; }); label.append(name); row.append(label);
+      if (skill.library) row.append(button(() => t("experts.view"), async () => {
+        const source = expert?.skills.some(s => s.id === skill.id) ? expert : entries.find(e => e.skills.some(s => s.id === skill.id));
+        const value = source && await command("expert-skill", undefined, { expertId: source.id, skillId: skill.id });
+        if (value && row.isConnected) {
+          const preview = element("pre", value.content, "expert-mail"); row.append(preview);
+        }
+      }, "quiet"));
+      else {
+        const label = element("label", () => t("experts.skill_content"));
+        const content = element("textarea"); content.value = skill.content; content.required = true;
+        content.addEventListener("input", () => { skill.content = content.value; }); label.append(content); row.append(label);
+      }
+      row.append(button(() => t("experts.remove"), () => { skills.splice(skills.indexOf(skill), 1); render(); }, "quiet"));
+      panel.append(row);
+    }
+    panel.append(button(() => t("experts.add_skill"), () => {
+      skills.push({ id: "skill-" + crypto.randomUUID(), name: t("experts.add_skill"), content: "" }); render();
+    }, "quiet"));
+  };
+  render();
+  const library = [...new Map(entries.flatMap(expert => expert.skills).filter(skill => skill.library).map(skill => [skill.library, skill])).values()];
+  const choose = element("select"); choose.setAttribute("aria-label", t("experts.add_library"));
+  for (const skill of library) { const option = element("option", skill.name); option.value = skill.id; choose.append(option); }
+  const add = button(() => t("experts.add_library"), () => {
+    const skill = library.find(skill => skill.id === choose.value);
+    if (skill && !skills.some(s => s.id === skill.id)) { skills.push({ ...skill, library: skill.id }); render(); }
+  }, "quiet");
+  editor.querySelector('button[type="submit"]').before(panel, choose, add);
+}
+
+function filterExpertChoices(editor, experts) {
+  const select = editor.elements.namedItem("expertId");
+  select.size = 6;
+  const search = element("input", undefined, "expert-search"); search.type = "search";
+  search.placeholder = t("experts.search"); search.setAttribute("aria-label", t("experts.search"));
+  search.addEventListener("input", () => {
+    const query = search.value.toLocaleLowerCase();
+    for (const option of select.options) option.hidden = Boolean(option.value && !(experts.find(e => e.id === option.value)?.name + " " + option.value).toLocaleLowerCase().includes(query));
+  });
+  select.before(search);
+}
+async function assignExpert(task, phase = "work") {
+  const experts = await command("experts"); if (!experts) return;
+  const label = () => t(phase === "review" ? "experts.review_lead" : "experts.assign");
+  const editor = form("assign-expert", label, [
+    { name: "expertId", label, value: (task.expertTeam?.[phase]?.lead === undefined && phase === "work" ? task.expertId : task.expertTeam?.[phase]?.lead) ?? "",
+      options: [["", () => t("experts.general")], ...experts.filter(e => e.enabled).map(e => [e.id, e.name])] },
+  ], () => t("ui.save_settings_2173b7d7"), async values => {
+    if (await command("expert-plan", task.id, { revision: task.revision, phase, lead: values.expertId || null, stages: [] })) await showTask(task.id);
+  }); filterExpertChoices(editor, experts);
+}
+async function addExpertStage(task, phase = "work") {
+  const experts = await command("experts"); if (!experts) return;
+  const editor = form("expert-stage", () => t(phase === "review" ? "experts.add_review_stage" : "experts.add_stage"), [
+    { name: "title", label: () => t("experts.stage_title"), required: true },
+    { name: "expertId", label: () => t("experts.assign"), options: experts.filter(e => e.enabled).map(e => [e.id, e.name]), required: true },
+    { name: "description", label: () => t("experts.description"), type: "area" },
+    { name: "inputs", label: () => t("experts.inputs"), type: "area" },
+    { name: "outputs", label: () => t("experts.outputs"), type: "area", required: true },
+    { name: "criteria", label: () => t("ui.acceptance_criteria_7e3779c2"), type: "area", required: true },
+    { name: "dependsOn", label: () => t("experts.prerequisites"), options: [["", "—"], ...(task.expertTeam?.[phase]?.stages ?? []).map(s => [s.key, s.title])] },
+  ], () => t("ui.save_settings_2173b7d7"), async values => {
+    const lines = value => value.split("\n").map(s => s.trim()).filter(Boolean);
+    const stage = { ...values, key: "stage-" + crypto.randomUUID(), inputs: lines(values.inputs), outputs: lines(values.outputs),
+      criteria: lines(values.criteria), dependsOn: values.dependsOn ? [values.dependsOn] : [] };
+    if (await command("expert-plan", task.id, { revision: task.revision, phase, stages: [stage] })) await showTask(task.id);
+  }); filterExpertChoices(editor, experts);
+}
+function expertTeamSection(task) {
+  const area = element("section", undefined, "expert-team");
+  area.append(element("h3", () => t("experts.team")));
+  for (const [phase, plan] of Object.entries(task.expertTeam ?? {})) {
+    area.append(element("h4", () => t(phase === "work" ? "status.in_progress" : "status.review")));
+    if (plan.lead) area.append(element("p", () => t(phase === "work" ? "experts.assign" : "experts.review_lead") + " · " + plan.lead));
+    const stages = element("ul");
+    for (const stage of plan.stages) {
+      const row = element("li", stage.title + " · " + stage.expertId);
+      if (stage.inputs.length) row.append(element("small", () => t("experts.inputs") + " · " + stage.inputs.join(", ")));
+      row.append(element("small", () => t("experts.outputs") + " · " + stage.outputs.join(", ")));
+      if (stage.dependsOn.length) row.append(element("small", () => t("experts.prerequisites") + " · " +
+        stage.dependsOn.map(key => plan.stages.find(item => item.key === key)?.title ?? key).join(", ")));
+      stages.append(row);
+    }
+    area.append(stages);
+  }
+  for (const stage of task.expertStages ?? []) {
+    const child = frame.board?.tasks.find(t => t.id === stage.taskId) ?? frame.board?.archived.find(t => t.id === stage.taskId);
+    area.append(button(stage.title + " · " + (child?.expertId ?? stage.expertId) + (child ? " · " + t("status." + child.status) : ""), () => showTask(stage.taskId), "quiet"));
+  }
+  task.history.forEach((event, index) => {
+    if (event.expertMessage?.to !== "owner" || event.messageKind !== "question" ||
+        task.history.some(reply => reply.expertMessage?.from === "owner" && reply.expertMessage.replyTo === index + 1)) return;
+    const question = element("article", undefined, "expert-mail");
+    question.append(element("strong", () => t("experts.owner")), element("p", event.text),
+      button(() => t("experts.reply"), () => composeExpertMail(task, event.expertMessage.from, index + 1)));
+    area.append(question);
+  });
+  area.append(button(() => t("experts.mail"), () => expertMailbox(task)), button(() => t("experts.send"), () => composeExpertMail(task)));
+  body.append(area);
+}
+async function expertMailbox(task) {
+  const parentId = task.expertStage?.parentId ?? task.id;
+  const parent = await command("show", parentId); if (!parent) return;
+  openSheet("expert-mail", () => t("experts.mail"));
+  body.append(button(() => t("experts.send"), () => composeExpertMail(parent)), button(parent.title, () => showTask(parentId), "quiet"));
+  parent.history.forEach((event, index) => {
+    if (!event.expertMessage) return;
+    const row = element("article", undefined, "expert-mail");
+    row.append(element("small", event.expertMessage.from + " → " + event.expertMessage.to + " · " + shortDate(event.at)), element("p", event.text));
+    row.append(button(() => t("experts.reply"), () => composeExpertMail(parent, event.expertMessage.from, index + 1), "quiet")); body.append(row);
+  });
+}
+async function composeExpertMail(task, recipient = "manager", replyTo) {
+  const parent = task.expertStage ? await command("show", task.expertStage.parentId) : task; if (!parent) return;
+  form("expert-message", () => t("experts.send"), [
+    { name: "to", label: () => t("experts.to"), value: recipient, options: [["manager", () => t("experts.manager")], ["team", () => t("experts.all")],
+      ["owner", () => t("experts.owner")], ["reviewer", () => t("ui.reviewer_50c42665")], ...[parent, ...(parent.expertStages ?? []).map(s => ({ id: s.taskId, title: s.title }))].map(s => [s.id, s.title])] },
+    { name: "text", label: () => t("experts.message"), type: "area", required: true },
+  ], () => t("experts.send"), async values => {
+    if (await command("expert-message", parent.id, { ...values, kind: "decision", ...(replyTo ? { replyTo } : {}) })) await expertMailbox(parent);
+  });
+}
+
 function settings() {
+  // The expert catalogue belongs to the selected board, including its overrides.
   const roles = [
-    ["executor", () => t("ui.executors_66276668")],
-    ["reviewer", () => t("ui.reviewers_fd4fe839")],
+    ["executor", () => t("limits.work")],
+    ["reviewer", () => t("limits.review")],
   ];
   const editor = form("settings", () => (t("ui.application_settings_b131bcd2")),
     roles.map(([name, label]) => ({ name, label, type: "number", required: true })),
     () => (t("ui.save_limits_5ec81bed")), async values => {
-      const result = await api.agentLimits(Object.fromEntries(Object.entries(values).map(([role, value]) => [role, Number(value)])));
+      const result = await api.taskLimits(Object.fromEntries(Object.entries(values).map(([role, value]) => [role, Number(value)])));
       if (!result.ok) return notice(boardError(result.error));
       if (editor.isConnected) sheet.close();
     });
   editor.id = "agent-limits";
-  editor.prepend(element("h3", () => t("ui.concurrent_agents_31683999")),
+  editor.prepend(element("h3", () => t("limits.title")),
     element("p", () => t("ui.defaults_for_each_board_board_settings_can_overr_e97efc09"), "muted"));
   const inputs = [...editor.querySelectorAll('input[type="number"]')];
   const save = editor.querySelector('button[type="submit"]');
   for (const input of inputs) input.disabled = true;
   save.disabled = true;
-  void api.agentLimits().then(result => {
+  void api.taskLimits().then(result => {
     if (!editor.isConnected) return;
     if (!result.ok) return notice(boardError(result.error));
     for (const [index, [role]] of roles.entries()) {
@@ -4502,6 +4680,7 @@ function settings() {
   }).catch(error => { if (editor.isConnected) notice(error.message); });
   appearanceSettings();
   codexSettings();
+  if (frame.board) body.append(button(() => t("experts.title"), () => expertSettings()));
 }
 
 function boardSettings() {
@@ -4527,9 +4706,6 @@ function boardSettings() {
         options: model ? [[model, model]] : [["", defaultModel]] },
       { name: role + "Effort", label: () => (t("ui.reasoning_effort_f0ee1b26")), value: effort,
         options: [[effort, effort ? reasoningName(effort) : defaultModel]] },
-      ...(role === "manager" ? [] : [{ name: role + "Limit", type: "number", value: current.agentLimits?.[role],
-        label: () => (role === "manager" ? t("ui.concurrent_background_runs_c8868724")
-          : t("ui.concurrent_agents_06461399")) }]),
     ];
   });
   let models = [];
@@ -4548,6 +4724,8 @@ function boardSettings() {
         ["reviewer", t("ui.reviewer_50c42665")],
       ] },
     ...agentFields.flat(),
+    { name: "executorLimit", type: "number", label: () => t("limits.work"), value: current.taskLimits?.executor },
+    { name: "reviewerLimit", type: "number", label: () => t("limits.review"), value: current.taskLimits?.reviewer },
     { name: "managerAccess", label: () => (t("ui.access_mode_on_this_computer_d6a20a28")),
       value: managerAccess, options: [
         ["ask", t("ui.ask_for_approval_cc8bdc3b")],
@@ -4556,9 +4734,9 @@ function boardSettings() {
       ] },
   ], () => (t("ui.save_settings_2173b7d7")), async values => {
     const agents = {};
-    const agentLimits = {};
+    const taskLimits = {};
     for (const [role, title] of roles) {
-      if (role !== "manager" && values[role + "Limit"] !== "") agentLimits[role] = Number(values[role + "Limit"]);
+      if (role !== "manager" && values[role + "Limit"] !== "") taskLimits[role] = Number(values[role + "Limit"]);
       const { [role + "Provider"]: provider, [role + "Model"]: model, [role + "Effort"]: effort } = values;
       if (provider === (current[role]?.provider ?? "codex") && model === (current[role]?.model ?? "") &&
           effort === (current[role]?.effort ?? "")) continue;
@@ -4573,7 +4751,7 @@ function boardSettings() {
       archiveAfterDays: values.archive === "" ? null : Number(values.archive), integrationMode: values.mode,
       showCardPreviews: values.showCardPreviews,
       ...(values.reviewMode !== reviewMode ? { reviewMode: values.reviewMode } : {}),
-      ...(roles.some(([role]) => agentLimits[role] !== current.agentLimits?.[role]) ? { agentLimits } : {}),
+      ...(roles.some(([role]) => taskLimits[role] !== current.taskLimits?.[role]) ? { taskLimits } : {}),
       ...agents,
     })) {
       if (values.managerAccess !== managerAccess) {
@@ -4584,6 +4762,7 @@ function boardSettings() {
     }
   });
   const [, review, ...selects] = editor.querySelectorAll("select");
+  body.append(button(() => t("experts.title"), () => expertSettings()));
   const reviewHint = element("small", undefined, "muted");
   const updateReviewHint = () => {
     bindLocalized(reviewHint, "textContent", () => ({
@@ -4595,18 +4774,21 @@ function boardSettings() {
   review.parentElement.append(reviewHint);
   review.addEventListener("change", updateReviewHint);
   updateReviewHint();
-  const limits = roles.map(([role]) => editor.elements.namedItem(role + "Limit"));
+  const limitPhases = ["executor", "reviewer"];
+  const limits = limitPhases.map(role => editor.elements.namedItem(role + "Limit"));
+  const limitGroup = element("fieldset", undefined, "board-agent-settings");
+  limits[0].parentElement.before(limitGroup);
+  limitGroup.append(element("legend", () => t("limits.title")), ...limits.map(input => input.parentElement));
   selects[0].parentElement.before(element("p", () => t("ui.an_empty_limit_uses_the_application_default_use__f19c1da9"), "muted"));
-  void api.agentLimits().then(result => {
+  void api.taskLimits().then(result => {
     if (!result.ok || !editor.isConnected) return;
-    roles.forEach(([role], index) => { if (limits[index]) limits[index].placeholder = String(result.data[role]); });
+    limitPhases.forEach((role, index) => { limits[index].placeholder = String(result.data[role]); });
   }).catch(() => {});
   const roleControls = roles.map(([role, title], index) => {
     const [provider, model, effort] = selects.slice(index * 3, index * 3 + 3);
     const group = element("fieldset", undefined, "board-agent-settings");
     provider.parentElement.before(group);
-    group.append(element("legend", title), provider.parentElement, model.parentElement, effort.parentElement,
-      ...(limits[index] ? [limits[index].parentElement] : []));
+    group.append(element("legend", title), provider.parentElement, model.parentElement, effort.parentElement);
     if (role === "manager") group.append(editor.elements.namedItem("managerAccess").parentElement);
     const savedModel = current[role]?.model ?? "";
     const savedEffort = current[role]?.effort ?? "";

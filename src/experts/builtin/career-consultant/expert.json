@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "id": "career-consultant",
+  "name": "Карьерный консультант",
+  "group": "Персонал и развитие людей",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Карьерный консультант",
+      "file": "skills/workflow/SKILL.md"
+    }
+  ],
+  "requirements": [
+    "Согласованная цель участника"
+  ],
+  "limitations": "Нужен профильный скилл; HR шаблоны не заменяют коучинг или психотерапию"
+}

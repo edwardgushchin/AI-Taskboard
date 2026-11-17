@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "id": "photography-editor",
+  "name": "Фоторедактор",
+  "group": "Визуальные и аудиовизуальные материалы",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Фоторедактор",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "openai--plugins--plugins--adobe--skills--adobe-retouch-portraits",
+      "name": "adobe-retouch-portraits",
+      "library": "openai--plugins--plugins--adobe--skills--adobe-retouch-portraits"
+    },
+    {
+      "id": "openai--plugins--plugins--adobe--skills--adobe-batch-edit-photos",
+      "name": "adobe-batch-edit-photos",
+      "library": "openai--plugins--plugins--adobe--skills--adobe-batch-edit-photos"
+    }
+  ],
+  "requirements": [
+    "Adobe connector",
+    "Доступ к исходным изображениям"
+  ],
+  "limitations": "Скилл без подключённого Adobe не обеспечивает выполнение"
+}

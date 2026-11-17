@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "id": "geospatial-analyst",
+  "name": "Геоаналитик",
+  "group": "Наука и исследования",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Геоаналитик",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "k-dense-ai--claude-scientific-skills--skills--geopandas",
+      "name": "geopandas",
+      "library": "k-dense-ai--claude-scientific-skills--skills--geopandas"
+    },
+    {
+      "id": "openai--plugins--plugins--build-web-data-visualization--skills--geospatial-and-cartographic-visualization",
+      "name": "geospatial-and-cartographic-visualization",
+      "library": "openai--plugins--plugins--build-web-data-visualization--skills--geospatial-and-cartographic-visualization"
+    }
+  ],
+  "requirements": [
+    "Python",
+    "Пространственные данные"
+  ],
+  "limitations": ""
+}

@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "id": "statistician",
+  "name": "Статистик",
+  "group": "Наука и исследования",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Статистик",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "k-dense-ai--claude-scientific-skills--skills--statistical-analysis",
+      "name": "statistical-analysis",
+      "library": "k-dense-ai--claude-scientific-skills--skills--statistical-analysis"
+    },
+    {
+      "id": "k-dense-ai--claude-scientific-skills--skills--statistical-power",
+      "name": "statistical-power",
+      "library": "k-dense-ai--claude-scientific-skills--skills--statistical-power"
+    }
+  ],
+  "requirements": [
+    "Python либо R и данные"
+  ],
+  "limitations": ""
+}

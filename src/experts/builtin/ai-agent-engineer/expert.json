@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "id": "ai-agent-engineer",
+  "name": "Разработчик AI агентов",
+  "group": "Данные и искусственный интеллект",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Разработчик AI агентов",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "openai--plugins--plugins--openai-developers--skills--agents-sdk",
+      "name": "agents-sdk",
+      "library": "openai--plugins--plugins--openai-developers--skills--agents-sdk"
+    },
+    {
+      "id": "openai--plugins--plugins--openai-developers--skills--openai-api-troubleshooting",
+      "name": "openai-api-troubleshooting",
+      "library": "openai--plugins--plugins--openai-developers--skills--openai-api-troubleshooting"
+    }
+  ],
+  "requirements": [
+    "Доступ к выбранному API",
+    "Ключ хранится вне промпта"
+  ],
+  "limitations": "Для Anthropic использовать A:claude-api как альтернативу; оценочные сценарии проектируются отдельно"
+}

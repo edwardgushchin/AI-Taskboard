@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "id": "ecommerce-developer",
+  "name": "Разработчик электронной торговли",
+  "group": "Веб и серверная разработка",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Разработчик электронной торговли",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--engineering--skills--system-design",
+      "name": "system-design",
+      "library": "anthropics--knowledge-work-plugins--engineering--skills--system-design"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--engineering--skills--testing-strategy",
+      "name": "testing-strategy",
+      "library": "anthropics--knowledge-work-plugins--engineering--skills--testing-strategy"
+    }
+  ],
+  "requirements": [],
+  "limitations": "Добавить проектные правила конкретного языка, БД и API"
+}

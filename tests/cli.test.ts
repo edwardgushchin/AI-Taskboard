@@ -886,7 +886,7 @@ test("board agent defaults apply to new and unset roles while explicit choices k
   const root = fixture(t);
   cli(root, ["init"]);
   const roles = {
-    manager: { provider: "codex", model: "gpt-6.1-sol", effort: "medium" },
+    manager: { provider: "codex", model: "gpt-6.2-sol", effort: "medium" },
     executor: { provider: "codex", model: "gpt-6.1-sol", effort: "high" },
     reviewer: { provider: "codex", model: "gpt-6.1-terra", effort: "high" },
   };
@@ -1509,16 +1509,16 @@ test("watch streams compact cards and sees new messages without a revision chang
     cli(root, ["settings"], { name: "   " });
     assert.deepEqual((await frame()).data.settings, initial.settings);
     assert.equal(initial.settings.showCardPreviews, undefined);
-    assert.equal(initial.settings.agentLimits, undefined);
-    const agentLimits = { executor: 0, reviewer: 2 };
-    cli(root, ["settings"], { agentLimits });
-    assert.deepEqual((await frame()).data.settings.agentLimits, agentLimits);
+    assert.equal(initial.settings.taskLimits, undefined);
+    const taskLimits = { executor: 0, reviewer: 2 };
+    cli(root, ["settings"], { taskLimits });
+    assert.deepEqual((await frame()).data.settings.taskLimits, taskLimits);
     for (const invalid of [{ executor: -1 }, { manager: 1.5 }, { reviewer: "2" }, { unknown: 1 }, null]) {
-      cli(root, ["settings"], { agentLimits: invalid }, "INVALID_INPUT");
+      cli(root, ["settings"], { taskLimits: invalid }, "INVALID_INPUT");
     }
-    assert.deepEqual(cli(root, ["list"]).settings.agentLimits, agentLimits);
-    cli(root, ["settings"], { agentLimits: {} });
-    assert.equal((await frame()).data.settings.agentLimits, undefined);
+    assert.deepEqual(cli(root, ["list"]).settings.taskLimits, taskLimits);
+    cli(root, ["settings"], { taskLimits: {} });
+    assert.equal((await frame()).data.settings.taskLimits, undefined);
     cli(root, ["settings"], { showCardPreviews: false });
     assert.deepEqual((await frame()).data.settings, { ...initial.settings, showCardPreviews: false });
     cli(root, ["settings"], { showCardPreviews: "false" }, "INVALID_INPUT");

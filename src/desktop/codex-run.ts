@@ -27,6 +27,9 @@ import { codexRpc, turnControl } from "./codex-rpc.ts";
 import type { AgentControl } from "./codex-rpc.ts";
 import { CodexTokenUsage } from "./codex-token-usage.ts";
 import type { TokenUsageReport } from "../cli/token-usage.ts";
+import type { Expert } from "../cli/experts.ts";
+import { expertCommands, executorExpertTools, leadInstructions, subagentInstructions } from "./expert-tools.ts";
+import type { teamInbox } from "../cli/expert-team.ts";
 import { insideProject } from "./project-files.ts";
 
 type Client = NonNullable<Awaited<ReturnType<typeof configuredCodex>>>;
@@ -69,7 +72,7 @@ const verifyWrite = [
   "}",
 ].join("\n");
 
-export type ExecutorTask = Pick<Task, "acceptanceRepair" | "id" | "title" | "description" | "criteria" | "dueDate" | "summary" | "nextStep" | "execution" | "git" | "codexThreadId" | "workingDirectory" | "schedule" | "toolGrants"> &
+export type ExecutorTask = Pick<Task, "expertId" | "expertTeam" | "expertStage" | "expertStages" | "acceptanceRepair" | "id" | "title" | "description" | "criteria" | "dueDate" | "summary" | "nextStep" | "execution" | "git" | "codexThreadId" | "workingDirectory" | "schedule" | "toolGrants"> &
   { feedback?: string; fullAccess?: boolean };
 
 export function missingCodexThread(message: string | undefined, threadId: string | undefined) {
@@ -93,9 +96,17 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   const paths = [...new Set([runDirectory, boardData, ...(task.git ? gitAccessPaths(cwd, task.git.branch) : [])])];
   const settings = await callCli<BoardSettings>(project, ["settings"]);
   if (!settings.ok) throw new Error(settings.error.message);
-  const developerInstructions = executorInstructions() + (task.schedule ? "\n" + recurringChildTool.description : "") + "\nCurrent board reviewMode: " + boardReviewMode(settings.data) + ". Read settings again if it changes.";
+  const plan = task.expertTeam?.work;
+  const lead = plan?.lead === undefined ? task.expertId : plan.lead;
+  const assigned = new Set([lead, ...(plan?.stages.map(stage => stage.expertId) ?? [])].filter(Boolean));
+  const specialization = lead ? await callCli<Expert[]>(project, ["expert-context"], { ids: [lead] }) : undefined;
+  if (specialization && !specialization.ok) throw new Error(specialization.error.message);
+  const developerInstructions = executorInstructions() + (specialization?.ok ? "\nAssigned expert package for this run:\n" + JSON.stringify(specialization.data) : "") +
+    (plan ? "\n" + leadInstructions + "\nAssigned work plan: " + JSON.stringify(plan) : "") +
+    (task.expertStage ? "\nAssigned stage: " + JSON.stringify(task.expertStage) + ". Read team_inbox for prerequisite results and peer questions. Produce the declared outputs before submitting." : "") +
+    (task.schedule ? "\n" + recurringChildTool.description : "") + "\nCurrent board reviewMode: " + boardReviewMode(settings.data) + ". Read settings again if it changes.";
   const worklog = boardWorklog(project, "executor", task.id);
-  const readOnlyWorktrees = [join(boardData, "worktrees"), join(dirname(boardData), ".taskboard-worktrees"), join(dirname(boardData), isolatedWorktreesDirectory)].filter(existsSync);
+  const readOnlyWorktrees = [join(boardData, "expert-work"), join(boardData, "worktrees"), join(dirname(boardData), ".taskboard-worktrees"), join(dirname(boardData), isolatedWorktreesDirectory)].filter(existsSync);
   const isolatedRoot = join(dirname(boardData), isolatedWorktreesDirectory);
   if (insideProject(runDirectory, isolatedRoot)) {
     if (runDirectory === isolatedRoot) throw new Error("Choose an individual worktree, not the shared worktree directory.");
@@ -105,12 +116,18 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     inputSchema: { type: "object", properties: { server: { type: "string" }, tool: { type: "string" }, reason: { type: "string" } }, required: ["server", "tool", "reason"], additionalProperties: false } };
   const accessTool = { name: "task_request_executor_access", description: "Request full host access for the current execution. Describe the required operation and the sandbox error. On approval the board applies access and continues the same work automatically.",
     inputSchema: { type: "object", properties: { reason: { type: "string", minLength: 1, maxLength: 3000 } }, required: ["reason"], additionalProperties: false } };
-  const tools = [worklogTool, checkWaitTool, requestTool, executorResultTool, githubReadTool, milestonesListTool, githubCreateMilestoneTool, githubSetMilestoneDueTool];
+  const tools = [worklogTool, checkWaitTool, requestTool, executorResultTool, githubReadTool, milestonesListTool, githubCreateMilestoneTool, githubSetMilestoneDueTool, ...executorExpertTools];
   if (task.schedule) tools.push(recurringChildTool);
   if (desktopProfile && !fullAccess) tools.push(accessTool);
   let accessDecision: Promise<CliReply> | undefined;
   let accessChange: "approved" | "ready" | "switching" | undefined;
   const mcp = await openBoardMcp(tools, async (name, args, requestSignal) => {
+    if (Object.hasOwn(expertCommands, name)) {
+      const input = args as Record<string, unknown>;
+      if (assigned.size && ((name === "expert_context" && (!Array.isArray(input.ids) || input.ids.some(id => !assigned.has(id)))) ||
+          (name === "expert_skill" && !assigned.has(input.expertId as string)))) return { ok: false, error: { code: "EXPERT_SCOPE", message: "Use the assigned specializations or ask the manager to change them." } };
+      return worklog.remind(await callCli(project, [expertCommands[name], ...(name.startsWith("team_") ? [task.id] : [])], { ...input, actor: "agent" }));
+    }
     if (name === recurringChildTool.name && task.schedule) return worklog.remind(await callCli(project, ["spawn-child", task.id, "--compact"], args));
     if (name === executorResultTool.name) return worklog.remind(await recordExecutorResult(project, task.id, args));
     if (name === accessTool.name && desktopProfile) {
@@ -185,6 +202,9 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   const tokens = new CodexTokenUsage();
   let activeThreadId: string | undefined;
   let control: AgentControl | undefined;
+  let mailTimer: NodeJS.Timeout | undefined;
+  let deliveredMail = 0;
+  let readingMail = false;
   let interruptTimeout: NodeJS.Timeout | undefined;
   const timeout = setTimeout(() => {
     rpc.fail(new Error("Codex did not start the task in time."));
@@ -192,6 +212,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     rpc.close();
   }, 60_000);
   const close = async () => {
+    clearInterval(mailTimer);
     clearTimeout(timeout);
     clearTimeout(interruptTimeout);
     signal?.removeEventListener("abort", interrupt);
@@ -287,7 +308,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     };
     const threadOptions = {
       cwd, model: task.execution?.model, permissions: profile,
-      approvalPolicy, approvalsReviewer, developerInstructions,
+      approvalPolicy, approvalsReviewer, developerInstructions: plan?.stages.length
+        ? developerInstructions + "\n" + await subagentInstructions(request) : developerInstructions,
       config: await executorToolConfig(request, cwd, task.toolGrants),
     };
     let started: ThreadReply | undefined;
@@ -309,7 +331,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
         "Codex did not enable automatic approval review. Check the connected Codex version and its approval policy.");
     }
     const threadId = started.thread.id;
-    const localTools = await verifyExecutorTools(request, threadId, task.toolGrants, task.schedule ? [recurringChildTool.name] : []);
+    const localTools = await verifyExecutorTools(request, threadId, task.toolGrants, [
+      ...(assigned.size ? executorExpertTools.map(tool => tool.name) : []), ...(task.schedule ? [recurringChildTool.name] : [])]);
     const githubTools = localTools.filter(name => name.startsWith("github_") || name === milestonesListTool.name);
     if (!codexThreadPattern.test(threadId) || (existing && threadId !== existing)) throw new Error("Codex returned an unexpected thread ID.");
     signal?.throwIfAborted();
@@ -351,6 +374,19 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     });
     worklog.start(threadId, turn.id);
     control = turnControl(request, threadId, turn.id);
+    if (assigned.size || task.expertStage || task.expertStages?.length) {
+      mailTimer = setInterval(() => {
+        if (readingMail || !control) return;
+        readingMail = true;
+        void callCli<ReturnType<typeof teamInbox>>(project, ["expert-inbox", task.id], { afterSequence: deliveredMail }).then(async inbox => {
+          if (!inbox.ok || !inbox.data.messages.length) return;
+          const sequence = Math.max(...inbox.data.messages.map(message => message.sequence));
+          await control!.steer("AI Taskboard: new addressed team mail through sequence " + sequence + ". Read team_inbox and coordinate with the sender. Owner questions need a human answer.", []);
+          deliveredMail = sequence;
+        }).catch(() => { /* Persisted mail remains available; retry on the next pass. */ }).finally(() => { readingMail = false; });
+      }, 2000);
+      mailTimer.unref();
+    }
     tokens.save(tokens.begin(threadId, turn.id), onTokenUsage);
     clearTimeout(timeout);
     if (turn.status !== "inProgress") turns.set(turn.id, turn);

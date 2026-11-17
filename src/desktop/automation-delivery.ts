@@ -55,7 +55,7 @@ export function automationDelivery(send: (text: string) => Promise<void>, wake: 
       enabled = board.settings.autoMode === true;
       if (!enabled && !wasEnabled) return;
       const settings = { enabled, reviewMode: boardReviewMode(board.settings), queue: autoQueueSettings(board.settings),
-        limits: board.settings.agentLimits };
+        limits: board.settings.taskLimits };
       const serializedSettings = JSON.stringify(settings);
       if (serializedSettings !== previousSettings) pending.push({ settings });
       previousSettings = serializedSettings;

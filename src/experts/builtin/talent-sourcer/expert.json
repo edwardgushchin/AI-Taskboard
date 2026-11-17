@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "id": "talent-sourcer",
+  "name": "Специалист по поиску кандидатов",
+  "group": "Персонал и развитие людей",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Специалист по поиску кандидатов",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--human-resources--skills--interview-prep",
+      "name": "interview-prep",
+      "library": "anthropics--knowledge-work-plugins--human-resources--skills--interview-prep"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--human-resources--skills--recruiting-pipeline",
+      "name": "recruiting-pipeline",
+      "library": "anthropics--knowledge-work-plugins--human-resources--skills--recruiting-pipeline"
+    }
+  ],
+  "requirements": [],
+  "limitations": ""
+}

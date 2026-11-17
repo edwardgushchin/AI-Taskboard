@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "id": "video-editor",
+  "name": "Видеомонтажёр",
+  "group": "Визуальные и аудиовизуальные материалы",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Видеомонтажёр",
+      "file": "skills/workflow/SKILL.md"
+    }
+  ],
+  "requirements": [
+    "FFmpeg либо редактор для исполнения"
+  ],
+  "limitations": "Не найден один проверенный скилл одновременно для видео аудио музыки; нужен отдельный скилл по роли"
+}

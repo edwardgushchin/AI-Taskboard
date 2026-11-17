@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "id": "supply-chain-security",
+  "name": "Специалист по безопасности зависимостей",
+  "group": "Безопасность и управление рисками",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Специалист по безопасности зависимостей",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "trailofbits--skills--plugins--supply-chain-risk-auditor--skills--supply-chain-risk-auditor",
+      "name": "supply-chain-risk-auditor",
+      "library": "trailofbits--skills--plugins--supply-chain-risk-auditor--skills--supply-chain-risk-auditor"
+    },
+    {
+      "id": "trailofbits--skills--plugins--audit-context-building--skills--audit-context-building",
+      "name": "audit-context-building",
+      "library": "trailofbits--skills--plugins--audit-context-building--skills--audit-context-building"
+    }
+  ],
+  "requirements": [
+    "Список зависимостей и lockfile"
+  ],
+  "limitations": ""
+}

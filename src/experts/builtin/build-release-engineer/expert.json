@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "id": "build-release-engineer",
+  "name": "Инженер сборки и выпуска",
+  "group": "Инфраструктура и эксплуатация",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Инженер сборки и выпуска",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "openai--skills--skills---curated--gh-fix-ci",
+      "name": "gh-fix-ci",
+      "library": "openai--skills--skills---curated--gh-fix-ci"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--engineering--skills--deploy-checklist",
+      "name": "deploy-checklist",
+      "library": "anthropics--knowledge-work-plugins--engineering--skills--deploy-checklist"
+    }
+  ],
+  "requirements": [
+    "GitHub для gh-fix-ci",
+    "Git и среда сборки"
+  ],
+  "limitations": "gh-fix-ci из устаревшего каталога; для другого CI нужен иной адаптер"
+}
