@@ -31,7 +31,8 @@ if (!process.versions.electron) {
   }
   if (output) {
     mkdirSync(output, { recursive: true });
-    for (const name of ["project-tabs-reordered.png", "project-tabs-drop.png"])
+    for (const name of ["project-tabs-reordered.png", "project-tabs-drop.png",
+      ...(environment.TASKBOARD_TAB_REORDER_ONLY ? [] : ["project-tabs-no-context-dark.png", "project-tabs-no-context-light.png"])])
       copyFileSync(join(artifacts, name), join(output, name));
     console.log("Project tab screenshots: " + output);
   }
@@ -128,13 +129,32 @@ if (!process.versions.electron) {
         const trigger = document.querySelector('.app-menu-trigger').getBoundingClientRect();
         const popup = menu.getBoundingClientRect();
         const tabs = document.querySelector('#project-tabs').getBoundingClientRect();
-        const point = document.elementFromPoint(popup.left + 12, tabs.top + tabs.height / 2);
+        const point = document.elementFromPoint(popup.left + 12, Math.max(popup.top, tabs.top) + 12);
         return { gap: popup.top - trigger.bottom, aboveTabs: menu.contains(point) };
       })()`);
       writeFileSync(join(artifacts, "project-tabs-menu-" + theme + ".png"), (await window.webContents.capturePage()).toPNG());
       check(menuPosition.gap >= 0 && menuPosition.gap <= 4, "File menu is anchored directly below its trigger in " + theme);
       check(menuPosition.aboveTabs, "File menu paints above the project tabs in " + theme);
       await evaluate("document.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))");
+      const selected = (await frame()).project;
+      for (const active of [true, false]) {
+        for (const target of [".project-tab-button", ".project-tab-close"]) {
+          const point = await evaluate(`(() => {
+            const tab = document.querySelector('.project-tab:has([aria-selected="${active}"])');
+            const rect = tab.querySelector(${JSON.stringify(target)}).getBoundingClientRect();
+            return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
+          })()`);
+          window.webContents.sendInputEvent({ type: "mouseDown", button: "right", clickCount: 1, ...point });
+          window.webContents.sendInputEvent({ type: "mouseUp", button: "right", clickCount: 1, ...point });
+          await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+          check((await frame()).project === selected && (await frame()).tabs.length === 2,
+            theme + ": right click on " + active + " " + target + " preserves project and tabs");
+          check(await evaluate("!document.querySelector(':popover-open, dialog[open]') && [...document.querySelectorAll('.app-menu-popup')].every(menu => !menu.getClientRects().length) && !document.querySelector('#board-tab-menu')"),
+            theme + ": right click opens no popup");
+        }
+      }
+      check(await evaluate("!document.querySelector('.project-tab-button[aria-haspopup]')"), "tabs do not announce a popup");
+      writeFileSync(join(artifacts, "project-tabs-no-context-" + theme + ".png"), (await window.webContents.capturePage()).toPNG());
       const hover = async selector => {
         const point = await evaluate(`(() => {
           const tab = document.querySelector('.project-tab:has([aria-selected="false"])');

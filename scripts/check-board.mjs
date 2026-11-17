@@ -570,6 +570,7 @@ app.whenReady().then(async () => {
       "hovering the gear on the welcome screen does not paint a background square");
     await click('#app-menu .app-menu-trigger');
     await evaluate(`createProjectItem().click(); settle()`);
+    await evaluate(`body.querySelector('[data-board-type=agent]').click(); settle()`);
     await check(`createProjectCalls.length === 1 && createProjectCalls[0] === null`,
       "File invokes project creation from the welcome screen");
     await click('#app-settings');
@@ -607,6 +608,7 @@ app.whenReady().then(async () => {
     await check(`gearMatchesRail() && byId('app-settings').matches(':hover')`, "the gear background stays matched on hover");
     await click('#app-menu .app-menu-trigger');
     await evaluate(`createProjectItem().click(); settle()`);
+    await evaluate(`body.querySelector('[data-board-type=agent]').click(); settle()`);
     await check(`createProjectCalls[1] === 'board-fixture' && frame.project === 'board-fixture'`,
       "File invokes the same creation flow while a board is open");
     await click('#app-menu .app-menu-trigger');
@@ -624,12 +626,12 @@ app.whenReady().then(async () => {
       boardNameInput().form.requestSubmit(); waitFor(() => !sheet.open)`);
     await check(`JSON.stringify(savedLimits.get('board-fixture')) === '{"executor":2,"reviewer":0}' &&
       limits.executor === 0 && limits.reviewer === 1`, "board overrides save without changing application defaults");
-    await evaluate(`sheet.close(); byId('project-tabs').querySelector('[aria-selected="false"]')
-      .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 25, clientY: 150 })); void 0`);
-    await click('#board-tab-menu button');
+    await evaluate(`sheet.close(); byId('project-tabs').querySelector('[aria-selected="false"]').click(); settle()`);
+    await click('#app-menu .app-menu-trigger');
+    await click('#board-settings-menu-item');
     await check(`frame.project === 'other-board' && sheet.textContent.includes('Вторая доска') &&
       !!body.querySelector('.board-agent-settings') && !byId('agent-limits') &&
-      boardLimit('executor').value === '' && boardLimit('reviewer').value === ''`, "the project tab opens settings for that board");
+      boardLimit('executor').value === '' && boardLimit('reviewer').value === ''`, "File opens settings for the selected board");
     await check(`savedManagerAccess.get('board-fixture') === 'full' && managerAccess().value === 'auto'`,
       "manager full access saves for the selected board only");
     await evaluate(`boardNameInput().value = 'Выпуск 0.3'; boardNameInput().form.requestSubmit(); waitFor(() => !sheet.open)`);
