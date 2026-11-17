@@ -902,7 +902,7 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .form textarea { resize: vertical; min-height: 67px; }
 .manager-question-trigger { grid-column: 1 / -1; justify-self: start; margin-top: 8px; color: var(--accent); }
 .manager-question { width: min(520px, calc(100% - 32px)); }
-.manager-question-text { margin: 0; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.manager-question-text { min-width: 0; margin: 0; line-height: 1.5; }
 .manager-question-options { display: grid; gap: 6px; }
 .manager-question-options .button { white-space: normal; overflow-wrap: anywhere; text-align: start; }
 .draft-attachments { list-style: none; margin: 0; padding: 0; }
