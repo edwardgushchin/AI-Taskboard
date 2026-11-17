@@ -1,3 +1,5 @@
+import { captureFileLink, isFileLink, verifyFileLink } from "../cli/attachment-links.ts";
+import type { FileLink } from "../cli/attachment-links.ts";
 import { providerLimitSource, readCodexLimits } from "./provider-limits.ts";
 import localization from "./localization.cjs";
 import { activeRunSummary, observeActiveRuns, enableSharedRuns } from "./active-runs.ts";
@@ -655,13 +657,29 @@ interface PastedFile {
   name: string;
   type: string;
   bytes: ArrayBuffer;
+  link?: FileLink;
 }
 
 function isPastedFile(file: unknown): file is PastedFile {
   if (!file || typeof file !== "object") return false;
-  const { name, type, bytes } = file as Partial<PastedFile>;
-  return typeof name === "string" && Boolean(name.trim()) && typeof type === "string" && bytes instanceof ArrayBuffer;
+  const { name, type, bytes, link } = file as Partial<PastedFile>;
+  return typeof name === "string" && Boolean(name.trim()) && typeof type === "string" && bytes instanceof ArrayBuffer && (link === undefined || (isFileLink(link) && bytes.byteLength === 0));
 }
+
+ipcMain.handle("board:fileLink", (event, path: unknown) => {
+  stateOf(event);
+  if (typeof path !== "string") throw new Error("Invalid file path.");
+  return captureFileLink(path);
+});
+
+ipcMain.handle("board:openFileLink", async (event, link: unknown) => {
+  stateOf(event);
+  if (!isFileLink(link)) return cliFailure("INVALID_INPUT", "Invalid attachment link.");
+  try {
+    const error = await shell.openPath(verifyFileLink(link));
+    return error ? cliFailure("ATTACHMENT_UNAVAILABLE", error) : { ok: true, data: null };
+  } catch (error) { return cliFailure("ATTACHMENT_UNAVAILABLE", (error as Error).message); }
+});
 
 const imageExtensions = new Map([
   ["image/png", ".png"], ["image/jpeg", ".jpg"], ["image/webp", ".webp"], ["image/gif", ".gif"],
@@ -742,6 +760,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     if (retryAt === undefined) {
       const sources = [];
       for (const [index, file] of files.entries()) {
+        if (file.link) { sources.push({ path: file.link.path, name: file.name, link: file.link }); continue; }
         const path = join(scratch, "upload-" + index);
         const suffix = imageExtensions.get(file.type);
         const name = file.name.trim();
@@ -770,6 +789,11 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     const attachments = [];
     for (const [index, file] of task.attachments.entries()) {
       let path = join(project, ".tasks", "attachments", id, file.file);
+      if (file.link) {
+        try { path = verifyFileLink(file.link); attachments.push({ id: file.file, name: file.name, bytes: file.bytes, path, link: file.link }); }
+        catch (error) { attachments.push({ id: file.file, name: file.name, error: (error as Error).message }); }
+        continue;
+      }
       if (activeFiles.has(file.file)) {
         const extension = extname(file.name).toLowerCase();
         const safeExtension = /^\.[a-z0-9]{1,10}$/.test(extension) ? extension : "";
@@ -818,7 +842,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     const answer = await replyToTask(app.getPath("userData"), project, { model, effort }, prompt, images,
       text => notify({ type: "commentary", text }),
       (name, args) => runAction(name, args),
-      scratch, maxAttachmentBytes - task.attachments.reduce((sum, file) => sum + file.bytes, 0),
+      scratch, maxAttachmentBytes - task.attachments.reduce((sum, file) => sum + (file.link ? 0 : file.bytes), 0),
       report => saveTaskTokenUsage(project, id, "discussion", report),
       control => ready.resolve(control), signal, id).finally(() => ready.reject(new Error("The agent session ended.")));
     if ("interrupted" in answer) return { saved, result: { ok: true as const, data: task } };
@@ -1110,11 +1134,17 @@ const goalWorkTools = [
 ];
 
 async function prepareBoardAttachments(files: PastedFile[], scratch: Set<string>) {
-  const attachments: { path: string; name: string; image?: string }[] = [];
+  const attachments: { path: string; name: string; image?: string; link?: FileLink; error?: string }[] = [];
   if (!files.length) return attachments;
   const directory = await mkdtemp(join(tmpdir(), "ai-taskboard-orchestrator-"));
   scratch.add(directory);
   for (const [index, file] of files.entries()) {
+    if (file.link) {
+      let error: string | undefined;
+      try { verifyFileLink(file.link); } catch (failure) { error = (failure as Error).message; }
+      attachments.push({ path: file.link.path, name: file.name, link: file.link, ...(error ? { error } : {}) });
+      continue;
+    }
     const suffix = extname(file.name.trim()).toLowerCase();
     const extension = imageExtensions.get(file.type) ?? (imageTypes.has(suffix) ? suffix : undefined);
     const path = join(directory, String(index) + (extension ?? ""));
@@ -1153,7 +1183,7 @@ ipcMain.handle("board:queue", async (event, project: string, action: unknown, id
       if (!existsSync(directory)) return { ok: true, data: [] };
       const jobs = readdirSync(directory).filter(name => name.endsWith(".json")).map(name => {
         const job = readJson(join(directory, name)) as {
-          id: string; draft: string; goal: boolean; created: number; files: { name: string; type: string; bytes: string }[];
+          id: string; draft: string; goal: boolean; created: number; files: { name: string; type: string; bytes: string; link?: FileLink }[];
         };
         return { ...job, files: job.files.map(file => ({ ...file, bytes: Uint8Array.from(Buffer.from(file.bytes, "base64")).buffer })) };
       });
@@ -1173,7 +1203,7 @@ ipcMain.handle("board:queue", async (event, project: string, action: unknown, id
         files.reduce((total, file) => total + file.bytes.byteLength, 0) <= maxAttachmentBytes) {
       storageDirectory(directory, true);
       writeJson(path, { id, draft, goal, created: Date.now(),
-        files: files.map(file => ({ name: file.name, type: file.type, bytes: Buffer.from(file.bytes).toString("base64") })) });
+        files: files.map(file => ({ name: file.name, type: file.type, ...(file.link ? { link: file.link } : {}), bytes: Buffer.from(file.bytes).toString("base64") })) });
     } else return cliFailure("INVALID_INPUT", t("errors.ef091a00af0e1a46"));
     return { ok: true, data: action === "add" ? id : null };
   } catch (error) {
@@ -1457,7 +1487,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   const deliveredMessages = new Set<string>();
   let waitWork = new AbortController();
   let items: BoardActivity[] = [];
-  let historyMessage: { at?: string; text: string; files: { url: string; name: string }[]; clientId?: string } | undefined;
+  let historyMessage: { at?: string; text: string; files: { url?: string; name: string; link?: FileLink; size?: number; error?: string }[]; clientId?: string } | undefined;
   let historyModel: string | undefined;
   let historyAccepted = false;
   const saveHistory = () => {
@@ -1591,7 +1621,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       historyMessage = {
         at: new Date().toISOString(),
         text: requestText,
-        files: attachments.flatMap(file => file.image ? [{ url: file.image, name: file.name }] : []),
+        files: attachments.flatMap(file => file.image || file.link ? [{ name: file.name, ...(file.image ? { url: file.image } : {}), ...(file.link ? { link: file.link, size: file.link.size, error: file.error } : {}) }] : []),
         clientId: typeof messageId === "string" ? messageId : undefined,
       };
     }
@@ -1604,8 +1634,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         manager: turn.items.findLast(item => item.type === "agentMessage" && item.phase !== "commentary")?.text.slice(-1200),
       }]) : undefined;
     const attachmentContext = attachments.length || unread.length || priorChat?.length ? JSON.stringify({
-      ...(attachments.length ? { attachments: attachments.map(({ name, image }, index) => ({
-        id: index + 1, name, image: Boolean(image), ...(image ? { imageIndex: ++imageIndex } : {}),
+      ...(attachments.length ? { attachments: attachments.map(({ name, image, path, link, error }, index) => ({
+        id: index + 1, name, ...(link ? { path, link, error } : {}), image: Boolean(image), ...(image ? { imageIndex: ++imageIndex } : {}),
       })), fallbackLanguage: t("ui.english_e7d843ef") } : {}),
       unreadBoardMessages: unread.length || undefined,
       previousConversation: priorChat?.length ? priorChat : undefined,
@@ -1854,8 +1884,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
               let imageIndex = 0;
               const firstAttachment = attachments.length;
               const prompt = prepared.length ? JSON.stringify({ latestUserMessage: {
-                text, attachments: prepared.map(({ name, image }, index) => ({
-                  id: firstAttachment + index + 1, name, ...(image ? { imageIndex: ++imageIndex } : {}),
+                text, attachments: prepared.map(({ name, image, path, link, error }, index) => ({
+                  id: firstAttachment + index + 1, name, ...(link ? { path, link, error } : {}), ...(image ? { imageIndex: ++imageIndex } : {}),
                 })),
               } }) : text;
               // Make the new files available to any tool call triggered by this message.
@@ -2331,6 +2361,14 @@ ipcMain.handle("board:saveAttachment", async (event, id: unknown, file: unknown,
   if (!state.project || typeof id !== "string" || !/^T-\d{4,}$/.test(id) ||
       typeof file !== "string" || typeof name !== "string") return cliFailure("INVALID_INPUT", t("errors.86ceb194927d805b"));
   const project = state.project;
+  const card = await callCli<Task>(project, ["show", id, "--compact"]);
+  if (!card.ok) return card;
+  if (card.data.attachments.find(entry => entry.file === file)?.link) {
+    const linked = await callCli<{ path: string }>(project, ["attachment", "read", id], { file });
+    if (!linked.ok) return linked;
+    const error = await shell.openPath(linked.data.path);
+    return error ? cliFailure("ATTACHMENT_UNAVAILABLE", error) : { ok: true, data: null };
+  }
   const result = await dialog.showSaveDialog(state.window, { defaultPath: basename(name.replaceAll("\\", "/")) });
   if (result.canceled || !result.filePath) return { ok: true, data: null };
   return callCli(project, ["attachment", "read", id], { file, destination: result.filePath });

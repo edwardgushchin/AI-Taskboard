@@ -741,9 +741,10 @@ function taskChat(task) {
           const result = await api.saveAttachment(task.id, file.file, file.name);
           if (!result.ok) notice(boardError(result.error));
         }, "quiet chat-attachment");
-        const label = isImageAttachment(file) ? t("ui.view_7aa05de3") : t("ui.save_ceeee51c");
+        const label = file.link || isImageAttachment(file) ? t("ui.view_7aa05de3") : t("ui.save_ceeee51c");
+        if (file.link) tile.title = file.link.path;
         controlLabelForIcon(tile, label + file.name);
-        tile.replaceChildren(icon("attachment"), element("span", file.name));
+        tile.replaceChildren(icon("attachment"), element("span", file.name), element("small", " / " + file.bytes + " B"));
         if (isImageAttachment(file)) {
           tile.dataset.task = task.id;
           tile.dataset.file = file.file;
@@ -871,8 +872,8 @@ function taskChat(task) {
       remove.disabled = Boolean(draft.saving);
       remove.append(icon("close"));
       bindLocalized(remove, "aria-label", () => t("ui.remove_07d1de5b") + file.name, true);
-      row.append(icon("attachment"), element("span", file.name), remove);
-      if (/^image\/(png|jpeg|webp|gif)$/.test(file.type)) showChatPreview(row, URL.createObjectURL(file));
+      row.append(icon("attachment"), element("span", file.name), element("small", " / " + file.size + " B"), remove);
+      if (!file.link && file.size <= 64 * 1024 * 1024 && /^image\/(png|jpeg|webp|gif)$/.test(file.type)) showChatPreview(row, URL.createObjectURL(file));
       return row;
     }));
   }
@@ -900,15 +901,9 @@ function taskChat(task) {
 
   function addFiles(newFiles) {
     if (draft.saving || !newFiles.length) return;
-    const total = task.attachments.reduce((sum, file) => sum + file.bytes, 0) +
-      [...draft.files, ...newFiles].reduce((sum, file) => sum + file.size, 0);
-    if (total > 64 * 1024 * 1024) {
-      draft.error = t("ui.attachments_are_limited_to_64_mib_per_task_ae680c16");
-    } else {
-      draft.files.push(...newFiles);
-      draft.error = "";
-      renderPendingFiles();
-    }
+    draft.files.push(...newFiles);
+    draft.error = "";
+    renderPendingFiles();
     sync();
   }
 
@@ -941,9 +936,7 @@ function taskChat(task) {
     renderChatTurn(list, draft);
     try {
       const { model, effort } = await discussionSettings();
-      const files = await Promise.all(draft.files.map(async file => ({
-        name: file.name, type: file.type, bytes: await file.arrayBuffer(),
-      })));
+      const files = await Promise.all(draft.files.map(file => api.filePayload(file)));
       if (!area.isConnected || frame.project !== project) return;
       const { saved, result } = await api.chatSend(task.id, {
         model, effort, text, files,
