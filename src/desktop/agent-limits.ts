@@ -9,7 +9,8 @@ export type AgentRole = keyof AgentLimits;
 
 export function parseAgentLimits(value: unknown): AgentLimits | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
-  const { executor, manager, reviewer } = value as AgentLimits;
+  const { executor, reviewer } = value as AgentLimits;
+  const manager = 0;
   if (![executor, manager, reviewer].every(limit => Number.isSafeInteger(limit) && limit >= 0)) return;
   return { executor, manager, reviewer };
 }
@@ -26,6 +27,7 @@ export function createAgentSlots(shared = false) {
     else entries.push({ id: "defaults", owner: 0, kind: "defaults", limits: { ...limits } });
   });
   const available = (project: string, role: AgentRole, overrides?: Partial<AgentLimits>) => {
+    if (role === "manager") return Infinity;
     if (sharedProject) {
       const path = sharedProject(project);
       const entries = runtimeEntries(path);
@@ -68,7 +70,7 @@ export function createAgentSlots(shared = false) {
     },
     get limits() { return { ...limits }; },
     configure(next: AgentLimits) {
-      limits = { ...next };
+      limits = { ...next, manager: 0 };
       if (shared) for (const path of projects.values()) persistDefaults(path, true);
     },
     available,
@@ -76,7 +78,7 @@ export function createAgentSlots(shared = false) {
       if (sharedProject) {
         const path = sharedProject(project);
         return registerRuntime(path, { kind: "slot", role, task }, entries => {
-          const limit = readBoardSettings(runtimeLocation(path)).agentLimits?.[role] ?? entries.find(entry => entry.kind === "defaults")?.limits?.[role] ?? limits[role];
+          const limit = role === "manager" ? 0 : readBoardSettings(runtimeLocation(path)).agentLimits?.[role] ?? entries.find(entry => entry.kind === "defaults")?.limits?.[role] ?? limits[role];
           return (!task || !entries.some(entry => entry.kind !== "queue" && entry.task === task)) &&
             (limit === 0 || entries.filter(entry => entry.kind === "slot" && entry.role === role).length < limit);
         });

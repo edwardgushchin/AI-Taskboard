@@ -4355,7 +4355,6 @@ function renderTagSettings(panel) {
 function settings() {
   const roles = [
     ["executor", () => t("ui.executors_66276668")],
-    ["manager", () => t("ui.manager_goals_and_background_runs_e3b2372a")],
     ["reviewer", () => t("ui.reviewers_fd4fe839")],
   ];
   const editor = form("settings", () => (t("ui.application_settings_b131bcd2")),
@@ -4407,9 +4406,9 @@ function boardSettings() {
         options: model ? [[model, model]] : [["", defaultModel]] },
       { name: role + "Effort", label: () => (t("ui.reasoning_effort_f0ee1b26")), value: effort,
         options: [[effort, effort ? reasoningName(effort) : defaultModel]] },
-      { name: role + "Limit", type: "number", value: current.agentLimits?.[role],
+      ...(role === "manager" ? [] : [{ name: role + "Limit", type: "number", value: current.agentLimits?.[role],
         label: () => (role === "manager" ? t("ui.concurrent_background_runs_c8868724")
-          : t("ui.concurrent_agents_06461399")) },
+          : t("ui.concurrent_agents_06461399")) }]),
     ];
   });
   let models = [];
@@ -4438,7 +4437,7 @@ function boardSettings() {
     const agents = {};
     const agentLimits = {};
     for (const [role, title] of roles) {
-      if (values[role + "Limit"] !== "") agentLimits[role] = Number(values[role + "Limit"]);
+      if (role !== "manager" && values[role + "Limit"] !== "") agentLimits[role] = Number(values[role + "Limit"]);
       const { [role + "Provider"]: provider, [role + "Model"]: model, [role + "Effort"]: effort } = values;
       if (provider === (current[role]?.provider ?? "codex") && model === (current[role]?.model ?? "") &&
           effort === (current[role]?.effort ?? "")) continue;
@@ -4479,14 +4478,14 @@ function boardSettings() {
   selects[0].parentElement.before(element("p", () => t("ui.an_empty_limit_uses_the_application_default_use__f19c1da9"), "muted"));
   void api.agentLimits().then(result => {
     if (!result.ok || !editor.isConnected) return;
-    roles.forEach(([role], index) => { limits[index].placeholder = String(result.data[role]); });
+    roles.forEach(([role], index) => { if (limits[index]) limits[index].placeholder = String(result.data[role]); });
   }).catch(() => {});
   const roleControls = roles.map(([role, title], index) => {
     const [provider, model, effort] = selects.slice(index * 3, index * 3 + 3);
     const group = element("fieldset", undefined, "board-agent-settings");
     provider.parentElement.before(group);
     group.append(element("legend", title), provider.parentElement, model.parentElement, effort.parentElement,
-      limits[index].parentElement);
+      ...(limits[index] ? [limits[index].parentElement] : []));
     if (role === "manager") group.append(editor.elements.namedItem("managerAccess").parentElement);
     const savedModel = current[role]?.model ?? "";
     const savedEffort = current[role]?.effort ?? "";

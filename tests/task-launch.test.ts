@@ -201,15 +201,15 @@ test("the scheduler launches a due approved card once, waits for an executor slo
 
 test("each board has separate pools with per-role inheritance and unlimited overrides", () => {
   const slots = createAgentSlots();
-  assert.deepEqual(slots.limits, { executor: 3, manager: 1, reviewer: 1 });
+  assert.deepEqual(slots.limits, { executor: 3, manager: 0, reviewer: 1 });
   assert.equal(parseAgentLimits({ executor: 1.5, manager: 1, reviewer: 1 }), undefined);
-  assert.equal(parseAgentLimits({ executor: 3, manager: -1, reviewer: 1 }), undefined);
+  assert.deepEqual(parseAgentLimits({ executor: 3, manager: -1, reviewer: 1 }), { executor: 3, manager: 0, reviewer: 1 });
   const manager = slots.acquire("one", "manager");
   const reviewer = slots.acquire("one", "reviewer");
   assert.ok(manager && reviewer);
-  assert.equal(slots.acquire("one", "manager"), undefined);
+  const secondManager = slots.acquire("one", "manager"); assert.ok(secondManager); secondManager();
   assert.equal(slots.acquire("one", "reviewer"), undefined);
-  assert.equal(slots.available("two", "manager"), 1);
+  assert.equal(slots.available("two", "manager"), Infinity);
   assert.equal(slots.available("two", "reviewer"), 1);
   assert.equal(slots.available("one", "executor", { manager: 0 }), 3);
   const extra = slots.acquire("one", "manager", { manager: 0 });
@@ -219,10 +219,10 @@ test("each board has separate pools with per-role inheritance and unlimited over
   assert.equal(slots.available("one", "reviewer", { reviewer: 1 }), 0);
   manager();
   manager();
-  assert.equal(slots.available("one", "manager"), 0);
+  assert.equal(slots.available("one", "manager"), Infinity);
   extra();
   reviewer();
-  assert.equal(slots.available("one", "manager"), 1);
+  assert.equal(slots.available("one", "manager"), Infinity);
   assert.equal(slots.available("one", "reviewer"), 2);
 });
 
@@ -646,32 +646,6 @@ test("new-chat continuation requires an explicit confirmation and a matching blo
 });
 
 
-test("pending user acceptance waits for the shared reviewer pool with auto mode off", async () => {
-  const f = fixture("started");
-  f.task.acceptanceRepair = { phase: "queued", targetHead: "a".repeat(40), attempts: 0, message: "fix: integrate result" };
-  f.task.mergeRepair = true;
-  const agentLimits = { executor: 1, reviewer: 1 };
-  f.savedSettings.set("project", { agentLimits });
-  f.subscriptions.set("project", { board: { tasks: [f.task], settings: { autoMode: false, agentLimits } }, listeners: [], tabs: new Set([1, 2]) });
-  const release = f.slots.acquire("project", "reviewer", agentLimits, "review:other")!;
-  f.runtime.scheduleRecurringTasks();
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(f.launched.length, 0);
-  assert.equal(f.task.status, "review");
-  assert.equal(f.slots.available("project", "executor", agentLimits), 1);
-  release();
-  f.runtime.scheduleRecurringTasks(); f.runtime.scheduleRecurringTasks();
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(f.launched.length, 1);
-  assert.equal(f.slots.available("project", "reviewer", agentLimits), 0);
-  assert.equal(f.slots.available("project", "executor", agentLimits), 1);
-  assert.equal(f.task.status, "review");
-  delete f.task.acceptanceRepair;
-  f.completion.resolve(undefined);
-  await new Promise(resolve => setImmediate(resolve));
-});
-
-
 test("restored acceptance completes checked results once and stops an orphaned repair", async () => {
   for (const phase of ["checking", "running"] as const) {
     const f = fixture("started");
@@ -687,4 +661,14 @@ test("restored acceptance completes checked results once and stops an orphaned r
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(f.calls.filter(call => call.args[0] === "accept").length, 1);
   }
+});
+
+
+test("a pending acceptance cannot launch a separate executor or reviewer context", async () => {
+  const f = fixture("started");
+  f.task.acceptanceRepair = { phase: "queued", targetHead: "a".repeat(40), attempts: 0, message: "fix: integrate" };
+  const result = await f.runtime.launchTask("project", f.task.id, undefined, false, f.task.revision, {}, false, true);
+  assert.equal(result.error.code, "ACCEPTANCE_PENDING");
+  assert.equal(f.launched.length, 0);
+  assert.equal(f.calls.filter(call => call.args[0] === "start").length, 0);
 });

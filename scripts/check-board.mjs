@@ -153,6 +153,12 @@ app.whenReady().then(async () => {
       await check(`lane('review').querySelectorAll('.task-card').length === 1 && lane('in_progress').querySelectorAll('.task-card').length === 0`, 'repair remains in review');
       await capture(`repair-${theme}-${phase}.png`);
     }
+    await evaluate(`Object.assign(window.taskboard, { themes: async () => [], codexStatus: async () => ({ state: "unavailable" }), chatModels: async () => ({ ok: true, data: [] }) }); settings(); settle()`);
+    await check(`!body.querySelector('[name="manager"]') && !!body.querySelector('[name="reviewer"]')`, 'manager has no application limit control');
+    await capture('manager-application-settings.png');
+    await evaluate(`boardSettings(); settle()`);
+    await check(`!body.querySelector('[name="managerLimit"]') && !!body.querySelector('[name="reviewerLimit"]') && !!body.querySelector('[name="managerModel"]')`, 'board retains manager model without manager limit');
+    await capture('manager-board-settings.png');
     console.log(`Acceptance repair Chromium checks passed: ${checks}`);
     return;
   }
@@ -503,7 +509,7 @@ app.whenReady().then(async () => {
       "the gear opens the settings menu without a board and disables board settings");
     await click('#settings-menu-app');
     await evaluate(`waitFor(() => limitFields()[0].value === '3')`);
-    await check(`limitFields().map(input => input.value).join(',') === '3,1,1' &&
+    await check(`limitFields().map(input => input.value).join(',') === '3,1' &&
       !!body.querySelector('.provider-panel') && !byId('tag-settings')`, "the gear menu opens shared settings even without an open board");
     await evaluate(`waitFor(() => !sandboxSelect().disabled && !sandboxSelect().parentElement.hidden)`);
     await check(`sandboxSelect().value === 'mxc'`, "Codex settings show the current Windows sandbox");

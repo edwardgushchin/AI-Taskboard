@@ -475,7 +475,7 @@ function run(
       delete store.index.settings.autoReview;
     }
     if (input.agentLimits !== undefined) {
-      if (!validAgentLimitOverrides(input.agentLimits)) {
+      if (!validAgentLimitOverrides(input.agentLimits) || Object.hasOwn(input.agentLimits, "manager")) {
         throw new TaskboardError("INVALID_INPUT", "Agent limits must be non-negative whole numbers for known roles.");
       }
       if (Object.keys(input.agentLimits).length) store.index.settings.agentLimits = input.agentLimits;

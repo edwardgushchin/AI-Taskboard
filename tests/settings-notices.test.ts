@@ -45,7 +45,7 @@ test("settings writes survive coalesced watches, inactive manager and restart; l
   assert.deepEqual(read(), journal);
   const defaults = { executor: 8, manager: 2, reviewer: 1 };
   const inherited = syncSettingsNotices(a, defaults);
-  assert.equal(inherited.events.at(-1)?.changes["Лимит менеджеров"], 2);
+  assert.equal(inherited.effective["Лимит менеджеров"], undefined);
   assert.equal(inherited.effective["Лимит исполнителей"], 1);
   assert.equal(syncSettingsNotices(b, defaults).events.length, 0);
   cli(a, ["settings"], { agentLimits: {}, manager: { model: "gpt-6.1-terra", effort: "high" } });

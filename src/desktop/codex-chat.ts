@@ -308,9 +308,9 @@ export function replyToBoard(
     ? providerAction?.(name, args) ?? Promise.resolve(cliFailure("PROVIDER_TOOLS_UNAVAILABLE", "Wait for the provider session to initialize."))
     : runAction(name, args);
   const dialogue = !session.goal && !session.resumeGoal && !session.separateTurn;
-  const fullAccess = !session.separateTurn && session.access === "full";
+  const fullAccess = !session.separateTurn && !session.readOnly && session.access === "full";
   const permissionProfile = fullAccess ? hostPermissionProfile : managerResearchProfile;
-  const accessInstructions = session.separateTurn ? "" : fullAccess
+  const accessInstructions = session.separateTurn || session.readOnly ? "" : fullAccess
     ? "\nFull access is enabled for this board. Commands run as the host user. "
     : "\nThe board's manager access mode is " + (session.access === "ask" ? "Ask for approval" : "Approve for me") + ". " +
       "Use Codex's native approval request when the sandbox blocks a required operation. If the operation needs the regular OS user, " +
@@ -350,6 +350,7 @@ interface BoardSession {
   goal?: string;
   resumeGoal?: boolean;
   separateTurn?: boolean;
+  readOnly?: boolean;
   onGoalSet?: () => void;
   messageId?: string;
   onMessage?: (id: string) => void;
@@ -558,7 +559,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
 }) {
   const { onCommentary, onTokenUsage, onControl, onActivity, signal, imageDirectory, imageLimit = 0, session } = options;
   const settings = session ? session.settings : options.settings;
-  const research = Boolean(session && !session.separateTurn);
+  const research = Boolean(session && !session.separateTurn && !session.readOnly);
   const fullAccess = research && session?.access === "full";
   const approvalPolicy = research && !fullAccess ? "on-request" : "never";
   const approvalsReviewer = session?.access === "ask" || fullAccess ? "user" : "auto_review";
