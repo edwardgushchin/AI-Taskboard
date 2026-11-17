@@ -20,10 +20,10 @@ const commands = [
 ];
 const question = {
   id: "synthetic-question", options: ["**Literal** `option`", "Второй вариант",
-    '*Выбрать* [документ](docs/design.md) и [сайт](https://example.com/) ![Описание](https://example.com/option.png) <img src=x onerror="window.questionExecuted=true">',
+    '*Выбрать* [документ](docs/explanation/architecture.md) и [сайт](https://example.com/) ![Описание](https://example.com/option.png) <img src=x onerror="window.questionExecuted=true">',
     '**Длинный вариант**\n`' + 'C:\\Synthetic\\100%&|<>"quoted"\\'.repeat(12) + '`'],
   text: 'Проверить **команды** и *оформление* для `C:\\Synthetic`?\n\n' +
-    '- Первый пункт\n- Второй пункт\n\n[Документ](docs/design.md) и [сайт](https://example.com/)\n\n' +
+    '- Первый пункт\n- Второй пункт\n\n[Документ](docs/explanation/architecture.md) и [сайт](https://example.com/)\n\n' +
     '<script>window.questionExecuted = true</script>\n\n<img src=x onerror="window.questionExecuted = true">\n\n' +
     '[Опасная ссылка](javascript:alert(1))\n\n' +
     commands.map(([language, code]) => '```' + language + '\n' + code + '```').join('\n\n') +
@@ -79,7 +79,7 @@ try {
     window.answers = []; window.links = []; window.documents = [];
     api.answerBoardQuestion = async (id, answer) => { answers.push({ id, answer }); return { ok: true }; };
     api.openLink = async href => { links.push(href); return { ok: true }; };
-    api.readMarkdown = async (...args) => { documents.push(args); return { ok: true, data: { name: 'design.md', path: 'docs/design.md', text: '# Synthetic document' } }; };
+    api.readMarkdown = async (...args) => { documents.push(args); return { ok: true, data: { name: 'architecture.md', path: 'docs/explanation/architecture.md', text: '# Synthetic document' } }; };
     window.fixture = ${JSON.stringify(question)};
     window.composer = draftComposer(); document.body.append(composer);
     window.trigger = composer.querySelector('.manager-question-trigger');
@@ -126,9 +126,9 @@ try {
     }
   } finally { await clipboard.writeText(previousClipboard); }
   console.log('Clipboard checks passed');
-  await evaluate(`dialog().querySelector('a[href="docs/design.md"]').click(); void 0;`);
+  await evaluate(`dialog().querySelector('a[href="docs/explanation/architecture.md"]').click(); void 0;`);
   await settle();
-  await check(`documents.length === 1 && documents[0][0] === undefined && documents[0][1] === 'docs/design.md' &&
+  await check(`documents.length === 1 && documents[0][0] === undefined && documents[0][1] === 'docs/explanation/architecture.md' &&
     !!document.querySelector('.markdown-preview[open]')`, "document link uses board context despite open task");
   await evaluate(`document.querySelector('.markdown-preview').close(); dialog().querySelector('a[href="https://example.com/"]').click(); void 0;`);
   await check(`links.join() === 'https://example.com/'`, "external link follows existing openLink policy");

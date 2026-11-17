@@ -745,7 +745,7 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 }
 .chat-code-copy.button > .icon { font-size: 1em; }
 .chat-text, .chat-action { overflow-wrap: anywhere; line-height: 1.7; }
-/* Codex content typography; see docs/chat-typography.md for the source. */
+/* Codex content typography. */
 .chat-entry:is([data-actor="agent"], .chat-coordination) .chat-text, .chat-run .chat-text, .chat-turn .chat-text {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 15px;

@@ -511,6 +511,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.equal(requests[6].params.model, "manager-model");
   assert.equal(requests[6].params.permissions, "ai-taskboard-manager");
   assert.equal(requests[6].params.sandbox, undefined);
+  assert.match(requests[6].params.developerInstructions, /documentation impact in task planning and goal work/);
   assert.match(requests[6].params.developerInstructions, /These rules apply.*worklog_record/s);
   assert.match(requests[6].params.developerInstructions, /Apply built-in rules silently/);
   assert.match(requests[6].params.developerInstructions, /Internally verify recorded:true and staged:false/);
