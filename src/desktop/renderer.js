@@ -1559,7 +1559,8 @@ function managerQuestionDialog(question, trigger) {
   const header = element("header", undefined, "sheet-header");
   header.append(title, close);
   const form = element("form", undefined, "sheet-body form");
-  const prompt = element("p", question.text, "manager-question-text");
+  const prompt = chatText(question.text, {});
+  prompt.classList.add("manager-question-text");
   prompt.id = "manager-question-text";
   dialog.setAttribute("aria-describedby", prompt.id);
   const choices = element("div", undefined, "manager-question-options");
