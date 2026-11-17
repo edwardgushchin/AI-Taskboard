@@ -159,7 +159,7 @@ function boardError(error) {
     GIT_WORKTREE_REQUIRED: t("ui.open_a_repository_with_a_main_worktree_31b281c4"),
     WORKING_DIRECTORY_UNAVAILABLE: t("ui.the_selected_working_directory_is_unavailable_or_43dc81fb"),
     GIT_COMMIT_REQUIRED: t("ui.select_a_branch_with_a_commit_first_6f14dd57"),
-    REMOTE_EXISTS: t("ui.the_origin_remote_already_exists_manage_it_with__7ec2efff"),
+    REMOTE_EXISTS: localization.errorText(error.message),
     GITHUB_UNAVAILABLE: t("ui.install_github_cli_gh_and_sign_in_with_gh_auth_l_a1832f3d"),
     GITHUB_CLI_MISSING: t("ui.install_github_cli_gh_on_the_host_and_make_it_av_af2f59c3"),
     GITHUB_AUTH_REQUIRED: t("ui.github_cli_has_no_usable_login_in_the_host_profi_6912b192"),
@@ -825,7 +825,8 @@ function renderAgentRunStatus(target, task) {
     spinner.title = label;
     if (!spinner.parentNode) target.replaceChildren(spinner);
   } else {
-    const text = frame.waitingTasks?.includes(task.id) ?
+    const repair = frame.board?.tasks.find(card => card.id === task.id)?.acceptanceRepair;
+    const text = repair ? ({ queued: t("ui.waiting_for_a_reviewer_slot_8918dd95"), running: t("ui.resolving_acceptance_conflict"), checking: t("ui.accepting_task_39473c27"), failed: repair.reason }[repair.phase]) : frame.waitingTasks?.includes(task.id) ?
       (task.mergeRepair || frame.board?.tasks.find(card => card.id === task.id)?.mergeRepair
         ? t("ui.waiting_for_a_reviewer_slot_8918dd95")
         : t("ui.waiting_for_an_available_executor_cc0934a8")) :
@@ -892,7 +893,7 @@ function card(task) {
   const signature = JSON.stringify([frame.localization?.locale, task.title, task.description,
     task.tags?.map(name => boardTags.get(tagKey(name)) ?? { name }), cover?.file,
     frame.runningTasks?.includes(task.id) ?? false, frame.waitingTasks?.includes(task.id) ?? false,
-    frame.reviewingTasks?.[task.id], task.status, task.mergeRepair, Boolean(task.codexThreadId),
+    frame.reviewingTasks?.[task.id], task.status, task.mergeRepair, task.acceptanceRepair, Boolean(task.codexThreadId),
     task.unfinishedDependencies, task.blocked, task.subtasks?.map(entry => entry.done),
     task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule,
     manualColumns().find(c => c.id === task.status)]);
@@ -3858,9 +3859,6 @@ async function showTask(id) {
   openTaskSheet(task);
   if (task.status === "blocked" && task.blocked) body.append(blockerBanner(task.blocked));
   if (task.executorFullAccess) body.append(element("p", () => t("ui.launch_mode_full_access_ed7fe948"), "task-state-label"));
-  if (task.status === "done" && task.cleanupAvailable) {
-    body.append(element("p", () => t("ui.accepted_worktree_retained_77cfc2d0"), "muted"));
-  }
   savedChangesSection(task, task.savedChanges);
   if (task.tags.length) {
     const tags = element("div", undefined, "task-tags");
@@ -3990,9 +3988,6 @@ async function showTask(id) {
   }));
   if (["done", "cancelled"].includes(task.status)) {
     actions.append(button(() => t("ui.edit_tags_fe276cc0"), () => editTaskTags(task)));
-    if (task.cleanupAvailable) {
-      actions.append(button(() => t("ui.worktree_cleanup_2ecfc375"), () => showCleanup(task)));
-    }
   } else {
     actions.append(button(() => t("ui.edit_c25be9fb"), () => taskEditor(task)));
     if (!manualBoard()) actions.append(button(() => t("ui.cancel_task_e9e056a5"), () => noteTask(task, "cancel"), "danger"));
@@ -4108,37 +4103,6 @@ function showTaskGit(git, open) {
   body.append(area);
 }
 
-async function showCleanup(task, draft = "", error) {
-  const generation = projectGeneration;
-  const status = await command("cleanup-status", task.id);
-  if (!status || generation !== projectGeneration || taskInSheet?.id !== task.id || !sheet.open ||
-      !["task", "cleanup"].includes(sheetKind)) return;
-  if (!status.pending) return showTask(task.id);
-  const fields = task.status === "done" && status.path ? [{
-    name: "artifacts", type: "area", value: draft,
-    label: () => (t("ui.temporary_evidence_files_to_clear_with_the_workt_b473f6a7")),
-  }] : [];
-  const editor = form("cleanup", () => (t("ui.worktree_cleanup_61a92196")), fields,
-    () => (t("ui.retry_cleanup_89298d2d")), async ({ artifacts }) => {
-      const paths = artifacts?.split("\n").map(path => path.trim()).filter(Boolean);
-      const result = await api.command("cleanup", task.id, paths?.length ? { artifacts: paths } : {});
-      if (generation !== projectGeneration || taskInSheet?.id !== task.id || sheetKind !== "cleanup" || !sheet.open) return;
-      if (result.ok) await showTask(task.id);
-      else await showCleanup(task, result.error.code === "DIRTY_WORKTREE" ? "" : artifacts, result.error);
-    });
-  const summary = element("section", undefined, "sheet-section");
-  if (status.path) summary.append(element("p", status.path, "muted"));
-  const reasons = {
-    DIRTY_WORKTREE: t("ui.local_files_or_changes_are_keeping_this_worktree_9892164a"),
-    WORKTREE_LOCKED: t("ui.the_worktree_is_locked_7b7495cc"),
-    TASK_BRANCH_CHANGED: t("ui.the_task_branch_changed_after_submission_a60cbafe"),
-  };
-  if (reasons[status.reason]) summary.append(element("p", reasons[status.reason]));
-  if (status.entries.length) summary.append(element("pre", status.entries.join("\n")));
-  editor.before(summary);
-  if (error) notice(boardError(error));
-}
-
 function taskAttachmentButton(id, attachment, kind) {
   const download = button(attachment.name + " / " + attachment.bytes + " B", async () => {
     const result = await api.saveAttachment(id, attachment.file, attachment.name);
@@ -4186,13 +4150,21 @@ async function showAcceptedTask(task) {
   await showTask(task.id);
   const messages = [];
   if (task.localChangesWarning) messages.push(boardError(task.localChangesWarning));
-  if (task.cleanupWarning && taskInSheet?.id === task.id && taskInSheet.cleanupAvailable) {
-    messages.push(t("ui.the_task_was_accepted_automatic_cleanup_is_pendi_da527ab7") + "\n" + boardError(task.cleanupWarning));
-  }
+
   if (messages.length) notice(messages.join("\n"));
 }
 
 async function showReview(task, messageDraft, acceptanceError) {
+  if (task.acceptanceRepair) {
+    taskInSheet = task;
+    const editor = form("review", () => t("ui.review_result_29ed25fb"), [], () => t("ui.cancel_4c6dcc32"), async () => {
+      const cancelled = await command("accept", task.id, { revision: task.revision, cancelRepair: true });
+      if (cancelled) sheet.close();
+    });
+    editor.before(element("p", task.acceptanceRepair.reason ?? ({ queued: t("ui.waiting_for_a_reviewer_slot_8918dd95"), running: t("ui.resolving_acceptance_conflict"), checking: t("ui.accepting_task_39473c27") }[task.acceptanceRepair.phase]), "muted"));
+    body.append(button(() => t("ui.work_activity_e01957b7"), () => showTask(task.id)));
+    return;
+  }
   const generation = projectGeneration;
   const review = await command("review", task.id);
   if (!review || generation !== projectGeneration) return;
@@ -4223,7 +4195,9 @@ async function showReview(task, messageDraft, acceptanceError) {
     });
     if (generation !== projectGeneration) return;
     if (result.ok) {
-      await showAcceptedTask(result.data);
+      if (result.data.status === "review") {
+        await showTask(task.id);
+      } else await showAcceptedTask(result.data);
     } else {
       if (sheetKind === "review" && taskInSheet?.id === task.id) await showReview(task, message, result.error);
       else notice(boardError(result.error), [t("ui.accepting_task_39473c27"), task.id, projectName()].join(" · "));
@@ -4409,7 +4383,6 @@ function renderTagSettings(panel) {
 function settings() {
   const roles = [
     ["executor", () => t("ui.executors_66276668")],
-    ["manager", () => t("ui.manager_goals_and_background_runs_e3b2372a")],
     ["reviewer", () => t("ui.reviewers_fd4fe839")],
   ];
   const editor = form("settings", () => (t("ui.application_settings_b131bcd2")),
@@ -4462,9 +4435,9 @@ function boardSettings() {
         options: model ? [[model, model]] : [["", defaultModel]] },
       { name: role + "Effort", label: () => (t("ui.reasoning_effort_f0ee1b26")), value: effort,
         options: [[effort, effort ? reasoningName(effort) : defaultModel]] },
-      { name: role + "Limit", type: "number", value: current.agentLimits?.[role],
+      ...(role === "manager" ? [] : [{ name: role + "Limit", type: "number", value: current.agentLimits?.[role],
         label: () => (role === "manager" ? t("ui.concurrent_background_runs_c8868724")
-          : t("ui.concurrent_agents_06461399")) },
+          : t("ui.concurrent_agents_06461399")) }]),
     ];
   });
   let models = [];
@@ -4493,7 +4466,7 @@ function boardSettings() {
     const agents = {};
     const agentLimits = {};
     for (const [role, title] of roles) {
-      if (values[role + "Limit"] !== "") agentLimits[role] = Number(values[role + "Limit"]);
+      if (role !== "manager" && values[role + "Limit"] !== "") agentLimits[role] = Number(values[role + "Limit"]);
       const { [role + "Provider"]: provider, [role + "Model"]: model, [role + "Effort"]: effort } = values;
       if (provider === (current[role]?.provider ?? "codex") && model === (current[role]?.model ?? "") &&
           effort === (current[role]?.effort ?? "")) continue;
@@ -4534,14 +4507,14 @@ function boardSettings() {
   selects[0].parentElement.before(element("p", () => t("ui.an_empty_limit_uses_the_application_default_use__f19c1da9"), "muted"));
   void api.agentLimits().then(result => {
     if (!result.ok || !editor.isConnected) return;
-    roles.forEach(([role], index) => { limits[index].placeholder = String(result.data[role]); });
+    roles.forEach(([role], index) => { if (limits[index]) limits[index].placeholder = String(result.data[role]); });
   }).catch(() => {});
   const roleControls = roles.map(([role, title], index) => {
     const [provider, model, effort] = selects.slice(index * 3, index * 3 + 3);
     const group = element("fieldset", undefined, "board-agent-settings");
     provider.parentElement.before(group);
     group.append(element("legend", title), provider.parentElement, model.parentElement, effort.parentElement,
-      limits[index].parentElement);
+      ...(limits[index] ? [limits[index].parentElement] : []));
     if (role === "manager") group.append(editor.elements.namedItem("managerAccess").parentElement);
     const savedModel = current[role]?.model ?? "";
     const savedEffort = current[role]?.effort ?? "";
@@ -4654,13 +4627,20 @@ async function gitCommand(action, input, project) {
     return;
   }
   notice();
+  if (result.data?.gitInfo && frame.board) {
+    frame.board.gitInfo = result.data.gitInfo;
+    renderStatusBar(false);
+  }
   return result.data;
 }
 
 function updateGitRevision(data) {
   const git = frame.board.gitInfo;
   const tracking = git?.branch === data.branch && git?.head === data.head ? git?.tracking : undefined;
-  frame.board.gitInfo = { ...git, branch: data.branch, head: data.head, tracking };
+  const sameBranch = git?.branch === data.branch;
+  frame.board.gitInfo = { ...git, branch: data.branch, head: data.head, tracking,
+    pushTarget: sameBranch ? git?.pushTarget : undefined,
+    pushError: sameBranch ? git?.pushError : "destination" };
   renderStatusBar(false);
 }
 
@@ -4791,8 +4771,8 @@ const gitPushes = new Map();
 
 async function pushTrackedBranch() {
   const project = frame.project;
-  const { branch, head, tracking } = frame.board?.gitInfo ?? {};
-  if (!project || !branch || !head || !tracking || gitPushes.has(project)) return;
+  const { branch, head, pushTarget } = frame.board?.gitInfo ?? {};
+  if (!project || !branch || !head || !pushTarget || gitPushes.has(project)) return;
   gitPushes.set(project, branch);
   renderStatusBar(false);
   try {
@@ -4905,7 +4885,7 @@ function renderActiveAgents() {
 
 function renderStatusBar(projectChanged) {
   renderActiveAgents();
-  const { branch, head, tracking } = frame.board?.gitInfo ?? {};
+  const { branch, head, tracking, remotes, pushTarget, pushError, trackingError, gitError } = frame.board?.gitInfo ?? {};
   const revision = head ? branch ?? head.slice(0, 8) : branch && t("ui.before_the_first_commit_7e00a15b");
   const item = byId("status-branch");
   const branchLabel = head && branch ? t("ui.git_branch_5fc2f4ee") : "Git";
@@ -4913,22 +4893,28 @@ function renderStatusBar(projectChanged) {
   item.title = revision ? branchLabel + " · " + revision : "";
   item.querySelector("span").textContent = revision ?? "";
   const status = byId("status-tracking");
-  status.hidden = !branch || !head || !tracking;
+  status.hidden = !gitError && (!branch || !head || !remotes?.length);
   const pushingBranch = gitPushes.get(frame.project);
-  status.disabled = pushingBranch !== undefined;
+  status.disabled = pushingBranch !== undefined || !pushTarget;
   const pushing = !status.hidden && pushingBranch === branch;
   status.setAttribute("aria-busy", String(pushing));
   if (!status.hidden) {
-    const { behind, ahead } = tracking;
-    status.querySelector("span").textContent = behind + "↓ " + ahead + "↑";
-    bindLocalized(status, "title", () => (pushing ? t("ui.pushing_commits_c457ab7e") :
-      status.disabled ? t("ui.another_branch_is_being_pushed_4961fd8c") :
-        t("ui.push_to_the_upstream_branch_6ed8fc36")) + " · " +
-      t("ui.behind_2ead5b5b") + behind + " · " + t("ui.ahead_10871dc0") + ahead);
+    const { behind, ahead } = tracking ?? {};
+    status.querySelector("span").textContent = tracking ? behind + "↓ " + ahead + "↑" : "?↓ ?↑";
+    bindLocalized(status, "title", () => {
+      const reason = gitError ? t("ui.git_state_unavailable") :
+        pushError ? t("ui.configure_git_upstream") :
+        trackingError ? t("ui.git_counts_unavailable") : t("ui.git_upstream_missing");
+      if (!tracking || !pushTarget) return reason + (pushTarget ? " · " +
+        t("ui.push_branch_destination") + pushTarget.remote + "/" + pushTarget.remoteRef.slice(11) : "");
+      return (pushing ? t("ui.pushing_commits_c457ab7e") :
+        status.disabled ? t("ui.another_branch_is_being_pushed_4961fd8c") : t("ui.push_remote_branch")) + " · " +
+        t("ui.behind_2ead5b5b") + behind + " · " + t("ui.ahead_10871dc0") + ahead;
+    });
     status.setAttribute("aria-label", status.title);
   }
   const publish = byId("status-publish");
-  publish.hidden = !branch || !head || Boolean(tracking);
+  publish.hidden = !branch || !head || !remotes || remotes.length > 0 || Boolean(gitError);
   bindLocalized(publish, "title", () => t("ui.publish_to_github_5ba684aa"));
   publish.setAttribute("aria-label", publish.title);
   if (projectChanged) {
@@ -5040,7 +5026,6 @@ function renderProjectTabs() {
     select.setAttribute("role", "tab");
     select.setAttribute("aria-selected", String(tab.path === frame.project));
     select.setAttribute("aria-controls", "workspace");
-    select.setAttribute("aria-haspopup", "true");
     select.tabIndex = tab.path === frame.project ? 0 : -1;
     select.append(element("span", tab.name, "project-tab-name"));
     if (tab.unread) {
@@ -5049,24 +5034,6 @@ function renderProjectTabs() {
       select.append(dot);
     }
     if (tab.detail) select.append(element("span", tab.detail, "project-tab-detail"));
-    container.addEventListener("contextmenu", event => {
-      event.preventDefault();
-      const menu = byId("board-tab-menu");
-      if (menu.matches(":popover-open")) menu.hidePopover();
-      const open = button(() => t("ui.board_settings_063b85d6"), protect(async () => {
-        menu.hidePopover();
-        if (frame.project !== tab.path) await api.selectTab(tab.path);
-        if (frame.project === tab.path) boardSettings();
-      }), "app-menu-item");
-      bindLocalized(menu, "aria-label", () => t("ui.board_menu_4c14bbf6"), true);
-      open.setAttribute("role", "menuitem");
-      open.setAttribute("autofocus", "");
-      menu.replaceChildren(open);
-      menu.showPopover({ source: select });
-      const anchor = select.getBoundingClientRect();
-      menu.style.left = Math.max(0, Math.min(event.clientX || anchor.right, innerWidth - menu.offsetWidth)) + "px";
-      menu.style.top = Math.max(0, Math.min(event.clientY || anchor.top, innerHeight - menu.offsetHeight)) + "px";
-    });
     select.addEventListener("keydown", protect(async event => {
       const index = tabs.findIndex(entry => entry.path === tab.path);
       if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
@@ -5158,6 +5125,13 @@ function update(next) {
   syncBoardNotice(projectChanged);
   const tagSettings = byId("tag-settings");
   if (tagsChanged && sheet.open && tagSettings) renderTagSettings(tagSettings);
+  if (sheetKind === "review" && sheet.open && taskInSheet?.acceptanceRepair) {
+    const current = frame.board?.tasks.find(task => task.id === taskInSheet.id);
+    if (current && (current.revision !== taskInSheet.revision || JSON.stringify(current.acceptanceRepair) !== JSON.stringify(taskInSheet.acceptanceRepair))) {
+      if (current.acceptanceRepair) void showReview({ ...taskInSheet, ...current });
+      else void showTask(current.id);
+    }
+  }
   if (sheetKind === "task" && sheet.open && taskInSheet) {
     body.querySelector(".task-chat")?.syncAgentState?.();
     const runStatus = byId("task-agent-run");

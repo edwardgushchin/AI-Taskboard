@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+import { beginBoardOperation } from "../desktop/board-worklog.ts";
+import { migrateWorklog } from "./worklog-migration.ts";
+import { maintainBoard, removeLegacyAttachments } from "./maintenance.ts";
+import { maintenanceQueue, claimMaintenance, releaseMaintenance, maintenanceFailure } from "./maintenance-state.ts";
 import { guardManual, manualAction, isManual } from "./manual-board.ts";
 import { existsSync, lstatSync, readFileSync, watch } from "node:fs";
 import type { FSWatcher, Stats } from "node:fs";
@@ -16,7 +20,7 @@ import { exists, initializeBoard, locateBoard, onBoard, readBoardSettings, withT
 import { recordSettings } from "./settings-notices.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
 import { discoverRepository, invokeGit, scheduleGitMaintenance } from "./git.ts";
-import { changeRepository, createGitHubMilestone, githubMilestones, githubRepository, inspectRepository, publishRepository, pushRepositoryBranch, readGitHub, repositoryRefs, setGitHubMilestoneDueDate } from "./repository.ts";
+import { boardGitInfo, changeRepository, createGitHubMilestone, githubMilestones, githubRepository, inspectRepository, publishRepository, pushRepositoryBranch, readGitHub, repositoryRefs, setGitHubMilestoneDueDate } from "./repository.ts";
 import { previewSubmission, previewTask, submitTask } from "./submission.ts";
 import { changeTask, createTask, recordRunLog, withoutVerification } from "./tasks.ts";
 import { recordTokenUsage, taskMetrics } from "./token-usage.ts";
@@ -25,7 +29,7 @@ import { projectUsage } from "./project-usage.ts";
 import { managerUsage } from "./manager-usage.ts";
 import { dependencyStatus, unfinishedDependencies, validateDependencies } from "./dependencies.ts";
 import { checkoutTaskWorktree, cleanTaskWorktree, finishTaskStart, hasPending, inspectCleanup, prepareTaskStart, taskWithCurrentWorktree } from "./worktree.ts";
-import { artifactFiles, discardTaskArtifacts, openReviewArtifact, readReviewArtifact } from "./artifacts.ts";
+import { artifactFiles, openReviewArtifact, readReviewArtifact } from "./artifacts.ts";
 import { acknowledgeTaskMessages, currentReviewApproval, managerInbox, sendTaskMessage, taskMessages } from "./task-messages.ts";
 import packageInfo from "../../package.json" with { type: "json" };
 import { grantTaskTool, requestTaskTool } from "./task-tools.ts";
@@ -57,6 +61,7 @@ const help = [
   "          milestone-batch --stdin (tasks: [{id, revision}], milestone: {repository, number} or null)",
   "          git refs, git inspect, git switch, git create, git detach, git publish --stdin, git push --stdin (branch and head)",
   "For init, pass git: true with --stdin to initialize Git in the chosen folder.",
+  "worklog-migrate (copy and verify legacy project/worktree diaries; sources remain unchanged)",
   "recover-test-data --stdin (manifest, optional apply:true); explicit canonical --project required; defaults to dry-run.",
   "Pass one UTF-8 JSON object with --stdin or --input-file PATH.",
 ].join("\n");
@@ -84,14 +89,14 @@ function readInput(fromStdin: boolean | undefined, file: string | undefined): Re
 type CompactTask = ReturnType<typeof compactTask>;
 
 function isMergeRepair(task: Task) {
-  return Boolean(task.git?.submission && ["ready", "in_progress", "blocked"].includes(task.status) &&
+  return Boolean(task.acceptanceRepair && task.status === "review" || task.git?.submission && ["ready", "in_progress", "blocked"].includes(task.status) &&
     task.history.findLast(event => event.action === "resolve-conflicts" || event.to === "review" || event.to === "draft")?.action === "resolve-conflicts");
 }
 
 function compactTask(task: Task) {
   const { id, title, description, status, revision, tags, priority, attachments, coverAttachment, codexThreadId,
     createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep, dependencies, milestone, workingDirectory, schedule, origin, launchRequested } = task;
-  return { id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
+  return { acceptanceRepair: task.acceptanceRepair, id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
     coverAttachment, codexThreadId, createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep,
     dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, origin, launchRequested, historyLength: task.history.length,
     ...(status === "review" && task.git?.submission && !task.result?.noChanges ? { reviewHasCommit: true } : {}),
@@ -109,7 +114,7 @@ function taskReceipt({ id, status, revision, git, result }: Task) {
 
 function taskLaunchState(task: Task) {
   const { id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep } = task;
-  return { id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep,
+  return { acceptanceRepair: task.acceptanceRepair, id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep,
     ...(isMergeRepair(task) ? { mergeRepair: true as const } : {}) };
 }
 
@@ -189,34 +194,9 @@ function changeTags(store: BoardStore, task: Task, input: Record<string, unknown
   store.saveIndex();
   return updated;
 }
-
-function boardGitInfo(location: BoardLocation) {
-  if (!location.repository || location.repository.bare) return {};
-  const value = (args: string[], env?: NodeJS.ProcessEnv) => {
-    try {
-      const result = invokeGit(location.root, args, env);
-      return result.code === 0 ? result.stdout.trim() || undefined : undefined;
-    } catch {
-      return undefined;
-    }
-  };
-  const branch = value(["symbolic-ref", "--quiet", "--short", "HEAD"]);
-  const head = value(["rev-parse", "--verify", "--quiet", "HEAD"]);
-  const counts = branch && head ? value(["rev-list", "--left-right", "--count", "--end-of-options",
-    head + "..." + branch + "@{upstream}"], { GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "" }) : undefined;
-  const divergence = /^(\d+)\s+(\d+)$/.exec(counts ?? "");
-  return {
-    branch, head,
-    tracking: divergence ? { ahead: Number(divergence[1]), behind: Number(divergence[2]) } : undefined,
-    user: value(["config", "--get", "user.name"]),
-    githubRepository: githubRepository(location),
-  };
-}
-
 function watchBoard(location: BoardLocation, compact: boolean): void {
   const cards = new Map<string, CachedCard>();
   const cleanedTasks = new Set<string>();
-  const cleanupRetries = new Map<string, number>();
   let nextCleanup = 0;
   let gitInfo: ReturnType<typeof boardGitInfo> = {};
   const read = (refreshGit: boolean) => {
@@ -228,9 +208,12 @@ function watchBoard(location: BoardLocation, compact: boolean): void {
       }
       return snapshotBoard(store, compact, cards);
     });
-    if (location.repository && Date.now() >= nextCleanup) {
-      const completedIds = new Set([...board.tasks, ...board.archived].filter(task => task.status === "done").map(task => task.id));
-      for (const id of retryAcceptedCleanup(location, location.repository.root, completedIds, cleanupRetries)) cleanedTasks.add(id);
+    if (Date.now() >= nextCleanup) {
+      try { for (const id of maintainBoard(location)) cleanedTasks.add(id); }
+      catch (error) {
+        try { onBoard(location, store => maintenanceFailure(store, "migration", error)); }
+        catch { /* Storage access failures remain private and retry on the next refresh. */ }
+      }
       nextCleanup = Date.now() + 15_000;
     }
     if (refreshGit || previousRepository !== location.repository) gitInfo = boardGitInfo(location);
@@ -283,45 +266,6 @@ function watchBoard(location: BoardLocation, compact: boolean): void {
   process.once("SIGTERM", stop);
 }
 
-function retryAcceptedCleanup(location: BoardLocation, root: string, completedIds: ReadonlySet<string>, retries: Map<string, number>): string[] {
-  if (!completedIds.size) return [];
-  const prefix = "refs/heads/ai-taskboard/";
-  let branches: string[];
-  try {
-    const result = invokeGit(root, ["for-each-ref", "--format=%(refname)", prefix]);
-    if (result.code !== 0) return [];
-    branches = result.stdout.trimEnd().split("\n");
-  } catch {
-    return [];
-  }
-  const cleaned: string[] = [];
-  for (const branch of branches) {
-    const id = branch.slice(prefix.length);
-    if (!completedIds.has(id)) continue;
-    const retryAt = retries.get(id);
-    if (retryAt !== undefined && Date.now() < retryAt) continue;
-    try {
-      const removed = withTaskStartLock(location, id, () => {
-        const snapshot = onBoard(location, store => {
-          if (!Object.hasOwn(store.index.tasks, id) && store.index.archive[id]?.status !== "done") return;
-          const task = readTask(store, id);
-          if (task.status !== "done" || task.git?.branch !== branch ||
-              (!task.git.accepted && !task.result?.noChanges) || hasPending(store, task)) return;
-          return { store, task };
-        });
-        return snapshot && cleanTaskWorktree(snapshot.store, snapshot.task).branchRemoved;
-      }, 0);
-      retries.delete(id);
-      if (removed) cleaned.push(id);
-    } catch (error) {
-      if (error instanceof TaskboardError && ["DIRTY_WORKTREE", "TASK_BRANCH_CHANGED", "UNMANAGED_WORKTREE"].includes(error.code)) {
-        // Persistent local state is unlikely to change between consecutive board refreshes.
-        retries.set(id, Date.now() + (retryAt === undefined ? 15_000 : 120_000));
-      }
-    }
-  }
-  return cleaned;
-}
 
 function run(
   store: BoardStore,
@@ -332,6 +276,15 @@ function run(
   filters: { archived?: boolean; tag?: string; compact?: boolean },
   lockWaitMs: number,
 ) {
+  if (command === "worklog-migrate") return migrateWorklog(store.location.root);
+  if (command === "maintenance") {
+    if (input.action === "claim" && typeof input.id === "string" && Number.isSafeInteger(input.owner))
+      return { claimed: claimMaintenance(store, input.id, input.owner as number) };
+    if (input.action === "release" && typeof input.id === "string" && Number.isSafeInteger(input.owner)) {
+      releaseMaintenance(store, input.id, input.owner as number); return null;
+    }
+    return maintenanceQueue(store);
+  }
   const manualResult = manualAction(store, command, id, input);
   if (manualResult !== undefined) return manualResult;
   if (command === "recover-test-data") {
@@ -537,7 +490,7 @@ function run(
       delete store.index.settings.autoReview;
     }
     if (input.agentLimits !== undefined) {
-      if (!validAgentLimitOverrides(input.agentLimits)) {
+      if (!validAgentLimitOverrides(input.agentLimits) || Object.hasOwn(input.agentLimits, "manager")) {
         throw new TaskboardError("INVALID_INPUT", "Agent limits must be non-negative whole numbers for known roles.");
       }
       if (Object.keys(input.agentLimits).length) store.index.settings.agentLimits = input.agentLimits;
@@ -669,7 +622,30 @@ function run(
     const submitted = submitTask(store, task, input);
     return filters.compact ? taskReceipt(submitted) : submitted;
   }
+  if (command === "accept" && input.cancelRepair === true && input.actor === "user") {
+    requireRevision(task, input.revision, true);
+    return store.save(record({ ...task, acceptanceRepair: undefined }, "acceptance-cancelled", "user"));
+  }
+  if (command === "accept" && input.repairFailure !== undefined && task.acceptanceRepair) {
+    requireRevision(task, input.revision, true);
+    const reason = text(input.repairFailure, "repairFailure", true);
+    return store.save(sendTaskMessage(record({ ...task, acceptanceRepair: { ...task.acceptanceRepair, phase: "failed", reason } },
+      "acceptance-failed", "agent"), { kind: "question", text: reason }, "agent"));
+  }
   if (command === "accept") {
+    if (task.acceptanceRepair) {
+      requireRevision(task, input.revision, true);
+      if (input.continueRepair !== true) return task;
+      if (task.acceptanceRepair.phase !== "checking") throw new TaskboardError("REPAIR_UNFINISHED", "Conflict repair has not passed its checks.");
+      if (input.targetHead !== task.acceptanceRepair.targetHead) {
+        const reason = "The target advanced after repair checks. Verify the new target before accepting.";
+        if (task.acceptanceRepair.attempts < 2) return store.save(record({ ...task, acceptanceRepair: {
+          ...task.acceptanceRepair, phase: "queued" } }, "acceptance-target-changed", "agent"));
+        return store.save(sendTaskMessage(record({ ...task, acceptanceRepair: { ...task.acceptanceRepair, phase: "failed", reason } },
+          "acceptance-failed", "agent"), { kind: "question", text: reason }, "agent"));
+      }
+      input = { ...input, actor: "user", message: task.acceptanceRepair.message };
+    } else if (input.continueRepair === true) throw new TaskboardError("REPAIR_CANCELLED", "Acceptance was cancelled.");
     if (input.autoMode === true && (!store.index.settings.autoMode || boardReviewMode(store.index.settings) !== "reviewer")) {
       throw new TaskboardError("AUTO_MODE_DISABLED", "Automatic integration is disabled.");
     }
@@ -679,6 +655,17 @@ function run(
     try {
       return acceptTask(store, task, input);
     } catch (error) {
+      if (input.actor === "user" && error instanceof TaskboardError && error.code === "MERGE_CONFLICT") {
+        const review = inspectReview(store, task, reviewDetails(store, task, true), true);
+        const previous = task.acceptanceRepair;
+        const exhausted = previous && previous.attempts >= 2;
+        const requested = record({ ...task, acceptanceRepair: {
+          phase: exhausted ? "failed" as const : "queued" as const, attempts: previous?.attempts ?? 0,
+          targetHead: review.targetHead!, message: text(input.message, "message", true),
+          ...(exhausted ? { reason: "Repeated merge conflict; a decision is required." } : {}),
+        } }, "acceptance-requested", "user");
+        return store.save(exhausted ? sendTaskMessage(requested, { kind: "question", text: requested.acceptanceRepair!.reason }, "agent") : requested);
+      }
       if (store.index.settings.autoMode && error instanceof TaskboardError &&
           !["AUTO_REVIEW_DISABLED", "REVIEW_MODE_CHANGED", "REVISION_CONFLICT", "REVIEW_REQUIRED"].includes(error.code)) {
         const message = "AI Taskboard integration: " + error.code + "\n" + error.message + "\n" + JSON.stringify(error.details ?? {}).slice(0, 1800);
@@ -700,7 +687,14 @@ function run(
     if (logged !== task) store.save(logged);
     return filters.compact ? taskReceipt(logged) : logged;
   }
-  const updated = changeTask(task, command, input);
+  let updated = changeTask(task, command, input);
+  if (command === "update" && task.acceptanceRepair &&
+      ["title", "description", "criteria", "questions", "subtasks", "dependencies", "execution"].some(key => input[key] !== undefined)) {
+    updated = { ...updated, acceptanceRepair: undefined };
+  }
+  if (command === "block" && updated.acceptanceRepair?.phase === "failed") {
+    updated = sendTaskMessage(updated, { kind: "question", text: updated.acceptanceRepair.reason }, "agent");
+  }
   if (command === "cancel") {
     if (input.mergedInto !== undefined) {
       const target = readTask(store, text(input.mergedInto, "mergedInto", true));
@@ -709,7 +703,6 @@ function run(
         transferred: text(input.transferred, "transferred", true) };
     }
     const closed = store.save(withoutVerification(updated));
-    discardTaskArtifacts(store, id);
     return closed;
   }
   if ((command === "update" || command === "unblock") && input.dependencies !== undefined) validateDependencies(store, updated);
@@ -729,7 +722,7 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
     if (input.launchDetails !== true) return { ...started, task: taskReceipt(started.task) };
     const { description, criteria, dueDate, execution, git, history, workingDirectory, schedule, toolGrants } = started.task;
     return { ...started, task: { ...taskLaunchState(started.task), description, criteria,
-      execution: execution ?? store.index.settings.executor ?? undefined, git, dueDate, workingDirectory, schedule, toolGrants,
+      execution: isMergeRepair(started.task) ? store.index.settings.reviewer : execution ?? store.index.settings.executor ?? undefined, git, dueDate, workingDirectory, schedule, toolGrants,
       feedback: history.findLast(event => event.action === "request-changes")?.text } };
   };
   return withTaskStartLock(location, id, startLockWaitMs => {
@@ -803,162 +796,181 @@ async function main() {
     const input = readInput(values.stdin, values["input-file"]);
     const location = locateBoard(values.project ?? process.cwd(), command === "init", command === "init" && input.git === true && input.boardType !== "manual", command === "init" && input.boardType === "manual");
     if (command !== "init") guardManual(readBoardSettings(location), command, input);
-    if (command === "recover-test-data" && values.project !== location.root) {
+    if (["worklog-migrate", "recover-test-data"].includes(command) && values.project !== location.root) {
       throw new TaskboardError("INVALID_PROJECT", "Recovery requires --project with the exact canonical board root.");
     }
     if (command === "watch") {
       watchBoard(location, values.compact === true);
     } else {
-      let data;
-      if (command === "settings" && !Object.keys(input).length) {
-        data = readBoardSettings(location);
-      } else if (command === "manager-usage") {
-        if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "Manager usage takes no task ID.");
-        readBoardSettings(location);
-        data = managerUsage(location.directory, input);
-      } else if (command === "github-read") {
-        if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "GitHub read takes no task ID.");
-        readBoardSettings(location);
-        data = await readGitHub(location, input);
-      } else if (command === "github-milestone-create" || command === "github-milestone-due") {
-        if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "GitHub milestone changes take no task ID.");
-        readBoardSettings(location);
-        data = await (command === "github-milestone-create" ? createGitHubMilestone : setGitHubMilestoneDueDate)(location, input);
-      } else if (command === "milestones") {
-        if (id !== undefined || Object.keys(input).length) throw new TaskboardError("INVALID_INPUT", "Milestones takes no arguments.");
-        data = await githubMilestones(location);
-      } else if (command === "milestone" || command === "milestone-batch") {
-        const batch = command === "milestone-batch";
-        if (batch ? id !== undefined || !Array.isArray(input.tasks) || !input.tasks.length : !id) {
-          throw new TaskboardError("INVALID_INPUT", batch ? "Supply a list of tasks." : "Supply a task ID.");
-        }
-        const tasks = (batch ? input.tasks as unknown[] : [{ id, revision: input.revision }]).map(value => {
-          const fields = object(value);
-          const taskId = text(fields.id, "task ID", true);
-          if (!taskIdPattern.test(taskId)) throw new TaskboardError("INVALID_INPUT", "Use an exact task ID.");
-          return { id: taskId, revision: number(fields.revision, "revision") };
-        });
-        if (new Set(tasks.map(task => task.id)).size !== tasks.length) {
-          throw new TaskboardError("INVALID_INPUT", "Use distinct task IDs.");
-        }
-        const actor = input.actor === undefined ? "user" : member(input.actor, ["user", "manager"], "actor");
-        let milestone: GitHubMilestone | undefined;
-        if (input.milestone !== null) {
-          const fields = object(input.milestone);
-          const selected = { repository: text(fields.repository, "repository", true).toLowerCase(),
-            number: number(fields.number, "milestone number") };
-          const result = await githubMilestones(location, selected);
-          const entry = result.milestones[0];
-          if (entry?.number !== selected.number) throw new TaskboardError("GITHUB_MILESTONES_FAILED", "GitHub returned a different milestone.");
-          milestone = { ...selected, title: entry.title };
-        }
-        data = onBoard(location, store => {
-          if (milestone && githubRepository(location) !== milestone.repository) {
-            throw new TaskboardError("GITHUB_REMOTE_REQUIRED", "The GitHub repository configured as origin changed.");
+      const audited = new Set(["start", "submit", "accept", "cancel", "cleanup", "archive", "restore-changes", "recover-test-data", "worklog-migrate", "git"]);
+      const finishOperation = audited.has(command) && command !== "git" || command === "git" && !["refs", "inspect"].includes(id ?? "")
+        ? beginBoardOperation(location.root, command + (extra ? "/" + extra : ""), id && /^T-\d+$/.test(id) ? id : undefined) : undefined;
+      try {
+        let data;
+        if (command === "settings" && !Object.keys(input).length) {
+          data = readBoardSettings(location);
+        } else if (command === "manager-usage") {
+          if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "Manager usage takes no task ID.");
+          readBoardSettings(location);
+          data = managerUsage(location.directory, input);
+        } else if (command === "github-read") {
+          if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "GitHub read takes no task ID.");
+          readBoardSettings(location);
+          data = await readGitHub(location, input);
+        } else if (command === "github-milestone-create" || command === "github-milestone-due") {
+          if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "GitHub milestone changes take no task ID.");
+          readBoardSettings(location);
+          data = await (command === "github-milestone-create" ? createGitHubMilestone : setGitHubMilestoneDueDate)(location, input);
+        } else if (command === "milestones") {
+          if (id !== undefined || Object.keys(input).length) throw new TaskboardError("INVALID_INPUT", "Milestones takes no arguments.");
+          data = await githubMilestones(location);
+        } else if (command === "milestone" || command === "milestone-batch") {
+          const batch = command === "milestone-batch";
+          if (batch ? id !== undefined || !Array.isArray(input.tasks) || !input.tasks.length : !id) {
+            throw new TaskboardError("INVALID_INPUT", batch ? "Supply a list of tasks." : "Supply a task ID.");
           }
-          const update = ({ id, revision }: (typeof tasks)[number]) => {
-            const task = store.card(id);
-            requireRevision(task, revision, true);
-            if (hasPending(store, task)) throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before modifying the task.");
-            if (JSON.stringify(task.milestone) === JSON.stringify(milestone)) return task;
-            const updated = record({ ...task, milestone }, "milestone", actor, task.status, milestone?.title);
-            return store.save({ ...updated, closedAt: task.closedAt });
-          };
-          if (!batch) return update(tasks[0]);
-          return { milestone: milestone ?? null, tasks: tasks.map(reference => {
-            try {
-              const { id, title, status, revision } = update(reference);
-              return { ok: true, data: { id, title, status, revision, changed: revision !== reference.revision } };
-            } catch (error) {
-              if (!(error instanceof TaskboardError)) throw error;
-              return { id: reference.id, ok: false, error: { code: error.code, message: error.message } };
+          const tasks = (batch ? input.tasks as unknown[] : [{ id, revision: input.revision }]).map(value => {
+            const fields = object(value);
+            const taskId = text(fields.id, "task ID", true);
+            if (!taskIdPattern.test(taskId)) throw new TaskboardError("INVALID_INPUT", "Use an exact task ID.");
+            return { id: taskId, revision: number(fields.revision, "revision") };
+          });
+          if (new Set(tasks.map(task => task.id)).size !== tasks.length) {
+            throw new TaskboardError("INVALID_INPUT", "Use distinct task IDs.");
+          }
+          const actor = input.actor === undefined ? "user" : member(input.actor, ["user", "manager"], "actor");
+          let milestone: GitHubMilestone | undefined;
+          if (input.milestone !== null) {
+            const fields = object(input.milestone);
+            const selected = { repository: text(fields.repository, "repository", true).toLowerCase(),
+              number: number(fields.number, "milestone number") };
+            const result = await githubMilestones(location, selected);
+            const entry = result.milestones[0];
+            if (entry?.number !== selected.number) throw new TaskboardError("GITHUB_MILESTONES_FAILED", "GitHub returned a different milestone.");
+            milestone = { ...selected, title: entry.title };
+          }
+          data = onBoard(location, store => {
+            if (milestone && githubRepository(location) !== milestone.repository) {
+              throw new TaskboardError("GITHUB_REMOTE_REQUIRED", "The GitHub repository configured as origin changed.");
             }
-          }) };
-        });
-      } else if (command === "start") {
-        if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
-        data = startTask(location, id, input, values.compact === true);
-      } else if (command === "accept") {
-        if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
-        data = withTaskStartLock(location, id, () => {
+            const update = ({ id, revision }: (typeof tasks)[number]) => {
+              const task = store.card(id);
+              requireRevision(task, revision, true);
+              if (hasPending(store, task)) throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before modifying the task.");
+              if (JSON.stringify(task.milestone) === JSON.stringify(milestone)) return task;
+              const updated = record({ ...task, milestone }, "milestone", actor, task.status, milestone?.title);
+              return store.save({ ...updated, closedAt: task.closedAt });
+            };
+            if (!batch) return update(tasks[0]);
+            return { milestone: milestone ?? null, tasks: tasks.map(reference => {
+              try {
+                const { id, title, status, revision } = update(reference);
+                return { ok: true, data: { id, title, status, revision, changed: revision !== reference.revision } };
+              } catch (error) {
+                if (!(error instanceof TaskboardError)) throw error;
+                return { id: reference.id, ok: false, error: { code: error.code, message: error.message } };
+              }
+            }) };
+          });
+        } else if (command === "maintain") {
+          data = input.attachmentsOnly === true ? onBoard(location, store => { removeLegacyAttachments(store); return { attachmentsRemoved: true }; }) : { cleaned: maintainBoard(location) };
+        } else if (command === "start") {
+          if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
+          data = startTask(location, id, input, values.compact === true);
+        } else if (command === "cancel") {
+          if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
           const { store, task } = onBoard(location, (store, lockWaitMs) => ({
             store, task: run(store, command, id, extra, input, values, lockWaitMs) as Task,
           }));
-          return cleanAcceptedTask(store, task);
-        });
-      } else if (command === "cleanup" || command === "cleanup-status") {
-        if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
-        data = withTaskStartLock(location, id, () => {
-          const { store, task } = onBoard(location, store => {
-            const task = readTask(store, id);
-            if (command === "cleanup" && !isArchived(store, id) && hasPending(store, task)) {
-              throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before modifying the task.");
-            }
-            return { store, task };
+          try { withTaskStartLock(location, id, () => cleanTaskWorktree(store, task), 0); }
+          catch { /* Private maintenance retries after the active operation releases it. */ }
+          data = task;
+        } else if (command === "accept") {
+          if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
+          data = withTaskStartLock(location, id, () => {
+            const { store, task } = onBoard(location, (store, lockWaitMs) => ({
+              store, task: run(store, command, id, extra, input, values, lockWaitMs) as Task,
+            }));
+            return cleanAcceptedTask(store, task);
           });
-          return command === "cleanup" ? cleanTaskWorktree(store, task, input.artifacts) : inspectCleanup(store, task);
-        });
-      } else if (command === "preview") {
-        if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
-        const { store, task } = onBoard(location, store => ({ store, task: previewTask(store, id) }));
-        data = previewSubmission(store, task, values.compact === true, input);
-        onBoard(location, store => previewTask(store, id, task.revision));
-      } else if (command === "review-artifact") {
-        if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
-        const artifact = onBoard(location, store => {
-          const task = store.card(id);
-          requireState(task, ["review"]);
-          requireRevision(task, input.revision, true);
-          return openReviewArtifact(store, id, input);
-        });
-        data = readReviewArtifact(artifact);
-      } else if (command === "review-queue") {
-        if (id !== undefined || Object.keys(input).length) {
-          throw new TaskboardError("INVALID_INPUT", "Review queue takes no arguments.");
-        }
-        const snapshot = onBoard(location, store => ({ store, tasks: store.snapshot().tasks.filter(task => task.status === "review") }));
-        data = inspectReviewQueue(snapshot.store, snapshot.tasks);
-      } else if (command === "review" && input.paths !== undefined) {
-        if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
-        const task = onBoard(location, store => store.card(id));
-        data = inspectReviewDiff(location.repository, task, input);
-      } else if (command === "review") {
-        if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
-        const compact = input.compact === true;
-        const { store, task, details } = onBoard(location, store => {
-          const task = store.card(id);
-          return { store, task, details: reviewDetails(store, task, compact) };
-        });
-        const review = inspectReview(store, task, details, compact, input.previousTargetHead, input.previousSubmitted);
-        if (!compact) onBoard(location, latest => {
-          const card = latest.card(id);
-          requireState(card, ["review"]);
-          requireRevision(card, task.revision, true);
-          if (exists(latest.pendingPath(id)) !== details.pending ||
-              latest.index.settings.integrationMode !== store.index.settings.integrationMode) {
-            throw new TaskboardError("REVISION_CONFLICT", "The submission changed. Open the current review.");
+        } else if (command === "cleanup" || command === "cleanup-status") {
+          if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
+          data = withTaskStartLock(location, id, () => {
+            const { store, task } = onBoard(location, store => {
+              const task = readTask(store, id);
+              if (command === "cleanup" && !isArchived(store, id) && hasPending(store, task)) {
+                throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before modifying the task.");
+              }
+              return { store, task };
+            });
+            return command === "cleanup" ? cleanTaskWorktree(store, task, input.artifacts) : inspectCleanup(store, task);
+          });
+        } else if (command === "preview") {
+          if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
+          const { store, task } = onBoard(location, store => ({ store, task: previewTask(store, id) }));
+          data = previewSubmission(store, task, values.compact === true, input);
+          onBoard(location, store => previewTask(store, id, task.revision));
+        } else if (command === "review-artifact") {
+          if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
+          const artifact = onBoard(location, store => {
+            const task = store.card(id);
+            requireState(task, ["review"]);
+            requireRevision(task, input.revision, true);
+            return openReviewArtifact(store, id, input);
+          });
+          data = readReviewArtifact(artifact);
+        } else if (command === "review-queue") {
+          if (id !== undefined || Object.keys(input).length) {
+            throw new TaskboardError("INVALID_INPUT", "Review queue takes no arguments.");
           }
-        });
-        data = reviewWithSettings(store, review, input);
-      } else if (command === "git") {
-        const action = member(id, ["refs", "inspect", "switch", "create", "detach", "publish", "push"], "action");
-        if (action === "inspect") data = inspectRepository(location, input);
-        else if (action === "publish") data = await publishRepository(location, input);
-        else if (action === "push") data = await pushRepositoryBranch(location, input);
-        else data = onBoard(location, () => action === "refs" ? repositoryRefs(location) : changeRepository(location, action, input));
-      } else {
-        data = command === "init" ? initializeBoard(location, store => snapshotBoard(store, values.compact === true), input.boardType) :
-          onBoard(location, (store, lockWaitMs) => run(store, command, id, extra, input, values, lockWaitMs));
-      }
-      if (command === "show") {
-        const task = data as Pick<Task, "status" | "git">;
-        if (task.status === "done") data = { ...task, acceptedTreeMatchesSubmission: compareAcceptedTree(location.repository, task.git) };
-      }
-      send({ ok: true, data });
-      const repo = location.repository;
-      if (repo && ((command === "accept" && (data as Task).git?.accepted) ||
-          (command === "submit" && (data as Task).git?.submission))) {
-        scheduleGitMaintenance(repo.root);
+          const snapshot = onBoard(location, store => ({ store, tasks: store.snapshot().tasks.filter(task => task.status === "review") }));
+          data = inspectReviewQueue(snapshot.store, snapshot.tasks);
+        } else if (command === "review" && input.paths !== undefined) {
+          if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
+          const task = onBoard(location, store => store.card(id));
+          data = inspectReviewDiff(location.repository, task, input);
+        } else if (command === "review") {
+          if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
+          const compact = input.compact === true;
+          const { store, task, details } = onBoard(location, store => {
+            const task = store.card(id);
+            return { store, task, details: reviewDetails(store, task, compact) };
+          });
+          const review = inspectReview(store, task, details, compact, input.previousTargetHead, input.previousSubmitted);
+          if (!compact) onBoard(location, latest => {
+            const card = latest.card(id);
+            requireState(card, ["review"]);
+            requireRevision(card, task.revision, true);
+            if (exists(latest.pendingPath(id)) !== details.pending ||
+                latest.index.settings.integrationMode !== store.index.settings.integrationMode) {
+              throw new TaskboardError("REVISION_CONFLICT", "The submission changed. Open the current review.");
+            }
+          });
+          data = reviewWithSettings(store, review, input);
+        } else if (command === "git") {
+          const action = member(id, ["refs", "inspect", "switch", "create", "detach", "publish", "push"], "action");
+          if (action === "inspect") data = inspectRepository(location, input);
+          else if (action === "publish") data = await publishRepository(location, input);
+          else if (action === "push") data = await pushRepositoryBranch(location, input);
+          else data = onBoard(location, () => action === "refs" ? repositoryRefs(location) : changeRepository(location, action, input));
+        } else {
+          data = command === "init" ? initializeBoard(location, store => snapshotBoard(store, values.compact === true), input.boardType) :
+            onBoard(location, (store, lockWaitMs) => run(store, command, id, extra, input, values, lockWaitMs));
+        }
+        if (command === "show") {
+          const task = data as Pick<Task, "status" | "git">;
+          if (task.status === "done") data = { ...task, acceptedTreeMatchesSubmission: compareAcceptedTree(location.repository, task.git) };
+        }
+        finishOperation?.("completed");
+        send({ ok: true, data });
+        const repo = location.repository;
+        if (repo && ((command === "accept" && (data as Task).git?.accepted) ||
+            (command === "submit" && (data as Task).git?.submission))) {
+          scheduleGitMaintenance(repo.root);
+        }
+      } catch (error) {
+        finishOperation?.("failed; " + describe(error).code);
+        throw error;
       }
     }
   }

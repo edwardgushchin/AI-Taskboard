@@ -219,6 +219,8 @@ test("board history recovers a steering message and its attachment in the middle
 
 test("discussion steering and interruption share the streaming connection, including during a tool call", async t => {
   const directory = mkdtempSync(join(tmpdir(), "ai-taskboard-chat-test-"));
+  mkdirSync(join(directory, ".tasks"), { recursive: true });
+  writeFileSync(join(directory, ".tasks", "board.json"), JSON.stringify({ settings: { boardType: "manual" } }));
   t.after(() => rmSync(directory, { recursive: true, force: true, maxRetries: 3 }));
   const script = join(directory, "provider.cjs");
   writeFileSync(script, `
@@ -296,7 +298,8 @@ test("discussion steering and interruption share the streaming connection, inclu
 
 test("board chat keeps a goal streaming across turns and times out only after inactivity", { timeout: 10_000 }, async t => {
   const directory = mkdtempSync(join(tmpdir(), "ai-taskboard-chat-test-"));
-  mkdirSync(join(directory, ".tasks"));
+  mkdirSync(join(directory, ".tasks"), { recursive: true });
+  writeFileSync(join(directory, ".tasks", "board.json"), JSON.stringify({ settings: { boardType: "manual" } }));
   t.after(() => rmSync(directory, { recursive: true, force: true, maxRetries: 3 }));
   const script = join(directory, "provider.cjs");
   const captured = join(directory, "requests.json");
@@ -695,6 +698,16 @@ test("board chat keeps a goal streaming across turns and times out only after in
   }), /did not apply the selected manager access mode/);
 
   providerMode = "";
+  await runtime("profile", directory, "Review in manager context", [], () => ({ ok: true }), [], "", controller.signal, {
+    ...session, goal: undefined, readOnly: true, access: "full",
+  });
+  const sharedReview: typeof newRequests = JSON.parse(readFileSync(captured, "utf8"));
+  const sharedThread = sharedReview.find(({ method }) => method === "thread/resume");
+  assert.equal(sharedThread?.params.threadId, threadId);
+  assert.equal(sharedThread?.params.sandbox, "read-only");
+  assert.equal(sharedReview.some(({ method }) => method === "thread/start"), false);
+  assert.deepEqual(sharedReview.find(({ method }) => method === "turn/start")?.params.sandboxPolicy,
+    { type: "readOnly", networkAccess: false });
   await runtime("profile", directory, "Review submissions", [], () => ({ ok: true }), [], "", controller.signal, {
     ...session, goal: undefined, separateTurn: true, access: "full", save: (id: string) => assert.equal(id, threadId),
   });

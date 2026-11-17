@@ -310,9 +310,9 @@ export function replyToBoard(
     ? providerAction?.(name, args) ?? Promise.resolve(cliFailure("PROVIDER_TOOLS_UNAVAILABLE", "Wait for the provider session to initialize."))
     : runAction(name, args);
   const dialogue = !session.goal && !session.resumeGoal && !session.separateTurn;
-  const fullAccess = !session.separateTurn && session.access === "full";
+  const fullAccess = !session.separateTurn && !session.readOnly && session.access === "full";
   const permissionProfile = fullAccess ? hostPermissionProfile : managerResearchProfile;
-  const accessInstructions = session.separateTurn ? "" : fullAccess
+  const accessInstructions = session.separateTurn || session.readOnly ? "" : fullAccess
     ? "\nFull access is enabled for this board. Commands run as the host user. "
     : "\nThe board's manager access mode is " + (session.access === "ask" ? "Ask for approval" : "Approve for me") + ". " +
       "Use Codex's native approval request when the sandbox blocks a required operation. If the operation needs the regular OS user, " +
@@ -323,7 +323,7 @@ export function replyToBoard(
     (config, env) => reply(profile, project, prompt, images, dispatch, {
       tools, instructions: boardAgentInstructions("manager", instructions + accessInstructions + (accessInstructions ?
         "Use existing credentials for authorized operations without exposing them. Keep SSH host key checking enabled and report server authentication failures separately from local permission failures." : ""), { dialogue, manual: readBoardSettings(locateBoard(project)).boardType === "manual" }),
-      signal, session, worklog, onTokenUsage: session.onTokenUsage, mcp: { config, env },
+      signal, session, worklog, role: session.role, onTokenUsage: session.onTokenUsage, mcp: { config, env },
       prepareResearch: async (request, client) => {
         const launchKey = JSON.stringify([profile, client.path, client.args, client.version, client.windowsSandbox, permissionProfile]);
         const availability = await probeManagerCli(project, launchKey, mcpTools, (cwd, command, env) =>
@@ -341,6 +341,7 @@ export function replyToBoard(
 interface BoardSession {
   id?: string;
   access?: ManagerAccess;
+  role?: "manager" | "reviewer";
   confirmApproval?: (details: string) => Promise<boolean>;
   settings?: ChatSettings | null;
   save: (id: string) => void;
@@ -352,6 +353,7 @@ interface BoardSession {
   goal?: string;
   resumeGoal?: boolean;
   separateTurn?: boolean;
+  readOnly?: boolean;
   onGoalSet?: () => void;
   messageId?: string;
   onMessage?: (id: string) => void;
@@ -561,7 +563,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
 }) {
   const { onCommentary, onTokenUsage, onControl, onActivity, signal, imageDirectory, imageLimit = 0, session } = options;
   const settings = session ? session.settings : options.settings;
-  const research = Boolean(session && !session.separateTurn);
+  const research = Boolean(session && !session.separateTurn && !session.readOnly);
   const fullAccess = research && session?.access === "full";
   const approvalPolicy = research && !fullAccess ? "on-request" : "never";
   const approvalsReviewer = session?.access === "ask" || fullAccess ? "user" : "auto_review";
@@ -878,7 +880,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
     mcp: options.mcp, research, fullAccess, webSearch: options.webSearch ?? Boolean(session), providerTools: Boolean(session),
   }).finally(async () => {
     finishRun?.();
-    options.worklog?.finish();
-    await tokens.save(tokens.finish(!completed), onTokenUsage);
+    try { options.worklog?.finish(); }
+    finally { await tokens.save(tokens.finish(!completed), onTokenUsage); }
   });
 }

@@ -10,6 +10,7 @@ test("Worklog writes only complete authored blocks and recovers a staged turn af
   t.after(() => rmSync(project, { recursive: true }));
   const board = join(project, ".tasks");
   mkdirSync(board);
+  writeFileSync(join(board, "board.json"), JSON.stringify({ settings: { boardType: "manual" } }));
   const worklog = boardWorklog(project, "executor", "T-0042");
   const threadId = "executor";
   const start = (turnId: string) => ({ method: "turn/started", params: { threadId, turn: { id: turnId } } });
@@ -77,6 +78,7 @@ test("Worklog writes only complete authored blocks and recovers a staged turn af
   t.after(() => rmSync(blockedProject, { recursive: true }));
   const blocked = join(blockedProject, relative(project, original));
   mkdirSync(join(blockedProject, ".tasks"));
+  writeFileSync(join(blockedProject, ".tasks", "board.json"), JSON.stringify({ settings: { boardType: "manual" } }));
   writeFileSync(blocked, "temporarily blocked");
   const pending = boardWorklog(blockedProject, "reviewer", "T-0042");
   pending.start(threadId, "pending");
@@ -101,7 +103,8 @@ test("all board roles receive the same action boundaries on every instruction bu
     for (let turn = 0; turn < 2; turn++) {
       const instructions = boardAgentInstructions(role);
       assert.match(instructions, /no drag-and-drop or arbitrary manual status movement/);
-      assert.match(instructions, /human review mode only the human accepts/);
+      assert.match(instructions, /human review mode only the human requests acceptance/);
+      assert.match(instructions, /persisted user acceptance request can continue automatically/);
       assert.match(instructions, /only tools actually supplied in this run/);
       assert.match(instructions, /send limitations or questions to the manager with message/);
       assert.match(instructions, /Confirm a transition only after a successful tool result/);

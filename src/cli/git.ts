@@ -174,7 +174,7 @@ export function discoverRepository(cwd: string): Repository | null {
   return { root: realpathSync(main.path), bare: main.bare === true };
 }
 
-export const isolatedWorktreesDirectory = ".taskboard-worktrees";
+export const isolatedWorktreesDirectory = ".worktrees";
 
 export function gitSafeDirectoryEnvironment(env: NodeJS.ProcessEnv, ...paths: string[]): NodeJS.ProcessEnv {
   const entries = [...new Set(paths)];

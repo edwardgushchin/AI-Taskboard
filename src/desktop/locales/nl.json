@@ -1,4 +1,5 @@
 {
+  "ui.resolving_acceptance_conflict": "Conflict oplossen",
   "ui.dismiss_notification_9a17797e": "Melding afwijzen",
   "ui.board_refresh_4c949d36": "Bord vernieuwen",
   "ui.opening_project_bc49a4b5": "Openingsproject",
@@ -1162,5 +1163,11 @@
   "limits.reset": "Herstel {time}",
   "ui.schedule_paused": "Planning gepauzeerd",
   "ui.pause_schedule": "Planning pauzeren",
-  "ui.resume_schedule": "Planning hervatten"
+  "ui.resume_schedule": "Planning hervatten",
+  "ui.git_state_unavailable": "Git-status niet beschikbaar",
+  "ui.configure_git_upstream": "Configureer de remote en gevolgde branch",
+  "ui.git_counts_unavailable": "Tellingen voor gevolgde branch niet beschikbaar",
+  "ui.git_upstream_missing": "Geen gevolgde branch ingesteld",
+  "ui.push_remote_branch": "Push naar de remote branch",
+  "ui.push_branch_destination": "Branch pushen naar "
 }

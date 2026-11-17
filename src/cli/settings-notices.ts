@@ -1,7 +1,7 @@
 import type { AgentLimits, BoardSettings } from "./model.ts";
 import { boardReviewMode, defaultBoardAgents } from "./model.ts";
 
-export const inheritedLimits: AgentLimits = { executor: 3, manager: 1, reviewer: 1 };
+export const inheritedLimits: AgentLimits = { executor: 3, manager: 0, reviewer: 1 };
 type Values = Record<string, string | number | boolean | null>;
 export type SettingsJournal = {
   defaults: AgentLimits;
@@ -27,7 +27,7 @@ export function effectiveSettings(settings: BoardSettings, defaults: AgentLimits
     "Авторежим": settings.autoMode ?? false,
   };
   for (const [role, label] of [["executor", "исполнителей"], ["manager", "менеджеров"], ["reviewer", "ревьюеров"]] as const) {
-    values[`Лимит ${label}`] = settings.agentLimits?.[role] ?? defaults[role];
+    if (role !== "manager") values[`Лимит ${label}`] = settings.agentLimits?.[role] ?? defaults[role];
     const agent = settings[role] === undefined ? defaultBoardAgents[role] : settings[role];
     values[`${role}: модель`] = agent?.model ?? "по умолчанию провайдера";
     values[`${role}: рассуждение`] = agent?.effort ?? "по умолчанию провайдера";

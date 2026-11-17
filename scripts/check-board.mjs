@@ -138,6 +138,50 @@ app.whenReady().then(async () => {
   await evaluate(`byId('notice-close').click(); void 0`);
   await evaluate(`push(); void 0`);
   await check(`byId('welcome').hidden && !byId('workspace').hidden && byId('app-content').getAttribute('aria-busy') === 'false'`, "a restored board replaces the loading state");
+  if (process.argv.includes("--repair-only")) {
+    for (const theme of ["dark", "light"]) for (const phase of ["queued", "running", "checking", "failed"]) {
+      nativeTheme.themeSource = theme;
+      await evaluate(`
+        fixture.theme = ${JSON.stringify(theme)};
+        fixture.board.tasks = [task('T-0001', 'Ремонт приёмки', { status: 'review', mergeRepair: true,
+          acceptanceRepair: { phase: ${JSON.stringify(phase)}, targetHead: 'a'.repeat(40), attempts: 1,
+            message: 'fix: integrate result', reason: ${phase === "failed" ? "'Required check failed'" : "undefined"} } })];
+        push(); void 0;
+      `);
+      await evaluate(`showReview(fixture.board.tasks[0]); settle()`);
+      await check(`sheet.open && sheetKind === 'review' && body.querySelector('form button[type=submit]') !== null`, 'repair phase shows cancellation');
+      await check(`lane('review').querySelectorAll('.task-card').length === 1 && lane('in_progress').querySelectorAll('.task-card').length === 0`, 'repair remains in review');
+      await capture(`repair-${theme}-${phase}.png`);
+    }
+    await evaluate(`Object.assign(window.taskboard, { themes: async () => [], codexStatus: async () => ({ state: "unavailable" }), chatModels: async () => ({ ok: true, data: [] }) }); settings(); settle()`);
+    await check(`!body.querySelector('[name="manager"]') && !!body.querySelector('[name="reviewer"]')`, 'manager has no application limit control');
+    await capture('manager-application-settings.png');
+    await evaluate(`boardSettings(); settle()`);
+    await check(`!body.querySelector('[name="managerLimit"]') && !!body.querySelector('[name="reviewerLimit"]') && !!body.querySelector('[name="managerModel"]')`, 'board retains manager model without manager limit');
+    await capture('manager-board-settings.png');
+    console.log(`Acceptance repair Chromium checks passed: ${checks}`);
+    return;
+  }
+  if (process.argv.includes("--cleanup-only")) {
+    await evaluate(`
+      const accepted = task('T-0138', 'Completed cleanup fixture', { status: 'done', cleanupAvailable: true,
+        git: { worktree: 'saved-worktree' }, artifacts: [{ source: 'required.log', sha256: 'saved' }] });
+      fixture.board.tasks = [accepted]; push();
+      window.taskboard.command = async () => ({ ok: true, data: structuredClone(accepted) });
+      showAcceptedTask({ ...accepted, cleanupWarning: { code: 'DIRTY_WORKTREE', message: 'private cleanup failure' } }); void 0;
+    `);
+    await evaluate(`waitFor(() => taskInSheet?.id === 'T-0138')`);
+    await check(`!document.body.textContent.includes('private cleanup failure') && !body.querySelector('.task-blocker')`, 'cleanup errors produce no notice or card banner');
+    await check(`!body.textContent.includes('Принято · рабочая копия сохранена') && taskInSheet.status === 'done'`, 'completed status is independent of pending cleanup');
+    await check(`body.querySelector('#task-review-files summary').textContent.includes('1 файл')`, 'required evidence remains available');
+    await evaluate(`fixture.board.tasks[0].cleanupAvailable = false; delete fixture.board.tasks[0].git.worktree; showTask('T-0138'); void 0`);
+    await evaluate(`waitFor(() => taskInSheet?.cleanupAvailable === false)`);
+    await check(`body.querySelector('#task-review-files summary').textContent.includes('1 файл')`, 'evidence remains after cleanup');
+    await check(`![...body.querySelectorAll('button')].some(button => button.textContent === 'Уборка рабочей копии…')`, 'maintenance needs no manual cleanup control');
+    await capture('cleanup-done.png');
+    console.log('Cleanup Chromium checks passed: ' + checks);
+    return;
+  }
   if (process.argv.includes("--run-status-only")) {
     await evaluate(`
       const queuedTask = task('T-0096', 'Проверка ожидания', { status: 'in_progress',
@@ -570,6 +614,7 @@ app.whenReady().then(async () => {
       "hovering the gear on the welcome screen does not paint a background square");
     await click('#app-menu .app-menu-trigger');
     await evaluate(`createProjectItem().click(); settle()`);
+    await evaluate(`body.querySelector('[data-board-type=agent]').click(); settle()`);
     await check(`createProjectCalls.length === 1 && createProjectCalls[0] === null`,
       "File invokes project creation from the welcome screen");
     await click('#app-settings');
@@ -578,7 +623,7 @@ app.whenReady().then(async () => {
       "the gear opens the settings menu without a board and disables board settings");
     await click('#settings-menu-app');
     await evaluate(`waitFor(() => limitFields()[0].value === '3')`);
-    await check(`limitFields().map(input => input.value).join(',') === '3,1,1' &&
+    await check(`limitFields().map(input => input.value).join(',') === '3,1' &&
       !!body.querySelector('.provider-panel') && !byId('tag-settings')`, "the gear menu opens shared settings even without an open board");
     await evaluate(`waitFor(() => !sandboxSelect().disabled && !sandboxSelect().parentElement.hidden)`);
     await check(`sandboxSelect().value === 'mxc'`, "Codex settings show the current Windows sandbox");
@@ -607,6 +652,7 @@ app.whenReady().then(async () => {
     await check(`gearMatchesRail() && byId('app-settings').matches(':hover')`, "the gear background stays matched on hover");
     await click('#app-menu .app-menu-trigger');
     await evaluate(`createProjectItem().click(); settle()`);
+    await evaluate(`body.querySelector('[data-board-type=agent]').click(); settle()`);
     await check(`createProjectCalls[1] === 'board-fixture' && frame.project === 'board-fixture'`,
       "File invokes the same creation flow while a board is open");
     await click('#app-menu .app-menu-trigger');
@@ -624,12 +670,12 @@ app.whenReady().then(async () => {
       boardNameInput().form.requestSubmit(); waitFor(() => !sheet.open)`);
     await check(`JSON.stringify(savedLimits.get('board-fixture')) === '{"executor":2,"reviewer":0}' &&
       limits.executor === 0 && limits.reviewer === 1`, "board overrides save without changing application defaults");
-    await evaluate(`sheet.close(); byId('project-tabs').querySelector('[aria-selected="false"]')
-      .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 25, clientY: 150 })); void 0`);
-    await click('#board-tab-menu button');
+    await evaluate(`sheet.close(); byId('project-tabs').querySelector('[aria-selected="false"]').click(); settle()`);
+    await click('#app-menu .app-menu-trigger');
+    await click('#board-settings-menu-item');
     await check(`frame.project === 'other-board' && sheet.textContent.includes('Вторая доска') &&
       !!body.querySelector('.board-agent-settings') && !byId('agent-limits') &&
-      boardLimit('executor').value === '' && boardLimit('reviewer').value === ''`, "the project tab opens settings for that board");
+      boardLimit('executor').value === '' && boardLimit('reviewer').value === ''`, "File opens settings for the selected board");
     await check(`savedManagerAccess.get('board-fixture') === 'full' && managerAccess().value === 'auto'`,
       "manager full access saves for the selected board only");
     await evaluate(`boardNameInput().value = 'Выпуск 0.3'; boardNameInput().form.requestSubmit(); waitFor(() => !sheet.open)`);
@@ -2343,20 +2389,20 @@ app.whenReady().then(async () => {
         if (input.artifacts?.join() !== 'report.local') return { ok: false, error: { message: 'Expected the report path' } };
         interrupted.cleanupAvailable = false;
         delete interrupted.git.worktree;
-        interrupted.artifacts = [];
+        interrupted.artifacts = [{ source: 'first.log', sha256: 'first' }, { source: 'report.local', sha256: 'saved' }];
       }
       return { ok: true, data: structuredClone(interrupted) };
     };
     const sheetButton = text => [...body.querySelectorAll('button')].find(node => node.textContent === text);
     showTask(interrupted.id); void 0;
   `);
-  await evaluate(`waitFor(() => sheetButton('Уборка рабочей копии…'))`);
-  await check(`body.textContent.includes('Принято · рабочая копия сохранена') &&
-    body.querySelector('#task-review-files summary').textContent.includes('1 файл')`, "an accepted card shows pending cleanup and a count of its saved artifacts");
-  await evaluate(`sheetButton('Уборка рабочей копии…').click(); waitFor(() => sheetKind === 'cleanup')`);
-  await check(`body.textContent.includes('!! report.local')`, "cleanup shows the files in the retained worktree");
-  await evaluate(`body.querySelector('textarea').value = 'report.local'; body.querySelector('form').requestSubmit(); waitFor(() => sheetKind === 'task' && !sheetButton('Уборка рабочей копии…'))`);
-  await check(`!body.querySelector('#task-review-files')`, "cleanup returns to the original card after discarding temporary artifacts");
+  await evaluate(`waitFor(() => taskInSheet?.id === interrupted.id)`);
+  await check(`!body.textContent.includes('Принято · рабочая копия сохранена') && !sheetButton('Уборка рабочей копии…') &&
+    body.querySelector('#task-review-files summary').textContent.includes('1 файл')`, "accepted cards retain normal completion and evidence without manual cleanup controls");
+  await evaluate(`interrupted.cleanupAvailable = false; delete interrupted.git.worktree;
+    interrupted.artifacts.push({ source: 'report.local', sha256: 'saved' }); showTask(interrupted.id); void 0`);
+  await evaluate(`waitFor(() => taskInSheet?.cleanupAvailable === false)`);
+  await check(`body.querySelector('#task-review-files summary').textContent.includes('2 файла')`, "automatic cleanup retains individual saved artifacts on the completed card");
   await evaluate(`
     let tagEdit;
     const cleanupCommands = window.taskboard.command;

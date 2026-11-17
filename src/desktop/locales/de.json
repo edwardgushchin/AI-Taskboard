@@ -1,4 +1,5 @@
 {
+  "ui.resolving_acceptance_conflict": "Konflikt wird gelöst",
   "ui.dismiss_notification_9a17797e": "Benachrichtigung verwerfen",
   "ui.board_refresh_4c949d36": "Board-Aktualisierung",
   "ui.opening_project_bc49a4b5": "Eröffnungsprojekt",
@@ -1162,5 +1163,11 @@
   "limits.reset": "Zurücksetzung {time}",
   "ui.schedule_paused": "Zeitplan pausiert",
   "ui.pause_schedule": "Zeitplan pausieren",
-  "ui.resume_schedule": "Zeitplan fortsetzen"
+  "ui.resume_schedule": "Zeitplan fortsetzen",
+  "ui.git_state_unavailable": "Git-Status nicht verfügbar",
+  "ui.configure_git_upstream": "Remote und Upstream-Branch konfigurieren",
+  "ui.git_counts_unavailable": "Upstream-Zähler nicht verfügbar",
+  "ui.git_upstream_missing": "Kein Upstream konfiguriert",
+  "ui.push_remote_branch": "An den Remote-Branch senden",
+  "ui.push_branch_destination": "Branch senden an "
 }

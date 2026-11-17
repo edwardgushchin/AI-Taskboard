@@ -1,11 +1,11 @@
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { artifactFiles } from "./artifacts.ts";
-import { git, inspectMergeTree, isAncestor, localBranch, mergeTree, requireRepository, resolveCommit, skipAutoMaintenance, worktrees } from "./git.ts";
+import { isolatedWorktreesDirectory, excludeBoard, git, inspectMergeTree, isAncestor, localBranch, mergeTree, requireRepository, resolveCommit, skipAutoMaintenance, worktrees } from "./git.ts";
 import type { Repository, Worktree } from "./git.ts";
 import { member, number, object, record, requireRevision, requireState, TaskboardError, text } from "./model.ts";
 import type { IntegrationMode, Task, TaskGit } from "./model.ts";
 import { checkPreserveChanges, describeSavedChanges, inspectLocalChanges, restoreSavedChanges, saveLocalChanges } from "./saved-changes.ts";
-import { exists, readJson, removeFile, writeJson } from "./storage.ts";
+import { directory, exists, readJson, removeFile, writeJson } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
 import { conventionalMessage, noChangesReviewIsStale } from "./submission.ts";
 import { checkProtectedPaths, cleanTaskWorktree, collidingPaths, findWorktree, gitStatus, isolateTaskWorktree, requireNoGitOperation, usableWorktree } from "./worktree.ts";
@@ -294,6 +294,9 @@ export function reopenConflictingReview(store: BoardStore, task: Task, input: Re
   if (exists(store.pendingPath(task.id))) {
     throw new TaskboardError("PENDING_OPERATION", "Finish the pending Git operation first.");
   }
+  if (task.acceptanceRepair && task.acceptanceRepair.phase !== "queued") {
+    throw new TaskboardError("REPAIR_UNFINISHED", "Conflict repair has already been claimed.");
+  }
   const context = reviewed(task);
   const repo = requireRepository(store.location.repository);
   const target = localBranch(repo, context.target);
@@ -303,9 +306,14 @@ export function reopenConflictingReview(store: BoardStore, task: Task, input: Re
     mergeTree(repo.root, head, context.submission.sha);
   } catch (error) {
     if (!(error instanceof TaskboardError) || error.code !== "MERGE_CONFLICT") throw error;
-    const worktree = input.isolatedWorktree === true ? isolateTaskWorktree(store, repo, task.id, currentPath) : currentPath;
-    const updated = store.save(record({ ...task, git: { ...context, worktree } }, "resolve-conflicts", "agent", "in_progress"));
+    const worktree = input.isolatedWorktree === true && !task.acceptanceRepair ? isolateTaskWorktree(store, repo, task.id, currentPath) : currentPath;
+    const updated = store.save(record({ ...task, ...(task.acceptanceRepair ? { acceptanceRepair: { ...task.acceptanceRepair, phase: "running" as const, targetHead: head, attempts: task.acceptanceRepair.attempts + 1 } } : {}), git: { ...context, worktree } }, "resolve-conflicts", "agent", task.acceptanceRepair ? "review" : "in_progress"));
     return { task: updated, worktree, target, targetHead: head, conflict: error.details };
+  }
+  if (task.acceptanceRepair) {
+    const updated = store.save(record({ ...task, acceptanceRepair: { ...task.acceptanceRepair, phase: "running", targetHead: head,
+      attempts: task.acceptanceRepair.attempts + 1 } }, "resolve-conflicts", "agent"));
+    return { task: updated, worktree: currentPath, target, targetHead: head };
   }
   throw new TaskboardError("NO_MERGE_CONFLICT", "The reviewed submission can be merged into the current target.");
 }
@@ -315,7 +323,11 @@ function targetPaths(path: string, parent: string, tree: string): string[] {
 }
 
 function temporaryTargetPath(store: BoardStore, task: Task): string {
-  return join(store.subdirectory("worktrees"), ".accept-" + task.id);
+  const repo = requireRepository(store.location.repository);
+  excludeBoard(repo, isolatedWorktreesDirectory);
+  const root = join(repo.root, isolatedWorktreesDirectory);
+  directory(root, true);
+  return join(root, ".accept-" + task.id);
 }
 
 function releaseTemporaryTarget(store: BoardStore, task: Task): void {
@@ -334,8 +346,26 @@ function releaseTemporaryTarget(store: BoardStore, task: Task): void {
   }
 }
 
+export function migrateIntegrationWorktree(store: BoardStore, task: Task): void {
+  const repo = store.location.repository;
+  if (!repo || !task.git) return;
+  const target = task.git.target;
+  let item = findWorktree(repo, target);
+  if (item && [join(store.location.directory, "worktrees", ".accept-" + task.id),
+      join(repo.root, ".taskboard-worktrees", ".accept-" + task.id)].some(path => !relative(path, item!.path))) {
+    const path = usableWorktree(item);
+    directory(dirname(path));
+    const destination = temporaryTargetPath(store, task);
+    if (exists(destination)) throw new TaskboardError("WORKTREE_COLLISION", "The integration worktree path is occupied.");
+    git(repo.root, ["worktree", "move", "--", path, destination]);
+    item = findWorktree(repo, target);
+  }
+}
+
 function checkoutTarget(store: BoardStore, repo: Repository, task: Task, target: string): string {
   let item = findWorktree(repo, target);
+  migrateIntegrationWorktree(store, task);
+  item = findWorktree(repo, target);
   if (!item) {
     const path = temporaryTargetPath(store, task);
     if (exists(path)) {
@@ -468,10 +498,8 @@ export function cleanAcceptedTask(store: BoardStore, task: Task) {
     cleanTaskWorktree(store, task);
     return result;
   } catch (error) {
-    const cleanupWarning = error instanceof TaskboardError
-      ? { code: error.code, message: error.message, details: error.details }
-      : { code: "CLEANUP_FAILED", message: String(error) };
-    return { ...result, cleanupWarning };
+    // Cleanup diagnostics are persisted internally by cleanTaskWorktree.
+    return result;
   }
 }
 

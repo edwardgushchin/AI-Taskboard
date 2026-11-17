@@ -69,7 +69,7 @@ const verifyWrite = [
   "}",
 ].join("\n");
 
-export type ExecutorTask = Pick<Task, "id" | "title" | "description" | "criteria" | "dueDate" | "summary" | "nextStep" | "execution" | "git" | "codexThreadId" | "workingDirectory" | "schedule" | "toolGrants"> &
+export type ExecutorTask = Pick<Task, "acceptanceRepair" | "id" | "title" | "description" | "criteria" | "dueDate" | "summary" | "nextStep" | "execution" | "git" | "codexThreadId" | "workingDirectory" | "schedule" | "toolGrants"> &
   { feedback?: string; fullAccess?: boolean };
 
 export function missingCodexThread(message: string | undefined, threadId: string | undefined) {
@@ -95,12 +95,11 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   if (!settings.ok) throw new Error(settings.error.message);
   const developerInstructions = executorInstructions() + (task.schedule ? "\n" + recurringChildTool.description : "") + "\nCurrent board reviewMode: " + boardReviewMode(settings.data) + ". Read settings again if it changes.";
   const worklog = boardWorklog(project, "executor", task.id);
-  const readOnlyWorktrees = [join(boardData, "worktrees")];
+  const readOnlyWorktrees = [join(boardData, "worktrees"), join(dirname(boardData), ".taskboard-worktrees"), join(dirname(boardData), isolatedWorktreesDirectory)].filter(existsSync);
   const isolatedRoot = join(dirname(boardData), isolatedWorktreesDirectory);
   if (insideProject(runDirectory, isolatedRoot)) {
     if (runDirectory === isolatedRoot) throw new Error("Choose an individual worktree, not the shared worktree directory.");
     directory(isolatedRoot, true);
-    readOnlyWorktrees.push(isolatedRoot);
   }
   const requestTool = { name: "task_tool_request", description: "Request a missing provider MCP tool for this task. The manager receives a question. Assignment requires a restarted task run; provider permissions still apply.",
     inputSchema: { type: "object", properties: { server: { type: "string" }, tool: { type: "string" }, reason: { type: "string" } }, required: ["server", "tool", "reason"], additionalProperties: false } };
@@ -255,9 +254,11 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       };
     } finally {
       finishRun();
-      worklog.finish();
-      await close();
-      await tokens.save(tokens.finish(Boolean(failure)), onTokenUsage);
+      try { worklog.finish(); }
+      finally {
+        await close();
+        await tokens.save(tokens.finish(Boolean(failure)), onTokenUsage);
+      }
     }
     if (failure && signal?.aborted) return { reason: signal.reason instanceof Error
       ? signal.reason.message : "The task run was interrupted." };
@@ -355,9 +356,11 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     if (turn.status !== "inProgress") turns.set(turn.id, turn);
     return { threadId, completion: releaseProvider.run(() => monitor(turn.id)), ...control };
   } catch (error) {
-    worklog.finish();
-    await close();
-    await tokens.save(tokens.finish(true), onTokenUsage);
+    try { worklog.finish(); }
+    finally {
+      await close();
+      await tokens.save(tokens.finish(true), onTokenUsage);
+    }
     if (error instanceof Error && /already has an active writer/i.test(error.message)) {
       throw Object.assign(error, { code: "CODEX_THREAD_BUSY" });
     }

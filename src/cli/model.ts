@@ -178,6 +178,7 @@ export function nextScheduledRun(rule: TaskScheduleRule, after: Date, previous?:
 }
 
 export interface Task {
+  acceptanceRepair?: { phase: "queued" | "running" | "checking" | "failed"; targetHead: string; attempts: number; message: string; reason?: string };
   tokenUsage?: import("./token-usage.ts").TaskTokenUsage;
   id: string;
   title: string;
@@ -340,6 +341,10 @@ export function record(
   next: TaskState = task.status,
   message?: string,
 ): Task {
+  if (task.acceptanceRepair) {
+    if (action === "submit") task = { ...task, acceptanceRepair: { ...task.acceptanceRepair, phase: "checking" } };
+    else if (["request-changes", "cancel", "accept"].includes(action)) task = { ...task, acceptanceRepair: undefined };
+  }
   const at = new Date().toISOString();
   const event: Task["history"][number] = { at, actor, action };
   if (message) event.text = message;

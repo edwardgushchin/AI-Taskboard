@@ -1,4 +1,5 @@
 {
+  "ui.resolving_acceptance_conflict": "Resolvendo conflito",
   "ui.dismiss_notification_9a17797e": "Ignorar notificação",
   "ui.board_refresh_4c949d36": "Atualização do quadro",
   "ui.opening_project_bc49a4b5": "Projeto de abertura",
@@ -1162,5 +1163,11 @@
   "limits.reset": "Redefinição {time}",
   "ui.schedule_paused": "Agendamento pausado",
   "ui.pause_schedule": "Pausar agendamento",
-  "ui.resume_schedule": "Retomar agendamento"
+  "ui.resume_schedule": "Retomar agendamento",
+  "ui.git_state_unavailable": "Estado do Git indisponível",
+  "ui.configure_git_upstream": "Configure o remoto e a ramificação de acompanhamento",
+  "ui.git_counts_unavailable": "Contadores de acompanhamento indisponíveis",
+  "ui.git_upstream_missing": "Nenhuma ramificação de acompanhamento configurada",
+  "ui.push_remote_branch": "Enviar para a ramificação remota",
+  "ui.push_branch_destination": "Enviar ramificação para "
 }

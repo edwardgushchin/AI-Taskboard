@@ -1,4 +1,5 @@
 {
+  "ui.resolving_acceptance_conflict": "Resolviendo el conflicto",
   "ui.dismiss_notification_9a17797e": "Descartar notificación",
   "ui.board_refresh_4c949d36": "Actualización del tablero",
   "ui.opening_project_bc49a4b5": "Proyecto de apertura",
@@ -1162,5 +1163,11 @@
   "limits.reset": "Se restablece {time}",
   "ui.schedule_paused": "Programación pausada",
   "ui.pause_schedule": "Pausar programación",
-  "ui.resume_schedule": "Reanudar programación"
+  "ui.resume_schedule": "Reanudar programación",
+  "ui.git_state_unavailable": "Estado de Git no disponible",
+  "ui.configure_git_upstream": "Configura el remoto y la rama de seguimiento",
+  "ui.git_counts_unavailable": "Contadores de seguimiento no disponibles",
+  "ui.git_upstream_missing": "No hay una rama de seguimiento configurada",
+  "ui.push_remote_branch": "Enviar a la rama remota",
+  "ui.push_branch_destination": "Enviar rama a "
 }

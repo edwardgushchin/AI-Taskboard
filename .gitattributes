@@ -1,6 +1,2 @@
 *.sh text eol=lf
 tests/fixtures/T-0084/*.json -text
-# Preserve the exact bytes of historical evidence when moving or staging it.
-evidence/T-0077/** -text
-evidence/T-0082/** -text
-evidence/T-0084/** -text

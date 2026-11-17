@@ -76,7 +76,7 @@ When a Windows x64 installer is published, download it from [Releases](https://g
 | Linux x64 / ARM64 | Planned; not verified by a completed CI/release matrix | `.deb` / `.rpm` targets configured |
 | macOS x64 / ARM64 | Planned; not verified by a completed CI/release matrix | `.pkg` target configured; signing and notarization required for distribution |
 
-Status checked on **2026-11-17**: CI and release tasks T-0100 / T-0101 are still drafts. Packaging configuration does not establish platform support. Existing [Windows UI evidence](evidence/T-0070/verification.md) covers development checks, not a clean-machine installer qualification.
+Status checked on **2026-11-17**: CI and release tasks T-0100 / T-0101 are still drafts. Packaging configuration does not establish platform support. The screenshot above was captured from the Windows development renderer; it does not qualify the installer on a clean machine.
 
 ## Data and boundaries
 
