@@ -237,7 +237,7 @@ test("GitHub publication validates input, preserves partial results and pins pus
       if (mode === "move-head") git(root, "switch", "other");
       git(root, "remote", "add", "origin", remote);
     }
-    if (command === "git" && mode === "push-failed") throw Object.assign(new Error("Push failed"), { stderr: "Push rejected" });
+    if (command === "git" && mode === "push-failed") throw Object.assign(new Error("Push failed"), { stderr: "Push rejected https://test-user:test-password@example.invalid/repo" });
     if (command === "git") {
       git(root, "update-ref", "refs/remotes/origin/main", git(root, "rev-parse", "refs/heads/main"));
       if (mode === "upstream-failed") writeFileSync(join(root, ".git", "config.lock"), "");
@@ -257,7 +257,10 @@ test("GitHub publication validates input, preserves partial results and pins pus
     mode = nextMode;
     if (code) await assert.rejects(publishRepository(location, fields), (error: any) => {
       assert.equal(error.code, code);
-      if (nextMode === "push-failed") assert.match(error.details.output, /Push rejected/);
+      if (nextMode === "push-failed") {
+        assert.match(error.details.output, /Push rejected/);
+        assert.doesNotMatch(error.details.output, /test-user|test-password/);
+      }
       return true;
     });
     else assert.equal((await publishRepository(location, fields)).remote, remote);

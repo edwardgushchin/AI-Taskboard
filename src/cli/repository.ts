@@ -365,7 +365,8 @@ async function pushPinnedBranch(location: BoardLocation, branch: string, head: s
     });
   } catch (error) {
     const { stdout = "", stderr = "", killed } = error as { stdout?: string; stderr?: string; killed?: boolean };
-    const output = redactSecrets([stdout, stderr].filter(Boolean).join("\n").trim()).slice(0, 4000);
+    const output = redactSecrets([stdout, stderr].filter(Boolean).join("\n").trim()
+      .replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi, "$1")).slice(0, 4000);
     throw new TaskboardError("GIT_PUSH_FAILED",
       killed ? "Git push timed out. Check the remote branch before retrying." : "Git could not push the branch.", { remote, remoteRef, output });
   }
@@ -401,7 +402,7 @@ async function pushPinnedBranch(location: BoardLocation, branch: string, head: s
     const cause = error instanceof TaskboardError ? error.message + " " + String((error.details as { output?: string } | undefined)?.output ?? "") : String(error);
     throw new TaskboardError("GIT_UPSTREAM_FAILED", "The commit was pushed, but upstream could not be configured. " +
       "The repository and remote were preserved; check branch tracking before retrying.",
-      { pushed: true, branch, head, remote, remoteRef, output: redactSecrets(cause).slice(0, 4000) });
+      { pushed: true, branch, head, remote, remoteRef, output: redactSecrets(cause.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi, "$1")).slice(0, 4000) });
   }
 }
 
