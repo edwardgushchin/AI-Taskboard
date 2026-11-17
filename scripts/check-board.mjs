@@ -138,6 +138,61 @@ app.whenReady().then(async () => {
   await evaluate(`byId('notice-close').click(); void 0`);
   await evaluate(`push(); void 0`);
   await check(`byId('welcome').hidden && !byId('workspace').hidden && byId('app-content').getAttribute('aria-busy') === 'false'`, "a restored board replaces the loading state");
+  if (process.argv.includes("--run-status-only")) {
+    await evaluate(`
+      const queuedTask = task('T-0096', 'Проверка ожидания', { status: 'in_progress',
+        codexThreadId: 'saved-thread', attachments: [{ file: 'notes.txt', name: 'notes.txt' }],
+        subtasks: [{ title: 'Проверка', done: false }],
+        milestone: { title: 'Очень длинная веха '.repeat(12), repository: 'example/board', number: 1 } });
+      fixture.board.tasks = [queuedTask]; fixture.waitingTasks = [queuedTask.id];
+      push(); void 0;
+    `);
+    for (const theme of ['light', 'dark']) for (const width of [320, 200]) for (const locale of ['ru', 'en', 'long']) {
+      nativeTheme.themeSource = theme;
+      await evaluate(`waitFor(() => matchMedia('(prefers-color-scheme: dark)').matches === ${theme === 'dark'})`);
+      await evaluate(`
+        fixture.theme = ${JSON.stringify(theme)}; fixture.russian = ${locale !== 'en'};
+        push();
+        {
+        const testCard = findCard('T-0096');
+        renderAgentRunStatus(testCard.querySelector('.task-run-status'), queuedTask);
+        testCard.style.width = '${width}px'; testCard.style.maxWidth = 'none';
+        if (${locale === 'long'}) testCard.querySelector('.task-run-status').textContent =
+          'Waiting for an available executor with the requested runtime profile. '.repeat(3) + 'W'.repeat(100);
+        }
+        void 0;
+      `);
+      await check(`(() => {
+        const card = findCard('T-0096'), status = card.querySelector('.task-run-status');
+        const meta = card.querySelector('.task-meta'), details = status.parentElement;
+        const s = status.getBoundingClientRect(), m = meta.getBoundingClientRect();
+        return details.classList.contains('task-card-details') && status.nextElementSibling === meta &&
+          s.bottom <= m.top && s.width >= details.clientWidth - 25 &&
+          status.scrollWidth <= status.clientWidth + 1 && card.scrollWidth <= card.clientWidth + 1 &&
+          meta.scrollWidth <= meta.clientWidth + 1 && !meta.querySelector('.task-run-status') &&
+          (status.textContent.startsWith('Waiting') || status.textContent === 'Ожидает свободного исполнителя');
+      })()`, `full-width waiting block: ${theme}, ${width}px, ${locale}, long milestone and attachments`);
+      await capture(`waiting-${theme}-${width}-${locale}.png`);
+    }
+    await evaluate(`fixture.russian = true; fixture.waitingTasks = []; push(); void 0`);
+    await check(`findCard('T-0096').querySelector('.task-run-status').textContent === 'Запуск с доски не активен'`, 'dequeue replaces waiting with inactive status');
+    await evaluate(`fixture.waitingTasks = ['T-0096']; fixture.runningTasks = ['T-0096']; push(); void 0`);
+    await check(`!!findCard('T-0096').querySelector('.agent-spinner') && !findCard('T-0096').textContent.includes('Ожидает свободного')`, 'running takes precedence over waiting');
+    await evaluate(`fixture.runningTasks = []; fixture.reviewingTasks = { 'T-0096': 'reviewer' }; push(); void 0`);
+    await check(`!!findCard('T-0096').querySelector('.agent-spinner')`, 'active review takes precedence over waiting');
+    await evaluate(`fixture.reviewingTasks = {}; fixture.board.tasks[0].mergeRepair = {}; fixture.board.tasks[0].revision++; push(); void 0`);
+    await check(`findCard('T-0096').querySelector('.task-run-status').textContent === t('ui.waiting_for_a_reviewer_slot_8918dd95')`, 'repair queue retains reviewer waiting label');
+    await evaluate(`fixture.waitingTasks = []; fixture.board.tasks[0].status = 'ready'; fixture.board.tasks[0].revision++; push(); void 0`);
+    await check(`!findCard('T-0096').querySelector('.task-run-status')`, 'no block remains when status has no run label');
+    await evaluate(`delete queuedTask.milestone; queuedTask.attachments = []; queuedTask.subtasks = [];
+      queuedTask.status = 'ready'; queuedTask.revision++; fixture.runningTasks = ['other-task'];
+      push(); void 0`);
+    await check(`!findCard('T-0096').querySelector('.task-run-status')`, 'occupied slots alone do not imply waiting');
+    await evaluate(`fixture.waitingTasks = ['T-0096']; push(); void 0`);
+    await check(`findCard('T-0096').querySelector('.task-run-status').nextElementSibling.classList.contains('task-meta')`, 'ready task without optional metadata also has a separate waiting block');
+    console.log('Run status Chromium checks passed: ' + checks);
+    return;
+  }
   if (process.argv.includes("--scroll-only")) {
     await evaluate(`
       fixture.board.tasks = Array.from({ length: 40 }, (_, i) => task('S-' + i, 'Scroll task ' + i,
