@@ -2037,9 +2037,18 @@ function draftComposer() {
     workLoading = true;
     workOlder.disabled = true;
     try {
-      const result = await api.boardHistory(project, cursor, "work");
-      if (disposed || work.hidden) return;
-      if (!result.ok) throw new Error(boardError(result.error));
+      let result;
+      let next = cursor;
+      const visited = new Set();
+      do {
+        visited.add(next);
+        result = await api.boardHistory(project, next, "work");
+        if (disposed || work.hidden) return;
+        if (!result.ok) throw new Error(boardError(result.error));
+        next = result.data.nextCursor;
+        // A broken provider cursor must not keep the loading loop alive.
+        if (visited.has(next)) next = null;
+      } while (!result.data.turns.length && next);
       if (!cursor && loadedOlderWork && !workViewport.atEnd()) {
         workReload = true;
         return;
@@ -2051,10 +2060,11 @@ function draftComposer() {
         new Set([...work.querySelectorAll("[data-item]")].map(row => activityRowKey(row.dataset.item)));
       for (const turn of result.data.turns) {
         for (const { text, files, clientId, at } of turn.messages) page.append(chatMessage("user", text, files, false, false, clientId, at));
-        if (!turn.items.length) continue;
-        for (const item of turn.items) saved.add(item.id);
+        const items = turn.items.filter(item => !saved.has(item.id));
+        if (!items.length) continue;
+        for (const item of items) saved.add(item.id);
         const run = element("div", undefined, "chat-run");
-        renderRunActivity(run, turn.items, true, turn.durationMs, undefined, { seenMessages: seen });
+        renderRunActivity(run, items, true, turn.durationMs, undefined, { seenMessages: seen });
         if (previous) {
           for (const row of run.querySelectorAll("[data-item]")) {
             if (!previous.has(activityRowKey(row.dataset.item))) row.setAttribute("data-enter", "");
@@ -2068,7 +2078,7 @@ function draftComposer() {
         else workSaved.replaceChildren(page);
         loadedOlderWork = Boolean(cursor);
         savedWorkItems = saved;
-        workCursor = result.data.nextCursor;
+        workCursor = next;
         workOlder.hidden = !workCursor;
         workError.hidden = true;
         renderLiveWork();
@@ -2081,6 +2091,7 @@ function draftComposer() {
         workViewport.update(() => {
           workError.textContent = error.message;
           workError.hidden = false;
+          workOlder.hidden = false;
           renderLiveWork();
         });
       }
