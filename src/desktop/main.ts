@@ -49,6 +49,7 @@ import { goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryFor
 import type { BoardMcpTool } from "./board-mcp.ts";
 import { createAgentSlots, parseAgentLimits } from "./agent-limits.ts";
 import { nextReadyTask } from "./auto-queue.ts";
+import { automationDelivery } from "./automation-delivery.ts";
 import type { AgentRole } from "./agent-limits.ts";
 import { checkForUpdates } from "./updates.ts";
 import { settingsDelivery, syncSettingsNotices } from "./settings-notices.ts";
@@ -347,6 +348,7 @@ function subscribe(project: string, board: Board): BoardWatch {
       }
       if (result.ok) {
         watch.board = result.data;
+        for (const requests of [boardRequests, boardWorkRequests]) requests.get(projectIdentity(project))?.automationChanged?.(result.data);
         for (const listener of watch.listeners) listener(result.data);
         scheduleAgentWork();
       }
@@ -930,6 +932,8 @@ type ManagerRequest = {
   items?: BoardActivity[];
   publishRun?: () => void;
   wakeGoal?: () => void;
+  automationEvent?: (event: { error: string }) => void;
+  automationChanged?: (board: Board) => void;
   question?: { view: ManagerQuestion; settle: (answer: string | null) => void };
 };
 const boardRequests = new Map<string, ManagerRequest>();
@@ -955,7 +959,11 @@ function scheduleAutoBoard(watch: BoardWatch) {
   if (state.running) return;
   state.running = true;
   const queue = state;
-  const failed = (error: string) => broadcastBoardChat(project, "orchestrator-review-error", { error });
+  const failed = (error: string) => {
+    broadcastBoardChat(project, "orchestrator-review-error", { error });
+    boardWorkRequests.get(projectIdentity(project))?.automationEvent?.({ error });
+    boardRequests.get(projectIdentity(project))?.automationEvent?.({ error });
+  };
   void (async () => {
     // Read again before every decision; watch snapshots can lag a CLI write.
     for (;;) {
@@ -964,6 +972,7 @@ function scheduleAutoBoard(watch: BoardWatch) {
       if (!current.ok) { failed(current.error.message); return; }
       const board = current.data;
       if (isManual(board.settings)) return;
+      const controls = board.settings.autoMode ? board.settings.autoQueue : undefined;
       const eligibleTasks = board.settings.autoMode ? board.tasks : board.tasks.filter(task => task.launchRequested);
       if (!board.settings.autoMode && !eligibleTasks.some(task => task.status === "ready")) return;
       const key = projectIdentity(project);
@@ -1013,6 +1022,7 @@ function scheduleAutoBoard(watch: BoardWatch) {
           .then(result => { if (!result.ok) failed(result.error.message); else if (result.data?.error) failed(result.data.error); })
           .catch(error => failed((error as Error).message));
       }
+      if (controls?.paused) return;
       const available = {
         executor: agentSlots.available(key, "executor", board.settings.agentLimits),
         reviewer: agentSlots.available(key, "reviewer", board.settings.agentLimits),
@@ -1031,14 +1041,15 @@ function scheduleAutoBoard(watch: BoardWatch) {
         const candidate = board.tasks.find(task => task.id === id)!;
         return !available[candidate.mergeRepair ? "reviewer" : "executor"] || executorBusy(project, id) ||
           queue.launches.has(id + ":" + candidate.revision);
-      });
+      }, Date.now(), controls);
       if (!task) return;
       const attempt = task.id + ":" + task.revision;
       queue.launches.add(attempt);
-      const result = await launchTask(project, task.id, undefined, false, task.revision, undefined, Boolean(task.schedule), false, false, Boolean(board.settings.autoMode));
+      const result = await launchTask(project, task.id, undefined, false, task.revision, undefined, Boolean(task.schedule), false, false,
+        Boolean(board.settings.autoMode), false, controls?.revision ?? 0);
       if (!result.ok) {
         if (["BOARD_BUSY", "REVISION_CONFLICT", "INVALID_TRANSITION", "LAUNCH_IN_PROGRESS", "CHAT_BUSY", "EXECUTOR_LIMIT", "REVIEWER_LIMIT",
-            "PROJECT_CLOSING", "DEPENDENCIES_INCOMPLETE", "AUTO_MODE_DISABLED"].includes(result.error.code)) {
+            "PROJECT_CLOSING", "DEPENDENCIES_INCOMPLETE", "AUTO_MODE_DISABLED", "AUTO_QUEUE_PAUSED", "AUTO_QUEUE_CHANGED"].includes(result.error.code)) {
           queue.launches.delete(attempt);
           return; // Retry on the next event/tick, never spin on the same snapshot.
         }
@@ -1614,6 +1625,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   requests.set(projectKey, running);
   let live: NonNullable<import("./board-runtime.ts").RuntimeEntry["state"]>["live"];
   let liveTimer: NodeJS.Timeout | undefined;
+  let stopAutomation = () => {};
   const broadcastRun = () => {
     if (cleanupJob) return;
     broadcastMaintenanceSafe(project, "orchestrator-run", lane === "work"
@@ -2085,6 +2097,25 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
             notify("orchestrator-ready", { model });
             return;
           }
+          if (!cleanupJob && !repairTask) {
+            stopAutomation();
+            const automation = automationDelivery(text => control.steer(text, []), () => {
+              waitWork.abort();
+              waitWork = new AbortController();
+            }, signal);
+            running.automationEvent = event => automation.event(event);
+            const observeAutomation = (snapshot: Board) => {
+              const entries = agentSlots.entries(project);
+              automation.observe(snapshot, id => ({
+                running: executorBusy(project, id),
+                reviewing: subscriptions.get(project)?.reviewerRuns.has(id) ||
+                  entries.some(entry => entry.kind === "slot" && entry.role === "reviewer" && entry.task === "review:" + id),
+              }));
+            };
+            running.automationChanged = observeAutomation;
+            stopAutomation = () => { automation.dispose(); running.automationEvent = undefined; running.automationChanged = undefined; };
+            observeAutomation(subscriptions.get(project)?.board ?? { ...board, settings: settings.data });
+          }
           if (goal) {
             running.wakeGoal = () => {
               waitWork.abort();
@@ -2168,6 +2199,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     return cliFailure("CODEX_BOARD_REQUEST_FAILED", message);
   } finally {
     clearTimeout(liveTimer);
+    stopAutomation();
     if (cleanupJob) {
       try { await callCli(project, ["maintenance"], { action: "release", id: cleanupJob.id, owner: process.pid }); }
       catch (error) { console.warn("Private maintenance release deferred", error); }
@@ -2730,6 +2762,7 @@ function publishRunActivity(project: string, id: string, items: RunActivity[]) {
 function notifyRunChange(project: string) {
   const watch = subscriptions.get(project);
   if (watch) {
+    for (const requests of [boardRequests, boardWorkRequests]) requests.get(projectIdentity(project))?.automationChanged?.(watch.board);
     for (const listener of watch.listeners) listener(watch.board, true);
     scheduleAutoReview(watch);
   }
@@ -2751,7 +2784,7 @@ type LaunchState = Pick<Task, "acceptanceRepair" | "id" | "title" | "status" | "
 
 async function launchTask(project: string, id: string, revisionRequest?: { input: Record<string, unknown> },
   newThread: false | "user" | "manager" = false, revision?: number,
-  continuation: ExecutorContinuation = {}, scheduled = false, resolveConflicts = false, resumeWithFullAccess = false, autoMode = false, manual = false): Promise<CliReply<LaunchState>> {
+  continuation: ExecutorContinuation = {}, scheduled = false, resolveConflicts = false, resumeWithFullAccess = false, autoMode = false, manual = false, autoQueueRevision?: number): Promise<CliReply<LaunchState>> {
   if (isManual(readBoardSettings(runtimeLocation(project)))) return cliFailure("MANUAL_BOARD", "На обычной доске исполнители недоступны.");
   const key = project + "\0" + id;
   if (launchingTasks.has(key)) return cliFailure("LAUNCH_IN_PROGRESS", t("errors.07f5f719b5d5f6c5"));
@@ -2869,7 +2902,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     signal.throwIfAborted();
     const started = await callCli<{ task: LaunchState & ExecutorTask } & ({ worktree: string } | { cwd: string })>(project, ["start", id, "--compact"],
       { revision: revision ?? current.data.revision, actor: manual ? "user" : "agent", launchDetails: true, ...(scheduled ? { scheduled } : {}),
-        ...(autoMode ? { autoMode: true } : {}),
+        ...(autoMode ? { autoMode: true, autoQueueRevision } : {}),
         ...(resolveConflicts ? { resolveConflicts } : {}),
         ...(process.platform === "win32" && client.windowsSandbox === "elevated" ? { isolatedWorktree: true } : {}) });
     if (!started.ok) {

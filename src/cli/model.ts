@@ -231,6 +231,7 @@ export interface BoardSettings {
   reviewMode?: ReviewMode;
   autoReview?: boolean;
   autoMode?: boolean;
+  autoQueue?: { revision: number; paused: boolean; order: string[]; held: string[] };
 }
 
 export const defaultBoardAgents = {

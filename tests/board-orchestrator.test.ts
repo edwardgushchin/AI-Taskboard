@@ -28,6 +28,8 @@ import { readReviewReports, saveReviewReports } from "../src/desktop/review-hist
 import { reviewerActivity, withReviewerChat } from "../src/desktop/reviewer-chat.ts";
 import { goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryForView, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, saveManagerHistory } from "../src/desktop/manager-history.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
+import { autoQueueSettings } from "../src/cli/auto-queue.ts";
+import { automationDelivery } from "../src/desktop/automation-delivery.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import { settingsDelivery, syncSettingsNotices } from "../src/desktop/settings-notices.ts";
 import { githubReadTool } from "../src/desktop/github-read.ts";
@@ -72,7 +74,7 @@ function fixture(t: TestContext) {
   };
   const { autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools } = runInNewContext(
     boardSource + "\n({ autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools })",
-    { AbortSignal, isManual, manualContext, locateBoard, readBoardSettings, boardReviewMode, callCli, cliFailure, defaultBoardAgents, hexTagColor, inspectProjectPath, managerInbox, needsManagerAttention, projectSha256, reviewVerifier, russianWriting, TaskboardError, taskIdPattern,
+    { AbortSignal, autoQueueSettings, isManual, manualContext, locateBoard, readBoardSettings, boardReviewMode, callCli, cliFailure, defaultBoardAgents, hexTagColor, inspectProjectPath, managerInbox, needsManagerAttention, projectSha256, reviewVerifier, russianWriting, TaskboardError, taskIdPattern,
       taskFields: { title: {}, description: {}, criteria: {}, tags: {} },
     },
   );
@@ -129,7 +131,7 @@ function fixture(t: TestContext) {
     activateTab: (owner: { active: unknown }, tab: unknown) => { owner.active = tab; },
     launchingTasks: new Set(), runningTasks, chatRuns: new Map(), activeAgents, managerInbox, needsManagerAttention, subscriptions, reviewerTools,
     process, closingProjects: new Set(), setImmediate, setTimeout, clearTimeout, performance, console, agentSlots, wait,
-    russianWriting, isManual, manualContext, runtimeLocation, runtimeTransaction, readBoardSettings, settingsDelivery, syncSettingsNotices,
+    russianWriting, isManual, manualContext, runtimeLocation, runtimeTransaction, readBoardSettings, settingsDelivery, syncSettingsNotices, automationDelivery,
     reviewWithCodex: async (_profile: string, cwd: string, settings: ChatSettings | null, context: string,
       tools: { name: string }[], call: RunAction, _signal: AbortSignal,
       onUsage: (report: import("../src/cli/token-usage.ts").TokenUsageReport) => Promise<void>) => {
@@ -201,7 +203,7 @@ function fixture(t: TestContext) {
       const expectedTools = cleanupTurn ? ["task_cleanup_status", "task_cleanup", "project_path", "project_sha256"] : manualTurn ? ["ask_user", "tag_set_color", "github_read"] : reviewTurn ? [
         "task_review", "task_review_diff", "task_review_artifact", "task_accept", "task_request_changes", "project_git", "project_path", "project_sha256",
       ] : [
-        "task_cancel", "provider_tools", "task_tool_grant", "task_tool_revoke", "task_set_executor_access", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_approve", "task_wait", "task_review_queue", "task_review", "task_review_diff",
+        "board_auto_queue", "task_cancel", "provider_tools", "task_tool_grant", "task_tool_revoke", "task_set_executor_access", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_approve", "task_wait", "task_review_queue", "task_review", "task_review_diff",
         "task_review_artifact", "task_accept", "task_request_changes",
         "task_cleanup_status", "task_cleanup", "project_git", "project_git_push",
         "milestones_list", "github_create_milestone", "github_set_milestone_due", "task_set_milestone", "tag_set_color", "github_read",
@@ -273,6 +275,8 @@ function fixture(t: TestContext) {
       subscriptions.set(project, { board: board.data, reviewerRuns: new Map(), reviewAttempts: new Map(),
         integrationAttempts: new Map(), reviewReports: new Map(), tabs: new Set() });
       for (const listener of boardListeners) listener(board.data);
+      runtime.boardWorkRequests.get(project)?.automationChanged?.(board.data);
+      runtime.boardRequests.get(project)?.automationChanged?.(board.data);
     },
     cli: (args: string[], input?: unknown) => callCli(project, args, input),
     run: (request: string, reply: Reply, files: unknown[] = [], goal: boolean | "resume" = false, id?: string) => {
@@ -352,6 +356,58 @@ test("manager can set and read the board tag palette in HEX", async t => {
     return { text: "Tag color saved." };
   });
   assert.equal(result.data?.answer, "Tag color saved.", JSON.stringify(result.error ?? result.data?.error));
+});
+
+test("a goal controls the persistent automatic queue and receives live board changes", async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"], { git: false })).ok, true);
+  assert.equal((await f.cli(["settings"], { autoMode: true, reviewMode: "reviewer" })).ok, true);
+  const first = (await f.cli(["create"], { title: "First slice", criteria: ["First result"] })).data;
+  const second = (await f.cli(["create"], { title: "Second slice", criteria: ["Second result"] })).data;
+  await f.cli(["approve", first.id]); await f.cli(["approve", second.id]);
+  await f.pushBoard();
+  let queueRevision = 0;
+  const notifications: string[] = [];
+  const received = Promise.withResolvers<void>();
+  const result = await f.run("Prepare a release with automatic dispatch", async (act, _prompt, _images, _id, _context, _waiting, _signal, goal) => {
+    goal!.accepted();
+    goal!.update({ objective: "Prepare a release", status: "active" });
+    const initial = await act("board_auto_queue", {});
+    assert.equal(initial.ok, true, JSON.stringify(initial));
+    assert.equal(initial.data.enabled, true);
+    const controlled = await act("board_auto_queue", { revision: initial.data.queue.revision, order: [second.id, first.id], hold: [first.id] });
+    assert.equal(controlled.ok, true, JSON.stringify(controlled));
+    queueRevision = controlled.data.queue.revision;
+    assert.equal((await act("board_auto_queue", { revision: 0, paused: true })).error.code, "REVISION_CONFLICT");
+    goal!.enableNotifications(async text => {
+      notifications.push(text);
+      if (text.includes('"status":"in_progress"')) received.resolve();
+    });
+    const waiting = act("task_wait", {});
+    for (let attempt = 0; !f.boardListeners.size && attempt < 50; attempt++) await wait(10);
+    assert.equal(f.boardListeners.size, 1, "an automatic goal can wait before any executor is known");
+    const snapshot = (await f.cli(["show", second.id])).data;
+    const started = await f.cli(["start", second.id], { revision: snapshot.revision, autoMode: true, autoQueueRevision: queueRevision });
+    assert.equal(started.ok, true, JSON.stringify(started));
+    f.setRunning(second.id, true);
+    await f.pushBoard();
+    await Promise.race([received.promise, wait(5000).then(() => assert.fail("No live automation update"))]);
+    assert.equal((await waiting).error.code, "USER_MESSAGE_RECEIVED");
+    assert.ok(notifications.some(text => text.includes(second.id) && text.includes('"running":true')));
+    const paused = await act("board_auto_queue", { revision: queueRevision, paused: true });
+    assert.equal(paused.ok, true);
+    assert.equal((await f.cli(["show", second.id])).data.status, "in_progress");
+    goal!.update({ objective: "Prepare a release", status: "paused" });
+    return { text: "Queue planned and automatic work observed." };
+  }, [], true);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal((await f.cli(["settings"])).data.autoMode, true);
+  const saved = (await f.cli(["auto-queue"])).data;
+  assert.equal(saved.paused, true);
+  assert.deepEqual(saved.order, [second.id, first.id]);
+  const before = notifications.length;
+  await f.pushBoard(); await wait(400);
+  assert.equal(notifications.length, before, "the completed turn removes its live subscription");
 });
 
 test("manager grants and revokes executor access for a task", async t => {

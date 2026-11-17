@@ -18,6 +18,7 @@ import { boardAgentRoles, boardReviewMode, hexTagColor, member, number, object, 
 import type { GitHubMilestone, Task } from "./model.ts";
 import { exists, initializeBoard, locateBoard, onBoard, readBoardSettings, withTaskStartLock } from "./storage.ts";
 import { recordSettings } from "./settings-notices.ts";
+import { requireAutoQueue, updateAutoQueue } from "./auto-queue.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
 import { discoverRepository, invokeGit, scheduleGitMaintenance } from "./git.ts";
 import { boardGitInfo, changeRepository, createGitHubMilestone, githubMilestones, githubRepository, inspectRepository, publishRepository, pushRepositoryBranch, readGitHub, repositoryRefs, setGitHubMilestoneDueDate } from "./repository.ts";
@@ -40,6 +41,7 @@ const help = [
   "Usage: ai-taskboard [--project PATH] [--json] COMMAND [TASK-ID] [--stdin]",
   "Commands: init, list, show, create, update, comment, approve, return-to-draft, start, progress,",
   "          pause, block, resume, unblock, preview, submit, review, accept, restore-changes, request-changes, cancel, cleanup, cleanup-status, settings, watch, doctor",
+  "          auto-queue (read controls), auto-queue --stdin (revision, paused, order, hold, release)",
   "          list --archived, archive sweep, chat TASK-ID, attachment add TASK-ID, attachment read TASK-ID",
   "          review-artifact TASK-ID --stdin (revision, source, sha256 and optional offset)",
   "          review-queue (Git status and submission time for tasks in review)",
@@ -450,6 +452,7 @@ function run(
     const active = store.doctor(input.repair === true);
     return { issues: [...active.issues, ...archive.issues], recovered: active.recovered, cleanedArchives: archive.cleaned };
   }
+  if (command === "auto-queue") return updateAutoQueue(store, input);
   if (command === "settings") {
     if (input.boardType !== undefined && input.boardType !== (store.index.settings.boardType ?? "agent")) {
       throw new TaskboardError("IMMUTABLE_BOARD_TYPE", "Тип доски выбирается при создании и не может быть изменён.");
@@ -731,6 +734,7 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
       if (input.autoMode === true && !store.index.settings.autoMode) {
         throw new TaskboardError("AUTO_MODE_DISABLED", "Automatic starts are disabled.");
       }
+      if (input.autoMode === true) requireAutoQueue(store.index.settings, id, input.autoQueueRevision);
       if ((input.scheduled === true || input.autoMode === true) && task.schedule?.paused) {
         throw new TaskboardError("INVALID_TRANSITION", "The recurring schedule is paused.");
       }

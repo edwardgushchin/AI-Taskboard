@@ -1,5 +1,5 @@
 import { priorities } from "../cli/model.ts";
-import type { Task } from "../cli/model.ts";
+import type { BoardSettings, Task } from "../cli/model.ts";
 
 export type QueueTask = Pick<Task, "id" | "status" | "priority" | "dueDate" | "milestone" | "schedule"> & {
   readySince?: string; unfinishedDependencies?: string[];
@@ -14,8 +14,13 @@ export function compareReadyTasks(a: QueueTask, b: QueueTask, milestoneDates: Re
     compare(date(a.readySince), date(b.readySince)) || a.id.localeCompare(b.id, "en", { numeric: true });
 }
 
-export function nextReadyTask<T extends QueueTask>(tasks: T[], milestoneDates: ReadonlyMap<number, string | null>, busy: (id: string) => boolean, now = Date.now()) {
-  return tasks.filter(task => task.status === "ready" && !task.unfinishedDependencies?.length &&
+export function nextReadyTask<T extends QueueTask>(tasks: T[], milestoneDates: ReadonlyMap<number, string | null>, busy: (id: string) => boolean, now = Date.now(), queue?: BoardSettings["autoQueue"]) {
+  if (queue?.paused) return;
+  const positions = new Map(queue?.order.map((id, index) => [id, index]));
+  return tasks.filter(task => task.status === "ready" && !queue?.held.includes(task.id) && !task.unfinishedDependencies?.length &&
     (!task.schedule || (!task.schedule.paused && Date.parse(task.schedule.nextAt) <= now)) && !busy(task.id))
-    .sort((a, b) => compareReadyTasks(a, b, milestoneDates))[0];
+    .sort((a, b) => {
+      const left = positions.get(a.id) ?? Infinity, right = positions.get(b.id) ?? Infinity;
+      return left === right ? compareReadyTasks(a, b, milestoneDates) : left - right;
+    })[0];
 }
