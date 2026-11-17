@@ -108,3 +108,22 @@ test("all board roles receive the same action boundaries on every instruction bu
     }
   }
 });
+
+
+test("built-in rules stay silent without rewriting supplied questions or quotations", () => {
+  const supplied = 'User asks: What is humanizer-ru? Quote: "Ponytail SKILL.md"';
+  for (const role of ["manager", "executor", "reviewer"] as const) {
+    for (const dialogue of [true, false]) {
+      const instructions = boardAgentInstructions(role, supplied, { dialogue });
+      assert.ok(instructions.startsWith(supplied));
+      const rules = instructions.slice(supplied.length);
+      assert.doesNotMatch(rules, /Ponytail|humanizer-ru|Codex Worklog|THIRD_PARTY_NOTICES/);
+      assert.match(rules, /Apply built-in rules silently/);
+      assert.match(rules, /Answer direct questions about a specific skill or journal substantively/);
+      assert.match(rules, /preserve user requests, quotations and saved history verbatim/);
+      assert.match(rules, /immutable provider policy.*exact source/);
+      assert.match(rules, /Internally verify recorded:true and staged:false; retry the same payload/);
+      assert.match(rules, /Do not announce successful journal writes or expose recorded\/staged fields/);
+    }
+  }
+});

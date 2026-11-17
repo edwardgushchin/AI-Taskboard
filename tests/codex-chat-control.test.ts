@@ -511,7 +511,10 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.equal(requests[6].params.model, "manager-model");
   assert.equal(requests[6].params.permissions, "ai-taskboard-manager");
   assert.equal(requests[6].params.sandbox, undefined);
-  assert.match(requests[6].params.developerInstructions, /Ponytail.*worklog_record/s);
+  assert.match(requests[6].params.developerInstructions, /These rules apply.*worklog_record/s);
+  assert.match(requests[6].params.developerInstructions, /Apply built-in rules silently/);
+  assert.match(requests[6].params.developerInstructions, /Internally verify recorded:true and staged:false/);
+  assert.doesNotMatch(requests[6].params.developerInstructions, /Ponytail|humanizer-ru|Codex Worklog/);
   assert.match(requests[6].params.developerInstructions, /Format substantial progress updates in Markdown/);
   assert.ok(requests[6].params.developerInstructions.includes(russianWriting));
   const diaryPath = readFileSync(join(directory, "worklog-path"), "utf8");
