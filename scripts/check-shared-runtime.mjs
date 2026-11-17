@@ -2,7 +2,7 @@
 // Node stand-ins so this check never contacts a model or opens a user's board.
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createRequire } from "node:module";
@@ -234,19 +234,24 @@ if (!process.versions.electron) {
     await delay(1000);
     for (const pid of providerPids) assert.throws(() => process.kill(pid, 0), "fixture provider must be dead");
     if (process.platform === "win32") {
-      // Leave the shared node_modules intact and clear Git's Windows fixture attributes.
+      // Windows Git uses hidden metadata and read-only loose objects.
       const modules = join(scratch, "node_modules");
       if (existsSync(modules)) rmSync(modules);
-      const gitMetadata = join(scratch, "git-board", ".git");
-      if (existsSync(gitMetadata)) execFileSync("attrib.exe", ["-H", gitMetadata], { windowsHide: true });
-      for (const folder of [join(gitMetadata, "objects"), join(scratch, "remote", "objects")]) {
-        if (!existsSync(folder)) continue;
-        for (const entry of readdirSync(folder, { recursive: true, withFileTypes: true })) {
-          if (entry.isFile()) chmodSync(join(entry.parentPath, entry.name), 0o600);
+      execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `
+        $ErrorActionPreference = 'Stop'
+        $base = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar)
+        $fixture = [IO.Path]::GetFullPath($env:TASKBOARD_SHARED_RUNTIME_FIXTURE)
+        if ([IO.Path]::GetDirectoryName($fixture) -ne $base -or [IO.Path]::GetFileName($fixture) -notlike 'taskboard-shared-runtime-*') {
+          throw 'Unexpected fixture directory'
         }
-      }
-    }
-    rmSync(scratch, { recursive: true, maxRetries: 10, retryDelay: 200 });
+        $flags = [IO.FileAttributes]::ReadOnly -bor [IO.FileAttributes]::Hidden
+        foreach ($entry in [IO.Directory]::EnumerateFileSystemEntries($fixture, '*', [IO.SearchOption]::AllDirectories)) {
+          $attributes = [IO.File]::GetAttributes($entry)
+          if ($attributes -band $flags) { [IO.File]::SetAttributes($entry, $attributes -band (-bnot $flags)) }
+        }
+        Remove-Item -LiteralPath $fixture -Recurse
+      `], { env: { ...process.env, TASKBOARD_SHARED_RUNTIME_FIXTURE: scratch }, windowsHide: true });
+    } else rmSync(scratch, { recursive: true, maxRetries: 10, retryDelay: 200 });
     assert.equal(existsSync(scratch), false);
     console.log("PASS: private profiles, boards and fixture providers cleaned");
   }
