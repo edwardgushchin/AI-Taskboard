@@ -25,11 +25,30 @@ const updateTool = {
   description: "Edit the requested fields while keeping the current status. Lists replace existing lists.",
   inputSchema: { type: "object", properties, required: ["authorization"], additionalProperties: false },
 };
-export const chatTools = [updateTool];
+const returnProperties = { reason: string };
+const returnTool = {
+  type: "function", name: "task_request_changes",
+  description: "Return this review card for correction. Include all user feedback and confirmed defects in reason. The executor waits for this discussion to finish and for an available slot. Confirm only the operation result; do not claim it has started.",
+  inputSchema: { type: "object", properties: returnProperties, required: ["reason"], additionalProperties: false },
+};
+export const chatTools = [updateTool, returnTool];
 
-export function taskChatActions(project: string, initial: Task, userText: string, onChange: () => void) {
+export function taskChatActions(project: string, initial: Task, userText: string, onChange: () => void,
+  requestChanges?: (task: Task, reason: string) => Promise<CliReply>) {
   let task = initial;
   return async (name: string, args: unknown): Promise<CliReply> => {
+    if (name === returnTool.name) {
+      if (!args || typeof args !== "object" || Array.isArray(args) ||
+          Object.keys(args).some(key => !Object.hasOwn(returnProperties, key))) {
+        return cliFailure("INVALID_INPUT", "Supply only the correction reason for this card.");
+      }
+      const { reason } = args as { reason?: unknown };
+      if (typeof reason !== "string" || !reason.trim()) return cliFailure("INVALID_INPUT", "Describe all required corrections.");
+      if (task.status !== "review" || !requestChanges) return cliFailure("INVALID_TRANSITION", "Only the current review card can be returned.");
+      const result = await requestChanges(task, reason);
+      if (result.ok) { task = { ...task, status: "in_progress" }; onChange(); }
+      return result;
+    }
     if (name !== updateTool.name || !args || typeof args !== "object" || Array.isArray(args)) {
       return cliFailure("INVALID_INPUT", "Unknown task action or invalid arguments.");
     }

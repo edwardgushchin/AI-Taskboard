@@ -733,6 +733,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
   const directories = active?.directories ?? new Set<string>();
   let scratch: string | undefined;
   let saved = request.retryAt !== undefined;
+  let handoff: LaunchState | undefined;
   try {
     const { model, effort, text, files, retryAt } = request;
     signal.throwIfAborted();
@@ -802,7 +803,19 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     }
     const replyStarted = performance.now();
     let replyTo = last;
-    let runAction = taskChatActions(project, task, message.text ?? "", () => notify({ type: "changed" }));
+    const requestChanges = async (card: Task, reason: string): Promise<CliReply> => {
+      const review = await callCli<{ revision: number; targetHead: string | null; settings: { reviewMode: string } }>(project, ["review", id], { compact: true, includeReviewerSettings: true });
+      if (!review.ok) return review;
+      if (review.data.revision !== card.revision) return cliFailure("REVISION_CONFLICT", "The card changed. Read the current card before returning it.");
+      const returned = await callCli<LaunchState>(project, ["request-changes", id, "--compact"], {
+        revision: card.revision, reason, actor: "manager", targetHead: review.data.targetHead,
+        reviewMode: review.data.settings.reviewMode, launchDetails: true,
+      });
+      if (!returned.ok) return returned;
+      handoff = returned.data;
+      return { ok: true, data: { ...returned.data, feedback: reason, executorState: "waiting_for_discussion" } };
+    };
+    let runAction = taskChatActions(project, task, message.text ?? "", () => notify({ type: "changed" }), requestChanges);
     const ready = Promise.withResolvers<AgentControl>();
     void ready.promise.catch(() => {});
     activeAgents.set(key, { directories, control: {
@@ -812,7 +825,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       if (index < replyTo) return () => {};
       const previousIndex = replyTo, previousAction = runAction;
       replyTo = index;
-      runAction = taskChatActions(project, latest, latest.history[index].text ?? "", () => notify({ type: "changed" }));
+      runAction = taskChatActions(project, latest, latest.history[index].text ?? "", () => notify({ type: "changed" }), requestChanges);
       return () => { if (replyTo === index) { replyTo = previousIndex; runAction = previousAction; } };
     } });
     const answer = await replyToTask(app.getPath("userData"), project, { model, effort }, prompt, images,
@@ -820,7 +833,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       (name, args) => runAction(name, args),
       scratch, maxAttachmentBytes - task.attachments.reduce((sum, file) => sum + file.bytes, 0),
       report => saveTaskTokenUsage(project, id, "discussion", report),
-      control => ready.resolve(control), signal, id).finally(() => ready.reject(new Error("The agent session ended.")));
+      control => ready.resolve(control), signal, id, task.status === "review").finally(() => ready.reject(new Error("The agent session ended.")));
     if ("interrupted" in answer) return { saved, result: { ok: true as const, data: task } };
     signal.throwIfAborted();
     const result = await callCli<Task>(project, ["chat", id], {
@@ -832,6 +845,16 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     return { saved, result: cliFailure("CHAT_FAILED", message.slice(0, 1500)) };
   } finally {
     if (!active) {
+      if (handoff) {
+        // Saving the final chat reply advances the revision. Queue only after all
+        // discussion writes finish, while chatRuns still prevents a local launch.
+        const latest = await callCli<LaunchState>(project, ["show", id, "--compact"]);
+        if (latest.ok && latest.data.status === "in_progress") {
+          const pending = { project, id, revision: latest.data.revision };
+          deferredExecutors.set(key, pending);
+          agentSlots.defer(project, id, pending);
+        }
+      }
       activeAgents.delete(key);
       const wasReplying = replyingTasks.delete(key);
       for (const directory of directories) await rm(directory, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});

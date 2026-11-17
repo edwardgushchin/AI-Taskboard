@@ -10,6 +10,7 @@ import ts from "typescript";
 import { createTask } from "../src/cli/tasks.ts";
 import { projectLabels } from "../src/desktop/project-tabs.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
+import { taskChatActions } from "../src/desktop/chat-actions.ts";
 
 const source = readFileSync(new URL("../src/desktop/main.ts", import.meta.url), "utf8");
 const parsed = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, true);
@@ -25,7 +26,7 @@ const activitySource = parsed.statements.filter(node => {
     ts.isIdentifier(declaration.name) && names.has(declaration.name.text));
 }).map(node => node.getText(parsed)).join("\n");
 
-function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean; saveReplyFailure?: boolean; controlled?: boolean; steerFailure?: boolean; stopFailure?: boolean } = {}) {
+function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean; saveReplyFailure?: boolean; controlled?: boolean; steerFailure?: boolean; stopFailure?: boolean; correction?: boolean; returnFailure?: boolean } = {}) {
   const task = createTask("T-0001", { title: "Discussion" });
   task.status = "review";
   task.history.push({ at: new Date().toISOString(), actor: "user", action: "comment", text: "Discuss", chat: { model: "test", effort: "low", files: [] } });
@@ -35,6 +36,8 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   const scheduled: boolean[] = [];
   const writes: { actor?: string; replyTo?: number }[] = [];
   const started = Promise.withResolvers<void>();
+  let action: (name: string, args: unknown) => Promise<any>;
+  const corrections: string[] = [];
   const slots = createAgentSlots();
   const runtime = runInNewContext(stripTypeScriptTypes(activitySource) +
     "\n({ sendChat, stopChat, activeAgents, frame, windowStates, runningTasks, launchingTasks, deferredExecutors, notifyRunChange, chatRuns, replyingTasks })", {
@@ -48,14 +51,23 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
     rm: async (path: string) => { removed.push(path); },
     writeFile: async () => {},
     cliFailure: (code: string, message: string) => ({ ok: false, error: { code, message } }),
-    taskChatActions: () => ({}),
+    taskChatActions: (project: string, card: typeof task, text: string, changed: () => void, callback: any) =>
+      taskChatActions(project, structuredClone(card), text, changed, callback),
     maxAttachmentBytes: 64 * 1024 * 1024,
     callCli: async (_project: string, args: string[], input: { actor?: string; text?: string; model?: string; effort?: string; replyTo?: number }) => {
+      if (args[0] === "review") return { ok: true, data: { revision: task.revision, targetHead: null, settings: { reviewMode: "human" } } };
+      if (args[0] === "request-changes") {
+        if (options.returnFailure) return { ok: false, error: { code: "STORAGE_ERROR" } };
+        corrections.push((input as any).reason);
+        task.status = "in_progress";
+        task.revision++;
+      }
       if (args[0] === "attachment") return { ok: false, error: { code: "ATTACHMENT_MISSING" } };
       if (args[0] === "chat" && (options.writeFailure || input?.actor === "agent" && options.saveReplyFailure)) {
         return { ok: false, error: { code: "STORAGE_ERROR" } };
       }
       if (args[0] === "chat") {
+        if (options.correction) task.revision++;
         writes.push(input);
         if (options.controlled) task.history.push({ at: new Date().toISOString(), actor: input.actor === "agent" ? "agent" : "user",
           action: "chat", text: input.text, chat: { model: "test", effort: "low" } });
@@ -63,6 +75,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
       return { ok: true, data: task };
     },
     replyToTask: async (...args: unknown[]) => {
+      action = args[6] as typeof action;
       (args[10] as Function)({
         steer: async (prompt: string) => {
           if (options.steerFailure) throw new Error("Turn already ended");
@@ -99,8 +112,65 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   const run = (retry = false) => runtime.sendChat("project-a", task.id,
     { ...request, ...(retry ? { retryAt: task.history.length - 1 } : {}) }, () => {});
   const active = (index = 0): string[] => Array.from(runtime.frame(windows[index].state).replyingTasks);
-  return { task, runtime, windows, run, active, request, response, delivered, writes, slots, removed, scheduled, started: started.promise };
+  return { task, runtime, windows, run, active, request, response, delivered, writes, slots, removed, scheduled, corrections,
+    action: (args: unknown, name = "task_request_changes") => action(name, args), started: started.promise };
 }
+
+test("review correction hands off after the last chat write and respects occupied executor slots", async () => {
+  for (const occupied of [false, true]) {
+    const f = fixture({ correction: true });
+    const releases = occupied ? Array.from({ length: 3 }, () => f.slots.acquire("project-a", "executor")!) : [];
+    const pending = f.run();
+    await f.started;
+    const reason = "Включить решётку в гиперссылку вместе с номером задачи.";
+    const result = await f.action({ reason });
+    assert.equal(result.ok, true);
+    assert.equal(result.data.executorState, "waiting_for_discussion");
+    assert.equal(result.data.feedback, reason);
+    assert.equal(f.task.status, "in_progress");
+    assert.equal(f.runtime.deferredExecutors.size, 0);
+    assert.equal(f.runtime.chatRuns.size, 1);
+    assert.equal((await f.action({ reason })).error.code, "INVALID_TRANSITION");
+    f.response.resolve({ text: "Возвращено, исполнитель ожидает завершения диалога." });
+    assert.equal((await pending).result.ok, true);
+    assert.equal(f.runtime.deferredExecutors.get("project-a\0T-0001").revision, f.task.revision);
+    assert.deepEqual(f.corrections, [reason]);
+    assert.equal(f.runtime.chatRuns.size, 0);
+    for (const release of releases) release();
+  }
+});
+
+test("correction rejects foreign cards, stale revisions, unavailable actions and failed operations", async () => {
+  for (const failure of ["foreign", "stale", "storage", "accept", "status"]) {
+    const f = fixture({ correction: true, returnFailure: failure === "storage" });
+    if (failure === "status") f.task.status = "in_progress";
+    const pending = f.run();
+    await f.started;
+    if (failure === "stale") f.task.revision++;
+    const result = await f.action({ reason: "Fix the link", ...(failure === "foreign" ? { id: "T-9999" } : {}) },
+      failure === "accept" ? "task_accept" : "task_request_changes");
+    assert.equal(result.ok, false);
+    assert.equal(f.corrections.length, 0);
+    f.response.resolve({ text: "Возврат не выполнен." });
+    await pending;
+    assert.equal(f.runtime.deferredExecutors.size, 0);
+  }
+});
+
+test("a confirmed correction survives reply-storage failure and a resumed discussion cannot repeat it", async () => {
+  const f = fixture({ correction: true, saveReplyFailure: true });
+  const pending = f.run();
+  await f.started;
+  assert.equal((await f.action({ reason: "Решётка должна быть частью гиперссылки" })).ok, true);
+  f.response.resolve({ text: "Возвращено" });
+  assert.equal((await pending).result.ok, false);
+  assert.equal(f.runtime.deferredExecutors.get("project-a\0T-0001").revision, f.task.revision);
+  const resumed = taskChatActions("project-a", structuredClone(f.task), "Повтори", () => {}, async () => {
+    throw new Error("A completed return must not be dispatched twice");
+  });
+  assert.equal((await resumed("task_request_changes", { reason: "Решётка должна быть частью гиперссылки" }) as any).error.code, "INVALID_TRANSITION");
+  assert.equal(f.corrections.length, 1);
+});
 
 test("confirmed queue snapshots agree across board windows and exclude interrupted or stale tasks", () => {
   const f = fixture();
