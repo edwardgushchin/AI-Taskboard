@@ -1,3 +1,5 @@
+import { isManual } from "../cli/manual-board.ts";
+import { readBoardSettings, locateBoard } from "../cli/storage.ts";
 import { boardReviewMode, defaultBoardAgents, hexTagColor, reviewVerifier, TaskboardError, taskIdPattern } from "../cli/model.ts";
 import type { ArchiveLink, BoardAgentSettings, BoardSettings, BoardTag, GitHubMilestone, ReviewMode, Task } from "../cli/model.ts";
 import { needsManagerAttention, type managerInbox } from "../cli/task-messages.ts";
@@ -353,6 +355,7 @@ export function boardActions(project: string, attachments: { path: string; name:
     if (!Object.hasOwn(actions, name) || !args || typeof args !== "object" || Array.isArray(args)) {
       return cliFailure("INVALID_INPUT", "Unknown board action or invalid arguments.");
     }
+    if (isManual(readBoardSettings(locateBoard(project))) && !["board_list", "task_show", "task_create", "task_update", "tag_set_color", "ask_user", "project_path", "project_sha256"].includes(name)) return cliFailure("MANUAL_BOARD", "На обычной доске статусы меняет пользователь; выполнение агентами недоступно.");
     const action = name as keyof typeof actions;
     const goal = activeGoal();
     const { properties, required } = actions[action];
@@ -488,12 +491,13 @@ export function boardActions(project: string, attachments: { path: string; name:
       if (input.activeOnly !== undefined && typeof input.activeOnly !== "boolean") {
         return cliFailure("INVALID_INPUT", "Set activeOnly to true or false.");
       }
-      const result = await callCli<{ tags: BoardTag[]; tasks: (Task & { unfinishedDependencies?: string[]; readySince?: string })[];
+      const result = await callCli<{ settings: BoardSettings; tags: BoardTag[]; tasks: (Task & { unfinishedDependencies?: string[]; readySince?: string })[];
         archived: (ArchiveLink & { id: string })[] }>(project, ["list", "--compact"]);
       if (!result.ok) return result;
       const { tags, tasks, archived } = result.data;
-      const active = input.activeOnly ? tasks.filter(({ status }) => status !== "done" && status !== "cancelled") : tasks;
-      return { ok: true, data: { tags: tags.map(tag => tag.name),
+      const active = input.activeOnly ? tasks.filter(({ status }) => isManual(result.data.settings)
+        ? !result.data.settings.manualColumns?.some(c => c.id === status && c.terminal) : status !== "done" && status !== "cancelled") : tasks;
+      return { ok: true, data: { ...(isManual(result.data.settings) ? { boardType: "manual", statuses: result.data.settings.manualColumns } : {}), tags: tags.map(tag => tag.name),
         tagColors: Object.fromEntries(tags.map(({ name, color }) => [name, color])),
         tasks: active.map(({ id, title, status, revision, tags, priority, dueDate, dependencies, unfinishedDependencies, readySince, goalThreadId, milestone, schedule }) =>
           ({ id, title, status, revision, tags, priority, dueDate, dependencies, unfinishedDependencies, readySince, running: isTaskRunning(id),

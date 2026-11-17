@@ -101,7 +101,7 @@ test("task discussion streams task usage before success, provider failure, or a 
   for (const outcome of ["ok", "unknown", "failed", "closed", "storage-failed", "review", "review-storage-failed"]) {
     const reports: TokenUsageReport[] = [];
     const runtime = runInNewContext(stripTypeScriptTypes(source) + "\n({ replyToTask, reviewWithCodex })", {
-      trackActiveRun, trackProvider, claimDiscussion, spawn, codexRpc, CodexTokenUsage, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogReminder, worklogTool, withBoardMcp, process, setTimeout, clearTimeout, runActivity, runLog,
+      trackActiveRun, trackProvider, claimDiscussion, spawn, codexRpc, CodexTokenUsage, manualContext: () => "", readBoardSettings: () => ({}), locateBoard: (path: string) => path, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogReminder, worklogTool, withBoardMcp, process, setTimeout, clearTimeout, runActivity, runLog,
       githubReadTool,
       configuredCodex: async () => ({ path: process.execPath, args: [stub, outcome] }),
       chatTools: [], saveChatImages: async () => [],

@@ -1,3 +1,5 @@
+const manualBoard = () => frame.board?.settings.boardType === "manual";
+const manualColumns = () => frame.board?.settings.manualColumns ?? [];
 const api = window.taskboard;
 const byId = id => document.getElementById(id);
 let frame = {};
@@ -474,7 +476,7 @@ function mountAppMenu() {
     }
     if (action === "settings") return settings();
     if (action === "board-settings") return boardSettings();
-    if (action === "create-project") return api.createBoard();
+    if (action === "create-project") return createBoard();
     return api.menuAction(action);
   });
 
@@ -892,7 +894,8 @@ function card(task) {
     frame.runningTasks?.includes(task.id) ?? false, frame.waitingTasks?.includes(task.id) ?? false,
     frame.reviewingTasks?.[task.id], task.status, task.mergeRepair, Boolean(task.codexThreadId),
     task.unfinishedDependencies, task.blocked, task.subtasks?.map(entry => entry.done),
-    task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule]);
+    task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule,
+    manualColumns().find(c => c.id === task.status)]);
   const previous = boardCards.get(task.id);
   if (previous?.signature === signature) return previous.node;
   const card = previous?.node ?? button("", () => showTask(task.id));
@@ -901,6 +904,7 @@ function card(task) {
   if (oldDetails) cardCovers.unobserve(oldDetails);
   card.className = "task-card";
   card.dataset.state = task.status;
+  card.style.borderLeft = manualBoard() ? `3px solid ${manualColumns().find(c => c.id === task.status)?.color ?? "transparent"}` : "";
   if (task.priority && task.priority !== "normal") {
     card.dataset.priority = task.priority;
     bindLocalized(card, "aria-description", () => t("ui.priority_b114c9b5") + " · " + priorityName(task.priority), true);
@@ -1056,6 +1060,7 @@ function switchBoardRendering(previousProject, project) {
 }
 
 function codexTaskAction(task) {
+  if (manualBoard()) return null;
   const generation = projectGeneration;
   const newThread = task.status === "blocked" && /already has an active writer/i.test(task.blocked?.reason ?? "");
   const missingThread = task.status === "blocked" && task.codexThreadId &&
@@ -1241,6 +1246,8 @@ function laneTools(state, title, tasks, total, count, content) {
     summary.title = filterLabel;
     summary.setAttribute("aria-label", active ? filterLabel + " (" + active + ")" : filterLabel);
   }
+  const create = manualBoard() ? button("Создать задачу", () => createManualTask(state), "quiet lane-create") : undefined;
+  if (create) create.prepend(icon("plus"));
   function renderBatch() {
     const children = matching.slice(0, visibleLimit).map(card);
     if (matching.length > visibleLimit) {
@@ -1258,6 +1265,7 @@ function laneTools(state, title, tasks, total, count, content) {
       empty.querySelector("button").hidden = !filtered;
       children.push(empty);
     }
+    if (create) children.push(create);
     syncChildren(content, children);
   }
   function focusedCardPosition() {
@@ -1373,7 +1381,7 @@ function render(previousBoard) {
   const board = frame.board;
   const noBoard = !board;
   const autoMode = byId("status-auto-mode");
-  autoMode.hidden = noBoard;
+  autoMode.hidden = noBoard || manualBoard();
   const enabled = board?.settings.autoMode === true;
   autoMode.setAttribute("aria-pressed", String(enabled));
   autoMode.querySelector("i").className = `icon codicon codicon-${enabled ? "sync" : "play"}`;
@@ -1428,8 +1436,8 @@ function render(previousBoard) {
     cardLayoutChanges(previousBoard, visible) : { affectedLanes: [], added: [] };
   const moves = captureCardMoves(affectedLanes);
   const focused = document.activeElement;
-  const toolsKey = JSON.stringify([frame.localization?.locale, [...boardTags]]);
-  const columns = lanes.map(([state, labelKey]) => {
+  const toolsKey = JSON.stringify([frame.localization?.locale, [...boardTags], manualColumns()]);
+  const columns = (manualBoard() ? manualColumns().map(c => [c.id, c.name]) : lanes).map(([state, labelKey]) => {
     const tasks = visible.filter(task => task.status === state);
     let lane = boardLanes.get(state);
     if (!lane) {
@@ -1442,7 +1450,9 @@ function render(previousBoard) {
       lane = { column, header, content };
       boardLanes.set(state, lane);
     }
-    const title = t(labelKey);
+    const title = manualBoard() ? labelKey : t(labelKey);
+    const statusColor = manualColumns().find(c => c.id === state)?.color;
+    lane.column.style.borderTop = statusColor ? `3px solid ${statusColor}` : "";
     const total = tasks.length;
     if (lane.toolsKey !== toolsKey) {
       const heading = element("h2", undefined, "lane-title");
@@ -3809,7 +3819,7 @@ function openTaskSheet(task) {
   renderAgentRunStatus(runStatus, task);
   byId("sheet-title").append(runStatus);
   const lane = lanes.find(([state]) => state === task.status);
-  const status = lane ? t(lane[1]) : task.status;
+  const status = manualBoard() ? manualColumns().find(c => c.id === task.status)?.name ?? task.status : lane ? t(lane[1]) : task.status;
   const metadata = [status, task.priority && priorityName(task.priority), task.updatedAt && shortDate(task.updatedAt)].filter(Boolean);
   if (metadata.length) body.append(element("p", metadata.join(" · "), "muted"));
 }
@@ -3957,7 +3967,7 @@ async function showTask(id) {
     actions.append(button(() => t("ui.dependencies_bbf4859b"), () => editDependencies(task)));
     actions.append(button(() => t("ui.execution_settings_c1ef196e"), () => editExecution(task)));
   }
-  if (!["done", "cancelled"].includes(task.status) && !frame.runningTasks?.includes(task.id)) {
+  if (!manualBoard() && !["done", "cancelled"].includes(task.status) && !frame.runningTasks?.includes(task.id)) {
     actions.append(button(() => t("ui.executor_access_4c93bc80"), () => editTaskAccess(task)));
   }
   if (task.workingDirectory) {
@@ -3985,7 +3995,25 @@ async function showTask(id) {
     }
   } else {
     actions.append(button(() => t("ui.edit_c25be9fb"), () => taskEditor(task)));
-    actions.append(button(() => t("ui.cancel_task_e9e056a5"), () => noteTask(task, "cancel"), "danger"));
+    if (!manualBoard()) actions.append(button(() => t("ui.cancel_task_e9e056a5"), () => noteTask(task, "cancel"), "danger"));
+  }
+  if (manualBoard()) {
+    const history = task.history.filter(event => event.action === "manual-move");
+    if (history.length) {
+      const details = element("details", undefined, "task-details");
+      details.append(element("summary", "История перемещений"));
+      for (const event of history) details.append(element("p", `${shortDate(event.at)} · ${event.text}`));
+      body.append(details);
+    }
+    const label = element("label", "Переместить дело");
+    const select = element("select");
+    for (const column of manualColumns()) {
+      const option = element("option", column.name + (column.terminal ? " (завершение)" : ""));
+      option.value = column.id; select.append(option);
+    }
+    select.value = task.status;
+    select.addEventListener("change", protect(() => act("manual-move", { to: select.value })));
+    label.append(select); actions.prepend(label);
   }
   const codexAction = codexTaskAction(task);
   if (codexAction) actions.append(codexAction);
@@ -4413,6 +4441,7 @@ function settings() {
 
 function boardSettings() {
   if (!frame.board) return;
+  if (manualBoard()) return manualBoardSettings();
   chatCatalog = undefined;
   const current = frame.board.settings;
   const { project, managerAccess = "auto" } = frame;
@@ -5139,7 +5168,7 @@ function update(next) {
     const task = frame.board?.tasks.find(entry => entry.id === taskInSheet.id);
     const archived = frame.board?.archived.find(entry => entry.id === taskInSheet.id);
     const cleaned = taskInSheet.cleanupAvailable && frame.board?.cleanedTasks?.includes(taskInSheet.id);
-    if (cleaned || (task && (task.revision !== taskInSheet.revision ||
+    if (JSON.stringify(previousBoard?.settings.manualColumns) !== JSON.stringify(frame.board?.settings.manualColumns) || cleaned || (task && (task.revision !== taskInSheet.revision ||
         (task.historyLength ?? task.history?.length) !== taskInSheet.history.length ||
         String(task.unfinishedDependencies) !== String(taskInSheet.unfinishedDependencies))) ||
         (archived && !task && (archived.status !== taskInSheet.status ||
@@ -5149,7 +5178,7 @@ function update(next) {
   }
 }
 
-byId("welcome-create").addEventListener("click", protect(() => api.createBoard()));
+byId("welcome-create").addEventListener("click", protect(createBoard));
 byId("git-branches").addEventListener("toggle", protect(event => {
   gitMenuKeys.abort();
   gitMenuKeys = new AbortController();
@@ -5258,3 +5287,91 @@ api.onTheme(theme => {
   applyTheme(theme);
 });
 api.bootstrap().then(update).catch(error => notice(error.message, t("ui.application_startup_a6ae49b2")));
+
+function createBoard() {
+  openSheet("board-type", "Создать доску");
+  body.append(element("p", "Выберите тип доски. После создания его нельзя изменить.", "muted"));
+  const choices = element("div", undefined, "form");
+  for (const [type, title, description] of [
+    ["agent", "Доска для агентов", "Задачи выполняют агенты. Вы задаёте результат и проверяете работу."],
+    ["manual", "Обычная доска", "Дела выполняете вы, а ИИ помогает их создавать и редактировать."],
+  ]) {
+    const choice = button("", async () => {
+      for (const control of choices.querySelectorAll("button")) control.disabled = true;
+      try {
+        const result = await api.createBoard(type);
+        if (result?.ok === false) return notice(boardError(result.error));
+        if (sheetKind === "board-type") sheet.close();
+      } finally { for (const control of choices.querySelectorAll("button")) control.disabled = false; }
+    }, "board-type-choice");
+    choice.dataset.boardType = type;
+    choice.append(element("strong", title), element("span", description));
+    choices.append(choice);
+  }
+  body.append(choices, button("Отмена", () => sheet.close()));
+  choices.querySelector("button").focus();
+}
+
+function createManualTask(status) {
+  const column = manualColumns().find(c => c.id === status);
+  if (!manualBoard() || !column) return;
+  const project = frame.project;
+  const generation = projectGeneration;
+  const editor = form("manual-create", "Создать задачу · " + column.name, [
+    { name: "title", label: "Название", required: true },
+    { name: "description", label: "Описание", type: "area" },
+  ], "Создать задачу", async values => {
+    if (project !== frame.project || generation !== projectGeneration) return;
+    const created = await command("create", undefined, { title: values.title, description: values.description, initialStatus: status });
+    if (created && editor.isConnected && sheetKind === "manual-create") sheet.close();
+  });
+  editor.querySelector("input").focus();
+}
+
+function manualBoardSettings() {
+  const previous = structuredClone(manualColumns());
+  const columns = structuredClone(previous);
+  const moves = {};
+  function render() {
+    openSheet("board-settings", "Обычная доска · Колонки");
+    body.append(element("p", "Вы сами меняете статусы дел. Отметьте колонку завершения. Авторежим недоступен; тип доски изменить нельзя."));
+    columns.forEach((column, index) => {
+      const row = element("section", undefined, "form");
+      const identity = element("div", undefined, "sheet-actions");
+      const controls = element("div", undefined, "sheet-actions");
+      const name = element("input"); name.value = column.name; name.setAttribute("aria-label", "Название колонки");
+      name.style.flex = "1"; name.style.minWidth = "0";
+      name.addEventListener("input", () => column.name = name.value);
+      const color = element("input"); color.type = "color"; color.value = column.color; color.setAttribute("aria-label", "Цвет колонки");
+      color.addEventListener("input", () => column.color = color.value);
+      const terminal = element("input"); terminal.type = "checkbox"; terminal.checked = column.terminal;
+      terminal.addEventListener("change", () => column.terminal = terminal.checked);
+      const end = element("label", "Завершение", "form-checkbox"); end.prepend(terminal);
+      identity.append(name, color);
+      row.append(identity, end, controls);
+      for (const [delta, caption] of [[-1, "Выше"], [1, "Ниже"]]) {
+        const move = button(caption, () => { [columns[index], columns[index + delta]] = [columns[index + delta], columns[index]]; render(); });
+        move.disabled = !columns[index + delta]; controls.append(move);
+      }
+      controls.append(button("Удалить", () => {
+        if (columns.length === 1) return notice("Нужна хотя бы одна колонка.");
+        const targets = columns.filter(c => c.id !== column.id);
+        const occupied = frame.board.tasks.some(t => t.status === column.id) || Object.values(moves).includes(column.id);
+        if (occupied) {
+          form("column-delete", "Куда перенести дела?", [{ name: "target", label: "Оставшаяся колонка", options: [["", "Выберите колонку"], ...targets.map(c => [c.id, c.name])], required: true }], "Перенести и удалить", async value => {
+            if (!targets.some(c => c.id === value.target)) return;
+            moves[column.id] = value.target;
+            for (const key of Object.keys(moves)) if (moves[key] === column.id) moves[key] = value.target;
+            columns.splice(index, 1); render();
+          });
+        } else { columns.splice(index, 1); render(); }
+      }));
+      body.append(row);
+    });
+    body.append(button("Добавить колонку", () => { columns.push({ id: "manual:" + crypto.randomUUID(), name: "Новая колонка", color: "#818CF8", terminal: false }); render(); }));
+    body.append(button("Сохранить колонки", async () => {
+      if (await command("manual-columns", undefined, { previous, columns, moves })) sheet.close();
+    }, "primary"));
+  }
+  render();
+}
