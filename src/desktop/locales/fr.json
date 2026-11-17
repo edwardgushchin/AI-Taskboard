@@ -1163,5 +1163,11 @@
   "limits.reset": "Réinitialisation {time}",
   "ui.schedule_paused": "Planification suspendue",
   "ui.pause_schedule": "Suspendre la planification",
-  "ui.resume_schedule": "Reprendre la planification"
+  "ui.resume_schedule": "Reprendre la planification",
+  "ui.git_state_unavailable": "État Git indisponible",
+  "ui.configure_git_upstream": "Configurer le dépôt distant et la branche suivie",
+  "ui.git_counts_unavailable": "Compteurs de suivi indisponibles",
+  "ui.git_upstream_missing": "Aucune branche suivie configurée",
+  "ui.push_remote_branch": "Envoyer vers la branche distante",
+  "ui.push_branch_destination": "Envoyer la branche vers "
 }

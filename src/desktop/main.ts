@@ -60,7 +60,7 @@ interface Board {
   managerInbox?: ReturnType<typeof import("../cli/task-messages.ts").managerInbox>;
   archived: (ArchiveLink & { id: string })[];
   cleanedTasks?: string[];
-  gitInfo?: { branch?: string; head?: string; user?: string; githubRepository?: string; tracking?: { ahead: number; behind: number } };
+  gitInfo?: ReturnType<typeof import("../cli/repository.ts").boardGitInfo>;
 }
 
 interface ProjectTab {

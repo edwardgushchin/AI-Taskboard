@@ -1179,5 +1179,11 @@
   "limits.reset": "Сброс {time}",
   "ui.schedule_paused": "Расписание приостановлено",
   "ui.pause_schedule": "Приостановить расписание",
-  "ui.resume_schedule": "Возобновить расписание"
+  "ui.resume_schedule": "Возобновить расписание",
+  "ui.git_state_unavailable": "Не удалось определить состояние Git",
+  "ui.configure_git_upstream": "Настройте удалённую ветку и её отслеживание",
+  "ui.git_counts_unavailable": "Счётчики отслеживаемой ветки недоступны",
+  "ui.git_upstream_missing": "Отслеживаемая ветка не настроена",
+  "ui.push_remote_branch": "Отправить коммиты в удалённую ветку",
+  "ui.push_branch_destination": "Отправить ветку в "
 }

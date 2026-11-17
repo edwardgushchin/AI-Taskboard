@@ -1179,5 +1179,11 @@
   "limits.reset": "Odnowienie {time}",
   "ui.schedule_paused": "Harmonogram wstrzymany",
   "ui.pause_schedule": "Wstrzymaj harmonogram",
-  "ui.resume_schedule": "Wznów harmonogram"
+  "ui.resume_schedule": "Wznów harmonogram",
+  "ui.git_state_unavailable": "Stan Git niedostępny",
+  "ui.configure_git_upstream": "Skonfiguruj zdalne repozytorium i śledzoną gałąź",
+  "ui.git_counts_unavailable": "Liczniki śledzonej gałęzi niedostępne",
+  "ui.git_upstream_missing": "Nie skonfigurowano śledzonej gałęzi",
+  "ui.push_remote_branch": "Wyślij do zdalnej gałęzi",
+  "ui.push_branch_destination": "Wyślij gałąź do "
 }

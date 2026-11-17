@@ -1163,5 +1163,11 @@
   "limits.reset": "Zurücksetzung {time}",
   "ui.schedule_paused": "Zeitplan pausiert",
   "ui.pause_schedule": "Zeitplan pausieren",
-  "ui.resume_schedule": "Zeitplan fortsetzen"
+  "ui.resume_schedule": "Zeitplan fortsetzen",
+  "ui.git_state_unavailable": "Git-Status nicht verfügbar",
+  "ui.configure_git_upstream": "Remote und Upstream-Branch konfigurieren",
+  "ui.git_counts_unavailable": "Upstream-Zähler nicht verfügbar",
+  "ui.git_upstream_missing": "Kein Upstream konfiguriert",
+  "ui.push_remote_branch": "An den Remote-Branch senden",
+  "ui.push_branch_destination": "Branch senden an "
 }

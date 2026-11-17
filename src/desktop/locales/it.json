@@ -1163,5 +1163,11 @@
   "limits.reset": "Ripristino {time}",
   "ui.schedule_paused": "Pianificazione sospesa",
   "ui.pause_schedule": "Sospendi pianificazione",
-  "ui.resume_schedule": "Riprendi pianificazione"
+  "ui.resume_schedule": "Riprendi pianificazione",
+  "ui.git_state_unavailable": "Stato Git non disponibile",
+  "ui.configure_git_upstream": "Configura il remoto e il ramo seguito",
+  "ui.git_counts_unavailable": "Contatori del ramo seguito non disponibili",
+  "ui.git_upstream_missing": "Nessun ramo seguito configurato",
+  "ui.push_remote_branch": "Invia al ramo remoto",
+  "ui.push_branch_destination": "Invia ramo a "
 }

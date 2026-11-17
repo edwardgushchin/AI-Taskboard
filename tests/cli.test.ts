@@ -11,6 +11,7 @@ import { test } from "node:test";
 import type { TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { nextScheduledRun } from "../src/cli/model.ts";
+import { locateBoard } from "../src/cli/storage.ts";
 import type { Task } from "../src/cli/model.ts";
 
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
@@ -236,7 +237,11 @@ test("GitHub publication validates input, preserves partial results and pins pus
       if (mode === "move-head") git(root, "switch", "other");
       git(root, "remote", "add", "origin", remote);
     }
-    if (command === "git" && mode === "push-failed") throw Object.assign(new Error("Push failed"), { stderr: "Push rejected" });
+    if (command === "git" && mode === "push-failed") throw Object.assign(new Error("Push failed"), { stderr: "Push rejected https://test-user:test-password@example.invalid/repo" });
+    if (command === "git") {
+      git(root, "update-ref", "refs/remotes/origin/main", git(root, "rev-parse", "refs/heads/main"));
+      if (mode === "upstream-failed") writeFileSync(join(root, ".git", "config.lock"), "");
+    }
     return { stdout: "", stderr: "" };
   } });
   const original = childProcess.execFile;
@@ -250,8 +255,15 @@ test("GitHub publication validates input, preserves partial results and pins pus
   const input = { head: snapshot.head, branch: snapshot.branch, name: "owner/repository", visibility: "private" };
   const publish = async (nextMode: string, fields: Record<string, unknown>, code?: string) => {
     mode = nextMode;
-    if (code) await assert.rejects(publishRepository(location, fields), { code });
-    else assert.deepEqual(await publishRepository(location, fields), { remote });
+    if (code) await assert.rejects(publishRepository(location, fields), (error: any) => {
+      assert.equal(error.code, code);
+      if (nextMode === "push-failed") {
+        assert.match(error.details.output, /Push rejected/);
+        assert.doesNotMatch(error.details.output, /test-user|test-password/);
+      }
+      return true;
+    });
+    else assert.equal((await publishRepository(location, fields)).remote, remote);
   };
   await publish("", { ...input, name: "--public" }, "INVALID_INPUT");
   await publish("", { ...input, visibility: "internal" }, "INVALID_INPUT");
@@ -264,6 +276,11 @@ test("GitHub publication validates input, preserves partial results and pins pus
   assert.equal(git(root, "remote", "get-url", "origin"), remote);
   await publish("", input, "REMOTE_EXISTS");
   git(root, "remote", "remove", "origin");
+  try { await publish("upstream-failed", input, "GIT_UPSTREAM_FAILED"); }
+  finally { rmSync(join(root, ".git", "config.lock")); }
+  assert.equal(git(root, "remote", "get-url", "origin"), remote);
+  assert.equal(spawnSync("git", ["config", "--get", "branch.main.remote"], { cwd: root, env }).status, 1);
+  git(root, "remote", "remove", "origin");
   git(root, "switch", "-c", "other");
   writeFileSync(join(root, "other.txt"), "other branch\n");
   git(root, "add", "other.txt");
@@ -274,7 +291,10 @@ test("GitHub publication validates input, preserves partial results and pins pus
   assert.deepEqual(calls.findLast(call => call.command === "gh" && call.args[0] === "repo")?.args, [
     "repo", "create", "owner/repository", "--private", "--source", root, "--remote", "origin",
   ]);
-  assert.deepEqual(calls.at(-1), { command: "git", args: ["push", "origin", input.head + ":refs/heads/main"] });
+  assert.equal(git(root, "config", "branch.main.remote"), "origin");
+  assert.equal(git(root, "config", "branch.main.merge"), "refs/heads/main");
+  assert.equal(spawnSync("git", ["config", "--get", "branch.other.remote"], {cwd: root, env}).status, 1);
+  assert.deepEqual(calls.at(-1), { command: "git", args: ["push", "--porcelain", "--no-mirror", "--no-follow-tags", "--recurse-submodules=no", "--", "origin", input.head + ":refs/heads/main"] });
 });
 
 test("GitHub milestones can be listed, assigned and cleared on local tasks", t => {
@@ -1563,6 +1583,47 @@ test("watch streams compact cards and sees new messages without a revision chang
   }
 });
 
+test("Git publication state and safe push are independent of tracking counts", async t => {
+  const root = fixture(t, true);
+  cli(root, ["init"]);
+  const { boardGitInfo } = await import(new URL("../src/cli/repository.ts?git-info", import.meta.url).href);
+  const info = () => boardGitInfo(locateBoard(root));
+  const head = git(root, "rev-parse", "HEAD");
+  assert.deepEqual(info().remotes, []);
+  assert.equal(boardGitInfo({ ...locateBoard(root), root: join(root, "missing") }).gitError, true);
+  const remote = fixture(t);
+  git(remote, "init", "--bare");
+  git(root, "remote", "add", "origin", remote);
+  assert.equal(info().githubRepository, undefined);
+  assert.equal(info().tracking, undefined);
+  assert.deepEqual(info().pushTarget, { remote: "origin", remoteRef: "refs/heads/main" });
+  cli(root, ["git", "push"], { branch: "main", head });
+  assert.equal(git(remote, "rev-parse", "refs/heads/main"), head);
+  assert.equal(info().upstream, "refs/heads/main");
+  assert.equal(git(root, "config", "branch.main.remote"), "origin");
+  git(root, "branch", "--set-upstream-to", "origin/main");
+  assert.deepEqual(info().tracking, { ahead: 0, behind: 0 });
+  git(root, "commit", "--allow-empty", "-m", "Local advance");
+  assert.deepEqual(info().tracking, { ahead: 1, behind: 0 });
+  cli(root, ["git", "push"], { branch: "main", head }, "STALE_REPOSITORY");
+  git(root, "update-ref", "-d", "refs/remotes/origin/main");
+  assert.equal(info().trackingError, true);
+  assert.ok(info().pushTarget);
+  git(root, "config", "--unset", "branch.main.merge");
+  assert.equal(info().pushError, "destination");
+  cli(root, ["git", "push"], { branch: "main", head: git(root, "rev-parse", "HEAD") }, "GIT_REMOTE_REQUIRED");
+  git(root, "remote", "set-url", "origin", "https://github.com/example/published.git");
+  assert.equal(info().githubRepository, "example/published");
+  cli(root, ["git", "publish"], { branch: "main", head: git(root, "rev-parse", "HEAD"), name: "duplicate", visibility: "private" }, "REMOTE_EXISTS");
+  git(root, "switch", "--detach");
+  assert.equal(info().branch, undefined);
+  assert.equal(info().pushTarget, undefined);
+  git(root, "switch", "--orphan", "unborn");
+  assert.equal(info().branch, "unborn");
+  assert.equal(info().head, undefined);
+  assert.equal(info().pushTarget, undefined);
+});
+
 test("watch reports Git tracking counts when only the upstream reference moves", { timeout: 20000 }, async t => {
   const root = fixture(t, true);
   cli(root, ["init"]);
@@ -1596,7 +1657,20 @@ test("watch reports Git tracking counts when only the upstream reference moves",
     git(root, "update-ref", upstream, head);
     assert.deepEqual((await gitInfo()).tracking, { ahead: 0, behind: 0 });
     git(root, "update-ref", "-d", upstream);
-    assert.equal((await gitInfo()).tracking, undefined);
+    const missing = await gitInfo();
+    assert.equal(missing.tracking, undefined);
+    assert.equal(missing.trackingError, true);
+    assert.ok(missing.pushTarget);
+    git(root, "branch", "--unset-upstream");
+    const untracked = await gitInfo();
+    assert.equal(untracked.upstream, undefined);
+    assert.equal(untracked.pushError, "destination");
+    git(root, "remote", "add", "origin", "https://github.com/example/published.git");
+    const published = await gitInfo();
+    assert.equal(published.githubRepository, "example/published");
+    assert.equal(published.pushTarget.remote, "origin");
+    git(root, "remote", "remove", "origin");
+    assert.equal((await gitInfo()).githubRepository, undefined);
   } finally {
     reader.close();
     child.kill();

@@ -1163,5 +1163,11 @@
   "limits.reset": "Resets {time}",
   "ui.schedule_paused": "Schedule paused",
   "ui.pause_schedule": "Pause schedule",
-  "ui.resume_schedule": "Resume schedule"
+  "ui.resume_schedule": "Resume schedule",
+  "ui.git_state_unavailable": "Git state unavailable",
+  "ui.configure_git_upstream": "Configure the upstream remote and branch",
+  "ui.git_counts_unavailable": "Upstream counts unavailable",
+  "ui.git_upstream_missing": "No upstream configured",
+  "ui.push_remote_branch": "Push to the remote branch",
+  "ui.push_branch_destination": "Push branch to "
 }

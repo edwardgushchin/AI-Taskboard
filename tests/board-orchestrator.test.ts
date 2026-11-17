@@ -1070,7 +1070,10 @@ test("manager pushes a pinned local branch to its configured remote without a co
 
     const published = await act("project_git_push", push);
     assert.equal(published.ok, true, JSON.stringify(published.error));
-    assert.deepEqual(published.data, { ...push, remote: "origin", remoteRef: "refs/heads/main" });
+    const { gitInfo, ...destination } = published.data;
+    assert.deepEqual(destination, { ...push, remote: "origin", remoteRef: "refs/heads/main" });
+    assert.equal(gitInfo.upstream, "refs/heads/main");
+    assert.deepEqual(gitInfo.tracking, { ahead: 0, behind: 0 });
     assert.equal(git(remote, "rev-parse", "refs/heads/main"), head);
     assert.equal(git(remote, "tag", "--list"), "");
     assert.equal((await act("project_git_push", push)).ok, true);

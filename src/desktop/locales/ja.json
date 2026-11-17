@@ -1163,5 +1163,11 @@
   "limits.reset": "リセット {time}",
   "ui.schedule_paused": "スケジュール一時停止中",
   "ui.pause_schedule": "スケジュールを一時停止",
-  "ui.resume_schedule": "スケジュールを再開"
+  "ui.resume_schedule": "スケジュールを再開",
+  "ui.git_state_unavailable": "Git の状態を取得できません",
+  "ui.configure_git_upstream": "リモートと追跡ブランチを設定してください",
+  "ui.git_counts_unavailable": "追跡ブランチのカウントを取得できません",
+  "ui.git_upstream_missing": "追跡ブランチが未設定です",
+  "ui.push_remote_branch": "リモートブランチにプッシュ",
+  "ui.push_branch_destination": "ブランチの送信先: "
 }
