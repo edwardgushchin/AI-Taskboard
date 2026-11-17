@@ -704,7 +704,6 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
   margin-block-end: 9px; color: var(--muted); font-size: 12px; font-weight: 600;
 }
 .chat-coordination .chat-author { position: static; width: auto; height: auto; clip-path: none; }
-.chat-coordination[data-actor="manager"] { border-inline-start-color: var(--accent); }
 .chat-coordination > .chat-text:not(:has(> .chat-review-finding:first-child)),
 .chat-coordination .chat-text > :is(h1, h2, h3, h4, h5, h6):not(:first-child) {
   padding-block-start: 10px; border-block-start: 1px solid var(--border);

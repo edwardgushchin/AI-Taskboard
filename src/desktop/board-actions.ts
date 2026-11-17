@@ -408,7 +408,7 @@ export function boardActions(project: string, attachments: { path: string; name:
       }
       if (!validId(id)) return cliFailure("INVALID_INPUT", "Use the exact task ID.");
       if (action === "manager_ack") return callCli(project, ["manager-ack", id], fields);
-      const sent = await callCli<{ id: string; sequence: number }>(project, ["manager-message", id], fields);
+      const sent = await callCli<{ id: string; sequence: number; at: string }>(project, ["manager-message", id], fields);
       if (!sent.ok) return sent;
       return { ok: true, data: { ...sent.data, notified: await notifyExecutor(id, sent.data.sequence).catch(() => false) } };
     }

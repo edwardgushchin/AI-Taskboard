@@ -1395,6 +1395,39 @@ app.whenReady().then(async () => {
     }
   }
   await evaluate(`timedManager.dispose()`);
+  await evaluate(`
+    const coordinationTimes = element('div', undefined, 'chat-run');
+    body.replaceChildren(coordinationTimes);
+    const timedCoordination = ['agent', 'manager'].map((actor, index) => ({
+      ...action('coordination-time-' + index, 'mcpToolCall'), messagesOnly: true,
+      messages: [{ id: 'T-0117', sequence: index + 1, actor, at: stamp, text: 'Проверьте результат в карточке задачи.' }]
+    }));
+    timedCoordination.push({ ...action('legacy-time', 'mcpToolCall'), messagesOnly: true,
+      messages: [{ id: 'T-0117', sequence: 3, actor: 'manager', text: 'Старая запись без времени.' }] });
+    renderRunActivity(coordinationTimes, timedCoordination, true);
+  `);
+  const coordinationTimeCheck = `(() => {
+    const rows = [...coordinationTimes.querySelectorAll('.chat-coordination')];
+    const expected = new Intl.DateTimeFormat('ru', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(stamp));
+    return rows.length === 3 && !rows[2].querySelector('time') && rows.slice(0, 2).every(row => {
+      const time = row.querySelector('time'), style = getComputedStyle(row);
+      const box = time.getBoundingClientRect(), content = row.querySelector('.chat-text').getBoundingClientRect();
+      return time.dateTime === stamp && time.textContent === expected && box.height > 0 && box.top >= content.bottom &&
+        style.borderInlineStartColor === style.borderInlineEndColor && style.borderInlineStartWidth === '1px' &&
+        row.querySelector('button').textContent === 'T-0117' && row.scrollWidth <= row.clientWidth;
+    });
+  })()`;
+  await check(coordinationTimeCheck, 'both coordination directions retain source times and ordinary borders');
+  await evaluate(`renderRunActivity(coordinationTimes, JSON.parse(JSON.stringify(timedCoordination)), false); void 0`);
+  await check(coordinationTimeCheck, 'saved coordination reload retains times and leaves legacy entries untimed');
+  for (const width of [850, 480]) {
+    window.setSize(width, 960);
+    for (const theme of ['light', 'dark']) {
+      nativeTheme.themeSource = theme;
+      await check(coordinationTimeCheck, 'coordination time layout at ' + width + ' / ' + theme);
+      await capture('coordination-times-' + width + '-' + theme + '.png');
+    }
+  }
 
   // Ordinary executor messages use the same renderer live, saved and reopened.
   await evaluate(`
