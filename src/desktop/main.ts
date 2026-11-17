@@ -1,3 +1,5 @@
+import { isManual, manualContext } from "../cli/manual-board.ts";
+import { russianWriting } from "./russian-writing.ts";
 import { captureFileLink, isFileLink, verifyFileLink } from "../cli/attachment-links.ts";
 import type { FileLink } from "../cli/attachment-links.ts";
 import { providerLimitSource, readCodexLimits } from "./provider-limits.ts";
@@ -98,6 +100,8 @@ const titleBarHeight = 36;
 const windowStates = new Map<number, WindowState>();
 const subscriptions = new Map<string, BoardWatch>();
 const commands = new Map<string, string[]>([
+  ["create", ["create"]],
+  ["manual-move", ["manual-move"]], ["manual-columns", ["manual-columns"]],
   ["project-usage", ["project-usage"]],
   ["init", ["init", "--compact"]], ["list", ["list", "--compact"]], ["show", ["show"]], ["update", ["update"]],
   ["comment", ["comment"]],
@@ -390,7 +394,7 @@ function activateTab(owner: WindowState, tab: ProjectTab): void {
   saveSession();
 }
 
-async function openProject(current: ProjectTab, project: string, create = false): Promise<void> {
+async function openProject(current: ProjectTab, project: string, create: false | "agent" | "manual" = false): Promise<void> {
   const owner = windowStates.get(current.window.webContents.id);
   if (!owner || owner.closing) return;
   project = projectPath(project);
@@ -408,12 +412,12 @@ async function openProject(current: ProjectTab, project: string, create = false)
   await loadProject(owner, state, project, create);
 }
 
-async function loadProject(owner: WindowState, state: ProjectTab, project: string, create = false): Promise<void> {
+async function loadProject(owner: WindowState, state: ProjectTab, project: string, create: false | "agent" | "manual" = false): Promise<void> {
   const selection = ++state.selection;
   state.project = project;
   state.error = undefined;
   state.loading = true;
-  const result = existsSync(project) ? await callCli<Board>(project, [create ? "init" : "list", "--compact"], create ? { git: true } : undefined)
+  const result = existsSync(project) ? await callCli<Board>(project, [create ? "init" : "list", "--compact"], create ? { git: create !== "manual", boardType: create } : undefined)
     : cliFailure("PROJECT_UNAVAILABLE", t("ui.the_folder_is_unavailable_a85a1dc3"));
   if (state.selection !== selection || owner.window.isDestroyed() || !owner.tabs.includes(state)) return;
   state.loading = false;
@@ -528,7 +532,7 @@ async function closeTab(owner: WindowState, tab: ProjectTab): Promise<void> {
   }
 }
 
-async function pickProject(state: ProjectTab, create = false): Promise<void> {
+async function pickProject(state: ProjectTab, create: false | "agent" | "manual" = false): Promise<void> {
   const result = await dialog.showOpenDialog(state.window, {
     title: create ? t("ui.create_board_e02d5c15") : t("ui.open_existing_board_754e46e5"),
     defaultPath: state.project && existsSync(state.project) ? state.project : undefined,
@@ -922,7 +926,7 @@ let schedulingAgentWork = false;
 
 function scheduleAutoBoard(watch: BoardWatch) {
   const { project } = watch.board;
-  if ((!watch.board.settings.autoMode && !watch.board.tasks.some(task => task.status === "ready" && task.launchRequested)) || subscriptions.get(project) !== watch || closingProjects.has(project)) return;
+  if (isManual(watch.board.settings) || (!watch.board.settings.autoMode && !watch.board.tasks.some(task => task.status === "ready" && task.launchRequested)) || subscriptions.get(project) !== watch || closingProjects.has(project)) return;
   let state = autoBoards.get(watch);
   if (!state) {
     state = { running: false, milestonesAt: 0, dates: new Map(), launches: new Set(), integrations: new Set(), notices: new Set() };
@@ -939,6 +943,7 @@ function scheduleAutoBoard(watch: BoardWatch) {
       const current = await callCli<Board>(project, ["list", "--compact"]);
       if (!current.ok) { failed(current.error.message); return; }
       const board = current.data;
+      if (isManual(board.settings)) return;
       const eligibleTasks = board.settings.autoMode ? board.tasks : board.tasks.filter(task => task.launchRequested);
       if (!board.settings.autoMode && !eligibleTasks.some(task => task.status === "ready")) return;
       const key = projectIdentity(project);
@@ -1140,13 +1145,14 @@ async function continueAcceptance(project: string, task: Task) {
 function scheduleRecurringTasks(now = Date.now()) {
   for (const [project, watch] of subscriptions) {
     if (!watch.tabs.size || closingProjects.has(project)) continue;
+    if (isManual(watch.board.settings)) continue;
     for (const task of watch.board.tasks) {
       if (task.status === "review" && ["queued", "checking", "running"].includes(task.acceptanceRepair?.phase ?? "")) void continueAcceptance(project, task).catch(error => console.error("Could not continue acceptance", task.id, error));
     }
     if (watch.board.settings?.autoMode) { scheduleAutoBoard(watch); continue; }
     const projectKey = projectIdentity(project);
     for (const task of watch.board.tasks) {
-      if (task.status !== "ready" || !task.schedule || !(Date.parse(task.schedule.nextAt) <= now) ||
+      if (task.status !== "ready" || !task.schedule || task.schedule.paused || !(Date.parse(task.schedule.nextAt) <= now) ||
           task.unfinishedDependencies?.length || launchingTasks.has(project + "\0" + task.id) || executorBusy(project, task.id)) continue;
       if (!agentSlots.available(projectKey, task.mergeRepair ? "reviewer" : "executor", watch.board.settings?.agentLimits)) continue;
       const { id, revision } = task;
@@ -1663,12 +1669,12 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       "Work only in the assigned task worktree. Read the current card and acceptanceRepair.targetHead, merge that target without destructive Git operations, " +
       "resolve conflicts without changing requirements, run required project checks, then preview and submit with the task CLI. Keep review throughout. " +
       "Use block with a reason and condition for failed checks, missing access, or a product decision. Do not accept directly; the board resumes the persisted user request after checked submission. "
-      : reviewIds ? autoReviewInstructions : boardInstructions + (autoNotice ?
+      : reviewIds ? autoReviewInstructions : (isManual(settings.data) ? manualContext(settings.data) + "\n" + russianWriting : boardInstructions) + (autoNotice ?
       " Handle only the addressed executor questions, blockers or integration failures in this short run. Do not create or resume a goal. " +
       "Read manager_inbox, handle the specified notices and acknowledge them with manager_ack. Do not retry an unchanged blocker. " +
       "For a merge conflict, organize repair with task_start resolveConflicts:true in the same card and worktree without asking permission to start repair. " +
       "Require a new submission and review after repair; human acceptance stays with the user. Do not perform routine dispatch or accept human-mode submissions. " : "") + (
-      reviewMode === "human" ? " " + manualReviewInstructions : "") + (goal ?
+      !isManual(settings.data) && reviewMode === "human" ? " " + manualReviewInstructions : "") + (goal ?
       " You run the board goal in the background. Read goal_inbox at the start of each turn, before waiting, " +
       "and when notified. Apply user directions, then confirm or decline with goal_inbox and a factual reply. " +
       "Use goal_report for meaningful decisions and milestones and ask_user when you need a user decision." :
@@ -1678,6 +1684,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     const reviewTaskTools = reviewMode === "reviewer"
       ? new Set([...autoReviewTaskTools, "manager_ack", "task_cancel", "task_start"]) : autoReviewTaskTools;
     const mcpTools: BoardMcpTool[] = boardMcpTools.filter(({ name }) =>
+      (!isManual(settings.data) || ["board_list", "task_show", "task_create", "task_update", "task_comment", "tag_set_color", "ask_user"].includes(name)) &&
       (reviewIds || !["project_path", "project_sha256"].includes(name)) &&
       (!reviewIds || autoReviewReadTools.has(name) || reviewTaskTools.has(name)) &&
       (name !== "task_accept" || reviewMode !== "human") &&
@@ -1833,7 +1840,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
             action: "Read manager_inbox for executor questions, blockers, submissions and review decisions.",
           } } : result;
         });
-      }, reviewIds ? [] : boardTools, instructions + "\n" + initialSettings.text, signal, {
+      }, reviewIds ? [] : isManual(settings.data) ? boardTools.filter(tool => ["board_list", "task_show", "task_create", "task_update", "tag_set_color", "ask_user"].includes(tool.name)) : boardTools, instructions + "\n" + initialSettings.text, signal, {
         id: threadId,
         access: reviewIds ? undefined : managerAccess(app.getPath("userData"), project),
         confirmApproval: reviewIds ? undefined : async details => {
@@ -2042,6 +2049,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
 }
 
 function scheduleAutoReview(watch: BoardWatch) {
+  if (isManual(watch.board.settings)) return;
   if (subscriptions.get(watch.board.project) !== watch) return;
   const mode = boardReviewMode(watch.board.settings);
   const { project, tasks } = watch.board;
@@ -2248,7 +2256,10 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
     }
   }
 }
-ipcMain.handle("board:create", async event => pickProject(stateOf(event), true));
+ipcMain.handle("board:create", async (event, type: unknown) => {
+  if (type !== "agent" && type !== "manual") return cliFailure("INVALID_INPUT", "Выберите тип доски в приложении.");
+  return pickProject(stateOf(event), type);
+});
 ipcMain.handle("board:recent", async (event, path: unknown) => {
   const state = stateOf(event);
   if (typeof path !== "string" || !recentBoards.includes(path)) throw new Error("Unknown recent board.");
@@ -2583,6 +2594,7 @@ type LaunchState = Pick<Task, "acceptanceRepair" | "id" | "title" | "status" | "
 async function launchTask(project: string, id: string, revisionRequest?: { input: Record<string, unknown> },
   newThread: false | "user" | "manager" = false, revision?: number,
   continuation: ExecutorContinuation = {}, scheduled = false, resolveConflicts = false, resumeWithFullAccess = false, autoMode = false, manual = false): Promise<CliReply<LaunchState>> {
+  if (isManual(readBoardSettings(runtimeLocation(project)))) return cliFailure("MANUAL_BOARD", "На обычной доске исполнители недоступны.");
   const key = project + "\0" + id;
   if (launchingTasks.has(key)) return cliFailure("LAUNCH_IN_PROGRESS", t("errors.07f5f719b5d5f6c5"));
   if (executorBusy(project, id)) return cliFailure("CHAT_BUSY", t("ui.wait_for_the_chat_reply_or_stop_the_agent_first_22c53959"));

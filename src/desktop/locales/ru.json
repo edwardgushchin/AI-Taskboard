@@ -1176,5 +1176,8 @@
   "limits.low": "Лимит заканчивается",
   "limits.summary": "{count} подключено; {unavailable} без актуальных данных",
   "limits.remaining": "осталось {percent}%",
-  "limits.reset": "Сброс {time}"
+  "limits.reset": "Сброс {time}",
+  "ui.schedule_paused": "Расписание приостановлено",
+  "ui.pause_schedule": "Приостановить расписание",
+  "ui.resume_schedule": "Возобновить расписание"
 }

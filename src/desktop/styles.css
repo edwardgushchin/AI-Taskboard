@@ -91,7 +91,6 @@ h1, h2, h3, p { margin: 0; }
 }
 .app-settings.button:hover { color: var(--text); }
 .app-settings .icon { width: 20px; height: 20px; font-size: 20px; }
-.board-tab-menu.app-menu-popup { position: fixed; inset: 0 auto auto 0; margin: 0; color: var(--text); }
 .settings-menu.app-menu-popup {
   position: fixed; inset: 0 auto auto 0; margin: 0; color: var(--text);
   min-width: 0; max-width: calc(100vw - 8px); max-height: calc(100vh - 8px); overflow: auto;
@@ -499,6 +498,9 @@ select:hover:not(:disabled) {
   background: color-mix(in srgb, var(--text) 9%, transparent); font-size: 10px; font-variant-numeric: tabular-nums;
 }
 .lane-cards { display: grid; gap: 9px; min-height: 13px; }
+.lane-create { display: flex; align-items: center; justify-content: flex-start; gap: 8px; width: 100%; }
+.board-type-choice { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 16px; text-align: left; }
+.board-type-choice span { font-weight: normal; color: var(--muted); white-space: normal; }
 .lane-more.button { justify-self: start; padding: 3px 5px; border: 0; color: var(--accent); font-size: 15px; }
 .task-card {
   position: relative; width: 100%; min-width: 0; display: grid; padding: 0;
@@ -743,7 +745,7 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 }
 .chat-code-copy.button > .icon { font-size: 1em; }
 .chat-text, .chat-action { overflow-wrap: anywhere; line-height: 1.7; }
-/* Codex content typography; see docs/chat-typography.md for the source. */
+/* Codex content typography. */
 .chat-entry:is([data-actor="agent"], .chat-coordination) .chat-text, .chat-run .chat-text, .chat-turn .chat-text {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 15px;
@@ -902,7 +904,7 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .form textarea { resize: vertical; min-height: 67px; }
 .manager-question-trigger { grid-column: 1 / -1; justify-self: start; margin-top: 8px; color: var(--accent); }
 .manager-question { width: min(520px, calc(100% - 32px)); }
-.manager-question-text { margin: 0; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.manager-question-text { min-width: 0; margin: 0; line-height: 1.5; }
 .manager-question-options { display: grid; gap: 6px; }
 .manager-question-options .button { white-space: normal; overflow-wrap: anywhere; text-align: start; }
 .draft-attachments { list-style: none; margin: 0; padding: 0; }

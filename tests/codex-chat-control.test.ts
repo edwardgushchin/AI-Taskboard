@@ -265,7 +265,7 @@ test("discussion steering and interruption share the streaming connection, inclu
       child.stderr.pipe(process.stderr);
       return child;
     },
-    trackActiveRun, trackProvider, claimDiscussion, codexRpc, turnControl, CodexTokenUsage, withBoardMcp, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
+    trackActiveRun, trackProvider, claimDiscussion, codexRpc, turnControl, CodexTokenUsage, withBoardMcp, manualContext: () => "", readBoardSettings: () => ({}), locateBoard: (path: string) => path, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
     githubReadTool, readBoardGitHub: async (project: string, args: unknown) => {
       assert.equal(project, directory);
       assert.deepEqual(args, { view: "run-failed-log", runId: 43816168554 });
@@ -436,7 +436,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
     spawn, turnControl, CodexTokenUsage, codexThreadPattern, Error, process, withBoardMcp, goalTaskWaitSeconds,
     managerCliContext, probeManagerCli: async () => providerMode === "cli-ready"
       ? { gitOptions: ["--no-optional-locks", "-c", "core.fsmonitor=false"] } : {},
-    responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
+    manualContext: () => "", readBoardSettings: () => ({}), locateBoard: (path: string) => path, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
     trackActiveRun, trackProvider, claimDiscussion, codexRpc: (child: Parameters<typeof codexRpc>[0], notify: Parameters<typeof codexRpc>[1], onRequest: Parameters<typeof codexRpc>[2]) =>
       codexRpc(child, (message: RpcMessage) => {
         elapsed += (message.params as { elapsed?: number })?.elapsed ?? 0;
@@ -511,6 +511,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.equal(requests[6].params.model, "manager-model");
   assert.equal(requests[6].params.permissions, "ai-taskboard-manager");
   assert.equal(requests[6].params.sandbox, undefined);
+  assert.match(requests[6].params.developerInstructions, /documentation impact in task planning and goal work/);
   assert.match(requests[6].params.developerInstructions, /These rules apply.*worklog_record/s);
   assert.match(requests[6].params.developerInstructions, /Apply built-in rules silently/);
   assert.match(requests[6].params.developerInstructions, /Internally verify recorded:true and staged:false/);

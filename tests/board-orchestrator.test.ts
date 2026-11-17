@@ -1,3 +1,4 @@
+import { isManual, manualContext } from "../src/cli/manual-board.ts";
 import { captureFileLink, isFileLink, verifyFileLink } from "../src/cli/attachment-links.ts";
 import localization from "../src/desktop/localization.cjs";
 import { activeRunSummary } from "../src/desktop/active-runs.ts";
@@ -18,7 +19,7 @@ import { boardReviewMode, codexThreadPattern, defaultBoardAgents, hexTagColor, m
 import { managerInbox, needsManagerAttention } from "../src/cli/task-messages.ts";
 import type { RunActivity, Task } from "../src/cli/model.ts";
 import type { ChatSettings } from "../src/cli/model.ts";
-import { directory as storageDirectory, readBoardSettings, readJson, writeJson } from "../src/cli/storage.ts";
+import { directory as storageDirectory, locateBoard, readBoardSettings, readJson, writeJson } from "../src/cli/storage.ts";
 import { runtimeLocation } from "../src/desktop/board-runtime.ts";
 import type { BoardGoal, BoardGoalAction } from "../src/desktop/codex-chat.ts";
 import { inspectProjectPath, projectSha256 } from "../src/desktop/project-files.ts";
@@ -70,7 +71,7 @@ function fixture(t: TestContext) {
   };
   const { autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools } = runInNewContext(
     boardSource + "\n({ autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools })",
-    { AbortSignal, boardReviewMode, callCli, cliFailure, defaultBoardAgents, hexTagColor, inspectProjectPath, managerInbox, needsManagerAttention, projectSha256, reviewVerifier, russianWriting, TaskboardError, taskIdPattern,
+    { AbortSignal, isManual, manualContext, locateBoard, readBoardSettings, boardReviewMode, callCli, cliFailure, defaultBoardAgents, hexTagColor, inspectProjectPath, managerInbox, needsManagerAttention, projectSha256, reviewVerifier, russianWriting, TaskboardError, taskIdPattern,
       taskFields: { title: {}, description: {}, criteria: {}, tags: {} },
     },
   );
@@ -127,7 +128,7 @@ function fixture(t: TestContext) {
     activateTab: (owner: { active: unknown }, tab: unknown) => { owner.active = tab; },
     launchingTasks: new Set(), runningTasks, chatRuns: new Map(), activeAgents, managerInbox, needsManagerAttention, subscriptions, reviewerTools,
     closingProjects: new Set(), setImmediate, setTimeout, clearTimeout, performance, console, agentSlots,
-    runtimeLocation, readBoardSettings, settingsDelivery, syncSettingsNotices,
+    russianWriting, isManual, manualContext, runtimeLocation, readBoardSettings, settingsDelivery, syncSettingsNotices,
     reviewWithCodex: async (_profile: string, cwd: string, settings: ChatSettings | null, context: string,
       tools: { name: string }[], call: RunAction, _signal: AbortSignal,
       onUsage: (report: import("../src/cli/token-usage.ts").TokenUsageReport) => Promise<void>) => {
@@ -181,17 +182,21 @@ function fixture(t: TestContext) {
         onGoalControl: (control: GoalControl) => void; onGoal: (goal: BoardGoal | null) => void; settings?: ChatSettings | null }) => {
       assert.equal(cwd, project);
       assert.ok(instructions.includes(russianWriting));
-      assert.match(instructions, /Before accepting, check whether the project or task needs any evidence after acceptance/);
-      assert.match(instructions, /verify the paths and checksums/);
+      const manualTurn = instructions.includes("Обычная доска личных дел");
       const reviewTurn = Boolean(session.readOnly || session.separateTurn);
-      if (!reviewTurn) {
+      if (manualTurn) assert.match(instructions, /Пользователь сам меняет статусы/);
+      else {
+        assert.match(instructions, /Before accepting, check whether the project or task needs any evidence after acceptance/);
+        assert.match(instructions, /verify the paths and checksums/);
+      }
+      if (!reviewTurn && !manualTurn) {
         assert.match(instructions, /reviewer approval can unblock dependent work.*before dispatching more independent work/);
         assert.match(instructions, /The board retries deferred cleanup.*retry only after the worktree changes/);
         assert.match(instructions, /only what changes the recipient's work/);
         assert.match(session.mcpTools.find(tool => tool.name === "task_message")!.description, /only what this executor needs to act/);
       }
       assert.equal(session.title, "Project manager for project");
-      const expectedTools = reviewTurn ? [
+      const expectedTools = manualTurn ? ["ask_user", "tag_set_color", "github_read"] : reviewTurn ? [
         "task_review", "task_review_diff", "task_review_artifact", "task_accept", "task_request_changes", "project_git", "project_path", "project_sha256",
       ] : [
         "task_cancel", "provider_tools", "task_tool_grant", "task_tool_revoke", "task_set_executor_access", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_approve", "task_wait", "task_review_queue", "task_review", "task_review_diff",
@@ -300,6 +305,29 @@ function fixture(t: TestContext) {
     goal: (kind: string, objective?: string) => handlers.get("board:goal")!({ sender }, kind, objective),
   };
 }
+
+test("manual manager edits personal tasks but cannot launch or move them", async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"], { boardType: "manual" })).ok, true);
+  const result = await f.run("Plan the week", async act => {
+    const created = await act("task_create", { title: "Buy groceries" });
+    assert.equal(created.ok, true, JSON.stringify(created));
+    const id = created.data.id;
+    const shown = await act("task_show", { id });
+    const updated = await act("task_update", { id, revision: shown.data.revision, description: "Milk", note: "User plan" });
+    assert.equal(updated.ok, true, JSON.stringify(updated));
+    assert.equal(updated.data.status, shown.data.status);
+    for (const name of ["task_start", "task_approve", "task_cancel", "task_accept"]) {
+      const blocked = await act(name, { id, revision: updated.data.revision });
+      assert.equal(blocked.error.code, "MANUAL_BOARD");
+    }
+    const board = await act("board_list", {});
+    assert.equal(board.data.boardType, "manual");
+    assert.ok(board.data.statuses.some((s: { id: string }) => s.id === shown.data.status));
+    return { text: "Week planned." };
+  });
+  assert.equal(result.data?.answer, "Week planned.", JSON.stringify(result));
+});
 
 test("manager can set and read the board tag palette in HEX", async t => {
   const f = fixture(t);

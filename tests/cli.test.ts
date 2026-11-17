@@ -871,7 +871,7 @@ test("board agent defaults apply to new and unset roles while explicit choices k
     reviewer: { provider: "codex", model: "gpt-6.1-terra", effort: "high" },
   };
   assert.deepEqual(cli(root, ["settings"]), {
-    archiveAfterDays: 90, integrationMode: "merge", reviewMode: "reviewer", ...roles,
+    boardType: "agent", archiveAfterDays: 90, integrationMode: "merge", reviewMode: "reviewer", ...roles,
   });
   const path = join(root, ".tasks", "board.json");
   const index = JSON.parse(readFileSync(path, "utf8"));
@@ -1296,6 +1296,86 @@ test("parallel processes receive unique task IDs and share one catalog entry per
   const snapshot = cli(root, ["list", "--tag", "shared"]);
   assert.equal(snapshot.tasks.length, 8);
   assert.equal(snapshot.tags.length, 9);
+});
+
+test("schedule pause persists across CLI processes, rejects stale automatic starts and survives manual completion", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  cli(root, ["settings"], { autoMode: true });
+  for (const rule of [{ everyMinutes: 60 }, { time: "09:00" }, { time: "09:00", weekday: 1 },
+    { time: "09:00", dayOfMonth: 31 }, { time: "09:00", dayOfMonth: 29, month: 2 }]) {
+    const created = cli(root, ["create"], { title: "Recurring", criteria: ["Checked"], schedule: rule, workingDirectory: root });
+    let task = cli(root, ["approve", created.id]);
+    task.schedule.nextAt = "2000-01-01T00:00:00.000Z";
+    const path = join(root, ".tasks", "tasks", task.id + ".json");
+    writeFileSync(path, JSON.stringify(task));
+    const paused = cli(root, ["update", task.id], { revision: task.revision, schedulePaused: true });
+    assert.deepEqual(paused.schedule, { ...task.schedule, paused: true });
+    assert.equal(cli(root, ["list", "--compact"]).tasks.find((entry: Task) => entry.id === task.id).schedule.paused, true);
+    cli(root, ["start", task.id], { revision: paused.revision, scheduled: true }, "INVALID_TRANSITION");
+    cli(root, ["start", task.id], { revision: paused.revision, autoMode: true }, "INVALID_TRANSITION");
+    cli(root, ["update", task.id], { revision: task.revision, schedulePaused: false }, "REVISION_CONFLICT");
+    const started = cli(root, ["start", task.id], { revision: paused.revision }).task;
+    assert.equal(started.schedule.paused, true);
+    const changed = cli(root, ["update", task.id], { revision: started.revision, schedulePaused: false });
+    const runningPaused = cli(root, ["update", task.id], { revision: changed.revision, schedulePaused: true });
+    assert.equal(runningPaused.status, "in_progress");
+    const completed = cli(root, ["progress", task.id], { summary: "Pass finished", nextStep: "Wait" });
+    assert.equal(completed.status, "ready");
+    assert.equal(completed.schedule.paused, true);
+    const resumed = cli(root, ["update", task.id], { revision: completed.revision, schedulePaused: false });
+    assert.equal(resumed.schedule.paused, false);
+    assert.ok(Date.parse(resumed.schedule.nextAt) > Date.now());
+    const expectedNext = nextScheduledRun(rule, new Date(resumed.updatedAt));
+    assert.ok(Math.abs(Date.parse(resumed.schedule.nextAt) - Date.parse(expectedNext)) < 100);
+    assert.deepEqual({ ...resumed.schedule, nextAt: expectedNext }, { ...rule, paused: false, nextAt: expectedNext });
+    cli(root, ["start", task.id], { revision: resumed.revision, scheduled: true }, "INVALID_TRANSITION");
+    cli(root, ["start", task.id], { revision: resumed.revision }, "INVALID_TRANSITION");
+    cli(root, ["update", task.id], { schedulePaused: "true" }, "INVALID_INPUT");
+  }
+  const plain = cli(root, ["create"], { title: "Plain" });
+  cli(root, ["update", plain.id], { schedulePaused: true }, "INVALID_INPUT");
+  const dependent = cli(root, ["create"], { title: "Dependent", criteria: ["Checked"], schedule: { everyMinutes: 60 }, dependencies: [plain.id], workingDirectory: root });
+  cli(root, ["approve", dependent.id]);
+  const paused = cli(root, ["update", dependent.id], { schedulePaused: true });
+  cli(root, ["start", dependent.id], { revision: paused.revision }, "DEPENDENCIES_INCOMPLETE");
+  const changed = cli(root, ["update", dependent.id], { schedule: { time: "10:00" } });
+  assert.equal(changed.schedule.paused, true);
+  assert.deepEqual(changed.dependencies, [plain.id]);
+});
+
+test("concurrent scheduler start and pause serialize on the board lock", async t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  for (const schedule of [{ everyMinutes: 1 }, { time: "09:00" }]) {
+    const created = cli(root, ["create"], { title: "Race", criteria: ["Checked"], schedule, workingDirectory: root });
+    const task = cli(root, ["approve", created.id]);
+    task.schedule.nextAt = "2000-01-01T00:00:00Z";
+    writeFileSync(join(root, ".tasks/tasks", task.id + ".json"), JSON.stringify(task));
+    const run = async (args: string[], input: object) => {
+      const child = spawn(process.execPath, commandArgs(root, args, input), { env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+      let output = "";
+      child.stdout.on("data", chunk => { output += chunk; });
+      child.stdin.end(JSON.stringify(input));
+      await once(child, "close");
+      return JSON.parse(output);
+    };
+    const [start, pause] = await Promise.all([
+      run(["start", task.id], { revision: task.revision, scheduled: true }),
+      run(["update", task.id], { revision: task.revision, schedulePaused: true }),
+    ]);
+    assert.ok(start.ok || pause.ok);
+    if (pause.ok) assert.equal(start.ok, false);
+    else {
+      assert.equal(pause.error.code, "REVISION_CONFLICT");
+      const current = cli(root, ["show", task.id]);
+      cli(root, ["update", task.id], { revision: current.revision, schedulePaused: true });
+    }
+    const current = cli(root, ["show", task.id]);
+    assert.equal(current.schedule.paused, true);
+    assert.equal(current.status, start.ok ? "in_progress" : "ready");
+    cli(root, ["start", task.id], { revision: current.revision, scheduled: true }, "INVALID_TRANSITION");
+  }
 });
 
 test("a recurring card starts only when due and approved and keeps its history for the next pass", t => {

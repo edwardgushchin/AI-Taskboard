@@ -53,9 +53,16 @@ function fields(task: Task, input: Record<string, unknown>): Task {
       const previous = task.schedule;
       if (previous?.time !== rule.time || previous?.weekday !== rule.weekday || previous?.everyMinutes !== rule.everyMinutes ||
           previous?.dayOfMonth !== rule.dayOfMonth || previous?.month !== rule.month) {
-        updated.schedule = { ...rule, nextAt: nextScheduledRun(rule, new Date()) };
+        updated.schedule = { ...rule, nextAt: nextScheduledRun(rule, new Date()), ...(previous?.paused ? { paused: true } : {}) };
       }
     }
+  }
+  if (input.schedulePaused !== undefined) {
+    if (typeof input.schedulePaused !== "boolean" || !updated.schedule) {
+      throw new TaskboardError("INVALID_INPUT", "schedulePaused requires a boolean and an existing schedule.");
+    }
+    updated.schedule = { ...updated.schedule, paused: input.schedulePaused,
+      ...(updated.schedule.paused && !input.schedulePaused ? { nextAt: nextScheduledRun(updated.schedule, new Date()) } : {}) };
   }
   if (input.dependencies !== undefined) {
     requireState(task, ["draft", "ready"]);

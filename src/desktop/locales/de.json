@@ -1160,5 +1160,8 @@
   "limits.low": "Kontingent fast aufgebraucht",
   "limits.summary": "{count} verbunden; {unavailable} ohne aktuelle Daten",
   "limits.remaining": "{percent}% verbleibend",
-  "limits.reset": "Zurücksetzung {time}"
+  "limits.reset": "Zurücksetzung {time}",
+  "ui.schedule_paused": "Zeitplan pausiert",
+  "ui.pause_schedule": "Zeitplan pausieren",
+  "ui.resume_schedule": "Zeitplan fortsetzen"
 }

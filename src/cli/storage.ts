@@ -1,3 +1,4 @@
+import { defaultColumns, validateColumns, isManual } from "./manual-board.ts";
 import { isFileLink } from "./attachment-links.ts";
 import {
   closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync,
@@ -109,10 +110,21 @@ export interface BoardLocation {
   repository: Repository | null;
 }
 
-export function locateBoard(path: string, initializing = false, initializeGit = false): BoardLocation {
+export function locateBoard(path: string, initializing = false, initializeGit = false, manualInit = false): BoardLocation {
   const selected = realpathSync(resolve(path));
   if (!statSync(selected).isDirectory()) {
     throw new TaskboardError("INVALID_PROJECT", "Select a project directory.");
+  }
+  if (manualInit) return { root: selected, directory: join(selected, ".tasks"), repository: null };
+  // Personal boards do not depend on a Git executable, repository or worktree.
+  for (let cursor = selected; ; cursor = dirname(cursor)) {
+    const boardPath = join(cursor, ".tasks", "board.json");
+    if (exists(boardPath)) {
+      const board = readJson(boardPath) as BoardIndex;
+      if (board.settings?.boardType === "manual") return { root: cursor, directory: dirname(boardPath), repository: null };
+      break;
+    }
+    if (exists(join(cursor, ".git")) || dirname(cursor) === cursor || initializing) break;
   }
   let repository = discoverRepository(selected);
   if (initializeGit && (!repository || (repository.bare
@@ -236,6 +248,7 @@ function validRoleSettings(value: unknown): boolean {
 
 function validTaskSchedule(value: unknown): boolean {
   if (!isRecord(value) || typeof value.nextAt !== "string" || !Number.isFinite(Date.parse(value.nextAt))) return false;
+  if (value.paused !== undefined && typeof value.paused !== "boolean") return false;
   if (value.everyMinutes !== undefined) {
     return value.time === undefined && value.weekday === undefined && value.dayOfMonth === undefined && value.month === undefined &&
       Number.isSafeInteger(value.everyMinutes) && Number(value.everyMinutes) >= 1;
@@ -253,6 +266,7 @@ function readIndex(path: string): BoardIndex {
       !Number.isSafeInteger(index.nextId) || index.nextId < 1 || !isRecord(index.tasks) ||
       !isRecord(index.archive) || !isRecord(index.settings) ||
       (index.tags !== undefined && !Array.isArray(index.tags)) ||
+      (index.settings.boardType !== undefined && !["agent", "manual"].includes(String(index.settings.boardType))) ||
       !["merge", "squash"].includes(String(index.settings.integrationMode)) ||
       (index.settings.name !== undefined && typeof index.settings.name !== "string") ||
       (index.settings.showCardPreviews !== undefined && typeof index.settings.showCardPreviews !== "boolean") ||
@@ -311,7 +325,7 @@ function readIndex(path: string): BoardIndex {
 
 export function validateCard(value: unknown, id: string): Task {
   if (!isRecord(value) || value.id !== id || typeof value.title !== "string" ||
-      !taskStates.includes(value.status as Task["status"]) || !Number.isSafeInteger(value.revision) ||
+      !(taskStates.includes(value.status as typeof taskStates[number]) || typeof value.status === "string" && /^manual:[a-zA-Z0-9-]+$/.test(value.status)) || !Number.isSafeInteger(value.revision) ||
       Number(value.revision) < 1 || typeof value.createdAt !== "string" || typeof value.updatedAt !== "string" ||
       typeof value.description !== "string" || typeof value.summary !== "string" ||
       typeof value.nextStep !== "string" || !Array.isArray(value.history) ||
@@ -397,6 +411,7 @@ export class BoardStore {
   constructor(location: BoardLocation) {
     this.location = location;
     this.index = readIndex(join(location.directory, "board.json"));
+    if (isManual(this.index.settings)) { validateColumns(this.index.settings.manualColumns); this.index.settings.autoMode = false; }
   }
 
   subdirectory(name: "tasks" | "worktrees" | "pending" | "attachments" | "archive", create = false): string {
@@ -525,7 +540,8 @@ export class BoardStore {
   }
 }
 
-export function initializeBoard<T>(location: BoardLocation, snapshot: (store: BoardStore) => T): T {
+export function initializeBoard<T>(location: BoardLocation, snapshot: (store: BoardStore) => T, boardType: unknown = "agent"): T {
+  if (boardType !== "agent" && boardType !== "manual") throw new TaskboardError("INVALID_INPUT", "Unknown board type.");
   directory(location.directory, true);
   return withLock(location.directory, () => {
     const path = join(location.directory, "board.json");
@@ -536,12 +552,14 @@ export function initializeBoard<T>(location: BoardLocation, snapshot: (store: Bo
       }
       const board: BoardIndex = {
         version: 1, nextId: 1,
-        settings: { archiveAfterDays: 90, integrationMode: "merge", reviewMode: "reviewer", ...defaultBoardAgents },
+        settings: { boardType, ...(boardType === "manual" ? { manualColumns: defaultColumns(), autoMode: false } : {}), archiveAfterDays: 90, integrationMode: "merge", reviewMode: "reviewer", ...defaultBoardAgents },
         tags: [], tasks: {}, archive: {},
       };
       writeJson(path, board);
     }
-    return snapshot(new BoardStore(location));
+    const store = new BoardStore(location);
+    if ((store.index.settings.boardType ?? "agent") !== boardType) throw new TaskboardError("IMMUTABLE_BOARD_TYPE", "Тип существующей доски нельзя изменить.");
+    return snapshot(store);
   });
 }
 
@@ -557,7 +575,7 @@ function requireBoard(location: BoardLocation): void {
 
 export function readBoardSettings(location: BoardLocation): BoardIndex["settings"] {
   requireBoard(location);
-  return readIndex(join(location.directory, "board.json")).settings;
+  return new BoardStore(location).index.settings;
 }
 
 export function onBoard<T>(location: BoardLocation, callback: (store: BoardStore, lockWaitMs: number) => T): T {

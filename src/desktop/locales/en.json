@@ -1160,5 +1160,8 @@
   "limits.low": "Low quota",
   "limits.summary": "{count} connected; {unavailable} without current data",
   "limits.remaining": "remaining {percent}%",
-  "limits.reset": "Resets {time}"
+  "limits.reset": "Resets {time}",
+  "ui.schedule_paused": "Schedule paused",
+  "ui.pause_schedule": "Pause schedule",
+  "ui.resume_schedule": "Resume schedule"
 }

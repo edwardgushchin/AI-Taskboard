@@ -287,6 +287,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.match(turn.params.input[0].text, /T-0001.*Проверка/s);
   assert.match(turn.params.input[0].text, /После записи результата в карточку и перед итоговым ответом.*mcp__ai_taskboard__worklog_record/);
   assert.ok(started.params.developerInstructions.includes(russianWriting));
+  assert.match(started.params.developerInstructions, /Before preview\/submit, update documentation/);
   assert.match(started.params.developerInstructions, /Current board reviewMode: reviewer/);
   assert.match(started.params.developerInstructions, /no drag-and-drop.*task_request_changes.*only tools actually supplied.*successful tool result/s);
   assert.match(started.params.developerInstructions, /These rules apply.*worklog_record/s);
@@ -379,6 +380,8 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(resumed.threadId, thread);
   assert.equal(await resumed.completion, undefined);
   const { requests: resumedCalls, flags: resumedFlags } = JSON.parse(readFileSync(capture, "utf8"));
+  assert.match(resumedCalls.find((call: { method: string }) => call.method === "thread/resume").params.developerInstructions,
+    /Before preview\/submit, update documentation/);
   assert.ok(resumedFlags.includes('web_search="live"'));
   assert.ok(resumedFlags.includes("network_proxy"));
   assert.equal(resumedFlags.includes("prefer_mxc"), process.platform === "win32");

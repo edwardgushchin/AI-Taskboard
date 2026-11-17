@@ -1,0 +1,47 @@
+{
+  "repository": "https://github.com/mthines/agent-skills",
+  "commit": "12b508bf9f955a2ebf839ce02189768eaf8b5f64",
+  "license": "MIT",
+  "materials": [
+    {
+      "path": "skills/authoring/docs/SKILL.md",
+      "sha256": "a8c7e2b712baa9b9d1e84e48ecbe711a0878731d0cc43eed6a209354efbc99b3",
+      "bytes": 15992
+    },
+    {
+      "path": "skills/authoring/docs/rules/docs-folder.md",
+      "sha256": "e2dbe8d7844ee279f509fc3e4d7b5f46a55a8abfd1fb6b353aa6895d0818f1db",
+      "bytes": 11645
+    },
+    {
+      "path": "skills/authoring/docs/rules/drift-detection.md",
+      "sha256": "df4b24cc7321012b583439da6c4d6edaf591bc9e6d18367d82477df47e1b2bf0",
+      "bytes": 14164
+    },
+    {
+      "path": "skills/authoring/docs/rules/auto-update-loop.md",
+      "sha256": "bed114ed4b01aa5e1a38f205ec1f45106b452b522b7c341997c5a9db5eaff4f1",
+      "bytes": 10896
+    },
+    {
+      "path": "skills/authoring/docs/rules/content-routing.md",
+      "sha256": "22323de1063a8c4350de8f1c3ccd2c890c0b461b9046a723b95ea43a7af03e40",
+      "bytes": 6716
+    },
+    {
+      "path": "skills/authoring/docs/rules/placement-resolver.md",
+      "sha256": "b73177db70a83e301c870ea3842227c1f003b5524e5384b8f3aa26b927282eee",
+      "bytes": 12660
+    },
+    {
+      "path": "skills/authoring/docs/rules/writing-style.md",
+      "sha256": "7d8f5525ca6ef33c9f696f1da69d0a558400ea670bbdf48ae901de58f0d8ea24",
+      "bytes": 8863
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "8082f26863dc4b4758997ee3ab7cc2f4a16c3428c6db09ba87b4aca1823e73ec",
+      "bytes": 1120
+    }
+  ]
+}

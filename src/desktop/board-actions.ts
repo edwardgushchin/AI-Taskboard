@@ -1,3 +1,5 @@
+import { isManual } from "../cli/manual-board.ts";
+import { readBoardSettings, locateBoard } from "../cli/storage.ts";
 import { boardReviewMode, defaultBoardAgents, hexTagColor, reviewVerifier, TaskboardError, taskIdPattern } from "../cli/model.ts";
 import type { ArchiveLink, BoardAgentSettings, BoardSettings, BoardTag, GitHubMilestone, ReviewMode, Task } from "../cli/model.ts";
 import { needsManagerAttention, type managerInbox } from "../cli/task-messages.ts";
@@ -70,7 +72,9 @@ const actions = {
   task_create: { description: "Create a focused draft for one independent deliverable only after checking the current board and reading descriptions and criteria of plausible matching tasks with task_show. Select relevant attachments from the latest message by their numeric IDs.",
     properties: { ...managerTaskFields, attachmentIds }, required: ["title"] },
   task_update: { description: "Edit an existing task without changing its status. To edit tags on a completed, cancelled, or archived task, send only id, revision, note, and tags. Lists replace existing lists. Propose requirement changes in chat if applying them would reopen a submitted task.",
-    properties: { ...taskReference, ...managerTaskFields, note: reason }, required: ["id", "revision", "note"] },
+    properties: { ...taskReference, ...managerTaskFields,
+      schedulePaused: { type: "boolean", description: "Pause (true) or resume (false) an existing recurring schedule. Keeps the rule, task status and running executor. Resume sets the next future run; manual starts keep the pause." },
+      note: reason }, required: ["id", "revision", "note"] },
   task_comment: { description: "Add a comment to a task.",
     properties: { ...taskReference, text: reason }, required: ["id", "revision", "text"] },
   task_cancel: { description: "Cancel an unfinished task. Record the reason in history. For consolidation, transfer requirements first, then supply mergedInto and transferred for a contextual notification.",
@@ -351,6 +355,7 @@ export function boardActions(project: string, attachments: { path: string; name:
     if (!Object.hasOwn(actions, name) || !args || typeof args !== "object" || Array.isArray(args)) {
       return cliFailure("INVALID_INPUT", "Unknown board action or invalid arguments.");
     }
+    if (isManual(readBoardSettings(locateBoard(project))) && !["board_list", "task_show", "task_create", "task_update", "tag_set_color", "ask_user", "project_path", "project_sha256"].includes(name)) return cliFailure("MANUAL_BOARD", "На обычной доске статусы меняет пользователь; выполнение агентами недоступно.");
     const action = name as keyof typeof actions;
     const goal = activeGoal();
     const { properties, required } = actions[action];
@@ -486,12 +491,13 @@ export function boardActions(project: string, attachments: { path: string; name:
       if (input.activeOnly !== undefined && typeof input.activeOnly !== "boolean") {
         return cliFailure("INVALID_INPUT", "Set activeOnly to true or false.");
       }
-      const result = await callCli<{ tags: BoardTag[]; tasks: (Task & { unfinishedDependencies?: string[]; readySince?: string })[];
+      const result = await callCli<{ settings: BoardSettings; tags: BoardTag[]; tasks: (Task & { unfinishedDependencies?: string[]; readySince?: string })[];
         archived: (ArchiveLink & { id: string })[] }>(project, ["list", "--compact"]);
       if (!result.ok) return result;
       const { tags, tasks, archived } = result.data;
-      const active = input.activeOnly ? tasks.filter(({ status }) => status !== "done" && status !== "cancelled") : tasks;
-      return { ok: true, data: { tags: tags.map(tag => tag.name),
+      const active = input.activeOnly ? tasks.filter(({ status }) => isManual(result.data.settings)
+        ? !result.data.settings.manualColumns?.some(c => c.id === status && c.terminal) : status !== "done" && status !== "cancelled") : tasks;
+      return { ok: true, data: { ...(isManual(result.data.settings) ? { boardType: "manual", statuses: result.data.settings.manualColumns } : {}), tags: tags.map(tag => tag.name),
         tagColors: Object.fromEntries(tags.map(({ name, color }) => [name, color])),
         tasks: active.map(({ id, title, status, revision, tags, priority, dueDate, dependencies, unfinishedDependencies, readySince, goalThreadId, milestone, schedule }) =>
           ({ id, title, status, revision, tags, priority, dueDate, dependencies, unfinishedDependencies, readySince, running: isTaskRunning(id),

@@ -109,6 +109,12 @@ test("all board roles receive the same action boundaries on every instruction bu
   }
 });
 
+test("manual board instructions describe personal tasks without agent lifecycle actions", () => {
+  const instructions = boardAgentInstructions("manager", "Personal tasks", { manual: true });
+  assert.match(instructions, /Only the user moves personal tasks/);
+  assert.doesNotMatch(instructions, /Managers create drafts|launch with task_start|delegate the smallest/);
+});
+
 
 test("built-in rules stay silent without rewriting supplied questions or quotations", () => {
   const supplied = 'User asks: What is humanizer-ru? Quote: "Ponytail SKILL.md"';
