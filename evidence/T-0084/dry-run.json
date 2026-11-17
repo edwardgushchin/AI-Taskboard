@@ -1,0 +1,57 @@
+{
+    "manifest":  {
+                     "targetRoot":  "C:\\Users\\eduar",
+                     "incident":  "T-0082",
+                     "cards":  [
+                                   {
+                                       "path":  ".tasks/tasks/T-0014.json",
+                                       "sha256":  "6a5798aedf9e34a8210d7161ee91b96671465b2730a43102d5c4509afd2bcb48",
+                                       "bytes":  1291,
+                                       "identity":  {
+                                                        "id":  "T-0014",
+                                                        "status":  "draft",
+                                                        "createdAt":  "2026-11-15T20:02:15.637Z",
+                                                        "revision":  1,
+                                                        "title":  "IPC statistics",
+                                                        "updatedAt":  "2026-11-15T20:02:15.637Z"
+                                                    }
+                                   },
+                                   {
+                                       "path":  ".tasks/tasks/T-0015.json",
+                                       "sha256":  "0e12fb1d8232ed550e2528fc0a1d180133694dda342cdcfca6d3ab9e16bdacd2",
+                                       "bytes":  1291,
+                                       "identity":  {
+                                                        "id":  "T-0015",
+                                                        "status":  "draft",
+                                                        "createdAt":  "2026-11-15T20:03:00.449Z",
+                                                        "revision":  1,
+                                                        "title":  "IPC statistics",
+                                                        "updatedAt":  "2026-11-15T20:03:00.449Z"
+                                                    }
+                                   },
+                                   {
+                                       "path":  ".tasks/tasks/T-0016.json",
+                                       "sha256":  "45fbf7e7686619dd4197671c3a0c83d29069096b4a9baddb26cae6a251490524",
+                                       "bytes":  1511,
+                                       "identity":  {
+                                                        "id":  "T-0016",
+                                                        "status":  "cancelled",
+                                                        "createdAt":  "2026-11-15T20:03:50.418Z",
+                                                        "revision":  2,
+                                                        "title":  "IPC statistics",
+                                                        "updatedAt":  "2026-11-15T20:03:51.048Z"
+                                                    }
+                                   }
+                               ],
+                     "schema":  1,
+                     "pending":  [
+
+                                 ],
+                     "nextId":  17,
+                     "boardIndex":  {
+                                        "path":  ".tasks/board.json",
+                                        "sha256":  "351f7c73ffc13ac4df80029d11d566bf7d784d414bc541dc081bccb5f9376416",
+                                        "bytes":  679
+                                    }
+                 }
+}

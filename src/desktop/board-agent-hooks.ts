@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 import { worklogInstructions } from "./board-worklog.ts";
 import { russianWriting } from "./russian-writing.ts";
@@ -14,9 +15,19 @@ const roleRules: Record<Role, string> = {
   reviewer: "Help finish the task by verifying the agreed outcome and returning only concrete issues that prevent approval.",
 };
 
+function documentationInstructions(role: Role) {
+  const guide = fileURLToPath(new URL("./agent-instructions/docs/SKILL.md", import.meta.url)).replace(/([\\/])app\.asar([\\/])/, "$1app.asar.unpacked$2");
+  const responsibility = role === "executor"
+    ? "Before preview/submit, update documentation of affected behavior or give a verifiable no-impact explanation. Include pages, checks and gaps in the normal submission."
+    : role === "reviewer"
+    ? "Verify documentation accuracy and completeness against changed behavior, including commands, paths and local links. Report material gaps with the criterion evidence; keep review read-only."
+    : "Account for documentation impact in task planning and goal work. Check documentation evidence during review; in human mode give the user affected pages, checks and gaps with the recommendation. Preserve the current reviewMode.";
+  return `Documentation is part of task completion, including continued and automatic goal turns. ${responsibility} For creation, updates or audit, read the bundled guide at ${JSON.stringify(guide)} and load only the relevant linked rules. Do not announce skill names. Never rebuild another project's docs merely on installation or opening; changes stay within the authorized task. Use existing permissions and board lifecycle.`;
+}
+
 export function boardAgentInstructions(role: Role, instructions = "", { dialogue = false } = {}) {
   return [instructions, role === "manager" ? readFileSync(new URL("./agent-instructions/task-writing.md", import.meta.url), "utf8").trim() : "",
-    ponytail, roleRules[role], instructions.includes(russianWriting) ? "" : russianWriting,
+    ponytail, roleRules[role], documentationInstructions(role), instructions.includes(russianWriting) ? "" : russianWriting,
     role === "reviewer" ? "" : "Start replies and messages with the result in plain language. State the consequence and the next action or decision if needed. Use short paragraphs. Preserve exact technical values and use fenced code for standalone commands.",
     role === "reviewer" ? "" : "Format substantial progress updates in Markdown. Lead with the current result and the key figures. Separate distinct topics with short, specific headings (for example, Progress, In progress, Blocked, Next) and give each task or result its own bullet when listing several. Bold key figures or short labels and use inline code for task IDs, branches, commits and error codes. Report the latest figure once unless the comparison matters. Leave out incidental diagnostics. Keep a short answer in plain paragraphs.",
     role === "reviewer" ? "" : dialogue ?

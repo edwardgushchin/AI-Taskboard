@@ -374,6 +374,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.equal(requests[6].params.permissions, "ai-taskboard-manager");
   assert.equal(requests[6].params.sandbox, undefined);
   assert.match(requests[6].params.developerInstructions, /Ponytail.*worklog_record/s);
+  assert.match(requests[6].params.developerInstructions, /documentation impact in task planning and goal work/);
   assert.match(requests[6].params.developerInstructions, /Format substantial progress updates in Markdown/);
   assert.ok(requests[6].params.developerInstructions.includes(russianWriting));
   const diaryPath = readFileSync(join(directory, "worklog-path"), "utf8");

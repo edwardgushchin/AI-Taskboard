@@ -29,4 +29,4 @@ Run `npm run package` on Windows x64. The NSIS installer and unpacked applicatio
 
 Future Linux and macOS releases use platform-native packages. The Linux build uses `AI_TASKBOARD_PROJECT_URL` and `AI_TASKBOARD_MAINTAINER` for package metadata. The macOS distribution requires Developer ID identities and notarization credentials.
 
-[Project design](docs/design.md)
+[Documentation](docs/README.md)
