@@ -572,6 +572,7 @@
   "ui.copied_copy_code_again_b2b609e4": "Скопировано. Скопировать код ещё раз",
   "ui.could_not_copy_select_the_code_or_retry_3ed46a84": "Не удалось скопировать. Выделите код или повторите.",
   "ui.copy_code_968ce1d3": "Скопировать код",
+  "ui.copy_hash": "Скопировать хеш",
   "ui.copy_full_hash_725de55a": "Скопировать полный хеш",
   "ui.copied_243d5f98": "Скопировано. ",
   "ui.copy_failed_retry_eeb3cc51": "Не удалось скопировать. Повторить.",

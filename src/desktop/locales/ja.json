@@ -572,6 +572,7 @@
   "ui.copied_copy_code_again_b2b609e4": "コピーされました。コードを再度コピーします",
   "ui.could_not_copy_select_the_code_or_retry_3ed46a84": "コピーできませんでした。コードを選択するか、再試行してください。",
   "ui.copy_code_968ce1d3": "コードをコピーする",
+  "ui.copy_hash": "ハッシュをコピー",
   "ui.copy_full_hash_725de55a": "完全なハッシュをコピーする",
   "ui.copied_243d5f98": "コピーされました。 ",
   "ui.copy_failed_retry_eeb3cc51": "コピーに失敗しました。リトライ。",

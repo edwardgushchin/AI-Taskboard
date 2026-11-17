@@ -44,6 +44,7 @@ const help = [
   "          project-usage (all available project token usage, including archived tasks and manager)",
   "          manager-usage (known board manager token usage) or manager-usage --stdin (record a run snapshot)",
   "          message TASK-ID --stdin (text, optional kind), messages TASK-ID (optional afterSequence with --stdin), manager-inbox",
+  "          spawn-child PARENT --stdin (key, basis, title, description, criteria; optional existingId and dependencies)",
   "          tool-request TASK-ID --stdin (server, tool, reason), tool-grant TASK-ID --stdin (revision, server, tool; restart required)",
   "          tool-revoke TASK-ID --stdin (revision, server, tool; restart required)",
   "          manager-ack [TASK-ID] --stdin (through for one card, messages with id and through for a batch)",
@@ -88,10 +89,10 @@ function isMergeRepair(task: Task) {
 
 function compactTask(task: Task) {
   const { id, title, description, status, revision, tags, priority, attachments, coverAttachment, codexThreadId,
-    createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep, dependencies, milestone, workingDirectory, schedule } = task;
+    createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep, dependencies, milestone, workingDirectory, schedule, origin, launchRequested } = task;
   return { acceptanceRepair: task.acceptanceRepair, id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
     coverAttachment, codexThreadId, createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep,
-    dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, historyLength: task.history.length,
+    dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, origin, launchRequested, historyLength: task.history.length,
     ...(status === "review" && task.git?.submission && !task.result?.noChanges ? { reviewHasCommit: true } : {}),
     ...(currentReviewApproval(task) ? { reviewApproved: true } : {}),
     ...(isMergeRepair(task) ? { mergeRepair: true as const } : {}),
@@ -352,6 +353,52 @@ function run(
     return filters.archived ? { project: snapshot.project, tags: snapshot.tags, archived } :
       { ...snapshot, tasks: snapshot.tasks.filter(matches), archived };
   }
+  if (command === "spawn-child") {
+    if (!id) throw new TaskboardError("INVALID_INPUT", "Supply the recurring parent ID.");
+    const parent = store.card(id);
+    requireState(parent, ["in_progress"]);
+    if (!parent.schedule) throw new TaskboardError("INVALID_TRANSITION", "Only a recurring executor can create child work.");
+    const key = text(input.key, "key", true);
+    const basis = text(input.basis, "basis", true);
+    // The board lock covers lookup and creation, including concurrent passes.
+    const snapshot = store.snapshot();
+    const cards = [...store.storedCards(), ...snapshot.archived.map(entry => readTask(store, entry.id))];
+    const linked = parent.childWork?.find(entry => entry.key === key);
+    if (linked) return readTask(store, linked.id);
+    const previous = cards.find(task => task.origin?.parent === id && task.origin.key === key);
+    if (previous) {
+      if (!store.index.tasks[previous.id] && !store.index.archive[previous.id]) return store.create(previous);
+      return previous;
+    }
+    if (input.existingId !== undefined) {
+      const existing = readTask(store, text(input.existingId, "existingId", true));
+      const linkedParent = record(parent, "child-work", "agent");
+      linkedParent.childWork = [...(parent.childWork ?? []), { key, basis, id: existing.id }];
+      linkedParent.history.at(-1)!.text = existing.id + ": " + basis;
+      store.save(linkedParent);
+      return existing;
+    }
+    const description = text(input.description, "description", true);
+    const criteria = strings(input.criteria, "criteria");
+    if (!criteria.length) throw new TaskboardError("INVALID_INPUT", "Child work needs acceptance criteria.");
+    let child = createTask(store.allocateId(), { title: input.title, description, criteria,
+      dependencies: input.dependencies, actor: "agent" });
+    const pending = [...(child.dependencies ?? [])];
+    const visited = new Set<string>();
+    while (pending.length) {
+      const dependency = pending.pop()!;
+      if (dependency === id) throw new TaskboardError("INVALID_INPUT", "Child work cannot wait for its recurring parent.");
+      if (!visited.has(dependency)) {
+        visited.add(dependency);
+        pending.push(...(readTask(store, dependency).dependencies ?? []));
+      }
+    }
+    validateDependencies(store, child);
+    child = changeTask(child, "approve", { revision: child.revision, actor: "agent" });
+    child.origin = { parent: id, key, basis };
+    child.launchRequested = true;
+    return createWithAttachments(store, child, undefined);
+  }
   if (command === "create") {
     const task = createTask(store.allocateId(), input);
     validateDependencies(store, task);
@@ -400,7 +447,7 @@ function run(
     const task = store.card(id);
     const sender = command === "manager-message" ? "manager" : "agent";
     const saved = store.save(sendTaskMessage(task, input, sender));
-    return { id, sequence: saved.history.length };
+    return { id, sequence: saved.history.length, at: saved.history.at(-1)?.at };
   }
   if (command === "tag") {
     if (id === "assign") {

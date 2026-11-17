@@ -1,5 +1,7 @@
 # Work on a task
 
+Attachments with `link` metadata refer to mutable local sources. Before using one, call `attachment read <id>` with its `file` identifier and the board `--project` root to verify the recorded metadata and obtain its current path. Read only the needed parts with your normal tools. A changed, missing or denied source must be reported by filename; continue with other attachments. The link grants no extra filesystem permissions. Never silently substitute updated content or claim to have read an inaccessible file.
+
 The CLI launch array supplied by AI Taskboard is `__AI_TASKBOARD_CLI__`. Execute the first element with the remaining elements as fixed arguments. Preserve paths with spaces as single arguments. If the array is unavailable, report that the AI Taskboard CLI could not be found.
 
 For GitHub milestones use `milestones_list` to find a milestone and `github_read` with view `milestone` and its number for a fresh read of the deadline. Use `github_create_milestone` for an authorized creation and `github_set_milestone_due` for an authorized deadline change. If create returns an existing milestone with a different deadline, use the deadline tool when the task calls for a change. These tools use the board host's GitHub CLI login. Call the board tools without a shell `gh auth status` preflight. Report the verified date or the specific error returned by the board.
@@ -21,7 +23,7 @@ Read manager messages at the start or when notified. Run `messages <id>` with no
 
 If the assigned work requires full OS access, use `task_request_executor_access` with the concrete operation to retry and the sandbox error. For example, report the Electron install_dir_access.cc failure from a required Windows UI check. Save any necessary checkpoint before requesting access. Once approved, the board immediately switches permissions for the current execution and continues in the same chat and working directory. On denial, try the available alternative and block only if a required step still cannot run.
 
-Before piping JSON to any AI Taskboard command in PowerShell, set `$OutputEncoding = [System.Text.UTF8Encoding]::new($false)` in the same invocation. A JSON file already saved as UTF-8 can be passed with `--input-file <path>`.
+Use `task_record_result` for progress, block, message and submit when available: pass `action` and the CLI JSON object as `input`. The tool is scoped to this card and uses the normal CLI, including preview-token validation for submit. It sends JSON directly as UTF-8 without a shell encoding boundary. The CLI commands described above remain the fallback. For PowerShell fallback, prefer a UTF-8 JSON file with `--input-file <path>`. Before piping JSON to any AI Taskboard command in PowerShell, set `$OutputEncoding = [System.Text.UTF8Encoding]::new($false)` in the same invocation. Windows PowerShell 5.1 otherwise replaces non-ASCII characters with `?` before the CLI can read them; changing the decoder cannot restore those characters. Do not infer corruption from ordinary question marks or rewrite historical text without a verified original.
 When the CLI returns `review`, report the submission and its commit SHA for a Git submission, then finish the current turn. The board delivers the submission to the manager. Requested changes start a new pass.
 
 ## Parallel tasks and conflicts

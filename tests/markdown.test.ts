@@ -13,6 +13,19 @@ const source = ["source-files.cjs", "markdown.js"].map(name =>
   readFileSync(new URL("../src/desktop/" + name, import.meta.url), "utf8")).join("\n");
 const markdown = runInNewContext(source + ";chatMarkdown", { window: { markdownit: MarkdownIt } }) as ReturnType<typeof MarkdownIt>;
 
+test("short commit references require explicit context in prose and inline code", () => {
+  for (const env of [{}, { agent: true }, { agent: true, report: true }, { coordination: true }]) {
+    for (const value of ["190cb97", "ABCDEF12", "abcd", "1".repeat(39)]) {
+      for (const text of ["Коммит " + value, "commit: `" + value + "`", "**Коммит** **" + value + "**"]) {
+        assert.ok(markdown.render(text, env).includes("<code>" + value + "</code>"), text);
+      }
+    }
+    for (const text of ["190cb97", "1234567", "decafbad", "Коммит src/190cb97", "commit 190cb97.txt", "commit 190cb97-extra", "commit 190cb97/next", "commit [190cb97](https://example.com)", "commit https://example.com/190cb97", "commit `git show 190cb97`", "```text\nКоммит 190cb97\n```", "    commit 190cb97"]) {
+      assert.doesNotMatch(markdown.render(text, env), /<code>190cb97<\/code>/, text);
+    }
+  }
+});
+
 test("rendered source and document destinations open the same real file without changing captions", async () => {
   const root = await mkdtemp(join(tmpdir(), "taskboard-source-links-"));
   try {

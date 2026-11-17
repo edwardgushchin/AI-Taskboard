@@ -17,7 +17,8 @@ export function claimDiscussion(project: string, task?: string) {
 }
 
 // Provider turns, independent of tabs, task statuses and reserved agent slots.
-const runs = new Map<symbol, { path: string; identity: string }>();
+type Role = "manager" | "executor" | "reviewer";
+const runs = new Map<symbol, { path: string; identity: string; role: Role }>();
 const listeners = new Set<() => void>();
 
 export function observeActiveRuns(listener: () => void) {
@@ -25,10 +26,10 @@ export function observeActiveRuns(listener: () => void) {
   return () => { listeners.delete(listener); };
 }
 
-export function trackActiveRun(project: string) {
-  const release = shared ? registerRuntime(project, { kind: "turn" }) : undefined;
+export function trackActiveRun(project: string, role: Role = "executor") {
+  const release = shared ? registerRuntime(project, { kind: "turn", role }) : undefined;
   const key = Symbol();
-  runs.set(key, { path: project, identity: projectIdentity(project) });
+  runs.set(key, { path: project, identity: projectIdentity(project), role });
   for (const listener of listeners) listener();
   return () => {
     release?.();
@@ -37,16 +38,16 @@ export function trackActiveRun(project: string) {
 }
 
 export function activeRunSummary(projects: { path: string; name?: string }[] = []) {
-  const boards = new Map<string, { path: string; name?: string; count: number }>();
+  const boards = new Map<string, { path: string; name?: string; count: number; roles: Record<Role, number> }>();
   const observed = shared ? projects.flatMap(project => runtimeEntries(project.path)
-    .filter(entry => entry.kind === "turn").map(() => ({ path: project.path, identity: projectIdentity(project.path) }))) : [...runs.values()];
+    .filter(entry => entry.kind === "turn").map(entry => ({ path: project.path, identity: projectIdentity(project.path), role: entry.role ?? "executor" }))) : [...runs.values()];
   for (const run of observed) {
     const board = boards.get(run.identity);
-    if (board) board.count++;
-    else boards.set(run.identity, { path: run.path, count: 1,
+    if (board) { board.count++; board.roles[run.role]++; }
+    else boards.set(run.identity, { path: run.path, count: 1, roles: { manager: 0, executor: 0, reviewer: 0, [run.role]: 1 },
       name: projects.find(project => projectIdentity(project.path) === run.identity)?.name });
   }
   const entries = [...boards.values()];
   return { total: observed.length, boards: projectLabels(entries).map((label, index) =>
-    ({ ...label, count: entries[index].count })) };
+    ({ ...label, count: entries[index].count, roles: entries[index].roles })) };
 }

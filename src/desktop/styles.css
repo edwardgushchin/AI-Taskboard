@@ -100,6 +100,7 @@ h1, h2, h3, p { margin: 0; }
 .settings-menu .app-menu-item:disabled { color: var(--muted); cursor: default; background: transparent; }
 .settings-menu hr { border: 0; border-top: 1px solid var(--border); margin: 4px; }
 .project-tab {
+  position: relative;
   --project-tab-background: var(--toolbar);
   display: flex; flex-direction: column-reverse; align-items: center; flex: 0 0 auto;
   min-height: 0; max-height: 260px; min-width: 0; width: 100%; padding-bottom: 4px;
@@ -110,6 +111,21 @@ h1, h2, h3, p { margin: 0; }
 .project-tab:has([aria-selected="true"]) {
   --project-tab-background: color-mix(in srgb, var(--accent) 14%, var(--bg));
   border-inline-start-color: var(--accent); color: var(--text);
+}
+/* Activity is on the opposite edge from selection and never takes layout space. */
+.project-tab.has-active-agents::after {
+  content: ""; position: absolute; inset-block: 3px; inset-inline-end: 0; width: 1px;
+  background: linear-gradient(transparent, var(--accent), transparent) 0 -48px / 100% 48px no-repeat;
+  background-color: color-mix(in srgb, var(--accent) 25%, transparent);
+  border-radius: 1px; pointer-events: none;
+  animation: project-agent-glint 3.6s linear infinite;
+}
+@keyframes project-agent-glint {
+  from { background-position-y: -48px; }
+  to { background-position-y: calc(100% + 48px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .project-tab.has-active-agents::after { animation: none; background: var(--accent); }
 }
 .project-tab button { border: 0; background: transparent; cursor: pointer; color: inherit; }
 .project-tab-button {
@@ -528,7 +544,10 @@ select:hover:not(:disabled) {
 .task-card .tag { padding: 4px 10px; border-radius: 14px; font-size: 12px; }
 .task-meta { min-width: 0; gap: 5px 8px; color: var(--muted); font-size: 11px; line-height: 15px; font-variant-numeric: tabular-nums; }
 .task-meta > span { display: inline-flex; align-items: center; min-width: 0; max-width: 100%; }
-.task-meta > .task-run-status { flex: 1; }
+.task-card-details > .task-run-status {
+  min-width: 0; color: var(--muted); font-size: 11px; line-height: 1.4;
+  white-space: normal; overflow-wrap: anywhere;
+}
 .task-identity { gap: 8px; }
 .task-id { flex: none; }
 .task-stat { display: inline-flex; align-items: center; gap: 2px; }
@@ -688,7 +707,6 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
   margin-block-end: 9px; color: var(--muted); font-size: 12px; font-weight: 600;
 }
 .chat-coordination .chat-author { position: static; width: auto; height: auto; clip-path: none; }
-.chat-coordination[data-actor="manager"] { border-inline-start-color: var(--accent); }
 .chat-coordination > .chat-text:not(:has(> .chat-review-finding:first-child)),
 .chat-coordination .chat-text > :is(h1, h2, h3, h4, h5, h6):not(:first-child) {
   padding-block-start: 10px; border-block-start: 1px solid var(--border);

@@ -84,6 +84,54 @@ app.whenReady().then(async () => {
     await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
     writeFileSync(join(artifacts, name), (await window.webContents.capturePage()).toPNG());
   };
+  if (process.argv.includes("--unicode-only")) {
+    const fixture = spawnSync(process.env.TASKBOARD_CHECK_NODE, ["--input-type=module", "-e", `
+      import { mkdirSync } from 'node:fs';
+      import { callCli } from ${JSON.stringify(new URL('../src/desktop/cli.ts', import.meta.url).href)};
+      import { recordExecutorResult } from ${JSON.stringify(new URL('../src/desktop/executor-results.ts', import.meta.url).href)};
+      import { syncTaskStatusNotices, readManagerHistory } from ${JSON.stringify(new URL('../src/desktop/manager-history.ts', import.meta.url).href)};
+      const root = process.argv[1]; mkdirSync(root);
+      const cli = async (args, input) => { const r = await callCli(root, args, input); if (!r.ok) throw Error(JSON.stringify(r)); return r.data; };
+      await cli(['init']);
+      const task = await cli(['create'], { title: 'Unicode fixture', criteria: ['Exact text'], workingDirectory: root });
+      await cli(['approve', task.id]); await cli(['start', task.id]); syncTaskStatusNotices(root);
+      const sample = 'Результат: ёж, English; «готово» — да? C:\\\\Проект\\\\file.ts abc1234 ??? literal \\\\u041F';
+      const preview = await cli(['preview', task.id]);
+      const r = await recordExecutorResult(root, task.id, { action: 'submit', input: {
+        token: preview.token, noChanges: true, summary: sample, checks: [sample], limitations: [sample] } });
+      if (!r.ok) throw Error(JSON.stringify(r));
+      syncTaskStatusNotices(root);
+      console.log(JSON.stringify({ sample, history: readManagerHistory(root, null, 'chat') }));
+    `, join(scratch, "unicode-board")], { encoding: "utf8", windowsHide: true });
+    assert.equal(fixture.status, 0, fixture.stderr);
+    const unicodeData = JSON.parse(fixture.stdout);
+    assert.ok(unicodeData.history.turns.some(turn => turn.items.some(item => item.text.includes(unicodeData.sample))), fixture.stdout);
+    await evaluate(`frame = { project: 'fixture', russian: true }; sheetKind = 'task'; sheet.showModal();
+      const unicodeFixture = ${fixture.stdout};
+      api.boardQueue = async () => ({ ok: true, data: [] });
+      body.style.paddingTop = '410px';
+      api.boardHistory = async () => ({ ok: true, data: unicodeFixture.history }); void 0;`);
+    for (const theme of ["light", "dark"]) {
+      nativeTheme.themeSource = theme;
+      for (const reopened of [false, true]) {
+        await evaluate(`window.unicodeManager?.dispose(); window.unicodeManager = draftComposer();
+          body.replaceChildren(window.unicodeManager);
+          if (!window.unicodeManager.hasAttribute('data-pinned')) window.unicodeManager.querySelector('.board-chat-pin').click();
+          window.unicodeManager.revealPinned(); window.unicodeManager.querySelector('.draft-input').click();
+          window.unicodeManager.invalidateHistory();
+          new Promise((resolve, reject) => { const started = performance.now(); const check = () => {
+            const log = window.unicodeManager.querySelector('.board-chat-log:not(.board-work)');
+            if (log?.textContent.includes(unicodeFixture.sample) && log.getBoundingClientRect().height > 50) return resolve(true);
+            if (performance.now() - started > 5000) return reject(Error('Unicode dialogue differs: ' + log?.textContent));
+            requestAnimationFrame(check); }; check(); });`);
+        console.log(`Unicode dialogue ${theme}, reopened=${reopened}: exact text passed`);
+      }
+      await capture(`unicode-${theme}.png`);
+    }
+    await evaluate(`window.unicodeManager.dispose()`);
+    console.log("Unicode Chromium checks passed");
+    return;
+  }
   await evaluate(`
     frame = { project: 'fixture', russian: true };
     sheetKind = 'task';
@@ -1347,6 +1395,39 @@ app.whenReady().then(async () => {
     }
   }
   await evaluate(`timedManager.dispose()`);
+  await evaluate(`
+    const coordinationTimes = element('div', undefined, 'chat-run');
+    body.replaceChildren(coordinationTimes);
+    const timedCoordination = ['agent', 'manager'].map((actor, index) => ({
+      ...action('coordination-time-' + index, 'mcpToolCall'), messagesOnly: true,
+      messages: [{ id: 'T-0117', sequence: index + 1, actor, at: stamp, text: 'Проверьте результат в карточке задачи.' }]
+    }));
+    timedCoordination.push({ ...action('legacy-time', 'mcpToolCall'), messagesOnly: true,
+      messages: [{ id: 'T-0117', sequence: 3, actor: 'manager', text: 'Старая запись без времени.' }] });
+    renderRunActivity(coordinationTimes, timedCoordination, true);
+  `);
+  const coordinationTimeCheck = `(() => {
+    const rows = [...coordinationTimes.querySelectorAll('.chat-coordination')];
+    const expected = new Intl.DateTimeFormat('ru', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(stamp));
+    return rows.length === 3 && !rows[2].querySelector('time') && rows.slice(0, 2).every(row => {
+      const time = row.querySelector('time'), style = getComputedStyle(row);
+      const box = time.getBoundingClientRect(), content = row.querySelector('.chat-text').getBoundingClientRect();
+      return time.dateTime === stamp && time.textContent === expected && box.height > 0 && box.top >= content.bottom &&
+        style.borderInlineStartColor === style.borderInlineEndColor && style.borderInlineStartWidth === '1px' &&
+        row.querySelector('button').textContent === 'T-0117' && row.scrollWidth <= row.clientWidth;
+    });
+  })()`;
+  await check(coordinationTimeCheck, 'both coordination directions retain source times and ordinary borders');
+  await evaluate(`renderRunActivity(coordinationTimes, JSON.parse(JSON.stringify(timedCoordination)), false); void 0`);
+  await check(coordinationTimeCheck, 'saved coordination reload retains times and leaves legacy entries untimed');
+  for (const width of [850, 480]) {
+    window.setSize(width, 960);
+    for (const theme of ['light', 'dark']) {
+      nativeTheme.themeSource = theme;
+      await check(coordinationTimeCheck, 'coordination time layout at ' + width + ' / ' + theme);
+      await capture('coordination-times-' + width + '-' + theme + '.png');
+    }
+  }
 
   // Ordinary executor messages use the same renderer live, saved and reopened.
   await evaluate(`
@@ -1376,6 +1457,85 @@ app.whenReady().then(async () => {
       await capture('executor-reopened-' + width + '-' + theme + '.png');
     }
   }
+
+  // Work pagination uses the same IPC path for local and provider cursors.
+  for (const prefix of ['local:', 'provider-cursor-']) {
+    await evaluate(`
+      var workCalls = [];
+      var workFailure = false;
+      var workDelay;
+      var workRow = id => ({ messages: [], items: [action(id, 'agentMessage', '', 'completed', id)] });
+      api.boardHistory = async (_project, cursor, view) => {
+        if (view !== 'work') return { ok: true, data: view === 'live' ? { work: [], chat: [] } : { turns: [] } };
+        workCalls.push(cursor);
+        if (workDelay) return workDelay.promise;
+        if (workFailure) return { ok: false, error: { code: 'BOARD_HISTORY_FAILED', message: 'History unavailable' } };
+        const pages = {
+          recent: { turns: [], nextCursor: '${prefix}1' },
+          '${prefix}1': { turns: [], nextCursor: '${prefix}2' },
+          '${prefix}2': { turns: Array.from({ length: 30 }, (_, i) => workRow('recent-work-' + i)), nextCursor: '${prefix}3' },
+          '${prefix}3': { turns: [], nextCursor: '${prefix}4' },
+          '${prefix}4': { turns: [workRow('older-work'), workRow('recent-work-0')], nextCursor: null }
+        };
+        return { ok: true, data: pages[cursor ?? 'recent'] };
+      };
+      frame.runningTasks = []; frame.replyingTasks = []; frame.reviewingTasks = {};
+      var workManager = draftComposer(); body.replaceChildren(workManager);
+      workManager.updateGoal({ objective: 'Сохранённая цель', status: 'paused' }, false);
+      if (!workManager.hasAttribute('data-pinned')) workManager.querySelector('.board-chat-pin').click();
+      workManager.querySelector('.board-work-toggle').click();
+      new Promise(resolve => setTimeout(resolve, 150));
+    `);
+    await check(`workCalls.length === 3 && workManager.querySelector('.board-work').textContent.includes('recent-work-29')`, 'work skips initial empty pages: ' + prefix);
+    await evaluate(`
+      var workLog = workManager.querySelector('.board-work');
+      workLog.scrollTop = 100;
+      var workAnchor = [...workLog.querySelectorAll('[data-chat-anchor], [data-item]')].find(row => row.getBoundingClientRect().top >= workLog.getBoundingClientRect().top);
+      var workOffset = workAnchor.getBoundingClientRect().top - workLog.getBoundingClientRect().top;
+      workFailure = true;
+      workLog.querySelector('.board-chat-older').click();
+      new Promise(resolve => setTimeout(resolve, 100));
+    `);
+    await check(`workLog.textContent.includes('History unavailable') && !workLog.querySelector('.board-chat-older').disabled`, 'work error permits retry');
+    await evaluate(`workFailure = false; workLog.querySelector('.board-chat-older').click(); new Promise(resolve => setTimeout(resolve, 100));`);
+    const workResult = await evaluate(`({ older: workLog.textContent.includes('older-work'), hidden: workLog.querySelector('.board-chat-older').hidden,
+      count: workLog.querySelectorAll('[data-item^="message:"]').length,
+      offset: workAnchor.getBoundingClientRect().top - workLog.getBoundingClientRect().top - workOffset,
+      calls: workCalls })`);
+    assert.ok(workResult.older && workResult.hidden && workResult.count === 31 && Math.abs(workResult.offset) <= 1,
+      'older work preserves anchor, deduplicates items and reaches end: ' + JSON.stringify(workResult));
+    await check(`workLog.querySelector('[data-item^="message:"]').dataset.item === 'message:older-work' &&
+      workManager.querySelector('.board-goal-status').textContent === 'Цель на паузе'`, 'older work precedes recent work with paused goal');
+    if (prefix === 'local:') await capture('work-pagination.png');
+    await evaluate(`
+      workLog.scrollTop = workLog.scrollHeight;
+      workLog.dispatchEvent(new Event('scroll'));
+      workDelay = Promise.withResolvers(); var workCallsBefore = workCalls.length; workManager.invalidateWork();
+      workManager.querySelector('.board-dialogue-toggle').click();
+      workDelay.resolve({ ok: true, data: { turns: [workRow('PRIVATE-LATE')], nextCursor: null } });
+      new Promise(resolve => setTimeout(resolve, 100));
+    `);
+    await check(`workCalls.length > workCallsBefore && !workManager.querySelector('.board-chat-log:not(.board-work)').textContent.includes('PRIVATE-LATE')`, 'tab switch during work load cannot leak into dialogue');
+    await evaluate(`workDelay = undefined; workManager.dispose();`);
+  }
+  await evaluate(`
+    workCalls = [];
+    var initialWorkFailure = true;
+    api.boardHistory = async (_project, cursor, view) => {
+      if (view !== 'work') return { ok: true, data: { turns: [], work: [], chat: [] } };
+      if (initialWorkFailure) return { ok: false, error: { code: 'BOARD_HISTORY_FAILED', message: 'Initial history failure' } };
+      workCalls.push(cursor);
+      return { ok: true, data: { turns: [], nextCursor: cursor === 'cycle-a' ? 'cycle-b' : 'cycle-a' } };
+    };
+    var cycleManager = draftComposer(); body.replaceChildren(cycleManager);
+    cycleManager.querySelector('.board-work-toggle').click();
+    new Promise(resolve => setTimeout(resolve, 100));
+  `);
+  await check(`cycleManager.querySelector('.board-work').textContent.includes('Initial history failure') &&
+    !cycleManager.querySelector('.board-work .board-chat-older').hidden`, 'first work history error exposes retry');
+  await evaluate(`initialWorkFailure = false; cycleManager.querySelector('.board-work .board-chat-older').click(); new Promise(resolve => setTimeout(resolve, 100));`);
+  await check(`workCalls.length === 3 && cycleManager.querySelector('.board-work .board-chat-older').hidden`, 'cursor cycle terminates empty history');
+  await evaluate(`cycleManager.dispose()`);
 
   // Measure a real visible anchor while a timestamped, overflowing chat prepends a page.
   const scrollResults = [];

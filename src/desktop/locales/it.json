@@ -572,6 +572,7 @@
   "ui.copied_copy_code_again_b2b609e4": "Copiato. Copia nuovamente il codice",
   "ui.could_not_copy_select_the_code_or_retry_3ed46a84": "Impossibile copiare. Seleziona il codice o riprova.",
   "ui.copy_code_968ce1d3": "Copia il codice",
+  "ui.copy_hash": "Copia l'hash",
   "ui.copy_full_hash_725de55a": "Copia l'hash completo",
   "ui.copied_243d5f98": "Copiato. ",
   "ui.copy_failed_retry_eeb3cc51": "Copia non riuscita. Riprova.",
