@@ -1576,7 +1576,21 @@ function managerQuestionDialog(question, trigger) {
   submit.type = "submit";
   const skip = button(() => t("ui.skip_question_773b15fa"), () => send(null), "quiet");
   actions.append(submit, skip);
-  const options = question.options.map(value => button(value, () => send(value), "quiet"));
+  const options = question.options.map(value => {
+    const option = button("", () => send(value), "quiet");
+    const caption = element("span", value, "chat-text");
+    if (chatMarkdown) {
+      const template = document.createElement("template");
+      template.innerHTML = chatMarkdown.renderInline(value);
+      // Keep the whole caption a single answer target, with no nested links or image requests.
+      for (const link of template.content.querySelectorAll("a")) link.replaceWith(...link.childNodes);
+      for (const image of template.content.querySelectorAll("img")) image.replaceWith(document.createTextNode(image.alt));
+      caption.replaceChildren(template.content);
+      if (!caption.textContent.trim()) caption.textContent = value;
+    }
+    option.append(caption);
+    return option;
+  });
   choices.append(...options);
   const controls = [close, skip, ...options];
   let sending = false;

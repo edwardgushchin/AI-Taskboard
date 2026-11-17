@@ -19,7 +19,9 @@ const commands = [
   ["unknown-synthetic", 'literal \\ % ! ^ & | < > "quote" \'single\'\nsecond line\n'],
 ];
 const question = {
-  id: "synthetic-question", options: ["**Literal** `option`", "Второй вариант"],
+  id: "synthetic-question", options: ["**Literal** `option`", "Второй вариант",
+    '*Выбрать* [документ](docs/design.md) и [сайт](https://example.com/) ![Описание](https://example.com/option.png) <img src=x onerror="window.questionExecuted=true">',
+    '**Длинный вариант**\n`' + 'C:\\Synthetic\\100%&|<>"quoted"\\'.repeat(12) + '`'],
   text: 'Проверить **команды** и *оформление* для `C:\\Synthetic`?\n\n' +
     '- Первый пункт\n- Второй пункт\n\n[Документ](docs/design.md) и [сайт](https://example.com/)\n\n' +
     '<script>window.questionExecuted = true</script>\n\n<img src=x onerror="window.questionExecuted = true">\n\n' +
@@ -36,6 +38,14 @@ try {
   console.log('Chromium ready');
   window = new BrowserWindow({ width: 850, height: 800, show: false,
     webPreferences: { sandbox: true, contextIsolation: true, backgroundThrottling: false } });
+  window.webContents.on('console-message', details => {
+    if (details.level === 'error') console.error(details.message);
+  });
+  const imageRequests = [];
+  window.webContents.session.webRequest.onBeforeRequest({ urls: ['https://example.com/*'] }, (details, done) => {
+    imageRequests.push(details.url);
+    done({ cancel: true });
+  });
   const evaluate = (code, gesture = false) => window.webContents.executeJavaScript(code, gesture);
   const check = async (code, name) => { assert.equal(await evaluate(code), true, name); results.push(name); };
   const settle = () => evaluate("new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))");
@@ -83,8 +93,15 @@ try {
     dialog().querySelectorAll('li').length === 2 && dialog().querySelectorAll('pre > code').length === 5 &&
     !dialog().querySelector('p pre, p div')`, "live question renders Markdown with valid block nesting");
   await check(`!window.questionExecuted && !dialog().querySelector('script, img, a[href^="javascript:"]') &&
-    dialog().textContent.includes('<script>') && dialog().querySelectorAll('.manager-question-options button')[0].textContent === fixture.options[0]`,
-  "HTML and executable links stay inert; answer labels stay literal");
+    dialog().textContent.includes('<script>')`, "HTML and executable links stay inert");
+  await check(`(() => { const options = dialog().querySelectorAll('.manager-question-options button');
+    return options[0].textContent === 'Literal option' && options[0].querySelector('strong')?.textContent === 'Literal' &&
+      options[0].querySelector('code')?.textContent === 'option' && options[1].textContent === fixture.options[1] &&
+      !dialog().querySelector('.manager-question-options :is(a, img, input, pre, p, div)') &&
+      options[2].querySelector('em')?.textContent === 'Выбрать' && options[2].textContent.includes('Описание') &&
+      options[2].textContent.includes('<img src=x') && !dialog().querySelector('.manager-question-options a, .manager-question-options img') &&
+      !!options[3].querySelector('br') && !!options[3].querySelector('code'); })()`,
+    "option captions render inline Markdown; plain text stays unchanged; links and images are inert captions");
   const previousClipboard = await clipboard.readText();
   await evaluate(`const writeClipboard = navigator.clipboard.writeText.bind(navigator.clipboard);
     navigator.clipboard.writeText = async text => { window.copiedSource = text; return writeClipboard(text); }; void 0;`);
@@ -151,6 +168,9 @@ try {
         await evaluate(`dialog().querySelectorAll('pre')[4].scrollIntoView({ block: 'center' }); void 0;`);
         await settle();
         writeFileSync(join(artifacts, `code-${theme}.png`), (await window.webContents.capturePage()).toPNG());
+        await evaluate(`dialog().querySelector('.manager-question-options').scrollIntoView({ block: 'start' }); void 0;`);
+        await settle();
+        writeFileSync(join(artifacts, `options-${theme}.png`), (await window.webContents.capturePage()).toPNG());
         await evaluate(`dialog().querySelector('textarea').focus(); void 0;`);
         await settle();
         writeFileSync(join(artifacts, `answer-${theme}.png`), (await window.webContents.capturePage()).toPNG());
@@ -164,7 +184,9 @@ try {
   await check(`!dialog() && document.activeElement === trigger && !trigger.hidden && answers.length === 0`,
     "Escape closes without answering and restores trigger focus");
   await evaluate(`trigger.click(); void 0;`);
-  await check(`dialog().open && dialog().querySelectorAll('pre').length === 5`, "pending question reopens with Markdown");
+  await check(`dialog().open && dialog().querySelectorAll('pre').length === 5 &&
+    dialog().querySelector('.manager-question-options strong')?.textContent === 'Literal' &&
+    dialog().querySelector('.manager-question-options code')?.textContent === 'option'`, "pending question reopens with Markdown in body and options");
   await evaluate(`dialog().querySelector('.manager-question-options button').click(); void 0;`);
   await settle();
   await check(`!dialog() && answers[0].id === fixture.id && answers[0].answer === fixture.options[0]`, "choice sends unchanged text");
@@ -181,9 +203,19 @@ try {
     dialog().querySelector('.sheet-actions .quiet').click(); void 0;`);
   await settle();
   await check(`answers[2].answer === null && !dialog()`, "skip sends null");
+  for (const index of [1, 2, 3]) {
+    await evaluate(`(() => { composer.updateQuestion(undefined); composer.updateQuestion({ ...fixture, id: 'option-${index}' });
+      const option = dialog().querySelectorAll('.manager-question-options button')[${index}];
+      (option.querySelector('code, em') ?? option).click(); })(); void 0;`);
+    await settle();
+    await check(`!dialog() && answers.at(-1).id === 'option-${index}' && answers.at(-1).answer === fixture.options[${index}]`,
+      `option ${index} sends its exact original string from nested caption clicks`);
+  }
   await evaluate(`composer.dispose(); composer.remove(); composer = draftComposer(); document.body.append(composer);
     trigger = composer.querySelector('.manager-question-trigger'); composer.updateQuestion(fixture); void 0;`);
-  await check(`dialog().open && dialog().querySelectorAll('pre').length === 5`, "restored pending question renders after composer recreation");
+  await check(`dialog().open && dialog().querySelectorAll('pre').length === 5 &&
+    dialog().querySelector('.manager-question-options strong')?.textContent === 'Literal' &&
+    dialog().querySelector('.manager-question-options code')?.textContent === 'option'`, "restored pending question renders body and options after composer recreation");
   await evaluate(`api.answerBoardQuestion = async () => ({ ok: false, error: { message: 'Synthetic failure' } });
     dialog().querySelector('.manager-question-options button').click(); void 0;`);
   await settle();
@@ -194,12 +226,36 @@ try {
     dialog().querySelector('.manager-question-options button').click(); void 0;`);
   await settle();
   await check(`!dialog()`, "answer can be retried after failure");
-  await evaluate(`composer.updateQuestion(undefined); composer.updateQuestion({ ...fixture, id: 'approval', approval: true }); void 0;`);
+  await evaluate(`api.answerBoardQuestion = async (id, answer) => { answers.push({ id, answer }); return { ok: true }; };
+    composer.updateQuestion(undefined); composer.updateQuestion({ ...fixture, id: 'approval', approval: true }); void 0;`);
   await check(`dialog().open && dialog().querySelectorAll('pre').length === 5 && !dialog().querySelector('textarea') &&
-    !dialog().querySelector('.sheet-actions')`, "shared approval dialog retains option-only controls");
+    !dialog().querySelector('.sheet-actions') && !!dialog().querySelector('.manager-question-options strong')`,
+    "shared approval dialog renders option Markdown and retains option-only controls");
+  await evaluate(`dialog().querySelector('.manager-question-options button').focus(); void 0;`);
+  await key('Space');
+  await check(`!dialog() && answers.at(-1).id === 'approval' && answers.at(-1).answer === fixture.options[0]`,
+    "keyboard activation sends original Markdown option in approval dialog");
+  await evaluate(`window.emptyCaption = '![](https://example.com/empty.png)';
+    composer.updateQuestion({ ...fixture, id: 'empty-caption', options: [emptyCaption] }); void 0;`);
+  await check(`dialog().querySelector('.manager-question-options button').textContent === emptyCaption &&
+    !dialog().querySelector('.manager-question-options img')`, "empty image caption falls back to original text for an accessible answer");
+  await evaluate(`dialog().querySelector('.manager-question-options button').click(); void 0;`);
+  await settle();
+  await check(`!dialog() && answers.at(-1).answer === emptyCaption`, "empty caption fallback sends original text");
+  await evaluate(`composer.updateQuestion({ ...fixture, id: 'no-options', options: [] }); void 0;`);
+  await check(`!dialog().querySelector('.manager-question-options') && !!dialog().querySelector('textarea')`,
+    "question without options keeps free input controls");
+  await evaluate(`dialog().querySelector('textarea').value = freeText;
+    dialog().querySelector('textarea').dispatchEvent(new Event('input'));
+    dialog().querySelector('form').requestSubmit(); void 0;`);
+  await settle();
+  await check(`!dialog() && answers.at(-1).id === 'no-options' && answers.at(-1).answer === freeText.trim()`,
+    "free answer works without options");
   await evaluate(`composer.updateQuestion(undefined); composer.dispose(); void 0;`);
   await settle();
   await check(`!dialog() && !window.questionExecuted`, "clearing question removes its modal; commands never execute");
+  assert.deepEqual(imageRequests, [], 'option images never request external resources');
+  results.push('option images never request external resources');
   writeFileSync(join(artifacts, 'checks.json'), JSON.stringify({ node: process.env.TASKBOARD_CHECK_NODE,
     electron: process.versions.electron, chromium: process.versions.chrome, checks: results }, null, 2) + '\n');
   console.log(`Manager question Chromium checks passed: ${results.length}`);
