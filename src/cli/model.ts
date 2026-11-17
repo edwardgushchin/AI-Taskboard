@@ -15,6 +15,10 @@ export const imageAttachmentPattern = /\.(png|jpe?g|webp|gif)$/i;
 
 export type TaskState = typeof taskStates[number];
 export type Priority = typeof priorities[number];
+export function validDueDate(value: unknown): value is string {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+    Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
+}
 export type Actor = "agent" | "user" | "manager" | "reviewer";
 export type IntegrationMode = "merge" | "squash";
 export interface BoardTag {
@@ -104,6 +108,7 @@ export interface TaskEvent {
   actor: Actor;
   action: string;
   text?: string;
+  mergedInto?: { id: string; title: string; transferred: string };
   messageKind?: "question" | "update" | "decision";
   reviewApproval?: { revision: number; targetHead: string | null; evidence: string[] };
   replyToMessage?: number;
@@ -179,6 +184,7 @@ export interface Task {
   questions: string[];
   tags: string[];
   priority: Priority;
+  dueDate?: string;
   subtasks: { title: string; done: boolean }[];
   attachments: Attachment[];
   coverAttachment?: string;
@@ -216,6 +222,7 @@ export interface BoardSettings {
   agentLimits?: Partial<AgentLimits>;
   reviewMode?: ReviewMode;
   autoReview?: boolean;
+  autoMode?: boolean;
 }
 
 export const defaultBoardAgents = {

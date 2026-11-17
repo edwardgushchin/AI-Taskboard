@@ -110,10 +110,12 @@ export async function executorToolConfig(request: ProviderRequest, cwd: string, 
 export async function verifyExecutorTools(request: ProviderRequest, threadId: string, grants: Task["toolGrants"]) {
   const rows = await pages<ServerStatus>(request, "mcpServerStatus/list", { threadId, detail: "toolsAndAuthOnly" })
     .catch(() => { throw new TaskboardError("PROVIDER_TOOLS_UNAVAILABLE", "Provider tool discovery is unsupported or failed. No tool access was confirmed."); });
-  if (!rows.some(row => row.name === "ai_taskboard" && !row.toolsError && Object.keys(row.tools).length)) {
+  const board = rows.find(row => row.name === "ai_taskboard" && !row.toolsError && Object.keys(row.tools).length);
+  if (!board) {
     throw new TaskboardError("PROVIDER_TOOLS_UNAVAILABLE", "Local board tools did not initialize.");
   }
   for (const grant of grants ?? []) if (!rows.some(row => row.name === grant.server && !row.toolsError && row.authStatus !== "notLoggedIn" && Object.hasOwn(row.tools, grant.tool))) {
     throw new TaskboardError("TOOL_UNAVAILABLE", "An assigned tool failed provider discovery or authorization at launch. No tool access was confirmed.");
   }
+  return Object.keys(board.tools);
 }

@@ -6,7 +6,7 @@ import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { electronCheck } from "./electron-check.mjs";
+import { electronCheck, localizationFixture } from "./electron-check.mjs";
 
 const script = fileURLToPath(import.meta.url);
 const root = resolve(dirname(script), "..");
@@ -74,6 +74,7 @@ app.whenReady().then(async () => {
     ${read("markdown.js")}
     ${read("chat.js")}
     ${read("review-diff.js")}
+    ${localizationFixture()}
     ${read("renderer.js")}
     void 0;
   `);
@@ -83,6 +84,54 @@ app.whenReady().then(async () => {
     await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
     writeFileSync(join(artifacts, name), (await window.webContents.capturePage()).toPNG());
   };
+  if (process.argv.includes("--unicode-only")) {
+    const fixture = spawnSync(process.env.TASKBOARD_CHECK_NODE, ["--input-type=module", "-e", `
+      import { mkdirSync } from 'node:fs';
+      import { callCli } from ${JSON.stringify(new URL('../src/desktop/cli.ts', import.meta.url).href)};
+      import { recordExecutorResult } from ${JSON.stringify(new URL('../src/desktop/executor-results.ts', import.meta.url).href)};
+      import { syncTaskStatusNotices, readManagerHistory } from ${JSON.stringify(new URL('../src/desktop/manager-history.ts', import.meta.url).href)};
+      const root = process.argv[1]; mkdirSync(root);
+      const cli = async (args, input) => { const r = await callCli(root, args, input); if (!r.ok) throw Error(JSON.stringify(r)); return r.data; };
+      await cli(['init']);
+      const task = await cli(['create'], { title: 'Unicode fixture', criteria: ['Exact text'], workingDirectory: root });
+      await cli(['approve', task.id]); await cli(['start', task.id]); syncTaskStatusNotices(root);
+      const sample = 'Результат: ёж, English; «готово» — да? C:\\\\Проект\\\\file.ts abc1234 ??? literal \\\\u041F';
+      const preview = await cli(['preview', task.id]);
+      const r = await recordExecutorResult(root, task.id, { action: 'submit', input: {
+        token: preview.token, noChanges: true, summary: sample, checks: [sample], limitations: [sample] } });
+      if (!r.ok) throw Error(JSON.stringify(r));
+      syncTaskStatusNotices(root);
+      console.log(JSON.stringify({ sample, history: readManagerHistory(root, null, 'chat') }));
+    `, join(scratch, "unicode-board")], { encoding: "utf8", windowsHide: true });
+    assert.equal(fixture.status, 0, fixture.stderr);
+    const unicodeData = JSON.parse(fixture.stdout);
+    assert.ok(unicodeData.history.turns.some(turn => turn.items.some(item => item.text.includes(unicodeData.sample))), fixture.stdout);
+    await evaluate(`frame = { project: 'fixture', russian: true }; sheetKind = 'task'; sheet.showModal();
+      const unicodeFixture = ${fixture.stdout};
+      api.boardQueue = async () => ({ ok: true, data: [] });
+      body.style.paddingTop = '410px';
+      api.boardHistory = async () => ({ ok: true, data: unicodeFixture.history }); void 0;`);
+    for (const theme of ["light", "dark"]) {
+      nativeTheme.themeSource = theme;
+      for (const reopened of [false, true]) {
+        await evaluate(`window.unicodeManager?.dispose(); window.unicodeManager = draftComposer();
+          body.replaceChildren(window.unicodeManager);
+          if (!window.unicodeManager.hasAttribute('data-pinned')) window.unicodeManager.querySelector('.board-chat-pin').click();
+          window.unicodeManager.revealPinned(); window.unicodeManager.querySelector('.draft-input').click();
+          window.unicodeManager.invalidateHistory();
+          new Promise((resolve, reject) => { const started = performance.now(); const check = () => {
+            const log = window.unicodeManager.querySelector('.board-chat-log:not(.board-work)');
+            if (log?.textContent.includes(unicodeFixture.sample) && log.getBoundingClientRect().height > 50) return resolve(true);
+            if (performance.now() - started > 5000) return reject(Error('Unicode dialogue differs: ' + log?.textContent));
+            requestAnimationFrame(check); }; check(); });`);
+        console.log(`Unicode dialogue ${theme}, reopened=${reopened}: exact text passed`);
+      }
+      await capture(`unicode-${theme}.png`);
+    }
+    await evaluate(`window.unicodeManager.dispose()`);
+    console.log("Unicode Chromium checks passed");
+    return;
+  }
   await evaluate(`
     frame = { project: 'fixture', russian: true };
     sheetKind = 'task';
@@ -328,7 +377,30 @@ app.whenReady().then(async () => {
       composerForm().querySelector('.chat-status').textContent.includes('Провайдер недоступен')`, "a catalog failure keeps the draft and shows the error");
     await evaluate(`modelFailure = false; composerForm().requestSubmit(); waitForSend()`);
     await check(`chats[4].text === 'Черновик останется' && composerInput().value === ''`, "sending again retries catalog loading and clears the saved draft");
-    console.log("Executor composer Chromium checks passed: 7");
+    await evaluate(`new Promise(resolve => setTimeout(resolve, 100))`);
+    await evaluate(`
+      frame.runningTasks = [];
+      frame.replyingTasks = [taskInSheet.id];
+      showTask();
+      composerInput().value = '';
+      composerInput().dispatchEvent(new Event('input'));
+      renderActiveAgents();
+    `);
+    await check(`!!composerForm().querySelector('.chat-send .codicon-debug-stop') &&
+      byId('status-agents').querySelector('span').textContent === '1' &&
+      byId('status-agents').title.includes('Обсуждения задач: 1') && frame.runningTasks.length === 0`,
+      "discussion has stop and a separate role in the total count without an executor");
+    await evaluate(`new Promise(resolve => setTimeout(resolve, 200))`);
+    window.setSize(850, 961);
+    await capture('task-discussion.png');
+    await evaluate(`frame.replyingTasks = []; taskInSheet.status = 'done'; showTask(); renderActiveAgents()`);
+    await check(`!!composerForm() && !!composerForm().querySelector('.codicon-play') &&
+      byId('status-agents').querySelector('span').textContent === '0'`,
+      "finished discussion clears the count and a completed card keeps its composer");
+    await evaluate(`taskInSheet.status = 'cancelled'; showTask()`);
+    await check(`!!composerForm() && !!composerForm().querySelector('.codicon-play')`,
+      "cancelled card keeps discussion available");
+    console.log("Executor composer Chromium checks passed: 10");
     return;
   }
   await check(`!completedWork.open && completedWork.querySelector('summary').textContent.includes('Выполнено за 7 мин 13 с')`, "completed chronology is folded with its measured duration");
@@ -627,7 +699,7 @@ app.whenReady().then(async () => {
     await evaluate(`new Promise(resolve => { const poll = () => document.querySelector('.image-preview-toolbar strong').textContent === 'reference-${index}.png' ? resolve() : requestAnimationFrame(poll); poll(); })`);
     await check(`document.querySelector('.image-preview-stage img').src === window.testImages[${index}]`, "reference images can be navigated in order");
   }
-  await evaluate(`document.querySelector('.image-preview').close(); frame.russian = false; renderRunActivity(saved, activity)`);
+  await evaluate(`document.querySelector('.image-preview').close(); localization.select("en"); renderRunActivity(saved, activity)`);
   await check(`firstGroup().querySelector('.chat-run-label').textContent.includes('3 actions')`, "English activity labels are available");
   await evaluate(`const testDraft = chatDrafts.get('fixture' + String.fromCharCode(0) + 'T-0032');
     testDraft.pending = 'replying'; testDraft.commentary = ['Live discussion update']; renderChatTurn(log, testDraft)`);
@@ -641,7 +713,7 @@ app.whenReady().then(async () => {
   // Native imageView results, including old saved JSON, use the same viewer as attachments.
   await evaluate(`
     const imageReads = [], imageSaves = [];
-    frame.russian = true;
+    localization.select("ru");
     api.runImagePreview = async (_task, path) => {
       imageReads.push(path);
       if (path === 'missing.png') return null;
@@ -864,7 +936,7 @@ app.whenReady().then(async () => {
   await evaluate(`
     sheet.close();
     showTask = originalShowTask;
-    frame.russian = true;
+    localization.select("ru");
     const reviewFiles = ['bin/verification.json', 'qa/build.log', 'bin/build.log', 'bin/build.log', 'bin/check.ps1',
       'bin/hashes.sha256', 'bin/' + 'a'.repeat(300) + '.bin'].map((source, index) => ({
         source, sha256: String(index).repeat(64),
@@ -1032,7 +1104,6 @@ app.whenReady().then(async () => {
     let stopCallsForManager = 0;
     api.boardHistory = async () => ({ ok: true, data: { turns: [] } });
     api.boardQueue = async (_project, action) => ({ ok: true, data: action === 'list' ? [] : 'request' });
-    api.boardSuggestions = async () => [];
     api.boardRequest = () => { manager.enableStop(); ready.resolve(true); return turn.promise; };
     api.stopOrchestrator = async () => {
       stopCallsForManager++;
@@ -1226,7 +1297,7 @@ app.whenReady().then(async () => {
       for (const record of records) for (const node of record.addedNodes) {
         if (node.nodeType !== 1) continue;
         const notes = [...node.querySelectorAll('[data-item^="reason:"]'), ...(node.matches('[data-item^="reason:"]') ? [node] : [])];
-        for (const note of notes) if (!note.matches('.board-manager-message')) bareReasons.push(note.textContent);
+        for (const note of notes) bareReasons.push(note.textContent);
       }
     });
     reasonObserver.observe(reasonLog, { childList: true, subtree: true });
@@ -1234,21 +1305,17 @@ app.whenReady().then(async () => {
     reasonManager.dispatchEvent(new Event('submit', { cancelable: true }));
     reasonReady.promise.then(() => true);
   `);
-  const reasonsIntact = `reasonItems.every(item => {
-    const notes = reasonLog.querySelectorAll('[data-item="reason:' + item.id + '"]');
-    return notes.length === 1 && notes[0].matches('.board-manager-message') &&
-      notes[0].firstElementChild.matches('p.chat-text') && notes[0].textContent === item.taskChanges[0].reason;
-  }) && bareReasons.length === 0`;
+  const reasonsIntact = `reasonLog.querySelectorAll('[data-item^="reason:"]').length === 0 && bareReasons.length === 0`;
   await evaluate(`reasonManager.updateActivity(reasonItems); void 0`);
-  await check(reasonsIntact, 'all action reasons are bubbles immediately during live updates, with exact multiline text');
+  await check(reasonsIntact, 'audit reasons never appear during live updates');
   await evaluate(`reasonManager.updateActivity(reasonItems); void 0`);
-  await check(reasonsIntact, 'repeated live updates do not duplicate reasons');
+  await check(reasonsIntact, 'repeated live updates keep audit reasons hidden');
   await evaluate(`reasonFinish.resolve({ ok: true, data: { answer: publicReply.text, items: [...reasonItems, publicReply] } });
     reasonFinish.promise.then(() => new Promise(resolve => requestAnimationFrame(() => resolve(true))))`);
-  await check(reasonsIntact, 'completion preserves reasons and their bubbles');
+  await check(reasonsIntact, 'completion keeps audit reasons hidden');
   await evaluate(`reasonManager.querySelector('.board-work-toggle').click(); void 0`);
   await check(`!reasonManager.querySelector('.board-work .board-manager-message') &&
-    reasonManager.querySelectorAll('.board-work p[data-item^="reason:"]').length === reasonItems.length`, 'work view retains plain reasons without dialogue bubble wrappers');
+    reasonManager.querySelectorAll('.board-work p[data-item^="reason:"]').length === 0`, 'work view keeps audit reasons within tool details');
   await evaluate(`reasonManager.querySelector('.board-dialogue-toggle').click(); void 0`);
   await check(reasonsIntact, 'switching views preserves the dialogue reasons');
   await evaluate(`reasonObserver.disconnect(); reasonManager.dispose(); reasonsSaved = true;
@@ -1260,23 +1327,15 @@ app.whenReady().then(async () => {
     new Promise(resolve => setTimeout(() => resolve(true), 250));`);
   await evaluate(`restoredReasons.invalidateHistory(); new Promise(resolve => setTimeout(() => resolve(true), 250));`);
   await check(reasonsIntact, 'history reload restores each reason once without intermediate bare text');
-  await check(`reasonItems.every(item => {
-    const row = reasonLog.querySelector('[data-item="item:' + item.id + '"]');
-    const note = reasonLog.querySelector('[data-item="reason:' + item.id + '"]');
-    return !!row && row.nextElementSibling === note && !row.matches('.board-manager-message');
-  }) && !!reasonLog.querySelector('.chat-work')`, 'history retains action rows, reason order and folded work');
+  await check(`reasonItems.every(item => !!reasonLog.querySelector('[data-item="item:' + item.id + '"]')) &&
+    !!reasonLog.querySelector('.chat-work') && reasonLog.textContent.includes(publicReply.text)`,
+    'history retains action details, folded work and the real manager reply');
   for (const width of [850, 480]) {
     window.setSize(width, 960);
     for (const theme of ['light', 'dark']) {
       nativeTheme.themeSource = theme;
       await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
-      await check(`(() => {
-        const note = reasonLog.querySelector('[data-item="reason:reason-unblock"]');
-        const normal = reasonLog.querySelector('.chat-run-final');
-        const a = getComputedStyle(note), b = getComputedStyle(normal);
-        return a.padding === b.padding && a.borderRadius === b.borderRadius && a.backgroundColor === b.backgroundColor &&
-          getComputedStyle(note.firstElementChild).whiteSpace === 'pre-wrap' && note.scrollWidth <= note.clientWidth;
-      })()`, 'reason matches ordinary manager bubble styling and wraps at ' + width + ' / ' + theme);
+      await check(reasonsIntact, 'audit reasons remain hidden at ' + width + ' / ' + theme);
       await evaluate(`reasonLog.scrollTop = 0`);
       await capture('reasons-' + width + '-' + theme + '.png');
     }

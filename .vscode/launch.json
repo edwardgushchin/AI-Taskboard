@@ -15,7 +15,7 @@
       "name": "Проверить задачу",
       "type": "node",
       "request": "launch",
-      "cwd": "${workspaceFolder}/.tasks/worktrees/${input:reviewTaskId}",
+      "cwd": "${workspaceFolder}/${input:reviewWorktreeRoot}/${input:reviewTaskId}",
       "runtimeExecutable": "${workspaceFolder}/node_modules/electron/dist/electron.exe",
       "args": [
         ".",
@@ -26,6 +26,13 @@
     }
   ],
   "inputs": [
+    {
+      "id": "reviewWorktreeRoot",
+      "type": "pickString",
+      "description": "Расположение рабочей копии (см. карточку задачи)",
+      "options": [".tasks/worktrees", ".taskboard-worktrees"],
+      "default": ".tasks/worktrees"
+    },
     {
       "id": "reviewTaskId",
       "type": "promptString",

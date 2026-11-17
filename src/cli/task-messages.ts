@@ -1,18 +1,20 @@
+import localization from "../desktop/localization.cjs";
 import { member, number, requireState, TaskboardError, text } from "./model.ts";
 import type { Task, TaskEvent } from "./model.ts";
 
-export function statusNotice(task: Task, event: TaskEvent, russian = true) {
+export function statusNotice(task: Task, event: TaskEvent, language: string | boolean = true) {
+  if (event.actor === "user") return;
   if (!event.from || !event.to || event.from === event.to) return;
-  const labels = russian ? {
-    draft: "возвращена в черновики", ready: "готова к работе", in_progress: "в работе",
-    blocked: "заблокирована", review: "сдана на проверку", done: "завершена", cancelled: "отменена",
-  } : {
-    draft: "draft", ready: "ready", in_progress: "in progress", blocked: "blocked",
-    review: "submitted for review", done: "completed", cancelled: "cancelled",
-  };
+  const locale = typeof language === "boolean" ? (language ? "ru" : "en") : language;
+  const t = (key: string, parameters = {}) => localization.text(key, parameters, locale);
   // Acceptance stores a Git SHA in event.text, not a user-facing outcome.
-  const detail = event.action === "accept" ? task.result?.summary : event.text;
-  return `${task.id} «${task.title}» — ${labels[event.to]}${detail?.trim() ? ": " + detail.trim() : "."}`;
+  if (event.mergedInto) {
+    const target = event.mergedInto;
+    return t("status.merged", { p0: task.id, p1: task.title, p2: target.id, p3: target.title, p4: target.transferred });
+  }
+  const detail = event.action === "accept" ? task.result?.summary :
+    ["block", "submit", "progress", "request-changes"].includes(event.action) ? event.text : undefined;
+  return `${task.id} «${task.title}» — ${t("status." + event.to)}${detail?.trim() ? ": " + detail.trim() : "."}`;
 }
 
 export function executorOutcome(event: TaskEvent | undefined) {
@@ -70,10 +72,6 @@ export function managerInbox(tasks: Task[]) {
 export function sendTaskMessage(task: Task, input: Record<string, unknown>, sender: "manager" | "agent"): Task {
   requireState(task, sender === "manager" ? ["ready", "in_progress", "blocked", "review"] : ["in_progress", "blocked", "review"]);
   const message = text(input.text, "text", true);
-  if (/\?{3,}/u.test(message) && !/\p{Script=Cyrillic}/u.test(message) &&
-      (message.match(/\?/g)?.length ?? 0) > message.length / 5) {
-    throw new TaskboardError("INVALID_INPUT", "The message appears to have lost Unicode characters. Send the original text using a UTF-8 JSON file with --input-file or set PowerShell $OutputEncoding to UTF-8 before piping to --stdin.");
-  }
   if (message.length > 4000) throw new TaskboardError("INVALID_INPUT", "Keep coordination messages within 4000 characters.");
   const kind = input.kind === undefined ? "update" : member(input.kind, ["question", "update", "decision"], "kind");
   const replyTo = input.replyTo === undefined ? undefined : number(input.replyTo, "replyTo", 1);

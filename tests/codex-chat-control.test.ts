@@ -1,6 +1,9 @@
+import localization from "../src/desktop/localization.cjs";
+import { trackActiveRun, trackProvider, claimDiscussion } from "../src/desktop/active-runs.ts";
 import { providerActions } from "../src/desktop/provider-tools.ts";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import type { SpawnOptions } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
@@ -9,7 +12,7 @@ import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import { withBoardMcp } from "../src/desktop/board-mcp.ts";
 import { goalTaskWaitSeconds } from "../src/desktop/board-actions.ts";
-import { boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "../src/desktop/board-agent-hooks.ts";
+import { responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "../src/desktop/board-agent-hooks.ts";
 import { codexRpc, turnControl } from "../src/desktop/codex-rpc.ts";
 import type { AgentControl, RpcMessage } from "../src/desktop/codex-rpc.ts";
 import type { BoardGoal, BoardGoalAction } from "../src/desktop/codex-chat.ts";
@@ -17,9 +20,76 @@ import { CodexTokenUsage } from "../src/desktop/codex-token-usage.ts";
 import { codexThreadPattern, taskIdPattern } from "../src/cli/model.ts";
 import { runActivity, runLog } from "../src/desktop/run-activity.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
+import { managerCliContext } from "../src/desktop/manager-cli.ts";
+import { managerAccess } from "../src/desktop/codex.ts";
+import { projectIdentity } from "../src/desktop/project-tabs.ts";
+import { githubReadTool } from "../src/desktop/github-read.ts";
 
 const source = readFileSync(new URL("../src/desktop/codex-chat.ts", import.meta.url), "utf8")
   .replace(/^import[\s\S]*?;\r?\n/gm, "").replace(/^export /gm, "");
+
+test("manager access defaults to auto and preserves old full-access choices per board", t => {
+  const directory = mkdtempSync(join(tmpdir(), "ai-taskboard-manager-access-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const first = join(directory, "first");
+  const second = join(directory, "second");
+  mkdirSync(first);
+  mkdirSync(second);
+  assert.equal(managerAccess(directory, first), "auto");
+  writeFileSync(join(directory, "manager-full-access.json"), JSON.stringify([projectIdentity(first)]));
+  assert.equal(managerAccess(directory, first), "full");
+  assert.equal(managerAccess(directory, second), "auto");
+  assert.equal(managerAccess(directory, second, "ask"), "ask");
+  assert.equal(managerAccess(directory, second), "ask");
+  assert.equal(managerAccess(directory, first), "full");
+  assert.equal(managerAccess(directory, first, "auto"), "auto");
+  assert.equal(managerAccess(directory, first), "auto");
+  assert.equal(managerAccess(directory, second), "ask");
+});
+
+test("an executor access request gets an independent manager decision scoped to its card", async () => {
+  const task = { id: "T-0118", revision: 13, title: "Verify Electron", status: "in_progress", criteria: ["Run the UI check"] };
+  const grants: unknown[] = [];
+  let answer = "";
+  let calls = 0;
+  const request = runInNewContext(stripTypeScriptTypes(source) + "\nreply = managerReply; requestExecutorAccess", {
+    AbortSignal, cliFailure: (code: string, message: string) => ({ ok: false, error: { code, message } }),
+    callCli: async (_project: string, argv: string[]) => {
+      assert.equal(argv[1], task.id);
+      return { ok: true, data: task };
+    },
+    executorFullAccess: () => false,
+    setTaskExecutorAccess: async (_profile: string, _project: string, args: unknown) => {
+      grants.push(args);
+      return { ok: true };
+    },
+    managerReply: async (_profile: string, _project: string, input: string, _images: string[], _action: unknown, options: any) => {
+      calls++;
+      assert.equal(JSON.parse(input).task.id, task.id);
+      assert.match(JSON.parse(input).executorRequest, /install_dir_access\.cc/);
+      assert.equal(options.tools.length, 0);
+      assert.equal(options.finalAnswerSchema.properties.approved.type, "boolean");
+      assert.match(options.instructions, /read-only shell does not limit that decision/);
+      return { text: answer };
+    },
+  });
+  const args = { reason: "Required UI check fails with Electron install_dir_access.cc:52." };
+  const run = (input: unknown = args, signal = new AbortController().signal) => request("profile", "project", task.id, input, undefined, signal);
+  assert.equal((await run({ ...args, id: "T-9999" })).error.code, "INVALID_INPUT");
+  assert.equal(calls, 0);
+  answer = JSON.stringify({ approved: false, reason: "Use the scripted check." });
+  assert.equal((await run()).data.approved, false);
+  assert.equal(grants.length, 0);
+  answer = "No structured decision";
+  assert.equal((await run()).error.code, "ACCESS_DECISION_FAILED");
+  answer = JSON.stringify({ approved: true, reason: "The required local check needs host access." });
+  assert.equal((await run(args, AbortSignal.abort())).error.code, "ACCESS_DECISION_FAILED");
+  assert.equal(grants.length, 0);
+  const approved = await run();
+  assert.equal(approved.data.approved, true);
+  assert.equal(approved.data.appliesOn, "current-execution");
+  assert.deepEqual(JSON.parse(JSON.stringify(grants)), [{ id: task.id, revision: task.revision, fullAccess: true }]);
+});
 
 test("task run history restores paginated activity in the empty run slots", async () => {
   const row = (id: string, at: number, type = "commandExecution") => ({
@@ -61,6 +131,15 @@ test("board activity extracts actual coordination messages from successful calls
     result: { content: [{ type: "text", text: JSON.stringify({ ok: true, data }) }] }, ...options,
   });
   const activity = (item: ReturnType<typeof make>) => boardActivity(new Map(), "item/completed", { item });
+  for (const tool of ["task_unblock", "task_cancel", "task_comment", "task_update"]) {
+    const reason = "Пользователь поручил ещё одну попытку…";
+    const item = make(tool, { id: "T-0115", title: "Проверка", status: "ready", revision: 4 }, { arguments: { reason } });
+    for (const result of [activity(item), activity(JSON.parse(JSON.stringify(item)))]) {
+      assert.equal(result.messages, undefined);
+      assert.equal(result.taskChanges[0].reason, undefined);
+      assert.ok(result.text.includes(reason)); // Audit data stays inside tool details.
+    }
+  }
   const inbox = activity(make("manager_inbox", [question]));
   assert.equal(inbox.messages[0].actor, "agent");
   assert.equal(inbox.messages[0].text, question.text);
@@ -137,13 +216,32 @@ test("discussion steering and interruption share the streaming connection, inclu
   const script = join(directory, "provider.cjs");
   writeFileSync(script, `
     const send = value => console.log(JSON.stringify(value));
-    require('node:readline').createInterface({ input: process.stdin }).on('line', line => {
+    const assert = require('node:assert/strict');
+    const url = process.argv.find(value => value.startsWith('mcp_servers={ai_taskboard=')).match(/http[^"]+/)[0];
+    const invoke = async (method, params) => {
+      const response = await fetch(url, { method: 'POST',
+        headers: { authorization: 'Bearer ' + process.env.AI_TASKBOARD_MCP_TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
+      return response.json();
+    };
+    require('node:readline').createInterface({ input: process.stdin }).on('line', async line => {
       const { id, method, params } = JSON.parse(line);
       if (id === undefined || !method) return;
       let result = {};
       if (method === 'model/list') result = { data: [{ model: 'test', defaultReasoningEffort: 'low', supportedReasoningEfforts: [] }], nextCursor: null };
-      if (method === 'thread/start') result = { thread: { id: 'thread' } };
-      if (method === 'turn/start') result = { turn: { id: 'turn', status: 'inProgress' } };
+      if (method === 'thread/start') {
+        assert.equal(params.sandbox, 'read-only');
+        result = { thread: { id: 'thread' } };
+      }
+      if (method === 'turn/start') {
+        const { result: { tools } } = await invoke('tools/list');
+        assert.deepEqual(tools.map(tool => tool.name).sort(), ['github_read', 'worklog_record']);
+        const github = await invoke('tools/call', { name: 'github_read', arguments: { view: 'run-failed-log', runId: 43816168554 } });
+        assert.equal(JSON.parse(github.result.content[0].text).data.log, 'Dependency resolution failed');
+        const write = await invoke('tools/call', { name: 'github_set_milestone_due', arguments: {} });
+        assert.equal(write.error.code, -32601);
+        result = { turn: { id: 'turn', status: 'inProgress' } };
+      }
       if (method === 'turn/steer') {
         if (params.expectedTurnId !== 'turn') throw new Error('Wrong turn');
         if (params.input[0].text === 'reject') { send({ id, error: { message: 'No active turn' } }); return; }
@@ -155,7 +253,17 @@ test("discussion steering and interruption share the streaming connection, inclu
     });
   `);
   const runtime = runInNewContext(stripTypeScriptTypes(source) + "\nreplyToTask", {
-    spawn, codexRpc, turnControl, CodexTokenUsage, withBoardMcp, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
+    spawn: (command: string, args: string[], options: SpawnOptions) => {
+      const child = spawn(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] });
+      child.stderr.pipe(process.stderr);
+      return child;
+    },
+    trackActiveRun, trackProvider, claimDiscussion, codexRpc, turnControl, CodexTokenUsage, withBoardMcp, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
+    githubReadTool, readBoardGitHub: async (project: string, args: unknown) => {
+      assert.equal(project, directory);
+      assert.deepEqual(args, { view: "run-failed-log", runId: 43816168554 });
+      return { ok: true, data: { log: "Dependency resolution failed" } };
+    },
     process, setTimeout, clearTimeout,
     configuredCodex: async () => ({ path: process.execPath, args: [script] }),
     chatTools: [], cliFailure: () => ({ ok: false }), saveChatImages: async () => [],
@@ -192,10 +300,16 @@ test("board chat keeps a goal streaming across turns and times out only after in
     const requests = [];
     let retries = 0;
     let goal = { objective: "Read this", status: "active" };
+    const approvalReplies = new Map();
     const threadId = ${JSON.stringify(threadId)};
     const send = value => console.log(JSON.stringify(value));
     require("node:readline").createInterface({ input: process.stdin }).on("line", async line => {
-      const { id, method, params } = JSON.parse(line);
+      const { id, method, params, result, error } = JSON.parse(line);
+      if (approvalReplies.has(id) && !method) {
+        approvalReplies.get(id)(error ?? result);
+        approvalReplies.delete(id);
+        return;
+      }
       if (id === undefined) return;
       requests.push({ method, params });
       if (method === "thread/resume" && retries++ < 4) {
@@ -210,7 +324,9 @@ test("board chat keeps a goal streaming across turns and times out only after in
       } else if (method === "config/read") {
         send({ id, result: { config: { model: "default-model", model_reasoning_effort: "medium" } } });
       } else if (method === "thread/resume" || method === "thread/start") {
-        send({ id, result: { thread: { id: threadId, name: "Project manager" }, model: params.model } });
+        send({ id, result: { thread: { id: threadId, name: "Project manager" }, model: params.model,
+          activePermissionProfile: { id: process.argv[2] === "wrong-access" ? ":read-only" : params.permissions },
+          approvalPolicy: params.approvalPolicy, approvalsReviewer: params.approvalsReviewer } });
       } else if (method === "thread/goal/set") {
         goal = { objective: params.objective ?? goal.objective, status: params.status ?? goal.status };
         send({ id, result: { goal } });
@@ -228,8 +344,9 @@ test("board chat keeps a goal streaming across turns and times out only after in
         send({ method: "thread/goal/cleared", params: { threadId } });
       } else if (method === "turn/start") {
         const config = process.argv.find(value => value.startsWith("mcp_servers.ai_taskboard="));
+        const native = process.argv[2] === "cli-ready";
         const url = config.match(/http[^"]+/)[0];
-        for (const name of ["task_start", "project_git", "project_disk", "project_path"]) {
+        for (const name of ["task_start", "project_git", "task_review_queue", "project_path"]) {
           if (!config.includes(name + '={approval_mode="approve"}')) throw new Error("Missing board tool policy for " + name);
         }
         const token = process.env.AI_TASKBOARD_MCP_TOKEN;
@@ -240,14 +357,26 @@ test("board chat keeps a goal streaming across turns and times out only after in
           return (await response.json()).result;
         };
         const { tools } = await invoke("tools/list");
-        if (tools.map(tool => tool.name).join(",") !== "task_start,project_git,project_disk,project_path,worklog_record") throw new Error("Missing board tools");
+        if (tools.map(tool => tool.name).join(",") !== (native ? "task_start,task_review_queue,project_path,worklog_record" :
+          "task_start,project_git,task_review_queue,project_path,worklog_record")) throw new Error("Unexpected board tools");
         for (const [name, args] of [["task_start", { id: "T-0001", revision: 2 }], ["project_git", { view: "status" }],
-          ["project_disk", {}], ["project_path", { path: ".", list: true }]]) {
+          ["task_review_queue", {}], ["project_path", { path: ".", list: true }]]) {
+          if (native && name === "project_git") continue;
           const result = await invoke("tools/call", { name, arguments: args });
           if (result.isError) throw new Error("Board tool failed");
         }
         send({ id, result: { turn: { id: "reply", status: "inProgress" } } });
         send({ method: "turn/started", params: { threadId, turn: { id: "reply", status: "inProgress" } } });
+        if (process.argv[2] === "manual-access") {
+          const approve = (kind, extra) => new Promise(resolve => {
+            approvalReplies.set(kind, resolve);
+            send({ id: kind, method: "item/" + kind + "/requestApproval", params: { threadId, turnId: "reply", ...extra } });
+          });
+          const command = await approve("commandExecution", { command: "Get-ChildItem", cwd: process.cwd(), availableDecisions: ["accept", "decline"] });
+          if (command?.decision !== "accept") throw Error("One-time command approval was not applied");
+          const permission = await approve("permissions", { permissions: { network: { enabled: true } } });
+          if (permission?.scope !== "turn" || Object.keys(permission.permissions).length) throw Error("Denied permissions were granted");
+        }
         const usage = { totalTokens: 120, inputTokens: 100, cachedInputTokens: 80, cacheWriteInputTokens: 0, outputTokens: 20, reasoningOutputTokens: 10 };
         send({ method: "thread/tokenUsage/updated", params: { threadId, turnId: "reply", tokenUsage: { total: usage, last: usage } } });
         send({ method: "item/completed", params: { threadId, elapsed: 120_000, item: { id: "first", type: "agentMessage", phase: "final_answer", text: "First turn" } } });
@@ -298,8 +427,10 @@ test("board chat keeps a goal streaming across turns and times out only after in
   let providerMode = "";
   const { replyToBoard: runtime, updateBoardGoal } = runInNewContext(stripTypeScriptTypes(source) + "\n({ replyToBoard, updateBoardGoal })", {
     spawn, turnControl, CodexTokenUsage, codexThreadPattern, Error, process, withBoardMcp, goalTaskWaitSeconds,
-    boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
-    codexRpc: (child: Parameters<typeof codexRpc>[0], notify: Parameters<typeof codexRpc>[1], onRequest: Parameters<typeof codexRpc>[2]) =>
+    managerCliContext, probeManagerCli: async () => providerMode === "cli-ready"
+      ? { gitOptions: ["--no-optional-locks", "-c", "core.fsmonitor=false"] } : {},
+    responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
+    trackActiveRun, trackProvider, claimDiscussion, codexRpc: (child: Parameters<typeof codexRpc>[0], notify: Parameters<typeof codexRpc>[1], onRequest: Parameters<typeof codexRpc>[2]) =>
       codexRpc(child, (message: RpcMessage) => {
         elapsed += (message.params as { elapsed?: number })?.elapsed ?? 0;
         if (watchdog && elapsed >= watchdog.expires) watchdog.fail();
@@ -331,7 +462,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
     id: threadId, title: "Project manager", save: () => assert.fail("Thread ID must be preserved"),
     settings: { model: "manager-model", effort: "high" },
     goal: "Read this",
-    mcpTools: ["task_start", "project_git", "project_disk", "project_path"].map(name => ({ name, description: name, inputSchema: { type: "object" } })),
+    mcpTools: ["task_start", "project_git", "task_review_queue", "project_path"].map(name => ({ name, description: name, inputSchema: { type: "object" } })),
     onGoalSet: () => accepted++, onActivity() {}, onControl: (value: AgentControl) => { control = value; },
     onWaiting: (value: boolean) => waiting.push(value),
     onTokenUsage: async (report: import("../src/cli/token-usage.ts").TokenUsageReport) => { reports.push(report); },
@@ -349,7 +480,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.deepEqual(launched, [
     { name: "task_start", args: { id: "T-0001", revision: 2 } },
     { name: "project_git", args: { view: "status" } },
-    { name: "project_disk", args: {} },
+    { name: "task_review_queue", args: {} },
     { name: "project_path", args: { path: ".", list: true } },
   ]);
   assert.deepEqual(waiting, [true, false]);
@@ -485,21 +616,77 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.equal(await updateBoardGoal("profile", directory, threadId, { kind: "clear" }), null);
 
   let savedThread: string | undefined;
+  providerMode = "cli-ready";
+  localization.select("ja");
+  t.after(() => localization.select("en"));
   await runtime("profile", directory, "Start", [], () => ({ ok: true }), [], "", controller.signal, {
     ...session, id: undefined, goal: undefined, save: (id: string) => { savedThread = id; },
   });
   const newRequests: { method: string; params: Record<string, unknown> }[] = JSON.parse(readFileSync(captured, "utf8"));
   const start = newRequests.find(({ method }) => method === "thread/start");
+  assert.match(start?.params.developerInstructions as string, /Default response language: 日本語 \(ja\)/);
   assert.equal(savedThread, threadId);
   assert.ok(flags().includes("network_proxy"));
   assert.equal(start?.params.cwd, directory);
   assert.ok((start?.params.developerInstructions as string).includes(writingRules));
+  assert.match(start?.params.developerInstructions as string, /git --no-pager --literal-pathspecs/);
   assert.equal(start?.params.permissions, "ai-taskboard-manager");
+  assert.equal(start?.params.approvalPolicy, "on-request");
+  assert.equal(start?.params.approvalsReviewer, "auto_review");
+  assert.match(start?.params.developerInstructions as string, /Board settings, Project manager, Access mode/);
   assert.equal(Object.hasOwn(start!.params, "projectId"), false);
   assert.equal(newRequests.some(({ method }) => method.startsWith("project/")), false);
+  localization.select("pl");
+  const nativeResume = await runtime("profile", directory, "Reply in Spanish: Continue", [], () => ({ ok: true }), [], "", controller.signal, {
+    ...session, id: savedThread, goal: undefined,
+  });
+  assert.equal(nativeResume.text, "First turn\n\nDone");
+  const nativeRequests: typeof newRequests = JSON.parse(readFileSync(captured, "utf8"));
+  const languageRules = nativeRequests.find(({method}) => method === "thread/resume")?.params.developerInstructions as string;
+  assert.match(languageRules, /Default response language: Polski \(pl\)/);
+  assert.match(languageRules, /explicit language requested by the user/);
+  assert.equal((nativeRequests.find(({method}) => method === "turn/start")?.params.input as any[])[0].text, "Reply in Spanish: Continue");
+  assert.match(nativeRequests.find(({ method }) => method === "thread/resume")?.params.developerInstructions as string,
+    /git --no-pager --literal-pathspecs/);
+  assert.equal(nativeRequests.find(({ method }) => method === "thread/resume")?.params.approvalsReviewer, "auto_review");
 
+  providerMode = "manual-access";
+  const prompts: string[] = [];
+  await runtime("profile", directory, "Check access", [], () => ({ ok: true }), [], "", controller.signal, {
+    ...session, goal: undefined, access: "ask",
+    confirmApproval: async (details: string) => { prompts.push(details); return prompts.length === 1; },
+  });
+  const manualRequests: typeof newRequests = JSON.parse(readFileSync(captured, "utf8"));
+  const manual = manualRequests.find(({ method }) => method === "thread/resume")?.params;
+  assert.equal(manual?.approvalPolicy, "on-request");
+  assert.equal(manual?.approvalsReviewer, "user");
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[0], /Get-ChildItem/);
+  assert.match(prompts[1], /"enabled": true/);
+
+  providerMode = "cli-ready";
+  for (const id of [undefined, savedThread]) {
+    await runtime("profile", directory, "Check SSH", [], () => ({ ok: true }), [], "", controller.signal, {
+      ...session, id, goal: undefined, access: "full", save: (id: string) => assert.equal(id, threadId),
+    });
+    const fullRequests: typeof newRequests = JSON.parse(readFileSync(captured, "utf8"));
+    const full = fullRequests.find(({ method }) => method === (id ? "thread/resume" : "thread/start"))!;
+    assert.ok(flags().includes('default_permissions=":danger-full-access"'));
+    assert.ok(!flags().some(flag => flag.startsWith("windows.sandbox=")));
+    assert.equal(full.params.permissions, ":danger-full-access");
+    assert.equal(full.params.approvalPolicy, "never");
+    assert.match(full.params.developerInstructions as string, /Keep SSH host key checking enabled/);
+    assert.ok(fullRequests.filter(({ method }) => method === "command/exec")
+      .every(({ params }) => params.permissionProfile === ":danger-full-access"));
+  }
+  providerMode = "wrong-access";
+  await assert.rejects(runtime("profile", directory, "Check SSH", [], () => ({ ok: true }), [], "", controller.signal, {
+    ...session, id: undefined, goal: undefined, access: "full",
+  }), /did not apply the selected manager access mode/);
+
+  providerMode = "";
   await runtime("profile", directory, "Review submissions", [], () => ({ ok: true }), [], "", controller.signal, {
-    ...session, goal: undefined, separateTurn: true, save: (id: string) => assert.equal(id, threadId),
+    ...session, goal: undefined, separateTurn: true, access: "full", save: (id: string) => assert.equal(id, threadId),
   });
   const reviewRequests: typeof newRequests = JSON.parse(readFileSync(captured, "utf8"));
   assert.match(flags().find(flag => flag.startsWith("mcp_servers.ai_taskboard="))!, /tool_timeout_sec=140,/);

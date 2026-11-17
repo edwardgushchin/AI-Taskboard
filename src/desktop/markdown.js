@@ -240,16 +240,16 @@ function addCodeCopy(pre, code) {
     try {
       await navigator.clipboard.writeText(code.textContent);
       copyIcon.classList.replace("codicon-copy", "codicon-check");
-      controlLabelForIcon(copy, language("Copied. Copy code again", "Скопировано. Скопировать код ещё раз"));
+      controlLabelForIcon(copy, () => t("ui.copied_copy_code_again_b2b609e4"));
     } catch {
-      controlLabelForIcon(copy, language("Could not copy. Select the code or retry.", "Не удалось скопировать. Выделите код или повторите."));
+      controlLabelForIcon(copy, () => t("ui.could_not_copy_select_the_code_or_retry_3ed46a84"));
       copyIcon.classList.replace("codicon-check", "codicon-copy");
     }
   }, "quiet chat-code-copy");
   const copyIcon = element("i", undefined, "icon codicon codicon-copy");
   copyIcon.setAttribute("aria-hidden", "true");
   copy.append(copyIcon);
-  controlLabelForIcon(copy, language("Copy code", "Скопировать код"));
+  controlLabelForIcon(copy, () => t("ui.copy_code_968ce1d3"));
   toolbar.append(copy);
   pre.before(wrapper);
   wrapper.append(toolbar, pre);
@@ -299,15 +299,15 @@ function formatReportReferences(block) {
     const fileBefore = /(?:^|\s)(?:\S+\.[\p{L}\p{N}]+|(?:file|файл)\s+[^:\n]+)[\s:：=—–-]*$/iu.test(prefix);
     const commit = /^(?:commit|коммит)/iu.test(labelBefore) ||
       (value.length === 40 && !labelBefore && !fileBefore);
-    const label = language("Copy full hash", "Скопировать полный хеш");
+    const label = t("ui.copy_full_hash_725de55a");
     const copy = button("", async () => {
       try {
         await navigator.clipboard.writeText(value);
         icon.classList.replace("codicon-copy", "codicon-check");
-        copy.setAttribute("aria-label", language("Copied. ", "Скопировано. ") + label);
+        bindLocalized(copy, "aria-label", () => t("ui.copied_243d5f98") + label, true);
       } catch {
         icon.classList.replace("codicon-check", "codicon-copy");
-        copy.setAttribute("aria-label", language("Copy failed. Retry.", "Не удалось скопировать. Повторить."));
+        bindLocalized(copy, "aria-label", () => t("ui.copy_failed_retry_eeb3cc51"), true);
       }
     }, "quiet chat-digest");
     const icon = element("i", undefined, "icon codicon codicon-copy");
@@ -406,17 +406,17 @@ function chatText(text, context = { taskId: taskInSheet?.id }) {
 async function openMarkdownPreview(value, context) {
   const focus = document.activeElement;
   const dialog = element("dialog", undefined, "markdown-preview");
-  const label = language("Document preview", "Просмотр документа");
+  const label = t("ui.document_preview_9653cffc");
   dialog.setAttribute("aria-label", label);
   const header = element("header", undefined, "sheet-header");
   const title = element("h2", label);
   const close = button("", () => dialog.close(), "quiet");
   close.append(icon("close"));
-  controlLabelForIcon(close, language("Close preview", "Закрыть просмотр"));
+  controlLabelForIcon(close, () => t("ui.close_preview_c54f8606"));
   header.append(title, close);
   const content = element("div", undefined, "markdown-preview-content");
   content.tabIndex = 0;
-  const status = element("p", language("Loading document…", "Загрузка документа…"), "muted");
+  const status = element("p", () => t("ui.loading_document_5f66a116"), "muted");
   status.setAttribute("role", "status");
   content.append(status);
   dialog.append(header, content);

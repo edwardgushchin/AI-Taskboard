@@ -6,6 +6,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' taskboard-assets:; style-src 'self'; font-src 'self'; img-src blob: data: https: http:">
   <title>AI Taskboard</title>
   <script src="../../node_modules/prismjs/prism.js" defer data-manual></script>
+  <script src="./localization.cjs" defer></script>
   <script src="./review-diff.js" defer></script>
   <link rel="stylesheet" href="./themes.css">
   <link rel="stylesheet" href="./vendor/codicons/codicon.css">
@@ -16,6 +17,7 @@
   <script src="./source-files.cjs" defer></script>
   <script src="./markdown.js" defer></script>
   <script src="./chat.js" defer></script>
+  <script src="./provider-limits.js" defer></script>
   <script src="./renderer.js" defer></script>
 </head>
 <body>
@@ -25,8 +27,8 @@
       <nav id="app-menu" class="app-menu" role="menubar" hidden></nav>
     </div>
   </header>
-  <nav id="project-tabs" class="project-tabs" role="tablist" aria-label="Projects" aria-orientation="vertical" hidden></nav>
-  <button id="app-settings" class="button quiet app-settings" type="button" aria-label="Application settings" title="Application settings">
+  <nav id="project-tabs" class="project-tabs" role="tablist" aria-label="Projects" data-i18n-aria-label="ui.projects_f40f8e75" aria-orientation="vertical" hidden></nav>
+  <button id="app-settings" class="button quiet app-settings" type="button" aria-label="Application settings" data-i18n-aria-label="ui.application_settings_b131bcd2" title="Application settings" data-i18n-title="ui.application_settings_b131bcd2">
     <i class="icon codicon codicon-settings-gear" aria-hidden="true"></i>
   </button>
   <div id="board-tab-menu" class="app-menu-popup board-tab-menu" role="menu" popover></div>
@@ -34,7 +36,7 @@
   <main id="app-content">
     <div id="notice" class="notice" hidden>
       <div class="notice-content" role="status"><strong id="notice-context"></strong><span id="notice-message"></span></div>
-      <button type="button" id="notice-close" class="button quiet" aria-label="Dismiss notification" title="Dismiss notification">
+      <button type="button" id="notice-close" class="button quiet" aria-label="Dismiss notification" data-i18n-aria-label="ui.dismiss_notification_9a17797e" title="Dismiss notification" data-i18n-title="ui.dismiss_notification_9a17797e">
         <i class="icon codicon codicon-close" aria-hidden="true"></i>
       </button>
     </div>
@@ -42,14 +44,14 @@
       <div class="welcome-content">
         <h1>AI Taskboard</h1>
         <section class="welcome-section" aria-labelledby="welcome-start">
-          <h2 id="welcome-start">Start</h2>
-          <button id="welcome-create" class="welcome-link" type="button"><i class="icon codicon codicon-add" aria-hidden="true"></i><span>Create board</span></button>
-          <button id="welcome-open" class="welcome-link" type="button"><i class="icon codicon codicon-folder" aria-hidden="true"></i><span>Open existing board</span></button>
+          <h2 id="welcome-start" data-i18n-text="ui.start_803a28bf">Start</h2>
+          <button id="welcome-create" class="welcome-link" type="button"><i class="icon codicon codicon-add" aria-hidden="true"></i><span data-i18n-text="ui.create_board_e02d5c15">Create board</span></button>
+          <button id="welcome-open" class="welcome-link" type="button"><i class="icon codicon codicon-folder" aria-hidden="true"></i><span data-i18n-text="ui.open_existing_board_754e46e5">Open existing board</span></button>
         </section>
         <section class="welcome-section" aria-labelledby="welcome-recent">
-          <h2 id="welcome-recent">Recent boards</h2>
+          <h2 id="welcome-recent" data-i18n-text="ui.recent_boards_efd567a4">Recent boards</h2>
           <ul id="recent-boards" class="recent-boards"></ul>
-          <p id="recent-empty" class="muted" hidden>No recent boards yet.</p>
+          <p id="recent-empty" class="muted" hidden data-i18n-text="ui.no_recent_boards_yet_300a7f50">No recent boards yet.</p>
         </section>
       </div>
     </section>
@@ -63,22 +65,24 @@
     <div class="status-repository">
       <button id="status-branch" type="button" class="button quiet status-git" popovertarget="git-branches" hidden><i class="icon codicon codicon-git-branch" aria-hidden="true"></i><span></span></button>
       <button id="status-tracking" type="button" class="button quiet status-tracking" hidden><i class="icon codicon codicon-sync" aria-hidden="true"></i><span></span></button>
-      <button id="status-publish" type="button" class="button quiet" aria-label="Publish to GitHub" hidden><i class="icon codicon codicon-cloud-upload" aria-hidden="true"></i></button>
+      <button id="status-publish" type="button" class="button quiet" aria-label="Publish to GitHub" data-i18n-aria-label="ui.publish_to_github_5ba684aa" hidden><i class="icon codicon codicon-cloud-upload" aria-hidden="true"></i></button>
     </div>
-    <section id="git-branches" class="git-branches" popover aria-label="Branches and tags"></section>
-    <span id="status-user" class="status-git" hidden><i class="icon codicon codicon-account" aria-hidden="true"></i><span></span></span>
+    <button id="status-auto-mode" type="button" class="button quiet" aria-pressed="false" hidden><i class="icon codicon codicon-play" aria-hidden="true"></i><span></span></button>
+    <section id="git-branches" class="git-branches" popover aria-label="Branches and tags" data-i18n-aria-label="ui.branches_and_tags_c785cf53"></section>
+    <button id="status-limits" type="button" class="button quiet" popovertarget="provider-limits"><i class="icon codicon codicon-target" aria-hidden="true"></i><span>Limits</span></button>
+    <section id="provider-limits" popover aria-label="Provider limits"></section>
     <div class="status-activity">
-      <span id="status-agents" role="img" hidden><i class="icon codicon codicon-hubot" aria-hidden="true"></i><span aria-hidden="true"></span></span>
-      <button id="status-notifications" type="button" class="button quiet" popovertarget="notifications" aria-label="Review queue">
+      <span id="status-agents" role="img" tabindex="0" aria-describedby="status-agents-tooltip" hidden><i class="icon codicon codicon-hubot" aria-hidden="true"></i><span aria-hidden="true"></span><span id="status-agents-tooltip" role="tooltip"></span></span>
+      <button id="status-notifications" type="button" class="button quiet" popovertarget="notifications" aria-label="Review queue" data-i18n-aria-label="ui.review_queue_df5dcbe5">
         <i class="icon codicon codicon-bell" aria-hidden="true"></i><span class="count" aria-hidden="true" hidden></span>
       </button>
     </div>
-    <section id="notifications" class="notifications" popover aria-label="Review queue"></section>
+    <section id="notifications" class="notifications" popover aria-label="Review queue" data-i18n-aria-label="ui.review_queue_df5dcbe5"></section>
   </footer>
   <dialog id="sheet" class="sheet" aria-labelledby="sheet-title" closedby="closerequest">
     <div class="sheet-header">
       <h2 id="sheet-title"></h2>
-      <button id="close-sheet" class="button quiet" aria-label="Close"><i class="icon codicon codicon-close" aria-hidden="true"></i></button>
+      <button id="close-sheet" class="button quiet" aria-label="Close" data-i18n-aria-label="html.7d9eb7acb13e2462"><i class="icon codicon codicon-close" aria-hidden="true"></i></button>
     </div>
     <div id="sheet-notice" class="notice" role="status" hidden></div>
     <div id="sheet-body" class="sheet-body" tabindex="0"></div>

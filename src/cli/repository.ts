@@ -5,11 +5,13 @@ import { githubRepositoryPattern, member, number, object, TaskboardError, text }
 import type { BoardLocation } from "./storage.ts";
 import { onBoard } from "./storage.ts";
 import { requireNoGitOperation } from "./worktree.ts";
+import { githubApi, githubRequests } from "./github-cli.ts";
+import { redactSecrets } from "./redact.ts";
 
 const execute = promisify(execFile);
 const commitId = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
-export function githubRepository(location: BoardLocation): string | undefined {
+export function githubRepository(location: Pick<BoardLocation, "repository">): string | undefined {
   if (!location.repository || location.repository.bare) return;
   const remote = invokeGit(location.repository.root, ["remote", "get-url", "origin"]);
   if (remote.code !== 0) return;
@@ -18,34 +20,144 @@ export function githubRepository(location: BoardLocation): string | undefined {
   if (repository && githubRepositoryPattern.test(repository)) return repository;
 }
 
+export function githubMilestoneArgs(repository: string) {
+  return ["api", "--hostname", "github.com", "--paginate", "--slurp", "repos/" + repository + "/milestones?state=all&per_page=100"];
+}
+
 export async function githubMilestones(location: BoardLocation, selected?: { repository: string; number: number }) {
   const repository = githubRepository(location);
   if (!repository || (selected && selected.repository !== repository)) {
     throw new TaskboardError("GITHUB_REMOTE_REQUIRED", "Choose a milestone from the GitHub repository configured as origin.");
   }
-  const endpoint = "repos/" + repository + "/milestones";
-  const args = selected ? [endpoint + "/" + selected.number] :
-    ["--paginate", "--slurp", endpoint + "?state=all&per_page=100"];
-  let response: unknown;
-  try {
-    const { stdout } = await execute("gh", ["api", "--hostname", "github.com", ...args], {
-      cwd: location.root, env: { ...process.env, GH_PROMPT_DISABLED: "1" },
-      windowsHide: true, timeout: 20_000, maxBuffer: 8 * 1024 * 1024,
-    });
-    response = JSON.parse(stdout);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      throw new TaskboardError("GITHUB_UNAVAILABLE", "Install GitHub CLI (gh) and sign in.");
-    }
-    throw new TaskboardError("GITHUB_MILESTONES_FAILED", "Could not read GitHub milestones. Check access, connection and whether the milestone still exists.");
-  }
-  const entries: unknown[] = selected ? [response] : Array.isArray(response) ? response.flat() : [];
-  if (!selected && !Array.isArray(response)) throw new TaskboardError("GITHUB_MILESTONES_FAILED", "Invalid milestone response.");
+  return listGitHubMilestones(githubApi(location.root), repository, selected?.number);
+}
+
+async function listGitHubMilestones(request: ReturnType<typeof githubApi>, repository: string, selected?: number) {
+  const args = selected === undefined ? githubMilestoneArgs(repository).slice(3) : ["repos/" + repository + "/milestones/" + selected];
+  const endpoint = args.pop()!;
+  const response = await request(endpoint, args, "GITHUB_MILESTONES_FAILED");
+  const entries: unknown[] = selected === undefined ? Array.isArray(response) ? response.flat() : [] : [response];
+  if (selected === undefined && !Array.isArray(response)) throw new TaskboardError("GITHUB_MILESTONES_FAILED", "Invalid milestone response.");
   return { repository, milestones: entries.map(entry => {
     const fields = object(entry);
     const state = member(fields.state, ["open", "closed"] as const, "state");
-    return { number: number(fields.number, "milestone number", 1), title: text(fields.title, "milestone title", true), state };
+    const due_on = fields.due_on == null ? null : text(fields.due_on, "milestone due_on", true);
+    if (due_on !== null && !Number.isFinite(Date.parse(due_on))) throw new TaskboardError("GITHUB_MILESTONES_FAILED", "Invalid milestone due_on.");
+    return { number: number(fields.number, "milestone number"), title: text(fields.title, "milestone title", true), state, due_on };
   }) };
+}
+
+export async function readGitHub(location: BoardLocation, input: Record<string, unknown>) {
+  const view = member(input.view, ["account", "repository", "milestone", "run-failed-log"], "GitHub view");
+  const fieldsByView: Record<typeof view, string[]> = { account: [], repository: [], milestone: ["number"], "run-failed-log": ["runId", "before"] };
+  if (Object.keys(input).some(key => key !== "view" && !fieldsByView[view].includes(key))) {
+    throw new TaskboardError("INVALID_INPUT", "Use view with its supported arguments.");
+  }
+  if (view === "account") {
+    const account = object(await githubApi(location.root)("user"));
+    return { login: text(account.login, "GitHub login") };
+  }
+  const repository = githubRepository(location);
+  if (!repository) throw new TaskboardError("GITHUB_REMOTE_REQUIRED", "The board's origin must identify a GitHub repository.");
+  if (view === "milestone") {
+    const milestoneNumber = number(input.number, "milestone number");
+    return readGitHubMilestone(githubApi(location.root), repository, milestoneNumber);
+  }
+  if (view === "run-failed-log") {
+    const runId = number(input.runId, "workflow run ID");
+    const before = input.before === undefined ? undefined : number(input.before, "before");
+    const output = redactSecrets(await githubRequests(location.root).failedLog(repository, runId));
+    const end = Math.min(before ?? output.length, output.length);
+    const start = Math.max(0, end - 16_000);
+    return { repository, runId, log: output.slice(start, end), ...(start ? { nextBefore: start } : {}) };
+  }
+  const fields = object(await githubApi(location.root)("repos/" + repository));
+  if (typeof fields.private !== "boolean") throw new TaskboardError("GITHUB_READ_FAILED", "GitHub returned invalid repository metadata.");
+  return { repository: text(fields.full_name, "GitHub repository"), private: fields.private,
+    defaultBranch: text(fields.default_branch, "default branch") };
+}
+
+function milestoneRepository(location: BoardLocation, value: unknown) {
+  const repository = githubRepository(location);
+  if (!repository || text(value, "repository", true).toLowerCase() !== repository) {
+    throw new TaskboardError("GITHUB_REMOTE_REQUIRED", "Use the GitHub repository configured as the board's origin.");
+  }
+  return repository;
+}
+
+function milestoneDueOn(value: unknown) {
+  const dueDate = text(value, "due date", true);
+  const dueOn = dueDate + "T00:00:00Z";
+  const timestamp = new Date(dueOn);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate) || Number.isNaN(timestamp.getTime()) || timestamp.toISOString().slice(0, 10) !== dueDate) {
+    throw new TaskboardError("INVALID_INPUT", "Use an existing calendar date in YYYY-MM-DD format.");
+  }
+  return dueOn;
+}
+
+async function readGitHubMilestone(request: ReturnType<typeof githubApi>, repository: string, milestoneNumber: number) {
+  const fields = object(await request("repos/" + repository + "/milestones/" + milestoneNumber));
+  if (fields.number !== milestoneNumber || (fields.due_on !== null &&
+      (typeof fields.due_on !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(fields.due_on)))) {
+    throw new TaskboardError("GITHUB_MILESTONE_VERIFY_FAILED", "GitHub returned unexpected milestone data.");
+  }
+  return { repository, number: milestoneNumber, title: text(fields.title, "milestone title", true),
+    state: member(fields.state, ["open", "closed"], "milestone state"),
+    dueDate: fields.due_on === null ? null : fields.due_on.slice(0, 10),
+    url: "https://github.com/" + repository + "/milestone/" + milestoneNumber };
+}
+
+export async function createGitHubMilestone(location: BoardLocation, input: Record<string, unknown>) {
+  if (Object.keys(input).some(key => !["repository", "title", "dueDate"].includes(key))) {
+    throw new TaskboardError("INVALID_INPUT", "Use only repository, title and dueDate.");
+  }
+  const repository = milestoneRepository(location, input.repository);
+  const title = text(input.title, "milestone title", true);
+  const dueOn = input.dueDate === undefined ? undefined : milestoneDueOn(input.dueDate);
+  const request = githubApi(location.root);
+  const find = async () => (await listGitHubMilestones(request, repository)).milestones.find(milestone => milestone.title === title);
+  const confirm = async (milestoneNumber: number, created: boolean) => {
+    const milestone = await readGitHubMilestone(request, repository, milestoneNumber);
+    if (milestone.title !== title || (created && dueOn && milestone.dueDate !== dueOn.slice(0, 10))) {
+      throw new TaskboardError("GITHUB_MILESTONE_VERIFY_FAILED", "Reading the milestone did not confirm the requested result.");
+    }
+    return { ...milestone, created };
+  };
+  const existing = await find();
+  if (existing) return confirm(existing.number, false);
+
+  const flags = ["--method", "POST", "-f", "title=" + title, ...(dueOn ? ["-f", "due_on=" + dueOn] : [])];
+  let response: unknown;
+  try {
+    response = await request("repos/" + repository + "/milestones", flags, "GITHUB_MILESTONE_CREATE_FAILED");
+  } catch (error) {
+    if (error instanceof TaskboardError && error.code === "GITHUB_MILESTONE_CREATE_FAILED") {
+      const appeared = await find().catch(() => undefined);
+      if (appeared) return confirm(appeared.number, false);
+    }
+    throw error;
+  }
+  return confirm(number(object(response).number, "milestone number"), true);
+}
+
+export async function setGitHubMilestoneDueDate(location: BoardLocation, input: Record<string, unknown>) {
+  if (Object.keys(input).some(key => !["repository", "number", "dueDate"].includes(key))) {
+    throw new TaskboardError("INVALID_INPUT", "Use only repository, number and dueDate.");
+  }
+  const repository = milestoneRepository(location, input.repository);
+  const milestoneNumber = number(input.number, "milestone number");
+  const dueOn = milestoneDueOn(input.dueDate);
+  const dueDate = dueOn.slice(0, 10);
+  const endpoint = "repos/" + repository + "/milestones/" + milestoneNumber;
+  const request = githubApi(location.root);
+  const before = await readGitHubMilestone(request, repository, milestoneNumber);
+  if (before.dueDate === dueDate) return { ...before, changed: false };
+  await request(endpoint, ["--method", "PATCH", "-f", "due_on=" + dueOn], "GITHUB_MILESTONE_UPDATE_FAILED");
+  const after = await readGitHubMilestone(request, repository, milestoneNumber);
+  if (after.dueDate !== dueDate || after.title !== before.title || after.state !== before.state) {
+    throw new TaskboardError("GITHUB_MILESTONE_VERIFY_FAILED", "Reading the milestone after the update did not confirm the requested result.");
+  }
+  return { ...after, changed: true };
 }
 
 function repositoryPath(location: BoardLocation): string {
@@ -109,6 +221,9 @@ function commitDiff(root: string, input: Record<string, unknown>) {
   return { output: output.slice(offset, end), truncated, ...(truncated ? { nextOffset: end } : {}) };
 }
 
+export const gitContentFilterPattern = "^filter\\..*\\.(clean|process|required)$";
+export const readOnlyGitOptions = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
+
 export function inspectRepository(location: BoardLocation, input: Record<string, unknown>) {
   const root = repositoryPath(location);
   if (input.view === "commit_diff") return commitDiff(root, input);
@@ -120,11 +235,11 @@ export function inspectRepository(location: BoardLocation, input: Record<string,
     staged_diff: ["diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", "--ignore-submodules=dirty", "--submodule=short"],
   };
   const env = { GIT_NO_LAZY_FETCH: "1" };
-  const args = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
+  const args = [...readOnlyGitOptions];
   const disabledFilters = new Set<string>();
   if (view === "status" || view === "diff") {
     // Worktree inspection may otherwise run repository-defined content filters.
-    const filters = invokeGit(root, ["config", "--null", "--name-only", "--get-regexp", "^filter\\..*\\.(clean|process|required)$"], env);
+    const filters = invokeGit(root, ["config", "--null", "--name-only", "--get-regexp", gitContentFilterPattern], env);
     if (filters.code !== 0 && filters.code !== 1) throw new TaskboardError("GIT_FAILED", "Git could not read filter configuration.");
     for (const key of new Set(filters.stdout.split("\0").filter(Boolean))) {
       if (key.includes("=")) throw new TaskboardError("GIT_FAILED", "Git cannot disable this content filter for inspection.");

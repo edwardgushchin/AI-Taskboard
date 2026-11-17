@@ -2,13 +2,13 @@ function appendChatTime(entry, at) {
   if (typeof at !== "string" || !at.trim()) return;
   const value = new Date(at);
   if (Number.isNaN(+value)) return;
-  const locale = frame.russian ? "ru" : undefined;
-  const time = element("time", new Intl.DateTimeFormat(locale, {
+  const locale = localization.locale;
+  const time = element("time", () => new Intl.DateTimeFormat(localization.locale, {
     hour: "2-digit", minute: "2-digit", hourCycle: "h23",
   }).format(value), "chat-time");
   time.dateTime = at;
-  time.title = new Intl.DateTimeFormat(locale, { dateStyle: "full", timeStyle: "long" }).format(value);
-  time.setAttribute("aria-label", time.title);
+  bindLocalized(time, "title", () => new Intl.DateTimeFormat(localization.locale, { dateStyle: "full", timeStyle: "long" }).format(value));
+  bindLocalized(time, "aria-label", () => new Intl.DateTimeFormat(localization.locale, { dateStyle: "full", timeStyle: "long" }).format(value), true);
   entry.append(time);
   return time;
 }
@@ -30,7 +30,7 @@ const chatPreviews = new IntersectionObserver(entries => {
 });
 
 function unavailableRunImage(tile) {
-  const label = language("Image unavailable: ", "Изображение недоступно: ") + tile.querySelector("span").textContent;
+  const label = t("ui.image_unavailable_024abc1d") + tile.querySelector("span").textContent;
   tile.querySelector("span").textContent = label;
   controlLabelForIcon(tile, label);
 }
@@ -57,7 +57,7 @@ function showChatPreview(tile, src) {
     tile.classList.add("has-preview");
     if (tile.dataset.file) {
       const name = tile.querySelector("span").textContent;
-      controlLabelForIcon(tile, language("Preview ", "Просмотреть ") + name);
+      controlLabelForIcon(tile, () => t("ui.preview_bb99ff84") + name);
     }
     if (atBottom) list.scrollTop = list.scrollHeight;
   };
@@ -71,7 +71,7 @@ function renderChatTurn(list, draft) {
   turn.hidden = draft.pending !== "replying";
   turn.replaceChildren(...(draft.commentary ?? []).map(text => chatText(text, { taskId: taskInSheet?.id, agent: true })));
   if (!turn.hidden) {
-    const thinking = element("p", language("Thinking…", "Думаю…"), "chat-thinking");
+    const thinking = element("p", () => t("ui.thinking_14a886f3"), "chat-thinking");
     thinking.setAttribute("role", "status");
     turn.append(thinking);
   }
@@ -111,12 +111,11 @@ function activityKind(item) {
 
 function boardWaitStatus(item) {
   if (item?.status !== "inProgress" || item.type !== "mcpToolCall" || item.title !== "ai_taskboard / task_wait") return;
-  return language("Waiting for a board update…", "Жду обновления на доске…");
+  return t("ui.waiting_for_a_board_update_c5ce9808");
 }
 
-function activityCount(count, english, russian) {
-  const form = new Intl.PluralRules(frame.russian ? "ru" : "en").select(count);
-  return count + " " + (frame.russian ? (russian[{ one: 0, few: 1, many: 2 }[form] ?? 2]) : english[count === 1 ? 0 : 1]);
+function activityCount(count, kind) {
+  return t("activity." + kind, { count });
 }
 
 function activityState(items) {
@@ -124,7 +123,7 @@ function activityState(items) {
   const running = items.filter(item => item.status === "inProgress").length;
   return {
     code: failed ? "failed" : running ? "running" : "completed",
-    text: [failed ? language("Failed: ", "Ошибок: ") + failed : "", running ? language("Running: ", "Выполняется: ") + running : ""].filter(Boolean).join(" · "),
+    text: () => [failed ? t("ui.failed_e2d9e6f1") + failed : "", running ? t("ui.running_25f4c99f") + running : ""].filter(Boolean).join(" · "),
   };
 }
 
@@ -132,22 +131,22 @@ function activitySummary(detail, label, preview, kind, state) {
   const summary = element("summary");
   const title = element("span", undefined, "chat-run-label");
   title.append(element("span", label));
-  const compact = preview.replace(/\s+/g, " ").trim();
-  if (compact) title.append(element("span", " " + compact.slice(0, 180) + (compact.length > 180 ? "…" : ""), "chat-run-preview"));
+  const compactText = () => (typeof preview === "function" ? preview() : preview).replace(/\s+/g, " ").trim();
+  if (compactText()) title.append(element("span", () => { const compact = compactText(); return " " + compact.slice(0, 180) + (compact.length > 180 ? "…" : ""); }, "chat-run-preview"));
   summary.append(icon(({ command: "terminal", edit: "edit", image: "images", search: "search", reasoning: "thought", tool: "tool" })[kind]), title);
-  if (state.text) summary.append(element("span", state.text, "chat-run-state"));
+  if (typeof state.text === "function" ? state.text() : state.text) summary.append(element("span", state.text, "chat-run-state"));
   summary.append(icon("chevron"));
   detail.dataset.state = state.code;
   detail.append(summary);
 }
 
 const taskChangeLabels = {
-  create: ["Draft created", "Черновик создан"], update: ["Task updated", "Задача обновлена"],
-  comment: ["Comment added", "Комментарий добавлен"], cancel: ["Task cancelled", "Задача отменена"],
-  block: ["Task blocked", "Задача заблокирована"], unblock: ["Task unblocked", "Задача разблокирована"],
-  start: ["Task started", "Задача запущена"], approve: ["Task approved", "Задача утверждена"],
-  accept: ["Task accepted", "Задача принята"], request_changes: ["Changes requested", "Задача возвращена на доработку"],
-  milestone: ["Milestone updated", "Веха обновлена"],
+  create: ["ui.draft_created_643a6b84"], update: ["ui.task_updated_14ff772e"],
+  comment: ["ui.comment_added_2322db33"], cancel: ["ui.task_cancelled_d8ca4852"],
+  block: ["ui.task_blocked_2a3a359f"], unblock: ["ui.task_unblocked_9a6c3578"],
+  start: ["ui.task_started_888ca190"], approve: ["ui.task_approved_b9a6d14e"],
+  accept: ["ui.task_accepted_c7c75e62"], request_changes: ["ui.changes_requested_ef2e2c25"],
+  milestone: ["ui.milestone_updated_02dacc38"],
 };
 const visibleTaskActions = new Set(["comment", "approve", "start", "block", "unblock", "request_changes", "accept", "cancel"]);
 
@@ -214,33 +213,33 @@ function renderRunActivity(container, items, completed = false, durationMs, task
   function operation(item) {
     const kind = activityKind(item);
     const labels = {
-      command: ["Ran command", "Выполнена команда"], edit: ["Edited files", "Изменены файлы"],
-      image: ["Viewed image", "Просмотр изображения"], search: ["Searched the web", "Поиск в интернете"],
-      reasoning: ["Reasoning summary", "Сводка размышлений"], tool: ["Used tool", "Вызов инструмента"],
+      command: ["ui.ran_command_e1621f9d"], edit: ["ui.edited_files_78139502"],
+      image: ["ui.viewed_image_cbd308a2"], search: ["ui.searched_the_web_6fb3e52c"],
+      reasoning: ["ui.reasoning_summary_62e07716"], tool: ["ui.used_tool_d30853ac"],
     };
     const detail = element("details", undefined, "chat-run-item");
     nodeActivities.set(detail, [item]);
     detail.dataset.item = "item:" + item.id;
     detail.open = previous.get(detail.dataset.item) ?? false;
     const state = activityState([item]);
-    const label = state.code === "running" ? language("In progress", "Выполняется") :
-      state.code === "failed" ? language("Action failed", "Ошибка действия") :
-      item.type === "imageGeneration" ? language("Generated image", "Создано изображение") : language(...labels[kind]);
+    const label = state.code === "running" ? t("ui.in_progress_15929530") :
+      state.code === "failed" ? t("ui.action_failed_0dcd9696") :
+      item.type === "imageGeneration" ? t("ui.generated_image_07d5dbeb") : t(...labels[kind]);
     // Only shorten the visible preview; the original command remains available below.
     const command = item.type === "commandExecution" ? readableRunCommand(item.title) : item.title;
     const preview = command.replace(/^(?:"[^"\r\n]*(?:pwsh|powershell)(?:\.exe)?"|\S*(?:pwsh|powershell)(?:\.exe)?)\s+-Command\s+/i, "");
     const approvalLabels = {
-      inProgress: ["Reviewing access", "Проверка доступа"],
-      approved: ["Access approved", "Доступ одобрен"],
-      denied: ["Access denied", "Доступ отклонён"],
-      timedOut: ["Access review timed out", "Время проверки доступа истекло"],
-      aborted: ["Access review cancelled", "Проверка доступа отменена"],
+      inProgress: ["ui.reviewing_access_b77978b1"],
+      approved: ["ui.access_approved_2536d83b"],
+      denied: ["ui.access_denied_590c4f9d"],
+      timedOut: ["ui.access_review_timed_out_06d1a3f6"],
+      aborted: ["ui.access_review_cancelled_225f3019"],
     };
     const approvalLabel = item.type === "autoApprovalReview" && Object.hasOwn(approvalLabels, item.status) ? approvalLabels[item.status] : undefined;
     const taskChanges = item.taskChanges ?? [];
     const changeLabel = taskChangeLabels[taskChanges[0]?.action];
-    const summaryLabel = taskChanges.length > 1 && taskChanges[0].action === "start" ? language("Tasks started", "Задачи запущены") :
-      changeLabel ? language(...changeLabel) : approvalLabel ? language(...approvalLabel) : label;
+    const summaryLabel = taskChanges.length > 1 && taskChanges[0].action === "start" ? t("ui.tasks_started_50af3215") :
+      changeLabel ? t(...changeLabel) : approvalLabel ? t(...approvalLabel) : label;
     const taskPreview = taskChanges.map(({ id }) => id).join(", ");
     activitySummary(detail, summaryLabel, taskPreview || preview, kind, state);
     const image = taskId && runImageFile(item);
@@ -254,7 +253,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
             preview: file => api.runImagePreview(taskId, file.file),
             save: file => api.saveRunImage(taskId, file.file),
           }), "quiet chat-attachment");
-        controlLabelForIcon(tile, language("View ", "Просмотреть ") + image.name);
+        controlLabelForIcon(tile, () => t("ui.view_7aa05de3") + image.name);
         tile.append(icon("images"), element("span", image.name));
         tile.dataset.task = taskId;
         tile.dataset.path = image.file;
@@ -275,12 +274,12 @@ function renderRunActivity(container, items, completed = false, durationMs, task
       detail.append(links);
     }
     if (command) detail.append(element("pre", command, "chat-run-command"));
-    detail.append(element("pre", item.text || language("No output.", "Нет вывода."), "chat-run-output"));
+    detail.append(element("pre", () => item.text || t("ui.no_output_868de65b"), "chat-run-output"));
     if (command !== item.title) {
       const original = element("details", undefined, "chat-run-original");
       original.dataset.item = "item:" + item.id + "/original";
       original.open = previous.get(original.dataset.item) ?? false;
-      original.append(element("summary", language("Original command", "Исходная команда")), element("pre", item.title));
+      original.append(element("summary", () => t("ui.original_command_40a5f550")), element("pre", item.title));
       detail.append(original);
     }
     return detail;
@@ -294,16 +293,9 @@ function renderRunActivity(container, items, completed = false, durationMs, task
       group.dataset.item = "group:" + operations[0].id;
       group.open = previous.get(group.dataset.item) ?? operations.some(item => previous.get("item:" + item.id));
       const kinds = [...new Set(operations.map(activityKind))];
-      const names = {
-        command: [["command", "commands"], ["команда", "команды", "команд"]],
-        edit: [["file edit", "file edits"], ["изменение файлов", "изменения файлов", "изменений файлов"]],
-        image: [["image view", "image views"], ["просмотр изображения", "просмотра изображений", "просмотров изображений"]],
-        search: [["search", "searches"], ["поиск", "поиска", "поисков"]],
-        tool: [["tool call", "tool calls"], ["вызов инструмента", "вызова инструментов", "вызовов инструментов"]],
-      };
-      const counts = kinds.map(kind => activityCount(operations.filter(item => activityKind(item) === kind).length, ...names[kind])).join(" · ");
-      const label = activityCount(operations.length, ["action", "actions"], ["действие", "действия", "действий"]);
-      activitySummary(group, label, "· " + counts, kinds.length === 1 ? kinds[0] : "tool", activityState(operations));
+      const counts = () => kinds.map(kind => activityCount(operations.filter(item => activityKind(item) === kind).length, kind)).join(" · ");
+      const label = () => activityCount(operations.length, "action");
+      activitySummary(group, label, () => "· " + counts(), kinds.length === 1 ? kinds[0] : "tool", activityState(operations));
       const children = element("div", undefined, "chat-run-children");
       children.append(...operations.map(operation));
       group.append(children);
@@ -332,13 +324,13 @@ function renderRunActivity(container, items, completed = false, durationMs, task
         entry.dataset.coordinationKey = key;
         entry.dataset.item = "coordination:" + key;
         const returned = message.actor === "reviewer" && message.kind === "request-changes";
-        const direction = message.actor === "manager" ? language("Manager → Executor", "Менеджер → Исполнитель") :
-          message.actor === "reviewer" ? (returned ? language("Reviewer → Manager", "Ревьюер → Менеджер") :
-            language("Reviewer → Manager · Approved", "Ревьюер → Менеджер · Согласовано")) :
-          language("Executor → Manager", "Исполнитель → Менеджер");
+        const direction = message.actor === "manager" ? t("ui.manager_executor_31a479f6") :
+          message.actor === "reviewer" ? (returned ? t("ui.reviewer_manager_bba0652d") :
+            t("ui.reviewer_manager_approved_e196cfdc")) :
+          t("ui.executor_manager_f5311347");
         const heading = element("div", undefined, "chat-coordination-header");
         heading.append(element("span", direction), button(message.id, () => showTask(message.id), "quiet board-chat-task"));
-        if (returned) heading.append(element("span", language("Changes requested", "Возврат на доработку"), "chat-review-status"));
+        if (returned) heading.append(element("span", () => t("ui.changes_requested_086dd071"), "chat-review-status"));
         entry.append(heading, returned ? reviewerFindings(message.text, message.id) :
           chatText(message.text, { taskId: message.id, coordination: true }));
         appendChatTime(entry, message.at);
@@ -347,7 +339,6 @@ function renderRunActivity(container, items, completed = false, durationMs, task
     }
     if (item.messagesOnly) continue;
     const showTaskEvent = item.taskChanges?.some(({ action }) => visibleTaskActions.has(action));
-    const reason = item.taskChanges?.[0]?.reason;
     if (["agentMessage", "plan", "truncated", "error", "reasoning"].includes(item.type)) {
       flush();
       if (item.type === "agentMessage" || item.type === "plan") {
@@ -357,27 +348,21 @@ function renderRunActivity(container, items, completed = false, durationMs, task
         if (entry !== message) entry.append(message);
         if (item.type === "agentMessage") appendChatTime(entry, item.at);
         entry.dataset.item = "message:" + item.id;
+        if (context?.dialogue && item.type === "agentMessage" && item.phase === "final_answer" &&
+            item.status === "completed" && item.text.trim()) entry.dataset.messageId = item.id;
         nodes.push(entry);
       }
       else if (item.type === "reasoning") nodes.push(operation(item));
-      else nodes.push(element("p", item.type === "error" ? item.text : language("Earlier activity exceeded the log limit.", "Ранние события не поместились в журнал."), item.type === "error" ? "chat-run-error" : "muted"));
-    } else if (showTaskEvent || reason) {
+      else nodes.push(element("p", () => item.type === "error" ? item.text : t("ui.earlier_activity_exceeded_the_log_limit_030e2178"), item.type === "error" ? "chat-run-error" : "muted"));
+    } else if (showTaskEvent) {
       flush();
       const row = operation(item);
       nodes.push(row);
-      if (showTaskEvent) taskEventRows.add(row);
-      if (reason) {
-        const text = element("p", reason, "chat-text");
-        const note = context?.dialogue ? element("div", undefined, "board-manager-message") : text;
-        if (note !== text) { note.append(text); appendChatTime(note, item.at); }
-        note.dataset.item = "reason:" + item.id;
-        nodes.push(note);
-        if (showTaskEvent) taskEventRows.add(note);
-      }
+      taskEventRows.add(row);
     } else operations.push(item);
   }
   flush();
-  const boundaryKey = node => node.dataset.coordinationKey ||
+  const boundaryKey = node => node.dataset.messageId || node.dataset.coordinationKey ||
     (node.dataset.actor === "user" || taskEventRows.has(node) ? node.dataset.item : undefined);
   const hasBoundaries = nodes.some(boundaryKey);
   function foldWork(batch, key, label) {
@@ -394,13 +379,12 @@ function renderRunActivity(container, items, completed = false, durationMs, task
     return work;
   }
   if (completed && nodes.length) {
-    let label = language("Completed", "Выполнено");
-    if (Number.isSafeInteger(durationMs) && durationMs >= 0) {
-      const seconds = Math.floor(durationMs / 1000);
-      const minutes = Math.floor(seconds / 60);
-      label = language("Completed in ", "Выполнено за ") +
-        (minutes ? minutes + language("m ", " мин ") : "") + seconds % 60 + language("s", " с");
-    }
+    let label = () => {
+      if (!Number.isSafeInteger(durationMs) || durationMs < 0) return t("ui.completed_a863c619");
+      const seconds = Math.floor(durationMs / 1000), minutes = Math.floor(seconds / 60);
+      const unit = (value, name) => new Intl.NumberFormat(localization.locale, {style:"unit",unit:name,unitDisplay:"short"}).format(value);
+      return t("ui.completed_in_93ef340c") + (minutes ? unit(minutes, "minute") + " " : "") + unit(seconds % 60, "second");
+    };
     let batch = [];
     let key = "work";
     for (const node of nodes.splice(0)) {
@@ -409,7 +393,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
         if (batch.length) nodes.push(foldWork(batch, key, label));
         batch = [];
         key = "work:" + boundary;
-        label = language("Work details", "Ход работы");
+        label = () => t("ui.work_details_e9890a2e");
         nodes.push(node);
       } else batch.push(node);
     }
@@ -523,34 +507,33 @@ function updateChat({ project, id, type, text, items, goal, goalRunning, error, 
 
 function legacyTokenUsageFailure(reason) {
   if (reason?.startsWith("Could not save task token usage:")) {
-    return language("The previous run was interrupted while saving token statistics.",
-      "Предыдущий запуск прервался при записи статистики токенов.");
+    return t("ui.the_previous_run_was_interrupted_while_saving_to_28925e5b");
   }
 }
 
 function chatEventLabel(action) {
   const labels = {
-    create: ["Created the task", "Создал задачу"], update: ["Updated the task", "Обновил задачу"],
-    approve: ["Approved the task", "Утвердил задачу"], start: ["Started work", "Начал работу"],
-    "return-to-draft": ["Returned the task to draft", "Вернул задачу в черновик"],
-    progress: ["Updated progress", "Обновил ход работы"], block: ["Blocked the task", "Заблокировал задачу"],
-    pause: ["Paused work", "Приостановил работу"],
-    resume: ["Resumed work", "Продолжил работу"], submit: ["Submitted for review", "Сдал на проверку"],
-    accept: ["Accepted the task", "Принял задачу"], cancel: ["Cancelled the task", "Отменил задачу"],
-    cover: ["Changed the card cover", "Сменил превью карточки"],
-    "request-changes": ["Requested changes", "Вернул на доработку"], attach: ["Attached a file", "Добавил файл"],
-    "review-note": ["Left on review", "Оставил на проверке"],
-    "review-approve": ["Approved the submission", "Согласовал сдачу"],
+    create: ["ui.created_the_task_834cf85a"], update: ["ui.updated_the_task_c7fa8e4b"],
+    approve: ["ui.approved_the_task_52081998"], start: ["ui.started_work_86e3b286"],
+    "return-to-draft": ["ui.returned_the_task_to_draft_0224ff4e"],
+    progress: ["ui.updated_progress_fde6405d"], block: ["ui.blocked_the_task_c97388fb"],
+    pause: ["ui.paused_work_5608a24c"],
+    resume: ["ui.resumed_work_8bc90aaa"], submit: ["ui.submitted_for_review_99b989f4"],
+    accept: ["ui.accepted_the_task_f6df7973"], cancel: ["ui.cancelled_the_task_07a3cdd4"],
+    cover: ["ui.changed_the_card_cover_c445cf83"],
+    "request-changes": ["ui.requested_changes_480ce0d7"], attach: ["ui.attached_a_file_f4ead942"],
+    "review-note": ["ui.left_on_review_8da49b68"],
+    "review-approve": ["ui.approved_the_submission_04c4f1df"],
   };
-  return Object.hasOwn(labels, action) ? language(...labels[action]) : action;
+  return Object.hasOwn(labels, action) ? t(...labels[action]) : action;
 }
 
 function reasoningName(effort) {
   const labels = {
-    none: ["None", "Нет"], minimal: ["Minimal", "Минимальное"], low: ["Low", "Низкое"], medium: ["Medium", "Среднее"],
-    high: ["High", "Высокое"], xhigh: ["Very high", "Очень высокое"], max: ["Max", "Максимальное"], ultra: ["Ultra", "Ультра"],
+    none: ["ui.none_643e51f5"], minimal: ["ui.minimal_2a7a811b"], low: ["ui.low_94c1f5ae"], medium: ["ui.medium_7f640a23"],
+    high: ["ui.high_0949bbee"], xhigh: ["ui.very_high_bc783636"], max: ["ui.max_b409d5a5"], ultra: ["ui.ultra_b4cfa729"],
   };
-  return Object.hasOwn(labels, effort) ? language(...labels[effort]) : effort;
+  return Object.hasOwn(labels, effort) ? t(...labels[effort]) : effort;
 }
 
 function chatEventAttachments(event, files) {
@@ -565,12 +548,12 @@ function reviewerChat(task, open) {
   const project = frame.project;
   const legacy = task.history.filter(event => event.actor === "reviewer" && event.text &&
     ["review-note", "review-approve", "request-changes"].includes(event.action));
-  const details = taskDetails("task-reviewer-chat", language("Reviewer chat", "Чат ревьюера"), "", open);
+  const details = taskDetails("task-reviewer-chat", t("ui.reviewer_chat_ffaa4f19"), "", open);
   const content = element("div", undefined, "task-details-content");
   const status = element("p", undefined, "muted");
   status.setAttribute("role", "status");
   const log = element("ol", undefined, "chat-log");
-  log.setAttribute("aria-label", language("Reviewer messages", "Сообщения ревьюера"));
+  bindLocalized(log, "aria-label", () => t("ui.reviewer_messages_d84eb921"), true);
   log.tabIndex = 0;
   log.hidden = true;
   content.append(status, log);
@@ -590,7 +573,7 @@ function reviewerChat(task, open) {
 
   async function load() {
     const request = ++generation;
-    if (log.hidden) status.textContent = language("Loading…", "Загружаю…");
+    if (log.hidden) bindLocalized(status, "textContent", () => t("ui.loading_4f987027"));
     try {
       const result = await api.reviewerChat(task.id);
       if (!details.isConnected || project !== frame.project || request !== generation) return;
@@ -616,8 +599,8 @@ function reviewerChat(task, open) {
         }
         if (node.finished) continue;
         node.finished = attempt.durationMs !== undefined;
-        node.label.textContent = shortDate(attempt.at) + " · " + (node.finished ?
-          language("Reviewer", "Ревьюер") : language("Reviewing", "Ревьюер проверяет"));
+        bindLocalized(node.label, "textContent", () => shortDate(attempt.at) + " · " + (node.finished ?
+          t("ui.reviewer_50c42665") : t("ui.reviewing_8e90650a")));
         node.error.textContent = attempt.error ?? "";
         node.error.hidden = !attempt.error;
         const items = attempt.items.flatMap(item => {
@@ -649,14 +632,14 @@ function reviewerChat(task, open) {
         }
       }
       log.hidden = !log.childElementCount;
-      status.textContent = log.hidden ? language("No reviewer messages yet.", "Сообщений ревьюера пока нет.") :
-        attempts.length ? "" : language("Saved review decisions", "Сохранённые решения по проверке");
+      bindLocalized(status, "textContent", () => log.hidden ? t("ui.no_reviewer_messages_yet_25b5caaf") :
+        attempts.length ? "" : t("ui.saved_review_decisions_2fbae036"));
       status.hidden = !status.textContent;
       if (scrollHeight - clientHeight - scrollTop <= 8) log.scrollTop = log.scrollHeight;
     } catch (error) {
       if (!details.isConnected || request !== generation) return;
       status.hidden = false;
-      status.textContent = language("Could not load reviewer chat. ", "Не удалось загрузить чат ревьюера. ") + error.message;
+      bindLocalized(status, "textContent", () => t("ui.could_not_load_reviewer_chat_5c01ba32") + error.message);
     }
   }
   return details;
@@ -672,14 +655,14 @@ function taskChat(task) {
     chatDrafts.set(key, draft);
   }
   const area = element("section", undefined, "task-chat");
-  const heading = element("h3", language("Agent chat", "Чат с агентом"));
+  const heading = element("h3", () => t("ui.agent_chat_065b4b62"));
   heading.id = "task-chat-heading";
   area.setAttribute("aria-labelledby", heading.id);
   const header = element("div", undefined, "chat-header");
   header.append(heading);
   area.append(header);
   const list = element("ol", undefined, "chat-log");
-  list.setAttribute("aria-label", language("Messages", "Сообщения"));
+  bindLocalized(list, "aria-label", () => t("ui.messages_e8e13717"), true);
   list.tabIndex = 0;
   const files = new Map(task.attachments.map(file => [file.file, file]));
   const events = task.history.map((event, index) => ({ event, index }));
@@ -687,7 +670,7 @@ function taskChat(task) {
     event: { at: task.createdAt, actor: "agent", action: "questions", text: task.questions.join("\n\n") },
   });
   const missingRuns = new Map();
-  const locale = frame.russian ? "ru" : undefined;
+  const locale = localization.locale;
   const dayFormat = new Intl.DateTimeFormat(locale, { dateStyle: "medium" });
   let day;
   let lastMessage;
@@ -698,7 +681,7 @@ function taskChat(task) {
     if (eventDay && eventDay !== day) {
       day = eventDay;
       const divider = element("li", undefined, "chat-day");
-      divider.append(element("span", day));
+      divider.append(element("span", () => new Intl.DateTimeFormat(localization.locale, { dateStyle: "medium" }).format(timestamp)));
       list.append(divider);
     }
     if (event.action === "run-log") {
@@ -722,15 +705,15 @@ function taskChat(task) {
     }
     const conversation = ["chat", "comment", "questions", "coordination"].includes(event.action);
     const attachments = chatEventAttachments(event, files);
-    const author = event.actor === "manager" ? language("Project manager", "Менеджер проекта") :
-      event.actor === "reviewer" ? language("Reviewer", "Ревьюер") :
-      event.actor === "user" ? language("You", "Вы") : language("Agent", "Агент");
+    const author = () => event.actor === "manager" ? t("ui.project_manager_48697fa0") :
+      event.actor === "reviewer" ? t("ui.reviewer_50c42665") :
+      event.actor === "user" ? t("ui.you_05444001") : t("ui.agent_262834de");
 
     if (!conversation) {
       const status = lanes.find(([code]) => code === event.to);
       const service = element("li", undefined, "chat-entry chat-event");
       service.append(element("span", author, "chat-author"),
-        element("span", chatEventLabel(event.action) + (status ? " · " + language(status[1], status[2]) : ""), "chat-action"));
+        element("span", () => chatEventLabel(event.action) + (status ? " · " + t(status[1]) : ""), "chat-action"));
       appendChatTime(service, event.at);
       list.append(service);
       if (!event.text && !attachments.length) continue;
@@ -743,7 +726,7 @@ function taskChat(task) {
     const returned = event.actor === "reviewer" && event.action === "request-changes";
     const coordination = returned || event.action === "coordination" || (event.actor === "manager" && event.text);
     if (coordination) entry.classList.add("chat-coordination");
-    const label = event.action === "coordination" && event.actor === "agent" ? language("Executor", "Исполнитель") : author;
+    const label = () => event.action === "coordination" && event.actor === "agent" ? t("ui.executor_92197b27") : author();
     entry.append(element("span", label, "chat-author"));
     if (attachments.length) {
       const images = attachments.filter(isImageAttachment);
@@ -758,7 +741,7 @@ function taskChat(task) {
           const result = await api.saveAttachment(task.id, file.file, file.name);
           if (!result.ok) notice(boardError(result.error));
         }, "quiet chat-attachment");
-        const label = isImageAttachment(file) ? language("View ", "Просмотреть ") : language("Save ", "Сохранить ");
+        const label = isImageAttachment(file) ? t("ui.view_7aa05de3") : t("ui.save_ceeee51c");
         controlLabelForIcon(tile, label + file.name);
         tile.replaceChildren(icon("attachment"), element("span", file.name));
         if (isImageAttachment(file)) {
@@ -781,9 +764,9 @@ function taskChat(task) {
   if (missingRuns.size) {
     const status = element("span", undefined, "muted");
     status.setAttribute("role", "status");
-    const load = button(language("Load Codex activity", "Загрузить ход работы из Codex"), async () => {
+    const load = button(() => t("ui.load_codex_activity_4ba86e2d"), async () => {
       load.disabled = true;
-      status.textContent = language("Loading…", "Загружаю…");
+      bindLocalized(status, "textContent", () => t("ui.loading_4f987027"));
       try {
         const result = await api.taskRunHistory(task.id);
         if (!area.isConnected || frame.project !== project) return;
@@ -800,15 +783,15 @@ function taskChat(task) {
           }
         }
         if (restored) load.remove();
-        status.textContent = restored === missingRuns.size ? "" : restored
-          ? language("Some runs are unavailable in the saved Codex chat.", "Часть запусков недоступна в сохранённом чате Codex.")
-          : language("No activity for these runs in the saved Codex chat.", "В сохранённом чате Codex нет данных об этих запусках.");
+        bindLocalized(status, "textContent", () => restored === missingRuns.size ? "" : restored
+          ? t("ui.some_runs_are_unavailable_in_the_saved_codex_cha_7d8bfad3")
+          : t("ui.no_activity_for_these_runs_in_the_saved_codex_ch_261837a1"));
         if (lastRestored) {
           lastRestored.querySelector(".chat-work > summary")?.focus({ preventScroll: true });
           lastRestored.scrollIntoView({ block: "nearest" });
         }
       } catch (error) {
-        status.textContent = language("Could not load the Codex activity. ", "Не удалось загрузить ход работы из Codex. ") + error.message;
+        bindLocalized(status, "textContent", () => t("ui.could_not_load_the_codex_activity_5cf03362") + error.message);
       } finally {
         load.disabled = false;
       }
@@ -824,17 +807,13 @@ function taskChat(task) {
   list.addEventListener("scroll", () => {
     draft.scroll = list.scrollHeight - list.clientHeight - list.scrollTop > 8 ? list.scrollTop : undefined;
   });
-  if (["done", "cancelled"].includes(task.status)) {
-    if (latestReply) header.append(element("span", latestReply.model, "muted"));
-    return area;
-  }
 
   const composer = element("form", undefined, "chat-composer");
   const input = element("textarea");
   input.id = "task-chat-input";
   input.rows = 3;
   input.value = draft.text;
-  input.placeholder = language("Message the agent…", "Написать агенту…");
+  bindLocalized(input, "placeholder", () => t("ui.message_the_agent_a84e2133"));
   input.setAttribute("aria-label", input.placeholder);
   const fileInput = element("input");
   fileInput.type = "file";
@@ -848,28 +827,28 @@ function taskChat(task) {
   send.type = "submit";
   const attach = button("", () => fileInput.click(), "quiet chat-icon chat-add");
   attach.append(icon("add"));
-  controlLabelForIcon(attach, language("Attach files", "Прикрепить файлы"));
+  controlLabelForIcon(attach, () => t("ui.attach_files_792aed0d"));
   const microphone = button("", () => {
     input.focus();
-    feedback.textContent = api.isWindows
-      ? language("Press Win+H to start Windows voice typing.", "Нажмите Win+H для голосового ввода Windows.")
-      : language("Start system dictation while this field is focused.", "Включите системную диктовку, пока фокус в поле ввода.");
+    bindLocalized(feedback, "textContent", () => api.isWindows
+      ? t("ui.press_win_h_to_start_windows_voice_typing_39244c53")
+      : t("ui.start_system_dictation_while_this_field_is_focus_f77f00e3"));
     feedback.hidden = false;
   }, "quiet chat-icon chat-mic");
   microphone.append(icon("mic"));
-  controlLabelForIcon(microphone, language("Voice input", "Голосовой ввод"));
+  controlLabelForIcon(microphone, () => t("ui.voice_input_a05b7480"));
   controls.append(attach, microphone, send);
   composer.append(pendingFiles, input, fileInput, controls, feedback);
   area.append(composer);
 
-  function working() { return Boolean(draft.pending || frame.runningTasks?.includes(task.id)); }
+  function working() { return Boolean(draft.pending || frame.runningTasks?.includes(task.id) || frame.replyingTasks?.includes(task.id)); }
   function stopping() { return working() && !draft.text.trim() && !draft.files.length; }
   function sync() {
     input.readOnly = Boolean(draft.saving);
     attach.disabled = microphone.disabled = input.readOnly;
     const stop = stopping();
     send.replaceChildren(icon(stop ? "stop" : "play"));
-    controlLabelForIcon(send, stop ? language("Stop agent", "Остановить агента") : language("Send message", "Отправить сообщение"));
+    controlLabelForIcon(send, () => stop ? t("ui.stop_agent_f50db092") : t("ui.send_message_173c4807"));
     send.disabled = Boolean(draft.saving || draft.stopping) || (!stop && !draft.text.trim() && !draft.files.length);
     feedback.textContent = draft.error ?? "";
     feedback.hidden = !feedback.textContent;
@@ -891,7 +870,7 @@ function taskChat(task) {
       }, "quiet");
       remove.disabled = Boolean(draft.saving);
       remove.append(icon("close"));
-      remove.setAttribute("aria-label", language("Remove ", "Удалить ") + file.name);
+      bindLocalized(remove, "aria-label", () => t("ui.remove_07d1de5b") + file.name, true);
       row.append(icon("attachment"), element("span", file.name), remove);
       if (/^image\/(png|jpeg|webp|gif)$/.test(file.type)) showChatPreview(row, URL.createObjectURL(file));
       return row;
@@ -910,8 +889,8 @@ function taskChat(task) {
       if (!result.ok) throw new Error(boardError(result.error));
       const model = configured ? result.data.find(entry => entry.id === configured.model) :
         (result.data.find(entry => entry.default) ?? result.data[0]);
-      if (configured && !model) throw new Error(language("The task model is unavailable.", "Модель задачи недоступна."));
-      if (!model?.id || !model.effort) throw new Error(language("No models available.", "Нет доступных моделей."));
+      if (configured && !model) throw new Error(t("ui.the_task_model_is_unavailable_cc563f3b"));
+      if (!model?.id || !model.effort) throw new Error(t("ui.no_models_available_f15531d2"));
       return { model: model.id, effort: model.effort };
     } catch (error) {
       if (chatCatalog === catalog) chatCatalog = undefined;
@@ -924,7 +903,7 @@ function taskChat(task) {
     const total = task.attachments.reduce((sum, file) => sum + file.bytes, 0) +
       [...draft.files, ...newFiles].reduce((sum, file) => sum + file.size, 0);
     if (total > 64 * 1024 * 1024) {
-      draft.error = language("Attachments are limited to 64 MiB per task.", "Лимит вложений на задачу — 64 МиБ.");
+      draft.error = t("ui.attachments_are_limited_to_64_mib_per_task_ae680c16");
     } else {
       draft.files.push(...newFiles);
       draft.error = "";
@@ -1008,6 +987,8 @@ function taskChat(task) {
 }
 
 function controlLabelForIcon(control, label) {
-  control.title = label;
-  control.setAttribute("aria-label", label);
+  if (typeof label === "function") {
+    bindLocalized(control, "title", label);
+    bindLocalized(control, "aria-label", label, true);
+  } else { control.title = label; control.setAttribute("aria-label", label); }
 }

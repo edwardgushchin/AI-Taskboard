@@ -1,6 +1,6 @@
 import {
   member, nextScheduledRun, number, object, priorities, reasoningEffortPattern, record, requireRevision, requireState, scheduleTimePattern, strings, taskIdPattern,
-  TaskboardError, text, validScheduleDate,
+  TaskboardError, text, validScheduleDate, validDueDate,
 } from "./model.ts";
 import { codexThreadPattern } from "./model.ts";
 import type { Actor, Task, TaskScheduleRule, TaskState } from "./model.ts";
@@ -16,6 +16,13 @@ function fields(task: Task, input: Record<string, unknown>): Task {
     if (input[key] !== undefined) updated[key] = strings(input[key], key);
   }
   if (input.priority !== undefined) updated.priority = member(input.priority, priorities, "priority");
+  if (input.dueDate !== undefined) {
+    if (input.dueDate === null) delete updated.dueDate;
+    else {
+      if (!validDueDate(input.dueDate)) throw new TaskboardError("INVALID_INPUT", "dueDate must be a calendar date in YYYY-MM-DD format.");
+      updated.dueDate = input.dueDate;
+    }
+  }
   if (input.schedule !== undefined) {
     requireState(task, ["draft", "ready", "blocked"]);
     if (input.schedule === null) delete updated.schedule;
@@ -98,7 +105,7 @@ export function actorFor(input: Record<string, unknown>, fallback: "agent" | "us
   return input.actor === undefined ? fallback : member(input.actor, ["agent", "user"], "actor");
 }
 
-function boardActor(input: Record<string, unknown>, fallback: "agent" | "user" = "agent"): Actor {
+export function boardActor(input: Record<string, unknown>, fallback: "agent" | "user" = "agent"): "agent" | "user" | "manager" {
   return input.actor === "manager" ? "manager" : actorFor(input, fallback);
 }
 
@@ -183,7 +190,8 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
       requireState(task, ["in_progress", "blocked"]);
       const summary = text(input.summary, "summary", true);
       const nextStep = input.nextStep === undefined ? task.nextStep : text(input.nextStep, "nextStep");
-      return record({ ...task, summary, nextStep }, action, "agent", task.status === "blocked" ? "blocked" : "ready", summary);
+      const status = task.schedule && task.status === "in_progress" ? "ready" : task.status;
+      return record({ ...task, summary, nextStep }, action, "agent", status, summary);
     }
     case "block": {
       requireState(task, input.allowUnstarted === true ? ["draft", "ready", "in_progress"] : ["in_progress"]);
@@ -199,7 +207,7 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
       const status = blocked?.previousStatus ?? (action === "resume" ? "in_progress" : "ready");
       const updated = action === "unblock" && input.dependencies !== undefined
         ? fields({ ...rest, status }, { dependencies: input.dependencies }) : rest;
-      return record(updated, action, action === "unblock" ? boardActor(input) : "agent", status, text(input.reason, "reason", true));
+      return record(updated, action, boardActor(input), status, text(input.reason, "reason", true));
     }
     case "update": {
       const updated = fields(task, input);

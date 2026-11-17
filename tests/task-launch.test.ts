@@ -1,3 +1,4 @@
+import localization from "../src/desktop/localization.cjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
@@ -15,7 +16,7 @@ const parsed = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, tr
 const names = new Set(["launchTask", "recordRunFailure", "publishRunActivity", "notifyRunChange", "saveTaskTokenUsage",
   "beginOperation", "confirmProjectClose", "projectOperations", "closingProjects", "launchingTasks", "runningTasks", "runActivityByTask",
   "activeAgents", "chatRuns", "windowStates", "executorBusy", "reserveAgent", "scheduleAgentWork", "scheduleRecurringTasks",
-  "deferredExecutors", "schedulingAgentWork", "executorLimit"]);
+  "deferredExecutors", "schedulingAgentWork", "taskRunLimit"]);
 const lifecycle = parsed.statements.filter(node => {
   if (ts.isFunctionDeclaration(node)) return node.name && names.has(node.name.text);
   return ts.isVariableStatement(node) && node.declarationList.declarations.some(declaration =>
@@ -27,26 +28,30 @@ const nextThread = "01234567-1234-5678-1234-123456789013";
 
 function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnect" | "closing" | "closing-on-retry" | "board-busy",
   activity?: RunActivity) {
-  const task: Task = { ...createTask("T-0001", { title: "Reviewed task" }), status: "review",
+  const task: Task & { mergeRepair?: true } = { ...createTask("T-0001", { title: "Reviewed task" }), status: "review",
     codexThreadId: outcome === "board-busy" ? undefined : previousThread,
     git: { target: "refs/heads/main", base: "a".repeat(40), branch: "refs/heads/ai-taskboard/T-0001", worktree: "worktree" } };
   const calls: { args: string[]; input: any }[] = [];
   const launched: any[] = [];
+  const access = { full: false };
   const subscriptions = new Map();
-  const savedSettings = new Map<string, { agentLimits: { executor: number } }>();
+  const savedSettings = new Map<string, { agentLimits: Partial<import("../src/cli/model.ts").AgentLimits> }>();
   const previousTurn = { status: "completed", completedAt: 1 as number | null, reads: 0 };
   type Completion = { reason: string; disconnected?: boolean; interrupted?: boolean } | undefined;
   const completion = Promise.withResolvers<Completion>();
   const retryCompletion = Promise.withResolvers<Completion>();
+  const finalCompletion = Promise.withResolvers<Completion>();
+  const completions = [completion, retryCompletion, finalCompletion];
   const slots = createAgentSlots();
   const runtime = runInNewContext(stripTypeScriptTypes(lifecycle) + "\n({launchTask, scheduleAgentWork, scheduleRecurringTasks, confirmProjectClose, projectOperations, runningTasks, activeAgents, deferredExecutors})", {
     AbortController, performance, setTimeout, clearTimeout, setImmediate, subscriptions, agentSlots: slots,
-    locateBoard: (project: string) => project,
+    runtimeLocation: (project: string) => project,
     readBoardSettings: (project: string) => savedSettings.get(project) ?? subscriptions.get(project)?.board.settings ?? {},
-    scheduleAutoReview: () => {}, projectIdentity: (project: string) => project,
+    scheduleAutoReview: () => {}, scheduleAutoBoard: () => {}, projectIdentity: (project: string) => project,
     broadcastBoardChat: () => {},
-    lang: (english: string) => english, cliFailure: failure, missingCodexThread,
+    t: (key: string, parameters = {}) => localization.text(key, parameters, "en"), localization, cliFailure: failure, missingCodexThread,
     app: { getPath: () => "profile" }, dialog: { showMessageBox: async () => ({ response: 1 }) },
+    executorFullAccess: () => access.full, process: { platform: process.platform },
     configuredCodex: async () => ({}), runLog: (items: Map<string, unknown>) => [...items.values()], rm: async () => {},
     readLastTaskTurn: async (_profile: string, _project: string, threadId: string) => {
       assert.equal(threadId, previousThread);
@@ -70,6 +75,11 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
       if (args[0] === "start") {
         if (input.revision !== task.revision) return failure("REVISION_CONFLICT", "The task changed.");
         if (input.scheduled) { task.status = "in_progress"; task.revision++; }
+        if (input.resolveConflicts && task.status === "review") {
+          task.status = "in_progress";
+          task.revision++;
+          task.mergeRepair = true;
+        }
         const execution = task.execution ?? { provider: "codex", model: "executor-model", effort: "low" };
         return { ok: true, data: { task: { ...structuredClone(task), execution }, worktree: task.git!.worktree } };
       }
@@ -84,7 +94,7 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
       if (args[0] === "progress") Object.assign(task, changeTask(task, "progress", input));
       return { ok: true, data: structuredClone(task) };
     },
-    startCodexRun: async (_client: unknown, _project: string, _cwd: string, snapshot: { codexThreadId?: string },
+    startCodexRun: async (_client: unknown, _project: string, _cwd: string, snapshot: { codexThreadId?: string; fullAccess?: boolean },
       onActivity: (item: RunActivity) => void, _usage: unknown, signal: AbortSignal, beforeTurn?: (threadId: string) => Promise<void>) => {
       launched.push(snapshot);
       const launchNumber = launched.length;
@@ -95,13 +105,13 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
       });
       const threadId = outcome === "missing" ? nextThread : snapshot.codexThreadId ?? nextThread;
       await beforeTurn?.(threadId);
-      if (activity) onActivity(activity);
+      if (activity && (!snapshot.fullAccess || activity.type !== "autoApprovalReview")) onActivity(activity);
       return { threadId,
-        completion: launchNumber === 1 ? completion.promise : retryCompletion.promise,
+        completion: completions[launchNumber - 1]!.promise,
         steer: async () => {}, interrupt: async () => {} };
     },
   });
-  return { runtime, task, calls, launched, previousTurn, completion, retryCompletion, subscriptions, slots, savedSettings };
+  return { runtime, task, calls, launched, previousTurn, completion, retryCompletion, finalCompletion, subscriptions, slots, savedSettings, access };
 }
 
 test("launch uses saved limits when the watch still has the previous value", async () => {
@@ -119,6 +129,32 @@ test("launch uses saved limits when the watch still has the previous value", asy
     await new Promise(resolve => setImmediate(resolve));
     for (const release of releases) release();
   }
+});
+
+test("merge conflict repair and its reconnect use reviewer capacity while the executor pool is full", async () => {
+  const f = fixture("disconnect");
+  const agentLimits = { executor: 1, reviewer: 1 };
+  f.savedSettings.set("project", { agentLimits });
+  const executor = f.slots.acquire("project", "executor", agentLimits)!;
+  const reviewer = f.slots.acquire("project", "reviewer", agentLimits)!;
+  const repair = () => f.runtime.launchTask("project", f.task.id, undefined, false, f.task.revision, undefined, false, true);
+  assert.equal((await repair()).error.code, "REVIEWER_LIMIT");
+  assert.equal(f.task.status, "review");
+  assert.equal(f.calls.some(call => call.args[0] === "start"), false);
+  reviewer();
+  assert.equal((await repair()).ok, true);
+  assert.equal(f.slots.available("project", "reviewer", agentLimits), 0);
+  assert.equal(f.slots.available("project", "executor", agentLimits), 0);
+  f.completion.resolve({ disconnected: true, reason: "Connection lost" });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.launched.length, 2);
+  assert.equal(f.slots.available("project", "reviewer", agentLimits), 0);
+  f.task.status = "review";
+  f.retryCompletion.resolve(undefined);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.slots.available("project", "reviewer", agentLimits), 1);
+  assert.equal(f.slots.available("project", "executor", agentLimits), 0);
+  executor();
 });
 
 test("the scheduler launches a due approved card once, waits for an executor slot and returns it to ready", async () => {
@@ -261,6 +297,105 @@ test("an approved snapshot skips the redundant card read while the CLI checks th
   f.task.status = "review";
   f.completion.resolve(undefined);
   await new Promise(resolve => setImmediate(resolve));
+});
+
+test("ordinary executor checkpoints keep the task running in the same chat until submission", async () => {
+  const f = fixture("started");
+  f.task.status = "in_progress";
+  const launched = await f.runtime.launchTask("project", f.task.id);
+  assert.equal(launched.ok, true, JSON.stringify(launched.error));
+  Object.assign(f.task, changeTask(f.task, "progress", { summary: "Implemented the queue.", nextStep: "Add review." }));
+  assert.equal(f.task.status, "in_progress");
+  f.completion.resolve(undefined);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.launched.length, 2);
+  assert.equal(f.launched[1].nextStep, "Add review.");
+  Object.assign(f.task, changeTask(f.task, "progress", { summary: "Added review.", nextStep: "Verify and submit." }));
+  f.retryCompletion.resolve(undefined);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.launched.length, 3);
+  assert.ok(f.launched.every(task => task.codexThreadId === previousThread && task.git.worktree === "worktree"));
+  f.task.status = "review";
+  f.finalCompletion.resolve(undefined);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.launched.length, 3);
+  assert.equal(f.task.status, "review");
+  assert.equal(f.runtime.projectOperations.size, 0);
+});
+
+test("the board follows up once when the executor exits without a changed checkpoint", async () => {
+  const f = fixture("started");
+  f.task.status = "in_progress";
+  const launched = await f.runtime.launchTask("project", f.task.id);
+  assert.equal(launched.ok, true, JSON.stringify(launched.error));
+  f.completion.resolve(undefined);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.launched.length, 2);
+  f.retryCompletion.resolve(undefined);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.launched.length, 2);
+  assert.equal(f.task.status, "blocked");
+  assert.match(f.task.blocked!.reason, /without submitting or changing the saved progress/);
+});
+
+test("a completed turn respects a blocker, an explicit stop and an access denial", async () => {
+  for (const kind of ["blocker", "stop", "denied"]) {
+    const f = fixture("started", kind === "denied" ? {
+      id: "approval", type: "autoApprovalReview", status: "denied", title: "Access", text: "Denied",
+    } : undefined);
+    f.task.status = "in_progress";
+    assert.equal((await f.runtime.launchTask("project", f.task.id)).ok, true);
+    if (kind === "blocker") Object.assign(f.task, changeTask(f.task, "block", { reason: "Missing input", condition: "Supply input" }));
+    if (kind === "stop") await f.runtime.activeAgents.get("project\0" + f.task.id).control.interrupt();
+    f.completion.resolve(undefined);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.launched.length, 1);
+    assert.equal(f.task.status, "blocked");
+    assert.match(f.task.blocked!.reason, kind === "blocker" ? /Missing input/ : kind === "stop" ? /The user stopped/ : /Access denied/);
+  }
+});
+
+test("a manager grant continues a sandboxed executor with full access without blocking the card", async () => {
+  const f = fixture("started", { id: "approval", type: "autoApprovalReview", status: "denied", title: "Sandbox access", text: "Denied" });
+  f.task.status = "in_progress";
+  assert.equal((await f.runtime.launchTask("project", f.task.id)).ok, true);
+  assert.equal(f.launched[0].fullAccess, false);
+  f.access.full = true;
+  f.completion.resolve({ interrupted: true, reason: "The board interrupted the old turn." });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.launched.length, 2);
+  assert.equal(f.launched[1].fullAccess, true);
+  assert.equal(f.launched[1].codexThreadId, previousThread);
+  assert.equal(f.launched[1].git.worktree, "worktree");
+  assert.equal(f.task.status, "in_progress");
+  assert.ok(f.calls.every(call => !call.input?.entries?.some((entry: RunActivity) => entry.id === "codex-interrupted")));
+  f.task.status = "review";
+  f.retryCompletion.resolve(undefined);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(!f.calls.some(call => call.args[0] === "block"));
+  assert.equal(f.task.status, "review");
+});
+
+test("automatic continuation waits for a slot if the board limit falls during work", async () => {
+  const f = fixture("started");
+  f.task.status = "in_progress";
+  const settings = { agentLimits: { executor: 2 } };
+  f.subscriptions.set("project", { board: { tasks: [f.task], settings }, listeners: [] });
+  const release = f.slots.acquire("project", "executor", settings.agentLimits)!;
+  assert.equal((await f.runtime.launchTask("project", f.task.id)).ok, true);
+  settings.agentLimits.executor = 1;
+  f.completion.resolve(undefined);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.launched.length, 1);
+  assert.equal(f.runtime.deferredExecutors.size, 1);
+  release();
+  f.runtime.scheduleAgentWork();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.launched.length, 2);
+  f.retryCompletion.resolve(undefined);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.launched.length, 2);
+  assert.equal(f.task.status, "blocked");
 });
 
 test("an executor reconnects once to the same chat after the App Server closes", async () => {
@@ -482,7 +617,7 @@ test("new-chat continuation requires an explicit confirmation and a matching blo
   runInNewContext(stripTypeScriptTypes(handlerNode.getText(parsed)), {
     ipcMain: { handle: (_name: string, callback: typeof handler) => { handler = callback; } },
     stateOf: () => ({ project: "project", window: {} }), taskIdPattern, cliFailure: failure,
-    lang: (english: string) => english, callCli: async () => ({ ok: true, data: task }),
+    t: (key: string, parameters = {}) => localization.text(key, parameters, "en"), localization, callCli: async () => ({ ok: true, data: task }),
     dialog: { showMessageBox: async (_window: unknown, options: { defaultId: number; cancelId: number }) => {
       assert.equal(options.defaultId, 0); assert.equal(options.cancelId, 0); return { response };
     } },

@@ -1,9 +1,15 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+export function localizationFixture(locale = "ru") {
+  const localization = createRequire(import.meta.url)("../src/desktop/localization.cjs");
+  return readFileSync(new URL("../src/desktop/localization.cjs", import.meta.url), "utf8") +
+    `\nObject.assign(window.taskboardLocalization.catalogs, ${JSON.stringify(localization.catalogs)});\nwindow.taskboardLocalization.select(${JSON.stringify(locale)});\n`;
+}
 
 export function electronCheck(script, name, timeout) {
   if (!process.versions.electron) {
@@ -11,11 +17,15 @@ export function electronCheck(script, name, timeout) {
     const scratch = mkdtempSync(join(temp, "ai-taskboard-" + name + "-"));
     const env = { ...process.env, TASKBOARD_CHECK_DIR: scratch, TASKBOARD_CHECK_NODE: process.execPath };
     delete env.ELECTRON_RUN_AS_NODE;
+    const args = process.argv.slice(2);
+    const outputIndex = args.indexOf("--artifacts");
+    const output = args[outputIndex + 1];
+    if (outputIndex >= 0 && output && !output.startsWith("--")) args[outputIndex + 1] = resolve(output);
     let status = 1;
     try {
       const electron = createRequire(script)("electron");
-      const result = spawnSync(electron, [fileURLToPath(script), ...process.argv.slice(2)], {
-        env, windowsHide: true, stdio: "inherit", timeout,
+      const result = spawnSync(electron, [fileURLToPath(script), ...args], {
+        cwd: scratch, env, windowsHide: true, stdio: "inherit", timeout,
       });
       if (result.error) console.error(result.error);
       else if (result.status !== 0) console.error("Electron check failed: " + (result.signal ?? result.status));

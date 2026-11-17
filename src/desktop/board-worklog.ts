@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import { globSync, readdirSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, win32 } from "node:path";
+import { redactSecrets } from "../cli/redact.ts";
 import { directory, exists, readBinary, readJson, removeFile, withLock, writeAtomic, writeJson } from "../cli/storage.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
 import type { CliReply } from "./cli.ts";
@@ -114,11 +115,7 @@ function cleanText(value: unknown, project: string, limit = 4096): string {
     path => reference(path, project) ?? "[external path]");
   const webLinks = (text: string) => text.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s<>"()\x60]+/gi,
     url => hold(reference(url, project) ?? "[private link]"));
-  return value.normalize("NFC").trim().replace(/\r\n/g, "\n")
-    .replace(/-----BEGIN [^-\n]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-\n]*PRIVATE KEY-----|$)/g, "[private key redacted]")
-    .replace(/(\b(?:api[_ -]?key|(?:access[_ -]?|refresh[_ -]?)?token|password|passwd|(?:client[_ -]?)?secret)|пароль|токен)\s*[:=]\s*(?:"[^"]*"|'[^']*'|\x60[^\x60]*\x60|[^\s,;]+)/gi, "$1=[redacted]")
-    .replace(/\b(Bearer|Basic)\s+[a-z0-9._~+/=-]+/gi, "$1 [redacted]")
-    .replace(/\b(?:sk-(?:proj-)?[a-z0-9_-]{16,}|gh[pousr]_[a-z0-9]{16,}|github_pat_[a-z0-9_]{16,}|AKIA[A-Z0-9]{16}|eyJ[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+)\b/gi, "[redacted]")
+  return redactSecrets(value.normalize("NFC").trim().replace(/\r\n/g, "\n"))
     .replace(linkPattern, (_link, label: string, rawTarget: string) => {
       const target = reference(rawTarget.replace(/^<|>$/g, ""), project);
       return hold(target ? "[" + label + "](<" + target + ">)" : "[private link]");

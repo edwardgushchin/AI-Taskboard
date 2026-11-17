@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import childProcess, { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, rmdirSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { syncBuiltinESMExports } from "node:module";
 import { promisify } from "node:util";
 import { createInterface } from "node:readline";
@@ -279,6 +279,9 @@ test("GitHub publication validates input, preserves partial results and pins pus
 
 test("GitHub milestones can be listed, assigned and cleared on local tasks", t => {
   const root = fixture(t, true);
+  const tools = fixture(t);
+  const executable = join(tools, process.platform === "win32" ? "gh.exe" : "gh");
+  writeFileSync(executable, "");
   cli(root, ["init"]);
   const task = cli(root, ["create"], { title: "Prepare the release" });
   cli(root, ["milestones"], undefined, "GITHUB_REMOTE_REQUIRED");
@@ -290,10 +293,10 @@ test("GitHub milestones can be listed, assigned and cleared on local tasks", t =
     import { promisify } from 'node:util';
     let requests = 0;
     cp.execFile = Object.assign(() => {}, { [promisify.custom]: async (cmd, args) => {
-      assert.equal(cmd, 'gh');
+      assert.equal(cmd, ${JSON.stringify(executable)});
       assert.equal(++requests, 1);
       assert.deepEqual(args.slice(0, 3), ['api', '--hostname', 'github.com']);
-      const open = { number: 5, title: 'Версия 1.0', state: 'open' };
+      const open = { number: 5, title: 'Версия 1.0', state: 'open', due_on: '2026-11-20T00:00:00Z' };
       const closed = { number: 3, title: 'Earlier release', state: 'closed' };
       switch (args.at(-1)) {
         case 'repos/owner/example/milestones?state=all&per_page=100':
@@ -309,13 +312,15 @@ test("GitHub milestones can be listed, assigned and cleared on local tasks", t =
   const call = (args: string[], input?: unknown) => {
     const result = spawnSync(process.execPath, ["--import", "data:text/javascript," + encodeURIComponent(mock),
       ...commandArgs(root, args, input)], {
-      env, encoding: "utf8", input: input === undefined ? undefined : JSON.stringify(input), windowsHide: true,
+      env: { ...env, PATH: tools + delimiter + process.env.PATH }, encoding: "utf8",
+      input: input === undefined ? undefined : JSON.stringify(input), windowsHide: true,
     });
     assert.ok(result.stdout, result.stderr);
     return JSON.parse(result.stdout);
   };
   assert.deepEqual(call(["milestones"]).data, { repository: "owner/example", milestones: [
-    { number: 5, title: "Версия 1.0", state: "open" }, { number: 3, title: "Earlier release", state: "closed" },
+    { number: 5, title: "Версия 1.0", state: "open", due_on: "2026-11-20T00:00:00Z" },
+    { number: 3, title: "Earlier release", state: "closed", due_on: null },
   ] });
   const select = (number: number, revision = task.revision, repository = "owner/example") =>
     call(["milestone", task.id], { revision, milestone: { repository, number } });
@@ -353,6 +358,230 @@ test("GitHub milestones can be listed, assigned and cleared on local tasks", t =
   git(root, "remote", "remove", "origin");
   cli(root, ["milestone", task.id], { revision: saved.revision, milestone: null });
   assert.equal(cli(root, ["show", task.id]).milestone, undefined);
+});
+
+test("GitHub read uses fixed host requests and distinguishes credentials from repository access", t => {
+  const project = fixture(t, true);
+  const tools = fixture(t);
+  const executable = join(tools, process.platform === "win32" ? "gh.exe" : "gh");
+  writeFileSync(executable, "");
+  writeFileSync(join(project, process.platform === "win32" ? "gh.exe" : "gh"), "");
+  cli(project, ["init"]);
+  git(project, "remote", "add", "origin", "git@github.com:Owner/Example.git");
+  const worktree = join(tools, "linked");
+  git(project, "worktree", "add", "-b", "linked", worktree);
+  const mock = `
+    import cp from 'node:child_process';
+    import assert from 'node:assert/strict';
+    import { syncBuiltinESMExports } from 'node:module';
+    import { homedir } from 'node:os';
+    import { join } from 'node:path';
+    import { promisify } from 'node:util';
+    const mode = process.env.TASKBOARD_TEST_GITHUB;
+    let checkedIdentity = false;
+    cp.execFile = Object.assign(() => {}, { [promisify.custom]: async (cmd, args, options) => {
+      assert.equal(cmd, ${JSON.stringify(executable)});
+      assert.equal(options.cwd, homedir());
+      assert.equal(options.env.GH_CONFIG_DIR, join(homedir(), 'gh-test-profile'));
+      assert.equal(options.env.GH_PROMPT_DISABLED, '1');
+      assert.equal(options.env.GH_DEBUG, undefined);
+      const fail = stderr => { throw Object.assign(new Error('fixture-output'), { stderr, stdout: 'fixture-output' }); };
+      if (args[0] === 'auth') {
+        assert.equal(checkedIdentity, true);
+        assert.ok(args.includes('--json') && !args.includes('--show-token'));
+        assert.ok(!mode.startsWith('override'));
+        const source = ['keyring', 'unconfigured'].includes(mode) ? '' : 'keyring';
+        return { stdout: JSON.stringify([{ configured: mode !== 'unconfigured', tokenSource: source }]) };
+      }
+      if (args[0] === 'run') {
+        assert.deepEqual(args, ['run', 'view', '43816168554', '--repo', 'github.com/owner/example', '--log-failed']);
+        if (mode === 'hidden') fail('gh: Not Found (HTTP 404)');
+        return { stdout: 'token=fixture-output\\n' + 'x'.repeat(16_000) };
+      }
+      assert.deepEqual(args.slice(0, 3), ['api', '--hostname', 'github.com']);
+      assert.equal(args.length, 4);
+      if (args[3] === 'user') {
+        checkedIdentity = true;
+        if (['keyring', 'expired', 'override', 'override-legacy', 'unconfigured', 'hidden-and-unauthorized'].includes(mode)) {
+          if (mode === 'override') assert.equal(options.env.GH_TOKEN, 'fixture-output');
+          if (mode === 'override-legacy') assert.equal(options.env.GITHUB_TOKEN, 'fixture-output');
+          fail('gh: Bad credentials (HTTP 401)');
+        }
+        return { stdout: JSON.stringify({ login: 'test-user', unrelated: 'fixture-output' }) };
+      }
+      assert.equal(args[3], 'repos/owner/example');
+      if (['hidden', 'hidden-and-unauthorized'].includes(mode)) fail('gh: Not Found (HTTP 404)');
+      if (mode === 'scope') fail('gh: Resource not accessible by personal access token (HTTP 403)');
+      return { stdout: JSON.stringify({ full_name: 'Owner/Example', default_branch: 'main', private: true, unrelated: 'fixture-output' }) };
+    } });
+    syncBuiltinESMExports();
+  `;
+  const read = (input: unknown, mode = "success", selected = project) => {
+    const child = spawnSync(process.execPath, ["--import", "data:text/javascript," + encodeURIComponent(mock),
+      ...commandArgs(selected, ["github-read"], input)], {
+      env: { ...env, PATH: [project, tools, process.env.PATH].join(delimiter), GH_CONFIG_DIR: "gh-test-profile",
+        GH_DEBUG: "api", GH_TOKEN: mode === "override" ? "fixture-output" : "",
+        GITHUB_TOKEN: mode === "override-legacy" ? "fixture-output" : "",
+        TASKBOARD_TEST_GITHUB: mode },
+      input: JSON.stringify(input), encoding: "utf8", windowsHide: true,
+    });
+    assert.ok(child.stdout, child.stderr);
+    assert.doesNotMatch(child.stdout, /fixture-output/);
+    return JSON.parse(child.stdout);
+  };
+  assert.deepEqual(read({ view: "account" }).data, { login: "test-user" });
+  assert.deepEqual(read({ view: "repository" }, "success", worktree).data,
+    { repository: "Owner/Example", defaultBranch: "main", private: true });
+  assert.equal(read({ view: "repository", endpoint: "user/emails" }).error.code, "INVALID_INPUT");
+  const runId = 43816168554;
+  const latest = read({ view: "run-failed-log", runId }, "success", worktree).data;
+  assert.deepEqual(latest, { repository: "owner/example", runId, log: "x".repeat(16_000), nextBefore: 17 });
+  assert.deepEqual(read({ view: "run-failed-log", runId, before: latest.nextBefore }).data,
+    { repository: "owner/example", runId, log: "token=[redacted]\n" });
+  assert.equal(read({ view: "run-failed-log", runId, repository: "other/repo" }).error.code, "INVALID_INPUT");
+  assert.equal(read({ view: "run-failed-log", runId: "--help" }).error.code, "INVALID_INPUT");
+  assert.equal(read({ view: "run-failed-log", runId }, "hidden").error.code, "GITHUB_RESOURCE_ACCESS");
+  assert.equal(read({ view: "account" }, "keyring").error.code, "GITHUB_AUTH_STORAGE");
+  assert.equal(read({ view: "account" }, "unconfigured").error.code, "GITHUB_AUTH_REQUIRED");
+  assert.equal(read({ view: "account" }, "expired").error.code, "GITHUB_AUTH_REJECTED");
+  assert.equal(read({ view: "account" }, "override").error.code, "GITHUB_AUTH_OVERRIDE");
+  const legacy = read({ view: "account" }, "override-legacy");
+  assert.equal(legacy.error.code, "GITHUB_AUTH_OVERRIDE");
+  assert.match(legacy.error.message, /^GITHUB_TOKEN /);
+  assert.equal(read({ view: "repository" }, "scope").error.code, "GITHUB_AUTH_SCOPE");
+  assert.equal(read({ view: "repository" }, "hidden").error.code, "GITHUB_RESOURCE_ACCESS");
+  assert.equal(read({ view: "repository" }, "hidden-and-unauthorized").error.code, "GITHUB_AUTH_REJECTED");
+});
+
+test("GitHub milestone deadline is pinned to origin and verified after writing", t => {
+  const root = fixture(t, true);
+  const tools = fixture(t);
+  const executable = join(tools, process.platform === "win32" ? "gh.exe" : "gh");
+  writeFileSync(executable, "");
+  cli(root, ["init"]);
+  git(root, "remote", "add", "origin", "git@github.com:Owner/Example.git");
+  const mock = `
+    import cp from 'node:child_process';
+    import assert from 'node:assert/strict';
+    import { syncBuiltinESMExports } from 'node:module';
+    import { promisify } from 'node:util';
+    const mode = process.env.TASKBOARD_TEST_MILESTONE;
+    const milestone = { number: 1, title: 'Existing', state: 'closed', due_on: null };
+    if (mode === 'same') milestone.due_on = '2026-11-20T00:00:00Z';
+    const base = ['api', '--hostname', 'github.com'];
+    const endpoint = 'repos/owner/example/milestones/1';
+    let reads = 0;
+    let writes = 0;
+    cp.execFile = Object.assign(() => {}, { [promisify.custom]: async (cmd, args) => {
+      assert.equal(cmd, ${JSON.stringify(executable)});
+      assert.ok(!['invalid', 'wrong-origin'].includes(mode));
+      if (args.includes('PATCH')) {
+        assert.deepEqual(args, [...base, '--method', 'PATCH', '-f', 'due_on=2026-11-20T00:00:00Z', endpoint]);
+        writes++;
+        assert.equal(reads, 1);
+        if (mode === 'denied') {
+          throw Object.assign(new Error('fixture-only'), { stderr: 'gh: Resource not accessible by personal access token (HTTP 403)' });
+        }
+        if (mode !== 'unverified') milestone.due_on = '2026-11-20T00:00:00Z';
+        return { stdout: '{}' };
+      }
+      assert.deepEqual(args, [...base, endpoint]);
+      reads++;
+      return { stdout: JSON.stringify(milestone) };
+    } });
+    process.on('exit', () => {
+      if (mode === 'same') assert.deepEqual([reads, writes], [1, 0]);
+      if (['success', 'unverified'].includes(mode)) assert.deepEqual([reads, writes], [2, 1]);
+      if (mode === 'denied') assert.deepEqual([reads, writes], [1, 1]);
+      if (['invalid', 'wrong-origin'].includes(mode)) assert.deepEqual([reads, writes], [0, 0]);
+    });
+    syncBuiltinESMExports();
+  `;
+  const input = { repository: "OWNER/Example", number: 1, dueDate: "2026-11-20" };
+  const run = (mode: string, args = input) => {
+    const result = spawnSync(process.execPath, ["--import", "data:text/javascript," + encodeURIComponent(mock),
+      ...commandArgs(root, ["github-milestone-due"], args)], {
+      env: { ...env, PATH: tools + delimiter + process.env.PATH, TASKBOARD_TEST_MILESTONE: mode },
+      input: JSON.stringify(args), encoding: "utf8", windowsHide: true,
+    });
+    assert.equal(result.stderr, "");
+    assert.doesNotMatch(result.stdout, /fixture-only/);
+    return JSON.parse(result.stdout);
+  };
+  assert.deepEqual(run("success").data, { repository: "owner/example", number: 1, title: "Existing", state: "closed",
+    dueDate: "2026-11-20", url: "https://github.com/owner/example/milestone/1", changed: true });
+  assert.equal(run("same").data.changed, false);
+  assert.equal(run("unverified").error.code, "GITHUB_MILESTONE_VERIFY_FAILED");
+  assert.equal(run("denied").error.code, "GITHUB_AUTH_SCOPE");
+  assert.equal(run("wrong-origin", { ...input, repository: "Other/Example" }).error.code, "GITHUB_REMOTE_REQUIRED");
+  assert.equal(run("invalid", { ...input, dueDate: "2026-02-29" }).error.code, "INVALID_INPUT");
+});
+
+test("GitHub milestone creation is retryable and both deadlines can be read separately", t => {
+  const root = fixture(t, true);
+  const tools = fixture(t);
+  const executable = join(tools, process.platform === "win32" ? "gh.exe" : "gh");
+  writeFileSync(executable, "");
+  cli(root, ["init"]);
+  git(root, "remote", "add", "origin", "git@github.com:Owner/Example.git");
+  const state = join(tools, "milestones.json");
+  writeFileSync(state, JSON.stringify([{ number: 1, title: "First", state: "open", due_on: "2026-11-20T00:00:00Z" }]));
+  const mock = `
+    import cp from 'node:child_process';
+    import assert from 'node:assert/strict';
+    import { readFileSync, writeFileSync } from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    import { promisify } from 'node:util';
+    const mode = process.env.TASKBOARD_TEST_MILESTONE;
+    const path = ${JSON.stringify(state)};
+    const base = ['api', '--hostname', 'github.com'];
+    const endpoint = 'repos/owner/example/milestones';
+    cp.execFile = Object.assign(() => {}, { [promisify.custom]: async (cmd, args) => {
+      assert.equal(cmd, ${JSON.stringify(executable)});
+      assert.deepEqual(args.slice(0, 3), base);
+      const milestones = JSON.parse(readFileSync(path, 'utf8'));
+      if (args.includes('POST')) {
+        assert.ok(mode === 'create' || mode === 'race');
+        assert.deepEqual(args, [...base, '--method', 'POST', '-f', 'title=Next', '-f', 'due_on=2026-11-27T00:00:00Z', endpoint]);
+        assert.ok(!milestones.some(row => row.title === 'Next'));
+        const next = { number: 2, title: 'Next', state: 'open', due_on: '2026-11-27T00:00:00Z' };
+        writeFileSync(path, JSON.stringify([...milestones, next]));
+        if (mode === 'race') throw Object.assign(new Error('fixture-only'), { stderr: 'gh: Validation Failed (HTTP 422)' });
+        return { stdout: JSON.stringify({ number: next.number }) };
+      }
+      if (args.includes('--paginate')) {
+        assert.deepEqual(args, [...base, '--paginate', '--slurp', endpoint + '?state=all&per_page=100']);
+        return { stdout: JSON.stringify([milestones]) };
+      }
+      assert.equal(args.length, 4);
+      const selected = milestones.find(row => args[3] === endpoint + '/' + row.number);
+      assert.ok(selected);
+      return { stdout: JSON.stringify(selected) };
+    } });
+    syncBuiltinESMExports();
+  `;
+  const run = (command: string, args: unknown, mode = "read") => {
+    const result = spawnSync(process.execPath, ["--import", "data:text/javascript," + encodeURIComponent(mock),
+      ...commandArgs(root, [command], args)], {
+      env: { ...env, PATH: tools + delimiter + process.env.PATH, TASKBOARD_TEST_MILESTONE: mode },
+      input: JSON.stringify(args), encoding: "utf8", windowsHide: true,
+    });
+    assert.equal(result.stderr, "");
+    assert.doesNotMatch(result.stdout, /fixture-only/);
+    return JSON.parse(result.stdout);
+  };
+  const input = { repository: "owner/example", title: "Next", dueDate: "2026-11-27" };
+  const first = readFileSync(state, "utf8");
+  const created = run("github-milestone-create", input, "create");
+  assert.deepEqual(created.data, { repository: "owner/example", number: 2, title: "Next", state: "open",
+    dueDate: "2026-11-27", url: "https://github.com/owner/example/milestone/2", created: true });
+  assert.deepEqual(run("github-milestone-create", { ...input, dueDate: "2026-12-01" }).data,
+    { ...created.data, created: false });
+  assert.equal(run("github-read", { view: "milestone", number: 1 }).data.dueDate, "2026-11-20");
+  assert.equal(run("github-read", { view: "milestone", number: 2 }).data.dueDate, "2026-11-27");
+  assert.equal(run("github-milestone-create", { ...input, repository: "other/repo" }).error.code, "GITHUB_REMOTE_REQUIRED");
+  writeFileSync(state, first);
+  assert.deepEqual(run("github-milestone-create", input, "race").data, { ...created.data, created: false });
 });
 
 test("dependencies prevent worktree creation until every dependency is completed", t => {
@@ -404,6 +633,124 @@ test("dependencies prevent worktree creation until every dependency is completed
   assert.equal(started.task.status, "in_progress");
   assert.deepEqual(started.task.execution, { model: "test-model", effort: "high" });
   assert.ok(existsSync(started.worktree));
+});
+
+test("cancelled dependencies keep an existing-directory task ready and unavailable, including after archival", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const dependency = cli(root, ["create"], { title: "Cancelled prerequisite", criteria: ["Verified"] });
+  cli(root, ["cancel", dependency.id], { reason: "No longer planned" });
+  const task = cli(root, ["create"], {
+    title: "Waiting task", criteria: ["Verified"], workingDirectory: root, dependencies: [dependency.id],
+  });
+  const ready = cli(root, ["approve", task.id]);
+  for (const archived of [false, true]) {
+    if (archived) {
+      cli(root, ["settings"], { archiveAfterDays: 0 });
+      cli(root, ["archive", "sweep"]);
+    }
+    for (const input of [undefined, { revision: ready.revision }]) {
+      const error = cli(root, ["start", task.id], input, "DEPENDENCIES_INCOMPLETE");
+      assert.deepEqual(error.details.dependencies, [dependency.id]);
+    }
+    const current = cli(root, ["show", task.id]);
+    assert.equal(current.status, "ready");
+    assert.equal(current.revision, ready.revision);
+    assert.equal(current.blocked, undefined);
+    assert.deepEqual(current.unfinishedDependencies, [dependency.id]);
+  }
+});
+
+test("manual start respects the next scheduled time for both worktrees and existing directories", t => {
+  for (const existingDirectory of [false, true]) {
+    const root = fixture(t, true);
+    cli(root, ["init"]);
+    const task = cli(root, ["create"], {
+      title: "Scheduled task", criteria: ["Verified"], schedule: { everyMinutes: 60 },
+      ...(existingDirectory ? { workingDirectory: root } : {}),
+    });
+    const ready = cli(root, ["approve", task.id]);
+    cli(root, ["start", task.id], { revision: ready.revision }, "INVALID_TRANSITION");
+    assert.equal(cli(root, ["show", task.id]).status, "ready");
+    assert.ok(!existsSync(join(root, ".taskboard-worktrees", task.id)));
+    ready.schedule.nextAt = "2000-01-01T00:00:00.000Z";
+    writeFileSync(join(root, ".tasks", "tasks", task.id + ".json"), JSON.stringify(ready));
+    const started = cli(root, ["start", task.id], { revision: ready.revision });
+    assert.equal(started.task.status, "in_progress");
+    const continued = cli(root, ["start", task.id]);
+    assert.equal(continued.task.revision, started.task.revision);
+    assert.equal(continued.worktree ?? continued.cwd, started.worktree ?? started.cwd);
+  }
+});
+
+test("automatic settings and task deadlines survive CLI restarts and guard start and acceptance", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  cli(root, ["settings"], { autoMode: "true" }, "INVALID_INPUT");
+  const task = cli(root, ["create"], { title: "External result", criteria: ["Verified"], workingDirectory: root, dueDate: "2026-11-20" });
+  assert.equal(cli(root, ["list", "--compact"]).tasks[0].dueDate, "2026-11-20");
+  for (const dueDate of ["2026-02-30", "tomorrow", 123]) cli(root, ["update", task.id], { dueDate }, "INVALID_INPUT");
+  cli(root, ["update", task.id], { dueDate: null });
+  assert.equal(cli(root, ["show", task.id]).dueDate, undefined);
+  cli(root, ["update", task.id], { dueDate: "2028-02-29" });
+  const ready = cli(root, ["approve", task.id]);
+  cli(root, ["start", task.id], { revision: ready.revision, autoMode: true }, "AUTO_MODE_DISABLED");
+  cli(root, ["settings"], { autoMode: true, reviewMode: "human" });
+  assert.equal(cli(root, ["settings"]).autoMode, true);
+  cli(root, ["start", task.id], { revision: ready.revision, autoMode: true });
+  const preview = cli(root, ["preview", task.id]);
+  const submitted = cli(root, ["submit", task.id], { token: preview.token, noChanges: true, summary: "Verified external result", checks: ["Checked"] });
+  const input = { revision: submitted.revision, targetHead: null, actor: "manager", reviewMode: "reviewer", autoMode: true };
+  cli(root, ["accept", task.id], input, "AUTO_REVIEW_DISABLED");
+  cli(root, ["settings"], { reviewMode: "reviewer" });
+  cli(root, ["accept", task.id], input, "REVIEW_REQUIRED");
+  cli(root, ["review-approve", task.id], { revision: submitted.revision, targetHead: null, summary: "Verified", evidence: ["External result checked"] });
+  cli(root, ["settings"], { autoMode: false });
+  cli(root, ["accept", task.id], input, "AUTO_MODE_DISABLED");
+  assert.equal(cli(root, ["show", task.id]).status, "review");
+  cli(root, ["settings"], { autoMode: true });
+  assert.equal(cli(root, ["accept", task.id], input).status, "done");
+});
+
+test("automatic integration reports conflicts once and repaired submissions require the selected acceptance again", t => {
+  for (const reviewMode of ["human", "reviewer"]) {
+    const root = fixture(t, true);
+    const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "source.txt"), "task version\n"));
+    cli(root, ["settings"], { autoMode: true, reviewMode });
+    writeFileSync(join(root, "source.txt"), "target version\n");
+    git(root, "commit", "-am", "fix: update target");
+    const head = git(root, "rev-parse", "HEAD");
+    const approval = { revision: task.revision, targetHead: head, summary: "Verified", evidence: ["Checked task result"] };
+    if (reviewMode === "reviewer") cli(root, ["review-approve", task.id], approval);
+    const accept = { revision: task.revision, targetHead: head,
+      ...(reviewMode === "reviewer" ? { autoMode: true, actor: "manager", reviewMode } : {}) };
+    for (let attempt = 0; attempt < 2; attempt++) cli(root, ["accept", task.id], accept, "MERGE_CONFLICT");
+    const notices = cli(root, ["manager-inbox"]).filter((entry: any) => entry.id === task.id && entry.kind === "question");
+    assert.equal(notices.length, 1); assert.match(notices[0].text, /MERGE_CONFLICT/);
+    assert.equal(cli(root, ["show", task.id]).status, "review");
+    const dependent = cli(root, ["create"], { title: "After integration", criteria: ["Verified"], dependencies: [task.id] });
+    cli(root, ["approve", dependent.id]);
+    cli(root, ["start", dependent.id], undefined, "DEPENDENCIES_INCOMPLETE");
+    const reopened = cli(root, ["start", task.id], { revision: task.revision, resolveConflicts: true });
+    assert.equal(reopened.worktree, worktree);
+    assert.equal(cli(root, ["show", task.id, "--compact"], { launchDetails: true }).mergeRepair, true);
+    assert.equal(cli(root, ["list", "--compact"]).tasks.find((entry: { id: string }) => entry.id === task.id).mergeRepair, true);
+    assert.throws(() => git(worktree, "merge", "--no-edit", head));
+    writeFileSync(join(worktree, "source.txt"), "target version\ntask version\n");
+    git(worktree, "add", "source.txt"); git(worktree, "commit", "-m", "fix: resolve integration conflict\n\nTask: " + task.id);
+    const preview = cli(worktree, ["preview", task.id]);
+    const repaired = cli(worktree, ["submit", task.id], { token: preview.token, message: preview.commitMessage ?? "fix: combine task and target",
+      summary: "Combined", checks: ["Checked combined result"] });
+    assert.equal(cli(root, ["show", task.id, "--compact"], { launchDetails: true }).mergeRepair, undefined);
+    const repairedInput = { ...accept, revision: repaired.revision };
+    if (reviewMode === "reviewer") {
+      cli(root, ["accept", task.id], repairedInput, "REVIEW_REQUIRED");
+      cli(root, ["review-approve", task.id], { ...approval, revision: repaired.revision });
+    } else assert.equal(cli(root, ["show", task.id]).status, "review");
+    assert.equal(cli(root, ["accept", task.id], repairedInput).status, "done");
+    assert.deepEqual(cli(root, ["show", dependent.id]).unfinishedDependencies, []);
+    assert.equal(readFileSync(join(root, "source.txt"), "utf8"), "target version\ntask version\n");
+  }
 });
 
 test("create saves attachments with the draft and rejects incomplete batches", t => {
@@ -558,10 +905,12 @@ test("task chat stores messages and attachments together and archives the conver
 
   const closing = cli(root, ["chat", task.id], { ...settings, text: "Cancel this task." });
   cli(root, ["cancel", task.id], { reason: "Archive the conversation" });
-  cli(root, ["chat", task.id], message, "INVALID_TRANSITION");
-  const closed = cli(root, ["chat", task.id], { ...reply, text: "The task was cancelled.", replyTo: closing.history.length - 1 });
+  let closed = cli(root, ["chat", task.id], { ...reply, text: "The task was cancelled.", replyTo: closing.history.length - 1 });
   assert.equal(closed.status, "cancelled");
   cli(root, ["chat", task.id], { ...reply, replyTo: closing.history.length - 1 }, "CHAT_CHANGED");
+  const discussion = cli(root, ["chat", task.id], { ...settings, text: "Discuss the cancelled card." });
+  assert.equal(discussion.status, "cancelled");
+  closed = cli(root, ["chat", task.id], { ...reply, replyTo: discussion.history.length - 1 });
   cli(root, ["settings"], { archiveAfterDays: 0 });
   assert.deepEqual(cli(root, ["archive", "sweep"]).archived, [task.id]);
   assert.deepEqual(cli(root, ["show", task.id]).history, closed.history);
@@ -668,6 +1017,44 @@ test("the board tag catalog migrates older tasks and shares names and colors acr
   assert.deepEqual(JSON.parse(readFileSync(indexPath, "utf8")).tags, migrated);
 });
 
+test("Elevated worktree paths preserve files, isolate sibling tasks and support cleanup", t => {
+  const root = fixture(t, true);
+  cli(root, ["init"]);
+  const legacy = cli(root, ["create"], { title: "Already started", criteria: ["Keep local files."] });
+  const next = cli(root, ["create"], { title: "Start in Elevated", criteria: ["Create a worktree."] });
+  cli(root, ["approve", legacy.id]);
+  cli(root, ["approve", next.id]);
+  const old = cli(root, ["start", legacy.id]).worktree;
+  writeFileSync(join(old, "source.txt"), "staged\n");
+  git(old, "add", "source.txt");
+  writeFileSync(join(old, "notes.local"), "unsaved notes\n");
+  const before = git(old, "status", "--porcelain", "--ignored");
+  cli(root, ["pause", legacy.id]);
+
+  const other = cli(root, ["start", next.id], { isolatedWorktree: true });
+  const target = join(root, ".taskboard-worktrees", legacy.id);
+  mkdirSync(target);
+  cli(root, ["start", legacy.id], { isolatedWorktree: true }, "WORKTREE_COLLISION");
+  assert.equal(cli(root, ["show", legacy.id]).status, "ready");
+  assert.equal(git(old, "status", "--porcelain", "--ignored"), before);
+  rmdirSync(target);
+
+  const moved = cli(root, ["start", legacy.id], { isolatedWorktree: true });
+  assert.equal(moved.worktree, realpathSync(target));
+  assert.equal(other.worktree, realpathSync(join(root, ".taskboard-worktrees", next.id)));
+  assert.ok(!existsSync(old));
+  assert.equal(cli(moved.worktree, ["show", legacy.id]).git.worktree, moved.worktree);
+  assert.equal(cli(root, ["start", legacy.id]).worktree, moved.worktree);
+  assert.equal(git(moved.worktree, "status", "--porcelain", "--ignored"), before);
+  assert.equal(readFileSync(join(moved.worktree, "notes.local"), "utf8"), "unsaved notes\n");
+  assert.equal(git(root, "status", "--porcelain"), "");
+
+  cli(root, ["cancel", next.id], { reason: "Check cleanup" });
+  assert.equal(cli(root, ["cleanup", next.id]).removed, true);
+  assert.ok(!existsSync(other.worktree));
+  assert.ok(existsSync(moved.worktree));
+});
+
 test("linked worktrees share the board and cleanup preserves local files and the branch", t => {
   const root = fixture(t, true);
   cli(root, ["init"]);
@@ -688,7 +1075,7 @@ test("linked worktrees share the board and cleanup preserves local files and the
   const progress = cli(worktree, ["progress", task.id, "--compact"], { summary: "Started", nextStep: "Edit the source" });
   assert.equal(progress.summary, "Started");
   assert.equal(progress.nextStep, "Edit the source");
-  assert.equal(progress.status, "ready");
+  assert.equal(progress.status, "in_progress");
   assert.equal(progress.history, undefined);
   assert.equal(cli(root, ["start", task.id]).worktree, worktree);
   const paused = cli(root, ["pause", task.id, "--compact"]);
@@ -998,7 +1385,6 @@ test("watch streams compact cards and sees new messages without a revision chang
     assert.equal(cli(started.worktree, ["show", task.id]).git.worktree, started.worktree);
     cli(root, ["run-log", task.id], { entries: [{ id: "check", type: "commandExecution",
       title: "Verification", text: "x".repeat(50_000), status: "completed" }] });
-    cli(root, ["message", task.id], { kind: "question", text: "?????? ????? ????" }, "INVALID_INPUT");
     const inputPath = join(root, "сообщение.json");
     const question = "Какое решение выбрать?";
     writeFileSync(inputPath, JSON.stringify({ kind: "question", text: question }));
@@ -1126,8 +1512,10 @@ test("submission commits the confirmed snapshot and rejects changed or incomplet
   const launchState = cli(root, ["show", task.id, "--compact"], { launchDetails: true });
   assert.equal(launchState.revision, edited.revision);
   assert.equal(launchState.history, undefined);
+  cli(root, ["settings"], { reviewMode: "human" });
   const returned = cli(root, ["request-changes", task.id, "--compact"], {
-    revision: edited.revision, reason: "Verify the CSV header", actor: "user", launchDetails: true,
+    revision: edited.revision, reason: "Verify the CSV header", actor: "manager", launchDetails: true,
+    reviewMode: "human", targetHead: cli(root, ["review", task.id]).targetHead,
   });
   assert.equal(returned.status, "in_progress");
   assert.equal(returned.history, undefined);
@@ -1380,6 +1768,9 @@ test("completed work outside Git can be submitted and accepted without a commit"
   assert.equal(review.stale, false);
   assert.deepEqual(review.result.checks, input.checks);
 
+  const log = join(worktree, "debug.log");
+  writeFileSync(log, "local verification output\n");
+  assert.equal(cli(root, ["review", task.id]).stale, false);
   writeFileSync(source, "modified after submission\n");
   assert.equal(cli(root, ["review", task.id]).stale, true);
   cli(root, ["accept", task.id], { revision: review.revision }, "STALE_SUBMISSION");
@@ -1387,6 +1778,8 @@ test("completed work outside Git can be submitted and accepted without a commit"
   cli(root, ["accept", task.id], { revision: review.revision - 1 }, "REVISION_CONFLICT");
   const done = cli(root, ["accept", task.id], { revision: review.revision });
   assert.equal(done.status, "done");
+  assert.equal(done.cleanupWarning.code, "DIRTY_WORKTREE");
+  assert.equal(readFileSync(log, "utf8"), "local verification output\n");
   assert.equal(done.git.accepted, undefined);
   assert.equal(Object.hasOwn(done, "acceptedTreeMatchesSubmission"), false);
   assert.equal(Object.hasOwn(cli(root, ["show", task.id, "--compact"]), "acceptedTreeMatchesSubmission"), false);
@@ -1395,11 +1788,13 @@ test("completed work outside Git can be submitted and accepted without a commit"
   assert.equal(metrics.cycleMs, Date.parse(done.closedAt) - Date.parse(task.createdAt));
   assert.equal(metrics.submissions, 1);
   assert.equal(metrics.returns, 0);
-  assert.equal(done.cleanupWarning, undefined);
+  rmSync(log);
+  const retried = cli(root, ["accept", task.id], { revision: review.revision });
+  assert.equal(retried.cleanupWarning, undefined);
+  assert.equal(retried.revision, done.revision);
   assert.equal(existsSync(worktree), false);
   assert.equal(git(root, "branch", "--list", "ai-taskboard/" + task.id), "");
   assert.equal(git(root, "rev-parse", "HEAD"), head);
-  assert.equal(cli(root, ["accept", task.id], { revision: review.revision }).revision, done.revision);
 });
 
 test("interrupted start and submit recover the existing worktree and commit", t => {
@@ -1472,7 +1867,16 @@ test("an executor can resume its own unfinished rebase in the registered worktre
   assert.equal(cli(root, ["show", card.id]).git.worktree, worktree);
   cli(root, ["preview", card.id], undefined, "GIT_OPERATION_IN_PROGRESS");
   assert.equal(git(worktree, "status", "--porcelain"), status);
-  git(worktree, "rebase", "--abort");
+
+  // Git finished the move, but the task still records the legacy location.
+  const relocated = join(root, ".taskboard-worktrees", card.id);
+  mkdirSync(dirname(relocated));
+  git(root, "worktree", "move", worktree, relocated);
+  const recovered = cli(root, ["start", card.id, "--compact"], { revision: task.revision, isolatedWorktree: true, launchDetails: true });
+  assert.equal(recovered.worktree, realpathSync(relocated));
+  assert.equal(recovered.task.git.worktree, recovered.worktree);
+  assert.equal(git(relocated, "status", "--porcelain"), status);
+  git(relocated, "rebase", "--abort");
 });
 
 test("resubmission verifies the actual Conventional Commit after an external rebase", t => {
@@ -1504,6 +1908,39 @@ test("resubmission verifies the actual Conventional Commit after an external reb
   assert.equal(submitted.git.submission.sha, head);
   assert.equal(git(worktree, "rev-parse", "HEAD"), head);
   assert.equal(cli(root, ["accept", task.id], { revision: submitted.revision }).status, "done");
+});
+
+const crashpadOutput = "[1116/134653.421:ERROR:third_party\\crashpad\\crashpad\\util\\win\\registration_protocol_win.cc:108] CreateFile: Access is denied. (0x5)\r\n";
+
+test("review and acceptance preserve a local file that became untracked after submission", t => {
+  const root = fixture(t, true);
+  const exclude = join(root, ".git", "info", "exclude");
+  let original = "";
+  const log = "debug.log";
+  const { task, worktree } = submitFixture(root, path => {
+    original = readFileSync(exclude, "utf8");
+    writeFileSync(exclude, original + "\n/" + log + "\n");
+    writeFileSync(join(path, log), crashpadOutput + "local verification output\n");
+    writeFileSync(join(path, "result.txt"), "verified result\n");
+  });
+  writeFileSync(exclude, original);
+  assert.equal(git(root, "status", "--porcelain"), "");
+  cli(root, ["settings"], { reviewMode: "reviewer" });
+
+  const review = cli(root, ["review", task.id]);
+  assert.equal(review.stale, false);
+  assert.deepEqual(review.paths, ["result.txt"]);
+  const [queued] = cli(root, ["review-queue"]);
+  assert.equal(queued.status, "clean");
+  cli(root, ["review-approve", task.id], { revision: task.revision, targetHead: review.targetHead,
+    summary: "Reviewed the submitted result.", evidence: task.criteria.map(() => "Verified result.txt.") });
+  const done = cli(root, ["accept", task.id], { revision: task.revision, targetHead: review.targetHead });
+  assert.equal(done.status, "done");
+  assert.equal(done.cleanupWarning.code, "DIRTY_WORKTREE");
+  assert.equal(readFileSync(join(root, "result.txt"), "utf8"), "verified result\n");
+  assert.equal(existsSync(join(root, log)), false);
+  assert.equal(readFileSync(join(worktree, log), "utf8"), crashpadOutput + "local verification output\n");
+  assert.deepEqual(cli(root, ["cleanup-status", task.id]).entries, ["?? " + log]);
 });
 
 test("accept creates a merge commit and protects the source and ignored files", t => {
@@ -1543,9 +1980,11 @@ test("accept creates a merge commit and protects the source and ignored files", 
   cli(root, ["review-approve", task.id], { ...decision, revision: task.revision - 1 }, "REVISION_CONFLICT");
   cli(root, ["review-approve", task.id], { ...decision, targetHead: task.git.submission.sha }, "TARGET_CHANGED");
   writeFileSync(join(worktree, "unsubmitted.txt"), "new edit");
+  git(worktree, "add", "--", "unsubmitted.txt");
   assert.equal(cli(root, ["review", task.id]).stale, true);
   cli(root, ["review-approve", task.id], decision, "STALE_SUBMISSION");
   cli(root, ["accept", task.id], { revision: task.revision }, "STALE_SUBMISSION");
+  git(worktree, "reset", "--", "unsubmitted.txt");
   rmSync(join(worktree, "unsubmitted.txt"));
   const approved = cli(root, ["review-approve", task.id], decision);
   assert.equal(approved.revision, task.revision);
@@ -1657,12 +2096,14 @@ test("review pages can omit unchanged context without losing edits", t => {
   assert.equal(JSON.parse(changed.stdout).error?.code, "REVISION_CONFLICT", changed.stdout + changed.stderr);
 });
 
-test("accepted task cleanup preserves local files and refuses to delete a changed branch", t => {
+test("accepted task cleanup preserves unrelated attachment files and refuses to delete a changed branch", t => {
   const root = fixture(t, true);
   const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "result.txt"), "delivered\n"));
   const exclude = join(root, ".git", "info", "exclude");
-  writeFileSync(exclude, readFileSync(exclude, "utf8") + "\n/ignored.local\n");
-  const ignored = join(worktree, "ignored.local");
+  writeFileSync(exclude, readFileSync(exclude, "utf8") + "\n/.codex-attachments/\n");
+  const sibling = join(worktree, ".codex-attachments", "another-session");
+  mkdirSync(sibling, { recursive: true });
+  const ignored = join(sibling, "keep.png");
   writeFileSync(ignored, "keep this file");
   mkdirSync(join(worktree, ".tasks", "qa"), { recursive: true });
   writeFileSync(join(worktree, ".tasks", "qa", "report.txt"), "keep this report");
@@ -1803,11 +2244,12 @@ test("artifact retention is bounded until cleanup and changed or unknown origina
   assert.deepEqual(cli(root, ["show", draft.id]).artifacts, final.artifacts);
 });
 
-test("accept discards ignored worktree output and preserves the project diary and task attachments", t => {
+test("accept discards Crashpad and temporary worktree attachments and preserves the project diary and task attachments", t => {
   const root = fixture(t, true);
   const exclude = join(root, ".git", "info", "exclude");
-  writeFileSync(exclude, readFileSync(exclude, "utf8") + "\n/.dev-diary/\n");
+  writeFileSync(exclude, readFileSync(exclude, "utf8") + "\n/.dev-diary/\n/.codex-attachments/\n");
   const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "result.txt"), "delivered\n"));
+  writeFileSync(join(worktree, "debug.log"), crashpadOutput + crashpadOutput);
   const diary = join(".dev-diary", "2026", "11");
   const qa = join(".tasks", "qa");
   const projectDiary = join(root, diary, "2026-11-12.md");
@@ -1816,7 +2258,11 @@ test("accept discards ignored worktree output and preserves the project diary an
   mkdirSync(join(worktree, diary), { recursive: true });
   mkdirSync(join(worktree, qa), { recursive: true });
   writeFileSync(join(worktree, diary, "2026-11-12.md"), "Task diary\n");
-  const report = join(worktree, qa, "results.bin");
+  writeFileSync(join(worktree, qa, "check.log"), "Temporary check output\n");
+  const stagedAttachments = join(worktree, ".codex-attachments", task.id);
+  mkdirSync(stagedAttachments, { recursive: true });
+  writeFileSync(join(stagedAttachments, "startup-error.txt"), "Earlier startup failure\n");
+  const report = join(stagedAttachments, "results.bin");
   const bytes = Buffer.from([0, 255, 128]);
   writeFileSync(report, bytes);
   if (process.platform === "win32") chmodSync(report, 0o444);

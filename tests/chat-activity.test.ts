@@ -1,3 +1,4 @@
+import localization from "../src/desktop/localization.cjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -21,10 +22,10 @@ function fixture(russian = true) {
     hidden = false;
     value = "";
     click?: () => unknown;
-    constructor(tag: string, text = "", className = "") { this.tag = tag; this.value = text; this.className = className; }
+    constructor(tag: string, text = "", className = "") { this.tag = tag; this.value = typeof text === "function" ? (text as () => string)() : text; this.className = className; }
     get textContent(): string { return this.value + this.children.map(child => child.textContent).join(""); }
     classList = { add: (name: string) => { this.className += " " + name; } };
-    set innerText(text: string) { this.value = text; }
+    set innerText(text: string) { this.value = typeof text === "function" ? (text as () => string)() : text; }
     append(...nodes: Node[]) { for (const node of nodes) { node.parent = this; this.children.push(node); } }
     replaceChildren(...nodes: Node[]) { this.children.forEach(child => { child.parent = undefined; }); this.children = []; this.append(...nodes); }
     matches(selector: string) { return selector.startsWith(".") ? this.className.split(" ").includes(selector.slice(1)) : this.tag === selector; }
@@ -46,7 +47,7 @@ function fixture(russian = true) {
   const openedTasks: string[] = [];
   const { renderRunActivity, boardWaitStatus } = runInNewContext(source + ";({ renderRunActivity, boardWaitStatus })", {
     window: {}, document, frame, taskInSheet: undefined,
-    language: (english: string, translated: string) => frame.russian ? translated : english,
+    t: (key: string, parameters = {}) => localization.text(key, parameters, frame.russian ? "ru" : "en"), localization: { ...localization, get locale() { return frame.russian ? "ru" : "en"; } }, bindLocalized: (node: any, property: string, render: () => string, attribute = false) => { const value = render(); if (attribute) node.setAttribute(property, value); else node[property] = value; return value; },
     element: (tag: string, text?: string, className?: string) => new Node(tag, text, className),
     icon: (name: string) => new Node("svg", name),
     button: (text: string, click: () => unknown, className: string) => Object.assign(new Node("button", text, className), { click }),
@@ -135,7 +136,7 @@ test("confirmed task transitions and comments remain in the timeline when work d
   assert.equal(view.container.children.at(-1)?.textContent, "Задача закрыта");
 });
 
-test("a manager cancellation reason is visible without expanding its tool details", () => {
+test("tool audit reasons never become separate messages during streaming or replay", () => {
   const view = fixture();
   const reason = "Те же исправления уже включены в T-0007.";
   const cancellation = { ...action("cancel", "mcpToolCall", "completed", "ai_taskboard / task_cancel"),
@@ -146,7 +147,7 @@ test("a manager cancellation reason is visible without expanding its tool detail
     assert.equal(row.parent, view.container);
     assert.equal(row.open, false);
     assert.match(row.querySelector("summary").textContent, /Задача отменена T-0009/);
-    assert.equal(view.container.children[view.container.children.indexOf(row) + 1].textContent, reason);
+    assert.ok(!view.container.querySelectorAll(".chat-text").some(node => node.textContent === reason));
   }
 });
 
@@ -197,7 +198,7 @@ test("activity groups consecutive operations without hiding messages, reasoning 
   const groups = view.container.querySelectorAll(".chat-run-group");
   assert.equal(groups.length, 2);
   assert.equal(groups[0].open, false);
-  assert.match(groups[0].querySelector("summary")!.textContent, /2 действия.*1 команда.*1 изменение файлов/);
+  assert.match(groups[0].querySelector("summary")!.textContent, /2 действия.*1 команда.*1 изменение файла/);
   assert.equal(view.container.children[1].textContent, "Agent explanation");
   assert.equal(view.container.children[3], view.row("reason"));
   assert.equal(view.container.children[4], view.row("single"));
@@ -316,6 +317,6 @@ test("older logs, commentary-only replies and errors retain readable completed h
   ], true, 0);
   const work = view.container.querySelector(".chat-work")!;
   assert.equal(view.container.querySelectorAll(".chat-run-final").length, 0);
-  assert.match(work.querySelector("summary")!.textContent, /Completed in 0s.*Failed: 1/);
+  assert.match(work.querySelector("summary")!.textContent, /Completed in 0 sec.*Failed: 1/);
   assert.equal(work.querySelector(".chat-run-error")!.textContent, "Disconnected");
 });

@@ -1,0 +1,28 @@
+{
+  "profile": "ai-taskboard-manager",
+  "launch": "production replyToBoard; new and resumed session",
+  "scope": "Only disposable temporary fixture, no real project source/Git",
+  "results": [
+    {
+      "mode": "new",
+      "passed": true,
+      "sha256": "108513af821bffa20cbca2ace45a271d500ab8220dfe74719af832db5e37de4b"
+    },
+    {
+      "mode": "resumed",
+      "passed": true,
+      "sha256": "b177e78bde7f013bcfa32bce6a05a29c7cd6a16ae3eb5bd6463ece54db0c6f3e"
+    }
+  ],
+  "checks": [
+    "exact file contents",
+    "directory listing",
+    "missing file",
+    "SHA-256",
+    "free and total bytes",
+    "native commandExecution and local MCP call"
+  ],
+  "cleanup": "fixture removed and absence asserted; production launcher closes App Server and MCP",
+  "testedRevision": "c9a81d3224dca40ad63669a47d383280a8671b1f",
+  "repeatedAfterMerge": true
+}

@@ -1,8 +1,10 @@
+import localization from "../src/desktop/localization.cjs";
+import { activeRunSummary } from "../src/desktop/active-runs.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
-import { mkdtemp, rm, statfs, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join } from "node:path";
@@ -15,7 +17,8 @@ import { boardReviewMode, codexThreadPattern, defaultBoardAgents, hexTagColor, m
 import { managerInbox, needsManagerAttention } from "../src/cli/task-messages.ts";
 import type { RunActivity, Task } from "../src/cli/model.ts";
 import type { ChatSettings } from "../src/cli/model.ts";
-import { directory as storageDirectory, locateBoard, readBoardSettings, readJson, writeJson } from "../src/cli/storage.ts";
+import { directory as storageDirectory, readBoardSettings, readJson, writeJson } from "../src/cli/storage.ts";
+import { runtimeLocation } from "../src/desktop/board-runtime.ts";
 import type { BoardGoal, BoardGoalAction } from "../src/desktop/codex-chat.ts";
 import { inspectProjectPath, projectSha256 } from "../src/desktop/project-files.ts";
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
@@ -24,6 +27,9 @@ import { goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryFor
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import { settingsDelivery, syncSettingsNotices } from "../src/desktop/settings-notices.ts";
+import { githubReadTool } from "../src/desktop/github-read.ts";
+import { executorFullAccess, managerAccess, setTaskExecutorAccess } from "../src/desktop/codex.ts";
+import type { ManagerAccess } from "../src/desktop/codex.ts";
 
 process.env.GIT_CEILING_DIRECTORIES = realpathSync(tmpdir());
 process.env.GIT_CONFIG_NOSYSTEM = "1";
@@ -63,7 +69,7 @@ function fixture(t: TestContext) {
   };
   const { autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools } = runInNewContext(
     boardSource + "\n({ autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools })",
-    { AbortSignal, boardReviewMode, callCli, cliFailure, defaultBoardAgents, hexTagColor, inspectProjectPath, managerInbox, needsManagerAttention, projectSha256, reviewVerifier, russianWriting, statfs, TaskboardError, taskIdPattern,
+    { AbortSignal, boardReviewMode, callCli, cliFailure, defaultBoardAgents, hexTagColor, inspectProjectPath, managerInbox, needsManagerAttention, projectSha256, reviewVerifier, russianWriting, TaskboardError, taskIdPattern,
       taskFields: { title: {}, description: {}, criteria: {}, tags: {} },
     },
   );
@@ -71,7 +77,8 @@ function fixture(t: TestContext) {
   type GoalControl = (action: BoardGoalAction) => Promise<BoardGoal | null>;
   type GoalRequest = { objective?: string; resume?: boolean; accepted: () => void; delivered: (id: string) => void; controls: (control: GoalControl) => void;
     update: (goal: BoardGoal | null) => void; activity: (items: RunActivity[]) => void; settings?: ChatSettings | null;
-    enableNotifications: (steer?: (text: string, images: string[]) => Promise<void>) => void; endTurn: () => void };
+    enableNotifications: (steer?: (text: string, images: string[]) => Promise<void>) => void; endTurn: () => void;
+    access?: ManagerAccess; confirmApproval?: (details: string) => Promise<boolean> };
   type Reply = (action: RunAction, prompt: string, images: string[], id?: string, context?: any,
     waiting?: (waiting: boolean) => void, signal?: AbortSignal, goal?: GoalRequest) => Promise<{ text: string } | { interrupted: true }>;
   let respond: Reply;
@@ -97,8 +104,11 @@ function fixture(t: TestContext) {
   const activeAgents = new Map<string, { control: { steer: (text: string) => Promise<void> } }>();
   const sender = { isDestroyed: () => true };
   const runtime = runInNewContext(handlerSource + "\n({ frame, scheduleAutoReview, boardRequests, boardWorkRequests, managerQuestion })", {
-    runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
+    scheduleAutoBoard: () => {},
+    activeRunSummary, runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
     AbortSignal, AbortController, ArrayBuffer, Buffer, Error, basename, dirname, extname, join, mkdtemp, rm, writeFile, maxAttachmentBytes, boardActions, boardInstructions, boardTools, callCli,
+    githubReadTool, readBoardGitHub: (cwd: string, args: unknown) => callCli(cwd, ["github-read"], args),
+    executorFullAccess, managerAccess, setTaskExecutorAccess,
     autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, defaultBoardAgents, reviewVerifier,
     existsSync, storageDirectory, readdirSync, rmSync, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
     goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryForView, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, saveManagerHistory,
@@ -116,7 +126,7 @@ function fixture(t: TestContext) {
     activateTab: (owner: { active: unknown }, tab: unknown) => { owner.active = tab; },
     launchingTasks: new Set(), runningTasks, chatRuns: new Map(), activeAgents, managerInbox, needsManagerAttention, subscriptions, reviewerTools,
     closingProjects: new Set(), setImmediate, setTimeout, clearTimeout, performance, console, agentSlots,
-    locateBoard, readBoardSettings, settingsDelivery, syncSettingsNotices,
+    runtimeLocation, readBoardSettings, settingsDelivery, syncSettingsNotices,
     reviewWithCodex: async (_profile: string, cwd: string, settings: ChatSettings | null, context: string,
       tools: { name: string }[], call: RunAction, _signal: AbortSignal,
       onUsage: (report: import("../src/cli/token-usage.ts").TokenUsageReport) => Promise<void>) => {
@@ -157,13 +167,13 @@ function fixture(t: TestContext) {
       const result = await callCli(cwd, ["start", id], { revision, resolveConflicts });
       return result.ok ? { ok: true, data: result.data.task } : result;
     },
-    tmpdir: () => folder, stateOf: () => ({ project, board: { project, settings: {} } }), app: { getPath: () => folder }, cliFailure, lang: (english: string) => english,
+    tmpdir: () => folder, stateOf: () => ({ project, board: { project, settings: {} } }), app: { getPath: () => folder }, cliFailure, t: (key: string, parameters = {}) => localization.text(key, parameters, "en"), localization,
     beginOperation: () => ({ controller: new AbortController(), finish() {} }),
     ipcMain: { handle: (name: string, callback: (...args: unknown[]) => Promise<any>) => { handlers.set(name, callback); } },
     replyToBoard: async (_profile: string, cwd: string, prompt: string, images: string[], action: RunAction,
       _tools: unknown, instructions: string, _signal: AbortSignal,
       session: { id?: string; title: string; save: (id: string) => void; attachmentContext?: string; mcpTools: { name: string; description: string }[];
-        separateTurn?: boolean;
+        separateTurn?: boolean; access?: ManagerAccess; confirmApproval?: (details: string) => Promise<boolean>;
         onWaiting: (waiting: boolean) => void; onTurnEnded: () => void; goal?: string; resumeGoal?: boolean; onGoalSet: () => void;
         onControl: (control: { steer: (text: string, images: string[], id?: string) => Promise<void>; interrupt: () => Promise<void> }) => void;
         onMessage: (id: string) => void; onActivity: (items: RunActivity[]) => void;
@@ -182,15 +192,14 @@ function fixture(t: TestContext) {
       const expectedTools = session.separateTurn ? [
         "task_review", "task_review_diff", "task_review_artifact", "task_accept", "task_request_changes", "project_git", "project_path", "project_sha256",
       ] : [
-        "task_cancel", "provider_tools", "task_tool_grant", "task_tool_revoke", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_approve", "task_wait", "task_review_queue", "task_review", "task_review_diff",
+        "task_cancel", "provider_tools", "task_tool_grant", "task_tool_revoke", "task_set_executor_access", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_approve", "task_wait", "task_review_queue", "task_review", "task_review_diff",
         "task_review_artifact", "task_accept", "task_request_changes",
-        "task_cleanup_status", "task_cleanup", "project_git", "project_git_push", "project_disk",
-        "project_path", "project_sha256", "milestones_list", "task_set_milestone", "tag_set_color",
+        "task_cleanup_status", "task_cleanup", "project_git", "project_git_push",
+        "milestones_list", "github_create_milestone", "github_set_milestone_due", "task_set_milestone", "tag_set_color", "github_read",
       ];
       const mode = boardReviewMode((await callCli(project, ["settings"], undefined, false)).data);
       assert.deepEqual(Array.from(session.mcpTools, tool => tool.name).sort(),
-        [...expectedTools.filter(name => (name !== "task_accept" || mode !== "human") &&
-          (name !== "task_request_changes" || mode === "manager")),
+        [...expectedTools.filter(name => (name !== "task_accept" || mode !== "human")),
         ...(!session.separateTurn ? (session.goal || session.resumeGoal ? ["goal_inbox", "goal_report"] : ["goal_read", "goal_send"]) : []),
         ...(session.separateTurn && mode === "reviewer" ? ["manager_ack", "task_cancel", "task_start"] : [])].sort());
       if (session.separateTurn) {
@@ -205,7 +214,7 @@ function fixture(t: TestContext) {
       return respond(action, prompt, images, session.id, session.attachmentContext && JSON.parse(session.attachmentContext),
         session.onWaiting, _signal, { objective: session.goal, resume: session.resumeGoal, accepted: session.onGoalSet, delivered: session.onMessage,
           controls: session.onGoalControl, update: session.onGoal, activity: session.onActivity,
-          settings: session.settings, endTurn: session.onTurnEnded,
+          settings: session.settings, endTurn: session.onTurnEnded, access: session.access, confirmApproval: session.confirmApproval,
           enableNotifications: steer => session.onControl({
             steer: async (text, images, id) => {
               if (steer) await steer(text, images);
@@ -285,33 +294,6 @@ function fixture(t: TestContext) {
   };
 }
 
-test("manager suggestions use the requested open board even after the active tab changes", async () => {
-  const suggestionHandler = main.statements.map(node => node.getText(main))
-    .filter(text => /^(?:const suggestions =|ipcMain\.handle\("board:suggestions",)/.test(text)).join("\n");
-  const active = { board: { project: "engine", tasks: [{ title: "Fix TabContainer", status: "ready" }] },
-    window: { webContents: { id: 1 } } };
-  const background = { board: { project: "dispatch", tasks: [{ title: "Route service requests", status: "draft" }] } };
-  const generated: { project: string; snapshot: unknown }[] = [];
-  const handle = runInNewContext(stripTypeScriptTypes(suggestionHandler), {
-    AbortSignal, basename, stateOf: () => active, app: { getPath: () => "profile" }, lang: (en: string) => en,
-    windowStates: new Map([[1, { tabs: [active, background] }]]),
-    ipcMain: { handle: (_name: string, callback: unknown) => callback },
-    boardSuggestions: async (_profile: string, project: string, context: string) => {
-      generated.push({ project, snapshot: JSON.parse(context) });
-      return [project];
-    },
-  });
-  assert.deepEqual(Array.from(await handle({}, "dispatch")), ["dispatch"]);
-  assert.deepEqual(Array.from(await handle({}, "engine")), ["engine"]);
-  assert.deepEqual(Array.from(await handle({}, "dispatch")), ["dispatch"]);
-  assert.deepEqual(Array.from(await handle({}, "unopened")), []);
-  assert.deepEqual(Array.from(await handle({})), []);
-  assert.deepEqual(generated, [
-    { project: "dispatch", snapshot: background.board },
-    { project: "engine", snapshot: active.board },
-  ]);
-});
-
 test("manager can set and read the board tag palette in HEX", async t => {
   const f = fixture(t);
   assert.equal((await f.cli(["init"])).ok, true);
@@ -331,6 +313,34 @@ test("manager can set and read the board tag palette in HEX", async t => {
   assert.equal(result.data?.answer, "Tag color saved.", JSON.stringify(result.error ?? result.data?.error));
 });
 
+test("manager grants and revokes executor access for a task", async t => {
+  const f = fixture(t);
+  const initialized = await f.cli(["init"]);
+  assert.ok(initialized.ok);
+  const card = (await f.cli(["create"], { title: "Run an Electron check", criteria: ["The window loads."],
+    workingDirectory: initialized.data.project })).data;
+  const accepted = (await f.cli(["approve", card.id])).data;
+  const started = (await f.cli(["start", card.id])).data.task;
+  assert.equal(started.status, "in_progress");
+  const request = await f.cli(["message", card.id], { kind: "question", text: "Electron fails its sandbox startup check. Can I use full access?" });
+  assert.ok(request.ok);
+  const reply = await f.run("Handle executor requests", async act => {
+    const inbox = await act("manager_inbox", { replay: true });
+    assert.match(JSON.stringify(inbox), /Electron fails its sandbox startup check/);
+    const args = { id: card.id, revision: started.revision, fullAccess: true };
+    const rejected = await act("task_set_executor_access", { ...args, revision: accepted.revision });
+    assert.equal(rejected.error.code, "REVISION_CONFLICT");
+    const granted = await act("task_set_executor_access", args);
+    assert.deepEqual(granted.data, { ...args, appliesOn: "next-run" });
+    assert.equal((await act("task_show", { id: card.id })).data.executorFullAccess, true);
+    const revoked = await act("task_set_executor_access", { ...args, fullAccess: false });
+    assert.equal(revoked.data.fullAccess, false);
+    assert.equal((await act("task_show", { id: card.id })).data.executorFullAccess, false);
+    return { text: "Executor settings verified." };
+  });
+  assert.ok(reply.ok, JSON.stringify(reply.error));
+});
+
 test("manager milestone tools use the board origin and return per-card results", async t => {
   const f = fixture(t);
   assert.equal((await f.cli(["init"])).ok, true);
@@ -347,6 +357,39 @@ test("manager milestone tools use the board origin and return per-card results",
     return { text: "No milestone is set." };
   });
   assert.equal(result.data?.answer, "No milestone is set.", JSON.stringify(result.error ?? result.data?.error));
+});
+
+test("manager routes GitHub milestone writes through the board host", async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"])).ok, true);
+  for (const goal of [false, true]) {
+    const reply = await f.run("Set the deadline of GitHub milestone #1 to 2026-11-20", async (act, _prompt, _images, _id, _context, _waiting, _signal, work) => {
+      if (goal) work!.accepted();
+      const result = await act("github_set_milestone_due", { repository: "owner/example", number: 1, dueDate: "2026-11-20" });
+      assert.equal(result.error.code, "GITHUB_REMOTE_REQUIRED");
+      const created = await act("github_create_milestone", { repository: "owner/example", title: "Next" });
+      assert.equal(created.error.code, "GITHUB_REMOTE_REQUIRED");
+      return { text: "No GitHub origin." };
+    }, [], goal);
+    assert.ok(reply.ok, JSON.stringify(reply.error));
+  }
+  assert.equal(f.cliCalls.filter(([name]) => name === "github-milestone-due").length, 2);
+  assert.equal(f.cliCalls.filter(([name]) => name === "github-milestone-create").length, 2);
+});
+
+test("GitHub read is routed to the board host on new and continued manager requests", async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"])).ok, true);
+  for (const goal of [false, false, true]) {
+    const reply = await f.run("Read origin", async (act, _prompt, _images, _id, _context, _waiting, _signal, work) => {
+      if (goal) work!.accepted();
+      const result = await act("github_read", { view: "repository" });
+      assert.equal(result.error.code, "GITHUB_REMOTE_REQUIRED");
+      return { text: "No GitHub origin." };
+    }, [], goal);
+    assert.ok(reply.ok, JSON.stringify(reply.error));
+  }
+  assert.equal(f.cliCalls.filter(([name]) => name === "github-read").length, 3);
 });
 
 test("a manager question returns the user's answer to the active request exactly once", async t => {
@@ -377,6 +420,28 @@ test("a manager question returns the user's answer to the active request exactly
   const result = await request;
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(result.data.answer, "Understood.");
+  assert.equal(f.pendingQuestion(), undefined);
+});
+
+test("manager manual approval asks the user and accepts only one of the displayed decisions", async t => {
+  const f = fixture(t);
+  await f.cli(["init"]);
+  managerAccess(f.folder, f.project, "ask");
+  const shown = Promise.withResolvers<void>();
+  const request = f.run("Check the project", async (_action, _prompt, _images, _id, _context, _waiting, _signal, manager) => {
+    assert.equal(manager?.access, "ask");
+    const decision = manager!.confirmApproval!("Get-ChildItem");
+    shown.resolve();
+    assert.equal(await decision, true);
+    return { text: "Done." };
+  });
+  await shown.promise;
+  const question = f.pendingQuestion();
+  assert.equal(question.approval, true);
+  assert.equal(question.text, "Get-ChildItem");
+  assert.equal((await f.answerQuestion(question.id, "yes")).error.code, "INVALID_INPUT");
+  assert.equal((await f.answerQuestion(question.id, "Allow once")).ok, true);
+  assert.equal((await request).ok, true);
   assert.equal(f.pendingQuestion(), undefined);
 });
 
@@ -879,7 +944,7 @@ test("send now steers the active manager with attachments and releases its execu
   assert.equal(f.boardListeners.size, 0);
 });
 
-test("manager reads Git and disk information without modifying the repository", async t => {
+test("manager reads Git information without modifying the repository", async t => {
   const f = fixture(t);
   assert.equal((await f.cli(["init"])).ok, true);
   const project = join(f.folder, "project");
@@ -924,8 +989,6 @@ test("manager reads Git and disk information without modifying the repository", 
     assert.doesNotMatch(commit.data.output, /Staged edit|Working edit/);
     assert.equal((await act("project_git", { view: "reset" })).error.code, "INVALID_INPUT");
     assert.equal((await act("project_git", { view: "status", path: ".." })).error.code, "INVALID_INPUT");
-    const disk = (await act("project_disk", {})).data;
-    assert.ok(disk.availableBytes >= 0 && disk.totalBytes > 0 && disk.availableBytes <= disk.totalBytes);
     return { text: "Проверил." };
   });
   assert.equal(reply.ok, true, JSON.stringify(reply.error));
@@ -1385,7 +1448,7 @@ test("a goal delegates a bounded slice, waits for submission, and reviews before
     assert.equal((await act("task_review_artifact", { ...artifact, revision: ref.revision + 1 })).error.code, "REVIEW_REQUIRED");
     assert.equal((await act("task_review_artifact", { ...artifact, sha256: "0".repeat(64) })).error.code, "REVIEW_REQUIRED");
     assert.equal((await act("task_accept", { ...ref, evidence: ["Verified manually."] })).error.code, "AUTO_REVIEW_DISABLED");
-    assert.equal((await act("task_request_changes", { id: sliceId, revision: ref.revision, reason: "Return for review." })).error.code, "AUTO_REVIEW_DISABLED");
+    assert.equal((await act("task_request_changes", { id: sliceId, revision: ref.revision + 1, reason: "Return for review." })).error.code, "REVIEW_REQUIRED");
     f.setRunning(sliceId, true);
     const refreshed = await act("task_review", { id: sliceId, knownRevision: review.revision });
     assert.equal(refreshed.ok, true, JSON.stringify(refreshed.error));
@@ -1495,7 +1558,7 @@ test("a reviewer leaves gaps on review and wakes the waiting manager on approval
     assert.equal(review.reviewer, undefined);
     const reference = { id: task.id, revision: review.revision };
     assert.equal((await act("task_accept", { ...reference, targetHead: null, evidence: ["Checked."] })).error.code, "AUTO_REVIEW_DISABLED");
-    assert.equal((await act("task_request_changes", { ...reference, reason: "Try again." })).error.code, "AUTO_REVIEW_DISABLED");
+    assert.equal((await act("task_request_changes", { ...reference, revision: reference.revision + 1, reason: "Try again." })).error.code, "REVIEW_REQUIRED");
     assert.equal((await f.cli(["accept", task.id], { revision: review.revision, actor: "manager" })).error.code, "AUTO_REVIEW_DISABLED");
     return { text: "Awaiting human acceptance." };
   });
@@ -2014,6 +2077,8 @@ test("manager reopens a conflicting approved submission and integrates its revie
     return result.stdout.trim();
   };
   git(f.project, "init", "-b", "main");
+  // Keep detached maintenance from holding the disposable cwd during cleanup.
+  git(f.project, "config", "maintenance.auto", "false");
   git(f.project, "config", "core.autocrlf", "false");
   git(f.project, "config", "user.name", "Taskboard");
   git(f.project, "config", "user.email", "taskboard@example.invalid");
@@ -2066,4 +2131,47 @@ test("manager reopens a conflicting approved submission and integrates its revie
   });
   assert.equal(result.data?.error, undefined, JSON.stringify(result));
   assert.equal(readFileSync(join(f.project, "source.txt"), "utf8"), "target\ntask\n");
+});
+
+
+test("manager returns the same card in every review mode and preserves human acceptance", { timeout: 150_000 }, async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"])).ok, true);
+  for (const mode of ["human", "manager", "reviewer"] as const) {
+    assert.equal((await f.cli(["settings"], { reviewMode: mode })).ok, true);
+    const { data: task } = await f.cli(["create"], { title: "T-0115 return scenario", criteria: ["Feedback reaches executor"] });
+    await f.cli(["approve", task.id]);
+    await f.cli(["start", task.id]);
+    const { data: preview } = await f.cli(["preview", task.id]);
+    assert.equal((await f.cli(["submit", task.id], { token: preview.token, noChanges: true, summary: "Check return", checks: ["Fixture result inspected"] })).ok, true);
+    const run = await f.run("Return work with feedback", async act => {
+      const { data: review } = await act("task_review", { id: task.id });
+      const ref = { id: task.id, revision: review.revision, reason: "Fix the validation failure and preserve the report." };
+      if (mode === "human") {
+        assert.equal((await act("task_accept", { id: ref.id, revision: ref.revision, targetHead: null })).error.code, "AUTO_REVIEW_DISABLED");
+        assert.equal((await f.cli(["accept", task.id], { revision: ref.revision, actor: "manager" })).error.code, "AUTO_REVIEW_DISABLED");
+      }
+      assert.equal((await f.cli(["request-changes", task.id], { ...ref, revision: ref.revision - 1, actor: "manager", reviewMode: mode, targetHead: null })).error.code, "REVISION_CONFLICT");
+      const otherMode = mode === "human" ? "manager" : "human";
+      await f.cli(["settings"], { reviewMode: otherMode });
+      assert.equal((await act("task_request_changes", ref)).error.code, "REVIEW_REQUIRED");
+      await f.cli(["settings"], { reviewMode: mode });
+      await act("task_review", { id: task.id });
+      const returned = await act("task_request_changes", ref);
+      assert.equal(returned.ok, true, JSON.stringify(returned.error));
+      const current = (await f.cli(["show", task.id])).data;
+      assert.equal(current.status, "in_progress");
+      const events = current.history.filter((event: any) => event.action === "request-changes");
+      assert.equal(events.length, 1);
+      assert.equal(events[0].actor, "manager");
+      assert.equal(events[0].text, ref.reason);
+      const launch = await f.cli(["start", task.id, "--compact"], { launchDetails: true });
+      assert.equal(launch.data.task.feedback, ref.reason);
+      assert.equal((await f.cli(["request-changes", task.id], { ...ref, revision: current.revision, actor: "manager", reviewMode: mode, targetHead: null })).error.code, "INVALID_TRANSITION");
+      assert.equal((await f.cli(["show", task.id])).data.history.filter((event: any) => event.action === "request-changes").length, 1);
+      return { text: "Returned after the successful tool result." };
+    });
+    assert.equal(run.ok, true, JSON.stringify(run.error ?? run.data?.error));
+    await f.cli(["cancel", task.id], { reason: "Fixture complete" });
+  }
 });

@@ -1,3 +1,4 @@
+import { trackActiveRun, trackProvider, claimDiscussion, activeRunSummary, observeActiveRuns } from "../src/desktop/active-runs.ts";
 import { providerActions } from "../src/desktop/provider-tools.ts";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -9,13 +10,17 @@ import { codexRpc } from "../src/desktop/codex-rpc.ts";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import { CodexTokenUsage } from "../src/desktop/codex-token-usage.ts";
-import { boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "../src/desktop/board-agent-hooks.ts";
+import { responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "../src/desktop/board-agent-hooks.ts";
 import { withBoardMcp } from "../src/desktop/board-mcp.ts";
+import { githubReadTool } from "../src/desktop/github-read.ts";
 import { runActivity, runLog } from "../src/desktop/run-activity.ts";
 import type { RunActivity } from "../src/cli/model.ts";
 import type { TokenUsageReport } from "../src/cli/token-usage.ts";
 
 test("task discussion streams task usage before success, provider failure, or a disconnect", async t => {
+  const counts: number[] = [];
+  const stop = observeActiveRuns(() => counts.push(activeRunSummary().total));
+  t.after(stop);
   const folder = mkdtempSync(join(tmpdir(), "ai-taskboard-chat-usage-"));
   t.after(() => rmSync(folder, { recursive: true, force: true }));
   mkdirSync(join(folder, ".tasks"));
@@ -93,7 +98,8 @@ test("task discussion streams task usage before success, provider failure, or a 
   for (const outcome of ["ok", "unknown", "failed", "closed", "storage-failed", "review", "review-storage-failed"]) {
     const reports: TokenUsageReport[] = [];
     const runtime = runInNewContext(stripTypeScriptTypes(source) + "\n({ replyToTask, reviewWithCodex })", {
-      spawn, codexRpc, CodexTokenUsage, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogReminder, worklogTool, withBoardMcp, process, setTimeout, clearTimeout, runActivity, runLog,
+      trackActiveRun, trackProvider, claimDiscussion, spawn, codexRpc, CodexTokenUsage, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogReminder, worklogTool, withBoardMcp, process, setTimeout, clearTimeout, runActivity, runLog,
+      githubReadTool,
       configuredCodex: async () => ({ path: process.execPath, args: [stub, outcome] }),
       chatTools: [], saveChatImages: async () => [],
       cliFailure: (code: string, message: string) => ({ ok: false, error: { code, message } }),
@@ -116,6 +122,8 @@ test("task discussion streams task usage before success, provider failure, or a 
         assert.equal(reports.length, 1);
         assert.deepEqual(Array.from(reports[0].records, record => record.totalTokens), [120, 120]);
       }
+      assert.equal(activeRunSummary().total, 0);
+      assert.ok(counts.includes(1));
       continue;
     }
     const reply = runtime.replyToTask("profile", folder, { model: "selected", effort: "low" }, "Prompt", [],
@@ -130,6 +138,8 @@ test("task discussion streams task usage before success, provider failure, or a 
       assert.equal(answer.text, "Reply");
       assert.equal(answer.usage?.used, outcome === "unknown" ? undefined : 120);
     }
+    assert.equal(activeRunSummary().total, 0);
+    assert.ok(counts.includes(1));
     if (outcome === "storage-failed") continue;
     const report = reports.at(-1)!;
     assert.equal(new Set(reports.map(report => report.id)).size, 1);

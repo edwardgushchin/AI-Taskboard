@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { electronCheck } from "./electron-check.mjs";
+import { electronCheck, localizationFixture } from "./electron-check.mjs";
 
 const script = fileURLToPath(import.meta.url);
 const root = resolve(dirname(script), "..");
@@ -62,7 +62,7 @@ app.whenReady().then(async () => {
     window.previewCalls = 0;
     const savedQueue = new Map();
     window.taskboard = {
-      subscribe(callback) { window.pushBoard = callback; }, onChatUpdate(callback) { window.pushChat = callback; }, onTheme() {},
+      subscribe(callback) { window.pushBoard = next => { window.taskboardLocalization.select(next.russian === false ? 'en' : 'ru'); callback({...next, localization: window.taskboardLocalization.state()}); }; }, onChatUpdate(callback) { window.pushChat = callback; }, onTheme() {},
       boardHistory: async (_project, _cursor, view) => ({ ok: true, data: view === 'live'
         ? { work: [], chat: [] } : { turns: [], model: "gpt-board-test" } }),
       agentLimits: async () => ({ ok: true, data: { executor: 3, manager: 1, reviewer: 1 } }),
@@ -77,9 +77,6 @@ app.whenReady().then(async () => {
         else if (action === 'remove') jobs.delete(id);
         return { ok: true, data: id };
       },
-      boardSuggestions: async project => project === "design-board" ? new Promise(resolve => { window.releaseSuggestions = () => resolve([
-        "Создай задачу на локализацию AI Taskboard", "Какие изменения нужны карточкам AI Taskboard?",
-      ]); }) : [],
       bootstrap: () => new Promise((_resolve, reject) => { window.rejectBootstrap = reject; }),
       attachmentPreview: async (_task, file) => {
         window.previewCalls++;
@@ -94,6 +91,7 @@ app.whenReady().then(async () => {
     ${read("source-files.cjs")}
     ${read("markdown.js")}
     ${read("chat.js")}
+    ${localizationFixture()}
     ${read("renderer.js")}
     void 0;
   `);
@@ -140,9 +138,78 @@ app.whenReady().then(async () => {
   await evaluate(`byId('notice-close').click(); void 0`);
   await evaluate(`push(); void 0`);
   await check(`byId('welcome').hidden && !byId('workspace').hidden && byId('app-content').getAttribute('aria-busy') === 'false'`, "a restored board replaces the loading state");
+  if (process.argv.includes("--scroll-only")) {
+    await evaluate(`
+      fixture.board.tasks = Array.from({ length: 40 }, (_, i) => task('S-' + i, 'Scroll task ' + i,
+        { description: Array(80).fill('Long task content.').join('\\n\\n'), criteria: [] }));
+      window.taskboard.command = async (_action, id) => ({ ok: true,
+        data: structuredClone(fixture.board.tasks.find(task => task.id === id)) });
+      push();
+      void 0;
+    `);
+    await evaluate(`(async () => {
+      while (lane('ready').querySelector('.lane-more')) {
+        lane('ready').querySelector('.lane-more').click();
+        await settle();
+      }
+    })()`);
+    for (const close of ['button', 'Escape']) for (const scroll of [false, true]) for (const refresh of [false, true]) {
+      await evaluate(`
+        findCard('S-0').focus();
+        byId('lanes').scrollTop = 400;
+        window.scrollBaseline = byId('lanes').scrollTop;
+        showTask('S-5');
+        waitFor(() => taskInSheet?.id === 'S-5').then(settle);
+      `);
+      await check(`scrollBaseline > 0 && byId('lanes').scrollTop === scrollBaseline`, 'opening retains board scroll');
+      if (scroll) {
+        await evaluate(`body.scrollTop = body.scrollHeight; settle()`);
+        await check(`body.scrollTop > 0 && byId('lanes').scrollTop === scrollBaseline`, 'sheet scroll is independent');
+      }
+      if (refresh) await evaluate(`fixture.board.tasks[6].title += '!'; fixture.board.tasks[6].revision++; push(); settle()`);
+      if (close === 'button') await click('#close-sheet');
+      else {
+        window.webContents.focus();
+        window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+        window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+      }
+      await evaluate(`waitFor(() => !sheet.open).then(settle)`);
+      await check(`byId('lanes').scrollTop === scrollBaseline && document.activeElement === findCard('S-0')`,
+        `close restores focus without scrolling: ${close}, sheet scroll=${scroll}, refresh=${refresh}`);
+    }
+    console.log('Sheet scroll Chromium checks passed: ' + checks + ' (8 combinations)');
+    return;
+  }
+  if (process.argv.includes("--auto-only")) {
+    await evaluate(`window.taskboard.command = async (action, id, input) => {
+      if (action === 'settings') { Object.assign(fixture.board.settings, input); push(); return {ok:true,data:fixture.board.settings}; }
+      if (action === 'show') return {ok:true,data:{...fixture.board.tasks.find(task => task.id === id), criteria:[]}};
+      if (action === 'update') { Object.assign(fixture.board.tasks.find(task => task.id === id), input); push(); return {ok:true,data:fixture.board.tasks.find(task => task.id === id)}; }
+      throw new Error('Unexpected action: ' + action);
+    }; void 0`);
+    await check(`byId('status-auto-mode').getAttribute('aria-pressed') === 'false'`, "automatic mode is visibly off by default");
+    await click('#status-auto-mode');
+    await check(`byId('status-auto-mode').getAttribute('aria-pressed') === 'true' && fixture.board.settings.autoMode === true`, "the toggle persists the enabled setting through the board command");
+    await capture('auto-mode-on.png');
+    await evaluate(`push(); void 0`);
+    await check(`byId('status-auto-mode').getAttribute('aria-pressed') === 'true'`, "a restored board snapshot retains the mode");
+    await click('#status-auto-mode');
+    await check(`byId('status-auto-mode').getAttribute('aria-pressed') === 'false'`, "the toggle turns automatic mode off");
+    await evaluate(`fixture.board.tasks[1].unfinishedDependencies = ['T-0001']; push(); void 0`);
+    await check(`lane('ready').contains(findCard('T-0002')) && findCard('T-0002').querySelector('.task-dependency-message').textContent.includes('T-0001')`, "dependency waiting retains the ready column and explanation");
+    await evaluate(`showTask('T-0002')`);
+    await check(`byId('task-launch').disabled`, "manual launch is disabled while dependencies are unfinished");
+    await evaluate(`taskEditor({...fixture.board.tasks[1],criteria:[]}); void 0`);
+    await check(`document.querySelector('input[name="dueDate"]').type === 'date'`, "task editing exposes a calendar deadline");
+    await evaluate(`(() => { const input = document.querySelector('input[name="dueDate"]'); input.value = '2026-11-20'; input.form.requestSubmit(); })()`);
+    await evaluate(`waitFor(() => fixture.board.tasks[1].dueDate === '2026-11-20')`);
+    await check(`findCard('T-0002').textContent.includes('2026-11-20')`, "saving a deadline updates the visible card");
+    console.log('Automatic mode Chromium checks passed: ' + checks);
+    return;
+  }
   if (process.argv.includes("--covers-only")) {
     await evaluate(`
-      const sizes = [[400, 8000], [800, 200], [40, 30]];
+      const sizes = [[400, 8000], [800, 200], [40, 30], [80, 80]];
       const sources = sizes.map(([width, height]) => {
         const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
         const ctx = canvas.getContext('2d');
@@ -164,10 +231,10 @@ app.whenReady().then(async () => {
       nativeTheme.themeSource = theme;
       window.setContentSize(width, 900);
       await evaluate(`waitFor(() => matchMedia('(prefers-color-scheme: dark)').matches === ${theme === 'dark'})`);
-      for (let shape = 0; shape < 3; shape++) {
+      for (let shape = 0; shape < 4; shape++) {
         await evaluate(`
           fixture.theme = '${theme}';
-          fixture.board.tasks = [task('T-0001', '${['Длинный скриншот', 'Широкое изображение', 'Маленькое изображение'][shape]}', {
+          fixture.board.tasks = [task('T-0001', '${['Длинный скриншот', 'Широкое изображение', 'Маленькое изображение', 'Квадратное изображение'][shape]}', {
             attachments: [{ file: '${shape}-${theme}-${width}.png', name: 'image.png' }]
           })];
           window.releaseCover = null; push();
@@ -187,12 +254,12 @@ app.whenReady().then(async () => {
         await check(`(() => {
           const image = findCard('T-0001').querySelector('img'), rect = image.getBoundingClientRect(), css = getComputedStyle(image);
           const parentCSS = getComputedStyle(image.parentElement);
-          const expectedWidth = Math.min(image.naturalWidth, image.parentElement.clientWidth - parseFloat(parentCSS.paddingLeft) - parseFloat(parentCSS.paddingRight));
+          const expectedWidth = image.parentElement.clientWidth - parseFloat(parentCSS.paddingLeft) - parseFloat(parentCSS.paddingRight);
           return !window.oversizedFrame && bounded(image) && Math.abs(rect.width - expectedWidth) < 1 &&
             Math.abs(rect.height - Math.min(180, expectedWidth * image.naturalHeight / image.naturalWidth)) < 2 &&
             css.objectFit === 'cover' && css.objectPosition === '50% 0%' && css.borderRadius === '7px' &&
             findCard('T-0001').querySelector('.task-meta').getBoundingClientRect().top >= rect.bottom;
-        })()`, 'native width, proportional cover crop at top, rounded border and footer (' + theme + ', ' + width + ', ' + shape + ')');
+        })()`, 'full inner width, proportional cover crop at top, rounded border and footer (' + theme + ', ' + width + ', ' + shape + ')');
         await evaluate(`
           window.stopMonitor = true;
           window.savedCover = findCard('T-0001').querySelector('img'); window.savedCalls = window.previewCalls;
@@ -357,7 +424,9 @@ app.whenReady().then(async () => {
       const projects = [{ path: 'board-fixture', name: 'Первая доска' }, { path: 'other-board', name: 'Вторая доска' }];
       const savedNames = new Map();
       const savedLimits = new Map();
+      const savedManagerAccess = new Map();
       const openBoard = project => window.pushBoard({ ...fixture, project,
+        managerAccess: savedManagerAccess.get(project) ?? 'auto',
         tabs: projects.map(tab => ({ ...tab, name: savedNames.get(tab.path) || tab.name })),
         board: { ...fixture.board, project, settings: { ...fixture.board.settings,
           name: savedNames.get(project), agentLimits: savedLimits.get(project) } } });
@@ -368,6 +437,11 @@ app.whenReady().then(async () => {
       Object.assign(window.taskboard, {
         createBoard: async () => { createProjectCalls.push(frame.project ?? null); },
         selectTab: async project => openBoard(project),
+        setManagerAccess: async (project, mode) => {
+          savedManagerAccess.set(project, mode);
+          openBoard(project);
+          return { ok: true, data: mode };
+        },
         command: async (action, _id, values) => {
           if (action !== 'settings') throw Error('Unexpected command: ' + action);
           if (typeof values.name === 'string') savedNames.set(frame.project, values.name.trim());
@@ -385,6 +459,7 @@ app.whenReady().then(async () => {
       const sandboxSelect = () => body.querySelector('.provider-panel select');
       const boardNameInput = () => byId('sheet-body').querySelector('form input[type="text"]');
       const boardLimit = role => body.querySelector('[name="' + role + 'Limit"]');
+      const managerAccess = () => body.querySelector('[name="managerAccess"]');
       const gearBackground = () => getComputedStyle(byId('app-settings')).backgroundColor;
       const gearMatchesRail = () => gearBackground() === getComputedStyle(byId('project-tabs')).backgroundColor;
       const createProjectItem = () => [...byId('app-menu').querySelectorAll('.app-menu-item')]
@@ -448,7 +523,11 @@ app.whenReady().then(async () => {
     await evaluate(`waitFor(() => boardLimit('executor').placeholder === '0')`);
     await check(`boardLimit('executor').value === '' && boardLimit('reviewer').placeholder === '1'`,
       "board limits inherit per-role application defaults");
+    await check(`managerAccess().value === 'auto' && managerAccess().closest('fieldset').textContent.includes('Менеджер проекта') &&
+      [...managerAccess().options].map(option => option.text).join(',') === 'Запрашивать разрешение,Подтверждать за меня,Полный доступ'`,
+      "manager settings show all three modes with automatic review selected by default");
     await evaluate(`boardLimit('executor').value = '2'; boardLimit('reviewer').value = '0';
+      managerAccess().value = 'full';
       boardNameInput().form.requestSubmit(); waitFor(() => !sheet.open)`);
     await check(`JSON.stringify(savedLimits.get('board-fixture')) === '{"executor":2,"reviewer":0}' &&
       limits.executor === 0 && limits.reviewer === 1`, "board overrides save without changing application defaults");
@@ -458,6 +537,8 @@ app.whenReady().then(async () => {
     await check(`frame.project === 'other-board' && sheet.textContent.includes('Вторая доска') &&
       !!body.querySelector('.board-agent-settings') && !byId('agent-limits') &&
       boardLimit('executor').value === '' && boardLimit('reviewer').value === ''`, "the project tab opens settings for that board");
+    await check(`savedManagerAccess.get('board-fixture') === 'full' && managerAccess().value === 'auto'`,
+      "manager full access saves for the selected board only");
     await evaluate(`boardNameInput().value = 'Выпуск 0.3'; boardNameInput().form.requestSubmit(); waitFor(() => !sheet.open)`);
     await check(`byId('project-tabs').querySelector('[aria-selected=true] .project-tab-name').textContent === 'Выпуск 0.3' &&
       byId('project-tabs').querySelector('[aria-selected=false] .project-tab-name').textContent === 'Первая доска'`,
@@ -470,9 +551,12 @@ app.whenReady().then(async () => {
     await evaluate(`openBoard('board-fixture'); boardSettings(); void 0`);
     await check(`boardLimit('executor').value === '2' && boardLimit('manager').value === '' &&
       boardLimit('reviewer').value === '0'`, "saved overrides reopen including zero");
+    await check(`managerAccess().value === 'full'`, "saved manager full access reopens enabled");
     await evaluate(`boardLimit('executor').value = ''; boardLimit('reviewer').value = '';
+      managerAccess().value = 'ask';
       boardNameInput().form.requestSubmit(); waitFor(() => !sheet.open)`);
     await check(`Object.keys(savedLimits.get('board-fixture')).length === 0`, "clearing overrides restores inheritance");
+    await check(`savedManagerAccess.get('board-fixture') === 'ask'`, "manual approval can be selected");
     await evaluate(`sheet.close(); void 0`);
     const key = async keyCode => {
       keyCode = keyCode.replace(/^Arrow/, '');
@@ -676,6 +760,21 @@ app.whenReady().then(async () => {
     await evaluate(`fixture.board.gitInfo = { branch: 'main', head: '0123456789abcdef' }; push(); void 0`);
     await check(`byId('status-branch').textContent === 'main' && !byId('status-publish').hidden && byId('status-tracking').hidden`,
       "a branch without tracking shows the publication control");
+    await evaluate(`
+      const publicationCalls = [];
+      window.taskboard.command = async (action, _id, input) => {
+        if (action === 'git-refs') return { ok: true, data: fixture.board.gitInfo };
+        publicationCalls.push({ action, input });
+        return { ok: true, data: { remote: 'https://github.com/example/project' } };
+      };
+      byId('status-publish').click(); waitFor(() => sheet.open);
+    `);
+    await check(`body.querySelector('form input').value && body.textContent.includes('main')`,
+      "publication still opens its repository form for the current branch");
+    await evaluate(`body.querySelector('form').requestSubmit(); waitFor(() => !sheet.open)`);
+    await check(`publicationCalls.length === 1 && publicationCalls[0].action === 'git-publish' &&
+      publicationCalls[0].input.branch === 'main' && !byId('status-publish').disabled`,
+      "publication submits the branch and restores its button without a user element");
     await evaluate(`fixture.board.gitInfo.tracking = { behind: 0, ahead: 19 }; push(); void 0`);
     await check(`!byId('status-tracking').hidden && byId('status-publish').hidden &&
       byId('status-tracking').textContent === '0↓ 19↑' &&
@@ -746,6 +845,38 @@ app.whenReady().then(async () => {
     await evaluate(`delete fixture.board.gitInfo.branch; push(); void 0`);
     await check(`byId('status-branch').textContent === '01234567' && byId('status-publish').hidden && byId('status-tracking').hidden`,
       "detached HEAD shows the commit hash and keeps the Git menu available");
+    for (const theme of ["dark", "github-light"]) {
+      for (const width of [1380, 760]) {
+        window.setContentSize(width, 760);
+        await evaluate(`fixture.theme = '${theme}'; void 0`);
+        for (const git of [undefined, { branch: 'main' },
+          { branch: 'main', head: '0123456789abcdef' },
+          { head: '0123456789abcdef' },
+          { branch: 'main', head: '0123456789abcdef', tracking: { behind: 1, ahead: 2 } }]) {
+          await evaluate(`
+            fixture.board.gitInfo = ${JSON.stringify(git)};
+            if (fixture.board.gitInfo) fixture.board.gitInfo.user = 'Developer';
+            push();
+            window.pushBoard({ ...fixture, project: 'other-board' });
+            push(); settle();
+          `);
+          await check(`document.documentElement.dataset.theme === '${theme}' &&
+            !byId('status-user') && !document.querySelector('.status-bar .codicon-account') &&
+            !document.querySelector('.status-bar').textContent.includes('Developer') &&
+            document.querySelector('.status-activity').previousElementSibling.id === 'git-branches' &&
+            (() => {
+              const bar = document.querySelector('.status-bar').getBoundingClientRect();
+              const group = document.querySelector('.status-repository').getBoundingClientRect();
+              const bell = byId('status-notifications').getBoundingClientRect();
+              return bar.bottom === innerHeight && bell.right <= innerWidth &&
+                bell.left >= group.right && Math.abs(bell.top + bell.height / 2 - (bar.top + bar.height / 2)) <= 1;
+            })()`, theme + ' ' + width + ': refresh and project switches retain aligned controls without a user or its spacing');
+        }
+        await capture('status-bar-' + theme + '-' + width + '.png');
+      }
+    }
+    await evaluate(`byId('status-notifications').click(); settle()`);
+    await check(`byId('notifications').matches(':popover-open')`, "the review notification menu still opens after refresh and project switches");
     console.log("Git status Chromium checks passed: " + checks);
     return;
   }
@@ -753,63 +884,6 @@ app.whenReady().then(async () => {
   const emulateMotion = value => window.webContents.debugger.sendCommand("Emulation.setEmulatedMedia", {
     features: value ? [{ name: "prefers-reduced-motion", value }] : [],
   });
-  if (process.argv.includes("--suggestions-only")) {
-    await emulateMotion("reduce");
-    await evaluate(`
-      const projects = [
-        { path: 'septic-board', name: 'Говновоз' }, { path: 'engine-board', name: 'Electron2D' },
-        { path: 'typing-board', name: 'Typing fixture' },
-      ];
-      const suggestionRequests = [];
-      const pendingSuggestions = new Map();
-      const placeholder = () => document.querySelector('.draft-placeholder').textContent;
-      const openBoard = project => window.pushBoard({ ...fixture, project, tabs: projects,
-        board: { ...fixture.board, project } });
-      window.taskboard.selectTab = async project => openBoard(project);
-      window.taskboard.boardSuggestions = project => new Promise(resolve => {
-        suggestionRequests.push(project);
-        pendingSuggestions.set(project, resolve);
-      });
-      openBoard('engine-board');
-      void 0;
-    `);
-    await click('#project-tabs [aria-selected="false"]');
-    await check(`suggestionRequests.join(',') === 'engine-board,septic-board'`, "each composer requests suggestions for its own project");
-    await evaluate(`pendingSuggestions.get('engine-board')(['Проверь фокус в TabContainer']); settle()`);
-    await check(`placeholder() === 'Напишите менеджеру проекта…'`, "a late response from the previous board leaves the current placeholder alone");
-    await evaluate(`pendingSuggestions.get('septic-board')(['Уточни требования к приёму заявок']); settle()`);
-    await check(`placeholder() === 'Уточни требования к приёму заявок'`, "the new board shows its own suggestions");
-    await click('#project-tabs [aria-selected="false"]');
-    await check(`placeholder() === 'Проверь фокус в TabContainer' && suggestionRequests.length === 2`, "switching back restores only that board's cached suggestions");
-    await emulateMotion("no-preference");
-    await evaluate(`
-      openBoard('typing-board');
-      const typedPrompt = 'Проверь сценарий загрузки проекта с длинным названием';
-      pendingSuggestions.get('typing-board')([typedPrompt]);
-      void 0;
-    `);
-    await check(`(async () => {
-      await waitFor(() => placeholder().length >= 3 && placeholder() !== typedPrompt && typedPrompt.startsWith(placeholder()));
-      const partial = placeholder();
-      for (let i = 0; i < 3; i++) openBoard('typing-board');
-      if (placeholder() !== partial) throw new Error('Refresh changed the suggestion: ' + partial + ' → ' + placeholder());
-      const field = document.querySelector('.draft-input textarea');
-      field.focus();
-      openBoard('typing-board');
-      await waitFor(() => document.activeElement === field && placeholder() === 'Напишите менеджеру проекта…');
-      field.value = 'Вопрос';
-      field.dispatchEvent(new Event('input'));
-      if (getComputedStyle(document.querySelector('.draft-placeholder')).visibility !== 'hidden') return false;
-      field.value = '';
-      field.dispatchEvent(new Event('input'));
-      field.blur();
-      openBoard('typing-board');
-      if (placeholder() !== partial) throw new Error('Blur restored ' + placeholder() + ' after ' + partial + ', active ' + document.activeElement?.tagName);
-      return true;
-    })()`, "board refreshes preserve the partial suggestion and field focus pauses it without flashing the full phrase");
-    console.log("Manager suggestions Chromium checks passed: " + checks);
-    return;
-  }
   await emulateMotion("no-preference");
   await check(`!byId('lanes').getAnimations({ subtree: true }).some(animation => animation.id === 'task-card-enter')`,
     "restoring a board shows its existing cards immediately");
@@ -1803,10 +1877,10 @@ app.whenReady().then(async () => {
   await evaluate(`fixture.board.tags[0].color = '#AB1234'; push(); void 0`);
   await check(`findCard('T-0002').querySelector('.tag').style.getPropertyValue('--tag-color') === '#AB1234'`, "tag color changes reach existing cards");
   await evaluate(`fixture.board.tasks[1].unfinishedDependencies = ['T-0001']; push(); void 0`);
-  await check(`lane('blocked').contains(findCard('T-0002')) && findCard('T-0002').dataset.state === 'ready' &&
+  await check(`lane('ready').contains(findCard('T-0002')) && findCard('T-0002').dataset.state === 'ready' &&
     findCard('T-0002').querySelector('.task-dependency-message').textContent === 'Ожидает T-0001' &&
     getComputedStyle(findCard('T-0002').querySelector('.task-dependency-message')).justifySelf === 'start'`,
-    "a ready task waiting for a dependency shows a compact badge in the blocked lane");
+    "a ready task waiting for a dependency shows a compact badge in the ready lane");
   await evaluate(`fixture.board.tasks[1].unfinishedDependencies = ['T-0003']; push(); void 0`);
   await check(`findCard('T-0002').querySelector('.task-dependency-message').textContent === 'Ожидает T-0003'`,
     "the displayed dependency updates even when the count stays the same");
@@ -1981,7 +2055,7 @@ app.whenReady().then(async () => {
   await evaluate(`fixture.board.tasks.find(task => task.id === 'T-0102').priority = 'high'; fixture.board.tasks.find(task => task.id === 'T-0000').priority = 'high'; push(); const sortingFilter = lane('ready').querySelector('select'); sortingFilter.value = 'high'; sortingFilter.dispatchEvent(new Event('change', { bubbles: true })); void 0`);
   await check(`laneIds('ready') === 'T-0000,T-0102'`, "column filters preserve newest-first order for the matching subset");
   await evaluate(`lane('ready').querySelector('.lane-filter-options button').click(); fixture.board.tasks.find(task => task.id === 'T-0103').unfinishedDependencies = ['T-0100']; push(); settle()`);
-  await check(`laneIds('blocked') === 'T-0106,T-0107,T-0103'`, "dependency-blocked tasks use the same last-change order in the blocked column");
+  await check(`laneIds('blocked') === 'T-0106,T-0107' && laneIds('ready') === 'T-0000,T-0102,T-0103'`, "dependency waiting retains the ready column and its last-change order");
   await evaluate(`fixture.board.tasks.push(task('T-9999', 'Совпадающая дата', { createdAt: '2026-11-05T12:00:00.000Z', updatedAt: 'invalid' })); push(); settle()`);
   await evaluate(`const tiedOrder = laneIds('ready'); fixture.board.tasks.reverse(); push(); settle()`);
   await check(`laneIds('ready') === tiedOrder && tiedOrder.startsWith('T-9999,T-0000,')`, "invalid updatedAt falls back to creation and equal dates use a stable task-number tie-breaker");
@@ -2215,7 +2289,7 @@ app.whenReady().then(async () => {
     sheet.close();
     fixture.project = 'design-board'; fixture.theme = 'dark'; fixture.runningTasks = [];
     fixture.tabs = [{ path: 'design-board', name: 'AI Taskboard' }, { path: 'design-other', name: 'Electron2D' }];
-    fixture.board = { gitInfo: { branch: 'main', head: '0123456789abcdef', user: 'Developer' }, tags: [{ name: 'интерфейс', color: '#91B6F9' }, { name: 'карточки', color: '#C0A5F4' }],
+    fixture.board = { settings: { autoMode: false }, gitInfo: { branch: 'main', head: '0123456789abcdef', user: 'Developer' }, tags: [{ name: 'интерфейс', color: '#91B6F9' }, { name: 'карточки', color: '#C0A5F4' }],
       archived: [task('T-0580', 'Похожий номер', { status: 'done' }), task('T-0058', 'Настроить порядок вкладок', { status: 'done' })], tasks: [
       task('T-0056', 'Убрать надпись «Загрузка проектов»', { tags: ['интерфейс'], createdAt: '2026-11-05' }),
       task('T-0055', 'Исправить обрезку превью по скруглению карточки', { tags: ['интерфейс', 'карточки'], priority: 'high', attachments: [{ file: 'cover.png', name: 'cover.png' }] }),
@@ -2228,7 +2302,7 @@ app.whenReady().then(async () => {
         attachments: index === 0 ? [{ file: 'cover.png', name: 'cover.png' }] : [] }))
     ] };
     const designBoard = structuredClone(fixture.board);
-    const designOther = { tags: [], archived: [], tasks: [task('T-0001', 'Другая доска', { description: 'Описание другой задачи' })] };
+    const designOther = { settings: { autoMode: false }, tags: [], archived: [], tasks: [task('T-0001', 'Другая доска', { description: 'Описание другой задачи' })] };
     const draftCalls = [];
     window.taskboard.command = async (_name, id) => ({ ok: true, data: { ...fixture.board.tasks.find(task => task.id === id), criteria: [] } });
     window.taskboard.selectTab = async project => {
@@ -2279,7 +2353,7 @@ app.whenReady().then(async () => {
     !questionPopup()`, "the user can reopen the popup and send a custom answer");
   await check(`!byId('search') && !byId('filters') && !byId('create') && !byId('board-actions')`, "top search, global filters and creation button are removed");
   await check(`byId('lanes').children.length === 7 && getComputedStyle(lane('ready')).backgroundColor === 'rgba(0, 0, 0, 0)'`, "reference composition uses seven open columns");
-  await check(`!byId('status-branch').hidden && byId('status-branch').textContent === 'main' && !byId('status-user').hidden && byId('status-user').textContent === 'Developer' && !byId('status-notifications').hidden && document.querySelector('.status-bar').getBoundingClientRect().bottom === innerHeight`, "status bar retains Git branch, user and notifications at the bottom of the window");
+  await check(`!byId('status-branch').hidden && byId('status-branch').textContent === 'main' && !byId('status-user') && !document.querySelector('.status-bar .codicon-account') && !byId('status-notifications').hidden && document.querySelector('.status-bar').getBoundingClientRect().bottom === innerHeight`, "status bar retains Git branch and notifications without a user block at the bottom of the window");
   await check(`document.fonts.check('16px codicon') && ['.codicon-git-branch', '.codicon-cloud-upload'].every(selector => { const node = document.querySelector(selector); return getComputedStyle(node).fontFamily === 'codicon' && getComputedStyle(node, '::before').content.length > 2 && node.getBoundingClientRect().width === 16; })`, "status Git branch and publication icons load the actual Codicons font and glyphs");
   await check(`byId('project-tabs').getAttribute('aria-orientation') === 'vertical' && byId('project-tabs').getBoundingClientRect().right <= byId('app-content').getBoundingClientRect().left`, "project tabs form a vertical rail to the left of the board");
   await check(`getComputedStyle(byId('project-tabs').querySelector('[role=tab]')).writingMode === 'vertical-rl'`, "project names are rotated vertically");
@@ -2375,20 +2449,23 @@ app.whenReady().then(async () => {
   await evaluate(`byId('lanes').scrollTop = 0; void 0`);
   await check(`draftForm().querySelector('.board-chat').getBoundingClientRect().height === 0 &&
     draftForm().querySelector('.draft-placeholder').textContent === 'Напишите менеджеру проекта…' &&
-    draftText().getAttribute('aria-label') === 'Сообщение менеджеру проекта'`, "collapsed composer addresses the project manager while suggestions are pending");
-  await evaluate(`
-    const draftPrompt = () => draftForm().querySelector('.draft-placeholder').textContent;
-    const initialPrompt = draftPrompt();
-    const projectPrompt = 'Создай задачу на локализацию AI Taskboard';
-    window.releaseSuggestions();
-    void 0;
-  `);
+    draftText().getAttribute('aria-label') === 'Сообщение менеджеру проекта'`, "collapsed composer addresses the project manager with a static localized hint");
+  for (const russian of [false, true]) {
+    await evaluate(`fixture.russian = ${russian}; push(); settle()`);
+    await check(`draftForm().querySelector('.draft-placeholder').textContent === ${JSON.stringify(russian ?
+      "Напишите менеджеру проекта…" : "Write to the project manager…")}`, "empty composer immediately follows the interface language");
+  }
   await check(`(async () => {
-    await waitFor(() => draftPrompt() && draftPrompt() !== initialPrompt && initialPrompt.startsWith(draftPrompt()));
-    await waitFor(() => draftPrompt() && draftPrompt() !== projectPrompt && projectPrompt.startsWith(draftPrompt()));
-    await waitFor(() => draftPrompt() === projectPrompt);
-    return !draftText().value;
-  })()`, "the empty composer erases its hint and types a generated project prompt");
+    const hint = draftForm().querySelector('.draft-placeholder');
+    const changes = [];
+    const observer = new MutationObserver(() => changes.push(hint.textContent));
+    observer.observe(hint, { childList: true, characterData: true, subtree: true });
+    draftText().focus(); push(); draftText().blur(); push();
+    await new Promise(resolve => setTimeout(resolve, 11000));
+    observer.disconnect();
+    return changes.length === 0 && hint.textContent === 'Напишите менеджеру проекта…';
+  })()`, "focus, refresh and idle leave the static hint unchanged without a typing flash");
+  await capture("manager-static-hint.png");
   await evaluate(`
     const draftBounds = () => JSON.stringify(draftForm().querySelector('.board-draft-field').getBoundingClientRect());
     draftText().value = 'Первая строка\\nВторая строка';

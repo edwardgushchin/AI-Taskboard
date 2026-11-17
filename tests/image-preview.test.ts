@@ -1,3 +1,4 @@
+import localization from "../src/desktop/localization.cjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -86,18 +87,18 @@ function preview(count = 5, initialSrc: string | null = "image-0") {
     document: { body },
     element: (tag: string, text?: string, className?: string) => {
       const node = new PreviewElement(tag, className);
-      node.textContent = text ?? "";
+      node.textContent = typeof text === "function" ? (text as () => string)() : text ?? "";
       return node;
     },
     button: (text: string, click: () => unknown) => {
       const node = new PreviewElement("button");
-      node.textContent = text;
+      node.textContent = typeof text === "function" ? (text as () => string)() : text;
       node.click = click;
       return node;
     },
     icon: () => new PreviewElement("i"),
-    controlLabelForIcon: (node: PreviewElement, label: string) => node.setAttribute("aria-label", label),
-    language: (english: string) => english,
+    controlLabelForIcon: (node: PreviewElement, label: string) => node.setAttribute("aria-label", typeof label === "function" ? (label as () => string)() : label),
+    t: (key: string, parameters = {}) => localization.text(key, parameters, "en"), localization, bindLocalized: (node: any, property: string, render: () => string, attribute = false) => { const value = render(); if (attribute) node.setAttribute(property, value); else node[property] = value; return value; },
     boardError: (error: Error) => error.message,
     ResizeObserver: class { observe() {} disconnect() {} },
     api: {

@@ -8,7 +8,7 @@ import { checkPreserveChanges, describeSavedChanges, inspectLocalChanges, restor
 import { exists, readJson, removeFile, writeJson } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
 import { conventionalMessage, noChangesReviewIsStale } from "./submission.ts";
-import { checkProtectedPaths, cleanTaskWorktree, collidingPaths, findWorktree, gitStatus, requireNoGitOperation, usableWorktree } from "./worktree.ts";
+import { checkProtectedPaths, cleanTaskWorktree, collidingPaths, findWorktree, gitStatus, isolateTaskWorktree, requireNoGitOperation, usableWorktree } from "./worktree.ts";
 import { withoutVerification } from "./tasks.ts";
 import { currentReviewApproval } from "./task-messages.ts";
 
@@ -54,7 +54,7 @@ function reviewWorktreePath(item: Worktree | undefined): string | undefined {
 
 function submissionIsStale(item: Worktree | undefined, submitted: string): boolean {
   const path = item?.head === submitted ? reviewWorktreePath(item) : undefined;
-  return !path || Boolean(gitStatus(path));
+  return !path || Boolean(gitStatus(path, "tracked"));
 }
 
 function reviewMerge(path: string, base: string, head: string, submitted: string) {
@@ -298,12 +298,13 @@ export function reopenConflictingReview(store: BoardStore, task: Task, input: Re
   const repo = requireRepository(store.location.repository);
   const target = localBranch(repo, context.target);
   const head = targetHead(repo, target);
-  const worktree = usableWorktree(findWorktree(repo, context.branch));
+  const currentPath = usableWorktree(findWorktree(repo, context.branch));
   try {
     mergeTree(repo.root, head, context.submission.sha);
   } catch (error) {
     if (!(error instanceof TaskboardError) || error.code !== "MERGE_CONFLICT") throw error;
-    const updated = store.save(record(task, "resolve-conflicts", "agent", "in_progress"));
+    const worktree = input.isolatedWorktree === true ? isolateTaskWorktree(store, repo, task.id, currentPath) : currentPath;
+    const updated = store.save(record({ ...task, git: { ...context, worktree } }, "resolve-conflicts", "agent", "in_progress"));
     return { task: updated, worktree, target, targetHead: head, conflict: error.details };
   }
   throw new TaskboardError("NO_MERGE_CONFLICT", "The reviewed submission can be merged into the current target.");
@@ -327,7 +328,7 @@ function releaseTemporaryTarget(store: BoardStore, task: Task): void {
     if (!item || item.locked || relative(expected, item.path)) return;
     const path = usableWorktree(item);
     requireNoGitOperation(path);
-    if (!gitStatus(path, true)) git(repo.root, ["worktree", "remove", path]);
+    if (!gitStatus(path, "all")) git(repo.root, ["worktree", "remove", path]);
   } catch {
     // Keep the checkout if it cannot be safely inspected or removed.
   }
@@ -518,7 +519,7 @@ function integrateTask(store: BoardStore, task: Task, input: Record<string, unkn
 
   const source = usableWorktree(findWorktree(repo, context.branch));
   requireNoGitOperation(source);
-  if (resolveCommit(source, "HEAD") !== submitted || gitStatus(source).length) {
+  if (resolveCommit(source, "HEAD") !== submitted || gitStatus(source, "tracked").length) {
     throw new TaskboardError("STALE_SUBMISSION", "The task worktree changed. Submit the task again.", { path: source });
   }
   if (!intent && isAncestor(repo.root, submitted, head)) {

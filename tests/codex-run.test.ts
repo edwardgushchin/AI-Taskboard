@@ -1,4 +1,6 @@
+import { activeRunSummary } from "../src/desktop/active-runs.ts";
 import assert from "node:assert/strict";
+import { callCli } from "../src/desktop/cli.ts";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
@@ -7,11 +9,29 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { startCodexRun } from "../src/desktop/codex-run.ts";
+import { executorFullAccess } from "../src/desktop/codex.ts";
 import { codexRpc } from "../src/desktop/codex-rpc.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { createTask } from "../src/cli/tasks.ts";
 import type { RunActivity } from "../src/cli/model.ts";
 import type { TokenUsageReport } from "../src/cli/token-usage.ts";
+
+test("executor full access is saved for the selected board and card only", t => {
+  const folder = realpathSync(mkdtempSync(join(tmpdir(), "ai-taskboard-executor-access-")));
+  t.after(() => rmSync(folder, { recursive: true }));
+  const profile = join(folder, "settings");
+  const project = join(folder, "board");
+  mkdirSync(project);
+  const task = { id: "T-0001", createdAt: "2026-11-16T10:00:00Z" };
+  assert.equal(executorFullAccess(profile, project, task), false);
+  assert.equal(executorFullAccess(profile, project, task, true), true);
+  assert.equal(executorFullAccess(profile, project, task), true);
+  assert.equal(executorFullAccess(profile, folder, task), false);
+  assert.equal(executorFullAccess(profile, project, { ...task, id: "T-0002" }), false);
+  assert.equal(executorFullAccess(profile, project, { ...task, createdAt: "2026-11-16T10:00:01Z" }), false);
+  assert.equal(executorFullAccess(profile, project, task, false), false);
+  assert.equal(executorFullAccess(profile, project, task), false);
+});
 
 test("closing the Codex connection does not wait for a descendant's output pipe", async () => {
   const child = spawn(process.execPath, ["-e", `
@@ -62,6 +82,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   git("-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--allow-empty", "--no-gpg-sign", "-m", "Initial");
   const base = git("rev-parse", "HEAD");
   git("worktree", "add", "-b", "ai-taskboard/T-0001", worktree);
+  assert.equal((await callCli(folder, ["init"])).ok, true);
   const stub = join(folder, "codex.cjs");
   const capture = join(folder, "captured.json");
   const thread = "01234567-1234-5678-1234-123456789012";
@@ -75,14 +96,18 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '  const { id, method, params } = JSON.parse(line);',
     '  if (id === undefined) return;',
     '  requests.push({ method, params });',
-    '  fs.writeFileSync(capture, JSON.stringify({ cwd: process.cwd(), flags, requests }));',
+    '  fs.writeFileSync(capture, JSON.stringify({ cwd: process.cwd(), flags, requests, temp: process.env.TEMP, tmp: process.env.TMP, tmpdir: require("node:os").tmpdir(), electronLog: process.env.ELECTRON_LOG_FILE }));',
     '  let result = {};',
     '  if (method === "command/exec") {',
     '    result = outcome === "denied" ? { exitCode: 1, stderr: "EACCES: permission denied" } : { exitCode: 0 };',
     '  } else if (method === "config/read") {',
     '    result = { config: { mcp_servers: { ai_taskboard: { url: "http://127.0.0.1/mcp" } } } };',
     '  } else if (method === "mcpServerStatus/list") {',
-    '    result = { data: [{ name: "ai_taskboard", tools: { worklog_record: {} } }] };',
+    '    const url = flags.find(flag => flag.startsWith("mcp_servers.ai_taskboard=")).match(/http[^"]+/)[0];',
+    '    const response = await fetch(url, { method: "POST", headers: { authorization: "Bearer " + process.env.AI_TASKBOARD_MCP_TOKEN },',
+    '      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });',
+    '    const { tools } = (await response.json()).result;',
+    '    result = { data: [{ name: "ai_taskboard", tools: Object.fromEntries(tools.map(tool => [tool.name, tool])) }] };',
     '  } else if (method === "thread/start" || method === "thread/resume") {',
     '    if (outcome === "busy") { send({ id, error: { message: "thread " + thread + " already has an active writer" } }); return; }',
     '    if (outcome === "missing" && method === "thread/resume") { send({ id, error: { message: "no rollout found for thread id " + params.threadId } }); return; }',
@@ -102,7 +127,30 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '  if (method === "turn/interrupt") send({ method: "turn/completed", params: { threadId: thread, turn: { id: params.turnId, status: "interrupted", error: { message: "Turn interrupted" } } } });',
 
     '  if (method === "turn/start") {',
+    '    if (outcome === "authored-worklog" || outcome === "resumed") {',
+    '      const url = flags.find(flag => flag.startsWith("mcp_servers.ai_taskboard=")).match(/http[^"]+/)[0];',
+    '      const headers = { authorization: "Bearer " + process.env.AI_TASKBOARD_MCP_TOKEN };',
+    '      const githubCalls = [',
+    '        ["github_read", { view: "repository" }],',
+    '        ["github_read", { view: "milestone", number: 1 }],',
+    '        ["milestones_list", {}],',
+    '        ["github_create_milestone", { repository: "owner/fixture", title: "Next", dueDate: "2026-11-27" }],',
+    '        ["github_set_milestone_due", { repository: "owner/fixture", number: 1, dueDate: "2026-11-20" }],',
+    '      ];',
+    '      const prompt = params.input[0].text;',
+    '      if (githubCalls.some(([name]) => !prompt.includes("mcp__ai_taskboard__" + name))) throw new Error("Missing live GitHub tools in executor prompt");',
+    '      for (const [name, args] of githubCalls) {',
+    '        const response = await fetch(url, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call",',
+    '          params: { name, arguments: args } }) });',
+    '        const payload = JSON.parse((await response.json()).result.content[0].text);',
+    '        if (payload.error?.code !== "GITHUB_REMOTE_REQUIRED") throw new Error("Unexpected GitHub reply for " + name);',
+    '      }',
+    '    }',
     '    if (outcome === "authored-worklog") {',
+    '      const endpoint = flags.find(flag => flag.startsWith("mcp_servers.ai_taskboard=")).match(/http[^"]+/)[0];',
+    '      const invalid = await fetch(endpoint, { method: "POST", headers: { authorization: "Bearer " + process.env.AI_TASKBOARD_MCP_TOKEN },',
+    '        body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "task_request_executor_access", arguments: { id: "T-9999" } } }) });',
+    '      if (JSON.parse((await invalid.json()).result.content[0].text).error?.code !== "INVALID_INPUT") throw new Error("Access tool must reject a caller-supplied card");',
     '      send({ method: "turn/started", params: { threadId: thread, turn: { id: "turn-1", status: "inProgress" } } });',
     '      const url = flags.find(flag => flag.startsWith("mcp_servers.ai_taskboard=")).match(/http[^"]+/)[0];',
     '      const entry = { title: "Исполнитель записал результат", timeline: [{ time: null, items: ["Проверил файлы."] }] };',
@@ -124,6 +172,18 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '      fs.writeFileSync(capture + ".check", (await response.json()).result.content[0].text);',
     '    }',
     '    if (outcome === "control") return;',
+    '    if (outcome === "access-switch") {',
+    '      const url = flags.find(flag => flag.startsWith("mcp_servers.ai_taskboard=")).match(/http[^"]+/)[0];',
+    '      const headers = { authorization: "Bearer " + process.env.AI_TASKBOARD_MCP_TOKEN };',
+    '      const response = await fetch(url, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call",',
+    '        params: { name: "task_request_executor_access", arguments: { reason: "Repeat the mandatory local UI check." } } }) });',
+    '      const { result } = await response.json();',
+    '      const access = JSON.parse(result.content[0].text);',
+    '      if (!access.data?.approved || access.data.appliesOn !== "current-execution") throw new Error("Unexpected access decision");',
+    '      send({ method: "item/completed", params: { threadId: thread, turnId: "turn-1", item: { id: "approved-access",',
+    '        type: "mcpToolCall", server: "ai_taskboard", tool: "task_request_executor_access", status: "completed", result } } });',
+    '      return;',
+    '    }',
     '    if (outcome === "closed") { console.error(JSON.stringify({ level: "WARN", message: "example diagnostic" })); process.stdin.destroy(); return; }',
     '    if (outcome.startsWith("usage")) {',
     '      send({ method: "turn/started", params: { threadId: thread, turn: { id: "turn-1" } } });',
@@ -173,7 +233,8 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     env: { ...process.env, CODEX_HOME: codexHome },
   });
   const activity: RunActivity[] = [];
-  const launch = (outcome: string) => startCodexRun(client(outcome), folder, worktree, task, item => activity.push(item));
+  const launch = (outcome: string) => startCodexRun(client(outcome), folder, worktree, task, item => activity.push(item),
+    undefined, undefined, undefined, folder);
   const run = await launch("authored-worklog");
   assert.equal(run.threadId, thread);
   assert.equal(await run.completion, undefined);
@@ -193,6 +254,8 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.ok(launched.flags.some((flag: string) => flag.startsWith("permissions.ai-taskboard=") && flag.endsWith(",network={enabled=true}}")));
   assert.equal(launched.flags.includes('windows.sandbox="mxc"'), process.platform === "win32");
   assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers.ai_taskboard=") && flag.includes("worklog_record")));
+  assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers.ai_taskboard=") && flag.includes("task_record_result")));
+  assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers.ai_taskboard=") && flag.includes("github_read")));
   assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers.ai_taskboard=") && flag.includes("check_wait") && flag.includes("tool_timeout_sec=1220")));
   assert.ok(!launched.flags.some((flag: string) => flag.includes("codex-worklog-codex-worklog")));
   const diaryPath = readFileSync(capture + ".worklog", "utf8");
@@ -206,6 +269,15 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(probe.params.permissionProfile, started.params.permissions);
   assert.ok(probe.params.command.includes(join(folder, ".git", "objects")));
   assert.ok(probe.params.command.includes(join(folder, ".git", "worktrees", "T-0001")));
+  if (process.platform === "win32") {
+    assert.match(launched.temp, /ai-taskboard-executor-temp-[^/\\]+$/);
+    assert.equal(launched.tmp, launched.temp);
+    assert.equal(launched.tmpdir, launched.temp);
+    assert.equal(launched.electronLog, process.env.ELECTRON_LOG_FILE ?? join(launched.temp, "electron_debug.log"));
+    assert.ok(probe.params.command.includes(launched.temp));
+    assert.ok(launched.flags.some((flag: string) => flag.includes(JSON.stringify(launched.temp) + ' = "write"')));
+    assert.ok(!existsSync(launched.temp));
+  }
   assert.equal(started.params.model, "test-model");
   assert.equal(started.params.approvalPolicy, "on-request");
   assert.equal(started.params.approvalsReviewer, "auto_review");
@@ -216,8 +288,11 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.match(turn.params.input[0].text, /После записи результата в карточку и перед итоговым ответом.*mcp__ai_taskboard__worklog_record/);
   assert.ok(started.params.developerInstructions.includes(russianWriting));
   assert.match(started.params.developerInstructions, /Before preview\/submit, update documentation/);
+  assert.match(started.params.developerInstructions, /Current board reviewMode: reviewer/);
+  assert.match(started.params.developerInstructions, /no drag-and-drop.*task_request_changes.*only tools actually supplied.*successful tool result/s);
   assert.match(started.params.developerInstructions, /Ponytail.*worklog_record/s);
   assert.match(started.params.developerInstructions, /Use built-in web search for relevant public sources/);
+  assert.match(started.params.developerInstructions, /github_create_milestone.*github_set_milestone_due.*without a shell `gh auth status` preflight/);
   assert.match(started.params.developerInstructions, /CLI launch array.*\[.+--disable-warning|CLI launch array.*ai-taskboard(?:\.exe)?"/);
   assert.doesNotMatch(started.params.developerInstructions, /__AI_TASKBOARD_CLI__/);
   assert.match(started.params.developerInstructions, /Exercise the specified public API, scenario and runtime profile.*SDK and dependencies.*clean environment/);
@@ -225,8 +300,10 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.match(started.params.developerInstructions, /report the submission.*then finish the current turn/);
   assert.match(started.params.developerInstructions, /wait for tests.*separate output directory/);
   assert.match(started.params.developerInstructions, /specific evidence after acceptance.*paths and SHA-256/);
-  assert.match(turn.params.input[0].text, /обязательный шаг, заблокируй задачу/);
-  assert.match(started.params.developerInstructions, /progress <id> --compact.*block <id> --compact.*pause <id> --compact/);
+  assert.match(turn.params.input[0].text, /запроси у менеджера смену режима.*При исчерпании доступных способов заблокируй задачу/);
+  assert.match(started.params.developerInstructions, /progress <id> --compact.*as a checkpoint.*block <id> --compact.*Pause only at the user's request/);
+  assert.match(turn.params.input[0].text, /Продолжай работу по всем критериям до сдачи через submit/);
+  assert.match(turn.params.input[0].text, /mcp__ai_taskboard__task_request_executor_access.*сразу применяет доступ к текущему выполнению/);
   await assert.rejects(startCodexRun(client("ok"), folder, worktree, task, undefined, undefined, undefined, async threadId => {
     assert.equal(threadId, thread);
     assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "mcpServerStatus/list");
@@ -234,10 +311,32 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   }), /Board busy/);
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "mcpServerStatus/list");
   await assert.rejects(launch("denied"), /Codex cannot write.*EACCES/s);
-  assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "command/exec");
+  const denied = JSON.parse(readFileSync(capture, "utf8"));
+  assert.equal(denied.requests.at(-1).method, "command/exec");
+  if (process.platform === "win32") {
+    assert.notEqual(denied.temp, launched.temp);
+    assert.ok(!existsSync(denied.temp));
+  }
   await assert.rejects(launch("readonly"), /did not apply the write permissions/);
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
   await assert.rejects(launch("manual-review"), /did not enable automatic approval review/);
+  assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
+  const fullTask = { ...task, fullAccess: true };
+  for (const existing of [undefined, thread]) {
+    const full = await startCodexRun({ ...client(existing ? "resumed" : "ok"), windowsSandbox: "elevated" },
+      folder, worktree, { ...fullTask, codexThreadId: existing });
+    assert.equal(await full.completion, undefined);
+    const { flags, requests } = JSON.parse(readFileSync(capture, "utf8"));
+    assert.ok(flags.includes('default_permissions=":danger-full-access"'));
+    assert.ok(flags.includes('approval_policy="never"'));
+    assert.ok(!flags.some((flag: string) => flag.startsWith("windows.sandbox=") || flag.startsWith("permissions.ai-taskboard=")));
+    assert.equal(requests[1].params.permissionProfile, ":danger-full-access");
+    assert.equal(requests[3].method, existing ? "thread/resume" : "thread/start");
+    assert.equal(requests[3].params.permissions, ":danger-full-access");
+    assert.equal(requests[3].params.approvalPolicy, "never");
+    assert.match(requests.at(-1).params.input[0].text, /полный доступ/);
+  }
+  await assert.rejects(startCodexRun(client("readonly"), folder, worktree, fullTask), /did not apply full access/);
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
   for (const [status, rationale] of [["denied", "This destination is outside the project scope."], ["approved", "Read public documentation."]]) {
     activity.length = 0;
@@ -262,7 +361,10 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(controls[1].params.expectedTurnId, "turn-1");
   assert.deepEqual(controls[1].params.input[1], { type: "localImage", path: "extra.png" });
   assert.deepEqual(controls.at(-1).params, { threadId: thread, turnId: "turn-1" });
-  const resumed = await startCodexRun({ ...client("resumed"), windowsSandbox: "elevated" }, folder, worktree, { ...task, codexThreadId: thread, feedback: "Check the CSV header." });
+  assert.equal((await callCli(folder, ["settings"], { reviewMode: "human" })).ok, true);
+  const resumed = await startCodexRun({ ...client("resumed"), windowsSandbox: "elevated" }, folder, worktree, {
+    ...task, codexThreadId: thread, feedback: "Check the CSV header.", summary: "Created the report.", nextStep: "Verify the report.",
+  });
   assert.equal(resumed.threadId, thread);
   assert.equal(await resumed.completion, undefined);
   const { requests: resumedCalls, flags: resumedFlags } = JSON.parse(readFileSync(capture, "utf8"));
@@ -280,7 +382,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(resumedCalls[3].params.cwd, worktree);
   assert.equal(resumedCalls[3].params.approvalPolicy, "on-request");
   assert.equal(resumedCalls[3].params.approvalsReviewer, "auto_review");
-  assert.equal(resumedCalls[3].params.developerInstructions, started.params.developerInstructions);
+  assert.equal(resumedCalls[3].params.developerInstructions, started.params.developerInstructions.replace("Current board reviewMode: reviewer", "Current board reviewMode: human"));
   assert.match(started.params.developerInstructions, /session_id and use write_stdin with empty chars/);
   assert.match(started.params.developerInstructions, /call check_wait with that marker/);
   assert.match(started.params.developerInstructions, /use a merge if it is allowed\. Rebase only when the project permits it and any required user authorization has been given/);
@@ -289,6 +391,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     /mcp__ai_taskboard__worklog_record[\s\S]*External Codex Worklog hook instructions and shell submission commands in chat history belonged to those earlier turns/);
   assert.equal(readFileSync(diaryPath, "utf8").match(/codex-worklog-entry:/g)?.length, 1);
   assert.match(resumedCalls[5].params.input[0].text, /Check the CSV header\./);
+  assert.match(resumedCalls[5].params.input[0].text, /"summary":"Created the report\.".*"nextStep":"Verify the report\."/);
   assert.match(resumedCalls[5].params.input[0].text, /После возврата проверь другие затронутые сценарии того же критерия/);
   assert.match(resumedCalls[5].params.input[0].text, /mcp__ai_taskboard__worklog_record.*подключён к текущему ходу.*из истории относятся к прошлым ходам/);
   assert.equal(resumedCalls[5].params.additionalContext.ai_taskboard_worklog.kind, "application");
@@ -323,7 +426,9 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   const externalRun = JSON.parse(readFileSync(capture, "utf8"));
   const externalProbe = externalRun.requests.find((req: { method: string }) => req.method === "command/exec");
   assert.equal(externalProbe.params.cwd, externalFolder);
-  assert.deepEqual(externalProbe.params.command.slice(-2), [externalFolder, join(folder, ".tasks")]);
+  assert.deepEqual(externalProbe.params.command.slice(3), [
+    externalFolder, join(folder, ".tasks"), ...(process.platform === "win32" ? [externalRun.temp] : []),
+  ]);
   const externalThread = externalRun.requests.find((req: { method: string }) => req.method === "thread/start");
   assert.equal(externalThread.params.cwd, externalFolder);
   assert.equal(externalThread.params.approvalsReviewer, "auto_review");
@@ -335,6 +440,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     const reports: TokenUsageReport[] = [];
     const measured = await startCodexRun(client(outcome), folder, worktree, task, undefined, async report => { reports.push(report); });
     const failure = await measured.completion;
+    assert.equal(activeRunSummary().total, 0);
     assert.equal(Boolean(failure), outcome !== "usage");
     assert.ok(reports.length >= 2);
     const record = reports.at(-1)!.records[0];
@@ -354,7 +460,29 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   }
   const interrupted = await launch("control");
   await interrupted.interrupt();
+  assert.equal(activeRunSummary().total, 1);
   assert.deepEqual(await interrupted.completion, { reason: "Turn interrupted", interrupted: true });
+  assert.equal(activeRunSummary().total, 0);
+  const card = await callCli<{ id: string; createdAt: string }>(folder, ["create"], {
+    title: "Verify UI", criteria: ["Run the required UI check."], workingDirectory: folder,
+  });
+  assert.ok(card.ok);
+  assert.equal(card.data.id, task.id);
+  assert.equal((await callCli(folder, ["approve", card.data.id])).ok, true);
+  assert.equal((await callCli(folder, ["start", card.data.id])).ok, true);
+  executorFullAccess(folder, folder, card.data, true);
+  const switching = await launch("access-switch");
+  const deadline = new AbortController();
+  try {
+    const outcome = await Promise.race([switching.completion,
+      delay(5000, undefined, { signal: deadline.signal }).then(() => { throw new Error("Approval did not interrupt the active turn"); })]);
+    assert.deepEqual(outcome, { reason: "Turn interrupted", interrupted: true });
+    assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "turn/interrupt");
+  } finally {
+    deadline.abort();
+    await switching.interrupt().catch(() => {});
+    await switching.completion;
+  }
   const controller = new AbortController();
   const waiting = await startCodexRun(client("control"), folder, worktree, task, undefined, undefined, controller.signal);
   controller.abort();

@@ -312,7 +312,7 @@ export function noChangesReviewIsStale(store: BoardStore, task: Task, head: stri
   if (head === null) return !task.workingDirectory || Boolean(task.git);
   try {
     const { path } = taskCheckout(store, task);
-    return resolveCommit(path, "HEAD") !== head || Boolean(gitStatus(path));
+    return resolveCommit(path, "HEAD") !== head || Boolean(gitStatus(path, "tracked"));
   } catch (error) {
     if (error instanceof TaskboardError &&
         ["WORKTREE_MISSING", "WORKTREE_BRANCH_CHANGED", "GIT_OPERATION_IN_PROGRESS"].includes(error.code)) return true;
