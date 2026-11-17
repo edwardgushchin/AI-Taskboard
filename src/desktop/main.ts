@@ -1,3 +1,4 @@
+import type { MaintenanceJob } from "../cli/maintenance-state.ts";
 import { isManual, manualContext } from "../cli/manual-board.ts";
 import { russianWriting } from "./russian-writing.ts";
 import { captureFileLink, isFileLink, verifyFileLink } from "../cli/attachment-links.ts";
@@ -1091,6 +1092,7 @@ function reserveAgent(project: string, role: AgentRole, task?: string) {
   return Object.assign(() => {
     release();
     scheduleAgentWork();
+    void callCli(project, ["maintain"]).catch(error => console.warn("Private lifecycle maintenance deferred", error));
   }, { run: release.run });
 }
 
@@ -1142,10 +1144,28 @@ async function continueAcceptance(project: string, task: Task) {
   } finally { acceptanceWork.delete(key); }
 }
 
+const maintenanceWork = new Set<string>();
+async function scheduleMaintenance(project: string, watch: BoardWatch) {
+  if (maintenanceWork.has(project)) return;
+  maintenanceWork.add(project);
+  try {
+    const jobs = await callCli<MaintenanceJob[]>(project, ["maintenance"]);
+    const tab = [...watch.tabs].find(tab => !tab.window.isDestroyed());
+    if (!jobs.ok || !tab) return;
+    for (const job of jobs.data) {
+      const result = await runBoardRequest(tab.window.webContents, watch.board,
+        "Repair the assigned private lifecycle maintenance fault. Use --project " + project + " for the task CLI.",
+        [], false, false, undefined, undefined, undefined, false, undefined, job);
+      if (!result.ok) break; // Persisted queue remains pending when the shared pool/context is occupied.
+    }
+  } finally { maintenanceWork.delete(project); }
+}
+
 function scheduleRecurringTasks(now = Date.now()) {
   for (const [project, watch] of subscriptions) {
     if (!watch.tabs.size || closingProjects.has(project)) continue;
     if (isManual(watch.board.settings)) continue;
+    void scheduleMaintenance(project, watch).catch(error => console.error("Private maintenance deferred", error));
     for (const task of watch.board.tasks) {
       if (task.status === "review" && ["queued", "checking", "running"].includes(task.acceptanceRepair?.phase ?? "")) void continueAcceptance(project, task).catch(error => console.error("Could not continue acceptance", task.id, error));
     }
@@ -1456,7 +1476,7 @@ ipcMain.handle("board:request", async (event, request: unknown, files: unknown =
 });
 
 async function runBoardRequest(sender: Electron.WebContents, board: Board | undefined, request: unknown, files: unknown = [],
-  goal: unknown = false, immediate: unknown = false, messageId?: unknown, reviewIds?: string[], expectedReviewMode?: ReviewMode, autoNotice = false, repairTask?: Task) {
+  goal: unknown = false, immediate: unknown = false, messageId?: unknown, reviewIds?: string[], expectedReviewMode?: ReviewMode, autoNotice = false, repairTask?: Task, cleanupJob?: MaintenanceJob) {
   if (!board || typeof request !== "string" || typeof immediate !== "boolean" || (immediate && goal !== false) || !Array.isArray(files) ||
       (messageId !== undefined && (typeof messageId !== "string" || !codexThreadPattern.test(messageId))) ||
       !files.every(isPastedFile) || (goal === "resume" ? Boolean(request.trim() || files.length) :
@@ -1473,8 +1493,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.error("Could not remove a delivered manager message.", error);
     }
   };
+  const broadcastMaintenanceSafe: typeof broadcastBoardChat = (...args) => { if (!cleanupJob) broadcastBoardChat(...args); };
   const projectKey = projectIdentity(board.project);
-  const lane = goal || reviewIds || autoNotice || repairTask ? "work" : "chat";
+  const lane = goal || reviewIds || autoNotice || repairTask || cleanupJob ? "work" : "chat";
   const requests = lane === "work" ? boardWorkRequests : boardRequests;
   if (files.reduce((total, file) => total + file.bytes.byteLength, 0) > maxAttachmentBytes) {
     return cliFailure("ATTACHMENT_LIMIT", t("ui.attachments_are_limited_to_64_mib_per_task_ae680c16"));
@@ -1504,23 +1525,28 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   if (closingProjects.has(board.project)) return cliFailure("PROJECT_CLOSING", t("ui.the_project_is_closing_beb637fb"));
   const writer = agentSlots.claim(board.project, "manager:context");
   if (!writer) return cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_agent_is_already_handling_a_request_72b4da49"));
-  const repairSlot = repairTask ? reserveAgent(board.project, "reviewer", repairTask.id) : undefined;
-  if (repairTask && !repairSlot) { writer(); return taskRunLimit("reviewer"); }
+  const repairSlot = repairTask || cleanupJob ? reserveAgent(board.project, "reviewer", repairTask?.id) : undefined;
+  if ((repairTask || cleanupJob) && !repairSlot) { writer(); return taskRunLimit("reviewer"); }
+  if (cleanupJob) {
+    const claim = await callCli<{ claimed: boolean }>(board.project, ["maintenance"], { action: "claim", id: cleanupJob.id, owner: process.pid });
+    if (!claim.ok || !claim.data.claimed) { repairSlot?.(); writer(); return cliFailure("MAINTENANCE_BUSY", "Maintenance is already claimed."); }
+  }
   const release = Object.assign(() => { repairSlot?.(); writer(); }, {
     run: <T>(callback: () => T) => writer.run(() => repairSlot ? repairSlot.run(callback) : callback()),
   });
   const project = board.project;
   const operation = beginOperation(project);
   const signal = operation.controller.signal;
-  const automaticDone = reviewIds || autoNotice || repairTask ? Promise.withResolvers<void>() : undefined;
+  const automaticDone = reviewIds || autoNotice || repairTask || cleanupJob ? Promise.withResolvers<void>() : undefined;
   const startedAt = Date.now();
   const managerRun: ManagerRun = { id: randomUUID(), phase: "starting", startedAt };
-  const running: ManagerRequest = { automaticDone: automaticDone?.promise, managerRun };
+  const running: ManagerRequest = { automaticDone: automaticDone?.promise, ...(cleanupJob ? {} : { managerRun }) };
   requests.set(projectKey, running);
   const publishRun = () => {
+    if (cleanupJob) return;
     agentSlots.update(project, "manager:context", running.managerRun
       ? { ...running.managerRun, reviewing: [...running.reviewing ?? []] } : undefined);
-    broadcastBoardChat(project, "orchestrator-run", lane === "work"
+    broadcastMaintenanceSafe(project, "orchestrator-run", lane === "work"
       ? { managerWork: running.managerRun ?? null } : { managerRun: running.managerRun ?? null });
   };
   const setRunPhase = (phase: ManagerRun["phase"]) => {
@@ -1552,6 +1578,14 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   let historyModel: string | undefined;
   let historyAccepted = false;
   const saveHistory = () => {
+    if (cleanupJob) {
+      try {
+        const root = join(project, ".tasks", "maintenance-runs");
+        storageDirectory(root, true);
+        writeJson(join(root, cleanupJob.id.replaceAll(":", "-") + ".json"), { job: cleanupJob.id, startedAt, items });
+      } catch (error) { console.warn("Private maintenance diagnostic could not be saved", error); }
+      return;
+    }
     if (!(historyAccepted && historyMessage) && !items.length) return;
     try {
       const changed = saveManagerHistory(project, startedAt, managerRun.id, {
@@ -1571,12 +1605,13 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   let activeGoal: BoardGoal | undefined;
   let goalWork = new AbortController();
   const notify = (type: string, details: { at?: string; items?: RunActivity[]; model?: string; goal?: BoardGoal | null; goalRunning?: boolean } = {}) => {
+    if (cleanupJob) return;
     if (lane === "work" && type !== "orchestrator-goal") return;
     if (!sender.isDestroyed()) sender.send("chat:update", { project: board.project, type, ...details });
   };
   function publishGoal(details: { goal?: BoardGoal | null; goalRunning: boolean }) {
     notify("orchestrator-goal", details);
-    broadcastBoardChat(project, "orchestrator-goal", details, sender);
+    broadcastMaintenanceSafe(project, "orchestrator-goal", details, sender);
   }
   function publishGoalNotice(text: string, actor: "agent" | "user" = "agent") {
     const id = randomUUID();
@@ -1584,7 +1619,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       message: { text, files: [], at: new Date().toISOString() } } : { lane: "notice", goalId,
       items: [{ id, at: new Date().toISOString(), type: "agentMessage", title: "", phase: "final_answer", text, status: "completed" }] });
     if (changed) publishManagerUnread(project);
-    broadcastBoardChat(project, "orchestrator-history");
+    broadcastMaintenanceSafe(project, "orchestrator-history");
   }
   async function askUser(args: unknown, approval = false): Promise<CliReply> {
     signal.throwIfAborted();
@@ -1605,7 +1640,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       running.question = undefined;
       response.resolve(answer);
       notification?.close();
-      broadcastBoardChat(project, "orchestrator-question", { question: managerQuestion(projectKey)?.view ?? null });
+      broadcastMaintenanceSafe(project, "orchestrator-question", { question: managerQuestion(projectKey)?.view ?? null });
     }
     running.question = { view, settle };
     // Leave time to deliver the response before the MCP call's 140-second deadline.
@@ -1614,7 +1649,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     signal.addEventListener("abort", aborted, { once: true });
     try {
       if (goal && !approval) publishGoalNotice(t("ui.question_from_the_goal_8b2d2caf") + "\n\n" + view.text);
-      broadcastBoardChat(project, "orchestrator-question", { question: managerQuestion(projectKey)?.view ?? null });
+      broadcastMaintenanceSafe(project, "orchestrator-question", { question: managerQuestion(projectKey)?.view ?? null });
       const windows = [...windowStates.values()].filter(({ window, tabs }) =>
         !window.isDestroyed() && tabs.some(tab => tab.board?.project === project));
       if (windows.length && !windows.some(({ window, active }) => window.isFocused() &&
@@ -1664,7 +1699,14 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     if (expectedReviewMode && reviewMode !== expectedReviewMode) {
       return cliFailure("REVIEW_MODE_CHANGED", t("errors.5842130646fd0b88"));
     }
-    const instructions = repairTask ? boardInstructions.replace("Do not edit files, run project code, or change Git state yourself.", "For this acceptance repair, edit and check only the assigned task worktree.") +
+    const instructions = cleanupJob ? boardInstructions.replace("Do not edit files, run project code, or change Git state yourself.", "Diagnose and repair only the assigned internal maintenance fault yourself.") +
+      " This is a private maintenance run with manager authority charged to the shared reviewer pool. No goal, user messages, notifications or product cards. " +
+      "Do not launch agents or change task status. Read the private maintenance diagnostic and inspect ownership, active runtime users, exact absolute paths and Git registration before mutation. " +
+      "Retry transient locks/access errors without force or weakening ACLs. Preserve unknown user data with the established saved-changes mechanism and required evidence as individual board attachments/artifacts. " +
+      "For node_modules, reproduce dependencies from the tracked lockfile in a dedicated system temp directory using npm ci --ignore-scripts, compare every relative file and SHA-256, " +
+      "and remove only matching reproducible dependency files after verifying no active users. Unknown/changed files must remain; never archive dependencies. Clean your temp directory. " +
+      "Then call task_cleanup for the original closed card or the maintain CLI for migration/legacy attachments. Never force git worktree remove. " +
+      "If safe repair is impossible, keep the private diagnostic and end; automatic retries retain the job. Do not ask the user. Assigned job: " + JSON.stringify(cleanupJob) : repairTask ? boardInstructions.replace("Do not edit files, run project code, or change Git state yourself.", "For this acceptance repair, edit and check only the assigned task worktree.") +
       " This turn repairs one user's pending acceptance in your existing board manager context. Do the repair yourself; do not launch an executor or reviewer. " +
       "Work only in the assigned task worktree. Read the current card and acceptanceRepair.targetHead, merge that target without destructive Git operations, " +
       "resolve conflicts without changing requirements, run required project checks, then preview and submit with the task CLI. Keep review throughout. " +
@@ -1684,12 +1726,13 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     const reviewTaskTools = reviewMode === "reviewer"
       ? new Set([...autoReviewTaskTools, "manager_ack", "task_cancel", "task_start"]) : autoReviewTaskTools;
     const mcpTools: BoardMcpTool[] = boardMcpTools.filter(({ name }) =>
+      (!cleanupJob || ["board_list", "task_show", "task_cleanup_status", "task_cleanup", "project_path", "project_sha256"].includes(name)) &&
       (!isManual(settings.data) || ["board_list", "task_show", "task_create", "task_update", "task_comment", "tag_set_color", "ask_user"].includes(name)) &&
-      (reviewIds || !["project_path", "project_sha256"].includes(name)) &&
+      (reviewIds || cleanupJob || !["project_path", "project_sha256"].includes(name)) &&
       (!reviewIds || autoReviewReadTools.has(name) || reviewTaskTools.has(name)) &&
       (name !== "task_accept" || reviewMode !== "human") &&
       (!repairTask || !["task_start", "task_start_batch", "task_accept", "task_request_changes"].includes(name)));
-    if (!reviewIds) mcpTools.push(...(goal ? goalWorkTools : goalChatTools), githubReadTool);
+    if (!reviewIds && !cleanupJob) mcpTools.push(...(goal ? goalWorkTools : goalChatTools), githubReadTool);
     const attachments = await prepareBoardAttachments(files, scratch);
     if (!reviewIds && goal !== "resume") {
       historyMessage = {
@@ -1700,7 +1743,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       };
     }
     let imageIndex = 0;
-    const unread = reviewIds || (!goal && boardWorkRequests.get(projectKey)?.goalRunning) ? [] :
+    const unread = cleanupJob || reviewIds || (!goal && boardWorkRequests.get(projectKey)?.goalRunning) ? [] :
       (subscriptions.get(project)?.board ?? board).managerInbox ?? [];
     const priorChat = lane === "chat" && !threadId ? readManagerHistory(project, null, "chat")?.turns.slice(-8)
       .flatMap(turn => turn.lane === "notice" ? [] : [{
@@ -1821,7 +1864,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         const pending = name === "task_wait" ? run(name, args) : pendingAction.then(() => run(name, args));
         if (!independent) pendingAction = pending;
         return pending.then(result => {
-          if (reviewIds) return result;
+          if (reviewIds || cleanupJob) return result;
           if (name === "task_review" && result.ok) {
             const { id, reviewMode, stale } = result.data as { id: string; reviewMode: string; stale: boolean };
             if (!stale && reviewMode !== "reviewer" && !signal.aborted && requests.get(projectKey) === running) startReview([id]);
@@ -1840,10 +1883,11 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
             action: "Read manager_inbox for executor questions, blockers, submissions and review decisions.",
           } } : result;
         });
-      }, reviewIds ? [] : isManual(settings.data) ? boardTools.filter(tool => ["board_list", "task_show", "task_create", "task_update", "tag_set_color", "ask_user"].includes(tool.name)) : boardTools, instructions + "\n" + initialSettings.text, signal, {
+      }, cleanupJob ? boardTools.filter(tool => ["board_list", "task_show"].includes(tool.name)) : reviewIds ? [] : isManual(settings.data) ? boardTools.filter(tool => ["board_list", "task_show", "task_create", "task_update", "tag_set_color", "ask_user"].includes(tool.name)) : boardTools, instructions + "\n" + initialSettings.text, signal, {
         id: threadId,
+        role: cleanupJob || repairTask ? "reviewer" : "manager",
         access: reviewIds ? undefined : managerAccess(app.getPath("userData"), project),
-        confirmApproval: reviewIds ? undefined : async details => {
+        confirmApproval: cleanupJob ? async () => false : reviewIds ? undefined : async details => {
           if (signal.aborted || requests.get(projectKey) !== running) return false;
           const allow = t("ui.allow_once_8539a30b");
           const result = await askUser({ question: details, options: [allow, t("ui.deny_ffcf9a77")] }, true);
@@ -1865,7 +1909,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
             saveHistory();
             notify("orchestrator-message-time", { at: historyMessage?.at });
             delivered();
-            if (typeof messageId === "string") broadcastBoardChat(project, "orchestrator-work-accepted", { id: messageId });
+            if (typeof messageId === "string") broadcastMaintenanceSafe(project, "orchestrator-work-accepted", { id: messageId });
           }
         },
         messageId: typeof messageId === "string" ? messageId : undefined,
@@ -1880,7 +1924,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           steering.get(id)?.resolve(true);
         },
         onGoal: goal => {
-          if (lane !== "work" || reviewIds) return;
+          if (cleanupJob || lane !== "work" || reviewIds) return;
           saveBoardGoal(binding, goal);
           activeGoal = goal?.status === "active" ? goal : undefined;
           if (activeGoal && goalWork.signal.aborted) goalWork = new AbortController();
@@ -1889,9 +1933,11 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           running.goalRunning = goalRunning;
           publishGoal({ goal, goalRunning });
         },
-        onGoalControl: control => { running.goal = control; },
+        onGoalControl: control => { if (!cleanupJob) running.goal = control; },
         onTurnEnded: () => { endReview(); saveHistory(); },
         onTokenUsage: async report => {
+          if (cleanupJob?.task) return saveTaskTokenUsage(project, cleanupJob.task, "reviewer", report);
+          if (cleanupJob) return;
           if (repairTask) return saveTaskTokenUsage(project, repairTask.id, "reviewer", report);
           const saved = await callCli(project, ["manager-usage"], report);
           if (!saved.ok) console.warn("Could not save manager token usage (%s).", saved.error.code);
@@ -1903,10 +1949,10 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         },
         onActivity: activity => {
           items = activity;
-          running.items = activity;
+          if (!cleanupJob) running.items = activity;
           if (lane === "chat") notify("orchestrator", { items: managerChatItems(items) });
           if (lane === "work" || activity.some(item => item.messages?.length)) {
-            broadcastBoardChat(project, "orchestrator-work-activity");
+            broadcastMaintenanceSafe(project, "orchestrator-work-activity");
           }
           const live = activity.findLast(item => item.status === "inProgress");
           const item = live && { type: live.type, status: live.status, title: live.title,
@@ -2022,6 +2068,10 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     }
     return cliFailure("CODEX_BOARD_REQUEST_FAILED", message);
   } finally {
+    if (cleanupJob) {
+      try { await callCli(project, ["maintenance"], { action: "release", id: cleanupJob.id, owner: process.pid }); }
+      catch (error) { console.warn("Private maintenance release deferred", error); }
+    }
     saveHistory();
     endReview();
     running.question?.settle(null);
@@ -2040,8 +2090,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     automaticDone?.resolve();
     operation.finish();
     if (threadId) {
-      broadcastBoardChat(project, "orchestrator-work-history");
-      if (lane === "chat") broadcastBoardChat(project, "orchestrator-history", {}, sender);
+      broadcastMaintenanceSafe(project, "orchestrator-work-history");
+      if (lane === "chat") broadcastMaintenanceSafe(project, "orchestrator-history", {}, sender);
     }
     const watch = subscriptions.get(board.project);
     if (watch) setImmediate(() => scheduleAutoReview(watch));

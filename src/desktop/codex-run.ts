@@ -95,12 +95,11 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   if (!settings.ok) throw new Error(settings.error.message);
   const developerInstructions = executorInstructions() + (task.schedule ? "\n" + recurringChildTool.description : "") + "\nCurrent board reviewMode: " + boardReviewMode(settings.data) + ". Read settings again if it changes.";
   const worklog = boardWorklog(project, "executor", task.id);
-  const readOnlyWorktrees = [join(boardData, "worktrees")];
+  const readOnlyWorktrees = [join(boardData, "worktrees"), join(dirname(boardData), ".taskboard-worktrees"), join(dirname(boardData), isolatedWorktreesDirectory)].filter(existsSync);
   const isolatedRoot = join(dirname(boardData), isolatedWorktreesDirectory);
   if (insideProject(runDirectory, isolatedRoot)) {
     if (runDirectory === isolatedRoot) throw new Error("Choose an individual worktree, not the shared worktree directory.");
     directory(isolatedRoot, true);
-    readOnlyWorktrees.push(isolatedRoot);
   }
   const requestTool = { name: "task_tool_request", description: "Request a missing provider MCP tool for this task. The manager receives a question. Assignment requires a restarted task run; provider permissions still apply.",
     inputSchema: { type: "object", properties: { server: { type: "string" }, tool: { type: "string" }, reason: { type: "string" } }, required: ["server", "tool", "reason"], additionalProperties: false } };

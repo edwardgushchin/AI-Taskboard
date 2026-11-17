@@ -75,8 +75,8 @@ test("closing the Codex connection does not wait for a descendant's output pipe"
 test("the Codex launch probes access, applies settings, and monitors the turn", async t => {
   const folder = realpathSync(mkdtempSync(join(tmpdir(), "ai-taskboard-codex-run-")));
   t.after(() => rmSync(folder, { recursive: true, force: true }));
-  const worktree = join(folder, ".tasks", "worktrees", "T-0001");
-  mkdirSync(join(folder, ".tasks", "worktrees"), { recursive: true });
+  const worktree = join(folder, ".worktrees", "T-0001");
+  mkdirSync(join(folder, ".worktrees"), { recursive: true });
   const git = (...args: string[]) => execFileSync("git", args, { cwd: folder, encoding: "utf8", windowsHide: true }).trim();
   git("init", "-b", "main");
   git("-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--allow-empty", "--no-gpg-sign", "-m", "Initial");
@@ -302,7 +302,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.match(turn.params.input[0].text, /сопоставь каждый критерий.*на более ранней ревизии.*повтори затронутую проверку/);
   assert.match(started.params.developerInstructions, /report the submission.*then finish the current turn/);
   assert.match(started.params.developerInstructions, /wait for tests.*separate output directory/);
-  assert.match(started.params.developerInstructions, /specific evidence after acceptance.*paths and SHA-256/);
+  assert.match(started.params.developerInstructions, /specific evidence after acceptance.*board-storage path and SHA-256/);
   assert.match(turn.params.input[0].text, /запроси у менеджера смену режима.*При исчерпании доступных способов заблокируй задачу/);
   assert.match(started.params.developerInstructions, /progress <id> --compact.*as a checkpoint.*block <id> --compact.*Pause only at the user's request/);
   assert.match(turn.params.input[0].text, /Продолжай работу по всем критериям до сдачи через submit/);

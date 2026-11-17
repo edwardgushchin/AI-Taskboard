@@ -48,7 +48,7 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
     AbortController, performance, setTimeout, clearTimeout, setImmediate, subscriptions, agentSlots: slots,
     isManual, runtimeLocation: (project: string) => project,
     readBoardSettings: (project: string) => savedSettings.get(project) ?? subscriptions.get(project)?.board.settings ?? {},
-    scheduleAutoReview: () => {}, scheduleAutoBoard: () => {}, projectIdentity: (project: string) => project,
+    scheduleMaintenance: async () => {}, scheduleAutoReview: () => {}, scheduleAutoBoard: () => {}, projectIdentity: (project: string) => project,
     broadcastBoardChat: () => {},
     t: (key: string, parameters = {}) => localization.text(key, parameters, "en"), localization, cliFailure: failure, missingCodexThread,
     app: { getPath: () => "profile" }, dialog: { showMessageBox: async () => ({ response: 1 }) },
@@ -343,12 +343,12 @@ test("an approved snapshot skips the redundant card read while the CLI checks th
   f.task.revision++;
   const stale = await f.runtime.launchTask("project", f.task.id, undefined, false, snapshot.revision);
   assert.equal(stale.error.code, "REVISION_CONFLICT");
-  assert.deepEqual(f.calls.map(call => call.args[0]), ["start"]);
+  assert.deepEqual(f.calls.filter(call => call.args[0] !== "maintain").map(call => call.args[0]), ["start"]);
   assert.equal(f.launched.length, 0);
   f.calls.length = 0;
   snapshot.revision = f.task.revision;
   assert.equal((await f.runtime.launchTask("project", f.task.id, undefined, false, snapshot.revision)).ok, true);
-  assert.deepEqual(f.calls.map(call => call.args[0]), ["start"]);
+  assert.deepEqual(f.calls.filter(call => call.args[0] !== "maintain").map(call => call.args[0]), ["start"]);
   f.task.status = "review";
   f.completion.resolve(undefined);
   await new Promise(resolve => setImmediate(resolve));

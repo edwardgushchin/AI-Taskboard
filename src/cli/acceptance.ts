@@ -1,11 +1,11 @@
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { artifactFiles } from "./artifacts.ts";
-import { git, inspectMergeTree, isAncestor, localBranch, mergeTree, requireRepository, resolveCommit, skipAutoMaintenance, worktrees } from "./git.ts";
+import { isolatedWorktreesDirectory, excludeBoard, git, inspectMergeTree, isAncestor, localBranch, mergeTree, requireRepository, resolveCommit, skipAutoMaintenance, worktrees } from "./git.ts";
 import type { Repository, Worktree } from "./git.ts";
 import { member, number, object, record, requireRevision, requireState, TaskboardError, text } from "./model.ts";
 import type { IntegrationMode, Task, TaskGit } from "./model.ts";
 import { checkPreserveChanges, describeSavedChanges, inspectLocalChanges, restoreSavedChanges, saveLocalChanges } from "./saved-changes.ts";
-import { exists, readJson, removeFile, writeJson } from "./storage.ts";
+import { directory, exists, readJson, removeFile, writeJson } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
 import { conventionalMessage, noChangesReviewIsStale } from "./submission.ts";
 import { checkProtectedPaths, cleanTaskWorktree, collidingPaths, findWorktree, gitStatus, isolateTaskWorktree, requireNoGitOperation, usableWorktree } from "./worktree.ts";
@@ -323,7 +323,11 @@ function targetPaths(path: string, parent: string, tree: string): string[] {
 }
 
 function temporaryTargetPath(store: BoardStore, task: Task): string {
-  return join(store.subdirectory("worktrees"), ".accept-" + task.id);
+  const repo = requireRepository(store.location.repository);
+  excludeBoard(repo, isolatedWorktreesDirectory);
+  const root = join(repo.root, isolatedWorktreesDirectory);
+  directory(root, true);
+  return join(root, ".accept-" + task.id);
 }
 
 function releaseTemporaryTarget(store: BoardStore, task: Task): void {
@@ -342,8 +346,26 @@ function releaseTemporaryTarget(store: BoardStore, task: Task): void {
   }
 }
 
+export function migrateIntegrationWorktree(store: BoardStore, task: Task): void {
+  const repo = store.location.repository;
+  if (!repo || !task.git) return;
+  const target = task.git.target;
+  let item = findWorktree(repo, target);
+  if (item && [join(store.location.directory, "worktrees", ".accept-" + task.id),
+      join(repo.root, ".taskboard-worktrees", ".accept-" + task.id)].some(path => !relative(path, item!.path))) {
+    const path = usableWorktree(item);
+    directory(dirname(path));
+    const destination = temporaryTargetPath(store, task);
+    if (exists(destination)) throw new TaskboardError("WORKTREE_COLLISION", "The integration worktree path is occupied.");
+    git(repo.root, ["worktree", "move", "--", path, destination]);
+    item = findWorktree(repo, target);
+  }
+}
+
 function checkoutTarget(store: BoardStore, repo: Repository, task: Task, target: string): string {
   let item = findWorktree(repo, target);
+  migrateIntegrationWorktree(store, task);
+  item = findWorktree(repo, target);
   if (!item) {
     const path = temporaryTargetPath(store, task);
     if (exists(path)) {
@@ -476,10 +498,8 @@ export function cleanAcceptedTask(store: BoardStore, task: Task) {
     cleanTaskWorktree(store, task);
     return result;
   } catch (error) {
-    const cleanupWarning = error instanceof TaskboardError
-      ? { code: error.code, message: error.message, details: error.details }
-      : { code: "CLEANUP_FAILED", message: String(error) };
-    return { ...result, cleanupWarning };
+    // Cleanup diagnostics are persisted internally by cleanTaskWorktree.
+    return result;
   }
 }
 

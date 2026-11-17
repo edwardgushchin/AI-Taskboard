@@ -323,7 +323,7 @@ export function replyToBoard(
     (config, env) => reply(profile, project, prompt, images, dispatch, {
       tools, instructions: boardAgentInstructions("manager", instructions + accessInstructions + (accessInstructions ?
         "Use existing credentials for authorized operations without exposing them. Keep SSH host key checking enabled and report server authentication failures separately from local permission failures." : ""), { dialogue, manual: readBoardSettings(locateBoard(project)).boardType === "manual" }),
-      signal, session, worklog, onTokenUsage: session.onTokenUsage, mcp: { config, env },
+      signal, session, worklog, role: session.role, onTokenUsage: session.onTokenUsage, mcp: { config, env },
       prepareResearch: async (request, client) => {
         const launchKey = JSON.stringify([profile, client.path, client.args, client.version, client.windowsSandbox, permissionProfile]);
         const availability = await probeManagerCli(project, launchKey, mcpTools, (cwd, command, env) =>
@@ -341,6 +341,7 @@ export function replyToBoard(
 interface BoardSession {
   id?: string;
   access?: ManagerAccess;
+  role?: "manager" | "reviewer";
   confirmApproval?: (details: string) => Promise<boolean>;
   settings?: ChatSettings | null;
   save: (id: string) => void;

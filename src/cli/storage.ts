@@ -414,7 +414,7 @@ export class BoardStore {
     if (isManual(this.index.settings)) { validateColumns(this.index.settings.manualColumns); this.index.settings.autoMode = false; }
   }
 
-  subdirectory(name: "tasks" | "worktrees" | "pending" | "attachments" | "archive", create = false): string {
+  subdirectory(name: "tasks" | "pending" | "attachments" | "archive", create = false): string {
     const path = join(this.location.directory, name);
     directory(path, create);
     return path;
@@ -547,7 +547,7 @@ export function initializeBoard<T>(location: BoardLocation, snapshot: (store: Bo
     const path = join(location.directory, "board.json");
     if (location.repository) excludeBoard(location.repository);
     if (!exists(path)) {
-      for (const name of ["tasks", "attachments", "archive", "pending", "worktrees"]) {
+      for (const name of ["tasks", "attachments", "archive", "pending"]) {
         directory(join(location.directory, name), true);
       }
       const board: BoardIndex = {

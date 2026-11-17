@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, rmdirSync } from "node:fs";
-import { join } from "node:path";
-import { git, invokeGit, requireRepository, resolveCommit } from "./git.ts";
+import { dirname, join, relative } from "node:path";
+import { isolatedWorktreesDirectory, excludeBoard, git, invokeGit, requireRepository, resolveCommit, worktrees } from "./git.ts";
 import { member, object, requireRevision, TaskboardError } from "./model.ts";
 import type { Task } from "./model.ts";
-import { exists, readJson, writeJson } from "./storage.ts";
+import { directory, exists, readJson, writeJson } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
-import { checkProtectedPaths, collidingPaths, findWorktree, gitStatus, requireNoGitOperation, usableWorktree } from "./worktree.ts";
+import { checkProtectedPaths, collidingPaths, findWorktree, gitStatus, requireNoGitOperation, usableWorktree, taskResourcesInUse } from "./worktree.ts";
 
 const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const destinations = ["target", "worktree"] as const;
@@ -136,8 +136,16 @@ function checkRestorePaths(path: string, base: string, sha: string, untracked: s
   }
 }
 
+function recoveryRoot(store: BoardStore): string {
+  const repo = requireRepository(store.location.repository);
+  excludeBoard(repo, isolatedWorktreesDirectory);
+  const root = join(repo.root, isolatedWorktreesDirectory);
+  directory(root, true);
+  return root;
+}
+
 function checkApply(store: BoardStore, repo: string, head: string, sha: string, path: string): void {
-  const scratch = mkdtempSync(join(store.subdirectory("worktrees"), ".restore-check-"));
+  const scratch = mkdtempSync(join(recoveryRoot(store), ".restore-check-"));
   try {
     git(repo, ["worktree", "add", "--detach", scratch, head]);
     applyBackup(scratch, sha, path);
@@ -168,9 +176,35 @@ export function checkPreserveChanges(
   }
 }
 
+export function migrateSavedWorktree(store: BoardStore, task: Task): void {
+  const backup = readBackup(store, task);
+  if (!backup?.restored || backup.restored.destination !== "worktree" || taskResourcesInUse(store, task.id)) return;
+  const repo = requireRepository(store.location.repository);
+  const sha = savedCommit(repo.root, task, backup);
+  if (!sha) return;
+  const name = ".restore-" + task.id + "-" + sha.slice(0, 12);
+  const source = backup.restored.path;
+  if (![join(store.location.directory, "worktrees", name), join(repo.root, ".taskboard-worktrees", name)]
+      .some(path => !relative(path, source))) return;
+  const target = join(recoveryRoot(store), name);
+  const entries = worktrees(repo.root);
+  const item = entries.find(item => !relative(item.path, exists(source) ? source : target));
+  if (!item || item.prunable || item.branch || item.head !== backup.base) {
+    throw new TaskboardError("UNMANAGED_WORKTREE", "The saved recovery directory is not its registered detached worktree.");
+  }
+  if (item.locked) throw new TaskboardError("WORKTREE_LOCKED", "The recovery worktree is locked.");
+  if (exists(source)) {
+    directory(dirname(source));
+    if (exists(target)) throw new TaskboardError("WORKTREE_COLLISION", "The recovery destination is occupied.");
+    git(repo.root, ["worktree", "move", "--", usableWorktree(item), target]);
+  }
+  writeJson(backupPath(store, task), { ...backup, restored: { ...backup.restored, path: target } });
+}
+
 export function restoreSavedChanges(store: BoardStore, task: Task, input: Record<string, unknown>, finishingAcceptance = false) {
   requireRevision(task, input.revision, true);
   const destination = member(input.destination, destinations, "destination");
+  migrateSavedWorktree(store, task);
   const repo = requireRepository(store.location.repository);
   const backup = readBackup(store, task);
   const sha = backup && savedCommit(repo.root, task, backup);
@@ -183,7 +217,7 @@ export function restoreSavedChanges(store: BoardStore, task: Task, input: Record
   }
   let path: string;
   if (destination === "worktree") {
-    path = join(store.subdirectory("worktrees"), ".restore-" + task.id + "-" + sha.slice(0, 12));
+    path = join(recoveryRoot(store), ".restore-" + task.id + "-" + sha.slice(0, 12));
     if (exists(path)) {
       throw new TaskboardError("WORKTREE_COLLISION", "The recovery worktree already exists.", { path });
     }
