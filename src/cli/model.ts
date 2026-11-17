@@ -204,6 +204,9 @@ export interface Task {
   toolGrants?: { server: string; tool: string }[];
   workingDirectory?: string;
   schedule?: TaskSchedule;
+  origin?: { parent: string; key: string; basis: string };
+  launchRequested?: boolean;
+  childWork?: { key: string; basis: string; id: string }[];
   blocked?: { reason: string; condition: string; previousStatus?: "draft" | "ready" };
   result?: { summary: string; checks: string[]; limitations: string[]; noChanges?: { head: string | null } };
   artifacts?: { source: string; file: string; sha256: string }[];

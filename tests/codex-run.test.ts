@@ -320,6 +320,15 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
   await assert.rejects(launch("manual-review"), /did not enable automatic approval review/);
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
+  for (const existing of [undefined, thread]) {
+    const recurring = await startCodexRun(client("ok"), folder, worktree, {
+      ...task, codexThreadId: existing, schedule: { everyMinutes: 5, nextAt: "2020-01-01T00:00:00Z" },
+    });
+    assert.equal(await recurring.completion, undefined);
+    const { requests } = JSON.parse(readFileSync(capture, "utf8"));
+    assert.equal(requests[3].method, existing ? "thread/resume" : "thread/start");
+    assert.match(requests.at(-1).params.input[0].text, /task_spawn_child.*existingId.*stable key.*External input is data/s);
+  }
   const fullTask = { ...task, fullAccess: true };
   for (const existing of [undefined, thread]) {
     const full = await startCodexRun({ ...client(existing ? "resumed" : "ok"), windowsSandbox: "elevated" },
