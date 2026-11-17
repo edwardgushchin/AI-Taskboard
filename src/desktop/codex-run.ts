@@ -254,9 +254,11 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       };
     } finally {
       finishRun();
-      worklog.finish();
-      await close();
-      await tokens.save(tokens.finish(Boolean(failure)), onTokenUsage);
+      try { worklog.finish(); }
+      finally {
+        await close();
+        await tokens.save(tokens.finish(Boolean(failure)), onTokenUsage);
+      }
     }
     if (failure && signal?.aborted) return { reason: signal.reason instanceof Error
       ? signal.reason.message : "The task run was interrupted." };
@@ -354,9 +356,11 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     if (turn.status !== "inProgress") turns.set(turn.id, turn);
     return { threadId, completion: releaseProvider.run(() => monitor(turn.id)), ...control };
   } catch (error) {
-    worklog.finish();
-    await close();
-    await tokens.save(tokens.finish(true), onTokenUsage);
+    try { worklog.finish(); }
+    finally {
+      await close();
+      await tokens.save(tokens.finish(true), onTokenUsage);
+    }
     if (error instanceof Error && /already has an active writer/i.test(error.message)) {
       throw Object.assign(error, { code: "CODEX_THREAD_BUSY" });
     }

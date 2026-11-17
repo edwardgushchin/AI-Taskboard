@@ -24,6 +24,7 @@ test("task discussion streams task usage before success, provider failure, or a 
   const folder = mkdtempSync(join(tmpdir(), "ai-taskboard-chat-usage-"));
   t.after(() => rmSync(folder, { recursive: true, force: true }));
   mkdirSync(join(folder, ".tasks"));
+  writeFileSync(join(folder, ".tasks", "board.json"), JSON.stringify({ settings: { boardType: "manual" } }));
   const stub = join(folder, "server.cjs");
   writeFileSync(stub, `
     const send = value => console.log(JSON.stringify(value));

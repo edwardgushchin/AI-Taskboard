@@ -880,7 +880,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
     mcp: options.mcp, research, fullAccess, webSearch: options.webSearch ?? Boolean(session), providerTools: Boolean(session),
   }).finally(async () => {
     finishRun?.();
-    options.worklog?.finish();
-    await tokens.save(tokens.finish(!completed), onTokenUsage);
+    try { options.worklog?.finish(); }
+    finally { await tokens.save(tokens.finish(!completed), onTokenUsage); }
   });
 }

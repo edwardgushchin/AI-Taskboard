@@ -1,8 +1,8 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { globSync, readdirSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, win32 } from "node:path";
 import { redactSecrets } from "../cli/redact.ts";
-import { directory, exists, readBinary, readJson, removeFile, withLock, writeAtomic, writeJson } from "../cli/storage.ts";
+import { directory, exists, locateBoard, readBinary, readJson, removeFile, withLock, writeAtomic, writeJson } from "../cli/storage.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
 import type { CliReply } from "./cli.ts";
 import type { RpcMessage } from "./codex-rpc.ts";
@@ -33,7 +33,7 @@ export const worklogReminder = "Worklog for this turn: before the final reply, c
   "Record concrete outcomes and evidence so someone can continue without opening the chat.";
 export const worklogInstructions = [
   worklogReminder,
-  "External journal hook instructions and shell submission commands in chat history belonged to those earlier turns. Use the built-in tool for this turn.",
+  "Use only the built-in worklog_record tool and canonical project .tasks/worklog. Do not run external journal hooks or create .dev-diary in the project or a worktree. The journal survives cancellation, deletion and cleanup; include failures and rollbacks even without a successful submission.",
   "Group investigation, unsuccessful attempts, final changes and checks for the same objective in one block. Use the language of the discussion.",
   "Context gives the problem, starting state and constraints. Timeline records significant phases, including failed attempts and their causes. Use observed HH:MM, ISO dates with timezone across midnight, or null if the time was not observed.",
   "Changes names the files, cards or components and the result. Separate the final state from reverted experiments and unresolved defects. Decisions records why a choice was made and what evidence supported it.",
@@ -244,6 +244,19 @@ function save(project: string, staged: Staged) {
     const prior = exists(path) ? readDiary(path) : header;
     if (!prior.startsWith(header) || !prior.endsWith("\n")) throw new Error("Invalid daily Worklog file.");
     const content = staged.submission.entries.map((entry, index) => renderBlock(staged, entry, entry_ids[index]!)).join("");
+    if (staged.turnId.includes("_fact_")) {
+      // Facts can be replayed after midnight. Identity, not delivery date, owns the record.
+      for (const file of globSync("[0-9][0-9][0-9][0-9]/[0-9][0-9]/????-??-??.md", { cwd: root })) {
+        const parts = file.split(/[/\\]/);
+        directory(join(root, parts[0]!));
+        directory(join(root, parts[0]!, parts[1]!));
+        const previous = readDiary(join(root, file));
+        if (previous.includes(marker(entry_ids[0]!))) {
+          if (!previous.includes(content.split("\n").slice(2).join("\n"))) throw new InvalidWorklogSubmission("Conflicting Worklog event identity.");
+          return;
+        }
+      }
+    }
     if (entry_ids.some(id => prior.includes(marker(id)))) {
       if (!prior.includes(content)) throw new InvalidWorklogSubmission("This turn already has a different Worklog submission.");
       return;
@@ -272,9 +285,10 @@ function save(project: string, staged: Staged) {
 }
 
 export function boardWorklog(project: string, role: Role, taskId?: string) {
+  project = locateBoard(project).root;
   const pendingRoot = join(project, ".tasks", "pending");
   const pendingPath = (binding: Binding) => join(pendingRoot, "worklog-" + entryId(binding) + ".json");
-  let turn: (Binding & { reminded?: boolean; skipped?: boolean; editedFiles?: boolean; submission?: Staged; saved?: boolean }) | undefined;
+  let turn: (Binding & { reminded?: boolean; skipped?: boolean; editedFiles?: boolean; submission?: Staged; saved?: boolean; facts?: boolean }) | undefined;
   let finishedTurnId: string | undefined;
   const recover = (path: string): Staged => {
     const staged = object(readJson(path), ["threadId", "turnId", "stamp", "role", "taskId", "submission"]);
@@ -295,7 +309,7 @@ export function boardWorklog(project: string, role: Role, taskId?: string) {
       removeFile(path);
       return saved;
     } catch (error) {
-      if (error instanceof InvalidWorklogSubmission) removeFile(path);
+      // Keep conflicting deliveries for diagnosis; never discard historical evidence.
       throw error;
     }
   };
@@ -334,7 +348,8 @@ export function boardWorklog(project: string, role: Role, taskId?: string) {
       console.warn("Could not read staged AI Taskboard Worklog:", (error as Error).message);
     }
   };
-  function finish() {
+  function finish(outcome = "interrupted or disconnected; final outcome unknown") {
+    if (turn?.facts) fact("turn-finished", "turn: " + outcome);
     const current = turn;
     if (current) finishedTurnId = current.turnId;
     turn = undefined;
@@ -380,12 +395,31 @@ export function boardWorklog(project: string, role: Role, taskId?: string) {
       return { ok: false, error: { code: "WORKLOG_WRITE_FAILED", message: (error as Error).message } };
     }
   }
+  function fact(id: string, detail: string) {
+    if (!turn) return;
+    turn.facts = true;
+    persist({ threadId: turn.threadId, turnId: turn.turnId + "_fact_" + createHash("sha256").update(id).digest("hex"),
+      stamp: timestamp(), role, taskId, submission: { language: "ru", entries: [{
+        title: "Событие выполнения операции", context: ["Наблюдаемый факт выполнения; итог работы требует авторского отчёта."],
+        timeline: [{ time: null, items: [detail] }], changes: ["Сохранён факт операции без команды, вывода и содержимого файлов."],
+        decisions: ["Событие записано сразу, независимо от сдачи и существования карточки."],
+        checks: ["Статус сообщён источником события; независимая проверка не выполнялась."],
+        next_steps: ["Сопоставить с авторским отчётом. Отсутствие отчёта не означает успех работы."], artifacts: [], supersedes: [],
+      }] } });
+  }
   function observe(message: RpcMessage, threadId: string) {
-    const params = message.params as { threadId?: string; turnId?: string; turn?: { id: string };
-      item?: { type?: string; status?: string } } | undefined;
+    const params = message.params as { threadId?: string; turnId?: string; turn?: { id: string; status?: string };
+      item?: { id?: string; type?: string; status?: string; exitCode?: number | null } } | undefined;
     if (params?.threadId !== threadId) return;
     if (message.method === "turn/started" && params.turn) start(threadId, params.turn.id);
-    if (message.method === "turn/completed" && params.turn?.id === turn?.turnId) finish();
+    if (message.method === "turn/completed" && params.turn?.id === turn?.turnId) finish(["completed", "failed", "interrupted"].includes(params.turn?.status ?? "") ? params.turn!.status : "completed; status unknown");
+    if ((message.method === "item/started" || message.method === "item/completed") && turn && turn.turnId === params.turnId &&
+        params.item?.id && ["commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall"].includes(params.item.type ?? "")) {
+      const item = params.item;
+      const status = ["inProgress", "completed", "failed", "declined", "interrupted"].includes(item.status ?? "") ? item.status : "unknown";
+      const exitCode = Number.isSafeInteger(item.exitCode) ? item.exitCode : "unknown";
+      fact(message.method + ":" + item.id, `${item.type}: ${message.method === "item/started" ? "started" : "completed"}; status=${status}; exitCode=${exitCode}`);
+    }
     if (message.method === "item/completed" && turn && turn.turnId === params.turnId) {
       if (params.item?.type === "contextCompaction") turn.reminded = false;
       if (params.item?.type === "fileChange" && params.item.status === "completed") {
@@ -402,5 +436,13 @@ export function boardWorklog(project: string, role: Role, taskId?: string) {
     turn.reminded = true;
     return { ...reply, worklog: worklogReminder };
   }
-  return { start, observe, finish, submit, remind };
+  return { start, observe, finish, submit, remind, fact };
+}
+
+// Service operations use the same writer and recovery queue, without reading a card.
+export function beginBoardOperation(project: string, operation: string, taskId?: string) {
+  const log = boardWorklog(project, "manager", taskId);
+  log.start("board-service", randomUUID());
+  log.fact("started", operation + ": started; outcome unknown");
+  return (outcome: string) => { log.fact("result", operation + ": " + outcome); log.finish(outcome); };
 }

@@ -1,3 +1,5 @@
+import { beginBoardOperation } from "../desktop/board-worklog.ts";
+import { migrateWorklog, removeMigratedWorklog } from "./worklog-migration.ts";
 import { maintenanceFailure, maintenanceSuccess } from "./maintenance-state.ts";
 import { inspectLocalChanges, saveLocalChanges } from "./saved-changes.ts";
 import { lstatSync, readdirSync, realpathSync, rmSync, rmdirSync, unlinkSync } from "node:fs";
@@ -345,7 +347,9 @@ export function isolateTaskWorktree(store: BoardStore, repo: Repository, id: str
   if (taskResourcesInUse(store, id)) return worktree;
   const target = join(isolatedRoot(repo, true), id);
   if (exists(target)) throw new TaskboardError("WORKTREE_COLLISION", "The isolated worktree path already contains files.", { path: target });
-  git(repo.root, ["worktree", "move", "--", worktree, target]);
+  const finish = beginBoardOperation(store.location.root, "migrate legacy worktree", id);
+  try { git(repo.root, ["worktree", "move", "--", worktree, target]); finish("moved to managed directory"); }
+  catch (error) { finish("failed; inspect worktree registration before retry"); throw error; }
   for (const root of legacyRoots) {
     if (!exists(root)) continue;
     try { rmdirSync(root); } catch (error) {
@@ -380,12 +384,15 @@ function cleanupEntries(path: string): string[] {
 
 export function cleanTaskWorktree(store: BoardStore, task: Task, artifacts?: unknown) {
   requireState(task, ["done", "cancelled"]);
+  const finish = beginBoardOperation(store.location.root, "worktree cleanup", task.id);
   try {
     const result = cleanTaskWorktreeNow(store, task, artifacts);
     maintenanceSuccess(store, "cleanup", task.id);
+    finish(result.removed ? "worktree removed" : "no worktree removed");
     return result;
   } catch (error) {
     maintenanceFailure(store, "cleanup", error, task.id);
+    finish("failed; resources retained for retry");
     throw error;
   }
 }
@@ -478,7 +485,8 @@ function clearEmptyQa(path: string): void {
 }
 
 function removeTaskOutput(path: string, id: string, changes: string[]): boolean {
-  const roots = [".dev-diary", `.codex-attachments/${id}`]
+  // Diaries remain in place: only separately verified migration can authorize their removal.
+  const roots = [`.codex-attachments/${id}`]
     .filter(root => changes.some(change => change.startsWith("! " + root + "/")));
   if (!roots.length || changes.some(change => !roots.some(root => change.startsWith("! " + root + "/")))) return false;
   if (git(path, ["ls-files", "-z", "--", ...roots])) return false;
@@ -522,6 +530,10 @@ function removeTaskWorktree(store: BoardStore, task: Task, repo: Repository, ite
   }
   directory(managedRoot);
   requireNoGitOperation(path);
+  if (exists(join(path, ".dev-diary"))) {
+    if (git(path, ["ls-files", "-z", "--", ".dev-diary"])) migrateWorklog(store.location.root, [join(path, ".dev-diary")]);
+    else removeMigratedWorklog(store.location.root, join(path, ".dev-diary"));
+  }
   if (task.status === "cancelled") {
     const head = resolveCommit(path, "HEAD")!;
     const local = inspectLocalChanges(path, head);
