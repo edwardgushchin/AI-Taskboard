@@ -1158,5 +1158,8 @@
   "limits.low": "Cota quase esgotada",
   "limits.summary": "{count} conectados; {unavailable} sem dados atuais",
   "limits.remaining": "restam {percent}%",
-  "limits.reset": "Redefinição {time}"
+  "limits.reset": "Redefinição {time}",
+  "ui.schedule_paused": "Agendamento pausado",
+  "ui.pause_schedule": "Pausar agendamento",
+  "ui.resume_schedule": "Retomar agendamento"
 }

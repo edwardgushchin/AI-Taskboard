@@ -180,6 +180,29 @@ app.whenReady().then(async () => {
     console.log('Sheet scroll Chromium checks passed: ' + checks + ' (8 combinations)');
     return;
   }
+  if (process.argv.includes("--schedule-only")) {
+    await evaluate(`
+      fixture.board.tasks[1].schedule = { everyMinutes: 60, nextAt: '2000-01-01T00:00:00Z' };
+      window.taskboard.command = async (action, id, input) => {
+        const task = fixture.board.tasks.find(task => task.id === id);
+        if (action === 'show') return {ok:true,data:{...task,criteria:[]}};
+        if (action !== 'update') throw Error(action);
+        if (input.revision !== task.revision) throw Error('stale revision');
+        task.schedule.paused = input.schedulePaused;
+        task.revision++; push(); return {ok:true,data:task};
+      }; push(); showTask('T-0002');
+    `);
+    await evaluate(`waitFor(() => document.querySelector('.sheet-actions')).then(settle)`);
+    for (const paused of [true, false, true]) {
+      await evaluate(`[...document.querySelectorAll('.sheet-actions button')].find(b => b.textContent === t('${paused ? 'ui.pause_schedule' : 'ui.resume_schedule'}')).click(); waitFor(() => fixture.board.tasks[1].schedule.paused === ${paused}).then(settle)`);
+      await check(`findCard('T-0002').querySelector('.task-schedule').textContent === ${paused ? "t('ui.schedule_paused')" : "scheduleInterval(60, 'short')"}`, 'the card shows the saved pause state');
+      await check(`byId('sheet-body').textContent.includes(t('${paused ? 'ui.resume_schedule' : 'ui.pause_schedule'}'))`, 'details offer the inverse action');
+      await check(`fixture.board.tasks[1].schedule.everyMinutes === 60 && fixture.board.tasks[1].status === 'ready'`, 'schedule action retains rule and status');
+    }
+    await capture('schedule-paused.png');
+    console.log('Schedule Chromium checks passed: ' + checks);
+    return;
+  }
   if (process.argv.includes("--auto-only")) {
     await evaluate(`window.taskboard.command = async (action, id, input) => {
       if (action === 'settings') { Object.assign(fixture.board.settings, input); push(); return {ok:true,data:fixture.board.settings}; }

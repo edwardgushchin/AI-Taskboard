@@ -39,6 +39,7 @@ test("ready selection excludes drafts, busy tasks, unfinished dependencies and f
   const now = Date.parse("2026-11-16T00:00:00Z");
   const future = { everyMinutes: 60, nextAt: "2026-11-17T00:00:00Z" };
   const tasks = [task("T-0001", { status: "draft" }), task("T-0002", { unfinishedDependencies: ["T-9999"] }),
+    task("T-0000", { schedule: { ...future, paused: true, nextAt: new Date(now).toISOString() } }),
     task("T-0003", { schedule: future }), task("T-0004"), task("T-0005", { schedule: { ...future, nextAt: new Date(now).toISOString() } })];
   assert.equal(nextReadyTask(tasks, new Map(), id => id === "T-0004", now)?.id, "T-0005");
   tasks[1].unfinishedDependencies = [];

@@ -958,8 +958,8 @@ function card(task) {
     identity.append(badge);
   }
   if (task.schedule) {
-    const badge = element("span", task.schedule.time ?? scheduleInterval(task.schedule.everyMinutes, "short"), "task-schedule");
-    badge.title = scheduleLabel(task.schedule);
+    const badge = element("span", task.schedule.paused ? t("ui.schedule_paused") : task.schedule.time ?? scheduleInterval(task.schedule.everyMinutes, "short"), "task-schedule");
+    badge.title = (task.schedule.paused ? t("ui.schedule_paused") + " · " : "") + scheduleLabel(task.schedule);
     badge.setAttribute("aria-label", badge.title);
     identity.append(badge);
   }
@@ -3862,7 +3862,8 @@ async function showTask(id) {
   }
   if (task.schedule) {
     const schedule = [scheduleLabel(task.schedule)];
-    if (task.status === "ready" && !task.unfinishedDependencies?.length) {
+    if (task.schedule.paused) schedule.push(t("ui.schedule_paused"));
+    if (!task.schedule.paused && task.status === "ready" && !task.unfinishedDependencies?.length) {
       schedule.push(t("ui.next_run_c1b8ce6d") + " · " + shortDate(task.schedule.nextAt));
     }
     section(() => (t("ui.schedule_dadf83ce")), schedule);
@@ -3909,6 +3910,10 @@ async function showTask(id) {
     const result = await command(name, task.id, { revision: task.revision, ...input });
     if (result) await showTask(task.id);
   };
+  if (task.schedule && !["done", "cancelled"].includes(task.status)) {
+    actions.append(button(() => t(task.schedule.paused ? "ui.resume_schedule" : "ui.pause_schedule"),
+      () => act("update", { schedulePaused: !task.schedule.paused })));
+  }
   if (task.status === "draft") actions.append(button(() => t("ui.approve_535c27a7"), () => act("approve"), "primary"));
   if (!frame.board?.archived.some(entry => entry.id === task.id) && (task.milestone || frame.board?.gitInfo?.githubRepository)) {
     actions.append(button(() => t("ui.milestone_3df16b83"), () => editMilestone(task)));

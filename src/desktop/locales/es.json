@@ -1158,5 +1158,8 @@
   "limits.low": "Cuota baja",
   "limits.summary": "{count} conectados; {unavailable} sin datos actuales",
   "limits.remaining": "queda {percent}%",
-  "limits.reset": "Se restablece {time}"
+  "limits.reset": "Se restablece {time}",
+  "ui.schedule_paused": "Programación pausada",
+  "ui.pause_schedule": "Pausar programación",
+  "ui.resume_schedule": "Reanudar programación"
 }

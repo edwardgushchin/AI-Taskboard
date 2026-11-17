@@ -1158,5 +1158,8 @@
   "limits.low": "Quotum bijna op",
   "limits.summary": "{count} verbonden; {unavailable} zonder actuele gegevens",
   "limits.remaining": "{percent}% resterend",
-  "limits.reset": "Herstel {time}"
+  "limits.reset": "Herstel {time}",
+  "ui.schedule_paused": "Planning gepauzeerd",
+  "ui.pause_schedule": "Planning pauzeren",
+  "ui.resume_schedule": "Planning hervatten"
 }

@@ -1174,5 +1174,8 @@
   "limits.low": "Limit bliski wyczerpania",
   "limits.summary": "Połączono: {count}; bez aktualnych danych: {unavailable}",
   "limits.remaining": "pozostało {percent}%",
-  "limits.reset": "Odnowienie {time}"
+  "limits.reset": "Odnowienie {time}",
+  "ui.schedule_paused": "Harmonogram wstrzymany",
+  "ui.pause_schedule": "Wstrzymaj harmonogram",
+  "ui.resume_schedule": "Wznów harmonogram"
 }

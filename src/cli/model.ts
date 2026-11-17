@@ -133,7 +133,7 @@ export type TaskScheduleRule =
     { weekday?: number; dayOfMonth?: never; month?: never } |
     { weekday?: never; dayOfMonth: number; month?: number }))
   | { everyMinutes: number; time?: never; weekday?: never; dayOfMonth?: never; month?: never };
-export type TaskSchedule = TaskScheduleRule & { nextAt: string };
+export type TaskSchedule = TaskScheduleRule & { nextAt: string; paused?: boolean };
 
 export function validScheduleDate(day: unknown, month: unknown): boolean {
   return typeof day === "number" && Number.isInteger(day) && day >= 1 && (month === undefined ? day <= 31 :

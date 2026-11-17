@@ -1158,5 +1158,8 @@
   "limits.low": "残り枠が少なくなっています",
   "limits.summary": "接続数 {count}、最新データなし {unavailable}",
   "limits.remaining": "残り {percent}%",
-  "limits.reset": "リセット {time}"
+  "limits.reset": "リセット {time}",
+  "ui.schedule_paused": "スケジュール一時停止中",
+  "ui.pause_schedule": "スケジュールを一時停止",
+  "ui.resume_schedule": "スケジュールを再開"
 }

@@ -1158,5 +1158,8 @@
   "limits.low": "Quota quasi esaurita",
   "limits.summary": "{count} connessi; {unavailable} senza dati aggiornati",
   "limits.remaining": "{percent}% rimanente",
-  "limits.reset": "Ripristino {time}"
+  "limits.reset": "Ripristino {time}",
+  "ui.schedule_paused": "Pianificazione sospesa",
+  "ui.pause_schedule": "Sospendi pianificazione",
+  "ui.resume_schedule": "Riprendi pianificazione"
 }
