@@ -1418,6 +1418,7 @@ function render(previousBoard) {
   if (!byId("board-composer").firstChild) byId("board-composer").append(draftComposer());
   const composer = byId("board-composer").firstChild;
   composer.localize();
+  composer.updateManagerBusy(frame.managerBusy);
   composer.updateManagerRun(frame.managerRun);
   composer.updateManagerWork(frame.managerWork);
   composer.syncManagerUnread(frame.managerUnread);
@@ -1736,6 +1737,8 @@ function draftComposer() {
   let sendingQueuedMessage = false;
   let active;
   let managerRun;
+  let managerBusy = false;
+  let queueRetry;
   let managerWork;
   let startingWork = false;
   let disposed = false;
@@ -1931,6 +1934,7 @@ function draftComposer() {
   }
   function readVisibleMessages() {
     clearTimeout(readRetry);
+    clearTimeout(queueRetry);
     if (!api.readManagerMessages || !unread.size || readFrame || readingMessages) return;
     readFrame = requestAnimationFrame(async () => {
       readFrame = undefined;
@@ -2014,7 +2018,8 @@ function draftComposer() {
     const workStatus = item => item ? runningLabel(item).status : t("ui.working_85aeded8");
     if (managerWork) {
       const time = managerWork.startedAt ? new Date(managerWork.startedAt).toLocaleTimeString(localization.locale, { hour: "2-digit", minute: "2-digit" }) : "";
-      const detail = managerWork.phase === "running" ? workStatus(managerWork.item) :
+      const detail = managerWork.lane === "maintenance" ? t("ui.checking_worktree_cleanup_1f82f9a8") :
+        managerWork.phase === "running" ? workStatus(managerWork.item) :
         managerWork.phase === "waiting" ? t("ui.waiting_for_a_session_67475e7f") :
           t("ui.starting_39fd3c7e");
       const row = element("div", () => [t("ui.manager_92a95b5c"), detail, time].filter(Boolean).join(" · "), "board-work-row");
@@ -2555,7 +2560,7 @@ function draftComposer() {
   progress.setAttribute("role", "status");
   const syncPrompt = () => {
     const status = !editor.matches("[data-open], [data-pinned]") && (active?.thinking.textContent || (managerWork &&
-      runningLabel(managerWork.item).status));
+      (managerWork.lane === "maintenance" ? t("ui.checking_worktree_cleanup_1f82f9a8") : runningLabel(managerWork.item).status)));
     const text = status || (goalMode ? t("ui.describe_the_goal_79e3a385") :
       t("ui.write_to_the_project_manager_49756120"));
     if (prompt.textContent !== text) prompt.textContent = text;
@@ -2809,6 +2814,7 @@ function draftComposer() {
   let historyLoaded = false;
   let hasDialogueHistory = false;
   let historyInvalidated = false;
+  let reloadAfterHistory = false;
   let loadingOlder = false;
   let historyGeneration = 0;
   let recentCursor;
@@ -2912,7 +2918,7 @@ function draftComposer() {
       const revision = goalRevision;
       loadingHistory = api.boardHistory(project).then(async result => {
         if (!result.ok) throw new Error(boardError(result.error));
-        if (disposed) return;
+        if (disposed || reloadAfterHistory) return;
         if (revision === goalRevision) editor.updateGoal(result.data.goal, result.data.goalRunning);
         const oldImages = [...log.querySelectorAll(".chat-attachments img")];
         let delivered;
@@ -2961,7 +2967,13 @@ function draftComposer() {
           }
           requestAnimationFrame(showDialoguePosition);
         }
-      }).finally(() => { loadingHistory = undefined; });
+      }).finally(() => {
+        loadingHistory = undefined;
+        if (reloadAfterHistory && !disposed) {
+          reloadAfterHistory = false;
+          editor.invalidateHistory();
+        }
+      });
     }
     return loadingHistory;
   };
@@ -2972,6 +2984,7 @@ function draftComposer() {
     }
     void restoreQueue().catch(() => {});
     void loadHistory()?.catch(error => message(error.message));
+    if (active?.shared && !active.items.length) refreshDialogue(active);
   };
   const openChat = () => {
     if (editor.hasAttribute("data-open") && (historyLoaded || loadingHistory)) return;
@@ -2991,6 +3004,10 @@ function draftComposer() {
   };
   editor.revealPinned = () => { if (pinned && !loadingHistory && !historyLoaded) revealHistory(); };
   editor.invalidateHistory = () => {
+    if (loadingHistory) {
+      reloadAfterHistory = true;
+      return;
+    }
     if (historyLoaded && !atEndOfHistory() && (olderNodes.length || loadingOlder)) {
       historyInvalidated = true;
       return;
@@ -3102,6 +3119,11 @@ function draftComposer() {
     });
     readVisibleMessages();
   };
+  function refreshDialogue(turn) {
+    void api.boardHistory(project, null, "live").then(result => {
+      if (!disposed && result.ok && active === turn && !turn.items.length) editor.updateActivity(result.data.dialogue ?? []);
+    }).catch(() => {});
+  }
   const pasteFiles = submitted => Promise.all(submitted.map(file => api.filePayload(file)));
   const queueStorage = async (action, id, draft, goal, attachments) => {
     const result = await api.boardQueue(project, action, id, draft, goal, attachments);
@@ -3109,11 +3131,47 @@ function draftComposer() {
     return result.data;
   };
   let restoredQueue;
+  let refreshingQueue = false;
+  let queueChanged = false;
+  editor.refreshQueue = () => {
+    if (disposed) return;
+    queueChanged = true;
+    if (refreshingQueue) return;
+    refreshingQueue = true;
+    void (async () => {
+      while (queueChanged && !disposed) {
+        queueChanged = false;
+        restoredQueue = undefined;
+        await restoreQueue();
+      }
+    })().catch(() => {}).finally(() => {
+      refreshingQueue = false;
+      sendNext();
+    });
+  };
   function restoreQueue() {
     restoredQueue ??= queueStorage("list").then(jobs => {
       if (disposed) return;
-      for (const [index, { id, draft, goal, files }] of jobs.entries()) {
-        enqueue(id, draft, goal, files.map(file => file.link ? { ...file, size: file.link.size } : new File([file.bytes], file.name, { type: file.type })), index === 0);
+      const ids = new Set(jobs.map(job => job.id));
+      for (const job of [...queued]) {
+        if (job.id && !ids.has(job.id) && !job.sending && !job.editing) removeWork(job);
+      }
+      for (const { id, draft, goal, files, failed = false } of jobs) {
+        if (active?.id === id) continue;
+        const job = queued.find(job => job.id === id);
+        if (!job) {
+          enqueue(id, draft, goal, files.map(file => file.link ? { ...file, size: file.link.size } : new File([file.bytes], file.name, { type: file.type })), failed);
+        } else if (!job.editing && !job.sending) {
+          if (draft !== job.draft) {
+            job.draft = draft;
+            job.request = draft.trim();
+            updateQueuedPreview(job);
+          }
+          if (failed !== job.failed) {
+            job.failed = failed;
+            renderQueuedActions(job);
+          }
+        }
       }
     }).catch(error => {
       restoredQueue = undefined;
@@ -3126,9 +3184,12 @@ function draftComposer() {
     const { status } = job;
     status.replaceChildren();
     if (job.failed) status.append(element("span", () => t("ui.not_sent_28bb3764"), "board-queued-failed"));
+    else if (managerBusy) status.append(element("span", () => t("ui.waiting_for_a_session_67475e7f")));
     if (job.failed) status.append(button(() => t("ui.retry_553b2066"), async () => {
       await loadHistory()?.catch(() => {});
       if (!queued.includes(job)) return;
+      try { await queueStorage("retry", job.id); }
+      catch (error) { message(error.message); return; }
       job.failed = false;
       renderQueuedActions(job);
       sendNext();
@@ -3218,6 +3279,10 @@ function draftComposer() {
       if (active) return sendQueuedNow(job);
       queued.splice(queued.indexOf(job), 1);
       queued.unshift(job);
+      if (job.failed) {
+        try { await queueStorage("retry", job.id); }
+        catch (error) { message(error.message); return; }
+      }
       job.failed = false;
       sendNext();
       return;
@@ -3290,15 +3355,24 @@ function draftComposer() {
       busy(false);
       syncGoal();
       greeting.hidden = log.childElementCount > 2;
+      editor.invalidateHistory();
       if (!run) sendNext();
     }
     if (!run) return;
-    if (!active) beginTurn(run.id, undefined, true);
+    if (!active) {
+      const turn = beginTurn(run.id, undefined, true);
+      if (editor.matches("[data-open], [data-pinned]")) refreshDialogue(turn);
+    }
     waitingForChat = run.phase === "waiting";
     canStop = run.phase !== "starting";
     if (waitingForChat) showActivityStatus(waitingLabel());
     else showRunningItem(run.item);
     syncAction();
+  };
+  editor.updateManagerBusy = busy => {
+    if (managerBusy === Boolean(busy)) return;
+    managerBusy = Boolean(busy);
+    for (const job of queued) if (!job.sending && !job.editing && job.row) renderQueuedActions(job);
   };
   editor.updateManagerWork = run => {
     if (disposed) return;
@@ -3307,11 +3381,11 @@ function draftComposer() {
     syncPrompt();
     syncGoal();
     renderWorkOverview();
-    if (!managerWork) sendWorkNext();
+    if (!managerWork) sendNext();
   };
   function sendWorkNext() {
     const next = queued.find(job => job.goal);
-    if (disposed || startingWork || managerWork || !next || next.failed || next.editing || next.sending) return;
+    if (disposed || queueRetry || managerBusy || active || startingWork || managerWork || !next || next.failed || next.editing || next.sending) return;
     startingWork = true;
     next.sending = true;
     bindLocalized(next.status, "textContent", () => t("ui.starting_39fd3c7e"));
@@ -3320,6 +3394,11 @@ function draftComposer() {
       const submitted = await pasteFiles(next.submitted);
       if (disposed) return;
       const result = await api.boardRequest(next.request, submitted, project, next.goal, false, next.id);
+      if (!result.ok && result.error.code === "BOARD_REQUEST_IN_PROGRESS") {
+        renderQueuedActions(next);
+        retryQueue();
+        return;
+      }
       if (!result.ok) throw new Error(boardError(result.error));
       if (result.data.error && result.data.keepQueued) throw new Error(result.data.error);
       removeWork(next);
@@ -3353,10 +3432,17 @@ function draftComposer() {
     const job = queued.find(job => job.goal && job.id === id);
     if (job) removeWork(job);
   };
+  function retryQueue() {
+    if (disposed || queueRetry) return;
+    queueRetry = setTimeout(() => {
+      queueRetry = undefined;
+      sendNext();
+    }, 1000);
+  }
   function sendNext() {
     sendWorkNext();
     const next = queued.find(job => !job.goal);
-    if (disposed || active || sendingQueuedMessage || !next || next.failed || next.editing || next.sending) return;
+    if (disposed || queueRetry || managerBusy || managerWork || startingWork || active || sendingQueuedMessage || !next || next.failed || next.editing || next.sending) return;
     queued.splice(queued.indexOf(next), 1);
     const { request, goal, submitted } = next;
     next.row?.remove();
@@ -3364,11 +3450,17 @@ function draftComposer() {
     const turn = beginTurn(next.id, entry);
     const { container, thinking } = turn;
     let accepted = false;
+    let deferred = false;
     void (async () => {
       void loadHistory()?.catch(() => {});
       const pasted = await pasteFiles(submitted);
       if (disposed) return;
       const result = await api.boardRequest(request, pasted, project, goal, false, next.id);
+      if (!result.ok && result.error.code === "BOARD_REQUEST_IN_PROGRESS") {
+        deferred = true;
+        retryQueue();
+        return;
+      }
       if (!result.ok && result.error.code === "BOARD_WAIT_CANCELLED") return;
       if (!result.ok) throw new Error(boardError(result.error));
       const { answer, error, items = [], keepQueued } = result.data;
@@ -3397,13 +3489,13 @@ function draftComposer() {
       editor.updateManagerRun(managerRun);
       if (accepted) {
         releaseSubmittedPreviews(submitted);
-        if ((historyInvalidated && atEndOfHistory()) || log.childElementCount - olderNodes.length - 2 > 120) {
+        if (!container.childElementCount || (historyInvalidated && atEndOfHistory()) || log.childElementCount - olderNodes.length - 2 > 120) {
           editor.invalidateHistory();
         }
         sendNext();
         return;
       }
-      next.failed = true;
+      next.failed = !deferred;
       queued.unshift(next);
       renderQueuedActions(next);
       entry.remove();
@@ -3439,7 +3531,7 @@ function draftComposer() {
     dismissedMention = undefined;
     attachments.hidden = !files.length;
     if (goalMode === goal) setGoalMode(false);
-    enqueue(id, draft, goal, submitted);
+    if (active?.id !== id && !queued.some(job => job.id === id)) enqueue(id, draft, goal, submitted);
     openChat();
     showWork(goal);
     sendNext();

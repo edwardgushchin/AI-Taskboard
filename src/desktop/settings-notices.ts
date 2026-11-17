@@ -13,7 +13,7 @@ export function syncSettingsNotices(project: string, defaults: AgentLimits): Set
       store.saveIndex();
     }
     return journal;
-  });
+  }, 0);
 }
 
 // Each lane has its own durable receipt. Windows share the same running request.

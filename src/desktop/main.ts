@@ -6,7 +6,7 @@ import type { FileLink } from "../cli/attachment-links.ts";
 import { providerLimitSource, readCodexLimits } from "./provider-limits.ts";
 import localization from "./localization.cjs";
 import { activeRunSummary, observeActiveRuns, enableSharedRuns } from "./active-runs.ts";
-import { runtimeLocation } from "./board-runtime.ts";
+import { runtimeLocation, runtimeTransaction } from "./board-runtime.ts";
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, Notification, protocol, session, shell } from "electron";
 import type { IpcMainInvokeEvent } from "electron";
 import { randomUUID } from "node:crypto";
@@ -15,6 +15,7 @@ import { lstat, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join } from "node:path";
 import { createInterface } from "node:readline";
+import { setTimeout as wait } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { callCli, cliChild, cliFailure } from "./cli.ts";
@@ -89,6 +90,7 @@ interface BoardWatch {
   stop: () => void;
   reviewAttempts: Map<string, string>;
   integrationAttempts: Map<string, number>;
+  shared?: { runtime: string; context?: string; activity: string; queue: number; history: number; unread: number };
   reviewReports: Map<string, ReviewedSubmission>;
   reviewerRuns: Map<string, Promise<void>>;
 }
@@ -196,6 +198,8 @@ function frame(state: ProjectTab) {
   const work = key ? boardWorkRequests.get(key) : undefined;
   const reviewerRuns = state.project ? subscriptions.get(state.project)?.reviewerRuns : undefined;
   const sharedRuns = state.board ? agentSlots.entries(state.board.project) : [];
+  const managerContext = sharedRuns.find(entry => entry.task === "manager:context");
+  const sharedManager = managerContext?.state && { ...managerContext.state, live: undefined };
   const openTabs = windowStates.get(state.window.webContents.id)?.tabs ?? [];
   const unreadTabs = new Set(openTabs.flatMap(tab =>
     tab.project && boardUnread(tab.board?.project).length ? [tab.project] : []));
@@ -211,8 +215,9 @@ function frame(state: ProjectTab) {
     project: state.project, board: state.board, error: state.error, loading: state.loading, localization: localization.state(), theme,
     managerQuestion: key ? managerQuestion(key)?.view : undefined,
     managerAccess: state.project ? managerAccess(app.getPath("userData"), state.project) : "auto",
-    managerRun: request?.managerRun ?? sharedRuns.find(entry => entry.task === "manager:context")?.state ?? null,
-    managerWork: work?.managerRun ?? sharedRuns.find(entry => entry.task === "manager:context")?.state ?? null,
+    managerBusy: Boolean(managerContext),
+    managerRun: request?.managerRun ?? (sharedManager?.lane === "chat" ? sharedManager : null),
+    managerWork: work?.managerRun ?? (sharedManager?.lane !== "chat" ? sharedManager ?? null : null),
     runningTasks: state.board?.tasks.filter(task => {
       const key = state.project + "\0" + task.id;
       return runningTasks.has(key) || sharedRuns.some(entry => entry.kind === "slot" && entry.task === task.id);
@@ -252,10 +257,8 @@ observeActiveRuns(() => {
 });
 
 function publishReviewActivity(project: string) {
-  for (const [lane, requests] of [["chat", boardRequests], ["work", boardWorkRequests]] as const) {
-    const request = requests.get(projectIdentity(project));
-    if (request?.managerRun) agentSlots.update(project, "manager:context",
-      { ...request.managerRun, reviewing: [...request.reviewing ?? []] });
+  for (const requests of [boardRequests, boardWorkRequests]) {
+    requests.get(projectIdentity(project))?.publishRun?.();
   }
   for (const { active } of windowStates.values()) {
     if (active.project === project) send(active);
@@ -285,11 +288,10 @@ function releaseWatch(project: string, watch: BoardWatch): void {
 
 function subscribe(project: string, board: Board): BoardWatch {
   agentSlots.remember(project);
-  syncSettingsNotices(project, agentSlots.inherited(project));
-  syncTaskStatusNotices(project, localization.locale);
   const tabs = new Set<ProjectTab>();
   let child: ReturnType<typeof cliChild> | undefined;
   let retry: NodeJS.Timeout | undefined;
+  let noticeRetry: NodeJS.Timeout | undefined;
   let stopped = false;
   let startedArchiveSweep = false;
   const watch: BoardWatch = {
@@ -298,12 +300,33 @@ function subscribe(project: string, board: Board): BoardWatch {
     stop: () => {
       stopped = true;
       if (retry) clearTimeout(retry);
+      if (noticeRetry) clearTimeout(noticeRetry);
       clearInterval(sweep);
       child?.kill();
     },
   };
   const archive = () => { void callCli(project, ["archive", "sweep"]); };
   const sweep = setInterval(archive, 24 * 60 * 60 * 1000);
+  function syncNotices() {
+    if (noticeRetry) clearTimeout(noticeRetry);
+    noticeRetry = undefined;
+    try {
+      if (syncTaskStatusNotices(project, localization.locale)) {
+        publishManagerUnread(project);
+        broadcastBoardChat(project, "orchestrator-history");
+      }
+      syncSettingsNotices(project, agentSlots.inherited(project));
+      const key = projectIdentity(project);
+      boardRequests.get(key)?.settingsChanged?.();
+      boardWorkRequests.get(key)?.settingsChanged?.();
+    } catch (error) {
+      if ((error as { code?: string }).code !== "BOARD_BUSY") throw error;
+      // The main process must remain responsive while the CLI owns the board.
+      noticeRetry = setTimeout(() => {
+        try { syncNotices(); } catch (failure) { console.error("Could not synchronize board notices.", failure); }
+      }, 1000);
+    }
+  }
   const launch = () => {
     if (stopped) return;
     const active = cliChild(project, ["watch", "--compact"]);
@@ -317,20 +340,13 @@ function subscribe(project: string, board: Board): BoardWatch {
       catch { result = cliFailure("CLI_UNAVAILABLE", t("errors.4bdf418ab969e5b1")); }
       if (result.ok) {
         try {
-          if (syncTaskStatusNotices(project, localization.locale)) {
-            publishManagerUnread(project);
-            broadcastBoardChat(project, "orchestrator-history");
-          }
+          syncNotices();
         } catch (error) {
           result = cliFailure("STATUS_NOTICE_FAILED", (error as Error).message);
         }
       }
       if (result.ok) {
         watch.board = result.data;
-        syncSettingsNotices(project, agentSlots.inherited(project));
-        const key = projectIdentity(project);
-        boardRequests.get(key)?.settingsChanged?.();
-        boardWorkRequests.get(key)?.settingsChanged?.();
         for (const listener of watch.listeners) listener(result.data);
         scheduleAgentWork();
       }
@@ -356,6 +372,7 @@ function subscribe(project: string, board: Board): BoardWatch {
       retry = setTimeout(launch, 1500);
     });
   };
+  try { syncNotices(); } catch (error) { console.error("Could not synchronize board notices.", error); }
   launch();
   return watch;
 }
@@ -897,6 +914,7 @@ type ManagerRun = {
   id: string;
   startedAt: number;
   phase: "starting" | "waiting" | "running";
+  lane: "chat" | "work" | "maintenance";
   item?: Pick<RunActivity, "type" | "title" | "text" | "status">;
 };
 type ManagerRequest = {
@@ -910,6 +928,7 @@ type ManagerRequest = {
   automaticDone?: Promise<void>;
   reviewing?: Set<string>;
   items?: BoardActivity[];
+  publishRun?: () => void;
   wakeGoal?: () => void;
   question?: { view: ManagerQuestion; settle: (answer: string | null) => void };
 };
@@ -1153,6 +1172,8 @@ async function scheduleMaintenance(project: string, watch: BoardWatch) {
     const tab = [...watch.tabs].find(tab => !tab.window.isDestroyed());
     if (!jobs.ok || !tab) return;
     for (const job of jobs.data) {
+      // Let the visible queue acquire the context between maintenance jobs.
+      if (hasPendingManagerMessages(project)) return;
       const result = await runBoardRequest(tab.window.webContents, watch.board,
         "Repair the assigned private lifecycle maintenance fault. Use --project " + project + " for the task CLI.",
         [], false, false, undefined, undefined, undefined, false, undefined, job);
@@ -1232,7 +1253,7 @@ async function prepareBoardAttachments(files: PastedFile[], scratch: Set<string>
 
 function broadcastBoardChat(project: string, type: string, details: { id?: string; goal?: BoardGoal | null; goalRunning?: boolean; error?: string;
   question?: ManagerQuestion | null; managerRun?: ManagerRun | null;
-  managerWork?: ManagerRun | null } = {}, except?: Electron.WebContents) {
+  managerWork?: ManagerRun | null; items?: RunActivity[] } = {}, except?: Electron.WebContents) {
   for (const { window, tabs } of windowStates.values()) {
     if (!window.isDestroyed() && window.webContents !== except && tabs.some(tab => tab.project === project)) {
       window.webContents.send("chat:update", { project, type, ...details });
@@ -1246,6 +1267,33 @@ function boardThreadPath(project: string, lane: "chat" | "work" = "work") {
   return existsSync(legacy) ? legacy : dialog;
 }
 
+type QueuedBoardMessage = {
+  id: string; draft: string; goal: boolean; created: number; failed?: boolean;
+  files: { name: string; type: string; bytes: string; link?: FileLink }[];
+};
+
+function readQueuedMessage(path: string) {
+  try { return readJson(path) as QueuedBoardMessage; }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+function hasPendingManagerMessages(project: string) {
+  const directory = join(project, ".tasks", "manager-queue");
+  if (!existsSync(directory)) return false;
+  storageDirectory(directory);
+  return readdirSync(directory).some(name => {
+    if (!name.endsWith(".json")) return false;
+    const job = readQueuedMessage(join(directory, name));
+    return Boolean(job && !job.failed);
+  });
+}
+
+function queuedFiles(job: QueuedBoardMessage): PastedFile[] {
+  return job.files.map(file => ({ ...file, bytes: Uint8Array.from(Buffer.from(file.bytes, "base64")).buffer }));
+}
+
 ipcMain.handle("board:queue", async (event, project: string, action: unknown, id?: unknown, draft?: unknown,
   goal?: unknown, files?: unknown) => {
   const state = stateOf(event);
@@ -1257,23 +1305,25 @@ ipcMain.handle("board:queue", async (event, project: string, action: unknown, id
     if (existsSync(directory)) storageDirectory(directory);
     if (action === "list") {
       if (!existsSync(directory)) return { ok: true, data: [] };
-      const jobs = readdirSync(directory).filter(name => name.endsWith(".json")).map(name => {
-        const job = readJson(join(directory, name)) as {
-          id: string; draft: string; goal: boolean; created: number; files: { name: string; type: string; bytes: string; link?: FileLink }[];
-        };
-        return { ...job, files: job.files.map(file => ({ ...file, bytes: Uint8Array.from(Buffer.from(file.bytes, "base64")).buffer })) };
+      const jobs = readdirSync(directory).filter(name => name.endsWith(".json")).flatMap(name => {
+        const job = readQueuedMessage(join(directory, name));
+        return job ? [{ ...job, files: queuedFiles(job) }] : [];
       });
-      return { ok: true, data: jobs.sort((left, right) => left.created - right.created) };
+      return { ok: true, data: jobs.sort((left, right) => left.created - right.created || left.id.localeCompare(right.id)) };
     }
     if (action === "add" && id === undefined) id = randomUUID();
     if (typeof id !== "string" || !codexThreadPattern.test(id)) return cliFailure("INVALID_INPUT", t("errors.9784747447fcf118"));
     const path = join(directory, id + ".json");
-    if (action === "remove") {
-      await rm(path, { force: true });
-    } else if (action === "edit" && typeof draft === "string") {
-      const job = readJson(path) as { goal: boolean; files: unknown[] };
-      if (!draft.trim() && (job.goal || !job.files.length)) return cliFailure("INVALID_INPUT", t("errors.e10b22707db91d58"));
-      writeJson(path, { ...job, draft });
+    if (action === "remove" || action === "retry" || (action === "edit" && typeof draft === "string")) {
+      const error = runtimeTransaction(board.project, () => {
+        if (action === "remove") { rmSync(path, { force: true }); return; }
+        const job = readQueuedMessage(path);
+        if (!job) return;
+        if (action === "retry") { writeJson(path, { ...job, failed: undefined }); return; }
+        if (!(draft as string).trim() && (job.goal || !job.files.length)) return cliFailure("INVALID_INPUT", t("errors.e10b22707db91d58"));
+        writeJson(path, { ...job, draft });
+      });
+      if (error) return error;
     } else if (action === "add" && typeof draft === "string" && typeof goal === "boolean" &&
         Array.isArray(files) && files.every(isPastedFile) && (draft.trim() || (!goal && files.length)) &&
         files.reduce((total, file) => total + file.bytes.byteLength, 0) <= maxAttachmentBytes) {
@@ -1281,6 +1331,7 @@ ipcMain.handle("board:queue", async (event, project: string, action: unknown, id
       writeJson(path, { id, draft, goal, created: Date.now(),
         files: files.map(file => ({ name: file.name, type: file.type, ...(file.link ? { link: file.link } : {}), bytes: Buffer.from(file.bytes).toString("base64") })) });
     } else return cliFailure("INVALID_INPUT", t("errors.ef091a00af0e1a46"));
+    broadcastBoardChat(project, "orchestrator-queue", {}, event.sender);
     return { ok: true, data: action === "add" ? id : null };
   } catch (error) {
     return cliFailure("BOARD_QUEUE_FAILED", (error as Error).message);
@@ -1319,9 +1370,12 @@ ipcMain.handle("board:history", async (event, project?: string, cursor: unknown 
   project = board.project;
   try {
     const key = projectIdentity(project);
+    const shared = agentSlots.entries(project).find(entry => entry.task === "manager:context")?.state;
+    const live = shared?.live?.items ?? [];
     if (view === "live") return { ok: true, data: {
-      work: managerWorkItems(boardWorkRequests.get(key)?.items ?? [], "work").slice(-80),
-      chat: managerWorkItems(boardRequests.get(key)?.items ?? []).slice(-45),
+      dialogue: managerChatItems(boardRequests.get(key)?.items ?? (shared?.lane === "chat" ? live : [])).slice(-45),
+      work: managerWorkItems(boardWorkRequests.get(key)?.items ?? (shared?.lane === "work" ? live : []), "work").slice(-80),
+      chat: managerWorkItems(boardRequests.get(key)?.items ?? (shared?.lane === "chat" ? live : [])).slice(-45),
       reviewers: Object.fromEntries([...(subscriptions.get(project)?.reviewerRuns.keys() ?? [])].map(id =>
         [id, reviewerActivity(board.project, id)])),
     } };
@@ -1355,7 +1409,7 @@ ipcMain.handle("board:history", async (event, project?: string, cursor: unknown 
       }
     };
     const data = await loadHistory();
-    const goalRunning = boardWorkRequests.get(key)?.goalRunning === true;
+    const goalRunning = Boolean(boardWorkRequests.get(key)?.goalRunning ?? shared?.goalRunning);
     return { ok: true, data: { turns: [], nextCursor: null, ...data,
       goal: background?.goal !== undefined ? background.goal : (data && "goal" in data ? data.goal : undefined),
       model: data?.model ?? board.settings.manager?.model, goalRunning } };
@@ -1488,7 +1542,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     if (!queuedPath) return;
     try {
       storageDirectory(dirname(queuedPath));
-      rmSync(queuedPath, { force: true });
+      runtimeTransaction(board.project, () => rmSync(queuedPath, { force: true }));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.error("Could not remove a delivered manager message.", error);
     }
@@ -1525,6 +1579,22 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   if (closingProjects.has(board.project)) return cliFailure("PROJECT_CLOSING", t("ui.the_project_is_closing_beb637fb"));
   const writer = agentSlots.claim(board.project, "manager:context");
   if (!writer) return cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_agent_is_already_handling_a_request_72b4da49"));
+  // Another window may have delivered, edited or removed the message before this claim.
+  let queued: QueuedBoardMessage | undefined;
+  try {
+    if (queuedPath) queued = readQueuedMessage(queuedPath);
+  } catch (error) {
+    writer();
+    return cliFailure("BOARD_QUEUE_FAILED", (error as Error).message);
+  }
+  if (queuedPath && !queued) {
+    writer();
+    return { ok: true as const, data: { answer: "", changes: [] } };
+  }
+  if (queued?.failed) {
+    writer();
+    return cliFailure("BOARD_QUEUE_FAILED", t("ui.not_sent_28bb3764"));
+  }
   const repairSlot = repairTask || cleanupJob ? reserveAgent(board.project, "reviewer", repairTask?.id) : undefined;
   if ((repairTask || cleanupJob) && !repairSlot) { writer(); return taskRunLimit("reviewer"); }
   if (cleanupJob) {
@@ -1539,21 +1609,36 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   const signal = operation.controller.signal;
   const automaticDone = reviewIds || autoNotice || repairTask || cleanupJob ? Promise.withResolvers<void>() : undefined;
   const startedAt = Date.now();
-  const managerRun: ManagerRun = { id: randomUUID(), phase: "starting", startedAt };
-  const running: ManagerRequest = { automaticDone: automaticDone?.promise, ...(cleanupJob ? {} : { managerRun }) };
+  const managerRun: ManagerRun = { id: randomUUID(), phase: "starting", startedAt, lane: cleanupJob ? "maintenance" : lane };
+  const running: ManagerRequest = { automaticDone: automaticDone?.promise, managerRun };
   requests.set(projectKey, running);
-  const publishRun = () => {
+  let live: NonNullable<import("./board-runtime.ts").RuntimeEntry["state"]>["live"];
+  let liveTimer: NodeJS.Timeout | undefined;
+  const broadcastRun = () => {
     if (cleanupJob) return;
-    agentSlots.update(project, "manager:context", running.managerRun
-      ? { ...running.managerRun, reviewing: [...running.reviewing ?? []] } : undefined);
     broadcastMaintenanceSafe(project, "orchestrator-run", lane === "work"
       ? { managerWork: running.managerRun ?? null } : { managerRun: running.managerRun ?? null });
+  };
+  const publishRun = running.publishRun = (updateWindows = true) => {
+    agentSlots.update(project, "manager:context", running.managerRun
+      ? { ...running.managerRun, goalRunning: running.goalRunning, reviewing: [...running.reviewing ?? []], live } : undefined);
+    if (updateWindows) broadcastRun();
   };
   const setRunPhase = (phase: ManagerRun["phase"]) => {
     if (managerRun.phase === phase) return;
     managerRun.phase = phase;
     publishRun();
   };
+  function publishLiveActivity() {
+    liveTimer = undefined;
+    const recent = items.slice(-45);
+    // Keep runtime reads small when command output contains a large attachment or transcript.
+    let remaining = 128 * 1024;
+    const snapshot = recent.reverse().filter(item => (remaining -= JSON.stringify(item).length) >= 0).reverse();
+    live = { sequence: (live?.sequence ?? 0) + 1, items: snapshot };
+    try { publishRun(false); }
+    catch (error) { console.warn("Could not share live manager activity.", (error as Error).message); }
+  }
   const reviewing = running.reviewing = new Set<string>();
   function startReview(ids: string[]) {
     const previousSize = reviewing.size;
@@ -1566,7 +1651,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     publishReviewActivity(project);
   }
   const changes: BoardChange[] = [];
-  let requestText = request.trim();
+  let requestText = queued?.draft.trim() ?? request.trim();
   let pendingAction: Promise<unknown> = Promise.resolve();
   const scratch = new Set<string>();
   let sendingNow: Promise<void> | undefined;
@@ -1694,7 +1779,14 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     const settings = await callCli<BoardSettings>(board.project, ["settings"]);
     if (!settings.ok) return settings;
     const settingsNotices = settingsDelivery(project, lane, () => syncSettingsNotices(project, agentSlots.inherited(project)));
-    const initialSettings = settingsNotices.initial();
+    let initialSettings;
+    while (!initialSettings) {
+      try { initialSettings = settingsNotices.initial(); }
+      catch (error) {
+        if ((error as { code?: string }).code !== "BOARD_BUSY") throw error;
+        await wait(250, undefined, { signal });
+      }
+    }
     const reviewMode = boardReviewMode(settings.data);
     if (expectedReviewMode && reviewMode !== expectedReviewMode) {
       return cliFailure("REVIEW_MODE_CHANGED", t("errors.5842130646fd0b88"));
@@ -1733,7 +1825,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       (name !== "task_accept" || reviewMode !== "human") &&
       (!repairTask || !["task_start", "task_start_batch", "task_accept", "task_request_changes"].includes(name)));
     if (!reviewIds && !cleanupJob) mcpTools.push(...(goal ? goalWorkTools : goalChatTools), githubReadTool);
-    const attachments = await prepareBoardAttachments(files, scratch);
+    const attachments = await prepareBoardAttachments(queued ? queuedFiles(queued) : files, scratch);
     if (!reviewIds && goal !== "resume") {
       historyMessage = {
         at: new Date().toISOString(),
@@ -1931,6 +2023,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           if (!activeGoal) goalWork.abort();
           const goalRunning = Boolean(activeGoal && !reviewIds);
           running.goalRunning = goalRunning;
+          publishRun(false);
           publishGoal({ goal, goalRunning });
         },
         onGoalControl: control => { if (!cleanupJob) running.goal = control; },
@@ -1950,16 +2043,19 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         onActivity: activity => {
           items = activity;
           if (!cleanupJob) running.items = activity;
-          if (lane === "chat") notify("orchestrator", { items: managerChatItems(items) });
+          if (lane === "chat") broadcastBoardChat(project, "orchestrator", { items: managerChatItems(items) });
           if (lane === "work" || activity.some(item => item.messages?.length)) {
             broadcastMaintenanceSafe(project, "orchestrator-work-activity");
           }
           const live = activity.findLast(item => item.status === "inProgress");
           const item = live && { type: live.type, status: live.status, title: live.title,
             text: live.type === "reasoning" ? live.text.slice(-4096) : "" };
-          if (JSON.stringify(managerRun.item) !== JSON.stringify(item)) {
-            managerRun.item = item;
-            publishRun();
+          if (!cleanupJob) {
+            if (JSON.stringify(managerRun.item) !== JSON.stringify(item)) {
+              managerRun.item = item;
+              broadcastRun();
+            }
+            liveTimer ??= setTimeout(publishLiveActivity, 500);
           }
         },
         onWaiting: waiting => {
@@ -2023,7 +2119,10 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
               if (receipt && !await receipt.promise) {
                 throw new Error(t("ui.the_active_reply_ended_before_the_message_was_de_d8eae951"));
               }
-              if (messageId) rmSync(join(board.project, ".tasks", "manager-queue", messageId + ".json"), { force: true });
+              if (messageId) {
+                const path = join(project, ".tasks", "manager-queue", messageId + ".json");
+                runtimeTransaction(project, () => rmSync(path, { force: true }));
+              }
             })().finally(() => {
               if (messageId) steering.delete(messageId);
               sendingNow = undefined;
@@ -2068,6 +2167,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     }
     return cliFailure("CODEX_BOARD_REQUEST_FAILED", message);
   } finally {
+    clearTimeout(liveTimer);
     if (cleanupJob) {
       try { await callCli(project, ["maintenance"], { action: "release", id: cleanupJob.id, owner: process.pid }); }
       catch (error) { console.warn("Private maintenance release deferred", error); }
@@ -2082,6 +2182,14 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     for (const receipt of steering.values()) receipt.resolve(false);
     await sendingNow?.catch(() => {});
     for (const directory of scratch) await rm(directory, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
+    if (queuedPath && !acceptedMessage) {
+      try {
+        runtimeTransaction(project, () => {
+          const pending = readQueuedMessage(queuedPath);
+          if (pending) writeJson(queuedPath, { ...pending, failed: true });
+        });
+      } catch (error) { console.warn("Could not save the queued message failure.", error); }
+    }
     requests.delete(projectKey);
     release?.();
     if (running.goalRunning) publishGoal({ goalRunning: false });
@@ -2089,9 +2197,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     publishRun();
     automaticDone?.resolve();
     operation.finish();
-    if (threadId) {
+    if (threadId || historyAccepted || items.length) {
       broadcastMaintenanceSafe(project, "orchestrator-work-history");
-      if (lane === "chat") broadcastMaintenanceSafe(project, "orchestrator-history", {}, sender);
+      if (lane === "chat") broadcastMaintenanceSafe(project, "orchestrator-history");
     }
     const watch = subscriptions.get(board.project);
     if (watch) setImmediate(() => scheduleAutoReview(watch));
@@ -2447,7 +2555,7 @@ ipcMain.handle("board:command", async (event, command: unknown, id: unknown, inp
     if (!result.ok) return result;
     return { ok: true, data: { ...result.data, executorFullAccess: executorFullAccess(app.getPath("userData"), project, result.data) } };
   }
-  input = { ...(input as Record<string, unknown> ?? {}), actor: "user" };
+  if (args[0] !== "git") input = { ...(input as Record<string, unknown> ?? {}), actor: "user" };
   const selection = state.selection;
   const result = await callCli<Board>(state.project, id === undefined ? args : [...args, id], input);
   if (command === "init" && result.ok && selection === state.selection && !state.window.isDestroyed()) {
@@ -3042,19 +3150,43 @@ else {
     setInterval(scheduleRecurringTasks, 10_000).unref();
     // Runtime changes do not change card revisions. Poll as a fallback across
     // profiles and after owner death, then wake the ordinary queues.
-    const runtimeSnapshots = new Map<string, string>();
     setInterval(() => {
       for (const watch of subscriptions.values()) {
         const project = watch.board.project;
         try {
-          const snapshot = JSON.stringify(agentSlots.entries(project));
-          if (runtimeSnapshots.get(project) !== snapshot) {
-            runtimeSnapshots.set(project, snapshot);
+          const entries = agentSlots.entries(project);
+          const context = entries.find(entry => entry.task === "manager:context");
+          const live = context?.owner !== process.pid ? context?.state?.live : undefined;
+          const stamp = (name: string) => statSync(join(project, ".tasks", name), { throwIfNoEntry: false })?.mtimeMs ?? 0;
+          const previous = watch.shared;
+          const next = watch.shared = {
+            runtime: JSON.stringify(entries, (key, value) => key === "live" ? undefined : value),
+            context: context?.id,
+            activity: live ? context!.id + ":" + live.sequence : "",
+            queue: stamp("manager-queue"),
+            history: stamp("manager-chat"),
+            unread: stamp("manager-unread.json"),
+          };
+          if (previous?.runtime !== next.runtime) {
             notifyRunChange(project);
+          } else if (previous?.unread !== next.unread) {
+            publishManagerUnread(project);
+          }
+          if (previous?.history !== next.history || (previous?.context && previous.context !== next.context)) {
+            broadcastBoardChat(project, "orchestrator-history");
+            broadcastBoardChat(project, "orchestrator-work-history");
+          }
+          if (previous?.activity !== next.activity) {
+            if (live && context?.state?.lane === "chat") {
+              broadcastBoardChat(project, "orchestrator", { items: managerChatItems(live.items) });
+            }
+            broadcastBoardChat(project, "orchestrator-work-activity");
+          }
+          if (previous?.queue !== next.queue) {
+            broadcastBoardChat(project, "orchestrator-queue");
           }
         } catch (error) { console.error(error); }
       }
-      for (const project of runtimeSnapshots.keys()) if (!subscriptions.has(project)) runtimeSnapshots.delete(project);
       scheduleAgentWork();
     }, 1000).unref();
     if (customTitleBar) {

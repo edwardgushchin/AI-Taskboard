@@ -182,8 +182,8 @@ function withSqliteLock<T>(lockPath: string, timeoutMs: 0 | 15_000, callback: (l
   }
 }
 
-export function withLock<T>(directoryPath: string, callback: (lockWaitMs: number) => T): T {
-  return withSqliteLock(join(directoryPath, ".lock.sqlite"), 15_000, callback);
+export function withLock<T>(directoryPath: string, callback: (lockWaitMs: number) => T, timeoutMs: 0 | 15_000 = 15_000): T {
+  return withSqliteLock(join(directoryPath, ".lock.sqlite"), timeoutMs, callback);
 }
 
 export function withRuntimeLock<T>(directoryPath: string, callback: () => T): T {
@@ -578,12 +578,12 @@ export function readBoardSettings(location: BoardLocation): BoardIndex["settings
   return new BoardStore(location).index.settings;
 }
 
-export function onBoard<T>(location: BoardLocation, callback: (store: BoardStore, lockWaitMs: number) => T): T {
+export function onBoard<T>(location: BoardLocation, callback: (store: BoardStore, lockWaitMs: number) => T, timeoutMs: 0 | 15_000 = 15_000): T {
   requireBoard(location);
   return withLock(location.directory, lockWaitMs => {
     finishTestRecovery(location);
     return callback(new BoardStore(location), lockWaitMs);
-  });
+  }, timeoutMs);
 }
 
 export function sha256(data: Uint8Array): string {

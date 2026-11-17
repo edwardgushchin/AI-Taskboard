@@ -459,6 +459,7 @@ function updateChat({ project, id, type, text, items, goal, goalRunning, error, 
       }
       if (frame.project === project) renderActiveAgents();
     }
+    else if (type === "orchestrator-queue") composer?.refreshQueue?.();
     else if (type === "orchestrator-work-activity") composer?.refreshWork?.();
     else if (type === "orchestrator-work-history") composer?.invalidateWork?.();
     else if (type === "orchestrator-work-accepted") composer?.acceptWork?.(id);

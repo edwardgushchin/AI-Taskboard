@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { directory, exists, locateBoard, readJson, withRuntimeLock, writeJson } from "../cli/storage.ts";
 import type { BoardLocation } from "../cli/storage.ts";
-import type { AgentLimits } from "../cli/model.ts";
+import type { AgentLimits, RunActivity } from "../cli/model.ts";
+import type { BoardActivity } from "./codex-chat.ts";
 
 const context = new AsyncLocalStorage<string>();
 
@@ -18,7 +19,16 @@ export interface RuntimeEntry {
   limits?: AgentLimits;
   revision?: number;
   continuation?: { afterDisconnect?: boolean; withoutProgress?: boolean };
-  state?: { id: string; phase: "starting" | "waiting" | "running"; startedAt: number; reviewing?: string[] };
+  state?: {
+    id: string;
+    phase: "starting" | "waiting" | "running";
+    startedAt: number;
+    lane?: "chat" | "work" | "maintenance";
+    reviewing?: string[];
+    item?: Pick<RunActivity, "type" | "title" | "text" | "status">;
+    live?: { sequence: number; items: BoardActivity[] };
+    goalRunning?: boolean;
+  };
   startedAt?: number;
 }
 
