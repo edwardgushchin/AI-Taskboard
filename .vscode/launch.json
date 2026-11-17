@@ -30,8 +30,8 @@
       "id": "reviewWorktreeRoot",
       "type": "pickString",
       "description": "Расположение рабочей копии (см. карточку задачи)",
-      "options": [".tasks/worktrees", ".taskboard-worktrees"],
-      "default": ".tasks/worktrees"
+      "options": [".worktrees"],
+      "default": ".worktrees"
     },
     {
       "id": "reviewTaskId",

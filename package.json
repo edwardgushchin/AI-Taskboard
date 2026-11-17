@@ -14,7 +14,8 @@
     "check": "tsc --noEmit",
     "start": "electron .",
     "build:cli": "node scripts/build-cli.mjs",
-    "package": "npm run build:cli && node scripts/package.mjs"
+    "package": "npm run build:cli && node scripts/package.mjs",
+    "check:docs": "node scripts/check-docs.mjs"
   },
   "devDependencies": {
     "@types/node": "24.19.2",
@@ -31,5 +32,6 @@
     "prismjs": "1.30.0",
     "semver": "7.8.6"
   },
-  "main": "src/desktop/main.ts"
+  "main": "src/desktop/main.ts",
+  "license": "PolyForm-Noncommercial-1.0.0"
 }

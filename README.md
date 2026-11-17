@@ -15,6 +15,41 @@ Use **Settings → Appearance** to follow the system or select a built-in theme.
 
 The board lives in the project's `.tasks` folder. Git operations require Git 2.38 or newer.
 
+## License and commercial permission
+
+Copyright 2026 Eduard Gushchin. AI Taskboard is source-available under the
+unchanged [PolyForm Noncommercial License 1.0.0](LICENSE). It is not OSI Open
+Source: the license restricts commercial use, which [OSD section 6](https://opensource.org/osd)
+does not allow.
+
+The license permits noncommercial purposes, including personal research,
+experimentation, study, entertainment and hobby use without anticipated
+commercial application. It also permits use by charitable organizations,
+educational institutions, public research organizations, public safety or
+health organizations, environmental protection organizations and government
+institutions, **regardless of their funding source or obligations resulting
+from funding**. These exceptions are part of the license; this summary does
+not narrow them. Statutory rights such as fair use are unaffected.
+
+For commercial use outside those permitted purposes, request separate
+permission from **Eduard Gushchin** at **[eduardgushchin@yandex.ru](mailto:eduardgushchin@yandex.ru)**
+before using the software. Describe your organization, intended use and
+distribution, if any. Permission, scope and any payment terms must be agreed
+separately; sending a request grants no commercial permission.
+
+When distributing copies or permitted modifications, include the license
+text or its URL and the `Required Notice:` from [NOTICE](NOTICE). Third-party
+components keep their own licenses and notices, including Codicons (CC-BY-4.0)
+and Codex Worklog (MIT). No previously granted rights are revoked.
+
+Installed desktop applications include these project terms in
+`resources/licenses` (`Contents/Resources/licenses` on macOS). Vendor and
+dependency licenses remain in `resources/app.asar`; Electron and Chromium
+notices ship with the runtime. The CLI directory includes `LICENSE`, `NOTICE`,
+this README and `THIRD-PARTY-NOTICES.txt`; distribute them with the executable.
+CLI builds download the license for the exact build-time Node.js version
+from the official Node.js repository and include it with the fflate license.
+
 ## Develop and package
 
 Use Node.js 24.12 or newer and Git 2.38 or newer. Run `npm ci`, `npm run check`, and `npm test`. Run `npm start` to open the app. For a direct CLI command, use `npm run taskboard -- --project "/path/to/project" list --json`.
@@ -29,4 +64,4 @@ Run `npm run package` on Windows x64. The NSIS installer and unpacked applicatio
 
 Future Linux and macOS releases use platform-native packages. The Linux build uses `AI_TASKBOARD_PROJECT_URL` and `AI_TASKBOARD_MAINTAINER` for package metadata. The macOS distribution requires Developer ID identities and notarization credentials.
 
-[Project design](docs/design.md)
+[Documentation](docs/README.md)

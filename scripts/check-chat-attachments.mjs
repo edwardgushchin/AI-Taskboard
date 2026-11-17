@@ -8,7 +8,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { electronCheck } from "./electron-check.mjs";
+import { electronCheck, localizationFixture } from "./electron-check.mjs";
 
 const script = fileURLToPath(import.meta.url);
 const root = resolve(dirname(script), "..");
@@ -84,6 +84,7 @@ app.whenReady().then(async () => {
     ${read("source-files.cjs")}
     ${read("markdown.js")}
     ${read("chat.js")}
+    ${localizationFixture()}
     ${read("renderer.js")}
     frame = { project: ${JSON.stringify(project)}, russian: true, board: { tasks: [window.fixtureTask], archived: [] } };
     document.querySelector('#welcome').hidden = true;

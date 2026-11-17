@@ -2,7 +2,7 @@
 
 ## Design Decisions
 
-- Read [docs/design.md](docs/design.md) before changing product behavior. When a change revises a documented decision, update the relevant section there.
+- Read [docs/explanation/architecture.md](docs/explanation/architecture.md) before changing product behavior. When a change revises a documented decision, update the relevant section there.
 - Use glyphs from the bundled Codicons font for all desktop UI icons. Do not add SVG icons or draw icons in CSS. If a native control only accepts an image, render the corresponding font glyph into an image.
 
 ## Verification

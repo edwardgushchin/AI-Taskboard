@@ -1,3 +1,6 @@
+import { isManual, manualContext } from "../src/cli/manual-board.ts";
+import { captureFileLink, isFileLink, verifyFileLink } from "../src/cli/attachment-links.ts";
+import localization from "../src/desktop/localization.cjs";
 import { activeRunSummary } from "../src/desktop/active-runs.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -16,7 +19,7 @@ import { boardReviewMode, codexThreadPattern, defaultBoardAgents, hexTagColor, m
 import { managerInbox, needsManagerAttention } from "../src/cli/task-messages.ts";
 import type { RunActivity, Task } from "../src/cli/model.ts";
 import type { ChatSettings } from "../src/cli/model.ts";
-import { directory as storageDirectory, readBoardSettings, readJson, writeJson } from "../src/cli/storage.ts";
+import { directory as storageDirectory, locateBoard, readBoardSettings, readJson, writeJson } from "../src/cli/storage.ts";
 import { runtimeLocation } from "../src/desktop/board-runtime.ts";
 import type { BoardGoal, BoardGoalAction } from "../src/desktop/codex-chat.ts";
 import { inspectProjectPath, projectSha256 } from "../src/desktop/project-files.ts";
@@ -38,7 +41,7 @@ const source = (file: string) => readFileSync(new URL("../src/desktop/" + file, 
 const boardSource = stripTypeScriptTypes(source("board-actions.ts").replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, ""));
 const main = ts.createSourceFile("main.ts", source("main.ts"), ts.ScriptTarget.Latest, true);
 const handlerSource = stripTypeScriptTypes(main.statements.map(node => node.getText(main)).filter(text =>
-  /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork)\(|const (?:imageExtensions|imageTypes|boardRequests|boardWorkRequests|goalChatTools|goalWorkTools|deferredExecutors) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
+  /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|scheduleMaintenance|scheduleRecurringTasks|taskRunLimit)\(|const (?:imageExtensions|imageTypes|boardRequests|boardWorkRequests|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork|maintenanceWork) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
 const cliFailure = (code: string, message: string) => ({ ok: false, error: { code, message } });
 
@@ -68,7 +71,7 @@ function fixture(t: TestContext) {
   };
   const { autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools } = runInNewContext(
     boardSource + "\n({ autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools })",
-    { AbortSignal, boardReviewMode, callCli, cliFailure, defaultBoardAgents, hexTagColor, inspectProjectPath, managerInbox, needsManagerAttention, projectSha256, reviewVerifier, russianWriting, TaskboardError, taskIdPattern,
+    { AbortSignal, isManual, manualContext, locateBoard, readBoardSettings, boardReviewMode, callCli, cliFailure, defaultBoardAgents, hexTagColor, inspectProjectPath, managerInbox, needsManagerAttention, projectSha256, reviewVerifier, russianWriting, TaskboardError, taskIdPattern,
       taskFields: { title: {}, description: {}, criteria: {}, tags: {} },
     },
   );
@@ -77,14 +80,14 @@ function fixture(t: TestContext) {
   type GoalRequest = { objective?: string; resume?: boolean; accepted: () => void; delivered: (id: string) => void; controls: (control: GoalControl) => void;
     update: (goal: BoardGoal | null) => void; activity: (items: RunActivity[]) => void; settings?: ChatSettings | null;
     enableNotifications: (steer?: (text: string, images: string[]) => Promise<void>) => void; endTurn: () => void;
-    access?: ManagerAccess; confirmApproval?: (details: string) => Promise<boolean> };
+    role?: string; access?: ManagerAccess; confirmApproval?: (details: string) => Promise<boolean> };
   type Reply = (action: RunAction, prompt: string, images: string[], id?: string, context?: any,
     waiting?: (waiting: boolean) => void, signal?: AbortSignal, goal?: GoalRequest) => Promise<{ text: string } | { interrupted: true }>;
   let respond: Reply;
   const handlers = new Map<string, (...args: unknown[]) => Promise<any>>();
   const threadId = "00000000-0000-0000-0000-000000000001";
   const dialogueId = "00000000-0000-0000-0000-000000000002";
-  const binding = join(project, ".tasks", "orchestrator.json");
+  const binding = join(project, ".tasks", "manager-dialog.json");
   const chatBinding = join(project, ".tasks", "manager-dialog.json");
   const idleGoalActions: BoardGoalAction[] = [];
   let providerHistoryReads = 0;
@@ -102,10 +105,10 @@ function fixture(t: TestContext) {
   });
   const activeAgents = new Map<string, { control: { steer: (text: string) => Promise<void> } }>();
   const sender = { isDestroyed: () => true };
-  const runtime = runInNewContext(handlerSource + "\n({ frame, scheduleAutoReview, boardRequests, boardWorkRequests, managerQuestion })", {
+  const runtime = runInNewContext(handlerSource + "\n({ frame, scheduleAutoReview, boardRequests, boardWorkRequests, managerQuestion, runBoardRequest, scheduleRecurringTasks })", {
     scheduleAutoBoard: () => {},
     activeRunSummary, runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
-    AbortSignal, AbortController, ArrayBuffer, Buffer, Error, basename, dirname, extname, join, mkdtemp, rm, writeFile, maxAttachmentBytes, boardActions, boardInstructions, boardTools, callCli,
+    captureFileLink, isFileLink, verifyFileLink, AbortSignal, AbortController, ArrayBuffer, Buffer, Error, basename, dirname, extname, join, mkdtemp, rm, writeFile, maxAttachmentBytes, boardActions, boardInstructions, boardTools, callCli,
     githubReadTool, readBoardGitHub: (cwd: string, args: unknown) => callCli(cwd, ["github-read"], args),
     executorFullAccess, managerAccess, setTaskExecutorAccess,
     autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, defaultBoardAgents, reviewVerifier,
@@ -124,8 +127,8 @@ function fixture(t: TestContext) {
     },
     activateTab: (owner: { active: unknown }, tab: unknown) => { owner.active = tab; },
     launchingTasks: new Set(), runningTasks, chatRuns: new Map(), activeAgents, managerInbox, needsManagerAttention, subscriptions, reviewerTools,
-    closingProjects: new Set(), setImmediate, setTimeout, clearTimeout, performance, console, agentSlots,
-    runtimeLocation, readBoardSettings, settingsDelivery, syncSettingsNotices,
+    process, closingProjects: new Set(), setImmediate, setTimeout, clearTimeout, performance, console, agentSlots,
+    russianWriting, isManual, manualContext, runtimeLocation, readBoardSettings, settingsDelivery, syncSettingsNotices,
     reviewWithCodex: async (_profile: string, cwd: string, settings: ChatSettings | null, context: string,
       tools: { name: string }[], call: RunAction, _signal: AbortSignal,
       onUsage: (report: import("../src/cli/token-usage.ts").TokenUsageReport) => Promise<void>) => {
@@ -166,29 +169,35 @@ function fixture(t: TestContext) {
       const result = await callCli(cwd, ["start", id], { revision, resolveConflicts });
       return result.ok ? { ok: true, data: result.data.task } : result;
     },
-    tmpdir: () => folder, stateOf: () => ({ project, board: { project, settings: {} } }), app: { getPath: () => folder }, cliFailure, lang: (english: string) => english,
+    tmpdir: () => folder, stateOf: () => ({ project, board: { project, settings: {} } }), app: { getPath: () => folder }, cliFailure, t: (key: string, parameters = {}) => localization.text(key, parameters, "en"), localization,
     beginOperation: () => ({ controller: new AbortController(), finish() {} }),
     ipcMain: { handle: (name: string, callback: (...args: unknown[]) => Promise<any>) => { handlers.set(name, callback); } },
     replyToBoard: async (_profile: string, cwd: string, prompt: string, images: string[], action: RunAction,
       _tools: unknown, instructions: string, _signal: AbortSignal,
       session: { id?: string; title: string; save: (id: string) => void; attachmentContext?: string; mcpTools: { name: string; description: string }[];
-        separateTurn?: boolean; access?: ManagerAccess; confirmApproval?: (details: string) => Promise<boolean>;
+        role?: "manager" | "reviewer"; separateTurn?: boolean; readOnly?: boolean; access?: ManagerAccess; confirmApproval?: (details: string) => Promise<boolean>;
         onWaiting: (waiting: boolean) => void; onTurnEnded: () => void; goal?: string; resumeGoal?: boolean; onGoalSet: () => void;
         onControl: (control: { steer: (text: string, images: string[], id?: string) => Promise<void>; interrupt: () => Promise<void> }) => void;
         onMessage: (id: string) => void; onActivity: (items: RunActivity[]) => void;
         onGoalControl: (control: GoalControl) => void; onGoal: (goal: BoardGoal | null) => void; settings?: ChatSettings | null }) => {
       assert.equal(cwd, project);
       assert.ok(instructions.includes(russianWriting));
-      assert.match(instructions, /Before accepting, check whether the project or task needs any evidence after acceptance/);
-      assert.match(instructions, /verify the paths and checksums/);
-      if (!session.separateTurn) {
+      const manualTurn = instructions.includes("Обычная доска личных дел");
+      const reviewTurn = Boolean(session.readOnly || session.separateTurn);
+      const cleanupTurn = instructions.includes("private maintenance run");
+      if (manualTurn) assert.match(instructions, /Пользователь сам меняет статусы/);
+      else {
+        assert.match(instructions, /Before accepting, check whether the project or task needs any evidence after acceptance/);
+        assert.match(instructions, /verify the paths and checksums/);
+      }
+      if (!reviewTurn && !manualTurn && !cleanupTurn) {
         assert.match(instructions, /reviewer approval can unblock dependent work.*before dispatching more independent work/);
-        assert.match(instructions, /The board retries deferred cleanup.*retry only after the worktree changes/);
+        assert.match(instructions, /Lifecycle cleanup and its diagnostics are internal/);
         assert.match(instructions, /only what changes the recipient's work/);
         assert.match(session.mcpTools.find(tool => tool.name === "task_message")!.description, /only what this executor needs to act/);
       }
       assert.equal(session.title, "Project manager for project");
-      const expectedTools = session.separateTurn ? [
+      const expectedTools = cleanupTurn ? ["task_cleanup_status", "task_cleanup", "project_path", "project_sha256"] : manualTurn ? ["ask_user", "tag_set_color", "github_read"] : reviewTurn ? [
         "task_review", "task_review_diff", "task_review_artifact", "task_accept", "task_request_changes", "project_git", "project_path", "project_sha256",
       ] : [
         "task_cancel", "provider_tools", "task_tool_grant", "task_tool_revoke", "task_set_executor_access", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_approve", "task_wait", "task_review_queue", "task_review", "task_review_diff",
@@ -198,22 +207,22 @@ function fixture(t: TestContext) {
       ];
       const mode = boardReviewMode((await callCli(project, ["settings"], undefined, false)).data);
       assert.deepEqual(Array.from(session.mcpTools, tool => tool.name).sort(),
-        [...expectedTools.filter(name => (name !== "task_accept" || mode !== "human")),
-        ...(!session.separateTurn ? (session.goal || session.resumeGoal ? ["goal_inbox", "goal_report"] : ["goal_read", "goal_send"]) : []),
-        ...(session.separateTurn && mode === "reviewer" ? ["manager_ack", "task_cancel", "task_start"] : [])].sort());
-      if (session.separateTurn) {
+        [...expectedTools.filter(name => (name !== "task_accept" || mode !== "human") && (!instructions.includes("This turn repairs") || !["task_start", "task_start_batch", "task_accept", "task_request_changes"].includes(name))),
+        ...(!reviewTurn && !cleanupTurn ? (session.goal || session.resumeGoal ? ["goal_inbox", "goal_report"] : ["goal_read", "goal_send"]) : []),
+        ...(reviewTurn && mode === "reviewer" ? ["manager_ack", "task_cancel", "task_start"] : [])].sort());
+      if (reviewTurn) {
         assert.doesNotMatch(instructions, /manager_inbox|task_cleanup_status/);
         assert.equal(session.attachmentContext, undefined);
-        assert.equal(session.id, undefined);
+        assert.equal(session.separateTurn, undefined);
         assert.equal((_tools as unknown[]).length, 0);
       }
-      const newThread = session.separateTurn ? "00000000-0000-0000-0000-000000000004" :
+      const newThread = reviewTurn ? dialogueId :
         session.goal || session.resumeGoal ? threadId : dialogueId;
       if (!session.id) session.save(newThread);
       return respond(action, prompt, images, session.id, session.attachmentContext && JSON.parse(session.attachmentContext),
         session.onWaiting, _signal, { objective: session.goal, resume: session.resumeGoal, accepted: session.onGoalSet, delivered: session.onMessage,
           controls: session.onGoalControl, update: session.onGoal, activity: session.onActivity,
-          settings: session.settings, endTurn: session.onTurnEnded, access: session.access, confirmApproval: session.confirmApproval,
+          role: session.role, settings: session.settings, endTurn: session.onTurnEnded, access: session.access, confirmApproval: session.confirmApproval,
           enableNotifications: steer => session.onControl({
             steer: async (text, images, id) => {
               if (steer) await steer(text, images);
@@ -227,6 +236,14 @@ function fixture(t: TestContext) {
   return {
     folder, project, threadId, dialogueId, binding, chatBinding, idleGoalActions, cliCalls, boardListeners, executorNotifications, managerNotifications,
     reviewing, agentSlots,
+    repair: (task: Task, reply: Reply) => {
+      respond = reply;
+      return runtime.runBoardRequest(sender, { project, tasks: [task] }, "Repair this acceptance", [], false, false, undefined, undefined, undefined, false, task);
+    },
+    cleanup: (job: import("../src/cli/maintenance-state.ts").MaintenanceJob, reply: Reply) => {
+      respond = reply;
+      return runtime.runBoardRequest(sender, { project, tasks: [] }, "Repair private lifecycle cleanup", [], false, false, undefined, undefined, undefined, false, undefined, job);
+    },
     busyDecisions,
     setReviewer: (runner: typeof reviewSubmission) => { reviewSubmission = runner; },
     schedule: (board: any, reply: Reply) => {
@@ -238,6 +255,7 @@ function fixture(t: TestContext) {
       subscriptions.set(project, watch);
       return {
         tick: () => runtime.scheduleAutoReview(watch),
+        acceptanceTick: () => runtime.scheduleRecurringTasks(),
         runChanged: () => { for (const listener of boardListeners) listener(watch.board); },
         reloadReviewReports: () => { watch.reviewReports = readReviewReports(folder, project); return watch.reviewReports; },
         reviewing,
@@ -292,6 +310,29 @@ function fixture(t: TestContext) {
     goal: (kind: string, objective?: string) => handlers.get("board:goal")!({ sender }, kind, objective),
   };
 }
+
+test("manual manager edits personal tasks but cannot launch or move them", async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"], { boardType: "manual" })).ok, true);
+  const result = await f.run("Plan the week", async act => {
+    const created = await act("task_create", { title: "Buy groceries" });
+    assert.equal(created.ok, true, JSON.stringify(created));
+    const id = created.data.id;
+    const shown = await act("task_show", { id });
+    const updated = await act("task_update", { id, revision: shown.data.revision, description: "Milk", note: "User plan" });
+    assert.equal(updated.ok, true, JSON.stringify(updated));
+    assert.equal(updated.data.status, shown.data.status);
+    for (const name of ["task_start", "task_approve", "task_cancel", "task_accept"]) {
+      const blocked = await act(name, { id, revision: updated.data.revision });
+      assert.equal(blocked.error.code, "MANUAL_BOARD");
+    }
+    const board = await act("board_list", {});
+    assert.equal(board.data.boardType, "manual");
+    assert.ok(board.data.statuses.some((s: { id: string }) => s.id === shown.data.status));
+    return { text: "Week planned." };
+  });
+  assert.equal(result.data?.answer, "Week planned.", JSON.stringify(result));
+});
 
 test("manager can set and read the board tag palette in HEX", async t => {
   const f = fixture(t);
@@ -500,18 +541,21 @@ test("a board snapshot with auto-review on wakes the manager once per submitted 
   assert.deepEqual(readJson(f.binding), goalBinding);
 });
 
-test("manager capacity on a board limits goals while ordinary chat can run", async t => {
+test("manager has no configurable capacity limit and shares one board context", async t => {
   const f = fixture(t);
   await f.cli(["init"]);
-  const release = f.agentSlots.acquire(f.project, "manager");
-  assert.ok(release);
-  const reply: Parameters<typeof f.run>[1] = async () => ({ text: "Available." });
-  const blocked = await f.run("Coordinate release", async () => assert.fail("A full pool must not start a goal"), [], true);
-  assert.equal(blocked.error.code, "MANAGER_LIMIT");
-  assert.equal((await f.run("How is the release?", reply)).data.answer, "Available.");
+  const configured = await f.cli(["settings"], { agentLimits: { manager: 1 } });
+  assert.equal(configured.error.code, "INVALID_INPUT");
+  f.agentSlots.configure({ executor: 1, manager: 1, reviewer: 1 });
+  const release = f.agentSlots.acquire(f.project, "manager")!;
+  assert.equal(f.agentSlots.available(f.project, "manager", { manager: 1 }), Infinity);
+  assert.equal((await f.run("Discuss", async () => ({ text: "Ready" }))).ok, true);
+  const goal = await f.run("Coordinate release", async (_act, _prompt, _images, id) => {
+    assert.equal(id, f.dialogueId);
+    return { text: "Same context" };
+  }, [], true);
+  assert.equal(goal.ok, true, JSON.stringify(goal));
   release();
-  assert.equal((await f.run("Coordinate release", reply, [], true)).ok, true);
-  assert.equal(f.agentSlots.available(f.project, "manager"), 1);
 });
 
 test("manager can route a draft to Luna or Sol without changing board defaults", async t => {
@@ -1314,9 +1358,12 @@ test("a goal delegates a bounded slice, waits for submission, and reviews before
     assert.match(f.executorNotifications[0], /afterSequence/);
     const received = await f.cli(["messages", slice.id]);
     assert.equal(received.data[0].text, decisionText);
+    assert.equal(decision.data.at, received.data[0].at);
+    assert.ok(Number.isFinite(Date.parse(decision.data.at)));
     assert.equal(received.data[0].replyTo, question.data.sequence);
     const later = await f.cli(["manager-message", slice.id], { text: "Use the existing test fixture." });
     const additions = await f.cli(["messages", slice.id], { afterSequence: decision.data.sequence });
+    assert.equal(later.data.at, additions.data[0].at);
     assert.deepEqual(additions.data.map(({ sequence }: { sequence: number }) => sequence), [later.data.sequence]);
     assert.deepEqual((await f.cli(["messages", slice.id], { afterSequence: later.data.sequence })).data, []);
     assert.equal((await f.cli(["messages", slice.id], { afterSequence: -1 })).error.code, "INVALID_INPUT");
@@ -1776,6 +1823,42 @@ test("the project manager can revise an approved task and resolve its blocker fr
   assert.deepEqual(updated.history.slice(-2).map((event: { actor: string }) => event.actor), ["manager", "manager"]);
 });
 
+test("manager keeps large file links through queue, provider context and card creation", async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"])).ok, true);
+  const path = join(f.project, "large.bin");
+  await writeFile(path, "part");
+  const { truncateSync } = await import("node:fs");
+  truncateSync(path, 80 * 1024 * 1024);
+  const link = captureFileLink(path);
+  const files = [{ name: "large.bin", type: "", bytes: new ArrayBuffer(0), link }];
+  const queued = await f.queue("add", undefined, "Read part", false, files);
+  assert.equal(queued.ok, true, JSON.stringify(queued));
+  const restored = await f.queue("list");
+  assert.equal(restored.data[0].files[0].link.path, link.path);
+  assert.equal(restored.data[0].files[0].bytes.byteLength, 0);
+  const result = await f.run("Read part", async (act, _prompt, images, _id, context) => {
+    assert.equal(images.length, 0);
+    assert.equal(context.attachments[0].path, link.path);
+    assert.equal(context.attachments[0].link.size, link.size);
+    const created = await act("task_create", { title: "Linked", attachmentIds: [1] });
+    assert.equal(created.ok, true, JSON.stringify(created));
+    assert.equal(created.data.attachments[0].link.path, link.path);
+    return { text: "Linked" };
+  }, files);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal((await f.queue("remove", queued.data)).ok, true);
+  truncateSync(path, 81 * 1024 * 1024);
+  const changed = await f.run("Check changed source", async (_act, _prompt, images, _id, context) => {
+    assert.equal(images.length, 0);
+    assert.match(context.attachments[0].error, /changed/);
+    assert.equal(context.attachments[0].link.path, link.path);
+    return { text: "Source changed; attach it again." };
+  }, files);
+  assert.equal(changed.ok, true, JSON.stringify(changed));
+  assert.ok(existsSync(path));
+});
+
 test("orchestrator preserves selected attachments, restores blocked drafts, and reports changes after a failed reply", async t => {
   const f = fixture(t);
   assert.equal((await f.cli(["init"])).ok, true);
@@ -1951,87 +2034,24 @@ test("two windows sharing a board cannot start separate orchestrator chats", asy
   }
 });
 
-test("the manager answers while the goal runs, and passes durable directions and decisions between the sessions", { timeout: 25_000 }, async t => {
-  const f = fixture(t);
-  await f.cli(["init"]);
-  const { data: task } = await f.cli(["create"], { title: "Release checks" });
-  f.setRunning(task.id, true);
-  const ready = Promise.withResolvers<void>();
-  const apply = Promise.withResolvers<void>();
-  const continued = Promise.withResolvers<void>();
-  const secretWork = "Private coordination goes in the work view";
-  const objective = "Coordinate the release";
-  const workRun = f.run(objective, async (call, _prompt, _images, _id, _context, _waiting, _signal, goal) => {
-    goal!.update({ objective, status: "active" });
-    goal!.accepted();
-    goal!.enableNotifications();
-    goal!.activity([{ id: "work-1", type: "mcpToolCall", title: "Current checks", text: secretWork, status: "inProgress",
-      messages: [{ id: task.id, actor: "agent", text: secretWork, sequence: 1 }] } as RunActivity]);
-    const waiting = call("task_wait", { ids: [task.id] });
-    ready.resolve();
-    await apply.promise;
-    const wake = await waiting;
-    assert.equal(wake.error.code, "USER_MESSAGE_RECEIVED");
-    assert.equal(wake.goalMessagesPending, true);
-    const [mail] = (await call("goal_inbox", {})).data;
-    assert.equal(mail.text, "Hold publication");
-    assert.equal((await call("goal_inbox", { id: mail.id, status: "applied", reply: "Publication is on hold." })).ok, true);
-    assert.equal((await call("goal_inbox", { id: mail.id, status: "applied", reply: "Duplicate." })).error.code, "GOAL_MESSAGE_CLOSED");
-    assert.equal((await call("goal_report", { text: "Release checks passed." })).ok, true);
-    continued.resolve();
-    goal!.update({ objective, status: "paused" });
-    return { text: "Background finished." };
+test("a running goal serializes manager turns and accepts steering in the same context", async t => {
+  const f = fixture(t); await f.cli(["init"]);
+  const ready = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>();
+  const work = f.run("Coordinate", async (_act, _prompt, _images, _id, _context, _waiting, _signal, goal) => {
+    goal!.accepted(); goal!.enableNotifications(); ready.resolve(); await finish.promise;
+    return { text: "Finished" };
   }, [], true);
   try {
-    await Promise.race([ready.promise, workRun.then(result => assert.fail(JSON.stringify(result)))]);
-    const walk = await f.run("What is happening? Hold publication.", async (call, _prompt, _images, id) => {
-      assert.equal(id, undefined);
-      const status = (await call("goal_read", {})).data;
-      assert.equal(status.running, true);
-      assert.equal(status.goal.objective, objective);
-      assert.equal(status.currentAction.title, "Current checks");
-      assert.equal(status.recent[0].messages[0].text, secretWork);
-      const queued = (await call("goal_send", { text: "Hold publication" })).data;
-      assert.equal(queued.status, "pending");
-      return { text: "I forwarded the direction." };
-    });
-    assert.equal(walk.data.id, f.dialogueId, JSON.stringify(walk));
-    assert.equal(walk.data.answer, "I forwarded the direction.");
-    assert.match(f.managerNotifications.at(-1) ?? "", /goal_inbox/);
-    assert.match(JSON.stringify((await f.history(undefined, "live")).data.work), /Current checks/);
-    apply.resolve();
-    await Promise.race([continued.promise, workRun.then(result => assert.fail(JSON.stringify(result)))]);
-    assert.equal((await workRun).ok, true);
-    const talk = await f.run("Send another update", async (call, _prompt, _images, id) => {
-      assert.equal(id, f.dialogueId);
-      const status = (await call("goal_read", {})).data;
-      assert.equal(status.running, false);
-      assert.equal(status.messages[0].status, "applied");
-      assert.ok(status.notices.some(({ report }: { report?: string }) => report === "Release checks passed."));
-      assert.equal((await call("goal_send", { text: "When resumed, check the notes." })).data.status, "pending");
-      return { text: "Queued for resumption." };
-    });
-    assert.equal(talk.ok, true);
-    const resume = await f.run("", async (call, _prompt, _images, id, _context, _waiting, _signal, goal) => {
-      assert.equal(id, f.threadId);
-      goal!.update({ objective, status: "active" });
-      assert.equal((await call("goal_inbox", {})).data[0].text, "When resumed, check the notes.");
-      return { text: "Resumed." };
-    }, [], "resume");
-    assert.equal(resume.ok, true);
-    const chat = JSON.stringify((await f.history()).data.turns);
-    assert.doesNotMatch(chat, /Private coordination|Background finished/);
-    assert.match(chat, /Publication is on hold/);
-    assert.match(chat, /Release checks passed/);
-    assert.match(JSON.stringify((await f.history(undefined, "work")).data.turns), /Private coordination/);
-  } finally {
-    if (!f.managerNotifications.length) {
-      f.setRunning(task.id, false);
-      await f.pushBoard();
-    }
-    apply.resolve();
-    await workRun;
-  }
+    await ready.promise;
+    const duplicate = await f.run("Parallel question", async () => assert.fail("Second context"));
+    assert.equal(duplicate.error.code, "BOARD_REQUEST_IN_PROGRESS");
+    assert.equal((await f.sendNow("Hold publication")).ok, true);
+    assert.equal(f.managerNotifications.at(-1), "Hold publication");
+  } finally { finish.resolve(); await work; }
+  const next = await f.run("Continue", async (_act, _prompt, _images, id) => {
+    assert.equal(id, f.threadId); return { text: "Same context" };
+  });
+  assert.equal(next.ok, true, JSON.stringify(next));
 });
 
 test("the manager can read the open queue without closed or archived cards", async t => {
@@ -2173,4 +2193,100 @@ test("manager returns the same card in every review mode and preserves human acc
     assert.equal(run.ok, true, JSON.stringify(run.error ?? run.data?.error));
     await f.cli(["cancel", task.id], { reason: "Fixture complete" });
   }
+});
+
+
+test("private cleanup repair persists, shares reviewer capacity and preserves a done card without a goal", async t => {
+  const f = fixture(t);
+  const git = (...args: string[]) => {
+    const result = spawnSync("git", ["-C", f.project, ...args], { encoding: "utf8", windowsHide: true });
+    assert.equal(result.status, 0, result.stderr); return result.stdout.trim();
+  };
+  git("init", "-b", "main"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.invalid");
+  await writeFile(join(f.project, ".gitignore"), "node_modules/\n*.local\n");
+  git("add", ".gitignore"); git("commit", "-m", "chore: fixture");
+  await f.cli(["init"]); await f.cli(["settings"], { reviewMode: "human", autoMode: false });
+  await f.run("Initial conversation", async () => ({ text: "Remembered" }));
+  const historyBefore = await f.history();
+  const { data: card } = await f.cli(["create"], { title: "T-0138 fixture", criteria: ["Keep evidence"] });
+  await f.cli(["approve", card.id]); const { data: started } = await f.cli(["start", card.id]);
+  await writeFile(join(started.worktree, "result.txt"), "result");
+  const { data: preview } = await f.cli(["preview", card.id]);
+  const { data: submitted } = await f.cli(["submit", card.id], { token: preview.token, message: "fix: fixture", summary: "Result", checks: ["Checked"] });
+  mkdirSync(join(started.worktree, "node_modules"));
+  const dependency = join(started.worktree, "node_modules", "reproduced.js");
+  await writeFile(dependency, "known dependency bytes");
+  await writeFile(join(started.worktree, "user.local"), "unknown user data");
+  const { data: done } = await f.cli(["accept", card.id], { revision: submitted.revision });
+  assert.equal(done.status, "done"); assert.equal(done.cleanupWarning, undefined);
+  const queuePath = join(f.project, ".tasks", "maintenance.json");
+  const jobs = JSON.parse(readFileSync(queuePath, "utf8"));
+  jobs[0].retryAt = 0; jobs[0].owner = 999999; // Recover an interrupted owner after restart.
+  await writeFile(queuePath, JSON.stringify(jobs));
+  const { data: pending } = await f.cli(["maintenance"]);
+  assert.equal(pending.length, 1);
+  const release = f.agentSlots.acquire(f.project, "reviewer", { reviewer: 1 }, "other-review")!;
+  assert.equal((await f.cleanup(pending[0], async () => assert.fail("Reviewer pool full"))).error.code, "REVIEWER_LIMIT");
+  assert.equal((await f.cli(["maintenance"])).data.length, 1);
+  release();
+  const result = await f.cleanup(pending[0], async (action, _prompt, _images, id, _context, _waiting, _signal, meta) => {
+    assert.equal(id, f.dialogueId);
+    assert.equal(meta?.role, "reviewer"); assert.equal(meta?.objective, undefined); assert.equal(meta?.resume, false);
+    assert.equal(f.agentSlots.available(f.project, "reviewer", { reviewer: 1 }), 0);
+    assert.equal(f.agentSlots.available(f.project, "executor", { executor: 1 }), 1);
+    assert.equal((await f.cli(["maintenance"], { action: "claim", id: pending[0].id, owner: process.pid })).data.claimed, false);
+    assert.equal(readFileSync(dependency, "utf8"), "known dependency bytes");
+    await rm(dependency);
+    await rm(join(started.worktree, "node_modules"), { recursive: true });
+    assert.equal(readFileSync(join(started.worktree, "user.local"), "utf8"), "unknown user data");
+    const cleaned = await action("task_cleanup", { id: card.id, artifacts: ["user.local"] });
+    assert.equal(cleaned.ok, true);
+    return { text: "Internal cleanup repaired." };
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual((await f.cli(["maintenance"])).data, []);
+  assert.ok(!existsSync(started.worktree));
+  assert.equal((await f.cli(["show", card.id])).data.status, "done");
+  assert.equal((await f.cli(["list"])).data.tasks.length, 1);
+  assert.deepEqual(await f.history(), historyBefore);
+  assert.equal(f.pendingQuestion(), undefined);
+  assert.equal(f.agentSlots.available(f.project, "reviewer", { reviewer: 1 }), 1);
+});
+
+test("acceptance repair reuses manager context and waits only for reviewer capacity", async t => {
+  const f = fixture(t);
+  const git = (...args: string[]) => {
+    const result = spawnSync("git", ["-C", f.project, ...args], { encoding: "utf8", windowsHide: true });
+    assert.equal(result.status, 0, result.stderr); return result.stdout.trim();
+  };
+  git("init", "-b", "main"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.invalid");
+  await writeFile(join(f.project, "source.txt"), "base\n"); git("add", "."); git("commit", "-m", "chore: initial");
+  await f.cli(["init"]); await f.cli(["settings"], { reviewMode: "human", autoMode: false });
+  await f.run("Initial conversation", async () => ({ text: "Remembered" }));
+  const { data: card } = await f.cli(["create"], { title: "Repair", criteria: ["Verified"] });
+  await f.cli(["approve", card.id]); const { data: started } = await f.cli(["start", card.id]);
+  await writeFile(join(started.worktree, "source.txt"), "task\n");
+  const { data: preview } = await f.cli(["preview", card.id]);
+  const { data: submitted } = await f.cli(["submit", card.id], { token: preview.token, message: "fix: task", summary: "Changed", checks: ["Checked"] });
+  await writeFile(join(f.project, "source.txt"), "target\n"); git("commit", "-am", "fix: target");
+  const { data: queued } = await f.cli(["accept", card.id], { actor: "user", revision: submitted.revision, targetHead: git("rev-parse", "HEAD"), message: "fix: integrate" });
+  assert.equal(queued.acceptanceRepair.phase, "queued");
+  const release = f.agentSlots.acquire(f.project, "reviewer", { reviewer: 1 }, "review:other")!;
+  assert.equal((await f.repair(queued, async () => assert.fail("Reviewer pool full"))).error.code, "REVIEWER_LIMIT");
+  assert.equal((await f.cli(["show", card.id])).data.acceptanceRepair.phase, "queued");
+  release();
+  const scheduler = f.schedule((await f.cli(["list", "--compact"])).data, async (_act, _prompt, _images, id, _context, _waiting, _signal, session) => {
+    assert.equal(id, f.dialogueId); assert.deepEqual(session?.settings, defaultBoardAgents.manager);
+    assert.equal(f.agentSlots.available(f.project, "reviewer", { reviewer: 1 }), 0);
+    assert.equal(f.agentSlots.available(f.project, "executor", { executor: 1 }), 1);
+    const running = (await f.cli(["show", card.id])).data;
+    assert.equal(running.status, "review"); assert.equal(running.git.worktree, started.worktree);
+    await f.cli(["block", card.id], { reason: "Needs product decision", condition: "Decide" });
+    return { text: "Decision needed" };
+  });
+  scheduler.acceptanceTick(); scheduler.acceptanceTick();
+  await scheduler.done();
+  assert.equal(f.agentSlots.available(f.project, "reviewer", { reviewer: 1 }), 1);
+  assert.equal((await f.cli(["show", card.id])).data.acceptanceRepair.phase, "failed");
+  assert.equal(f.cliCalls.filter(args => args[0] === "start" && args[1] === card.id).length, 2);
 });

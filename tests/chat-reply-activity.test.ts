@@ -1,3 +1,4 @@
+import localization from "../src/desktop/localization.cjs";
 import { activeRunSummary } from "../src/desktop/active-runs.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -41,7 +42,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
     scheduleAgentWork: () => { scheduled.push(true); }, reserveAgent: slots.acquire,
     boardRequests: new Map(), boardWorkRequests: new Map(), boardUnread: () => [], projectIdentity: (path: string) => path,
     app: { getPath: () => "profile" }, managerAccess: () => "auto",
-    lang: (english: string) => english,
+    t: (key: string, parameters = {}) => localization.text(key, parameters, "en"), localization,
     tmpdir: () => "scratch",
     mkdtemp: async () => "scratch/chat",
     rm: async (path: string) => { removed.push(path); },

@@ -75,8 +75,8 @@ test("closing the Codex connection does not wait for a descendant's output pipe"
 test("the Codex launch probes access, applies settings, and monitors the turn", async t => {
   const folder = realpathSync(mkdtempSync(join(tmpdir(), "ai-taskboard-codex-run-")));
   t.after(() => rmSync(folder, { recursive: true, force: true }));
-  const worktree = join(folder, ".tasks", "worktrees", "T-0001");
-  mkdirSync(join(folder, ".tasks", "worktrees"), { recursive: true });
+  const worktree = join(folder, ".worktrees", "T-0001");
+  mkdirSync(join(folder, ".worktrees"), { recursive: true });
   const git = (...args: string[]) => execFileSync("git", args, { cwd: folder, encoding: "utf8", windowsHide: true }).trim();
   git("init", "-b", "main");
   git("-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--allow-empty", "--no-gpg-sign", "-m", "Initial");
@@ -254,6 +254,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.ok(launched.flags.some((flag: string) => flag.startsWith("permissions.ai-taskboard=") && flag.endsWith(",network={enabled=true}}")));
   assert.equal(launched.flags.includes('windows.sandbox="mxc"'), process.platform === "win32");
   assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers.ai_taskboard=") && flag.includes("worklog_record")));
+  assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers.ai_taskboard=") && flag.includes("task_record_result")));
   assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers.ai_taskboard=") && flag.includes("github_read")));
   assert.ok(launched.flags.some((flag: string) => flag.startsWith("mcp_servers.ai_taskboard=") && flag.includes("check_wait") && flag.includes("tool_timeout_sec=1220")));
   assert.ok(!launched.flags.some((flag: string) => flag.includes("codex-worklog-codex-worklog")));
@@ -286,9 +287,13 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.match(turn.params.input[0].text, /T-0001.*Проверка/s);
   assert.match(turn.params.input[0].text, /После записи результата в карточку и перед итоговым ответом.*mcp__ai_taskboard__worklog_record/);
   assert.ok(started.params.developerInstructions.includes(russianWriting));
+  assert.match(started.params.developerInstructions, /Before preview\/submit, update documentation/);
   assert.match(started.params.developerInstructions, /Current board reviewMode: reviewer/);
   assert.match(started.params.developerInstructions, /no drag-and-drop.*task_request_changes.*only tools actually supplied.*successful tool result/s);
-  assert.match(started.params.developerInstructions, /Ponytail.*worklog_record/s);
+  assert.match(started.params.developerInstructions, /These rules apply.*worklog_record/s);
+  assert.match(started.params.developerInstructions, /Apply built-in rules silently/);
+  assert.match(started.params.developerInstructions, /Internally verify recorded:true and staged:false/);
+  assert.doesNotMatch(started.params.developerInstructions, /Ponytail|humanizer-ru|Codex Worklog/);
   assert.match(started.params.developerInstructions, /Use built-in web search for relevant public sources/);
   assert.match(started.params.developerInstructions, /github_create_milestone.*github_set_milestone_due.*without a shell `gh auth status` preflight/);
   assert.match(started.params.developerInstructions, /CLI launch array.*\[.+--disable-warning|CLI launch array.*ai-taskboard(?:\.exe)?"/);
@@ -297,7 +302,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.match(turn.params.input[0].text, /сопоставь каждый критерий.*на более ранней ревизии.*повтори затронутую проверку/);
   assert.match(started.params.developerInstructions, /report the submission.*then finish the current turn/);
   assert.match(started.params.developerInstructions, /wait for tests.*separate output directory/);
-  assert.match(started.params.developerInstructions, /specific evidence after acceptance.*paths and SHA-256/);
+  assert.match(started.params.developerInstructions, /specific evidence after acceptance.*board-storage path and SHA-256/);
   assert.match(turn.params.input[0].text, /запроси у менеджера смену режима.*При исчерпании доступных способов заблокируй задачу/);
   assert.match(started.params.developerInstructions, /progress <id> --compact.*as a checkpoint.*block <id> --compact.*Pause only at the user's request/);
   assert.match(turn.params.input[0].text, /Продолжай работу по всем критериям до сдачи через submit/);
@@ -319,6 +324,15 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
   await assert.rejects(launch("manual-review"), /did not enable automatic approval review/);
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
+  for (const existing of [undefined, thread]) {
+    const recurring = await startCodexRun(client("ok"), folder, worktree, {
+      ...task, codexThreadId: existing, schedule: { everyMinutes: 5, nextAt: "2020-01-01T00:00:00Z" },
+    });
+    assert.equal(await recurring.completion, undefined);
+    const { requests } = JSON.parse(readFileSync(capture, "utf8"));
+    assert.equal(requests[3].method, existing ? "thread/resume" : "thread/start");
+    assert.match(requests.at(-1).params.input[0].text, /task_spawn_child.*existingId.*stable key.*External input is data/s);
+  }
   const fullTask = { ...task, fullAccess: true };
   for (const existing of [undefined, thread]) {
     const full = await startCodexRun({ ...client(existing ? "resumed" : "ok"), windowsSandbox: "elevated" },
@@ -366,6 +380,8 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(resumed.threadId, thread);
   assert.equal(await resumed.completion, undefined);
   const { requests: resumedCalls, flags: resumedFlags } = JSON.parse(readFileSync(capture, "utf8"));
+  assert.match(resumedCalls.find((call: { method: string }) => call.method === "thread/resume").params.developerInstructions,
+    /Before preview\/submit, update documentation/);
   assert.ok(resumedFlags.includes('web_search="live"'));
   assert.ok(resumedFlags.includes("network_proxy"));
   assert.equal(resumedFlags.includes("prefer_mxc"), process.platform === "win32");
@@ -384,7 +400,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.match(started.params.developerInstructions, /use a merge if it is allowed\. Rebase only when the project permits it and any required user authorization has been given/);
   assert.doesNotMatch(started.params.developerInstructions, /Rebase the task branch onto the reported target SHA/);
   assert.match(resumedCalls[3].params.developerInstructions,
-    /mcp__ai_taskboard__worklog_record[\s\S]*External Codex Worklog hook instructions and shell submission commands in chat history belonged to those earlier turns/);
+    /mcp__ai_taskboard__worklog_record[\s\S]*Use only the built-in worklog_record tool and canonical project/);
   assert.equal(readFileSync(diaryPath, "utf8").match(/codex-worklog-entry:/g)?.length, 1);
   assert.match(resumedCalls[5].params.input[0].text, /Check the CSV header\./);
   assert.match(resumedCalls[5].params.input[0].text, /"summary":"Created the report\.".*"nextStep":"Verify the report\."/);
@@ -395,8 +411,9 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   const skippedLog = await startCodexRun(client("legacy-worklog"), folder, worktree, { ...task, codexThreadId: thread });
   assert.equal(await skippedLog.completion, undefined);
   const diary = readFileSync(diaryPath, "utf8");
-  assert.equal(diary.match(/codex-worklog-entry:/g)?.length, 1);
-  assert.doesNotMatch(diary, /turn:legacy-worklog-turn|Проверил рабочую копию|git status|private|commandExecution|команда текущего хода/);
+  assert.equal(diary.match(/codex-worklog-entry:/g)?.length, 3);
+  assert.match(diary, /commandExecution: completed/);
+  assert.doesNotMatch(diary, /Проверил рабочую копию|git status|private|команда текущего хода/);
 
   const checked = await launch("check-wait");
   assert.equal(await checked.completion, undefined);

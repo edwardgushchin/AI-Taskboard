@@ -1,3 +1,6 @@
+import { manualContext } from "../cli/manual-board.ts";
+import { readBoardSettings, locateBoard } from "../cli/storage.ts";
+import { responseLanguageInstructions } from "./board-agent-hooks.ts";
 import { trackActiveRun, trackProvider, claimDiscussion } from "./active-runs.ts";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
@@ -144,7 +147,7 @@ export async function reviewWithCodex(profile: string, project: string, settings
   let usage: TokenUsageReport | undefined;
   const worklog = boardWorklog(project, "reviewer", taskId);
   const options = {
-    settings, tools, signal, onActivity, onTokenUsage: async (report: TokenUsageReport) => { usage = report; }, finalAnswerSchema: {
+    role: "reviewer" as const, settings, tools, signal, onActivity, onTokenUsage: async (report: TokenUsageReport) => { usage = report; }, finalAnswerSchema: {
       type: "object", additionalProperties: false, required: ["summary", "findings", "evidence", "needsHuman", "verifyRisk"],
       properties: {
         summary: { type: "string" },
@@ -239,8 +242,8 @@ export function replyToTask(
       "The user handles task status and acceptance on the board. If an edit would change the status, propose the wording in chat for the user to apply on the board.",
       "Report actual results and failures. On a retry do not repeat a change already recorded.",
       "Use github_read for GitHub checks, including run-failed-log for Actions logs. The board uses its host login. Try the tool before asking the user to copy a log.",
-      "Read explicitly attached files when relevant. Do not edit project files or run project tasks.",
-    ].join(" ")),
+      "Read explicitly attached files when relevant. A linked attachment is a mutable local source: read only the needed parts with normal tools. If the attachment has an error, report it and continue with other files. Links do not grant access: report actual permission failures with the filename, without claiming to read inaccessible content. Do not edit project files or run project tasks.",
+    ].join(" ") + manualContext(readBoardSettings(locateBoard(project))), { manual: readBoardSettings(locateBoard(project)).boardType === "manual" }),
     onCommentary, onTokenUsage, onControl, signal, imageDirectory, imageLimit,
   };
   const release = claimDiscussion(project, taskId);
@@ -269,7 +272,7 @@ export async function requestExecutorAccess(profile: string, project: string, id
       task: { id: task.id, title: task.title, description: task.description, criteria: task.criteria },
       executorRequest: reason.trim(),
     }), [], async () => cliFailure("INVALID_INPUT", "Return the access decision in the response."), {
-      settings, tools: [], signal: AbortSignal.any([signal, AbortSignal.timeout(90_000)]),
+      role: "manager", settings, tools: [], signal: AbortSignal.any([signal, AbortSignal.timeout(90_000)]),
       instructions: [
         "You are the AI Taskboard project manager deciding whether this executor needs the host user's full OS access for the assigned card.",
         "The board applies your structured decision to the executor. Your read-only shell does not limit that decision. Use the supplied evidence and return the decision directly.",
@@ -307,9 +310,9 @@ export function replyToBoard(
     ? providerAction?.(name, args) ?? Promise.resolve(cliFailure("PROVIDER_TOOLS_UNAVAILABLE", "Wait for the provider session to initialize."))
     : runAction(name, args);
   const dialogue = !session.goal && !session.resumeGoal && !session.separateTurn;
-  const fullAccess = !session.separateTurn && session.access === "full";
+  const fullAccess = !session.separateTurn && !session.readOnly && session.access === "full";
   const permissionProfile = fullAccess ? hostPermissionProfile : managerResearchProfile;
-  const accessInstructions = session.separateTurn ? "" : fullAccess
+  const accessInstructions = session.separateTurn || session.readOnly ? "" : fullAccess
     ? "\nFull access is enabled for this board. Commands run as the host user. "
     : "\nThe board's manager access mode is " + (session.access === "ask" ? "Ask for approval" : "Approve for me") + ". " +
       "Use Codex's native approval request when the sandbox blocks a required operation. If the operation needs the regular OS user, " +
@@ -319,8 +322,8 @@ export function replyToBoard(
     async (name, args) => name === worklogTool.name ? worklog.submit(args) : worklog.remind(await dispatch(name, args)),
     (config, env) => reply(profile, project, prompt, images, dispatch, {
       tools, instructions: boardAgentInstructions("manager", instructions + accessInstructions + (accessInstructions ?
-        "Use existing credentials for authorized operations without exposing them. Keep SSH host key checking enabled and report server authentication failures separately from local permission failures." : ""), { dialogue }),
-      signal, session, worklog, onTokenUsage: session.onTokenUsage, mcp: { config, env },
+        "Use existing credentials for authorized operations without exposing them. Keep SSH host key checking enabled and report server authentication failures separately from local permission failures." : ""), { dialogue, manual: readBoardSettings(locateBoard(project)).boardType === "manual" }),
+      signal, session, worklog, role: session.role, onTokenUsage: session.onTokenUsage, mcp: { config, env },
       prepareResearch: async (request, client) => {
         const launchKey = JSON.stringify([profile, client.path, client.args, client.version, client.windowsSandbox, permissionProfile]);
         const availability = await probeManagerCli(project, launchKey, mcpTools, (cwd, command, env) =>
@@ -338,6 +341,7 @@ export function replyToBoard(
 interface BoardSession {
   id?: string;
   access?: ManagerAccess;
+  role?: "manager" | "reviewer";
   confirmApproval?: (details: string) => Promise<boolean>;
   settings?: ChatSettings | null;
   save: (id: string) => void;
@@ -349,6 +353,7 @@ interface BoardSession {
   goal?: string;
   resumeGoal?: boolean;
   separateTurn?: boolean;
+  readOnly?: boolean;
   onGoalSet?: () => void;
   messageId?: string;
   onMessage?: (id: string) => void;
@@ -533,8 +538,8 @@ function boardMessage(content: { type: string; text?: string; url?: string }[]) 
   try {
     const { latestUserMessage } = JSON.parse(text);
     if (typeof latestUserMessage?.text === "string" && Array.isArray(latestUserMessage.attachments)) {
-      const files = latestUserMessage.attachments.map((file: { name: string; imageIndex?: number }) => ({
-        name: file.name, url: file.imageIndex ? safeImage(images[file.imageIndex - 1]?.url) : undefined,
+      const files = latestUserMessage.attachments.map((file: { name: string; imageIndex?: number; link?: import("../cli/attachment-links.ts").FileLink; error?: string }) => ({
+        name: file.name, ...(file.link ? { link: file.link, size: file.link.size, error: file.error } : {}), url: file.imageIndex ? safeImage(images[file.imageIndex - 1]?.url) : undefined,
       })) as { name: string; url?: string }[];
       return { text: latestUserMessage.text as string, files };
     }
@@ -543,6 +548,7 @@ function boardMessage(content: { type: string; text?: string; url?: string }[]) 
 }
 
 function reply(profile: string, project: string, prompt: string, images: string[], runAction: RunAction, options: {
+  role?: "manager" | "executor" | "reviewer";
   settings?: ChatSettings | null; tools: object[]; instructions: string;
   onCommentary?: (text: string) => void; onTokenUsage?: (report: TokenUsageReport) => Promise<void>;
   onActivity?: (items: RunActivity[]) => void;
@@ -557,7 +563,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
 }) {
   const { onCommentary, onTokenUsage, onControl, onActivity, signal, imageDirectory, imageLimit = 0, session } = options;
   const settings = session ? session.settings : options.settings;
-  const research = Boolean(session && !session.separateTurn);
+  const research = Boolean(session && !session.separateTurn && !session.readOnly);
   const fullAccess = research && session?.access === "full";
   const approvalPolicy = research && !fullAccess ? "on-request" : "never";
   const approvalsReviewer = session?.access === "ask" || fullAccess ? "user" : "auto_review";
@@ -597,7 +603,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
       }),
       cwd: project, model: modelId, approvalPolicy,
       ...(research ? { approvalsReviewer } : {}),
-      developerInstructions: researchInstructions ? options.instructions + "\n\n" + researchInstructions : options.instructions,
+      developerInstructions: [options.instructions, researchInstructions, responseLanguageInstructions()].filter(Boolean).join("\n\n"),
       ...(research ? { permissions: permissionProfile } : { sandbox: "read-only" }),
       ...(session && effort ? { config: { model_reasoning_effort: effort } } : {}),
     };
@@ -765,7 +771,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
         return goalChange;
       };
       const publishControl = () => {
-        if (turn?.status === "inProgress") finishRun ??= trackActiveRun(project);
+        if (turn?.status === "inProgress") finishRun ??= trackActiveRun(project, options.role ?? (session ? "manager" : "executor"));
         session?.onGoalControl?.(runGoalChange);
         const control = {
           async steer(text: string, images: string[], clientUserMessageId?: string) {
@@ -799,7 +805,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
             publishControl();
           } else if (followingGoal && turn.status === "completed") {
             turn = data.turn;
-            if (turn?.status === "inProgress") finishRun ??= trackActiveRun(project);
+            if (turn?.status === "inProgress") finishRun ??= trackActiveRun(project, options.role ?? (session ? "manager" : "executor"));
           }
         }
         if (method === "turn/completed" && data.turn && data.turn.id === turn?.id) {
@@ -874,7 +880,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
     mcp: options.mcp, research, fullAccess, webSearch: options.webSearch ?? Boolean(session), providerTools: Boolean(session),
   }).finally(async () => {
     finishRun?.();
-    options.worklog?.finish();
-    await tokens.save(tokens.finish(!completed), onTokenUsage);
+    try { options.worklog?.finish(); }
+    finally { await tokens.save(tokens.finish(!completed), onTokenUsage); }
   });
 }
