@@ -437,6 +437,10 @@ export class BoardStore {
     writeJson(join(this.location.directory, "board.json"), this.index);
   }
 
+  storedCards(): Task[] {
+    return this.cardIds().map(id => this.readCardFile(id));
+  }
+
   private cardIds(): string[] {
     return readdirSync(this.subdirectory("tasks"))
       .filter(name => name.endsWith(".json") && taskIdPattern.test(name.slice(0, -5)))

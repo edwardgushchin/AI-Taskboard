@@ -2848,3 +2848,95 @@ test("doctor recovers archive cleanup after an index switch and preserves change
   assert.ok(!existsSync(folder));
   assert.equal(cli(root, ["show", task.id]).status, "cancelled");
 });
+
+test("recurring child work deduplicates local and external occurrences and recovers creation", async t => {
+  const root = fixture(t); cli(root, ["init"]);
+  const p = cli(root, ["create"], { title: "Local and issue checks", criteria: ["Inspect sources"], schedule: { everyMinutes: 5 }, workingDirectory: root });
+  let parent = cli(root, ["approve", p.id], { revision: p.revision });
+  const parentPath = join(root, ".tasks", "tasks", p.id + ".json");
+  const due = JSON.parse(readFileSync(parentPath, "utf8")); due.schedule.nextAt = "2020-01-01T00:00:00Z";
+  writeFileSync(parentPath, JSON.stringify(due));
+  cli(root, ["start", p.id], { revision: parent.revision });
+  const localResult = join(root, "check-result.json");
+  writeFileSync(localResult, JSON.stringify({ check: "local:check:file:event1", error: "Local check found a failure" }));
+  const finding = JSON.parse(readFileSync(localResult, "utf8"));
+  const brief = { title: "Repair finding", description: "Fix the observed problem", criteria: ["Check succeeds"], basis: finding.error, key: finding.check };
+  cli(root, ["spawn-child", p.id], { ...brief, criteria: [] }, "INVALID_INPUT");
+  const first = cli(root, ["spawn-child", p.id], brief);
+  assert.equal(first.status, "ready"); assert.equal(first.launchRequested, true);
+  assert.equal(first.origin.parent, p.id); assert.deepEqual(first.dependencies, undefined);
+  const repeat = cli(root, ["spawn-child", p.id], brief); assert.equal(repeat.id, first.id);
+  // A saved card with an interrupted index write must be recovered, not duplicated.
+  const indexPath = join(root, ".tasks", "board.json");
+  const index = JSON.parse(readFileSync(indexPath, "utf8")); delete index.tasks[first.id];
+  writeFileSync(indexPath, JSON.stringify(index));
+  assert.equal(cli(root, ["spawn-child", p.id], brief).id, first.id);
+  assert.ok(cli(root, ["list"]).tasks.some((task: any) => task.id === first.id));
+  const beforeReadFailure = cli(root, ["list"]).tasks.length;
+  assert.throws(() => JSON.parse("temporarily unavailable"));
+  assert.equal(cli(root, ["list"]).tasks.length, beforeReadFailure);
+  const issue = JSON.parse('{"repository":"org/repo","number":42,"title":"Repair an Issue"}');
+  const external = { ...brief, key: "issue:" + issue.repository + ":" + issue.number, basis: issue.title };
+  const replies = await Promise.all(Array.from({ length: 3 }, () => new Promise<any>((resolve, reject) => {
+    const child = spawn(process.execPath, commandArgs(root, ["spawn-child", p.id], external), { env, windowsHide: true });
+    let output = ""; child.stdout.on("data", data => output += data); child.on("error", reject);
+    child.on("close", code => { try { assert.equal(code, 0, output); resolve(JSON.parse(output).data); } catch (error) { reject(error); } });
+    child.stdin.end(JSON.stringify(external));
+  })));
+  assert.equal(new Set(replies.map(reply => reply.id)).size, 1);
+  assert.notEqual(replies[0].id, first.id);
+  const next = cli(root, ["spawn-child", p.id], { ...brief, key: "local:check:file:event2" }); assert.notEqual(next.id, first.id);
+  cli(root, ["spawn-child", p.id], { ...brief, key: "bad", dependencies: [p.id] }, "INVALID_INPUT");
+  const intermediate = cli(root, ["create"], { title: "Wait for parent", criteria: ["Ready"], dependencies: [p.id] });
+  cli(root, ["spawn-child", p.id], { ...brief, key: "transitive", dependencies: [intermediate.id] }, "INVALID_INPUT");
+  const match = cli(root, ["spawn-child", p.id], { ...brief, key: "semantic", existingId: first.id });
+  assert.equal(match.id, first.id);
+  assert.equal(cli(root, ["spawn-child", p.id], { ...brief, key: "semantic" }).id, first.id);
+  const compactChild = cli(root, ["list", "--compact"]).tasks.find((task: any) => task.id === first.id);
+  assert.equal(compactChild.origin.key, brief.key); assert.equal(compactChild.launchRequested, true);
+  const firstPath = join(root, ".tasks", "tasks", first.id + ".json");
+  const finished = JSON.parse(readFileSync(firstPath, "utf8")); finished.status = "done"; finished.closedAt = "2020-01-01T00:00:00Z";
+  writeFileSync(firstPath, JSON.stringify(finished));
+  assert.equal(cli(root, ["spawn-child", p.id], brief).id, first.id);
+  cli(root, ["settings"], { archiveAfterDays: 0 }); cli(root, ["archive", "sweep"]);
+  assert.equal(cli(root, ["spawn-child", p.id], brief).id, first.id);
+  const linkedParent = cli(root, ["show", p.id]);
+  assert.equal(linkedParent.childWork[0].id, first.id);
+  assert.equal(linkedParent.childWork[0].basis, brief.basis);
+  const ordinary = cli(root, ["create"], { title: "Ordinary", criteria: ["Done"], workingDirectory: root });
+  const approved = cli(root, ["approve", ordinary.id], { revision: ordinary.revision });
+  cli(root, ["start", ordinary.id], { revision: approved.revision });
+  cli(root, ["spawn-child", ordinary.id], brief, "INVALID_TRANSITION");
+  parent = cli(root, ["show", p.id]);
+  const parentFile = JSON.parse(readFileSync(parentPath, "utf8")); parentFile.schedule.paused = true;
+  writeFileSync(parentPath, JSON.stringify(parentFile));
+  cli(root, ["progress", p.id], { summary: "Checked sources", nextStep: "Repeat checks", revision: parent.revision });
+  const completed = cli(root, ["show", p.id]); assert.equal(completed.status, "ready"); assert.ok(completed.schedule.nextAt); assert.equal(completed.schedule.paused, true);
+  cli(root, ["spawn-child", p.id], brief, "INVALID_TRANSITION");
+});
+
+test("recurring children use independent Git worktrees and ordinary review modes", t => {
+  const root = fixture(t, true); cli(root, ["init"]);
+  const created = cli(root, ["create"], { title: "Inspect local results", criteria: ["Record pass"], schedule: { everyMinutes: 5 }, workingDirectory: root });
+  const approved = cli(root, ["approve", created.id], { revision: created.revision });
+  const parentPath = join(root, ".tasks", "tasks", created.id + ".json");
+  const saved = JSON.parse(readFileSync(parentPath, "utf8")); saved.schedule.nextAt = "2020-01-01T00:00:00Z";
+  writeFileSync(parentPath, JSON.stringify(saved)); cli(root, ["start", created.id], { revision: approved.revision });
+  const directories = new Set<string>();
+  for (const mode of ["human", "reviewer"]) {
+    cli(root, ["settings"], { reviewMode: mode, autoMode: false });
+    const child = cli(root, ["spawn-child", created.id], { key: mode, basis: "Local finding " + mode, title: "Repair " + mode, description: "Fix local finding", criteria: ["Finding resolved"] });
+    const started = cli(root, ["start", child.id], { revision: child.revision });
+    assert.ok(started.worktree); assert.notEqual(started.worktree, root); directories.add(started.worktree);
+    const current = cli(root, ["show", child.id]);
+    const repeat = cli(root, ["start", child.id], { revision: current.revision });
+    assert.equal(repeat.worktree, started.worktree);
+    const preview = cli(root, ["preview", child.id, "--compact"]);
+    const submitted = cli(root, ["submit", child.id, "--compact"], { token: preview.token, noChanges: true, summary: "Verified existing fix", checks: ["Local finding resolved"] });
+    assert.equal(submitted.status, "review");
+    const detail = cli(root, ["show", child.id]); assert.equal(detail.origin.parent, created.id);
+    if (mode === "human") cli(root, ["accept", child.id], { revision: submitted.revision, actor: "manager", reviewMode: "human", targetHead: git(root, "rev-parse", "HEAD") }, "AUTO_REVIEW_DISABLED");
+  }
+  assert.equal(directories.size, 2);
+  assert.equal(cli(root, ["show", created.id]).status, "in_progress");
+});

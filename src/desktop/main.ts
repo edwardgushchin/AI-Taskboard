@@ -922,7 +922,7 @@ let schedulingAgentWork = false;
 
 function scheduleAutoBoard(watch: BoardWatch) {
   const { project } = watch.board;
-  if (!watch.board.settings.autoMode || subscriptions.get(project) !== watch || closingProjects.has(project)) return;
+  if ((!watch.board.settings.autoMode && !watch.board.tasks.some(task => task.status === "ready" && task.launchRequested)) || subscriptions.get(project) !== watch || closingProjects.has(project)) return;
   let state = autoBoards.get(watch);
   if (!state) {
     state = { running: false, milestonesAt: 0, dates: new Map(), launches: new Set(), integrations: new Set(), notices: new Set() };
@@ -939,9 +939,10 @@ function scheduleAutoBoard(watch: BoardWatch) {
       const current = await callCli<Board>(project, ["list", "--compact"]);
       if (!current.ok) { failed(current.error.message); return; }
       const board = current.data;
-      if (!board.settings.autoMode) return;
+      const eligibleTasks = board.settings.autoMode ? board.tasks : board.tasks.filter(task => task.launchRequested);
+      if (!board.settings.autoMode && !eligibleTasks.some(task => task.status === "ready")) return;
       const key = projectIdentity(project);
-      if (boardReviewMode(board.settings) === "reviewer") {
+      if (board.settings.autoMode && boardReviewMode(board.settings) === "reviewer") {
         const task = board.tasks.find(task => task.status === "review" && task.reviewApproved && !executorBusy(project, task.id) &&
           !watch.reviewerRuns.has(task.id) && !queue.integrations.has(task.id + ":" + task.revision));
         if (task) {
@@ -980,7 +981,7 @@ function scheduleAutoBoard(watch: BoardWatch) {
       const notices = (board.managerInbox ?? []).filter(message => ["question", "block"].includes(message.kind) &&
         !queue.notices.has(message.id + ":" + message.sequence));
       const tab = [...watch.tabs].find(tab => !tab.window.isDestroyed());
-      if (notices.length && tab && !boardWorkRequests.has(key) && agentSlots.available(key, "manager", board.settings.agentLimits)) {
+      if (board.settings.autoMode && notices.length && tab && !boardWorkRequests.has(key) && agentSlots.available(key, "manager", board.settings.agentLimits)) {
         for (const notice of notices) queue.notices.add(notice.id + ":" + notice.sequence);
         const prompt = "AI Taskboard automatic mode: handle these addressed notices without a goal. " + JSON.stringify(notices);
         void runBoardRequest(tab.window.webContents, board, prompt, [], false, false, undefined, undefined, undefined, true)
@@ -991,8 +992,8 @@ function scheduleAutoBoard(watch: BoardWatch) {
         executor: agentSlots.available(key, "executor", board.settings.agentLimits),
         reviewer: agentSlots.available(key, "reviewer", board.settings.agentLimits),
       };
-      if (!board.tasks.some(task => task.status === "ready" && available[task.mergeRepair ? "reviewer" : "executor"])) return;
-      if (board.tasks.some(task => task.status === "ready" && task.milestone) && Date.now() - queue.milestonesAt >= 60_000) {
+      if (!eligibleTasks.some(task => task.status === "ready" && available[task.mergeRepair ? "reviewer" : "executor"])) return;
+      if (eligibleTasks.some(task => task.status === "ready" && task.milestone) && Date.now() - queue.milestonesAt >= 60_000) {
         queue.milestonesAt = Date.now();
         const milestones = await callCli<{ repository: string; milestones: { number: number; due_on: string | null }[] }>(project, ["milestones"]);
         if (!milestones.ok) { queue.milestonesError = milestones.error.message; failed(milestones.error.message); return; }
@@ -1000,8 +1001,8 @@ function scheduleAutoBoard(watch: BoardWatch) {
         queue.dates = new Map(milestones.data.milestones.map(entry => [entry.number, entry.due_on]));
         continue; // A deadline, setting or card may have changed during the network request.
       }
-      if (queue.milestonesError && board.tasks.some(task => task.status === "ready" && task.milestone)) return;
-      const task = nextReadyTask(board.tasks, queue.dates, id => {
+      if (queue.milestonesError && eligibleTasks.some(task => task.status === "ready" && task.milestone)) return;
+      const task = nextReadyTask(eligibleTasks, queue.dates, id => {
         const candidate = board.tasks.find(task => task.id === id)!;
         return !available[candidate.mergeRepair ? "reviewer" : "executor"] || executorBusy(project, id) ||
           queue.launches.has(id + ":" + candidate.revision);
@@ -1009,13 +1010,14 @@ function scheduleAutoBoard(watch: BoardWatch) {
       if (!task) return;
       const attempt = task.id + ":" + task.revision;
       queue.launches.add(attempt);
-      const result = await launchTask(project, task.id, undefined, false, task.revision, undefined, Boolean(task.schedule), false, false, true);
+      const result = await launchTask(project, task.id, undefined, false, task.revision, undefined, Boolean(task.schedule), false, false, Boolean(board.settings.autoMode));
       if (!result.ok) {
         if (["BOARD_BUSY", "REVISION_CONFLICT", "INVALID_TRANSITION", "LAUNCH_IN_PROGRESS", "CHAT_BUSY", "EXECUTOR_LIMIT", "REVIEWER_LIMIT",
             "PROJECT_CLOSING", "DEPENDENCIES_INCOMPLETE", "AUTO_MODE_DISABLED"].includes(result.error.code)) {
           queue.launches.delete(attempt);
           return; // Retry on the next event/tick, never spin on the same snapshot.
         }
+        if (task.launchRequested) { queue.launches.delete(attempt); failed(task.id + ": " + result.error.message); return; }
         await callCli(project, ["block", task.id, "--compact"], { revision: task.revision, allowUnstarted: true,
           reason: result.error.message, condition: t("ui.fix_the_launch_error_and_unblock_the_task_9eea19ab") });
       }
