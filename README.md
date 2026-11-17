@@ -7,6 +7,10 @@
 
 *Real application renderer with public demo data. No model session or private conversation is shown.*
 
+![Git status in the demo repository: feature/board-polish, zero incoming and three unpushed commits](docs/images/git-status.png)
+
+*Git detail from the same window at 150% zoom: `feature/board-polish`, three local commits ahead of `origin`.*
+
 AI Taskboard brings a Kanban board, agent chats and Git review into one Electron app. Describe a change to the project manager, approve a task, and let an executor work in a separate Git worktree. Review the result before it enters your target branch.
 
 **Early development:** the first slice targets Windows x64. Public installers are not available yet; use the source quick start below. [Releases](https://github.com/edwardgushchin/AI-Taskboard/releases) will host installers when published.
