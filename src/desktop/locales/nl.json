@@ -571,6 +571,7 @@
   "ui.copied_copy_code_again_b2b609e4": "Gekopieerd. Kopieer de code opnieuw",
   "ui.could_not_copy_select_the_code_or_retry_3ed46a84": "Kan niet kopiëren. Selecteer de code of probeer het opnieuw.",
   "ui.copy_code_968ce1d3": "Kopieer code",
+  "ui.copy_hash": "Hash kopiëren",
   "ui.copy_full_hash_725de55a": "Kopieer volledige hash",
   "ui.copied_243d5f98": "Gekopieerd. ",
   "ui.copy_failed_retry_eeb3cc51": "Kopiëren mislukt. Opnieuw proberen.",
