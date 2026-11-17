@@ -13,7 +13,20 @@
       "to": "bin",
       "filter": [
         "ai-taskboard",
-        "ai-taskboard.exe"
+        "ai-taskboard.exe",
+        "LICENSE",
+        "NOTICE",
+        "README.md",
+        "THIRD-PARTY-NOTICES.txt"
+      ]
+    },
+    {
+      "from": ".",
+      "to": "licenses",
+      "filter": [
+        "LICENSE",
+        "NOTICE",
+        "README.md"
       ]
     }
   ],
