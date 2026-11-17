@@ -10,6 +10,7 @@ test("Worklog writes only complete authored blocks and recovers a staged turn af
   t.after(() => rmSync(project, { recursive: true }));
   const board = join(project, ".tasks");
   mkdirSync(board);
+  writeFileSync(join(board, "board.json"), JSON.stringify({ settings: { boardType: "manual" } }));
   const worklog = boardWorklog(project, "executor", "T-0042");
   const threadId = "executor";
   const start = (turnId: string) => ({ method: "turn/started", params: { threadId, turn: { id: turnId } } });
@@ -77,6 +78,7 @@ test("Worklog writes only complete authored blocks and recovers a staged turn af
   t.after(() => rmSync(blockedProject, { recursive: true }));
   const blocked = join(blockedProject, relative(project, original));
   mkdirSync(join(blockedProject, ".tasks"));
+  writeFileSync(join(blockedProject, ".tasks", "board.json"), JSON.stringify({ settings: { boardType: "manual" } }));
   writeFileSync(blocked, "temporarily blocked");
   const pending = boardWorklog(blockedProject, "reviewer", "T-0042");
   pending.start(threadId, "pending");

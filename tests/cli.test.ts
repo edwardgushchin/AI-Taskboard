@@ -2521,7 +2521,7 @@ test("accept discards Crashpad and temporary worktree attachments and preserves 
   writeFileSync(projectDiary, "Project diary\n");
   mkdirSync(join(worktree, diary), { recursive: true });
   mkdirSync(join(worktree, qa), { recursive: true });
-  writeFileSync(join(worktree, diary, "2026-11-12.md"), "Task diary\n");
+  writeFileSync(join(worktree, diary, "2026-11-12.md"), "# Codex Worklog — 2026-11-12\n\n## 2026-11-12 19:48 +03:00 — Task diary\n\n<!-- codex-worklog-entry:aaaaaaaaaaaaaaaaaaaaaaaa -->\n");
   writeFileSync(join(worktree, qa, "check.log"), "Temporary check output\n");
   const stagedAttachments = join(worktree, ".codex-attachments", task.id);
   mkdirSync(stagedAttachments, { recursive: true });
@@ -2542,6 +2542,7 @@ test("accept discards Crashpad and temporary worktree attachments and preserves 
   assert.equal(git(root, "branch", "--list", "ai-taskboard/" + task.id), "");
   assert.ok(existsSync(join(root, ".tasks", "artifacts")));
   assert.equal(readFileSync(projectDiary, "utf8"), "Project diary\n");
+  assert.match(readFileSync(join(root, ".tasks", "worklog", "2026", "11", "2026-11-12.md"), "utf8"), /Task diary/);
   const file = done.attachments[0].file;
   assert.equal(cli(root, ["attachment", "read", task.id], { file }).base64, bytes.toString("base64"));
 });
@@ -3219,4 +3220,45 @@ test("recurring children use independent Git worktrees and ordinary review modes
   }
   assert.equal(directories.size, 2);
   assert.equal(cli(root, ["show", created.id]).status, "in_progress");
+});
+
+
+test("canonical journal survives cancellation, worktree cleanup, archival and physical card deletion", async t => {
+  const root = fixture(t, true);
+  cli(root, ["init"]);
+  const card = cli(root, ["create"], { title: "Preserve interrupted journal", criteria: ["History survives"] });
+  cli(root, ["approve", card.id]);
+  const { worktree } = cli(root, ["start", card.id]);
+  const { boardWorklog } = await import("../src/desktop/board-worklog.ts");
+  const log = boardWorklog(worktree, "executor", card.id);
+  log.start("interrupted", "before-cancel");
+  log.fact("edit", "fileChange: completed; final report not submitted");
+  log.finish();
+  const { globSync } = await import("node:fs");
+  const read = () => globSync(".tasks/worklog/*/*/*.md", { cwd: root }).map(file => readFileSync(join(root, file), "utf8")).join("");
+  assert.deepEqual(cli(root, ["worklog-migrate"]), []);
+  const before = read();
+  assert.match(before, /fileChange: completed/);
+  assert.equal(existsSync(join(worktree, ".dev-diary")), false);
+  const journal = join(root, ".tasks", "worklog");
+  const heldJournal = join(root, ".tasks", "held-journal");
+  renameSync(journal, heldJournal); writeFileSync(journal, "blocked storage");
+  cli(root, ["cancel", card.id], { reason: "Test storage failure" }, "INVALID_STORAGE_PATH");
+  assert.equal(cli(root, ["show", card.id]).status, "in_progress");
+  assert.equal(existsSync(worktree), true);
+  rmSync(journal); renameSync(heldJournal, journal);
+  cli(root, ["cancel", card.id], { reason: "Test interruption before final report" });
+  assert.equal(existsSync(worktree), false);
+  assert.ok(read().includes(before.trim()));
+  cli(root, ["settings"], { archiveAfterDays: 0 });
+  cli(root, ["archive", "sweep"]);
+  assert.equal(existsSync(join(root, ".tasks", "tasks", card.id + ".json")), false);
+  const indexPath = join(root, ".tasks", "board.json");
+  const index = JSON.parse(readFileSync(indexPath, "utf8"));
+  const archive = join(root, ".tasks", index.archive[card.id].path);
+  rmSync(archive); delete index.archive[card.id]; writeFileSync(indexPath, JSON.stringify(index));
+  const afterDelete = boardWorklog(root, "reviewer", card.id);
+  afterDelete.start("reviewer", "deleted-card"); afterDelete.fact("review", "card absent; earlier operations remain available");
+  assert.match(read(), /fileChange: completed/);
+  assert.match(read(), /card absent/);
 });

@@ -1,3 +1,4 @@
+import { beginBoardOperation } from "../desktop/board-worklog.ts";
 import { migrateIntegrationWorktree } from "./acceptance.ts";
 import { migrateSavedWorktree } from "./saved-changes.ts";
 import { readdirSync, rmSync, rmdirSync } from "node:fs";
@@ -19,7 +20,9 @@ export function removeLegacyAttachments(store: BoardStore) {
   directory(root);
   if (exists(path)) {
     directory(path); // Refuse a symlink/junction, including one to another project.
-    rmSync(path, { recursive: true });
+    const finish = beginBoardOperation(root, "remove legacy attachments");
+    try { rmSync(path, { recursive: true }); finish("removed legacy attachments"); }
+    catch (error) { finish("failed; retry required"); throw error; }
   }
   maintenanceSuccess(store, "attachments");
 }
