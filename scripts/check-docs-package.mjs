@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { electronCheck } from './electron-check.mjs';
 
 const { scratch } = electronCheck(import.meta.url, 'docs-package', 60_000);
@@ -22,7 +22,7 @@ try {
     for (const file of files) {
       const packaged = readFileSync(join(file.parentPath, file.name));
       const relative = join(file.parentPath.slice(base.length), file.name);
-      const source = readFileSync(join('src/desktop/agent-instructions/docs', relative));
+      const source = readFileSync(join(fileURLToPath(new URL('../src/desktop/agent-instructions/docs/', import.meta.url)), relative));
       assert.equal(createHash('sha256').update(packaged).digest('hex'), createHash('sha256').update(source).digest('hex'));
       count++;
     }
