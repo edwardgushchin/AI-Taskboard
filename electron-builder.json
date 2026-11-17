@@ -72,5 +72,8 @@
   "rpm": {
     "fpm": ["--depends", "mesa-libgbm", "--depends", "alsa-lib"]
   },
-  "artifactName": "ai-taskboard-${version}-${os}-${arch}.${ext}"
+  "artifactName": "ai-taskboard-${version}-${os}-${arch}.${ext}",
+  "asarUnpack": [
+    "src/desktop/agent-instructions/docs/**/*"
+  ]
 }

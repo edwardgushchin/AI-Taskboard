@@ -14,7 +14,8 @@
     "check": "tsc --noEmit",
     "start": "electron .",
     "build:cli": "node scripts/build-cli.mjs",
-    "package": "npm run build:cli && node scripts/package.mjs"
+    "package": "npm run build:cli && node scripts/package.mjs",
+    "check:docs": "node scripts/check-docs.mjs"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

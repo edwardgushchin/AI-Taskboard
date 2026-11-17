@@ -36,7 +36,7 @@ AI Taskboard brings a Kanban board, agent chats and Git review into one Electron
 
 ### Requirements
 
-- Windows x64 for the current development slice; see [platform status](#platforms).
+- Windows x64 for the current development slice; see [platform status](#platform-status).
 - Node.js **24.12+**, npm and Git **2.38+** for source development.
 - A Codex executable and subscription sign-in for running agents. The app uses **Codex App Server**; no separate paid API key is required by the board. Subscription access and usage limits still apply.
 
@@ -123,7 +123,8 @@ from the official Node.js repository and include it with the fflate license.
 <a id="documentation"></a>
 ## Documentation and feedback
 
+- [Documentation index](docs/README.md): guides and project notes.
 - [Development and packaging](docs/development.md): checks, CLI, VS Code and installer builds.
-- [Project design](docs/design.md) (Russian): workflow, storage, Git integration and review rules.
+- [Project design](docs/explanation/architecture.md) (Russian): workflow, storage, Git integration and review rules.
 - [Releases](https://github.com/edwardgushchin/AI-Taskboard/releases): published packages when available.
 - [GitHub Issues](https://github.com/edwardgushchin/AI-Taskboard/issues): bugs and feature requests. Include reproduction steps and remove private data from logs and screenshots.
