@@ -723,10 +723,13 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
       if (input.autoMode === true && !store.index.settings.autoMode) {
         throw new TaskboardError("AUTO_MODE_DISABLED", "Automatic starts are disabled.");
       }
+      if ((input.scheduled === true || input.autoMode === true) && task.schedule?.paused) {
+        throw new TaskboardError("INVALID_TRANSITION", "The recurring schedule is paused.");
+      }
       if (input.scheduled === true) {
         requireRevision(task, input.revision, true);
         requireState(task, ["ready"]);
-        if (!task.schedule || !(Date.parse(task.schedule.nextAt) <= Date.now())) {
+        if (!task.schedule || task.schedule.paused || !(Date.parse(task.schedule.nextAt) <= Date.now())) {
           throw new TaskboardError("INVALID_TRANSITION", "The task is not due to run.");
         }
       }

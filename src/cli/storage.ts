@@ -236,6 +236,7 @@ function validRoleSettings(value: unknown): boolean {
 
 function validTaskSchedule(value: unknown): boolean {
   if (!isRecord(value) || typeof value.nextAt !== "string" || !Number.isFinite(Date.parse(value.nextAt))) return false;
+  if (value.paused !== undefined && typeof value.paused !== "boolean") return false;
   if (value.everyMinutes !== undefined) {
     return value.time === undefined && value.weekday === undefined && value.dayOfMonth === undefined && value.month === undefined &&
       Number.isSafeInteger(value.everyMinutes) && Number(value.everyMinutes) >= 1;

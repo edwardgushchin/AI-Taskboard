@@ -235,6 +235,44 @@ app.whenReady().then(async () => {
     console.log('Sheet scroll Chromium checks passed: ' + checks + ' (8 combinations)');
     return;
   }
+  if (process.argv.includes("--schedule-pause-only")) {
+    await evaluate(`
+      fixture.board.tasks[1].schedule = { everyMinutes: 60, nextAt: '2000-01-01T00:00:00Z' };
+      window.taskboard.command = async (action, id, input) => {
+        const task = fixture.board.tasks.find(task => task.id === id);
+        if (action === 'show') return {ok:true,data:{...task,criteria:[]}};
+        if (action !== 'update') throw Error(action);
+        if (input.revision !== task.revision) throw Error('stale revision');
+        task.schedule.paused = input.schedulePaused;
+        task.revision++; push(); return {ok:true,data:task};
+      }; push(); showTask('T-0002');
+    `);
+    await evaluate(`waitFor(() => document.querySelector('.sheet-actions')).then(settle)`);
+    for (const rule of [{ everyMinutes: 60 }, { time: '09:00' }]) {
+      for (const russian of [true, false]) for (const theme of ['dark', 'light']) {
+        nativeTheme.themeSource = theme;
+        await evaluate(`fixture.russian = ${russian}; fixture.theme = '${theme}'; fixture.board.tasks[1].schedule = { ...${JSON.stringify(rule)}, nextAt: '2000-01-01T00:00:00Z' }; push(); showTask('T-0002')`);
+        await evaluate(`settle()`);
+        for (const paused of [true, false, true]) {
+          await evaluate(`[...document.querySelectorAll('.sheet-actions button')].find(b => b.textContent === t('${paused ? 'ui.pause_schedule' : 'ui.resume_schedule'}')).click(); waitFor(() => fixture.board.tasks[1].schedule.paused === ${paused}).then(settle)`);
+          await check(`(() => { const badge = findCard('T-0002').querySelector('.task-schedule');
+            const detail = body.querySelector('.task-schedule-pause');
+            if (!${paused}) return !badge.querySelector('.codicon-debug-pause') && !detail && badge.textContent === ${rule.time ? JSON.stringify(rule.time) : "scheduleInterval(60, 'short')"};
+            return [badge, detail].every(node => node && node.textContent === '' && node.getAttribute('role') === 'img' &&
+              node.title.includes(t('ui.schedule_paused')) && node.getAttribute('aria-label') === node.title &&
+              node.querySelector('.codicon-debug-pause')?.getAttribute('aria-hidden') === 'true' &&
+              getComputedStyle(node.querySelector('.codicon-debug-pause'), '::before').content.codePointAt(1) === 60113);
+          })()`, 'pause is a Codicons glyph with a tooltip and accessible name in card and details; resume restores timing');
+          await check(`byId('sheet-body').textContent.includes(t('${paused ? 'ui.resume_schedule' : 'ui.pause_schedule'}'))`, 'details offer the inverse action');
+          await check(`fixture.board.tasks[1].schedule.${rule.time ? "time === '09:00'" : 'everyMinutes === 60'} && fixture.board.tasks[1].status === 'ready'`, 'schedule action retains rule and status');
+        }
+        if (russian && rule.time) await capture('schedule-paused-' + theme + '.png');
+      }
+    }
+    await capture('schedule-paused.png');
+    console.log('Schedule Chromium checks passed: ' + checks);
+    return;
+  }
   if (process.argv.includes("--auto-only")) {
     await evaluate(`window.taskboard.command = async (action, id, input) => {
       if (action === 'settings') { Object.assign(fixture.board.settings, input); push(); return {ok:true,data:fixture.board.settings}; }

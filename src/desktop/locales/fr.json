@@ -1159,5 +1159,8 @@
   "limits.low": "Quota bientôt épuisé",
   "limits.summary": "{count} connectés ; {unavailable} sans données actuelles",
   "limits.remaining": "{percent}% restant",
-  "limits.reset": "Réinitialisation {time}"
+  "limits.reset": "Réinitialisation {time}",
+  "ui.schedule_paused": "Planification suspendue",
+  "ui.pause_schedule": "Suspendre la planification",
+  "ui.resume_schedule": "Reprendre la planification"
 }
