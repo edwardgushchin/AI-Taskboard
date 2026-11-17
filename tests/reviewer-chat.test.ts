@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { readReviewerChat, withReviewerChat } from "../src/desktop/reviewer-chat.ts";
 
 test("reviewer chat displays the active attempt and retains recent success and failure after it ends", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const project = await mkdtemp(join(tmpdir(), "taskboard-reviewer-chat-"));
   t.after(() => rm(project, { recursive: true, force: true }));
   await mkdir(join(project, ".tasks"));
@@ -16,7 +17,11 @@ test("reviewer chat displays the active attempt and retains recent success and f
   let updates = 0;
   await withReviewerChat(project, task, () => updates++, async publish => {
     assert.equal(readReviewerChat(project, task)[0]?.durationMs, undefined);
+    for (let index = 0; index < 50; index++) publish([{ ...item, text: String(index) }]);
     publish([item]);
+    assert.equal(updates, 1, "a burst only schedules one update");
+    t.mock.timers.tick(100);
+    assert.equal(updates, 2);
     assert.deepEqual(readReviewerChat(project, task)[0]?.items, [item]);
     assert.deepEqual(readReviewerChat(project, "T-0043"), []);
   });

@@ -17,7 +17,7 @@ import {
 import { boardAgentRoles, boardReviewMode, hexTagColor, member, number, object, reasoningEffortPattern, record, registerTags, requireRevision, requireState, reviewModes, strings, tagKey, taskIdPattern, TaskboardError, text, validAgentLimitOverrides } from "./model.ts";
 import type { GitHubMilestone, Task } from "./model.ts";
 import { exists, initializeBoard, locateBoard, onBoard, readBoardSettings, withTaskStartLock } from "./storage.ts";
-import { recordSettings } from "./settings-notices.ts";
+import { inheritedLimits, recordSettings } from "./settings-notices.ts";
 import { requireAutoQueue, updateAutoQueue } from "./auto-queue.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
 import { discoverRepository, invokeGit, scheduleGitMaintenance } from "./git.ts";
@@ -36,7 +36,10 @@ import packageInfo from "../../package.json" with { type: "json" };
 import { grantTaskTool, requestTaskTool } from "./task-tools.ts";
 import { recoverTestData } from "./test-recovery.ts";
 import { expertContext, expertSkill, listExperts, readExpert, saveExpert } from "./experts.ts";
-import { createExpertPlan, reviewDecisionSequence, sendTeamMessage, teamInbox } from "./expert-team.ts";
+import { approvalRequirements, createExpertPlan, expertStagesStatus, initialExpertTeam, requireApprovalPlan, requireExpertPlan, requireExpertResults, reviewDecisionSequence, sendTeamMessage, taskExpertPhase, teamInbox, updateExpertStage } from "./expert-team.ts";
+import { syncTaskStatusNotices } from "../desktop/manager-history.ts";
+import { syncSettingsNotices } from "../desktop/settings-notices.ts";
+import { runtimeEntries } from "../desktop/board-runtime.ts";
 
 const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "pause", "block", "resume", "unblock", "update"]);
 const help = [
@@ -104,6 +107,8 @@ function compactTask(task: Task) {
     reviewDecision: status === "review" ? reviewDecisionSequence(task) : undefined, acceptanceRepair: task.acceptanceRepair, id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
     coverAttachment, codexThreadId, createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep,
     dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, origin, launchRequested, historyLength: task.history.length,
+    expertWorkPlanned: Boolean(task.expertTeam?.work?.lead || task.expertStage),
+    expertReviewPlanned: Boolean(task.expertTeam?.review?.lead),
     ...(status === "review" && task.git?.submission && !task.result?.noChanges ? { reviewHasCommit: true } : {}),
     ...(currentReviewApproval(task) ? { reviewApproved: true } : {}),
     ...(isMergeRepair(task) ? { mergeRepair: true as const } : {}),
@@ -125,7 +130,7 @@ function taskLaunchState(task: Task) {
 
 function reviewWithSettings(store: BoardStore, task: Task, review: ReturnType<typeof inspectReview>, input: Record<string, unknown>) {
   if (input.includeReviewerSettings !== true) return review;
-  return { ...review, reviewTeam: task.expertTeam?.review, reviewDecision: reviewDecisionSequence(task), settings: {
+  return { ...review, reviewTeam: task.expertTeam?.review, reviewDecision: reviewDecisionSequence(task) || undefined, settings: {
     reviewMode: boardReviewMode(store.index.settings),
     reviewer: store.index.settings.reviewer,
   } };
@@ -203,6 +208,8 @@ function watchBoard(location: BoardLocation, compact: boolean): void {
   const cards = new Map<string, CachedCard>();
   const cleanedTasks = new Set<string>();
   let nextCleanup = 0;
+  let nextGitRefresh = 0;
+  let gitChanged = false;
   let gitInfo: ReturnType<typeof boardGitInfo> = {};
   const read = (refreshGit: boolean) => {
     const previousRepository = location.repository;
@@ -221,7 +228,11 @@ function watchBoard(location: BoardLocation, compact: boolean): void {
       }
       nextCleanup = Date.now() + 15_000;
     }
-    if (refreshGit || previousRepository !== location.repository) gitInfo = boardGitInfo(location);
+    if (gitChanged || (refreshGit && Date.now() >= nextGitRefresh) || previousRepository !== location.repository) {
+      gitInfo = boardGitInfo(location);
+      nextGitRefresh = Date.now() + 4000;
+      gitChanged = false;
+    }
     return { ok: true, data: { ...board, gitInfo, cleanedTasks: [...cleanedTasks] } };
   };
   let previous = JSON.stringify(read(true));
@@ -243,23 +254,28 @@ function watchBoard(location: BoardLocation, compact: boolean): void {
       previous = current;
     }
   };
-  const schedule = () => {
+  const schedule = (gitEvent: boolean) => {
+    gitChanged ||= gitEvent;
     if (refreshTimer) clearTimeout(refreshTimer);
     refreshTimer = setTimeout(refresh, 25, false);
   };
-  for (const [path, relevant] of [
-    [location.directory, (name: string) => name === "board.json"],
-    [join(location.directory, "tasks"), (name: string) => /^T-[0-9]{4,}\.json$/.test(name)],
-  ] as const) {
+  const observe = (path: string, relevant: (name: string) => boolean, gitEvent = false, recursive = false) => {
     try {
-      const watcher = watch(path, (_event, filename) => {
-        if (!filename || relevant(filename)) schedule();
+      const watcher = watch(path, { recursive }, (_event, filename) => {
+        if (!filename || relevant(filename)) schedule(gitEvent);
       });
       watcher.on("error", () => watcher.close());
       watchers.push(watcher);
     } catch {
       // The periodic refresh covers filesystems that do not support watch.
     }
+  };
+  observe(location.directory, name => name === "board.json");
+  observe(join(location.directory, "tasks"), name => /^T-[0-9]{4,}\.json$/.test(name));
+  if (location.repository && !location.repository.bare) {
+    const gitDir = join(location.root, ".git");
+    observe(gitDir, name => ["HEAD", "config", "packed-refs"].includes(name), true);
+    observe(join(gitDir, "refs"), name => !name.endsWith(".lock"), true, true);
   }
   const interval = setInterval(refresh, 1500, true);
   const stop = () => {
@@ -287,11 +303,23 @@ function run(
   if (command === "expert-context") return expertContext(store, strings(input.ids, "expert IDs"));
   if (command === "expert-skill") return expertSkill(store, text(input.expertId, "expert ID", true), text(input.skillId, "skill ID", true));
   if (command === "expert-plan") return createExpertPlan(store, text(id, "parent task ID", true), input);
+  if (command === "expert-stage") {
+    const taskId = text(id, "task ID", true);
+    const phase = taskExpertPhase(input.phase);
+    if ((phase === "work" && input.actor !== "agent") || (phase === "review" && !["reviewer", "manager"].includes(String(input.actor))))
+      throw new TaskboardError("INVALID_INPUT", "Only the responsible phase agent may report a stage.");
+    if (phase === "review" && (input.actor === "manager" ? "manager" : "reviewer") !== boardReviewMode(store.index.settings))
+      throw new TaskboardError("REVIEW_MODE_CHANGED", "Use the responsible agent for the current review mode.");
+    const targetHead = phase === "review" ? verifyReviewDecision(store, store.card(taskId), input.targetHead) : undefined;
+    return updateExpertStage(store, taskId, phase, input, targetHead);
+  }
   if (command === "expert-inbox") return teamInbox(store, text(id, "task ID", true),
     input.actor === "manager" ? "manager" : input.actor === "user" ? "owner" : input.actor === "reviewer" ? "reviewer" : id!,
     input.afterSequence === undefined ? 0 : number(input.afterSequence, "afterSequence", 0));
   if (command === "expert-message") return sendTeamMessage(store, text(id, "task ID", true),
-    input.actor === "manager" ? "manager" : input.actor === "user" ? "owner" : input.actor === "reviewer" ? "reviewer" : id!, input);
+    typeof input.stage === "string" && (input.actor === "agent" && input.stage.startsWith("work:") ||
+      ["reviewer", "manager"].includes(String(input.actor)) && input.stage.startsWith("review:")) ? input.stage :
+      input.actor === "manager" ? "manager" : input.actor === "user" ? "owner" : input.actor === "reviewer" ? "reviewer" : id!, input);
   if (["create", "update"].includes(command) && input.expertId != null) readExpert(store, text(input.expertId, "expert ID", true));
   if (command === "worklog-migrate") return migrateWorklog(store.location.root);
   if (command === "maintenance") {
@@ -374,6 +402,9 @@ function run(
   }
   if (command === "create") {
     const task = createTask(store.allocateId(), input);
+    const expertTeam = initialExpertTeam(store, input.expertTeam);
+    if (expertTeam) task.expertTeam = expertTeam;
+    requireApprovalPlan(task, store.index.settings, "creation");
     if (isManual(store.index.settings)) {
       if (input.initialStatus !== undefined && input.actor !== "user") throw new TaskboardError("MANUAL_BOARD", "Начальную колонку выбирает пользователь.");
       const column = store.index.settings.manualColumns!.find(c => c.id === (input.initialStatus ?? store.index.settings.manualColumns![0].id));
@@ -474,6 +505,11 @@ function run(
     }
     if (input.manualColumns !== undefined) throw new TaskboardError("INVALID_INPUT", "Используйте настройку колонок с явным переносом дел.");
     if (isManual(store.index.settings) && input.autoMode === true) throw new TaskboardError("MANUAL_BOARD", "На обычной доске авторежим недоступен.");
+    if (input.requireExpertPlans !== undefined) {
+      if (typeof input.requireExpertPlans !== "boolean") throw new TaskboardError("INVALID_INPUT", "requireExpertPlans must be a boolean.");
+      if (isManual(store.index.settings) && input.requireExpertPlans) throw new TaskboardError("MANUAL_BOARD", "Expert execution is unavailable on a manual board.");
+      store.index.settings.requireExpertPlans = input.requireExpertPlans;
+    }
     const settingsJournal = store.index.managerSettings ?? recordSettings(store.index.settings);
     if (input.name !== undefined) {
       const name = text(input.name, "Board name");
@@ -542,6 +578,10 @@ function run(
     const task = taskWithCurrentWorktree(store, stored);
     const details = {
       artifacts: artifactFiles(store, id), savedChanges: describeSavedChanges(store, task),
+      ...(task.status === "draft" ? { approvalRequirements: approvalRequirements(task, store.index.settings) } : {}),
+      ...(task.expertTeam ? { expertStageStatus: {
+        work: expertStagesStatus(task, "work"), review: expertStagesStatus(task, "review"),
+      } } : {}),
       ...(task.dependencies?.length ? {
         unfinishedDependencies: unfinishedDependencies(task, dependency => dependencyStatus(store, dependency)),
       } : {}),
@@ -604,10 +644,16 @@ function run(
       const verificationStarted = performance.now();
       const targetHead = verifyReviewDecision(store, task, input.targetHead);
       decisionTiming = { lockWaitMs, verificationMs: Math.round(performance.now() - verificationStarted) };
+      if (command === "request-changes" && mode !== "human" && input.actor === mode) {
+        if (store.index.settings.requireExpertPlans) requireExpertPlan(task, "review");
+        requireExpertResults(task, "review", targetHead);
+      }
       if (reviewerReport) {
         if (hasPending(store, task)) throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation first.");
         const summary = text(input.summary, "review summary", true);
         if (command === "review-approve") {
+          if (store.index.settings.requireExpertPlans) requireExpertPlan(task, "review");
+          requireExpertResults(task, "review", targetHead);
           const evidence = input.evidence;
           if (!Array.isArray(evidence) || !evidence.length || evidence.length !== task.criteria.length ||
               evidence.some(entry => typeof entry !== "string" || !entry.trim())) {
@@ -652,6 +698,11 @@ function run(
       "acceptance-failed", "agent"), { kind: "question", text: reason }, "agent"));
   }
   if (command === "accept") {
+    if (input.actor === "manager" && !task.acceptanceRepair && boardReviewMode(store.index.settings) === "manager" &&
+        (store.index.settings.requireExpertPlans || task.expertTeam?.review?.stages.length)) {
+      if (store.index.settings.requireExpertPlans) requireExpertPlan(task, "review");
+      requireExpertResults(task, "review", verifyReviewDecision(store, task, input.targetHead));
+    }
     if (task.acceptanceRepair) {
       requireRevision(task, input.revision, true);
       if (input.continueRepair !== true) return task;
@@ -706,6 +757,8 @@ function run(
     if (logged !== task) store.save(logged);
     return filters.compact ? taskReceipt(logged) : logged;
   }
+  if (command === "progress" && task.schedule && task.status === "in_progress") requireExpertResults(task, "work");
+  if (command === "approve" && task.status === "draft") requireApprovalPlan(task, store.index.settings);
   let updated = changeTask(task, command, input);
   if (command === "update" && task.acceptanceRepair &&
       ["title", "description", "criteria", "questions", "subtasks", "dependencies", "execution"].some(key => input[key] !== undefined)) {
@@ -829,6 +882,11 @@ async function main() {
         let data;
         if (command === "settings" && !Object.keys(input).length) {
           data = readBoardSettings(location);
+        } else if (command === "sync-notices") {
+          if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "Notice synchronization takes no task ID.");
+          const limits = runtimeEntries(location.root).find(entry => entry.id === "task-defaults")?.limits ?? inheritedLimits;
+          syncSettingsNotices(location.root, limits);
+          data = { changed: syncTaskStatusNotices(location.root, text(input.language, "language", true)) };
         } else if (command === "manager-usage") {
           if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "Manager usage takes no task ID.");
           readBoardSettings(location);

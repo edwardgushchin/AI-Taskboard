@@ -118,6 +118,42 @@ test("off and lowered limits apply before the next decision without interrupting
   }
 });
 
+test("automatic planning requests missing plans once and dispatches already planned work within the limit", async () => {
+  const f = fixture("reviewer");
+  f.board.settings.requireExpertPlans = true;
+  f.add("T-0001", { priority: "high" });
+  f.add("T-0002", { expertWorkPlanned: true, expertReviewPlanned: true });
+  f.add("T-0003", { status: "draft" });
+  await f.tick();
+  assert.deepEqual(f.launches, ["T-0002"]);
+  assert.equal(f.notices.length, 1);
+  assert.match(f.notices[0][2], /T-0001/);
+  assert.doesNotMatch(f.notices[0][2], /T-0003/);
+  await f.tick();
+  assert.equal(f.notices.length, 1);
+  Object.assign(f.board.tasks[0], { expertWorkPlanned: true, expertReviewPlanned: true, revision: 2 });
+  await f.tick();
+  assert.deepEqual(f.launches, ["T-0002"]);
+  f.finish("T-0002");
+  await f.tick();
+  assert.deepEqual(f.launches, ["T-0002", "T-0001"]);
+});
+
+test("an explicitly requested child gets a plan even with automatic dispatch off", async () => {
+  const f = fixture();
+  Object.assign(f.board.settings, { requireExpertPlans: true, autoMode: false });
+  f.add("T-0001", { launchRequested: true });
+  f.add("T-0002");
+  await f.tick();
+  assert.deepEqual(f.launches, []);
+  assert.equal(f.notices.length, 1);
+  assert.match(f.notices[0][2], /T-0001/);
+  assert.doesNotMatch(f.notices[0][2], /T-0002/);
+  Object.assign(f.board.tasks[0], { expertWorkPlanned: true, revision: 2 });
+  await f.tick();
+  assert.deepEqual(f.launches, ["T-0001"]);
+});
+
 test("automatic dispatch resumes a paused merge repair when only reviewer capacity is available", async () => {
   const f = fixture();
   f.add("T-0001");

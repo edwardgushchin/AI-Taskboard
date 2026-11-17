@@ -641,6 +641,9 @@ function openSheet(kind, title) {
   if (kind !== "task") taskSheetRequest++;
   chatPreviews.disconnect();
   sheetKind = kind;
+  sheet.classList.toggle("task-sheet", kind === "task");
+  byId("task-side").hidden = true;
+  byId("task-side").replaceChildren();
   if (typeof title === "function") bindLocalized(byId("sheet-title"), "textContent", title);
   else byId("sheet-title").textContent = title;
   body.replaceChildren();
@@ -671,10 +674,17 @@ function section(title, content, target = body) {
   target.append(area);
 }
 
+function removeLegacyTaskHeadings(content) {
+  for (const heading of content.querySelectorAll(":scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > h5, :scope > h6")) {
+    if (/^(?:проблема|ожидаемый результат|ограничения|problem|expected result|constraints)$/iu.test(heading.textContent.trim())) heading.remove();
+  }
+}
+
 function taskDescription(text, taskId) {
   if (!text) return;
   const area = element("section", undefined, "sheet-section task-sheet-description");
   const content = chatText(text, { taskId });
+  removeLegacyTaskHeadings(content);
   foldTechnicalDetails(content, /^Диагностика и связанные файлы$/, "task-description-details", false);
   area.append(element("h3", () => t("ui.description_b4571c10")), content);
   body.append(area);
@@ -684,9 +694,11 @@ function cardDescription(text) {
   if (!chatMarkdown) return element("span", text, "task-description");
   // A template stays inert: no links, images or controls enter the card button.
   const template = document.createElement("template");
-  template.innerHTML = chatMarkdown.render(text);
-  for (const image of template.content.querySelectorAll("img")) image.replaceWith(image.alt);
-  return element("span", template.content.textContent.trim(), "task-description");
+  template.innerHTML = "<div>" + chatMarkdown.render(text) + "</div>";
+  const content = template.content.firstElementChild;
+  removeLegacyTaskHeadings(content);
+  for (const image of content.querySelectorAll("img")) image.replaceWith(image.alt);
+  return element("span", content.textContent.trim(), "task-description");
 }
 
 function checkCommandLabel(command) {
@@ -725,37 +737,50 @@ function showSubmissionResult(result, target = body) {
   if (result.checks?.length) {
     const area = element("section", undefined, "sheet-section task-checks");
     area.append(element("h3", () => t("ui.checks_33b2cadc")));
+    const totals = { passed: 0, failed: 0, skipped: 0 };
     for (const value of result.checks) {
       const parts = value.match(/^([\s\S]+?)\n(?:Command|Команда):\s*([\s\S]+)$/i);
       const statement = (parts?.[1] ?? value).trim();
-      const outcome = statement.match(/^([\s\S]+?)(?:\s+[-–—]\s+|:\s*)(pass(?:ed)?|fail(?:ed)?|skipped|not run|пройден[аоы]?|не пройден[аоы]?|пропущен[аоы]?|не запускал[аи]?)(?:\s*([;:.—–-])\s*([\s\S]*))?$/i);
+      const outcome = statement.match(/^([\s\S]+?)(?:\s+[-–—]\s+|:\s*)(pass(?:ed)?|fail(?:ed)?|skipped|not run|пройден[аоы]?|не пройден[аоы]?|пропущен[аоы]?|не запускал[аи]?)(?:[\s,;:.—–-]+([\s\S]*))?$/i);
       const name = outcome?.[1] ?? statement;
       const commandLabel = !parts && outcome ? checkCommandLabel(name) : undefined;
       const status = outcome?.[2].toLowerCase();
       const passed = status && /^(?:pass|пройден)/.test(status);
       const failed = status && /^(?:fail|не пройден)/.test(status);
       const command = parts?.[2] ?? (commandLabel && value);
-      const row = element(command ? "details" : "div", undefined, "task-check");
-      const line = element(command ? "summary" : "div", undefined, "task-check-line");
-      if (command) {
+      const note = outcome?.[3];
+      const expandedDetails = command || note?.length > 110;
+      const row = element(expandedDetails ? "details" : "div", undefined, "task-check");
+      const line = element(expandedDetails ? "summary" : "div", undefined, "task-check-line");
+      if (expandedDetails) {
         const arrow = element("i", undefined, "codicon codicon-chevron-right task-check-arrow");
         arrow.setAttribute("aria-hidden", "true");
         line.append(arrow);
       }
       const copy = element("span", undefined, "task-check-copy");
       copy.append(command || outcome ? element("span", commandLabel ?? name, "task-check-name") : chatText(name));
-      if (outcome?.[4]) copy.append(element("span", outcome[4], "task-check-note"));
+      if (note && !expandedDetails) copy.append(element("span", note, "task-check-note"));
       line.append(copy);
       if (status) {
         const label = passed ? t("ui.passed_68bec83e") : failed ? t("ui.failed_5f8945bd") : t("ui.skipped_8c40ee29");
         const badge = element("span", label, "task-check-status");
         badge.dataset.outcome = passed ? "passed" : failed ? "failed" : "skipped";
+        totals[badge.dataset.outcome]++;
         line.append(badge);
       }
       row.append(line);
+      if (note && expandedDetails) row.append(element("p", note, "task-check-detail"));
       if (command) row.append(element("pre", command, "task-check-command"));
       area.append(row);
     }
+    const counts = element("p", undefined, "task-check-counts");
+    for (const [outcome, label] of [["passed", "ui.passed_68bec83e"], ["failed", "ui.failed_5f8945bd"], ["skipped", "ui.skipped_8c40ee29"]]) {
+      if (!totals[outcome]) continue;
+      const count = element("span", () => t(label) + " " + totals[outcome], "task-check-status");
+      count.dataset.outcome = outcome;
+      counts.append(count);
+    }
+    if (counts.childElementCount) area.firstElementChild.after(counts);
     target.append(area);
   }
   section(() => (t("ui.limitations_499c4317")), result.limitations, target);
@@ -1825,6 +1850,7 @@ function draftComposer() {
   bar.append(views, resize, pin);
   let currentGoal;
   let goalRunning = false;
+  const activeGoalRunId = () => goalRunning && managerWork?.phase === "running" ? managerWork.id : undefined;
   let goalRevision = 0;
   let changingGoal = false;
   const goalPanel = element("details", undefined, "board-goal");
@@ -2032,12 +2058,7 @@ function draftComposer() {
       const title = frame.board?.tasks.find(task => task.id === id)?.title;
       const link = button(id + (title ? " · " + title : ""), protect(async () => {
         await showTask(id);
-        if (reviewing[id] !== "reviewer") return;
-        const reviewer = byId("task-reviewer-chat");
-        if (reviewer) {
-          reviewer.open = true;
-          reviewer.scrollIntoView({ block: "nearest" });
-        }
+        if (reviewing[id] === "reviewer" && taskInSheet?.id === id) byId("task-side").firstElementChild?.openReviewer();
       }), "quiet board-chat-task");
       const status = reviewing[id] === "reviewer" ? t("ui.reviewer_50c42665") + " · " + workStatus(activeReviewers[id]?.item) :
         reviewing[id] === "manager" ? t("ui.manager_is_reviewing_b8f46e42") :
@@ -3270,13 +3291,13 @@ function draftComposer() {
     validate();
     edit.focus({ preventScroll: true });
   }
-  async function sendQueuedNow(job) {
+  async function sendQueuedNow(job, goalRunId = activeGoalRunId()) {
     if (disposed || sendingQueuedMessage || job.sending || job.editing || !queued.includes(job)) return;
     const turn = active;
-    if (!turn) {
+    if (!turn && !goalRunId) {
       await loadHistory()?.catch(() => {});
       if (disposed || !queued.includes(job) || job.sending || job.editing) return;
-      if (active) return sendQueuedNow(job);
+      if (active || activeGoalRunId()) return sendQueuedNow(job);
       queued.splice(queued.indexOf(job), 1);
       queued.unshift(job);
       if (job.failed) {
@@ -3289,19 +3310,19 @@ function draftComposer() {
     }
     sendingQueuedMessage = true;
     job.sending = true;
-    const delivery = { after: turn.lastItem };
-    turn.deliveries.set(job.id, delivery);
+    const delivery = { after: turn?.lastItem };
+    turn?.deliveries.set(job.id, delivery);
     job.status.replaceChildren(element("span", () => t("ui.sending_15dba7c5")));
     message("");
     try {
       const pasted = await pasteFiles(job.submitted);
       if (disposed) return;
-      const result = await api.boardRequest(job.request, pasted, project, false, true, job.id);
+      const result = await api.boardRequest(job.request, pasted, project, false, true, job.id, goalRunId);
       if (disposed) return;
       if (!result.ok) throw new Error(boardError(result.error));
       queued.splice(queued.indexOf(job), 1);
       job.row.remove();
-      if (turn.items.some(item => item.userMessage && item.id === job.id) || active !== turn) {
+      if (!turn || turn.items.some(item => item.userMessage && item.id === job.id) || active !== turn) {
         releaseMessagePreviews(job.messageFiles);
       } else {
         delivery.fallback = { id: job.id, type: "userMessage", status: "completed", text: job.request, title: "",
@@ -3310,7 +3331,7 @@ function draftComposer() {
       }
       releaseSubmittedPreviews(job.submitted);
     } catch (error) {
-      if (!turn.items.some(item => item.userMessage && item.id === job.id)) turn.deliveries.delete(job.id);
+      if (turn && !turn.items.some(item => item.userMessage && item.id === job.id)) turn.deliveries.delete(job.id);
       if (!disposed) {
         renderQueuedActions(job);
         message(error.message);
@@ -3507,6 +3528,7 @@ function draftComposer() {
     if (dictation || savingQueuedMessage || !hasDraft()) return;
     const draft = input.value;
     const goal = goalMode;
+    const goalRunId = !goal && !work.hidden ? activeGoalRunId() : undefined;
     const submitted = [...files];
     let id;
     savingQueuedMessage = true;
@@ -3533,8 +3555,10 @@ function draftComposer() {
     if (goalMode === goal) setGoalMode(false);
     if (active?.id !== id && !queued.some(job => job.id === id)) enqueue(id, draft, goal, submitted);
     openChat();
-    showWork(goal);
-    sendNext();
+    showWork(goal || Boolean(goalRunId));
+    const job = goalRunId && queued.find(job => job.id === id);
+    if (job) void sendQueuedNow(job, goalRunId);
+    else sendNext();
     syncAction();
   });
   function updateQueuedPreview(job) {
@@ -3761,150 +3785,6 @@ function taskEditor(task) {
   showFields();
 }
 
-async function editMilestone(task) {
-  const project = frame.project;
-  const generation = projectGeneration;
-  const current = task.milestone;
-  let repository = frame.board?.gitInfo?.githubRepository;
-  const view = form("milestone", () => (t("ui.github_milestone_11d33bfa")), [{
-    name: "milestone", label: () => (t("ui.milestone_82c768da")), value: current ? "current" : "",
-    options: [["", t("ui.no_milestone_e1c29664")], ...(current ? [["current", current.title + " · " + current.repository]] : [])],
-  }], () => (t("ui.save_7eea8139")), async values => {
-    if (values.milestone === "current" || (!values.milestone && !current)) return showTask(task.id);
-    const milestone = values.milestone ? { repository, number: Number(values.milestone) } : null;
-    const saved = await command("milestone", task.id, { revision: task.revision, milestone });
-    if (saved && frame.project === project && sheet.open && view.isConnected) await showTask(task.id);
-  });
-  const select = view.querySelector("select");
-  const save = view.querySelector('[type="submit"]');
-  const status = element("p", undefined, "muted");
-  status.setAttribute("role", "status");
-  save.before(status);
-  if (!repository) {
-    bindLocalized(status, "textContent", () => t("ui.configure_a_github_origin_to_choose_another_mile_0da284a2"));
-    return;
-  }
-  bindLocalized(status, "textContent", () => t("ui.loading_milestones_8a984d86"));
-  const result = await api.command("milestones").catch(error => ({ ok: false, error }));
-  if (!view.isConnected || !sheet.open || projectGeneration !== generation) return;
-  if (!result.ok) {
-    status.textContent = boardError(result.error);
-    return;
-  }
-  repository = result.data.repository;
-  bindLocalized(status, "textContent", () => result.data.milestones.length ? repository :
-    t("ui.this_repository_has_no_milestones_3e24cde2"));
-  for (const entry of result.data.milestones) {
-    if (current?.repository === repository && current.number === entry.number) {
-      select.querySelector('[value="current"]').textContent = entry.title + " · " + repository;
-      continue;
-    }
-    const closed = entry.state === "closed" ? t("ui.closed_e1ef79ba") : "";
-    select.add(localizedOption(entry.title + " · #" + entry.number + closed, String(entry.number)));
-  }
-}
-
-function editDependencies(task) {
-  const dependencies = new Set(task.dependencies ?? []);
-  const board = frame.board;
-  const entries = [...board.tasks, ...board.archived].filter(candidate => candidate.id !== task.id);
-  const editor = form("dependencies", () => (t("ui.task_dependencies_496b3742")), [],
-    () => (t("ui.save_7eea8139")), async () => {
-      const saved = await command("update", task.id, {
-        dependencies: [...dependencies], revision: task.revision, actor: "user",
-      });
-      if (saved) await showTask(saved.id);
-    });
-  const choices = element("fieldset", undefined, "dependency-choices");
-  choices.append(element("legend", () => t("ui.complete_before_starting_this_task_9c7caae7")));
-  for (const candidate of entries) {
-    const row = element("label", undefined, "dependency-option");
-    const checkbox = element("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = dependencies.has(candidate.id);
-    checkbox.addEventListener("change", () => {
-      if (checkbox.checked) dependencies.add(candidate.id);
-      else dependencies.delete(candidate.id);
-    });
-    row.append(checkbox, candidate.id + " · " + candidate.title);
-    choices.append(row);
-  }
-  if (!entries.length) choices.append(element("p", () => t("ui.no_other_tasks_on_this_board_6dfc48ad")));
-  editor.prepend(choices);
-}
-
-async function editExecution(task) {
-  const title = t("ui.execution_settings_aceb50d5");
-  openSheet("execution", title);
-  const loading = element("p", () => t("ui.loading_models_32c54be2"), "muted");
-  body.append(loading);
-  const result = await api.executionModels();
-  if (!sheet.open || !loading.isConnected) return;
-  const models = result.ok ? result.data : [];
-  const selected = task.execution?.model ?? "";
-  const defaultLabel = t("ui.board_default_cdea75f4");
-  const canSetDirectory = !task.git && !task.codexThreadId && !task.history.some(event => event.action === "start");
-  const modelOptions = [["", defaultLabel], ...models.map(model => [model.id, model.name])];
-  if (selected && !models.some(model => model.id === selected)) {
-    modelOptions.push([selected, selected + " · " + t("ui.unavailable_31fb3a55")]);
-  }
-  const editor = form("execution", title, [
-    { name: "model", label: () => (t("ui.model_a909c227")), value: selected, options: modelOptions },
-    { name: "effort", label: () => (t("ui.reasoning_effort_cea4174e")), options: [] },
-    ...(canSetDirectory ? [{ name: "workingDirectory", value: task.workingDirectory ?? "",
-      label: () => (t("ui.working_directory_empty_for_a_task_worktree_e8790ed1")) }] : []),
-  ], () => (t("ui.save_7eea8139")), async ({ model, effort, workingDirectory }) => {
-    if (model && !models.some(entry => entry.id === model)) {
-      notice(t("ui.choose_an_available_model_216af4d4"));
-      return;
-    }
-    const saved = await command("update", task.id, {
-      execution: model ? { model, effort: effort || undefined } : null,
-      ...(canSetDirectory ? { workingDirectory: workingDirectory.trim() || null } : {}),
-      revision: task.revision, actor: "user",
-    });
-    if (saved) await showTask(saved.id);
-  });
-  const [model, effort] = editor.querySelectorAll("select");
-  function setEfforts(value) {
-    const available = models.find(entry => entry.id === model.value)?.efforts ?? [];
-    effort.replaceChildren(localizedOption(t("ui.provider_default_69f2d8eb"), ""),
-      ...available.map(value => localizedOption(value, value)));
-    effort.disabled = !available.length;
-    if (available.includes(value)) effort.value = value;
-  }
-  model.addEventListener("change", () => setEfforts(""));
-  setEfforts(task.execution?.effort);
-  if (!result.ok) notice(boardError(result.error));
-}
-
-function editTaskAccess(task) {
-  const project = frame.project;
-  const title = t("ui.executor_access_7d02bf31");
-  const editor = form("task-access", title, [{
-    name: "mode", label: () => (t("ui.mode_45d0aa30")), value: task.executorFullAccess ? "full" : "auto",
-    options: [["auto", t("ui.approve_for_me_64ade20f")], ["full", t("ui.full_access_47d69a72")]],
-  }], () => (t("ui.save_7eea8139")), async ({ mode }) => {
-    const result = await api.setTaskAccess(project, task.id, task.createdAt, mode === "full");
-    if (frame.project !== project || sheetKind !== "task-access" || !editor.isConnected) return;
-    if (result.ok) await showTask(task.id);
-    else notice(boardError(result.error));
-  });
-  editor.prepend(element("p", () => t("ui.full_access_runs_commands_with_your_operating_sy_49e76291"), "muted"));
-}
-
-function editTaskTags(task) {
-  const editor = form("task-tags", () => (t("ui.edit_tags_fe276cc0") + " · " + task.id), [
-    { name: "tags", label: () => (t("ui.tags_comma_separated_d9e75f27")), value: task.tags.join(", ") },
-  ], () => (t("ui.save_7eea8139")), async ({ tags }) => {
-    const saved = await command("tag-assign", task.id, {
-      tags: tags.split(",").map(tag => tag.trim()).filter(Boolean), revision: task.revision,
-    });
-    if (saved && editor.isConnected && sheet.open) await showTask(task.id);
-  });
-  editor.querySelector("input").focus();
-}
-
 function openTaskSheet(task) {
   openSheet("task", task.id + (task.title ? " · " + task.title : ""));
   const runStatus = element("span", undefined, "task-agent-run muted");
@@ -3950,7 +3830,6 @@ async function showTask(id) {
   taskInSheet = task;
   openTaskSheet(task);
   if (task.status === "blocked" && task.blocked) body.append(blockerBanner(task.blocked));
-  if (task.executorFullAccess) body.append(element("p", () => t("ui.launch_mode_full_access_ed7fe948"), "task-state-label"));
   savedChangesSection(task, task.savedChanges);
   if (task.tags.length) {
     const tags = element("div", undefined, "task-tags");
@@ -3968,6 +3847,7 @@ async function showTask(id) {
     details.open = descriptionOpen[index] ?? false;
   });
   section(() => (t("ui.acceptance_criteria_7e3779c2")), task.criteria);
+  if (!manualBoard() && !task.expertStage) expertTeamSection(task);
   const stateLabel = (done, text) => {
     const label = element("div", undefined, "task-state-label");
     const state = icon(done ? "check" : "circle");
@@ -3979,9 +3859,7 @@ async function showTask(id) {
   };
   section(() => (t("ui.subtasks_b409bda5")), task.subtasks.map(item => stateLabel(item.done, item.title)));
   if (!manualBoard()) {
-    if (task.expertId) section(() => t("experts.assign"), task.expertId);
     if (task.expertStage) body.append(button(task.expertStage.parentId, () => showTask(task.expertStage.parentId), "quiet"));
-    if (task.expertTeam || task.expertStages?.length || task.expertStage || task.expertId || task.history.some(event => event.expertMessage)) expertTeamSection(task);
   }
   if (task.status === "in_progress") section(() => (t("ui.submission_1577a02d")), t("ui.result_not_submitted_61369662"));
   section(() => (t("ui.progress_d4dff843")), task.summary);
@@ -4013,7 +3891,7 @@ async function showTask(id) {
   if (task.attachments.length) {
     const images = task.attachments.filter(isImageAttachment);
     const previous = selectedCover(task, images)?.file ?? "";
-    if ((images.length > 1 || (images.length === 1 && !previous)) && !frame.board?.archived.some(entry => entry.id === task.id)) {
+    if (manualBoard() && (images.length > 1 || (images.length === 1 && !previous)) && !frame.board?.archived.some(entry => entry.id === task.id)) {
       const label = element("label", undefined, "task-cover-setting");
       label.append(element("span", () => t("ui.card_cover_43d5cce6")));
       const picker = element("select");
@@ -4053,27 +3931,8 @@ async function showTask(id) {
     actions.append(button(() => t(task.schedule.paused ? "ui.resume_schedule" : "ui.pause_schedule"),
       () => act("update", { schedulePaused: !task.schedule.paused })));
   }
-  if (task.status === "draft") actions.append(button(() => t("ui.approve_535c27a7"), () => act("approve"), "primary"));
-  if (!frame.board?.archived.some(entry => entry.id === task.id) && (task.milestone || frame.board?.gitInfo?.githubRepository)) {
-    actions.append(button(() => t("ui.milestone_3df16b83"), () => editMilestone(task)));
-  }
+  if (task.status === "draft" && !task.approvalRequirements?.length) actions.append(button(() => t("ui.approve_535c27a7"), () => act("approve"), "primary"));
   if (task.status === "ready") actions.append(button(() => t("ui.return_to_draft_ccd17679"), () => act("return-to-draft")));
-  if (["draft", "ready"].includes(task.status)) {
-    if (!manualBoard()) {
-      actions.append(button(() => t("experts.assign"), () => assignExpert(task)));
-      actions.append(button(() => t("experts.add_stage"), () => addExpertStage(task)));
-    }
-    actions.append(button(() => t("ui.dependencies_bbf4859b"), () => editDependencies(task)));
-    actions.append(button(() => t("ui.execution_settings_c1ef196e"), () => editExecution(task)));
-  }
-  if (!manualBoard() && (["draft", "ready"].includes(task.status) ||
-      (task.status === "review" && !task.acceptanceRepair && !task.history.some(event => event.reviewApproval?.revision === task.revision)))) {
-    actions.append(button(() => t("experts.review_lead"), () => assignExpert(task, "review")),
-      button(() => t("experts.add_review_stage"), () => addExpertStage(task, "review")));
-  }
-  if (!manualBoard() && !["done", "cancelled"].includes(task.status) && !frame.runningTasks?.includes(task.id)) {
-    actions.append(button(() => t("ui.executor_access_4c93bc80"), () => editTaskAccess(task)));
-  }
   if (task.workingDirectory) {
     const directory = element("section", undefined, "sheet-section");
     const location = element("p", () => t("ui.working_directory_b37ab351") + " · ");
@@ -4092,11 +3951,9 @@ async function showTask(id) {
     const result = await api.openWorktree(task.id);
     if (!result.ok) notice(boardError(result.error));
   }));
-  if (["done", "cancelled"].includes(task.status)) {
-    actions.append(button(() => t("ui.edit_tags_fe276cc0"), () => editTaskTags(task)));
-  } else {
-    actions.append(button(() => t("ui.edit_c25be9fb"), () => taskEditor(task)));
-    if (!manualBoard()) actions.append(button(() => t("ui.cancel_task_e9e056a5"), () => noteTask(task, "cancel"), "danger"));
+  if (!["done", "cancelled"].includes(task.status)) {
+    if (manualBoard()) actions.append(button(() => t("ui.edit_c25be9fb"), () => taskEditor(task)));
+    else actions.append(button(() => t("ui.cancel_task_e9e056a5"), () => noteTask(task, "cancel"), "danger"));
   }
   if (manualBoard()) {
     const history = task.history.filter(event => event.action === "manual-move");
@@ -4119,10 +3976,9 @@ async function showTask(id) {
   const codexAction = codexTaskAction(task);
   if (codexAction) actions.append(codexAction);
   body.append(actions);
-  if (task.status === "review" || task.history.some(event => event.actor === "reviewer" || event.action === "submit")) {
-    body.append(reviewerChat(task, openDetails.has("task-reviewer-chat")));
-  }
-  body.append(taskChat(task));
+  const side = byId("task-side");
+  side.replaceChildren(taskChat(task));
+  side.hidden = false;
   body.scrollTop = scroll;
   if (focusedChat && byId("task-chat-input")) {
     byId("task-chat-input").focus({ preventScroll: true });
@@ -4516,7 +4372,10 @@ function editExpert(expert, entries) {
     { name: "prompt", label: () => t("experts.prompt"), type: "area", value: expert?.prompt, required: true },
   ], () => t("ui.save_settings_2173b7d7"), async values => {
     if (await command("expert-save", undefined, { ...values, id: expertId, skills,
-      ...(expert ? { revision: expert.revision } : {}), requirements: expert?.requirements ?? [], limitations: expert?.limitations ?? "" })) await expertSettings();
+      ...(expert ? { revision: expert.revision } : {}), requirements: expert?.requirements ?? [], limitations: expert?.limitations ?? "" })) {
+      taskExpertCatalog = undefined;
+      await expertSettings();
+    }
   });
   const panel = element("section", undefined, "expert-skills");
   const render = () => {
@@ -4530,7 +4389,7 @@ function editExpert(expert, entries) {
         const source = expert?.skills.some(s => s.id === skill.id) ? expert : entries.find(e => e.skills.some(s => s.id === skill.id));
         const value = source && await command("expert-skill", undefined, { expertId: source.id, skillId: skill.id });
         if (value && row.isConnected) {
-          const preview = element("pre", value.content, "expert-mail"); row.append(preview);
+          const preview = element("pre", value.content, "expert-skill-preview"); row.append(preview);
         }
       }, "quiet"));
       else {
@@ -4556,97 +4415,189 @@ function editExpert(expert, entries) {
   editor.querySelector('button[type="submit"]').before(panel, choose, add);
 }
 
-function filterExpertChoices(editor, experts) {
-  const select = editor.elements.namedItem("expertId");
-  select.size = 6;
-  const search = element("input", undefined, "expert-search"); search.type = "search";
-  search.placeholder = t("experts.search"); search.setAttribute("aria-label", t("experts.search"));
-  search.addEventListener("input", () => {
-    const query = search.value.toLocaleLowerCase();
-    for (const option of select.options) option.hidden = Boolean(option.value && !(experts.find(e => e.id === option.value)?.name + " " + option.value).toLocaleLowerCase().includes(query));
-  });
-  select.before(search);
+let taskExpertCatalog;
+function expertRoleNames(project) {
+  if (taskExpertCatalog?.project !== project) {
+    const catalog = { project, names: api.command("experts").then(result => {
+      if (!result.ok) throw new Error(boardError(result.error));
+      return new Map(result.data.map(expert => [expert.id, expert.name]));
+    }).catch(() => {
+      if (taskExpertCatalog === catalog) taskExpertCatalog = undefined;
+      return new Map();
+    }) };
+    taskExpertCatalog = catalog;
+  }
+  return taskExpertCatalog.names;
 }
-async function assignExpert(task, phase = "work") {
-  const experts = await command("experts"); if (!experts) return;
-  const label = () => t(phase === "review" ? "experts.review_lead" : "experts.assign");
-  const editor = form("assign-expert", label, [
-    { name: "expertId", label, value: (task.expertTeam?.[phase]?.lead === undefined && phase === "work" ? task.expertId : task.expertTeam?.[phase]?.lead) ?? "",
-      options: [["", () => t("experts.general")], ...experts.filter(e => e.enabled).map(e => [e.id, e.name])] },
-  ], () => t("ui.save_settings_2173b7d7"), async values => {
-    if (await command("expert-plan", task.id, { revision: task.revision, phase, lead: values.expertId || null, stages: [] })) await showTask(task.id);
-  }); filterExpertChoices(editor, experts);
+
+function expertAvatar(id, name) {
+  const short = { "qa-engineer": "QA", "ux-designer": "UX", "ui-designer": "UI",
+    "frontend-developer": "FE", "backend-developer": "BE" };
+  const initials = short[id] ?? name.match(/[\p{L}\p{N}]+/gu)?.slice(0, 2).map(word => word[0]).join("").toUpperCase() ?? "?";
+  const avatar = element("span", initials, "expert-avatar");
+  avatar.style.setProperty("--expert-hue", [...id].reduce((hue, char) => (hue * 31 + char.codePointAt(0)) % 360, 0));
+  avatar.setAttribute("aria-hidden", "true");
+  return avatar;
 }
-async function addExpertStage(task, phase = "work") {
-  const experts = await command("experts"); if (!experts) return;
-  const editor = form("expert-stage", () => t(phase === "review" ? "experts.add_review_stage" : "experts.add_stage"), [
-    { name: "title", label: () => t("experts.stage_title"), required: true },
-    { name: "expertId", label: () => t("experts.assign"), options: experts.filter(e => e.enabled).map(e => [e.id, e.name]), required: true },
-    { name: "description", label: () => t("experts.description"), type: "area" },
-    { name: "inputs", label: () => t("experts.inputs"), type: "area" },
-    { name: "outputs", label: () => t("experts.outputs"), type: "area", required: true },
-    { name: "criteria", label: () => t("ui.acceptance_criteria_7e3779c2"), type: "area", required: true },
-    { name: "dependsOn", label: () => t("experts.prerequisites"), options: [["", "—"], ...(task.expertTeam?.[phase]?.stages ?? []).map(s => [s.key, s.title])] },
-  ], () => t("ui.save_settings_2173b7d7"), async values => {
-    const lines = value => value.split("\n").map(s => s.trim()).filter(Boolean);
-    const stage = { ...values, key: "stage-" + crypto.randomUUID(), inputs: lines(values.inputs), outputs: lines(values.outputs),
-      criteria: lines(values.criteria), dependsOn: values.dependsOn ? [values.dependsOn] : [] };
-    if (await command("expert-plan", task.id, { revision: task.revision, phase, stages: [stage] })) await showTask(task.id);
-  }); filterExpertChoices(editor, experts);
+
+function expertStageLabel(task, phase, key) {
+  return task.expertTeam?.[phase]?.stages.find(stage => stage.key === key)?.title;
 }
+
 function expertTeamSection(task) {
   const area = element("section", undefined, "expert-team");
-  area.append(element("h3", () => t("experts.team")));
-  for (const [phase, plan] of Object.entries(task.expertTeam ?? {})) {
-    area.append(element("h4", () => t(phase === "work" ? "status.in_progress" : "status.review")));
-    if (plan.lead) area.append(element("p", () => t(phase === "work" ? "experts.assign" : "experts.review_lead") + " · " + plan.lead));
-    const stages = element("ul");
-    for (const stage of plan.stages) {
-      const row = element("li", stage.title + " · " + stage.expertId);
-      if (stage.inputs.length) row.append(element("small", () => t("experts.inputs") + " · " + stage.inputs.join(", ")));
-      row.append(element("small", () => t("experts.outputs") + " · " + stage.outputs.join(", ")));
-      if (stage.dependsOn.length) row.append(element("small", () => t("experts.prerequisites") + " · " +
-        stage.dependsOn.map(key => plan.stages.find(item => item.key === key)?.title ?? key).join(", ")));
-      stages.append(row);
+  area.append(element("h3", () => t("experts.plan_title")));
+  if (task.approvalRequirements?.length) {
+    const reason = element("p", () => t("experts.approval_incomplete") + " " +
+      task.approvalRequirements.map(field => t("experts.missing_" + field)).join(", ") + ".", "muted");
+    reason.classList.add("expert-approval-requirements");
+    area.append(reason);
+  }
+  const labels = new Map();
+  const keyForTask = frame.project + "\0" + task.id;
+  const openStages = chatDrafts.get(keyForTask)?.openStages;
+  const role = id => {
+    const label = element("span", id?.replaceAll("-", " "));
+    if (id) {
+      if (!labels.has(id)) labels.set(id, []);
+      labels.get(id).push(label);
     }
-    area.append(stages);
+    return label;
+  };
+  const phases = element("div", undefined, "expert-team-phases");
+  for (const phase of ["work", "review"]) {
+    const plan = task.expertTeam?.[phase];
+    const lead = phase === "work" && plan?.lead === undefined ? task.expertId : plan?.lead;
+    const phaseArea = element("section", undefined, "expert-phase");
+    const header = element("header", undefined, "expert-phase-header");
+    header.append(element("h4", () => t(phase === "work" ? "experts.work_phase" : "experts.review_phase")));
+    const assignment = element("div", undefined, "expert-lead");
+    if (lead) assignment.append(expertAvatar(lead, lead), role(lead), element("span", () => t("experts.lead"), "muted"));
+    else assignment.append(element("span", () => t("experts.no_lead"), "muted"));
+    header.append(assignment);
+    phaseArea.append(header);
+    for (const stage of plan?.stages ?? []) {
+      const state = task.expertStageStatus?.[phase]?.find(item => item.key === stage.key);
+      const details = element("details", undefined, "expert-stage");
+      const key = phase + ":" + stage.key;
+      details.open = openStages?.has(key) ?? false;
+      details.addEventListener("toggle", () => {
+        const draft = chatDrafts.get(keyForTask);
+        if (!draft || !details.isConnected) return;
+        const expanded = draft.openStages ??= new Set();
+        if (details.open) expanded.add(key);
+        else expanded.delete(key);
+      });
+      const title = element("summary", undefined, "expert-stage-row");
+      const copy = element("span", undefined, "expert-stage-copy");
+      copy.append(element("strong", stage.title), role(stage.expertId));
+      title.append(icon("chevron-right"), expertAvatar(stage.expertId, stage.expertId), copy);
+      if (state) {
+        const status = element("span", () => t("experts.stage_" + state.state), "expert-stage-status");
+        status.dataset.state = state.state;
+        title.append(status);
+      }
+      details.append(title);
+      if (stage.description) details.append(chatText(stage.description, { taskId: task.id }));
+      for (const [label, values] of [["stage_inputs", stage.inputs], ["stage_outputs", stage.outputs],
+        ["stage_prerequisites", stage.dependsOn.map(id => plan.stages.find(entry => entry.key === id)?.title ?? id)]]) {
+        if (values.length) details.append(element("p", () => t("experts." + label) + " · " + values.join(", "), "muted"));
+      }
+      section(() => t("ui.acceptance_criteria_7e3779c2"), stage.criteria, details);
+      if (state?.run?.result) details.append(chatText(state.run.result, { taskId: task.id }));
+      if (state?.run?.fallback) details.append(element("p", () => t("experts.local_execution") + " · " + state.run.fallback, "muted"));
+      for (const [output, evidence] of Object.entries(state?.run?.outputs ?? {})) details.append(chatText(output + " · " + evidence, { taskId: task.id }));
+      phaseArea.append(details);
+    }
+    const legacy = phase === "work" ? task.expertStages ?? [] : [];
+    for (const stage of legacy) {
+      const child = frame.board?.tasks.find(entry => entry.id === stage.taskId) ?? frame.board?.archived?.find(entry => entry.id === stage.taskId);
+      const link = button("", () => showTask(stage.taskId), "quiet");
+      link.append(stage.title + " · ", role(child?.expertId ?? stage.expertId));
+      if (child) link.append(element("span", () => " · " + t("status." + child.status)));
+      phaseArea.append(link);
+    }
+    if (!plan?.stages.length && !legacy.length) phaseArea.append(element("p", () => t("experts.no_stages"), "muted"));
+    phases.append(phaseArea);
   }
-  for (const stage of task.expertStages ?? []) {
-    const child = frame.board?.tasks.find(t => t.id === stage.taskId) ?? frame.board?.archived.find(t => t.id === stage.taskId);
-    area.append(button(stage.title + " · " + (child?.expertId ?? stage.expertId) + (child ? " · " + t("status." + child.status) : ""), () => showTask(stage.taskId), "quiet"));
-  }
-  task.history.forEach((event, index) => {
-    if (event.expertMessage?.to !== "owner" || event.messageKind !== "question" ||
-        task.history.some(reply => reply.expertMessage?.from === "owner" && reply.expertMessage.replyTo === index + 1)) return;
-    const question = element("article", undefined, "expert-mail");
-    question.append(element("strong", () => t("experts.owner")), element("p", event.text),
-      button(() => t("experts.reply"), () => composeExpertMail(task, event.expertMessage.from, index + 1)));
-    area.append(question);
-  });
-  area.append(button(() => t("experts.mail"), () => expertMailbox(task)), button(() => t("experts.send"), () => composeExpertMail(task)));
+  area.append(phases);
   body.append(area);
+  if (labels.size) void expertRoleNames(frame.project).then(names => {
+    if (!area.isConnected) return;
+    for (const [id, nodes] of labels) for (const label of nodes) {
+      label.textContent = names.get(id) ?? label.textContent;
+    }
+  });
 }
-async function expertMailbox(task) {
-  const parentId = task.expertStage?.parentId ?? task.id;
-  const parent = await command("show", parentId); if (!parent) return;
-  openSheet("expert-mail", () => t("experts.mail"));
-  body.append(button(() => t("experts.send"), () => composeExpertMail(parent)), button(parent.title, () => showTask(parentId), "quiet"));
-  parent.history.forEach((event, index) => {
+
+function expertTeamMail(task) {
+  const log = element("section", undefined, "task-team-mail");
+  log.append(element("h4", () => t("experts.conversation")));
+  if (task.expertStage) {
+    log.append(button(task.expertStage.parentId, () => showTask(task.expertStage.parentId), "quiet"));
+    return log;
+  }
+  const list = element("ol", undefined, "expert-conversation");
+  const entries = [];
+  const address = id => {
+    const [phase, key] = id.split(":");
+    const stage = task.expertTeam?.[phase]?.stages.find(item => item.key === key);
+    if (stage) return { role: stage.expertId, name: stage.title };
+    if (id === task.id) return { role: task.expertTeam?.work?.lead ?? task.expertId, name: t("ui.executor_92197b27") };
+    if (id === "reviewer") return { role: task.expertTeam?.review?.lead, name: t("ui.reviewer_50c42665") };
+    const child = task.expertStages?.find(stage => stage.taskId === id);
+    if (child) return { role: child.expertId, name: child.title };
+    const labels = { owner: "experts.owner", manager: "experts.manager", team: "experts.all" };
+    return { name: Object.hasOwn(labels, id) ? t(labels[id]) : id };
+  };
+  task.history.forEach((event, index) => {
     if (!event.expertMessage) return;
-    const row = element("article", undefined, "expert-mail");
-    row.append(element("small", event.expertMessage.from + " → " + event.expertMessage.to + " · " + shortDate(event.at)), element("p", event.text));
-    row.append(button(() => t("experts.reply"), () => composeExpertMail(parent, event.expertMessage.from, index + 1), "quiet")); body.append(row);
+    const { from, to, replyTo } = event.expertMessage;
+    const sender = address(from);
+    const recipient = address(to);
+    const row = element("li", undefined, "expert-message");
+    row.id = "team-message-" + (index + 1);
+    const bubble = element("article", undefined, "expert-bubble");
+    const header = element("div", undefined, "expert-bubble-header");
+    const author = element("strong", sender.name, "expert-author");
+    const route = element("small", undefined, "expert-recipient");
+    const recipientLabel = element("span", recipient.name);
+    route.append(icon("arrow-right"), recipientLabel);
+    header.append(author);
+    appendChatTime(header, event.at);
+    bubble.append(header, route);
+    if (replyTo && task.history[replyTo - 1]?.expertMessage) {
+      const jump = button(() => t("experts.referenced_message") + " #" + replyTo, () => {
+        const previous = list.querySelector("#team-message-" + replyTo);
+        previous?.scrollIntoView({ block: "nearest" });
+        previous?.focus({ preventScroll: true });
+      }, "quiet expert-message-reference");
+      bubble.append(jump);
+    }
+    bubble.append(chatText(event.text ?? "", { taskId: task.id }));
+    const avatar = expertAvatar(sender.role ?? from, sender.name);
+    row.tabIndex = -1;
+    row.append(avatar, bubble);
+    list.append(row);
+    entries.push({ sender, recipient, author, recipientLabel, avatar });
   });
-}
-async function composeExpertMail(task, recipient = "manager", replyTo) {
-  const parent = task.expertStage ? await command("show", task.expertStage.parentId) : task; if (!parent) return;
-  form("expert-message", () => t("experts.send"), [
-    { name: "to", label: () => t("experts.to"), value: recipient, options: [["manager", () => t("experts.manager")], ["team", () => t("experts.all")],
-      ["owner", () => t("experts.owner")], ["reviewer", () => t("ui.reviewer_50c42665")], ...[parent, ...(parent.expertStages ?? []).map(s => ({ id: s.taskId, title: s.title }))].map(s => [s.id, s.title])] },
-    { name: "text", label: () => t("experts.message"), type: "area", required: true },
-  ], () => t("experts.send"), async values => {
-    if (await command("expert-message", parent.id, { ...values, kind: "decision", ...(replyTo ? { replyTo } : {}) })) await expertMailbox(parent);
-  });
+  if (!entries.length) log.append(element("p", () => t("experts.no_mail"), "muted"));
+  else {
+    log.append(list);
+    void expertRoleNames(frame.project).then(names => {
+      for (const { sender, recipient, author, recipientLabel, avatar } of entries) {
+        const name = names.get(sender.role);
+        if (name) {
+          if (sender.name !== name) author.title = sender.name;
+          author.textContent = name;
+          avatar.replaceWith(expertAvatar(sender.role, name));
+        }
+        const target = names.get(recipient.role);
+        recipientLabel.textContent = target && target !== recipient.name ? target + " · " + recipient.name : recipient.name;
+      }
+    });
+  }
+  return log;
 }
 
 function settings() {
@@ -4717,6 +4668,8 @@ function boardSettings() {
       options: [["merge", "Merge"], ["squash", "Squash"]] },
     { name: "showCardPreviews", label: () => (t("ui.show_previews_on_board_cards_a3f2af17")),
       type: "checkbox", value: current.showCardPreviews !== false },
+    { name: "requireExpertPlans", label: () => t("experts.require_plans"),
+      type: "checkbox", value: current.requireExpertPlans === true },
     { name: "reviewMode", label: () => (t("ui.who_reviews_tasks_3636b553")),
       value: reviewMode, options: [
         ["human", t("ui.human_56f4a79e")],
@@ -4750,6 +4703,7 @@ function boardSettings() {
       ...(values.name.trim() !== (current.name ?? "") ? { name: values.name } : {}),
       archiveAfterDays: values.archive === "" ? null : Number(values.archive), integrationMode: values.mode,
       showCardPreviews: values.showCardPreviews,
+      ...(values.requireExpertPlans !== Boolean(current.requireExpertPlans) ? { requireExpertPlans: values.requireExpertPlans } : {}),
       ...(values.reviewMode !== reviewMode ? { reviewMode: values.reviewMode } : {}),
       ...(roles.some(([role]) => taskLimits[role] !== current.taskLimits?.[role]) ? { taskLimits } : {}),
       ...agents,
@@ -5407,7 +5361,7 @@ function update(next) {
     }
   }
   if (sheetKind === "task" && sheet.open && taskInSheet) {
-    body.querySelector(".task-chat")?.syncAgentState?.();
+    byId("task-side").firstElementChild?.syncAgentState?.();
     const runStatus = byId("task-agent-run");
     if (runStatus) renderAgentRunStatus(runStatus, taskInSheet);
     const launch = byId("task-launch");
@@ -5416,7 +5370,9 @@ function update(next) {
     const task = frame.board?.tasks.find(entry => entry.id === taskInSheet.id);
     const archived = frame.board?.archived.find(entry => entry.id === taskInSheet.id);
     const cleaned = taskInSheet.cleanupAvailable && frame.board?.cleanedTasks?.includes(taskInSheet.id);
-    if (JSON.stringify(previousBoard?.settings.manualColumns) !== JSON.stringify(frame.board?.settings.manualColumns) || cleaned || (task && (task.revision !== taskInSheet.revision ||
+    if (previousBoard?.settings.requireExpertPlans !== frame.board?.settings.requireExpertPlans ||
+        previousBoard?.settings.reviewMode !== frame.board?.settings.reviewMode ||
+        JSON.stringify(previousBoard?.settings.manualColumns) !== JSON.stringify(frame.board?.settings.manualColumns) || cleaned || (task && (task.revision !== taskInSheet.revision ||
         (task.historyLength ?? task.history?.length) !== taskInSheet.history.length ||
         String(task.unfinishedDependencies) !== String(taskInSheet.unfinishedDependencies))) ||
         (archived && !task && (archived.status !== taskInSheet.status ||
@@ -5504,6 +5460,7 @@ document.addEventListener("keydown", event => {
 sheet.addEventListener("close", () => {
   if (sheet.open) return;
   chatPreviews.disconnect();
+  byId("task-side").replaceChildren();
   taskSheetRequest++;
   sheetKind = "";
   taskInSheet = undefined;

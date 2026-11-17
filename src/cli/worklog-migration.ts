@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { globSync, lstatSync, readdirSync, rmdirSync } from "node:fs";
-import { join } from "node:path";
-import { directory, exists, locateBoard, readBinary, removeFile, withLock, writeAtomic } from "./storage.ts";
+import { dirname, join } from "node:path";
+import { directory, exists, locateBoard, readBinary, removeFile, withLock } from "./storage.ts";
+import { appendWorklogBlocks, readWorklogPart, worklogParts } from "./worklog-files.ts";
 
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 const entry = /<!-- codex-worklog-entry:([0-9a-f]{24}) -->/g;
@@ -14,6 +15,19 @@ function blocks(text: string) {
     if (ids.length !== 1) throw new Error("Legacy block must have exactly one entry identity.");
     return { id: ids[0]!, content };
   });
+}
+
+function canonicalBlocks(root: string) {
+  const known = new Map<string, string>();
+  for (const { path } of worklogParts(root)) {
+    directory(dirname(dirname(path)));
+    directory(dirname(path));
+    for (const block of blocks(readWorklogPart(path))) {
+      if (known.has(block.id)) throw new Error("WORKLOG_ID_CONFLICT: duplicate canonical identity " + block.id);
+      known.set(block.id, block.content);
+    }
+  }
+  return known;
 }
 
 // Source files are never deleted here. Cleanup must separately confirm the copy.
@@ -46,20 +60,8 @@ export function migrateWorklog(project: string, sources?: string[]) {
       const day = parts[2]!.slice(0, 10);
       if (!text.startsWith("# Codex Worklog — " + day)) throw new Error("Invalid legacy diary header: " + path);
       const incoming = blocks(text);
-      const destination = join(root, file);
       withLock(root, () => {
-        directory(join(root, parts[0]!), true); directory(join(root, parts[0]!, parts[1]!), true);
-        const prior = exists(destination) ? readBinary(destination).toString("utf8") : "# Codex Worklog — " + day + "\n";
-        const known = new Map<string, string>();
-        for (const file of globSync("[0-9][0-9][0-9][0-9]/[0-9][0-9]/????-??-??.md", { cwd: root })) {
-          const parts = file.split(/[/\\]/);
-          directory(join(root, parts[0]!)); directory(join(root, parts[0]!, parts[1]!));
-          for (const block of blocks(readBinary(join(root, file)).toString("utf8"))) {
-            const previous = known.get(block.id);
-            if (previous !== undefined) throw new Error("WORKLOG_ID_CONFLICT: duplicate canonical identity " + block.id);
-            known.set(block.id, block.content);
-          }
-        }
+        const known = canonicalBlocks(root);
         const missing: string[] = [];
         for (const block of incoming) {
           const previous = known.get(block.id);
@@ -67,11 +69,10 @@ export function migrateWorklog(project: string, sources?: string[]) {
           if (previous === undefined) { missing.push("\n" + block.content); known.set(block.id, block.content); }
         }
         if (!readBinary(path).equals(bytes)) throw new Error("Legacy diary changed during migration: " + path);
-        if (missing.length) writeAtomic(destination, prior + missing.join(""));
-        const after = exists(destination) ? readBinary(destination) : Buffer.from(prior);
-        const saved = new Map(blocks(after.toString("utf8")).map(block => [block.id, block.content]));
+        const { path: destination, before, after } = appendWorklogBlocks(root, day, missing);
+        const saved = missing.length ? canonicalBlocks(root) : known;
         if (incoming.some(block => saved.get(block.id) !== block.content)) throw new Error("Worklog migration verification failed: " + path);
-        report.push({ source: path, sha256: hash(bytes), destination, before: hash(prior), after: hash(after), added: missing.length, verified: incoming.length });
+        report.push({ source: path, sha256: hash(bytes), destination, before: hash(before), after: hash(after), added: missing.length, verified: incoming.length });
       });
     }
   }
@@ -83,9 +84,9 @@ export function removeMigratedWorklog(project: string, source: string) {
   const report = migrateWorklog(project, [source]);
   const root = join(locateBoard(project).directory, "worklog");
   withLock(root, () => {
+    const saved = canonicalBlocks(root);
     for (const row of report) {
       if (hash(readBinary(row.source)) !== row.sha256) throw new Error("Legacy diary changed before cleanup: " + row.source);
-      const saved = new Map(blocks(readBinary(row.destination).toString("utf8")).map(block => [block.id, block.content]));
       if (blocks(readBinary(row.source).toString("utf8")).some(block => saved.get(block.id) !== block.content)) throw new Error("Legacy diary is not fully preserved: " + row.source);
     }
     for (const row of report) removeFile(row.source);

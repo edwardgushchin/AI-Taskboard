@@ -12,7 +12,7 @@ import { runInNewContext } from "node:vm";
 import { CodexTokenUsage } from "../src/desktop/codex-token-usage.ts";
 import { responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "../src/desktop/board-agent-hooks.ts";
 import { withBoardMcp } from "../src/desktop/board-mcp.ts";
-import { executorExpertTools, expertCommands, leadInstructions, subagentInstructions } from "../src/desktop/expert-tools.ts";
+import { executorExpertTools, expertCommands, leadInstructions, phaseStageReporter, subagentInstructions } from "../src/desktop/expert-tools.ts";
 import { githubReadTool } from "../src/desktop/github-read.ts";
 import { runActivity, runLog } from "../src/desktop/run-activity.ts";
 import type { RunActivity } from "../src/cli/model.ts";
@@ -43,6 +43,7 @@ test("task discussion streams task usage before success, provider failure, or a 
         assert.equal(params.permissions, undefined);
         assert.equal(params.sandbox, "read-only");
         if (reviewing) {
+          assert.equal(params.ephemeral, false, "the provider needs the review lead's rollout for native subagents");
           assert.match(params.developerInstructions, /Assigned review lead specialization: .*QA lead/);
           assert.match(params.developerInstructions, /Assigned review plan: .*check-api/);
           assert.match(params.developerInstructions, /Native subagents are enabled/);
@@ -108,7 +109,7 @@ test("task discussion streams task usage before success, provider failure, or a 
     const reports: TokenUsageReport[] = [];
     const runtime = runInNewContext(stripTypeScriptTypes(source) + "\n({ replyToTask, reviewWithCodex })", {
       executorExpertTools, expertCommands, trackActiveRun, trackProvider, claimDiscussion, spawn, codexRpc, CodexTokenUsage, manualContext: () => "", readBoardSettings: () => ({}), locateBoard: (path: string) => path, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogReminder, worklogTool, withBoardMcp, process, setTimeout, clearTimeout, runActivity, runLog,
-      githubReadTool, leadInstructions, subagentInstructions,
+      githubReadTool, leadInstructions, phaseStageReporter, subagentInstructions,
       callCli: async (_project: string, args: string[]) => {
         assert.equal(args[0], "expert-context");
         return { ok: true, data: [{ prompt: "QA lead" }] };

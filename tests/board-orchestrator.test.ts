@@ -33,7 +33,7 @@ import { automationDelivery } from "../src/desktop/automation-delivery.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import { settingsDelivery, syncSettingsNotices } from "../src/desktop/settings-notices.ts";
 import { githubReadTool } from "../src/desktop/github-read.ts";
-import { expertActions, expertCommands, leadInstructions } from "../src/desktop/expert-tools.ts";
+import { expertActions, expertCommands, leadInstructions, phaseStageReporter } from "../src/desktop/expert-tools.ts";
 import { executorFullAccess, managerAccess, setTaskExecutorAccess } from "../src/desktop/codex.ts";
 import type { ManagerAccess } from "../src/desktop/codex.ts";
 
@@ -114,7 +114,7 @@ function fixture(t: TestContext) {
     activeRunSummary, runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
     captureFileLink, isFileLink, verifyFileLink, AbortSignal, AbortController, ArrayBuffer, Buffer, Error, basename, dirname, extname, join, mkdtemp, rm, writeFile, maxAttachmentBytes, boardActions, boardInstructions, boardTools, callCli,
     githubReadTool, readBoardGitHub: (cwd: string, args: unknown) => callCli(cwd, ["github-read"], args),
-    executorFullAccess, managerAccess, setTaskExecutorAccess,
+    executorFullAccess, managerAccess, setTaskExecutorAccess, phaseStageReporter,
     autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, defaultBoardAgents, reviewVerifier,
     existsSync, storageDirectory, readdirSync, rmSync, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
     goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryForView, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, saveManagerHistory,
@@ -214,6 +214,7 @@ function fixture(t: TestContext) {
       const mode = boardReviewMode((await callCli(project, ["settings"], undefined, false)).data);
       assert.deepEqual(Array.from(session.mcpTools, tool => tool.name).sort(),
         [...expectedTools.filter(name => (name !== "task_accept" || mode !== "human") && (!instructions.includes("This turn repairs") || !["task_start", "task_start_batch", "task_accept", "task_request_changes"].includes(name))),
+        ...(!manualTurn && !cleanupTurn && mode === "manager" ? ["expert_stage"] : []),
         ...(!reviewTurn && !cleanupTurn ? (session.goal || session.resumeGoal ? ["goal_inbox", "goal_report"] : ["goal_read", "goal_send"]) : []),
         ...(reviewTurn && mode === "reviewer" ? ["manager_ack", "task_cancel", "task_start"] : [])].sort());
       if (reviewTurn) {
@@ -313,7 +314,8 @@ function fixture(t: TestContext) {
       const managerRun = () => runtime.frame({ project, board: { project, tasks: [] }, window: { webContents: {} } }).managerWork;
       return { state, tab, notifications: questionNotifications, goalActivity, managerRuns, managerRun };
     },
-    sendNow: (request: string, files: unknown[] = [], id?: string) => handlers.get("board:request")!({ sender }, request, files, undefined, false, true, id),
+    sendNow: (request: string, files: unknown[] = [], id?: string, goalRunId?: string) =>
+      handlers.get("board:request")!({ sender }, request, files, undefined, false, true, id, goalRunId),
     queue: (action: string, ...args: unknown[]) => handlers.get("board:queue")!({ sender }, project, action, ...args),
     goal: (kind: string, objective?: string) => handlers.get("board:goal")!({ sender }, kind, objective),
   };
@@ -1166,7 +1168,7 @@ test("manager pushes a pinned local branch to its configured remote without a co
 test("manager adopts expert roles, loads a board skill and plans an addressed specialist team", async t => {
   const f = fixture(t);
   assert.equal((await f.cli(["init"])).ok, true);
-  const parent = (await f.cli(["create"], { title: "Sprint" })).data;
+  assert.equal((await f.cli(["settings"], { requireExpertPlans: true, reviewMode: "reviewer" })).ok, true);
   const reply = await f.run("Подготовь команду спринта", async act => {
     const experts = await act("expert_list", {});
     assert.equal(experts.ok, true); assert.equal(experts.data.length, 220);
@@ -1174,13 +1176,21 @@ test("manager adopts expert roles, loads a board skill and plans an addressed sp
     assert.equal(context.ok, true); assert.equal(context.data.length, 2);
     const skill = await act("expert_skill", { expertId: "product-owner", skillId: "workflow" });
     assert.equal(skill.ok, true); assert.match(skill.data.directory, /experts[\\/]product-owner[\\/]skills/);
-    const planned = await act("expert_plan", { id: parent.id, revision: parent.revision, stages: [
+    const stages = [
       { key: "analysis", expertId: "business-analyst", title: "Requirements", criteria: ["Acceptance criteria"], outputs: ["requirements.md"] },
       { key: "test", expertId: "qa-engineer", title: "Tests", criteria: ["Requirements covered"], inputs: ["requirements.md"], outputs: ["test-plan.md"], dependsOn: ["analysis"] },
-    ] });
+    ];
+    const brief = { title: "Sprint", description: "Prepare requirements and a test plan.", criteria: ["Both plans are ready."] };
+    const incomplete = await act("task_create", brief);
+    assert.equal(incomplete.error.code, "EXPERT_PLAN_REQUIRED");
+    assert.equal((await act("board_list", {})).data.tasks.length, 0);
+    const planned = await act("task_create", { ...brief,
+      expertTeam: { work: { lead: "product-owner", stages }, review: { lead: "qa-engineer", stages: [] } } });
     assert.equal(planned.ok, true, JSON.stringify(planned.error));
-    const stages = planned.data.stages;
-    assert.equal(stages[1].dependsOn[0], stages[0].key);
+    const parent = planned.data;
+    assert.equal(parent.revision, 1);
+    const saved = await act("task_show", { id: parent.id });
+    assert.equal(saved.data.expertTeam.work.stages[1].dependsOn[0], stages[0].key);
     const sent = await act("team_message", { id: parent.id, to: parent.id, kind: "decision", text: "Start with the EU market" });
     assert.equal(sent.ok, true, JSON.stringify(sent.error));
     const inbox = await act("team_inbox", { id: parent.id });
@@ -2091,6 +2101,8 @@ test("goal actions use the running chat connection and resume requires an existi
   await Promise.race([connected.promise, resume.then(result => assert.fail(JSON.stringify(result)))]);
   try {
     assert.deepEqual(goalActivity, [true]);
+    assert.deepEqual(managerRuns.slice(0, 4).map(run => run?.phase), ["starting", "waiting", "starting", "running"]);
+    for (let attempt = 0; managerRuns.length === 4 && attempt < 100; attempt++) await wait(20);
     assert.deepEqual(managerRuns.map(run => run?.phase), ["starting", "waiting", "starting", "running", "running"]);
     assert.deepEqual(structuredClone(managerRun()), managerRuns.at(-1));
     assert.equal(managerRuns.at(-1)?.item?.title, "ai_taskboard / project_git");
@@ -2129,20 +2141,49 @@ test("two windows sharing a board cannot start separate orchestrator chats", asy
   }
 });
 
-test("a running goal serializes manager turns and accepts steering in the same context", async t => {
+test("a running goal accepts a question answer and steering during task_wait in the same context", { timeout: 15_000 }, async t => {
   const f = fixture(t); await f.cli(["init"]);
-  const ready = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>();
-  const work = f.run("Coordinate", async (_act, _prompt, _images, _id, _context, _waiting, _signal, goal) => {
-    goal!.accepted(); goal!.enableNotifications(); ready.resolve(); await finish.promise;
+  const { data: task } = await f.cli(["create"], { title: "Running task" });
+  f.setRunning(task.id, true);
+  const { managerRun } = f.backgroundWindow();
+  const asked = Promise.withResolvers<void>(), ready = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>();
+  const work = f.run("Coordinate", async (act, _prompt, _images, _id, _context, _waiting, _signal, goal) => {
+    goal!.accepted();
+    goal!.update({ objective: "Coordinate", status: "active" });
+    goal!.enableNotifications();
+    const answer = act("ask_user", { question: "Which release?", options: ["Alpha", "Beta"] });
+    asked.resolve();
+    assert.equal((await answer).data.answer, "Alpha");
+    const waiting = act("task_wait", { ids: [task.id] });
+    ready.resolve();
+    assert.equal((await waiting).error.code, "USER_MESSAGE_RECEIVED");
+    await finish.promise;
     return { text: "Finished" };
   }, [], true);
   try {
+    await asked.promise;
+    const question = f.pendingQuestion();
+    assert.equal(question.text, "Which release?");
+    const turns = (await f.history()).data.turns as { items: RunActivity[] }[];
+    assert.ok(turns.some(turn => turn.items.some(item => item.text.includes(question.text))));
+    assert.equal((await f.answerQuestion(question.id, "Alpha")).ok, true);
     await ready.promise;
+    const goalRunId = managerRun().id;
     const duplicate = await f.run("Parallel question", async () => assert.fail("Second context"));
     assert.equal(duplicate.error.code, "BOARD_REQUEST_IN_PROGRESS");
-    assert.equal((await f.sendNow("Hold publication")).ok, true);
+    const messageId = "00000000-0000-4000-8000-000000000003";
+    assert.equal((await f.queue("add", messageId, "Hold publication", false, [])).ok, true);
+    assert.equal((await f.sendNow("Hold publication", [], messageId, "stale-run")).error.code, "CHAT_NOT_RUNNING");
+    assert.equal((await f.queue("list")).data.length, 1);
+    assert.equal((await f.sendNow("Hold publication", [], messageId, goalRunId)).ok, true);
+    assert.equal((await f.queue("list")).data.length, 0);
     assert.equal(f.managerNotifications.at(-1), "Hold publication");
-  } finally { finish.resolve(); await work; }
+  } finally {
+    finish.resolve();
+    if (f.pendingQuestion()) await f.answerQuestion(f.pendingQuestion().id, null);
+  }
+  const result = await work;
+  assert.equal(result.data.answer, "Finished");
   const next = await f.run("Continue", async (_act, _prompt, _images, id) => {
     assert.equal(id, f.threadId); return { text: "Same context" };
   });

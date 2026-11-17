@@ -137,12 +137,11 @@ export function createTask(id: string, input: Record<string, unknown>): Task {
   }, input);
 }
 
-export function recordRunLog(task: Task, input: Record<string, unknown>): Task {
-  if (task.status === "done" || task.status === "cancelled") return task;
-  if (!Array.isArray(input.entries) || !input.entries.length || Buffer.byteLength(JSON.stringify(input.entries)) > 1_000_000) {
+export function parseRunEntries(value: unknown) {
+  if (!Array.isArray(value) || !value.length || Buffer.byteLength(JSON.stringify(value)) > 1_000_000) {
     throw new TaskboardError("INVALID_INPUT", "Expected a run log of at most 1 MB.");
   }
-  const entries = input.entries.map(value => {
+  return value.map(value => {
     const item = object(value);
     if (typeof item.text !== "string") throw new TaskboardError("INVALID_INPUT", "Expected item text.");
     if (item.at !== undefined && (typeof item.at !== "string" || !item.at.trim() || !Number.isFinite(Date.parse(item.at)))) {
@@ -155,8 +154,12 @@ export function recordRunLog(task: Task, input: Record<string, unknown>): Task {
       ...(item.phase === undefined ? {} : { phase: member(item.phase, ["commentary", "final_answer"], "item phase") }),
     };
   });
+}
+
+export function recordRunLog(task: Task, input: Record<string, unknown>): Task {
+  if (task.status === "done" || task.status === "cancelled") return task;
   const updated = record(task, "run-log", "agent");
-  updated.history.at(-1)!.run = entries;
+  updated.history.at(-1)!.run = parseRunEntries(input.entries);
   if (input.durationMs !== undefined) updated.history.at(-1)!.durationMs = number(input.durationMs, "durationMs", 0);
   return { ...updated, revision: task.revision, closedAt: task.closedAt };
 }

@@ -282,6 +282,7 @@ function readIndex(path: string): BoardIndex {
       (index.settings.autoReview !== undefined && typeof index.settings.autoReview !== "boolean") ||
       (index.settings.reviewMode !== undefined && !reviewModes.some(mode => mode === (index.settings as Record<string, unknown>).reviewMode)) ||
       (index.settings.taskLimits !== undefined && !validAgentLimitOverrides(index.settings.taskLimits)) ||
+      (index.settings.requireExpertPlans !== undefined && typeof index.settings.requireExpertPlans !== "boolean") ||
       !boardAgentRoles.every(role => validRoleSettings((index.settings as Record<string, unknown>)[role])) ||
       !(index.settings.archiveAfterDays === null ||
         (Number.isSafeInteger(index.settings.archiveAfterDays) && Number(index.settings.archiveAfterDays) >= 0))) {
@@ -396,7 +397,7 @@ export function validateCard(value: unknown, id: string): Task {
           .every(value => Number.isSafeInteger(value) && Number(value) >= 0))) {
       throw new TaskboardError("CORRUPT_STORAGE", "Invalid start timing for " + id + ".", { id });
     }
-    if (event?.run !== undefined && (event.action !== "run-log" || !Array.isArray(event.run) ||
+    if (event?.run !== undefined && ((event.action !== "run-log" && (event.action !== "chat" || event.actor !== "agent")) || !Array.isArray(event.run) ||
         event.run.some(item => !isRecord(item) ||
           !["id", "type", "title", "text", "status"].every(key => typeof item[key] === "string") ||
           (item.phase !== undefined && !["commentary", "final_answer"].includes(String(item.phase)))))) {

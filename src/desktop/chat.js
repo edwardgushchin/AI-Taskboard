@@ -69,7 +69,7 @@ function renderChatTurn(list, draft) {
   const turn = list.querySelector(".chat-turn");
   const atBottom = draft.scroll === undefined;
   turn.hidden = draft.pending !== "replying";
-  turn.replaceChildren(...(draft.commentary ?? []).map(text => chatText(text, { taskId: taskInSheet?.id, agent: true })));
+  turn.replaceChildren();
   if (!turn.hidden) {
     const thinking = element("p", () => t("ui.thinking_14a886f3"), "chat-thinking");
     thinking.setAttribute("role", "status");
@@ -306,6 +306,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
   for (const item of items) {
     if (finalItems.has(item)) continue;
     if (item.type === "reasoning" && !item.text.trim()) continue;
+    if (item.userMessage?.text?.startsWith("AI Taskboard queue: handle these addressed notices without a goal. [")) continue;
     if (item.userMessage && context?.userMessage) {
       flush();
       const entry = context.userMessage(item.userMessage);
@@ -474,18 +475,13 @@ function updateChat({ project, id, type, text, items, goal, goalRunning, error, 
   const open = frame.project === project && sheet.open && sheetKind === "task" && taskInSheet?.id === id;
   if (type === "reviewer-chat") {
     if (frame.project === project) byId("board-composer").firstChild?.refreshWork();
-    if (open) byId("task-reviewer-chat")?.refresh();
+    if (open) byId("task-side").firstElementChild?.refreshReview();
     return;
   }
   if (type === "run" && frame.project === project) {
     (frame.runActivity ??= {})[id] = items;
     byId("board-composer").firstChild?.updateManagerWork();
-    const list = open && body.querySelector(".task-chat .chat-log");
-    if (list) {
-      const atBottom = list.scrollHeight - list.clientHeight - list.scrollTop <= 8;
-      renderRunActivity(list.querySelector(".chat-run-live"), items, false, undefined, id);
-      if (atBottom) list.scrollTop = list.scrollHeight;
-    }
+    if (open) byId("task-side").firstElementChild?.updateRun(items);
     return;
   }
   const draft = chatDrafts.get(project + "\0" + id);
@@ -501,8 +497,7 @@ function updateChat({ project, id, type, text, items, goal, goalRunning, error, 
     if (open) void protect(() => showTask(id))();
   } else if (type === "commentary" && draft?.pending) {
     (draft.commentary ??= []).push(text);
-    const list = open && body.querySelector(".task-chat .chat-log");
-    if (list) renderChatTurn(list, draft);
+    if (open) byId("task-side").firstElementChild?.updateDiscussion();
   }
 }
 
@@ -525,6 +520,7 @@ function chatEventLabel(action) {
     "request-changes": ["ui.requested_changes_480ce0d7"], attach: ["ui.attached_a_file_f4ead942"],
     "review-note": ["ui.left_on_review_8da49b68"],
     "review-approve": ["ui.approved_the_submission_04c4f1df"],
+    "expert-stage": ["experts.stage_event"],
   };
   return Object.hasOwn(labels, action) ? t(...labels[action]) : action;
 }
@@ -545,7 +541,7 @@ function chatEventAttachments(event, files) {
   return matches.length === 1 ? matches : [];
 }
 
-function reviewerChat(task, open) {
+function reviewerChat(task, open, onCollaboration) {
   const project = frame.project;
   const legacy = task.history.filter(event => event.actor === "reviewer" && event.text &&
     ["review-note", "review-approve", "request-changes"].includes(event.action));
@@ -562,11 +558,11 @@ function reviewerChat(task, open) {
   const nodes = new Map();
   let timer;
   let generation = 0;
-  const refresh = () => {
-    if (!details.open || timer !== undefined) return;
+  const refresh = (force = false) => {
+    if (force !== true && !details.open || timer !== undefined) return;
     timer = setTimeout(() => {
       timer = undefined;
-      if (details.isConnected && details.open) void load();
+      if (details.isConnected && (force === true || details.open)) void load();
     }, 200);
   };
   details.refresh = refresh;
@@ -581,6 +577,7 @@ function reviewerChat(task, open) {
       if (!result.ok) throw new Error(boardError(result.error));
       const { scrollHeight, clientHeight, scrollTop } = log;
       const attempts = result.data;
+      onCollaboration?.(attempts.flatMap(attempt => attempt.items.filter(collaborationItem)));
       for (const [id, node] of nodes) {
         if (attempts.some(attempt => attempt.id === id)) continue;
         node.entry.remove();
@@ -605,6 +602,7 @@ function reviewerChat(task, open) {
         node.error.textContent = attempt.error ?? "";
         node.error.hidden = !attempt.error;
         const items = attempt.items.flatMap(item => {
+          if (onCollaboration && collaborationItem(item)) return [];
           if (item.type !== "agentMessage" || item.phase === "commentary") return [item];
           if (item.status !== "completed") return [];
           try {
@@ -646,6 +644,49 @@ function reviewerChat(task, open) {
   return details;
 }
 
+function collaborationItem(item) {
+  return item.type === "collabAgentToolCall" || item.type === "subAgentActivity";
+}
+
+function collaborationData(item) {
+  try { return JSON.parse(item.text) ?? {}; } catch { return {}; }
+}
+
+function teamActivity(task, item, details, agents) {
+  const operation = item.type === "subAgentActivity" ? { started: "spawn", interacted: "interaction", completed: "completed" }[details.kind] :
+    { spawnAgent: "spawn", sendInput: "send", wait: "wait", closeAgent: "close", resumeAgent: "resume" }[details.tool ?? item.title];
+  if (!operation) return;
+  const ids = [...new Set([...(details.receiverThreadIds ?? []), ...Object.keys(details.agentsStates ?? {}),
+    ...(details.agentThreadId ? [details.agentThreadId] : [])])];
+  const active = operation === "wait" && !ids.length && details.startedAtMs ? [...agents.values()].filter(agent =>
+    agent.startedAtMs && agent.startedAtMs <= details.startedAtMs && (!agent.firstCompletion || agent.firstCompletion >= details.startedAtMs)) : [];
+  const labels = [...new Set(ids.map(id => agents.get(id)?.name ?? t("experts.unnamed_agent")))];
+  const expand = Boolean(details.prompt || Object.values(details.agentsStates ?? {}).some(state => state?.message));
+  const row = element(expand ? "details" : "div", undefined, "expert-agent-event");
+  const summary = element(expand ? "summary" : "div", undefined, "expert-agent-event-line");
+  const glyph = operation === "completed" ? "check" : operation === "wait" ? "debug-pause" :
+    operation === "send" || operation === "interaction" ? "comment-discussion" : "hubot";
+  const caption = element("span", undefined, "expert-agent-caption");
+  caption.append(element("strong", () => t("experts.agent_" + operation)));
+  if (labels.length) caption.append(element("span", labels.join(", "), "muted"));
+  else if (active.length) caption.append(element("span", () => t("experts.active_at_wait") + " " +
+    [...new Set(active.map(agent => agent.name))].join(", "), "muted"));
+  else if (operation === "wait") caption.append(element("span", () => t("experts.wait_target_unavailable"), "muted"));
+  const model = details.model && [details.model, details.reasoningEffort && reasoningName(details.reasoningEffort)].filter(Boolean).join(" · ");
+  if (model) caption.append(element("span", model, "muted"));
+  const state = activityState([item]);
+  if (state.code === "running" || state.code === "failed") caption.append(element("span", state.text, "muted"));
+  summary.append(icon(glyph), caption);
+  appendChatTime(summary, item.at);
+  row.dataset.agentCall = item.id;
+  row.append(summary);
+  for (const status of Object.values(details.agentsStates ?? {})) {
+    if (typeof status?.message === "string" && status.message) row.append(chatText(status.message, { taskId: task.id, agent: true }));
+  }
+  if (typeof details.prompt === "string") row.append(chatText(details.prompt, { taskId: task.id, agent: true }));
+  return row;
+}
+
 function taskChat(task) {
   const project = frame.project;
   const key = project + "\0" + task.id;
@@ -660,11 +701,23 @@ function taskChat(task) {
   heading.id = "task-chat-heading";
   area.setAttribute("aria-labelledby", heading.id);
   const header = element("div", undefined, "chat-header");
-  header.append(heading);
+  const tabs = element("div", undefined, "board-chat-views");
+  header.append(heading, tabs);
   area.append(header);
-  const list = element("ol", undefined, "chat-log");
+  const list = element("ol", undefined, "chat-log task-dialogue");
   bindLocalized(list, "aria-label", () => t("ui.messages_e8e13717"), true);
   list.tabIndex = 0;
+  const work = element("ol", undefined, "chat-log task-work");
+  work.hidden = true;
+  bindLocalized(work, "aria-label", () => t("ui.work_activity_e01957b7"), true);
+  work.tabIndex = 0;
+  const team = element("div", undefined, "chat-log task-team");
+  team.hidden = true;
+  bindLocalized(team, "aria-label", () => t("experts.team"), true);
+  team.tabIndex = 0;
+  const teamLog = element("div", undefined, "task-team-activity");
+  const savedTeam = [];
+  const savedWork = [];
   const files = new Map(task.attachments.map(file => [file.file, file]));
   const events = task.history.map((event, index) => ({ event, index }));
   if (task.questions.length) events.splice(1, 0, {
@@ -676,47 +729,56 @@ function taskChat(task) {
   let day;
   let lastMessage;
   for (const { event, index } of events) {
+    const returned = event.actor === "reviewer" && event.action === "request-changes";
+    const conversation = ["chat", "comment", "questions"].includes(event.action) || returned;
+    if (event.expertMessage) continue;
+    const timeline = conversation ? list : work;
     if (event.chat) lastMessage = event;
     const timestamp = new Date(event.at);
     const eventDay = !event.at || Number.isNaN(+timestamp) ? "" : dayFormat.format(timestamp);
-    if (eventDay && eventDay !== day) {
+    if (conversation && eventDay && eventDay !== day) {
       day = eventDay;
       const divider = element("li", undefined, "chat-day");
       divider.append(element("span", () => new Intl.DateTimeFormat(localization.locale, { dateStyle: "medium" }).format(timestamp)));
       list.append(divider);
     }
-    if (event.action === "run-log") {
+    if (event.action === "run-log" || event.run?.length) {
       const log = element("li", undefined, "chat-run");
       if (event.run?.length) {
-        renderRunActivity(log, event.run, true, event.durationMs, task.id);
-        list.append(log);
+        savedTeam.push(...event.run.filter(collaborationItem));
+        const activity = event.action === "chat" ? event.run.filter(item => item.phase !== "final_answer") : event.run;
+        savedWork.push(() => renderRunActivity(log, activity.filter(item => !collaborationItem(item)), true, event.durationMs, task.id));
+        work.append(log);
       } else if (task.codexThreadId && event.durationMs !== undefined) {
         log.hidden = true;
-        list.append(log);
+        work.append(log);
         missingRuns.set(index, { log, durationMs: event.durationMs });
       }
-      continue;
+      if (event.action === "run-log") continue;
     }
-    if (event.chat?.commentary?.length) {
+    if (!event.run?.length && event.chat?.commentary?.length) {
       const commentary = element("li", undefined, "chat-run");
-      renderRunActivity(commentary, event.chat.commentary.map((text, index) => ({
+      savedWork.push(() => renderRunActivity(commentary, event.chat.commentary.map((text, index) => ({
         id: String(index), type: "agentMessage", phase: "commentary", title: "", text, status: "completed",
-      })), true, event.durationMs);
-      list.append(commentary);
+      })), true, event.durationMs));
+      work.append(commentary);
     }
-    const conversation = ["chat", "comment", "questions", "coordination"].includes(event.action);
     const attachments = chatEventAttachments(event, files);
     const author = () => event.actor === "manager" ? t("ui.project_manager_48697fa0") :
       event.actor === "reviewer" ? t("ui.reviewer_50c42665") :
       event.actor === "user" ? t("ui.you_05444001") : t("ui.agent_262834de");
 
-    if (!conversation) {
+    if (!conversation && event.action !== "coordination") {
       const status = lanes.find(([code]) => code === event.to);
       const service = element("li", undefined, "chat-entry chat-event");
-      service.append(element("span", author, "chat-author"),
-        element("span", () => chatEventLabel(event.action) + (status ? " · " + t(status[1]) : ""), "chat-action"));
+      const stage = event.expertStageRun;
+      const label = () => stage ? [
+        expertStageLabel(task, stage.phase, stage.key) ?? t("experts.stage_event"),
+        t("experts.stage_" + stage.state),
+      ].join(" · ") : chatEventLabel(event.action) + (status ? " · " + t(status[1]) : "");
+      service.append(element("span", author, "chat-author"), element("span", label, "chat-action"));
       appendChatTime(service, event.at);
-      list.append(service);
+      work.append(service);
       if (!event.text && !attachments.length) continue;
       // A chat edit can quote the pending request as its audit note.
       if (event.action === "update" && event.actor === "user" &&
@@ -724,7 +786,6 @@ function taskChat(task) {
     }
     const entry = element("li", undefined, "chat-entry");
     entry.dataset.actor = event.actor;
-    const returned = event.actor === "reviewer" && event.action === "request-changes";
     const coordination = returned || event.action === "coordination" || (event.actor === "manager" && event.text);
     if (coordination) entry.classList.add("chat-coordination");
     const label = () => event.action === "coordination" && event.actor === "agent" ? t("ui.executor_92197b27") : author();
@@ -761,8 +822,9 @@ function taskChat(task) {
         chatText(text, { taskId: task.id, coordination, agent: event.action === "chat" && event.actor === "agent" }));
     }
     appendChatTime(entry, event.at);
-    list.append(entry);
+    timeline.append(entry);
   }
+  const workControls = element("li", undefined, "task-work-controls");
   if (missingRuns.size) {
     const status = element("span", undefined, "muted");
     status.setAttribute("role", "status");
@@ -778,12 +840,14 @@ function taskChat(task) {
         for (const [index, { log, durationMs }] of missingRuns) {
           const items = result.data[index];
           if (!items?.length) continue;
-          renderRunActivity(log, items, true, durationMs, undefined, { taskId: task.id });
-          if (!log.hidden) {
+          savedTeam.push(...items.filter(collaborationItem));
+          renderRunActivity(log, items.filter(item => !collaborationItem(item)), true, durationMs, task.id);
+          if (items.length) {
             restored++;
             lastRestored = log;
           }
         }
+        renderTeam();
         if (restored) load.remove();
         bindLocalized(status, "textContent", () => restored === missingRuns.size ? "" : restored
           ? t("ui.some_runs_are_unavailable_in_the_saved_codex_cha_7d8bfad3")
@@ -798,17 +862,94 @@ function taskChat(task) {
         load.disabled = false;
       }
     }, "quiet");
-    header.append(load, status);
+    workControls.append(load, status);
   }
+  let review;
+  if (task.status === "review" || task.history.some(event => event.actor === "reviewer" || event.action === "submit")) {
+    review = reviewerChat(task, draft.reviewerOpen, items => { reviewTeam = items; renderTeam(); });
+    review.addEventListener("toggle", () => { draft.reviewerOpen = review.open; });
+    workControls.append(review);
+  }
+  if (workControls.childElementCount) work.prepend(workControls);
   const liveRun = element("li", undefined, "chat-run chat-run-live");
-  renderRunActivity(liveRun, frame.runActivity?.[task.id] ?? [], false, undefined, task.id);
-  list.append(liveRun, element("li", undefined, "chat-turn"));
+  const progress = element("li", undefined, "chat-run");
+  work.append(liveRun, progress);
+  list.append(element("li", undefined, "chat-turn"));
   renderChatTurn(list, draft);
-  area.append(list);
-  requestAnimationFrame(() => { list.scrollTop = draft.scroll ?? list.scrollHeight; });
-  list.addEventListener("scroll", () => {
-    draft.scroll = list.scrollHeight - list.clientHeight - list.scrollTop > 8 ? list.scrollTop : undefined;
-  });
+  area.append(list, work, team);
+
+  let liveTeam = [];
+  let reviewTeam = [];
+  let renderedTeam;
+  let teamRoleNames;
+  let loadingTeamRoles = false;
+  function renderTeam() {
+    if (team.hidden) return;
+    if (!loadingTeamRoles && task.expertTeam) {
+      loadingTeamRoles = true;
+      void expertRoleNames(project).then(names => {
+        if (!team.isConnected) return;
+        teamRoleNames = names;
+        renderedTeam = undefined;
+        renderTeam();
+      });
+    }
+    const items = [...savedTeam, ...liveTeam, ...reviewTeam];
+    const byId = new Map(items.map(item => [item.id, item]));
+    const snapshot = JSON.stringify([...byId.values()]);
+    if (snapshot === renderedTeam) return;
+    renderedTeam = snapshot;
+    const opened = new Set([...teamLog.querySelectorAll("details[open]")].map(row => row.dataset.agentCall));
+    const plan = Object.values(task.expertTeam ?? {}).flatMap(phase => phase.stages);
+    const roleAndStage = stage => [teamRoleNames?.get(stage.expertId), stage.title].filter(Boolean).join(" · ");
+    const agents = new Map();
+    for (const stages of Object.values(task.expertStageStatus ?? {})) for (const stage of stages) {
+      if (stage.run?.agentId) agents.set(stage.run.agentId, { name: roleAndStage(stage) });
+    }
+    const activity = [...byId.values()].sort((a, b) => (a.at ?? "").localeCompare(b.at ?? ""))
+      .map(item => [item, collaborationData(item)]);
+    for (const [item, data] of activity) {
+      if (item.type !== "subAgentActivity" || !data.agentThreadId) continue;
+      const key = data.agentPath?.split("/").at(-1);
+      const matching = plan.filter(stage => stage.key === key || stage.expertId === key);
+      const agent = agents.get(data.agentThreadId) ?? {
+        name: matching.length === 1 ? roleAndStage(matching[0]) : key?.replaceAll("-", " ") || t("experts.unnamed_agent"),
+      };
+      if (data.kind === "started") agent.startedAtMs ??= data.startedAtMs;
+      if (data.kind === "completed") agent.firstCompletion ??= data.completedAtMs;
+      agents.set(data.agentThreadId, agent);
+    }
+    const rows = [];
+    for (const [item, data] of activity) {
+      const row = teamActivity(task, item, data, agents);
+      if (!row) continue;
+      if (row.tagName === "DETAILS") row.open = opened.has(item.id);
+      rows.push(row);
+    }
+    if (!rows.length) rows.push(element("p", () => t("experts.no_agent_activity"), "muted"));
+    teamLog.replaceChildren(...rows);
+  }
+  let liveItems = [];
+  function renderLiveWork() {
+    const follow = work.scrollHeight - work.clientHeight - work.scrollTop <= 8;
+    renderRunActivity(liveRun, liveItems.filter(item => !collaborationItem(item) && item.phase !== "final_answer"),
+      false, undefined, task.id);
+    if (follow) work.scrollTop = work.scrollHeight;
+  }
+  area.updateRun = (items = []) => {
+    liveItems = items;
+    liveTeam = items.filter(collaborationItem);
+    if (!work.hidden) renderLiveWork();
+    area.updateDiscussion();
+    renderTeam();
+  };
+  area.updateDiscussion = () => {
+    renderChatTurn(list, draft);
+    const commentary = frame.runActivity?.[task.id]?.some(item => item.phase === "commentary") ? [] : draft.commentary ?? [];
+    progress.replaceChildren(...commentary.map(text => chatText(text, { taskId: task.id, agent: true })));
+    progress.hidden = !commentary.length;
+  };
+  area.updateRun(frame.runActivity?.[task.id]);
 
   const composer = element("form", undefined, "chat-composer");
   const input = element("textarea");
@@ -842,6 +983,55 @@ function taskChat(task) {
   controls.append(attach, microphone, send);
   composer.append(pendingFiles, input, fileInput, controls, feedback);
   area.append(composer);
+
+  if (!manualBoard()) {
+    const agents = element("details", undefined, "expert-agent-history");
+    agents.open = draft.agentHistoryOpen ?? false;
+    agents.addEventListener("toggle", () => {
+      if (agents.isConnected) draft.agentHistoryOpen = agents.open;
+    });
+    agents.append(element("summary", () => t("experts.subagents")), teamLog);
+    team.append(agents, expertTeamMail(task));
+  }
+  const views = [
+    ["dialogue", "ui.dialogue_e154ab04", list], ["work", "ui.work_activity_e01957b7", work],
+    ...(!manualBoard() ? [["team", "experts.team", team]] : []),
+  ].map(([name, label, panel]) => {
+    const control = button(() => t(label), () => selectView(name), "quiet");
+    control.setAttribute("aria-controls", panel.id = "task-chat-" + name);
+    tabs.append(control);
+    panel.addEventListener("scroll", () => {
+      if (panel.hidden) return;
+      (draft.viewScroll ??= {})[name] = panel.scrollHeight - panel.clientHeight - panel.scrollTop > 8 ? panel.scrollTop : undefined;
+      if (name === "dialogue") draft.scroll = draft.viewScroll[name];
+    });
+    return { name, control, panel };
+  });
+  function selectView(name) {
+    draft.view = name;
+    composer.hidden = name !== "dialogue";
+    for (const view of views) {
+      view.panel.hidden = view.name !== name;
+      view.control.setAttribute("aria-pressed", String(!view.panel.hidden));
+      if (!view.panel.hidden) requestAnimationFrame(() => {
+        if (!view.panel.hidden) view.panel.scrollTop = draft.viewScroll?.[name] ?? view.panel.scrollHeight;
+      });
+    }
+    if (name === "work") {
+      for (const render of savedWork.splice(0)) render();
+      renderLiveWork();
+    }
+    if (name === "team") renderTeam();
+    area.refreshReview();
+  }
+  area.refreshReview = () => { if (draft.view !== "dialogue") review?.refresh(draft.view === "team"); };
+  area.openReviewer = () => {
+    if (!review) return;
+    selectView("work");
+    review.open = true;
+    requestAnimationFrame(() => review.scrollIntoView({ block: "nearest" }));
+  };
+  selectView(views.some(view => view.name === draft.view) ? draft.view : "dialogue");
 
   function working() { return Boolean(draft.pending || frame.runningTasks?.includes(task.id) || frame.replyingTasks?.includes(task.id)); }
   function stopping() { return working() && !draft.text.trim() && !draft.files.length; }

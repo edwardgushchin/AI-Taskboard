@@ -29,7 +29,6 @@ app.whenReady().then(async () => {
     await window.webContents.insertCSS(read("themes.css") + read("styles.css") +
       read("vendor/codicons/codicon.css").replace("./codicon.ttf", "data:font/ttf;base64," + font));
     const evaluate = code => window.webContents.executeJavaScript(code);
-    const run = code => evaluate("(async () => {" + code + "})()");
     const check = async (code, name) => { assert.equal(await evaluate(code), true, name); checks.push(name); };
     const settled = () => evaluate("new Promise(r => setTimeout(r, 60))");
     await evaluate(`
@@ -52,7 +51,6 @@ app.whenReady().then(async () => {
         if(action==='update'){Object.assign(parentCard,input);return {ok:true,data:parentCard};}
         if(action==='expert-plan')return {ok:true,data:{}};
         if(action==='show')return {ok:true,data:structuredClone(parentCard)};
-        if(action==='expert-message'){parentCard.history.push({at:new Date().toISOString(),text:input.text,messageKind:'decision',expertMessage:{from:'owner',to:input.to,replyTo:input.replyTo}});return {ok:true,data:{}};}
         return {ok:true,data:[]};
       };
       window.uiReady = expertSettings(); void 0;
@@ -68,17 +66,10 @@ app.whenReady().then(async () => {
     await check("calls.some(c=>c.action==='expert-save' && c.input.prompt==='Собственные правила QA' && c.input.revision===1)", "saving edits carries the expected package revision");
     await evaluate("editExpert(undefined,catalog); body.querySelector('[name=name]').value='Новый эксперт'; body.querySelector('[name=group]').value='Свои'; body.querySelector('[name=prompt]').value='Проверь исходные данные'; body.querySelector('form').requestSubmit(); void 0;"); await settled();
     await check("catalog.length===221 && catalog.at(-1).id.startsWith('custom-')", "custom experts are added without provider installation");
-    await run("await assignExpert(parentCard); body.querySelector('[name=expertId]').value='business-analyst'; body.querySelector('form').requestSubmit(); void 0;"); await settled();
-    await check("calls.some(c=>c.action==='expert-plan' && c.id==='T-0001' && c.input.phase==='work' && c.input.lead==='business-analyst')", "a card can be assigned a selected specialization");
-    await run("await addExpertStage(parentCard); body.querySelector('[name=title]').value='Требования'; body.querySelector('[name=expertId]').value='product-owner'; body.querySelector('[name=outputs]').value='Спецификация'; body.querySelector('[name=criteria]').value='Критерии проверяемы'; body.querySelector('form').requestSubmit(); void 0;"); await settled();
-    await check("calls.some(c=>c.action==='expert-plan' && c.input.stages[0]?.expertId==='product-owner' && c.input.stages[0].outputs[0]==='Спецификация')", "stage creation sends the expert and declared output");
-    await run("await assignExpert(parentCard,'review'); body.querySelector('[name=expertId]').value='qa-engineer'; body.querySelector('form').requestSubmit(); void 0;"); await settled();
-    await check("calls.some(c=>c.action==='expert-plan' && c.input.phase==='review' && c.input.lead==='qa-engineer')", "review lead can be assigned independently");
-    await evaluate("parentCard.expertStages=[{key:'analysis',taskId:'T-0002',title:'Анализ',expertId:'business-analyst'}]; parentCard.history=[{at:new Date().toISOString(),text:'Нужен выбор рынка <img src=x>',messageKind:'question',expertMessage:{from:'T-0002',to:'owner'}}]; openSheet('expert-team','Команда'); expertTeamSection(parentCard); void 0;");
-    await check("body.querySelectorAll('.expert-mail').length===1 && !body.querySelector('.expert-mail img')", "human questions are visible and message HTML remains inert");
+    await evaluate("parentCard.expertStages=[{key:'analysis',taskId:'T-0002',title:'Анализ',expertId:'business-analyst'}]; parentCard.history=[{at:new Date().toISOString(),text:'Нужен выбор рынка <img src=x>',messageKind:'question',expertMessage:{from:'T-0002',to:'owner'}}]; openSheet('expert-team','Команда'); expertTeamSection(parentCard); body.append(expertTeamMail(parentCard)); void 0;");
+    await check("body.querySelectorAll('.expert-message').length===1 && !body.querySelector('.expert-message img')", "human questions are visible and message HTML remains inert");
     writeFileSync(join(artifacts, "expert-team.png"), (await window.webContents.capturePage()).toPNG());
-    await run("await composeExpertMail(parentCard,'T-0002',1); body.querySelector('[name=text]').value='Европейский рынок'; body.querySelector('form').requestSubmit(); void 0;"); await settled();
-    await check("calls.some(c=>c.action==='expert-message' && c.input.to==='T-0002' && c.input.replyTo===1)", "human replies retain their destination and question reference");
+    await check("!body.querySelector('.task-team-mail button, .task-team-mail textarea')", "expert conversation is read-only for the operator");
     await evaluate("boardSettings(); void 0;"); await settled();
     await check("[...body.querySelectorAll('[name$=Limit]')].map(input=>input.placeholder).join(',')==='1,1' && !body.querySelector('[name=managerLimit]')", "board settings inherit one work task and one review task");
     await evaluate("body.querySelector('[name=executorLimit]').value='2'; body.querySelector('[name=reviewerLimit]').value='0'; body.querySelector('form').requestSubmit(); void 0;"); await settled();

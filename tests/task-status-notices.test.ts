@@ -26,9 +26,10 @@ test("CLI transitions replay in order without goals, windows or a running manage
     return JSON.parse(result.stdout).data;
   };
   cli(["init"]);
+  const sync = () => cli(["sync-notices"], { language: "ru" }).changed;
   const task = cli(["create"], { title: "Проверка доступа", criteria: ["Доступ проверен"], workingDirectory: root });
   cli(["approve", task.id]);
-  assert.equal(syncTaskStatusNotices(root), false); // First enable skips old events.
+  assert.equal(sync(), false); // First enable skips old events.
   const messages = () => readManagerHistory(root, null, "chat")?.turns.flatMap(turn => turn.items.map(item => item.text)) ?? [];
   cli(["update", task.id], { title: "Доступ к SSH" });
   assert.equal(syncTaskStatusNotices(root), false);
@@ -41,7 +42,7 @@ test("CLI transitions replay in order without goals, windows or a running manage
   cli(["request-changes", task.id], { actor: "user", reason: "проверь повторно" });
   submit();
   cli(["accept", task.id], { revision: cli(["show", task.id]).revision });
-  assert.equal(syncTaskStatusNotices(root), true);
+  assert.equal(sync(), true);
   const texts = messages();
   assert.equal(texts.length, 5);
   for (const [i, label] of ["в работе.", "заблокирована: нужен доступ к серверу", "в работе.",

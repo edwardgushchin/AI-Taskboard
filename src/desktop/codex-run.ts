@@ -28,7 +28,7 @@ import type { AgentControl } from "./codex-rpc.ts";
 import { CodexTokenUsage } from "./codex-token-usage.ts";
 import type { TokenUsageReport } from "../cli/token-usage.ts";
 import type { Expert } from "../cli/experts.ts";
-import { expertCommands, executorExpertTools, leadInstructions, subagentInstructions } from "./expert-tools.ts";
+import { expertCommands, executorExpertTools, leadInstructions, phaseStageReporter, subagentInstructions } from "./expert-tools.ts";
 import type { teamInbox } from "../cli/expert-team.ts";
 import { insideProject } from "./project-files.ts";
 
@@ -97,6 +97,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   const settings = await callCli<BoardSettings>(project, ["settings"]);
   if (!settings.ok) throw new Error(settings.error.message);
   const plan = task.expertTeam?.work;
+  const stages = phaseStageReporter(project, "work", task.id);
   const lead = plan?.lead === undefined ? task.expertId : plan.lead;
   const assigned = new Set([lead, ...(plan?.stages.map(stage => stage.expertId) ?? [])].filter(Boolean));
   const specialization = lead ? await callCli<Expert[]>(project, ["expert-context"], { ids: [lead] }) : undefined;
@@ -119,9 +120,10 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   const tools = [worklogTool, checkWaitTool, requestTool, executorResultTool, githubReadTool, milestonesListTool, githubCreateMilestoneTool, githubSetMilestoneDueTool, ...executorExpertTools];
   if (task.schedule) tools.push(recurringChildTool);
   if (desktopProfile && !fullAccess) tools.push(accessTool);
-  let accessDecision: Promise<CliReply> | undefined;
+  let accessDecision: { reason: string; result: Promise<CliReply>; reconsidered: boolean } | undefined;
   let accessChange: "approved" | "ready" | "switching" | undefined;
   const mcp = await openBoardMcp(tools, async (name, args, requestSignal) => {
+    if (name === "expert_stage") return worklog.remind(await stages.report(args));
     if (Object.hasOwn(expertCommands, name)) {
       const input = args as Record<string, unknown>;
       if (assigned.size && ((name === "expert_context" && (!Array.isArray(input.ids) || input.ids.some(id => !assigned.has(id)))) ||
@@ -131,9 +133,17 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     if (name === recurringChildTool.name && task.schedule) return worklog.remind(await callCli(project, ["spawn-child", task.id, "--compact"], args));
     if (name === executorResultTool.name) return worklog.remind(await recordExecutorResult(project, task.id, args));
     if (name === accessTool.name && desktopProfile) {
-      const pending = accessDecision ??= requestExecutorAccess(desktopProfile, project, task.id, args, settings.data.manager,
+      const requestAccess = () => requestExecutorAccess(desktopProfile, project, task.id, args, settings.data.manager,
         signal ? AbortSignal.any([signal, requestSignal]) : requestSignal);
-      const result = await pending;
+      const input = args as { reason?: unknown } | null;
+      const reason = typeof input?.reason === "string" && Object.keys(input).length === 1 ? input.reason.trim() : "";
+      if (!reason || reason.length > 3000) return worklog.remind(await requestAccess());
+      let pending = accessDecision ??= { reason, result: requestAccess(), reconsidered: false };
+      let result = await pending.result;
+      if (result.ok && (result.data as { approved?: boolean })?.approved === false && reason !== pending.reason && !pending.reconsidered) {
+        if (pending === accessDecision) accessDecision = { reason, result: requestAccess(), reconsidered: true };
+        if (accessDecision) { pending = accessDecision; result = await pending.result; }
+      }
       if (!result.ok && accessDecision === pending) accessDecision = undefined;
       if (result.ok && (result.data as { approved?: boolean })?.approved === true) {
         accessChange ??= "approved";
@@ -224,6 +234,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   };
   child.stderr.resume();
   const rpc = codexRpc(child, message => {
+    stages.observe(message, activeThreadId);
     tokens.queue(tokens.observe(message), onTokenUsage);
     const params = message.params as { threadId?: string; turn: Turn; item?: { type?: string; server?: string; tool?: string; status?: string } };
     if (activeThreadId && params?.threadId === activeThreadId) {
@@ -278,6 +289,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       try { worklog.finish(); }
       finally {
         await close();
+        await worklog.drain();
         await tokens.save(tokens.finish(Boolean(failure)), onTokenUsage);
       }
     }
@@ -348,7 +360,10 @@ export async function startCodexRun(client: Client, project: string, cwd: string
         "У задачи нет отдельной ветки или worktree. Используй сценарий сдачи результата вне Git из инструкции.",
       ] : []),
       "Прочитай актуальную карточку через show " + task.id + " --compact.",
-      ...(localTools.includes(accessTool.name) ? ["Если обязательный шаг требует полного доступа ОС, вызови mcp__ai_taskboard__task_request_executor_access и укажи, какую операцию нужно повторить. При одобрении доска сразу применяет доступ к текущему выполнению и продолжает в том же чате."] : []),
+      ...(localTools.includes(accessTool.name) ? [
+        "Если обязательный шаг требует полного доступа ОС, вызови mcp__ai_taskboard__task_request_executor_access и укажи, какую операцию нужно повторить. При одобрении доска сразу применяет доступ к текущему выполнению и продолжает в том же чате.",
+        "Перед обязательной проверкой в браузере попробуй открыть пустую страницу установленным браузером с временным профилем. При отказе среды используй доступный браузерный инструмент или один раз запроси нужный доступ.",
+      ] : []),
       ...(githubTools.length ? ["Хостовые инструменты GitHub, подтверждённые для текущего хода: " +
         githubTools.map(name => "mcp__ai_taskboard__" + name).join(", ") +
         ". Для поддерживаемых операций обращайся к ним напрямую. Статус gh из оболочки не проверяет авторизацию доски."] : []),
@@ -358,8 +373,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       task.schedule
         ? "Это очередной запуск повторяющейся задачи. Выполни один проход по текущим условиям и запиши результат через progress с summary и nextStep. Карточка вернётся в готовые до следующего запуска. Не используй submit. Если без посторонней помощи выполнить задачу нельзя, используй block."
         : "Продолжай работу по всем критериям до сдачи через submit. Если сохранён прогресс, возобнови работу с указанного следующего шага и проверь актуальное состояние. Запись progress сохраняет промежуточный результат. Заверши ход только после сдачи, при блокировке с конкретным условием продолжения или по команде пользователя.",
-      "После записи результата в карточку и перед итоговым ответом вызови mcp__ai_taskboard__worklog_record с языком и массивом entries. " +
-        "Инструмент подключён к текущему ходу. Команды Worklog из истории относятся к прошлым ходам.",
+      "После записи результата в карточку и перед итоговым ответом один раз вызови mcp__ai_taskboard__worklog_record с языком и массивом entries. " +
+        "Инструмент подключён к текущему ходу. Команды Worklog из истории относятся к прошлым ходам. Объедини изменения и проверки в одну запись. Успешная запись завершает Worklog этого хода.",
       "Перед сдачей сопоставь каждый критерий с результатом в diff или проверке. Для изменённого поведения перечисли существенно разные условия, в которых действует один критерий, и проверь сочетания, где результат может различаться. Например, для изменений поставки это чистая и повторная сборка, сборка и публикация, настройки по умолчанию и переопределения. После возврата проверь другие затронутые сценарии того же критерия. Если проверка выполнена на более ранней ревизии, покажи, почему она ещё применима, либо повтори затронутую проверку.",
       "Если доступ отклонён, продолжай разрешённым способом и запроси у менеджера смену режима, если она нужна для обязательного шага. При исчерпании доступных способов заблокируй задачу. В причине укажи шаг, нужный ресурс и причину отказа, в условии разблокировки — конкретное действие для продолжения.",
       "Рабочая папка: " + cwd,
@@ -395,6 +410,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     try { worklog.finish(); }
     finally {
       await close();
+      await worklog.drain();
       await tokens.save(tokens.finish(true), onTokenUsage);
     }
     if (error instanceof Error && /already has an active writer/i.test(error.message)) {

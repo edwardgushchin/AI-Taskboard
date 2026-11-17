@@ -10,7 +10,7 @@ import type { ArchiveLink, Attachment, BoardTag, Task } from "./model.ts";
 import { directory, exists, readBinary, removeFile, validateCard, writeAtomic } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
 import { managerInbox } from "./task-messages.ts";
-import { actorFor, withoutVerification } from "./tasks.ts";
+import { actorFor, parseRunEntries, withoutVerification } from "./tasks.ts";
 
 const maxCard = 16 * 1024 * 1024;
 const day = 24 * 60 * 60 * 1000;
@@ -220,6 +220,7 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
   const usage = actor === "agent" && input.usage !== undefined ? object(input.usage) : undefined;
   const commentary = actor === "agent" && input.commentary !== undefined ? strings(input.commentary, "commentary") : [];
   const durationMs = actor === "agent" && input.durationMs !== undefined ? number(input.durationMs, "durationMs", 0) : undefined;
+  const run = actor === "agent" && input.run !== undefined ? parseRunEntries(input.run) : undefined;
   const chat = {
     model, effort,
     ...(commentary.length ? { commentary } : {}),
@@ -236,6 +237,7 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
       ...(actor === "user" || attachments.length ? { files: attachments.map(attachment => attachment.file) } : {}),
     };
     if (durationMs !== undefined) updated.history.at(-1)!.durationMs = durationMs;
+    if (run) updated.history.at(-1)!.run = run;
     return store.save(updated);
   });
 }

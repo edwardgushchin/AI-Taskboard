@@ -252,10 +252,9 @@ test("a task being launched never starts a competing chat provider", async () =>
   assert.equal(f.writes.length, 0);
 });
 
-test("discussions bypass every role limit, preserve free executor slots and run independently", async () => {
+test("discussions bypass work and review task limits and run independently", async () => {
   const f = fixture();
-  const occupied = [f.slots.acquire("project-a", "executor")!, f.slots.acquire("project-a", "executor")!,
-    f.slots.acquire("project-a", "executor")!, f.slots.acquire("project-a", "manager")!, f.slots.acquire("project-a", "reviewer")!];
+  const occupied = [f.slots.acquire("project-a", "executor")!, f.slots.acquire("project-a", "reviewer")!];
   const first = f.run();
   await f.started;
   const second = f.runtime.sendChat("project-a", "T-0002", f.request, () => {});
@@ -285,7 +284,7 @@ test("discussion ignores status and unfinished dependencies and never starts exe
     f.task.dependencies = ["T-9999"];
     const pending = f.run();
     await f.started;
-    assert.equal(f.slots.available("project-a", "executor"), 3);
+    assert.equal(f.slots.available("project-a", "executor"), 1);
     assert.deepEqual(Array.from(f.runtime.frame(f.windows[0].state).runningTasks), []);
     f.response.resolve({ text: "Reply" });
     assert.equal((await pending).result.ok, true);

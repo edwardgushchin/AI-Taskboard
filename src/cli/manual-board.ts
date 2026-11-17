@@ -31,7 +31,7 @@ export function guardManual(settings: BoardSettings, command: string, input: Rec
   if (!isManual(settings)) return;
   if (!["list", "show", "settings", "create", "update", "comment", "chat", "attachment", "tag", "doctor", "watch",
     "manual-move", "manual-columns", "manager-inbox", "manager-ack", "messages", "message", "manager-message",
-    "manager-usage", "project-usage", "token-usage", "metrics", "experts", "expert-get", "expert-save", "expert-context", "expert-skill"].includes(command)) manualError();
+    "manager-usage", "project-usage", "token-usage", "metrics", "experts", "expert-get", "expert-save", "expert-context", "expert-skill", "sync-notices"].includes(command)) manualError();
   if (input.schedule != null || input.execution != null || input.workingDirectory != null || input.status !== undefined) manualError();
 }
 export function manualAction(store: BoardStore, command: string, id: string | undefined, input: Record<string, unknown>): Task | BoardSettings | undefined {

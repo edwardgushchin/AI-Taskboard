@@ -129,7 +129,6 @@ if (!process.versions.electron) {
     await a.ask({ action: "closeGitBoard" });
     await b.ask({ action: "closeGitBoard" });
     record("PASS: desktop Push sends the pinned commit to the local remote and both profiles update their Git counts");
-    if (managerOnly) break checks;
     const boardLock = new DatabaseSync(join(project, ".tasks", ".lock.sqlite"));
     try {
       boardLock.exec("PRAGMA busy_timeout=2000");
@@ -143,6 +142,7 @@ if (!process.versions.electron) {
       } finally { clearTimeout(timer); }
     } finally { boardLock.close(); }
     record("PASS: focus, click and board IPC stay responsive while the board transaction lock is held");
+    if (managerOnly) break checks;
     const expectCount = async total => {
       let latest;
       try { await wait(async () => { latest = await frames(); return latest.every(frame => frame.activeAgents.total === total) && [...await a.ask({action:"dom"}), ...await b.ask({action:"dom"})].every(view => view.count === total); }, "all windows count " + total); }

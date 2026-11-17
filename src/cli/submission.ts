@@ -8,6 +8,7 @@ import { exists, readJson, removeFile, taskWorkingDirectory, writeJson } from ".
 import type { BoardStore } from "./storage.ts";
 import { findTaskWorktree, gitStatus, requireNoGitOperation, usableWorktree } from "./worktree.ts";
 import { saveArtifacts } from "./artifacts.ts";
+import { requireExpertResults } from "./expert-team.ts";
 
 interface Snapshot {
   head: string;
@@ -201,6 +202,7 @@ function directorySubmissionToken(task: Task) {
 
 export function submitTask(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
   if (task.schedule) throw new TaskboardError("INVALID_TRANSITION", "Record the recurring task result with progress instead of submitting it for review.");
+  if (!task.acceptanceRepair) requireExpertResults(task, "work");
   if (task.acceptanceRepair?.phase === "running") {
     if (input.noChanges === true) throw new TaskboardError("INVALID_INPUT", "Submit the repaired Git commit with its evidence.");
     if (!strings(input.checks, "checks").length || strings(input.limitations ?? [], "limitations").length) {

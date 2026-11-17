@@ -105,6 +105,9 @@ export interface RunActivity {
 
 export interface TaskEvent {
   expertMessage?: { from: string; to: string; replyTo?: number };
+  expertPhase?: "work" | "review";
+  expertStageRun?: { phase: "work" | "review"; key: string; state: "running" | "blocked" | "done";
+    result?: string; outputs?: Record<string, string>; agentId?: string; sessionId?: string; fallback?: string; targetHead?: string | null };
   at: string;
   durationMs?: number;
   startTiming?: { lockWaitMs: number; prepareMs: number; gitWorktreeAddMs?: number };
@@ -230,6 +233,7 @@ export interface Task {
 
 export interface BoardSettings {
   boardType?: "agent" | "manual";
+  requireExpertPlans?: boolean;
   manualColumns?: ManualColumn[];
   name?: string;
   archiveAfterDays: number | null;

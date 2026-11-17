@@ -50,16 +50,21 @@ export async function withReviewerChat<T>(project: string, id: string, notify: (
   const attempt: ReviewerAttempt = { id: randomUUID(), at: new Date().toISOString(), items: [] };
   const current: { attempt: ReviewerAttempt; history?: ReviewerAttempt[] } = { attempt };
   active.set(path, current);
+  let notifyTimer: NodeJS.Timeout | undefined;
   notify();
   try {
     return await run(items => {
       attempt.items = items;
-      notify();
+      notifyTimer ??= setTimeout(() => {
+        notifyTimer = undefined;
+        notify();
+      }, 100);
     });
   } catch (error) {
     attempt.error = (error instanceof Error ? error.message : String(error)).slice(0, 2000);
     throw error;
   } finally {
+    clearTimeout(notifyTimer);
     attempt.durationMs = Math.round(performance.now() - started);
     try {
       directory(dirname(dirname(path)));

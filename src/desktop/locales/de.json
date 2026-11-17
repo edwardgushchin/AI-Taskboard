@@ -1189,6 +1189,7 @@
   "experts.team": "Expertenteam",
   "experts.add_stage": "Arbeitsschritt hinzufügen",
   "experts.stage_title": "Name der Phase",
+  "experts.require_plans": "Expertenpläne vor dem Start von Aufgaben verlangen",
   "experts.description": "Beschreibung",
   "experts.inputs": "Eingaben, eine pro Zeile",
   "experts.outputs": "Ergebnisse, eines pro Zeile",

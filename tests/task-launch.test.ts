@@ -34,6 +34,7 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
     git: { target: "refs/heads/main", base: "a".repeat(40), branch: "refs/heads/ai-taskboard/T-0001", worktree: "worktree" } };
   const calls: { args: string[]; input: any }[] = [];
   const launched: any[] = [];
+  const closeDialogs: { message: string; detail: string }[] = [];
   const access = { full: false };
   const subscriptions = new Map();
   const savedSettings = new Map<string, Partial<import("../src/cli/model.ts").BoardSettings>>();
@@ -44,14 +45,17 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
   const finalCompletion = Promise.withResolvers<Completion>();
   const completions = [completion, retryCompletion, finalCompletion];
   const slots = createAgentSlots();
-  const runtime = runInNewContext(stripTypeScriptTypes(lifecycle) + "\n({launchTask, scheduleAgentWork, scheduleRecurringTasks, confirmProjectClose, projectOperations, runningTasks, activeAgents, deferredExecutors})", {
+  const runtime = runInNewContext(stripTypeScriptTypes(lifecycle) + "\n({launchTask, scheduleAgentWork, scheduleRecurringTasks, beginOperation, confirmProjectClose, projectOperations, runningTasks, activeAgents, deferredExecutors})", {
     AbortController, performance, setTimeout, clearTimeout, setImmediate, subscriptions, agentSlots: slots,
     isManual, runtimeLocation: (project: string) => project,
     readBoardSettings: (project: string) => savedSettings.get(project) ?? subscriptions.get(project)?.board.settings ?? {},
     scheduleMaintenance: async () => {}, scheduleAutoReview: () => {}, scheduleAutoBoard: () => {}, projectIdentity: (project: string) => project,
     broadcastBoardChat: () => {}, boardRequests: new Map(), boardWorkRequests: new Map(),
     t: (key: string, parameters = {}) => localization.text(key, parameters, "en"), localization, cliFailure: failure, missingCodexThread,
-    app: { getPath: () => "profile" }, dialog: { showMessageBox: async () => ({ response: 1 }) },
+    app: { getPath: () => "profile" }, dialog: { showMessageBox: async (_window: unknown, options: { message: string; detail: string }) => {
+      closeDialogs.push(options);
+      return { response: 1 };
+    } },
     executorFullAccess: () => access.full, process: { platform: process.platform },
     configuredCodex: async () => ({}), runLog: (items: Map<string, unknown>) => [...items.values()], rm: async () => {},
     readLastTaskTurn: async (_profile: string, _project: string, threadId: string) => {
@@ -122,7 +126,7 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
         steer: async () => {}, interrupt: async () => {} };
     },
   });
-  return { runtime, task, calls, launched, previousTurn, completion, retryCompletion, finalCompletion, subscriptions, slots, savedSettings, access };
+  return { runtime, task, calls, launched, previousTurn, completion, retryCompletion, finalCompletion, subscriptions, slots, savedSettings, access, closeDialogs };
 }
 
 test("manual boards reject direct launches and stale recurring schedules", async () => {
@@ -556,6 +560,17 @@ test("closing a project during reconnection does not turn the aborted retry into
   assert.equal(f.task.status, "in_progress");
   assert.equal(f.task.codexThreadId, previousThread);
   assert.ok(!f.calls.some(call => call.args[0] === "block"));
+  assert.equal(f.runtime.projectOperations.size, 0);
+});
+
+test("closing identifies a maintenance operation even with no running executor", async () => {
+  const f = fixture("started");
+  assert.equal(f.runtime.runningTasks.size, 0);
+  const operation = f.runtime.beginOperation("project", "Worktree cleanup · T-0090");
+  operation.controller.signal.addEventListener("abort", operation.finish, { once: true });
+  assert.equal(await f.runtime.confirmProjectClose({ window: {} }, [{ project: "project" }]), true);
+  assert.equal(f.closeDialogs[0]?.detail, "project\nWorktree cleanup · T-0090");
+  assert.match(f.closeDialogs[0]?.message ?? "", /operations in progress/);
   assert.equal(f.runtime.projectOperations.size, 0);
 });
 

@@ -4,14 +4,15 @@ import { join } from "node:path";
 import { codexThreadPattern } from "../cli/model.ts";
 import { directory, exists, readJson, writeJson } from "../cli/storage.ts";
 import type { BoardActivity } from "./codex-chat.ts";
-import { locateBoard, onBoard, withRuntimeLock } from "../cli/storage.ts";
+import { onBoard, withRuntimeLock } from "../cli/storage.ts";
+import { runtimeLocation } from "./board-runtime.ts";
 import { readTask } from "../cli/archive.ts";
 import { statusNotice } from "../cli/task-messages.ts";
 
 // Run under the board lock, shared by all windows and CLI writers. Persist the
 // delivery batch before writing chat files so an interrupted replay is idempotent.
 export function syncTaskStatusNotices(project: string, language: string | boolean = true) {
-  return onBoard(locateBoard(project), store => {
+  return onBoard(runtimeLocation(project), store => {
     const path = join(project, ".tasks", "manager-status-position.json");
     type Notice = { id: string; at: number; eventAt?: string; text: string };
     type Position = { through: Record<string, number>; pending: Notice[]; lastAt: number };

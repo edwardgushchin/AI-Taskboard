@@ -6,7 +6,7 @@ import { isAbsolute, join, relative } from "node:path";
 import { readTask } from "./archive.ts";
 import { directory, exists, onBoard, withTaskStartLock } from "./storage.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
-import { maintenanceFailure, maintenanceSuccess } from "./maintenance-state.ts";
+import { cleanupRetryDeferred, maintenanceFailure, maintenanceSuccess } from "./maintenance-state.ts";
 import { cleanTaskWorktree, findTaskWorktree, hasPending, isolateTaskWorktree, taskResourcesInUse, usableWorktree } from "./worktree.ts";
 import { git, worktrees } from "./git.ts";
 import { TaskboardError } from "./model.ts";
@@ -49,13 +49,15 @@ export function maintainBoard(location: BoardLocation): string[] {
         const { store, task } = snapshot;
         const repo = location.repository;
         if (!repo || !task.git || hasPending(store, task) || taskResourcesInUse(store, id)) return;
+        const closed = task.status === "done" || task.status === "cancelled";
+        if (closed && cleanupRetryDeferred(store, id)) return;
         try {
           migrateSavedWorktree(store, task);
           migrateIntegrationWorktree(store, task);
           const item = findTaskWorktree(repo, task.git);
           if (!item || item.prunable) {
             maintenanceSuccess(store, "migration", id);
-            if (task.status === "done" || task.status === "cancelled") {
+            if (closed) {
               try {
                 const result = cleanTaskWorktree(store, task);
                 if (result.removed || result.branchRemoved) cleaned.push(id);
@@ -70,8 +72,11 @@ export function maintainBoard(location: BoardLocation): string[] {
             current.save({ ...latest, git: { ...latest.git!, worktree } });
           });
           maintenanceSuccess(store, "migration", id);
-          if (task.status === "done" || task.status === "cancelled") {
-            try { if (cleanTaskWorktree(store, { ...task, git: { ...task.git, worktree } }).removed) cleaned.push(id); }
+          if (closed) {
+            try {
+              const result = cleanTaskWorktree(store, { ...task, git: { ...task.git, worktree } });
+              if (result.removed || result.branchRemoved) cleaned.push(id);
+            }
             catch { /* cleanTaskWorktree records the private diagnostic. */ }
           }
         } catch (error) { maintenanceFailure(store, "migration", error, id); }

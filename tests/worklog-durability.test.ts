@@ -4,8 +4,11 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, readdirSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
-import { boardWorklog } from "../src/desktop/board-worklog.ts";
+import { DatabaseSync } from "node:sqlite";
+import { setTimeout as wait } from "node:timers/promises";
+import { boardWorklog, worklogStorage } from "../src/desktop/board-worklog.ts";
 import { migrateWorklog, removeMigratedWorklog } from "../src/cli/worklog-migration.ts";
+import { maxWorklogPartBytes } from "../src/cli/worklog-files.ts";
 
 function fixture(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), "taskboard-journal-"));
@@ -18,6 +21,61 @@ function read(root: string) {
   return globSync(".tasks/worklog/*/*/*.md", { cwd: root }).map(file => readFileSync(join(root, file), "utf8")).join("");
 }
 const legacy = (id: string, text: string) => `# Codex Worklog — 2026-11-12\n\n## 2026-11-12 19:48 +03:00 — ${text}\n\n<!-- codex-worklog-session:old turn:old -->\n\nOriginal content\n\n<!-- codex-worklog-entry:${id} -->\n`;
+
+test("a full Worklog starts a new part and preserves replay, corrections and migration", t => {
+  const root = fixture(t);
+  const month = join(root, ".tasks", "worklog", "2026", "11");
+  mkdirSync(month, { recursive: true });
+  const day = join(month, "2026-11-12.md");
+  const original = legacy("a".repeat(24), "Old result");
+  const full = original.replace("Original content", "Original content" + "x".repeat(maxWorklogPartBytes - Buffer.byteLength(original)));
+  writeFileSync(day, full);
+  const storage = worklogStorage(root);
+  const base = {
+    threadId: "thread", turnId: "turn_fact_test", stamp: "2026-11-12 19:50 +03:00", role: "executor" as const,
+    submission: { language: "en", entries: [{
+      title: "New result", context: ["Context"], timeline: [{ time: null, items: ["Ran."] }],
+      changes: ["Changed."], decisions: ["Chosen."], checks: ["Verified."], next_steps: ["Done."], artifacts: [], supersedes: [],
+    }] },
+  };
+  const saved = storage.persist(base);
+  assert.equal(saved.path, join(month, "2026-11-12.part-2.md"));
+  assert.ok(readFileSync(day).equals(Buffer.from(full)));
+  assert.equal(storage.persist({ ...base, stamp: "2026-11-13 02:00 +03:00" }).path, saved.path);
+  const correction = storage.persist({ ...base, turnId: "correction", stamp: "2026-11-13 02:00 +03:00",
+    submission: { ...base.submission, entries: [{ ...base.submission.entries[0]!, supersedes: saved.entry_ids }] } });
+  assert.match(readFileSync(correction.path, "utf8"), new RegExp(saved.entry_ids[0]!));
+  const source = join(root, ".dev-diary", "2026", "11", "2026-11-12.md");
+  mkdirSync(join(root, ".dev-diary", "2026", "11"), { recursive: true });
+  writeFileSync(source, legacy("b".repeat(24), "Migrated result"));
+  assert.equal(migrateWorklog(root)[0]?.destination, saved.path);
+  assert.equal(migrateWorklog(root)[0]?.added, 0);
+  assert.match(readFileSync(saved.path, "utf8"), /New result[\s\S]*Migrated result/);
+  assert.throws(() => storage.persist({ ...base,
+    submission: { ...base.submission, entries: [{ ...base.submission.entries[0]!, title: "Same ID, changed text" }] } }), /Conflicting Worklog event identity/);
+});
+
+test("a blocked background Worklog writer leaves the event loop free and saves the final facts in order", async t => {
+  const root = fixture(t);
+  const pending = join(root, ".tasks", "pending");
+  mkdirSync(pending);
+  const lock = new DatabaseSync(join(pending, ".lock.sqlite"));
+  const log = boardWorklog(root, "executor", "T-0042", true);
+  lock.exec("BEGIN IMMEDIATE");
+  try {
+    log.start("thread", "turn");
+    log.fact("start", "Operation started.");
+    log.fact("result", "Operation finished.");
+    log.finish("completed");
+    await wait(250);
+    assert.equal(read(root), "");
+  } finally {
+    lock.close();
+    await log.drain();
+  }
+  assert.match(read(root), /Operation started\.[\s\S]*Operation finished\.[\s\S]*turn: completed/);
+  assert.ok(!readdirSync(pending).some(name => name.startsWith("worklog-")));
+});
 
 test("migration preserves bytes of blocks, current entries and sources; repeat and conflict", t => {
   const root = fixture(t);

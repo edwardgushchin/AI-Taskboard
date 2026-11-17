@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import childProcess, { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, rmdirSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, globSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, rmdirSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { syncBuiltinESMExports } from "node:module";
@@ -12,6 +12,7 @@ import type { TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { nextScheduledRun } from "../src/cli/model.ts";
 import { locateBoard } from "../src/cli/storage.ts";
+import { maxWorklogPartBytes } from "../src/cli/worklog-files.ts";
 import type { Task } from "../src/cli/model.ts";
 
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
@@ -945,13 +946,16 @@ test("task chat stores messages and attachments together and archives the conver
   assert.deepEqual(sent.history[0], task.history[0]);
   assert.deepEqual(sent.history.at(-1).chat, { ...settings, files: [file] });
   const reply = { ...settings, actor: "agent", text: "Who should receive the export?", usage: { used: 32, limit: 256 },
-    commentary: ["I have checked the export settings."], durationMs: 12_000 };
+    commentary: ["I have checked the export settings."], durationMs: 12_000,
+    run: [{ id: "summary", type: "reasoning", title: "", text: "Checked the current export settings", status: "completed" }] };
   cli(root, ["chat", task.id], { ...reply, replyTo: 0 }, "CHAT_CHANGED");
   cli(root, ["chat", task.id], { ...reply, durationMs: -1, replyTo: sent.history.length - 1 }, "INVALID_INPUT");
+  cli(root, ["chat", task.id], { ...reply, run: [{ ...reply.run[0], at: "invalid" }], replyTo: sent.history.length - 1 }, "INVALID_INPUT");
   const answered = cli(root, ["chat", task.id], { ...reply, replyTo: sent.history.length - 1 });
   assert.deepEqual(answered.history.at(-1).chat.usage, reply.usage);
   assert.deepEqual(answered.history.at(-1).chat.commentary, reply.commentary);
   assert.equal(answered.history.at(-1).durationMs, reply.durationMs);
+  assert.deepEqual(answered.history.at(-1).run, reply.run);
   cli(root, ["chat", task.id], { ...reply, replyTo: sent.history.length - 1 }, "CHAT_CHANGED");
   const entries = [{ id: "final", type: "agentMessage", phase: "final_answer", title: "", text: "Saved result", status: "completed" }];
   cli(root, ["run-log", task.id], { entries, durationMs: -1 }, "INVALID_INPUT");
@@ -1897,8 +1901,26 @@ test("T-0138 cleanup retains QA and unknown files, queues dependency repair and 
   assert.equal(JSON.parse(readFileSync(fault, "utf8")).filter((job: { operation: string }) => job.operation === "cleanup").length, 1);
   const artifact = cli(root, ["show", task.id]).artifacts.find((item: { source: string }) => item.source === ".tasks/qa/required.png");
   assert.equal(readFileSync(artifact.file, "utf8"), "review evidence");
+  const readCleanupFacts = () => globSync(".tasks/worklog/*/*/*.md", { cwd: root })
+    .flatMap(path => readFileSync(join(root, path), "utf8").match(/^  - worktree cleanup:.*$/gm) ?? []);
+  const originalJobs = JSON.parse(readFileSync(fault, "utf8"));
+  const cleanup = originalJobs.find((job: { operation: string }) => job.operation === "cleanup");
+  const beforeRetry = readCleanupFacts();
+  assert.match(beforeRetry.at(-1)!, /failed; resources retained for retry/);
   cli(root, ["maintain"]); cli(root, ["maintain"]);
-  assert.equal(JSON.parse(readFileSync(fault, "utf8")).length, 1);
+  assert.deepEqual(JSON.parse(readFileSync(fault, "utf8")), originalJobs);
+  assert.deepEqual(readCleanupFacts(), beforeRetry);
+  cleanup.cleanupRetryAt = 0;
+  writeFileSync(fault, JSON.stringify(originalJobs));
+  cli(root, ["maintain"]);
+  const afterRetry = JSON.parse(readFileSync(fault, "utf8"));
+  assert.equal(afterRetry.length, 1);
+  assert.equal(afterRetry[0].attempts, cleanup.attempts + 1);
+  assert.ok(afterRetry[0].cleanupRetryAt > Date.now());
+  assert.deepEqual(readCleanupFacts().slice(beforeRetry.length), [
+    "  - worktree cleanup: started; outcome unknown",
+    "  - worktree cleanup: failed; resources retained for retry",
+  ]);
   assert.equal(readFileSync(join(worktree, "unknown.local"), "utf8"), "user data");
   // The diagnostic agent removes only independently reproduced dependency bytes.
   assert.equal(readFileSync(join(worktree, "node_modules", "fixture-dependency", "index.js"), "utf8"), "export default 1;\n");
@@ -1923,6 +1945,28 @@ function submitFixture(root: string, edit: (worktree: string) => void, target?: 
   });
   return { task: reviewed, worktree };
 }
+
+test("a full daily Worklog allows start, submit and accept", t => {
+  const root = fixture(t, true);
+  cli(root, ["init"]);
+  const now = new Date();
+  const year = String(now.getFullYear());
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = year + "-" + month + "-" + String(now.getDate()).padStart(2, "0");
+  const folder = join(root, ".tasks", "worklog", year, month);
+  mkdirSync(folder, { recursive: true });
+  const header = "# Codex Worklog — " + day + "\n";
+  const full = Buffer.concat([Buffer.from(header), Buffer.alloc(maxWorklogPartBytes - Buffer.byteLength(header), 10)]);
+  const original = join(folder, day + ".md");
+  writeFileSync(original, full);
+  const { task } = submitFixture(root, path => writeFileSync(join(path, "result.txt"), "result\n"));
+  const done = cli(root, ["accept", task.id], { revision: task.revision });
+  assert.equal(done.status, "done");
+  assert.ok(readFileSync(original).equals(full));
+  const next = globSync("*.part-2.md", { cwd: folder });
+  assert.equal(next.length, 1);
+  assert.match(readFileSync(join(folder, next[0]!), "utf8"), /start: started[\s\S]*submit: started[\s\S]*accept: started/);
+});
 
 test("acceptance publishes completion and releases the board before worktree cleanup", t => {
   const root = fixture(t, true);
@@ -3308,7 +3352,6 @@ test("canonical journal survives cancellation, worktree cleanup, archival and ph
   log.start("interrupted", "before-cancel");
   log.fact("edit", "fileChange: completed; final report not submitted");
   log.finish();
-  const { globSync } = await import("node:fs");
   const read = () => globSync(".tasks/worklog/*/*/*.md", { cwd: root }).map(file => readFileSync(join(root, file), "utf8")).join("");
   assert.deepEqual(cli(root, ["worklog-migrate"]), []);
   const before = read();
@@ -3324,6 +3367,9 @@ test("canonical journal survives cancellation, worktree cleanup, archival and ph
   cli(root, ["cancel", card.id], { reason: "Test interruption before final report" });
   assert.equal(existsSync(worktree), false);
   assert.ok(read().includes(before.trim()));
+  const afterCancel = read();
+  cli(root, ["maintain"]); cli(root, ["maintain"]);
+  assert.equal(read(), afterCancel, "a retained cancelled branch with no worktree adds no cleanup audit");
   cli(root, ["settings"], { archiveAfterDays: 0 });
   cli(root, ["archive", "sweep"]);
   assert.equal(existsSync(join(root, ".tasks", "tasks", card.id + ".json")), false);

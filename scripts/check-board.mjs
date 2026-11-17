@@ -138,6 +138,119 @@ app.whenReady().then(async () => {
   await evaluate(`byId('notice-close').click(); void 0`);
   await evaluate(`push(); void 0`);
   await check(`byId('welcome').hidden && !byId('workspace').hidden && byId('app-content').getAttribute('aria-busy') === 'false'`, "a restored board replaces the loading state");
+  if (process.argv.includes("--experts-only")) {
+    await evaluate(`
+      const completed = { key: 'verify', expertId: 'qa-engineer', title: 'Verify outcomes', inputs: ['Scope'],
+        outputs: ['Proof'], dependsOn: [], criteria: ['Check evidence'] };
+      const spawn = { id: 'child-call', type: 'collabAgentToolCall', title: 'spawnAgent',
+        text: JSON.stringify({ receiverThreadIds: ['child-session'], prompt: 'Verify the evidence' }), status: 'completed' };
+      const native = { id: 'native-spawn', type: 'subAgentActivity', at: '2026-11-18T00:00:00Z',
+        text: JSON.stringify({ kind: 'started', agentThreadId: 'child-session', agentPath: '/root/verify',
+          model: 'gpt-6.1-sol', reasoningEffort: 'high', startedAtMs: 1000 }), status: 'completed' };
+      const wait = { id: 'native-wait', type: 'collabAgentToolCall', title: 'wait', at: '2026-11-18T00:00:01Z',
+        text: JSON.stringify({ tool: 'wait', receiverThreadIds: [], agentsStates: {}, startedAtMs: 2000 }), status: 'completed' };
+      const planned = task('T-0001', 'Expert plan', { status: 'draft', approvalRequirements: ['review'],
+        executorFullAccess: true,
+        result: { summary: 'Ready for QA', checks: ['JavaScript — passed, Node 24', 'Keyboard — failed. Focus leaves the form', 'Device — skipped'] },
+        expertTeam: { work: { lead: 'product-owner', stages: [completed] },
+          review: { lead: 'qa-engineer', stages: [completed] } },
+        expertStageStatus: { work: [{ ...completed, state: 'done', run: {
+          state: 'done', agentId: 'child-session', result: 'Verified native output', outputs: { Proof: 'Evidence recorded' }
+        } }] },
+        history: [
+          { actor: 'user', action: 'chat', text: 'Keep this in dialogue', chat: {} },
+          { actor: 'agent', action: 'chat', text: 'Answer in dialogue', chat: {},
+            run: [{ id: 'summary', type: 'reasoning', title: '', text: 'Saved work summary', status: 'completed' }] },
+          { actor: 'agent', action: 'coordination', at: '2026-11-18T00:00:01Z', text: 'Hand off evidence', expertMessage: { from: 'work:verify', to: 'review:verify' } },
+          { actor: 'agent', action: 'expert-stage', expertStageRun: { phase: 'work', key: 'verify', state: 'done' } },
+          { actor: 'agent', action: 'run-log', run: [spawn, native, wait] },
+        ],
+      });
+      fixture.board.tasks = [planned];
+      fixture.board.settings.requireExpertPlans = true;
+      window.taskboard.command = async action => ({ ok: true, data: action === 'experts' ?
+        [{ id: 'product-owner', name: 'Product Owner' }, { id: 'qa-engineer', name: 'QA Engineer' }] : structuredClone(planned) });
+      window.taskboard.themes = async () => [];
+      window.taskboard.codexStatus = async () => ({ state: 'unavailable' });
+      window.taskboard.chatModels = async () => ({ ok: true, data: [] });
+      push();
+      showTask(planned.id);
+      void 0;
+    `);
+    await evaluate(`waitFor(() => body.querySelector('.expert-team'))`);
+    await check(`body.querySelector('.expert-team').textContent.includes('Verified native output') &&
+      body.querySelector('.expert-team').textContent.includes('Evidence recorded')`, 'card renders the saved specialist result');
+    await evaluate(`waitFor(() => body.querySelector('.expert-lead').textContent.includes('Product Owner'))`);
+    await check(`(() => {
+      const pane = byId('task-side').getBoundingClientRect();
+      const card = body.getBoundingClientRect();
+      return pane.left >= card.right && Math.abs(pane.top - card.top) < 1 &&
+        body.querySelectorAll('.expert-phase').length === 2 && body.querySelectorAll('.expert-stage').length === 2 &&
+        body.querySelector('.expert-approval-requirements').textContent.includes('ответственного за ревью') &&
+        !body.textContent.includes('Режим запуска') &&
+        ![...body.querySelectorAll('button')].some(button => ['Утвердить', 'Веха…', 'Редактировать', 'Параметры запуска…',
+          'Зависимости…', 'Доступ исполнителя…', 'Назначить ответственного за работу', 'Добавить этап ревью'].includes(button.textContent));
+    })()`, 'two panes show both expert phases and stop incomplete approval and direct edits');
+    await check(`byId('task-chat-dialogue').checkVisibility() &&
+      byId('task-chat-dialogue').textContent.includes('Answer in dialogue') &&
+      !byId('task-chat-dialogue').textContent.includes('Saved work summary') &&
+      !byId('task-chat-dialogue').textContent.includes('Hand off evidence') &&
+      byId('task-chat-input').checkVisibility()`, 'the dialogue contains actual messages and its composer');
+    await evaluate(`
+      const laneButton = name => document.querySelector('#task-side [aria-controls="task-chat-' + name + '"]');
+      laneButton('work').click();
+      updateChat({ project: fixture.project, id: planned.id, type: 'run', items: [
+        { id: 'live-summary', type: 'reasoning', title: '', text: 'Current work summary', status: 'inProgress' }
+      ] });
+      settle();
+    `);
+    await check(`byId('task-chat-work').checkVisibility() && byId('task-chat-input').closest('form').hidden &&
+      /Current work summary/.test(byId('task-chat-work').textContent) && /Saved work summary/.test(byId('task-chat-work').textContent) &&
+      byId('task-chat-work').textContent.includes('Verify outcomes · Завершён') &&
+      !/Answer in dialogue|expert-stage/.test(byId('task-chat-work').textContent)`, 'work history names the stage and separates live activity from dialogue');
+    await evaluate(`laneButton('team').click(); settle()`);
+    await evaluate(`waitFor(() => byId('task-chat-team').querySelector('.expert-author')?.textContent === 'QA Engineer')`);
+    await check(`(() => {
+      const team = byId('task-chat-team');
+      const bubble = team.querySelector('.expert-message');
+      return team.checkVisibility() && bubble.querySelector('.expert-avatar').textContent === 'QA' &&
+        bubble.querySelector('time').dateTime === '2026-11-18T00:00:01Z' &&
+        bubble.querySelector('.expert-bubble').textContent.includes('Hand off evidence') &&
+        !team.querySelector('form, textarea, [type=submit]') && !bubble.querySelector('button') &&
+        byId('task-chat-input').closest('form').hidden;
+    })()`, 'team conversation has a named avatar, bubble, timestamp and no composer or reply');
+    await evaluate(`byId('task-chat-team').querySelector('.expert-agent-history > summary').click(); settle()`);
+    await check(`(() => {
+      const wait = byId('task-chat-team').querySelector('[data-agent-call="native-wait"]');
+      const started = byId('task-chat-team').querySelector('[data-agent-call="native-spawn"]');
+      return wait.checkVisibility() && wait.textContent.includes('В этот момент работали QA Engineer · Verify outcomes') &&
+        started.textContent.includes('gpt-6.1-sol') && started.textContent.includes('Verify outcomes') &&
+        !wait.textContent.includes('child-session');
+    })()`, 'App Server v2 events correlate a named agent with wait and show the reported model');
+    await check(`(() => {
+      const target = document.createElement('div');
+      showSubmissionResult(planned.result, target);
+      const totals = [...target.querySelectorAll('.task-check-counts [data-outcome]')];
+      return totals.map(node => node.dataset.outcome).join() === 'passed,failed,skipped' &&
+        target.querySelector('.task-check-note').textContent === 'Node 24';
+    })()`, 'operator sees result counts and a comma-separated legacy result is parsed');
+    await check(`(() => {
+      const target = document.createElement('div');
+      renderRunActivity(target, [{ id: 'notice', type: 'userMessage', userMessage: {
+        text: 'AI Taskboard queue: handle these addressed notices without a goal. [{"id":"T-0001"}]'
+      }, status: 'completed', title: '', text: '' }], true);
+      return !target.textContent.includes('AI Taskboard queue');
+    })()`, 'historical automatic notice payload is hidden');
+    window.setContentSize(710, 820);
+    await evaluate(`settle()`);
+    await check(`byId('task-side').getBoundingClientRect().top >= body.getBoundingClientRect().bottom`, 'on a narrow screen the chat moves below the card');
+    window.setContentSize(1380, 900);
+    if (keepArtifacts) writeFileSync(join(artifacts, "task-card-team.png"), (await window.webContents.capturePage()).toPNG());
+    await evaluate(`boardSettings(); settle()`);
+    await check(`body.querySelector('[name="requireExpertPlans"]')?.checked === true`, 'board settings display the persisted plan requirement');
+    console.log(`Expert team Chromium checks passed: ${checks}`);
+    return;
+  }
   if (process.argv.includes("--repair-only")) {
     for (const theme of ["dark", "light"]) for (const phase of ["queued", "running", "checking", "failed"]) {
       nativeTheme.themeSource = theme;
@@ -805,7 +918,7 @@ app.whenReady().then(async () => {
       waitFor(openReviewer);
     `);
     await check(`!openReviewer().open && reviewerReads === 0`, "opening a task does not load review history");
-    await evaluate(`openReviewer().querySelector('summary').click();
+    await evaluate(`document.querySelector('[aria-controls="task-chat-work"]').click(); openReviewer().querySelector('summary').click();
       waitFor(() => openReviewer().textContent.includes('Сохранённое согласование.'))`);
     await check(`openReviewer().textContent.includes('Сохранённые решения по проверке')`, "older cards show the decisions that were saved");
     await evaluate(`
@@ -833,10 +946,11 @@ app.whenReady().then(async () => {
       sheet.close();
       reviewed.status = 'done';
       await showTask(reviewed.id);
-      openReviewer().querySelector('summary').click();
+      document.querySelector('[aria-controls="task-chat-work"]').click();
+      if (!openReviewer().open) openReviewer().querySelector('summary').click();
       await waitFor(() => openReviewer().textContent.includes('Результат согласован.'));
     })()`);
-    await check(`openReviewer().open && !document.querySelector('.task-chat .chat-composer')`, "a closed card still has the saved reviewer chat");
+    await check(`openReviewer().open && document.querySelector('.task-chat .chat-composer').hidden`, "a closed card still has the saved reviewer chat");
     console.log("Reviewer chat Chromium checks passed: " + checks);
     return;
   }
@@ -1151,74 +1265,86 @@ app.whenReady().then(async () => {
     await evaluate(`
       const selectedTask = fixture.board.tasks[0];
       const selectedPath = 'C:/Test/Shared files';
-      window.taskboard.executionModels = async () => ({ ok: true, data: [] });
-      window.taskboard.chatModels = async () => ({ ok: true, data: [] });
-      window.taskboard.command = async (action, id, input) => {
-        if (action === 'update') selectedTask.workingDirectory = input.workingDirectory;
+      selectedTask.workingDirectory = selectedPath;
+      window.taskboard.command = async action => {
+        if (action !== 'show') throw new Error('Unexpected action ' + action);
         return { ok: true, data: structuredClone(selectedTask) };
       };
-      const openSettings = () => [...body.querySelectorAll('button')]
-        .find(button => button.textContent === 'Параметры запуска…').click();
-      showTask(selectedTask.id).then(() => {
-        openSettings();
-        return waitFor(() => body.querySelector('form input'));
-      });
+      push();
+      showTask(selectedTask.id);
+      waitFor(() => body.textContent.includes(selectedPath));
     `);
-    await check(`body.querySelector('form input').value === ''`, "a new task defaults to a worktree");
-    await evaluate(`
-      body.querySelector('form input').value = selectedPath;
-      body.querySelector('form').requestSubmit();
-      waitFor(() => sheetKind === 'task' && body.textContent.includes(selectedPath));
-    `);
-    await check(`selectedTask.workingDirectory === selectedPath && body.textContent.includes('Рабочая папка')`,
-      "execution settings save and display the existing working directory");
+    await check(`body.textContent.includes('Рабочая папка') &&
+      ![...body.querySelectorAll('button')].some(control => control.textContent === 'Параметры запуска…')`,
+      "a manager-set working directory is visible in the card");
     console.log("Working directory Chromium checks passed: " + checks);
     return;
   }
   if (process.argv.includes("--schedule-only")) {
     await evaluate(`
       const recurringTask = fixture.board.tasks[0];
-      recurringTask.criteria = ['Сохранить результат проверки.'];
-      window.taskboard.chatModels = async () => ({ ok: true, data: [] });
-      window.taskboard.command = async (action, id, input) => {
-        if (action === 'update' && id === recurringTask.id) {
-          recurringTask.schedule = input.schedule ? { ...input.schedule, nextAt: '2030-01-14T09:00:00.000Z' } : undefined;
-          push();
-        }
+      recurringTask.schedule = { everyMinutes: 60, nextAt: '2030-01-14T09:00:00.000Z' };
+      window.taskboard.command = async action => {
+        if (action !== 'show') throw new Error('Unexpected action ' + action);
         return { ok: true, data: structuredClone(recurringTask) };
       };
-      const scheduleFields = () => byId('sheet-body').querySelector('[name="scheduleMode"]')?.form.elements;
-      const edit = async () => {
-        const editButton = () => [...byId('sheet-body').querySelectorAll('button')].find(button => button.textContent === 'Редактировать');
-        await waitFor(editButton);
-        editButton().click();
-        await waitFor(scheduleFields);
-      };
-      const setScheduleMode = mode => {
-        const control = scheduleFields().scheduleMode;
-        control.value = mode;
-        control.dispatchEvent(new Event('change'));
-      };
-      showTask(recurringTask.id).then(() => edit());
+      push();
+      showTask(recurringTask.id);
+      waitFor(() => body.textContent.includes('Следующий запуск'));
     `);
-    await check(`scheduleFields().scheduleMode.value === 'none' && scheduleFields().scheduleTime.disabled && scheduleFields().scheduleInterval.disabled`,
-      "a task without a schedule hides the timing fields");
-    for (const [mode, value, expected] of [["hourly", 1, { everyMinutes: 60 }], ["minutes", 15, { everyMinutes: 15 }],
-      ["hours", 3, { everyMinutes: 180 }], ["daily", 1, { time: "09:00" }], ["weekly", 1, { time: "09:00", weekday: 1 }],
-      ["monthly", 1, { time: "09:00", dayOfMonth: 31 }], ["yearly", 1, { time: "09:00", dayOfMonth: 29, month: 2 }]]) {
-      await evaluate(`setScheduleMode(${JSON.stringify(mode)}); scheduleFields().scheduleInterval.value = ${value};
-        scheduleFields().scheduleTime.value = '09:00'; scheduleFields().scheduleDay.value = '1';
-        scheduleFields().scheduleMonth.value = '2'; scheduleFields().scheduleMonth.dispatchEvent(new Event('change'));
-        scheduleFields().scheduleDate.value = ${JSON.stringify(String(expected.dayOfMonth ?? 1))}; scheduleFields().scheduleMode.form.requestSubmit();
-        waitFor(() => sheetKind === 'task' && !!findCard(recurringTask.id).querySelector('.task-schedule'))`);
-      await check(`(() => { const { nextAt, ...rule } = recurringTask.schedule; return JSON.stringify(rule) === ${JSON.stringify(JSON.stringify(expected))} &&
-        body.textContent.includes('Следующий запуск'); })()`, `the ${mode} rule is saved and the next run is visible`);
-      await evaluate(`edit()`);
-    }
-    await evaluate(`setScheduleMode('none'); scheduleFields().scheduleMode.form.requestSubmit();
-      waitFor(() => sheetKind === 'task' && !findCard(recurringTask.id).querySelector('.task-schedule'))`);
-    await check(`!recurringTask.schedule && !body.textContent.includes('Следующий запуск')`, "turning off the schedule stops recurrence");
+    await check(`!!findCard(recurringTask.id).querySelector('.task-schedule') &&
+      ![...body.querySelectorAll('button')].some(control => control.textContent === 'Редактировать')`,
+      "a manager-set schedule and its next run stay visible without the manual editor");
     console.log("Task schedule Chromium checks passed: " + checks);
+    return;
+  }
+  if (process.argv.includes("--goal-reply-only")) {
+    await evaluate(`
+      const activeGoal = { objective: 'Проверить карточки', status: 'active' };
+      fixture.managerBusy = true;
+      fixture.managerWork = { id: 'goal-run', phase: 'running', lane: 'work', startedAt: Date.now(),
+        item: { type: 'mcpToolCall', title: 'ai_taskboard / task_wait', text: '', status: 'inProgress' } };
+      window.taskboard.boardHistory = async (_project, _cursor, view) => ({ ok: true, data: view === 'live'
+        ? { work: [], chat: [] } : { turns: [], goal: activeGoal, goalRunning: true } });
+      push();
+    `);
+    await clickManagerField();
+    await evaluate(`waitFor(() => !document.querySelector('.board-goal').hidden)`);
+    await click(".board-work-toggle");
+    await evaluate(`
+      const workForm = document.querySelector('#board-draft');
+      const workSends = [];
+      window.taskboard.boardRequest = async (text, _files, project, goal, immediate, id, goalRunId) => {
+        workSends.push({ text, goal, immediate, goalRunId });
+        await window.taskboard.boardQueue(project, 'remove', id);
+        return { ok: true, data: null };
+      };
+      workForm.querySelector('.draft-input textarea').value = 'Выбираю первый вариант';
+      workForm.requestSubmit();
+      waitFor(() => workSends.length && !workForm.querySelector('.board-queued-row'));
+    `);
+    await check(`workSends[0].text === 'Выбираю первый вариант' && workSends[0].immediate === true &&
+      workSends[0].goal === false && workSends[0].goalRunId === 'goal-run' &&
+      document.querySelector('.board-work').checkVisibility()`,
+      "sending from Work Activity reaches the active goal without leaving its tab");
+    await evaluate(`
+      const goalQuestion = { id: 'goal-question', text: 'Выбрать первый вариант?', options: ['Да', 'Нет'] };
+      const updateQuestion = question => window.pushChat({ project: fixture.project, type: 'orchestrator-question', question });
+      let goalAnswer;
+      window.taskboard.answerBoardQuestion = async (id, answer) => {
+        goalAnswer = { id, answer };
+        updateQuestion(null);
+        return { ok: true, data: null };
+      };
+      updateQuestion(goalQuestion);
+    `);
+    await check(`document.querySelector('.manager-question[open]')?.textContent.includes(goalQuestion.text)`,
+      "a goal question opens an answer form over Work Activity");
+    await evaluate(`document.querySelector('.manager-question[open] .manager-question-options button').click(); settle()`);
+    await check(`goalAnswer?.id === 'goal-question' && goalAnswer.answer === 'Да' &&
+      document.querySelector('.board-work').checkVisibility()`,
+      "choosing an answer responds to the goal question in Work Activity");
+    console.log("Goal replies Chromium checks passed: " + checks);
     return;
   }
   if (process.argv.includes("--goal-only")) {
@@ -1433,14 +1559,15 @@ app.whenReady().then(async () => {
       void 0;
     `);
     await clickManagerField();
-    await evaluate(`waitFor(() => document.querySelector('.board-chat .chat-review-return'))`);
-    await check(`findingsRendered(document.querySelector('.board-chat .chat-review-return'))`,
+    await click(".board-work-toggle");
+    await evaluate(`waitFor(() => document.querySelector('.board-chat .chat-entry:has(.chat-review-finding)'))`);
+    await check(`findingsRendered(document.querySelector('.board-chat .chat-entry:has(.chat-review-finding)'))`,
       "reviewer returns in manager chat separate findings, keeping prose, source locations and Markdown links");
     await check(`document.querySelector('.chat-review-status').textContent === 'Возврат на доработку' &&
-      document.querySelector('.chat-review-return .board-chat-task').textContent === reviewed.id &&
-      document.querySelector('.chat-coordination:not(.chat-review-return)').textContent.includes('Сдача согласована.')`,
+      document.querySelector('.chat-entry:has(.chat-review-finding) .board-chat-task').textContent === reviewed.id &&
+      document.querySelector('.chat-coordination:not(:has(.chat-review-finding))').textContent.includes('Сдача согласована.')`,
       "reviewer return keeps its task link, and reviewer approval remains a regular message");
-    await evaluate(`document.querySelector('.chat-review-return').scrollIntoView({ block: 'start' }); settle()`);
+    await evaluate(`document.querySelector('.chat-entry:has(.chat-review-finding)').scrollIntoView({ block: 'start' }); settle()`);
     if (keepArtifacts) await capture("board-review-message.png");
     await evaluate(`document.querySelector('.chat-review-finding a').click();
       waitFor(() => document.querySelector('.markdown-preview .source-line'))`);
@@ -1449,9 +1576,9 @@ app.whenReady().then(async () => {
       document.querySelector('.markdown-preview .source-line').textContent === 'return null;'`,
       "a source link opens its highlighted line in the task worktree preview");
     await evaluate(`document.querySelector('.markdown-preview').close(); settle()`);
-    await evaluate(`document.querySelector('.chat-review-return .board-chat-task').click(); settle()`);
-    await evaluate(`waitFor(() => document.querySelector('.task-chat .chat-review-return'))`);
-    await check(`findingsRendered(document.querySelector('.task-chat .chat-review-return'))`,
+    await evaluate(`document.querySelector('.chat-entry:has(.chat-review-finding) .board-chat-task').click(); settle()`);
+    await evaluate(`waitFor(() => document.querySelector('.task-chat .chat-entry:has(.chat-review-finding)'))`);
+    await check(`findingsRendered(document.querySelector('.task-chat .chat-entry:has(.chat-review-finding)'))`,
       "the same findings are readable in the task chat");
     console.log("Reviewer message Chromium checks passed: " + checks);
     return;
@@ -1466,40 +1593,16 @@ app.whenReady().then(async () => {
       fixture.board.gitInfo = { githubRepository: 'owner/example' };
       let openedMilestone;
       window.taskboard.openLink = async url => { openedMilestone = url; };
-      let failMilestones = false;
-      window.taskboard.command = async (action, id, input) => {
+      milestoneTask.milestone = { repository: 'owner/example', number: 5, title: 'Версия 1.0' };
+      window.taskboard.command = async (action, id) => {
         if (action === 'show' && id === milestoneTask.id) return { ok: true, data: structuredClone(milestoneTask) };
-        if (action === 'milestones') {
-          return failMilestones ? { ok: false, error: { code: 'GITHUB_MILESTONES_FAILED' } } : {
-            ok: true, data: { repository: 'owner/example', milestones: [
-              { number: 5, title: 'Версия 1.0', state: 'open' },
-              { number: 3, title: 'Версия 0.9', state: 'closed' },
-            ] },
-          };
-        }
-        if (action === 'milestone' && id === milestoneTask.id && input.revision === milestoneTask.revision) {
-          if (input.milestone && (input.milestone.repository !== 'owner/example' || input.milestone.number !== 5)) {
-            throw new Error('Unexpected milestone selection');
-          }
-          milestoneTask.milestone = input.milestone ? { ...input.milestone, title: 'Версия 1.0' } : undefined;
-          milestoneTask.revision++;
-          push();
-          return { ok: true, data: structuredClone(milestoneTask) };
-        }
         throw new Error('Unexpected action ' + action);
       };
-      const milestoneButton = () => [...body.querySelectorAll('button')].find(control => control.textContent === 'Веха…');
       push();
-      showTask(milestoneTask.id).then(() => milestoneButton().click())
-        .then(() => waitFor(() => body.querySelectorAll('select option').length === 3));
+      showTask(milestoneTask.id).then(() => waitFor(() => !!body.querySelector('.task-milestone-link')));
     `);
-    await check(`[...body.querySelectorAll('select option')].some(option => option.textContent.includes('Версия 0.9') &&
-      option.textContent.includes('закрыта'))`, "the milestone picker lists open and closed GitHub milestones");
-    await evaluate(`
-      body.querySelector('select').value = '5';
-      body.querySelector('form').requestSubmit();
-      waitFor(() => !!body.querySelector('.task-milestone-link'));
-    `);
+    await check(`![...body.querySelectorAll('button')].some(control => control.textContent === 'Веха…')`,
+      "the assigned milestone is visible without a manual milestone picker");
     await check(`(() => {
       const card = findCard(milestoneTask.id);
       const id = card.querySelector('.task-id').getBoundingClientRect();
@@ -1526,10 +1629,6 @@ app.whenReady().then(async () => {
     })()`, "task ID and milestone share the footer text color, and all five icons use the loaded Codicons font");
     await evaluate(`body.querySelector('.task-milestone-link').click(); waitFor(() => !!openedMilestone)`);
     await check(`openedMilestone === 'https://github.com/owner/example/milestone/5'`, "the assigned milestone opens on GitHub");
-    await evaluate(`failMilestones = true; milestoneButton().click(); waitFor(() => body.textContent.includes('Не удалось загрузить вехи GitHub'))`);
-    await check(`body.querySelector('select').selectedOptions[0].textContent.includes('Версия 1.0')`, "a GitHub error preserves the assigned milestone");
-    await evaluate(`body.querySelector('select').value = ''; body.querySelector('form').requestSubmit(); waitFor(() => !!milestoneButton())`);
-    await check(`!findCard(milestoneTask.id).querySelector('.task-milestone') && !body.querySelector('.task-milestone-link')`, "the milestone can be cleared while GitHub is unreachable");
     await check(`(() => {
       const title = 'Очень длинное название следующей вехи проекта';
       milestoneTask.milestone = { repository: 'owner/example', number: 6, title };
@@ -2403,26 +2502,11 @@ app.whenReady().then(async () => {
     interrupted.artifacts.push({ source: 'report.local', sha256: 'saved' }); showTask(interrupted.id); void 0`);
   await evaluate(`waitFor(() => taskInSheet?.cleanupAvailable === false)`);
   await check(`body.querySelector('#task-review-files summary').textContent.includes('2 файла')`, "automatic cleanup retains individual saved artifacts on the completed card");
-  await evaluate(`
-    let tagEdit;
-    const cleanupCommands = window.taskboard.command;
-    window.taskboard.command = async (name, id, input) => {
-      if (name === 'tag-assign') {
-        tagEdit = { id, revision: input.revision, tags: [...input.tags] };
-        interrupted.tags = [...input.tags];
-        interrupted.revision++;
-        push();
-      }
-      return cleanupCommands(name, id, input);
-    };
-    sheetButton('Изменить теги').click();
-    waitFor(() => sheetKind === 'task-tags');
-  `);
-  await evaluate(`body.querySelector('input').value = 'Готово, Интерфейс'; body.querySelector('form').requestSubmit();
-    waitFor(() => sheetKind === 'task' && taskInSheet.tags.includes('Готово'))`);
-  await check(`tagEdit.id === interrupted.id && tagEdit.revision === taskInSheet.revision - 1 &&
-    tagEdit.tags.join(',') === 'Готово,Интерфейс' && taskInSheet.status === 'done' &&
-    byId('task-sheet-tags').textContent.includes('Готово')`, "a completed card supports a tag-only edit and shows the result");
+  await check(`!sheetButton('Изменить теги')`, "the completed card has no direct tag editor");
+  await evaluate(`interrupted.tags = ['Готово', 'Интерфейс']; interrupted.revision++; push();
+    waitFor(() => taskInSheet.tags.includes('Готово'))`);
+  await check(`taskInSheet.status === 'done' && byId('task-sheet-tags').textContent.includes('Готово')`,
+    "a tag change made by the manager is reflected in the open card");
   window.setContentSize(1720, 960);
   await evaluate(`
     sheet.close();
