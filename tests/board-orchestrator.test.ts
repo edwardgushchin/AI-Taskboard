@@ -1316,9 +1316,12 @@ test("a goal delegates a bounded slice, waits for submission, and reviews before
     assert.match(f.executorNotifications[0], /afterSequence/);
     const received = await f.cli(["messages", slice.id]);
     assert.equal(received.data[0].text, decisionText);
+    assert.equal(decision.data.at, received.data[0].at);
+    assert.ok(Number.isFinite(Date.parse(decision.data.at)));
     assert.equal(received.data[0].replyTo, question.data.sequence);
     const later = await f.cli(["manager-message", slice.id], { text: "Use the existing test fixture." });
     const additions = await f.cli(["messages", slice.id], { afterSequence: decision.data.sequence });
+    assert.equal(later.data.at, additions.data[0].at);
     assert.deepEqual(additions.data.map(({ sequence }: { sequence: number }) => sequence), [later.data.sequence]);
     assert.deepEqual((await f.cli(["messages", slice.id], { afterSequence: later.data.sequence })).data, []);
     assert.equal((await f.cli(["messages", slice.id], { afterSequence: -1 })).error.code, "INVALID_INPUT");

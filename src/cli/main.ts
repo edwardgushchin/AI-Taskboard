@@ -447,7 +447,7 @@ function run(
     const task = store.card(id);
     const sender = command === "manager-message" ? "manager" : "agent";
     const saved = store.save(sendTaskMessage(task, input, sender));
-    return { id, sequence: saved.history.length };
+    return { id, sequence: saved.history.length, at: saved.history.at(-1)?.at };
   }
   if (command === "tag") {
     if (id === "assign") {
