@@ -1,4 +1,5 @@
 {
+  "ui.resolving_acceptance_conflict": "Разрешение конфликта",
   "ui.dismiss_notification_9a17797e": "Скрыть уведомление",
   "ui.board_refresh_4c949d36": "Обновление доски",
   "ui.opening_project_bc49a4b5": "Открытие проекта",
@@ -571,6 +572,7 @@
   "ui.copied_copy_code_again_b2b609e4": "Скопировано. Скопировать код ещё раз",
   "ui.could_not_copy_select_the_code_or_retry_3ed46a84": "Не удалось скопировать. Выделите код или повторите.",
   "ui.copy_code_968ce1d3": "Скопировать код",
+  "ui.copy_hash": "Скопировать хеш",
   "ui.copy_full_hash_725de55a": "Скопировать полный хеш",
   "ui.copied_243d5f98": "Скопировано. ",
   "ui.copy_failed_retry_eeb3cc51": "Не удалось скопировать. Повторить.",
@@ -1174,5 +1176,8 @@
   "limits.low": "Лимит заканчивается",
   "limits.summary": "{count} подключено; {unavailable} без актуальных данных",
   "limits.remaining": "осталось {percent}%",
-  "limits.reset": "Сброс {time}"
+  "limits.reset": "Сброс {time}",
+  "ui.schedule_paused": "Расписание приостановлено",
+  "ui.pause_schedule": "Приостановить расписание",
+  "ui.resume_schedule": "Возобновить расписание"
 }

@@ -1,4 +1,5 @@
 {
+  "ui.resolving_acceptance_conflict": "Risoluzione del conflitto",
   "ui.dismiss_notification_9a17797e": "Ignora notifica",
   "ui.board_refresh_4c949d36": "Aggiornamento della scheda",
   "ui.opening_project_bc49a4b5": "Progetto di apertura",
@@ -571,6 +572,7 @@
   "ui.copied_copy_code_again_b2b609e4": "Copiato. Copia nuovamente il codice",
   "ui.could_not_copy_select_the_code_or_retry_3ed46a84": "Impossibile copiare. Seleziona il codice o riprova.",
   "ui.copy_code_968ce1d3": "Copia il codice",
+  "ui.copy_hash": "Copia l'hash",
   "ui.copy_full_hash_725de55a": "Copia l'hash completo",
   "ui.copied_243d5f98": "Copiato. ",
   "ui.copy_failed_retry_eeb3cc51": "Copia non riuscita. Riprova.",
@@ -1158,5 +1160,8 @@
   "limits.low": "Quota quasi esaurita",
   "limits.summary": "{count} connessi; {unavailable} senza dati aggiornati",
   "limits.remaining": "{percent}% rimanente",
-  "limits.reset": "Ripristino {time}"
+  "limits.reset": "Ripristino {time}",
+  "ui.schedule_paused": "Pianificazione sospesa",
+  "ui.pause_schedule": "Sospendi pianificazione",
+  "ui.resume_schedule": "Riprendi pianificazione"
 }

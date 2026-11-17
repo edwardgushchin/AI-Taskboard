@@ -8,12 +8,26 @@
     "src/**/*"
   ],
   "extraResources": [
+    { "from": "THIRD_PARTY_NOTICES.md", "to": "THIRD_PARTY_NOTICES.md" },
     {
       "from": "dist/cli",
       "to": "bin",
       "filter": [
         "ai-taskboard",
-        "ai-taskboard.exe"
+        "ai-taskboard.exe",
+        "LICENSE",
+        "NOTICE",
+        "README.md",
+        "THIRD-PARTY-NOTICES.txt"
+      ]
+    },
+    {
+      "from": ".",
+      "to": "licenses",
+      "filter": [
+        "LICENSE",
+        "NOTICE",
+        "README.md"
       ]
     }
   ],
@@ -58,5 +72,8 @@
   "rpm": {
     "fpm": ["--depends", "mesa-libgbm", "--depends", "alsa-lib"]
   },
-  "artifactName": "ai-taskboard-${version}-${os}-${arch}.${ext}"
+  "artifactName": "ai-taskboard-${version}-${os}-${arch}.${ext}",
+  "asarUnpack": [
+    "src/desktop/agent-instructions/docs/**/*"
+  ]
 }

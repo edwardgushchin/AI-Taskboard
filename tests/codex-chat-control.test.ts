@@ -125,7 +125,7 @@ test("task run history restores paginated activity in the empty run slots", asyn
 
 test("board activity extracts actual coordination messages from successful calls and saved results", () => {
   const boardActivity = runInNewContext(stripTypeScriptTypes(source) + "\nboardActivity", { runActivity, taskIdPattern });
-  const question = { id: "T-0005", sequence: 21, kind: "question", text: "Можно повторить проверку без GPU?" };
+  const question = { id: "T-0005", sequence: 21, at: "2026-11-12T13:00:10Z", kind: "question", text: "Можно повторить проверку без GPU?" };
   const make = (tool: string, data: unknown, options = {}) => ({
     id: tool, tool, type: "mcpToolCall", server: "ai_taskboard", status: "completed",
     result: { content: [{ type: "text", text: JSON.stringify({ ok: true, data }) }] }, ...options,
@@ -154,11 +154,18 @@ test("board activity extracts actual coordination messages from successful calls
   const returned = { ...approval, kind: "request-changes", text: "Проверь частичную запись." };
   assert.equal(activity(make("manager_inbox", [returned])).messages[0].kind, "request-changes");
   assert.equal(activity(make("task_wait", { inbox: [returned] })).messages[0].text, returned.text);
-  const sent = make("task_message", { id: question.id, sequence: 23, notified: false },
+  const sent = make("task_message", { id: question.id, sequence: 23, at: question.at, notified: false },
     { arguments: { id: question.id, text: "Да, сначала CPU." } });
   assert.equal(activity(sent).messages[0].actor, "manager");
   assert.equal(activity(sent).messages[0].sequence, 23);
   assert.equal(activity(sent).messages[0].text, "Да, сначала CPU.");
+  for (const item of [sent, JSON.parse(JSON.stringify(sent))]) {
+    assert.equal(activity(item).messages[0].at, question.at);
+  }
+  assert.equal(inbox.messages[0].at, question.at);
+  const legacy = make("task_message", { id: question.id, sequence: 24 }, sent);
+  legacy.result = make("task_message", { id: question.id, sequence: 24 }).result;
+  assert.equal(activity(legacy).messages[0].at, undefined);
   assert.equal(activity({ ...sent, status: "failed" }).messages, undefined);
   assert.equal(activity(make("manager_ack", { id: question.id, through: question.sequence })).messagesOnly, true);
 });
@@ -258,7 +265,7 @@ test("discussion steering and interruption share the streaming connection, inclu
       child.stderr.pipe(process.stderr);
       return child;
     },
-    trackActiveRun, trackProvider, claimDiscussion, codexRpc, turnControl, CodexTokenUsage, withBoardMcp, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
+    trackActiveRun, trackProvider, claimDiscussion, codexRpc, turnControl, CodexTokenUsage, withBoardMcp, manualContext: () => "", readBoardSettings: () => ({}), locateBoard: (path: string) => path, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
     githubReadTool, readBoardGitHub: async (project: string, args: unknown) => {
       assert.equal(project, directory);
       assert.deepEqual(args, { view: "run-failed-log", runId: 43816168554 });
@@ -429,7 +436,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
     spawn, turnControl, CodexTokenUsage, codexThreadPattern, Error, process, withBoardMcp, goalTaskWaitSeconds,
     managerCliContext, probeManagerCli: async () => providerMode === "cli-ready"
       ? { gitOptions: ["--no-optional-locks", "-c", "core.fsmonitor=false"] } : {},
-    responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
+    manualContext: () => "", readBoardSettings: () => ({}), locateBoard: (path: string) => path, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
     trackActiveRun, trackProvider, claimDiscussion, codexRpc: (child: Parameters<typeof codexRpc>[0], notify: Parameters<typeof codexRpc>[1], onRequest: Parameters<typeof codexRpc>[2]) =>
       codexRpc(child, (message: RpcMessage) => {
         elapsed += (message.params as { elapsed?: number })?.elapsed ?? 0;
@@ -504,7 +511,11 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.equal(requests[6].params.model, "manager-model");
   assert.equal(requests[6].params.permissions, "ai-taskboard-manager");
   assert.equal(requests[6].params.sandbox, undefined);
-  assert.match(requests[6].params.developerInstructions, /Ponytail.*worklog_record/s);
+  assert.match(requests[6].params.developerInstructions, /documentation impact in task planning and goal work/);
+  assert.match(requests[6].params.developerInstructions, /These rules apply.*worklog_record/s);
+  assert.match(requests[6].params.developerInstructions, /Apply built-in rules silently/);
+  assert.match(requests[6].params.developerInstructions, /Internally verify recorded:true and staged:false/);
+  assert.doesNotMatch(requests[6].params.developerInstructions, /Ponytail|humanizer-ru|Codex Worklog/);
   assert.match(requests[6].params.developerInstructions, /Format substantial progress updates in Markdown/);
   assert.ok(requests[6].params.developerInstructions.includes(russianWriting));
   const diaryPath = readFileSync(join(directory, "worklog-path"), "utf8");
@@ -684,6 +695,16 @@ test("board chat keeps a goal streaming across turns and times out only after in
   }), /did not apply the selected manager access mode/);
 
   providerMode = "";
+  await runtime("profile", directory, "Review in manager context", [], () => ({ ok: true }), [], "", controller.signal, {
+    ...session, goal: undefined, readOnly: true, access: "full",
+  });
+  const sharedReview: typeof newRequests = JSON.parse(readFileSync(captured, "utf8"));
+  const sharedThread = sharedReview.find(({ method }) => method === "thread/resume");
+  assert.equal(sharedThread?.params.threadId, threadId);
+  assert.equal(sharedThread?.params.sandbox, "read-only");
+  assert.equal(sharedReview.some(({ method }) => method === "thread/start"), false);
+  assert.deepEqual(sharedReview.find(({ method }) => method === "turn/start")?.params.sandboxPolicy,
+    { type: "readOnly", networkAccess: false });
   await runtime("profile", directory, "Review submissions", [], () => ({ ok: true }), [], "", controller.signal, {
     ...session, goal: undefined, separateTurn: true, access: "full", save: (id: string) => assert.equal(id, threadId),
   });

@@ -1,3 +1,5 @@
+import { manualContext } from "../cli/manual-board.ts";
+import { readBoardSettings, locateBoard } from "../cli/storage.ts";
 import { responseLanguageInstructions } from "./board-agent-hooks.ts";
 import { trackActiveRun, trackProvider, claimDiscussion } from "./active-runs.ts";
 import { spawn } from "node:child_process";
@@ -242,8 +244,8 @@ export function replyToTask(
       "Confirm a return only from a successful operation result. executorState waiting_for_discussion means waiting for this discussion to end; the executor then enters the shared queue for an available slot. Finish your reply after the handoff. On an error report it without claiming a transition; refresh the card before retrying a revision conflict.",
       "Report actual results and failures. On a retry do not repeat a change already recorded.",
       "Use github_read for GitHub checks, including run-failed-log for Actions logs. The board uses its host login. Try the tool before asking the user to copy a log.",
-      "Read explicitly attached files when relevant. Do not edit project files or run project tasks.",
-    ].join(" ")),
+      "Read explicitly attached files when relevant. A linked attachment is a mutable local source: read only the needed parts with normal tools. If the attachment has an error, report it and continue with other files. Links do not grant access: report actual permission failures with the filename, without claiming to read inaccessible content. Do not edit project files or run project tasks.",
+    ].join(" ") + manualContext(readBoardSettings(locateBoard(project))), { manual: readBoardSettings(locateBoard(project)).boardType === "manual" }),
     onCommentary, onTokenUsage, onControl, signal, imageDirectory, imageLimit,
   };
   const release = claimDiscussion(project, taskId);
@@ -310,9 +312,9 @@ export function replyToBoard(
     ? providerAction?.(name, args) ?? Promise.resolve(cliFailure("PROVIDER_TOOLS_UNAVAILABLE", "Wait for the provider session to initialize."))
     : runAction(name, args);
   const dialogue = !session.goal && !session.resumeGoal && !session.separateTurn;
-  const fullAccess = !session.separateTurn && session.access === "full";
+  const fullAccess = !session.separateTurn && !session.readOnly && session.access === "full";
   const permissionProfile = fullAccess ? hostPermissionProfile : managerResearchProfile;
-  const accessInstructions = session.separateTurn ? "" : fullAccess
+  const accessInstructions = session.separateTurn || session.readOnly ? "" : fullAccess
     ? "\nFull access is enabled for this board. Commands run as the host user. "
     : "\nThe board's manager access mode is " + (session.access === "ask" ? "Ask for approval" : "Approve for me") + ". " +
       "Use Codex's native approval request when the sandbox blocks a required operation. If the operation needs the regular OS user, " +
@@ -322,8 +324,8 @@ export function replyToBoard(
     async (name, args) => name === worklogTool.name ? worklog.submit(args) : worklog.remind(await dispatch(name, args)),
     (config, env) => reply(profile, project, prompt, images, dispatch, {
       tools, instructions: boardAgentInstructions("manager", instructions + accessInstructions + (accessInstructions ?
-        "Use existing credentials for authorized operations without exposing them. Keep SSH host key checking enabled and report server authentication failures separately from local permission failures." : ""), { dialogue }),
-      signal, session, worklog, onTokenUsage: session.onTokenUsage, mcp: { config, env },
+        "Use existing credentials for authorized operations without exposing them. Keep SSH host key checking enabled and report server authentication failures separately from local permission failures." : ""), { dialogue, manual: readBoardSettings(locateBoard(project)).boardType === "manual" }),
+      signal, session, worklog, role: session.role, onTokenUsage: session.onTokenUsage, mcp: { config, env },
       prepareResearch: async (request, client) => {
         const launchKey = JSON.stringify([profile, client.path, client.args, client.version, client.windowsSandbox, permissionProfile]);
         const availability = await probeManagerCli(project, launchKey, mcpTools, (cwd, command, env) =>
@@ -341,6 +343,7 @@ export function replyToBoard(
 interface BoardSession {
   id?: string;
   access?: ManagerAccess;
+  role?: "manager" | "reviewer";
   confirmApproval?: (details: string) => Promise<boolean>;
   settings?: ChatSettings | null;
   save: (id: string) => void;
@@ -352,6 +355,7 @@ interface BoardSession {
   goal?: string;
   resumeGoal?: boolean;
   separateTurn?: boolean;
+  readOnly?: boolean;
   onGoalSet?: () => void;
   messageId?: string;
   onMessage?: (id: string) => void;
@@ -536,8 +540,8 @@ function boardMessage(content: { type: string; text?: string; url?: string }[]) 
   try {
     const { latestUserMessage } = JSON.parse(text);
     if (typeof latestUserMessage?.text === "string" && Array.isArray(latestUserMessage.attachments)) {
-      const files = latestUserMessage.attachments.map((file: { name: string; imageIndex?: number }) => ({
-        name: file.name, url: file.imageIndex ? safeImage(images[file.imageIndex - 1]?.url) : undefined,
+      const files = latestUserMessage.attachments.map((file: { name: string; imageIndex?: number; link?: import("../cli/attachment-links.ts").FileLink; error?: string }) => ({
+        name: file.name, ...(file.link ? { link: file.link, size: file.link.size, error: file.error } : {}), url: file.imageIndex ? safeImage(images[file.imageIndex - 1]?.url) : undefined,
       })) as { name: string; url?: string }[];
       return { text: latestUserMessage.text as string, files };
     }
@@ -561,7 +565,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
 }) {
   const { onCommentary, onTokenUsage, onControl, onActivity, signal, imageDirectory, imageLimit = 0, session } = options;
   const settings = session ? session.settings : options.settings;
-  const research = Boolean(session && !session.separateTurn);
+  const research = Boolean(session && !session.separateTurn && !session.readOnly);
   const fullAccess = research && session?.access === "full";
   const approvalPolicy = research && !fullAccess ? "on-request" : "never";
   const approvalsReviewer = session?.access === "ask" || fullAccess ? "user" : "auto_review";

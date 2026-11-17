@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { maintainBoard, removeLegacyAttachments } from "./maintenance.ts";
+import { maintenanceQueue, claimMaintenance, releaseMaintenance, maintenanceFailure } from "./maintenance-state.ts";
+import { guardManual, manualAction, isManual } from "./manual-board.ts";
 import { existsSync, lstatSync, readFileSync, watch } from "node:fs";
 import type { FSWatcher, Stats } from "node:fs";
 import { join } from "node:path";
@@ -24,7 +27,7 @@ import { projectUsage } from "./project-usage.ts";
 import { managerUsage } from "./manager-usage.ts";
 import { dependencyStatus, unfinishedDependencies, validateDependencies } from "./dependencies.ts";
 import { checkoutTaskWorktree, cleanTaskWorktree, finishTaskStart, hasPending, inspectCleanup, prepareTaskStart, taskWithCurrentWorktree } from "./worktree.ts";
-import { artifactFiles, discardTaskArtifacts, openReviewArtifact, readReviewArtifact } from "./artifacts.ts";
+import { artifactFiles, openReviewArtifact, readReviewArtifact } from "./artifacts.ts";
 import { acknowledgeTaskMessages, currentReviewApproval, managerInbox, sendTaskMessage, taskMessages } from "./task-messages.ts";
 import packageInfo from "../../package.json" with { type: "json" };
 import { grantTaskTool, requestTaskTool } from "./task-tools.ts";
@@ -44,6 +47,7 @@ const help = [
   "          project-usage (all available project token usage, including archived tasks and manager)",
   "          manager-usage (known board manager token usage) or manager-usage --stdin (record a run snapshot)",
   "          message TASK-ID --stdin (text, optional kind), messages TASK-ID (optional afterSequence with --stdin), manager-inbox",
+  "          spawn-child PARENT --stdin (key, basis, title, description, criteria; optional existingId and dependencies)",
   "          tool-request TASK-ID --stdin (server, tool, reason), tool-grant TASK-ID --stdin (revision, server, tool; restart required)",
   "          tool-revoke TASK-ID --stdin (revision, server, tool; restart required)",
   "          manager-ack [TASK-ID] --stdin (through for one card, messages with id and through for a batch)",
@@ -82,16 +86,16 @@ function readInput(fromStdin: boolean | undefined, file: string | undefined): Re
 type CompactTask = ReturnType<typeof compactTask>;
 
 function isMergeRepair(task: Task) {
-  return Boolean(task.git?.submission && ["ready", "in_progress", "blocked"].includes(task.status) &&
+  return Boolean(task.acceptanceRepair && task.status === "review" || task.git?.submission && ["ready", "in_progress", "blocked"].includes(task.status) &&
     task.history.findLast(event => event.action === "resolve-conflicts" || event.to === "review" || event.to === "draft")?.action === "resolve-conflicts");
 }
 
 function compactTask(task: Task) {
   const { id, title, description, status, revision, tags, priority, attachments, coverAttachment, codexThreadId,
-    createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep, dependencies, milestone, workingDirectory, schedule } = task;
-  return { id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
+    createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep, dependencies, milestone, workingDirectory, schedule, origin, launchRequested } = task;
+  return { acceptanceRepair: task.acceptanceRepair, id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
     coverAttachment, codexThreadId, createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep,
-    dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, historyLength: task.history.length,
+    dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, origin, launchRequested, historyLength: task.history.length,
     ...(status === "review" && task.git?.submission && !task.result?.noChanges ? { reviewHasCommit: true } : {}),
     ...(currentReviewApproval(task) ? { reviewApproved: true } : {}),
     ...(isMergeRepair(task) ? { mergeRepair: true as const } : {}),
@@ -107,7 +111,7 @@ function taskReceipt({ id, status, revision, git, result }: Task) {
 
 function taskLaunchState(task: Task) {
   const { id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep } = task;
-  return { id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep,
+  return { acceptanceRepair: task.acceptanceRepair, id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep,
     ...(isMergeRepair(task) ? { mergeRepair: true as const } : {}) };
 }
 
@@ -214,7 +218,6 @@ function boardGitInfo(location: BoardLocation) {
 function watchBoard(location: BoardLocation, compact: boolean): void {
   const cards = new Map<string, CachedCard>();
   const cleanedTasks = new Set<string>();
-  const cleanupRetries = new Map<string, number>();
   let nextCleanup = 0;
   let gitInfo: ReturnType<typeof boardGitInfo> = {};
   const read = (refreshGit: boolean) => {
@@ -226,9 +229,12 @@ function watchBoard(location: BoardLocation, compact: boolean): void {
       }
       return snapshotBoard(store, compact, cards);
     });
-    if (location.repository && Date.now() >= nextCleanup) {
-      const completedIds = new Set([...board.tasks, ...board.archived].filter(task => task.status === "done").map(task => task.id));
-      for (const id of retryAcceptedCleanup(location, location.repository.root, completedIds, cleanupRetries)) cleanedTasks.add(id);
+    if (Date.now() >= nextCleanup) {
+      try { for (const id of maintainBoard(location)) cleanedTasks.add(id); }
+      catch (error) {
+        try { onBoard(location, store => maintenanceFailure(store, "migration", error)); }
+        catch { /* Storage access failures remain private and retry on the next refresh. */ }
+      }
       nextCleanup = Date.now() + 15_000;
     }
     if (refreshGit || previousRepository !== location.repository) gitInfo = boardGitInfo(location);
@@ -281,45 +287,6 @@ function watchBoard(location: BoardLocation, compact: boolean): void {
   process.once("SIGTERM", stop);
 }
 
-function retryAcceptedCleanup(location: BoardLocation, root: string, completedIds: ReadonlySet<string>, retries: Map<string, number>): string[] {
-  if (!completedIds.size) return [];
-  const prefix = "refs/heads/ai-taskboard/";
-  let branches: string[];
-  try {
-    const result = invokeGit(root, ["for-each-ref", "--format=%(refname)", prefix]);
-    if (result.code !== 0) return [];
-    branches = result.stdout.trimEnd().split("\n");
-  } catch {
-    return [];
-  }
-  const cleaned: string[] = [];
-  for (const branch of branches) {
-    const id = branch.slice(prefix.length);
-    if (!completedIds.has(id)) continue;
-    const retryAt = retries.get(id);
-    if (retryAt !== undefined && Date.now() < retryAt) continue;
-    try {
-      const removed = withTaskStartLock(location, id, () => {
-        const snapshot = onBoard(location, store => {
-          if (!Object.hasOwn(store.index.tasks, id) && store.index.archive[id]?.status !== "done") return;
-          const task = readTask(store, id);
-          if (task.status !== "done" || task.git?.branch !== branch ||
-              (!task.git.accepted && !task.result?.noChanges) || hasPending(store, task)) return;
-          return { store, task };
-        });
-        return snapshot && cleanTaskWorktree(snapshot.store, snapshot.task).branchRemoved;
-      }, 0);
-      retries.delete(id);
-      if (removed) cleaned.push(id);
-    } catch (error) {
-      if (error instanceof TaskboardError && ["DIRTY_WORKTREE", "TASK_BRANCH_CHANGED", "UNMANAGED_WORKTREE"].includes(error.code)) {
-        // Persistent local state is unlikely to change between consecutive board refreshes.
-        retries.set(id, Date.now() + (retryAt === undefined ? 15_000 : 120_000));
-      }
-    }
-  }
-  return cleaned;
-}
 
 function run(
   store: BoardStore,
@@ -330,6 +297,16 @@ function run(
   filters: { archived?: boolean; tag?: string; compact?: boolean },
   lockWaitMs: number,
 ) {
+  if (command === "maintenance") {
+    if (input.action === "claim" && typeof input.id === "string" && Number.isSafeInteger(input.owner))
+      return { claimed: claimMaintenance(store, input.id, input.owner as number) };
+    if (input.action === "release" && typeof input.id === "string" && Number.isSafeInteger(input.owner)) {
+      releaseMaintenance(store, input.id, input.owner as number); return null;
+    }
+    return maintenanceQueue(store);
+  }
+  const manualResult = manualAction(store, command, id, input);
+  if (manualResult !== undefined) return manualResult;
   if (command === "recover-test-data") {
     if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "Recovery takes a manifest, not a task ID.");
     return recoverTestData(store, input);
@@ -352,8 +329,61 @@ function run(
     return filters.archived ? { project: snapshot.project, tags: snapshot.tags, archived } :
       { ...snapshot, tasks: snapshot.tasks.filter(matches), archived };
   }
+  if (command === "spawn-child") {
+    if (!id) throw new TaskboardError("INVALID_INPUT", "Supply the recurring parent ID.");
+    const parent = store.card(id);
+    requireState(parent, ["in_progress"]);
+    if (!parent.schedule) throw new TaskboardError("INVALID_TRANSITION", "Only a recurring executor can create child work.");
+    const key = text(input.key, "key", true);
+    const basis = text(input.basis, "basis", true);
+    // The board lock covers lookup and creation, including concurrent passes.
+    const snapshot = store.snapshot();
+    const cards = [...store.storedCards(), ...snapshot.archived.map(entry => readTask(store, entry.id))];
+    const linked = parent.childWork?.find(entry => entry.key === key);
+    if (linked) return readTask(store, linked.id);
+    const previous = cards.find(task => task.origin?.parent === id && task.origin.key === key);
+    if (previous) {
+      if (!store.index.tasks[previous.id] && !store.index.archive[previous.id]) return store.create(previous);
+      return previous;
+    }
+    if (input.existingId !== undefined) {
+      const existing = readTask(store, text(input.existingId, "existingId", true));
+      const linkedParent = record(parent, "child-work", "agent");
+      linkedParent.childWork = [...(parent.childWork ?? []), { key, basis, id: existing.id }];
+      linkedParent.history.at(-1)!.text = existing.id + ": " + basis;
+      store.save(linkedParent);
+      return existing;
+    }
+    const description = text(input.description, "description", true);
+    const criteria = strings(input.criteria, "criteria");
+    if (!criteria.length) throw new TaskboardError("INVALID_INPUT", "Child work needs acceptance criteria.");
+    let child = createTask(store.allocateId(), { title: input.title, description, criteria,
+      dependencies: input.dependencies, actor: "agent" });
+    const pending = [...(child.dependencies ?? [])];
+    const visited = new Set<string>();
+    while (pending.length) {
+      const dependency = pending.pop()!;
+      if (dependency === id) throw new TaskboardError("INVALID_INPUT", "Child work cannot wait for its recurring parent.");
+      if (!visited.has(dependency)) {
+        visited.add(dependency);
+        pending.push(...(readTask(store, dependency).dependencies ?? []));
+      }
+    }
+    validateDependencies(store, child);
+    child = changeTask(child, "approve", { revision: child.revision, actor: "agent" });
+    child.origin = { parent: id, key, basis };
+    child.launchRequested = true;
+    return createWithAttachments(store, child, undefined);
+  }
   if (command === "create") {
     const task = createTask(store.allocateId(), input);
+    if (isManual(store.index.settings)) {
+      if (input.initialStatus !== undefined && input.actor !== "user") throw new TaskboardError("MANUAL_BOARD", "Начальную колонку выбирает пользователь.");
+      const column = store.index.settings.manualColumns!.find(c => c.id === (input.initialStatus ?? store.index.settings.manualColumns![0].id));
+      if (!column) throw new TaskboardError("INVALID_INPUT", "Колонка удалена. Выберите существующую колонку.");
+      task.status = column.id;
+      if (column.terminal) task.closedAt = task.updatedAt;
+    } else if (input.initialStatus !== undefined) throw new TaskboardError("INVALID_INPUT", "Выбор начальной колонки доступен только на обычной доске.");
     validateDependencies(store, task);
     return createWithAttachments(store, task.tags.length ? assignTags(store, task) : task, input.attachmentSources);
   }
@@ -400,7 +430,7 @@ function run(
     const task = store.card(id);
     const sender = command === "manager-message" ? "manager" : "agent";
     const saved = store.save(sendTaskMessage(task, input, sender));
-    return { id, sequence: saved.history.length };
+    return { id, sequence: saved.history.length, at: saved.history.at(-1)?.at };
   }
   if (command === "tag") {
     if (id === "assign") {
@@ -441,6 +471,11 @@ function run(
     return { issues: [...active.issues, ...archive.issues], recovered: active.recovered, cleanedArchives: archive.cleaned };
   }
   if (command === "settings") {
+    if (input.boardType !== undefined && input.boardType !== (store.index.settings.boardType ?? "agent")) {
+      throw new TaskboardError("IMMUTABLE_BOARD_TYPE", "Тип доски выбирается при создании и не может быть изменён.");
+    }
+    if (input.manualColumns !== undefined) throw new TaskboardError("INVALID_INPUT", "Используйте настройку колонок с явным переносом дел.");
+    if (isManual(store.index.settings) && input.autoMode === true) throw new TaskboardError("MANUAL_BOARD", "На обычной доске авторежим недоступен.");
     const settingsJournal = store.index.managerSettings ?? recordSettings(store.index.settings);
     if (input.name !== undefined) {
       const name = text(input.name, "Board name");
@@ -475,7 +510,7 @@ function run(
       delete store.index.settings.autoReview;
     }
     if (input.agentLimits !== undefined) {
-      if (!validAgentLimitOverrides(input.agentLimits)) {
+      if (!validAgentLimitOverrides(input.agentLimits) || Object.hasOwn(input.agentLimits, "manager")) {
         throw new TaskboardError("INVALID_INPUT", "Agent limits must be non-negative whole numbers for known roles.");
       }
       if (Object.keys(input.agentLimits).length) store.index.settings.agentLimits = input.agentLimits;
@@ -607,7 +642,30 @@ function run(
     const submitted = submitTask(store, task, input);
     return filters.compact ? taskReceipt(submitted) : submitted;
   }
+  if (command === "accept" && input.cancelRepair === true && input.actor === "user") {
+    requireRevision(task, input.revision, true);
+    return store.save(record({ ...task, acceptanceRepair: undefined }, "acceptance-cancelled", "user"));
+  }
+  if (command === "accept" && input.repairFailure !== undefined && task.acceptanceRepair) {
+    requireRevision(task, input.revision, true);
+    const reason = text(input.repairFailure, "repairFailure", true);
+    return store.save(sendTaskMessage(record({ ...task, acceptanceRepair: { ...task.acceptanceRepair, phase: "failed", reason } },
+      "acceptance-failed", "agent"), { kind: "question", text: reason }, "agent"));
+  }
   if (command === "accept") {
+    if (task.acceptanceRepair) {
+      requireRevision(task, input.revision, true);
+      if (input.continueRepair !== true) return task;
+      if (task.acceptanceRepair.phase !== "checking") throw new TaskboardError("REPAIR_UNFINISHED", "Conflict repair has not passed its checks.");
+      if (input.targetHead !== task.acceptanceRepair.targetHead) {
+        const reason = "The target advanced after repair checks. Verify the new target before accepting.";
+        if (task.acceptanceRepair.attempts < 2) return store.save(record({ ...task, acceptanceRepair: {
+          ...task.acceptanceRepair, phase: "queued" } }, "acceptance-target-changed", "agent"));
+        return store.save(sendTaskMessage(record({ ...task, acceptanceRepair: { ...task.acceptanceRepair, phase: "failed", reason } },
+          "acceptance-failed", "agent"), { kind: "question", text: reason }, "agent"));
+      }
+      input = { ...input, actor: "user", message: task.acceptanceRepair.message };
+    } else if (input.continueRepair === true) throw new TaskboardError("REPAIR_CANCELLED", "Acceptance was cancelled.");
     if (input.autoMode === true && (!store.index.settings.autoMode || boardReviewMode(store.index.settings) !== "reviewer")) {
       throw new TaskboardError("AUTO_MODE_DISABLED", "Automatic integration is disabled.");
     }
@@ -617,6 +675,17 @@ function run(
     try {
       return acceptTask(store, task, input);
     } catch (error) {
+      if (input.actor === "user" && error instanceof TaskboardError && error.code === "MERGE_CONFLICT") {
+        const review = inspectReview(store, task, reviewDetails(store, task, true), true);
+        const previous = task.acceptanceRepair;
+        const exhausted = previous && previous.attempts >= 2;
+        const requested = record({ ...task, acceptanceRepair: {
+          phase: exhausted ? "failed" as const : "queued" as const, attempts: previous?.attempts ?? 0,
+          targetHead: review.targetHead!, message: text(input.message, "message", true),
+          ...(exhausted ? { reason: "Repeated merge conflict; a decision is required." } : {}),
+        } }, "acceptance-requested", "user");
+        return store.save(exhausted ? sendTaskMessage(requested, { kind: "question", text: requested.acceptanceRepair!.reason }, "agent") : requested);
+      }
       if (store.index.settings.autoMode && error instanceof TaskboardError &&
           !["AUTO_REVIEW_DISABLED", "REVIEW_MODE_CHANGED", "REVISION_CONFLICT", "REVIEW_REQUIRED"].includes(error.code)) {
         const message = "AI Taskboard integration: " + error.code + "\n" + error.message + "\n" + JSON.stringify(error.details ?? {}).slice(0, 1800);
@@ -638,7 +707,14 @@ function run(
     if (logged !== task) store.save(logged);
     return filters.compact ? taskReceipt(logged) : logged;
   }
-  const updated = changeTask(task, command, input);
+  let updated = changeTask(task, command, input);
+  if (command === "update" && task.acceptanceRepair &&
+      ["title", "description", "criteria", "questions", "subtasks", "dependencies", "execution"].some(key => input[key] !== undefined)) {
+    updated = { ...updated, acceptanceRepair: undefined };
+  }
+  if (command === "block" && updated.acceptanceRepair?.phase === "failed") {
+    updated = sendTaskMessage(updated, { kind: "question", text: updated.acceptanceRepair.reason }, "agent");
+  }
   if (command === "cancel") {
     if (input.mergedInto !== undefined) {
       const target = readTask(store, text(input.mergedInto, "mergedInto", true));
@@ -647,7 +723,6 @@ function run(
         transferred: text(input.transferred, "transferred", true) };
     }
     const closed = store.save(withoutVerification(updated));
-    discardTaskArtifacts(store, id);
     return closed;
   }
   if ((command === "update" || command === "unblock") && input.dependencies !== undefined) validateDependencies(store, updated);
@@ -667,7 +742,7 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
     if (input.launchDetails !== true) return { ...started, task: taskReceipt(started.task) };
     const { description, criteria, dueDate, execution, git, history, workingDirectory, schedule, toolGrants } = started.task;
     return { ...started, task: { ...taskLaunchState(started.task), description, criteria,
-      execution: execution ?? store.index.settings.executor ?? undefined, git, dueDate, workingDirectory, schedule, toolGrants,
+      execution: isMergeRepair(started.task) ? store.index.settings.reviewer : execution ?? store.index.settings.executor ?? undefined, git, dueDate, workingDirectory, schedule, toolGrants,
       feedback: history.findLast(event => event.action === "request-changes")?.text } };
   };
   return withTaskStartLock(location, id, startLockWaitMs => {
@@ -676,10 +751,13 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
       if (input.autoMode === true && !store.index.settings.autoMode) {
         throw new TaskboardError("AUTO_MODE_DISABLED", "Automatic starts are disabled.");
       }
+      if ((input.scheduled === true || input.autoMode === true) && task.schedule?.paused) {
+        throw new TaskboardError("INVALID_TRANSITION", "The recurring schedule is paused.");
+      }
       if (input.scheduled === true) {
         requireRevision(task, input.revision, true);
         requireState(task, ["ready"]);
-        if (!task.schedule || !(Date.parse(task.schedule.nextAt) <= Date.now())) {
+        if (!task.schedule || task.schedule.paused || !(Date.parse(task.schedule.nextAt) <= Date.now())) {
           throw new TaskboardError("INVALID_TRANSITION", "The task is not due to run.");
         }
       }
@@ -736,7 +814,8 @@ async function main() {
     if (values.archived && command !== "list") throw new TaskboardError("INVALID_INPUT", "Use --archived with list.");
     if (values.tag !== undefined && command !== "list") throw new TaskboardError("INVALID_INPUT", "Use --tag with list.");
     const input = readInput(values.stdin, values["input-file"]);
-    const location = locateBoard(values.project ?? process.cwd(), command === "init", command === "init" && input.git === true);
+    const location = locateBoard(values.project ?? process.cwd(), command === "init", command === "init" && input.git === true && input.boardType !== "manual", command === "init" && input.boardType === "manual");
+    if (command !== "init") guardManual(readBoardSettings(location), command, input);
     if (command === "recover-test-data" && values.project !== location.root) {
       throw new TaskboardError("INVALID_PROJECT", "Recovery requires --project with the exact canonical board root.");
     }
@@ -809,9 +888,19 @@ async function main() {
             }
           }) };
         });
+      } else if (command === "maintain") {
+        data = input.attachmentsOnly === true ? onBoard(location, store => { removeLegacyAttachments(store); return { attachmentsRemoved: true }; }) : { cleaned: maintainBoard(location) };
       } else if (command === "start") {
         if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
         data = startTask(location, id, input, values.compact === true);
+      } else if (command === "cancel") {
+        if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
+        const { store, task } = onBoard(location, (store, lockWaitMs) => ({
+          store, task: run(store, command, id, extra, input, values, lockWaitMs) as Task,
+        }));
+        try { withTaskStartLock(location, id, () => cleanTaskWorktree(store, task), 0); }
+        catch { /* Private maintenance retries after the active operation releases it. */ }
+        data = task;
       } else if (command === "accept") {
         if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
         data = withTaskStartLock(location, id, () => {
@@ -881,7 +970,7 @@ async function main() {
         else if (action === "push") data = await pushRepositoryBranch(location, input);
         else data = onBoard(location, () => action === "refs" ? repositoryRefs(location) : changeRepository(location, action, input));
       } else {
-        data = command === "init" ? initializeBoard(location, store => snapshotBoard(store, values.compact === true)) :
+        data = command === "init" ? initializeBoard(location, store => snapshotBoard(store, values.compact === true), input.boardType) :
           onBoard(location, (store, lockWaitMs) => run(store, command, id, extra, input, values, lockWaitMs));
       }
       if (command === "show") {

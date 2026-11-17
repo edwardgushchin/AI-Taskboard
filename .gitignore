@@ -4,3 +4,5 @@ release/
 .tasks/
 .dev-diary/
 .codex-attachments/
+
+.worktrees/

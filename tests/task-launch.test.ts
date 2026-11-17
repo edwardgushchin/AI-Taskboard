@@ -1,4 +1,5 @@
 import localization from "../src/desktop/localization.cjs";
+import { isManual } from "../src/cli/manual-board.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
@@ -16,7 +17,7 @@ const parsed = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, tr
 const names = new Set(["launchTask", "recordRunFailure", "publishRunActivity", "notifyRunChange", "saveTaskTokenUsage",
   "beginOperation", "confirmProjectClose", "projectOperations", "closingProjects", "launchingTasks", "runningTasks", "runActivityByTask",
   "activeAgents", "chatRuns", "windowStates", "executorBusy", "reserveAgent", "scheduleAgentWork", "scheduleRecurringTasks",
-  "deferredExecutors", "schedulingAgentWork", "taskRunLimit"]);
+  "deferredExecutors", "schedulingAgentWork", "taskRunLimit", "acceptanceWork", "continueAcceptance"]);
 const lifecycle = parsed.statements.filter(node => {
   if (ts.isFunctionDeclaration(node)) return node.name && names.has(node.name.text);
   return ts.isVariableStatement(node) && node.declarationList.declarations.some(declaration =>
@@ -35,7 +36,7 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
   const launched: any[] = [];
   const access = { full: false };
   const subscriptions = new Map();
-  const savedSettings = new Map<string, { agentLimits: Partial<import("../src/cli/model.ts").AgentLimits> }>();
+  const savedSettings = new Map<string, Partial<import("../src/cli/model.ts").BoardSettings>>();
   const previousTurn = { status: "completed", completedAt: 1 as number | null, reads: 0 };
   type Completion = { reason: string; disconnected?: boolean; interrupted?: boolean } | undefined;
   const completion = Promise.withResolvers<Completion>();
@@ -45,9 +46,9 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
   const slots = createAgentSlots();
   const runtime = runInNewContext(stripTypeScriptTypes(lifecycle) + "\n({launchTask, scheduleAgentWork, scheduleRecurringTasks, confirmProjectClose, projectOperations, runningTasks, activeAgents, deferredExecutors})", {
     AbortController, performance, setTimeout, clearTimeout, setImmediate, subscriptions, agentSlots: slots,
-    runtimeLocation: (project: string) => project,
+    isManual, runtimeLocation: (project: string) => project,
     readBoardSettings: (project: string) => savedSettings.get(project) ?? subscriptions.get(project)?.board.settings ?? {},
-    scheduleAutoReview: () => {}, scheduleAutoBoard: () => {}, projectIdentity: (project: string) => project,
+    scheduleMaintenance: async () => {}, scheduleAutoReview: () => {}, scheduleAutoBoard: () => {}, projectIdentity: (project: string) => project,
     broadcastBoardChat: () => {},
     t: (key: string, parameters = {}) => localization.text(key, parameters, "en"), localization, cliFailure: failure, missingCodexThread,
     app: { getPath: () => "profile" }, dialog: { showMessageBox: async () => ({ response: 1 }) },
@@ -76,12 +77,22 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
         if (input.revision !== task.revision) return failure("REVISION_CONFLICT", "The task changed.");
         if (input.scheduled) { task.status = "in_progress"; task.revision++; }
         if (input.resolveConflicts && task.status === "review") {
-          task.status = "in_progress";
+          task.status = task.acceptanceRepair ? "review" : "in_progress";
+          if (task.acceptanceRepair) task.acceptanceRepair.phase = "running";
           task.revision++;
           task.mergeRepair = true;
         }
         const execution = task.execution ?? { provider: "codex", model: "executor-model", effort: "low" };
         return { ok: true, data: { task: { ...structuredClone(task), execution }, worktree: task.git!.worktree } };
+      }
+      if (args[0] === "review") return { ok: true, data: { revision: task.revision, targetHead: task.acceptanceRepair?.targetHead } };
+      if (args[0] === "accept") {
+        if (input.revision !== task.revision) return failure("REVISION_CONFLICT", "Changed");
+        if (input.repairFailure && task.acceptanceRepair) {
+          task.acceptanceRepair.phase = "failed"; task.acceptanceRepair.reason = input.repairFailure; task.revision++;
+        } else if (input.continueRepair && task.acceptanceRepair?.phase === "checking") {
+          task.status = "done"; delete task.acceptanceRepair; task.revision++;
+        }
       }
       if (args[0] === "block") {
         if (task.status !== "in_progress") return failure("INVALID_TRANSITION", "The task is no longer in progress.");
@@ -113,6 +124,18 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
   });
   return { runtime, task, calls, launched, previousTurn, completion, retryCompletion, finalCompletion, subscriptions, slots, savedSettings, access };
 }
+
+test("manual boards reject direct launches and stale recurring schedules", async () => {
+  const f = fixture("started");
+  f.savedSettings.set("project", { boardType: "manual", autoMode: true });
+  assert.equal((await f.runtime.launchTask("project", f.task.id)).error.code, "MANUAL_BOARD");
+  f.task.status = "ready";
+  f.task.schedule = { everyMinutes: 1, nextAt: new Date(0).toISOString() };
+  f.subscriptions.set("project", { board: { tasks: [f.task], settings: { boardType: "manual" } }, tabs: new Set([{}]) });
+  f.runtime.scheduleRecurringTasks();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.launched.length, 0);
+});
 
 test("launch uses saved limits when the watch still has the previous value", async () => {
   for (const limit of [3, 1, 0]) {
@@ -165,6 +188,7 @@ test("the scheduler launches a due approved card once, waits for an executor slo
   const snapshot = structuredClone(f.task);
   const agentLimits = { executor: 1 };
   const tasks = [
+    { ...snapshot, id: "T-0000", schedule: { ...snapshot.schedule, paused: true } },
     { ...snapshot, id: "T-0002", status: "draft" }, { ...snapshot, id: "T-0003", status: "blocked" },
     { ...snapshot, id: "T-0004", unfinishedDependencies: ["T-0002"] },
     { ...snapshot, id: "T-0005", schedule: { time: "09:00", nextAt: new Date(2100, 0, 1, 9).toISOString() } }, snapshot,
@@ -189,17 +213,48 @@ test("the scheduler launches a due approved card once, waits for an executor slo
   release();
 });
 
+test("pausing while waiting for a slot prevents launch across windows; an active pass finishes paused", async () => {
+  for (const rule of [{ everyMinutes: 1 }, { time: "09:00" }]) {
+    const f = fixture("started", { id: "result", type: "agentMessage", phase: "final_answer", status: "completed", title: "", text: "Completed" });
+    f.task.status = "ready";
+    f.task.schedule = { ...rule, nextAt: "2000-01-01T00:00:00Z" };
+    const watch = { board: { tasks: [f.task], settings: { agentLimits: { executor: 1 } } }, listeners: [], tabs: new Set([1, 2]) };
+    f.subscriptions.set("project", watch);
+    const release = f.slots.acquire("project", "executor", { executor: 1 })!;
+    f.runtime.scheduleRecurringTasks();
+    Object.assign(f.task, changeTask(f.task, "update", { schedulePaused: true }));
+    release();
+    f.runtime.scheduleRecurringTasks();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.launched.length, 0);
+    Object.assign(f.task, changeTask(f.task, "update", { schedulePaused: false }));
+    f.task.schedule!.nextAt = "2000-01-01T00:00:00Z";
+    f.runtime.scheduleRecurringTasks();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.launched.length, 1);
+    Object.assign(f.task, changeTask(f.task, "update", { schedulePaused: true }));
+    assert.ok(f.runtime.runningTasks.has("project\0" + f.task.id));
+    f.completion.resolve(undefined);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.task.status, "ready", JSON.stringify(f.task.blocked));
+    assert.equal(f.task.schedule!.paused, true);
+    f.runtime.scheduleRecurringTasks(Date.now() + 86400000);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.launched.length, 1);
+  }
+});
+
 test("each board has separate pools with per-role inheritance and unlimited overrides", () => {
   const slots = createAgentSlots();
-  assert.deepEqual(slots.limits, { executor: 3, manager: 1, reviewer: 1 });
+  assert.deepEqual(slots.limits, { executor: 3, manager: 0, reviewer: 1 });
   assert.equal(parseAgentLimits({ executor: 1.5, manager: 1, reviewer: 1 }), undefined);
-  assert.equal(parseAgentLimits({ executor: 3, manager: -1, reviewer: 1 }), undefined);
+  assert.deepEqual(parseAgentLimits({ executor: 3, manager: -1, reviewer: 1 }), { executor: 3, manager: 0, reviewer: 1 });
   const manager = slots.acquire("one", "manager");
   const reviewer = slots.acquire("one", "reviewer");
   assert.ok(manager && reviewer);
-  assert.equal(slots.acquire("one", "manager"), undefined);
+  const secondManager = slots.acquire("one", "manager"); assert.ok(secondManager); secondManager();
   assert.equal(slots.acquire("one", "reviewer"), undefined);
-  assert.equal(slots.available("two", "manager"), 1);
+  assert.equal(slots.available("two", "manager"), Infinity);
   assert.equal(slots.available("two", "reviewer"), 1);
   assert.equal(slots.available("one", "executor", { manager: 0 }), 3);
   const extra = slots.acquire("one", "manager", { manager: 0 });
@@ -209,10 +264,10 @@ test("each board has separate pools with per-role inheritance and unlimited over
   assert.equal(slots.available("one", "reviewer", { reviewer: 1 }), 0);
   manager();
   manager();
-  assert.equal(slots.available("one", "manager"), 0);
+  assert.equal(slots.available("one", "manager"), Infinity);
   extra();
   reviewer();
-  assert.equal(slots.available("one", "manager"), 1);
+  assert.equal(slots.available("one", "manager"), Infinity);
   assert.equal(slots.available("one", "reviewer"), 2);
 });
 
@@ -288,12 +343,12 @@ test("an approved snapshot skips the redundant card read while the CLI checks th
   f.task.revision++;
   const stale = await f.runtime.launchTask("project", f.task.id, undefined, false, snapshot.revision);
   assert.equal(stale.error.code, "REVISION_CONFLICT");
-  assert.deepEqual(f.calls.map(call => call.args[0]), ["start"]);
+  assert.deepEqual(f.calls.filter(call => call.args[0] !== "maintain").map(call => call.args[0]), ["start"]);
   assert.equal(f.launched.length, 0);
   f.calls.length = 0;
   snapshot.revision = f.task.revision;
   assert.equal((await f.runtime.launchTask("project", f.task.id, undefined, false, snapshot.revision)).ok, true);
-  assert.deepEqual(f.calls.map(call => call.args[0]), ["start"]);
+  assert.deepEqual(f.calls.filter(call => call.args[0] !== "maintain").map(call => call.args[0]), ["start"]);
   f.task.status = "review";
   f.completion.resolve(undefined);
   await new Promise(resolve => setImmediate(resolve));
@@ -633,4 +688,32 @@ test("new-chat continuation requires an explicit confirmation and a matching blo
   task.status = "review";
   assert.equal((await handler!({}, "T-0001", { newThread: true })).error.code, "INVALID_INPUT");
   assert.equal(launches, 1);
+});
+
+
+test("restored acceptance completes checked results once and stops an orphaned repair", async () => {
+  for (const phase of ["checking", "running"] as const) {
+    const f = fixture("started");
+    f.task.acceptanceRepair = { phase, targetHead: "a".repeat(40), attempts: 1, message: "fix: integrate result" };
+    f.subscriptions.set("project", { board: { tasks: [f.task], settings: { autoMode: false } }, listeners: [], tabs: new Set([1, 2]) });
+    f.runtime.scheduleRecurringTasks(); f.runtime.scheduleRecurringTasks();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.launched.length, 0);
+    assert.equal(f.calls.filter(call => call.args[0] === "accept").length, 1);
+    assert.equal(f.task.status, phase === "checking" ? "done" : "review");
+    if (phase === "running") assert.equal(f.task.acceptanceRepair?.phase, "failed");
+    f.runtime.scheduleRecurringTasks();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.calls.filter(call => call.args[0] === "accept").length, 1);
+  }
+});
+
+
+test("a pending acceptance cannot launch a separate executor or reviewer context", async () => {
+  const f = fixture("started");
+  f.task.acceptanceRepair = { phase: "queued", targetHead: "a".repeat(40), attempts: 0, message: "fix: integrate" };
+  const result = await f.runtime.launchTask("project", f.task.id, undefined, false, f.task.revision, {}, false, true);
+  assert.equal(result.error.code, "ACCEPTANCE_PENDING");
+  assert.equal(f.launched.length, 0);
+  assert.equal(f.calls.filter(call => call.args[0] === "start").length, 0);
 });

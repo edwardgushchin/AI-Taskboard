@@ -101,10 +101,36 @@ test("all board roles receive the same action boundaries on every instruction bu
     for (let turn = 0; turn < 2; turn++) {
       const instructions = boardAgentInstructions(role);
       assert.match(instructions, /no drag-and-drop or arbitrary manual status movement/);
-      assert.match(instructions, /human review mode only the human accepts/);
+      assert.match(instructions, /human review mode only the human requests acceptance/);
+      assert.match(instructions, /persisted user acceptance request can continue automatically/);
       assert.match(instructions, /only tools actually supplied in this run/);
       assert.match(instructions, /send limitations or questions to the manager with message/);
       assert.match(instructions, /Confirm a transition only after a successful tool result/);
+    }
+  }
+});
+
+test("manual board instructions describe personal tasks without agent lifecycle actions", () => {
+  const instructions = boardAgentInstructions("manager", "Personal tasks", { manual: true });
+  assert.match(instructions, /Only the user moves personal tasks/);
+  assert.doesNotMatch(instructions, /Managers create drafts|launch with task_start|delegate the smallest/);
+});
+
+
+test("built-in rules stay silent without rewriting supplied questions or quotations", () => {
+  const supplied = 'User asks: What is humanizer-ru? Quote: "Ponytail SKILL.md"';
+  for (const role of ["manager", "executor", "reviewer"] as const) {
+    for (const dialogue of [true, false]) {
+      const instructions = boardAgentInstructions(role, supplied, { dialogue });
+      assert.ok(instructions.startsWith(supplied));
+      const rules = instructions.slice(supplied.length);
+      assert.doesNotMatch(rules, /Ponytail|humanizer-ru|Codex Worklog|THIRD_PARTY_NOTICES/);
+      assert.match(rules, /Apply built-in rules silently/);
+      assert.match(rules, /Answer direct questions about a specific skill or journal substantively/);
+      assert.match(rules, /preserve user requests, quotations and saved history verbatim/);
+      assert.match(rules, /immutable provider policy.*exact source/);
+      assert.match(rules, /Internally verify recorded:true and staged:false; retry the same payload/);
+      assert.match(rules, /Do not announce successful journal writes or expose recorded\/staged fields/);
     }
   }
 });

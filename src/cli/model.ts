@@ -13,7 +13,8 @@ export const maxAttachmentBytes = 64 * 1024 * 1024;
 export const codexThreadPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 export const imageAttachmentPattern = /\.(png|jpe?g|webp|gif)$/i;
 
-export type TaskState = typeof taskStates[number];
+export type TaskState = typeof taskStates[number] | `manual:${string}`;
+export interface ManualColumn { id: `manual:${string}`; name: string; color: string; terminal: boolean }
 export type Priority = typeof priorities[number];
 export function validDueDate(value: unknown): value is string {
   return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) &&
@@ -57,6 +58,7 @@ export interface Attachment {
   file: string;
   bytes: number;
   sha256: string;
+  link?: import("./attachment-links.ts").FileLink;
 }
 
 export interface TaskGit {
@@ -133,7 +135,7 @@ export type TaskScheduleRule =
     { weekday?: number; dayOfMonth?: never; month?: never } |
     { weekday?: never; dayOfMonth: number; month?: number }))
   | { everyMinutes: number; time?: never; weekday?: never; dayOfMonth?: never; month?: never };
-export type TaskSchedule = TaskScheduleRule & { nextAt: string };
+export type TaskSchedule = TaskScheduleRule & { nextAt: string; paused?: boolean };
 
 export function validScheduleDate(day: unknown, month: unknown): boolean {
   return typeof day === "number" && Number.isInteger(day) && day >= 1 && (month === undefined ? day <= 31 :
@@ -176,6 +178,7 @@ export function nextScheduledRun(rule: TaskScheduleRule, after: Date, previous?:
 }
 
 export interface Task {
+  acceptanceRepair?: { phase: "queued" | "running" | "checking" | "failed"; targetHead: string; attempts: number; message: string; reason?: string };
   tokenUsage?: import("./token-usage.ts").TaskTokenUsage;
   id: string;
   title: string;
@@ -204,6 +207,9 @@ export interface Task {
   toolGrants?: { server: string; tool: string }[];
   workingDirectory?: string;
   schedule?: TaskSchedule;
+  origin?: { parent: string; key: string; basis: string };
+  launchRequested?: boolean;
+  childWork?: { key: string; basis: string; id: string }[];
   blocked?: { reason: string; condition: string; previousStatus?: "draft" | "ready" };
   result?: { summary: string; checks: string[]; limitations: string[]; noChanges?: { head: string | null } };
   artifacts?: { source: string; file: string; sha256: string }[];
@@ -212,6 +218,8 @@ export interface Task {
 }
 
 export interface BoardSettings {
+  boardType?: "agent" | "manual";
+  manualColumns?: ManualColumn[];
   name?: string;
   archiveAfterDays: number | null;
   integrationMode: IntegrationMode;
@@ -333,6 +341,10 @@ export function record(
   next: TaskState = task.status,
   message?: string,
 ): Task {
+  if (task.acceptanceRepair) {
+    if (action === "submit") task = { ...task, acceptanceRepair: { ...task.acceptanceRepair, phase: "checking" } };
+    else if (["request-changes", "cancel", "accept"].includes(action)) task = { ...task, acceptanceRepair: undefined };
+  }
   const at = new Date().toISOString();
   const event: Task["history"][number] = { at, actor, action };
   if (message) event.text = message;
