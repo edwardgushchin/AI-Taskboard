@@ -1,4 +1,5 @@
 import { defaultColumns, validateColumns, isManual } from "./manual-board.ts";
+import { isFileLink } from "./attachment-links.ts";
 import {
   closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync,
   renameSync, statSync, unlinkSync, writeFileSync,
@@ -247,6 +248,7 @@ function validRoleSettings(value: unknown): boolean {
 
 function validTaskSchedule(value: unknown): boolean {
   if (!isRecord(value) || typeof value.nextAt !== "string" || !Number.isFinite(Date.parse(value.nextAt))) return false;
+  if (value.paused !== undefined && typeof value.paused !== "boolean") return false;
   if (value.everyMinutes !== undefined) {
     return value.time === undefined && value.weekday === undefined && value.dayOfMonth === undefined && value.month === undefined &&
       Number.isSafeInteger(value.everyMinutes) && Number(value.everyMinutes) >= 1;
@@ -348,7 +350,8 @@ export function validateCard(value: unknown, id: string): Task {
         typeof entry.name !== "string" || typeof entry.file !== "string" ||
         !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(entry.file) ||
         !Number.isSafeInteger(entry.bytes) || Number(entry.bytes) < 0 ||
-        typeof entry.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(entry.sha256)) ||
+        (entry.link === undefined ? typeof entry.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(entry.sha256) :
+          !isFileLink(entry.link) || entry.link.size !== entry.bytes || entry.sha256 !== "")) ||
       new Set(value.attachments.map(entry => entry.file)).size !== value.attachments.length) {
     throw new TaskboardError("CORRUPT_STORAGE", "Invalid card for " + id + ".", { id });
   }
@@ -447,6 +450,10 @@ export class BoardStore {
 
   saveIndex(): void {
     writeJson(join(this.location.directory, "board.json"), this.index);
+  }
+
+  storedCards(): Task[] {
+    return this.cardIds().map(id => this.readCardFile(id));
   }
 
   private cardIds(): string[] {

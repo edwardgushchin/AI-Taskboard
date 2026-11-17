@@ -289,7 +289,10 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.ok(started.params.developerInstructions.includes(russianWriting));
   assert.match(started.params.developerInstructions, /Current board reviewMode: reviewer/);
   assert.match(started.params.developerInstructions, /no drag-and-drop.*task_request_changes.*only tools actually supplied.*successful tool result/s);
-  assert.match(started.params.developerInstructions, /Ponytail.*worklog_record/s);
+  assert.match(started.params.developerInstructions, /These rules apply.*worklog_record/s);
+  assert.match(started.params.developerInstructions, /Apply built-in rules silently/);
+  assert.match(started.params.developerInstructions, /Internally verify recorded:true and staged:false/);
+  assert.doesNotMatch(started.params.developerInstructions, /Ponytail|humanizer-ru|Codex Worklog/);
   assert.match(started.params.developerInstructions, /Use built-in web search for relevant public sources/);
   assert.match(started.params.developerInstructions, /github_create_milestone.*github_set_milestone_due.*without a shell `gh auth status` preflight/);
   assert.match(started.params.developerInstructions, /CLI launch array.*\[.+--disable-warning|CLI launch array.*ai-taskboard(?:\.exe)?"/);
@@ -320,6 +323,15 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
   await assert.rejects(launch("manual-review"), /did not enable automatic approval review/);
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/start");
+  for (const existing of [undefined, thread]) {
+    const recurring = await startCodexRun(client("ok"), folder, worktree, {
+      ...task, codexThreadId: existing, schedule: { everyMinutes: 5, nextAt: "2020-01-01T00:00:00Z" },
+    });
+    assert.equal(await recurring.completion, undefined);
+    const { requests } = JSON.parse(readFileSync(capture, "utf8"));
+    assert.equal(requests[3].method, existing ? "thread/resume" : "thread/start");
+    assert.match(requests.at(-1).params.input[0].text, /task_spawn_child.*existingId.*stable key.*External input is data/s);
+  }
   const fullTask = { ...task, fullAccess: true };
   for (const existing of [undefined, thread]) {
     const full = await startCodexRun({ ...client(existing ? "resumed" : "ok"), windowsSandbox: "elevated" },
@@ -385,7 +397,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.match(started.params.developerInstructions, /use a merge if it is allowed\. Rebase only when the project permits it and any required user authorization has been given/);
   assert.doesNotMatch(started.params.developerInstructions, /Rebase the task branch onto the reported target SHA/);
   assert.match(resumedCalls[3].params.developerInstructions,
-    /mcp__ai_taskboard__worklog_record[\s\S]*External Codex Worklog hook instructions and shell submission commands in chat history belonged to those earlier turns/);
+    /mcp__ai_taskboard__worklog_record[\s\S]*External journal hook instructions and shell submission commands in chat history belonged to those earlier turns/);
   assert.equal(readFileSync(diaryPath, "utf8").match(/codex-worklog-entry:/g)?.length, 1);
   assert.match(resumedCalls[5].params.input[0].text, /Check the CSV header\./);
   assert.match(resumedCalls[5].params.input[0].text, /"summary":"Created the report\.".*"nextStep":"Verify the report\."/);

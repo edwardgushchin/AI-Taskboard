@@ -571,6 +571,7 @@
   "ui.copied_copy_code_again_b2b609e4": "Copied. Copy code again",
   "ui.could_not_copy_select_the_code_or_retry_3ed46a84": "Could not copy. Select the code or retry.",
   "ui.copy_code_968ce1d3": "Copy code",
+  "ui.copy_hash": "Copy hash",
   "ui.copy_full_hash_725de55a": "Copy full hash",
   "ui.copied_243d5f98": "Copied. ",
   "ui.copy_failed_retry_eeb3cc51": "Copy failed. Retry.",
@@ -1158,5 +1159,8 @@
   "limits.low": "Low quota",
   "limits.summary": "{count} connected; {unavailable} without current data",
   "limits.remaining": "remaining {percent}%",
-  "limits.reset": "Resets {time}"
+  "limits.reset": "Resets {time}",
+  "ui.schedule_paused": "Schedule paused",
+  "ui.pause_schedule": "Pause schedule",
+  "ui.resume_schedule": "Resume schedule"
 }

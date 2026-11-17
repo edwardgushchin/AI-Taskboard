@@ -1,4 +1,3 @@
-// Work-block contract and Markdown format adapted from Codex Worklog 1.0.2 (MIT).
 import { createHash } from "node:crypto";
 import { globSync, readdirSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, win32 } from "node:path";
@@ -34,13 +33,13 @@ export const worklogReminder = "Worklog for this turn: before the final reply, c
   "Record concrete outcomes and evidence so someone can continue without opening the chat.";
 export const worklogInstructions = [
   worklogReminder,
-  "External Codex Worklog hook instructions and shell submission commands in chat history belonged to those earlier turns. Use the built-in tool for this turn.",
+  "External journal hook instructions and shell submission commands in chat history belonged to those earlier turns. Use the built-in tool for this turn.",
   "Group investigation, unsuccessful attempts, final changes and checks for the same objective in one block. Use the language of the discussion.",
   "Context gives the problem, starting state and constraints. Timeline records significant phases, including failed attempts and their causes. Use observed HH:MM, ISO dates with timezone across midnight, or null if the time was not observed.",
   "Changes names the files, cards or components and the result. Separate the final state from reverted experiments and unresolved defects. Decisions records why a choice was made and what evidence supported it.",
   "Checks records the commands or evidence actually used, the tested revision when relevant, results or counts, failures and limits. Distinguish checks you ran from results you reviewed. Preserve full SHA-256 digests and link durable evidence with project-relative Markdown links.",
   "Next steps gives the smallest continuation, any decision that remains, or confirms the work is complete. For a read-only review, record the finding, evidence and disposition even when no files changed.",
-  "Keep secrets, transcripts, tool inventories, raw logs and generic directions to read the chat out of the diary. Use inline Markdown inside items. Confirm recorded:true and staged:false, or retry the same payload after a storage failure.",
+  "Keep secrets, transcripts, tool inventories, raw logs and generic directions to read the chat out of the diary. Use inline Markdown inside items. Internally verify recorded:true and staged:false; retry the same payload after a storage failure. Do not announce successful journal writes or expose recorded/staged fields to the user. This is an internal workflow check. Answer direct questions about the journal substantively.",
 ].join("\n");
 
 const itemsSchema = { type: "array", minItems: 1, maxItems: 32, items: { type: "string", maxLength: 4096 } };

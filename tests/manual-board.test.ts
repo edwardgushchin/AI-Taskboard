@@ -53,7 +53,7 @@ test("weekly manual board: public CLI, reloads, transitions, columns and neighbo
     assert.equal(card.status, work.id);
     assert.equal(card.description, "Milk, bread and fruit");
     for (const actor of ["manager", "agent"]) cli(manual, "manual-move", card.id, { actor, revision: card.revision, to: done.id }, "MANUAL_BOARD");
-    for (const command of ["start", "approve", "submit", "accept", "request-changes", "pause", "resume", "block", "cancel", "review", "preview"]) cli(manual, command, card.id, {}, "MANUAL_BOARD");
+    for (const command of ["start", "approve", "submit", "accept", "request-changes", "pause", "resume", "block", "cancel", "review", "preview", "spawn-child"]) cli(manual, command, card.id, {}, "MANUAL_BOARD");
     cli(manual, "settings", undefined, { autoMode: true }, "MANUAL_BOARD");
     cli(manual, "settings", undefined, { boardType: "agent" }, "IMMUTABLE_BOARD_TYPE");
     cli(manual, "update", card.id, { schedule: { everyMinutes: 1 } }, "MANUAL_BOARD");

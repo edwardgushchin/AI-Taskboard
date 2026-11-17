@@ -46,7 +46,10 @@ test("task discussion streams task usage before success, provider failure, or a 
           assert.match(params.developerInstructions, /Report all material gaps together in a single return/);
           assert.match(params.developerInstructions, /check every criterion, even if you already found a defect/);
           assert.match(params.developerInstructions, /tested revision or provides concrete evidence that it still applies/);
-          assert.match(params.developerInstructions, /Ponytail.*humanizer-ru.*worklog_record/s);
+          assert.match(params.developerInstructions, /These rules apply.*worklog_record/s);
+          assert.match(params.developerInstructions, /Apply built-in rules silently/);
+          assert.match(params.developerInstructions, /Internally verify recorded:true and staged:false/);
+          assert.doesNotMatch(params.developerInstructions, /Ponytail|humanizer-ru|Codex Worklog/);
         } else {
           assert.match(params.developerInstructions, /Use built-in web search for relevant public sources/);
         }

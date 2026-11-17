@@ -178,6 +178,7 @@ test("the scheduler launches a due approved card once, waits for an executor slo
   const snapshot = structuredClone(f.task);
   const agentLimits = { executor: 1 };
   const tasks = [
+    { ...snapshot, id: "T-0000", schedule: { ...snapshot.schedule, paused: true } },
     { ...snapshot, id: "T-0002", status: "draft" }, { ...snapshot, id: "T-0003", status: "blocked" },
     { ...snapshot, id: "T-0004", unfinishedDependencies: ["T-0002"] },
     { ...snapshot, id: "T-0005", schedule: { time: "09:00", nextAt: new Date(2100, 0, 1, 9).toISOString() } }, snapshot,
@@ -200,6 +201,37 @@ test("the scheduler launches a due approved card once, waits for an executor slo
   assert.ok(Date.parse(f.task.schedule.nextAt) > Date.now());
   assert.equal(f.slots.available("other", "executor"), 3);
   release();
+});
+
+test("pausing while waiting for a slot prevents launch across windows; an active pass finishes paused", async () => {
+  for (const rule of [{ everyMinutes: 1 }, { time: "09:00" }]) {
+    const f = fixture("started", { id: "result", type: "agentMessage", phase: "final_answer", status: "completed", title: "", text: "Completed" });
+    f.task.status = "ready";
+    f.task.schedule = { ...rule, nextAt: "2000-01-01T00:00:00Z" };
+    const watch = { board: { tasks: [f.task], settings: { agentLimits: { executor: 1 } } }, listeners: [], tabs: new Set([1, 2]) };
+    f.subscriptions.set("project", watch);
+    const release = f.slots.acquire("project", "executor", { executor: 1 })!;
+    f.runtime.scheduleRecurringTasks();
+    Object.assign(f.task, changeTask(f.task, "update", { schedulePaused: true }));
+    release();
+    f.runtime.scheduleRecurringTasks();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.launched.length, 0);
+    Object.assign(f.task, changeTask(f.task, "update", { schedulePaused: false }));
+    f.task.schedule!.nextAt = "2000-01-01T00:00:00Z";
+    f.runtime.scheduleRecurringTasks();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.launched.length, 1);
+    Object.assign(f.task, changeTask(f.task, "update", { schedulePaused: true }));
+    assert.ok(f.runtime.runningTasks.has("project\0" + f.task.id));
+    f.completion.resolve(undefined);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.task.status, "ready", JSON.stringify(f.task.blocked));
+    assert.equal(f.task.schedule!.paused, true);
+    f.runtime.scheduleRecurringTasks(Date.now() + 86400000);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.launched.length, 1);
+  }
 });
 
 test("each board has separate pools with per-role inheritance and unlimited overrides", () => {

@@ -74,3 +74,10 @@ test("executor configuration limits external tools, preserves board and policy, 
     { revision: 1, server: "docs", tool: "read" }, true);
   assert.deepEqual(revoked.toolGrants, []);
 });
+
+test("recurring launch verifies the scoped child tool", async () => {
+  const request: ProviderRequest = async <T>() => ({ data: [{ name: "ai_taskboard", tools: { worklog_record: {} } }] }) as T;
+  await assert.rejects(verifyExecutorTools(request, "thread", [], ["task_spawn_child"]), /recurring executor tools/);
+  const available: ProviderRequest = async <T>() => ({ data: [{ name: "ai_taskboard", tools: { task_spawn_child: {} } }] }) as T;
+  assert.deepEqual(await verifyExecutorTools(available, "thread", [], ["task_spawn_child"]), ["task_spawn_child"]);
+});

@@ -1,6 +1,14 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 contextBridge.exposeInMainWorld("taskboard", {
+  openFileLink: link => ipcRenderer.invoke("board:openFileLink", link),
+  filePayload: async file => {
+    if (file.link) return { name: file.name, type: file.type, link: file.link, bytes: new ArrayBuffer(0) };
+    const path = webUtils.getPathForFile(file);
+    if (path) return { name: file.name, type: file.type, link: await ipcRenderer.invoke("board:fileLink", path), bytes: new ArrayBuffer(0) };
+    if (file.size > 64 * 1024 * 1024) throw new Error("This file has no local path. Save it locally and attach it again.");
+    return { name: file.name, type: file.type, bytes: await file.arrayBuffer() };
+  },
   bootstrap: () => ipcRenderer.invoke("board:bootstrap"),
   open: () => ipcRenderer.invoke("board:open"),
   boardRequest: (request, files, project, goal, immediate, id) => ipcRenderer.invoke("board:request", request, files, project, goal, immediate, id),

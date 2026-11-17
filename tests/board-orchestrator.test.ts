@@ -1,4 +1,5 @@
 import { isManual, manualContext } from "../src/cli/manual-board.ts";
+import { captureFileLink, isFileLink, verifyFileLink } from "../src/cli/attachment-links.ts";
 import localization from "../src/desktop/localization.cjs";
 import { activeRunSummary } from "../src/desktop/active-runs.ts";
 import assert from "node:assert/strict";
@@ -107,7 +108,7 @@ function fixture(t: TestContext) {
   const runtime = runInNewContext(handlerSource + "\n({ frame, scheduleAutoReview, boardRequests, boardWorkRequests, managerQuestion })", {
     scheduleAutoBoard: () => {},
     activeRunSummary, runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
-    AbortSignal, AbortController, ArrayBuffer, Buffer, Error, basename, dirname, extname, join, mkdtemp, rm, writeFile, maxAttachmentBytes, boardActions, boardInstructions, boardTools, callCli,
+    captureFileLink, isFileLink, verifyFileLink, AbortSignal, AbortController, ArrayBuffer, Buffer, Error, basename, dirname, extname, join, mkdtemp, rm, writeFile, maxAttachmentBytes, boardActions, boardInstructions, boardTools, callCli,
     githubReadTool, readBoardGitHub: (cwd: string, args: unknown) => callCli(cwd, ["github-read"], args),
     executorFullAccess, managerAccess, setTaskExecutorAccess,
     autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, defaultBoardAgents, reviewVerifier,
@@ -1343,9 +1344,12 @@ test("a goal delegates a bounded slice, waits for submission, and reviews before
     assert.match(f.executorNotifications[0], /afterSequence/);
     const received = await f.cli(["messages", slice.id]);
     assert.equal(received.data[0].text, decisionText);
+    assert.equal(decision.data.at, received.data[0].at);
+    assert.ok(Number.isFinite(Date.parse(decision.data.at)));
     assert.equal(received.data[0].replyTo, question.data.sequence);
     const later = await f.cli(["manager-message", slice.id], { text: "Use the existing test fixture." });
     const additions = await f.cli(["messages", slice.id], { afterSequence: decision.data.sequence });
+    assert.equal(later.data.at, additions.data[0].at);
     assert.deepEqual(additions.data.map(({ sequence }: { sequence: number }) => sequence), [later.data.sequence]);
     assert.deepEqual((await f.cli(["messages", slice.id], { afterSequence: later.data.sequence })).data, []);
     assert.equal((await f.cli(["messages", slice.id], { afterSequence: -1 })).error.code, "INVALID_INPUT");
@@ -1803,6 +1807,42 @@ test("the project manager can revise an approved task and resolve its blocker fr
   assert.equal(updated.revision, blocked.revision + 2);
   assert.deepEqual(updated.criteria, ["Task chats appear in a shared project folder on desktop and mobile"]);
   assert.deepEqual(updated.history.slice(-2).map((event: { actor: string }) => event.actor), ["manager", "manager"]);
+});
+
+test("manager keeps large file links through queue, provider context and card creation", async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"])).ok, true);
+  const path = join(f.project, "large.bin");
+  await writeFile(path, "part");
+  const { truncateSync } = await import("node:fs");
+  truncateSync(path, 80 * 1024 * 1024);
+  const link = captureFileLink(path);
+  const files = [{ name: "large.bin", type: "", bytes: new ArrayBuffer(0), link }];
+  const queued = await f.queue("add", undefined, "Read part", false, files);
+  assert.equal(queued.ok, true, JSON.stringify(queued));
+  const restored = await f.queue("list");
+  assert.equal(restored.data[0].files[0].link.path, link.path);
+  assert.equal(restored.data[0].files[0].bytes.byteLength, 0);
+  const result = await f.run("Read part", async (act, _prompt, images, _id, context) => {
+    assert.equal(images.length, 0);
+    assert.equal(context.attachments[0].path, link.path);
+    assert.equal(context.attachments[0].link.size, link.size);
+    const created = await act("task_create", { title: "Linked", attachmentIds: [1] });
+    assert.equal(created.ok, true, JSON.stringify(created));
+    assert.equal(created.data.attachments[0].link.path, link.path);
+    return { text: "Linked" };
+  }, files);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal((await f.queue("remove", queued.data)).ok, true);
+  truncateSync(path, 81 * 1024 * 1024);
+  const changed = await f.run("Check changed source", async (_act, _prompt, images, _id, context) => {
+    assert.equal(images.length, 0);
+    assert.match(context.attachments[0].error, /changed/);
+    assert.equal(context.attachments[0].link.path, link.path);
+    return { text: "Source changed; attach it again." };
+  }, files);
+  assert.equal(changed.ok, true, JSON.stringify(changed));
+  assert.ok(existsSync(path));
 });
 
 test("orchestrator preserves selected attachments, restores blocked drafts, and reports changes after a failed reply", async t => {

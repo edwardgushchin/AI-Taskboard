@@ -962,8 +962,9 @@ function card(task) {
     identity.append(badge);
   }
   if (task.schedule) {
-    const badge = element("span", task.schedule.time ?? scheduleInterval(task.schedule.everyMinutes, "short"), "task-schedule");
-    badge.title = scheduleLabel(task.schedule);
+    const badge = task.schedule.paused ? schedulePauseIndicator() : element("span", task.schedule.time ?? scheduleInterval(task.schedule.everyMinutes, "short"));
+    badge.classList.add("task-schedule");
+    badge.title = (task.schedule.paused ? t("ui.schedule_paused") + " · " : "") + scheduleLabel(task.schedule);
     badge.setAttribute("aria-label", badge.title);
     identity.append(badge);
   }
@@ -975,7 +976,6 @@ function card(task) {
   meta.append(identity);
   const runStatus = element("span", undefined, "task-run-status");
   renderAgentRunStatus(runStatus, task);
-  if (!runStatus.hidden) meta.append(runStatus);
   if (task.unfinishedDependencies?.length && task.status === "draft") {
     meta.append(taskIndicator("link", task.unfinishedDependencies.length,
       t("ui.unfinished_dependencies_5cfaaab6"), "dependency-warning"));
@@ -996,6 +996,7 @@ function card(task) {
     attachments.append(icon("attach"), String(task.attachments.length));
     meta.append(attachments);
   }
+  if (!runStatus.hidden) item.append(runStatus);
   item.append(meta);
   card.replaceChildren(item);
   boardCards.set(task.id, { node: card, signature });
@@ -1569,7 +1570,8 @@ function managerQuestionDialog(question, trigger) {
   const header = element("header", undefined, "sheet-header");
   header.append(title, close);
   const form = element("form", undefined, "sheet-body form");
-  const prompt = element("p", question.text, "manager-question-text");
+  const prompt = chatText(question.text, {});
+  prompt.classList.add("manager-question-text");
   prompt.id = "manager-question-text";
   dialog.setAttribute("aria-describedby", prompt.id);
   const choices = element("div", undefined, "manager-question-options");
@@ -1585,7 +1587,21 @@ function managerQuestionDialog(question, trigger) {
   submit.type = "submit";
   const skip = button(() => t("ui.skip_question_773b15fa"), () => send(null), "quiet");
   actions.append(submit, skip);
-  const options = question.options.map(value => button(value, () => send(value), "quiet"));
+  const options = question.options.map(value => {
+    const option = button("", () => send(value), "quiet");
+    const caption = element("span", value, "chat-text");
+    if (chatMarkdown) {
+      const template = document.createElement("template");
+      template.innerHTML = chatMarkdown.renderInline(value);
+      // Keep the whole caption a single answer target, with no nested links or image requests.
+      for (const link of template.content.querySelectorAll("a")) link.replaceWith(...link.childNodes);
+      for (const image of template.content.querySelectorAll("img")) image.replaceWith(document.createTextNode(image.alt));
+      caption.replaceChildren(template.content);
+      if (!caption.textContent.trim()) caption.textContent = value;
+    }
+    option.append(caption);
+    return option;
+  });
   choices.append(...options);
   const controls = [close, skip, ...options];
   let sending = false;
@@ -2047,9 +2063,18 @@ function draftComposer() {
     workLoading = true;
     workOlder.disabled = true;
     try {
-      const result = await api.boardHistory(project, cursor, "work");
-      if (disposed || work.hidden) return;
-      if (!result.ok) throw new Error(boardError(result.error));
+      let result;
+      let next = cursor;
+      const visited = new Set();
+      do {
+        visited.add(next);
+        result = await api.boardHistory(project, next, "work");
+        if (disposed || work.hidden) return;
+        if (!result.ok) throw new Error(boardError(result.error));
+        next = result.data.nextCursor;
+        // A broken provider cursor must not keep the loading loop alive.
+        if (visited.has(next)) next = null;
+      } while (!result.data.turns.length && next);
       if (!cursor && loadedOlderWork && !workViewport.atEnd()) {
         workReload = true;
         return;
@@ -2061,10 +2086,11 @@ function draftComposer() {
         new Set([...work.querySelectorAll("[data-item]")].map(row => activityRowKey(row.dataset.item)));
       for (const turn of result.data.turns) {
         for (const { text, files, clientId, at } of turn.messages) page.append(chatMessage("user", text, files, false, false, clientId, at));
-        if (!turn.items.length) continue;
-        for (const item of turn.items) saved.add(item.id);
+        const items = turn.items.filter(item => !saved.has(item.id));
+        if (!items.length) continue;
+        for (const item of items) saved.add(item.id);
         const run = element("div", undefined, "chat-run");
-        renderRunActivity(run, turn.items, true, turn.durationMs, undefined, { seenMessages: seen });
+        renderRunActivity(run, items, true, turn.durationMs, undefined, { seenMessages: seen });
         if (previous) {
           for (const row of run.querySelectorAll("[data-item]")) {
             if (!previous.has(activityRowKey(row.dataset.item))) row.setAttribute("data-enter", "");
@@ -2078,7 +2104,7 @@ function draftComposer() {
         else workSaved.replaceChildren(page);
         loadedOlderWork = Boolean(cursor);
         savedWorkItems = saved;
-        workCursor = result.data.nextCursor;
+        workCursor = next;
         workOlder.hidden = !workCursor;
         workError.hidden = true;
         renderLiveWork();
@@ -2091,6 +2117,7 @@ function draftComposer() {
         workViewport.update(() => {
           workError.textContent = error.message;
           workError.hidden = false;
+          workOlder.hidden = false;
           renderLiveWork();
         });
       }
@@ -2640,7 +2667,11 @@ function draftComposer() {
       const images = files.filter(file => file.url);
       for (const file of files) {
         const tile = file.url ? button("", () => previewImages(images, file), "quiet chat-attachment") :
-          element("span", undefined, "chat-attachment");
+          file.link ? button("", async () => {
+            const result = await api.openFileLink(file.link);
+            if (!result.ok) message(boardError(result.error));
+          }, "quiet chat-attachment") : element("span", undefined, "chat-attachment");
+        if (file.link) tile.title = file.link.path;
         if (file.url) {
           controlLabelForIcon(tile, () => t("ui.view_7aa05de3") + file.name);
           const img = element("img");
@@ -2648,7 +2679,7 @@ function draftComposer() {
           img.loading = "lazy";
           img.src = file.url;
           tile.append(img);
-        } else tile.append(icon("attachment"), element("span", file.name));
+        } else tile.append(icon("attachment"), element("span", file.name + (file.size !== undefined ? " / " + file.size + " B" : "")));
         tiles.append(tile);
       }
       entry.append(tiles);
@@ -2785,7 +2816,7 @@ function draftComposer() {
   const olderNodes = [];
   const previewUrls = [];
   const pendingPreviews = new Map();
-  const previewSource = file => /^(?:image\/(?:png|jpeg|webp|gif))$/.test(file.type) || isImageAttachment(file);
+  const previewSource = file => !file.link && file.size <= 64 * 1024 * 1024 && (/^(?:image\/(?:png|jpeg|webp|gif))$/.test(file.type) || isImageAttachment(file));
   const releasePreview = file => {
     const url = pendingPreviews.get(file);
     if (url) URL.revokeObjectURL(url);
@@ -3070,9 +3101,7 @@ function draftComposer() {
     });
     readVisibleMessages();
   };
-  const pasteFiles = submitted => Promise.all(submitted.map(async file => ({
-    name: file.name, type: file.type, bytes: await file.arrayBuffer(),
-  })));
+  const pasteFiles = submitted => Promise.all(submitted.map(file => api.filePayload(file)));
   const queueStorage = async (action, id, draft, goal, attachments) => {
     const result = await api.boardQueue(project, action, id, draft, goal, attachments);
     if (!result.ok) throw new Error(boardError(result.error));
@@ -3083,7 +3112,7 @@ function draftComposer() {
     restoredQueue ??= queueStorage("list").then(jobs => {
       if (disposed) return;
       for (const [index, { id, draft, goal, files }] of jobs.entries()) {
-        enqueue(id, draft, goal, files.map(file => new File([file.bytes], file.name, { type: file.type })), index === 0);
+        enqueue(id, draft, goal, files.map(file => file.link ? { ...file, size: file.link.size } : new File([file.bytes], file.name, { type: file.type })), index === 0);
       }
     }).catch(error => {
       restoredQueue = undefined;
@@ -3422,7 +3451,7 @@ function draftComposer() {
   function enqueue(id, draft, goal, submitted, failed = false) {
     const request = draft.trim();
     const messageFiles = submitted.map(file => {
-      if (!previewSource(file)) return { name: file.name };
+      if (!previewSource(file)) return { name: file.name, size: file.size, link: file.link };
       const url = URL.createObjectURL(file);
       previewUrls.push(url);
       return { name: file.name, url };
@@ -3453,15 +3482,11 @@ function draftComposer() {
     renderQueuedActions(job);
   }
   function addFiles(pasted) {
-    if ([...files, ...pasted].reduce((total, file) => total + file.size, 0) > 64 * 1024 * 1024) {
-      message(t("ui.attachments_are_limited_to_64_mib_per_task_ae680c16"));
-      return;
-    }
     message("");
     for (const file of pasted) {
       files.push(file);
       const row = element("li", undefined, "board-attachment");
-      const url = previewSource(file) ? pendingPreviews.get(file) ?? URL.createObjectURL(file) : undefined;
+      const url = !file.link && previewSource(file) ? pendingPreviews.get(file) ?? URL.createObjectURL(file) : undefined;
       if (url) pendingPreviews.set(file, url);
       const remove = button("", () => {
         files.splice(files.indexOf(file), 1);
@@ -3487,7 +3512,7 @@ function draftComposer() {
         view.append(thumbnail);
         row.classList.add("board-attachment-image");
         row.append(view);
-      } else row.append(icon("attachment"), element("span", file.name));
+      } else row.append(icon("attachment"), element("span", file.name + (file.size !== undefined ? " / " + file.size + " B" : "")));
       remove.classList.add("board-attachment-remove");
       row.append(remove);
       attachments.append(row);
@@ -3547,6 +3572,15 @@ function scheduleInterval(minutes, unitDisplay) {
   const hours = minutes % 60 === 0;
   return new Intl.NumberFormat(localization.locale, { style: "unit", unit: hours ? "hour" : "minute", unitDisplay })
     .format(hours ? minutes / 60 : minutes);
+}
+
+function schedulePauseIndicator() {
+  const indicator = element("span", undefined, "task-schedule-pause task-stat");
+  indicator.title = t("ui.schedule_paused");
+  indicator.setAttribute("role", "img");
+  indicator.setAttribute("aria-label", indicator.title);
+  indicator.append(icon("debug-pause"));
+  return indicator;
 }
 
 function scheduleLabel({ time, weekday, everyMinutes, dayOfMonth, month }) {
@@ -3872,7 +3906,8 @@ async function showTask(id) {
   }
   if (task.schedule) {
     const schedule = [scheduleLabel(task.schedule)];
-    if (task.status === "ready" && !task.unfinishedDependencies?.length) {
+    if (task.schedule.paused) schedule.push(schedulePauseIndicator());
+    if (!task.schedule.paused && task.status === "ready" && !task.unfinishedDependencies?.length) {
       schedule.push(t("ui.next_run_c1b8ce6d") + " · " + shortDate(task.schedule.nextAt));
     }
     section(() => (t("ui.schedule_dadf83ce")), schedule);
@@ -3919,6 +3954,10 @@ async function showTask(id) {
     const result = await command(name, task.id, { revision: task.revision, ...input });
     if (result) await showTask(task.id);
   };
+  if (task.schedule && !["done", "cancelled"].includes(task.status)) {
+    actions.append(button(() => t(task.schedule.paused ? "ui.resume_schedule" : "ui.pause_schedule"),
+      () => act("update", { schedulePaused: !task.schedule.paused })));
+  }
   if (task.status === "draft") actions.append(button(() => t("ui.approve_535c27a7"), () => act("approve"), "primary"));
   if (!frame.board?.archived.some(entry => entry.id === task.id) && (task.milestone || frame.board?.gitInfo?.githubRepository)) {
     actions.append(button(() => t("ui.milestone_3df16b83"), () => editMilestone(task)));
@@ -4101,11 +4140,11 @@ async function showCleanup(task, draft = "", error) {
 }
 
 function taskAttachmentButton(id, attachment, kind) {
-  const download = button(attachment.name, async () => {
+  const download = button(attachment.name + " / " + attachment.bytes + " B", async () => {
     const result = await api.saveAttachment(id, attachment.file, attachment.name);
     if (!result.ok) notice(boardError(result.error));
   }, kind);
-  download.prepend(icon("cloud-download"));
+  download.prepend(icon(attachment.link ? "link-external" : "cloud-download"));
   return download;
 }
 
