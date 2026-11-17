@@ -162,6 +162,26 @@ app.whenReady().then(async () => {
     console.log(`Acceptance repair Chromium checks passed: ${checks}`);
     return;
   }
+  if (process.argv.includes("--cleanup-only")) {
+    await evaluate(`
+      const accepted = task('T-0138', 'Completed cleanup fixture', { status: 'done', cleanupAvailable: true,
+        git: { worktree: 'saved-worktree' }, artifacts: [{ source: 'required.log', sha256: 'saved' }] });
+      fixture.board.tasks = [accepted]; push();
+      window.taskboard.command = async () => ({ ok: true, data: structuredClone(accepted) });
+      showAcceptedTask({ ...accepted, cleanupWarning: { code: 'DIRTY_WORKTREE', message: 'private cleanup failure' } }); void 0;
+    `);
+    await evaluate(`waitFor(() => taskInSheet?.id === 'T-0138')`);
+    await check(`!document.body.textContent.includes('private cleanup failure') && !body.querySelector('.task-blocker')`, 'cleanup errors produce no notice or card banner');
+    await check(`!body.textContent.includes('Принято · рабочая копия сохранена') && taskInSheet.status === 'done'`, 'completed status is independent of pending cleanup');
+    await check(`body.querySelector('#task-review-files summary').textContent.includes('1 файл')`, 'required evidence remains available');
+    await evaluate(`fixture.board.tasks[0].cleanupAvailable = false; delete fixture.board.tasks[0].git.worktree; showTask('T-0138'); void 0`);
+    await evaluate(`waitFor(() => taskInSheet?.cleanupAvailable === false)`);
+    await check(`body.querySelector('#task-review-files summary').textContent.includes('1 файл')`, 'evidence remains after cleanup');
+    await check(`![...body.querySelectorAll('button')].some(button => button.textContent === 'Уборка рабочей копии…')`, 'maintenance needs no manual cleanup control');
+    await capture('cleanup-done.png');
+    console.log('Cleanup Chromium checks passed: ' + checks);
+    return;
+  }
   if (process.argv.includes("--run-status-only")) {
     await evaluate(`
       const queuedTask = task('T-0096', 'Проверка ожидания', { status: 'in_progress',
@@ -2369,20 +2389,20 @@ app.whenReady().then(async () => {
         if (input.artifacts?.join() !== 'report.local') return { ok: false, error: { message: 'Expected the report path' } };
         interrupted.cleanupAvailable = false;
         delete interrupted.git.worktree;
-        interrupted.artifacts = [];
+        interrupted.artifacts = [{ source: 'first.log', sha256: 'first' }, { source: 'report.local', sha256: 'saved' }];
       }
       return { ok: true, data: structuredClone(interrupted) };
     };
     const sheetButton = text => [...body.querySelectorAll('button')].find(node => node.textContent === text);
     showTask(interrupted.id); void 0;
   `);
-  await evaluate(`waitFor(() => sheetButton('Уборка рабочей копии…'))`);
-  await check(`body.textContent.includes('Принято · рабочая копия сохранена') &&
-    body.querySelector('#task-review-files summary').textContent.includes('1 файл')`, "an accepted card shows pending cleanup and a count of its saved artifacts");
-  await evaluate(`sheetButton('Уборка рабочей копии…').click(); waitFor(() => sheetKind === 'cleanup')`);
-  await check(`body.textContent.includes('!! report.local')`, "cleanup shows the files in the retained worktree");
-  await evaluate(`body.querySelector('textarea').value = 'report.local'; body.querySelector('form').requestSubmit(); waitFor(() => sheetKind === 'task' && !sheetButton('Уборка рабочей копии…'))`);
-  await check(`!body.querySelector('#task-review-files')`, "cleanup returns to the original card after discarding temporary artifacts");
+  await evaluate(`waitFor(() => taskInSheet?.id === interrupted.id)`);
+  await check(`!body.textContent.includes('Принято · рабочая копия сохранена') && !sheetButton('Уборка рабочей копии…') &&
+    body.querySelector('#task-review-files summary').textContent.includes('1 файл')`, "accepted cards retain normal completion and evidence without manual cleanup controls");
+  await evaluate(`interrupted.cleanupAvailable = false; delete interrupted.git.worktree;
+    interrupted.artifacts.push({ source: 'report.local', sha256: 'saved' }); showTask(interrupted.id); void 0`);
+  await evaluate(`waitFor(() => taskInSheet?.cleanupAvailable === false)`);
+  await check(`body.querySelector('#task-review-files summary').textContent.includes('2 файла')`, "automatic cleanup retains individual saved artifacts on the completed card");
   await evaluate(`
     let tagEdit;
     const cleanupCommands = window.taskboard.command;

@@ -41,7 +41,7 @@ const source = (file: string) => readFileSync(new URL("../src/desktop/" + file, 
 const boardSource = stripTypeScriptTypes(source("board-actions.ts").replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, ""));
 const main = ts.createSourceFile("main.ts", source("main.ts"), ts.ScriptTarget.Latest, true);
 const handlerSource = stripTypeScriptTypes(main.statements.map(node => node.getText(main)).filter(text =>
-  /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|scheduleRecurringTasks|taskRunLimit)\(|const (?:imageExtensions|imageTypes|boardRequests|boardWorkRequests|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
+  /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|scheduleMaintenance|scheduleRecurringTasks|taskRunLimit)\(|const (?:imageExtensions|imageTypes|boardRequests|boardWorkRequests|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork|maintenanceWork) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
 const cliFailure = (code: string, message: string) => ({ ok: false, error: { code, message } });
 
@@ -80,7 +80,7 @@ function fixture(t: TestContext) {
   type GoalRequest = { objective?: string; resume?: boolean; accepted: () => void; delivered: (id: string) => void; controls: (control: GoalControl) => void;
     update: (goal: BoardGoal | null) => void; activity: (items: RunActivity[]) => void; settings?: ChatSettings | null;
     enableNotifications: (steer?: (text: string, images: string[]) => Promise<void>) => void; endTurn: () => void;
-    access?: ManagerAccess; confirmApproval?: (details: string) => Promise<boolean> };
+    role?: string; access?: ManagerAccess; confirmApproval?: (details: string) => Promise<boolean> };
   type Reply = (action: RunAction, prompt: string, images: string[], id?: string, context?: any,
     waiting?: (waiting: boolean) => void, signal?: AbortSignal, goal?: GoalRequest) => Promise<{ text: string } | { interrupted: true }>;
   let respond: Reply;
@@ -127,7 +127,7 @@ function fixture(t: TestContext) {
     },
     activateTab: (owner: { active: unknown }, tab: unknown) => { owner.active = tab; },
     launchingTasks: new Set(), runningTasks, chatRuns: new Map(), activeAgents, managerInbox, needsManagerAttention, subscriptions, reviewerTools,
-    closingProjects: new Set(), setImmediate, setTimeout, clearTimeout, performance, console, agentSlots,
+    process, closingProjects: new Set(), setImmediate, setTimeout, clearTimeout, performance, console, agentSlots,
     russianWriting, isManual, manualContext, runtimeLocation, readBoardSettings, settingsDelivery, syncSettingsNotices,
     reviewWithCodex: async (_profile: string, cwd: string, settings: ChatSettings | null, context: string,
       tools: { name: string }[], call: RunAction, _signal: AbortSignal,
@@ -175,7 +175,7 @@ function fixture(t: TestContext) {
     replyToBoard: async (_profile: string, cwd: string, prompt: string, images: string[], action: RunAction,
       _tools: unknown, instructions: string, _signal: AbortSignal,
       session: { id?: string; title: string; save: (id: string) => void; attachmentContext?: string; mcpTools: { name: string; description: string }[];
-        separateTurn?: boolean; readOnly?: boolean; access?: ManagerAccess; confirmApproval?: (details: string) => Promise<boolean>;
+        role?: "manager" | "reviewer"; separateTurn?: boolean; readOnly?: boolean; access?: ManagerAccess; confirmApproval?: (details: string) => Promise<boolean>;
         onWaiting: (waiting: boolean) => void; onTurnEnded: () => void; goal?: string; resumeGoal?: boolean; onGoalSet: () => void;
         onControl: (control: { steer: (text: string, images: string[], id?: string) => Promise<void>; interrupt: () => Promise<void> }) => void;
         onMessage: (id: string) => void; onActivity: (items: RunActivity[]) => void;
@@ -184,19 +184,20 @@ function fixture(t: TestContext) {
       assert.ok(instructions.includes(russianWriting));
       const manualTurn = instructions.includes("Обычная доска личных дел");
       const reviewTurn = Boolean(session.readOnly || session.separateTurn);
+      const cleanupTurn = instructions.includes("private maintenance run");
       if (manualTurn) assert.match(instructions, /Пользователь сам меняет статусы/);
       else {
         assert.match(instructions, /Before accepting, check whether the project or task needs any evidence after acceptance/);
         assert.match(instructions, /verify the paths and checksums/);
       }
-      if (!reviewTurn && !manualTurn) {
+      if (!reviewTurn && !manualTurn && !cleanupTurn) {
         assert.match(instructions, /reviewer approval can unblock dependent work.*before dispatching more independent work/);
-        assert.match(instructions, /The board retries deferred cleanup.*retry only after the worktree changes/);
+        assert.match(instructions, /Lifecycle cleanup and its diagnostics are internal/);
         assert.match(instructions, /only what changes the recipient's work/);
         assert.match(session.mcpTools.find(tool => tool.name === "task_message")!.description, /only what this executor needs to act/);
       }
       assert.equal(session.title, "Project manager for project");
-      const expectedTools = manualTurn ? ["ask_user", "tag_set_color", "github_read"] : reviewTurn ? [
+      const expectedTools = cleanupTurn ? ["task_cleanup_status", "task_cleanup", "project_path", "project_sha256"] : manualTurn ? ["ask_user", "tag_set_color", "github_read"] : reviewTurn ? [
         "task_review", "task_review_diff", "task_review_artifact", "task_accept", "task_request_changes", "project_git", "project_path", "project_sha256",
       ] : [
         "task_cancel", "provider_tools", "task_tool_grant", "task_tool_revoke", "task_set_executor_access", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_approve", "task_wait", "task_review_queue", "task_review", "task_review_diff",
@@ -207,7 +208,7 @@ function fixture(t: TestContext) {
       const mode = boardReviewMode((await callCli(project, ["settings"], undefined, false)).data);
       assert.deepEqual(Array.from(session.mcpTools, tool => tool.name).sort(),
         [...expectedTools.filter(name => (name !== "task_accept" || mode !== "human") && (!instructions.includes("This turn repairs") || !["task_start", "task_start_batch", "task_accept", "task_request_changes"].includes(name))),
-        ...(!reviewTurn ? (session.goal || session.resumeGoal ? ["goal_inbox", "goal_report"] : ["goal_read", "goal_send"]) : []),
+        ...(!reviewTurn && !cleanupTurn ? (session.goal || session.resumeGoal ? ["goal_inbox", "goal_report"] : ["goal_read", "goal_send"]) : []),
         ...(reviewTurn && mode === "reviewer" ? ["manager_ack", "task_cancel", "task_start"] : [])].sort());
       if (reviewTurn) {
         assert.doesNotMatch(instructions, /manager_inbox|task_cleanup_status/);
@@ -221,7 +222,7 @@ function fixture(t: TestContext) {
       return respond(action, prompt, images, session.id, session.attachmentContext && JSON.parse(session.attachmentContext),
         session.onWaiting, _signal, { objective: session.goal, resume: session.resumeGoal, accepted: session.onGoalSet, delivered: session.onMessage,
           controls: session.onGoalControl, update: session.onGoal, activity: session.onActivity,
-          settings: session.settings, endTurn: session.onTurnEnded, access: session.access, confirmApproval: session.confirmApproval,
+          role: session.role, settings: session.settings, endTurn: session.onTurnEnded, access: session.access, confirmApproval: session.confirmApproval,
           enableNotifications: steer => session.onControl({
             steer: async (text, images, id) => {
               if (steer) await steer(text, images);
@@ -238,6 +239,10 @@ function fixture(t: TestContext) {
     repair: (task: Task, reply: Reply) => {
       respond = reply;
       return runtime.runBoardRequest(sender, { project, tasks: [task] }, "Repair this acceptance", [], false, false, undefined, undefined, undefined, false, task);
+    },
+    cleanup: (job: import("../src/cli/maintenance-state.ts").MaintenanceJob, reply: Reply) => {
+      respond = reply;
+      return runtime.runBoardRequest(sender, { project, tasks: [] }, "Repair private lifecycle cleanup", [], false, false, undefined, undefined, undefined, false, undefined, job);
     },
     busyDecisions,
     setReviewer: (runner: typeof reviewSubmission) => { reviewSubmission = runner; },
@@ -2190,6 +2195,63 @@ test("manager returns the same card in every review mode and preserves human acc
   }
 });
 
+
+test("private cleanup repair persists, shares reviewer capacity and preserves a done card without a goal", async t => {
+  const f = fixture(t);
+  const git = (...args: string[]) => {
+    const result = spawnSync("git", ["-C", f.project, ...args], { encoding: "utf8", windowsHide: true });
+    assert.equal(result.status, 0, result.stderr); return result.stdout.trim();
+  };
+  git("init", "-b", "main"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.invalid");
+  await writeFile(join(f.project, ".gitignore"), "node_modules/\n*.local\n");
+  git("add", ".gitignore"); git("commit", "-m", "chore: fixture");
+  await f.cli(["init"]); await f.cli(["settings"], { reviewMode: "human", autoMode: false });
+  await f.run("Initial conversation", async () => ({ text: "Remembered" }));
+  const historyBefore = await f.history();
+  const { data: card } = await f.cli(["create"], { title: "T-0138 fixture", criteria: ["Keep evidence"] });
+  await f.cli(["approve", card.id]); const { data: started } = await f.cli(["start", card.id]);
+  await writeFile(join(started.worktree, "result.txt"), "result");
+  const { data: preview } = await f.cli(["preview", card.id]);
+  const { data: submitted } = await f.cli(["submit", card.id], { token: preview.token, message: "fix: fixture", summary: "Result", checks: ["Checked"] });
+  mkdirSync(join(started.worktree, "node_modules"));
+  const dependency = join(started.worktree, "node_modules", "reproduced.js");
+  await writeFile(dependency, "known dependency bytes");
+  await writeFile(join(started.worktree, "user.local"), "unknown user data");
+  const { data: done } = await f.cli(["accept", card.id], { revision: submitted.revision });
+  assert.equal(done.status, "done"); assert.equal(done.cleanupWarning, undefined);
+  const queuePath = join(f.project, ".tasks", "maintenance.json");
+  const jobs = JSON.parse(readFileSync(queuePath, "utf8"));
+  jobs[0].retryAt = 0; jobs[0].owner = 999999; // Recover an interrupted owner after restart.
+  await writeFile(queuePath, JSON.stringify(jobs));
+  const { data: pending } = await f.cli(["maintenance"]);
+  assert.equal(pending.length, 1);
+  const release = f.agentSlots.acquire(f.project, "reviewer", { reviewer: 1 }, "other-review")!;
+  assert.equal((await f.cleanup(pending[0], async () => assert.fail("Reviewer pool full"))).error.code, "REVIEWER_LIMIT");
+  assert.equal((await f.cli(["maintenance"])).data.length, 1);
+  release();
+  const result = await f.cleanup(pending[0], async (action, _prompt, _images, id, _context, _waiting, _signal, meta) => {
+    assert.equal(id, f.dialogueId);
+    assert.equal(meta?.role, "reviewer"); assert.equal(meta?.objective, undefined); assert.equal(meta?.resume, false);
+    assert.equal(f.agentSlots.available(f.project, "reviewer", { reviewer: 1 }), 0);
+    assert.equal(f.agentSlots.available(f.project, "executor", { executor: 1 }), 1);
+    assert.equal((await f.cli(["maintenance"], { action: "claim", id: pending[0].id, owner: process.pid })).data.claimed, false);
+    assert.equal(readFileSync(dependency, "utf8"), "known dependency bytes");
+    await rm(dependency);
+    await rm(join(started.worktree, "node_modules"), { recursive: true });
+    assert.equal(readFileSync(join(started.worktree, "user.local"), "utf8"), "unknown user data");
+    const cleaned = await action("task_cleanup", { id: card.id, artifacts: ["user.local"] });
+    assert.equal(cleaned.ok, true);
+    return { text: "Internal cleanup repaired." };
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual((await f.cli(["maintenance"])).data, []);
+  assert.ok(!existsSync(started.worktree));
+  assert.equal((await f.cli(["show", card.id])).data.status, "done");
+  assert.equal((await f.cli(["list"])).data.tasks.length, 1);
+  assert.deepEqual(await f.history(), historyBefore);
+  assert.equal(f.pendingQuestion(), undefined);
+  assert.equal(f.agentSlots.available(f.project, "reviewer", { reviewer: 1 }), 1);
+});
 
 test("acceptance repair reuses manager context and waits only for reviewer capacity", async t => {
   const f = fixture(t);

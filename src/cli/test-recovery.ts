@@ -67,7 +67,7 @@ function recoverTestDataLocked(store: BoardStore, input: Record<string, unknown>
     if (taskStartInProgress(store.location, id)) fail("Task start is active: " + id);
     const pending = readdirSync(store.subdirectory("pending")).filter(name => name.startsWith(id + "."));
     if (pending.some(name => name !== id + ".start.sqlite")) fail("Pending operation: " + id);
-    const roots = [store.subdirectory("attachments"), store.subdirectory("worktrees")];
+    const roots = [store.subdirectory("attachments"), join(store.location.directory, "worktrees"), join(store.location.root, ".taskboard-worktrees")].filter(exists);
     const isolated = join(store.location.root, isolatedWorktreesDirectory);
     if (exists(isolated)) {
       directory(isolated);

@@ -3859,9 +3859,6 @@ async function showTask(id) {
   openTaskSheet(task);
   if (task.status === "blocked" && task.blocked) body.append(blockerBanner(task.blocked));
   if (task.executorFullAccess) body.append(element("p", () => t("ui.launch_mode_full_access_ed7fe948"), "task-state-label"));
-  if (task.status === "done" && task.cleanupAvailable) {
-    body.append(element("p", () => t("ui.accepted_worktree_retained_77cfc2d0"), "muted"));
-  }
   savedChangesSection(task, task.savedChanges);
   if (task.tags.length) {
     const tags = element("div", undefined, "task-tags");
@@ -3991,9 +3988,6 @@ async function showTask(id) {
   }));
   if (["done", "cancelled"].includes(task.status)) {
     actions.append(button(() => t("ui.edit_tags_fe276cc0"), () => editTaskTags(task)));
-    if (task.cleanupAvailable) {
-      actions.append(button(() => t("ui.worktree_cleanup_2ecfc375"), () => showCleanup(task)));
-    }
   } else {
     actions.append(button(() => t("ui.edit_c25be9fb"), () => taskEditor(task)));
     if (!manualBoard()) actions.append(button(() => t("ui.cancel_task_e9e056a5"), () => noteTask(task, "cancel"), "danger"));
@@ -4109,37 +4103,6 @@ function showTaskGit(git, open) {
   body.append(area);
 }
 
-async function showCleanup(task, draft = "", error) {
-  const generation = projectGeneration;
-  const status = await command("cleanup-status", task.id);
-  if (!status || generation !== projectGeneration || taskInSheet?.id !== task.id || !sheet.open ||
-      !["task", "cleanup"].includes(sheetKind)) return;
-  if (!status.pending) return showTask(task.id);
-  const fields = task.status === "done" && status.path ? [{
-    name: "artifacts", type: "area", value: draft,
-    label: () => (t("ui.temporary_evidence_files_to_clear_with_the_workt_b473f6a7")),
-  }] : [];
-  const editor = form("cleanup", () => (t("ui.worktree_cleanup_61a92196")), fields,
-    () => (t("ui.retry_cleanup_89298d2d")), async ({ artifacts }) => {
-      const paths = artifacts?.split("\n").map(path => path.trim()).filter(Boolean);
-      const result = await api.command("cleanup", task.id, paths?.length ? { artifacts: paths } : {});
-      if (generation !== projectGeneration || taskInSheet?.id !== task.id || sheetKind !== "cleanup" || !sheet.open) return;
-      if (result.ok) await showTask(task.id);
-      else await showCleanup(task, result.error.code === "DIRTY_WORKTREE" ? "" : artifacts, result.error);
-    });
-  const summary = element("section", undefined, "sheet-section");
-  if (status.path) summary.append(element("p", status.path, "muted"));
-  const reasons = {
-    DIRTY_WORKTREE: t("ui.local_files_or_changes_are_keeping_this_worktree_9892164a"),
-    WORKTREE_LOCKED: t("ui.the_worktree_is_locked_7b7495cc"),
-    TASK_BRANCH_CHANGED: t("ui.the_task_branch_changed_after_submission_a60cbafe"),
-  };
-  if (reasons[status.reason]) summary.append(element("p", reasons[status.reason]));
-  if (status.entries.length) summary.append(element("pre", status.entries.join("\n")));
-  editor.before(summary);
-  if (error) notice(boardError(error));
-}
-
 function taskAttachmentButton(id, attachment, kind) {
   const download = button(attachment.name + " / " + attachment.bytes + " B", async () => {
     const result = await api.saveAttachment(id, attachment.file, attachment.name);
@@ -4187,9 +4150,7 @@ async function showAcceptedTask(task) {
   await showTask(task.id);
   const messages = [];
   if (task.localChangesWarning) messages.push(boardError(task.localChangesWarning));
-  if (task.cleanupWarning && taskInSheet?.id === task.id && taskInSheet.cleanupAvailable) {
-    messages.push(t("ui.the_task_was_accepted_automatic_cleanup_is_pendi_da527ab7") + "\n" + boardError(task.cleanupWarning));
-  }
+
   if (messages.length) notice(messages.join("\n"));
 }
 

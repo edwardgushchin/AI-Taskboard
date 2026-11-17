@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { maintainBoard, removeLegacyAttachments } from "./maintenance.ts";
+import { maintenanceQueue, claimMaintenance, releaseMaintenance, maintenanceFailure } from "./maintenance-state.ts";
 import { guardManual, manualAction, isManual } from "./manual-board.ts";
 import { existsSync, lstatSync, readFileSync, watch } from "node:fs";
 import type { FSWatcher, Stats } from "node:fs";
@@ -25,7 +27,7 @@ import { projectUsage } from "./project-usage.ts";
 import { managerUsage } from "./manager-usage.ts";
 import { dependencyStatus, unfinishedDependencies, validateDependencies } from "./dependencies.ts";
 import { checkoutTaskWorktree, cleanTaskWorktree, finishTaskStart, hasPending, inspectCleanup, prepareTaskStart, taskWithCurrentWorktree } from "./worktree.ts";
-import { artifactFiles, discardTaskArtifacts, openReviewArtifact, readReviewArtifact } from "./artifacts.ts";
+import { artifactFiles, openReviewArtifact, readReviewArtifact } from "./artifacts.ts";
 import { acknowledgeTaskMessages, currentReviewApproval, managerInbox, sendTaskMessage, taskMessages } from "./task-messages.ts";
 import packageInfo from "../../package.json" with { type: "json" };
 import { grantTaskTool, requestTaskTool } from "./task-tools.ts";
@@ -216,7 +218,6 @@ function boardGitInfo(location: BoardLocation) {
 function watchBoard(location: BoardLocation, compact: boolean): void {
   const cards = new Map<string, CachedCard>();
   const cleanedTasks = new Set<string>();
-  const cleanupRetries = new Map<string, number>();
   let nextCleanup = 0;
   let gitInfo: ReturnType<typeof boardGitInfo> = {};
   const read = (refreshGit: boolean) => {
@@ -228,9 +229,12 @@ function watchBoard(location: BoardLocation, compact: boolean): void {
       }
       return snapshotBoard(store, compact, cards);
     });
-    if (location.repository && Date.now() >= nextCleanup) {
-      const completedIds = new Set([...board.tasks, ...board.archived].filter(task => task.status === "done").map(task => task.id));
-      for (const id of retryAcceptedCleanup(location, location.repository.root, completedIds, cleanupRetries)) cleanedTasks.add(id);
+    if (Date.now() >= nextCleanup) {
+      try { for (const id of maintainBoard(location)) cleanedTasks.add(id); }
+      catch (error) {
+        try { onBoard(location, store => maintenanceFailure(store, "migration", error)); }
+        catch { /* Storage access failures remain private and retry on the next refresh. */ }
+      }
       nextCleanup = Date.now() + 15_000;
     }
     if (refreshGit || previousRepository !== location.repository) gitInfo = boardGitInfo(location);
@@ -283,45 +287,6 @@ function watchBoard(location: BoardLocation, compact: boolean): void {
   process.once("SIGTERM", stop);
 }
 
-function retryAcceptedCleanup(location: BoardLocation, root: string, completedIds: ReadonlySet<string>, retries: Map<string, number>): string[] {
-  if (!completedIds.size) return [];
-  const prefix = "refs/heads/ai-taskboard/";
-  let branches: string[];
-  try {
-    const result = invokeGit(root, ["for-each-ref", "--format=%(refname)", prefix]);
-    if (result.code !== 0) return [];
-    branches = result.stdout.trimEnd().split("\n");
-  } catch {
-    return [];
-  }
-  const cleaned: string[] = [];
-  for (const branch of branches) {
-    const id = branch.slice(prefix.length);
-    if (!completedIds.has(id)) continue;
-    const retryAt = retries.get(id);
-    if (retryAt !== undefined && Date.now() < retryAt) continue;
-    try {
-      const removed = withTaskStartLock(location, id, () => {
-        const snapshot = onBoard(location, store => {
-          if (!Object.hasOwn(store.index.tasks, id) && store.index.archive[id]?.status !== "done") return;
-          const task = readTask(store, id);
-          if (task.status !== "done" || task.git?.branch !== branch ||
-              (!task.git.accepted && !task.result?.noChanges) || hasPending(store, task)) return;
-          return { store, task };
-        });
-        return snapshot && cleanTaskWorktree(snapshot.store, snapshot.task).branchRemoved;
-      }, 0);
-      retries.delete(id);
-      if (removed) cleaned.push(id);
-    } catch (error) {
-      if (error instanceof TaskboardError && ["DIRTY_WORKTREE", "TASK_BRANCH_CHANGED", "UNMANAGED_WORKTREE"].includes(error.code)) {
-        // Persistent local state is unlikely to change between consecutive board refreshes.
-        retries.set(id, Date.now() + (retryAt === undefined ? 15_000 : 120_000));
-      }
-    }
-  }
-  return cleaned;
-}
 
 function run(
   store: BoardStore,
@@ -332,6 +297,14 @@ function run(
   filters: { archived?: boolean; tag?: string; compact?: boolean },
   lockWaitMs: number,
 ) {
+  if (command === "maintenance") {
+    if (input.action === "claim" && typeof input.id === "string" && Number.isSafeInteger(input.owner))
+      return { claimed: claimMaintenance(store, input.id, input.owner as number) };
+    if (input.action === "release" && typeof input.id === "string" && Number.isSafeInteger(input.owner)) {
+      releaseMaintenance(store, input.id, input.owner as number); return null;
+    }
+    return maintenanceQueue(store);
+  }
   const manualResult = manualAction(store, command, id, input);
   if (manualResult !== undefined) return manualResult;
   if (command === "recover-test-data") {
@@ -750,7 +723,6 @@ function run(
         transferred: text(input.transferred, "transferred", true) };
     }
     const closed = store.save(withoutVerification(updated));
-    discardTaskArtifacts(store, id);
     return closed;
   }
   if ((command === "update" || command === "unblock") && input.dependencies !== undefined) validateDependencies(store, updated);
@@ -916,9 +888,19 @@ async function main() {
             }
           }) };
         });
+      } else if (command === "maintain") {
+        data = input.attachmentsOnly === true ? onBoard(location, store => { removeLegacyAttachments(store); return { attachmentsRemoved: true }; }) : { cleaned: maintainBoard(location) };
       } else if (command === "start") {
         if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
         data = startTask(location, id, input, values.compact === true);
+      } else if (command === "cancel") {
+        if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
+        const { store, task } = onBoard(location, (store, lockWaitMs) => ({
+          store, task: run(store, command, id, extra, input, values, lockWaitMs) as Task,
+        }));
+        try { withTaskStartLock(location, id, () => cleanTaskWorktree(store, task), 0); }
+        catch { /* Private maintenance retries after the active operation releases it. */ }
+        data = task;
       } else if (command === "accept") {
         if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
         data = withTaskStartLock(location, id, () => {
