@@ -1,4 +1,4 @@
-const isImageAttachment = file => /\.(png|jpe?g|webp|gif)$/i.test(file.name);
+const isImageAttachment = file => !file.link && /\.(png|jpe?g|webp|gif)$/i.test(file.name);
 
 function openImagePreview(taskId, files, initialIndex, initialSrc, source = {
   preview: file => api.attachmentPreview(taskId, file.file),
@@ -9,7 +9,7 @@ function openImagePreview(taskId, files, initialIndex, initialSrc, source = {
   const title = element("strong");
   const viewport = element("div", undefined, "image-preview-viewport");
   viewport.tabIndex = 0;
-  viewport.setAttribute("aria-label", language("Image", "Изображение"));
+  bindLocalized(viewport, "aria-label", () => t("ui.image_0ef98c9b"), true);
   const stage = element("div", undefined, "image-preview-stage");
   let image = element("img");
   image.hidden = true;
@@ -53,16 +53,16 @@ function openImagePreview(taskId, files, initialIndex, initialSrc, source = {
 
   const zoomOut = button("", () => zoom(1 / 1.25), "quiet");
   zoomOut.append(icon("zoom-out"));
-  controlLabelForIcon(zoomOut, language("Zoom out", "Уменьшить"));
+  controlLabelForIcon(zoomOut, () => t("ui.zoom_out_f212b60f"));
   const zoomIn = button("", () => zoom(1.25), "quiet");
   zoomIn.append(icon("zoom-in"));
-  controlLabelForIcon(zoomIn, language("Zoom in", "Увеличить"));
+  controlLabelForIcon(zoomIn, () => t("ui.zoom_in_ee912b88"));
   const close = button("", () => dialog.close(), "quiet");
   close.append(icon("close"));
-  controlLabelForIcon(close, language("Close preview", "Закрыть просмотр"));
+  controlLabelForIcon(close, () => t("ui.close_preview_c54f8606"));
   const original = button("1:1", () => { fitted = false; resize(1); }, "quiet");
-  controlLabelForIcon(original, language("Actual size", "Исходный размер"));
-  const save = button(language("Save", "Сохранить"), async () => {
+  controlLabelForIcon(original, () => t("ui.actual_size_bff05f3a"));
+  const save = button(() => t("ui.save_7eea8139"), async () => {
     const file = files[displayedIndex];
     const selection = request;
     const result = await source.save(file);
@@ -78,8 +78,8 @@ function openImagePreview(taskId, files, initialIndex, initialSrc, source = {
     previous.append(icon("arrow-left"));
     const next = button("", () => move(1), "quiet");
     next.append(icon("arrow-right"));
-    controlLabelForIcon(previous, language("Previous image", "Предыдущее изображение"));
-    controlLabelForIcon(next, language("Next image", "Следующее изображение"));
+    controlLabelForIcon(previous, () => t("ui.previous_image_4a7f8790"));
+    controlLabelForIcon(next, () => t("ui.next_image_d867f6ec"));
     toolbar.append(previous, position, next);
     dialog.addEventListener("keydown", event => {
       if (event.altKey || event.ctrlKey || event.metaKey || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
@@ -87,7 +87,7 @@ function openImagePreview(taskId, files, initialIndex, initialSrc, source = {
       move(event.key === "ArrowLeft" ? -1 : 1);
     });
   }
-  toolbar.append(zoomOut, scaleLabel, zoomIn, button(language("Fit", "Вписать"), fit, "quiet"), original, save, close);
+  toolbar.append(zoomOut, scaleLabel, zoomIn, button(() => t("ui.fit_9a002f36"), fit, "quiet"), original, save, close);
   stage.append(image, status);
   viewport.append(stage);
   dialog.append(toolbar, viewport);
@@ -153,7 +153,7 @@ function openImagePreview(taskId, files, initialIndex, initialSrc, source = {
     const display = loaded => {
       if (selection !== request || !dialog.open) return;
       if (!loaded) {
-        status.textContent = language("Image unavailable: ", "Изображение недоступно: ") + files[at].name;
+        bindLocalized(status, "textContent", () => t("ui.image_unavailable_024abc1d") + files[at].name);
         status.hidden = false;
         return;
       }
@@ -173,7 +173,7 @@ function openImagePreview(taskId, files, initialIndex, initialSrc, source = {
     };
     if (entry.image) display(entry.image);
     else {
-      status.textContent = language("Loading image…", "Загрузка изображения…");
+      bindLocalized(status, "textContent", () => t("ui.loading_image_2f7fd2f5"));
       status.hidden = false;
       void entry.pending.then(display);
     }

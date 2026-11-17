@@ -21,6 +21,7 @@
 .codicon-file::before { content: "\ea7b"; }
 .codicon-arrow-up::before { content: "\eaa1"; }
 .codicon-debug-stop::before { content: "\ead7"; }
+.codicon-debug-pause::before { content: "\ead1"; }
 .codicon-stop-circle::before { content: "\eba5"; }
 .codicon-tasklist::before { content: "\eb67"; }
 .codicon-symbol-number::before { content: "\ea90"; }

@@ -16,6 +16,6 @@ export function compareReadyTasks(a: QueueTask, b: QueueTask, milestoneDates: Re
 
 export function nextReadyTask<T extends QueueTask>(tasks: T[], milestoneDates: ReadonlyMap<number, string | null>, busy: (id: string) => boolean, now = Date.now()) {
   return tasks.filter(task => task.status === "ready" && !task.unfinishedDependencies?.length &&
-    (!task.schedule || Date.parse(task.schedule.nextAt) <= now) && !busy(task.id))
+    (!task.schedule || (!task.schedule.paused && Date.parse(task.schedule.nextAt) <= now)) && !busy(task.id))
     .sort((a, b) => compareReadyTasks(a, b, milestoneDates))[0];
 }

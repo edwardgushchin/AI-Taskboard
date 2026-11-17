@@ -10,7 +10,7 @@ import { statusNotice } from "../cli/task-messages.ts";
 
 // Run under the board lock, shared by all windows and CLI writers. Persist the
 // delivery batch before writing chat files so an interrupted replay is idempotent.
-export function syncTaskStatusNotices(project: string, russian = true) {
+export function syncTaskStatusNotices(project: string, language: string | boolean = true) {
   return onBoard(locateBoard(project), store => {
     const path = join(project, ".tasks", "manager-status-position.json");
     type Notice = { id: string; at: number; eventAt?: string; text: string };
@@ -36,7 +36,7 @@ export function syncTaskStatusNotices(project: string, russian = true) {
       if (saved) {
         for (let i = position.through[id] ?? 0; i < task.history.length; i++) {
           const event = task.history[i]!;
-          const text = statusNotice(task, event, russian);
+          const text = statusNotice(task, event, language);
           if (text) events.push({ task: id, sequence: i + 1, at: event.at, text });
         }
       }
@@ -66,33 +66,67 @@ type Run = {
 type Turn = { messages: Message[]; items: BoardActivity[]; durationMs?: number; lane?: Run["lane"]; goalId?: string };
 const cursorPrefix = "local:";
 const filePattern = /^\d{13}-[0-9a-f-]{36}\.json$/i;
-const unreadByProject = new Map<string, string[]>();
+type ReadPosition = { at: number; file: string; index: number };
+type UnreadState = { unread: string[]; through?: ReadPosition };
+const unreadByProject = new Map<string, UnreadState>();
 
 export const isLocalManagerCursor = (cursor: string | null) => cursor?.startsWith(cursorPrefix) ?? false;
 
-export function managerUnread(project: string): string[] {
+function unreadState(project: string): UnreadState {
   const cached = unreadByProject.get(project);
   if (cached) return cached;
   const path = join(project, ".tasks", "manager-unread.json");
-  const saved: unknown = exists(path) ? readJson(path) : [];
-  if (!Array.isArray(saved) || saved.some(id => typeof id !== "string")) {
+  const saved = exists(path) ? readJson(path) : [];
+  const state: UnreadState = Array.isArray(saved) ? { unread: saved } : saved as UnreadState;
+  if (!state || !Array.isArray(state.unread) || state.unread.some(id => typeof id !== "string") ||
+      (state.through && (!Number.isFinite(state.through.at) || !filePattern.test(state.through.file) || !Number.isSafeInteger(state.through.index) || state.through.index < 0))) {
     throw new Error("Invalid manager unread messages.");
   }
-  unreadByProject.set(project, saved);
-  return saved;
+  unreadByProject.set(project, state);
+  return state;
 }
 
-function updateManagerUnread(project: string, ids: string[]): boolean {
-  const previous = managerUnread(project);
-  if (ids.length === previous.length && ids.every((id, index) => id === previous[index])) return false;
-  writeJson(join(project, ".tasks", "manager-unread.json"), ids);
-  unreadByProject.set(project, ids);
+export function managerUnread(project: string): string[] {
+  return unreadState(project).unread;
+}
+
+function updateManagerUnread(project: string, ids: string[], through = unreadState(project).through): boolean {
+  const previous = unreadState(project);
+  if (ids.length === previous.unread.length && ids.every((id, index) => id === previous.unread[index]) &&
+      through?.at === previous.through?.at && through?.file === previous.through?.file && through?.index === previous.through?.index) return false;
+  const state = { unread: ids, through };
+  writeJson(join(project, ".tasks", "manager-unread.json"), state);
+  unreadByProject.set(project, state);
   return true;
 }
 
+const comparePosition = (a: ReadPosition, b: ReadPosition) =>
+  a.at - b.at || (a.file < b.file ? -1 : a.file > b.file ? 1 : a.index - b.index);
+
+function messagePosition(file: string, item: BoardActivity, index: number): ReadPosition {
+  const eventAt = item.at ? Date.parse(item.at) : NaN;
+  return { at: Number.isFinite(eventAt) ? eventAt : Number(file.slice(0, 13)), file, index };
+}
+
 export function readManagerMessages(project: string, ids: string[]) {
-  const read = new Set(ids);
-  return updateManagerUnread(project, managerUnread(project).filter(id => !read.has(id)));
+  const requested = new Set(ids);
+  const positions = new Map<string, ReadPosition>();
+  const folder = join(project, ".tasks", "manager-chat");
+  if (exists(folder)) for (const file of readdirSync(folder).filter(name => filePattern.test(name)).sort()) {
+    const run = readJson(join(folder, file)) as Run;
+    for (const [index, item] of run.items.entries()) {
+      if (incomingMessages({ ...run, items: [item] }).length) positions.set(item.id, messagePosition(file, item, index));
+    }
+  }
+  let through = unreadState(project).through;
+  for (const id of requested) {
+    const position = positions.get(id);
+    if (position && (!through || comparePosition(position, through) > 0)) through = position;
+  }
+  return updateManagerUnread(project, managerUnread(project).filter(id => {
+    const position = positions.get(id);
+    return !position || !through || comparePosition(position, through) > 0;
+  }), through);
 }
 
 function incomingMessages({ lane, items }: Run) {
@@ -110,7 +144,10 @@ export function saveManagerHistory(project: string, startedAt: number, id: strin
   const path = join(folder, String(startedAt).padStart(13, "0") + "-" + id + ".json");
   const incoming = incomingMessages(run);
   const previous = incoming.length && exists(path) ? new Set(incomingMessages(readJson(path) as Run)) : new Set<string>();
-  const added = incoming.filter(id => !previous.has(id));
+  const through = unreadState(project).through;
+  const file = String(startedAt).padStart(13, "0") + "-" + id + ".json";
+  const added = incoming.filter(messageId => !previous.has(messageId) && (!through ||
+    comparePosition(messagePosition(file, run.items.find(item => item.id === messageId)!, run.items.findIndex(item => item.id === messageId)), through) > 0));
   // Write unread first: replay after an interrupted chat write must not lose
   // the unread marker. Existing messages retain their read state on replay.
   const changed = added.length > 0 && updateManagerUnread(project, [...new Set([...managerUnread(project), ...added])]);

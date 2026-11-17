@@ -1,9 +1,15 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+export function localizationFixture(locale = "ru") {
+  const localization = createRequire(import.meta.url)("../src/desktop/localization.cjs");
+  return readFileSync(new URL("../src/desktop/localization.cjs", import.meta.url), "utf8") +
+    `\nObject.assign(window.taskboardLocalization.catalogs, ${JSON.stringify(localization.catalogs)});\nwindow.taskboardLocalization.select(${JSON.stringify(locale)});\n`;
+}
 
 export function electronCheck(script, name, timeout) {
   if (!process.versions.electron) {

@@ -2,6 +2,8 @@ const chatMarkdown = window.markdownit?.({ breaks: true, linkify: true, html: fa
 
 const sourceLocation = new RegExp(sourceFile.source.replace(/\$$/, ":[1-9]\\d*(?::\\d+)?$"), "i");
 const fullDigest = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+const shortCommit = /^[0-9a-f]{4,39}$/i;
+const commitContext = /(?:^|[^\p{L}\p{N}_])(?:commit|коммит[а-яё]*)[\s:—–=-]*$/iu;
 const reportSentences = new Intl.Segmenter(undefined, { granularity: "sentence" });
 
 function localDocumentLink(value) {
@@ -114,11 +116,14 @@ if (chatMarkdown) {
   const digest = /(?<![\p{L}\p{N}_.%/\\-])(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{40})(?![\p{L}\p{N}_%/\\-]|\.[\p{L}\p{N}])/u;
   const reportReferences = new RegExp(digest.source + "|" + agentReferences.source, "gu");
   chatMarkdown.core.ruler.after("local_markdown_links", "chat_references", state => {
-    const reference = /(?<![\p{L}\p{N}_.\/%\\-])(?:T-\d{4,}|v?\d+\.\d+\.\d+(?:-[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?(?:\+[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?|[\da-fA-F]{64}|[\da-fA-F]{40})(?![\p{L}\p{N}_\/%\\-])/gu;
+    const reference = /(?<![\p{L}\p{N}_.\/%\\-])(?:T-\d{4,}|v?\d+\.\d+\.\d+(?:-[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?(?:\+[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?|[\da-fA-F]{64}|[\da-fA-F]{4,40})(?![\p{L}\p{N}_\/%\\-]|\.[\p{L}\p{N}])/gu;
     for (const block of state.tokens) {
       if (block.type !== "inline") continue;
       let inLink = false;
+      let prefix = "";
       block.children = block.children.flatMap(token => {
+        const before = prefix;
+        prefix += token.content;
         if (token.type === "link_open") inLink = true;
         if (token.type === "link_close") inLink = false;
         if (inLink || !["text", "code_inline"].includes(token.type)) return [token];
@@ -126,13 +131,14 @@ if (chatMarkdown) {
         let cursor = 0;
         for (const match of token.content.matchAll(reference)) {
           const value = match[0];
+          if (shortCommit.test(value) && !commitContext.test(before + token.content.slice(0, match.index))) continue;
           if (token.type === "code_inline" && value !== token.content) continue;
           if (match.index > cursor) {
             const text = new state.Token("text", "", 0);
             text.content = token.content.slice(cursor, match.index);
             parts.push(text);
           }
-          const type = /^T-/.test(value) ? "chat_task" : fullDigest.test(value) ? "code_inline" : "chat_version";
+          const type = /^T-/.test(value) ? "chat_task" : fullDigest.test(value) || shortCommit.test(value) ? "code_inline" : "chat_version";
           const part = new state.Token(type, type === "code_inline" ? "code" : "", 0);
           part.content = value;
           parts.push(part);
@@ -240,16 +246,16 @@ function addCodeCopy(pre, code) {
     try {
       await navigator.clipboard.writeText(code.textContent);
       copyIcon.classList.replace("codicon-copy", "codicon-check");
-      controlLabelForIcon(copy, language("Copied. Copy code again", "Скопировано. Скопировать код ещё раз"));
+      controlLabelForIcon(copy, () => t("ui.copied_copy_code_again_b2b609e4"));
     } catch {
-      controlLabelForIcon(copy, language("Could not copy. Select the code or retry.", "Не удалось скопировать. Выделите код или повторите."));
+      controlLabelForIcon(copy, () => t("ui.could_not_copy_select_the_code_or_retry_3ed46a84"));
       copyIcon.classList.replace("codicon-check", "codicon-copy");
     }
   }, "quiet chat-code-copy");
   const copyIcon = element("i", undefined, "icon codicon codicon-copy");
   copyIcon.setAttribute("aria-hidden", "true");
   copy.append(copyIcon);
-  controlLabelForIcon(copy, language("Copy code", "Скопировать код"));
+  controlLabelForIcon(copy, () => t("ui.copy_code_968ce1d3"));
   toolbar.append(copy);
   pre.before(wrapper);
   wrapper.append(toolbar, pre);
@@ -290,24 +296,26 @@ function showCoordinationEvidence(block) {
 function formatReportReferences(block) {
   for (const code of block.querySelectorAll(":not(pre, a) > code")) {
     const value = code.textContent;
-    if (!fullDigest.test(value) || code.closest("a, pre")) continue;
+    if ((!fullDigest.test(value) && !shortCommit.test(value)) || code.closest("a, pre")) continue;
     const range = document.createRange();
     range.selectNodeContents(code.closest("p, li, td") ?? code.parentElement);
     range.setEndBefore(code);
     const prefix = range.toString();
+    const short = shortCommit.test(value);
+    if (short && !commitContext.test(prefix)) continue;
     const labelBefore = /(?:^|[^\p{L}\p{N}_])(SHA-?\d+|checksum|контрольн\S*\s+сумм\S*|commit|коммит\S*)[\s:—–=-]*$/iu.exec(prefix)?.[1] ?? "";
     const fileBefore = /(?:^|\s)(?:\S+\.[\p{L}\p{N}]+|(?:file|файл)\s+[^:\n]+)[\s:：=—–-]*$/iu.test(prefix);
-    const commit = /^(?:commit|коммит)/iu.test(labelBefore) ||
+    const commit = short || /^(?:commit|коммит)/iu.test(labelBefore) ||
       (value.length === 40 && !labelBefore && !fileBefore);
-    const label = language("Copy full hash", "Скопировать полный хеш");
+    const label = short ? t("ui.copy_hash") : t("ui.copy_full_hash_725de55a");
     const copy = button("", async () => {
       try {
         await navigator.clipboard.writeText(value);
         icon.classList.replace("codicon-copy", "codicon-check");
-        copy.setAttribute("aria-label", language("Copied. ", "Скопировано. ") + label);
+        bindLocalized(copy, "aria-label", () => t("ui.copied_243d5f98") + label, true);
       } catch {
         icon.classList.replace("codicon-check", "codicon-copy");
-        copy.setAttribute("aria-label", language("Copy failed. Retry.", "Не удалось скопировать. Повторить."));
+        bindLocalized(copy, "aria-label", () => t("ui.copy_failed_retry_eeb3cc51"), true);
       }
     }, "quiet chat-digest");
     const icon = element("i", undefined, "icon codicon codicon-copy");
@@ -406,17 +414,17 @@ function chatText(text, context = { taskId: taskInSheet?.id }) {
 async function openMarkdownPreview(value, context) {
   const focus = document.activeElement;
   const dialog = element("dialog", undefined, "markdown-preview");
-  const label = language("Document preview", "Просмотр документа");
+  const label = t("ui.document_preview_9653cffc");
   dialog.setAttribute("aria-label", label);
   const header = element("header", undefined, "sheet-header");
   const title = element("h2", label);
   const close = button("", () => dialog.close(), "quiet");
   close.append(icon("close"));
-  controlLabelForIcon(close, language("Close preview", "Закрыть просмотр"));
+  controlLabelForIcon(close, () => t("ui.close_preview_c54f8606"));
   header.append(title, close);
   const content = element("div", undefined, "markdown-preview-content");
   content.tabIndex = 0;
-  const status = element("p", language("Loading document…", "Загрузка документа…"), "muted");
+  const status = element("p", () => t("ui.loading_document_5f66a116"), "muted");
   status.setAttribute("role", "status");
   content.append(status);
   dialog.append(header, content);

@@ -10,7 +10,7 @@ import { codexRpc } from "../src/desktop/codex-rpc.ts";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import { CodexTokenUsage } from "../src/desktop/codex-token-usage.ts";
-import { boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "../src/desktop/board-agent-hooks.ts";
+import { responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "../src/desktop/board-agent-hooks.ts";
 import { withBoardMcp } from "../src/desktop/board-mcp.ts";
 import { githubReadTool } from "../src/desktop/github-read.ts";
 import { runActivity, runLog } from "../src/desktop/run-activity.ts";
@@ -46,7 +46,10 @@ test("task discussion streams task usage before success, provider failure, or a 
           assert.match(params.developerInstructions, /Report all material gaps together in a single return/);
           assert.match(params.developerInstructions, /check every criterion, even if you already found a defect/);
           assert.match(params.developerInstructions, /tested revision or provides concrete evidence that it still applies/);
-          assert.match(params.developerInstructions, /Ponytail.*humanizer-ru.*worklog_record/s);
+          assert.match(params.developerInstructions, /These rules apply.*worklog_record/s);
+          assert.match(params.developerInstructions, /Apply built-in rules silently/);
+          assert.match(params.developerInstructions, /Internally verify recorded:true and staged:false/);
+          assert.doesNotMatch(params.developerInstructions, /Ponytail|humanizer-ru|Codex Worklog/);
         } else {
           assert.match(params.developerInstructions, /Use built-in web search for relevant public sources/);
         }
@@ -98,7 +101,7 @@ test("task discussion streams task usage before success, provider failure, or a 
   for (const outcome of ["ok", "unknown", "failed", "closed", "storage-failed", "review", "review-storage-failed"]) {
     const reports: TokenUsageReport[] = [];
     const runtime = runInNewContext(stripTypeScriptTypes(source) + "\n({ replyToTask, reviewWithCodex })", {
-      trackActiveRun, trackProvider, claimDiscussion, spawn, codexRpc, CodexTokenUsage, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogReminder, worklogTool, withBoardMcp, process, setTimeout, clearTimeout, runActivity, runLog,
+      trackActiveRun, trackProvider, claimDiscussion, spawn, codexRpc, CodexTokenUsage, manualContext: () => "", readBoardSettings: () => ({}), locateBoard: (path: string) => path, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogReminder, worklogTool, withBoardMcp, process, setTimeout, clearTimeout, runActivity, runLog,
       githubReadTool,
       configuredCodex: async () => ({ path: process.execPath, args: [stub, outcome] }),
       chatTools: [], saveChatImages: async () => [],

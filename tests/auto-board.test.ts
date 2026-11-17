@@ -1,3 +1,5 @@
+import { isManual } from "../src/cli/manual-board.ts";
+import localization from "../src/desktop/localization.cjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
@@ -26,8 +28,8 @@ function fixture(mode = "human") {
   const fail = (code: string) => ({ ok: false, error: { code, message: code } });
   const runtime = runInNewContext(stripTypeScriptTypes(code) + "\n({scheduleAutoBoard, autoBoards})", {
     subscriptions: new Map([["project", watch]]), closingProjects: new Set(), boardWorkRequests: new Map(),
-    nextReadyTask, boardReviewMode, agentSlots: slots, projectIdentity: (path: string) => path,
-    executorBusy: (_: string, id: string) => busy.has(id), lang: (text: string) => text,
+    isManual, nextReadyTask, boardReviewMode, agentSlots: slots, projectIdentity: (path: string) => path,
+    executorBusy: (_: string, id: string) => busy.has(id), t: (key: string) => localization.text(key, {}, "en"),
     broadcastBoardChat: (_: string, __: string, value: any) => errors.push(value.error),
     reserveAgent: (_: string, role: "reviewer") => slots.acquire("project", role, board.settings.agentLimits),
     publishReviewActivity: () => {},
@@ -60,7 +62,7 @@ function fixture(mode = "human") {
       return { ok: true, data: task };
     },
     launchTask: async (_: string, id: string, ...args: any[]) => {
-      assert.equal(args.at(-1), true);
+      assert.equal(args.at(-1), Boolean(board.settings.autoMode));
       if (launchError) { const error = launchError; launchError = undefined; return fail(error); }
       const task = board.tasks.find((task: any) => task.id === id);
       const release = slots.acquire("project", task.mergeRepair ? "reviewer" : "executor", board.settings.agentLimits);
@@ -164,4 +166,33 @@ test("a changed target is reviewed again, and missing evidence does not cause re
     assert.deepEqual(f.accepted, needsHuman ? [] : ["T-0001"]);
     assert.equal(f.board.tasks[0].status, needsHuman ? "review" : "done");
   }
+});
+
+test("manual boards never dispatch or review even with stale automatic settings", async () => {
+  for (const autoMode of [true, false]) {
+    const f = fixture("reviewer"); Object.assign(f.board.settings, { boardType: "manual", autoMode });
+    f.add("T-0001", { launchRequested: true }); f.add("T-0002", { status: "review", reviewApproved: true });
+    await f.tick(); assert.deepEqual(f.launches, []); assert.deepEqual(f.reviews, []); assert.deepEqual(f.accepted, []);
+  }
+});
+
+for (const mode of ["human", "reviewer"]) test("explicit child queue without auto mode: " + mode, async () => {
+  const f = fixture(mode); f.board.settings.autoMode = false;
+  f.add("T-0001"); // unrelated ready work must remain untouched
+  const parent = f.slots.acquire("project", "executor", f.board.settings.agentLimits)!;
+  f.add("T-0002", { launchRequested: true, origin: { parent: "T-0099", key: "local:disk:event1", basis: "Local check" } });
+  await f.tick(); assert.deepEqual(f.launches, []);
+  parent(); await f.tick(); assert.deepEqual(f.launches, ["T-0002"]);
+  await f.tick(); assert.deepEqual(f.launches, ["T-0002"]);
+  f.finish("T-0002"); await f.tick();
+  assert.equal(f.board.tasks[1].status, "review"); assert.deepEqual(f.accepted, []);
+});
+test("explicit request survives launch failure and waits for real dependencies", async () => {
+  const f = fixture(); f.board.settings.autoMode = false;
+  f.add("T-0001"); f.add("T-0002", { launchRequested: true, dependencies: ["T-0001"] });
+  await f.tick(); assert.deepEqual(f.launches, []);
+  f.board.tasks[0].status = "done"; f.failLaunch("CODEX_UNAVAILABLE");
+  await f.tick(); assert.equal(f.board.tasks[1].status, "ready");
+  assert.equal(f.board.tasks[1].launchRequested, true);
+  await f.tick(); assert.deepEqual(f.launches, ["T-0002"]);
 });

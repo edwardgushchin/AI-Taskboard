@@ -1,3 +1,5 @@
+import localization from "../src/desktop/localization.cjs";
+import { isManual } from "../src/cli/manual-board.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
@@ -34,7 +36,7 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
   const launched: any[] = [];
   const access = { full: false };
   const subscriptions = new Map();
-  const savedSettings = new Map<string, { agentLimits: Partial<import("../src/cli/model.ts").AgentLimits> }>();
+  const savedSettings = new Map<string, Partial<import("../src/cli/model.ts").BoardSettings>>();
   const previousTurn = { status: "completed", completedAt: 1 as number | null, reads: 0 };
   type Completion = { reason: string; disconnected?: boolean; interrupted?: boolean } | undefined;
   const completion = Promise.withResolvers<Completion>();
@@ -44,11 +46,11 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
   const slots = createAgentSlots();
   const runtime = runInNewContext(stripTypeScriptTypes(lifecycle) + "\n({launchTask, scheduleAgentWork, scheduleRecurringTasks, confirmProjectClose, projectOperations, runningTasks, activeAgents, deferredExecutors})", {
     AbortController, performance, setTimeout, clearTimeout, setImmediate, subscriptions, agentSlots: slots,
-    runtimeLocation: (project: string) => project,
+    isManual, runtimeLocation: (project: string) => project,
     readBoardSettings: (project: string) => savedSettings.get(project) ?? subscriptions.get(project)?.board.settings ?? {},
     scheduleAutoReview: () => {}, scheduleAutoBoard: () => {}, projectIdentity: (project: string) => project,
     broadcastBoardChat: () => {},
-    lang: (english: string) => english, cliFailure: failure, missingCodexThread,
+    t: (key: string, parameters = {}) => localization.text(key, parameters, "en"), localization, cliFailure: failure, missingCodexThread,
     app: { getPath: () => "profile" }, dialog: { showMessageBox: async () => ({ response: 1 }) },
     executorFullAccess: () => access.full, process: { platform: process.platform },
     configuredCodex: async () => ({}), runLog: (items: Map<string, unknown>) => [...items.values()], rm: async () => {},
@@ -113,6 +115,18 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
   return { runtime, task, calls, launched, previousTurn, completion, retryCompletion, finalCompletion, subscriptions, slots, savedSettings, access };
 }
 
+test("manual boards reject direct launches and stale recurring schedules", async () => {
+  const f = fixture("started");
+  f.savedSettings.set("project", { boardType: "manual", autoMode: true });
+  assert.equal((await f.runtime.launchTask("project", f.task.id)).error.code, "MANUAL_BOARD");
+  f.task.status = "ready";
+  f.task.schedule = { everyMinutes: 1, nextAt: new Date(0).toISOString() };
+  f.subscriptions.set("project", { board: { tasks: [f.task], settings: { boardType: "manual" } }, tabs: new Set([{}]) });
+  f.runtime.scheduleRecurringTasks();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.launched.length, 0);
+});
+
 test("launch uses saved limits when the watch still has the previous value", async () => {
   for (const limit of [3, 1, 0]) {
     const f = fixture("started");
@@ -164,6 +178,7 @@ test("the scheduler launches a due approved card once, waits for an executor slo
   const snapshot = structuredClone(f.task);
   const agentLimits = { executor: 1 };
   const tasks = [
+    { ...snapshot, id: "T-0000", schedule: { ...snapshot.schedule, paused: true } },
     { ...snapshot, id: "T-0002", status: "draft" }, { ...snapshot, id: "T-0003", status: "blocked" },
     { ...snapshot, id: "T-0004", unfinishedDependencies: ["T-0002"] },
     { ...snapshot, id: "T-0005", schedule: { time: "09:00", nextAt: new Date(2100, 0, 1, 9).toISOString() } }, snapshot,
@@ -186,6 +201,37 @@ test("the scheduler launches a due approved card once, waits for an executor slo
   assert.ok(Date.parse(f.task.schedule.nextAt) > Date.now());
   assert.equal(f.slots.available("other", "executor"), 3);
   release();
+});
+
+test("pausing while waiting for a slot prevents launch across windows; an active pass finishes paused", async () => {
+  for (const rule of [{ everyMinutes: 1 }, { time: "09:00" }]) {
+    const f = fixture("started", { id: "result", type: "agentMessage", phase: "final_answer", status: "completed", title: "", text: "Completed" });
+    f.task.status = "ready";
+    f.task.schedule = { ...rule, nextAt: "2000-01-01T00:00:00Z" };
+    const watch = { board: { tasks: [f.task], settings: { agentLimits: { executor: 1 } } }, listeners: [], tabs: new Set([1, 2]) };
+    f.subscriptions.set("project", watch);
+    const release = f.slots.acquire("project", "executor", { executor: 1 })!;
+    f.runtime.scheduleRecurringTasks();
+    Object.assign(f.task, changeTask(f.task, "update", { schedulePaused: true }));
+    release();
+    f.runtime.scheduleRecurringTasks();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.launched.length, 0);
+    Object.assign(f.task, changeTask(f.task, "update", { schedulePaused: false }));
+    f.task.schedule!.nextAt = "2000-01-01T00:00:00Z";
+    f.runtime.scheduleRecurringTasks();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.launched.length, 1);
+    Object.assign(f.task, changeTask(f.task, "update", { schedulePaused: true }));
+    assert.ok(f.runtime.runningTasks.has("project\0" + f.task.id));
+    f.completion.resolve(undefined);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.task.status, "ready", JSON.stringify(f.task.blocked));
+    assert.equal(f.task.schedule!.paused, true);
+    f.runtime.scheduleRecurringTasks(Date.now() + 86400000);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.launched.length, 1);
+  }
 });
 
 test("each board has separate pools with per-role inheritance and unlimited overrides", () => {
@@ -616,7 +662,7 @@ test("new-chat continuation requires an explicit confirmation and a matching blo
   runInNewContext(stripTypeScriptTypes(handlerNode.getText(parsed)), {
     ipcMain: { handle: (_name: string, callback: typeof handler) => { handler = callback; } },
     stateOf: () => ({ project: "project", window: {} }), taskIdPattern, cliFailure: failure,
-    lang: (english: string) => english, callCli: async () => ({ ok: true, data: task }),
+    t: (key: string, parameters = {}) => localization.text(key, parameters, "en"), localization, callCli: async () => ({ ok: true, data: task }),
     dialog: { showMessageBox: async (_window: unknown, options: { defaultId: number; cancelId: number }) => {
       assert.equal(options.defaultId, 0); assert.equal(options.cancelId, 0); return { response };
     } },
