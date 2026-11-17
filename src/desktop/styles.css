@@ -499,6 +499,9 @@ select:hover:not(:disabled) {
   background: color-mix(in srgb, var(--text) 9%, transparent); font-size: 10px; font-variant-numeric: tabular-nums;
 }
 .lane-cards { display: grid; gap: 9px; min-height: 13px; }
+.lane-create { display: flex; align-items: center; justify-content: flex-start; gap: 8px; width: 100%; }
+.board-type-choice { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 16px; text-align: left; }
+.board-type-choice span { font-weight: normal; color: var(--muted); white-space: normal; }
 .lane-more.button { justify-self: start; padding: 3px 5px; border: 0; color: var(--accent); font-size: 15px; }
 .task-card {
   position: relative; width: 100%; min-width: 0; display: grid; padding: 0;

@@ -476,7 +476,7 @@ function mountAppMenu() {
     }
     if (action === "settings") return settings();
     if (action === "board-settings") return boardSettings();
-    if (action === "create-project") return api.createBoard();
+    if (action === "create-project") return createBoard();
     return api.menuAction(action);
   });
 
@@ -1245,6 +1245,8 @@ function laneTools(state, title, tasks, total, count, content) {
     summary.title = filterLabel;
     summary.setAttribute("aria-label", active ? filterLabel + " (" + active + ")" : filterLabel);
   }
+  const create = manualBoard() ? button("Создать задачу", () => createManualTask(state), "quiet lane-create") : undefined;
+  if (create) create.prepend(icon("plus"));
   function renderBatch() {
     const children = matching.slice(0, visibleLimit).map(card);
     if (matching.length > visibleLimit) {
@@ -1262,6 +1264,7 @@ function laneTools(state, title, tasks, total, count, content) {
       empty.querySelector("button").hidden = !filtered;
       children.push(empty);
     }
+    if (create) children.push(create);
     syncChildren(content, children);
   }
   function focusedCardPosition() {
@@ -5136,7 +5139,7 @@ function update(next) {
   }
 }
 
-byId("welcome-create").addEventListener("click", protect(() => api.createBoard()));
+byId("welcome-create").addEventListener("click", protect(createBoard));
 byId("git-branches").addEventListener("toggle", protect(event => {
   gitMenuKeys.abort();
   gitMenuKeys = new AbortController();
@@ -5245,6 +5248,46 @@ api.onTheme(theme => {
   applyTheme(theme);
 });
 api.bootstrap().then(update).catch(error => notice(error.message, t("ui.application_startup_a6ae49b2")));
+
+function createBoard() {
+  openSheet("board-type", "Создать доску");
+  body.append(element("p", "Выберите тип доски. После создания его нельзя изменить.", "muted"));
+  const choices = element("div", undefined, "form");
+  for (const [type, title, description] of [
+    ["agent", "Доска для агентов", "Задачи выполняют агенты. Вы задаёте результат и проверяете работу."],
+    ["manual", "Обычная доска", "Дела выполняете вы, а ИИ помогает их создавать и редактировать."],
+  ]) {
+    const choice = button("", async () => {
+      for (const control of choices.querySelectorAll("button")) control.disabled = true;
+      try {
+        const result = await api.createBoard(type);
+        if (result?.ok === false) return notice(boardError(result.error));
+        if (sheetKind === "board-type") sheet.close();
+      } finally { for (const control of choices.querySelectorAll("button")) control.disabled = false; }
+    }, "board-type-choice");
+    choice.dataset.boardType = type;
+    choice.append(element("strong", title), element("span", description));
+    choices.append(choice);
+  }
+  body.append(choices, button("Отмена", () => sheet.close()));
+  choices.querySelector("button").focus();
+}
+
+function createManualTask(status) {
+  const column = manualColumns().find(c => c.id === status);
+  if (!manualBoard() || !column) return;
+  const project = frame.project;
+  const generation = projectGeneration;
+  const editor = form("manual-create", "Создать задачу · " + column.name, [
+    { name: "title", label: "Название", required: true },
+    { name: "description", label: "Описание", type: "area" },
+  ], "Создать задачу", async values => {
+    if (project !== frame.project || generation !== projectGeneration) return;
+    const created = await command("create", undefined, { title: values.title, description: values.description, initialStatus: status });
+    if (created && editor.isConnected && sheetKind === "manual-create") sheet.close();
+  });
+  editor.querySelector("input").focus();
+}
 
 function manualBoardSettings() {
   const previous = structuredClone(manualColumns());

@@ -98,6 +98,7 @@ const titleBarHeight = 36;
 const windowStates = new Map<number, WindowState>();
 const subscriptions = new Map<string, BoardWatch>();
 const commands = new Map<string, string[]>([
+  ["create", ["create"]],
   ["manual-move", ["manual-move"]], ["manual-columns", ["manual-columns"]],
   ["project-usage", ["project-usage"]],
   ["init", ["init", "--compact"]], ["list", ["list", "--compact"]], ["show", ["show"]], ["update", ["update"]],
@@ -529,22 +530,14 @@ async function closeTab(owner: WindowState, tab: ProjectTab): Promise<void> {
   }
 }
 
-async function pickProject(state: ProjectTab, create = false): Promise<void> {
+async function pickProject(state: ProjectTab, create: false | "agent" | "manual" = false): Promise<void> {
   const result = await dialog.showOpenDialog(state.window, {
     title: create ? t("ui.create_board_e02d5c15") : t("ui.open_existing_board_754e46e5"),
     defaultPath: state.project && existsSync(state.project) ? state.project : undefined,
     properties: ["openDirectory"],
   });
   if (!result.canceled && result.filePaths[0] && !state.window.isDestroyed()) {
-    let type: false | "agent" | "manual" = false;
-    if (create) {
-      const choice = await dialog.showMessageBox(state.window, { type: "question", title: "Тип доски",
-        message: "Какую доску создать?", detail: "Доска для агентов: задачи выполняют агенты.\nОбычная доска: дела выполняете вы, ИИ помогает их вести. Тип нельзя изменить после создания.",
-        buttons: ["Доска для агентов", "Обычная доска", "Отмена"], cancelId: 2 });
-      if (choice.response === 2) return;
-      type = choice.response === 1 ? "manual" : "agent";
-    }
-    await openProject(state, result.filePaths[0], type);
+    await openProject(state, result.filePaths[0], create);
   }
 }
 
@@ -2165,7 +2158,10 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
     }
   }
 }
-ipcMain.handle("board:create", async event => pickProject(stateOf(event), true));
+ipcMain.handle("board:create", async (event, type: unknown) => {
+  if (type !== "agent" && type !== "manual") return cliFailure("INVALID_INPUT", "Выберите тип доски в приложении.");
+  return pickProject(stateOf(event), type);
+});
 ipcMain.handle("board:recent", async (event, path: unknown) => {
   const state = stateOf(event);
   if (typeof path !== "string" || !recentBoards.includes(path)) throw new Error("Unknown recent board.");

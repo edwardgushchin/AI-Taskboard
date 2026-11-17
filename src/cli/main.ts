@@ -357,7 +357,13 @@ function run(
   }
   if (command === "create") {
     const task = createTask(store.allocateId(), input);
-    if (isManual(store.index.settings)) task.status = store.index.settings.manualColumns![0].id;
+    if (isManual(store.index.settings)) {
+      if (input.initialStatus !== undefined && input.actor !== "user") throw new TaskboardError("MANUAL_BOARD", "Начальную колонку выбирает пользователь.");
+      const column = store.index.settings.manualColumns!.find(c => c.id === (input.initialStatus ?? store.index.settings.manualColumns![0].id));
+      if (!column) throw new TaskboardError("INVALID_INPUT", "Колонка удалена. Выберите существующую колонку.");
+      task.status = column.id;
+      if (column.terminal) task.closedAt = task.updatedAt;
+    } else if (input.initialStatus !== undefined) throw new TaskboardError("INVALID_INPUT", "Выбор начальной колонки доступен только на обычной доске.");
     validateDependencies(store, task);
     return createWithAttachments(store, task.tags.length ? assignTags(store, task) : task, input.attachmentSources);
   }

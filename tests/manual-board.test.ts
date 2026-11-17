@@ -25,6 +25,15 @@ test("weekly manual board: public CLI, reloads, transitions, columns and neighbo
     let board = cli(manual, "init", undefined, { boardType: "manual", git: true });
     assert.equal(existsSync(join(manual, ".git")), false);
     const first = board.settings.manualColumns[0]; const work = board.settings.manualColumns[1]; const done = board.settings.manualColumns[2];
+    for (const column of [first, work, done]) {
+      const created = cli(manual, "create", undefined, { actor: "user", title: column.name, initialStatus: column.id });
+      assert.equal(created.status, column.id);
+      assert.equal(Boolean(created.closedAt), column.terminal);
+      assert.equal(created.git, undefined);
+      assert.equal(created.history.some((e: { action: string }) => e.action === "start"), false);
+    }
+    cli(manual, "create", undefined, { actor: "user", title: "Missing column", initialStatus: "manual:removed" }, "INVALID_INPUT");
+    cli(manual, "create", undefined, { actor: "manager", title: "Not a user move", initialStatus: work.id }, "MANUAL_BOARD");
     const attachmentPath = join(root, "shopping.txt"); writeFileSync(attachmentPath, "Milk and bread");
     let card = cli(manual, "create", undefined, { title: "Buy groceries", actor: "manager", attachmentSources: [{ path: attachmentPath }] });
     const attachments = card.attachments;
@@ -67,6 +76,7 @@ test("weekly manual board: public CLI, reloads, transitions, columns and neighbo
     assert.equal(readFileSync(join(manual, ".tasks", "attachments", card.id, attachments[0].file), "utf8"), "Milk and bread");
     assert.equal(existsSync(join(manual, ".tasks", "worktrees", card.id)), false);
     cli(agent, "init");
+    cli(agent, "create", undefined, { actor: "user", title: "Wrong process", initialStatus: work.id }, "INVALID_INPUT");
     const legacyPath = join(agent, ".tasks", "board.json");
     const legacy = JSON.parse(readFileSync(legacyPath, "utf8")); delete legacy.settings.boardType; writeFileSync(legacyPath, JSON.stringify(legacy));
     const task = cli(agent, "create", undefined, { title: "Agent work", criteria: ["Works"] });
