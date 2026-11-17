@@ -971,7 +971,6 @@ function card(task) {
   meta.append(identity);
   const runStatus = element("span", undefined, "task-run-status");
   renderAgentRunStatus(runStatus, task);
-  if (!runStatus.hidden) meta.append(runStatus);
   if (task.unfinishedDependencies?.length && task.status === "draft") {
     meta.append(taskIndicator("link", task.unfinishedDependencies.length,
       t("ui.unfinished_dependencies_5cfaaab6"), "dependency-warning"));
@@ -992,6 +991,7 @@ function card(task) {
     attachments.append(icon("attach"), String(task.attachments.length));
     meta.append(attachments);
   }
+  if (!runStatus.hidden) item.append(runStatus);
   item.append(meta);
   card.replaceChildren(item);
   boardCards.set(task.id, { node: card, signature });

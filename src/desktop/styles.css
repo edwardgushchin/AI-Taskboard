@@ -544,7 +544,10 @@ select:hover:not(:disabled) {
 .task-card .tag { padding: 4px 10px; border-radius: 14px; font-size: 12px; }
 .task-meta { min-width: 0; gap: 5px 8px; color: var(--muted); font-size: 11px; line-height: 15px; font-variant-numeric: tabular-nums; }
 .task-meta > span { display: inline-flex; align-items: center; min-width: 0; max-width: 100%; }
-.task-meta > .task-run-status { flex: 1; }
+.task-card-details > .task-run-status {
+  min-width: 0; color: var(--muted); font-size: 11px; line-height: 1.4;
+  white-space: normal; overflow-wrap: anywhere;
+}
 .task-identity { gap: 8px; }
 .task-id { flex: none; }
 .task-stat { display: inline-flex; align-items: center; gap: 2px; }
