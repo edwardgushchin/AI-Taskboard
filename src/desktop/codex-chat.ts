@@ -1,3 +1,5 @@
+import { manualContext } from "../cli/manual-board.ts";
+import { readBoardSettings, locateBoard } from "../cli/storage.ts";
 import { responseLanguageInstructions } from "./board-agent-hooks.ts";
 import { trackActiveRun, trackProvider, claimDiscussion } from "./active-runs.ts";
 import { spawn } from "node:child_process";
@@ -240,8 +242,8 @@ export function replyToTask(
       "The user handles task status and acceptance on the board. If an edit would change the status, propose the wording in chat for the user to apply on the board.",
       "Report actual results and failures. On a retry do not repeat a change already recorded.",
       "Use github_read for GitHub checks, including run-failed-log for Actions logs. The board uses its host login. Try the tool before asking the user to copy a log.",
-      "Read explicitly attached files when relevant. Do not edit project files or run project tasks.",
-    ].join(" ")),
+      "Read explicitly attached files when relevant. A linked attachment is a mutable local source: read only the needed parts with normal tools. If the attachment has an error, report it and continue with other files. Links do not grant access: report actual permission failures with the filename, without claiming to read inaccessible content. Do not edit project files or run project tasks.",
+    ].join(" ") + manualContext(readBoardSettings(locateBoard(project))), { manual: readBoardSettings(locateBoard(project)).boardType === "manual" }),
     onCommentary, onTokenUsage, onControl, signal, imageDirectory, imageLimit,
   };
   const release = claimDiscussion(project, taskId);
@@ -320,7 +322,7 @@ export function replyToBoard(
     async (name, args) => name === worklogTool.name ? worklog.submit(args) : worklog.remind(await dispatch(name, args)),
     (config, env) => reply(profile, project, prompt, images, dispatch, {
       tools, instructions: boardAgentInstructions("manager", instructions + accessInstructions + (accessInstructions ?
-        "Use existing credentials for authorized operations without exposing them. Keep SSH host key checking enabled and report server authentication failures separately from local permission failures." : ""), { dialogue }),
+        "Use existing credentials for authorized operations without exposing them. Keep SSH host key checking enabled and report server authentication failures separately from local permission failures." : ""), { dialogue, manual: readBoardSettings(locateBoard(project)).boardType === "manual" }),
       signal, session, worklog, onTokenUsage: session.onTokenUsage, mcp: { config, env },
       prepareResearch: async (request, client) => {
         const launchKey = JSON.stringify([profile, client.path, client.args, client.version, client.windowsSandbox, permissionProfile]);
@@ -534,8 +536,8 @@ function boardMessage(content: { type: string; text?: string; url?: string }[]) 
   try {
     const { latestUserMessage } = JSON.parse(text);
     if (typeof latestUserMessage?.text === "string" && Array.isArray(latestUserMessage.attachments)) {
-      const files = latestUserMessage.attachments.map((file: { name: string; imageIndex?: number }) => ({
-        name: file.name, url: file.imageIndex ? safeImage(images[file.imageIndex - 1]?.url) : undefined,
+      const files = latestUserMessage.attachments.map((file: { name: string; imageIndex?: number; link?: import("../cli/attachment-links.ts").FileLink; error?: string }) => ({
+        name: file.name, ...(file.link ? { link: file.link, size: file.link.size, error: file.error } : {}), url: file.imageIndex ? safeImage(images[file.imageIndex - 1]?.url) : undefined,
       })) as { name: string; url?: string }[];
       return { text: latestUserMessage.text as string, files };
     }

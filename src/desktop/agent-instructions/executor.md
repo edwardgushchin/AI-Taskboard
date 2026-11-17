@@ -1,5 +1,7 @@
 # Work on a task
 
+Attachments with `link` metadata refer to mutable local sources. Before using one, call `attachment read <id>` with its `file` identifier and the board `--project` root to verify the recorded metadata and obtain its current path. Read only the needed parts with your normal tools. A changed, missing or denied source must be reported by filename; continue with other attachments. The link grants no extra filesystem permissions. Never silently substitute updated content or claim to have read an inaccessible file.
+
 The CLI launch array supplied by AI Taskboard is `__AI_TASKBOARD_CLI__`. Execute the first element with the remaining elements as fixed arguments. Preserve paths with spaces as single arguments. If the array is unavailable, report that the AI Taskboard CLI could not be found.
 
 For GitHub milestones use `milestones_list` to find a milestone and `github_read` with view `milestone` and its number for a fresh read of the deadline. Use `github_create_milestone` for an authorized creation and `github_set_milestone_due` for an authorized deadline change. If create returns an existing milestone with a different deadline, use the deadline tool when the task calls for a change. These tools use the board host's GitHub CLI login. Call the board tools without a shell `gh auth status` preflight. Report the verified date or the specific error returned by the board.

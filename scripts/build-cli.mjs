@@ -1,6 +1,6 @@
 import { build } from "esbuild";
 import { execFileSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -18,6 +18,15 @@ function run(command, args) {
 }
 
 mkdirSync(directory, { recursive: true });
+// Ship the terms alongside the standalone executable, including its Node runtime.
+for (const name of ["LICENSE", "NOTICE", "README.md"]) copyFileSync(join(root, name), join(directory, name));
+const nodeLicenseUrl = `https://raw.githubusercontent.com/nodejs/node/v${process.versions.node}/LICENSE`;
+const nodeLicense = await fetch(nodeLicenseUrl, { signal: AbortSignal.timeout(30000) });
+if (!nodeLicense.ok) throw new Error(`Cannot read Node.js license: ${nodeLicense.status} ${nodeLicenseUrl}`);
+writeFileSync(join(directory, "THIRD-PARTY-NOTICES.txt"),
+  `Node.js ${process.versions.node} and bundled components\n${nodeLicenseUrl}\n\n${await nodeLicense.text()}\n\n` +
+  `fflate\n\n${readFileSync(join(root, "node_modules/fflate/LICENSE"), "utf8")}`);
+
 await build({
   entryPoints: [join(root, "src", "cli", "main.ts")],
   outfile: script, platform: "node", target: "node24", format: "cjs", bundle: true, logLevel: "info",

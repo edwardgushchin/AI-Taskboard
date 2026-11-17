@@ -1,0 +1,19 @@
+AI Taskboard
+Required Notice: Copyright 2026 Eduard Gushchin
+
+AI Taskboard is offered under the PolyForm Noncommercial License 1.0.0.
+See LICENSE. For a separate commercial permission, contact
+Eduard Gushchin at eduardgushchin@yandex.ru before commercial use
+outside the purposes permitted by that license.
+
+Third-party components retain their own licenses and notices. The project's
+noncommercial restriction does not apply to those components independently.
+Codicons: src/desktop/vendor/codicons/LICENSE and NOTICE.txt (CC-BY-4.0).
+Codex Worklog: src/desktop/vendor/codex-worklog/LICENSE (MIT).
+Desktop dependencies: their license/notice files in app.asar/node_modules.
+Electron and Chromium: LICENSE.electron.txt and LICENSES.chromium.html
+beside the desktop executable (inside the application bundle on macOS).
+Standalone CLI: THIRD-PARTY-NOTICES.txt beside the CLI executable contains
+the Node.js runtime and fflate notices.
+
+This license does not revoke rights previously granted under other terms.

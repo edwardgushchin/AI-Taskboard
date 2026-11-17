@@ -499,6 +499,9 @@ select:hover:not(:disabled) {
   background: color-mix(in srgb, var(--text) 9%, transparent); font-size: 10px; font-variant-numeric: tabular-nums;
 }
 .lane-cards { display: grid; gap: 9px; min-height: 13px; }
+.lane-create { display: flex; align-items: center; justify-content: flex-start; gap: 8px; width: 100%; }
+.board-type-choice { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 16px; text-align: left; }
+.board-type-choice span { font-weight: normal; color: var(--muted); white-space: normal; }
 .lane-more.button { justify-self: start; padding: 3px 5px; border: 0; color: var(--accent); font-size: 15px; }
 .task-card {
   position: relative; width: 100%; min-width: 0; display: grid; padding: 0;
@@ -544,7 +547,10 @@ select:hover:not(:disabled) {
 .task-card .tag { padding: 4px 10px; border-radius: 14px; font-size: 12px; }
 .task-meta { min-width: 0; gap: 5px 8px; color: var(--muted); font-size: 11px; line-height: 15px; font-variant-numeric: tabular-nums; }
 .task-meta > span { display: inline-flex; align-items: center; min-width: 0; max-width: 100%; }
-.task-meta > .task-run-status { flex: 1; }
+.task-card-details > .task-run-status {
+  min-width: 0; color: var(--muted); font-size: 11px; line-height: 1.4;
+  white-space: normal; overflow-wrap: anywhere;
+}
 .task-identity { gap: 8px; }
 .task-id { flex: none; }
 .task-stat { display: inline-flex; align-items: center; gap: 2px; }
@@ -704,7 +710,6 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
   margin-block-end: 9px; color: var(--muted); font-size: 12px; font-weight: 600;
 }
 .chat-coordination .chat-author { position: static; width: auto; height: auto; clip-path: none; }
-.chat-coordination[data-actor="manager"] { border-inline-start-color: var(--accent); }
 .chat-coordination > .chat-text:not(:has(> .chat-review-finding:first-child)),
 .chat-coordination .chat-text > :is(h1, h2, h3, h4, h5, h6):not(:first-child) {
   padding-block-start: 10px; border-block-start: 1px solid var(--border);
@@ -900,7 +905,7 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .form textarea { resize: vertical; min-height: 67px; }
 .manager-question-trigger { grid-column: 1 / -1; justify-self: start; margin-top: 8px; color: var(--accent); }
 .manager-question { width: min(520px, calc(100% - 32px)); }
-.manager-question-text { margin: 0; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.manager-question-text { min-width: 0; margin: 0; line-height: 1.5; }
 .manager-question-options { display: grid; gap: 6px; }
 .manager-question-options .button { white-space: normal; overflow-wrap: anywhere; text-align: start; }
 .draft-attachments { list-style: none; margin: 0; padding: 0; }

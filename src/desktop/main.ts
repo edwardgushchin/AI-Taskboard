@@ -1,3 +1,7 @@
+import { isManual, manualContext } from "../cli/manual-board.ts";
+import { russianWriting } from "./russian-writing.ts";
+import { captureFileLink, isFileLink, verifyFileLink } from "../cli/attachment-links.ts";
+import type { FileLink } from "../cli/attachment-links.ts";
 import { providerLimitSource, readCodexLimits } from "./provider-limits.ts";
 import localization from "./localization.cjs";
 import { activeRunSummary, observeActiveRuns, enableSharedRuns } from "./active-runs.ts";
@@ -96,6 +100,8 @@ const titleBarHeight = 36;
 const windowStates = new Map<number, WindowState>();
 const subscriptions = new Map<string, BoardWatch>();
 const commands = new Map<string, string[]>([
+  ["create", ["create"]],
+  ["manual-move", ["manual-move"]], ["manual-columns", ["manual-columns"]],
   ["project-usage", ["project-usage"]],
   ["init", ["init", "--compact"]], ["list", ["list", "--compact"]], ["show", ["show"]], ["update", ["update"]],
   ["comment", ["comment"]],
@@ -388,7 +394,7 @@ function activateTab(owner: WindowState, tab: ProjectTab): void {
   saveSession();
 }
 
-async function openProject(current: ProjectTab, project: string, create = false): Promise<void> {
+async function openProject(current: ProjectTab, project: string, create: false | "agent" | "manual" = false): Promise<void> {
   const owner = windowStates.get(current.window.webContents.id);
   if (!owner || owner.closing) return;
   project = projectPath(project);
@@ -406,12 +412,12 @@ async function openProject(current: ProjectTab, project: string, create = false)
   await loadProject(owner, state, project, create);
 }
 
-async function loadProject(owner: WindowState, state: ProjectTab, project: string, create = false): Promise<void> {
+async function loadProject(owner: WindowState, state: ProjectTab, project: string, create: false | "agent" | "manual" = false): Promise<void> {
   const selection = ++state.selection;
   state.project = project;
   state.error = undefined;
   state.loading = true;
-  const result = existsSync(project) ? await callCli<Board>(project, [create ? "init" : "list", "--compact"], create ? { git: true } : undefined)
+  const result = existsSync(project) ? await callCli<Board>(project, [create ? "init" : "list", "--compact"], create ? { git: create !== "manual", boardType: create } : undefined)
     : cliFailure("PROJECT_UNAVAILABLE", t("ui.the_folder_is_unavailable_a85a1dc3"));
   if (state.selection !== selection || owner.window.isDestroyed() || !owner.tabs.includes(state)) return;
   state.loading = false;
@@ -526,7 +532,7 @@ async function closeTab(owner: WindowState, tab: ProjectTab): Promise<void> {
   }
 }
 
-async function pickProject(state: ProjectTab, create = false): Promise<void> {
+async function pickProject(state: ProjectTab, create: false | "agent" | "manual" = false): Promise<void> {
   const result = await dialog.showOpenDialog(state.window, {
     title: create ? t("ui.create_board_e02d5c15") : t("ui.open_existing_board_754e46e5"),
     defaultPath: state.project && existsSync(state.project) ? state.project : undefined,
@@ -655,13 +661,29 @@ interface PastedFile {
   name: string;
   type: string;
   bytes: ArrayBuffer;
+  link?: FileLink;
 }
 
 function isPastedFile(file: unknown): file is PastedFile {
   if (!file || typeof file !== "object") return false;
-  const { name, type, bytes } = file as Partial<PastedFile>;
-  return typeof name === "string" && Boolean(name.trim()) && typeof type === "string" && bytes instanceof ArrayBuffer;
+  const { name, type, bytes, link } = file as Partial<PastedFile>;
+  return typeof name === "string" && Boolean(name.trim()) && typeof type === "string" && bytes instanceof ArrayBuffer && (link === undefined || (isFileLink(link) && bytes.byteLength === 0));
 }
+
+ipcMain.handle("board:fileLink", (event, path: unknown) => {
+  stateOf(event);
+  if (typeof path !== "string") throw new Error("Invalid file path.");
+  return captureFileLink(path);
+});
+
+ipcMain.handle("board:openFileLink", async (event, link: unknown) => {
+  stateOf(event);
+  if (!isFileLink(link)) return cliFailure("INVALID_INPUT", "Invalid attachment link.");
+  try {
+    const error = await shell.openPath(verifyFileLink(link));
+    return error ? cliFailure("ATTACHMENT_UNAVAILABLE", error) : { ok: true, data: null };
+  } catch (error) { return cliFailure("ATTACHMENT_UNAVAILABLE", (error as Error).message); }
+});
 
 const imageExtensions = new Map([
   ["image/png", ".png"], ["image/jpeg", ".jpg"], ["image/webp", ".webp"], ["image/gif", ".gif"],
@@ -742,6 +764,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     if (retryAt === undefined) {
       const sources = [];
       for (const [index, file] of files.entries()) {
+        if (file.link) { sources.push({ path: file.link.path, name: file.name, link: file.link }); continue; }
         const path = join(scratch, "upload-" + index);
         const suffix = imageExtensions.get(file.type);
         const name = file.name.trim();
@@ -770,6 +793,11 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     const attachments = [];
     for (const [index, file] of task.attachments.entries()) {
       let path = join(project, ".tasks", "attachments", id, file.file);
+      if (file.link) {
+        try { path = verifyFileLink(file.link); attachments.push({ id: file.file, name: file.name, bytes: file.bytes, path, link: file.link }); }
+        catch (error) { attachments.push({ id: file.file, name: file.name, error: (error as Error).message }); }
+        continue;
+      }
       if (activeFiles.has(file.file)) {
         const extension = extname(file.name).toLowerCase();
         const safeExtension = /^\.[a-z0-9]{1,10}$/.test(extension) ? extension : "";
@@ -818,7 +846,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     const answer = await replyToTask(app.getPath("userData"), project, { model, effort }, prompt, images,
       text => notify({ type: "commentary", text }),
       (name, args) => runAction(name, args),
-      scratch, maxAttachmentBytes - task.attachments.reduce((sum, file) => sum + file.bytes, 0),
+      scratch, maxAttachmentBytes - task.attachments.reduce((sum, file) => sum + (file.link ? 0 : file.bytes), 0),
       report => saveTaskTokenUsage(project, id, "discussion", report),
       control => ready.resolve(control), signal, id).finally(() => ready.reject(new Error("The agent session ended.")));
     if ("interrupted" in answer) return { saved, result: { ok: true as const, data: task } };
@@ -898,7 +926,7 @@ let schedulingAgentWork = false;
 
 function scheduleAutoBoard(watch: BoardWatch) {
   const { project } = watch.board;
-  if (!watch.board.settings.autoMode || subscriptions.get(project) !== watch || closingProjects.has(project)) return;
+  if (isManual(watch.board.settings) || (!watch.board.settings.autoMode && !watch.board.tasks.some(task => task.status === "ready" && task.launchRequested)) || subscriptions.get(project) !== watch || closingProjects.has(project)) return;
   let state = autoBoards.get(watch);
   if (!state) {
     state = { running: false, milestonesAt: 0, dates: new Map(), launches: new Set(), integrations: new Set(), notices: new Set() };
@@ -915,9 +943,11 @@ function scheduleAutoBoard(watch: BoardWatch) {
       const current = await callCli<Board>(project, ["list", "--compact"]);
       if (!current.ok) { failed(current.error.message); return; }
       const board = current.data;
-      if (!board.settings.autoMode) return;
+      if (isManual(board.settings)) return;
+      const eligibleTasks = board.settings.autoMode ? board.tasks : board.tasks.filter(task => task.launchRequested);
+      if (!board.settings.autoMode && !eligibleTasks.some(task => task.status === "ready")) return;
       const key = projectIdentity(project);
-      if (boardReviewMode(board.settings) === "reviewer") {
+      if (board.settings.autoMode && boardReviewMode(board.settings) === "reviewer") {
         const task = board.tasks.find(task => task.status === "review" && task.reviewApproved && !executorBusy(project, task.id) &&
           !watch.reviewerRuns.has(task.id) && !queue.integrations.has(task.id + ":" + task.revision));
         if (task) {
@@ -956,7 +986,7 @@ function scheduleAutoBoard(watch: BoardWatch) {
       const notices = (board.managerInbox ?? []).filter(message => ["question", "block"].includes(message.kind) &&
         !queue.notices.has(message.id + ":" + message.sequence));
       const tab = [...watch.tabs].find(tab => !tab.window.isDestroyed());
-      if (notices.length && tab && !boardWorkRequests.has(key) && agentSlots.available(key, "manager", board.settings.agentLimits)) {
+      if (board.settings.autoMode && notices.length && tab && !boardWorkRequests.has(key) && agentSlots.available(key, "manager", board.settings.agentLimits)) {
         for (const notice of notices) queue.notices.add(notice.id + ":" + notice.sequence);
         const prompt = "AI Taskboard automatic mode: handle these addressed notices without a goal. " + JSON.stringify(notices);
         void runBoardRequest(tab.window.webContents, board, prompt, [], false, false, undefined, undefined, undefined, true)
@@ -967,8 +997,8 @@ function scheduleAutoBoard(watch: BoardWatch) {
         executor: agentSlots.available(key, "executor", board.settings.agentLimits),
         reviewer: agentSlots.available(key, "reviewer", board.settings.agentLimits),
       };
-      if (!board.tasks.some(task => task.status === "ready" && available[task.mergeRepair ? "reviewer" : "executor"])) return;
-      if (board.tasks.some(task => task.status === "ready" && task.milestone) && Date.now() - queue.milestonesAt >= 60_000) {
+      if (!eligibleTasks.some(task => task.status === "ready" && available[task.mergeRepair ? "reviewer" : "executor"])) return;
+      if (eligibleTasks.some(task => task.status === "ready" && task.milestone) && Date.now() - queue.milestonesAt >= 60_000) {
         queue.milestonesAt = Date.now();
         const milestones = await callCli<{ repository: string; milestones: { number: number; due_on: string | null }[] }>(project, ["milestones"]);
         if (!milestones.ok) { queue.milestonesError = milestones.error.message; failed(milestones.error.message); return; }
@@ -976,8 +1006,8 @@ function scheduleAutoBoard(watch: BoardWatch) {
         queue.dates = new Map(milestones.data.milestones.map(entry => [entry.number, entry.due_on]));
         continue; // A deadline, setting or card may have changed during the network request.
       }
-      if (queue.milestonesError && board.tasks.some(task => task.status === "ready" && task.milestone)) return;
-      const task = nextReadyTask(board.tasks, queue.dates, id => {
+      if (queue.milestonesError && eligibleTasks.some(task => task.status === "ready" && task.milestone)) return;
+      const task = nextReadyTask(eligibleTasks, queue.dates, id => {
         const candidate = board.tasks.find(task => task.id === id)!;
         return !available[candidate.mergeRepair ? "reviewer" : "executor"] || executorBusy(project, id) ||
           queue.launches.has(id + ":" + candidate.revision);
@@ -985,13 +1015,14 @@ function scheduleAutoBoard(watch: BoardWatch) {
       if (!task) return;
       const attempt = task.id + ":" + task.revision;
       queue.launches.add(attempt);
-      const result = await launchTask(project, task.id, undefined, false, task.revision, undefined, Boolean(task.schedule), false, false, true);
+      const result = await launchTask(project, task.id, undefined, false, task.revision, undefined, Boolean(task.schedule), false, false, Boolean(board.settings.autoMode));
       if (!result.ok) {
         if (["BOARD_BUSY", "REVISION_CONFLICT", "INVALID_TRANSITION", "LAUNCH_IN_PROGRESS", "CHAT_BUSY", "EXECUTOR_LIMIT", "REVIEWER_LIMIT",
             "PROJECT_CLOSING", "DEPENDENCIES_INCOMPLETE", "AUTO_MODE_DISABLED"].includes(result.error.code)) {
           queue.launches.delete(attempt);
           return; // Retry on the next event/tick, never spin on the same snapshot.
         }
+        if (task.launchRequested) { queue.launches.delete(attempt); failed(task.id + ": " + result.error.message); return; }
         await callCli(project, ["block", task.id, "--compact"], { revision: task.revision, allowUnstarted: true,
           reason: result.error.message, condition: t("ui.fix_the_launch_error_and_unblock_the_task_9eea19ab") });
       }
@@ -1071,10 +1102,11 @@ function taskRunLimit(role: "executor" | "reviewer") {
 function scheduleRecurringTasks(now = Date.now()) {
   for (const [project, watch] of subscriptions) {
     if (!watch.tabs.size || closingProjects.has(project)) continue;
+    if (isManual(watch.board.settings)) continue;
     if (watch.board.settings?.autoMode) { scheduleAutoBoard(watch); continue; }
     const projectKey = projectIdentity(project);
     for (const task of watch.board.tasks) {
-      if (task.status !== "ready" || !task.schedule || !(Date.parse(task.schedule.nextAt) <= now) ||
+      if (task.status !== "ready" || !task.schedule || task.schedule.paused || !(Date.parse(task.schedule.nextAt) <= now) ||
           task.unfinishedDependencies?.length || launchingTasks.has(project + "\0" + task.id) || executorBusy(project, task.id)) continue;
       if (!agentSlots.available(projectKey, task.mergeRepair ? "reviewer" : "executor", watch.board.settings?.agentLimits)) continue;
       const { id, revision } = task;
@@ -1110,11 +1142,17 @@ const goalWorkTools = [
 ];
 
 async function prepareBoardAttachments(files: PastedFile[], scratch: Set<string>) {
-  const attachments: { path: string; name: string; image?: string }[] = [];
+  const attachments: { path: string; name: string; image?: string; link?: FileLink; error?: string }[] = [];
   if (!files.length) return attachments;
   const directory = await mkdtemp(join(tmpdir(), "ai-taskboard-orchestrator-"));
   scratch.add(directory);
   for (const [index, file] of files.entries()) {
+    if (file.link) {
+      let error: string | undefined;
+      try { verifyFileLink(file.link); } catch (failure) { error = (failure as Error).message; }
+      attachments.push({ path: file.link.path, name: file.name, link: file.link, ...(error ? { error } : {}) });
+      continue;
+    }
     const suffix = extname(file.name.trim()).toLowerCase();
     const extension = imageExtensions.get(file.type) ?? (imageTypes.has(suffix) ? suffix : undefined);
     const path = join(directory, String(index) + (extension ?? ""));
@@ -1153,7 +1191,7 @@ ipcMain.handle("board:queue", async (event, project: string, action: unknown, id
       if (!existsSync(directory)) return { ok: true, data: [] };
       const jobs = readdirSync(directory).filter(name => name.endsWith(".json")).map(name => {
         const job = readJson(join(directory, name)) as {
-          id: string; draft: string; goal: boolean; created: number; files: { name: string; type: string; bytes: string }[];
+          id: string; draft: string; goal: boolean; created: number; files: { name: string; type: string; bytes: string; link?: FileLink }[];
         };
         return { ...job, files: job.files.map(file => ({ ...file, bytes: Uint8Array.from(Buffer.from(file.bytes, "base64")).buffer })) };
       });
@@ -1173,7 +1211,7 @@ ipcMain.handle("board:queue", async (event, project: string, action: unknown, id
         files.reduce((total, file) => total + file.bytes.byteLength, 0) <= maxAttachmentBytes) {
       storageDirectory(directory, true);
       writeJson(path, { id, draft, goal, created: Date.now(),
-        files: files.map(file => ({ name: file.name, type: file.type, bytes: Buffer.from(file.bytes).toString("base64") })) });
+        files: files.map(file => ({ name: file.name, type: file.type, ...(file.link ? { link: file.link } : {}), bytes: Buffer.from(file.bytes).toString("base64") })) });
     } else return cliFailure("INVALID_INPUT", t("errors.ef091a00af0e1a46"));
     return { ok: true, data: action === "add" ? id : null };
   } catch (error) {
@@ -1457,7 +1495,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   const deliveredMessages = new Set<string>();
   let waitWork = new AbortController();
   let items: BoardActivity[] = [];
-  let historyMessage: { at?: string; text: string; files: { url: string; name: string }[]; clientId?: string } | undefined;
+  let historyMessage: { at?: string; text: string; files: { url?: string; name: string; link?: FileLink; size?: number; error?: string }[]; clientId?: string } | undefined;
   let historyModel: string | undefined;
   let historyAccepted = false;
   const saveHistory = () => {
@@ -1567,12 +1605,12 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     if (expectedReviewMode && reviewMode !== expectedReviewMode) {
       return cliFailure("REVIEW_MODE_CHANGED", t("errors.5842130646fd0b88"));
     }
-    const instructions = reviewIds ? autoReviewInstructions : boardInstructions + (autoNotice ?
+    const instructions = reviewIds ? autoReviewInstructions : (isManual(settings.data) ? manualContext(settings.data) + "\n" + russianWriting : boardInstructions) + (autoNotice ?
       " Handle only the addressed executor questions, blockers or integration failures in this short run. Do not create or resume a goal. " +
       "Read manager_inbox, handle the specified notices and acknowledge them with manager_ack. Do not retry an unchanged blocker. " +
       "For a merge conflict, organize repair with task_start resolveConflicts:true in the same card and worktree without asking permission to start repair. " +
       "Require a new submission and review after repair; human acceptance stays with the user. Do not perform routine dispatch or accept human-mode submissions. " : "") + (
-      reviewMode === "human" ? " " + manualReviewInstructions : "") + (goal ?
+      !isManual(settings.data) && reviewMode === "human" ? " " + manualReviewInstructions : "") + (goal ?
       " You run the board goal in the background. Read goal_inbox at the start of each turn, before waiting, " +
       "and when notified. Apply user directions, then confirm or decline with goal_inbox and a factual reply. " +
       "Use goal_report for meaningful decisions and milestones and ask_user when you need a user decision." :
@@ -1582,6 +1620,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     const reviewTaskTools = reviewMode === "reviewer"
       ? new Set([...autoReviewTaskTools, "manager_ack", "task_cancel", "task_start"]) : autoReviewTaskTools;
     const mcpTools: BoardMcpTool[] = boardMcpTools.filter(({ name }) =>
+      (!isManual(settings.data) || ["board_list", "task_show", "task_create", "task_update", "task_comment", "tag_set_color", "ask_user"].includes(name)) &&
       (reviewIds || !["project_path", "project_sha256"].includes(name)) &&
       (!reviewIds || autoReviewReadTools.has(name) || reviewTaskTools.has(name)) &&
       (name !== "task_accept" || reviewMode !== "human"));
@@ -1591,7 +1630,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       historyMessage = {
         at: new Date().toISOString(),
         text: requestText,
-        files: attachments.flatMap(file => file.image ? [{ url: file.image, name: file.name }] : []),
+        files: attachments.flatMap(file => file.image || file.link ? [{ name: file.name, ...(file.image ? { url: file.image } : {}), ...(file.link ? { link: file.link, size: file.link.size, error: file.error } : {}) }] : []),
         clientId: typeof messageId === "string" ? messageId : undefined,
       };
     }
@@ -1604,8 +1643,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         manager: turn.items.findLast(item => item.type === "agentMessage" && item.phase !== "commentary")?.text.slice(-1200),
       }]) : undefined;
     const attachmentContext = attachments.length || unread.length || priorChat?.length ? JSON.stringify({
-      ...(attachments.length ? { attachments: attachments.map(({ name, image }, index) => ({
-        id: index + 1, name, image: Boolean(image), ...(image ? { imageIndex: ++imageIndex } : {}),
+      ...(attachments.length ? { attachments: attachments.map(({ name, image, path, link, error }, index) => ({
+        id: index + 1, name, ...(link ? { path, link, error } : {}), image: Boolean(image), ...(image ? { imageIndex: ++imageIndex } : {}),
       })), fallbackLanguage: t("ui.english_e7d843ef") } : {}),
       unreadBoardMessages: unread.length || undefined,
       previousConversation: priorChat?.length ? priorChat : undefined,
@@ -1736,7 +1775,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
             action: "Read manager_inbox for executor questions, blockers, submissions and review decisions.",
           } } : result;
         });
-      }, reviewIds ? [] : boardTools, instructions + "\n" + initialSettings.text, signal, {
+      }, reviewIds ? [] : isManual(settings.data) ? boardTools.filter(tool => ["board_list", "task_show", "task_create", "task_update", "tag_set_color", "ask_user"].includes(tool.name)) : boardTools, instructions + "\n" + initialSettings.text, signal, {
         id: threadId,
         access: reviewIds ? undefined : managerAccess(app.getPath("userData"), project),
         confirmApproval: reviewIds ? undefined : async details => {
@@ -1854,8 +1893,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
               let imageIndex = 0;
               const firstAttachment = attachments.length;
               const prompt = prepared.length ? JSON.stringify({ latestUserMessage: {
-                text, attachments: prepared.map(({ name, image }, index) => ({
-                  id: firstAttachment + index + 1, name, ...(image ? { imageIndex: ++imageIndex } : {}),
+                text, attachments: prepared.map(({ name, image, path, link, error }, index) => ({
+                  id: firstAttachment + index + 1, name, ...(link ? { path, link, error } : {}), ...(image ? { imageIndex: ++imageIndex } : {}),
                 })),
               } }) : text;
               // Make the new files available to any tool call triggered by this message.
@@ -1945,6 +1984,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
 }
 
 function scheduleAutoReview(watch: BoardWatch) {
+  if (isManual(watch.board.settings)) return;
   if (subscriptions.get(watch.board.project) !== watch) return;
   const mode = boardReviewMode(watch.board.settings);
   const { project, tasks } = watch.board;
@@ -2151,7 +2191,10 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
     }
   }
 }
-ipcMain.handle("board:create", async event => pickProject(stateOf(event), true));
+ipcMain.handle("board:create", async (event, type: unknown) => {
+  if (type !== "agent" && type !== "manual") return cliFailure("INVALID_INPUT", "Выберите тип доски в приложении.");
+  return pickProject(stateOf(event), type);
+});
 ipcMain.handle("board:recent", async (event, path: unknown) => {
   const state = stateOf(event);
   if (typeof path !== "string" || !recentBoards.includes(path)) throw new Error("Unknown recent board.");
@@ -2331,6 +2374,14 @@ ipcMain.handle("board:saveAttachment", async (event, id: unknown, file: unknown,
   if (!state.project || typeof id !== "string" || !/^T-\d{4,}$/.test(id) ||
       typeof file !== "string" || typeof name !== "string") return cliFailure("INVALID_INPUT", t("errors.86ceb194927d805b"));
   const project = state.project;
+  const card = await callCli<Task>(project, ["show", id, "--compact"]);
+  if (!card.ok) return card;
+  if (card.data.attachments.find(entry => entry.file === file)?.link) {
+    const linked = await callCli<{ path: string }>(project, ["attachment", "read", id], { file });
+    if (!linked.ok) return linked;
+    const error = await shell.openPath(linked.data.path);
+    return error ? cliFailure("ATTACHMENT_UNAVAILABLE", error) : { ok: true, data: null };
+  }
   const result = await dialog.showSaveDialog(state.window, { defaultPath: basename(name.replaceAll("\\", "/")) });
   if (result.canceled || !result.filePath) return { ok: true, data: null };
   return callCli(project, ["attachment", "read", id], { file, destination: result.filePath });
@@ -2478,6 +2529,7 @@ type LaunchState = Pick<Task, "id" | "title" | "status" | "revision" | "createdA
 async function launchTask(project: string, id: string, revisionRequest?: { input: Record<string, unknown> },
   newThread: false | "user" | "manager" = false, revision?: number,
   continuation: ExecutorContinuation = {}, scheduled = false, resolveConflicts = false, resumeWithFullAccess = false, autoMode = false, manual = false): Promise<CliReply<LaunchState>> {
+  if (isManual(readBoardSettings(runtimeLocation(project)))) return cliFailure("MANUAL_BOARD", "На обычной доске исполнители недоступны.");
   const key = project + "\0" + id;
   if (launchingTasks.has(key)) return cliFailure("LAUNCH_IN_PROGRESS", t("errors.07f5f719b5d5f6c5"));
   if (executorBusy(project, id)) return cliFailure("CHAT_BUSY", t("ui.wait_for_the_chat_reply_or_stop_the_agent_first_22c53959"));

@@ -1,7 +1,7 @@
 <h1 align="center">AI Taskboard</h1>
 <p align="center"><strong>A local task board for coding agents and the people reviewing their work.</strong></p>
 <p align="center">English · <a href="README.ru.md">Русский</a></p>
-<p align="center"><a href="#features">Features</a> · <a href="#workflow">Workflow</a> · <a href="#quick-start">Quick start</a> · <a href="#platforms">Platforms</a> · <a href="#documentation">Documentation</a></p>
+<p align="center"><a href="#features">Features</a> · <a href="#workflow">Workflow</a> · <a href="#quick-start">Quick start</a> · <a href="#platforms">Platforms</a> · <a href="#documentation">Documentation</a> · <a href="#license">License</a></p>
 
 ![AI Taskboard showing demo tasks from draft through review and completion](docs/images/board.png)
 
@@ -55,7 +55,7 @@ Sign in with your subscription before running agents:
 codex login
 ```
 
-1. Open a project folder and choose **Create board** if it has no board yet.
+1. Open a project folder and choose **Create board** if it has no board yet. Select **Board for agents** for the workflow described here.
 2. AI Taskboard detects Codex automatically. To select it manually, open **Settings → Codex model provider → Choose executable…**.
 3. Describe a change to the manager, approve its draft, then start the executor from the card.
 4. Inspect the submitted diff and checks. In human review mode, choose **Accept** when the result is ready.
@@ -82,7 +82,43 @@ Status checked on **2026-11-17**: CI and release tasks T-0100 / T-0101 are still
 
 Cards and board state live in the project's local **`.tasks`** directory, outside Git history. Back it up separately from source commits. Git worktrees isolate task changes, but acceptance still depends on the target branch and Git checks. Agent execution uses the configured provider's permissions and limits.
 
-Codex is the current model provider. Claude Code, Cursor and other client integrations are planned. The repository does not currently declare a project license; bundled third-party components retain their own notices.
+Codex is the current model provider. Claude Code, Cursor and other client integrations are planned.
+
+<a id="license"></a>
+## License and commercial permission
+
+Copyright 2026 Eduard Gushchin. AI Taskboard is source-available under the
+unchanged [PolyForm Noncommercial License 1.0.0](LICENSE). It is not OSI Open
+Source: the license restricts commercial use, which [OSD section 6](https://opensource.org/osd)
+does not allow.
+
+The license permits noncommercial purposes, including personal research,
+experimentation, study, entertainment and hobby use without anticipated
+commercial application. It also permits use by charitable organizations,
+educational institutions, public research organizations, public safety or
+health organizations, environmental protection organizations and government
+institutions, **regardless of their funding source or obligations resulting
+from funding**. These exceptions are part of the license; this summary does
+not narrow them. Statutory rights such as fair use are unaffected.
+
+For commercial use outside those permitted purposes, request separate
+permission from **Eduard Gushchin** at **[eduardgushchin@yandex.ru](mailto:eduardgushchin@yandex.ru)**
+before using the software. Describe your organization, intended use and
+distribution, if any. Permission, scope and any payment terms must be agreed
+separately; sending a request grants no commercial permission.
+
+When distributing copies or permitted modifications, include the license
+text or its URL and the `Required Notice:` from [NOTICE](NOTICE). Third-party
+components keep their own licenses and notices, including Codicons (CC-BY-4.0)
+and Codex Worklog (MIT). No previously granted rights are revoked.
+
+Installed desktop applications include these project terms in
+`resources/licenses` (`Contents/Resources/licenses` on macOS). Vendor and
+dependency licenses remain in `resources/app.asar`; Electron and Chromium
+notices ship with the runtime. The CLI directory includes `LICENSE`, `NOTICE`,
+this README and `THIRD-PARTY-NOTICES.txt`; distribute them with the executable.
+CLI builds download the license for the exact build-time Node.js version
+from the official Node.js repository and include it with the fflate license.
 
 <a id="documentation"></a>
 ## Documentation and feedback

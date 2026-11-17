@@ -17,6 +17,27 @@ function fixture(t: import("node:test").TestContext) {
   return project;
 }
 
+test("paused work history can have several empty filtered pages before saved work", t => {
+  const project = fixture(t);
+  const at = Date.now();
+  saveManagerHistory(project, at, randomUUID(), { lane: "work", items: [
+    { id: "saved-work", type: "agentMessage", title: "", text: "Saved work", status: "completed" },
+  ] });
+  for (let i = 1; i <= 41; i++) saveManagerHistory(project, at + i, randomUUID(), {
+    lane: "chat", message: { text: "Dialogue", files: [] }, items: [],
+  });
+  const first = readManagerHistory(project, null, "work")!;
+  assert.equal(first.turns.length, 0);
+  assert.ok(first.nextCursor);
+  const second = readManagerHistory(project, first.nextCursor, "work")!;
+  assert.equal(second.turns.length, 0);
+  assert.ok(second.nextCursor);
+  const last = readManagerHistory(project, second.nextCursor, "work")!;
+  assert.deepEqual(last.turns.flatMap(turn => turn.items.map(item => item.id)), ["saved-work"]);
+  assert.equal(last.nextCursor, null);
+  assert.ok(!readManagerHistory(project, null, "chat")!.turns.some(turn => turn.items.some(item => item.id === "saved-work")));
+});
+
 test("manager history preserves steering order and pages through locally saved runs", t => {
   const project = fixture(t);
   const started = Date.now();

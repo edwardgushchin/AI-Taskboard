@@ -138,6 +138,61 @@ app.whenReady().then(async () => {
   await evaluate(`byId('notice-close').click(); void 0`);
   await evaluate(`push(); void 0`);
   await check(`byId('welcome').hidden && !byId('workspace').hidden && byId('app-content').getAttribute('aria-busy') === 'false'`, "a restored board replaces the loading state");
+  if (process.argv.includes("--run-status-only")) {
+    await evaluate(`
+      const queuedTask = task('T-0096', 'Проверка ожидания', { status: 'in_progress',
+        codexThreadId: 'saved-thread', attachments: [{ file: 'notes.txt', name: 'notes.txt' }],
+        subtasks: [{ title: 'Проверка', done: false }],
+        milestone: { title: 'Очень длинная веха '.repeat(12), repository: 'example/board', number: 1 } });
+      fixture.board.tasks = [queuedTask]; fixture.waitingTasks = [queuedTask.id];
+      push(); void 0;
+    `);
+    for (const theme of ['light', 'dark']) for (const width of [320, 200]) for (const locale of ['ru', 'en', 'long']) {
+      nativeTheme.themeSource = theme;
+      await evaluate(`waitFor(() => matchMedia('(prefers-color-scheme: dark)').matches === ${theme === 'dark'})`);
+      await evaluate(`
+        fixture.theme = ${JSON.stringify(theme)}; fixture.russian = ${locale !== 'en'};
+        push();
+        {
+        const testCard = findCard('T-0096');
+        renderAgentRunStatus(testCard.querySelector('.task-run-status'), queuedTask);
+        testCard.style.width = '${width}px'; testCard.style.maxWidth = 'none';
+        if (${locale === 'long'}) testCard.querySelector('.task-run-status').textContent =
+          'Waiting for an available executor with the requested runtime profile. '.repeat(3) + 'W'.repeat(100);
+        }
+        void 0;
+      `);
+      await check(`(() => {
+        const card = findCard('T-0096'), status = card.querySelector('.task-run-status');
+        const meta = card.querySelector('.task-meta'), details = status.parentElement;
+        const s = status.getBoundingClientRect(), m = meta.getBoundingClientRect();
+        return details.classList.contains('task-card-details') && status.nextElementSibling === meta &&
+          s.bottom <= m.top && s.width >= details.clientWidth - 25 &&
+          status.scrollWidth <= status.clientWidth + 1 && card.scrollWidth <= card.clientWidth + 1 &&
+          meta.scrollWidth <= meta.clientWidth + 1 && !meta.querySelector('.task-run-status') &&
+          (status.textContent.startsWith('Waiting') || status.textContent === 'Ожидает свободного исполнителя');
+      })()`, `full-width waiting block: ${theme}, ${width}px, ${locale}, long milestone and attachments`);
+      await capture(`waiting-${theme}-${width}-${locale}.png`);
+    }
+    await evaluate(`fixture.russian = true; fixture.waitingTasks = []; push(); void 0`);
+    await check(`findCard('T-0096').querySelector('.task-run-status').textContent === 'Запуск с доски не активен'`, 'dequeue replaces waiting with inactive status');
+    await evaluate(`fixture.waitingTasks = ['T-0096']; fixture.runningTasks = ['T-0096']; push(); void 0`);
+    await check(`!!findCard('T-0096').querySelector('.agent-spinner') && !findCard('T-0096').textContent.includes('Ожидает свободного')`, 'running takes precedence over waiting');
+    await evaluate(`fixture.runningTasks = []; fixture.reviewingTasks = { 'T-0096': 'reviewer' }; push(); void 0`);
+    await check(`!!findCard('T-0096').querySelector('.agent-spinner')`, 'active review takes precedence over waiting');
+    await evaluate(`fixture.reviewingTasks = {}; fixture.board.tasks[0].mergeRepair = {}; fixture.board.tasks[0].revision++; push(); void 0`);
+    await check(`findCard('T-0096').querySelector('.task-run-status').textContent === t('ui.waiting_for_a_reviewer_slot_8918dd95')`, 'repair queue retains reviewer waiting label');
+    await evaluate(`fixture.waitingTasks = []; fixture.board.tasks[0].status = 'ready'; fixture.board.tasks[0].revision++; push(); void 0`);
+    await check(`!findCard('T-0096').querySelector('.task-run-status')`, 'no block remains when status has no run label');
+    await evaluate(`delete queuedTask.milestone; queuedTask.attachments = []; queuedTask.subtasks = [];
+      queuedTask.status = 'ready'; queuedTask.revision++; fixture.runningTasks = ['other-task'];
+      push(); void 0`);
+    await check(`!findCard('T-0096').querySelector('.task-run-status')`, 'occupied slots alone do not imply waiting');
+    await evaluate(`fixture.waitingTasks = ['T-0096']; push(); void 0`);
+    await check(`findCard('T-0096').querySelector('.task-run-status').nextElementSibling.classList.contains('task-meta')`, 'ready task without optional metadata also has a separate waiting block');
+    console.log('Run status Chromium checks passed: ' + checks);
+    return;
+  }
   if (process.argv.includes("--scroll-only")) {
     await evaluate(`
       fixture.board.tasks = Array.from({ length: 40 }, (_, i) => task('S-' + i, 'Scroll task ' + i,
@@ -178,6 +233,44 @@ app.whenReady().then(async () => {
         `close restores focus without scrolling: ${close}, sheet scroll=${scroll}, refresh=${refresh}`);
     }
     console.log('Sheet scroll Chromium checks passed: ' + checks + ' (8 combinations)');
+    return;
+  }
+  if (process.argv.includes("--schedule-pause-only")) {
+    await evaluate(`
+      fixture.board.tasks[1].schedule = { everyMinutes: 60, nextAt: '2000-01-01T00:00:00Z' };
+      window.taskboard.command = async (action, id, input) => {
+        const task = fixture.board.tasks.find(task => task.id === id);
+        if (action === 'show') return {ok:true,data:{...task,criteria:[]}};
+        if (action !== 'update') throw Error(action);
+        if (input.revision !== task.revision) throw Error('stale revision');
+        task.schedule.paused = input.schedulePaused;
+        task.revision++; push(); return {ok:true,data:task};
+      }; push(); showTask('T-0002');
+    `);
+    await evaluate(`waitFor(() => document.querySelector('.sheet-actions')).then(settle)`);
+    for (const rule of [{ everyMinutes: 60 }, { time: '09:00' }]) {
+      for (const russian of [true, false]) for (const theme of ['dark', 'light']) {
+        nativeTheme.themeSource = theme;
+        await evaluate(`fixture.russian = ${russian}; fixture.theme = '${theme}'; fixture.board.tasks[1].schedule = { ...${JSON.stringify(rule)}, nextAt: '2000-01-01T00:00:00Z' }; push(); showTask('T-0002')`);
+        await evaluate(`settle()`);
+        for (const paused of [true, false, true]) {
+          await evaluate(`[...document.querySelectorAll('.sheet-actions button')].find(b => b.textContent === t('${paused ? 'ui.pause_schedule' : 'ui.resume_schedule'}')).click(); waitFor(() => fixture.board.tasks[1].schedule.paused === ${paused}).then(settle)`);
+          await check(`(() => { const badge = findCard('T-0002').querySelector('.task-schedule');
+            const detail = body.querySelector('.task-schedule-pause');
+            if (!${paused}) return !badge.querySelector('.codicon-debug-pause') && !detail && badge.textContent === ${rule.time ? JSON.stringify(rule.time) : "scheduleInterval(60, 'short')"};
+            return [badge, detail].every(node => node && node.textContent === '' && node.getAttribute('role') === 'img' &&
+              node.title.includes(t('ui.schedule_paused')) && node.getAttribute('aria-label') === node.title &&
+              node.querySelector('.codicon-debug-pause')?.getAttribute('aria-hidden') === 'true' &&
+              getComputedStyle(node.querySelector('.codicon-debug-pause'), '::before').content.codePointAt(1) === 60113);
+          })()`, 'pause is a Codicons glyph with a tooltip and accessible name in card and details; resume restores timing');
+          await check(`byId('sheet-body').textContent.includes(t('${paused ? 'ui.resume_schedule' : 'ui.pause_schedule'}'))`, 'details offer the inverse action');
+          await check(`fixture.board.tasks[1].schedule.${rule.time ? "time === '09:00'" : 'everyMinutes === 60'} && fixture.board.tasks[1].status === 'ready'`, 'schedule action retains rule and status');
+        }
+        if (russian && rule.time) await capture('schedule-paused-' + theme + '.png');
+      }
+    }
+    await capture('schedule-paused.png');
+    console.log('Schedule Chromium checks passed: ' + checks);
     return;
   }
   if (process.argv.includes("--auto-only")) {
