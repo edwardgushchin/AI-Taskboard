@@ -60,6 +60,12 @@ test("Git status separates publication, destination and counts", () => {
     assert.equal(node("status-tracking").hidden, sendHidden);
     assert.equal(node("status-tracking").disabled, disabled);
     assert.doesNotMatch(node("status-tracking").title, /undefined/);
+    if (!sendHidden) {
+      const tracking = (info as any).tracking;
+      assert.equal(node("status-trackingspan").textContent,
+        tracking ? tracking.behind + "↓ " + tracking.ahead + "↑" : "?↓ ?↑");
+      assert.doesNotMatch(node("status-trackingspan").textContent, /Branch|Ветка/);
+    }
   }
 });
 
@@ -83,4 +89,19 @@ test("status push sends a pinned revision without upstream and clears busy state
   await assert.rejects(push(), /rejected/);
   assert.equal(called, 1);
   assert.equal(pushes.size, 0);
+});
+
+
+test("successful push applies the returned Git snapshot immediately", async () => {
+  const renderer = readFileSync(new URL("../src/desktop/renderer.js", import.meta.url), "utf8");
+  const frame: any = { project: "fixture", board: { gitInfo: { branch: "main" } } };
+  const fresh = { branch: "main", upstream: "refs/heads/main", tracking: { ahead: 0, behind: 0 } };
+  let draws = 0;
+  const command = runInNewContext(renderer.slice(renderer.indexOf("async function gitCommand("), renderer.indexOf("\nfunction updateGitRevision")) + "\ngitCommand", {
+    frame, api: { command: async () => ({ ok: true, data: { gitInfo: fresh } }) }, notice() {},
+    renderStatusBar() { draws++; },
+  });
+  await command("push", {}, "fixture");
+  assert.equal(frame.board.gitInfo, fresh);
+  assert.equal(draws, 1);
 });

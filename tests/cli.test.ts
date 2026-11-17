@@ -11,7 +11,6 @@ import { test } from "node:test";
 import type { TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { nextScheduledRun } from "../src/cli/model.ts";
-import { boardGitInfo } from "../src/cli/repository.ts";
 import { locateBoard } from "../src/cli/storage.ts";
 import type { Task } from "../src/cli/model.ts";
 
@@ -239,6 +238,7 @@ test("GitHub publication validates input, preserves partial results and pins pus
       git(root, "remote", "add", "origin", remote);
     }
     if (command === "git" && mode === "push-failed") throw Object.assign(new Error("Push failed"), { stderr: "Push rejected" });
+    if (command === "git") git(root, "update-ref", "refs/remotes/origin/main", git(root, "rev-parse", "refs/heads/main"));
     return { stdout: "", stderr: "" };
   } });
   const original = childProcess.execFile;
@@ -253,7 +253,7 @@ test("GitHub publication validates input, preserves partial results and pins pus
   const publish = async (nextMode: string, fields: Record<string, unknown>, code?: string) => {
     mode = nextMode;
     if (code) await assert.rejects(publishRepository(location, fields), { code });
-    else assert.deepEqual(await publishRepository(location, fields), { remote });
+    else assert.equal((await publishRepository(location, fields)).remote, remote);
   };
   await publish("", { ...input, name: "--public" }, "INVALID_INPUT");
   await publish("", { ...input, visibility: "internal" }, "INVALID_INPUT");
@@ -276,7 +276,10 @@ test("GitHub publication validates input, preserves partial results and pins pus
   assert.deepEqual(calls.findLast(call => call.command === "gh" && call.args[0] === "repo")?.args, [
     "repo", "create", "owner/repository", "--private", "--source", root, "--remote", "origin",
   ]);
-  assert.deepEqual(calls.at(-1), { command: "git", args: ["push", "origin", input.head + ":refs/heads/main"] });
+  assert.equal(git(root, "config", "branch.main.remote"), "origin");
+  assert.equal(git(root, "config", "branch.main.merge"), "refs/heads/main");
+  assert.equal(spawnSync("git", ["config", "--get", "branch.other.remote"], {cwd: root, env}).status, 1);
+  assert.deepEqual(calls.at(-1), { command: "git", args: ["push", "--porcelain", "--no-mirror", "--no-follow-tags", "--recurse-submodules=no", "--", "origin", input.head + ":refs/heads/main"] });
 });
 
 test("GitHub milestones can be listed, assigned and cleared on local tasks", t => {
@@ -1423,6 +1426,7 @@ test("watch streams compact cards and sees new messages without a revision chang
 test("Git publication state and safe push are independent of tracking counts", async t => {
   const root = fixture(t, true);
   cli(root, ["init"]);
+  const { boardGitInfo } = await import(new URL("../src/cli/repository.ts?git-info", import.meta.url).href);
   const info = () => boardGitInfo(locateBoard(root));
   const head = git(root, "rev-parse", "HEAD");
   assert.deepEqual(info().remotes, []);
@@ -1435,7 +1439,8 @@ test("Git publication state and safe push are independent of tracking counts", a
   assert.deepEqual(info().pushTarget, { remote: "origin", remoteRef: "refs/heads/main" });
   cli(root, ["git", "push"], { branch: "main", head });
   assert.equal(git(remote, "rev-parse", "refs/heads/main"), head);
-  assert.equal(info().upstream, undefined); // Sending does not rewrite user configuration.
+  assert.equal(info().upstream, "refs/heads/main");
+  assert.equal(git(root, "config", "branch.main.remote"), "origin");
   git(root, "branch", "--set-upstream-to", "origin/main");
   assert.deepEqual(info().tracking, { ahead: 0, behind: 0 });
   git(root, "commit", "--allow-empty", "-m", "Local advance");

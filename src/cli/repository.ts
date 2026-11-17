@@ -337,6 +337,74 @@ export function boardGitInfo(location: BoardLocation) {
   }
 }
 
+function branchTracking(root: string, branch: string) {
+  return ["remote", "merge"].map(key => {
+    const result = invokeGit(root, ["config", "--get-all", "branch." + branch + "." + key]);
+    if (result.code === 1) return "";
+    if (result.code !== 0) throw new TaskboardError("GIT_FAILED", "Could not read upstream configuration.");
+    return result.stdout.trimEnd();
+  });
+}
+
+async function pushPinnedBranch(location: BoardLocation, branch: string, head: string,
+  target: { remote: string; remoteRef: string }, originalTracking = branchTracking(location.root, branch)) {
+  const root = location.root;
+  const { remote, remoteRef } = target;
+  const remoteConfiguration = () => JSON.stringify(["url", "pushurl", "fetch"].map(key => {
+    const result = invokeGit(root, ["config", "--get-all", "remote." + remote + "." + key]);
+    if (result.code !== 0 && result.code !== 1) throw new Error("Could not read remote configuration.");
+    return result.stdout;
+  }));
+  const configuration = remoteConfiguration();
+  try {
+    // A pinned refspec keeps a concurrent local commit out of this push.
+    await execute("git", ["push", "--porcelain", "--no-mirror", "--no-follow-tags", "--recurse-submodules=no", "--",
+      remote, head + ":" + remoteRef], {
+      cwd: root, env: { ...gitEnvironment(), GCM_INTERACTIVE: "never" }, windowsHide: true,
+      timeout: 120_000, maxBuffer: 1024 * 1024,
+    });
+  } catch (error) {
+    const { stdout = "", stderr = "", killed } = error as { stdout?: string; stderr?: string; killed?: boolean };
+    const output = redactSecrets([stdout, stderr].filter(Boolean).join("\n").trim()).slice(0, 4000);
+    throw new TaskboardError("GIT_PUSH_FAILED",
+      killed ? "Git push timed out. Check the remote branch before retrying." : "Git could not push the branch.", { remote, remoteRef, output });
+  }
+  try {
+    onBoard(location, () => {
+      if (configuration !== remoteConfiguration() || resolveCommit(root, "refs/heads/" + branch) !== head) {
+        throw new Error("The source branch or remote configuration changed during push. Read the current state before setting upstream.");
+      }
+      const current = branchTracking(root, branch);
+      if (current[0] === remote && current[1] === remoteRef) return;
+      if (current.some(Boolean) || originalTracking.some(Boolean)) {
+        throw new Error("Upstream configuration changed or conflicts with the pushed destination; it was preserved.");
+      }
+      // Let Git write both branch settings for the explicitly named source branch.
+      // Resolve the actual fetch mapping, including renamed local tracking refs.
+      const fetch = git(root, ["config", "--get-all", "remote." + remote + ".fetch"]);
+      let trackingRef: string | undefined;
+      for (const spec of fetch.trim().split(/\r?\n/)) {
+        const [source, destination] = spec.replace(/^\+/, "").split(":");
+        if (!destination || source.startsWith("^")) continue;
+        if (source === remoteRef) trackingRef = destination;
+        else if (source.includes("*") && destination.includes("*")) {
+          const [prefix, suffix] = source.split("*");
+          if (remoteRef.startsWith(prefix) && remoteRef.endsWith(suffix)) {
+            trackingRef = destination.replace("*", remoteRef.slice(prefix.length, suffix ? -suffix.length : undefined));
+          }
+        }
+      }
+      if (!trackingRef) throw new Error("The remote has no fetch mapping for the pushed branch.");
+      git(root, ["branch", "--set-upstream-to=" + trackingRef, "--", branch]);
+    });
+  } catch (error) {
+    const cause = error instanceof TaskboardError ? error.message + " " + String((error.details as { output?: string } | undefined)?.output ?? "") : String(error);
+    throw new TaskboardError("GIT_UPSTREAM_FAILED", "The commit was pushed, but upstream could not be configured. " +
+      "The repository and remote were preserved; check branch tracking before retrying.",
+      { pushed: true, branch, head, remote, remoteRef, output: redactSecrets(cause).slice(0, 4000) });
+  }
+}
+
 export async function pushRepositoryBranch(location: BoardLocation, input: Record<string, unknown>) {
   const root = repositoryPath(location);
   const branch = text(input.branch, "branch", true);
@@ -352,21 +420,8 @@ export async function pushRepositoryBranch(location: BoardLocation, input: Recor
     if (tip !== head) throw new TaskboardError("STALE_REPOSITORY", "The branch tip changed. Read its current commit before pushing.");
     return repositoryPushTarget(root, branch);
   });
-  try {
-    // A pinned refspec keeps a concurrent local commit out of this push.
-    await execute("git", ["push", "--porcelain", "--no-mirror", "--no-follow-tags", "--recurse-submodules=no", "--",
-      remote, head + ":" + remoteRef], {
-      cwd: root, env: { ...gitEnvironment(), GCM_INTERACTIVE: "never" }, windowsHide: true,
-      timeout: 120_000, maxBuffer: 1024 * 1024,
-    });
-  } catch (error) {
-    const { stdout = "", stderr = "", killed } = error as { stdout?: string; stderr?: string; killed?: boolean };
-    const output = [stdout, stderr].filter(Boolean).join("\n").trim()
-      .replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi, "$1").slice(0, 4000);
-    throw new TaskboardError("GIT_PUSH_FAILED",
-      killed ? "Git push timed out. Check the remote branch before retrying." : "Git could not push the branch.", { remote, remoteRef, output });
-  }
-  return { branch, head, remote, remoteRef };
+  await pushPinnedBranch(location, branch, head, { remote, remoteRef });
+  return { branch, head, remote, remoteRef, gitInfo: boardGitInfo(location) };
 }
 
 export async function publishRepository(location: BoardLocation, input: Record<string, unknown>) {
@@ -383,7 +438,7 @@ export async function publishRepository(location: BoardLocation, input: Record<s
     if (git(root, ["remote"]).trim()) {
       throw new TaskboardError("REMOTE_EXISTS", "A remote already exists. Manage this remote with your Git tools.");
     }
-    return current;
+    return { branch: current.branch, head: current.head };
   });
   prepare();
   // gh also launches Git; inherited routing variables must not select another repository.
@@ -397,6 +452,7 @@ export async function publishRepository(location: BoardLocation, input: Record<s
       : "Sign in to GitHub CLI with gh auth login, then retry.");
   }
   const current = prepare();
+  const originalTracking = branchTracking(root, current.branch);
   try {
     await execute("gh", ["repo", "create", name, "--" + visibility, "--source", root, "--remote", "origin"], options);
   } catch (error) {
@@ -405,12 +461,13 @@ export async function publishRepository(location: BoardLocation, input: Record<s
     });
   }
   try {
-    // Publish the reviewed commit and branch even if HEAD changes during the network request.
-    await execute("git", ["push", "origin", current.head + ":refs/heads/" + current.branch], options);
+    await pushPinnedBranch(location, current.branch, current.head,
+      { remote: "origin", remoteRef: "refs/heads/" + current.branch }, originalTracking);
   } catch (error) {
+    if (error instanceof TaskboardError && error.code === "GIT_UPSTREAM_FAILED") throw error;
     throw new TaskboardError("GITHUB_PUSH_FAILED", "The GitHub repository and origin were created, but the push failed. Check Git authentication and push the branch with your Git tools.", {
       output: String((error as { stderr?: string }).stderr ?? "").trim().slice(0, 4000),
     });
   }
-  return { remote: git(root, ["remote", "get-url", "origin"]).trim() };
+  return { remote: git(root, ["remote", "get-url", "origin"]).trim(), gitInfo: boardGitInfo(location) };
 }

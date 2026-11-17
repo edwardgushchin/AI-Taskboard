@@ -4561,6 +4561,10 @@ async function gitCommand(action, input, project) {
     return;
   }
   notice();
+  if (result.data?.gitInfo && frame.board) {
+    frame.board.gitInfo = result.data.gitInfo;
+    renderStatusBar(false);
+  }
   return result.data;
 }
 
@@ -4834,10 +4838,10 @@ function renderStatusBar(projectChanged) {
       pushError ? language("Configure the upstream remote and branch", "Настройте удалённую ветку и её отслеживание") :
       trackingError ? language("Upstream counts unavailable", "Счётчики отслеживаемой ветки недоступны") :
       language("No upstream configured", "Отслеживаемая ветка не настроена");
-    status.querySelector("span").textContent = tracking ? behind + "↓ " + ahead + "↑" : language("Branch", "Ветка");
+    status.querySelector("span").textContent = tracking ? behind + "↓ " + ahead + "↑" : "?↓ ?↑";
     status.title = (pushing ? language("Pushing commits…", "Отправка коммитов…") :
       status.disabled ? language("Another branch is being pushed", "Отправляется другая ветка") :
-        language("Push to the upstream branch", "Отправить коммиты в отслеживаемую ветку")) + " · " +
+        language("Push to the remote branch", "Отправить коммиты в удалённую ветку")) + " · " +
       language("Behind ", "Отставание ") + behind + " · " + language("Ahead ", "Опережение ") + ahead;
     if (!tracking || !pushTarget) status.title = reason + (pushTarget ? " · " +
       language("Push branch to ", "Отправить ветку в ") + pushTarget.remote + "/" + pushTarget.remoteRef.slice(11) : "");
