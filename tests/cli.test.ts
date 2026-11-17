@@ -238,7 +238,10 @@ test("GitHub publication validates input, preserves partial results and pins pus
       git(root, "remote", "add", "origin", remote);
     }
     if (command === "git" && mode === "push-failed") throw Object.assign(new Error("Push failed"), { stderr: "Push rejected" });
-    if (command === "git") git(root, "update-ref", "refs/remotes/origin/main", git(root, "rev-parse", "refs/heads/main"));
+    if (command === "git") {
+      git(root, "update-ref", "refs/remotes/origin/main", git(root, "rev-parse", "refs/heads/main"));
+      if (mode === "upstream-failed") writeFileSync(join(root, ".git", "config.lock"), "");
+    }
     return { stdout: "", stderr: "" };
   } });
   const original = childProcess.execFile;
@@ -252,7 +255,11 @@ test("GitHub publication validates input, preserves partial results and pins pus
   const input = { head: snapshot.head, branch: snapshot.branch, name: "owner/repository", visibility: "private" };
   const publish = async (nextMode: string, fields: Record<string, unknown>, code?: string) => {
     mode = nextMode;
-    if (code) await assert.rejects(publishRepository(location, fields), { code });
+    if (code) await assert.rejects(publishRepository(location, fields), (error: any) => {
+      assert.equal(error.code, code);
+      if (nextMode === "push-failed") assert.match(error.details.output, /Push rejected/);
+      return true;
+    });
     else assert.equal((await publishRepository(location, fields)).remote, remote);
   };
   await publish("", { ...input, name: "--public" }, "INVALID_INPUT");
@@ -265,6 +272,11 @@ test("GitHub publication validates input, preserves partial results and pins pus
   await publish("push-failed", input, "GITHUB_PUSH_FAILED");
   assert.equal(git(root, "remote", "get-url", "origin"), remote);
   await publish("", input, "REMOTE_EXISTS");
+  git(root, "remote", "remove", "origin");
+  try { await publish("upstream-failed", input, "GIT_UPSTREAM_FAILED"); }
+  finally { rmSync(join(root, ".git", "config.lock")); }
+  assert.equal(git(root, "remote", "get-url", "origin"), remote);
+  assert.equal(spawnSync("git", ["config", "--get", "branch.main.remote"], { cwd: root, env }).status, 1);
   git(root, "remote", "remove", "origin");
   git(root, "switch", "-c", "other");
   writeFileSync(join(root, "other.txt"), "other branch\n");

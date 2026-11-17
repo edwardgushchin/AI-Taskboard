@@ -465,8 +465,10 @@ export async function publishRepository(location: BoardLocation, input: Record<s
       { remote: "origin", remoteRef: "refs/heads/" + current.branch }, originalTracking);
   } catch (error) {
     if (error instanceof TaskboardError && error.code === "GIT_UPSTREAM_FAILED") throw error;
+    const output = error instanceof TaskboardError
+      ? (error.details as { output?: string } | undefined)?.output : (error as { stderr?: string }).stderr;
     throw new TaskboardError("GITHUB_PUSH_FAILED", "The GitHub repository and origin were created, but the push failed. Check Git authentication and push the branch with your Git tools.", {
-      output: String((error as { stderr?: string }).stderr ?? "").trim().slice(0, 4000),
+      output: String(output ?? "").trim().slice(0, 4000),
     });
   }
   return { remote: git(root, ["remote", "get-url", "origin"]).trim(), gitInfo: boardGitInfo(location) };

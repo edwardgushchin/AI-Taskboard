@@ -159,7 +159,7 @@ function boardError(error) {
     GIT_WORKTREE_REQUIRED: t("ui.open_a_repository_with_a_main_worktree_31b281c4"),
     WORKING_DIRECTORY_UNAVAILABLE: t("ui.the_selected_working_directory_is_unavailable_or_43dc81fb"),
     GIT_COMMIT_REQUIRED: t("ui.select_a_branch_with_a_commit_first_6f14dd57"),
-    REMOTE_EXISTS: t("ui.the_origin_remote_already_exists_manage_it_with__7ec2efff"),
+    REMOTE_EXISTS: localization.errorText(error.message),
     GITHUB_UNAVAILABLE: t("ui.install_github_cli_gh_and_sign_in_with_gh_auth_l_a1832f3d"),
     GITHUB_CLI_MISSING: t("ui.install_github_cli_gh_on_the_host_and_make_it_av_af2f59c3"),
     GITHUB_AUTH_REQUIRED: t("ui.github_cli_has_no_usable_login_in_the_host_profi_6912b192"),
@@ -4900,22 +4900,22 @@ function renderStatusBar(projectChanged) {
   status.setAttribute("aria-busy", String(pushing));
   if (!status.hidden) {
     const { behind, ahead } = tracking ?? {};
-    const reason = gitError ? t("ui.git_state_unavailable") :
-      pushError ? t("ui.configure_git_upstream") :
-      trackingError ? t("ui.git_counts_unavailable") :
-      t("ui.git_upstream_missing");
     status.querySelector("span").textContent = tracking ? behind + "↓ " + ahead + "↑" : "?↓ ?↑";
-    status.title = (pushing ? t("ui.pushing_commits_c457ab7e") :
-      status.disabled ? t("ui.another_branch_is_being_pushed_4961fd8c") :
-        t("ui.push_remote_branch")) + " · " +
-      t("ui.behind_2ead5b5b") + behind + " · " + t("ui.ahead_10871dc0") + ahead;
-    if (!tracking || !pushTarget) status.title = reason + (pushTarget ? " · " +
-      t("ui.push_branch_destination") + pushTarget.remote + "/" + pushTarget.remoteRef.slice(11) : "");
+    bindLocalized(status, "title", () => {
+      const reason = gitError ? t("ui.git_state_unavailable") :
+        pushError ? t("ui.configure_git_upstream") :
+        trackingError ? t("ui.git_counts_unavailable") : t("ui.git_upstream_missing");
+      if (!tracking || !pushTarget) return reason + (pushTarget ? " · " +
+        t("ui.push_branch_destination") + pushTarget.remote + "/" + pushTarget.remoteRef.slice(11) : "");
+      return (pushing ? t("ui.pushing_commits_c457ab7e") :
+        status.disabled ? t("ui.another_branch_is_being_pushed_4961fd8c") : t("ui.push_remote_branch")) + " · " +
+        t("ui.behind_2ead5b5b") + behind + " · " + t("ui.ahead_10871dc0") + ahead;
+    });
     status.setAttribute("aria-label", status.title);
   }
   const publish = byId("status-publish");
   publish.hidden = !branch || !head || !remotes || remotes.length > 0 || Boolean(gitError);
-  publish.title = t("ui.publish_to_github_5ba684aa");
+  bindLocalized(publish, "title", () => t("ui.publish_to_github_5ba684aa"));
   publish.setAttribute("aria-label", publish.title);
   if (projectChanged) {
     gitMenuRequest++;
