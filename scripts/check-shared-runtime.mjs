@@ -270,6 +270,15 @@ if (!process.versions.electron) {
       await wait(async () => (await readOrder()).every(view => view.review[0] === "Review order 6"), "repeated review ends");
     }
     record("PASS: active-first ordering in both columns across processes, including repeat review, repair, multiple runs and idle order; focus, scroll and dialog preserved");
+    await restarted.ask({ action: "focusReviewMore", overflow: true });
+    for (const id of reviews.slice(0, -1)) assert.equal(await b.ask({ action: "reserve", role: "reviewer", task: "review:" + id }), true);
+    await wait(async () => (await readOrder()).every(view => view.review[0] === "Review order 5"), "six active reviews sorted first");
+    await wait(() => restarted.ask({ action: "reviewMoreFitRetried" }), "last inactive card tried and removed");
+    assert.equal(await restarted.ask({ action: "reviewMoreFocusRestored" }), true, "focus and scroll after rejected fit");
+    await restarted.ask({ action: "resetReviewFit" });
+    for (const id of reviews.slice(0, -1)) await b.ask({ action: "release", role: "reviewer", task: "review:" + id });
+    await wait(async () => (await readOrder()).every(view => view.review[0] === "Review order 6" && view.review.length < reviews.length), "idle review batch restored");
+    record("PASS: rejected fit restores focus to Show more without scrolling");
     await restarted.ask({ action: "focusReviewMore" });
     for (const id of reviews) assert.equal(await b.ask({ action: "reserve", role: "reviewer", task: "review:" + id }), true);
     await wait(async () => (await readOrder()).every(view => view.review.length === reviews.length), "all review cards visible after activation");
@@ -378,15 +387,41 @@ if (!process.versions.electron) {
         return { execution: titles('in_progress'), review: titles('review'), more: Boolean(document.querySelector('#lane-cards-in_progress .lane-more')) };
       })()`)));
       if (command.action === "focusReviewMore") {
-        await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(`(() => {
+        const contents = BrowserWindow.getAllWindows()[0].webContents;
+        const style = command.overflow ? await contents.insertCSS(
+          "#lane-cards-review > .task-card { height: 42px; min-height: 0; overflow: hidden; } #lane-cards-review > .qa-tall.task-card { height: 1200px; }") : null;
+        await contents.executeJavaScript(`(() => {
           const lane = document.querySelector('#lane-cards-review');
           const more = lane.querySelector('.lane-more');
+          if (${Boolean(style)}) {
+            const tall = lane.querySelector('.task-card');
+            tall.classList.add('qa-tall');
+            const fit = globalThis.reviewFit = { style: ${JSON.stringify(style)}, tall, more, retried: false };
+            fit.observer = new MutationObserver(records => {
+              if (more.isConnected && !tall.isConnected && records.some(record => [...record.addedNodes].includes(tall)) &&
+                  records.some(record => [...record.removedNodes].includes(more))) fit.retried = true;
+            });
+            fit.observer.observe(lane, { childList: true });
+          }
           more.focus({ preventScroll: true });
           const board = document.querySelector('#lanes');
           board.scrollLeft = 80;
           if (document.activeElement !== more || board.scrollLeft <= 0) throw Error("Show more focus fixture not set");
           globalThis.reviewMoreFocus = { visible: new Set(lane.querySelectorAll('.task-card')), left: board.scrollLeft, top: board.scrollTop };
         })()`);
+        data = true;
+      }
+      if (command.action === "reviewMoreFitRetried") data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript("reviewFit.retried");
+      if (command.action === "reviewMoreFocusRestored") {
+        data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(`(() => {
+          const board = document.querySelector('#lanes');
+          return document.activeElement === reviewFit.more && board.scrollLeft === reviewMoreFocus.left && board.scrollTop === reviewMoreFocus.top;
+        })()`);
+      }
+      if (command.action === "resetReviewFit") {
+        const contents = BrowserWindow.getAllWindows()[0].webContents;
+        const key = await contents.executeJavaScript("reviewFit.observer.disconnect(); reviewFit.tall.classList.remove('qa-tall'); reviewFit.style");
+        await contents.removeInsertedCSS(key);
         data = true;
       }
       if (command.action === "reviewMoreFocusTransferred") {

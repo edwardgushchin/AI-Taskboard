@@ -1336,7 +1336,10 @@ function laneTools(state, title, tasks, total, count, content) {
       renderBatch();
       break;
     }
-    if (focused === more && !more.isConnected) content.children[firstNew]?.focus({ preventScroll: true });
+    if (focused === more && document.activeElement !== more) {
+      const next = more.isConnected ? more : content.children[firstNew];
+      next?.focus({ preventScroll: true });
+    }
   }
   updateCards();
   updateCollapse();
