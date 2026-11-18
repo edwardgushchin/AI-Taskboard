@@ -1,4 +1,6 @@
 {
+  "task_chat.retry_reply": "Retry reply",
+  "task_chat.writer_busy": "Another session is using this task. Try again when it finishes.",
   "draft_discussion.queued": "Draft discussion is queued.",
   "draft_discussion.running": "Reviewing the draft…",
   "draft_discussion.failed": "Draft review failed: {reason}",

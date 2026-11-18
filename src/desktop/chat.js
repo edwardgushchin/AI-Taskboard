@@ -768,6 +768,7 @@ function taskChat(task) {
   const savedRunItems = new Set();
   let day;
   let lastMessage;
+  let lastMessageIndex = -1;
   for (const { event, index } of events) {
     if (event.action === "submit") submittedAt = event.at;
     if (event.action === "start" || (event.to && event.to !== "review")) submissionRow = undefined;
@@ -778,7 +779,10 @@ function taskChat(task) {
       row.dataset.historyAt = event.at;
       work.append(row);
     };
-    if (event.chat) lastMessage = event;
+    if (event.chat) {
+      lastMessage = event;
+      lastMessageIndex = index;
+    }
     const timestamp = new Date(event.at);
     const eventDay = !event.at || Number.isNaN(+timestamp) ? "" : dayFormat.format(timestamp);
     if (conversation && eventDay && eventDay !== day) {
@@ -1039,6 +1043,9 @@ function taskChat(task) {
   const controls = element("div", undefined, "chat-controls");
   const feedback = element("p", undefined, "chat-status");
   feedback.setAttribute("role", "status");
+  const retryReply = button(() => t("task_chat.retry_reply"), () => {
+    if (!retryReply.disabled) void submit(lastMessageIndex);
+  }, "quiet chat-retry-reply");
   const send = element("button", undefined, "button primary chat-icon chat-send");
   send.type = "submit";
   const attach = button("", () => fileInput.click(), "quiet chat-icon chat-add");
@@ -1053,7 +1060,7 @@ function taskChat(task) {
   }, "quiet chat-icon chat-mic");
   microphone.append(icon("mic"));
   controlLabelForIcon(microphone, () => t("ui.voice_input_a05b7480"));
-  controls.append(attach, microphone, send);
+  controls.append(attach, microphone, retryReply, send);
   composer.append(pendingFiles, input, fileInput, controls, feedback);
   if (task.status === "draft" && task.draftDiscussion) {
     const { phase, reason } = task.draftDiscussion;
@@ -1132,6 +1139,8 @@ function taskChat(task) {
     send.replaceChildren(icon(stop ? "stop" : "play"));
     controlLabelForIcon(send, () => stop ? t("ui.stop_agent_f50db092") : t("ui.send_message_173c4807"));
     send.disabled = Boolean(draft.saving || draft.stopping) || (!stop && !draft.text.trim() && !draft.files.length);
+    retryReply.hidden = lastMessage?.actor !== "user" || working();
+    retryReply.disabled = retryReply.hidden || Boolean(draft.saving || draft.stopping);
     feedback.textContent = draft.error ?? "";
     feedback.hidden = !feedback.textContent;
     for (const remove of pendingFiles.querySelectorAll("button")) remove.disabled = input.readOnly;
@@ -1188,9 +1197,10 @@ function taskChat(task) {
     sync();
   }
 
-  async function submit() {
-    if (send.disabled) return;
-    if (stopping()) {
+  async function submit(retryAt) {
+    const retrying = retryAt !== undefined;
+    if (!retrying && send.disabled) return;
+    if (!retrying && stopping()) {
       draft.stopping = true;
       draft.error = "";
       sync();
@@ -1216,13 +1226,13 @@ function taskChat(task) {
     sync();
     renderChatTurn(list, draft);
     try {
-      const { model, effort } = await discussionSettings();
-      const files = await Promise.all(draft.files.map(file => api.filePayload(file)));
+      const { model, effort } = retrying ? lastMessage.chat : await discussionSettings();
+      const files = retrying ? [] : await Promise.all(draft.files.map(file => api.filePayload(file)));
       if (!area.isConnected || frame.project !== project) return;
       const { saved, result } = await api.chatSend(task.id, {
-        model, effort, text, files,
+        model, effort, text: retrying ? "" : text, files, ...(retrying ? { retryAt } : {}),
       });
-      if (saved && draft.saving === submission) {
+      if (saved && !retrying && draft.saving === submission) {
         draft.text = "";
         draft.files = [];
       }

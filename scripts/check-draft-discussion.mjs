@@ -5,11 +5,11 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFil
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { electronCheck } from "./electron-check.mjs";
 
 const live = process.argv.includes("--live");
-const { scratch, artifacts } = electronCheck(import.meta.url, "draft-discussion", live ? 240000 : 90000,
+const { scratch, artifacts } = electronCheck(import.meta.url, "draft-discussion", live ? 240000 : 150000,
   live ? [[]] : [["--first-pass"], ["--restart"]]);
 const require = createRequire(import.meta.url);
 const { app, BrowserWindow, dialog } = require("electron");
@@ -57,6 +57,8 @@ const calls = [];
 let mutableSources = [];
 let failProvider = true;
 let staleGate;
+let stopGate;
+let failMessage = true;
 globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images, _commentary, _action, _scratch,
   _limit, _usage, onControl, _signal, id, _activity, mode) => {
   const context = JSON.parse(prompt);
@@ -70,8 +72,18 @@ globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images,
   }
   calls.push({ context, configured, mode, images: images.map(path => readFileSync(path).toString("base64")),
     documents: context.attachments.filter(file => file.path && file.name.endsWith(".txt")).map(file => readFileSync(file.path, "utf8")) });
-  onControl({ interrupt: async () => {}, steer: async () => assert.fail("An automatic review must own its turn.") });
-  if (context.task.title === "Provider inactive" && failProvider) throw Error("Fixture provider unavailable");
+  const interrupted = Promise.withResolvers();
+  onControl({ interrupt: async () => interrupted.resolve({ interrupted: true }),
+    steer: async () => assert.fail("Unexpected steering request.") });
+  if (context.latestUserMessage?.text === "Fail once" && failMessage) {
+    failMessage = false;
+    throw Error("Fixture provider unavailable");
+  }
+  if (context.latestUserMessage?.text === "Wait for stop") {
+    stopGate = true;
+    return interrupted.promise;
+  }
+  if (mode === "initial" && context.task.title === "Provider inactive" && failProvider) throw Error("Fixture provider unavailable");
   if (context.task.title === "Stale draft") await new Promise(resolve => { staleGate = resolve; });
   await delay(450);
   return { text: context.latestUserMessage ? "User answer recorded: " + context.latestUserMessage.text :
@@ -93,11 +105,23 @@ try {
       process.platform === "win32" ? "junction" : "dir");
   }
   const sourceUrl = new URL("../src/desktop/main.ts", import.meta.url);
-  let source = readFileSync(sourceUrl, "utf8").replaceAll("import.meta.url", JSON.stringify(sourceUrl.href))
-    .replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, sourceUrl).href));
-  if (!live) source = source.replace("writer.run(() => replyToTask(", "writer.run(() => globalThis.draftFixtureReply(");
+  const readSource = url => readFileSync(url, "utf8").replaceAll("import.meta.url", JSON.stringify(url.href))
+    .replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, url).href));
+  const compile = source => require("esbuild").transformSync(source, { loader: "ts", format: "esm" }).code;
+  let source = readSource(sourceUrl);
+  if (!live) {
+    // Keep replyToTask and its writer context in the test. Replace only the provider call.
+    const chatUrl = new URL("./codex-chat.ts", sourceUrl);
+    const providerCall = "reply(profile, project, prompt, images, runAction, { ...options, worklog, mcp: { config, env } })";
+    const chat = readSource(chatUrl);
+    assert.equal(chat.split(providerCall).length, 2);
+    const chatEntry = join(scratch, "codex-chat-under-test.mjs");
+    writeFileSync(chatEntry, compile(chat.replace(providerCall,
+      "globalThis.draftFixtureReply(profile, project, settings, prompt, images, onCommentary, runAction, imageDirectory, imageLimit, onTokenUsage, onControl, signal, taskId, onActivity, mode)")));
+    source = source.replace(chatUrl.href, pathToFileURL(chatEntry).href);
+  }
   const entry = join(scratch, "main-under-test.mjs");
-  writeFileSync(entry, require("esbuild").transformSync(source, { loader: "ts", format: "esm" }).code);
+  writeFileSync(entry, compile(source));
   process.on("unhandledRejection", error => { console.error(error); app.exit(1); });
   app.on("web-contents-created", (_event, contents) => contents.setBackgroundThrottling(false));
   require(entry);
@@ -188,7 +212,7 @@ try {
     assert.equal(messages(show(report.ui)).length, 1);
     check("A fresh Electron process exposes a retry for an orphaned turn and keeps existing replies single");
   } else {
-    const { registerRuntime } = await import("../src/desktop/board-runtime.ts");
+    const { registerRuntime, runtimeEntries } = await import("../src/desktop/board-runtime.ts");
     slot = registerRuntime(project, { kind: "slot", role: "executor", task: "T-9999" });
     assert.ok(slot);
     const response = await evaluate(`window.taskboard.command("create", undefined, { title: "Created in desktop" })`);
@@ -200,12 +224,65 @@ try {
     assert.deepEqual(calls[0].configured, { model: "gpt-6.1-sol", effort: "medium" });
     check("Desktop creation starts in the background with the executor pool occupied and uses board settings");
 
+    const startMessage = (id, text, run = evaluate) => run(`window.taskboard.chatSend(
+      ${JSON.stringify(id)}, ${JSON.stringify({ ...settings, text, files: [] })})`);
+    const say = async (id, text, run) => {
+      const reply = await startMessage(id, text, run);
+      assert.equal(reply.result.ok, true, JSON.stringify(reply));
+    };
+    // Leave a new draft with no chat history, ready for a user's first message.
+    const ordinary = cli(["create"], { title: "Provider inactive", execution: settings });
+    await until(() => show(ordinary.id).draftDiscussion?.phase === "failed", "new draft before ordinary chat");
+    await until(() => !runtimeEntries(project).some(entry => entry.task === ordinary.id), "initial writer released");
+    await say(ordinary.id, "First message");
+    await say(ordinary.id, "Follow-up");
+    assert.deepEqual(messages(show(ordinary.id)).map(event => event.actor), ["user", "agent", "user", "agent"]);
+    assert.equal(runtimeEntries(project).filter(entry => entry.kind === "slot").length, 1);
+    assert.equal(show(ordinary.id).status, "draft");
+    check("First message and follow-up get one reply each with the executor pool occupied");
+
+    await display(ordinary.id);
+    await evaluate(`{
+      const input = document.querySelector("#task-chat-input");
+      input.value = "Fail once";
+      input.dispatchEvent(new Event("input"));
+      input.form.requestSubmit();
+    }`);
+    await until(() => evaluate(`document.querySelector(".chat-retry-reply")?.disabled === false &&
+      document.querySelector(".chat-status:not([hidden])")?.textContent === "Fixture provider unavailable"`), "saved-message retry");
+    assert.equal(messages(show(ordinary.id)).at(-1).text, "Fail once");
+    await capture("task-chat-retry.png");
+    await evaluate("document.querySelector('.chat-retry-reply').click()");
+    await waitReply(ordinary.id, 6);
+    assert.deepEqual(messages(show(ordinary.id)).slice(-2).map(event => [event.actor, event.text]),
+      [["user", "Fail once"], ["agent", "User answer recorded: Fail once"]]);
+    await until(() => !runtimeEntries(project).some(entry => entry.task === ordinary.id), "writer released after retry");
+    check("The visible retry answers the saved message without appending it again");
+
     await evaluate("window.taskboard.menuAction('new-window')");
     const other = BrowserWindow.getAllWindows().find(candidate => candidate.id !== window.id);
     assert.ok(other);
     const evaluateOther = code => other.webContents.executeJavaScript(code);
     await until(() => evaluateOther("Boolean(window.taskboard)"), "second renderer");
     await open(project, evaluateOther);
+    const pending = startMessage(ordinary.id, "Wait for stop");
+    await until(() => stopGate, "ordinary provider is running");
+    const beforeConflict = show(ordinary.id);
+    const conflict = await startMessage(ordinary.id, "Competing message", evaluateOther);
+    assert.equal(conflict.saved, false);
+    assert.equal(conflict.result.error.code, "CHAT_BUSY");
+    assert.equal(runtimeEntries(project).filter(entry => entry.kind === "task" && entry.task === ordinary.id).length, 1);
+    assert.deepEqual(show(ordinary.id), beforeConflict);
+    assert.equal((await evaluate(`window.taskboard.chatStop(${JSON.stringify(ordinary.id)})`)).ok, true);
+    assert.equal((await pending).result.ok, true);
+    assert.equal(messages(show(ordinary.id)).length, 7);
+    await say(ordinary.id, "Competing message", evaluateOther);
+    assert.deepEqual(messages(show(ordinary.id)).slice(-3).map(event => event.text),
+      ["Wait for stop", "Competing message", "User answer recorded: Competing message"]);
+    assert.equal(show(ordinary.id).status, "draft");
+    assert.equal(show(ordinary.id).git, undefined);
+    assert.equal(runtimeEntries(project).some(entry => entry.task === ordinary.id), false);
+    check("The second window is rejected while one writer is active and can send after stopping it");
 
     const { boardActions } = await import("../src/desktop/board-actions.ts");
     const never = () => assert.fail("Unrelated manager action");
