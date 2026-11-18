@@ -6,7 +6,7 @@ import type { FileLink } from "../cli/attachment-links.ts";
 import { providerLimitSource, readCodexLimits } from "./provider-limits.ts";
 import localization from "./localization.cjs";
 import { activeRunSummary, observeActiveRuns, enableSharedRuns } from "./active-runs.ts";
-import { matchesQueuedExecutor, registerRuntime, runtimeLocation, runtimeTransaction } from "./board-runtime.ts";
+import { matchesQueuedExecutor, prepareQueuedTurn, recordQueuedTurn, registerRuntime, runtimeLocation, runtimeTransaction } from "./board-runtime.ts";
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, Notification, protocol, session, shell } from "electron";
 import type { IpcMainInvokeEvent } from "electron";
 import { randomUUID } from "node:crypto";
@@ -1254,6 +1254,8 @@ function scheduleAutoBoard(watch: BoardWatch) {
   })().catch(error => failed((error as Error).message)).finally(() => { queue.running = false; });
 }
 
+const queuedRecoveryDelay = new Set<string>();
+
 function scheduleAgentWork() {
   if (schedulingAgentWork) return;
   schedulingAgentWork = true;
@@ -1275,12 +1277,14 @@ function scheduleAgentWork() {
             continue;
           }
           const role = task.mergeRepair ? "reviewer" : "executor";
-          if (!agentSlots.available(projectIdentity(project), role, settings?.taskLimits) || executorBusy(project, id)) continue;
+          const key = project + "\0" + id;
+          if (queuedRecoveryDelay.has(key) ||
+              !agentSlots.available(projectIdentity(project), role, settings?.taskLimits) || executorBusy(project, id)) continue;
           const failed = (error: string) => broadcastBoardChat(project, "orchestrator-review-error", { error: id + " · " + error });
           void launchTask(project, id, undefined, false, task.revision, continuation,
             false, false, false, false, false, undefined, revision).then(result => {
             if (result.ok || ["EXECUTOR_LIMIT", "REVIEWER_LIMIT", "BOARD_BUSY", "CHAT_BUSY",
-              "LAUNCH_IN_PROGRESS", "PROJECT_CLOSING", "REVISION_CONFLICT", "INVALID_TRANSITION"].includes(result.error.code)) return;
+              "LAUNCH_IN_PROGRESS", "PROJECT_CLOSING", "REVISION_CONFLICT", "INVALID_TRANSITION", "CODEX_START_UNCONFIRMED"].includes(result.error.code)) return;
             agentSlots.defer(project, id, undefined, revision);
             notifyRunChange(project);
             failed(result.error.message);
@@ -3011,6 +3015,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   const runStarted = performance.now();
   let prepared = false;
   let monitoring = false;
+  let recoveringThreadId: string | undefined;
   let release: (() => void) | undefined;
   let updateTimer: NodeJS.Timeout | undefined;
   const publish = () => {
@@ -3071,10 +3076,14 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       scheduleAgentWork();
       return current;
     }
+    if (queued) {
+      const task = current.data;
+      recoveringThreadId = agentSlots.entries(project).find(entry => matchesQueuedExecutor(entry, task))?.turnRequest?.threadId;
+    }
     const client = await configuredCodex(app.getPath("userData"));
     if (!client) {
       const reason = t("ui.choose_the_codex_executable_in_settings_06a08a7e");
-      if (prepared) throw new Error(reason);
+      if (prepared || recoveringThreadId) throw new Error(reason);
       return cliFailure("CODEX_UNAVAILABLE", reason);
     }
     if (newThread) {
@@ -3165,7 +3174,14 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
           (queued && ["INVALID_TRANSITION", "REVISION_CONFLICT"].includes(saved.error.code)) ? saved.error.code : "CODEX_LINK_FAILED",
       });
       linked = saved.data;
-    }, desktopProfile));
+      if (!queued) return;
+      const pending = prepareQueuedTurn(project, linked, codexThreadId);
+      if (!pending) throw Object.assign(new Error("The queued start is no longer pending."), { code: "INVALID_TRANSITION" });
+      if (pending.threadId !== codexThreadId) {
+        throw Object.assign(new Error("The queued start belongs to another Codex thread."), { code: "CODEX_START_UNCONFIRMED" });
+      }
+      return { ...pending, accepted: (turnId: string) => recordQueuedTurn(project, id, pending.clientId, turnId) };
+    }, desktopProfile, recoveringThreadId));
     const { threadId: codexThreadId, completion } = run;
     const directories = new Set<string>();
     let stopRequested = false;
@@ -3178,6 +3194,10 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     notifyRunChange(project);
     let retry: { revision: number; reason: string; continuation: ExecutorContinuation } | undefined;
     void completion.then(async outcome => {
+      if (run.recovered && !stopRequested) {
+        await saveActivity();
+        return;
+      }
       const reason = outcome?.reason;
       const items = [...activity.values()];
       // Some tool rejections reach the agent's reply but do not fail the App Server turn.
@@ -3291,6 +3311,11 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     if (queued && signal.aborted) return cliFailure("CHAT_BUSY", (error as Error).message);
     if (code === "BOARD_BUSY" || (queued && (code === "INVALID_TRANSITION" || code === "REVISION_CONFLICT"))) {
       return cliFailure(code, (error as Error).message);
+    }
+    if (recoveringThreadId || code === "CODEX_START_UNCONFIRMED") {
+      queuedRecoveryDelay.add(key);
+      setTimeout(() => queuedRecoveryDelay.delete(key), 5_000).unref();
+      return cliFailure("CODEX_START_UNCONFIRMED", (error as Error).message);
     }
     const busy = code === "CODEX_THREAD_BUSY";
     const reason = busy ? t("ui.this_codex_chat_is_already_open_in_another_proce_9d6a0201") + "\n\n" + (error as Error).message : (error as Error).message;

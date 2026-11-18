@@ -19,6 +19,7 @@ export interface RuntimeEntry {
   limits?: AgentLimits;
   revision?: number;
   linkedThread?: { revision: number; codexThreadId: string };
+  turnRequest?: { threadId: string; clientId: string; turnId?: string };
   continuation?: { afterDisconnect?: boolean; withoutProgress?: boolean };
   state?: {
     id: string;
@@ -108,6 +109,23 @@ export function linkQueuedExecutor(project: string, task: QueuedTask, updated: Q
       entry.linkedThread = { revision: updated.revision, codexThreadId: updated.codexThreadId };
     }
     return true;
+  });
+}
+
+export function prepareQueuedTurn(project: string, task: QueuedTask, threadId: string) {
+  return runtimeTransaction(project, entries => {
+    const entry = entries.find(entry => matchesQueuedExecutor(entry, task));
+    if (!entry) return;
+    const previous = entry.turnRequest;
+    entry.turnRequest ??= { threadId, clientId: randomUUID() };
+    return { ...entry.turnRequest, recover: Boolean(previous) };
+  });
+}
+
+export function recordQueuedTurn(project: string, task: string, clientId: string, turnId: string) {
+  runtimeTransaction(project, entries => {
+    const entry = entries.find(entry => entry.kind === "queue" && entry.task === task);
+    if (entry?.turnRequest?.clientId === clientId) entry.turnRequest.turnId = turnId;
   });
 }
 
