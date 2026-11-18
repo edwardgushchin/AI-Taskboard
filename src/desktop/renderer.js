@@ -931,11 +931,20 @@ function card(task) {
   card.className = "task-card";
   card.dataset.state = task.status;
   card.style.borderLeft = manualBoard() ? `3px solid ${manualColumns().find(c => c.id === task.status)?.color ?? "transparent"}` : "";
-  if (task.priority && task.priority !== "normal") {
+  const hasPriority = task.priority && task.priority !== "normal";
+  if (hasPriority) {
     card.dataset.priority = task.priority;
-    bindLocalized(card, "aria-description", () => t("ui.priority_b114c9b5") + " · " + priorityName(task.priority), true);
   } else {
     delete card.dataset.priority;
+  }
+  const subtasks = task.subtasks ?? [];
+  const completed = subtasks.filter(entry => entry.done).length;
+  if (hasPriority || subtasks.length) {
+    bindLocalized(card, "aria-description", () => [
+      hasPriority ? t("ui.priority_b114c9b5") + " · " + priorityName(task.priority) : "",
+      subtasks.length ? t("ui.subtasks_b409bda5") + " " + completed + "/" + subtasks.length : "",
+    ].filter(Boolean).join(". "), true);
+  } else {
     card.removeAttribute("aria-description");
   }
   const item = element("span", undefined, "task-card-details");
@@ -1009,12 +1018,15 @@ function card(task) {
   if (block && !manualWait) {
     item.append(blockerBanner(block));
   }
-  if (task.subtasks?.length) {
-    const count = task.subtasks.filter(entry => entry.done).length + "/" + task.subtasks.length;
-    const subtasks = element("span", undefined, "task-stat");
-    bindLocalized(subtasks, "title", () => t("ui.subtasks_b409bda5") + " " + count);
-    subtasks.append(icon("checklist"), count);
-    meta.append(subtasks);
+  if (subtasks.length) {
+    const progress = element("span", undefined, "task-subtask-progress");
+    progress.setAttribute("aria-hidden", "true");
+    for (const subtask of subtasks) {
+      const bar = element("span");
+      if (subtask.done) bar.classList.add("is-done");
+      progress.append(bar);
+    }
+    item.append(progress);
   }
   if (task.attachments?.length) {
     const attachments = element("span", undefined, "task-stat");
