@@ -250,7 +250,6 @@ export interface Task {
 
 export interface BoardSettings {
   boardType?: "agent" | "manual";
-  requireExpertPlans?: boolean;
   manualColumns?: ManualColumn[];
   name?: string;
   archiveAfterDays: number | null;
@@ -285,6 +284,11 @@ export function taskReviewMode(task: Pick<Task, "reviewModeOverride">, settings:
 
 export function taskReviewModeVersion(task: Pick<Task, "reviewModeOverride">, settings: Pick<BoardSettings, "reviewModeVersion">) {
   return task.reviewModeOverride?.version ?? settings.reviewModeVersion;
+}
+
+export function reviewsAcceptanceRepair(task: Pick<Task, "acceptanceRepair" | "reviewModeOverride">, settings: BoardSettings): boolean {
+  return taskReviewMode(task, settings) === "reviewer-human" && task.acceptanceRepair?.phase === "checking" &&
+    task.acceptanceRepair.reviewModeVersion === taskReviewModeVersion(task, settings);
 }
 
 export function boardReviewMode(settings: Pick<BoardSettings, "reviewMode" | "autoReview">): ReviewMode {

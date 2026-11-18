@@ -1,3 +1,4 @@
+import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, symlinkSync, writeFileSync, appendFileSync } from "node:fs";
@@ -72,7 +73,7 @@ async function run() {
     cli(["init"]);
     cli(["settings"], { reviewMode: "reviewer", autoMode });
   }
-  const create = title => cli(["create"], { title, criteria: evidence }).id;
+  const create = title => cli(["create"], plannedDraft({ title, criteria: evidence })).id;
   const hybrid = phase === "restart" ? "T-0001" : create("Personal acceptance");
   const normal = phase === "restart" ? "T-0002" : create("Inherited review");
   if (phase !== "restart") {

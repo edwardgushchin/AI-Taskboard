@@ -834,11 +834,13 @@ function executeAcceptance(store: BoardStore, task: Task, input: Record<string, 
   }
   const mode = taskReviewMode(task, store.index.settings);
   const plan = task.expertTeam?.review;
+  const managerReview = input.actor === "manager" && mode === "manager";
   const requiresAssignedSkills = mode !== "human" && (plan?.skills?.length || plan?.stages.some(stage => stage.skills?.length));
-  if (task.status === "review" && !task.acceptanceRepair && (requiresAssignedSkills ||
-      (input.actor === "manager" && mode === "manager" && (store.index.settings.requireExpertPlans || plan?.stages.length)))) {
-    if (store.index.settings.requireExpertPlans) requireExpertPlan(task, "review");
-    requireExpertResults(task, "review", verifyReviewDecision(store, task, input.targetHead ?? null));
+  if (task.status === "review" && !task.acceptanceRepair) {
+    if (managerReview) requireExpertPlan(task, "review");
+    if (requiresAssignedSkills || (managerReview && plan?.stages.length)) {
+      requireExpertResults(task, "review", verifyReviewDecision(store, task, input.targetHead ?? null));
+    }
   }
 
   if (task.acceptanceRepair) {

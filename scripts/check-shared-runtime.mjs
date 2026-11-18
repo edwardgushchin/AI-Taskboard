@@ -1,3 +1,4 @@
+import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
 // Two real Electron processes and three windows; provider turns are isolated
 // Node stand-ins so this check never contacts a model or opens a user's board.
 import assert from "node:assert/strict";
@@ -80,7 +81,7 @@ if (!process.versions.electron) {
       cli(project, ["settings"], { autoMode: false, reviewMode: "human" });
       const returned = ["manual", "auto"].map((mode, index) => {
         const thread = "10000000-0000-0000-0000-00000000000" + (index + 1);
-        const { id } = cli(project, ["create"], { title: mode, criteria: ["Recover existing checkout"] });
+        const { id } = cli(project, ["create"], plannedDraft({ title: mode, criteria: ["Recover existing checkout"] }));
         cli(project, ["approve", id]);
         const { task, worktree } = cli(project, ["start", id]);
         cli(project, ["update", id], { codexThreadId: thread });
@@ -193,7 +194,7 @@ if (!process.versions.electron) {
       break checks;
     }
     const tasks = [];
-    for (let i = 0; !managerOnly && i < 6; i++) { const task = cli(project, ["create"], { title: "Isolated concurrency " + i, criteria: ["Fixture completes"], workingDirectory: project }); cli(project, ["approve", task.id]); tasks.push(task.id); }
+    for (let i = 0; !managerOnly && i < 6; i++) { const task = cli(project, ["create"], plannedDraft({ title: "Isolated concurrency " + i, criteria: ["Fixture completes"], workingDirectory: project })); cli(project, ["approve", task.id]); tasks.push(task.id); }
     const a = await start("profile-a"), b = await start("profile-b");
     await a.ask({ action: "newWindow" });
     const frames = async () => [...await a.ask({ action: "frames" }), ...await b.ask({ action: "frames" })];
@@ -441,7 +442,7 @@ if (!process.versions.electron) {
     record("PASS: launch failure releases slot; restart preserves living orphan; provider death reclaims slot");
     cli(project, ["settings"], { taskLimits: { executor: 6, reviewer: 7 } });
     const makeCards = (name, review) => Array.from({ length: 7 }, (_, index) => {
-      const task = cli(project, ["create"], { title: name + " " + index, criteria: ["Fixture completes"], workingDirectory: project });
+      const task = cli(project, ["create"], plannedDraft({ title: name + " " + index, criteria: ["Fixture completes"], workingDirectory: project }));
       cli(project, ["approve", task.id]);
       cli(project, ["start", task.id, "--compact"]);
       if (review) {

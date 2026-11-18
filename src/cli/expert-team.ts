@@ -1,6 +1,9 @@
-import { taskReviewMode, member, object, strings, text, number, record, requireRevision, requireState, TaskboardError } from "./model.ts";
+import { taskReviewMode, member, object, strings, text, number, record, requireRevision, requireState, reviewsAcceptanceRepair, TaskboardError, usesIndependentReviewer } from "./model.ts";
 import type { BoardSettings, ExpertPhase, SkillCheck, Task, TaskEvent } from "./model.ts";
 import type { BoardStore } from "./storage.ts";
+import { exists } from "./storage.ts";
+import { resolveCommit } from "./git.ts";
+import { isManual } from "./manual-board.ts";
 import { readExpert } from "./experts.ts";
 import { readTask } from "./archive.ts";
 import { artifactSource } from "./artifacts.ts";
@@ -21,7 +24,7 @@ export function requireExpertPlan(task: Task, phase: Phase) {
 }
 
 export function approvalRequirements(task: Task, settings: BoardSettings) {
-  if (!settings.requireExpertPlans || settings.boardType === "manual") return [];
+  if (isManual(settings)) return [];
   return [
     ...(!task.description.trim() ? ["description"] : []),
     ...(!task.criteria.some(criterion => criterion.trim()) ? ["criteria"] : []),
@@ -33,16 +36,27 @@ export function approvalRequirements(task: Task, settings: BoardSettings) {
 export function requireApprovalPlan(task: Task, settings: BoardSettings, action: "creation" | "approval" = "approval") {
   const missing = approvalRequirements(task, settings);
   if (missing.length) throw new TaskboardError("EXPERT_PLAN_REQUIRED", "Missing required card fields for " + action + ": " + missing.join(", ") + ".");
+  const phases: Phase[] = task.schedule || taskReviewMode(task, settings) === "human" ? ["work"] : ["work", "review"];
+  for (const phase of phases) {
+    const plan = task.expertTeam?.[phase];
+    if (!plan) continue;
+    checkSkillAssignments(plan, phase + " lead");
+    for (const stage of plan.stages) checkSkillAssignments(stage, phase + ":" + stage.key);
+  }
 }
 
-export function initialExpertTeam(store: BoardStore, task: Pick<Task, "schedule">, value: unknown): Task["expertTeam"] {
-  if (value === undefined) return;
-  if (store.index.settings.boardType === "manual") throw new TaskboardError("MANUAL_BOARD", "Expert plans require an agent board.");
-  const team = object(value);
-  return Object.fromEntries(Object.entries(team).map(([key, plan]) => {
-    const phase = taskExpertPhase(key);
-    return [phase, parseExpertPlan(store, task, phase, object(plan))];
-  }));
+export function planNewTask(store: BoardStore, task: Task, value: unknown) {
+  if (value !== undefined) {
+    if (isManual(store.index.settings)) throw new TaskboardError("MANUAL_BOARD", "Expert plans require an agent board.");
+    task.expertTeam = Object.fromEntries(Object.entries(object(value)).map(([key, plan]) => {
+      const phase = taskExpertPhase(key);
+      const parsed = parseExpertPlan(store, task, phase, object(plan));
+      task.history.push({ at: task.createdAt, action: "expert-plan", actor: task.history[0].actor,
+        expertPhase: phase, text: parsed.reason });
+      return [phase, parsed];
+    }));
+  }
+  requireApprovalPlan(task, store.index.settings, "creation");
 }
 
 function parseSkillChecks(value: unknown, skills: string[] | undefined): Record<string, SkillCheck> | undefined {
@@ -99,7 +113,7 @@ function parseExpertPlan(store: BoardStore, task: Pick<Task, "schedule">, phase:
       throw new TaskboardError("INVALID_INPUT", "Select distinct skills from the stage specialization.");
     }
     const stageChecks = parseSkillChecks(stage.skillChecks, stageSkills);
-    checkSkillAssignments({ skills: stageSkills, skillChecks: stageChecks }, key);
+    checkSkillAssignments({ skills: stageSkills, skillChecks: stageChecks }, phase + ":" + key);
     const criteria = strings(stage.criteria, "stage criteria");
     const outputs = strings(stage.outputs, "outputs");
     if (!criteria.length || !outputs.length) throw new TaskboardError("INVALID_INPUT", "Each stage needs criteria and outputs.");
@@ -126,6 +140,7 @@ function parseExpertPlan(store: BoardStore, task: Pick<Task, "schedule">, phase:
   }
   const all = input.replace ? proposed : [...existing, ...proposed.filter(stage => !existing.some(old => old.key === stage.key))];
   if (all.length > 32) throw new TaskboardError("INVALID_INPUT", "Each phase can have at most 32 stages.");
+  for (const stage of input.replace ? [] : existing) checkSkillAssignments(stage, phase + ":" + stage.key);
   const visiting = new Set<string>();
   const done = new Set<string>();
   const visit = (key: string) => {
@@ -153,7 +168,15 @@ export function createExpertPlan(store: BoardStore, parentId: string, input: Rec
   requireRevision(parent, input.revision, true);
   if (runtimeEntries(store.location.root).some(entry => entry.kind === "slot" && [parent.id, "review:" + parent.id].includes(entry.task ?? "")))
     throw new TaskboardError("EXPERT_PHASE_RUNNING", "The responsible agent is already running this phase.");
-  if (parent.status === "review" && (parent.acceptanceRepair || currentReviewApproval(parent, store.index.settings)))
+  const settings = store.index.settings;
+  const fillsMissingReviewPlan = phase === "review" && !previous?.lead && Boolean(plan.lead);
+  const fillsMissingRepairPlan = fillsMissingReviewPlan && reviewsAcceptanceRepair(parent, settings);
+  const approval = currentReviewApproval(parent, settings)?.reviewApproval;
+  const currentTarget = fillsMissingReviewPlan && approval?.targetHead && parent.git && store.location.repository &&
+    usesIndependentReviewer(taskReviewMode(parent, settings)) && resolveCommit(store.location.repository.root, parent.git.target);
+  const hasCurrentApproval = approval && (!currentTarget || currentTarget === approval.targetHead);
+  if (parent.status === "review" && (exists(store.pendingPath(parent.id)) ||
+      (parent.acceptanceRepair && !fillsMissingRepairPlan) || hasCurrentApproval))
     throw new TaskboardError("INVALID_TRANSITION", "The submission already has a review decision or is being integrated.");
   const updated = record({ ...parent, expertTeam: { ...parent.expertTeam, [phase]: plan } }, "expert-plan", "manager", parent.status, plan.reason);
   updated.history.at(-1)!.expertPhase = phase;
@@ -194,7 +217,7 @@ export function requireSkillProof(task: Task, phase: Phase, key?: string, target
   const plan = task.expertTeam?.[phase];
   const scope = key ? plan?.stages.find(stage => stage.key === key) : plan;
   if (!scope?.skills?.length) return;
-  checkSkillAssignments(scope, key ?? phase + " lead");
+  checkSkillAssignments(scope, key ? phase + ":" + key : phase + " lead");
   const event = task.history.slice(stageEpoch(task, phase) + 1).findLast(({ expertSkillProof: proof }) =>
     proof?.phase === phase && proof.key === key && proof.targetHead === targetHead && proof.expertRevision === scope.skillExpertRevision &&
     (!agentId || proof.agentId === agentId) && (!sessionId || proof.sessionId === sessionId));
@@ -210,7 +233,7 @@ export function skillProofScope(store: BoardStore, task: Task, phase: Phase, key
   if (key && !stage) throw new TaskboardError("INVALID_INPUT", "Unknown specialist stage.");
   const scope = stage ?? plan;
   if (!scope?.skills?.length) return;
-  checkSkillAssignments(scope, key ?? phase + " lead");
+  checkSkillAssignments(scope, key ? phase + ":" + key : phase + " lead");
   const expert = readExpert(store, stage?.expertId ?? plan!.lead!);
   if (expert.revision !== scope.skillExpertRevision) {
     throw new TaskboardError("SKILL_PLAN_OUTDATED", "The expert package changed. Refresh the assigned skills in the plan.");
