@@ -831,10 +831,13 @@ function executeAcceptance(store: BoardStore, task: Task, input: Record<string, 
     return store.save(sendTaskMessage(record({ ...task, acceptanceRepair: { ...task.acceptanceRepair, phase: "failed", reason } },
       "acceptance-failed", "agent"), { kind: "question", text: reason }, "agent"));
   }
-  if (input.actor === "manager" && !task.acceptanceRepair && boardReviewMode(store.index.settings) === "manager" &&
-      (store.index.settings.requireExpertPlans || task.expertTeam?.review?.stages.length)) {
+  const mode = boardReviewMode(store.index.settings);
+  const plan = task.expertTeam?.review;
+  const requiresAssignedSkills = mode !== "human" && (plan?.skills?.length || plan?.stages.some(stage => stage.skills?.length));
+  if (task.status === "review" && !task.acceptanceRepair && (requiresAssignedSkills ||
+      (input.actor === "manager" && mode === "manager" && (store.index.settings.requireExpertPlans || plan?.stages.length)))) {
     if (store.index.settings.requireExpertPlans) requireExpertPlan(task, "review");
-    requireExpertResults(task, "review", verifyReviewDecision(store, task, input.targetHead));
+    requireExpertResults(task, "review", verifyReviewDecision(store, task, input.targetHead ?? null));
   }
 
   if (task.acceptanceRepair) {

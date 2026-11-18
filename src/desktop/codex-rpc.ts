@@ -87,6 +87,7 @@ export function codexRpc(child: ChildProcess,
   return {
     send,
     fail,
+    get failed() { return Boolean(failure); },
     close: () => {
       fail(new Error("The Codex session ended."));
       reader.close();

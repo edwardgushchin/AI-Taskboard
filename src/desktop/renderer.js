@@ -1110,6 +1110,16 @@ function switchBoardRendering(previousProject, project) {
 function codexTaskAction(task) {
   if (manualBoard()) return null;
   const generation = projectGeneration;
+  if (frame.waitingTasks?.includes(task.id)) {
+    const stop = button(() => t("ui.stop_agent_f50db092"), async () => {
+      const result = await api.chatStop(task.id);
+      if (generation !== projectGeneration) return;
+      if (!result.ok) notice(boardError(result.error), task.id);
+      else if (sheetKind === "task" && taskInSheet?.id === task.id) await showTask(task.id);
+    });
+    stop.id = "task-stop-waiting";
+    return stop;
+  }
   const newThread = task.status === "blocked" && /already has an active writer/i.test(task.blocked?.reason ?? "");
   const missingThread = task.status === "blocked" && task.codexThreadId &&
     task.blocked?.reason === "no rollout found for thread id " + task.codexThreadId;
@@ -5575,7 +5585,8 @@ function update(next) {
     const task = frame.board?.tasks.find(entry => entry.id === taskInSheet.id);
     const archived = frame.board?.archived.find(entry => entry.id === taskInSheet.id);
     const cleaned = taskInSheet.cleanupAvailable && frame.board?.cleanedTasks?.includes(taskInSheet.id);
-    if (previousBoard?.settings.requireExpertPlans !== frame.board?.settings.requireExpertPlans ||
+    if (Boolean(byId("task-stop-waiting")) !== Boolean(frame.waitingTasks?.includes(taskInSheet.id)) ||
+        previousBoard?.settings.requireExpertPlans !== frame.board?.settings.requireExpertPlans ||
         previousBoard?.settings.reviewMode !== frame.board?.settings.reviewMode ||
         JSON.stringify(previousBoard?.settings.manualColumns) !== JSON.stringify(frame.board?.settings.manualColumns) || cleaned || (task && (task.revision !== taskInSheet.revision ||
         (task.historyLength ?? task.history?.length) !== taskInSheet.history.length ||

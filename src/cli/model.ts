@@ -106,6 +106,9 @@ export interface RunActivity {
 export interface TaskEvent {
   expertMessage?: { from: string; to: string; replyTo?: number };
   expertSkill?: { expertId: string; skillId: string; name: string; source: "plan" | "tool" };
+  expertSkillProof?: { phase: "work" | "review"; key?: string; targetHead?: string | null;
+    agentId: string; sessionId: string; expertId: string; expertRevision: number; items: Record<string, string>;
+    outputs?: Record<string, string> };
   expertPhase?: "work" | "review";
   expertStageRun?: { phase: "work" | "review"; key: string; state: "running" | "blocked" | "done";
     result?: string; outputs?: Record<string, string>; agentId?: string; sessionId?: string; fallback?: string; targetHead?: string | null };
@@ -182,11 +185,16 @@ export function nextScheduledRun(rule: TaskScheduleRule, after: Date, previous?:
   return next.toISOString();
 }
 
+export type SkillCheck = { command: string } | { tool: string; server?: string; arguments?: Record<string, string | number | boolean | null> };
+
 export interface ExpertPhase {
   lead?: string | null;
   reason?: string;
   skills?: string[];
+  skillChecks?: Record<string, SkillCheck>;
+  skillExpertRevision?: number;
   stages: { key: string; expertId: string; title: string; description: string; criteria: string[];
+    skills?: string[]; skillChecks?: Record<string, SkillCheck>; skillExpertRevision?: number;
     inputs: string[]; outputs: string[]; dependsOn: string[]; artifactOutputs?: Record<string, ArtifactKind> }[];
 }
 

@@ -1,5 +1,5 @@
 import { boardReviewMode, member, object, strings, text, number, record, requireRevision, requireState, TaskboardError } from "./model.ts";
-import type { BoardSettings, ExpertPhase, Task, TaskEvent } from "./model.ts";
+import type { BoardSettings, ExpertPhase, SkillCheck, Task, TaskEvent } from "./model.ts";
 import type { BoardStore } from "./storage.ts";
 import { readExpert } from "./experts.ts";
 import { readTask } from "./archive.ts";
@@ -45,6 +45,36 @@ export function initialExpertTeam(store: BoardStore, task: Pick<Task, "schedule"
   }));
 }
 
+function parseSkillChecks(value: unknown, skills: string[] | undefined): Record<string, SkillCheck> | undefined {
+  if (value === undefined) return;
+  return Object.fromEntries(Object.entries(object(value)).map(([id, entry]) => {
+    if (!skills?.includes(id)) throw new TaskboardError("INVALID_INPUT", "Checks must refer to assigned skill IDs.");
+    const check = object(entry);
+    if (check.command !== undefined && Object.keys(check).length === 1) {
+      const command = text(check.command, "skill command", true);
+      if (command.length <= 1000 && !/[\r\n\0]/.test(command)) return [id, { command }];
+    }
+    if (Object.keys(check).every(key => ["tool", "server", "arguments"].includes(key))) {
+      const tool = text(check.tool, "skill tool", true);
+      const server = check.server === undefined ? undefined : text(check.server, "skill server", true);
+      const args = check.arguments === undefined ? undefined : object(check.arguments);
+      if (/^[a-zA-Z0-9_-]{1,128}$/.test(tool) && !/^(?:expert_|team_|worklog_|task_record_result$)/.test(tool) &&
+          (!server || /^[a-zA-Z0-9_-]{1,128}$/.test(server)) && (!args || Object.keys(args).length <= 12 &&
+            Object.values(args).every(v => v === null || typeof v === "boolean" ||
+              typeof v === "number" && Number.isFinite(v) || typeof v === "string" && v.length <= 1000))) {
+        return [id, { tool, ...(server ? { server } : {}), ...(args ? { arguments: args as Record<string, string | number | boolean | null> } : {}) }];
+      }
+    }
+    throw new TaskboardError("INVALID_INPUT", "Use an exact command or a specific observable tool action for " + id + ".");
+  }));
+}
+
+function checkSkillAssignments(scope: Pick<ExpertPhase, "skills" | "skillChecks">, name: string) {
+  const missing = scope.skills?.filter(id => !Object.hasOwn(scope.skillChecks ?? {}, id)) ?? [];
+  if (missing.length) throw new TaskboardError("SKILL_CHECK_REQUIRED",
+    "Define a successful command or tool action for each assigned skill in " + name + ": " + missing.join(", ") + ".");
+}
+
 function parseExpertPlan(store: BoardStore, task: Pick<Task, "schedule">, phase: Phase, input: Record<string, unknown>, previous?: ExpertPhase): ExpertPhase {
   const lead = input.lead === undefined ? previous?.lead : input.lead === null ? null : text(input.lead, "lead specialization", true);
   const expert = lead ? readExpert(store, lead) : undefined;
@@ -54,13 +84,22 @@ function parseExpertPlan(store: BoardStore, task: Pick<Task, "schedule">, phase:
   const skills = input.skills === undefined ? previousSkills : strings(input.skills, "lead skills");
   if (skills && (new Set(skills).size !== skills.length || skills.some(id => !expert?.skills.some(skill => skill.id === id))))
     throw new TaskboardError("INVALID_INPUT", "Select distinct skills from the lead specialization.");
+  const skillChecks = parseSkillChecks(input.skillChecks ?? (input.skills === undefined && previous?.lead === lead ? previous?.skillChecks : undefined), skills);
+  checkSkillAssignments({ skills, skillChecks }, phase + " lead");
   if (!Array.isArray(input.stages) || input.stages.length > 32)
     throw new TaskboardError("INVALID_INPUT", "Supply up to 32 assigned stages.");
   const proposed = input.stages.map(value => {
     const stage = object(value);
     const key = text(stage.key, "stage key", true);
     if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(key)) throw new TaskboardError("INVALID_INPUT", "Invalid stage key.");
-    const expertId = text(stage.expertId, "expert ID", true); readExpert(store, expertId);
+    const expertId = text(stage.expertId, "expert ID", true);
+    const stageExpert = readExpert(store, expertId);
+    const stageSkills = stage.skills === undefined ? undefined : strings(stage.skills, "stage skills");
+    if (stageSkills && (new Set(stageSkills).size !== stageSkills.length || stageSkills.some(id => !stageExpert.skills.some(skill => skill.id === id)))) {
+      throw new TaskboardError("INVALID_INPUT", "Select distinct skills from the stage specialization.");
+    }
+    const stageChecks = parseSkillChecks(stage.skillChecks, stageSkills);
+    checkSkillAssignments({ skills: stageSkills, skillChecks: stageChecks }, key);
     const criteria = strings(stage.criteria, "stage criteria");
     const outputs = strings(stage.outputs, "outputs");
     if (!criteria.length || !outputs.length) throw new TaskboardError("INVALID_INPUT", "Each stage needs criteria and outputs.");
@@ -73,6 +112,8 @@ function parseExpertPlan(store: BoardStore, task: Pick<Task, "schedule">, phase:
     });
     return { key, expertId, title: text(stage.title, "stage title", true), description: text(stage.description ?? "", "stage description"),
       criteria, inputs: strings(stage.inputs ?? [], "inputs"), outputs, dependsOn: strings(stage.dependsOn ?? [], "stage dependencies"),
+      ...(stageSkills !== undefined ? { skills: stageSkills } : {}),
+      ...(stageChecks ? { skillChecks: stageChecks, skillExpertRevision: stageExpert.revision } : {}),
       ...(artifacts.length ? { artifactOutputs: Object.fromEntries(artifacts) } : {}) };
   });
   const existing = previous?.stages ?? [];
@@ -98,7 +139,8 @@ function parseExpertPlan(store: BoardStore, task: Pick<Task, "schedule">, phase:
     done.add(key);
   };
   all.forEach(stage => visit(stage.key));
-  return { lead, reason, ...(skills !== undefined ? { skills } : {}), stages: all };
+  return { lead, reason, ...(skills !== undefined ? { skills } : {}),
+    ...(skillChecks ? { skillChecks, skillExpertRevision: expert?.revision } : {}), stages: all };
 }
 
 export function createExpertPlan(store: BoardStore, parentId: string, input: Record<string, unknown>) {
@@ -142,9 +184,38 @@ export function expertStagesStatus(task: Task, phase: Phase, targetHead?: string
 }
 
 export function requireExpertResults(task: Task, phase: Phase, targetHead?: string | null) {
+  requireSkillProof(task, phase, undefined, targetHead);
   const pending = expertStagesStatus(task, phase, targetHead).filter(stage => stage.state !== "done");
   if (pending.length) throw new TaskboardError("EXPERT_STAGES_INCOMPLETE",
     "Record the required results for " + pending.map(stage => stage.address).join(", ") + " before finishing this phase.");
+}
+
+export function requireSkillProof(task: Task, phase: Phase, key?: string, targetHead?: string | null, agentId?: string, sessionId?: string) {
+  const plan = task.expertTeam?.[phase];
+  const scope = key ? plan?.stages.find(stage => stage.key === key) : plan;
+  if (!scope?.skills?.length) return;
+  checkSkillAssignments(scope, key ?? phase + " lead");
+  const event = task.history.slice(stageEpoch(task, phase) + 1).findLast(({ expertSkillProof: proof }) =>
+    proof?.phase === phase && proof.key === key && proof.targetHead === targetHead && proof.expertRevision === scope.skillExpertRevision &&
+    (!agentId || proof.agentId === agentId) && (!sessionId || proof.sessionId === sessionId));
+  if (!scope.skills.every(id => Object.hasOwn(event?.expertSkillProof?.items ?? {}, id))) {
+    throw new TaskboardError("SKILL_USE_REQUIRED", "Verify the assigned skill actions before finishing " + (key ?? phase) + ".");
+  }
+  return event?.expertSkillProof;
+}
+
+export function skillProofScope(store: BoardStore, task: Task, phase: Phase, key?: string) {
+  const plan = task.expertTeam?.[phase];
+  const stage = key ? plan?.stages.find(stage => stage.key === key) : undefined;
+  if (key && !stage) throw new TaskboardError("INVALID_INPUT", "Unknown specialist stage.");
+  const scope = stage ?? plan;
+  if (!scope?.skills?.length) return;
+  checkSkillAssignments(scope, key ?? phase + " lead");
+  const expert = readExpert(store, stage?.expertId ?? plan!.lead!);
+  if (expert.revision !== scope.skillExpertRevision) {
+    throw new TaskboardError("SKILL_PLAN_OUTDATED", "The expert package changed. Refresh the assigned skills in the plan.");
+  }
+  return { skillChecks: scope.skillChecks!, expertId: expert.id, expertRevision: expert.revision, outputs: stage?.outputs };
 }
 
 export function updateExpertStage(store: BoardStore, id: string, phase: Phase, input: Record<string, unknown>, targetHead?: string | null) {
@@ -172,10 +243,15 @@ export function updateExpertStage(store: BoardStore, id: string, phase: Phase, i
     if (run.result.length > 8000) throw new TaskboardError("INVALID_INPUT", "Stage summaries are limited to 8000 characters.");
   }
   if (state === "done") {
+    const proof = requireSkillProof(task, phase, stage.key, targetHead, typeof input.agentId === "string" ? input.agentId : undefined,
+      typeof input.sessionId === "string" ? input.sessionId : undefined);
     const outputs = object(input.outputs);
     if (Object.keys(outputs).length !== stage.outputs.length ||
         stage.outputs.some(name => !Object.hasOwn(outputs, name) || typeof outputs[name] !== "string" || !outputs[name].trim() || outputs[name].length > 4000))
       throw new TaskboardError("INVALID_INPUT", "Supply evidence for each declared output, keyed by its exact name.");
+    if (proof && (input.agentId || proof.outputs) && (input.agentId !== proof.agentId ||
+      stage.outputs.some(name => proof.outputs?.[name] !== (outputs[name] as string).trim())))
+      throw new TaskboardError("EXPERT_RESULT_MISMATCH", "Report the specialist's own verified outputs.");
     run.outputs = Object.fromEntries(stage.outputs.map(name => [name, (outputs[name] as string).trim()]));
     const artifactNames = Object.keys(stage.artifactOutputs ?? {});
     if (artifactNames.length) {
