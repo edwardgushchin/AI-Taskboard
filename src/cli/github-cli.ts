@@ -105,6 +105,11 @@ export function githubRequests(project: string) {
 
   return {
     request,
+    deleteMilestone: (endpoint: string) => read(
+      ["api", "--hostname", host, "--method", "DELETE", "--include", endpoint],
+      stdout => {
+        if (!/^HTTP\/\S+ 204(?:\s|$)/.test(stdout)) throw new Error("Expected HTTP 204");
+      }, "GITHUB_MILESTONE_DELETE_FAILED"),
     failedLog: (repository: string, runId: number) => read(
       ["run", "view", String(runId), "--repo", host + "/" + repository, "--log-failed"],
       stdout => stdout, "GITHUB_RUN_LOG_FAILED"),

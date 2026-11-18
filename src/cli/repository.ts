@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 import { git, gitEnvironment, invokeGit, requireRepository, resolveCommit } from "./git.ts";
 import { githubRepositoryPattern, member, number, object, TaskboardError, text } from "./model.ts";
 import type { BoardLocation } from "./storage.ts";
-import { onBoard } from "./storage.ts";
+import { onBoard, onBoardAsync, sha256 } from "./storage.ts";
 import { requireNoGitOperation } from "./worktree.ts";
 import { githubApi, githubRequests } from "./github-cli.ts";
 import { redactSecrets } from "./redact.ts";
@@ -95,16 +95,88 @@ function milestoneDueOn(value: unknown) {
   return dueOn;
 }
 
+function milestoneEndpoint(repository: string, milestoneNumber: number) {
+  return "repos/" + repository + "/milestones/" + milestoneNumber;
+}
+
 async function readGitHubMilestone(request: ReturnType<typeof githubApi>, repository: string, milestoneNumber: number) {
-  const fields = object(await request("repos/" + repository + "/milestones/" + milestoneNumber));
+  const fields = object(await request(milestoneEndpoint(repository, milestoneNumber)));
   if (fields.number !== milestoneNumber || (fields.due_on !== null &&
       (typeof fields.due_on !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(fields.due_on)))) {
     throw new TaskboardError("GITHUB_MILESTONE_VERIFY_FAILED", "GitHub returned unexpected milestone data.");
   }
+  const description = fields.description;
+  if (description != null && typeof description !== "string") {
+    throw new TaskboardError("GITHUB_MILESTONE_VERIFY_FAILED", "GitHub returned an invalid milestone description.");
+  }
   return { repository, number: milestoneNumber, title: text(fields.title, "milestone title", true),
     state: member(fields.state, ["open", "closed"], "milestone state"),
+    ...(description !== undefined ? { description } : {}),
     dueDate: fields.due_on === null ? null : fields.due_on.slice(0, 10),
     url: "https://github.com/" + repository + "/milestone/" + milestoneNumber };
+}
+
+export async function updateGitHubMilestone(location: BoardLocation, input: Record<string, unknown>) {
+  if (Object.keys(input).some(key => !["repository", "number", "title", "description", "state"].includes(key))) {
+    throw new TaskboardError("INVALID_INPUT", "Use only repository, number, title, description and state.");
+  }
+  const repository = milestoneRepository(location, input.repository);
+  const milestoneNumber = number(input.number, "milestone number");
+  if (input.description !== undefined && typeof input.description !== "string") {
+    throw new TaskboardError("INVALID_INPUT", "Milestone description must be a string.");
+  }
+  const changes = {
+    ...(input.title !== undefined ? { title: text(input.title, "milestone title", true) } : {}),
+    ...(input.description !== undefined ? { description: input.description } : {}),
+    ...(input.state !== undefined ? { state: member(input.state, ["open", "closed"], "milestone state") } : {}),
+  };
+  const entries = Object.entries(changes) as [keyof typeof changes, string][];
+  if (!entries.length) throw new TaskboardError("INVALID_INPUT", "Supply a title, description or state to change.");
+  const request = githubApi(location.root);
+  const read = () => readGitHubMilestone(request, repository, milestoneNumber);
+  const matches = (milestone: Awaited<ReturnType<typeof read>>) => entries.every(([key, value]) =>
+    (key === "description" ? milestone.description ?? "" : milestone[key]) === value);
+  const before = await read();
+  if (matches(before)) return { ...before, changed: false };
+  milestoneRepository(location, repository);
+  await request(milestoneEndpoint(repository, milestoneNumber),
+    ["--method", "PATCH", ...entries.flatMap(([key, value]) => ["-f", key + "=" + value])],
+    "GITHUB_MILESTONE_UPDATE_FAILED");
+  const after = await read();
+  if (!matches(after)) {
+    throw new TaskboardError("GITHUB_MILESTONE_VERIFY_FAILED", "Reading the milestone after the update did not confirm the requested result.");
+  }
+  return { ...after, changed: true };
+}
+
+export async function deleteGitHubMilestone(location: BoardLocation, input: Record<string, unknown>) {
+  if (Object.keys(input).some(key => !["repository", "number", "token", "keepLinks"].includes(key)) ||
+      (input.keepLinks !== undefined && typeof input.keepLinks !== "boolean") ||
+      (input.token !== undefined && (typeof input.token !== "string" || !/^[0-9a-f]{64}$/.test(input.token)))) {
+    throw new TaskboardError("INVALID_INPUT", "Use repository, number, optional preview token and keepLinks.");
+  }
+  const milestoneNumber = number(input.number, "milestone number");
+  return onBoardAsync(location, async store => {
+    const repository = milestoneRepository(location, input.repository);
+    const { request, deleteMilestone } = githubRequests(location.root);
+    const milestone = await readGitHubMilestone(request, repository, milestoneNumber);
+    const links = (source: ReturnType<typeof store.snapshot>["tasks"] | ReturnType<typeof store.archivedCards>, archived: boolean) =>
+      source.filter(task => task.milestone?.repository.toLowerCase() === repository && task.milestone.number === milestoneNumber)
+        .map(({ id, title, status, updatedAt }) => ({ id, title, status, updatedAt, archived }));
+    const linkedCards = [...links(store.storedCards(), false), ...links(store.archivedCards(), true)]
+      .sort((a, b) => a.id.localeCompare(b.id));
+    const token = sha256(Buffer.from(JSON.stringify([milestone, linkedCards, input.keepLinks === true])));
+    if (input.token === undefined) return { milestone, linkedCards, token, deleted: false };
+    if (input.token !== token) {
+      throw new TaskboardError("GITHUB_MILESTONE_STALE", "The milestone or its card links changed. Inspect them and obtain a new confirmation.");
+    }
+    if (linkedCards.length && input.keepLinks !== true) {
+      throw new TaskboardError("GITHUB_MILESTONE_LINKED", "Resolve the linked cards or explicitly choose to keep their links.");
+    }
+    milestoneRepository(location, repository);
+    await deleteMilestone(milestoneEndpoint(repository, milestoneNumber));
+    return { repository, number: milestoneNumber, state: "deleted", deleted: true, linkedCards };
+  });
 }
 
 export async function createGitHubMilestone(location: BoardLocation, input: Record<string, unknown>) {

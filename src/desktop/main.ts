@@ -2249,6 +2249,12 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       unreadBoardMessages: unread.length || undefined,
       previousConversation: priorChat?.length ? priorChat : undefined,
     }) : undefined;
+    const confirmApproval = async (details: string) => {
+      if (signal.aborted || requests.get(projectKey) !== running) return false;
+      const allow = t("ui.allow_once_8539a30b");
+      const result = await askUser({ question: details, options: [allow, t("ui.deny_ffcf9a77")] }, true);
+      return !signal.aborted && result.ok && (result.data as { answer: string | null }).answer === allow;
+    };
     const runAction = boardActions(board.project, attachments, changes, signal,
       (id, revision, { reason, targetHead, reviewMode, reviewModeVersion, newThread, resolveConflicts } = {}) => reason ?
         launchTask(board.project, id, { input: { revision, reason, targetHead, reviewMode, reviewModeVersion, actor: "manager" } }) :
@@ -2264,7 +2270,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       }, deliveredMessages, () => waitWork.signal, undefined, undefined,
       (id, revision) => id === managerReviewId
         ? Promise.resolve(cliFailure("CHAT_BUSY", "Return this task from its card or the manager chat after this automatic review ends."))
-        : returnTaskToDraft(board.project, id, revision, "manager"));
+        : returnTaskToDraft(board.project, id, revision, "manager"),
+      reviewIds || cleanupJob || repairTask ? undefined : confirmApproval);
     const run = async (name: string, args: unknown): Promise<CliReply> => {
       try {
         if (name === boardReviewModeTool.name) {
@@ -2394,12 +2401,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         separateTurn: reviewIds ? true : undefined,
         role: cleanupJob || repairTask ? "reviewer" : "manager",
         access: reviewIds ? undefined : managerAccess(app.getPath("userData"), project),
-        confirmApproval: cleanupJob ? async () => false : reviewIds ? undefined : async details => {
-          if (signal.aborted || requests.get(projectKey) !== running) return false;
-          const allow = t("ui.allow_once_8539a30b");
-          const result = await askUser({ question: details, options: [allow, t("ui.deny_ffcf9a77")] }, true);
-          return !signal.aborted && result.ok && (result.data as { answer: string | null }).answer === allow;
-        },
+        confirmApproval: cleanupJob ? async () => false : reviewIds ? undefined : confirmApproval,
         settings: settings.data.manager,
         attachmentContext,
         mcpTools,

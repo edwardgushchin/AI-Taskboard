@@ -613,6 +613,110 @@ test("GitHub milestone creation is retryable and both deadlines can be read sepa
   assert.deepEqual(run("github-milestone-create", input, "race").data, { ...created.data, created: false });
 });
 
+test("GitHub milestone edits and confirmed deletion use current remote and board state", t => {
+  const root = fixture(t, true);
+  const tools = fixture(t);
+  const executable = join(tools, process.platform === "win32" ? "gh.exe" : "gh");
+  const state = join(tools, "milestone.json");
+  writeFileSync(executable, "");
+  writeFileSync(state, JSON.stringify({ number: 1, title: "First", description: null, state: "open", due_on: null }));
+  cli(root, ["init"]);
+  git(root, "remote", "add", "origin", "git@github.com:Owner/Example.git");
+  const mock = `
+    import cp from 'node:child_process';
+    import assert from 'node:assert/strict';
+    import { readFileSync, writeFileSync } from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    import { promisify } from 'node:util';
+    const path = ${JSON.stringify(state)};
+    const endpoint = 'repos/owner/example/milestones/1';
+    const mode = process.env.TASKBOARD_TEST_MILESTONE;
+    const fail = stderr => { throw Object.assign(new Error('fixture'), { stderr }); };
+    cp.execFile = Object.assign(() => {}, { [promisify.custom]: async (cmd, args) => {
+      assert.equal(cmd, ${JSON.stringify(executable)});
+      assert.deepEqual(args.slice(0, 3), ['api', '--hostname', 'github.com']);
+      if (args[3] === 'user') return { stdout: '{"login":"fixture"}' };
+      assert.equal(args.at(-1), endpoint);
+      const row = JSON.parse(readFileSync(path, 'utf8'));
+      if (!row) fail('gh: Not Found (HTTP 404)');
+      if (args.includes('PATCH')) {
+        assert.notEqual(mode, 'no-write');
+        if (mode === 'denied') fail('gh: Resource not accessible by personal access token (HTTP 403)');
+        for (let i = 5; i < args.length - 1; i += 2) {
+          assert.equal(args[i], '-f');
+          const split = args[i + 1].indexOf('=');
+          row[args[i + 1].slice(0, split)] = args[i + 1].slice(split + 1);
+        }
+        if (mode !== 'unverified') writeFileSync(path, JSON.stringify(row));
+      }
+      if (args.includes('DELETE')) {
+        assert.deepEqual(args.slice(3), ['--method', 'DELETE', '--include', endpoint]);
+        assert.notEqual(mode, 'no-write');
+        if (mode === 'denied') fail('gh: Resource not accessible by personal access token (HTTP 403)');
+        if (mode === 'unverified') return { stdout: 'HTTP/2 200 OK' };
+        writeFileSync(path, 'null');
+        return { stdout: 'HTTP/2 204 No Content' };
+      }
+      return { stdout: JSON.stringify(row) };
+    } });
+    syncBuiltinESMExports();
+  `;
+  const target = { repository: "owner/example", number: 1 };
+  const run = (command: string, args: object = target, mode = "no-write", id?: string) => {
+    const result = spawnSync(process.execPath, ["--import", "data:text/javascript," + encodeURIComponent(mock),
+      ...commandArgs(root, [command, ...(id ? [id] : [])], args)], {
+      env: { ...env, PATH: tools + delimiter + process.env.PATH, TASKBOARD_TEST_MILESTONE: mode },
+      input: JSON.stringify(args), encoding: "utf8", windowsHide: true,
+    });
+    assert.equal(result.stderr, "");
+    return JSON.parse(result.stdout);
+  };
+  const update = "github-milestone-update";
+  const remove = "github-milestone-delete";
+  const changed = { ...target, title: "Renamed", description: "  Release notes\nLine 2", state: "closed" };
+  assert.equal(run(update, changed, "unverified").error.code, "GITHUB_MILESTONE_VERIFY_FAILED");
+  assert.equal(run(update, changed, "denied").error.code, "GITHUB_AUTH_SCOPE");
+  assert.equal(run(update, { ...target, repository: "other/repo" }).error.code, "GITHUB_REMOTE_REQUIRED");
+  assert.equal(run(update, target).error.code, "INVALID_INPUT");
+  const beforeEdit = run(remove).data.token;
+  const result = run(update, changed, "success").data;
+  assert.deepEqual({ ...result, dueDate: undefined, url: undefined }, { ...changed, changed: true, dueDate: undefined, url: undefined });
+  assert.equal(run(update, changed).data.changed, false);
+  assert.equal(run(remove, { ...target, token: beforeEdit }).error.code, "GITHUB_MILESTONE_STALE");
+  const reopened = run(update, { ...target, state: "open", description: "" }, "success").data;
+  assert.equal(reopened.title, "Renamed");
+  assert.equal(reopened.state, "open");
+  assert.equal(reopened.description, "");
+  assert.equal(run("github-read", { view: "milestone", number: 1 }).data.state, "open");
+
+  const unlinked = run(remove).data;
+  assert.equal(unlinked.deleted, false);
+  const active = cli(root, ["create"], { title: "Linked card" });
+  const archived = cli(root, ["create"], { title: "Archived card" });
+  for (const task of [active, archived]) {
+    assert.equal(run("milestone", { revision: task.revision, milestone: target }, "no-write", task.id).ok, true);
+  }
+  cli(root, ["cancel", archived.id], { reason: "Archive fixture" });
+  cli(root, ["settings"], { archiveAfterDays: 0 });
+  cli(root, ["archive", "sweep"]);
+  assert.equal(run(remove, { ...target, token: unlinked.token }).error.code, "GITHUB_MILESTONE_STALE");
+  assert.equal(run(remove, { ...target, repository: "other/repo" }).error.code, "GITHUB_REMOTE_REQUIRED");
+  const linked = run(remove).data;
+  assert.deepEqual(linked.linkedCards.map((card: { id: string; archived: boolean }) => [card.id, card.archived]),
+    [[active.id, false], [archived.id, true]]);
+  assert.equal(run(remove, { ...target, token: linked.token }).error.code, "GITHUB_MILESTONE_LINKED");
+  assert.equal(run(remove, { ...target, token: linked.token, keepLinks: true }).error.code, "GITHUB_MILESTONE_STALE");
+  const keepLinks = { ...target, keepLinks: true };
+  const approved = { ...keepLinks, token: run(remove, keepLinks).data.token };
+  assert.equal(run(remove, approved, "denied").error.code, "GITHUB_AUTH_SCOPE");
+  assert.equal(run(remove, approved, "unverified").error.code, "GITHUB_MILESTONE_DELETE_FAILED");
+  assert.deepEqual(run(remove, approved, "success").data,
+    { ...target, state: "deleted", deleted: true, linkedCards: linked.linkedCards });
+  assert.equal(run(remove, approved).error.code, "GITHUB_RESOURCE_ACCESS");
+  assert.equal(cli(root, ["show", active.id]).milestone.number, 1);
+  assert.equal(cli(root, ["list"]).archived[0].milestone.number, 1);
+});
+
 test("dependencies prevent worktree creation until every dependency is completed", t => {
   const root = fixture(t, true);
   cli(root, ["init"]);
