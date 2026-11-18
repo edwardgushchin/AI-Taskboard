@@ -203,7 +203,7 @@ type TaskCheckout = {
 };
 
 function saveStart(store: BoardStore, task: Task, lockWaitMs: number, prepareMs: number, gitWorktreeAddMs?: number, actor: "user" | "agent" | "manager" = "agent") {
-  const updated = record(task, "start", actor, "in_progress");
+  const updated = record({ ...task, discussionReturn: undefined }, "start", actor, "in_progress");
   updated.history.at(-1)!.startTiming = {
     lockWaitMs, prepareMs, ...(gitWorktreeAddMs !== undefined ? { gitWorktreeAddMs } : {}),
   };
@@ -228,6 +228,9 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
     }
   }
   requireRevision(task, input.revision);
+  if (input.discussionReturn !== undefined && input.discussionReturn !== task.discussionReturn) {
+    throw new TaskboardError("INVALID_TRANSITION", "This discussion return is no longer waiting to launch.");
+  }
   if (task.workingDirectory) {
     if (task.git || input.target !== undefined || input.resolveConflicts === true) {
       throw new TaskboardError("INVALID_INPUT", "This task uses an existing directory and has no task branch.");
@@ -236,7 +239,7 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
       throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted operation before starting.");
     }
     const cwd = taskWorkingDirectory(task.workingDirectory, true);
-    return { task: task.status === "in_progress" ? task : save(task), cwd };
+    return { task: task.status === "in_progress" && task.discussionReturn === undefined ? task : save(task), cwd };
   }
   const branch = worktreeBranch(task);
   const pendingPath = store.pendingPath(task.id);
@@ -271,10 +274,10 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
           const intent: StartIntent = { action: "start", revision, target, base, actor: boardActor(pending), restore: true };
           return { id: task.id, repo, branch, managedPath, intent, preparing, lockWaitMs };
         }
-        // A ready task may have been saved successfully just before removal of the intent was interrupted.
+        // The restored worktree and its start event may already be saved if removal of the intent was interrupted.
         const last = task.history.findLast(event => event.action !== "coordination");
         if (task.status !== "in_progress" || task.revision !== revision + 1 ||
-            last?.action !== "start" || last.from !== "ready" || !task.git.worktree ||
+            last?.action !== "start" || (last.from !== "ready" && last.from !== undefined) || !task.git.worktree ||
             relative(managedPath, task.git.worktree) || relative(managedPath, existing.path) || existing.head !== base) {
           throw new TaskboardError("PENDING_OPERATION", "The interrupted worktree recovery does not match this task revision or target.");
         }
@@ -293,7 +296,7 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
     const worktree = isolateTaskWorktree(store, repo, task.id, usableWorktree(existing));
     const updated = { ...task, git: { ...task.git, worktree } };
     if (pending) removeFile(pendingPath);
-    if (task.status === "in_progress") return { task: worktree === task.git.worktree ? task : store.save(updated), worktree };
+    if (task.status === "in_progress" && task.discussionReturn === undefined) return { task: worktree === task.git.worktree ? task : store.save(updated), worktree };
     return { task: save(updated), worktree };
   }
 
@@ -393,7 +396,7 @@ export function finishTaskStart(store: BoardStore, plan: TaskCheckout, checkout:
     throw new TaskboardError("PENDING_OPERATION", "The saved task branch or target changed during checkout.");
   }
   const updatedTask = { ...task, git: { ...(restore ? task.git! : { target, base, branch }), worktree } };
-  const updated = task.status === "in_progress" ? store.save(updatedTask) : saveStart(store, updatedTask,
+  const updated = task.status === "in_progress" && task.discussionReturn === undefined ? store.save(updatedTask) : saveStart(store, updatedTask,
     lockWaitMs + finalLockWaitMs, prepareMs, gitWorktreeAddMs, intent.actor);
   removeFile(pendingPath);
   return { task: updated, worktree };

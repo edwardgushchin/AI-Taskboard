@@ -2145,6 +2145,74 @@ function submitFixture(root: string, edit: (worktree: string) => void, target?: 
   return { task: reviewed, worktree };
 }
 
+test("review return transfers link feedback to the same Git worktree", t => {
+  const root = fixture(t, true);
+  const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "source.txt"), "# T-0096\n"));
+  cli(root, ["settings"], { reviewMode: "human" });
+  const before = cli(root, ["chat", task.id], { text: "Решетка должна быть частью гиперссылки", model: "test", effort: "low" });
+  const review = cli(root, ["review", task.id], { compact: true, includeReviewerSettings: true });
+  const reason = "Включить решётку и номер задачи в одну гиперссылку с общим подчёркиванием при наведении и фокусе.";
+  const decision = { reason, actor: "manager", revision: review.revision, targetHead: review.targetHead, reviewMode: review.settings.reviewMode };
+  cli(root, ["accept", task.id], decision, "AUTO_REVIEW_DISABLED");
+  const fromDiscussion = { ...decision, actor: "discussion" };
+  const returned = cli(root, ["request-changes", task.id], fromDiscussion);
+  cli(root, ["request-changes", task.id], fromDiscussion, "REVISION_CONFLICT");
+  assert.equal(returned.status, "in_progress");
+  assert.deepEqual(returned.history.slice(0, -1), before.history);
+  assert.equal(returned.history.at(-1).text, reason);
+  const { discussionReturn } = returned;
+  assert.equal(discussionReturn, returned.revision);
+  const posted = cli(root, ["chat", task.id], { text: "Возвращено", model: "test", effort: "low" });
+  const start = { discussionReturn, revision: returned.revision, launchDetails: true };
+  cli(root, ["start", task.id, "--compact"], start, "REVISION_CONFLICT");
+  assert.equal(cli(root, ["show", task.id]).discussionReturn, discussionReturn);
+  const started = cli(root, ["start", task.id, "--compact"], { ...start, revision: posted.revision });
+  cli(root, ["start", task.id, "--compact"], { ...start, revision: started.task.revision }, "INVALID_TRANSITION");
+  assert.equal(started.task.id, task.id);
+  assert.equal(started.worktree, worktree);
+  assert.equal(started.task.feedback, reason);
+});
+
+test("restoring a removed worktree consumes its discussion return exactly once", t => {
+  const root = fixture(t, true);
+  const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "source.txt"), "# T-0096\n"));
+  const review = cli(root, ["review", task.id], { compact: true });
+  const reason = "Include the # in the link";
+  const returned = cli(root, ["request-changes", task.id], { actor: "discussion", reason, revision: review.revision, targetHead: review.targetHead });
+  git(root, "worktree", "remove", worktree);
+  const request = { revision: returned.revision, discussionReturn: returned.discussionReturn, launchDetails: true };
+  const started = cli(root, ["start", task.id, "--compact"], request);
+  assert.equal(started.worktree, worktree);
+  assert.equal(started.task.feedback, reason);
+  assert.equal(started.task.discussionReturn, undefined);
+  assert.equal(readFileSync(join(worktree, "source.txt"), "utf8"), "# T-0096\n");
+  const restored = cli(root, ["show", task.id]);
+  assert.equal(restored.discussionReturn, undefined);
+  assert.equal(restored.history.at(-1).action, "start");
+  cli(root, ["start", task.id, "--compact"], { ...request, revision: restored.revision }, "INVALID_TRANSITION");
+});
+
+test("discussion return does not decide the manager's independent review", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  cli(root, ["settings"], { reviewMode: "manager", autoMode: false });
+  const { id } = cli(root, ["create"], { title: "Correct link", criteria: ["One link"], workingDirectory: root, expertTeam: {
+    review: { lead: "qa-engineer", reason: "Independent verification", stages: [{
+      key: "verify", expertId: "qa-engineer", title: "Verify", criteria: ["Checked"], outputs: ["Decision"],
+    }] },
+  } });
+  cli(root, ["approve", id]);
+  cli(root, ["start", id]);
+  const { token } = cli(root, ["preview", id]);
+  const submitted = cli(root, ["submit", id], { token, noChanges: true, summary: "Submitted", checks: ["Checked"] });
+  const decision = { revision: submitted.revision, targetHead: null, reviewMode: "manager", reason: "Include the # in the link" };
+  cli(root, ["request-changes", id], { ...decision, actor: "manager" }, "EXPERT_STAGES_INCOMPLETE");
+  const returned = cli(root, ["request-changes", id], { ...decision, actor: "discussion" });
+  assert.equal(returned.status, "in_progress");
+  assert.equal(returned.discussionReturn, returned.revision);
+  assert.equal(returned.history.at(-1).actor, "agent");
+});
+
 test("a full daily Worklog allows start, submit and accept", t => {
   const root = fixture(t, true);
   cli(root, ["init"]);
