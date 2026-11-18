@@ -543,7 +543,16 @@ select:hover:not(:disabled) {
 }
 .task-schedule { color: var(--blue); }
 .task-milestone-link.button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: start; }
-.task-card .tag { padding: 4px 10px; border-radius: 14px; font-size: 12px; }
+.task-card .task-tags { min-width: 0; gap: 4px 6px; }
+.task-card .tag {
+  min-width: 0; padding: 2px 6px; border-radius: 6px;
+  background: color-mix(in srgb, var(--tag-color) 13%, var(--panel));
+  color: light-dark(
+    oklch(from var(--tag-color) calc(0.34 + 0.10 * l) min(c, 0.16) h),
+    oklch(from var(--tag-color) calc(0.78 + 0.14 * l) min(c, 0.16) h)
+  );
+  font-weight: 600;
+}
 .task-subtask-progress { display: grid; gap: 4px; }
 .task-subtask-progress > span {
   height: 6px; border-radius: 999px;
@@ -560,6 +569,10 @@ select:hover:not(:disabled) {
   white-space: normal; overflow-wrap: anywhere;
 }
 .task-identity { gap: 8px; }
+.task-card-footer {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 8px; min-width: 0;
+}
+.task-card-footer > .task-run-status { display: inline-flex; align-items: center; min-height: 15px; color: var(--muted); }
 .task-id { flex: none; }
 .task-stat { display: inline-flex; align-items: center; gap: 2px; }
 .task-stat .codicon { width: 14px; height: 12px; font-size: 12px; }
@@ -893,7 +906,7 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 }
 .chat-attachment > span { overflow-wrap: anywhere; white-space: normal; }
 .chat-attachment.has-preview, .chat-composer .draft-attachments .has-preview { overflow: hidden; padding: 0; }
-.chat-attachment.has-preview > :is(.icon, span) { display: none; }
+.chat-attachment.has-preview > :is(.icon, span, small) { display: none; }
 .chat-attachment img { display: block; min-width: 0; width: auto; height: auto; max-width: 250px; max-height: 160px; object-fit: contain; }
 .chat-composer {
   display: grid; gap: 10px; min-width: 0; padding: 12px;
