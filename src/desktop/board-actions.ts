@@ -613,7 +613,7 @@ export function boardActions(project: string, attachments: { path: string; name:
           revision, targetHead, artifacts: data.artifacts, mode: data.reviewMode, criteriaCount: criteria.length,
           reviewerApproved: Boolean(data.reviewerApproval),
         });
-        if (!runReview || data.reviewMode !== "reviewer" || data.stale || data.reviewerApproval) {
+        if (!runReview || data.reviewMode !== "reviewer" || data.stale || data.reviewerApproval?.targetHead === targetHead) {
           const current = { ...data, targetChangesSinceApproval: data.reviewerApproval ? targetChangesSinceReview : undefined,
             executorRunning: isTaskRunning(id) };
           if (!data.stale && fields.knownRevision === revision && previousRead?.revision === revision &&
