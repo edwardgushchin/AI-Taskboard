@@ -1,0 +1,117 @@
+name: Native CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, ai-taskboard/T-0100]
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: ${{ matrix.os }} / ${{ matrix.arch }}
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows, platform: win32, arch: x64, image: windows-2025 }
+          - { os: windows, platform: win32, arch: arm64, image: windows-11-arm }
+          - { os: linux, platform: linux, arch: x64, image: ubuntu-24.04 }
+          - { os: linux, platform: linux, arch: arm64, image: ubuntu-24.04-arm }
+          - { os: macos, platform: darwin, arch: x64, image: macos-15-intel }
+          - { os: macos, platform: darwin, arch: arm64, image: macos-15 }
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET_OS: ${{ matrix.os }}
+      TARGET_PLATFORM: ${{ matrix.platform }}
+      TARGET_ARCH: ${{ matrix.arch }}
+      RUNNER_IMAGE: ${{ matrix.image }}
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      AI_TASKBOARD_PROJECT_URL: https://github.com/${{ github.repository }}
+      AI_TASKBOARD_MAINTAINER: AI Taskboard <41898282+github-actions[bot]@users.noreply.github.com>
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24.14.0
+          architecture: ${{ matrix.arch }}
+          package-manager-cache: false
+
+      - name: Record build identity and verify runner and Node
+        env:
+          HOST_ARCH: ${{ runner.arch }}
+        run: |
+          mkdir -p ci-results
+          node --input-type=module <<'JS' | tee ci-results/build.json
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          const { version } = JSON.parse(readFileSync('package.json'));
+          const { TARGET_OS, TARGET_PLATFORM, TARGET_ARCH, RUNNER_IMAGE, HOST_ARCH,
+            GITHUB_SERVER_URL, GITHUB_REPOSITORY, GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT, GITHUB_SHA } = process.env;
+          console.log(JSON.stringify({ version, os: TARGET_OS, targetArch: TARGET_ARCH,
+            image: RUNNER_IMAGE, hostArch: HOST_ARCH, node: process.version,
+            nodePlatform: process.platform, nodeArch: process.arch, sha: GITHUB_SHA,
+            run: `${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}` }, null, 2));
+          assert.equal(HOST_ARCH.toLowerCase(), TARGET_ARCH);
+          assert.equal(process.platform, TARGET_PLATFORM);
+          assert.equal(process.arch, TARGET_ARCH);
+          JS
+          version=$(node -p "require('./package.json').version")
+          echo "PACKAGE_ID=ai-taskboard-${version}-${TARGET_OS}-${TARGET_ARCH}" >> "$GITHUB_ENV"
+
+      - name: Install Linux runtime and native package tools
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb xauth libgtk-3-0t64 libnss3 libgbm1 libasound2t64 libopenjp2-tools rpm
+
+      - name: Install dependencies
+        run: npm ci 2>&1 | tee ci-results/npm-ci.log
+      - name: Check types and documentation
+        run: |
+          npm run check 2>&1 | tee ci-results/types.log
+          npm run check:docs 2>&1 | tee ci-results/docs.log
+      - name: Run CLI and desktop board tests
+        run: |
+          node --test tests/board-creation.test.ts tests/board-location.test.ts tests/localization.test.ts tests/localization-settings.test.ts tests/documentation.test.ts 2>&1 | tee ci-results/tests.log
+      - name: Build standalone CLI and Electron package
+        run: npm run package -- --ci 2>&1 | tee ci-results/package.log
+      - name: Verify packaged CLI and launch the packaged desktop
+        run: |
+          if [[ "$TARGET_OS" == linux ]]; then
+            # Ubuntu 24.04 restricts unprivileged user namespaces. Use Electron's setuid sandbox.
+            sandbox=(release/linux*-unpacked/chrome-sandbox)
+            sudo chown root:root "${sandbox[@]}"
+            sudo chmod 4755 "${sandbox[@]}"
+            xvfb-run -a node scripts/check-ci-package.mjs "$TARGET_ARCH" ci-results 2>&1 | tee ci-results/smoke.log
+          else
+            node scripts/check-ci-package.mjs "$TARGET_ARCH" ci-results 2>&1 | tee ci-results/smoke.log
+          fi
+
+      - name: Upload verified packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE_ID }}
+          if-no-files-found: error
+          compression-level: 0
+          path: |
+            release/${{ env.PACKAGE_ID }}.*
+      - name: Upload verification and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            ci-results/
+            release/builder-debug.yml
+            release/builder-effective-config.yaml

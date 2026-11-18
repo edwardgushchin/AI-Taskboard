@@ -1,4 +1,4 @@
-import { build } from "electron-builder";
+import { Arch, Platform, build } from "electron-builder";
 import { chmodSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -6,6 +6,14 @@ import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const config = {};
+const ci = process.argv.includes("--ci");
+const platform = Platform.current();
+const platformName = { win32: "windows", linux: "linux", darwin: "macos" }[process.platform];
+if (ci) {
+  config.artifactName = `ai-taskboard-\${version}-${platformName}-${process.arch}.\${ext}`;
+  if (process.platform === "win32") config.win = { signExecutable: false };
+  if (process.platform === "darwin") config.mac = { identity: "-", hardenedRuntime: false, notarize: false };
+}
 const stage = join(root, "dist", "installer");
 mkdirSync(stage, { recursive: true });
 
@@ -28,7 +36,7 @@ if (process.platform === "linux") {
     config.rpm = { ...config.rpm, [property]: path };
   }
 }
-if (process.platform === "darwin") {
+if (process.platform === "darwin" && !ci) {
   const scripts = join(stage, "pkg-scripts");
   mkdirSync(scripts, { recursive: true });
   const postinstall = join(scripts, "postinstall");
@@ -36,4 +44,5 @@ if (process.platform === "darwin") {
   chmodSync(postinstall, 0o755);
   config.pkg = { scripts, allowAnywhere: false, allowCurrentUserHome: false };
 }
-await build({ projectDir: root, config, publish: "never" });
+const targets = ci ? platform.createTarget(process.platform === "darwin" ? "zip" : null, Arch[process.arch]) : undefined;
+await build({ projectDir: root, config, targets, publish: "never" });
