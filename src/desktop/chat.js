@@ -1029,6 +1029,28 @@ function taskChat(task) {
   controlLabelForIcon(microphone, () => t("ui.voice_input_a05b7480"));
   controls.append(attach, microphone, send);
   composer.append(pendingFiles, input, fileInput, controls, feedback);
+  if (task.status === "draft" && task.draftDiscussion) {
+    const { phase, reason } = task.draftDiscussion;
+    const discussion = element("div", undefined, "chat-status");
+    discussion.setAttribute("role", "status");
+    discussion.append(element("span", () => t("draft_discussion." + phase, { reason })));
+    if (phase === "failed") {
+      const retry = button(() => t("draft_discussion.retry"), async () => {
+        retry.disabled = true;
+        draft.error = "";
+        try {
+          const result = await api.retryDraftDiscussion(task.id);
+          if (!result.ok) draft.error = boardError(result.error);
+        } catch (error) { draft.error = error.message; }
+        finally {
+          retry.disabled = false;
+          if (frame.project === project && sheet.open && sheetKind === "task" && taskInSheet?.id === task.id) await showTask(task.id);
+        }
+      }, "quiet");
+      discussion.append(" ", retry);
+    }
+    composer.prepend(discussion);
+  }
   area.append(composer);
 
   if (!manualBoard()) {

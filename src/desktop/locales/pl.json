@@ -1,4 +1,9 @@
 {
+  "draft_discussion.queued": "Przegląd szkicu oczekuje w kolejce.",
+  "draft_discussion.running": "Trwa przegląd szkicu…",
+  "draft_discussion.failed": "Przegląd szkicu nie powiódł się: {reason}",
+  "draft_discussion.retry": "Ponów przegląd",
+  "draft_discussion.interrupted": "Poprzedni przegląd szkicu został przerwany.",
   "ui.resolving_acceptance_conflict": "Rozwiązywanie konfliktu",
   "ui.dismiss_notification_9a17797e": "Odrzuć powiadomienie",
   "ui.board_refresh_4c949d36": "Odświeżenie tablicy",

@@ -821,6 +821,30 @@ test("linked attachments survive chat, restart and archive without copying large
     Buffer.from("keep source").toString("base64"));
 });
 
+test("linked attachment snapshots preserve verified bytes and reject stale sources", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const source = join(root, "source.txt");
+  const destination = join(root, "snapshot.txt");
+  const original = Buffer.concat([Buffer.alloc(64 * 1024, 1), Buffer.alloc(256, 2)]);
+  writeFileSync(source, original);
+  const task = cli(root, ["create"], { title: "Draft", attachmentSources: [{ path: source, link: true }] });
+  const args = ["attachment", "read", task.id];
+  const file = task.attachments[0].file;
+  cli(root, args, { file, destination }, "ATTACHMENT_LINK");
+  assert.equal(cli(root, args, { file, destination, snapshot: true }).path, destination);
+  assert.deepEqual(readFileSync(destination), original);
+  cli(root, args, { file, destination, snapshot: true }, "IO_ERROR");
+  writeFileSync(source, "changed");
+  assert.deepEqual(readFileSync(destination), original);
+  const rejected = join(root, "rejected.txt");
+  cli(root, args, { file, destination: rejected, snapshot: true }, "ATTACHMENT_CHANGED");
+  assert.equal(existsSync(rejected), false);
+  rmSync(source);
+  cli(root, args, { file, destination: rejected, snapshot: true }, "ATTACHMENT_UNAVAILABLE");
+  assert.equal(existsSync(rejected), false);
+});
+
 test("create saves attachments with the draft and rejects incomplete batches", t => {
   const root = fixture(t);
   cli(root, ["init"]);
