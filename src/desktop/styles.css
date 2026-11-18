@@ -549,7 +549,7 @@ select:hover:not(:disabled) {
   background: color-mix(in srgb, var(--tag-color) 13%, var(--panel));
   color: light-dark(
     oklch(from var(--tag-color) calc(0.34 + 0.10 * l) min(c, 0.16) h),
-    oklch(from var(--tag-color) calc(0.75 + 0.09 * l) min(c, 0.16) h)
+    oklch(from var(--tag-color) calc(0.78 + 0.14 * l) min(c, 0.16) h)
   );
   font-weight: 600;
 }
