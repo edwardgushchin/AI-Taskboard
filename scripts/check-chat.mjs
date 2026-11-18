@@ -134,11 +134,12 @@ app.whenReady().then(async () => {
         api.boardRequest = () => { dialogue.ready.resolve(true); return dialogue.finish.promise; };
         dialogue.open = () => {
           dialogue.manager = draftComposer();
-          body.replaceChildren(dialogue.manager);
+          (${reopening} ? byId('board-composer') : body).replaceChildren(dialogue.manager);
           dialogue.manager.querySelector('.draft-input textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
           dialogue.log = dialogue.manager.querySelector('.board-chat-log:not(.board-work)');
         };
-        if (!sheet.open) sheet.showModal();
+        if (${reopening}) byId('workspace').hidden = false;
+        else if (!sheet.open) sheet.showModal();
         dialogue.open();
         if (${!reopening}) {
           dialogue.manager.querySelector('.draft-input textarea').value = '${question}';
@@ -202,7 +203,13 @@ app.whenReady().then(async () => {
         await check(`JSON.stringify([...dialogue.log.querySelectorAll('[data-message-id]')].map(node => node.dataset.messageId)) ===
           ${JSON.stringify(JSON.stringify(expected))}`, "older and recent pages preserve saved order and have no missing or duplicate replies");
       }
-      if (keepArtifacts && paused && reopening) await capture("dialogue-history-paused-restart.png");
+      if (keepArtifacts && paused && reopening) {
+        await evaluate(`document.fonts.ready.then(() => {
+          dialogue.log.querySelector('[data-message-id="full-answer"]').scrollIntoView({ block: 'center' });
+          return true;
+        })`);
+        await capture("dialogue-history-paused-restart.png");
+      }
       await evaluate("dialogue.manager.dispose()");
       console.log(`Dialogue history passed: ${paused ? "paused goal" : "no goal"}, ${reopening ? "restarted Electron" : "stream and reopened composer"}`);
     }
