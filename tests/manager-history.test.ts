@@ -165,11 +165,12 @@ test("only delivered dialogue replies become unread and repeated saves preserve 
   assert.deepEqual(readManagerHistory(project, null, "work")!.turns.flatMap(turn => turn.items.map(item => item.id)), ["first", statusId]);
 });
 
-test("work history identifies older status notices with multiline card titles", t => {
+test("work history identifies older status notices with multiline titles and embedded separators", t => {
   const project = fixture(t);
   const start = Date.now();
-  const notices = ["", "\n", "\r\n", "\r"].map((separator, index) => {
-    const title = "First" + separator + "Second";
+  const titles = ["FirstSecond", "First\nSecond", "First\r\nSecond", "First\rSecond",
+    "Релиз «Клиент» — v2.1\nПроверка", "Release «Client» — preview» — cancelled.\nCheck"];
+  const notices = titles.map((title, index) => {
     const task = { id: "T-0042", title } as Task;
     const at = new Date(start + index).toISOString();
     const text = statusNotice(task, { action: "cancel", actor: "manager", from: "ready", to: "cancelled", at }, index % 2 ? "ru" : "en");
@@ -184,6 +185,24 @@ test("work history identifies older status notices with multiline card titles", 
     notices.map(item => ({ ...item, statusTransition: { task: "T-0042", status: "cancelled" } })));
   assert.deepEqual(readManagerHistory(project, null, "chat")!.turns.flatMap(turn => turn.items), [reply]);
   assert.deepEqual(managerUnread(project), [reply.id]);
+});
+
+test("work history reads older status reasons with embedded separators and preserves ambiguous notices", t => {
+  const project = fixture(t);
+  const start = Date.now();
+  const task = { id: "T-0042", title: "Release «Client» — preview" } as Task;
+  const reasons = ["Retry «client» — v2.1.\nCheck access", "Review «previous attempt» — cancelled."];
+  const items = reasons.map((reason, index) => {
+    const at = new Date(start + index).toISOString();
+    const text = statusNotice(task, { action: "block", actor: "manager", from: "in_progress", to: "blocked", at, text: reason }, "en")!;
+    const item = { id: randomUUID(), text, at, title: "", type: "agentMessage", status: "completed" };
+    saveManagerHistory(project, start + index, item.id, { lane: "notice", items: [item] });
+    return item;
+  });
+  assert.deepEqual(readManagerHistory(project, null, "work")!.turns.flatMap(turn => turn.items), [
+    { ...items[0]!, statusTransition: { task: "T-0042", status: "blocked" } },
+    { ...items[1]!, statusTransition: undefined },
+  ]);
 });
 
 test("work pages interleaved notices and chat runs without losing or duplicating notices", t => {

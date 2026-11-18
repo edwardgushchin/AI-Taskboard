@@ -198,8 +198,8 @@ app.whenReady().then(async () => {
           ...Array.from({ length: 24 }, (_, index) => ({
             at: start + 101 + index, run: { lane: "notice", items: [
               answer("notice-" + index, "T-" + String(index + 1).padStart(4, "0") +
-                " «batch-cancel-" + index + (index === 0 ? "\nВторая строка отмены" : index === 1 ? "\r\nВторая строка запуска" : "") +
-                "» — " + (transitionResults[index]?.[2] ?? "отменена") + ".", 101 + index),
+                " «batch-cancel-" + index + (index === 0 ? " Релиз «Клиент» — v2.1\nПроверка" : index === 1 ? "\r\nВторая строка запуска" : "") +
+                "» — " + (transitionResults[index]?.[2] ?? "отменена") + (index === 2 ? ": Повтор «Клиент» — v2.1." : "."), 101 + index),
             ] },
           })),
         ]);
@@ -303,9 +303,19 @@ app.whenReady().then(async () => {
       await check(`!dialogue.manager.querySelector('[data-status-result]:not([hidden])')`,
         "matching notices replace all five tool result rows");
       await check(`
-        dialogue.manager.querySelector('[data-item="final:notice-0"]').textContent.includes('Вторая строка отмены') &&
+        dialogue.manager.querySelector('[data-item="final:notice-0"]').textContent.includes('Релиз «Клиент» — v2.1') &&
+        dialogue.manager.querySelector('[data-item="final:notice-0"]').textContent.includes('Проверка') &&
+        dialogue.manager.querySelector('[data-item="final:notice-2"]').textContent.includes('Повтор «Клиент» — v2.1.') &&
         dialogue.manager.querySelector('[data-item="final:notice-1"]').textContent.includes('Вторая строка запуска')
-      `, "matching notices preserve both lines of older card titles");
+      `, "matching notices preserve separators in older card titles and reasons");
+      if (keepArtifacts && paused) {
+        await evaluate(`document.fonts.ready.then(() => {
+          const work = dialogue.manager.querySelector('.board-work');
+          const notice = work.querySelector('[data-item="final:notice-0"]');
+          work.scrollTop += notice.getBoundingClientRect().top - work.getBoundingClientRect().top - 105;
+        })`);
+        await capture("manager-work-notice-with-separator.png");
+      }
       await evaluate(`(async () => {
         for (let i = 0; i < ${Object.keys(workPages).length}; i++) {
           const older = dialogue.manager.querySelector('.board-work .board-chat-older');

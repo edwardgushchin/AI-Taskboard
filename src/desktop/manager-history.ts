@@ -83,9 +83,19 @@ const mergedPrefixes = Object.keys(localization.catalogs).map(locale => {
 
 // Only older records produced by status sync need their formatted fields recovered.
 function noticeTransition(text: string): BoardActivity["statusTransition"] {
-  const regular = /^(T-\d+) «.*?» — ([^\r\n]+?)(?:[.:]|$)/su.exec(text);
-  const status = regular && statusLabels.get(regular[2]!);
-  if (regular && status) return { task: regular[1]!, status };
+  const task = /^(T-\d+) «/u.exec(text)?.[1];
+  if (task) {
+    let status: typeof taskStates[number] | undefined;
+    // Titles and reasons are unescaped. Only a known status followed by the
+    // notice's ending or reason separator can mark the end of the title.
+    for (const [, label] of text.matchAll(/» — (?=([^»\r\n.:]+)(?:\.$|: \S))/gu)) {
+      const candidate = statusLabels.get(label!);
+      if (!candidate) continue;
+      if (status && status !== candidate) return;
+      status = candidate;
+    }
+    if (status) return { task, status };
+  }
   for (const { prefix, suffix } of mergedPrefixes) {
     if (!suffix || !text.startsWith(prefix!)) continue;
     const match = /^T-\d+/u.exec(text.slice(prefix!.length));
