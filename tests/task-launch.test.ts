@@ -1,9 +1,11 @@
 import localization from "../src/desktop/localization.cjs";
 import { isManual } from "../src/cli/manual-board.ts";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
-import { test } from "node:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, test } from "node:test";
 import { setTimeout as wait } from "node:timers/promises";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
@@ -12,13 +14,15 @@ import { taskIdPattern } from "../src/cli/model.ts";
 import type { RunActivity, Task } from "../src/cli/model.ts";
 import { missingCodexThread } from "../src/desktop/codex-run.ts";
 import { createAgentSlots, parseAgentLimits } from "../src/desktop/agent-limits.ts";
+import type { DeferredExecutor } from "../src/desktop/board-runtime.ts";
+import { deferExecutor, linkQueuedExecutor, matchesQueuedExecutor, prepareQueuedTurn, runtimeEntries } from "../src/desktop/board-runtime.ts";
 
 const source = readFileSync(new URL("../src/desktop/main.ts", import.meta.url), "utf8");
 const parsed = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, true);
 const names = new Set(["launchTask", "recordRunFailure", "publishRunActivity", "notifyRunChange", "saveTaskTokenUsage",
   "beginOperation", "confirmProjectClose", "projectOperations", "closingProjects", "launchingTasks", "runningTasks", "runActivityByTask",
   "activeAgents", "chatRuns", "windowStates", "executorBusy", "reserveAgent", "scheduleAgentWork", "scheduleRecurringTasks",
-  "deferredExecutors", "schedulingAgentWork", "taskRunLimit", "acceptanceWork", "continueAcceptance",
+  "queuedRecoveryDelay", "schedulingAgentWork", "taskRunLimit", "acceptanceWork", "continueAcceptance",
   "returnTaskToDraft", "returningDrafts", "reviewOperations", "managerReviewOperations", "taskOperations", "steeringOperations"]);
 const lifecycle = parsed.statements.filter(node => {
   if (ts.isFunctionDeclaration(node)) return node.name && names.has(node.name.text);
@@ -28,8 +32,10 @@ const lifecycle = parsed.statements.filter(node => {
 const failure = (code: string, message: string) => ({ ok: false, error: { code, message } });
 const previousThread = "01234567-1234-5678-1234-123456789012";
 const nextThread = "01234567-1234-5678-1234-123456789013";
+const scratch = mkdtempSync(join(tmpdir(), "task-launch-"));
+after(() => rmSync(scratch, { recursive: true }));
 
-function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnect" | "closing" | "closing-on-retry" | "board-busy",
+function fixture(outcome: "busy" | "missing" | "failed" | "started" | "recovered" | "disconnect" | "closing" | "closing-on-retry" | "board-busy",
   activity?: RunActivity) {
   const task: Task & { mergeRepair?: true } = { ...createTask("T-0001", { title: "Reviewed task" }), status: "review",
     codexThreadId: outcome === "board-busy" ? undefined : previousThread,
@@ -46,12 +52,26 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
   const retryCompletion = Promise.withResolvers<Completion>();
   const finalCompletion = Promise.withResolvers<Completion>();
   const completions = [completion, retryCompletion, finalCompletion];
-  const slots = createAgentSlots();
-  const runtime = runInNewContext(stripTypeScriptTypes(lifecycle) + "\n({launchTask, returnTaskToDraft, scheduleAgentWork, scheduleRecurringTasks, beginOperation, confirmProjectClose, projectOperations, runningTasks, activeAgents, deferredExecutors})", {
+  const registry = mkdtempSync(join(scratch, "registry-"));
+  function location(project: string) {
+    const root = join(registry, project);
+    const directory = join(root, ".tasks");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, "board.json"), "{}");
+    return root;
+  }
+  const slots = Object.assign(createAgentSlots(), {
+    entries: (project: string) => runtimeEntries(location(project)),
+    defer: (project: string, id: string, pending?: DeferredExecutor, expectedRevision?: number) =>
+      deferExecutor(location(project), id, pending, expectedRevision),
+  });
+  const runtime = runInNewContext(stripTypeScriptTypes(lifecycle) + "\n({launchTask, returnTaskToDraft, scheduleAgentWork, scheduleRecurringTasks, beginOperation, confirmProjectClose, projectOperations, runningTasks, activeAgents})", {
     AbortController, AbortSignal, wait, performance, setTimeout, clearTimeout, setImmediate, subscriptions, agentSlots: slots,
     isManual, runtimeLocation: (project: string) => project,
     readBoardSettings: (project: string) => savedSettings.get(project) ?? subscriptions.get(project)?.board.settings ?? {},
-    scheduleMaintenance: async () => {}, scheduleAutoReview: () => {}, scheduleAutoBoard: () => {}, projectIdentity: (project: string) => project,
+    scheduleMaintenance: async () => {}, scheduleAutoReview: () => {}, scheduleAutoBoard: () => {}, scheduleDraftDiscussions: () => {},
+    projectIdentity: (project: string) => project, matchesQueuedExecutor,
+    prepareQueuedTurn: (project: string, ...args: [Task, string]) => prepareQueuedTurn(location(project), ...args),
     broadcastBoardChat: () => {}, boardRequests: new Map(), boardWorkRequests: new Map(),
     t: (key: string, parameters = {}) => localization.text(key, parameters, "en"), localization, cliFailure: failure, missingCodexThread,
     app: { getPath: () => "profile" }, dialog: { showMessageBox: async (_window: unknown, options: { message: string; detail: string }) => {
@@ -65,7 +85,7 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
       previousTurn.reads++;
       return previousTurn;
     },
-    callCli: async (_project: string, args: string[], input: any) => {
+    callCli: async (project: string, args: string[], input: any) => {
       calls.push({ args, input });
       if (args[0] === "request-changes") {
         if (input.revision !== task.revision) return failure("REVISION_CONFLICT", "The task changed.");
@@ -106,7 +126,9 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
       }
       if (args[0] === "update") {
         if (outcome === "board-busy") return failure("BOARD_BUSY", "Another command is working on this board.");
-        Object.assign(task, changeTask(task, "update", input));
+        const updated = changeTask(task, "update", input);
+        if (input.queuedExecutor) linkQueuedExecutor(location(project), task, updated);
+        Object.assign(task, updated);
       }
       if (args[0] === "progress") Object.assign(task, changeTask(task, "progress", input));
       if (args[0] === "return-to-draft") Object.assign(task, changeTask(task, "return-to-draft", input));
@@ -124,7 +146,7 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
       const threadId = outcome === "missing" ? nextThread : snapshot.codexThreadId ?? nextThread;
       await beforeTurn?.(threadId);
       if (activity && (!snapshot.fullAccess || activity.type !== "autoApprovalReview")) onActivity(activity);
-      return { threadId,
+      return { threadId, recovered: outcome === "recovered",
         completion: completions[launchNumber - 1]!.promise,
         steer: async () => {}, interrupt: async () => {} };
     },
@@ -138,7 +160,7 @@ test("manual boards reject direct launches and stale recurring schedules", async
   assert.equal((await f.runtime.launchTask("project", f.task.id)).error.code, "MANUAL_BOARD");
   f.task.status = "ready";
   f.task.schedule = { everyMinutes: 1, nextAt: new Date(0).toISOString() };
-  f.subscriptions.set("project", { board: { tasks: [f.task], settings: { boardType: "manual" } }, tabs: new Set([{}]) });
+  f.subscriptions.set("project", { board: { project: "project", tasks: [f.task], settings: { boardType: "manual" } }, tabs: new Set([{}]) });
   f.runtime.scheduleRecurringTasks();
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.launched.length, 0);
@@ -166,7 +188,7 @@ test("launch uses saved limits when the watch still has the previous value", asy
   for (const limit of [3, 1, 0]) {
     const f = fixture("started");
     f.task.status = "in_progress";
-    f.subscriptions.set("project", { board: { tasks: [f.task], settings: { taskLimits: { executor: 2 } } }, listeners: [], tabs: new Set() });
+    f.subscriptions.set("project", { board: { project: "project", tasks: [f.task], settings: { taskLimits: { executor: 2 } } }, listeners: [], tabs: new Set() });
     const previousLimits = { executor: 2 };
     const releases = [f.slots.acquire("project", "executor", previousLimits)!, f.slots.acquire("project", "executor", previousLimits)!];
     f.savedSettings.set("project", { taskLimits: { executor: limit } });
@@ -301,14 +323,14 @@ test("a full board preserves review feedback and another board can still launch"
   const f = fixture("started");
   f.task.status = "in_progress";
   const settings = { taskLimits: { executor: 1 } };
-  f.subscriptions.set("full", { board: { tasks: [f.task], settings }, listeners: [] });
+  f.subscriptions.set("full", { board: { project: "full", tasks: [f.task], settings }, listeners: [] });
   const release = f.slots.acquire("full", "executor", settings.taskLimits)!;
   assert.equal((await f.runtime.launchTask("full", f.task.id)).error.code, "EXECUTOR_LIMIT");
   assert.equal((await f.runtime.launchTask("other", f.task.id)).ok, true);
   f.task.status = "review";
   const returned = await f.runtime.launchTask("full", f.task.id, { input: { revision: f.task.revision, reason: "Fix the result." } });
   assert.equal(returned.ok, true);
-  assert.equal(f.runtime.deferredExecutors.get("full\0" + f.task.id).revision, f.task.revision);
+  assert.equal(f.slots.entries("full").find(entry => entry.task === f.task.id)?.revision, f.task.revision);
   assert.equal(f.task.history.at(-1)?.text, "Fix the result.");
   assert.equal(f.launched.length, 1);
   release();
@@ -316,7 +338,7 @@ test("a full board preserves review feedback and another board can still launch"
   await new Promise(resolve => setImmediate(resolve));
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.launched.length, 2);
-  assert.equal(f.runtime.deferredExecutors.size, 0);
+  assert.equal(f.slots.entries("full").length, 0);
   f.task.status = "review";
   f.retryCompletion.resolve(undefined);
   await new Promise(resolve => setImmediate(resolve));
@@ -328,13 +350,13 @@ test("deferred executors wait for two occupied slots, follow limit changes and d
     const f = fixture("started");
     f.slots.configure({ executor: 2, manager: 1, reviewer: 1 });
     const settings: { taskLimits?: { executor: number } } = action === "app-increase" ? {} : { taskLimits: { executor: 2 } };
-    const board = { tasks: [f.task], settings };
+    const board = { project: "project", tasks: [f.task], settings };
     f.subscriptions.set("project", { board, listeners: [] });
     const first = f.slots.acquire("project", "executor", settings.taskLimits)!;
     const second = f.slots.acquire("project", "executor", settings.taskLimits)!;
     await f.runtime.launchTask("project", f.task.id, { input: { revision: f.task.revision, reason: "Fix" } });
     await new Promise(resolve => setImmediate(resolve));
-    assert.equal(f.runtime.deferredExecutors.size, 1, action);
+    assert.equal(f.slots.entries("project").length, 1, action);
     assert.equal(f.launched.length, 0, action);
     if (action === "release") first();
     if (action === "board-increase") settings.taskLimits!.executor = 3;
@@ -349,7 +371,7 @@ test("deferred executors wait for two occupied slots, follow limit changes and d
     await new Promise(resolve => setImmediate(resolve));
     const waits = ["decrease", "watch-lag"].includes(action);
     const invalid = ["cancel", "delete", "revision"].includes(action);
-    assert.equal(f.runtime.deferredExecutors.size, waits ? 1 : 0, action);
+    assert.equal(f.slots.entries("project").length, waits ? 1 : 0, action);
     assert.equal(f.launched.length, waits || invalid ? 0 : 1, action);
     if (waits) { board.tasks = [f.task]; first(); second(); f.runtime.scheduleAgentWork(); }
     await new Promise(resolve => setImmediate(resolve));
@@ -365,7 +387,7 @@ test("an approved snapshot skips the redundant card read while the CLI checks th
   const f = fixture("started");
   f.task.status = "ready";
   const snapshot = structuredClone(f.task);
-  f.subscriptions.set("project", { board: { tasks: [snapshot] }, listeners: [] });
+  f.subscriptions.set("project", { board: { project: "project", tasks: [snapshot] }, listeners: [] });
   f.task.revision++;
   const stale = await f.runtime.launchTask("project", f.task.id, undefined, false, snapshot.revision);
   assert.equal(stale.error.code, "REVISION_CONFLICT");
@@ -461,14 +483,14 @@ test("automatic continuation waits for a slot if the board limit falls during wo
   const f = fixture("started");
   f.task.status = "in_progress";
   const settings = { taskLimits: { executor: 2 } };
-  f.subscriptions.set("project", { board: { tasks: [f.task], settings }, listeners: [] });
+  f.subscriptions.set("project", { board: { project: "project", tasks: [f.task], settings }, listeners: [] });
   const release = f.slots.acquire("project", "executor", settings.taskLimits)!;
   assert.equal((await f.runtime.launchTask("project", f.task.id)).ok, true);
   settings.taskLimits.executor = 1;
   f.completion.resolve(undefined);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.launched.length, 1);
-  assert.equal(f.runtime.deferredExecutors.size, 1);
+  assert.equal(f.slots.entries("project").length, 1);
   release();
   f.runtime.scheduleAgentWork();
   await new Promise(resolve => setImmediate(resolve));
@@ -477,6 +499,32 @@ test("automatic continuation waits for a slot if the board limit falls during wo
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.launched.length, 2);
   assert.equal(f.task.status, "blocked");
+});
+
+test("a recovered turn keeps its result without starting another turn", async () => {
+  for (const outcome of [
+    undefined,
+    { interrupted: true, reason: "Interrupted by Codex" },
+    { reason: "Provider turn failed" },
+    { disconnected: true, reason: "Provider connection lost" },
+  ]) {
+    const f = fixture("recovered");
+    f.task.status = "in_progress";
+    f.subscriptions.set("project", { board: { project: "project", tasks: [f.task] }, listeners: [] });
+    f.slots.defer("project", f.task.id, { revision: f.task.revision });
+    f.runtime.scheduleAgentWork();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.launched.length, 1);
+    f.access.full = true;
+    f.completion.resolve(outcome);
+    await new Promise(resolve => setImmediate(resolve));
+    const reason = outcome?.interrupted ? undefined : outcome?.reason;
+    assert.equal(f.task.status, reason ? "blocked" : "in_progress");
+    assert.equal(f.task.blocked?.reason, reason);
+    assert.equal(f.launched.length, 1);
+    assert.equal(f.slots.entries("project").length, 0);
+    assert.equal(f.runtime.activeAgents.size, 0);
+  }
 });
 
 test("an executor reconnects once to the same chat after the App Server closes", async () => {
@@ -732,7 +780,7 @@ test("restored acceptance completes checked results once and stops an orphaned r
   for (const phase of ["checking", "running"] as const) {
     const f = fixture("started");
     f.task.acceptanceRepair = { phase, targetHead: "a".repeat(40), attempts: 1, message: "fix: integrate result" };
-    f.subscriptions.set("project", { board: { tasks: [f.task], settings: { autoMode: false } }, listeners: [], tabs: new Set([1, 2]) });
+    f.subscriptions.set("project", { board: { project: "project", tasks: [f.task], settings: { autoMode: false } }, listeners: [], tabs: new Set([1, 2]) });
     f.runtime.scheduleRecurringTasks(); f.runtime.scheduleRecurringTasks();
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(f.launched.length, 0);

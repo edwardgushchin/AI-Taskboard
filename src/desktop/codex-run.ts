@@ -36,7 +36,37 @@ import { insideProject } from "./project-files.ts";
 type Client = NonNullable<Awaited<ReturnType<typeof configuredCodex>>>;
 type Turn = { id: string; status: string; error?: { message?: string } | null };
 type RunFailure = { reason: string; disconnected?: boolean; interrupted?: boolean };
-type Run = AgentControl & { threadId: string; completion: Promise<RunFailure | undefined> };
+type Run = AgentControl & { threadId: string; completion: Promise<RunFailure | undefined>; recovered?: true };
+type QueuedTurn = { clientId: string; recover: boolean; turnId?: string; accepted: (turnId: string) => void };
+
+async function findQueuedTurn(request: <R>(method: string, params: object) => Promise<R>,
+  threadId: string, queued: QueuedTurn): Promise<Turn | undefined> {
+  type SavedTurn = Turn & { itemsView?: string; items: { type: string; clientId?: string }[] };
+  let cursor: string | undefined;
+  const seen = new Set<string>();
+  let active = false;
+  try {
+    do {
+      const page: { data: SavedTurn[]; nextCursor?: string | null } = await request("thread/turns/list", {
+        threadId, cursor, sortDirection: "desc", limit: 10, itemsView: "full",
+      });
+      for (const turn of page.data) {
+        if (turn.id === queued.turnId) return turn;
+        if (!Array.isArray(turn.items) || turn.itemsView === "summary" || turn.itemsView === "notLoaded") {
+          throw new Error("Codex returned incomplete turn history.");
+        }
+        if (turn.items.some(item => item.type === "userMessage" && item.clientId === queued.clientId)) return turn;
+        active ||= turn.status === "inProgress";
+      }
+      cursor = page.nextCursor ?? undefined;
+      if (cursor && seen.has(cursor)) throw new Error("Codex repeated a turn history cursor.");
+      if (cursor) seen.add(cursor);
+    } while (cursor);
+    if (queued.turnId || active) throw new Error("Codex has not confirmed the queued turn in history.");
+  } catch (error) {
+    throw Object.assign(new Error((error as Error).message), { code: "CODEX_START_UNCONFIRMED" });
+  }
+}
 const taskProfile = "ai-taskboard";
 const instructions = new URL("./agent-instructions/", import.meta.url);
 
@@ -82,7 +112,8 @@ export function missingCodexThread(message: string | undefined, threadId: string
 
 export async function startCodexRun(client: Client, project: string, cwd: string, task: ExecutorTask,
   onActivity?: (item: RunActivity) => void, onTokenUsage?: (report: TokenUsageReport) => Promise<void>, signal?: AbortSignal,
-  beforeTurn?: (threadId: string) => Promise<void>, desktopProfile?: string): Promise<Run> {
+  beforeTurn?: (threadId: string) => Promise<void | QueuedTurn>, desktopProfile?: string,
+  recoveringThreadId?: string): Promise<Run> {
   signal?.throwIfAborted();
   const fullAccess = task.fullAccess === true;
   const profile = fullAccess ? ":danger-full-access" : taskProfile;
@@ -130,6 +161,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   let guiEvidence: ReturnType<typeof windowsGuiEvidence> | undefined;
   const mcp = await openBoardMcp(tools, async (name, args, requestSignal) => {
     if (name === "expert_stage") return worklog.remind(await stages.report(args));
+    if (name === "expert_verify_skills") return worklog.remind(await stages.verify(args));
     if (Object.hasOwn(expertCommands, name)) {
       const input = args as Record<string, unknown>;
       if (assigned.size && ((name === "expert_context" && (!Array.isArray(input.ids) || input.ids.some(id => !assigned.has(id)))) ||
@@ -323,6 +355,9 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       throw new Error("Codex cannot write to the directories required for this task. " + (error as Error).message);
     }
     let existing = task.codexThreadId;
+    if (recoveringThreadId && existing !== recoveringThreadId) {
+      throw Object.assign(new Error("The queued start belongs to another Codex thread."), { code: "CODEX_START_UNCONFIRMED" });
+    }
     type ThreadReply = {
       thread: { id: string; model?: string }; model?: string; activePermissionProfile?: { id: string };
       approvalPolicy?: string; approvalsReviewer?: string;
@@ -339,6 +374,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
         started = await request<ThreadReply>("thread/resume", { ...threadOptions, threadId: existing });
       } catch (error) {
         if (!missingCodexThread((error as Error).message, existing)) throw error;
+        if (recoveringThreadId) throw Object.assign(error as Error, { code: "CODEX_START_UNCONFIRMED" });
         signal?.throwIfAborted();
         existing = undefined;
       }
@@ -357,7 +393,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     const githubTools = localTools.filter(name => name.startsWith("github_") || name === milestonesListTool.name);
     if (!codexThreadPattern.test(threadId) || (existing && threadId !== existing)) throw new Error("Codex returned an unexpected thread ID.");
     signal?.throwIfAborted();
-    await beforeTurn?.(threadId);
+    const queued = await beforeTurn?.(threadId);
     signal?.throwIfAborted();
     timeout.refresh();
     const prompt = [
@@ -391,11 +427,24 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       ...(task.feedback ? ["Замечание к последней сдаче: " + task.feedback] : []),
     ].join("\n");
     activeThreadId = threadId;
+    stages.bind(request, threadId);
     tokens.track(threadId, started.model ?? started.thread.model ?? null, true);
-    const { turn } = await request<{ turn: Turn }>("turn/start", {
+    const recovered = queued && queued.recover ? await findQueuedTurn(request, threadId, queued) : undefined;
+    signal?.throwIfAborted();
+    const { turn } = recovered ? { turn: recovered } : await request<{ turn: Turn }>("turn/start", {
       threadId, effort: task.execution?.effort, input: [{ type: "text", text: prompt, text_elements: [] }],
+      ...(queued ? { clientUserMessageId: queued.clientId } : {}),
       additionalContext: { ai_taskboard_worklog: { value: worklogReminder, kind: "application" } },
+    }).catch(error => {
+      if (queued && rpc.failed) throw Object.assign(error as Error, { code: "CODEX_START_UNCONFIRMED" });
+      throw error;
     });
+    if (queued) {
+      try { queued.accepted(turn.id); }
+      catch (error) {
+        throw Object.assign(error as Error, { code: "CODEX_START_UNCONFIRMED" });
+      }
+    }
     worklog.start(threadId, turn.id);
     control = turnControl(request, threadId, turn.id);
     if (assigned.size || task.expertStage || task.expertStages?.length) {
@@ -414,7 +463,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     tokens.save(tokens.begin(threadId, turn.id), onTokenUsage);
     clearTimeout(timeout);
     if (turn.status !== "inProgress") turns.set(turn.id, turn);
-    return { threadId, completion: releaseProvider.run(() => monitor(turn.id)), ...control };
+    return { threadId, completion: releaseProvider.run(() => monitor(turn.id)), ...control,
+      ...(recovered ? { recovered: true as const } : {}) };
   } catch (error) {
     try { worklog.finish(); }
     finally {

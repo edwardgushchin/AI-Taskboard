@@ -1,6 +1,7 @@
 import type { AgentLimits } from "../cli/model.ts";
 import { inheritedLimits } from "../cli/settings-notices.ts";
-import { registerRuntime, runtimeEntries, runtimeLocation, runtimeTransaction } from "./board-runtime.ts";
+import { deferExecutor, registerRuntime, runtimeEntries, runtimeLocation, runtimeTransaction } from "./board-runtime.ts";
+import type { DeferredExecutor } from "./board-runtime.ts";
 import { projectIdentity } from "./project-tabs.ts";
 import { readBoardSettings } from "../cli/storage.ts";
 
@@ -63,12 +64,8 @@ export function createAgentSlots(shared = false) {
         if (entry) entry.state = state;
       });
     },
-    defer(project: string, task: string, pending?: { revision: number; continuation?: { afterDisconnect?: boolean; withoutProgress?: boolean } }) {
-      if (sharedProject) runtimeTransaction(sharedProject(project), entries => {
-        const index = entries.findIndex(entry => entry.kind === "queue" && entry.task === task);
-        if (index >= 0) entries.splice(index, 1);
-        if (pending) entries.push({ id: "queue:" + task, owner: 0, kind: "queue", task, ...pending });
-      });
+    defer(project: string, task: string, pending?: DeferredExecutor, expectedRevision?: number) {
+      return sharedProject ? deferExecutor(sharedProject(project), task, pending, expectedRevision) : false;
     },
     entries(project: string) { return sharedProject ? runtimeEntries(sharedProject(project)) : []; },
     busy(project: string, task: string) {
@@ -80,12 +77,13 @@ export function createAgentSlots(shared = false) {
       if (shared) for (const path of projects.values()) persistDefaults(path, true);
     },
     available,
-    acquire(project: string, role: AgentRole, overrides?: Partial<AgentLimits>, task?: string) {
+    acquire(project: string, role: AgentRole, overrides?: Partial<AgentLimits>, task?: string, queuedRevision?: number) {
       if (sharedProject) {
         const path = sharedProject(project);
         return registerRuntime(path, { kind: "slot", role, task }, entries => {
           const limit = role === "manager" ? 0 : readBoardSettings(runtimeLocation(path)).taskLimits?.[role] ?? savedDefaults(entries)?.limits?.[role] ?? limits[role];
-          return (!task || !entries.some(entry => entry.kind !== "queue" && (entry.task === task ||
+          const queued = entries.find(entry => entry.kind === "queue" && entry.task === task);
+          return queued?.revision === queuedRevision && (!task || !entries.some(entry => entry.kind !== "queue" && (entry.task === task ||
             entry.kind === "slot" && entry.role === role && taskId(entry.task) === taskId(task)))) &&
             (limit === 0 || entries.filter(entry => entry.kind === "slot" && entry.role === role).length < limit);
         });

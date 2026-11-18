@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readSync, readdirSync, renameSync, rmSync, rmdirSync, writeSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, win32 } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep, win32 } from "node:path";
 import { maxAttachmentBytes, member, number, object, TaskboardError, strings, taskIdPattern } from "./model.ts";
 import type { ArtifactKind } from "./model.ts";
 import { directory, exists, readJson, removeFile, writeJson } from "./storage.ts";
@@ -57,12 +57,28 @@ export function openReviewArtifact(store: BoardStore, id: string, input: Record<
   const offset = input.offset === undefined ? 0 : number(input.offset, "offset", 0);
   const format = member(input.format ?? "text", ["text", "png"], "artifact format");
   if (format === "png" && offset !== 0) throw new TaskboardError("INVALID_INPUT", "Read the PNG without an offset.");
+  return openSavedArtifact(artifact, format, offset);
+}
+
+function openSavedArtifact(artifact: ReturnType<typeof artifactFiles>[number], format: ArtifactKind, offset: number) {
   directory(dirname(artifact.file));
   if (!lstatSync(artifact.file, { throwIfNoEntry: false })?.isFile()) {
     throw new TaskboardError("ARTIFACT_NOT_FOUND", "The saved material is unavailable.");
   }
   const fd = openSync(artifact.file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
   return { fd, offset, source: artifact.source, sha256: artifact.sha256, format };
+}
+
+export function readSavedPng(store: BoardStore, path: string) {
+  const comparable = (value: string) => sep === "\\" ? value.replaceAll("\\", "/").toLowerCase() : value;
+  const candidate = comparable(path);
+  const id = /(?:^|\/)\.tasks\/artifacts\/(T-\d{4,})\/[a-f0-9]{64}\/[^/]+\.png$/i.exec(candidate)?.[1].toUpperCase();
+  if (!id) return null;
+  const artifact = artifactFiles(store, id).find(({ file }) =>
+    candidate === comparable(file) || candidate === comparable(relative(store.location.root, file)));
+  if (!artifact) return null;
+  const result = readReviewArtifact(openSavedArtifact(artifact, "png", 0));
+  return "pngBase64" in result ? { name: basename(artifact.file), base64: result.pngBase64 } : null;
 }
 
 function readArtifactBytes(fd: number, kind: ArtifactKind) {

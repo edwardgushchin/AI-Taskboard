@@ -40,7 +40,7 @@ import { expertContext, expertSkill, listExperts, readExpert, saveExpert } from 
 import { approvalRequirements, createExpertPlan, expertStagesStatus, planNewTask, requireApprovalPlan, requireExpertPlan, requireExpertResults, reviewDecisionSequence, sendTeamMessage, taskExpertPhase, teamInbox, updateExpertStage } from "./expert-team.ts";
 import { syncTaskStatusNotices } from "../desktop/manager-history.ts";
 import { syncSettingsNotices } from "../desktop/settings-notices.ts";
-import { registerRuntime, runtimeEntries, runtimeTransaction } from "../desktop/board-runtime.ts";
+import { deferExecutor, linkQueuedExecutor, matchesQueuedExecutor, registerRuntime, runtimeEntries, runtimeTransaction } from "../desktop/board-runtime.ts";
 
 const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "checklist", "pause", "block", "resume", "unblock", "update"]);
 const help = [
@@ -718,10 +718,14 @@ function run(
       "acceptance-failed", "agent"), { kind: "question", text: reason }, "agent"));
   }
   if (command === "accept") {
-    if (input.actor === "manager" && !task.acceptanceRepair && boardReviewMode(store.index.settings) === "manager") {
-      requireExpertPlan(task, "review");
-      if (task.expertTeam?.review?.stages.length) {
-        requireExpertResults(task, "review", verifyReviewDecision(store, task, input.targetHead));
+    const mode = boardReviewMode(store.index.settings);
+    const plan = task.expertTeam?.review;
+    const managerReview = input.actor === "manager" && mode === "manager";
+    const requiresAssignedSkills = mode !== "human" && (plan?.skills?.length || plan?.stages.some(stage => stage.skills?.length));
+    if (task.status === "review" && !task.acceptanceRepair) {
+      if (managerReview) requireExpertPlan(task, "review");
+      if (requiresAssignedSkills || (managerReview && plan?.stages.length)) {
+        requireExpertResults(task, "review", verifyReviewDecision(store, task, input.targetHead ?? null));
       }
     }
     if (task.acceptanceRepair) {
@@ -808,7 +812,15 @@ function run(
   if (command === "approve" && task.status === "draft") requireApprovalPlan(task, store.index.settings);
   let updated = changeTask(task, command, discussionReturn ? { ...input, actor: "agent" } : input);
   if (discussionReturn) updated.discussionReturn = updated.revision;
-  if (command === "update" && updated === task) return task;
+  if (command === "update" && input.queuedExecutor === true) {
+    requireRevision(task, input.revision, true);
+    if (!linkQueuedExecutor(store.location.root, task, updated)) {
+      throw new TaskboardError("INVALID_TRANSITION", "The queued start is no longer pending.");
+    }
+  }
+  if (command === "update" && updated === task) {
+    return filters.compact && input.launchDetails === true ? taskLaunchState(task) : task;
+  }
   if (command === "update" && task.acceptanceRepair &&
       ["title", "description", "criteria", "questions", "subtasks", "dependencies", "execution"].some(key => input[key] !== undefined)) {
     updated = { ...updated, acceptanceRepair: undefined };
@@ -823,7 +835,9 @@ function run(
       updated.history.at(-1)!.mergedInto = { id: target.id, title: target.title,
         transferred: text(input.transferred, "transferred", true) };
     }
-    return store.save(updated);
+    const cancelled = store.save(updated);
+    deferExecutor(store.location.root, id);
+    return cancelled;
   }
   if ((command === "update" || command === "unblock") && input.dependencies !== undefined) validateDependencies(store, updated);
   const saved = store.save(command === "request-changes" && input.actor === "reviewer" ? withReviewerUsage(updated) :
@@ -838,6 +852,11 @@ function run(
 }
 
 function startTask(location: BoardLocation, id: string, input: Record<string, unknown>, compact: boolean) {
+  const enqueue = input.queueExecutor === true ? (task: Task) => {
+    if (!deferExecutor(location.root, id, { revision: task.revision }, undefined, true)) {
+      throw new TaskboardError("CHAT_BUSY", "This task already has an active writer.");
+    }
+  } : undefined;
   const reply = <T extends { task: Task }>(store: BoardStore, started: T) => {
     if (!compact) return started;
     if (input.launchDetails !== true) return { ...started, task: taskReceipt(started.task) };
@@ -849,6 +868,17 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
   return withTaskStartLock(location, id, startLockWaitMs => {
     const prepared = onBoard(location, (store, lockWaitMs) => {
       const task = store.card(id);
+      if (enqueue && (input.actor !== "user" || input.autoMode || input.scheduled || input.resolveConflicts ||
+          isMergeRepair(task) || task.acceptanceRepair)) {
+        throw new TaskboardError("INVALID_INPUT", "Only manual executor starts can be queued.");
+      }
+      const isQueued = () => runtimeEntries(location.root).some(entry => matchesQueuedExecutor(entry, task));
+      if (enqueue && isQueued()) {
+        return { started: { task: taskLaunchState(task) } };
+      }
+      if (input.queuedExecutor === true && !isQueued()) {
+        throw new TaskboardError("INVALID_TRANSITION", "The queued start is no longer pending.");
+      }
       if (input.autoMode === true && !store.index.settings.autoMode) {
         throw new TaskboardError("AUTO_MODE_DISABLED", "Automatic starts are disabled.");
       }
@@ -866,14 +896,15 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
       if (task.status !== "in_progress" && input.resolveConflicts === true) {
         return { started: reply(store, reopenConflictingReview(store, task, input)) };
       }
-      const result = prepareTaskStart(store, task, input, startLockWaitMs + lockWaitMs);
+      const result = prepareTaskStart(store, task, input, startLockWaitMs + lockWaitMs, enqueue);
+      if ("task" in result && task.status === "in_progress") enqueue?.(result.task);
       return "task" in result ? { started: reply(store, result) } : { checkout: result };
     });
     if (!prepared.checkout) return prepared.started;
     const plan = prepared.checkout;
     const worktree = checkoutTaskWorktree(plan);
     return onBoard(location, (store, lockWaitMs) =>
-      reply(store, finishTaskStart(store, plan, worktree, lockWaitMs, input.isolatedWorktree === true)));
+      reply(store, finishTaskStart(store, plan, worktree, lockWaitMs, input.isolatedWorktree === true, enqueue)));
   });
 }
 

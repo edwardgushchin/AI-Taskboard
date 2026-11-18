@@ -149,13 +149,14 @@ export async function reviewWithCodex(profile: string, project: string, settings
   onActivity?: (items: RunActivity[]) => void, plan?: ExpertPhase, targetHead?: string | null) {
   let usage: TokenUsageReport | undefined;
   const worklog = boardWorklog(project, "reviewer", taskId);
-  const stages = taskId && plan?.stages.length ? phaseStageReporter(project, "review", taskId, targetHead) : undefined;
+  const stages = taskId && plan ? phaseStageReporter(project, "review", taskId, targetHead) : undefined;
   const lead = plan?.lead ? await callCli<Expert[]>(project, ["expert-context"], { ids: [plan.lead] }) : undefined;
   if (lead && !lead.ok) throw new Error(lead.error.message);
   const skills = taskId && lead?.ok ? await leadSkillInstructions(project, taskId, lead.data[0], plan, "reviewer", context) : [];
   const options = {
     role: "reviewer" as const, settings, tools, signal, onActivity, specialistDelegation: Boolean(plan?.stages.length),
-    observeProvider: stages?.observe, onTokenUsage: async (report: TokenUsageReport) => { usage = report; }, finalAnswerSchema: {
+    observeProvider: stages?.observe, onProviderReady: stages?.bind,
+    onTokenUsage: async (report: TokenUsageReport) => { usage = report; }, finalAnswerSchema: {
       type: "object", additionalProperties: false, required: ["summary", "findings", "evidence", "needsHuman", "verifyRisk"],
       properties: {
         summary: { type: "string" },
@@ -187,10 +188,12 @@ export async function reviewWithCodex(profile: string, project: string, settings
       "Set verifyRisk only if a concrete changed behavior requires independent confirmation because an error could cause material harm, data loss, deadlocks, incompatible API or schema changes, or a significant security regression. Point to that behavior in the summary. If candidateReview is present, independently try to refute its material findings and check the cited risk. Return a complete final report based on your own evidence. Keep only substantiated findings and explain any differing conclusion briefly.",
     ].join(" ")),
   };
-  const specialistTools = executorExpertTools.filter(tool => tool.name === "expert_stage" ? Boolean(stages && plan?.stages.length) : taskId || !tool.name.startsWith("team_"));
+  const specialistTools = executorExpertTools.filter(tool => tool.name === "expert_stage" ? Boolean(stages && plan?.stages.length) :
+    tool.name === "expert_verify_skills" ? Boolean(stages && plan?.skills?.length) : taskId || !tool.name.startsWith("team_"));
   const result = await withBoardMcp([worklogTool, ...specialistTools], async (name, args) => {
     if (name === worklogTool.name) return worklog.submit(args);
     if (name === "expert_stage" && stages) return worklog.remind(await stages.report(args));
+    if (name === "expert_verify_skills" && stages) return worklog.remind(await stages.verify(args));
     return worklog.remind(await callCli(project, [expertCommands[name], ...(taskId && (name.startsWith("team_") || name === "expert_skill") ? [taskId] : [])],
       { ...args as object, actor: "reviewer", ...(name === "expert_skill" ? { source: "tool" } : {}) }));
   }, (config, env) =>
@@ -275,7 +278,8 @@ export function replyToTask(
     onCommentary, onTokenUsage, onControl, signal, imageDirectory, imageLimit, onActivity,
   };
   const specialistTools = mode === "initial" ? [] :
-    executorExpertTools.filter(tool => tool.name !== "expert_stage" && (taskId || !tool.name.startsWith("team_")));
+    executorExpertTools.filter(tool => !["expert_stage", "expert_verify_skills"].includes(tool.name) &&
+      (taskId || !tool.name.startsWith("team_")));
   // sendChat owns the board writer through preparation, this turn and saving the reply.
   return withBoardMcp([worklogTool, githubReadTool, ...specialistTools], async (name, args) => {
     if (Object.hasOwn(expertCommands, name)) return worklog.remind(await callCli(project,
@@ -372,7 +376,7 @@ export function replyToBoard(
         mcpTools.splice(0, mcpTools.length, ...native.tools);
         return native.instructions;
       },
-      onProviderReady: (request, id) => { providerAction = providerActions(project, request, id); },
+      onProviderReady: (request, id) => { providerAction = providerActions(project, request, id); session.bindProvider?.(request, id); },
     }), session.goal || session.resumeGoal ? goalTaskWaitSeconds + 20 : undefined);
 }
 
@@ -386,6 +390,7 @@ interface BoardSession {
   title: string;
   onActivity: (items: BoardActivity[]) => void;
   observeProvider?: (message: RpcMessage, threadId: string) => void;
+  bindProvider?: (request: RpcRequest, threadId: string) => void;
   onControl: (control: AgentControl, model?: string) => void;
   onWaiting: (waiting: boolean) => void;
   attachmentContext?: string;
