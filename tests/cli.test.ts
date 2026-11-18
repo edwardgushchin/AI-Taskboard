@@ -18,7 +18,7 @@ import { saveLocalChanges, inspectLocalChanges } from "../src/cli/saved-changes.
 import { maxWorklogPartBytes } from "../src/cli/worklog-files.ts";
 import type { Task } from "../src/cli/model.ts";
 import { boardToolContent } from "../src/desktop/board-mcp.ts";
-import { taskChatActions } from "../src/desktop/chat-actions.ts";
+import { setReviewModeFromChat, taskChatActions } from "../src/desktop/chat-actions.ts";
 import { registerRuntime, runtimeEntries, runtimeTransaction } from "../src/desktop/board-runtime.ts";
 
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
@@ -1077,7 +1077,7 @@ test("task chat records a clarification once, with its sources and lifecycle int
     ok: false, error: { code: "INVALID_INPUT", message: "Use the parameters defined for this task action." },
   });
   const first = await edit("task_update", update);
-  assert.ok(first.ok && first.data.changed);
+  assert.ok(first.ok && (first.data as { changed: boolean }).changed);
   const edited = show();
   assert.deepEqual({ ...edited, description: sent.description, history: sent.history,
     revision: sent.revision, updatedAt: sent.updatedAt }, sent);
@@ -1091,7 +1091,7 @@ test("task chat records a clarification once, with its sources and lifecycle int
     text: "Уточнение добавлено в описание." });
   const repeated = send(clarification);
   const second = await action(repeated)("task_update", update);
-  assert.ok(second.ok && !second.data.changed);
+  assert.ok(second.ok && !(second.data as { changed: boolean }).changed);
   assert.deepEqual(show(), repeated);
   assert.equal(refreshes, 1);
 
@@ -1106,7 +1106,7 @@ test("task chat records a clarification once, with its sources and lifecycle int
   assert.ok(!stale.ok && stale.error.code === "REVISION_CONFLICT");
   assert.deepEqual(show(), concurrent);
   const saved = await action(show())("task_update", { authorization: latestText, criteria });
-  assert.ok(saved.ok && saved.data.changed);
+  assert.ok(saved.ok && (saved.data as { changed: boolean }).changed);
   assert.deepEqual(show().criteria, criteria);
   assert.equal(show().status, "draft");
   assert.equal(show().history.some(event => event.action === "start"), false);
@@ -3708,6 +3708,69 @@ test("doctor recovers archive cleanup after an index switch and preserves change
   assert.equal(cli(root, ["show", task.id]).status, "cancelled");
 });
 
+
+test("card review mode validates owner scope and preserves other cards", async t => {
+  const root = fixture(t);
+  cli(root, ["init"], { git: false });
+  const card: Task = cli(root, ["create"], { title: "Pinned review", criteria: ["One result"] });
+  const { id: otherId } = cli(root, ["create"], { title: "Board default" });
+  const other: Task = cli(root, ["show", otherId]);
+  const authorization = "Set " + card.id + " to reviewer-human";
+  const input = { id: card.id, revision: card.revision, mode: "reviewer-human", authorization };
+  const errorCode = (reply: ReturnType<typeof setReviewModeFromChat>) => reply.ok ? undefined : reply.error.code;
+  assert.equal(errorCode(setReviewModeFromChat(root, "", input)), "USER_DIRECTION_REQUIRED");
+  assert.equal(errorCode(setReviewModeFromChat(root, authorization, { ...input, mode: "unknown" })), "INVALID_INPUT");
+  assert.equal(errorCode(setReviewModeFromChat(root, authorization, { ...input, id: other.id })), "USER_DIRECTION_REQUIRED");
+  const before = cli(root, ["show", card.id]);
+  const negative = [
+    { message: `What is the review mode of ${card.id}?`, mode: "reviewer-human" },
+    { message: `Set ${card.id} to reviewer-human or manager`, mode: "reviewer-human" },
+    { message: authorization, mode: "manager" },
+    { message: authorization, mode: null },
+    { message: `Restore board inheritance for ${card.id}`, mode: "reviewer-human" },
+    { message: `Before we decide, consider: ${authorization}`, mode: "reviewer-human", quote: authorization },
+    { message: `Не назначай ${card.id} режим «Ревью + человек»`, mode: "reviewer-human" },
+  ];
+  for (const { message, mode, quote } of negative) {
+    const authorization = quote ?? message;
+    assert.equal(errorCode(setReviewModeFromChat(root, message, { ...input, mode, authorization })), "USER_DIRECTION_REQUIRED", message);
+    const reply = await taskChatActions(root, before, message, () => assert.fail("Unexpected card write"))(
+      "task_set_review_mode", { mode, authorization });
+    assert.ok(!reply.ok && reply.error.code === "USER_DIRECTION_REQUIRED", message);
+  }
+  assert.deepEqual(cli(root, ["show", card.id]), before);
+
+  const set = setReviewModeFromChat(root, authorization, input);
+  assert.ok(set.ok);
+  assert.equal(set.data.effectiveReviewMode, "reviewer-human");
+  assert.deepEqual(set.data.history.slice(0, -1), card.history);
+  assert.equal(set.data.history.at(-1)?.actor, "user");
+  assert.equal(errorCode(setReviewModeFromChat(root, authorization, input)), "REVISION_CONFLICT");
+
+  cli(root, ["settings"], { reviewMode: "human" });
+  const cards = cli(root, ["list", "--compact"]).tasks;
+  assert.equal(cards.find((task: Task) => task.id === card.id).reviewModeOverride.mode, "reviewer-human");
+  assert.equal(cards.find((task: Task) => task.id === other.id).reviewModeOverride, undefined);
+  const restore = "Restore board inheritance";
+  const restored = await taskChatActions(root, set.data, restore, () => {})("task_set_review_mode", { mode: null, authorization: restore });
+  assert.ok(restored.ok);
+  assert.deepEqual(restored.data, { id: card.id, revision: set.data.revision + 1, reviewMode: "human", inherited: true });
+  assert.deepEqual(cli(root, ["show", other.id]), other);
+
+  const ready = cli(root, ["approve", card.id]);
+  cli(root, ["start", card.id], { revision: ready.revision });
+  const preview = cli(root, ["preview", card.id]);
+  const submission = cli(root, ["submit", card.id], { token: preview.token, noChanges: true, summary: "Result", checks: ["Checked"] });
+  const done = cli(root, ["accept", card.id], { revision: submission.revision });
+  assert.equal(done.status, "done");
+  assert.equal(errorCode(setReviewModeFromChat(root, authorization, { ...input, revision: done.revision })), "INVALID_TRANSITION");
+
+  const ordinary = fixture(t);
+  cli(ordinary, ["init"], { boardType: "manual" });
+  const personal = cli(ordinary, ["create"], { title: "Personal card", expertTeam: undefined });
+  const personalRequest = "Set " + personal.id + " to reviewer-human";
+  assert.equal(errorCode(setReviewModeFromChat(ordinary, personalRequest, { ...input, id: personal.id, authorization: personalRequest, revision: personal.revision })), "MANUAL_BOARD");
+});
 
 test("reviewer-human requires fresh reviewer approval and desktop acceptance", async t => {
   const root = fixture(t);
