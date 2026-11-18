@@ -607,6 +607,15 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .task-agent-run {
   display: inline-block; margin-inline-start: 8px; vertical-align: middle; font-size: 12px; font-weight: 400;
 }
+#sheet-title .task-agent-run:has(> .agent-spinner) {
+  display: inline; margin-inline-start: 0; font-size: inherit; vertical-align: baseline;
+}
+/* Keep the spinner with the end of the title when the line wraps. */
+#sheet-title .task-agent-run:has(> .agent-spinner)::before { content: "\00a0"; }
+#sheet-title .task-agent-run > .agent-spinner {
+  width: 1em; height: 1em; font-size: inherit; vertical-align: -.2em;
+  margin-block: .22em; margin-inline: .15em .22em;
+}
 .sheet-body { padding: 20px; display: grid; gap: 16px; overflow: auto; }
 .sheet-body:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .sheet.task-sheet[open] {
