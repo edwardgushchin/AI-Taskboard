@@ -27,7 +27,7 @@ export function electronCheck(script, name, timeout, phases = [[]]) {
       for (const phase of phases) {
         const result = spawnSync(electron, [fileURLToPath(script), ...args, ...phase], {
           // Desktop helpers can briefly retain their inherited working directory after exit.
-          cwd: phases.length > 1 ? temp : scratch, env, windowsHide: true, stdio: "inherit", timeout,
+          cwd: process.platform === "win32" || phases.length > 1 ? temp : scratch, env, windowsHide: true, stdio: "inherit", timeout,
         });
         if (result.error) console.error(result.error);
         else if (result.status !== 0) console.error("Electron check failed: " + (result.signal ?? result.status));
