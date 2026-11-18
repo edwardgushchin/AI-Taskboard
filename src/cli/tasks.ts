@@ -201,6 +201,17 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
       return record(task, action, boardActor(input, "user"), "cancelled", text(input.reason, "reason", true));
     case "comment":
       return record(task, action, boardActor(input), task.status, text(input.text, "text", true));
+    case "checklist": {
+      requireState(task, task.acceptanceRepair?.phase === "running" ? ["review"] : ["in_progress"]);
+      requireRevision(task, input.revision, true);
+      const index = number(input.index, "checklist item number") - 1;
+      const item = task.subtasks[index];
+      if (!item || typeof input.done !== "boolean") throw new TaskboardError("INVALID_INPUT", "Select an existing checklist item and supply its completed state.");
+      if (item.done === input.done) return task;
+      const subtasks = task.subtasks.slice();
+      subtasks[index] = { ...item, done: input.done };
+      return record({ ...task, subtasks }, action, "agent", task.status, item.title);
+    }
     case "progress": {
       requireState(task, task.acceptanceRepair?.phase === "running" ? ["review"] : ["in_progress", "blocked"]);
       const summary = text(input.summary, "summary", true);

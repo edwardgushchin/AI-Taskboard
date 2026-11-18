@@ -43,7 +43,13 @@ export function initialExpertTeam(store: BoardStore, value: unknown): Task["expe
 
 function parseExpertPlan(store: BoardStore, input: Record<string, unknown>, previous?: ExpertPhase): ExpertPhase {
   const lead = input.lead === undefined ? previous?.lead : input.lead === null ? null : text(input.lead, "lead specialization", true);
-  if (lead) readExpert(store, lead);
+  const expert = lead ? readExpert(store, lead) : undefined;
+  const reason = text(input.reason, "team rationale", true);
+  if (reason.length > 2000) throw new TaskboardError("INVALID_INPUT", "Team rationale is limited to 2000 characters.");
+  const previousSkills = previous?.lead === lead ? previous?.skills : undefined;
+  const skills = input.skills === undefined ? previousSkills : strings(input.skills, "lead skills");
+  if (skills && (new Set(skills).size !== skills.length || skills.some(id => !expert?.skills.some(skill => skill.id === id))))
+    throw new TaskboardError("INVALID_INPUT", "Select distinct skills from the lead specialization.");
   if (!Array.isArray(input.stages) || input.stages.length > 32)
     throw new TaskboardError("INVALID_INPUT", "Supply up to 32 assigned stages.");
   const proposed = input.stages.map(value => {
@@ -82,7 +88,7 @@ function parseExpertPlan(store: BoardStore, input: Record<string, unknown>, prev
     done.add(key);
   };
   all.forEach(stage => visit(stage.key));
-  return { lead, stages: all };
+  return { lead, reason, ...(skills !== undefined ? { skills } : {}), stages: all };
 }
 
 export function createExpertPlan(store: BoardStore, parentId: string, input: Record<string, unknown>) {
@@ -97,7 +103,7 @@ export function createExpertPlan(store: BoardStore, parentId: string, input: Rec
     throw new TaskboardError("EXPERT_PHASE_RUNNING", "The responsible agent is already running this phase.");
   if (parent.status === "review" && (parent.acceptanceRepair || currentReviewApproval(parent)))
     throw new TaskboardError("INVALID_TRANSITION", "The submission already has a review decision or is being integrated.");
-  const updated = record({ ...parent, expertTeam: { ...parent.expertTeam, [phase]: plan } }, "expert-plan", "manager");
+  const updated = record({ ...parent, expertTeam: { ...parent.expertTeam, [phase]: plan } }, "expert-plan", "manager", parent.status, plan.reason);
   updated.history.at(-1)!.expertPhase = phase;
   store.save(updated);
   return { parent: updated, phase, ...plan };

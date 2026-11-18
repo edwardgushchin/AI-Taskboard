@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { callCli, cliFailure } from "./cli.ts";
 import type { RpcMessage } from "./codex-rpc.ts";
+import type { Expert } from "../cli/experts.ts";
+import type { ExpertPhase } from "../cli/model.ts";
 
 const s = { type: "string", minLength: 1 };
 const list = { type: "array", items: s };
@@ -12,12 +14,13 @@ export const expertActions = {
     properties: { ids: { ...list, minItems: 1, maxItems: 6, uniqueItems: true } }, required: ["ids"] },
   expert_skill: { description: "Read and materialize a skill in the expert's board-owned directory, including bundled scripts and references. Use returned absolute paths. This does not install provider plugins, dependencies or grant tool access.",
     properties: { expertId: s, skillId: s }, required: ["expertId", "skillId"] },
-  expert_plan: { description: "Assign the responsible lead's specialization and specialist stages to the work or review phase of one card. Stage keys are stable, dependencies reference stage keys, the lead delegates the stages within its session. Use an empty stages array to set only the lead. Plan both phases before launch when possible.",
+  expert_plan: { description: "Assign a phase's lead, relevant lead skill IDs and stages. Explain why these specialists cover the work, including why the lead can work alone if stages is empty. Stage dependencies reference stable keys.",
     properties: { ...task, revision: { type: "integer", minimum: 1 }, phase: { type: "string", enum: ["work", "review"] },
+      reason: { ...s, maxLength: 2000 }, skills: list,
       lead: { type: ["string", "null"] }, replace: { type: "boolean" }, stages: { type: "array", maxItems: 32, items: {
       type: "object", properties: { key: s, expertId: s, title: s, description: { type: "string" },
         criteria: { ...list, minItems: 1 }, inputs: list, outputs: { ...list, minItems: 1 }, dependsOn: list },
-      required: ["key", "expertId", "title", "criteria", "outputs"], additionalProperties: false } } }, required: ["id", "revision", "stages"] },
+      required: ["key", "expertId", "title", "criteria", "outputs"], additionalProperties: false } } }, required: ["id", "revision", "reason", "stages"] },
   expert_stage: { description: "Start, block, or finish a stage in your assigned phase. Start before working. Returns the specialist package and prerequisite results. For done, provide evidence for every exact declared output and the provider agent ID when delegated. For local execution of another specialization, give the actual fallback reason.",
     properties: { ...task, phase: { type: "string", enum: ["work", "review"] }, targetHead: { type: ["string", "null"] },
       revision: { type: "integer", minimum: 1 }, key: s, state: { type: "string", enum: ["running", "blocked", "done"] },
@@ -37,6 +40,21 @@ export const executorExpertTools = Object.entries(expertActions).filter(([name])
   return { name, description: action.description, inputSchema: { type: "object", properties,
     required: action.required.filter(name => name !== "id"), additionalProperties: false } };
 });
+
+export async function leadSkillInstructions(project: string, taskId: string, expert: Expert, plan: ExpertPhase | undefined,
+  actor: "agent" | "reviewer", context: string) {
+  const workflow = expert.skills.filter(skill => skill.id === "workflow").map(skill => skill.id);
+  const selected = plan?.skills ?? (/\bElectron\b/i.test(context)
+    ? expert.skills.filter(skill => skill.name === "electron").map(skill => skill.id) : []);
+  const loaded = [];
+  for (const skillId of new Set([...workflow, ...selected])) {
+    const skill = await callCli<{ content: string; directory: string }>(project, ["expert-skill", taskId],
+      { expertId: expert.id, skillId, actor, source: "plan" });
+    if (!skill.ok) throw new Error("Could not load " + expert.id + "/" + skillId + ": " + skill.error.message);
+    loaded.push("Loaded board skill " + skillId + " (" + skill.data.directory + ")\n" + skill.data.content);
+  }
+  return loaded;
+}
 export const expertInstructions = "Board experts are internal instruction packages, never Codex/Claude plugins. Apply these instructions when the corresponding expert/team tools are provided. " +
   "As manager, before planning a sprint or doing domain work, use expert_list to choose the necessary specializations yourself, then expert_context " +
   "(for example business-analyst and product-owner) and expert_skill for the relevant methods. You may combine or change specializations for the current phase; " +
@@ -51,7 +69,7 @@ export const expertInstructions = "Board experts are internal instruction packag
 
 export const leadInstructions = "You are responsible for this card's current phase and its final result. Apply the assigned lead specialization and read your team inbox before delegating or reporting a decision. " +
   "Read the current revision and recorded stage states before opening work with expert_stage. On REVISION_CONFLICT, reread the card and reconcile changed requirements before retrying. A completed stage already has a result; reuse it. After collecting the result, use expert_stage with state done, a summary, and an outputs object keyed by each exact declared output. For delegated work pass the actual child agent ID after waiting for its result. " +
-  "Load the assigned package's workflow skill if present and any other relevant skills via expert_skill before delegation. Pass the prompt, applicable skill instructions or readable skill paths, scope, inputs and outputs to the specialist. Ask the specialist to report which skills it actually used and what they contributed. Handle your own stages yourself and reuse the same native subagent for later stages of its specialization. " +
+  "Apply the preloaded lead skills. Load any additional relevant skills and the skills of delegated specialists via expert_skill before using them. Pass the prompt, applicable skill instructions or readable skill paths, scope, inputs and outputs to the specialist. Report which skills actually affected the result. Handle your own stages yourself and reuse the same native subagent for later stages of its specialization. " +
   "Run only independent, non-conflicting stages in parallel. Wait for prerequisites and pass their results to dependent specialists. Use the provider's messaging and wait mechanisms to coordinate. " +
   "Use team_message for meaningful handoffs and questions between assigned roles. Include the decision or artifact the receiving stage needs and route it to its stage address. Deliver incoming mail from team_inbox to its native agent. If a decision blocks a stage, mark it blocked and leave a persistent question. " +
   "If delegation is unavailable or fails, apply the package yourself and give the factual fallback reason when recording its result. Check every result before submitting or giving the review decision. The same task permission and review scope apply to all delegates.";

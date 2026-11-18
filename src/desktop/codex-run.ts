@@ -22,13 +22,14 @@ import { bundled, entry } from "./cli.ts";
 import { taskboardCliLaunch } from "./codex.ts";
 import type { configuredCodex } from "./codex.ts";
 import { requestExecutorAccess } from "./codex-chat.ts";
+import { windowsGuiEvidence } from "./windows-gui.ts";
 import type { CliReply } from "./cli.ts";
 import { codexRpc, turnControl } from "./codex-rpc.ts";
 import type { AgentControl } from "./codex-rpc.ts";
 import { CodexTokenUsage } from "./codex-token-usage.ts";
 import type { TokenUsageReport } from "../cli/token-usage.ts";
 import type { Expert } from "../cli/experts.ts";
-import { expertCommands, executorExpertTools, leadInstructions, phaseStageReporter, subagentInstructions } from "./expert-tools.ts";
+import { expertCommands, executorExpertTools, leadInstructions, leadSkillInstructions, phaseStageReporter, subagentInstructions } from "./expert-tools.ts";
 import type { teamInbox } from "../cli/expert-team.ts";
 import { insideProject } from "./project-files.ts";
 
@@ -102,7 +103,11 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   const assigned = new Set([lead, ...(plan?.stages.map(stage => stage.expertId) ?? [])].filter(Boolean));
   const specialization = lead ? await callCli<Expert[]>(project, ["expert-context"], { ids: [lead] }) : undefined;
   if (specialization && !specialization.ok) throw new Error(specialization.error.message);
+  const skills = specialization?.ok
+    ? await leadSkillInstructions(project, task.id, specialization.data[0], plan, "agent",
+      [task.title, task.description, ...task.criteria, task.summary, task.nextStep].join("\n")) : [];
   const developerInstructions = executorInstructions() + (specialization?.ok ? "\nAssigned expert package for this run:\n" + JSON.stringify(specialization.data) : "") +
+    (skills.length ? "\n" + skills.join("\n\n") : "") +
     (plan ? "\n" + leadInstructions + "\nAssigned work plan: " + JSON.stringify(plan) : "") +
     (task.expertStage ? "\nAssigned stage: " + JSON.stringify(task.expertStage) + ". Read team_inbox for prerequisite results and peer questions. Produce the declared outputs before submitting." : "") +
     (task.schedule ? "\n" + recurringChildTool.description : "") + "\nCurrent board reviewMode: " + boardReviewMode(settings.data) + ". Read settings again if it changes.";
@@ -122,26 +127,30 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   if (desktopProfile && !fullAccess) tools.push(accessTool);
   let accessDecision: { reason: string; result: Promise<CliReply>; reconsidered: boolean } | undefined;
   let accessChange: "approved" | "ready" | "switching" | undefined;
+  let guiEvidence: ReturnType<typeof windowsGuiEvidence> | undefined;
   const mcp = await openBoardMcp(tools, async (name, args, requestSignal) => {
     if (name === "expert_stage") return worklog.remind(await stages.report(args));
     if (Object.hasOwn(expertCommands, name)) {
       const input = args as Record<string, unknown>;
       if (assigned.size && ((name === "expert_context" && (!Array.isArray(input.ids) || input.ids.some(id => !assigned.has(id)))) ||
           (name === "expert_skill" && !assigned.has(input.expertId as string)))) return { ok: false, error: { code: "EXPERT_SCOPE", message: "Use the assigned specializations or ask the manager to change them." } };
-      return worklog.remind(await callCli(project, [expertCommands[name], ...(name.startsWith("team_") ? [task.id] : [])], { ...input, actor: "agent" }));
+      return worklog.remind(await callCli(project, [expertCommands[name], ...(name.startsWith("team_") || name === "expert_skill" ? [task.id] : [])],
+        { ...input, actor: "agent", ...(name === "expert_skill" ? { source: "tool" } : {}) }));
     }
     if (name === recurringChildTool.name && task.schedule) return worklog.remind(await callCli(project, ["spawn-child", task.id, "--compact"], args));
     if (name === executorResultTool.name) return worklog.remind(await recordExecutorResult(project, task.id, args));
     if (name === accessTool.name && desktopProfile) {
-      const requestAccess = () => requestExecutorAccess(desktopProfile, project, task.id, args, settings.data.manager,
-        signal ? AbortSignal.any([signal, requestSignal]) : requestSignal);
+      const requestAccess = async (checkGui = false) => requestExecutorAccess(desktopProfile, project, task.id, args, settings.data.manager,
+        signal ? AbortSignal.any([signal, requestSignal]) : requestSignal,
+        checkGui && process.platform === "win32" && (client.windowsSandbox ?? "mxc") === "mxc"
+          ? await (guiEvidence ??= windowsGuiEvidence(request, profile)) : undefined);
       const input = args as { reason?: unknown } | null;
       const reason = typeof input?.reason === "string" && Object.keys(input).length === 1 ? input.reason.trim() : "";
       if (!reason || reason.length > 3000) return worklog.remind(await requestAccess());
-      let pending = accessDecision ??= { reason, result: requestAccess(), reconsidered: false };
+      let pending = accessDecision ??= { reason, result: requestAccess(true), reconsidered: false };
       let result = await pending.result;
       if (result.ok && (result.data as { approved?: boolean })?.approved === false && reason !== pending.reason && !pending.reconsidered) {
-        if (pending === accessDecision) accessDecision = { reason, result: requestAccess(), reconsidered: true };
+        if (pending === accessDecision) accessDecision = { reason, result: requestAccess(true), reconsidered: true };
         if (accessDecision) { pending = accessDecision; result = await pending.result; }
       }
       if (!result.ok && accessDecision === pending) accessDecision = undefined;
@@ -362,7 +371,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       "Прочитай актуальную карточку через show " + task.id + " --compact.",
       ...(localTools.includes(accessTool.name) ? [
         "Если обязательный шаг требует полного доступа ОС, вызови mcp__ai_taskboard__task_request_executor_access и укажи, какую операцию нужно повторить. При одобрении доска сразу применяет доступ к текущему выполнению и продолжает в том же чате.",
-        "Перед обязательной проверкой в браузере попробуй открыть пустую страницу установленным браузером с временным профилем. При отказе среды используй доступный браузерный инструмент или один раз запроси нужный доступ.",
+        "При отказе запуска обязательного GUI-теста приложи команду и код выхода к запросу доступа. На Windows MXC доска сама проверит создание оконной станции. После отказа повтори запрос только с новыми сведениями.",
       ] : []),
       ...(githubTools.length ? ["Хостовые инструменты GitHub, подтверждённые для текущего хода: " +
         githubTools.map(name => "mcp__ai_taskboard__" + name).join(", ") +

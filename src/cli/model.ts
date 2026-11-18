@@ -105,6 +105,7 @@ export interface RunActivity {
 
 export interface TaskEvent {
   expertMessage?: { from: string; to: string; replyTo?: number };
+  expertSkill?: { expertId: string; skillId: string; name: string; source: "plan" | "tool" };
   expertPhase?: "work" | "review";
   expertStageRun?: { phase: "work" | "review"; key: string; state: "running" | "blocked" | "done";
     result?: string; outputs?: Record<string, string>; agentId?: string; sessionId?: string; fallback?: string; targetHead?: string | null };
@@ -183,6 +184,8 @@ export function nextScheduledRun(rule: TaskScheduleRule, after: Date, previous?:
 
 export interface ExpertPhase {
   lead?: string | null;
+  reason?: string;
+  skills?: string[];
   stages: { key: string; expertId: string; title: string; description: string; criteria: string[];
     inputs: string[]; outputs: string[]; dependsOn: string[] }[];
 }

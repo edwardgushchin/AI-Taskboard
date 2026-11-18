@@ -1185,7 +1185,8 @@ test("manager adopts expert roles, loads a board skill and plans an addressed sp
     assert.equal(incomplete.error.code, "EXPERT_PLAN_REQUIRED");
     assert.equal((await act("board_list", {})).data.tasks.length, 0);
     const planned = await act("task_create", { ...brief,
-      expertTeam: { work: { lead: "product-owner", stages }, review: { lead: "qa-engineer", stages: [] } } });
+      expertTeam: { work: { lead: "product-owner", reason: "Coordinate requirements and test planning.", stages },
+        review: { lead: "qa-engineer", reason: "One QA specialist can verify both outputs.", stages: [] } } });
     assert.equal(planned.ok, true, JSON.stringify(planned.error));
     const parent = planned.data;
     assert.equal(parent.revision, 1);

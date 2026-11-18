@@ -513,6 +513,7 @@ function chatEventLabel(action) {
     approve: ["ui.approved_the_task_52081998"], start: ["ui.started_work_86e3b286"],
     "return-to-draft": ["ui.returned_the_task_to_draft_0224ff4e"],
     progress: ["ui.updated_progress_fde6405d"], block: ["ui.blocked_the_task_c97388fb"],
+    checklist: ["ui.updated_progress_fde6405d"],
     pause: ["ui.paused_work_5608a24c"],
     resume: ["ui.resumed_work_8bc90aaa"], submit: ["ui.submitted_for_review_99b989f4"],
     accept: ["ui.accepted_the_task_f6df7973"], cancel: ["ui.cancelled_the_task_07a3cdd4"],
@@ -520,7 +521,7 @@ function chatEventLabel(action) {
     "request-changes": ["ui.requested_changes_480ce0d7"], attach: ["ui.attached_a_file_f4ead942"],
     "review-note": ["ui.left_on_review_8da49b68"],
     "review-approve": ["ui.approved_the_submission_04c4f1df"],
-    "expert-stage": ["experts.stage_event"],
+    "expert-plan": ["experts.plan_event"], "expert-stage": ["experts.stage_event"],
   };
   return Object.hasOwn(labels, action) ? t(...labels[action]) : action;
 }
@@ -775,6 +776,9 @@ function taskChat(task) {
       const label = () => stage ? [
         expertStageLabel(task, stage.phase, stage.key) ?? t("experts.stage_event"),
         t("experts.stage_" + stage.state),
+      ].join(" · ") : event.expertSkill ? [
+        t(event.expertSkill.source === "plan" ? "experts.skill_preloaded" : "experts.skill_loaded"),
+        event.expertSkill.name, event.expertSkill.expertId,
       ].join(" · ") : chatEventLabel(event.action) + (status ? " · " + t(status[1]) : "");
       service.append(element("span", author, "chat-author"), element("span", label, "chat-action"));
       appendChatTime(service, event.at);

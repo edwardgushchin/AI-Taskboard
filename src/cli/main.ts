@@ -41,7 +41,7 @@ import { syncTaskStatusNotices } from "../desktop/manager-history.ts";
 import { syncSettingsNotices } from "../desktop/settings-notices.ts";
 import { runtimeEntries } from "../desktop/board-runtime.ts";
 
-const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "pause", "block", "resume", "unblock", "update"]);
+const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "checklist", "pause", "block", "resume", "unblock", "update"]);
 const help = [
   "Usage: ai-taskboard [--project PATH] [--json] COMMAND [TASK-ID] [--stdin]",
   "Commands: init, list, show, create, update, comment, approve, return-to-draft, start, progress,",
@@ -301,7 +301,20 @@ function run(
   if (command === "expert-get") return readExpert(store, text(input.expertId, "expert ID", true), false);
   if (command === "expert-save") return saveExpert(store, input);
   if (command === "expert-context") return expertContext(store, strings(input.ids, "expert IDs"));
-  if (command === "expert-skill") return expertSkill(store, text(input.expertId, "expert ID", true), text(input.skillId, "skill ID", true));
+  if (command === "expert-skill") {
+    const task = id ? store.card(id) : undefined;
+    if (task) {
+      if (input.actor !== "agent" && input.actor !== "reviewer")
+        throw new TaskboardError("INVALID_INPUT", "Only the current executor or reviewer may log a task skill.");
+      requireState(task, [input.actor === "reviewer" || task.acceptanceRepair?.phase === "running" ? "review" : "in_progress"]);
+    }
+    const skill = expertSkill(store, text(input.expertId, "expert ID", true), text(input.skillId, "skill ID", true));
+    if (task) store.save({ ...task, history: [...task.history, {
+      at: new Date().toISOString(), action: "expert-skill", actor: input.actor === "reviewer" ? "reviewer" : "agent",
+      expertSkill: { expertId: skill.expertId, skillId: skill.skillId, name: skill.name, source: input.source === "plan" ? "plan" : "tool" },
+    }] });
+    return skill;
+  }
   if (command === "expert-plan") return createExpertPlan(store, text(id, "parent task ID", true), input);
   if (command === "expert-stage") {
     const taskId = text(id, "task ID", true);
@@ -403,7 +416,13 @@ function run(
   if (command === "create") {
     const task = createTask(store.allocateId(), input);
     const expertTeam = initialExpertTeam(store, input.expertTeam);
-    if (expertTeam) task.expertTeam = expertTeam;
+    if (expertTeam) {
+      task.expertTeam = expertTeam;
+      for (const [phase, plan] of Object.entries(expertTeam)) {
+        task.history.push({ at: task.createdAt, action: "expert-plan", actor: task.history[0].actor,
+          expertPhase: taskExpertPhase(phase), text: plan.reason });
+      }
+    }
     requireApprovalPlan(task, store.index.settings, "creation");
     if (isManual(store.index.settings)) {
       if (input.initialStatus !== undefined && input.actor !== "user") throw new TaskboardError("MANUAL_BOARD", "Начальную колонку выбирает пользователь.");
@@ -781,6 +800,7 @@ function run(
   const saved = store.save(command === "request-changes" && input.actor === "reviewer" ? withReviewerUsage(updated) :
     command === "update" && input.tags !== undefined ? assignTags(store, updated) : updated);
   if (!filters.compact) return saved;
+  if (command === "checklist") return { id: saved.id, status: saved.status, revision: saved.revision, subtasks: saved.subtasks };
   if (input.launchDetails === true && ["request-changes", "resume", "update"].includes(command)) return taskLaunchState(saved);
   if (["progress", "pause", "block", "resume"].includes(command)) {
     return taskLaunchState(saved);
