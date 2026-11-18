@@ -617,6 +617,7 @@ async function command(action, id, input) {
   const result = await api.command(action, id, input);
   if (generation !== projectGeneration) return undefined;
   if (!result.ok) {
+    if (result.error.code === "ACCEPTANCE_CANCELLED") return undefined;
     const actions = {
       update: ["ui.editing_task_56c9ac84"], approve: ["ui.approving_task_68f23ece"],
       "return-to-draft": ["ui.returning_task_to_draft_a416bf7a"],
@@ -4300,12 +4301,12 @@ async function showReview(task, messageDraft, acceptanceError) {
   task = { ...task, revision: review.revision, result: review.result };
   taskInSheet = task;
   const hybrid = review.reviewMode === "reviewer-human";
-  const canAccept = !hybrid || review.pending || review.awaitingHumanAcceptance;
+  const canAccept = !review.pendingModeChanged && (!hybrid || review.pending || review.awaitingHumanAcceptance);
   const decision = { revision: review.revision, targetHead: review.targetHead, reviewModeVersion: review.reviewModeVersion };
   const showReviewStatus = editor => {
-    if (!hybrid) return;
-    editor.before(element("p", () => t(canAccept ? "ui.awaiting_human_acceptance" : "ui.awaiting_reviewer_approval"), "muted"));
     if (!canAccept) editor.querySelector("button[type=submit]").disabled = true;
+    if (!hybrid || review.pendingModeChanged) return;
+    editor.before(element("p", () => t(canAccept ? "ui.awaiting_human_acceptance" : "ui.awaiting_reviewer_approval"), "muted"));
   };
   if (review.noChanges) {
     const editor = form("review", () => (t("ui.review_result_29ed25fb")), [], () => (t("ui.accept_e596557e")), async () => {
@@ -4333,6 +4334,7 @@ async function showReview(task, messageDraft, acceptanceError) {
       ...decision, message,
     });
     if (generation !== projectGeneration) return;
+    if (!result.ok && result.error.code === "ACCEPTANCE_CANCELLED") return;
     if (result.ok) {
       if (result.data.status === "review") {
         await showTask(task.id);
@@ -4343,6 +4345,17 @@ async function showReview(task, messageDraft, acceptanceError) {
     }
   });
   showReviewStatus(editor);
+  if (review.pendingModeChanged) {
+    editor.before(element("p", () => t("ui.recover_interrupted_acceptance_hint"), "muted"));
+    editor.before(button(() => t("ui.recover_interrupted_acceptance"), async () => {
+      const recovered = await command("accept", task.id, { revision: review.revision, cancelPending: true });
+      if (recovered?.status === "done") await showAcceptedTask(recovered);
+      else if (recovered) {
+        await showTask(task.id);
+        if (recovered.localChangesWarning) notice(boardError(recovered.localChangesWarning));
+      }
+    }));
+  }
   const diff = renderReviewDiff(review.diff);
   const caption = element("p", review.target + " · " + review.mode + " · " + review.submitted.slice(0, 12), "muted");
   body.prepend(caption, diff);

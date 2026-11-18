@@ -32,8 +32,9 @@ import { taskChatActions } from "./chat-actions.ts";
 import type { CliReply } from "./cli.ts";
 import { executionModels } from "./codex-models.ts";
 import type { ArchiveLink, BoardSettings, BoardTag, ReviewMode, RunActivity, Task } from "../cli/model.ts";
-import { boardReviewMode, codexThreadPattern, defaultBoardAgents, maxAttachmentBytes, reviewVerifier, taskIdPattern, usesIndependentReviewer } from "../cli/model.ts";
-import { BoardStore, directory as storageDirectory, readBoardSettings, readJson, writeJson } from "../cli/storage.ts";
+import { boardReviewMode, codexThreadPattern, defaultBoardAgents, maxAttachmentBytes, reviewVerifier, taskIdPattern, TaskboardError, usesIndependentReviewer } from "../cli/model.ts";
+import { BoardStore, directory as storageDirectory, locateBoard, readBoardSettings, readJson, writeJson } from "../cli/storage.ts";
+import { applyDesktopAcceptance } from "../cli/acceptance.ts";
 import { missingCodexThread, startCodexRun } from "./codex-run.ts";
 import type { ExecutorTask } from "./codex-run.ts";
 import { runLog } from "./run-activity.ts";
@@ -2942,6 +2943,34 @@ ipcMain.handle("chat:transcribeVoice", async (event, samples: unknown, language:
     return cliFailure("DICTATION_UNAVAILABLE", t("ui.could_not_transcribe_the_recording_the_first_use_0a91c70e"));
   }
 });
+async function confirmHumanAcceptance(state: ProjectTab, project: string, id: string, input: Record<string, unknown>) {
+  const settings = await callCli<BoardSettings>(project, ["settings"]);
+  if (!settings.ok) return settings;
+  if (boardReviewMode(settings.data) !== "reviewer-human") return callCli(project, ["accept", id], input);
+  const card = await callCli<Task>(project, ["show", id, "--compact"]);
+  if (!card.ok || card.data.status === "done") return card;
+  const review = await callCli<{ revision: number; targetHead: string | null; reviewModeVersion?: number;
+    awaitingHumanAcceptance: boolean; pending?: boolean }>(project, ["review", id, "--compact"]);
+  if (!review.ok) return review;
+  const { revision, targetHead, reviewModeVersion, awaitingHumanAcceptance, pending } = review.data;
+  if (revision !== input.revision || targetHead !== input.targetHead || reviewModeVersion !== input.reviewModeVersion) {
+    return cliFailure("REVISION_CONFLICT", "Open the current review before accepting.");
+  }
+  if (!awaitingHumanAcceptance && !pending) {
+    return cliFailure("REVIEW_REQUIRED", "The reviewer must approve the current submission and target before acceptance.");
+  }
+  try {
+    const data = await applyDesktopAcceptance(locateBoard(project), id, {
+      revision, targetHead, reviewModeVersion, actor: "user", message: input.message, commit: input.commit,
+    }, state.window, card.data.title, () => state.project === project);
+    return { ok: true as const, data };
+  } catch (error) {
+    const code = error instanceof TaskboardError ? error.code : "IO_ERROR";
+    return { ok: false as const, error: { code, message: (error as Error).message,
+      details: error instanceof TaskboardError ? error.details : undefined } };
+  }
+}
+
 ipcMain.handle("board:command", async (event, command: unknown, id: unknown, input: unknown) => {
   const state = stateOf(event);
   const args = typeof command === "string" ? commands.get(command) : undefined;
@@ -2969,8 +2998,12 @@ ipcMain.handle("board:command", async (event, command: unknown, id: unknown, inp
     return { ok: true, data: { ...result.data, executorFullAccess: executorFullAccess(app.getPath("userData"), project, result.data) } };
   }
   if (args[0] !== "git") input = { ...(input as Record<string, unknown> ?? {}), actor: "user" };
+  const fields = input as Record<string, unknown>;
+  if (command === "accept" && typeof id === "string" && fields.cancelPending !== true && fields.cancelRepair !== true) {
+    return confirmHumanAcceptance(state, state.project, id, fields);
+  }
   const selection = state.selection;
-  const result = await callCli<Board>(state.project, id === undefined ? args : [...args, id], input, command === "accept");
+  const result = await callCli<Board>(state.project, id === undefined ? args : [...args, id], input);
   if (command === "init" && result.ok && selection === state.selection && !state.window.isDestroyed()) {
     bind(state, result.data);
     state.error = undefined;

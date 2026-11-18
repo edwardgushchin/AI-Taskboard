@@ -9,7 +9,7 @@ import { existsSync, lstatSync, readFileSync, watch } from "node:fs";
 import type { FSWatcher, Stats } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { acceptTask, cleanAcceptedTask, compareAcceptedTree, inspectReview, inspectReviewDiff, inspectReviewQueue, reopenConflictingReview, reviewDetails, verifyReviewDecision } from "./acceptance.ts";
+import { applyAcceptance, cleanAcceptedTask, compareAcceptedTree, inspectReview, inspectReviewDiff, inspectReviewQueue, reopenConflictingReview, reviewDetails, verifyReviewDecision } from "./acceptance.ts";
 import { describeSavedChanges, restoreSavedChanges } from "./saved-changes.ts";
 import {
   addAttachment, addChatMessage, archiveDiagnostics, createWithAttachments, isArchived, reactivateArchivedTask, readAttachment, readTask, restoreReplyImages, sweepArchives,
@@ -743,78 +743,7 @@ function run(
     const submitted = submitTask(store, task, input);
     return filters.compact ? taskReceipt(submitted) : submitted;
   }
-  if (command === "accept" && input.cancelRepair === true && input.actor === "user") {
-    requireRevision(task, input.revision, true);
-    return store.save(record({ ...task, acceptanceRepair: undefined }, "acceptance-cancelled", "user"));
-  }
-  if (command === "accept" && input.repairFailure !== undefined && task.acceptanceRepair) {
-    requireRevision(task, input.revision, true);
-    const reason = text(input.repairFailure, "repairFailure", true);
-    return store.save(sendTaskMessage(record({ ...task, acceptanceRepair: { ...task.acceptanceRepair, phase: "failed", reason } },
-      "acceptance-failed", "agent"), { kind: "question", text: reason }, "agent"));
-  }
-  if (command === "accept") {
-    if (input.actor === "manager" && !task.acceptanceRepair && boardReviewMode(store.index.settings) === "manager" &&
-        (store.index.settings.requireExpertPlans || task.expertTeam?.review?.stages.length)) {
-      if (store.index.settings.requireExpertPlans) requireExpertPlan(task, "review");
-      requireExpertResults(task, "review", verifyReviewDecision(store, task, input.targetHead));
-    }
-    let userAcceptance = process.env.TASKBOARD_DESKTOP_ACCEPTANCE === "1";
-    if (task.acceptanceRepair) {
-      requireRevision(task, input.revision, true);
-      if (input.continueRepair !== true) return task;
-      const repairVersion = task.acceptanceRepair.reviewModeVersion;
-      const hybrid = boardReviewMode(store.index.settings) === "reviewer-human";
-      if ((hybrid || repairVersion !== undefined) && (!hybrid || repairVersion !== store.index.settings.reviewModeVersion)) {
-        throw new TaskboardError("REVIEW_MODE_CHANGED", "Cancel acceptance and review the submission under the current mode.");
-      }
-      if (task.acceptanceRepair.phase !== "checking") throw new TaskboardError("REPAIR_UNFINISHED", "Conflict repair has not passed its checks.");
-      const recovering = exists(store.pendingPath(task.id));
-      if (hybrid && !recovering) verifyReviewDecision(store, task, input.targetHead);
-      if (!recovering && input.targetHead !== task.acceptanceRepair.targetHead) {
-        const reason = "The target advanced after repair checks. Verify the new target before accepting.";
-        if (task.acceptanceRepair.attempts < 2) return store.save(record({ ...task, acceptanceRepair: {
-          ...task.acceptanceRepair, phase: "queued" } }, "acceptance-target-changed", "agent"));
-        return store.save(sendTaskMessage(record({ ...task, acceptanceRepair: { ...task.acceptanceRepair, phase: "failed", reason } },
-          "acceptance-failed", "agent"), { kind: "question", text: reason }, "agent"));
-      }
-      userAcceptance = true;
-      input = { actor: "user", revision: task.revision, targetHead: input.targetHead,
-        reviewModeVersion: repairVersion, message: task.acceptanceRepair.message };
-    } else if (input.continueRepair === true) throw new TaskboardError("REPAIR_CANCELLED", "Acceptance was cancelled.");
-    if (input.autoMode === true && (!store.index.settings.autoMode || boardReviewMode(store.index.settings) !== "reviewer")) {
-      throw new TaskboardError("AUTO_MODE_DISABLED", "Automatic integration is disabled.");
-    }
-    if (input.autoMode === true && currentReviewApproval(task, store.index.settings)?.reviewApproval?.targetHead !== input.targetHead) {
-      throw new TaskboardError("REVIEW_REQUIRED", "Automatic integration requires reviewer approval for the current target.");
-    }
-    try {
-      return acceptTask(store, task, input, userAcceptance);
-    } catch (error) {
-      if (input.actor === "user" && error instanceof TaskboardError && error.code === "MERGE_CONFLICT") {
-        const review = inspectReview(store, task, reviewDetails(store, task, true), true);
-        const previous = task.acceptanceRepair;
-        const exhausted = previous && previous.attempts >= 2;
-        const requested = record({ ...task, acceptanceRepair: {
-          phase: exhausted ? "failed" as const : "queued" as const, attempts: previous?.attempts ?? 0,
-          reviewModeVersion: boardReviewMode(store.index.settings) === "reviewer-human" ? store.index.settings.reviewModeVersion : undefined,
-          targetHead: review.targetHead!, message: text(input.message, "message", true),
-          ...(exhausted ? { reason: "Repeated merge conflict; a decision is required." } : {}),
-        } }, "acceptance-requested", "user");
-        return store.save(exhausted ? sendTaskMessage(requested, { kind: "question", text: requested.acceptanceRepair!.reason }, "agent") : requested);
-      }
-      if (store.index.settings.autoMode && error instanceof TaskboardError &&
-          !["AUTO_REVIEW_DISABLED", "HUMAN_ACCEPTANCE_REQUIRED", "REVIEW_MODE_CHANGED", "REVISION_CONFLICT", "REVIEW_REQUIRED"].includes(error.code)) {
-        const message = "AI Taskboard integration: " + error.code + "\n" + error.message + "\n" + JSON.stringify(error.details ?? {}).slice(0, 1800);
-        const latest = store.card(task.id);
-        const submitted = latest.history.findLastIndex(event => event.action === "submit");
-        if (latest.status === "review" && !latest.history.slice(submitted + 1).some(event => event.action === "coordination" && event.text === message)) {
-          store.save(sendTaskMessage(latest, { kind: "question", text: message }, "agent"));
-        }
-      }
-      throw error;
-    }
-  }
+  if (command === "accept") return applyAcceptance(store, task, input);
   if (command === "return-to-draft") {
     const draft = changeTask(task, command, input);
     if (draft !== task && hasPending(store, task, true)) {

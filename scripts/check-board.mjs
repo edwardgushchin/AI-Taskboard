@@ -88,6 +88,7 @@ app.whenReady().then(async () => {
     };
     ${readFileSync(require.resolve("markdown-it/browser"), "utf8")}
     ${read("image-preview.js")}
+    ${read("review-diff.js")}
     ${read("source-files.cjs")}
     ${read("markdown.js")}
     ${read("chat.js")}
@@ -371,6 +372,22 @@ app.whenReady().then(async () => {
     await check(`body.querySelector('[name=reviewMode]').selectedOptions[0].textContent === 'Review + human'`, 'saved mode selected in board settings');
     await check(`body.querySelector('[name=reviewMode]').parentElement.querySelector('small').textContent.includes('You decide')`, 'settings explain the human decision');
     await capture('reviewer-human-settings-en.png');
+    await evaluate(`
+      sheet.close();
+      Object.assign(hybridTask, { result: { summary: 'Delivered', checks: ['Checked'] }, reviewApproved: false });
+      window.taskboard.command = async (action, id, fields) => {
+        if (action === 'accept') { window.recoveryRequest = { id, fields }; return { ok: false, error: { code: 'FIXTURE', message: 'Recorded recovery request' } }; }
+        return { ok: true, data: { revision: hybridTask.revision, result: hybridTask.result, targetHead: 'a'.repeat(40),
+          reviewMode: 'reviewer-human', reviewModeVersion: 2, pending: true, pendingModeChanged: true,
+          target: 'refs/heads/main', mode: 'squash', submitted: 'b'.repeat(40), message: 'feat: fixture', diff: '' } };
+      };
+      showReview(hybridTask);
+    `);
+    await check(`body.querySelector('button[type=submit]').disabled`, 'interrupted acceptance disables integration after a mode change');
+    await capture('reviewer-human-recovery-en.png');
+    await evaluate(`[...body.querySelectorAll('button')].find(button => button.textContent === 'Recover interrupted acceptance').click(); settle()`);
+    await check(`window.recoveryRequest.id === hybridTask.id && window.recoveryRequest.fields.cancelPending === true &&
+      window.recoveryRequest.fields.revision === hybridTask.revision`, 'recovery action pins the current revision');
     console.log('Reviewer-human Chromium checks passed: ' + checks);
     return;
   }

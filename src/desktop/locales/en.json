@@ -1,4 +1,7 @@
 {
+  "ui.confirm_human_acceptance": "Accept this reviewed submission?",
+  "ui.recover_interrupted_acceptance": "Recover interrupted acceptance",
+  "ui.recover_interrupted_acceptance_hint": "The review mode changed during acceptance. Recover the interrupted operation to continue.",
   "ui.review_then_human": "Review + human",
   "ui.review_then_human_hint": "The reviewer checks submissions. You decide whether to accept approved work or return it for changes.",
   "ui.awaiting_human_acceptance": "Awaiting human acceptance",
