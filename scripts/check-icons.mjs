@@ -7,7 +7,7 @@ import { electronCheck, localizationFixture } from "./electron-check.mjs";
 
 const root = new URL("../", import.meta.url);
 const read = file => readFileSync(new URL(file, root), "utf8");
-const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "icons", 60_000);
+const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "icons", 120_000);
 const { app, BrowserWindow, nativeTheme } = await import("electron");
 app.setPath("userData", join(scratch, "profile"));
 app.disableHardwareAcceleration();
@@ -108,6 +108,7 @@ try {
     await evaluate(`new Promise(resolve => { const dialog = document.querySelector('.image-preview'); dialog.addEventListener('close', () => resolve()); dialog.close(); })`);
   }
   // Exercise the shared status entry point for both callers and every active role.
+  const spinnerResults = [];
   for (const theme of ["dark", "light"]) {
     nativeTheme.themeSource = theme;
     console.log("Checking returned conditions: " + theme);
@@ -118,6 +119,8 @@ try {
       assert.equal(await evaluate(`(() => {
         document.documentElement.dataset.theme = 'github-' + ${JSON.stringify(theme)};
         for (const russian of [false, true]) {
+          localization.select(russian ? 'ru' : 'en');
+          const language = (en, ru) => russian ? ru : en;
           for (const caller of ['task-stat task-run-status', 'task-run-status']) {
             const target = element('span', undefined, caller);
             document.body.append(target);
@@ -134,6 +137,8 @@ try {
               if (!glyph.matches('.codicon-sync.agent-spinner') || glyph.hasAttribute('aria-hidden') ||
                   glyph.getAttribute('role') !== 'status' || glyph.getAttribute('aria-label') !== expected ||
                   glyph.title !== expected || style.borderTopWidth !== '0px' ||
+                  style.fontSize !== '12px' || style.width !== (target.matches('.task-stat') ? '14px' : '12px') ||
+                  style.height !== '12px' ||
                   getComputedStyle(glyph, '::before').fontFamily !== 'codicon' ||
                   (style.animationName === 'none') !== ${motion === "reduce"}) return false;
               renderAgentRunStatus(target, task);
@@ -149,7 +154,61 @@ try {
         }
         return true;
       })()`), true, `${theme}/${motion}: active roles, reuse, idle and stopped in board/card callers`);
+      for (const width of [1000, 720]) {
+        window.setContentSize(width, 600);
+        await paint();
+        for (const [role, label] of [["agent", "Agent is working"], ["reviewer", "Reviewer is reviewing"],
+          ["manager", "Project manager is reviewing"]]) {
+          for (const multiline of [false, true]) {
+            const metrics = await evaluate(`(() => {
+              localization.select('en');
+              const task = { id: 'T-0001', status: 'in_progress',
+                title: ${multiline
+                  ? "'Verify the active task indicator next to the heading as the title wraps across several lines in the open task window'"
+                  : "'Verify the task indicator'"} };
+              frame = { russian: false, runningTasks: ${role === "agent"} ? [task.id] : [],
+                reviewingTasks: { [task.id]: ${JSON.stringify(role)} } };
+              openTaskSheet(task);
+              const title = byId('sheet-title'), glyph = title.querySelector('.agent-spinner');
+              const style = getComputedStyle(glyph);
+              const range = document.createRange();
+              range.selectNode(title.firstChild);
+              const lines = [...range.getClientRects()], last = lines.at(-1);
+              const animation = glyph.getAnimations()[0];
+              if (animation) {
+                animation.pause();
+                animation.currentTime = 100;
+              }
+              const bounds = glyph.getBoundingClientRect();
+              const header = title.getBoundingClientRect();
+              const close = byId('close-sheet').getBoundingClientRect();
+              return { fontSize: style.fontSize, width: style.width, height: style.height,
+                titleSize: getComputedStyle(title).fontSize, lines: lines.length,
+                gap: bounds.left - last.right,
+                offset: Math.abs((bounds.top + bounds.bottom - last.top - last.bottom) / 2),
+                inside: bounds.top >= header.top - .5 && bounds.bottom <= header.bottom + .5 &&
+                  bounds.right <= header.right && bounds.right < close.left,
+                label: glyph.getAttribute('aria-label'), role: glyph.getAttribute('role'),
+                spinning: style.animationName === 'agent-spin' };
+            })()`);
+            const scenario = `${theme}/${width}/${motion}/${role}/${multiline ? "wrapped" : "single"}`;
+            spinnerResults.push({ scenario, ...metrics });
+            assert.deepEqual([metrics.titleSize, metrics.fontSize, metrics.width, metrics.height], Array(4).fill("20px"), scenario);
+            assert.equal(metrics.lines > 1, multiline, scenario);
+            assert.ok(metrics.gap >= 3 && metrics.gap <= 9 && metrics.offset <= 4 && metrics.inside, scenario);
+            assert.equal(metrics.role, "status", scenario);
+            assert.equal(metrics.label, label, scenario);
+            assert.equal(metrics.spinning, motion === "no-preference", scenario);
+            if (role === "agent" && motion === "reduce" && width === (multiline ? 720 : 1000)) {
+              await capture(`task-spinner-${theme}-${width}-${multiline ? "wrapped" : "single"}.png`);
+            }
+          }
+        }
+      }
+      await evaluate("byId('close-sheet').click()");
+      await paint();
     }
+    window.setContentSize(1000, 800);
     await window.webContents.debugger.sendCommand("Emulation.setEmulatedMedia", { features: [] });
     // Real manager submit/stop workflow, independent of unrelated chat layout assertions.
     for (const russian of [false, true]) {
@@ -181,7 +240,7 @@ try {
         const glyph = button.querySelector('.codicon-stop-circle');
         const rect = button.getBoundingClientRect(), bounds = glyph.getBoundingClientRect();
         const style = getComputedStyle(button);
-        return !button.disabled && button.getAttribute('aria-label') === language('Stop reply', 'Остановить ответ') &&
+        return !button.disabled && button.getAttribute('aria-label') === (${russian} ? 'Остановить ответ' : 'Stop reply') &&
           document.activeElement === button && rect.width === 28 && rect.height === 28 &&
           bounds.width === 22 && bounds.height === 22 && Math.abs(bounds.left - rect.left - 3) < .1 &&
           Math.abs(bounds.top - rect.top - 3) < .1 &&
@@ -228,6 +287,10 @@ try {
     assert.equal(await evaluate(`!frame.tabs.length && byId('project-tabs').hidden`), true, theme + ": focused close button closes last tab");
   }
   console.log(`Icon checks passed: ${names.length} CSS glyphs in TTF; ${aliases.length} aliases; dark/light; English/Russian preview controls.`);
+  console.log(`Task heading spinner checks passed: ${spinnerResults.length} scenarios on Electron ${process.versions.electron}.`);
+  if (keepArtifacts) writeFileSync(join(artifacts, "task-spinner-report.json"), JSON.stringify({
+    electron: process.versions.electron, node: process.versions.node, platform: process.platform, scenarios: spinnerResults,
+  }, null, 2));
   console.log('Returned criteria passed: agent/reviewer/manager status in both callers and motion modes; manager Stop action/focus; tabs arrows/Home/End/Delete and close action/focus; dark/light.');
 } catch (error) {
   console.error(error);
