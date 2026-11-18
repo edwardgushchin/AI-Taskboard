@@ -193,6 +193,7 @@ export interface ExpertPhase {
 export type ArtifactKind = "png" | "text";
 
 export interface Task {
+  draftDiscussion?: { phase: "queued" | "running" } | { phase: "failed"; reason: string };
   expertId?: string;
   expertTeam?: { work?: ExpertPhase; review?: ExpertPhase };
   expertStage?: { parentId: string; key: string; inputs: string[]; outputs: string[] };
@@ -379,6 +380,7 @@ export function record(
     ...(task.schedule && next === "ready" && task.status !== "ready"
       ? { schedule: { ...task.schedule, nextAt: nextScheduledRun(task.schedule, new Date(at),
         task.status === "in_progress" ? task.schedule.nextAt : undefined) } } : {}),
+    ...(next !== "draft" && task.draftDiscussion ? { draftDiscussion: undefined } : {}),
     status: next,
     revision: task.revision + 1,
     updatedAt: at,

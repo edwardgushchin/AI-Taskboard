@@ -742,6 +742,7 @@ const replyingTasks = new Set<string>();
 interface ActiveAgent {
   control: AgentControl;
   directories: Set<string>;
+  draftDiscussion?: true;
   updateMessage?: (task: Task, index: number) => () => void;
 }
 const activeAgents = new Map<string, ActiveAgent>();
@@ -837,10 +838,12 @@ async function saveTaskTokenUsage(project: string, id: string, role: TaskUsageRo
   if (!saved.ok) console.warn("Could not save task token usage for %s (%s).", id, saved.error.code);
 }
 
-async function sendChat(project: string, id: string, request: ChatRequest, notify: (update: ChatUpdate) => void) {
+async function sendChat(project: string, id: string, request: ChatRequest, notify: (update: ChatUpdate) => void,
+  automatic?: NonNullable<Task["draftDiscussion"]>["phase"]) {
   const key = project + "\0" + id;
   const active = activeAgents.get(key);
-  if (returningDrafts.has(key) || (!active && (chatRuns.has(key) || launchingTasks.has(key))) || (active && request.retryAt !== undefined)) {
+  if (returningDrafts.has(key) || (!active && (chatRuns.has(key) || launchingTasks.has(key))) ||
+      (active && (automatic || active.draftDiscussion || request.retryAt !== undefined))) {
     return { saved: false, result: cliFailure("CHAT_BUSY", t("ui.the_agent_is_already_replying_to_this_task_234378d8")) };
   }
   if (closingProjects.has(project)) return { saved: false, result: cliFailure("PROJECT_CLOSING",
@@ -862,17 +865,51 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
   let scratch: string | undefined;
   let saved = request.retryAt !== undefined;
   let streamed = false;
+  let discussionStarted = false;
+  let discussionFailure = t("draft_discussion.interrupted");
   try {
-    const { model, effort, text, files, retryAt } = request;
+    let { model, effort } = request;
+    const { text, files, retryAt } = request;
     signal.throwIfAborted();
-    scratch = await mkdtemp(join(tmpdir(), "ai-taskboard-chat-"));
-    directories.add(scratch);
+    if (!automatic) {
+      scratch = await mkdtemp(join(tmpdir(), "ai-taskboard-chat-"));
+      directories.add(scratch);
+    }
     let reply: CliReply<Task>;
-    if (retryAt === undefined) {
+    if (automatic) {
+      const current = await callCli<Task>(project, ["show", id]);
+      if (!current.ok) return { saved, result: current };
+      const task = current.data;
+      if (task.status !== "draft" || task.draftDiscussion?.phase !== automatic) {
+        return { saved, result: cliFailure("CHAT_CHANGED", "The draft discussion changed.") };
+      }
+      if (automatic === "running") {
+        const result = await callCli<Task>(project, ["draft-discussion", id], {
+          revision: task.revision, phase: "failed", reason: discussionFailure,
+        });
+        return { saved, result };
+      }
+      reply = await callCli<Task>(project, ["draft-discussion", id], { revision: task.revision, phase: "running" });
+      if (!reply.ok) return { saved, result: reply };
+      discussionStarted = true;
+      replyingTasks.add(key);
+      notifyRunChange(project);
+      const configured = task.execution ?? readBoardSettings(runtimeLocation(project)).executor;
+      if (configured?.effort) ({ model, effort } = { model: configured.model, effort: configured.effort });
+      else {
+        const models = await chatModels(app.getPath("userData"), project);
+        const chosen = configured ? models.find(entry => entry.id === configured.model) :
+          models.find(entry => entry.default) ?? models[0];
+        if (!chosen?.id || !chosen.effort) throw new Error(t("ui.the_task_model_is_unavailable_cc563f3b"));
+        ({ id: model, effort } = chosen);
+      }
+      scratch = await mkdtemp(join(tmpdir(), "ai-taskboard-chat-"));
+      directories.add(scratch);
+    } else if (retryAt === undefined) {
       const sources = [];
       for (const [index, file] of files.entries()) {
         if (file.link) { sources.push({ path: file.link.path, name: file.name, link: file.link }); continue; }
-        const path = join(scratch, "upload-" + index);
+        const path = join(scratch!, "upload-" + index);
         const suffix = imageExtensions.get(file.type);
         const name = file.name.trim();
         await writeFile(path, Buffer.from(file.bytes));
@@ -890,50 +927,65 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     const task = reply.data;
     const last = task.history.findLastIndex(entry => entry.chat);
     const message = task.history[last];
-    if (message?.actor !== "user" ||
-        (retryAt !== undefined && last !== retryAt)) {
+    if (!automatic && (message?.actor !== "user" || retryAt !== undefined && last !== retryAt)) {
       return { saved, result: cliFailure("CHAT_CHANGED", t("ui.this_message_is_no_longer_awaiting_a_reply_6ec519ec")) };
     }
     if (!active) replyingTasks.add(key);
     notifyRunChange(project);
-    const activeFiles = new Set(message.chat?.files);
+    const activeFiles = new Set(message?.chat?.files);
+    const inspectDraft = task.status === "draft";
     const images: string[] = [];
     const attachments = [];
     for (const [index, file] of task.attachments.entries()) {
       let path = join(project, ".tasks", "attachments", id, file.file);
-      if (file.link) {
+      const extension = extname(file.name).toLowerCase();
+      const safeExtension = /^\.[a-z0-9]{1,10}$/.test(extension) ? extension : "";
+      if (file.link && !inspectDraft) {
         try { path = verifyFileLink(file.link); attachments.push({ id: file.file, name: file.name, bytes: file.bytes, path, link: file.link }); }
         catch (error) { attachments.push({ id: file.file, name: file.name, error: (error as Error).message }); }
         continue;
       }
-      if (activeFiles.has(file.file)) {
-        const extension = extname(file.name).toLowerCase();
-        const safeExtension = /^\.[a-z0-9]{1,10}$/.test(extension) ? extension : "";
-        path = join(scratch, "attachment-" + index + safeExtension);
-        const copy = await callCli(project, ["attachment", "read", id], { file: file.file, destination: path });
-        if (!copy.ok) return { saved, result: copy };
+      if (inspectDraft || activeFiles.has(file.file)) {
+        path = join(scratch!, "attachment-" + index + safeExtension);
+        const copy = await callCli(project, ["attachment", "read", id], {
+          file: file.file, destination: path, ...(file.link ? { snapshot: true } : {}),
+        });
+        if (!copy.ok) {
+          if (!inspectDraft) return { saved, result: copy };
+          attachments.push({ id: file.file, name: file.name, error: copy.error.message });
+          continue;
+        }
         if (imageTypes.has(safeExtension)) images.push(path);
       }
-      attachments.push({ id: file.file, name: file.name, path });
+      attachments.push({ id: file.file, name: file.name, path, bytes: file.bytes, ...(file.link ? { linked: true } : {}) });
     }
+    const context = inspectDraft ? await Promise.all((task.dependencies ?? []).map(async dependency => {
+      const result = await callCli<Task>(project, ["show", dependency, "--compact"]);
+      return result.ok ? { id: dependency, title: result.data.title, status: result.data.status,
+        description: result.data.description, criteria: result.data.criteria, summary: result.data.summary } :
+        { id: dependency, error: result.error.message };
+    })) : undefined;
     const prompt = JSON.stringify({
       task: { id, title: task.title, status: task.status, description: task.description,
         criteria: task.criteria, openQuestions: task.questions, tags: task.tags, priority: task.priority,
-        subtasks: task.subtasks, dependencies: task.dependencies, summary: task.summary, nextStep: task.nextStep },
-      history: task.history.slice(0, last).map(event => ({
+        subtasks: task.subtasks, dependencies: task.dependencies, milestone: task.milestone, dueDate: task.dueDate,
+        schedule: task.schedule, workingDirectory: task.workingDirectory, execution: task.execution, expertTeam: task.expertTeam,
+        summary: task.summary, nextStep: task.nextStep },
+      dependencyContext: context,
+      history: (automatic ? task.history : task.history.slice(0, last)).map(event => ({
         actor: event.actor, action: event.action, text: event.text, from: event.from, to: event.to, files: event.chat?.files,
       })),
-      subsequentEvents: task.history.slice(last + 1),
+      subsequentEvents: automatic ? undefined : task.history.slice(last + 1),
       attachments,
-      latestUserMessage: { text: message.text ?? "", files: message.chat?.files ?? [] },
+      latestUserMessage: automatic ? undefined : { text: message.text ?? "", files: message.chat?.files ?? [] },
     });
     signal.throwIfAborted();
     if (active) {
       // A finished turn must not silently turn a steering message into another run.
       if (activeAgents.get(key) !== active) throw new Error(t("ui.the_agent_finished_before_receiving_this_message_88246090"));
       // The request owns its staging files until it hands them to the active turn.
-      active.directories.add(scratch);
-      directories.delete(scratch);
+      active.directories.add(scratch!);
+      directories.delete(scratch!);
       const undo = active.updateMessage?.(task, last);
       try { await active.control.steer(prompt, images); }
       catch (error) { undo?.(); throw error; }
@@ -941,10 +993,10 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     }
     const replyStarted = performance.now();
     let replyTo = last;
-    let runAction = taskChatActions(project, task, message.text ?? "", () => notify({ type: "changed" }));
+    let runAction = taskChatActions(project, task, message?.text ?? "", () => notify({ type: "changed" }));
     const ready = Promise.withResolvers<AgentControl>();
     void ready.promise.catch(() => {});
-    activeAgents.set(key, { directories, control: {
+    activeAgents.set(key, { directories, draftDiscussion: automatic ? true : undefined, control: {
       steer: async (text, images) => (await ready.promise).steer(text, images),
       interrupt: async () => (await ready.promise).interrupt(),
     }, updateMessage: (latest, index) => {
@@ -962,17 +1014,31 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       control => ready.resolve(control), signal, id, items => {
         streamed = true;
         notify({ type: "run", items });
-      })).finally(() => ready.reject(new Error("The agent session ended.")));
+      }, automatic === undefined ? undefined : "initial")).finally(() => ready.reject(new Error("The agent session ended.")));
     if ("interrupted" in answer) return { saved, result: { ok: true as const, data: task } };
     signal.throwIfAborted();
     const result = await callCli<Task>(project, ["chat", id], {
       ...answer, actor: "agent", model, effort, replyTo, durationMs: Math.round(performance.now() - replyStarted),
+      ...(automatic ? { draftDiscussion: true, revision: task.revision } : {}),
     });
+    if (result.ok) discussionStarted = false;
+    else discussionFailure = result.error.message;
     return { saved, result };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    discussionFailure = message;
     return { saved, result: cliFailure("CHAT_FAILED", message.slice(0, 1500)) };
   } finally {
+    if (discussionStarted) {
+      try {
+        const current = await callCli<Task>(project, ["show", id, "--compact"]);
+        if (current.ok && current.data.status === "draft" && current.data.draftDiscussion?.phase === "running") {
+          await callCli(project, ["draft-discussion", id], {
+            revision: current.data.revision, phase: "failed", reason: discussionFailure || t("draft_discussion.interrupted"),
+          });
+        }
+      } catch (error) { console.warn("Could not save the draft discussion failure.", error); }
+    }
     if (streamed) notify({ type: "run", items: [] });
     if (!active) {
       activeAgents.delete(key);
@@ -981,7 +1047,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       chatRuns.delete(key);
       taskOperations.delete(key);
       writer();
-      scheduleAgentWork();
+      if (!automatic) scheduleAgentWork();
       if (wasReplying) notifyRunChange(project);
     } else {
       if (scratch && directories.has(scratch)) {
@@ -1012,6 +1078,18 @@ ipcMain.handle("chat:send", async (event, id: unknown, request: unknown) => {
     if (update.type === "run") return publishRunActivity(project, id, update.items);
     if (!event.sender.isDestroyed()) event.sender.send("chat:update", { project, id, ...update });
   });
+});
+
+function runDraftDiscussion(project: string, id: string, phase: NonNullable<Task["draftDiscussion"]>["phase"]) {
+  return sendChat(project, id, { model: "", effort: "", text: "", files: [] }, update => {
+    if (update.type === "run") publishRunActivity(project, id, update.items);
+  }, phase);
+}
+
+ipcMain.handle("chat:retry-draft-discussion", async (event, id: unknown) => {
+  const project = stateOf(event).board?.project;
+  if (!project || typeof id !== "string" || !taskIdPattern.test(id)) return cliFailure("INVALID_INPUT", t("errors.f6cce3ef8b13aaf9"));
+  return (await runDraftDiscussion(project, id, "failed")).result;
 });
 
 type ManagerQuestion = { id: string; text: string; options: string[]; approval?: true };
@@ -1210,9 +1288,21 @@ function scheduleAgentWork() {
       for (const watch of subscriptions.values()) {
         scheduleAutoReview(watch);
         scheduleAutoBoard(watch);
+        scheduleDraftDiscussions(watch);
       }
     } catch (error) { console.error(error); }
   });
+}
+
+function scheduleDraftDiscussions({ board }: BoardWatch) {
+  const { project, tasks } = board;
+  if (isManual(board.settings) || closingProjects.has(project)) return;
+  const writers = new Set(agentSlots.entries(project).filter(entry => entry.kind !== "queue").map(entry => entry.task));
+  for (const task of tasks) {
+    const phase = task.draftDiscussion?.phase;
+    if (task.status !== "draft" || (phase !== "queued" && phase !== "running") || writers.has(task.id)) continue;
+    void runDraftDiscussion(project, task.id, phase).catch(error => console.warn("Could not run draft discussion", error));
+  }
 }
 
 function reserveAgent(project: string, role: AgentRole, task?: string, queuedRevision?: number) {
@@ -2862,13 +2952,14 @@ function executorBusy(project: string, id: string) {
   return launchingTasks.has(key) || runningTasks.has(key) || chatRuns.has(key) || agentSlots.busy(project, id);
 }
 
-function publishRunActivity(project: string, id: string, items: RunActivity[]) {
+function publishRunActivity(project: string, id: string, items: RunActivity[],
+  savedRun?: { sequence: number; items: RunActivity[]; durationMs: number }) {
   const key = project + "\0" + id;
   if (items.length) runActivityByTask.set(key, items);
   else runActivityByTask.delete(key);
   for (const state of windowStates.values()) {
     if (state.active.project === project && !state.window.isDestroyed()) {
-      state.window.webContents.send("chat:update", { project, id, type: "run", items });
+      state.window.webContents.send("chat:update", { project, id, type: "run", items, savedRun });
     }
   }
 }
@@ -2933,8 +3024,12 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     }
     const items = runLog(activity);
     if (!items.length) return;
-    const saved = await callCli(project, ["run-log", id, "--compact"], { entries: items, durationMs: Math.round(performance.now() - runStarted) });
-    if (saved.ok) publishRunActivity(project, id, []);
+    const durationMs = Math.round(performance.now() - runStarted);
+    const saved = await callCli<{ runLogSequence?: number }>(project, ["run-log", id, "--compact"], { entries: items, durationMs });
+    if (saved.ok) {
+      const sequence = saved.data.runLogSequence;
+      publishRunActivity(project, id, [], sequence === undefined ? undefined : { sequence, items, durationMs });
+    }
     else publishRunActivity(project, id, [
       { id: "save-error", type: "error", title: "", text: saved.error.message, status: "failed" },
     ]);

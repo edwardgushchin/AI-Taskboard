@@ -1,4 +1,9 @@
 {
+  "draft_discussion.queued": "Die Entwurfsprüfung wartet.",
+  "draft_discussion.running": "Der Entwurf wird geprüft…",
+  "draft_discussion.failed": "Entwurfsprüfung fehlgeschlagen: {reason}",
+  "draft_discussion.retry": "Entwurf erneut prüfen",
+  "draft_discussion.interrupted": "Die vorherige Entwurfsprüfung wurde unterbrochen.",
   "ui.resolving_acceptance_conflict": "Konflikt wird gelöst",
   "ui.dismiss_notification_9a17797e": "Benachrichtigung verwerfen",
   "ui.board_refresh_4c949d36": "Board-Aktualisierung",

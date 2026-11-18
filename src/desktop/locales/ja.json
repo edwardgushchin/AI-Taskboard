@@ -1,4 +1,9 @@
 {
+  "draft_discussion.queued": "下書きの確認を待機しています。",
+  "draft_discussion.running": "下書きを確認しています…",
+  "draft_discussion.failed": "下書きの確認に失敗しました：{reason}",
+  "draft_discussion.retry": "確認を再試行",
+  "draft_discussion.interrupted": "前回の下書き確認は中断されました。",
   "ui.resolving_acceptance_conflict": "競合を解決中",
   "ui.dismiss_notification_9a17797e": "通知を閉じる",
   "ui.board_refresh_4c949d36": "ボードのリフレッシュ",
