@@ -1216,9 +1216,9 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
           if (review.data.stale) { failed(task.id + ": submission changed"); continue; }
           if (review.data.reviewerApproval?.targetHead !== review.data.targetHead) {
             if (!task.expertReviewPlanned) { queue.integrations.delete(attempt); return; }
-            const release = reserveAgent(project, "reviewer", "review:" + task.id, undefined, true);
+            const release = reserveAgent(project, "reviewer", "review:" + task.id, undefined, { id: task.id, mode: "reviewer" });
             if (!release) { queue.integrations.delete(attempt); return; }
-            watch.reviewerRuns.set(task.id, release.run(() => reviewSubmission(watch, task.id, 4)).finally(() => {
+            watch.reviewerRuns.set(task.id, release.run(() => reviewSubmission(watch, task.id, 4, "reviewer")).finally(() => {
               watch.reviewerRuns.delete(task.id);
               release();
               publishReviewActivity(project);
@@ -1386,13 +1386,22 @@ function scheduleDraftDiscussions({ board }: BoardWatch) {
   }
 }
 
-function reserveAgent(project: string, role: AgentRole, task?: string, queuedRevision?: number, requiresAutoMode = false) {
+function reserveAgent(project: string, role: AgentRole, task?: string, queuedRevision?: number, review?: { id: string; mode: ReviewMode }) {
   agentSlots.remember(project);
   // A tool call can race the watch snapshot after CLI settings were saved.
   const location = runtimeLocation(project);
   const acquire = (settings: BoardSettings) => agentSlots.acquire(projectIdentity(project), role, settings.taskLimits, task, queuedRevision);
-  const release = requiresAutoMode
-    ? onBoard(location, store => store.index.settings.autoMode ? acquire(store.index.settings) : undefined)
+  const release = review
+    ? onBoard(location, store => {
+      if (!Object.hasOwn(store.index.tasks, review.id)) return;
+      const card = store.card(review.id);
+      const { settings } = store.index;
+      const mode = taskReviewMode(card, settings);
+      if (card.status !== "review" || mode !== review.mode || !usesIndependentReviewer(mode) ||
+          (!settings.autoMode && mode !== "reviewer-human") ||
+          (card.acceptanceRepair && !reviewsAcceptanceRepair(card, settings))) return;
+      return acquire(settings);
+    })
     : acquire(readBoardSettings(location));
   if (!release) return;
   return Object.assign((restart = false) => {
@@ -2705,10 +2714,11 @@ function scheduleAutoReview(watch: BoardWatch) {
   const independent = ready.filter(task => usesIndependentReviewer(modeOf(task))).slice(0, capacity);
   for (const task of independent) {
     const { id } = task;
-    const release = reserveAgent(project, "reviewer", "review:" + id, undefined, modeOf(task) !== "reviewer-human");
+    const mode = modeOf(task);
+    const release = reserveAgent(project, "reviewer", "review:" + id, undefined, { id, mode });
     if (!release) continue;
     watch.reviewAttempts.set(id, reviewAttempt(task));
-    watch.reviewerRuns.set(id, release.run(() => reviewSubmission(watch, id, 4)).finally(() => {
+    watch.reviewerRuns.set(id, release.run(() => reviewSubmission(watch, id, 4, mode)).finally(() => {
       watch.reviewerRuns.delete(id);
       release();
       publishReviewActivity(project);
@@ -2731,7 +2741,7 @@ function scheduleAutoReview(watch: BoardWatch) {
   }).catch(error => failed((error as Error).message));
 }
 
-async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: number) {
+async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: number, expectedMode: ReviewMode) {
   const { board: { project }, reviewReports: reports } = watch;
   const key = project + "\0" + id;
   if (returningDrafts.has(key)) return;
@@ -2763,6 +2773,8 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
   const review = boardActions(project, [], [], signal, async () => cliFailure("INVALID_INPUT", t("errors.6c4fab5f39631a35")),
     () => undefined, id => executorBusy(project, id), () => () => {}, async () => false, undefined, () => signal,
     (settings, context, call, reviewSignal, submissionSequence) => {
+      const evidence = JSON.parse(context);
+      if (evidence.reviewMode !== expectedMode) throw new TaskboardError("REVIEW_MODE_CHANGED", "The review mode changed before the reviewer started.");
       const startedAtMs = Date.now();
       const started = performance.now();
       return withReviewerChat(project, id, () => broadcastBoardChat(project, "reviewer-chat", { id }), async onActivity => {
@@ -2777,7 +2789,6 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
           };
         };
         let firstPass: RunActivity[] = [];
-        const evidence = JSON.parse(context);
         const initial = await reviewWithCodex(app.getPath("userData"), project, settings, context, reviewerTools, call, reviewSignal,
           trackUsage, id, items => { firstPass = items; onActivity(items); }, evidence.reviewTeam, evidence.targetHead);
         const candidate = initial as Partial<ReviewReport> | null;
@@ -2809,14 +2820,14 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
         result = await review("task_review", { id });
       }
       if (!result.ok) {
-        if (!["INVALID_TRANSITION", "REVISION_CONFLICT"].includes(result.error.code)) notify(result.error.message);
+        if (!["INVALID_TRANSITION", "REVISION_CONFLICT", "REVIEW_MODE_CHANGED"].includes(result.error.code)) notify(result.error.message);
         return;
       }
       const { reviewMode, reviewModeVersion, stale, revision, targetHead, reviewer } = result.data as {
         reviewMode: ReviewMode; reviewModeVersion?: number; stale: boolean; revision: number; targetHead: string | null;
         reviewer?: ReviewReport;
       };
-      if (!usesIndependentReviewer(reviewMode)) return;
+      if (reviewMode !== expectedMode) return;
       if (stale) {
         notify(t("ui.the_submission_changed_submit_it_again_38ed8598"));
         return;

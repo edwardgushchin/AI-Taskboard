@@ -33,8 +33,9 @@ function fixture(mode = "human") {
     isManual, nextReadyTask, taskReviewMode, taskReviewModeVersion, reviewsAcceptanceRepair, agentSlots: slots, projectIdentity: (path: string) => path,
     executorBusy: (_: string, id: string) => busy.has(id), t: (key: string) => localization.text(key, {}, "en"),
     broadcastBoardChat: (_: string, __: string, value: any) => errors.push(value.error),
-    reserveAgent: (_: string, role: "reviewer", _task: string, _revision: number | undefined, automatic: boolean) =>
-      automatic && !board.settings.autoMode ? undefined : slots.acquire("project", role, board.settings.taskLimits),
+    reserveAgent: (_: string, role: "reviewer", _task: string, _revision: number | undefined, review: { id: string; mode: string }) =>
+      !board.settings.autoMode || taskReviewMode(board.tasks.find((task: any) => task.id === review.id), board.settings) !== review.mode
+        ? undefined : slots.acquire("project", role, board.settings.taskLimits),
     publishReviewActivity: () => {},
     reviewSubmission: async (_: unknown, id: string) => {
       reviews.push(id);

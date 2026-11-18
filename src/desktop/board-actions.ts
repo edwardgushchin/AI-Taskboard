@@ -695,6 +695,7 @@ export function boardActions(project: string, attachments: { path: string; name:
           reviewReports.set(id, { targetHead, submitted, mergeBase, description, criteria, artifacts, snapshot, report: reviewer });
           return { ok: true, data: { ...data, reviewer, executorRunning: isTaskRunning(id) } };
         } catch (error) {
+          if (error instanceof TaskboardError && error.code === "REVIEW_MODE_CHANGED") return cliFailure(error.code, error.message);
           return cliFailure("REVIEW_FAILED", (error as Error).message);
         }
       }

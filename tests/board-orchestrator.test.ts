@@ -59,6 +59,7 @@ function fixture(t: TestContext) {
   const env = { ...process.env, GIT_CEILING_DIRECTORIES: folder };
   const cliCalls: string[][] = [];
   const busyDecisions = new Map<string, number>();
+  let beforeReviewRead: (() => void) | undefined;
   const callCli = async (cwd: string, args: string[], input?: unknown, track = true) => {
     assert.equal(cwd, project);
     if (track) cliCalls.push(args);
@@ -67,6 +68,11 @@ function fixture(t: TestContext) {
     if (busy > 0) {
       busyDecisions.set(key, busy - 1);
       return cliFailure("BOARD_BUSY", "Another command is working on this board.");
+    }
+    if (args[0] === "review" && beforeReviewRead) {
+      const change = beforeReviewRead;
+      beforeReviewRead = undefined;
+      change();
     }
     const result = spawnSync(process.execPath, [entry, "--project", cwd, "--json", ...args,
       ...(input === undefined ? [] : ["--stdin"])], { env, encoding: "utf8", input: JSON.stringify(input), windowsHide: true });
@@ -269,6 +275,7 @@ function fixture(t: TestContext) {
       return runtime.runBoardRequest(sender, { project, tasks: [] }, "Repair private lifecycle cleanup", [], false, false, undefined, undefined, undefined, false, undefined, job);
     },
     busyDecisions,
+    beforeReviewRead: (change: () => void) => { beforeReviewRead = change; },
     setReviewer: (runner: typeof reviewSubmission) => { reviewSubmission = runner; },
     schedule: (board: any, reply: Reply) => {
       respond = reply;
@@ -676,6 +683,62 @@ test("manager can route a draft to Luna or Sol without changing board defaults",
   });
   assert.equal(routed.data?.answer, "Routed.", JSON.stringify(routed));
   assert.deepEqual((await f.cli(["settings"])).data.executor, defaultBoardAgents.executor);
+});
+
+test("a stale reviewer-human snapshot cannot reserve a reviewer after switching to reviewer with automatic mode off", { timeout: 90_000 }, async t => {
+  const f = fixture(t);
+  await f.cli(["init"], { git: false });
+  await f.cli(["settings"], { reviewMode: "reviewer-human", autoMode: true });
+  const { data: task } = await f.cli(["create"], plannedDraft({ title: "Waiting for review", criteria: ["Verified"] }));
+  await f.cli(["approve", task.id]);
+  await f.cli(["start", task.id]);
+  const { data: preview } = await f.cli(["preview", task.id]);
+  assert.equal((await f.cli(["submit", task.id], { token: preview.token, noChanges: true,
+    summary: "External result", checks: ["Verified"] })).ok, true);
+  const { data: snapshot } = await f.cli(["list", "--compact"]);
+  const queue = f.schedule(snapshot, async () => assert.fail("Unexpected manager review"));
+  let calls = 0;
+  f.setReviewer(async () => {
+    calls++;
+    return { summary: "Reviewed", needsHuman: true, findings: [], evidence: ["Checked"] };
+  });
+  assert.equal((await f.cli(["settings"], { reviewMode: "reviewer", autoMode: false })).ok, true);
+  queue.tick();
+  assert.deepEqual(Object.keys(queue.reviewing()), []);
+  await queue.done();
+  assert.equal(calls, 0);
+  await queue.refresh();
+  queue.tick();
+  await queue.done();
+  assert.equal(calls, 0);
+
+  const setMode = (mode: "reviewer-human" | "reviewer", revision: number) => {
+    const authorization = `Set ${task.id} to ${mode}`;
+    const saved = setReviewModeFromChat(f.project, authorization, { id: task.id, revision, mode, authorization });
+    assert.ok(saved.ok, JSON.stringify(saved));
+    return saved.data.revision;
+  };
+  const current = (await f.cli(["show", task.id])).data;
+  const hybridRevision = setMode("reviewer-human", current.revision);
+  await queue.refresh();
+  const reviewerRevision = setMode("reviewer", hybridRevision);
+  queue.tick();
+  assert.deepEqual(Object.keys(queue.reviewing()), []);
+  await queue.done();
+  assert.equal(calls, 0);
+
+  const reservedRevision = setMode("reviewer-human", reviewerRevision);
+  await queue.refresh();
+  f.beforeReviewRead(() => { setMode("reviewer", reservedRevision); });
+  queue.tick();
+  await queue.done();
+  assert.equal(calls, 0);
+
+  await f.cli(["settings"], { autoMode: true });
+  await queue.refresh();
+  queue.tick();
+  await queue.done();
+  assert.equal(calls, 1);
 });
 
 test("reviewer-human uses the shared review queue with and without automatic mode", { timeout: 120_000 }, async t => {
