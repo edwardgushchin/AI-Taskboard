@@ -408,6 +408,7 @@ export type BoardActivity = RunActivity & { taskChanges?: BoardChange[]; message
 export function updateBoardGoal(profile: string, project: string, threadId: string, action: BoardGoalAction) {
   return withServer(profile, project, async ({ request }) => {
     const goal = await readGoal(request, threadId);
+    if (action.kind === "clear" && goal === null) return null;
     return changeGoal(request, threadId, action, goal);
   }, async () => undefined);
 }
