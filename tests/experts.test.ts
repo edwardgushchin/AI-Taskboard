@@ -73,15 +73,18 @@ test("work and review stages stay on one card with independent dependency graphs
   const f = fixture(t);
   f.run(store => {
     const parent = store.create(createTask(store.allocateId(), { title: "Sprint" }));
-    assert.throws(() => createExpertPlan(store, parent.id, { revision: 1, stages: [brief("a", "product-owner", ["b"]), brief("b", "qa-engineer", ["a"])] }), /cycle/);
-    const work = { revision: parent.revision, lead: "backend-developer", stages: [brief("analysis"), brief("design", "ux-designer", ["analysis"])] };
+    const reason = "The backend lead needs an independent interface design.";
+    assert.throws(() => createExpertPlan(store, parent.id, { revision: 1, stages: [] }), /team rationale/);
+    assert.throws(() => createExpertPlan(store, parent.id, { revision: 1, reason, stages: [brief("a", "product-owner", ["b"]), brief("b", "qa-engineer", ["a"])] }), /cycle/);
+    const work = { revision: parent.revision, lead: "backend-developer", reason, stages: [brief("analysis"), brief("design", "ux-designer", ["analysis"])] };
     const result = createExpertPlan(store, parent.id, work);
     assert.equal(result.lead, "backend-developer");
+    assert.equal(result.parent.history.at(-1)?.text, reason);
     assert.deepEqual(result.stages[1].dependsOn, ["analysis"]);
     assert.equal(createExpertPlan(store, parent.id, work).parent.revision, result.parent.revision);
     assert.throws(() => createExpertPlan(store, parent.id, { ...work, stages: [brief("analysis", "qa-engineer")] }), /different plan/);
-    assert.throws(() => createExpertPlan(store, parent.id, { revision: 2, phase: "review", stages: [brief("test", "qa-engineer", ["analysis"])] }), /Unknown prerequisite/);
-    const review = createExpertPlan(store, parent.id, { phase: "review", revision: 2, lead: "qa-engineer", stages: [brief("test", "qa-engineer")] });
+    assert.throws(() => createExpertPlan(store, parent.id, { revision: 2, phase: "review", reason, stages: [brief("test", "qa-engineer", ["analysis"])] }), /Unknown prerequisite/);
+    const review = createExpertPlan(store, parent.id, { phase: "review", revision: 2, lead: "qa-engineer", reason: "QA can verify both outputs.", stages: [brief("test", "qa-engineer")] });
     assert.equal(review.parent.expertTeam?.work?.stages.length, 2);
     assert.equal(review.parent.expertTeam?.review?.stages.length, 1);
     assert.equal(store.snapshot().tasks.length, 1);
@@ -140,31 +143,46 @@ test("planned work and review enforce stage order, evidence and independent mail
     return reply.data;
   };
   const work = [brief("analysis", "product-owner"), brief("test", "qa-engineer", ["analysis"])];
-  const review = { lead: "independent-reviewer", stages: [brief("test", "independent-reviewer")] };
-  const scope = { title: "Check scope", description: "Verify the changes.", criteria: ["Checked"], workingDirectory: f.root };
+  const review = { lead: "independent-reviewer", reason: "Separate review verifies the output.", stages: [brief("test", "independent-reviewer")] };
+  const workPlan = { lead: "product-owner", reason: "The product owner checks scope and QA tests the result.", stages: work };
+  const scope = { title: "Check scope", description: "Verify the changes.", criteria: ["Checked"], workingDirectory: f.root,
+    subtasks: [{ title: "Check the scope" }, { title: "Verify the output" }] };
   const task = call(["create"], scope);
   call(["settings"], { requireExpertPlans: true, reviewMode: "reviewer" });
   call(["create"], { ...scope, actor: "manager" }, "EXPERT_PLAN_REQUIRED");
   call(["create"], { ...scope, actor: "user" }, "EXPERT_PLAN_REQUIRED");
   call(["create"], { ...scope, actor: "manager", expertTeam: {
-    work: { lead: "product-owner", stages: work }, review: { ...review, stages: [brief("test", "qa-engineer", ["missing"])] },
+    work: workPlan, review: { ...review, stages: [brief("test", "qa-engineer", ["missing"])] },
   } }, "INVALID_INPUT");
   assert.deepEqual(call(["list"]).tasks.map((entry: { id: string }) => entry.id), [task.id]);
-  const planned = call(["create"], { ...scope, actor: "manager", expertTeam: { work: { lead: "product-owner", stages: work }, review } });
+  const planned = call(["create"], { ...scope, actor: "manager", expertTeam: { work: workPlan, review } });
   assert.equal(planned.revision, 1);
   assert.equal(planned.status, "draft");
+  assert.deepEqual(planned.history.filter((event: { action: string }) => event.action === "expert-plan").map((event: { text: string }) => event.text), [workPlan.reason, review.reason]);
   assert.deepEqual(call(["show", planned.id]).approvalRequirements, []);
   assert.equal(call(["approve", planned.id], { revision: planned.revision }).status, "ready");
   let revision = task.revision;
   const command = (name: string, input: object = {}, error?: string) => call([name, task.id], input, error);
   assert.deepEqual(command("show").approvalRequirements, ["work", "review"]);
   command("approve", { revision }, "EXPERT_PLAN_REQUIRED");
-  revision = command("expert-plan", { revision, lead: "product-owner", stages: work }).parent.revision;
+  revision = command("expert-plan", { revision, ...workPlan }).parent.revision;
   command("approve", { revision }, "EXPERT_PLAN_REQUIRED");
   revision = command("expert-plan", { revision, phase: "review", ...review }).parent.revision;
   revision = command("approve", { revision }).revision;
   const started = command("start", { revision }).task;
   revision = started.revision;
+  const loaded = command("expert-skill", { actor: "agent", expertId: "product-owner", skillId: "workflow" });
+  assert.match(loaded.content, /workflow/);
+  assert.deepEqual(command("show").history.at(-1).expertSkill, {
+    expertId: "product-owner", skillId: "workflow", name: loaded.name, source: "tool",
+  });
+  assert.equal(command("show").revision, revision);
+  const checked = command("checklist", { revision, index: 1, done: true });
+  assert.equal(checked.status, "in_progress");
+  assert.deepEqual(checked.subtasks.map((item: { done: boolean }) => item.done), [true, false]);
+  command("checklist", { revision, index: 2, done: true }, "REVISION_CONFLICT");
+  revision = checked.revision;
+  assert.equal(command("checklist", { revision, index: 1, done: true }).revision, revision);
   const report = (key: string, state: string, input: object = {}, error?: string) =>
     command("expert-stage", { revision, actor: "agent", phase: "work", key, state, ...input }, error);
   report("test", "running", {}, "EXPERT_DEPENDENCIES_INCOMPLETE");
@@ -206,7 +224,7 @@ test("one native specialist can finish multiple stages but cannot impersonate a 
   const task = f.run(store => {
     const task = store.create(createTask(store.allocateId(), { title: "Expert handoffs" }));
     const plan = createExpertPlan(store, task.id, {
-      revision: task.revision, lead: "product-owner",
+      revision: task.revision, lead: "product-owner", reason: "The owner coordinates the audit and checks its results.",
       stages: [brief("first"), brief("second"), brief("audit", "qa-engineer")],
     }).parent;
     return store.save({ ...plan, status: "in_progress" });

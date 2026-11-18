@@ -50,6 +50,7 @@ test("manager access defaults to auto and preserves old full-access choices per 
 
 test("an executor access request gets an independent manager decision scoped to its card", async () => {
   const task = { id: "T-0118", revision: 13, title: "Verify Electron", status: "in_progress", criteria: ["Run the UI check"] };
+  const evidence = { operation: "CreateWindowStationW", mxcError: 5, hostError: 0 };
   const grants: unknown[] = [];
   let answer = "";
   let calls = 0;
@@ -68,6 +69,7 @@ test("an executor access request gets an independent manager decision scoped to 
       calls++;
       assert.equal(JSON.parse(input).task.id, task.id);
       assert.match(JSON.parse(input).executorRequest, /install_dir_access\.cc/);
+      assert.deepEqual(JSON.parse(input).sandboxEvidence, evidence);
       assert.equal(options.tools.length, 0);
       assert.equal(options.finalAnswerSchema.properties.approved.type, "boolean");
       assert.match(options.instructions, /read-only shell does not limit that decision/);
@@ -75,7 +77,7 @@ test("an executor access request gets an independent manager decision scoped to 
     },
   });
   const args = { reason: "Required UI check fails with Electron install_dir_access.cc:52." };
-  const run = (input: unknown = args, signal = new AbortController().signal) => request("profile", "project", task.id, input, undefined, signal);
+  const run = (input: unknown = args, signal = new AbortController().signal) => request("profile", "project", task.id, input, undefined, signal, evidence);
   assert.equal((await run({ ...args, id: "T-9999" })).error.code, "INVALID_INPUT");
   assert.equal(calls, 0);
   answer = JSON.stringify({ approved: false, reason: "Use the scripted check." });
@@ -89,6 +91,7 @@ test("an executor access request gets an independent manager decision scoped to 
   const approved = await run();
   assert.equal(approved.data.approved, true);
   assert.equal(approved.data.appliesOn, "current-execution");
+  assert.deepEqual(approved.data.sandboxEvidence, evidence);
   assert.deepEqual(JSON.parse(JSON.stringify(grants)), [{ id: task.id, revision: task.revision, fullAccess: true }]);
 });
 

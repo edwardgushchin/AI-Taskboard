@@ -53,7 +53,7 @@ app.whenReady().then(async () => {
       '<p><a href="src/desktop/styles.css:582">styles.css</a></p>\n');
   } finally { smoke.destroy(); }
   window.webContents.on("console-message", details => {
-    if (details.level === "error") console.error("Renderer line " + details.lineNumber, details.message);
+    if (details.level === "error") console.error(details.message + " (renderer line " + details.lineNumber + ")");
   });
   const html = read("index.html").replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, "")
     .replace(/<link\b[^>]*>/g, "").replace(/<meta http-equiv="Content-Security-Policy"[^>]*>/, "");
@@ -81,8 +81,8 @@ app.whenReady().then(async () => {
     void 0;
   `);
   const evaluate = async (code, userGesture = false) => {
-    try { return await window.webContents.executeJavaScript(code, userGesture); }
-    catch (error) { throw new Error("Renderer check failed: " + code.trim().slice(0, 160), { cause: error }); }
+    try { return await window.webContents.executeJavaScript(code + "\n//# sourceURL=check-chat-evaluate.js", userGesture); }
+    catch (error) { throw new Error("Renderer check failed: " + code.trim().slice(0, 180), { cause: error }); }
   };
   const check = async (code, message) => assert.equal(await evaluate(code), true, message);
   const capture = async name => {
@@ -296,7 +296,12 @@ app.whenReady().then(async () => {
     document.querySelector('#welcome').hidden = true;
     body.replaceChildren(taskChat(taskInSheet));
     sheet.showModal();
-    const log = body.querySelector('.chat-log');
+    const taskDialogue = body.querySelector('.task-dialogue');
+    const log = body.querySelector('.task-work');
+    const showTaskChatView = view => body.querySelector('[aria-controls="task-chat-' + view + '"]').click();
+    showTaskChatView('work');
+  `);
+  await evaluate(`
     const savedLog = log.querySelector('.chat-run');
     const completedWork = savedLog.querySelector('.chat-work');
     const saved = completedWork.querySelector('.chat-run-body');
@@ -766,8 +771,8 @@ app.whenReady().then(async () => {
       statusRows()[1]?.includes('Задача принята T-0002') && statusRows()[2]?.includes('Задача запущена T-0003') &&
       manager.lastElementChild.matches('.chat-run-final');
   })()`, "confirmed status events stay visible and ordered even with the tool chronology collapsed");
-  await check(`(() => { const times = [...log.querySelectorAll('.chat-entry > time')];
-    return times.length > 2 && times.every(time => time.dateTime && /^\\d{2}:\\d{2}$/.test(time.textContent) && time.title === time.getAttribute('aria-label')) && !!log.querySelector('.chat-day');
+  await check(`(() => { const times = [...taskDialogue.querySelectorAll('.chat-entry > time'), ...log.querySelectorAll('.chat-entry > time')];
+    return times.length > 2 && times.every(time => time.dateTime && /^\\d{2}:\\d{2}$/.test(time.textContent) && time.title === time.getAttribute('aria-label')) && !!taskDialogue.querySelector('.chat-day');
   })()`, 'task messages use compact accessible times and preserve date dividers');
   await check(`log.querySelectorAll('.chat-work').length === 2 && log.querySelectorAll('.chat-work')[1].textContent.includes('Проверяю оформление обсуждения.')`, "discussion commentary folds above its final answer too");
   await check(`getComputedStyle(log).backgroundColor !== getComputedStyle(body).backgroundColor`, "chat restores its distinct theme background");
@@ -812,7 +817,7 @@ app.whenReady().then(async () => {
   await check(`log.scrollWidth <= log.clientWidth + 1 && row('cmd-1').querySelector('pre').scrollHeight > 0`, "expanded long commands stay inside the log");
   await capture("chat-expanded.png");
   // Open the actual attachment tile, using the existing viewer and supplied reference images.
-  await evaluate(`log.scrollTop = 0; log.querySelector('.chat-attachment').click()`);
+  await evaluate(`showTaskChatView('dialogue'); taskDialogue.scrollTop = 0; taskDialogue.querySelector('.chat-attachment').click()`);
   await check(`document.querySelector('.image-preview').open`, "clicking an attachment opens image preview");
   await evaluate(`new Promise(resolve => { const poll = () => document.querySelector('.image-preview-stage img:not([hidden])') ? resolve() : requestAnimationFrame(poll); poll(); })`);
   await check(`document.querySelector('.image-preview-stage img').naturalWidth > 0 &&
@@ -826,11 +831,12 @@ app.whenReady().then(async () => {
   await evaluate(`document.querySelector('.image-preview').close(); localization.select("en"); renderRunActivity(saved, activity)`);
   await check(`firstGroup().querySelector('.chat-run-label').textContent.includes('3 actions')`, "English activity labels are available");
   await evaluate(`const testDraft = chatDrafts.get('fixture' + String.fromCharCode(0) + 'T-0032');
-    testDraft.pending = 'replying'; testDraft.commentary = ['Live discussion update']; renderChatTurn(log, testDraft)`);
-  await check(`!log.querySelector('.chat-turn').hidden && log.querySelector('.chat-turn').textContent.includes('Live discussion update') && !log.querySelector('.chat-turn details')`, "discussion progress stays visible while replying");
-  await evaluate(`testDraft.pending = undefined; testDraft.commentary = []; renderChatTurn(log, testDraft);
-    updateChat({ project: 'fixture', id: 'T-0032', type: 'run', items: activity })`);
-  await check(`!live.hidden && !live.querySelector('.chat-work') && live.textContent.includes('Проверяю карточку')`, "live run chronology stays visible through the normal update handler");
+    testDraft.pending = 'replying'; testDraft.commentary = ['Live discussion update']; body.querySelector('.task-chat').updateDiscussion()`);
+  await check(`!taskDialogue.querySelector('.chat-turn').hidden && log.textContent.includes('Live discussion update') &&
+    !taskDialogue.textContent.includes('Live discussion update')`, "the dialogue shows its pending state and commentary appears in Work");
+  await evaluate(`testDraft.pending = undefined; testDraft.commentary = []; body.querySelector('.task-chat').updateDiscussion(); showTaskChatView('work');
+    body.querySelector('.task-chat').updateRun(activity)`);
+  await check(`!live.hidden && !live.querySelector('.chat-work') && live.textContent.includes('Проверяю карточку')`, "live run chronology stays visible in Work");
   await evaluate(`updateChat({ project: 'fixture', id: 'T-0032', type: 'run', items: [] }); body.replaceChildren(taskChat(taskInSheet))`);
   await check(`!body.querySelector('.chat-work').open && body.querySelector('.chat-run-final').textContent.includes('Готово.') && body.querySelector('.chat-run-live').hidden`, "reopening restores folded work and a visible final reply without duplicating the live log");
 
@@ -850,7 +856,8 @@ app.whenReady().then(async () => {
         text: JSON.stringify({ path, startedAtMs: 1, completedAtMs: 1 }) }));
     taskInSheet.history = [{ at: '2026-11-12T15:00:00Z', actor: 'agent', action: 'run-log', run: viewedImages }];
     body.replaceChildren(taskChat(taskInSheet));
-    const imageLog = body.querySelector('.chat-log');
+    showTaskChatView('work');
+    const imageLog = body.querySelector('.task-work');
     const imageWork = imageLog.querySelector('.chat-work');
     imageWork.open = true;
     imageWork.querySelector('.chat-run-group').open = true;
@@ -890,13 +897,13 @@ app.whenReady().then(async () => {
   await evaluate(`document.querySelector('.image-preview').close();
     body.replaceChildren(taskChat(taskInSheet));
     const restoredImages = body.querySelector('.chat-work'); restoredImages.open = true; restoredImages.querySelector('.chat-run-group').open = true;
-    updateChat({ project: 'fixture', id: 'T-0032', type: 'run', items: viewedImages });
+    body.querySelector('.task-chat').updateRun(viewedImages);
     const liveImages = body.querySelector('.chat-run-live'); liveImages.querySelector('.chat-run-group').open = true;
   `);
   await check(`body.querySelector('.chat-work').querySelectorAll('.chat-run-images').length === viewedImages.length && liveImages.querySelectorAll('.chat-run-images').length === viewedImages.length`, "reopening and live updates both retain every viewed image");
   await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
   await evaluate(`const retainedImageTile = liveImages.querySelector('.chat-attachment'); retainedImageTile.focus();
-    const readsBeforeUpdate = imageReads.length; updateChat({ project: 'fixture', id: 'T-0032', type: 'run', items: viewedImages });`);
+    const readsBeforeUpdate = imageReads.length; body.querySelector('.task-chat').updateRun(viewedImages);`);
   await check(`liveImages.querySelector('.chat-attachment') === retainedImageTile`, "stream updates retain image tiles");
   await check(`document.activeElement === retainedImageTile`, "stream updates retain image keyboard focus");
   await check(`imageReads.length === readsBeforeUpdate`, "stream updates do not repeat image reads");
@@ -919,6 +926,7 @@ app.whenReady().then(async () => {
     body.replaceChildren();
     section('Описание', mdLink);
     body.append(taskChat(taskInSheet));
+    showTaskChatView('dialogue');
     const descriptionLink = body.querySelector('.sheet-section a');
     const chatLink = [...body.querySelectorAll('.chat-entry a')].find(node => node.textContent === 'Подробная диагностика');
     const waitMarkdown = selector => new Promise((resolve, reject) => {
@@ -1088,7 +1096,7 @@ app.whenReady().then(async () => {
     rows[1].querySelector('summary').click();
     return { length: rows.length, build: rows[0].querySelector('.task-check-name').textContent,
       result: rows[0].querySelector('.task-check-status').textContent,
-      note: rows[0].querySelector('.task-check-note').textContent,
+      note: rows[0].querySelector('.task-check-detail').textContent,
       command: rows[1].querySelector('pre').textContent === savedCommand,
       initiallyClosed, opened: rows[1].open && rows[1].querySelector('pre').getBoundingClientRect().height > 0,
       exportCommand: rows[2].querySelector('pre').textContent,
@@ -1159,7 +1167,7 @@ app.whenReady().then(async () => {
   await check(`!body.querySelector('.task-details')`, "task card omits empty sections");
   await evaluate(`
     const previewTask = { ...sourceTask, id: 'T-0018', title: 'Карточка с большой историей', description: 'Описание из снимка' };
-    frame.board = { tasks: [previewTask], archived: [] };
+    frame.board = { tasks: [previewTask], archived: [], settings: {} };
     let taskRead = Promise.withResolvers();
     api.command = () => taskRead.promise;
     let pendingTask = showTask(previewTask.id);
@@ -1180,7 +1188,7 @@ app.whenReady().then(async () => {
     });
   `);
   await check(`body.textContent.includes('Актуальное описание') && !body.textContent.includes('Описание из снимка') &&
-    !!body.querySelector('.task-chat')`, "fresh task details replace the preview when retry completes");
+    !!byId('task-side').querySelector('.task-chat')`, "fresh task details replace the preview when retry completes");
   await evaluate(`
     taskRead = Promise.withResolvers();
     pendingTask = showTask(sourceTask.id);
@@ -1208,13 +1216,14 @@ app.whenReady().then(async () => {
     api.command = async () => ({ ok: true, data: closedTask });
     showTask(closedTask.id).then(() => true);
   `);
-  await check(`historyCalls === 0 && !body.querySelector('.chat-work')`, "a completed card reads Codex history only on request");
-  await evaluate(`const restoreRun = body.querySelector('.chat-header > button.button.quiet'); restoreRun.click(); void 0`);
-  await check(`!restoreRun.disabled && body.querySelector('.chat-header [role=status]').textContent.includes('Codex unavailable')`,
+  await check(`historyCalls === 0 && !byId('task-side').querySelector('.chat-work')`, "a completed card reads Codex history only on request");
+  await evaluate(`const historyChat = byId('task-side'); historyChat.querySelector('[aria-controls="task-chat-work"]').click();`);
+  await evaluate(`const restoreRun = historyChat.querySelector('.task-work button'); restoreRun.click(); void 0`);
+  await check(`!restoreRun.disabled && historyChat.querySelector('.task-work [role=status]').textContent.includes('Codex unavailable')`,
     "a history failure leaves the load action available");
   await evaluate(`restoreRun.click(); void 0`);
   await check(`(() => {
-    const log = body.querySelector('.chat-log');
+    const log = historyChat.querySelector('.task-work');
     const entries = [...log.querySelectorAll('.chat-coordination')];
     const run = log.querySelector('.chat-work');
     return historyCalls === 2 && !restoreRun.isConnected && !run.open &&
@@ -1235,7 +1244,10 @@ app.whenReady().then(async () => {
       return { ok: true };
     };
     const manager = draftComposer();
-    body.replaceChildren(manager);
+    sheet.close();
+    const workspaceWasHidden = byId('workspace').hidden;
+    byId('workspace').hidden = false;
+    byId('board-composer').replaceChildren(manager);
     const actionButton = manager.querySelector('.draft-send');
     manager.querySelector('.draft-input textarea').value = 'Проверь доску';
     manager.requestSubmit();
@@ -1316,7 +1328,8 @@ app.whenReady().then(async () => {
   await evaluate(`actionButton.click(); turn.promise.then(() => new Promise(resolve => requestAnimationFrame(() => resolve(true))))`);
   await check(`stopCallsForManager === 1 && actionButton.matches('[data-action="send"]') && !!actionButton.querySelector('.codicon-arrow-up')`,
     "the same manager button stops the reply and returns to send");
-  await evaluate(`manager.dispose()`);
+  await evaluate(`manager.dispose(); byId('board-composer').replaceChildren();
+    byId('workspace').hidden = workspaceWasHidden; sheet.showModal()`);
   // Use the production projection, also asserted at all request exits by the
   // orchestrator test. Observe added nodes, including ones removed before paint.
   const projection = spawnSync(process.env.TASKBOARD_CHECK_NODE, ['--input-type=module', '-e', `
@@ -1562,12 +1575,12 @@ app.whenReady().then(async () => {
     taskInSheet = { id: 'T-0067', createdAt: executorAt, status: 'in_progress', questions: [], attachments: [], history: [] };
     byId('sheet-title').textContent = 'T-0067 · Время исполнителя';
     body.replaceChildren(taskChat(taskInSheet));
-    updateChat({ project: frame.project, id: 'T-0067', type: 'run', items: [executorItem] });
+    showTaskChatView('work');
+    body.querySelector('.task-chat').updateRun([executorItem]);
   `);
   await check(`body.querySelector('[data-item="message:executor-message"] time')?.dateTime === executorAt`, 'ordinary executor commentary has time during streaming without dialogue context');
   await capture('executor-live.png');
   await evaluate(`
-    updateChat({ project: frame.project, id: 'T-0067', type: 'run', items: [] });
     executorItem.status = 'completed';
     taskInSheet.history = [{ action: 'run-log', actor: 'agent', at: '2026-11-14T22:05:00.000Z', durationMs: 360000,
       run: [executorItem, { ...executorItem, id: 'executor-final', phase: 'final_answer', text: 'Время исполнителя сохранено' }] }];

@@ -150,7 +150,7 @@ export function expertSkill(store: BoardStore, expertId: string, skillId: string
       return exists(resolve(path, decodeURIComponent(local))) ? match : "](" + new URL(target, sourceUrl).href + ")";
     });
   }
-  return { expertId, skillId, directory: path, sourceUrl,
+  return { expertId, skillId, name: skill.name, directory: path, sourceUrl,
     content: "Board skill context: board instructions and lifecycle take precedence. Upstream provider plugins, slash commands, hooks and external integrations are not installed. Use only the tools available in this task.\n\n" + content };
 }
 export function expertContext(store: BoardStore, keys: string[]) {

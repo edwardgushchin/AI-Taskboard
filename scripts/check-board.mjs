@@ -151,8 +151,9 @@ app.whenReady().then(async () => {
         text: JSON.stringify({ tool: 'wait', receiverThreadIds: [], agentsStates: {}, startedAtMs: 2000 }), status: 'completed' };
       const planned = task('T-0001', 'Expert plan', { status: 'draft', approvalRequirements: ['review'],
         executorFullAccess: true,
+        subtasks: [{ title: 'Verify keyboard focus', done: false }],
         result: { summary: 'Ready for QA', checks: ['JavaScript — passed, Node 24', 'Keyboard — failed. Focus leaves the form', 'Device — skipped'] },
-        expertTeam: { work: { lead: 'product-owner', stages: [completed] },
+        expertTeam: { work: { lead: 'product-owner', reason: 'The lead owns scope and QA owns verification.', stages: [completed] },
           review: { lead: 'qa-engineer', stages: [completed] } },
         expertStageStatus: { work: [{ ...completed, state: 'done', run: {
           state: 'done', agentId: 'child-session', result: 'Verified native output', outputs: { Proof: 'Evidence recorded' }
@@ -163,6 +164,7 @@ app.whenReady().then(async () => {
             run: [{ id: 'summary', type: 'reasoning', title: '', text: 'Saved work summary', status: 'completed' }] },
           { actor: 'agent', action: 'coordination', at: '2026-11-18T00:00:01Z', text: 'Hand off evidence', expertMessage: { from: 'work:verify', to: 'review:verify' } },
           { actor: 'agent', action: 'expert-stage', expertStageRun: { phase: 'work', key: 'verify', state: 'done' } },
+          { actor: 'agent', action: 'expert-skill', expertSkill: { source: 'plan', expertId: 'product-owner', skillId: 'workflow', name: 'Workflow' } },
           { actor: 'agent', action: 'run-log', run: [spawn, native, wait] },
         ],
       });
@@ -178,7 +180,8 @@ app.whenReady().then(async () => {
       void 0;
     `);
     await evaluate(`waitFor(() => body.querySelector('.expert-team'))`);
-    await check(`body.querySelector('.expert-team').textContent.includes('Verified native output') &&
+    await check(`body.querySelector('.expert-team').textContent.includes('The lead owns scope and QA owns verification.') &&
+      body.querySelector('.expert-team').textContent.includes('Verified native output') &&
       body.querySelector('.expert-team').textContent.includes('Evidence recorded')`, 'card renders the saved specialist result');
     await evaluate(`waitFor(() => body.querySelector('.expert-lead').textContent.includes('Product Owner'))`);
     await check(`(() => {
@@ -207,6 +210,7 @@ app.whenReady().then(async () => {
     await check(`byId('task-chat-work').checkVisibility() && byId('task-chat-input').closest('form').hidden &&
       /Current work summary/.test(byId('task-chat-work').textContent) && /Saved work summary/.test(byId('task-chat-work').textContent) &&
       byId('task-chat-work').textContent.includes('Verify outcomes · Завершён') &&
+      byId('task-chat-work').textContent.includes('Скил подготовлен для контекста · Workflow') &&
       !/Answer in dialogue|expert-stage/.test(byId('task-chat-work').textContent)`, 'work history names the stage and separates live activity from dialogue');
     await evaluate(`laneButton('team').click(); settle()`);
     await evaluate(`waitFor(() => byId('task-chat-team').querySelector('.expert-author')?.textContent === 'QA Engineer')`);
@@ -241,6 +245,11 @@ app.whenReady().then(async () => {
       }, status: 'completed', title: '', text: '' }], true);
       return !target.textContent.includes('AI Taskboard queue');
     })()`, 'historical automatic notice payload is hidden');
+    await check(`[...document.querySelectorAll('.task-stat')].some(stat => stat.textContent === '0/1')`, 'the task has one unchecked item');
+    await evaluate(`planned.status = 'in_progress'; planned.subtasks[0].done = true; planned.revision++; push(); settle()`);
+    await check(`[...document.querySelectorAll('.task-stat')].some(stat => stat.textContent === '1/1') &&
+      [...body.querySelectorAll('.task-state-label .codicon-check')].some(icon => icon.parentElement.textContent.includes('Verify keyboard focus'))`,
+    'a board update refreshes checklist progress while the task is open');
     window.setContentSize(710, 820);
     await evaluate(`settle()`);
     await check(`byId('task-side').getBoundingClientRect().top >= body.getBoundingClientRect().bottom`, 'on a narrow screen the chat moves below the card');
