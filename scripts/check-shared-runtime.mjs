@@ -218,7 +218,7 @@ if (!process.versions.electron) {
     await wait(async () => (await restarted.ask({ action: "frames" })).every(frame => frame.activeAgents.total === 0 && !frame.runningTasks.includes(tasks[5])), "dead owner and provider reclaimed");
     assert.equal(await restarted.ask({ action: "reserve", role: "executor" }), true); await restarted.ask({ action: "release", role: "executor" });
     record("PASS: launch failure releases slot; restart preserves living orphan; provider death reclaims slot");
-    cli(project, ["settings"], { taskLimits: { executor: 6, reviewer: 2 } });
+    cli(project, ["settings"], { taskLimits: { executor: 6, reviewer: 7 } });
     const makeCards = (name, review) => Array.from({ length: 7 }, (_, index) => {
       const task = cli(project, ["create"], { title: name + " " + index, criteria: ["Fixture completes"], workingDirectory: project });
       cli(project, ["approve", task.id]);
@@ -244,6 +244,18 @@ if (!process.versions.electron) {
     await wait(async () => (await readOrder()).every(view =>
       JSON.stringify(view.execution.slice(0, 6)) === JSON.stringify(executionPrefix) &&
       view.review[0] === "Review order 1" && view.review[1] === "Review order 0"), "active groups sorted before batch limit");
+    assert.ok(await b.ask({ action: "discussion", id: execution[6] }));
+    assert.ok(await restarted.ask({ action: "discussion", id: reviews[6] }));
+    await wait(async () => [...await b.ask({ action: "frames" }), ...await restarted.ask({ action: "frames" })].every(frame =>
+      frame.replyingTasks.includes(execution[6]) && frame.replyingTasks.includes(reviews[6])), "shared discussions in both columns");
+    await delay(1200); // Allow the fallback runtime poll to deliver the frame to the other renderers.
+    for (const view of await readOrder()) {
+      assert.deepEqual(view.execution.slice(0, 6), executionPrefix);
+      assert.deepEqual(view.review.slice(0, 2), ["Review order 1", "Review order 0"]);
+    }
+    await b.ask({ action: "endDiscussion" });
+    await restarted.ask({ action: "endDiscussion" });
+    record("PASS: standalone discussions in both columns stay below active execution, review and repair");
     assert.equal(await restarted.ask({ action: "orderFocusPreserved" }), true);
     assert.equal(await b.ask({ action: "orderDialogPreserved" }), true);
     if (output) await restarted.ask({ action: "screenshot", path: join(output, "active-order.png") });
@@ -258,6 +270,12 @@ if (!process.versions.electron) {
       await wait(async () => (await readOrder()).every(view => view.review[0] === "Review order 6"), "repeated review ends");
     }
     record("PASS: active-first ordering in both columns across processes, including repeat review, repair, multiple runs and idle order; focus, scroll and dialog preserved");
+    await restarted.ask({ action: "focusReviewMore" });
+    for (const id of reviews) assert.equal(await b.ask({ action: "reserve", role: "reviewer", task: "review:" + id }), true);
+    await wait(async () => (await readOrder()).every(view => view.review.length === reviews.length), "all review cards visible after activation");
+    assert.equal(await restarted.ask({ action: "reviewMoreFocusTransferred" }), true);
+    for (const id of reviews) await b.ask({ action: "release", role: "reviewer", task: "review:" + id });
+    record("PASS: when activity removes Show more, focus moves to a newly shown card without scrolling");
     if (output) { mkdirSync(output, { recursive: true }); await restarted.ask({ action: "screenshot", path: join(output, "shared-windows.png") }); writeFileSync(join(output, "shared-runtime.txt"), results.join("\n") + "\n"); }
   } catch (error) {
     if (output) { mkdirSync(output, { recursive: true }); writeFileSync(join(output, "failure.txt"), error.stack + "\n" + workers.map(worker => worker.logs).join("\n")); }
@@ -359,6 +377,27 @@ if (!process.versions.electron) {
         const titles = state => [...document.querySelectorAll('#lane-cards-' + state + ' .task-card-heading strong')].map(node => node.textContent);
         return { execution: titles('in_progress'), review: titles('review'), more: Boolean(document.querySelector('#lane-cards-in_progress .lane-more')) };
       })()`)));
+      if (command.action === "focusReviewMore") {
+        await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(`(() => {
+          const lane = document.querySelector('#lane-cards-review');
+          const more = lane.querySelector('.lane-more');
+          more.focus({ preventScroll: true });
+          const board = document.querySelector('#lanes');
+          board.scrollLeft = 80;
+          if (document.activeElement !== more || board.scrollLeft <= 0) throw Error("Show more focus fixture not set");
+          globalThis.reviewMoreFocus = { visible: new Set(lane.querySelectorAll('.task-card')), left: board.scrollLeft, top: board.scrollTop };
+        })()`);
+        data = true;
+      }
+      if (command.action === "reviewMoreFocusTransferred") {
+        data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(`(() => {
+          const board = document.querySelector('#lanes');
+          const card = document.activeElement;
+          return card.matches('#lane-cards-review > .task-card') && !reviewMoreFocus.visible.has(card) &&
+            !document.querySelector('#lane-cards-review .lane-more') &&
+            board.scrollLeft === reviewMoreFocus.left && board.scrollTop === reviewMoreFocus.top;
+        })()`);
+      }
       if (["focusOrder", "openOrderDialog", "orderFocusPreserved", "orderDialogPreserved"].includes(command.action)) {
         const win = BrowserWindow.getAllWindows()[0];
         if (command.action === "focusOrder") {

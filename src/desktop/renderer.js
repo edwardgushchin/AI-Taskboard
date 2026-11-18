@@ -1263,13 +1263,19 @@ function laneTools(state, title, tasks, total, count, content) {
       (!selected.size || task.tags.some(name => selected.has(tagKey(name)))));
     activeCount = 0;
     if (!manualBoard() && (state === "in_progress" || state === "review")) {
-      const active = new Set([...(frame.runningTasks ?? []), ...(frame.replyingTasks ?? []),
+      const active = new Set([...(frame.runningTasks ?? []),
         ...(state === "review" ? Object.keys(frame.reviewingTasks ?? {}) : [])]);
       matching.sort((a, b) => Number(active.has(b.id)) - Number(active.has(a.id)));
       activeCount = matching.filter(task => active.has(task.id)).length;
     }
+    const previous = document.activeElement === more ? new Set(content.children) : undefined;
     visibleLimit = Math.max(visibleLimit, activeCount, focusedCardPosition());
     renderBatch();
+    if (previous && !more.isConnected) {
+      const cards = [...content.querySelectorAll(":scope > .task-card")];
+      const next = cards.find(card => !previous.has(card)) ?? cards.at(-1) ?? summary;
+      next.focus({ preventScroll: true });
+    }
     scheduleLaneFit();
     const active = selected.size + Number(Boolean(priority.value));
     const label = matching.length === total ? String(total) : matching.length + t("ui.of_45303c22") + total;
