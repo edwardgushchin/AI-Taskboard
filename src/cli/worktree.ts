@@ -174,7 +174,9 @@ export function hasPending(store: BoardStore, task: Task, holdsStartLock = false
   const pending = object(readJson(path));
   if (pending.action === "start" && pending.restore === true) {
     if (!holdsStartLock && taskStartInProgress(store.location, task.id)) return true;
-    // The saved branch already identifies the task. Keep any checkout left by the interrupted start.
+    if (repo && task.git && (exists(join(isolatedRoot(repo), task.id)) ||
+        worktrees(repo.root).some(item => item.branch === task.git?.branch))) return true;
+    // With no checkout left behind, the saved branch already identifies the task.
     removeFile(path);
     return false;
   }
@@ -254,8 +256,29 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
     }
     const entries = worktrees(repo.root);
     const existing = findTaskWorktree(repo, task.git, entries);
+    if (existing && (existing.prunable || !exists(existing.path))) {
+      throw new TaskboardError("WORKTREE_MISSING", "Git still registers the task worktree at an unavailable path.", { path: existing.path });
+    }
     if (pending?.restore === true) {
-      // The task start lock proves the previous checkout has released its reservation.
+      if (existing) {
+        const { revision, target, base } = pending;
+        const managedPath = join(isolatedRoot(repo), task.id);
+        if (typeof revision !== "number" || target !== task.git.target ||
+            typeof base !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(base)) {
+          throw new TaskboardError("PENDING_OPERATION", "The interrupted worktree recovery does not match this task revision or target.");
+        }
+        if (revision === task.revision) {
+          const intent: StartIntent = { action: "start", revision, target, base, actor: boardActor(pending), restore: true };
+          return { id: task.id, repo, branch, managedPath, intent, preparing, lockWaitMs };
+        }
+        // A ready task may have been saved successfully just before removal of the intent was interrupted.
+        const last = task.history.findLast(event => event.action !== "coordination");
+        if (task.status !== "in_progress" || task.revision !== revision + 1 ||
+            last?.action !== "start" || last.from !== "ready" || !task.git.worktree ||
+            relative(managedPath, task.git.worktree) || relative(managedPath, existing.path) || existing.head !== base) {
+          throw new TaskboardError("PENDING_OPERATION", "The interrupted worktree recovery does not match this task revision or target.");
+        }
+      }
       removeFile(pendingPath);
       pending = undefined;
     }
@@ -266,9 +289,6 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
         base, actor: boardActor(input), restore: true };
       writeJson(pendingPath, intent);
       return { id: task.id, repo, branch, managedPath, intent, preparing, lockWaitMs };
-    }
-    if (existing.prunable || !exists(existing.path)) {
-      throw new TaskboardError("WORKTREE_MISSING", "Git still registers the task worktree at an unavailable path.", { path: existing.path });
     }
     const worktree = isolateTaskWorktree(store, repo, task.id, usableWorktree(existing));
     const updated = { ...task, git: { ...task.git, worktree } };
@@ -339,6 +359,15 @@ export function checkoutTaskWorktree({ id, repo, branch, managedPath, intent: { 
   const moved = [join(repo.root, ".tasks", "worktrees", id), join(repo.root, ".taskboard-worktrees", id), join(isolatedRoot(repo), id)].some(path => !relative(path, worktree));
   if (item?.head !== base || (!matches && (restore || !moved))) {
     throw new TaskboardError("WORKTREE_COLLISION", "The task worktree does not match the pending checkout.");
+  }
+  if (restore && existing) {
+    requireNoGitOperation(worktree);
+    // An interrupted Git command can leave a valid registration before populating the index and files.
+    if (gitStatus(worktree, "tracked")) {
+      throw new TaskboardError("WORKTREE_CHECKOUT_INCOMPLETE",
+        "The interrupted checkout could not be verified: tracked files or the index differ from the saved commit. Inspect and preserve local changes before completing the checkout and retrying.",
+        { path: worktree, head: base });
+    }
   }
   return { worktree, gitWorktreeAddMs };
 }
