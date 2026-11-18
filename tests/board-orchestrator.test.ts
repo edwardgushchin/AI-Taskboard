@@ -22,7 +22,7 @@ import { boardReviewMode, taskReviewMode, taskReviewModeVersion, codexThreadPatt
 import { managerInbox, needsManagerAttention } from "../src/cli/task-messages.ts";
 import type { RunActivity, Task } from "../src/cli/model.ts";
 import type { ChatSettings } from "../src/cli/model.ts";
-import { directory as storageDirectory, locateBoard, readBoardSettings, readJson, writeJson } from "../src/cli/storage.ts";
+import { directory as storageDirectory, locateBoard, onBoard, readBoardSettings, readJson, writeJson } from "../src/cli/storage.ts";
 import { registerRuntime, runtimeLocation, runtimeTransaction } from "../src/desktop/board-runtime.ts";
 import type { BoardGoal, BoardGoalAction, readBoardHistory } from "../src/desktop/codex-chat.ts";
 import { inspectProjectPath, projectSha256 } from "../src/desktop/project-files.ts";
@@ -143,7 +143,7 @@ function fixture(t: TestContext) {
     activateTab: (owner: { active: unknown }, tab: unknown) => { owner.active = tab; },
     launchingTasks: new Set(), runningTasks, chatRuns: new Map(), activeAgents, managerInbox, needsManagerAttention, subscriptions, reviewerTools,
     process, closingProjects: new Set(), setImmediate, setTimeout, clearTimeout, performance, console, agentSlots, wait,
-    russianWriting, isManual, manualContext, runtimeLocation, runtimeTransaction, readBoardSettings, settingsDelivery, syncSettingsNotices, automationDelivery,
+    russianWriting, isManual, manualContext, runtimeLocation, runtimeTransaction, onBoard, readBoardSettings, TaskboardError, settingsDelivery, syncSettingsNotices, automationDelivery,
     reviewWithCodex: async (_profile: string, cwd: string, settings: ChatSettings | null, context: string,
       tools: { name: string }[], call: RunAction, _signal: AbortSignal,
       onUsage: (report: import("../src/cli/token-usage.ts").TokenUsageReport) => Promise<void>) => {
@@ -227,6 +227,7 @@ function fixture(t: TestContext) {
       assert.deepEqual(Array.from(session.mcpTools, tool => tool.name).sort(),
         [...expectedTools.filter(name => (name !== "task_accept" || (mode !== "human" && mode !== "reviewer-human")) && (!instructions.includes("This turn repairs") || !["task_start", "task_start_batch", "task_accept", "task_request_changes"].includes(name))),
         ...(!manualTurn && !cleanupTurn && !instructions.includes("This turn repairs") ? ["task_return_to_draft"] : []),
+        ...(!manualTurn && !cleanupTurn && !reviewTurn && !instructions.includes("This turn repairs") && !prompt.startsWith("AI Taskboard queue:") ? ["board_set_auto_mode"] : []),
         ...(!manualTurn && !cleanupTurn && mode === "manager" ? ["expert_stage", "expert_verify_skills"] : []),
         ...(!reviewTurn && !cleanupTurn && !instructions.includes("This turn repairs") ? (session.goal || session.resumeGoal ? ["goal_inbox", "goal_report"] : ["goal_read", "goal_send"]) : []),
         ...(!reviewTurn && !manualTurn && !cleanupTurn && !session.goal && !session.resumeGoal &&
@@ -360,6 +361,9 @@ test("manual manager edits personal tasks but cannot launch or move them", async
     }
     const board = await act("board_list", {});
     assert.equal(board.data.boardType, "manual");
+    const autoMode = await act("board_set_auto_mode", { enabled: true, reason: "Try the automatic queue" });
+    assert.equal(autoMode.error.code, "MANUAL_BOARD");
+    assert.match(autoMode.error.message, /авторежим недоступен|automatic mode/i);
     assert.ok(board.data.statuses.some((s: { id: string }) => s.id === shown.data.status));
     return { text: "Week planned." };
   });
@@ -402,6 +406,9 @@ test("a goal controls the persistent automatic queue and receives live board cha
     const initial = await act("board_auto_queue", {});
     assert.equal(initial.ok, true, JSON.stringify(initial));
     assert.equal(initial.data.enabled, true);
+    assert.equal((await act("board_set_auto_mode", { enabled: false, reason: "Handle the backlog" })).data.enabled, false);
+    assert.equal((await act("board_auto_queue", {})).data.enabled, false);
+    assert.equal((await act("board_set_auto_mode", { enabled: true, reason: "Return dispatch to the board" })).data.enabled, true);
     const controlled = await act("board_auto_queue", { revision: initial.data.queue.revision, order: [second.id, first.id], hold: [first.id] });
     assert.equal(controlled.ok, true, JSON.stringify(controlled));
     queueRevision = controlled.data.queue.revision;
@@ -584,6 +591,7 @@ test("a board snapshot with auto-review on wakes the manager once per submitted 
     assert.deepEqual(Object.entries(activity()), [["T-0001", "manager"]]);
     assert.match(message, /automatic review.*T-0001/i);
     assert.equal((await act("task_create", { title: "Unrelated task" })).error.code, "INVALID_INPUT");
+    assert.equal((await act("board_set_auto_mode", { enabled: false, reason: "Review role" })).error.code, "INVALID_INPUT");
     assert.equal((await act("task_review", { id: "T-0002" })).error.code, "INVALID_INPUT");
     if (calls === 1) {
       goal.endTurn();
@@ -591,15 +599,16 @@ test("a board snapshot with auto-review on wakes the manager once per submitted 
     }
     return { text: "Waiting for human judgment." };
   };
-  const board = { project: join(f.folder, "project"), settings: { reviewMode: "human" },
+  const board = { project: join(f.folder, "project"), settings: { reviewMode: "human", autoMode: false },
     tasks: [{ id: "T-0001", status: "review", revision: 7, expertReviewPlanned: true }] };
   const watch = f.schedule(board, respond);
   activity = watch.reviewing;
   watch.tick();
   assert.equal(calls, 0);
   assert.deepEqual(Object.keys(watch.reviewing()), []);
-  await f.cli(["settings"], { reviewMode: "manager" });
+  await f.cli(["settings"], { reviewMode: "manager", autoMode: true });
   board.settings.reviewMode = "manager";
+  board.settings.autoMode = true;
   f.setRunning("T-0001", true);
   watch.tick();
   assert.equal(calls, 0);
@@ -611,6 +620,10 @@ test("a board snapshot with auto-review on wakes the manager once per submitted 
   assert.deepEqual(Object.keys(watch.reviewing()), []);
   assert.equal(calls, 0);
   releaseManager();
+  await f.cli(["settings"], { autoMode: false });
+  watch.tick();
+  assert.equal(calls, 0);
+  await f.cli(["settings"], { autoMode: true });
   watch.tick();
   watch.tick();
   await watch.done();
@@ -745,7 +758,7 @@ test("reviewers agree to submissions or return defects, and the manager controls
   git("commit", "--allow-empty", "-m", "Initial commit");
   await f.cli(["init"]);
   const model = { provider: "codex", model: "review-model", effort: "xhigh" };
-  await f.cli(["settings"], { reviewMode: "reviewer", reviewer: model });
+  await f.cli(["settings"], { reviewMode: "reviewer", autoMode: true, reviewer: model });
   await writeFile(join(project, ".git", "info", "exclude"), "\n/review.log\n", { flag: "a" });
   const tasks: Task[] = [];
   for (const name of ["pass", "fail", "hold-a", "hold-b", "queued"]) {
@@ -839,23 +852,9 @@ test("reviewers agree to submissions or return defects, and the manager controls
       evidence: [title === "pass" ? "Verified in submitted diff." : null] };
   });
   const { data: board } = await f.cli(["list", "--compact"]);
-  const notified = new Set<string>();
   f.busyDecisions.set("review-approve " + tasks[0].id, 2);
   f.busyDecisions.set("request-changes " + tasks[1].id, 2);
-  const handleApproval: Parameters<typeof f.schedule>[1] = async (act, prompt) => {
-    assert.match(prompt, /reviewer approved these submissions/i);
-    const messages = [];
-    for (const [, id, sequence] of prompt.matchAll(/(T-\d+) \((\d+)\)/g)) {
-      assert.ok(!notified.has(id));
-      const { data: review } = await act("task_review", { id });
-      assert.ok(review.reviewerApproval);
-      messages.push({ id, through: Number(sequence) });
-      notified.add(id);
-    }
-    assert.equal((await act("manager_ack", { messages: [...messages, { id: "T-9999", through: 1 }] })).error.code, "INVALID_INPUT");
-    assert.equal((await act("manager_ack", { messages })).ok, true);
-    return { text: "Integrate these submissions later." };
-  };
+  const handleApproval: Parameters<typeof f.schedule>[1] = async () => assert.fail("Unexpected automatic manager integration");
   const watch = f.schedule(board, handleApproval);
   f.setRunning(tasks[1].id, true);
   watch.tick();
@@ -931,7 +930,7 @@ test("reviewers agree to submissions or return defects, and the manager controls
   await watch.refresh();
   watch.tick();
   await watch.done();
-  assert.deepEqual([...notified], [approved.id]);
+  assert.equal((await f.cli(["show", approved.id])).data.status, "review");
   f.setRunning(tasks[4].id, true);
   const readReturnPrompt = "Read review feedback while waiting for another executor";
   const readReturn = await f.run(readReturnPrompt, async (act, prompt, images) => {
@@ -975,7 +974,10 @@ test("reviewers agree to submissions or return defects, and the manager controls
   await watch.refresh();
   watch.tick();
   await watch.done();
-  assert.deepEqual([...notified].sort(), [approved.id, repaired.id].sort());
+  await f.cli(["settings"], { autoMode: false });
+  watch.tick();
+  await watch.done();
+  assert.equal((await f.cli(["show", repaired.id])).data.status, "review");
   await watch.refresh();
   watch.tick();
   await watch.done();
@@ -1871,7 +1873,7 @@ test("a reviewer leaves gaps on review and wakes the waiting manager on approval
     return { text: "Awaiting human acceptance." };
   });
   assert.equal(manual.ok, true, JSON.stringify(manual.error));
-  assert.equal((await f.cli(["settings"], { autoReview: true })).ok, true);
+  assert.equal((await f.cli(["settings"], { autoReview: true, autoMode: true })).ok, true);
   assert.equal((await f.cli(["settings"])).data.reviewMode, "reviewer");
   let report = { summary: "The user must approve the result.", findings: [], evidence: ["Checked."] as (string | null)[], needsHuman: true, verifyRisk: false };
   const reviewModels: (ChatSettings | null | undefined)[] = [];

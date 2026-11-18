@@ -33,7 +33,7 @@ import type { CliReply } from "./cli.ts";
 import { executionModels } from "./codex-models.ts";
 import type { ArchiveLink, BoardSettings, BoardTag, ReviewMode, RunActivity, Task } from "../cli/model.ts";
 import { boardReviewMode, taskReviewMode, taskReviewModeVersion, codexThreadPattern, defaultBoardAgents, maxAttachmentBytes, reviewsAcceptanceRepair, reviewVerifier, taskIdPattern, TaskboardError, usesIndependentReviewer } from "../cli/model.ts";
-import { BoardStore, directory as storageDirectory, locateBoard, readBoardSettings, readJson, writeJson } from "../cli/storage.ts";
+import { BoardStore, directory as storageDirectory, locateBoard, onBoard, readBoardSettings, readJson, writeJson } from "../cli/storage.ts";
 import { applyDesktopAcceptance } from "../cli/acceptance.ts";
 import { missingCodexThread, startCodexRun } from "./codex-run.ts";
 import type { ExecutorTask } from "./codex-run.ts";
@@ -95,7 +95,6 @@ interface BoardWatch {
   board: Board;
   stop: () => void;
   reviewAttempts: Map<string, string>;
-  integrationAttempts: Map<string, number>;
   shared?: { runtime: string; context?: string; activity: string; queue: number; history: number; binding: number; unread: number };
   reviewReports: Map<string, ReviewedSubmission>;
   reviewerRuns: Map<string, Promise<void>>;
@@ -308,7 +307,7 @@ function subscribe(project: string, board: Board): BoardWatch {
   let stopped = false;
   let startedArchiveSweep = false;
   const watch: BoardWatch = {
-    tabs, board, listeners: new Set(), reviewAttempts: new Map(), integrationAttempts: new Map(),
+    tabs, board, listeners: new Set(), reviewAttempts: new Map(),
     reviewReports: readReviewReports(app.getPath("userData"), project), reviewerRuns: new Map(),
     stop: () => {
       stopped = true;
@@ -1156,7 +1155,8 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
   const planned = (task: Board["tasks"][number], settings: BoardSettings) => task.mergeRepair || task.expertStage ||
     (task.expertWorkPlanned && (task.schedule || taskReviewMode(task, settings) === "human" || task.expertReviewPlanned));
   const missingPlan = (task: Board["tasks"][number], settings: BoardSettings) => {
-    if (task.status === "review") return taskReviewMode(task, settings) !== "human" && !task.expertReviewPlanned &&
+    const mode = taskReviewMode(task, settings);
+    if (task.status === "review") return (settings.autoMode || mode === "reviewer-human") && mode !== "human" && !task.expertReviewPlanned &&
       !task.reviewPending && !task.reviewApproved && (!task.acceptanceRepair || reviewsAcceptanceRepair(task, settings));
     const controls = settings.autoMode ? settings.autoQueue : undefined;
     return task.status === "ready" && !controls?.paused && !controls?.held.includes(task.id) &&
@@ -1216,7 +1216,7 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
           if (review.data.stale) { failed(task.id + ": submission changed"); continue; }
           if (review.data.reviewerApproval?.targetHead !== review.data.targetHead) {
             if (!task.expertReviewPlanned) { queue.integrations.delete(attempt); return; }
-            const release = reserveAgent(project, "reviewer", "review:" + task.id);
+            const release = reserveAgent(project, "reviewer", "review:" + task.id, undefined, true);
             if (!release) { queue.integrations.delete(attempt); return; }
             watch.reviewerRuns.set(task.id, release.run(() => reviewSubmission(watch, task.id, 4)).finally(() => {
               watch.reviewerRuns.delete(task.id);
@@ -1271,7 +1271,7 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
             JSON.stringify(needsPlan.map(({ id, status, revision }) => ({ id, status, revision }))) : "");
         void runBoardRequest(tab.window.webContents, board, prompt, [], false, false, undefined, undefined, undefined, true)
           .then(result => {
-            if (!result.ok && ["BOARD_REQUEST_IN_PROGRESS", "MANAGER_LIMIT"].includes(result.error.code)) {
+            if (!result.ok && ["BOARD_REQUEST_IN_PROGRESS", "MANAGER_LIMIT", "BOARD_BUSY", "AUTO_MODE_DISABLED"].includes(result.error.code)) {
               for (const notice of noticeKeys) queue.notices.delete(notice);
             } else if (!result.ok) failed(result.error.message);
             else if (result.data?.error) failed(result.data.error);
@@ -1310,8 +1310,12 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
           return; // Retry on the next event/tick, never spin on the same snapshot.
         }
         if (task.launchRequested) { queue.launches.delete(attempt); failed(task.id + ": " + result.error.message); return; }
-        await callCli(project, ["block", task.id, "--compact"], { revision: task.revision, allowUnstarted: true,
-          reason: result.error.message, condition: t("ui.fix_the_launch_error_and_unblock_the_task_9eea19ab") });
+        const blocked = await callCli(project, ["block", task.id, "--compact"], { revision: task.revision, allowUnstarted: true,
+          reason: result.error.message, condition: t("ui.fix_the_launch_error_and_unblock_the_task_9eea19ab"),
+          autoMode: true, autoQueueRevision: controls?.revision ?? 0 });
+        if (!blocked.ok && ["AUTO_MODE_DISABLED", "AUTO_QUEUE_PAUSED", "AUTO_QUEUE_CHANGED"].includes(blocked.error.code)) {
+          queue.launches.delete(attempt);
+        }
       }
     }
   })().catch(error => failed((error as Error).message)).finally(() => { queue.running = false; });
@@ -1382,11 +1386,14 @@ function scheduleDraftDiscussions({ board }: BoardWatch) {
   }
 }
 
-function reserveAgent(project: string, role: AgentRole, task?: string, queuedRevision?: number) {
+function reserveAgent(project: string, role: AgentRole, task?: string, queuedRevision?: number, requiresAutoMode = false) {
   agentSlots.remember(project);
   // A tool call can race the watch snapshot after CLI settings were saved.
-  const overrides = readBoardSettings(runtimeLocation(project)).taskLimits;
-  const release = agentSlots.acquire(projectIdentity(project), role, overrides, task, queuedRevision);
+  const location = runtimeLocation(project);
+  const acquire = (settings: BoardSettings) => agentSlots.acquire(projectIdentity(project), role, settings.taskLimits, task, queuedRevision);
+  const release = requiresAutoMode
+    ? onBoard(location, store => store.index.settings.autoMode ? acquire(store.index.settings) : undefined)
+    : acquire(readBoardSettings(location));
   if (!release) return;
   return Object.assign((restart = false) => {
     release(restart);
@@ -1923,7 +1930,19 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     boardRequests.has(projectKey) || boardWorkRequests.has(projectKey);
   if (busy) return cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_agent_is_already_handling_a_request_72b4da49"));
   if (closingProjects.has(board.project)) return cliFailure("PROJECT_CLOSING", t("ui.the_project_is_closing_beb637fb"));
-  const writer = agentSlots.claim(board.project, context);
+  const claimWriter = () => agentSlots.claim(board.project, context);
+  let writer;
+  try {
+    writer = (autoNotice && board.settings.autoMode) || expectedReviewMode === "manager"
+      ? onBoard(runtimeLocation(board.project), store => {
+        if (!store.index.settings.autoMode) throw new TaskboardError("AUTO_MODE_DISABLED", "Automatic dispatch is disabled.");
+        return claimWriter();
+      })
+      : claimWriter();
+  } catch (error) {
+    if (error instanceof TaskboardError) return cliFailure(error.code, error.message);
+    throw error;
+  }
   if (!writer) return cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_agent_is_already_handling_a_request_72b4da49"));
   // Another window may have delivered, edited or removed the message before this claim.
   let queued: QueuedBoardMessage | undefined;
@@ -2211,8 +2230,10 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       "The goal handles its incoming executor and reviewer mail. Use board tools for the user's direct requests.");
     const reviewTaskTools = usesIndependentReviewer(reviewMode)
       ? new Set([...autoReviewTaskTools, "manager_ack", "task_cancel", "task_start"]) : autoReviewTaskTools;
+    const allowAutoModeChange = !background;
     const stages = hasMode("manager") ? phaseStageReporter(project, "review") : undefined;
     const mcpTools: BoardMcpTool[] = boardMcpTools.filter(({ name }) =>
+      (name !== "board_set_auto_mode" || allowAutoModeChange) &&
       (!["expert_stage", "expert_verify_skills"].includes(name) || hasMode("manager")) &&
       (!cleanupJob || ["board_list", "task_show", "task_cleanup_status", "task_cleanup", "project_path", "project_sha256"].includes(name)) &&
       (!isManual(settings.data) || ["expert_list", "expert_context", "expert_skill", "board_list", "task_show", "task_create", "task_update", "task_comment", "tag_set_color", "ask_user"].includes(name)) &&
@@ -2262,7 +2283,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       }, deliveredMessages, () => waitWork.signal, undefined, undefined,
       (id, revision) => id === managerReviewId
         ? Promise.resolve(cliFailure("CHAT_BUSY", "Return this task from its card or the manager chat after this automatic review ends."))
-        : returnTaskToDraft(board.project, id, revision, "manager"));
+        : returnTaskToDraft(board.project, id, revision, "manager"), allowAutoModeChange);
     const run = async (name: string, args: unknown): Promise<CliReply> => {
       try {
         if (name === boardReviewModeTool.name) {
@@ -2648,7 +2669,6 @@ function scheduleAutoReview(watch: BoardWatch) {
   const modeOf = (task: Task) => taskReviewMode(task, settings);
   if (tasks.every(task => modeOf(task) === "human")) {
     watch.reviewAttempts.clear();
-    watch.integrationAttempts.clear();
     if (watch.reviewReports.size) {
       watch.reviewReports.clear();
       saveReviewReports(project, watch.reviewReports);
@@ -2666,64 +2686,46 @@ function scheduleAutoReview(watch: BoardWatch) {
   for (const id of watch.reviewAttempts.keys()) {
     if (!submittedIds.has(id)) watch.reviewAttempts.delete(id);
   }
-  for (const id of watch.integrationAttempts.keys()) {
-    if (!submittedIds.has(id)) watch.integrationAttempts.delete(id);
-  }
   const projectKey = projectIdentity(project);
-  const overrides = watch.board.settings?.taskLimits;
+  const overrides = settings.taskLimits;
   const managerAvailable = agentSlots.available(projectKey, "manager", overrides) > 0 && !backgroundManagerRequests.has(projectKey);
   if (closingProjects.has(project)) return;
   const tab = [...watch.tabs].find(tab => !tab.window.isDestroyed());
   if (!tab) return;
-  const managerBatchSize = 4;
   const capacity = agentSlots.available(projectKey, "reviewer", overrides);
 
   const reviewAttempt = (task: Task & { reviewDecision?: number; reviewTargetHead?: string | null }) =>
     JSON.stringify([modeOf(task), taskReviewModeVersion(task, settings), task.revision, task.reviewDecision, task.reviewTargetHead]);
-  const ready = submissions.filter(task => modeOf(task) !== "human" && !task.reviewPending &&
+  const ready = submissions.filter(task => (settings.autoMode || modeOf(task) === "reviewer-human") &&
+    modeOf(task) !== "human" && !task.reviewPending &&
     (!task.acceptanceRepair || reviewsAcceptanceRepair(task, settings)) && !watch.reviewerRuns.has(task.id) &&
     task.expertReviewPlanned && (!usesIndependentReviewer(modeOf(task)) || !task.reviewApproved) &&
     watch.reviewAttempts.get(task.id) !== reviewAttempt(task) &&
     ((usesIndependentReviewer(modeOf(task)) && task.reviewHasCommit) || !executorBusy(project, task.id)));
   const independent = ready.filter(task => usesIndependentReviewer(modeOf(task))).slice(0, capacity);
-  for (const task of independent) watch.reviewAttempts.set(task.id, reviewAttempt(task));
-  let ids = independent.map(task => task.id);
-  let mode: ReviewMode = "reviewer";
-  let prompt: string;
-  {
-    for (const id of ids) {
-      const release = reserveAgent(project, "reviewer", "review:" + id);
-      if (!release) { watch.reviewAttempts.delete(id); continue; }
-      watch.reviewerRuns.set(id, release.run(() => reviewSubmission(watch, id, 4)).finally(() => {
-        watch.reviewerRuns.delete(id);
-        release();
-        publishReviewActivity(project);
-      }));
-    }
-    if (independent.length) publishReviewActivity(project);
-    if (settings.autoMode) scheduleAutoBoard(watch);
-    if (!managerAvailable) return;
-    const awaitingIntegration = new Set(settings.autoMode ? [] : submissions.filter(task => modeOf(task) === "reviewer" && task.reviewApproved).map(task => task.id));
-    const approvals = (watch.board.managerInbox ?? []).filter(({ id, kind, sequence }) =>
-      kind === "review-approve" && awaitingIntegration.has(id) && watch.integrationAttempts.get(id) !== sequence).slice(0, managerBatchSize);
-    for (const { id, sequence } of approvals) watch.integrationAttempts.set(id, sequence);
-    ids = approvals.map(({ id }) => id);
-    prompt = t("ui.ai_taskboard_the_reviewer_approved_these_submiss_7b01f774") + approvals.map(({ id, sequence }) => id + " (" + sequence + ")").join(", ");
+  for (const task of independent) {
+    const { id } = task;
+    const release = reserveAgent(project, "reviewer", "review:" + id, undefined, modeOf(task) !== "reviewer-human");
+    if (!release) continue;
+    watch.reviewAttempts.set(id, reviewAttempt(task));
+    watch.reviewerRuns.set(id, release.run(() => reviewSubmission(watch, id, 4)).finally(() => {
+      watch.reviewerRuns.delete(id);
+      release();
+      publishReviewActivity(project);
+    }));
   }
-  if (!ids.length && capacity > independent.length) {
-    const task = ready.find(task => modeOf(task) === "manager");
-    if (!task) return;
-    mode = "manager";
-    ids = [task.id];
-    watch.reviewAttempts.set(task.id, reviewAttempt(task));
-    prompt = t("ui.ai_taskboard_automatic_review_follow_the_board_s_d65f54d4") + ids.join(", ");
-  }
-  if (!ids.length) return;
+  if (independent.length) publishReviewActivity(project);
+  if (settings.autoMode) scheduleAutoBoard(watch);
+  if (!managerAvailable || capacity <= independent.length) return;
+  const task = ready.find(task => modeOf(task) === "manager");
+  if (!task) return;
+  watch.reviewAttempts.set(task.id, reviewAttempt(task));
+  const prompt = t("ui.ai_taskboard_automatic_review_follow_the_board_s_d65f54d4") + task.id;
   const failed = (error: string) => broadcastBoardChat(project, "orchestrator-review-error", { error });
-  void runBoardRequest(tab.window.webContents, watch.board, prompt, [], false, false, undefined, ids, mode).then(result => {
+  void runBoardRequest(tab.window.webContents, watch.board, prompt, [], false, false, undefined, [task.id], "manager").then(result => {
     if (!result.ok) {
-      if (["MANAGER_LIMIT", "REVIEWER_LIMIT", "BOARD_REQUEST_IN_PROGRESS"].includes(result.error.code)) {
-        for (const id of ids) { watch.reviewAttempts.delete(id); watch.integrationAttempts.delete(id); }
+      if (["MANAGER_LIMIT", "REVIEWER_LIMIT", "BOARD_REQUEST_IN_PROGRESS", "AUTO_MODE_DISABLED", "BOARD_BUSY"].includes(result.error.code)) {
+        watch.reviewAttempts.delete(task.id);
       } else if (result.error.code !== "REVIEW_MODE_CHANGED") failed(result.error.message);
     } else if (result.data?.error) failed(result.data.error);
   }).catch(error => failed((error as Error).message));

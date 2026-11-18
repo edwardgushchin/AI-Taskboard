@@ -25,7 +25,7 @@ function fixture(mode = "human") {
   const managers = new Map<string, any>(), dialogues = new Map<string, any>();
   const busy = new Map<string, () => void>();
   const launches: string[] = [], accepted: string[] = [], reviews: string[] = [], notices: any[] = [], calls: string[][] = [], errors: string[] = [];
-  let afterLaunch: (() => void) | undefined, beforeAccept: (() => void) | undefined, launchError: string | undefined;
+  let afterLaunch: (() => void) | undefined, beforeAccept: (() => void) | undefined, afterReviewRead: (() => void) | undefined, launchError: string | undefined;
   const fail = (code: string) => ({ ok: false, error: { code, message: code } });
   const runtime = runInNewContext(stripTypeScriptTypes(code) + "\n({scheduleAutoBoard, autoBoards})", {
     subscriptions: new Map([["project", watch]]), closingProjects: new Set(), boardWorkRequests: managers, boardRequests: dialogues,
@@ -33,7 +33,8 @@ function fixture(mode = "human") {
     isManual, nextReadyTask, taskReviewMode, taskReviewModeVersion, reviewsAcceptanceRepair, agentSlots: slots, projectIdentity: (path: string) => path,
     executorBusy: (_: string, id: string) => busy.has(id), t: (key: string) => localization.text(key, {}, "en"),
     broadcastBoardChat: (_: string, __: string, value: any) => errors.push(value.error),
-    reserveAgent: (_: string, role: "reviewer") => slots.acquire("project", role, board.settings.taskLimits),
+    reserveAgent: (_: string, role: "reviewer", _task: string, _revision: number | undefined, automatic: boolean) =>
+      automatic && !board.settings.autoMode ? undefined : slots.acquire("project", role, board.settings.taskLimits),
     publishReviewActivity: () => {},
     reviewSubmission: async (_: unknown, id: string) => {
       reviews.push(id);
@@ -50,9 +51,12 @@ function fixture(mode = "human") {
         return { ok: true, data: structuredClone(board) };
       }
       if (args[0] === "milestones") return { ok: true, data: { repository: "owner/repo", milestones: [{ number: 1, due_on: "2026-11-20T00:00:00Z" }] } };
-      if (args[0] === "review") return { ok: true, data: { revision: task.revision, targetHead: "target", stale: false,
+      if (args[0] === "review") {
+        afterReviewRead?.();
+        return { ok: true, data: { revision: task.revision, targetHead: "target", stale: false,
         reviewMode: taskReviewMode(task, board.settings), reviewModeVersion: taskReviewModeVersion(task, board.settings),
         reviewerApproval: { targetHead: task.approvalTarget ?? "target" } } };
+      }
       if (args[0] === "accept") {
         beforeAccept?.();
         if (!board.settings.autoMode || board.settings.reviewMode !== "reviewer") return fail("AUTO_MODE_DISABLED");
@@ -95,6 +99,7 @@ function fixture(mode = "human") {
   };
   return { board, watch, slots, launches, accepted, reviews, notices, calls, errors, tick, add, finish, managers,
     afterLaunch: (callback: () => void) => { afterLaunch = callback; }, beforeAccept: (callback: () => void) => { beforeAccept = callback; },
+    afterReviewRead: (callback: () => void) => { afterReviewRead = callback; },
     failLaunch: (code: string) => { launchError = code; } };
 }
 
@@ -319,6 +324,20 @@ test("a changed target is reviewed again, and missing evidence does not cause re
     assert.deepEqual(f.accepted, needsHuman ? [] : ["T-0001"]);
     assert.equal(f.board.tasks[0].status, needsHuman ? "review" : "done");
   }
+});
+
+test("switching off after reading stale approval prevents reviewer dispatch and allows it again on resume", async () => {
+  const f = fixture("reviewer");
+  f.add("T-0001", { status: "review", reviewApproved: true, approvalTarget: "old-target" });
+  f.afterReviewRead(() => { f.board.settings.autoMode = false; });
+  await f.tick();
+  assert.deepEqual(f.reviews, []);
+  assert.deepEqual(f.accepted, []);
+  f.afterReviewRead(() => {});
+  f.board.settings.autoMode = true;
+  await f.tick();
+  assert.deepEqual(f.reviews, ["T-0001"]);
+  assert.deepEqual(f.accepted, ["T-0001"]);
 });
 
 test("manual boards never dispatch or review even with stale automatic settings", async () => {
