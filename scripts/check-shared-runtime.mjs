@@ -33,6 +33,7 @@ if (!process.versions.electron) {
   const managerOnly = process.argv.includes("--manager-only");
   const hybridOnly = process.argv.includes("--reviewer-human-only");
   const recoveryOnly = process.argv.includes("--worktree-recovery-only");
+  const restartOnly = process.argv.includes("--task-restart-only");
   const outputIndex = process.argv.indexOf("--artifacts");
   const output = outputIndex < 0 ? undefined : resolve(process.argv[outputIndex + 1]);
   const workers = [], providerPids = new Set();
@@ -42,7 +43,9 @@ if (!process.versions.electron) {
   const project = join(scratch, "board"), other = join(scratch, "other");
   const record = text => { results.push(text); console.log(text); };
   const start = async name => {
-    const child = spawn(require("electron"), [script, "--worker", scratch, name, ...(hybridOnly ? ["--reviewer-human-only"] : [])], { cwd: scratch, env: { ...env, ELECTRON_LOG_FILE: join(scratch, name + "-electron.log") }, windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"] });
+    const child = spawn(require("electron"), [script, "--worker", scratch, name,
+      ...(hybridOnly ? ["--reviewer-human-only"] : []), ...(restartOnly ? ["--task-restart-only"] : [])],
+    { cwd: scratch, env: { ...env, ELECTRON_LOG_FILE: join(scratch, name + "-electron.log") }, windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"] });
     let logs = "", sequence = 0;
     const pending = new Map();
     child.stdout.on("data", data => { logs += data; }); child.stderr.on("data", data => { logs += data; });
@@ -69,6 +72,107 @@ if (!process.versions.electron) {
   };
   checks: try {
     symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), join(scratch, "node_modules"), process.platform === "win32" ? "junction" : "dir");
+    if (restartOnly) {
+      mkdirSync(project);
+      mkdirSync(other);
+      cli(other, ["init"], { git: false });
+      const git = (...args) => execFileSync("git", args, { cwd: project, env, windowsHide: true, encoding: "utf8" }).trim();
+      git("init", "-b", "main");
+      git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "Fixture");
+      cli(project, ["init"]);
+      for (const autoMode of [false, true]) {
+        cli(project, ["settings"], { autoMode: false, reviewMode: "human", taskLimits: { executor: 8, reviewer: 1 } });
+        const cards = ["Continue first", "Continue second", "Explicitly stopped", "Already blocked", "Already cancelled",
+          "Already submitted", "Missing worktree", "Missing chat"].map(title => {
+          const { id } = cli(project, ["create"], { title, criteria: ["Preserve previous results"] });
+          cli(project, ["approve", id]);
+          const { worktree } = cli(project, ["start", id]);
+          return { id, worktree, title };
+        });
+        const first = await start("restart-" + autoMode);
+        const bindings = new Map();
+        const show = id => cli(project, ["show", id, "--compact"]);
+        for (const { id, worktree } of cards) {
+          const launch = await first.ask({ action: "launch", id });
+          assert.equal(launch.ok, true, JSON.stringify(launch));
+          const thread = show(id).codexThreadId;
+          bindings.set(id, { cwd: worktree, thread });
+        }
+        const [primary, secondary, stopped, blocked, cancelled, submitted, missingTree, missingChat] = cards.map(card => card.id);
+        await first.ask({ action: "stop", id: stopped });
+        await wait(() => show(stopped).status === "blocked", "explicit stop persisted");
+        cli(project, ["block", blocked], { reason: "Fixture blocked", condition: "Manual decision required" });
+        cli(project, ["cancel", cancelled], { reason: "Fixture cancelled" });
+        const { token } = cli(project, ["preview", submitted]);
+        cli(project, ["submit", submitted], { token, noChanges: true, summary: "Prior result", checks: ["Fixture checked"] });
+        for (const id of [primary, secondary, missingTree, missingChat]) {
+          cli(project, ["progress", id], { summary: "Saved before restart", nextStep: "Continue fixture" });
+        }
+        writeFileSync(join(bindings.get(primary).cwd, "prior.txt"), "Preserved");
+        writeFileSync(join(scratch, "missing-chat"), bindings.get(missingChat).thread);
+        cli(project, ["settings"], { autoMode, taskLimits: { executor: 1, reviewer: 1 } });
+        const firstExit = once(first.child, "exit");
+        if (autoMode) first.child.kill();
+        else await first.ask({ action: "quit" });
+        await firstExit;
+        const runtime = JSON.parse(readFileSync(join(project, ".tasks", "runtime.json"), "utf8"));
+        assert.ok(runtime.some(entry => entry.task === primary && entry.restart && entry.kind === (autoMode ? "slot" : "queue")),
+          "interrupted execution must be durable: " + JSON.stringify(runtime.filter(entry => entry.task === primary)));
+        git("worktree", "remove", bindings.get(missingTree).cwd);
+        const restarted = await start(autoMode ? "restart-crashed" : "restart-false");
+        const frame = worker => worker.ask({ action: "frames" }).then(frames => frames[0]);
+        if (autoMode) {
+          await wait(async () => (await frame(restarted)).runningTasks.includes(primary), "live provider protected after desktop death");
+          assert.equal(await restarted.ask({ action: "executorBinding", id: primary }), undefined);
+          for (const pid of providerPids) { try { process.kill(pid); } catch {} }
+        }
+        if (!autoMode) {
+          assert.equal((await frame(restarted)).board.project, other);
+          await wait(() => restarted.ask({ action: "executorBinding", id: primary }), "executor resumes in restored background tab")
+            .catch(error => { throw Error(error.message + "\n" + JSON.stringify(show(primary)) + "\n" + restarted.logs); });
+          assert.equal(await restarted.ask({ action: "activateFixtureBoard" }), true);
+        }
+        const peer = await start("restart-peer-" + autoMode);
+        const owners = [restarted, peer];
+        await wait(async () => {
+          const snapshots = await Promise.all(owners.map(frame));
+          return snapshots.every(state => state.runningTasks.includes(primary) && state.waitingTasks.includes(secondary));
+        }, "one resumed executor and one waiting in both processes");
+        if (output && !autoMode) {
+          mkdirSync(output, { recursive: true });
+          await wait(async () => (await restarted.ask({ action: "dom" }))[0].waiting, "queue caption");
+          await restarted.ask({ action: "screenshot", path: join(output, "task-restart-queue.png") });
+        }
+        for (const id of [primary, secondary]) {
+          await wait(async () => (await Promise.all(owners.map(worker => worker.ask({ action: "canStop", id })))).some(Boolean),
+            "resumed executor reached its turn: " + id);
+          const seen = await Promise.all(owners.map(worker => worker.ask({ action: "executorBinding", id })));
+          assert.deepEqual(seen.filter(Boolean), [bindings.get(id)]);
+          const owner = owners[seen.findIndex(Boolean)];
+          await owner.ask({ action: "stop", id });
+          if (id === primary) await wait(async () => (await frame(restarted)).runningTasks.includes(secondary), "slot release drains queue");
+        }
+        await wait(() => show(missingTree).status === "blocked" && show(missingChat).status === "blocked", "specific recovery errors persisted");
+        assert.match(show(missingTree).blocked.reason, /WORKTREE_MISSING/);
+        assert.match(show(missingChat).blocked.reason, /no rollout found/);
+        for (const id of [missingTree, missingChat]) assert.equal(show(id).summary, "Saved before restart");
+        assert.equal(readFileSync(join(bindings.get(primary).cwd, "prior.txt"), "utf8"), "Preserved");
+        for (const [id, status] of [[stopped, "blocked"], [blocked, "blocked"], [cancelled, "cancelled"], [submitted, "review"]]) {
+          assert.equal(show(id).status, status);
+          for (const worker of owners) assert.equal(await worker.ask({ action: "executorBinding", id }), undefined);
+        }
+        record("PASS " + JSON.stringify({ autoMode, exit: autoMode ? "process kill, live provider, provider exit" : "app.quit with restored background tab",
+          limit: 1, bindings: [bindings.get(primary), bindings.get(secondary)], excluded: [stopped, blocked, cancelled, submitted],
+          blocked: [show(missingTree).blocked.reason, show(missingChat).blocked.reason], versions: await restarted.ask({ action: "versions" }) }));
+        for (const worker of owners) {
+          const exited = once(worker.child, "exit");
+          await worker.ask({ action: "exit" });
+          await exited;
+        }
+      }
+      if (output) writeFileSync(join(output, "task-restart-check.txt"), results.join("\n") + "\n");
+      break checks;
+    }
     if (recoveryOnly) {
       const git = (...args) => execFileSync("git", args, { cwd: project, env, windowsHide: true, encoding: "utf8" }).trim();
       mkdirSync(project);
@@ -436,7 +540,11 @@ if (!process.versions.electron) {
     await wait(async () => (await restarted.ask({ action: "frames" })).every(frame => frame.runningTasks.includes(tasks[5])), "restart sees orphan provider");
     assert.equal((await restarted.ask({ action: "launch", id: tasks[5] })).ok, false);
     for (const pid of providerPids) { try { process.kill(pid); } catch {} }
-    await wait(async () => (await restarted.ask({ action: "frames" })).every(frame => frame.activeAgents.total === 0 && !frame.runningTasks.includes(tasks[5])), "dead owner and provider reclaimed");
+    await wait(async () => Boolean(await restarted.ask({ action: "executorBinding", id: tasks[5] }) ||
+      await b.ask({ action: "executorBinding", id: tasks[5] })), "dead owner and provider reclaimed and continued");
+    await restarted.ask({ action: "stop", id: tasks[5] });
+    await b.ask({ action: "stop", id: tasks[5] });
+    await wait(async () => (await restarted.ask({ action: "frames" })).every(frame => frame.activeAgents.total === 0), "resumed provider stopped");
     assert.equal(await restarted.ask({ action: "reserve", role: "executor" }), true); await restarted.ask({ action: "release", role: "executor" });
     record("PASS: launch failure releases slot; restart preserves living orphan; provider death reclaims slot");
     cli(project, ["settings"], { taskLimits: { executor: 6, reviewer: 7 } });
@@ -558,6 +666,8 @@ if (!process.versions.electron) {
   const scratch = process.argv[3], name = process.argv[4], project = join(scratch, "board"), other = join(scratch, "other");
   app.setPath("userData", join(scratch, name)); app.setPath("appData", join(scratch, "app-data-" + name));
   app.disableHardwareAcceleration(); app.requestSingleInstanceLock = () => true;
+  const restartOnly = process.argv.includes("--task-restart-only");
+  if (restartOnly) dialog.showMessageBox = async () => ({ response: 1 });
   const runs = new Map(), leases = new Map(), pids = new Set(), providerRequests = new Map(); let failNext = false, providerSequence = 0;
   const executorBindings = new Map();
   let gitWindow;
@@ -605,24 +715,33 @@ if (!process.versions.electron) {
     await delay(3000);
     return { text: "Isolated manager fixture" };
   };
-  globalThis.runtimeCheckStart = async (_client, board, _cwd, task, _activity, _usage, _signal, beforeTurn) => {
+  globalThis.runtimeCheckStart = async (_client, board, _cwd, task, _activity, _usage, signal, beforeTurn, _profile, _recoveringThread, strict) => {
     if (failNext) { failNext = false; throw Error("Isolated provider launch failure"); }
+    if (restartOnly && existsSync(join(scratch, "missing-chat")) &&
+        task.codexThreadId === readFileSync(join(scratch, "missing-chat"), "utf8")) {
+      assert.equal(strict, true);
+      throw Error("no rollout found for thread id " + task.codexThreadId);
+    }
     executorBindings.set(task.id, { cwd: _cwd, thread: task.codexThreadId });
     const request = ++providerSequence;
     const pid = await new Promise(resolve => { providerRequests.set(request, resolve); process.send({spawnProvider: request}); });
     pids.add(pid);
     const provider = active.trackProvider(board, pid), finish = provider.run(() => active.trackActiveRun(board));
     const threadId = task.codexThreadId ?? ("10000000-0000-0000-0000-" + String(pid).padStart(12, "0"));
-    await beforeTurn(threadId);
+    const queued = await beforeTurn(threadId);
+    queued?.accepted("turn-" + pid);
+    const interrupt = () => { try { process.kill(pid); } catch {} };
+    signal?.addEventListener("abort", interrupt, { once: true });
     const completion = new Promise(resolve => {
       const timer = setInterval(() => {
         try { process.kill(pid, 0); } catch {
           clearInterval(timer); finish(); provider(); runs.delete(task.id);
+          signal?.removeEventListener("abort", interrupt);
           resolve({ interrupted: true, reason: "Isolated fixture finished" });
         }
       }, 50);
     });
-    const control = { threadId, completion, interrupt: async () => { try { process.kill(pid); } catch {} }, steer: async () => {} };
+    const control = { threadId, completion, interrupt, steer: async () => {} };
     runs.set(task.id, control); return control;
   };
   const sourceUrl = new URL("../src/desktop/main.ts", import.meta.url);
@@ -650,8 +769,12 @@ if (!process.versions.electron) {
   }
   source = source.replaceAll("import.meta.url", JSON.stringify(sourceUrl.href)).replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, sourceUrl).href));
   const entry = join(scratch, name + ".mjs");
-  writeFileSync(entry, transformSync(source + "\nglobalThis.sharedCheck = {createWindow,launchTask,agentSlots,reserveAgent,scheduleAgentWork,scheduleMaintenance,activeAgents,subscriptions};", { loader: "ts", format: "esm" }).code);
-  process.argv.push("--project", project);
+  writeFileSync(entry, transformSync(source + "\nglobalThis.sharedCheck = {createWindow,activateTab,windowStates,launchTask,agentSlots,reserveAgent,scheduleAgentWork,scheduleMaintenance,activeAgents,subscriptions};", { loader: "ts", format: "esm" }).code);
+  if (restartOnly && name === "restart-false") {
+    const profile = app.getPath("userData"), layout = join(profile, "project-tabs.json");
+    mkdirSync(profile, { recursive: true });
+    if (!existsSync(layout)) writeFileSync(layout, JSON.stringify([{ projects: [other, project], active: other }]));
+  } else process.argv.push("--project", project);
   require(entry);
   const ready = wait(async () => BrowserWindow.getAllWindows().length && BrowserWindow.getAllWindows()[0].webContents.executeJavaScript("window.taskboard?.bootstrap().then(frame => Boolean(frame.board) && !frame.loading)"), "initial window");
   process.on("message", async command => {
@@ -661,6 +784,14 @@ if (!process.versions.electron) {
       const qa = globalThis.sharedCheck; let data;
       const board = command.other ? other : project, key = command.role + (command.other ? ":other" : "") + (command.task ?? "");
       if (command.action === "ready") data = true;
+      if (command.action === "quit") setImmediate(() => app.quit());
+      if (command.action === "activateFixtureBoard") {
+        const owner = [...qa.windowStates.values()][0];
+        const tab = owner.tabs.find(tab => tab.project === project);
+        assert.ok(tab);
+        qa.activateTab(owner, tab);
+        data = true;
+      }
       if (command.action === "reviews") data = reviews;
       if (command.action === "confirmations") data = confirmations;
       if (command.action === "answerConfirmation") {

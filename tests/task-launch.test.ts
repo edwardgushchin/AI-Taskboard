@@ -15,7 +15,7 @@ import type { RunActivity, Task } from "../src/cli/model.ts";
 import { missingCodexThread } from "../src/desktop/codex-run.ts";
 import { createAgentSlots, parseAgentLimits } from "../src/desktop/agent-limits.ts";
 import type { DeferredExecutor } from "../src/desktop/board-runtime.ts";
-import { deferExecutor, linkQueuedExecutor, matchesQueuedExecutor, prepareQueuedTurn, runtimeEntries } from "../src/desktop/board-runtime.ts";
+import { deferExecutor, forgetExecutor, linkQueuedExecutor, matchesQueuedExecutor, prepareQueuedTurn, rememberExecutor, runtimeEntries } from "../src/desktop/board-runtime.ts";
 
 const source = readFileSync(new URL("../src/desktop/main.ts", import.meta.url), "utf8");
 const parsed = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, true);
@@ -71,6 +71,9 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "recovered
     readBoardSettings: (project: string) => savedSettings.get(project) ?? subscriptions.get(project)?.board.settings ?? {},
     scheduleMaintenance: async () => {}, scheduleAutoReview: () => {}, scheduleAutoBoard: () => {}, scheduleDraftDiscussions: () => {},
     projectIdentity: (project: string) => project, matchesQueuedExecutor,
+    rememberExecutor: (project: string, ...args: Parameters<typeof rememberExecutor> extends [string, ...infer Rest] ? Rest : never) =>
+      rememberExecutor(location(project), ...args),
+    forgetExecutor: (project: string, id: string) => forgetExecutor(location(project), id),
     prepareQueuedTurn: (project: string, ...args: [Task, string]) => prepareQueuedTurn(location(project), ...args),
     broadcastBoardChat: () => {}, boardRequests: new Map(), boardWorkRequests: new Map(),
     t: (key: string, parameters = {}) => localization.text(key, parameters, "en"), localization, cliFailure: failure, missingCodexThread,

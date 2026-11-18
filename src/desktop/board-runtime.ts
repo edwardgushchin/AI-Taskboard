@@ -20,6 +20,7 @@ export interface RuntimeEntry {
   revision?: number;
   linkedThread?: { revision: number; codexThreadId: string };
   turnRequest?: { threadId: string; clientId: string; turnId?: string };
+  restart?: { threadId: string; cwd: string };
   continuation?: { afterDisconnect?: boolean; withoutProgress?: boolean };
   queuedMessageId?: string;
   steeringMessageId?: string;
@@ -68,9 +69,38 @@ function liveEntries(entries: RuntimeEntry[]) {
       entry = entries.find(candidate => candidate.id === entry!.parent);
     }
   }
-  return entries.filter(entry => entry.kind === "defaults" || entry.kind === "queue" ? true : entry.kind === "provider"
+  const live = entries.filter(entry => entry.kind === "defaults" || entry.kind === "queue" ? true : entry.kind === "provider"
     ? providers.has(entry)
     : isAlive(entry.owner) || protectedIds.has(entry.id) || (entry.parent && protectedIds.has(entry.parent)));
+  const retained = new Set(live);
+  for (const entry of entries) if (!retained.has(entry)) queueRestart(live, entry);
+  return live;
+}
+
+function queueRestart(entries: RuntimeEntry[], slot: RuntimeEntry) {
+  const { task, revision, restart, continuation } = slot;
+  if (slot.kind !== "slot" || !task || revision === undefined || !restart ||
+      entries.some(entry => entry.kind === "queue" && entry.task === task)) return;
+  entries.push({ id: slot.id, kind: "queue", owner: 0, task, revision, restart, continuation });
+}
+
+export function rememberExecutor(project: string, task: QueuedTask, cwd: string, continuation: RuntimeEntry["continuation"]) {
+  runtimeTransaction(project, entries => {
+    const slot = entries.find(entry => entry.id === context.getStore() && entry.kind === "slot" && entry.role === "executor");
+    if (slot && task.status === "in_progress" && task.codexThreadId) {
+      slot.revision = task.revision;
+      slot.restart = { threadId: task.codexThreadId, cwd };
+      slot.continuation = continuation;
+    }
+  });
+}
+
+export function forgetExecutor(project: string, task: string) {
+  runtimeTransaction(project, entries => {
+    for (const entry of entries) if (entry.kind === "slot" && entry.task === task) delete entry.restart;
+    const index = entries.findIndex(entry => entry.kind === "queue" && entry.task === task);
+    if (index >= 0) entries.splice(index, 1);
+  });
 }
 
 export function runtimeTransaction<T>(project: string, action: (entries: RuntimeEntry[]) => T): T {
@@ -97,8 +127,9 @@ type QueuedTask = Pick<Task, "id" | "revision" | "status" | "codexThreadId">;
 
 export function matchesQueuedExecutor(entry: RuntimeEntry, task: QueuedTask) {
   return entry.kind === "queue" && entry.task === task.id && task.status === "in_progress" &&
-    (entry.revision === task.revision || (entry.linkedThread?.revision === task.revision &&
-      entry.linkedThread.codexThreadId === task.codexThreadId));
+    (entry.restart ? entry.restart.threadId === task.codexThreadId && (entry.revision ?? Infinity) <= task.revision
+      : entry.revision === task.revision || (entry.linkedThread?.revision === task.revision &&
+        entry.linkedThread.codexThreadId === task.codexThreadId));
 }
 
 export function linkQueuedExecutor(project: string, task: QueuedTask, updated: QueuedTask) {
@@ -161,9 +192,12 @@ export function registerRuntime(project: string, value: Omit<RuntimeEntry, "id" 
     return true;
   });
   if (!accepted) return;
-  const release = () => runtimeTransaction(project, entries => {
+  const release = (restart = false) => runtimeTransaction(project, entries => {
     const index = entries.findIndex(entry => entry.id === id);
-    if (index >= 0) entries.splice(index, 1);
+    if (index >= 0) {
+      const [entry] = entries.splice(index, 1);
+      if (restart) queueRestart(entries, entry);
+    }
   });
   return Object.assign(release, { run: <T>(callback: () => T) => context.run(id, callback) });
 }
