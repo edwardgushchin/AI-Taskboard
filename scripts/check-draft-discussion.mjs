@@ -150,6 +150,8 @@ try {
     assert.equal((question.match(/\?/g) ?? []).length, 1, question);
     assert.doesNotMatch(question, /(?:what|which)\s+(?:day|time|schedule)\b/i);
     const answer = "Use audits+north@example.invalid as the recipient. Please confirm the delivery time and recipient.";
+    await until(() => evaluate(`window.taskboard.bootstrap().then(f => !f.replyingTasks?.includes(${JSON.stringify(unresolved.id)}))`),
+      "released discussion writer before follow-up");
     const followup = await evaluate(`window.taskboard.chatSend(${JSON.stringify(unresolved.id)}, ${JSON.stringify({ ...execution, text: answer, files: [] })})`);
     assert.equal(followup.result.ok, true, JSON.stringify(followup));
     const confirmation = await waitAgent(unresolved.id, 2);
