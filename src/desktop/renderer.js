@@ -3185,6 +3185,52 @@ function draftComposer() {
   let restoredQueue;
   let refreshingQueue = false;
   let queueChanged = false;
+  let movingQueue = false;
+  let draggedJob;
+  let dropRow;
+  const canMove = job => !job.goal && !job.editing && !job.sending && !job.inFlight && queued.includes(job);
+  function clearQueueDrop() {
+    dropRow?.removeAttribute("data-queue-drop");
+    dropRow = undefined;
+  }
+  function queueDropTarget(event) {
+    const row = event.target.closest(".board-queued-row");
+    const target = queued.find(job => job.row === row);
+    if (!draggedJob || !canMove(draggedJob) || !target || target === draggedJob || !canMove(target)) return;
+    const bounds = row.getBoundingClientRect();
+    return { target, after: event.clientY >= bounds.top + bounds.height / 2 };
+  }
+  queue.addEventListener("dragover", event => {
+    clearQueueDrop();
+    const drop = queueDropTarget(event);
+    if (!drop) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    dropRow = drop.target.row;
+    dropRow.dataset.queueDrop = drop.after ? "after" : "before";
+  });
+  queue.addEventListener("dragleave", event => {
+    if (!queue.contains(event.relatedTarget)) clearQueueDrop();
+  });
+  queue.addEventListener("drop", event => {
+    const drop = queueDropTarget(event);
+    clearQueueDrop();
+    if (!drop) return;
+    event.preventDefault();
+    void moveQueueJob(draggedJob, drop.target, drop.after);
+  });
+  async function moveQueueJob(job, target, after) {
+    if (disposed || movingQueue || !canMove(job) || (target && !canMove(target))) return;
+    movingQueue = true;
+    try {
+      await queueStorage(target ? "move" : "promote", job.id, target?.id, after);
+    } catch (error) {
+      if (!disposed) message(error.message);
+    } finally {
+      movingQueue = false;
+      editor.refreshQueue();
+    }
+  }
   editor.refreshQueue = () => {
     if (disposed) return;
     queueChanged = true;
@@ -3208,22 +3254,39 @@ function draftComposer() {
       for (const job of [...queued]) {
         if (job.id && !ids.has(job.id) && !job.sending && !job.editing) removeWork(job);
       }
-      for (const { id, draft, goal, files, failed = false } of jobs) {
+      for (const { id, draft, goal, files, failed = false, inFlight } of jobs) {
         if (active?.id === id) continue;
         const job = queued.find(job => job.id === id);
         if (!job) {
-          enqueue(id, draft, goal, files.map(file => file.link ? { ...file, size: file.link.size } : new File([file.bytes], file.name, { type: file.type })), failed);
-        } else if (!job.editing && !job.sending) {
+          enqueue(id, draft, goal, files.map(file => file.link ? { ...file, size: file.link.size } : new File([file.bytes], file.name, { type: file.type })), failed, inFlight);
+          continue;
+        }
+        const changedFlight = job.inFlight !== inFlight;
+        job.inFlight = inFlight;
+        if (!job.editing && !job.sending) {
           if (draft !== job.draft) {
             job.draft = draft;
             job.request = draft.trim();
             updateQueuedPreview(job);
           }
-          if (failed !== job.failed) {
+          if (failed !== job.failed || changedFlight) {
             job.failed = failed;
             renderQueuedActions(job);
           }
         }
+      }
+      const positions = new Map(jobs.map(({ id }, index) => [id, index]));
+      const position = job => job.id ? positions.get(job.id) ?? jobs.length : -1;
+      queued.sort((left, right) => position(left) - position(right));
+      const focused = document.activeElement;
+      let row = queue.firstElementChild;
+      for (const job of queued) {
+        if (!job.row) continue;
+        if (row === job.row) row = row.nextElementSibling;
+        else queue.insertBefore(job.row, row);
+      }
+      if (focused?.isConnected && queue.contains(focused) && document.activeElement !== focused) {
+        focused.focus({ preventScroll: true });
       }
     }).catch(error => {
       restoredQueue = undefined;
@@ -3235,6 +3298,14 @@ function draftComposer() {
   function renderQueuedActions(job) {
     const { status } = job;
     status.replaceChildren();
+    if (job.handle) {
+      job.handle.draggable = !job.inFlight;
+      job.handle.setAttribute("aria-disabled", String(Boolean(job.inFlight)));
+    }
+    if (job.inFlight) {
+      status.append(element("span", () => t("ui.sending_15dba7c5")));
+      return;
+    }
     if (job.failed) status.append(element("span", () => t("ui.not_sent_28bb3764"), "board-queued-failed"));
     if (job.failed) status.append(button(() => t("ui.retry_553b2066"), async () => {
       await loadHistory()?.catch(() => {});
@@ -3328,14 +3399,7 @@ function draftComposer() {
       await loadHistory()?.catch(() => {});
       if (disposed || !queued.includes(job) || job.sending || job.editing) return;
       if (active) return sendQueuedNow(job);
-      queued.splice(queued.indexOf(job), 1);
-      queued.unshift(job);
-      if (job.failed) {
-        try { await queueStorage("retry", job.id); }
-        catch (error) { message(error.message); return; }
-      }
-      job.failed = false;
-      sendNext();
+      await moveQueueJob(job);
       return;
     }
     sendingQueuedMessage = true;
@@ -3436,7 +3500,8 @@ function draftComposer() {
   };
   function sendWorkNext() {
     const next = queued.find(job => job.goal);
-    if (disposed || queueRetry || managerBusy || active || startingWork || !next || next.failed || next.editing || next.sending) return;
+    if (disposed || refreshingQueue || movingQueue || queueRetry || managerBusy || active || startingWork ||
+        !next || next.failed || next.editing || next.sending || next.inFlight) return;
     startingWork = true;
     next.sending = true;
     bindLocalized(next.status, "textContent", () => t("ui.starting_39fd3c7e"));
@@ -3445,6 +3510,10 @@ function draftComposer() {
       const submitted = await pasteFiles(next.submitted);
       if (disposed) return;
       const result = await api.boardRequest(next.request, submitted, project, next.goal, false, next.id);
+      if (!result.ok && result.error.code === "BOARD_QUEUE_CHANGED") {
+        editor.refreshQueue();
+        return;
+      }
       if (!result.ok && result.error.code === "BOARD_REQUEST_IN_PROGRESS") {
         renderQueuedActions(next);
         retryQueue();
@@ -3491,9 +3560,10 @@ function draftComposer() {
     }, 1000);
   }
   function sendNext() {
+    if (refreshingQueue || movingQueue) return;
     sendWorkNext();
     const next = queued.find(job => !job.goal && !job.failed);
-    if (disposed || queueRetry || managerBusy || startingWork || active || sendingQueuedMessage || !next || next.editing || next.sending) return;
+    if (disposed || queueRetry || managerBusy || startingWork || active || sendingQueuedMessage || !next || next.editing || next.sending || next.inFlight) return;
     queued.splice(queued.indexOf(next), 1);
     const { request, goal, submitted } = next;
     next.row?.remove();
@@ -3502,11 +3572,16 @@ function draftComposer() {
     const { container, thinking } = turn;
     let accepted = false;
     let deferred = false;
+    let orderChanged = false;
     void (async () => {
       void loadHistory()?.catch(() => {});
       const pasted = await pasteFiles(submitted);
       if (disposed) return;
       const result = await api.boardRequest(request, pasted, project, goal, false, next.id);
+      if (!result.ok && result.error.code === "BOARD_QUEUE_CHANGED") {
+        orderChanged = deferred = true;
+        return;
+      }
       if (!result.ok && result.error.code === "BOARD_REQUEST_IN_PROGRESS") {
         deferred = true;
         retryQueue();
@@ -3552,7 +3627,8 @@ function draftComposer() {
       renderQueuedActions(next);
       entry.remove();
       queue.prepend(next.row);
-      sendNext();
+      if (orderChanged) editor.refreshQueue();
+      else sendNext();
     });
   }
   editor.addEventListener("submit", async event => {
@@ -3596,8 +3672,9 @@ function draftComposer() {
   function updateQueuedPreview(job) {
     job.preview.textContent = job.request.replace(/\s+/g, " ") || job.messageFiles.map(file => file.name).join(", ");
     job.preview.title = job.preview.textContent.slice(0, 180);
+    if (job.handle) controlLabelForIcon(job.handle, () => t("ui.reorder_queued_message", { message: job.preview.title }));
   }
-  function enqueue(id, draft, goal, submitted, failed = false) {
+  function enqueue(id, draft, goal, submitted, failed = false, inFlight = false) {
     const request = draft.trim();
     const messageFiles = submitted.map(file => {
       if (!previewSource(file)) return { name: file.name, size: file.size, link: file.link };
@@ -3607,7 +3684,8 @@ function draftComposer() {
     });
     const row = element("div", undefined, "board-queued-row");
     row.setAttribute("role", "listitem");
-    row.append(icon(goal ? "target" : "tasklist"));
+    const handle = goal ? undefined : element("button", undefined, "button quiet board-queue-handle");
+    row.append(handle ?? icon("target"));
     const images = messageFiles.filter(file => file.url);
     if (images.length) {
       const thumbnail = button("", () => previewImages(images, images[0]), "quiet board-queued-thumbnail");
@@ -3625,8 +3703,33 @@ function draftComposer() {
     const status = element("div", undefined, "board-queued-status");
     row.append(preview, status);
     queue.append(row);
-    const job = { id, row, preview, status, draft, request, goal, submitted, messageFiles, failed };
+    const job = { id, row, preview, status, handle, draft, request, goal, submitted, messageFiles, failed, inFlight };
     queued.push(job);
+    if (handle) {
+      handle.type = "button";
+      handle.setAttribute("aria-keyshortcuts", "ArrowUp ArrowDown");
+      handle.append(icon("gripper"));
+      handle.addEventListener("dragstart", event => {
+        if (!canMove(job) || movingQueue) { event.preventDefault(); return; }
+        draggedJob = job;
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", job.id);
+        event.dataTransfer.setDragImage(row, 12, row.offsetHeight / 2);
+      });
+      handle.addEventListener("dragend", () => {
+        draggedJob = undefined;
+        clearQueueDrop();
+      });
+      handle.addEventListener("keydown", event => {
+        if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+        event.preventDefault();
+        const pending = queued.filter(canMove);
+        const index = pending.indexOf(job);
+        const after = event.key === "ArrowDown";
+        const target = pending[index + (after ? 1 : -1)];
+        if (index >= 0 && target) void moveQueueJob(job, target, after);
+      });
+    }
     updateQueuedPreview(job);
     renderQueuedActions(job);
   }
