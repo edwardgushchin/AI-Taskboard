@@ -40,7 +40,7 @@ import { expertContext, expertSkill, listExperts, readExpert, saveExpert } from 
 import { approvalRequirements, createExpertPlan, expertStagesStatus, planNewTask, requireApprovalPlan, requireExpertPlan, requireExpertResults, reviewDecisionSequence, sendTeamMessage, taskExpertPhase, teamInbox, updateExpertStage } from "./expert-team.ts";
 import { syncTaskStatusNotices } from "../desktop/manager-history.ts";
 import { syncSettingsNotices } from "../desktop/settings-notices.ts";
-import { deferExecutor, linkQueuedExecutor, matchesQueuedExecutor, registerRuntime, runtimeEntries, runtimeTransaction } from "../desktop/board-runtime.ts";
+import { deferExecutor, forgetExecutor, linkQueuedExecutor, matchesQueuedExecutor, registerRuntime, runtimeEntries } from "../desktop/board-runtime.ts";
 
 const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "checklist", "pause", "block", "resume", "unblock", "update"]);
 const help = [
@@ -736,6 +736,7 @@ function run(
   }
   if (command === "submit") {
     const submitted = submitTask(store, task, input);
+    forgetExecutor(store.location.root, id);
     return filters.compact ? taskReceipt(submitted) : submitted;
   }
   if (command === "accept") return applyAcceptance(store, task, input);
@@ -744,7 +745,9 @@ function run(
     if (draft !== task && hasPending(store, task, true)) {
       throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before returning the task to draft.");
     }
-    return draft === task ? task : isArchived(store, id) ? reactivateArchivedTask(store, draft) : store.save(draft);
+    const saved = draft === task ? task : isArchived(store, id) ? reactivateArchivedTask(store, draft) : store.save(draft);
+    forgetExecutor(store.location.root, id);
+    return saved;
   }
   if (hasPending(store, task)) {
     throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before modifying the task.");
@@ -802,12 +805,13 @@ function run(
         transferred: text(input.transferred, "transferred", true) };
     }
     const cancelled = store.save(updated);
-    deferExecutor(store.location.root, id);
+    forgetExecutor(store.location.root, id);
     return cancelled;
   }
   if ((command === "update" || command === "unblock") && input.dependencies !== undefined) validateDependencies(store, updated);
   const saved = store.save(command === "request-changes" && input.actor === "reviewer" ? withReviewerUsage(updated) :
     command === "update" && input.tags !== undefined ? assignTags(store, updated) : updated);
+  if (task.status === "in_progress" && saved.status !== "in_progress") forgetExecutor(store.location.root, id);
   if (!filters.compact) return saved;
   if (command === "checklist") return { id: saved.id, status: saved.status, revision: saved.revision, subtasks: saved.subtasks };
   if (input.launchDetails === true && ["request-changes", "resume", "update"].includes(command)) return taskLaunchState(saved);
@@ -838,11 +842,12 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
           isMergeRepair(task) || task.acceptanceRepair)) {
         throw new TaskboardError("INVALID_INPUT", "Only manual executor starts can be queued.");
       }
-      const isQueued = () => runtimeEntries(location.root).some(entry => matchesQueuedExecutor(entry, task));
-      if (enqueue && isQueued()) {
+      const queued = (enqueue || input.queuedExecutor === true)
+        ? runtimeEntries(location.root).find(entry => matchesQueuedExecutor(entry, task)) : undefined;
+      if (enqueue && queued) {
         return { started: { task: taskLaunchState(task) } };
       }
-      if (input.queuedExecutor === true && !isQueued()) {
+      if (input.queuedExecutor === true && !queued) {
         throw new TaskboardError("INVALID_TRANSITION", "The queued start is no longer pending.");
       }
       if (input.autoMode === true && !store.index.settings.autoMode) {
@@ -862,7 +867,7 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
       if (task.status !== "in_progress" && input.resolveConflicts === true) {
         return { started: reply(store, reopenConflictingReview(store, task, input)) };
       }
-      const result = prepareTaskStart(store, task, input, startLockWaitMs + lockWaitMs, enqueue);
+      const result = prepareTaskStart(store, task, input, startLockWaitMs + lockWaitMs, enqueue, queued?.restart?.cwd);
       if ("task" in result && task.status === "in_progress") enqueue?.(result.task);
       return "task" in result ? { started: reply(store, result) } : { checkout: result };
     });
@@ -1019,10 +1024,6 @@ async function main() {
           try {
             data = withTaskStartLock(location, id, () => onBoard(location,
               (store, lockWaitMs) => run(store, command, id, extra, input, values, lockWaitMs)));
-            runtimeTransaction(location.root, entries => {
-              const index = entries.findIndex(entry => entry.kind === "queue" && entry.task === id);
-              if (index >= 0) entries.splice(index, 1);
-            });
           } finally { release(); }
         } else if (command === "accept") {
           if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");

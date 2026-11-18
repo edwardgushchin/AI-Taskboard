@@ -214,7 +214,7 @@ function saveStart(store: BoardStore, task: Task, lockWaitMs: number, prepareMs:
 }
 
 export function prepareTaskStart(store: BoardStore, task: Task, input: Record<string, unknown>, lockWaitMs: number,
-  beforeSave?: (task: Task) => void): StartedTask | TaskCheckout {
+  beforeSave?: (task: Task) => void, restartCwd?: string): StartedTask | TaskCheckout {
   const preparing = performance.now();
   const save = (card: Task) => saveStart(store, card, lockWaitMs, Math.round(performance.now() - preparing), undefined, boardActor(input), beforeSave);
   requireState(task, ["ready", "in_progress"]);
@@ -247,6 +247,9 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
       throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted operation before starting.");
     }
     const cwd = taskWorkingDirectory(task.workingDirectory, true);
+    if (restartCwd && relative(restartCwd, cwd)) {
+      throw new TaskboardError("WORKTREE_MISSING", "The previous execution directory is no longer assigned: " + restartCwd);
+    }
     return { task: task.status === "in_progress" && task.discussionReturn === undefined ? task : save(task), cwd };
   }
   const branch = worktreeBranch(task);
@@ -267,6 +270,9 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
     }
     const entries = worktrees(repo.root);
     const existing = findTaskWorktree(repo, task.git, entries);
+    if (restartCwd && (!existing || existing.prunable || !exists(existing.path) || relative(restartCwd, existing.path))) {
+      throw new TaskboardError("WORKTREE_MISSING", "The previous execution worktree is unavailable: " + restartCwd);
+    }
     if (existing && (existing.prunable || !exists(existing.path))) {
       throw new TaskboardError("WORKTREE_MISSING", "Git still registers the task worktree at an unavailable path.", { path: existing.path });
     }
