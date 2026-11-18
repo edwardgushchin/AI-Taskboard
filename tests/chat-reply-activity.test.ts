@@ -68,7 +68,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
     taskChatActions: (project: string, card: typeof task, text: string, changed: () => void, callback: any) =>
       taskChatActions(project, structuredClone(card), text, changed, callback),
     maxAttachmentBytes: 64 * 1024 * 1024,
-    callCli: async (_project: string, args: string[], input: { actor?: string; text?: string; model?: string; effort?: string; replyTo?: number; revision?: number; reason?: string }) => {
+    callCli: async (_project: string, args: string[], input: { actor?: string; text?: string; model?: string; effort?: string; replyTo?: number; revision?: number; reason?: string; retryAt?: number }) => {
       if (args[0] === "review") return { ok: true, data: { revision: task.revision, targetHead: null, settings: { reviewMode: "human" } } };
       if (args[0] === "request-changes") {
         if (options.returnFailure) return { ok: false, error: { code: "STORAGE_ERROR" } };
@@ -79,6 +79,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
         task.discussionReturn = task.revision;
       }
       if (args[0] === "attachment") return { ok: false, error: { code: "ATTACHMENT_MISSING" } };
+      if (args[0] === "chat" && input.retryAt !== undefined) return { ok: true, data: task };
       if (args[0] === "chat" && (options.writeFailure || input?.actor === "agent" && options.saveReplyFailure)) {
         return { ok: false, error: { code: "STORAGE_ERROR" } };
       }

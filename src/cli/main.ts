@@ -787,7 +787,12 @@ function run(
   if (hasPending(store, task)) {
     throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before modifying the task.");
   }
-  if (command === "chat") return addChatMessage(store, task, input);
+  if (command === "chat") {
+    if (input.retryAt === undefined) return addChatMessage(store, task, input);
+    if (Object.keys(input).length !== 1) throw new TaskboardError("INVALID_INPUT", "Retry takes only the saved message index.");
+    number(input.retryAt, "retryAt", 0);
+    return task;
+  }
   if (command === "draft-discussion") {
     requireRevision(task, input.revision, true);
     const phase = task.draftDiscussion?.phase;
