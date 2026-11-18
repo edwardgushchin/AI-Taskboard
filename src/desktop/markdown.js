@@ -375,6 +375,31 @@ function splitLongReportParagraphs(block) {
   }
 }
 
+function showHexColors(block) {
+  const hexColor = /(?<![\p{L}\p{M}\p{N}_#/%\\])#[0-9a-f]{6}(?![\p{L}\p{M}\p{N}_#]|[./\\][\p{L}\p{N}])/giu;
+  const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+  const matches = [];
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    if (!node.data.includes("#") || node.parentElement.closest("a, pre, button")) continue;
+    const colors = [...node.data.matchAll(hexColor)];
+    if (colors.length) matches.push({ node, colors });
+  }
+  for (const { node, colors } of matches) {
+    const fragment = document.createDocumentFragment();
+    let offset = 0;
+    for (const { 0: color, index } of colors) {
+      fragment.append(node.data.slice(offset, index));
+      const label = element("span", color, "chat-hex-color");
+      label.style.setProperty("--chat-hex", color);
+      fragment.append(label);
+      offset = index + color.length;
+    }
+    fragment.append(node.data.slice(offset));
+    node.replaceWith(fragment);
+  }
+}
+
 function chatText(text, context = { taskId: taskInSheet?.id }) {
   const block = element("div", undefined, "chat-text");
   if (!chatMarkdown) {
@@ -395,6 +420,7 @@ function chatText(text, context = { taskId: taskInSheet?.id }) {
   }
   formatReportReferences(block);
   for (const code of block.querySelectorAll("pre > code")) addCodeCopy(code.parentElement, code);
+  if (!context.source) showHexColors(block);
   block.addEventListener("click", event => {
     const link = event.target.closest("a");
     if (!link) return;
