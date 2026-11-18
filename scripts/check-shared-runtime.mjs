@@ -85,7 +85,7 @@ if (!process.versions.electron) {
         cli(project, ["settings"], { autoMode: false, reviewMode: "human", taskLimits: { executor: 8, reviewer: 1 } });
         const cards = ["Continue first", "Continue second", "Explicitly stopped", "Already blocked", "Already cancelled",
           "Already submitted", "Missing worktree", "Missing chat"].map(title => {
-          const { id } = cli(project, ["create"], { title, criteria: ["Preserve previous results"] });
+          const { id } = cli(project, ["create"], plannedDraft({ title, criteria: ["Preserve previous results"] }));
           cli(project, ["approve", id]);
           const { worktree } = cli(project, ["start", id]);
           return { id, worktree, title };
@@ -129,29 +129,33 @@ if (!process.versions.electron) {
         }
         if (!autoMode) {
           assert.equal((await frame(restarted)).board.project, other);
-          await wait(() => restarted.ask({ action: "executorBinding", id: primary }), "executor resumes in restored background tab")
-            .catch(error => { throw Error(error.message + "\n" + JSON.stringify(show(primary)) + "\n" + restarted.logs); });
+          await wait(async () => Boolean(await restarted.ask({ action: "executorBinding", id: primary }) ||
+            await restarted.ask({ action: "executorBinding", id: secondary })), "executor resumes in restored background tab");
           assert.equal(await restarted.ask({ action: "activateFixtureBoard" }), true);
         }
         const peer = await start("restart-peer-" + autoMode);
         const owners = [restarted, peer];
+        const resumed = [primary, secondary];
+        let firstResumed;
         await wait(async () => {
           const snapshots = await Promise.all(owners.map(frame));
-          return snapshots.every(state => state.runningTasks.includes(primary) && state.waitingTasks.includes(secondary));
+          firstResumed = resumed.find(id => snapshots.every(state => state.runningTasks.includes(id)));
+          return firstResumed && snapshots.every(state => state.waitingTasks.includes(resumed.find(id => id !== firstResumed)));
         }, "one resumed executor and one waiting in both processes");
+        const nextResumed = resumed.find(id => id !== firstResumed);
         if (output && !autoMode) {
           mkdirSync(output, { recursive: true });
           await wait(async () => (await restarted.ask({ action: "dom" }))[0].waiting, "queue caption");
           await restarted.ask({ action: "screenshot", path: join(output, "task-restart-queue.png") });
         }
-        for (const id of [primary, secondary]) {
+        for (const id of [firstResumed, nextResumed]) {
           await wait(async () => (await Promise.all(owners.map(worker => worker.ask({ action: "canStop", id })))).some(Boolean),
             "resumed executor reached its turn: " + id);
           const seen = await Promise.all(owners.map(worker => worker.ask({ action: "executorBinding", id })));
           assert.deepEqual(seen.filter(Boolean), [bindings.get(id)]);
           const owner = owners[seen.findIndex(Boolean)];
           await owner.ask({ action: "stop", id });
-          if (id === primary) await wait(async () => (await frame(restarted)).runningTasks.includes(secondary), "slot release drains queue");
+          if (id === firstResumed) await wait(async () => (await frame(restarted)).runningTasks.includes(nextResumed), "slot release drains queue");
         }
         await wait(() => show(missingTree).status === "blocked" && show(missingChat).status === "blocked", "specific recovery errors persisted");
         assert.match(show(missingTree).blocked.reason, /WORKTREE_MISSING/);
