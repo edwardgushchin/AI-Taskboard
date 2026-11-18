@@ -1,4 +1,5 @@
 {
+  "ui.reorder_queued_message": "Move queued message {message}. Use Up or Down Arrow.",
   "draft_discussion.queued": "Draft discussion is queued.",
   "draft_discussion.running": "Reviewing the draft…",
   "draft_discussion.failed": "Draft review failed: {reason}",

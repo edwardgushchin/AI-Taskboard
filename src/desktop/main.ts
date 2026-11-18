@@ -1505,6 +1505,17 @@ function queuedFiles(job: QueuedBoardMessage): PastedFile[] {
   return job.files.map(file => ({ ...file, bytes: Uint8Array.from(Buffer.from(file.bytes, "base64")).buffer }));
 }
 
+function listQueuedMessages(directory: string) {
+  if (!existsSync(directory)) return [];
+  const orderPath = join(directory, "order");
+  const order = new Map((existsSync(orderPath) ? readJson(orderPath) as string[] : []).map((id, index) => [id, index]));
+  return readdirSync(directory).filter(name => name.endsWith(".json")).flatMap(name => {
+    const job = readQueuedMessage(join(directory, name));
+    return job ? [job] : [];
+  }).sort((left, right) => (order.get(left.id) ?? order.size) - (order.get(right.id) ?? order.size) ||
+    left.created - right.created || left.id.localeCompare(right.id));
+}
+
 ipcMain.handle("board:queue", async (event, project: string, action: unknown, id?: unknown, draft?: unknown,
   goal?: unknown, files?: unknown) => {
   const state = stateOf(event);
@@ -1515,18 +1526,36 @@ ipcMain.handle("board:queue", async (event, project: string, action: unknown, id
   try {
     if (existsSync(directory)) storageDirectory(directory);
     if (action === "list") {
-      if (!existsSync(directory)) return { ok: true, data: [] };
-      const jobs = readdirSync(directory).filter(name => name.endsWith(".json")).flatMap(name => {
-        const job = readQueuedMessage(join(directory, name));
-        return job ? [{ ...job, files: queuedFiles(job) }] : [];
-      });
-      return { ok: true, data: jobs.sort((left, right) => left.created - right.created || left.id.localeCompare(right.id)) };
+      const context = agentSlots.entries(board.project).find(entry => entry.task === "manager:context");
+      return { ok: true, data: listQueuedMessages(directory).map(job => ({
+        ...job, files: queuedFiles(job), inFlight: context?.queuedMessageId === job.id || context?.steeringMessageId === job.id,
+      })) };
     }
     if (action === "add" && id === undefined) id = randomUUID();
     if (typeof id !== "string" || !codexThreadPattern.test(id)) return cliFailure("INVALID_INPUT", t("errors.9784747447fcf118"));
     const path = join(directory, id + ".json");
-    if (action === "remove" || action === "retry" || (action === "edit" && typeof draft === "string")) {
-      const error = runtimeTransaction(board.project, () => {
+    if (action === "promote" || (action === "move" && typeof draft === "string" &&
+        codexThreadPattern.test(draft) && typeof goal === "boolean")) {
+      runtimeTransaction(board.project, entries => {
+        const context = entries.find(entry => entry.task === "manager:context");
+        const jobs = listQueuedMessages(directory);
+        const canMove = (job: QueuedBoardMessage) => !job.goal &&
+          job.id !== context?.queuedMessageId && job.id !== context?.steeringMessageId;
+        const pending = jobs.filter(canMove);
+        const index = pending.findIndex(job => job.id === id);
+        if (index < 0 || id === draft) return;
+        const [job] = pending.splice(index, 1);
+        const target = action === "promote" ? 0 : pending.findIndex(candidate => candidate.id === draft);
+        if (target < 0) return;
+        pending.splice(target + (action === "move" && goal ? 1 : 0), 0, job);
+        let next = 0;
+        writeJson(join(directory, "order"), jobs.map(job => (canMove(job) ? pending[next++] : job).id));
+        if (action === "promote" && job.failed) writeJson(path, { ...job, failed: undefined });
+      });
+    } else if (action === "remove" || action === "retry" || (action === "edit" && typeof draft === "string")) {
+      const error = runtimeTransaction(board.project, entries => {
+        const context = entries.find(entry => entry.task === "manager:context");
+        if (context?.queuedMessageId === id || context?.steeringMessageId === id) return;
         if (action === "remove") { rmSync(path, { force: true }); return; }
         const job = readQueuedMessage(path);
         if (!job) return;
@@ -1762,11 +1791,36 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     if (!current?.sendNow || current.changingGoal) {
       return cliFailure("CHAT_NOT_RUNNING", t("ui.the_manager_has_no_active_reply_the_message_is_s_1148c98d"));
     }
+    let claimed = false;
     try {
-      await current.sendNow(request.trim(), files, typeof messageId === "string" ? messageId : undefined);
+      const queued = queuedPath && runtimeTransaction(board.project, entries => {
+        const writer = entries.find(entry => entry.task === context && entry.owner === process.pid);
+        if (!writer || writer.steeringMessageId || writer.queuedMessageId === messageId) {
+          throw new Error(t("ui.a_message_is_already_being_sent_ed690319"));
+        }
+        const pending = readQueuedMessage(queuedPath);
+        if (pending) {
+          writer.steeringMessageId = pending.id;
+          claimed = true;
+        }
+        return pending;
+      });
+      if (!queuedPath || queued) {
+        if (claimed) broadcastBoardChat(board.project, "orchestrator-queue", {}, sender);
+        await current.sendNow(queued ? queued.draft.trim() : request.trim(), queued ? queuedFiles(queued) : files,
+          typeof messageId === "string" ? messageId : undefined);
+      }
       return { ok: true as const, data: null };
     } catch (error) {
       return cliFailure("CHAT_SEND_FAILED", (error as Error).message);
+    } finally {
+      if (claimed) {
+        runtimeTransaction(board.project, entries => {
+          const writer = entries.find(entry => entry.task === context && entry.steeringMessageId === messageId);
+          if (writer) delete writer.steeringMessageId;
+        });
+        broadcastBoardChat(board.project, "orchestrator-queue", {}, sender);
+      }
     }
   }
   const busy = background ? backgroundManagerRequests.has(projectKey) :
@@ -1779,11 +1833,27 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   let queued: QueuedBoardMessage | undefined;
   try {
     if (queuedPath) {
-      queued = readQueuedMessage(queuedPath);
-      if (queued && hasManagerMessage(board.project, queued.id, queued.created)) {
-        delivered();
-        queued = undefined;
+      const selection = runtimeTransaction(board.project, entries => {
+        const pending = readQueuedMessage(queuedPath);
+        if (!pending) return;
+        if (hasManagerMessage(board.project, pending.id, pending.created)) {
+          rmSync(queuedPath, { force: true });
+          return;
+        }
+        if (pending.failed) return "failed";
+        if (!pending.goal && listQueuedMessages(dirname(queuedPath)).find(job => !job.goal && !job.failed)?.id !== pending.id) {
+          return "changed";
+        }
+        const claim = entries.find(entry => entry.task === context && entry.owner === process.pid);
+        if (claim) claim.queuedMessageId = pending.id;
+        return pending;
+      });
+      if (selection === "failed" || selection === "changed") {
+        writer();
+        return cliFailure("BOARD_QUEUE_CHANGED", t("ui.not_sent_28bb3764"));
       }
+      queued = selection;
+      if (queued) broadcastBoardChat(board.project, "orchestrator-queue", {}, sender);
     }
   } catch (error) {
     writer();
@@ -1792,10 +1862,6 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   if (queuedPath && !queued) {
     writer();
     return { ok: true as const, data: { answer: "", changes: [] } };
-  }
-  if (queued?.failed) {
-    writer();
-    return cliFailure("BOARD_QUEUE_FAILED", t("ui.not_sent_28bb3764"));
   }
   const managerReviewId = repairTask?.id ?? (expectedReviewMode === "manager" ? reviewIds?.[0] : undefined);
   const managerReviewKey = managerReviewId ? board.project + "\0" + managerReviewId : undefined;
