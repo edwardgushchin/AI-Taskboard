@@ -8,9 +8,10 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { electronCheck } from "./electron-check.mjs";
 
-const { scratch } = electronCheck(import.meta.url, "reviewer-queue", 120_000,
-  [["approval"], ["advanced-target"], ["human"], ["note"]]);
+const { scratch, artifacts } = electronCheck(import.meta.url, "reviewer-queue", 120_000,
+  [["push-review"], ["push-accept"], ["approval"], ["advanced-target"], ["human"], ["note"]]);
 const scenario = process.argv.at(-1);
+const racedCommand = { "push-review": "review", "push-accept": "accept" }[scenario];
 const require = createRequire(import.meta.url);
 const { app, BrowserWindow } = require("electron");
 const { transformSync } = require("esbuild");
@@ -42,6 +43,14 @@ async function run() {
   git("config", "--local", "user.name", "Taskboard fixture");
   git("config", "--local", "user.email", "fixture@example.invalid");
   git("commit", "--allow-empty", "-m", "Initial state");
+  const remote = join(scratch, scenario + ".git");
+  const remoteHead = () => git("--git-dir=" + remote, "rev-parse", "refs/heads/main");
+  if (racedCommand) {
+    git("init", "--bare", remote);
+    git("remote", "add", "origin", remote);
+    git("push", "--set-upstream", "origin", "main");
+    git("commit", "--allow-empty", "-m", "Commit to push");
+  }
   cli(["init"]);
   cli(["settings"], { reviewMode: "reviewer", autoMode: scenario !== "note" });
   const task = cli(["create"], { title: "Review a submitted change", criteria: ["Result is present"] });
@@ -67,7 +76,7 @@ async function run() {
     findings: [], evidence: ["Result is present."],
   };
   const initialHead = head();
-  const preapprove = scenario === "advanced-target" || scenario === "human";
+  const preapprove = racedCommand || scenario === "advanced-target" || scenario === "human";
   let submitted;
   if (preapprove) {
     submitted = submit();
@@ -87,6 +96,22 @@ async function run() {
     assert.deepEqual(dispatcher, json);
     if (scenario === "human") cli(["settings"], { reviewMode: "human" });
   }
+  // Leave a second submission for the dispatcher to process after the first
+  // changes. It uses a different file so it can integrate independently.
+  let independent;
+  if (racedCommand) {
+    const card = cli(["create"], { title: "Independent submission", criteria: ["Result is present"] });
+    const ready = cli(["approve", card.id]);
+    const started = cli(["start", card.id], { revision: ready.revision });
+    writeFileSync(join(started.worktree, "independent.txt"), "Independent result\n");
+    const preview = cli(["preview", card.id, "--compact"]);
+    independent = cli(["submit", card.id, "--compact"], {
+      token: preview.token, message: "fix: supply independent result", summary: "Result saved", checks: ["Read independent.txt"],
+    });
+    cli(["review-approve", card.id, "--compact"], {
+      targetHead: initialHead, revision: independent.revision, summary: report.summary, evidence: report.evidence,
+    });
+  }
   const integrationBase = head();
 
   app.setPath("userData", join(scratch, "profile-" + scenario));
@@ -99,28 +124,117 @@ async function run() {
   const sourceUrl = new URL("../src/desktop/main.ts", import.meta.url);
   const source = readFileSync(sourceUrl, "utf8")
     .replace("replyToTask, reviewWithCodex, updateBoardGoal", "replyToTask, updateBoardGoal")
+    .replace("import { callCli, cliChild, cliFailure }", "import { callCli as realCallCli, cliChild, cliFailure }")
     .replaceAll("import.meta.url", JSON.stringify(sourceUrl.href))
     .replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, sourceUrl).href));
   const entry = join(scratch, "main-under-test.mjs");
-  writeFileSync(entry, transformSync("const reviewWithCodex = globalThis.reviewQueueProvider;\n" + source,
+  writeFileSync(entry, transformSync(`const reviewWithCodex = globalThis.reviewQueueProvider;
+const callCli = (...args) => globalThis.reviewQueueCli(realCallCli, ...args);
+` + source,
     { loader: "ts", format: "esm" }).code);
+  const raceReleased = Promise.withResolvers();
+  const autoErrors = [];
+  let raceResult, pushResult;
+  let held = false;
+  globalThis.reviewQueueCli = async (call, board, args, input) => {
+    const race = !held && board === project && args[0] === racedCommand && args[1] === task.id;
+    if (race) {
+      held = true;
+      await raceReleased.promise;
+    }
+    const result = await call(board, args, input);
+    if (race) raceResult = result;
+    if (board === project && args[0] === "git" && args[1] === "push") pushResult = result;
+    return result;
+  };
   const calls = [];
   globalThis.reviewQueueProvider = async (_profile, board, _settings, context, _tools, _call, _signal, _usage, id, publish) => {
     const { submitted: submission, targetHead } = JSON.parse(context);
     calls.push({ board, id, submission, targetHead });
-    assert.equal(show().status, "review");
-    assert.equal(head(), integrationBase);
+    assert.equal(cli(["show", id]).status, "review");
+    assert.equal(head(), targetHead);
     publish([{ id: "review-preparation", type: "agentMessage", phase: "commentary", title: "",
       text: "Test provider is reviewing.", status: "completed" }]);
     return report;
   };
   app.on("web-contents-created", (_event, contents) => contents.setBackgroundThrottling(false));
+  app.on("browser-window-created", (_event, { webContents }) => {
+    const send = webContents.send.bind(webContents);
+    webContents.send = (channel, ...args) => {
+      if (channel === "chat:update" && args[0]?.type === "orchestrator-review-error") autoErrors.push(args[0].error);
+      return send(channel, ...args);
+    };
+  });
   require(entry);
   const window = await waitFor(async () => {
     const win = BrowserWindow.getAllWindows()[0];
     return win && !win.webContents.isLoading() && await win.webContents.executeJavaScript(
       "window.taskboard?.bootstrap().then(frame => Boolean(frame.board) && !frame.loading)") && win;
   }, "the isolated board");
+  if (racedCommand) {
+    await waitFor(() => held, "queued " + racedCommand);
+    const evaluate = code => window.webContents.executeJavaScript(code);
+    const push = async () => {
+      pushResult = undefined;
+      await waitFor(() => evaluate(`(() => {
+        const button = document.querySelector('#status-tracking');
+        if (!button || button.hidden || button.disabled) return false;
+        button.click();
+        return true;
+      })()`), "enabled Push button");
+      return waitFor(() => pushResult, "push response");
+    };
+    const beforePush = remoteHead();
+    assert.notEqual(beforePush, initialHead);
+    assert.equal(show().status, "review");
+    assert.equal((await push()).ok, true);
+    assert.equal(remoteHead(), initialHead);
+    assert.equal(head(), initialHead);
+    assert.equal(show().status, "review");
+    if (scenario === "push-accept") {
+      writeFileSync(join(remote, "hooks", "pre-receive"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+      // Pushing an already current ref skips server-side hooks. Move the
+      // fixture's remote ref back to its starting point to exercise rejection.
+      git("--git-dir=" + remote, "update-ref", "refs/heads/main", beforePush, initialHead);
+      const rejected = await push();
+      assert.equal(rejected.error?.code, "GIT_PUSH_FAILED");
+      assert.equal(remoteHead(), beforePush);
+      assert.equal(head(), initialHead);
+      await waitFor(() => evaluate("!document.querySelector('#notice').hidden"), "visible push error");
+      assert.match(await evaluate("document.querySelector('#notice').textContent"), /Pushing commits|Отправка коммитов/i);
+      console.log(JSON.stringify({ pushRejected: rejected.error.code, remoteHead: remoteHead() }));
+    }
+    const revision = show().revision;
+    const changed = racedCommand === "review" ? cli(["return-to-draft", task.id], { revision }) :
+      cli(["accept", task.id], { revision, targetHead: initialHead, actor: "manager", reviewMode: "reviewer", autoMode: true });
+    assert.equal(changed.status, racedCommand === "review" ? "draft" : "done");
+    const integrationHead = head();
+    raceReleased.resolve();
+    await waitFor(() => raceResult, "raced " + racedCommand + " response");
+    assert.equal(raceResult.error?.code, racedCommand === "review" ? "INVALID_TRANSITION" : "REVIEW_REQUIRED");
+    const done = await waitFor(() => {
+      const card = cli(["show", independent.id]);
+      return card.status === "done" && card;
+    }, "independent integration");
+    const checked = show();
+    assert.equal(checked.status, changed.status);
+    const firstAccepts = checked.history.filter(event => event.action === "accept").length;
+    assert.equal(firstAccepts, racedCommand === "review" ? 0 : 1);
+    assert.equal(done.history.filter(event => event.action === "accept").length, 1);
+    assert.equal(git("rev-list", "--count", "--first-parent", integrationHead + "..HEAD"), "1");
+    console.log(JSON.stringify({ scenario, pushed: initialHead, localHeadAtPush: initialHead, rejected: racedCommand,
+      code: raceResult.error.code, details: raceResult.error.details, statusAtRejection: changed.status,
+      firstAccepts, independent: done.status, independentIntegrations: 1, autoErrors }));
+    assert.deepEqual(autoErrors, []);
+    if (scenario === "push-review") {
+      await waitFor(() => evaluate(`window.taskboard.bootstrap().then(f =>
+        f.board?.tasks.some(t => t.id === ${JSON.stringify(task.id)} && t.status === 'draft') &&
+        f.board?.tasks.some(t => t.id === ${JSON.stringify(independent.id)} && t.status === 'done'))`), "updated cards");
+      await delay(450); // Let the cards settle into their new columns.
+      writeFileSync(join(artifacts, "push-during-review.png"), (await window.webContents.capturePage()).toPNG());
+    }
+    return;
+  }
   if (!preapprove) {
     assert.deepEqual(calls, []);
     submitted = submit();

@@ -1,4 +1,5 @@
 {
+  "ui.reorder_queued_message": "Mover el mensaje en espera «{message}». Usa las flechas arriba y abajo.",
   "draft_discussion.queued": "La revisión del borrador está en cola.",
   "draft_discussion.running": "Revisando el borrador…",
   "draft_discussion.failed": "Error al revisar el borrador: {reason}",
@@ -1152,7 +1153,8 @@
     "other": "{count} archivos"
   },
   "limits.label": "Límites",
-  "limits.weekly": "Límite semanal",
+  "limits.provider": "Límites de {provider}",
+  "limits.weekly": "Semana",
   "limits.daily": "Límite diario",
   "limits.duration": "Límite de {duration}",
   "limits.window": "Límite",

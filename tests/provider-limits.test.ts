@@ -47,8 +47,8 @@ test('explicit absence of windows differs from missing or malformed data',()=>{
 });
 test('window labels use readable durations in Russian and English without plan assumptions',()=>{
  const label=(globalThis as any).providerLimitWindowLabel;
- assert.equal(label(10080,'ru-RU'),'Недельный лимит');
- assert.equal(label(10080,'en-US'),'Weekly limit');
+ assert.equal(label(10080,'ru-RU'),'Неделя');
+ assert.equal(label(10080,'en-US'),'Week');
  assert.match(label(300,'ru-RU'),/5 часов/);
  assert.match(label(90,'ru-RU'),/90 минут/);
  assert.match(label(2880,'ru-RU'),/2 дня/);

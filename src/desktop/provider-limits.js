@@ -50,9 +50,18 @@ if (typeof document !== "undefined") {
     }
     for (const provider of summary.providers) {
       const group = document.createElement("section");
+      const header = document.createElement("header");
+      header.className = "limits-header";
       const title = document.createElement("h3");
-      title.textContent = provider.provider;
-      group.append(title);
+      title.textContent = t("limits.provider", { provider: provider.provider });
+      header.append(title);
+      if (provider.plan) {
+        const plan = document.createElement("span");
+        plan.className = "limits-plan";
+        plan.textContent = provider.plan.replaceAll("_", " ").replace(/\b[a-z]/g, letter => letter.toUpperCase());
+        header.append(plan);
+      }
+      group.append(header);
       content.append(group);
       if (provider.state !== "ready") {
         const status = document.createElement("p");
@@ -64,12 +73,19 @@ if (typeof document !== "undefined") {
         const quota = document.createElement("div");
         quota.className = "limits-window";
         const row = document.createElement("p");
+        row.className = "limits-row";
         const windowLabel = globalThis.providerLimitWindowLabel(window.durationMins, localization.locale);
-        const bucket = window.name && window.name.toLowerCase() !== provider.provider.toLowerCase() ? window.name + " · " : "";
-        row.textContent = `${bucket}${windowLabel}: ${t("limits.remaining", { percent: Math.floor(window.remaining) })}`;
+        const bucket = window.name && window.name.toLowerCase() !== provider.provider.toLowerCase() ? " · " + window.name : "";
+        const name = document.createElement("span");
+        name.textContent = windowLabel + bucket;
+        const percent = Math.floor(window.remaining);
+        const value = document.createElement("span");
+        value.textContent = new Intl.NumberFormat(localization.locale, { style: "percent" }).format(percent / 100);
+        row.append(name, value);
         const meter = document.createElement("meter");
         meter.min = 0; meter.max = 100; meter.value = window.remaining;
-        meter.setAttribute("aria-label", row.textContent);
+        meter.setAttribute("aria-label", name.textContent);
+        meter.setAttribute("aria-valuetext", t("limits.remaining", { percent }));
         quota.append(row, meter);
         if (window.resetsAt) {
           const reset = document.createElement("p");
