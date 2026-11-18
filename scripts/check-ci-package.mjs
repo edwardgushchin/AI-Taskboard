@@ -53,21 +53,19 @@ function binaryArchitecture(path) {
   }
 }
 
-async function welcomeVisible(url) {
+async function devtools(url, method, params) {
   const socket = new WebSocket(url);
   try {
     return await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error("Renderer response timed out")), 3000);
-      socket.addEventListener("open", () => socket.send(JSON.stringify({
-        id: 1, method: "Runtime.evaluate",
-        params: { expression: "Boolean(window.taskboard && document.querySelector('#welcome')?.hidden === false)", returnByValue: true },
-      })));
+      socket.addEventListener("open", () => socket.send(JSON.stringify({ id: 1, method, params })));
       socket.addEventListener("error", () => { clearTimeout(timeout); resolve(false); }, { once: true });
+      socket.addEventListener("close", () => { clearTimeout(timeout); resolve(false); }, { once: true });
       socket.addEventListener("message", ({ data }) => {
         const message = JSON.parse(data);
         if (message.id !== 1) return;
         clearTimeout(timeout);
-        resolve(message.result?.result?.value === true);
+        resolve(message.result);
       });
     });
   } finally {
@@ -81,6 +79,7 @@ const profile = mkdtempSync(join(tmpdir(), "taskboard-ci-"));
 let child;
 let launchError;
 let exited;
+let browserSocket;
 try {
   assert.ok(existsSync(join(resources, "app.asar")));
   report.checks.desktopArch = binaryArchitecture(desktop);
@@ -120,7 +119,7 @@ try {
   child = spawn(desktop, [
     `--user-data-dir=${profile}`, "--remote-debugging-address=127.0.0.1",
     "--remote-debugging-port=0", "--enable-logging=stderr",
-  ], { cwd: profile, env, detached: !windows, stdio: ["ignore", "inherit", "inherit"] });
+  ], { cwd: tmpdir(), env, detached: !windows, stdio: ["ignore", "inherit", "inherit"] });
   child.on("error", error => { launchError = error; });
   exited = new Promise(done => child.once("close", done));
 
@@ -131,11 +130,17 @@ try {
     assert.equal(child.signalCode, null, "Packaged application crashed before showing its welcome page");
     const portFile = join(profile, "DevToolsActivePort");
     if (existsSync(portFile)) {
-      const port = Number.parseInt(readFileSync(portFile, "utf8"), 10);
+      const [portLine, browserPath] = readFileSync(portFile, "utf8").trim().split(/\r?\n/);
+      const port = Number.parseInt(portLine, 10);
+      if (browserPath?.startsWith("/devtools/browser/")) browserSocket = `ws://127.0.0.1:${port}${browserPath}`;
       const pages = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(2000) })
         .then(response => response.json()).catch(() => []);
       const page = pages.find(target => target.type === "page" && target.url.startsWith("file:") && target.webSocketDebuggerUrl);
-      if (page && await welcomeVisible(page.webSocketDebuggerUrl)) {
+      const result = page && await devtools(page.webSocketDebuggerUrl, "Runtime.evaluate", {
+        expression: "Boolean(window.taskboard && document.querySelector('#welcome')?.hidden === false)",
+        returnByValue: true,
+      });
+      if (result?.result?.value === true) {
         report.checks.welcome = true;
         break;
       }
@@ -149,12 +154,20 @@ try {
   throw error;
 } finally {
   try {
+    if (browserSocket && child.exitCode === null && child.signalCode === null) {
+      await devtools(browserSocket, "Browser.close").catch(() => {});
+      await Promise.race([exited, delay(4000, undefined, { ref: false })]);
+    }
     if (child?.pid && child.exitCode === null && child.signalCode === null) {
       if (windows) execFileSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { timeout: 10_000 });
       else process.kill(-child.pid, "SIGKILL");
     }
     if (exited) await exited;
     rmSync(profile, { recursive: true, maxRetries: 12, retryDelay: 200 });
+    report.checks.profileRemoved = true;
+  } catch (error) {
+    report.cleanupError = error.message;
+    throw error;
   } finally {
     writeFileSync(join(output, "package.json"), JSON.stringify(report, null, 2) + "\n");
   }

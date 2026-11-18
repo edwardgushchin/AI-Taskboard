@@ -105,7 +105,10 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           path: |
-            release/${{ env.PACKAGE_ID }}.*
+            release/${{ env.PACKAGE_ID }}.exe
+            release/${{ env.PACKAGE_ID }}.deb
+            release/${{ env.PACKAGE_ID }}.rpm
+            release/${{ env.PACKAGE_ID }}.zip
       - name: Upload verification and diagnostics
         if: always()
         uses: actions/upload-artifact@v4

@@ -9,7 +9,7 @@ import { discoverRepository } from "../src/cli/git.ts";
 import { locateBoard } from "../src/cli/storage.ts";
 
 test("explicit nested init stays local despite parent Git and unrelated invocation cwd", t => {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "T-0084-location-")));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "T-0084-location-")));
   t.after(() => { rmSync(root, { recursive: true, force: true }); assert.equal(existsSync(root), false); });
   const git = (...args: string[]) => {
     const r = spawnSync("git", ["-C", root, ...args], { encoding: "utf8", windowsHide: true });
