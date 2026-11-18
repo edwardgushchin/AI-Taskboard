@@ -1,4 +1,7 @@
 {
+  "ui.reorder_queued_message": "Переместить сообщение «{message}». Используйте стрелки вверх и вниз.",
+  "task_chat.retry_reply": "Повторить ответ",
+  "task_chat.writer_busy": "Карточку использует другой сеанс. Повторите попытку после его завершения.",
   "draft_discussion.queued": "Разбор черновика в очереди.",
   "draft_discussion.running": "Агент разбирает черновик…",
   "draft_discussion.failed": "Разбор черновика прерван. {reason}",
