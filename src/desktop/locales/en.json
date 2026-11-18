@@ -1,5 +1,6 @@
 {
   "ui.review_then_human": "Review + human",
+  "ui.review_then_human_hint": "The reviewer checks submissions. You decide whether to accept approved work or return it for changes.",
   "ui.awaiting_human_acceptance": "Awaiting human acceptance",
   "ui.awaiting_reviewer_approval": "Awaiting reviewer approval",
   "ui.reorder_queued_message": "Move queued message {message}. Use Up or Down Arrow.",

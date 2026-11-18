@@ -369,6 +369,7 @@ app.whenReady().then(async () => {
     await capture('reviewer-human-board-en.png');
     await evaluate(`boardSettings(); settle()`);
     await check(`body.querySelector('[name=reviewMode]').selectedOptions[0].textContent === 'Review + human'`, 'saved mode selected in board settings');
+    await check(`body.querySelector('[name=reviewMode]').parentElement.querySelector('small').textContent.includes('You decide')`, 'settings explain the human decision');
     await capture('reviewer-human-settings-en.png');
     console.log('Reviewer-human Chromium checks passed: ' + checks);
     return;

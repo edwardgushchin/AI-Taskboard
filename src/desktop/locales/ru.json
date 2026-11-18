@@ -1,5 +1,6 @@
 {
   "ui.review_then_human": "Ревью + человек",
+  "ui.review_then_human_hint": "Ревьюер проверяет сдачу. После одобрения вы решаете, принять работу или вернуть её на доработку.",
   "ui.awaiting_human_acceptance": "Ожидает приёмки человеком",
   "ui.awaiting_reviewer_approval": "Ожидает одобрения ревьюера",
   "ui.reorder_queued_message": "Переместить сообщение «{message}». Используйте стрелки вверх и вниз.",

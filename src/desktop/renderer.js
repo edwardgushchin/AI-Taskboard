@@ -4903,6 +4903,7 @@ function boardSettings() {
       human: t("ui.you_decide_whether_to_accept_the_task_or_return__2b0d5a6d"),
       manager: t("ui.the_project_manager_checks_the_submission_and_de_c9044678"),
       reviewer: t("ui.the_reviewer_checks_submissions_the_manager_deci_9b1a5dc9"),
+      "reviewer-human": t("ui.review_then_human_hint"),
     }[review.value]));
   };
   review.parentElement.append(reviewHint);
