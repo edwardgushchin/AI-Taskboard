@@ -6,7 +6,7 @@ import type { FileLink } from "../cli/attachment-links.ts";
 import { providerLimitSource, readCodexLimits } from "./provider-limits.ts";
 import localization from "./localization.cjs";
 import { activeRunSummary, observeActiveRuns, enableSharedRuns } from "./active-runs.ts";
-import { registerRuntime, runtimeLocation, runtimeTransaction } from "./board-runtime.ts";
+import { matchesQueuedExecutor, registerRuntime, runtimeLocation, runtimeTransaction } from "./board-runtime.ts";
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, Notification, protocol, session, shell } from "electron";
 import type { IpcMainInvokeEvent } from "electron";
 import { randomUUID } from "node:crypto";
@@ -229,7 +229,7 @@ function frame(state: ProjectTab) {
     replyingTasks: state.board?.tasks.filter(task => (replyingTasks.has(state.project + "\0" + task.id) || sharedRuns.some(entry => entry.kind === "task" && entry.task === task.id))).map(task => task.id),
     waitingTasks: state.board?.tasks.filter(task => {
       const key = state.project + "\0" + task.id;
-      return task.status === "in_progress" && sharedRuns.some(entry => entry.kind === "queue" && entry.task === task.id && entry.revision === task.revision) &&
+      return sharedRuns.some(entry => matchesQueuedExecutor(entry, task)) &&
         !runningTasks.has(key) && !replyingTasks.has(key) && !sharedRuns.some(entry => entry.kind === "slot" && entry.task === task.id);
     }).map(task => task.id),
     reviewingTasks: Object.fromEntries(state.board?.tasks.flatMap(task => {
@@ -795,6 +795,7 @@ async function returnTaskToDraft(project: string, id: string, revision: unknown,
 async function stopChat(project: string, id: string) {
   const active = activeAgents.get(project + "\0" + id);
   if (!active && agentSlots.defer(project, id)) {
+    taskOperations.get(project + "\0" + id)?.controller.abort();
     notifyRunChange(project);
     return { ok: true as const, data: null };
   }
@@ -1262,12 +1263,13 @@ function scheduleAgentWork() {
       for (const watch of subscriptions.values()) {
         const { project, tasks, settings } = watch.board;
         if (closingProjects.has(project)) continue;
-        for (const { kind, task: id, revision, continuation } of agentSlots.entries(project)) {
+        for (const entry of agentSlots.entries(project)) {
+          const { kind, task: id, revision, continuation } = entry;
           if (kind !== "queue" || !id || revision === undefined) continue;
           const task = tasks.find(task => task.id === id);
           // The queue can be saved before the watch sees the new card revision.
           if (task && task.revision < revision) continue;
-          if (!task || task.status !== "in_progress" || task.revision !== revision) {
+          if (!task || !matchesQueuedExecutor(entry, task)) {
             agentSlots.defer(project, id, undefined, revision);
             notifyRunChange(project);
             continue;
@@ -1275,13 +1277,13 @@ function scheduleAgentWork() {
           const role = task.mergeRepair ? "reviewer" : "executor";
           if (!agentSlots.available(projectIdentity(project), role, settings?.taskLimits) || executorBusy(project, id)) continue;
           const failed = (error: string) => broadcastBoardChat(project, "orchestrator-review-error", { error: id + " · " + error });
-          void launchTask(project, id, undefined, false, revision, continuation,
-            false, false, false, false, false, undefined, true).then(result => {
+          void launchTask(project, id, undefined, false, task.revision, continuation,
+            false, false, false, false, false, undefined, revision).then(result => {
             if (result.ok || ["EXECUTOR_LIMIT", "REVIEWER_LIMIT", "BOARD_BUSY", "CHAT_BUSY",
-              "LAUNCH_IN_PROGRESS", "PROJECT_CLOSING"].includes(result.error.code)) return;
+              "LAUNCH_IN_PROGRESS", "PROJECT_CLOSING", "REVISION_CONFLICT", "INVALID_TRANSITION"].includes(result.error.code)) return;
             agentSlots.defer(project, id, undefined, revision);
             notifyRunChange(project);
-            if (!["REVISION_CONFLICT", "INVALID_TRANSITION"].includes(result.error.code)) failed(result.error.message);
+            failed(result.error.message);
           }).catch(error => failed((error as Error).message));
         }
       }
@@ -2990,7 +2992,8 @@ type LaunchState = Pick<Task, "acceptanceRepair" | "id" | "title" | "status" | "
 async function launchTask(project: string, id: string, revisionRequest?: { input: Record<string, unknown> },
   newThread: false | "user" | "manager" = false, revision?: number,
   continuation: ExecutorContinuation = {}, scheduled = false, resolveConflicts = false, resumeWithFullAccess = false,
-  autoMode = false, manual = false, autoQueueRevision?: number, queued = false): Promise<CliReply<LaunchState>> {
+  autoMode = false, manual = false, autoQueueRevision?: number, queuedRevision?: number): Promise<CliReply<LaunchState>> {
+  const queued = queuedRevision !== undefined;
   if (isManual(readBoardSettings(runtimeLocation(project)))) return cliFailure("MANUAL_BOARD", "На обычной доске исполнители недоступны.");
   const key = project + "\0" + id;
   if (returningDrafts.has(key)) return cliFailure("CHAT_BUSY", "This task is being returned to draft.");
@@ -3051,7 +3054,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       return cliFailure("INVALID_TRANSITION", "Only a ready or in-progress task can be started.");
     }
     const role = current.data.mergeRepair || (resolveConflicts && current.data.status === "review") ? "reviewer" : "executor";
-    const releaseSlot = reserveAgent(project, role, id, queued ? revision : undefined);
+    const releaseSlot = reserveAgent(project, role, id, queuedRevision);
     release = releaseSlot;
     if (!releaseSlot) {
       if (!revisionRequest) {
@@ -3146,18 +3149,20 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       activity.set(item.id, item);
       updateTimer ??= setTimeout(publish, 80);
     }, report => saveTaskTokenUsage(project, id, role, report), signal, async codexThreadId => {
-      if (linked.codexThreadId === codexThreadId) return;
+      if (!queued && linked.codexThreadId === codexThreadId) return;
       const previousCodexThreadId = linked.codexThreadId;
       // Preserve edits made while Codex was starting and link the chat before it can run.
       const saved = await callCli<LaunchState>(project, ["update", id, "--compact"], {
         codexThreadId, actor: "user", launchDetails: true,
-        ...(previousCodexThreadId ? { previousCodexThreadId,
+        ...(queued ? { queuedExecutor: true, revision: linked.revision, preserveStatus: true } : {}),
+        ...(previousCodexThreadId && previousCodexThreadId !== codexThreadId ? { previousCodexThreadId,
           note: (newThread ? t("ui.continued_in_a_new_chat_previous_chat_6e40fb2d") :
             t("ui.codex_could_not_find_the_previous_chat_continued_726501de")) +
             "`" + previousCodexThreadId + "`" } : {}),
       });
       if (!saved.ok) throw Object.assign(new Error(saved.error.message), {
-        code: saved.error.code === "BOARD_BUSY" ? "BOARD_BUSY" : "CODEX_LINK_FAILED",
+        code: saved.error.code === "BOARD_BUSY" ||
+          (queued && ["INVALID_TRANSITION", "REVISION_CONFLICT"].includes(saved.error.code)) ? saved.error.code : "CODEX_LINK_FAILED",
       });
       linked = saved.data;
     }, desktopProfile));
@@ -3272,10 +3277,21 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         operation.finish();
       }
     });
+    if (queued) {
+      try {
+        const pending = agentSlots.entries(project).find(entry => matchesQueuedExecutor(entry, linked));
+        if (pending?.revision !== undefined) agentSlots.defer(project, id, undefined, pending.revision);
+      } catch (error) {
+        console.warn("Could not acknowledge the queued executor start", error);
+      }
+    }
     return { ok: true, data: linked };
   } catch (error) {
     const code = (error as { code?: string }).code;
-    if (code === "BOARD_BUSY") return cliFailure(code, (error as Error).message);
+    if (queued && signal.aborted) return cliFailure("CHAT_BUSY", (error as Error).message);
+    if (code === "BOARD_BUSY" || (queued && (code === "INVALID_TRANSITION" || code === "REVISION_CONFLICT"))) {
+      return cliFailure(code, (error as Error).message);
+    }
     const busy = code === "CODEX_THREAD_BUSY";
     const reason = busy ? t("ui.this_codex_chat_is_already_open_in_another_proce_9d6a0201") + "\n\n" + (error as Error).message : (error as Error).message;
     await saveActivity();

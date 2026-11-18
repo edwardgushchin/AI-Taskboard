@@ -40,7 +40,7 @@ import { expertContext, expertSkill, listExperts, readExpert, saveExpert } from 
 import { approvalRequirements, createExpertPlan, expertStagesStatus, initialExpertTeam, requireApprovalPlan, requireExpertPlan, requireExpertResults, reviewDecisionSequence, sendTeamMessage, taskExpertPhase, teamInbox, updateExpertStage } from "./expert-team.ts";
 import { syncTaskStatusNotices } from "../desktop/manager-history.ts";
 import { syncSettingsNotices } from "../desktop/settings-notices.ts";
-import { deferExecutor, registerRuntime, runtimeEntries, runtimeTransaction } from "../desktop/board-runtime.ts";
+import { deferExecutor, linkQueuedExecutor, matchesQueuedExecutor, registerRuntime, runtimeEntries, runtimeTransaction } from "../desktop/board-runtime.ts";
 
 const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "checklist", "pause", "block", "resume", "unblock", "update"]);
 const help = [
@@ -805,7 +805,15 @@ function run(
   if (command === "progress" && task.schedule && task.status === "in_progress") requireExpertResults(task, "work");
   if (command === "approve" && task.status === "draft") requireApprovalPlan(task, store.index.settings);
   let updated = changeTask(task, command, input);
-  if (command === "update" && updated === task) return task;
+  if (command === "update" && input.queuedExecutor === true) {
+    requireRevision(task, input.revision, true);
+    if (!linkQueuedExecutor(store.location.root, task, updated)) {
+      throw new TaskboardError("INVALID_TRANSITION", "The queued start is no longer pending.");
+    }
+  }
+  if (command === "update" && updated === task) {
+    return filters.compact && input.launchDetails === true ? taskLaunchState(task) : task;
+  }
   if (command === "update" && task.acceptanceRepair &&
       ["title", "description", "criteria", "questions", "subtasks", "dependencies", "execution"].some(key => input[key] !== undefined)) {
     updated = { ...updated, acceptanceRepair: undefined };
@@ -820,7 +828,9 @@ function run(
       updated.history.at(-1)!.mergedInto = { id: target.id, title: target.title,
         transferred: text(input.transferred, "transferred", true) };
     }
-    return store.save(updated);
+    const cancelled = store.save(updated);
+    deferExecutor(store.location.root, id);
+    return cancelled;
   }
   if ((command === "update" || command === "unblock") && input.dependencies !== undefined) validateDependencies(store, updated);
   const saved = store.save(command === "request-changes" && input.actor === "reviewer" ? withReviewerUsage(updated) :
@@ -855,9 +865,12 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
           isMergeRepair(task) || task.acceptanceRepair)) {
         throw new TaskboardError("INVALID_INPUT", "Only manual executor starts can be queued.");
       }
-      if (enqueue && task.status === "in_progress" && runtimeEntries(location.root).some(entry =>
-        entry.kind === "queue" && entry.task === id && entry.revision === task.revision)) {
+      const isQueued = () => runtimeEntries(location.root).some(entry => matchesQueuedExecutor(entry, task));
+      if (enqueue && isQueued()) {
         return { started: { task: taskLaunchState(task) } };
+      }
+      if (input.queuedExecutor === true && !isQueued()) {
+        throw new TaskboardError("INVALID_TRANSITION", "The queued start is no longer pending.");
       }
       if (input.autoMode === true && !store.index.settings.autoMode) {
         throw new TaskboardError("AUTO_MODE_DISABLED", "Automatic starts are disabled.");
@@ -878,10 +891,6 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
       }
       const result = prepareTaskStart(store, task, input, startLockWaitMs + lockWaitMs, enqueue);
       if ("task" in result && task.status === "in_progress") enqueue?.(result.task);
-      if (input.queuedExecutor === true && (task.status !== "in_progress" ||
-          !deferExecutor(location.root, id, undefined, task.revision))) {
-        throw new TaskboardError("INVALID_TRANSITION", "The queued start is no longer pending.");
-      }
       return "task" in result ? { started: reply(store, result) } : { checkout: result };
     });
     if (!prepared.checkout) return prepared.started;

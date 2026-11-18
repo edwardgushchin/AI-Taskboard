@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { directory, exists, locateBoard, readJson, withRuntimeLock, writeJson } from "../cli/storage.ts";
 import type { BoardLocation } from "../cli/storage.ts";
-import type { AgentLimits, RunActivity } from "../cli/model.ts";
+import type { AgentLimits, RunActivity, Task } from "../cli/model.ts";
 import type { BoardActivity } from "./codex-chat.ts";
 
 const context = new AsyncLocalStorage<string>();
@@ -18,6 +18,7 @@ export interface RuntimeEntry {
   parent?: string;
   limits?: AgentLimits;
   revision?: number;
+  linkedThread?: { revision: number; codexThreadId: string };
   continuation?: { afterDisconnect?: boolean; withoutProgress?: boolean };
   state?: {
     id: string;
@@ -88,6 +89,27 @@ export function runtimeEntries(project: string) {
 }
 
 export type DeferredExecutor = Pick<RuntimeEntry, "continuation"> & { revision: number };
+
+type QueuedTask = Pick<Task, "id" | "revision" | "status" | "codexThreadId">;
+
+export function matchesQueuedExecutor(entry: RuntimeEntry, task: QueuedTask) {
+  return entry.kind === "queue" && entry.task === task.id && task.status === "in_progress" &&
+    (entry.revision === task.revision || (entry.linkedThread?.revision === task.revision &&
+      entry.linkedThread.codexThreadId === task.codexThreadId));
+}
+
+export function linkQueuedExecutor(project: string, task: QueuedTask, updated: QueuedTask) {
+  return runtimeTransaction(project, entries => {
+    const entry = entries.find(entry => matchesQueuedExecutor(entry, task));
+    if (!entry) return false;
+    // Publish both revisions before saving the card, so either snapshot survives a crash.
+    if (updated.revision !== task.revision && updated.codexThreadId) {
+      entry.revision = task.revision;
+      entry.linkedThread = { revision: updated.revision, codexThreadId: updated.codexThreadId };
+    }
+    return true;
+  });
+}
 
 export function deferExecutor(project: string, task: string, pending?: DeferredExecutor, expectedRevision?: number, onlyIfIdle = false) {
   return runtimeTransaction(project, entries => {

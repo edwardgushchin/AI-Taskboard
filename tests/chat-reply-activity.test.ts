@@ -13,6 +13,7 @@ import { TaskboardError } from "../src/cli/model.ts";
 import { projectLabels } from "../src/desktop/project-tabs.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import type { RuntimeEntry } from "../src/desktop/board-runtime.ts";
+import { matchesQueuedExecutor } from "../src/desktop/board-runtime.ts";
 
 const source = readFileSync(new URL("../src/desktop/main.ts", import.meta.url), "utf8");
 const parsed = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, true);
@@ -44,7 +45,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   const runtime = runInNewContext(stripTypeScriptTypes(activitySource) +
     "\n({ sendChat, stopChat, returnTaskToDraft, activeAgents, frame, windowStates, runningTasks, launchingTasks, notifyRunChange, chatRuns, replyingTasks })", {
     agentSlots: { ...slots, entries: (project: string) => sharedRuns.get(project) ?? [] },
-    registerRuntime: () => () => {}, activeRunSummary, basename, extname, join, performance, projectLabels, AbortController, AbortSignal, wait, subscriptions: new Map(),
+    registerRuntime: () => () => {}, matchesQueuedExecutor, activeRunSummary, basename, extname, join, performance, projectLabels, AbortController, AbortSignal, wait, subscriptions: new Map(),
     isManual: () => false, runtimeLocation: (project: string) => project, readBoardSettings: () => ({}),
     scheduleAgentWork: () => { scheduled.push(true); }, reserveAgent: slots.acquire,
     boardRequests: new Map(), boardWorkRequests: new Map(), boardUnread: () => [], projectIdentity: (path: string) => path,
@@ -135,6 +136,10 @@ test("confirmed queue snapshots agree across board windows and exclude interrupt
   f.runtime.runningTasks.clear();
   f.task.revision++;
   assert.deepEqual(waiting(0), []);
+  f.sharedRuns.get("project-a")![0].linkedThread = { revision: f.task.revision, codexThreadId: "new-thread" };
+  assert.deepEqual(waiting(0), []);
+  f.task.codexThreadId = "new-thread";
+  assert.deepEqual(waiting(0), [f.task.id]);
   f.task.revision--;
   f.task.status = "blocked";
   assert.deepEqual(waiting(1), []);
