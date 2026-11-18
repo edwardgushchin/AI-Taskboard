@@ -1890,6 +1890,10 @@ function draftComposer() {
   goalText.rows = 2;
   const goalError = element("div", undefined, "board-goal-error");
   goalError.setAttribute("role", "alert");
+  const goalPending = element("div");
+  goalPending.setAttribute("role", "status");
+  goalPending.hidden = true;
+  bindLocalized(goalPending, "textContent", () => t("ui.waiting_for_the_codex_chat_to_become_available_ddb2e85f"));
   const goalActions = element("div", undefined, "board-goal-actions");
   const saveGoal = button("", () => changeGoal("edit", goalText.value.trim()), "quiet");
   const pauseGoal = button("", () => changeGoal("pause"), "quiet");
@@ -1906,7 +1910,7 @@ function draftComposer() {
   }, "quiet");
   const clearGoal = button("", () => changeGoal("clear"), "quiet danger");
   goalActions.append(saveGoal, pauseGoal, resumeGoal, clearGoal);
-  goalBody.append(goalText, goalActions, goalError);
+  goalBody.append(goalText, goalActions, goalPending, goalError);
   goalPanel.append(goalSummary, goalBody);
   const goalLabels = {
     active: ["ui.active_goal_4b86aa5f"], paused: ["ui.goal_paused_9030eeb9"],
@@ -1946,6 +1950,7 @@ function draftComposer() {
     if (changingGoal) return;
     changingGoal = true;
     goalError.textContent = "";
+    goalPending.hidden = kind !== "clear";
     const revision = goalRevision;
     syncGoal();
     try {
@@ -1957,6 +1962,7 @@ function draftComposer() {
       goalError.textContent = error.message;
     } finally {
       changingGoal = false;
+      goalPending.hidden = true;
       syncGoal();
     }
   }

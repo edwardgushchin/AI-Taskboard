@@ -45,7 +45,7 @@ const source = (file: string) => readFileSync(new URL("../src/desktop/" + file, 
 const boardSource = stripTypeScriptTypes(source("board-actions.ts").replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, ""));
 const main = ts.createSourceFile("main.ts", source("main.ts"), ts.ScriptTarget.Latest, true);
 const handlerSource = stripTypeScriptTypes(main.statements.map(node => node.getText(main)).filter(text =>
-  /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|returnTaskToDraft|scheduleMaintenance|scheduleRecurringTasks|taskRunLimit|readQueuedMessage|queuedFiles)\(|const (?:imageExtensions|imageTypes|boardRequests|boardWorkRequests|backgroundManagerRequests|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork|maintenanceWork|returningDrafts|reviewOperations|managerReviewOperations|taskOperations|steeringOperations) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
+  /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|changeBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|returnTaskToDraft|scheduleMaintenance|scheduleRecurringTasks|taskRunLimit|readQueuedMessage|queuedFiles)\(|const (?:imageExtensions|imageTypes|boardRequests|boardGoalClears|boardWorkRequests|backgroundManagerRequests|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork|maintenanceWork|returningDrafts|reviewOperations|managerReviewOperations|taskOperations|steeringOperations) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
 const cliFailure = (code: string, message: string) => ({ ok: false, error: { code, message } });
 
@@ -102,6 +102,7 @@ function fixture(t: TestContext) {
   const boardListeners = new Set<(tasks: Task[]) => void>();
   const subscriptions = new Map();
   const agentSlots = createAgentSlots();
+  let clearGoalError: string | undefined;
   const executorNotifications: string[] = [];
   const managerNotifications: string[] = [];
   const questionNotifications: { title: string; body: string; click?: () => void; closed?: boolean }[] = [];
@@ -163,6 +164,7 @@ function fixture(t: TestContext) {
       assert.equal(cwd, project);
       assert.equal(id, threadId);
       idleGoalActions.push(action);
+      if (clearGoalError) throw new Error(clearGoalError);
       return null;
     },
     launchTask: async (cwd: string, id: string, review?: { input: unknown }, newThread?: false | "manager", revision?: number, _retryDisconnect?: boolean, _scheduled?: boolean, resolveConflicts?: boolean) => {
@@ -249,7 +251,7 @@ function fixture(t: TestContext) {
   const reviewing = () => runtime.frame({ project, board: subscriptions.get(project)?.board, window: { webContents: {} } }).reviewingTasks;
   return {
     folder, project, threadId, dialogueId, binding, chatBinding, idleGoalActions, cliCalls, boardListeners, executorNotifications, managerNotifications,
-    reviewing, agentSlots,
+    reviewing, agentSlots, failGoalClear: (message?: string) => { clearGoalError = message; },
     repair: (task: Task, reply: Reply) => {
       respond = reply;
       return runtime.runBoardRequest(sender, { project, tasks: [task] }, "Repair this acceptance", [], false, false, undefined, undefined, undefined, false, task);
@@ -2213,6 +2215,63 @@ test("goal actions use the running chat connection and resume requires an existi
   assert.equal(managerRun(), null);
   assert.equal((await f.goal("clear")).data, null);
   assert.equal(f.idleGoalActions[0]?.kind, "clear");
+});
+
+test("clearing a paused goal waits for dialogue and shares the result between requests", async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"])).ok, true);
+  const goal = { objective: "Saved objective", status: "paused" };
+  writeJson(f.chatBinding, { provider: "codex", id: f.threadId, history: "local", goal });
+  const connected = Promise.withResolvers<void>();
+  const done = Promise.withResolvers<void>();
+  const activeWriter = "failed to record goal instruction: thread already has an active writer";
+  f.failGoalClear(activeWriter);
+  const dialogue = f.run("Ordinary question", async (_act, _prompt, _images, id, _context, _waiting, signal) => {
+    assert.equal(id, f.threadId);
+    connected.resolve();
+    await done.promise;
+    assert.equal(signal?.aborted, false);
+    return { text: "Ordinary answer" };
+  });
+  await Promise.race([connected.promise, dialogue.then(result => assert.fail(JSON.stringify(result)))]);
+  try {
+    const first = f.goal("clear");
+    const duplicate = f.goal("clear");
+    const early = await Promise.race([first, wait(50, "pending")]);
+    assert.equal(early, "pending", JSON.stringify(early));
+    assert.equal(f.idleGoalActions.length, 0);
+    assert.deepEqual((await f.history()).data.goal, goal);
+    f.failGoalClear();
+    done.resolve();
+    assert.equal((await dialogue).data.answer, "Ordinary answer");
+    for (const result of await Promise.all([first, duplicate])) {
+      assert.equal(result.ok, true);
+      assert.equal(result.data, null);
+    }
+    assert.equal((await f.goal("clear")).data, null);
+    assert.equal(f.idleGoalActions.length, 1);
+    const history = await f.history();
+    assert.equal(history.data.goal, null);
+    assert.match(JSON.stringify(history.data.turns), /Ordinary question.*Ordinary answer/);
+  } finally {
+    done.resolve();
+    await dialogue;
+  }
+});
+
+test("a provider refusal leaves a paused goal in history and permits retry", async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"])).ok, true);
+  const goal = { objective: "Saved objective", status: "paused" };
+  writeJson(f.chatBinding, { provider: "codex", id: f.threadId, history: "local", goal });
+  f.failGoalClear("Provider refused");
+  const rejected = await f.goal("clear");
+  assert.equal(rejected.error.code, "BOARD_GOAL_FAILED");
+  assert.equal(rejected.error.message, "Provider refused");
+  assert.deepEqual((await f.history()).data.goal, goal);
+  f.failGoalClear();
+  assert.equal((await f.goal("clear")).data, null);
+  assert.equal(f.idleGoalActions.length, 2);
 });
 
 test("two windows sharing a board cannot start separate orchestrator chats", async t => {

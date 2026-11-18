@@ -93,7 +93,7 @@ interface BoardWatch {
   stop: () => void;
   reviewAttempts: Map<string, string>;
   integrationAttempts: Map<string, number>;
-  shared?: { runtime: string; context?: string; activity: string; queue: number; history: number; unread: number };
+  shared?: { runtime: string; context?: string; activity: string; queue: number; history: number; binding: number; unread: number };
   reviewReports: Map<string, ReviewedSubmission>;
   reviewerRuns: Map<string, Promise<void>>;
 }
@@ -1118,6 +1118,7 @@ type ManagerRequest = {
   question?: { view: ManagerQuestion; settle: (answer: string | null) => void };
 };
 const boardRequests = new Map<string, ManagerRequest>();
+const boardGoalClears = new Map<string, ReturnType<typeof changeBoardGoal>>();
 const boardWorkRequests = new Map<string, ManagerRequest>();
 const backgroundManagerRequests = new Map<string, ManagerRequest>();
 enableSharedRuns();
@@ -1558,7 +1559,7 @@ function readBoardThread(path: string) {
   return { provider: stored.provider, id: stored.id, history: stored.history, goal: stored.goal, goalId: stored.goalId };
 }
 
-function saveBoardGoal(path: string, goal: BoardGoal | null) {
+function saveBoardGoal(path: string, goal: BoardGoal | null, required = false) {
   try {
     const thread = readBoardThread(path);
     const snapshot = goal && { objective: goal.objective, status: goal.status };
@@ -1566,6 +1567,7 @@ function saveBoardGoal(path: string, goal: BoardGoal | null) {
       writeJson(path, { ...thread, goal: snapshot });
     }
   } catch (error) {
+    if (required) throw error;
     console.warn("Could not save the manager goal locally.", (error as Error).message);
   }
 }
@@ -1682,34 +1684,65 @@ ipcMain.handle("board:goal", async (event, kind: unknown, objective: unknown) =>
   }
   const action: BoardGoalAction = kind === "edit" ? { kind, objective: (objective as string).trim() } : { kind };
   const key = projectIdentity(project);
+  if (kind !== "clear") return changeBoardGoal(project, key, action);
+  const pending = boardGoalClears.get(key);
+  if (pending) return pending;
+  const clear = changeBoardGoal(project, key, action);
+  boardGoalClears.set(key, clear);
+  try { return await clear; }
+  finally { boardGoalClears.delete(key); }
+});
+
+async function changeBoardGoal(project: string, key: string, action: BoardGoalAction) {
   const running = boardWorkRequests.get(key);
-  if (running && (!running.goal || running.changingGoal)) {
-    return cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_project_manager_is_connecting_or_changing_th_eb7d3eec"));
-  }
-  const operation = running ?? {};
-  const writer = running ? undefined : agentSlots.claim(project, "manager:context");
-  if (!running && !writer) return cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_agent_is_already_handling_a_request_72b4da49"));
-  operation.changingGoal = true;
-  if (!running) boardWorkRequests.set(key, operation);
+  const busy = () => cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_agent_is_already_handling_a_request_72b4da49"));
+  let writer: ReturnType<typeof agentSlots.claim>;
+  let activity: ReturnType<typeof beginOperation> | undefined;
+  let operation: ManagerRequest | undefined;
   try {
     const binding = boardThreadPath(project);
-    const id = readBoardThread(binding)?.id;
-    if (!id) return cliFailure("INVALID_INPUT", t("ui.there_is_no_saved_goal_67c98597"));
-    if (kind === "pause" || kind === "clear") running?.question?.settle(null);
-    const goal = running?.goal ? await running.goal(action) : await updateBoardGoal(app.getPath("userData"), project, id, action);
+    const saved = readBoardThread(binding);
+    if (!saved) return cliFailure("INVALID_INPUT", t("ui.there_is_no_saved_goal_67c98597"));
+    if (running && (!running.goal || running.changingGoal)) {
+      return cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_project_manager_is_connecting_or_changing_th_eb7d3eec"));
+    }
     if (!running) {
-      saveBoardGoal(binding, goal);
+      if (action.kind === "clear") activity = beginOperation(project, t("ui.clear_goal_a38efd6d"));
+      while (!(writer = boardRequests.has(key) ? undefined : agentSlots.claim(project, "manager:context"))) {
+        if (!activity || boardWorkRequests.has(key) ||
+          agentSlots.entries(project).some(entry => entry.task === "manager:context" && entry.state?.lane === "work")) return busy();
+        await wait(100, undefined, { signal: activity.controller.signal });
+      }
+      if (boardThreadPath(project) !== binding) return busy();
+      const current = readBoardThread(binding);
+      if (current?.id !== saved.id || current.goalId !== saved.goalId) return busy();
+      if (action.kind === "clear" && current.goal === null) {
+        broadcastBoardChat(project, "orchestrator-goal", { goal: null, goalRunning: false });
+        return { ok: true, data: null };
+      }
+    }
+    operation = running ?? {};
+    operation.changingGoal = true;
+    if (!running) boardWorkRequests.set(key, operation);
+    if (action.kind === "pause" || action.kind === "clear") running?.question?.settle(null);
+    const goal = running?.goal ? await running.goal(action) :
+      await writer!.run(() => updateBoardGoal(app.getPath("userData"), project, saved.id, action));
+    if (!running) {
+      saveBoardGoal(binding, goal, action.kind === "clear");
       broadcastBoardChat(project, "orchestrator-goal", { goal, goalRunning: false });
     }
     return { ok: true, data: goal };
   } catch (error) {
     return cliFailure("BOARD_GOAL_FAILED", (error as Error).message);
   } finally {
-    operation.changingGoal = false;
-    if (!running) boardWorkRequests.delete(key);
+    if (operation) {
+      operation.changingGoal = false;
+      if (!running) boardWorkRequests.delete(key);
+    }
     writer?.();
+    activity?.finish();
   }
-});
+}
 
 ipcMain.handle("board:request", async (event, request: unknown, files: unknown = [], project?: string, goal: unknown = false,
   immediate: unknown = false, messageId?: unknown, goalRunId?: unknown) => {
@@ -3445,6 +3478,7 @@ else {
               backgroundLive && background!.id + ":" + backgroundLive.sequence].join("|"),
             queue: stamp("manager-queue"),
             history: stamp("manager-chat"),
+            binding: statSync(boardThreadPath(project), { throwIfNoEntry: false })?.mtimeMs ?? 0,
             unread: stamp("manager-unread.json"),
           };
           if (previous?.runtime !== next.runtime) {
@@ -3452,7 +3486,8 @@ else {
           } else if (previous?.unread !== next.unread) {
             publishManagerUnread(project);
           }
-          if (previous?.history !== next.history || (previous?.context && previous.context !== next.context)) {
+          if (previous?.history !== next.history || previous?.binding !== next.binding ||
+              (previous?.context && previous.context !== next.context)) {
             broadcastBoardChat(project, "orchestrator-history");
             broadcastBoardChat(project, "orchestrator-work-history");
           }
