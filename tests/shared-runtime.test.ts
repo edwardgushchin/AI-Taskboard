@@ -1,11 +1,11 @@
 import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { initializeBoard, locateBoard, onBoard, withLock } from "../src/cli/storage.ts";
-import { createAgentSlots } from "../src/desktop/agent-limits.ts";
+import { cachedTaskLimits, createAgentSlots, readProfileTaskLimits } from "../src/desktop/agent-limits.ts";
 import { projectIdentity } from "../src/desktop/project-tabs.ts";
 import { runtimeEntries } from "../src/desktop/board-runtime.ts";
 
@@ -63,6 +63,28 @@ test("a profile save only replaces an older shared task limit", t => {
     active();
   }
   assert.equal(second.available(project, "executor"), 1);
+});
+
+test("legacy profile limits replace undated caches but respect a newer explicit save", t => {
+  const profile = mkdtempSync(join(tmpdir(), "taskboard-legacy-limits-"));
+  t.after(() => rmSync(profile, { recursive: true, maxRetries: 5 }));
+  const path = join(profile, "task-limits.json");
+  const legacyLimits = { executor: 1, manager: 0, reviewer: 1 };
+  const modernLimits = { executor: 4, manager: 0, reviewer: 2 };
+  writeFileSync(path, JSON.stringify(legacyLimits));
+  utimesSync(path, 100, 100);
+  const preference = readProfileTaskLimits(profile);
+  assert.ok(preference);
+  const legacyCache = { id: "task-defaults", owner: 0, kind: "defaults" as const,
+    limits: { executor: 5, manager: 0, reviewer: 1 } };
+  const builtInCache = { ...legacyCache, id: "task-defaults-v2", limits: { executor: 3, manager: 0, reviewer: 2 } };
+  assert.deepEqual(cachedTaskLimits([legacyCache], preference), legacyLimits);
+  assert.deepEqual(cachedTaskLimits([builtInCache], preference), legacyLimits);
+  assert.deepEqual(cachedTaskLimits([{ ...builtInCache, limits: modernLimits, limitsSavedAt: 100_001 }], preference), modernLimits);
+  writeFileSync(path, JSON.stringify({ ...legacyLimits, savedAt: 100_000 }));
+  utimesSync(path, 200, 200);
+  assert.deepEqual(cachedTaskLimits([{ ...builtInCache, limits: modernLimits, limitsSavedAt: 100_001 }],
+    readProfileTaskLimits(profile)), modernLimits);
 });
 
 test("runtime snapshots and reservations stay responsive during a board transaction", t => {

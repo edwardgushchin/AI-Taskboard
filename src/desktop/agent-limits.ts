@@ -1,3 +1,4 @@
+import { closeSync, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { AgentLimits } from "../cli/model.ts";
@@ -5,7 +6,7 @@ import { inheritedLimits } from "../cli/settings-notices.ts";
 import { deferExecutor, registerRuntime, runtimeEntries, runtimeLocation, runtimeTransaction } from "./board-runtime.ts";
 import type { DeferredExecutor, RuntimeEntry } from "./board-runtime.ts";
 import { projectIdentity } from "./project-tabs.ts";
-import { readBoardSettings, readJson } from "../cli/storage.ts";
+import { readBoardSettings } from "../cli/storage.ts";
 
 export const desktopAppName = "AI Taskboard";
 export const defaultAgentLimits: AgentLimits = inheritedLimits;
@@ -47,12 +48,24 @@ function defaultProfile() {
 }
 
 export function readProfileTaskLimits(profile = defaultProfile()): TaskLimitsPreference | undefined {
+  const path = join(profile, "task-limits.json");
   try {
-    const value = readJson(join(profile, "task-limits.json"));
-    const limits = parseAgentLimits(value);
-    if (!limits) return;
-    const { savedAt } = value as { savedAt?: number };
-    return { limits, savedAt: typeof savedAt === "number" && Number.isSafeInteger(savedAt) && savedAt > 0 ? savedAt : undefined };
+    if (!lstatSync(path).isFile()) return;
+    const file = openSync(path, "r");
+    try {
+      const stat = fstatSync(file);
+      if (!stat.isFile()) return;
+      const value: unknown = JSON.parse(readFileSync(file, "utf8"));
+      const limits = parseAgentLimits(value);
+      if (!limits) return;
+      const { savedAt } = value as { savedAt?: number };
+      // Older releases only wrote the preference file on explicit save.
+      const timestamp = Math.trunc(stat.mtimeMs);
+      return { limits, savedAt: typeof savedAt === "number" && Number.isSafeInteger(savedAt) && savedAt > 0
+        ? savedAt : timestamp > 0 ? timestamp : undefined };
+    } finally {
+      closeSync(file);
+    }
   } catch {
     return undefined;
   }

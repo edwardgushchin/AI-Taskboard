@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -9,7 +9,8 @@ import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import { locateBoard, onBoard } from "../src/cli/storage.ts";
 
 const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "task-limits", 60_000,
-  [["clean"], ["save-before-open"], ["open-after-save"], ["second-profile"], ["legacy-profile"], ["save"], ["restart"]]);
+  [["clean"], ["save-before-open"], ["open-after-save"], ["second-profile"], ["legacy-profile"], ["legacy-after-clean"],
+    ["save"], ["restart"], ["stale-legacy-profile"]]);
 
 void (async () => {
   const require = createRequire(import.meta.url);
@@ -18,7 +19,7 @@ void (async () => {
   const phase = process.argv.at(-1);
   const root = fileURLToPath(new URL("../", import.meta.url));
   const appData = process.platform === "darwin" ? join(scratch, "Library", "Application Support") : join(scratch, "app-data");
-  const profileName = phase === "second-profile" ? "second-profile"
+  const profileName = ["second-profile", "stale-legacy-profile"].includes(phase) ? phase
     : ["save-before-open", "open-after-save"].includes(phase) ? "later-profile" : "AI Taskboard";
   const profile = join(appData, profileName);
   const cliEnv = { ...process.env, GIT_CEILING_DIRECTORIES: scratch, APPDATA: appData, XDG_CONFIG_HOME: appData, HOME: scratch };
@@ -104,15 +105,23 @@ void (async () => {
       const source = readFileSync(url, "utf8").replaceAll("import.meta.url", JSON.stringify(url.href))
         .replace(/from "(\.\.?\/[^"\n]+)"/g, (_, specifier) => "from " + JSON.stringify(new URL(specifier, url).href));
       writeFileSync(entry, transformSync(source, { loader: "ts", format: "esm" }).code);
-    } else if (phase === "legacy-profile") {
+    } else if (phase === "legacy-profile" || phase === "legacy-after-clean") {
+      const legacy = phase === "legacy-profile";
       writeFileSync(profileLimits, JSON.stringify({ executor: 1, manager: 0, reviewer: 1 }));
-      writeFileSync(runtime, JSON.stringify([{ id: "task-defaults", kind: "defaults", owner: 0,
-        limits: { executor: 1, manager: 0, reviewer: 1 } }]));
+      utimesSync(profileLimits, 100, 100);
+      writeFileSync(runtime, JSON.stringify([{ id: legacy ? "task-defaults" : "task-defaults-v2", kind: "defaults", owner: 0,
+        limits: { executor: legacy ? 5 : 3, manager: 0, reviewer: legacy ? 1 : 2 } }]));
+      reservations(legacy ? 5 : 3, legacy ? 1 : 2);
       notice([1, 1]);
-      notice([3, 2], join(appData, "unused-profile"));
+      notice(legacy ? [5, 1] : [3, 2], join(appData, "unused-profile"));
       notice([1, 1], profile);
     } else if (phase === "save") {
       cli(board, "settings", { taskLimits: { reviewer: 0 } });
+    } else if (phase === "stale-legacy-profile") {
+      mkdirSync(profile, { recursive: true });
+      writeFileSync(profileLimits, JSON.stringify({ executor: 5, manager: 0, reviewer: 1 }));
+      utimesSync(profileLimits, 100, 100);
+      notice([4, 0], profile);
     }
     symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), modules,
       process.platform === "win32" ? "junction" : "dir");
@@ -173,7 +182,7 @@ void (async () => {
       await saveLimits(1, 1);
       reservations(3, 2);
       record("PASS app saved 1/1 with no board open; the existing shared cache still contains 3/2.");
-    } else if (phase === "legacy-profile" || phase === "second-profile" || phase === "open-after-save") {
+    } else if (["legacy-profile", "legacy-after-clean", "second-profile", "open-after-save"].includes(phase)) {
       if (phase === "second-profile") {
         assert.equal(existsSync(profileLimits), false);
         await showLimits([3, 2]);
@@ -194,23 +203,26 @@ void (async () => {
       } else if (phase === "open-after-save") {
         record("PASS reopening the app applies explicit 1/1 to the existing 3/2 cache on first board open; CLI and both pools use 1/1.");
       } else {
-        record("PASS explicit legacy profile 1/1 is used by standalone CLI before Electron opens the board, then published to both slot pools.");
+        const previous = phase === "legacy-profile" ? "legacy 5/1" : "published defaults 3/2";
+        record(`PASS explicit legacy profile 1/1 replaces ${previous} in CLI before opening and in both slot pools after opening.`);
       }
     } else {
       await open(board);
-      const appLimits = phase === "restart" ? [4, 2] : [1, 1];
+      const appLimits = phase === "save" ? [1, 1] : [4, 2];
       await boardLimits([["", String(appLimits[0])], ["0", String(appLimits[1])]]);
       await showLimits(appLimits);
       assert.deepEqual(cli(board, "settings").taskLimits, { reviewer: 0 });
-      notice([appLimits[0], 0]);
+      notice([appLimits[0], 0], profile);
       const pool = createAgentSlots(true);
       assert.equal(pool.available(board, "executor"), appLimits[0]);
       assert.equal(pool.available(board, "reviewer"), Infinity);
       if (phase === "save") {
         await saveLimits(4, 2);
         record("PASS saved board review 0 takes precedence over app review 1 in settings, notices and slot availability.");
-      } else {
+      } else if (phase === "restart") {
         record("PASS after application restart: saved app 4/2 and board review 0 persist; inherited work 4 and unlimited review are effective.");
+      } else {
+        record("PASS older legacy profile 5/1 does not replace the newer explicit 4/2 in CLI, Electron and shared slots.");
       }
     }
     if (keepArtifacts) console.log(report);
