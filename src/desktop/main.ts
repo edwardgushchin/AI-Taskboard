@@ -37,7 +37,7 @@ import { directory as storageDirectory, readBoardSettings, readJson, writeJson }
 import { missingCodexThread, startCodexRun } from "./codex-run.ts";
 import type { ExecutorTask } from "./codex-run.ts";
 import { runLog } from "./run-activity.ts";
-import { readRunImage } from "./run-images.ts";
+import { readReviewerImage, readRunImage } from "./run-images.ts";
 import { projectIdentity, projectLabels, projectPath, savedWindows } from "./project-tabs.ts";
 import { readMarkdownFile } from "./markdown-files.ts";
 import { normalizeRecentBoards, readRecentBoards, rememberRecentBoard } from "./recent-boards.ts";
@@ -2885,21 +2885,22 @@ ipcMain.handle("board:attachmentPreview", async (event, id: unknown, file: unkno
   return type ? "data:" + type + ";base64," + result.data.base64 : null;
 });
 
-async function taskRunImage(event: IpcMainInvokeEvent, id: unknown, path: unknown) {
+async function taskRunImage(event: IpcMainInvokeEvent, id: unknown, path: unknown, reviewer: unknown) {
   const { project } = stateOf(event);
   if (!project || typeof id !== "string" || !taskIdPattern.test(id) || typeof path !== "string") return null;
   const task = await callCli<Task>(project, ["show", id]);
   if (!task.ok) return null;
+  if (reviewer === true) return readReviewerImage(project, task.data.id, path);
   return readRunImage(project, task.data, runActivityByTask.get(project + "\0" + id) ?? [], path);
 }
 
-ipcMain.handle("board:runImagePreview", async (event, id: unknown, path: unknown) => {
-  const image = await taskRunImage(event, id, path);
+ipcMain.handle("board:runImagePreview", async (event, id: unknown, path: unknown, reviewer: unknown) => {
+  const image = await taskRunImage(event, id, path, reviewer);
   return image ? "data:" + image.type + ";base64," + image.data.toString("base64") : null;
 });
 
-ipcMain.handle("board:saveRunImage", async (event, id: unknown, path: unknown) => {
-  const image = await taskRunImage(event, id, path);
+ipcMain.handle("board:saveRunImage", async (event, id: unknown, path: unknown, reviewer: unknown) => {
+  const image = await taskRunImage(event, id, path, reviewer);
   if (!image) return cliFailure("IMAGE_UNAVAILABLE", t("ui.image_unavailable_f6c21e43"));
   const result = await dialog.showSaveDialog(stateOf(event).window, { defaultPath: image.name });
   if (result.canceled || !result.filePath) return { ok: true, data: null };
