@@ -3,7 +3,7 @@ import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { codexThreadPattern } from "../cli/model.ts";
 import { directory, exists, readJson, writeJson } from "../cli/storage.ts";
-import type { BoardActivity } from "./codex-chat.ts";
+import type { BoardActivity, readBoardHistory } from "./codex-chat.ts";
 import { onBoard, withRuntimeLock } from "../cli/storage.ts";
 import { runtimeLocation } from "./board-runtime.ts";
 import { readTask } from "../cli/archive.ts";
@@ -221,7 +221,7 @@ export function managerHistoryForView(turns: Turn[], view?: "chat" | "work") {
   });
 }
 
-export function readManagerHistory(project: string, cursor: string | null = null, view?: "chat" | "work", noticesOnly = false) {
+export function readManagerHistory(project: string, cursor: string | null = null, view?: "chat" | "work") {
   const before = cursor === null ? undefined : cursor.slice(cursorPrefix.length);
   if (before !== undefined && (!isLocalManagerCursor(cursor) || !filePattern.test(before))) {
     throw new Error("Invalid manager history cursor.");
@@ -231,20 +231,71 @@ export function readManagerHistory(project: string, cursor: string | null = null
   const folder = join(board, "manager-chat");
   if (!exists(folder)) return undefined;
   directory(folder);
-  const names = readdirSync(folder).filter(name => filePattern.test(name) && (!before || name < before) &&
-    (!noticesOnly || (readJson(join(folder, name)) as Run).lane === "notice")).sort().reverse();
-  const runs: Run[] = [];
+  const names = readdirSync(folder).filter(name => filePattern.test(name) && (!before || name < before)).sort().reverse();
+  const pages: Turn[][] = [];
+  let model: string | undefined;
+  let consumed = 0;
+  let conversations = 0;
   let remaining = 4 * 1024 * 1024;
-  for (const name of names.slice(0, 20)) {
+  for (const name of names) {
+    if (pages.length >= 20 && (view !== "chat" || conversations >= 2)) break;
     const path = join(folder, name);
-    remaining -= statSync(path).size;
-    if (remaining < 0 && runs.length) break;
-    runs.push(readJson(path) as Run);
+    const size = statSync(path).size;
+    const exceedsBudget = size > remaining && pages.length > 0;
+    const needsConversation = view === "chat" && conversations === 0;
+    if (exceedsBudget && !needsConversation) break;
+    const run = readJson(path) as Run;
+    const turns = managerHistoryForView(displayTurns(run), view);
+    if (view !== "chat" || turns.some(turn => turn.messages.length || turn.items.length)) {
+      // An inline image can exceed the page budget after Base64 encoding.
+      // Keep the first conversation together even if notices started the page.
+      if (exceedsBudget && run.lane === "notice") break;
+      remaining -= size;
+      pages.push(turns);
+      model ??= run.model;
+      if (run.lane !== "notice") conversations++;
+    }
+    consumed++;
   }
-  const model = runs.find(run => run.model)?.model;
-  const nextCursor = runs.length < names.length ? cursorPrefix + names[runs.length - 1] : null;
-  const turns = managerHistoryForView(runs.reverse().flatMap(displayTurns), view);
-  return { model, turns, nextCursor };
+  const nextCursor = consumed < names.length ? cursorPrefix + names[consumed - 1] : null;
+  return { model, turns: pages.reverse().flat(), nextCursor };
+}
+
+type LegacyHistoryReader = (cursor: string | null) => ReturnType<typeof readBoardHistory>;
+const providerCursorPrefix = "provider:";
+
+export async function readManagerDialogue(project: string, cursor: string | null, readLegacy?: LegacyHistoryReader) {
+  if (!cursor?.startsWith(providerCursorPrefix)) {
+    const local = readManagerHistory(project, cursor, "chat");
+    if (local?.turns.length || local?.nextCursor || !readLegacy) {
+      return local && { ...local, nextCursor: local.nextCursor ?? (readLegacy ? providerCursorPrefix : null) };
+    }
+  }
+  if (!readLegacy) return;
+  // Resumed threads can still have an old binding even though later runs are
+  // journaled locally. Only the provider's history before that journal is needed.
+  const folder = join(project, ".tasks", "manager-chat");
+  const firstRun = exists(folder) ? readdirSync(folder).filter(name => filePattern.test(name)).sort()
+    .find(name => {
+      const run = readJson(join(folder, name)) as Run;
+      return run.lane !== "notice" && managerHistoryForView(displayTurns(run), "chat").some(turn => turn.messages.length);
+    }) : undefined;
+  const cutoff = firstRun ? Number(firstRun.slice(0, 13)) : Infinity;
+  const beforeLocal = ({ at }: { at?: string }) => !at || Date.parse(at) < cutoff;
+  let next = cursor?.startsWith(providerCursorPrefix) ? cursor.slice(providerCursorPrefix.length) || null : null;
+  const visited = new Set<string | null>();
+  do {
+    visited.add(next);
+    const legacy = await readLegacy(next);
+    if (!legacy) return;
+    const turns = managerHistoryForView(legacy.turns, "chat").map(turn => ({
+      ...turn, messages: turn.messages.filter(beforeLocal), items: turn.items.filter(beforeLocal),
+    })).filter(turn => turn.messages.length || turn.items.length);
+    next = legacy.nextCursor;
+    if (turns.length || !next || visited.has(next)) {
+      return { ...legacy, turns, nextCursor: next && !visited.has(next) ? providerCursorPrefix + next : null };
+    }
+  } while (next);
 }
 
 type GoalMessage = {

@@ -3510,7 +3510,8 @@ function draftComposer() {
       editor.updateManagerRun(managerRun);
       if (accepted) {
         releaseSubmittedPreviews(submitted);
-        if (!container.childElementCount || (historyInvalidated && atEndOfHistory()) || log.childElementCount - olderNodes.length - 2 > 120) {
+        if (loadingHistory || !container.childElementCount || (historyInvalidated && atEndOfHistory()) ||
+            log.childElementCount - olderNodes.length - 2 > 120) {
           editor.invalidateHistory();
         }
         sendNext();

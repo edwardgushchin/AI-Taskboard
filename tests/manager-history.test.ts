@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
 import { writeJson } from "../src/cli/storage.ts";
-import { managerUnread, readManagerHistory, readManagerMessages, saveManagerHistory } from "../src/desktop/manager-history.ts";
+import { managerUnread, readManagerDialogue, readManagerHistory, readManagerMessages, saveManagerHistory } from "../src/desktop/manager-history.ts";
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
 import type { ReviewedSubmission } from "../src/desktop/board-actions.ts";
 
@@ -68,6 +68,70 @@ test("manager history preserves steering order and pages through locally saved r
   assert.throws(() => readManagerHistory(project, "local:../project"), /Invalid manager history cursor/);
 });
 
+for (const pausedGoal of [false, true]) test(`dialogue reload preserves saved replies and notices ${pausedGoal ? "with the paused legacy goal" : "without a goal"}`, async t => {
+  const project = fixture(t);
+  const start = Date.now();
+  const at = (offset: number) => new Date(start + offset).toISOString();
+  const answer = (id: string, text: string, offset: number) => ({
+    id, text, at: at(offset), title: "", type: "agentMessage", status: "completed", phase: "final_answer" as const,
+  });
+  const chat = (id: string, offset: number, text: string) => ({
+    lane: "chat" as const, message: { clientId: id, text: id, files: [], at: at(offset) },
+    items: text ? [answer(id + "-answer", text, offset + 30)] : [],
+  });
+  for (let i = 0; i < 22; i++) saveManagerHistory(project, start + i, randomUUID(), chat(`prior-${i}`, i, "Previous reply"));
+  const run = randomUUID();
+  saveManagerHistory(project, start + 100, run, chat("question", 100, ""));
+  const duringStream = await readManagerDialogue(project, null);
+  assert.equal(duringStream?.turns.at(-1)?.messages[0]?.text, "question");
+  assert.deepEqual(duringStream?.turns.at(-1)?.items, []);
+  for (let i = 101; i < 125; i++) saveManagerHistory(project, start + i, randomUUID(), {
+    lane: "notice", items: [answer(`notice-${i}`, "Status changed", i)],
+  });
+  saveManagerHistory(project, start + 100, run, chat("question", 100, "Full streamed answer"));
+  let providerCalls = 0;
+  const readLegacy = pausedGoal ? async () => {
+    providerCalls++;
+    return { goal: undefined, model: undefined, nextCursor: null, turns: [{
+      messages: [{ text: "Legacy question", at: at(-10), files: [] }],
+      items: [answer("legacy", "Legacy reply", -5), answer("question-answer", "Full streamed answer", 130)],
+      durationMs: undefined,
+    }] };
+  } : undefined;
+  const first = await readManagerDialogue(project, null, readLegacy);
+  assert.equal(providerCalls, 0);
+  assert.deepEqual(first?.turns.flatMap(turn => turn.messages.map(message => message.text)), ["prior-21", "question"]);
+  assert.equal(first?.turns.find(turn => turn.messages[0]?.text === "question")?.items[0]?.text, "Full streamed answer");
+  assert.equal(first?.turns.filter(turn => turn.lane === "notice").length, 24);
+  assert.deepEqual(await readManagerDialogue(project, null, readLegacy), first);
+  const pages = [first!];
+  while (pages[0]?.nextCursor) pages.unshift((await readManagerDialogue(project, pages[0].nextCursor, readLegacy))!);
+  const turns = pages.flatMap(page => page.turns);
+  const questions = turns.flatMap(turn => turn.messages.map(message => message.text));
+  assert.deepEqual(questions, [...(pausedGoal ? ["Legacy question"] : []), ...Array.from({ length: 22 }, (_, i) => `prior-${i}`), "question"]);
+  const ids = turns.flatMap(turn => turn.items.map(item => item.id));
+  assert.equal(ids.length, new Set(ids).size);
+  assert.equal(ids.length, 47 + Number(pausedGoal));
+});
+
+test("the newest question with a 4 MiB image stays on the first page after status notices", async t => {
+  const project = fixture(t);
+  const start = Date.now();
+  const image = { name: "image.png", url: "data:image/png;base64," + Buffer.alloc(4 * 1024 * 1024).toString("base64") };
+  const item = (id: string) => ({ id, type: "agentMessage", title: "", status: "completed", phase: "final_answer" as const, text: id });
+  for (const [offset, id] of ["prior", "latest"].entries()) {
+    saveManagerHistory(project, start + offset, randomUUID(), {
+      lane: "chat", message: { text: id, files: [image] }, items: [item(id + "-answer")],
+    });
+  }
+  saveManagerHistory(project, start + 2, randomUUID(), { lane: "notice", items: [item("notice")] });
+  const first = (await readManagerDialogue(project, null))!;
+  assert.deepEqual(first.turns.flatMap(turn => turn.items.map(item => item.id)), ["latest-answer", "notice"]);
+  assert.deepEqual(first.turns[0]?.messages[0]?.files, [image]);
+  assert.deepEqual((await readManagerDialogue(project, first.nextCursor))?.turns.map(turn => turn.messages[0]?.text), ["prior"]);
+  assert.deepEqual(await readManagerDialogue(project, null), first);
+});
+
 test("only delivered dialogue replies become unread and repeated saves preserve read status", t => {
   const project = fixture(t);
   const other = fixture(t);
@@ -89,16 +153,16 @@ test("only delivered dialogue replies become unread and repeated saves preserve 
   assert.deepEqual(JSON.parse(readFileSync(join(project, ".tasks", "manager-unread.json"), "utf8")).unread, ["second"]);
 });
 
-test("legacy provider conversations page local notices without duplicating mirrored chat runs", t => {
+test("dialogue pages interleaved notices and chat runs in saved order", t => {
   const project = fixture(t);
   const at = Date.now();
   for (let i = 0; i < 25; i++) saveManagerHistory(project, at + i, randomUUID(), {
     lane: i % 2 ? "notice" : "chat", items: [{ id: String(i), type: "agentMessage", title: "", text: String(i), status: "completed" }],
   });
-  const notices = readManagerHistory(project, null, "chat", true)!;
-  assert.equal(notices.turns.length, 12);
-  assert.ok(notices.turns.every(turn => turn.lane === "notice"));
-  assert.deepEqual(notices.turns.map(turn => turn.items[0]!.text), Array.from({ length: 12 }, (_, i) => String(2 * i + 1)));
+  const recent = readManagerHistory(project, null, "chat")!;
+  const older = readManagerHistory(project, recent.nextCursor!, "chat")!;
+  assert.equal(older.nextCursor, null);
+  assert.deepEqual([...older.turns, ...recent.turns].map(turn => turn.items[0]!.text), Array.from({ length: 25 }, (_, i) => String(i)));
 });
 
 test("review reports move into board storage and a cleared board cache supersedes old profile data", t => {
