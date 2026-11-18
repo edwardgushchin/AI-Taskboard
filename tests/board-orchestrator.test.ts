@@ -821,7 +821,7 @@ test("reviewers agree to submissions or return defects, and the manager controls
   git("commit", "--allow-empty", "-m", "Initial commit");
   await f.cli(["init"]);
   const model = { provider: "codex", model: "review-model", effort: "xhigh" };
-  await f.cli(["settings"], { reviewMode: "reviewer", autoMode: true, reviewer: model });
+  await f.cli(["settings"], { reviewMode: "reviewer", autoMode: true, reviewer: model, taskLimits: { reviewer: 1 } });
   await writeFile(join(project, ".git", "info", "exclude"), "\n/review.log\n", { flag: "a" });
   const tasks: Task[] = [];
   for (const name of ["pass", "fail", "hold-a", "hold-b", "queued"]) {
@@ -2623,6 +2623,7 @@ test("manager returns the same card in every review mode and preserves human acc
 
 test("private cleanup repair persists, shares reviewer capacity and preserves a done card without a goal", async t => {
   const f = fixture(t);
+  f.agentSlots.configure({ ...f.agentSlots.limits, reviewer: 1 });
   const git = (...args: string[]) => {
     const result = spawnSync("git", ["-C", f.project, ...args], { encoding: "utf8", windowsHide: true });
     assert.equal(result.status, 0, result.stderr); return result.stdout.trim();
@@ -2680,6 +2681,7 @@ test("private cleanup repair persists, shares reviewer capacity and preserves a 
 
 test("acceptance repair has an isolated context and waits for shared reviewer capacity", async t => {
   const f = fixture(t);
+  f.agentSlots.configure({ ...f.agentSlots.limits, reviewer: 1 });
   const git = (...args: string[]) => {
     const result = spawnSync("git", ["-C", f.project, ...args], { encoding: "utf8", windowsHide: true });
     assert.equal(result.status, 0, result.stderr); return result.stdout.trim();

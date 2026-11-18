@@ -1,15 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { codexThreadPattern, taskStates } from "../cli/model.ts";
-import type { TaskEvent } from "../cli/model.ts";
-import { BoardStore, directory, exists, readJson, writeJson } from "../cli/storage.ts";
+import { codexThreadPattern } from "../cli/model.ts";
+import { directory, exists, readJson, writeJson } from "../cli/storage.ts";
 import type { BoardActivity, readBoardHistory } from "./codex-chat.ts";
 import { onBoard, withRuntimeLock } from "../cli/storage.ts";
 import { runtimeLocation } from "./board-runtime.ts";
 import { readTask } from "../cli/archive.ts";
 import { statusNotice } from "../cli/task-messages.ts";
-import localization from "./localization.cjs";
 
 // Run under the board lock, shared by all windows and CLI writers. Persist the
 // delivery batch before writing chat files so an interrupted replay is idempotent.
@@ -74,44 +72,6 @@ type Run = {
 type Turn = { messages: Message[]; items: BoardActivity[]; durationMs?: number; lane?: Run["lane"]; goalId?: string };
 // Status sync writes unscoped notices. Goal notices record exchanges with the owner.
 const isStatusNotice = ({ lane, goalId }: Pick<Run, "lane" | "goalId">) => lane === "notice" && !goalId;
-const statusLabels = new Map(Object.keys(localization.catalogs).flatMap(locale =>
-  taskStates.map(status => [localization.text("status." + status, {}, locale), status] as const)));
-const mergedPrefixes = Object.keys(localization.catalogs).map(locale => {
-  const [prefix, suffix] = localization.text("status.merged",
-    { p0: "{p0}", p1: "{p1}", p2: "", p3: "", p4: "" }, locale).split("{p0}");
-  return { prefix, suffix: suffix?.split("{p1}")[0] };
-});
-
-// Only older records produced by status sync need their formatted fields recovered.
-function noticeTransition({ text, at }: BoardActivity, taskHistory?: (task: string) => TaskEvent[]): BoardActivity["statusTransition"] {
-  const task = /^(T-\d+) «/u.exec(text)?.[1];
-  if (task) {
-    const candidates = new Set<string>();
-    // Titles and reasons are unescaped. Only a known status followed by the
-    // notice's ending or reason separator can mark the end of the title.
-    for (const [, label] of text.matchAll(/» — (?=([^»\r\n.:]+)(?:\.$|: \S))/gu)) {
-      const candidate = statusLabels.get(label!);
-      if (candidate) candidates.add(candidate);
-    }
-    if (candidates.size === 1) return { task, status: candidates.values().next().value! };
-    if (candidates.size > 1) {
-      const time = at ? Date.parse(at) : NaN;
-      if (!Number.isFinite(time) || !taskHistory) return;
-      const recorded = new Set<string>();
-      for (const event of taskHistory(task)) {
-        if (event.actor !== "user" && event.from && event.to && event.from !== event.to &&
-            Date.parse(event.at) === time && candidates.has(event.to)) recorded.add(event.to);
-      }
-      if (recorded.size === 1) return { task, status: recorded.values().next().value! };
-      return;
-    }
-  }
-  for (const { prefix, suffix } of mergedPrefixes) {
-    if (!suffix || !text.startsWith(prefix!)) continue;
-    const match = /^T-\d+/u.exec(text.slice(prefix!.length));
-    if (match && text.startsWith(suffix, prefix!.length + match[0].length)) return { task: match[0], status: "cancelled" };
-  }
-}
 const cursorPrefix = "local:";
 const filePattern = /^\d{13}-[0-9a-f-]{36}\.json$/i;
 type ReadPosition = { at: number; file: string; index: number };
@@ -236,19 +196,13 @@ export function saveManagerHistory(project: string, startedAt: number, id: strin
   return changed;
 }
 
-function displayTurns({ message, items, durationMs, lane, goalId }: Run, startedAt?: number): Turn[] {
+function displayTurns({ message, items, durationMs, lane, goalId }: Run): Turn[] {
   const turns: Turn[] = [];
   const scope = { ...(lane ? { lane } : {}), ...(goalId ? { goalId } : {}) };
   let current: Turn = { messages: message ? [message] : [], items: [], ...scope };
-  for (const [index, item] of items.entries()) {
+  for (const item of items) {
     if (!item.userMessage) {
-      // Old logs have only the tool start time. Cap its possible transition
-      // at the next operation on the same card, or at the saved end of the run.
-      const completedAt = item.completedAt ?? (startedAt !== undefined && item.taskChanges?.length ?
-        items.slice(index + 1).find(next => next.at && next.taskChanges?.some(change =>
-          item.taskChanges!.some(previous => change.id === previous.id)))?.at ??
-        (durationMs !== undefined ? new Date(startedAt + durationMs).toISOString() : undefined) : undefined);
-      current.items.push(item.taskChanges?.length && completedAt ? { ...item, completedAt } : item);
+      current.items.push(item);
       continue;
     }
     if (current.messages.length || current.items.length) turns.push(current);
@@ -299,18 +253,17 @@ const automaticReviewPrefixes = [
   "Автоматическая проверка AI Taskboard. Проверь сдачи в режиме, выбранном на доске",
 ];
 
-export function managerHistoryForView(turns: Turn[], view?: "chat" | "work", taskHistory?: (task: string) => TaskEvent[]) {
+export function managerHistoryForView(turns: Turn[], view?: "chat" | "work") {
   return turns.flatMap(turn => {
     if (!view) return [turn];
+    if (isStatusNotice(turn)) return [];
     const first = turn.messages[0];
     const automatic = !turn.lane && turn.messages.length === 1 && first && !first.clientId && !first.files.length &&
       automaticReviewPrefixes.some(prefix => first.text.startsWith(prefix));
     if (view === "chat") {
-      return turn.lane === "work" || isStatusNotice(turn) || automatic ? [] : [{ ...turn, items: managerChatItems(turn.items) }];
+      return turn.lane === "work" || automatic ? [] : [{ ...turn, items: managerChatItems(turn.items) }];
     }
-    const notice = isStatusNotice(turn);
-    const items = notice ? turn.items.map(item => ({ ...item, statusTransition: item.statusTransition ?? noticeTransition(item, taskHistory) })) :
-      managerWorkItems(turn.items, automatic ? "work" : turn.lane);
+    const items = managerWorkItems(turn.items, automatic ? "work" : turn.lane);
     const messages = turn.lane === "work" ? turn.messages : [];
     return items.length || messages.length ? [{ ...turn, items, messages }] : [];
   });
@@ -327,21 +280,6 @@ export function readManagerHistory(project: string, cursor: string | null = null
   if (!exists(folder)) return undefined;
   directory(folder);
   const names = readdirSync(folder).filter(name => filePattern.test(name) && (!before || name < before)).sort().reverse();
-  let store: BoardStore | undefined;
-  const taskHistories = new Map<string, TaskEvent[]>();
-  function taskHistory(task: string) {
-    const cached = taskHistories.get(task);
-    if (cached) return cached;
-    let history: TaskEvent[] = [];
-    try {
-      store ??= new BoardStore({ root: project, directory: board, repository: null });
-      history = readTask(store, task).history;
-    } catch {
-      // A chat log can outlive its board or card. Keep the original notice in that case.
-    }
-    taskHistories.set(task, history);
-    return history;
-  }
   const pages: Turn[][] = [];
   let model: string | undefined;
   let consumed = 0;
@@ -353,13 +291,16 @@ export function readManagerHistory(project: string, cursor: string | null = null
     const size = statSync(path).size;
     const exceedsBudget = size > remaining && pages.length > 0;
     const needsConversation = view === "chat" && conversations === 0;
-    if (exceedsBudget && view !== "chat") break;
     const run = readJson(path) as Run;
-    const turns = managerHistoryForView(displayTurns(run, view === "work" ? Number(name.slice(0, 13)) : undefined), view, taskHistory);
+    if (view && isStatusNotice(run)) {
+      consumed++;
+      continue;
+    }
+    const turns = managerHistoryForView(displayTurns(run), view);
     if (view !== "chat" || turns.some(turn => turn.messages.length || turn.items.length)) {
       // An inline image can exceed the page budget after Base64 encoding.
       // Keep the first conversation together even if goal notices started the page.
-      if (exceedsBudget && (!needsConversation || run.lane === "notice")) break;
+      if (exceedsBudget && (view !== "chat" || !needsConversation || run.lane === "notice")) break;
       remaining -= size;
       pages.push(turns);
       model ??= run.model;

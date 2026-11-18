@@ -13,7 +13,8 @@ import { electronCheck, localizationFixture } from "./electron-check.mjs";
 
 const script = fileURLToPath(import.meta.url);
 const root = resolve(dirname(script), "..");
-const phases = process.argv.includes("--artifact-links") ? [["--live-artifacts"], ["--reopen-artifacts"]] : [[]];
+const noticesCheck = process.argv.includes("--manager-notices");
+const phases = noticesCheck ? [[], ["--reopen-dialogue"]] : process.argv.includes("--artifact-links") ? [["--live-artifacts"], ["--reopen-artifacts"]] : [[]];
 const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "chat", 150_000, phases);
 const { app, BrowserWindow, nativeTheme, ipcMain } = await import("electron");
 const option = name => { const index = process.argv.indexOf(name); return index < 0 ? undefined : process.argv[index + 1]; };
@@ -242,7 +243,7 @@ app.whenReady().then(async () => {
     console.log("Chat HEX Chromium checks passed");
     return;
   }
-  const dialogueFixture = option("--dialogue-history");
+  const dialogueFixture = noticesCheck ? join(scratch, "manager-notices") : option("--dialogue-history");
   if (process.argv.includes("--artifact-links")) {
     const project = join(scratch, "board with spaces");
     const reopening = process.argv.includes("--reopen-artifacts");
@@ -258,7 +259,8 @@ app.whenReady().then(async () => {
       import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
       import { join } from 'node:path';
       import { callCli } from ${JSON.stringify(new URL('../src/desktop/cli.ts', import.meta.url).href)};
-      import { readManagerDialogue, readManagerHistory, saveManagerHistory, syncTaskStatusNotices }
+      import { plannedDraft } from ${JSON.stringify(new URL("../tests/fixtures/planned-draft.ts", import.meta.url).href)};
+      import { readManagerDialogue, readManagerHistory, saveManagerHistory }
         from ${JSON.stringify(new URL('../src/desktop/manager-history.ts', import.meta.url).href)};
       const [root, reopen, source] = process.argv.slice(1);
       const cli = async (args, input) => {
@@ -270,10 +272,9 @@ app.whenReady().then(async () => {
       if (reopen !== "true") {
         mkdirSync(root);
         await cli(['init']);
-        const task = await cli(['create'], { title: 'Artifact fixture', workingDirectory: root, criteria: ['Show the screenshot'] });
+        const task = await cli(['create'], plannedDraft({ title: 'Artifact fixture', workingDirectory: root, criteria: ['Show the screenshot'] }));
         await cli(['approve', task.id]);
         await cli(['start', task.id]);
-        syncTaskStatusNotices(root);
         const name = 'manager work status.png';
         const bytes = source ? readFileSync(source) : readFileSync(0);
         const digest = createHash('sha256').update(bytes).digest('hex');
@@ -288,7 +289,6 @@ app.whenReady().then(async () => {
           const preview = await cli(['preview', task.id]);
           await cli(['submit', task.id], { token: preview.token, noChanges: true, summary, artifacts,
             checks: ['Fixture screenshot saved'] });
-          syncTaskStatusNotices(root);
         };
         await submit('First submission', [name]);
         await cli(['request-changes', task.id], { reason: 'Include the screenshot link' });
@@ -297,6 +297,8 @@ app.whenReady().then(async () => {
         const at = new Date().toISOString();
         reply = { id: 'artifact-reply', type: 'agentMessage', phase: 'final_answer', status: 'completed',
           text: report('Open screenshot'), title: '', at };
+        saveManagerHistory(root, Date.parse(at), "a0000000-0000-4000-8000-000000000002",
+          { lane: "work", items: [{ ...reply, text: report("Submission screenshot") }] });
         saveManagerHistory(root, Date.parse(at), 'a0000000-0000-4000-8000-000000000001',
           { lane: 'chat', message: { text: 'Show the screenshot', files: [], at }, items: [reply] });
       }
@@ -357,6 +359,7 @@ app.whenReady().then(async () => {
     return;
   }
   if (dialogueFixture) {
+    if (noticesCheck) window.setContentSize(1280, 800);
     const reopening = process.argv.includes("--reopen-dialogue");
     const largeImage = process.argv.includes("--large-dialogue-image");
     const files = [];
@@ -371,19 +374,20 @@ app.whenReady().then(async () => {
       id, text, at: new Date(start + offset).toISOString(), title: "", type: "agentMessage", status: "completed", phase: "final_answer",
     });
     const question = "current-question";
-    const reply = answer("full-answer", "full-streamed-answer: T-0001 отменена.", 130);
+    const report = "Сборка прошла. Проверка доступа завершена.";
+    const reply = answer("full-answer", "full-streamed-answer: " + report, 130);
     const partial = { ...answer("partial-answer", "partial-stream: T-0001 отме", 128), status: "inProgress" };
     const progress = { ...answer("progress", "Проверяю состояние карточки T-0001.", 127), phase: "commentary" };
     const blockReason = "Review «previous attempt» — cancelled.";
     const transitionResults = [
       ["cancel", "cancelled", "отменена"], ["start", "in_progress", "в работе"],
       ["block", "blocked", "заблокирована"], ["submit", "review", "сдана на проверку"],
-      ["accept", "done", "завершена"],
+      ["accept", "done", "завершена"], ["approve", "ready", "готова к работе"],
     ];
     const transitionTools = transitionResults.map(([action, status], index) => ({
       id: "transition-" + action, title: "ai_taskboard / task_" + action, type: "mcpToolCall", status: "completed",
       at: new Date(start + 100).toISOString(), completedAt: new Date(start + 105).toISOString(), text: "Saved tool output",
-      taskChanges: [{ action, status, id: "T-" + String(index + 1).padStart(4, "0") }],
+      taskChanges: [{ action, status, id: ["submit", "accept", "approve"].includes(action) ? "T-0004" : "T-" + String(index + 1).padStart(4, "0") }],
     }));
     const io = (project, action, input) => {
       const result = spawnSync(process.env.TASKBOARD_CHECK_NODE, ["--input-type=module", "-e", `
@@ -392,7 +396,9 @@ app.whenReady().then(async () => {
         import { join } from "node:path";
         import { initializeBoard } from ${JSON.stringify(new URL("../src/cli/storage.ts", import.meta.url).href)};
         import { createTask } from ${JSON.stringify(new URL("../src/cli/tasks.ts", import.meta.url).href)};
-        import { managerChatItems, managerUnread, readManagerDialogue, readManagerView, saveManagerHistory } from ${JSON.stringify(new URL("../src/desktop/manager-history.ts", import.meta.url).href)};
+        import { callCli } from ${JSON.stringify(new URL("../src/desktop/cli.ts", import.meta.url).href)};
+        import { plannedDraft } from ${JSON.stringify(new URL("../tests/fixtures/planned-draft.ts", import.meta.url).href)};
+        import { managerChatItems, readManagerHistory, syncTaskStatusNotices, managerUnread, readManagerDialogue, readManagerView, saveManagerHistory } from ${JSON.stringify(new URL("../src/desktop/manager-history.ts", import.meta.url).href)};
         const [project, action] = process.argv.slice(1);
         const input = JSON.parse(readFileSync(0, "utf8"));
         if (action === "seed") {
@@ -401,6 +407,24 @@ app.whenReady().then(async () => {
           store.create({ ...task, status: "blocked", updatedAt: input.at, history: [...task.history, {
             action: "block", actor: "manager", from: "in_progress", to: "blocked", at: input.at, text: input.reason,
           }] });
+        } else if (action === "late-transitions") {
+          const cli = async (args, data) => {
+            const result = await callCli(project, args, data);
+            if (!result.ok) throw Error(JSON.stringify(result));
+            return result.data;
+          };
+          await cli(["settings"], { reviewMode: "manager" });
+          const card = await cli(["create"], plannedDraft({ title: "Проверка отчёта", criteria: ["Проверить доступ"], workingDirectory: project }));
+          syncTaskStatusNotices(project);
+          await cli(["approve", card.id], { actor: "manager" });
+          await cli(["start", card.id], { actor: "manager" });
+          const preview = await cli(["preview", card.id]);
+          await cli(["submit", card.id], { token: preview.token, noChanges: true, summary: input, checks: ["Сборка прошла"] });
+          await cli(["accept", card.id], { actor: "manager", revision: (await cli(["show", card.id])).revision });
+          if (!syncTaskStatusNotices(project)) throw Error("No late status records were delivered");
+          const saved = await cli(["show", card.id]);
+          const notices = readManagerHistory(project).turns.flatMap(turn => turn.items).filter(item => item.statusTransition?.task === card.id);
+          console.log(JSON.stringify({ status: saved.status, result: saved.result, history: saved.history, notices, unread: managerUnread(project) }));
         } else if (action === "write") {
           mkdirSync(join(project, ".tasks"), { recursive: true });
           for (const { at, id, run } of input) saveManagerHistory(project, at, id ?? randomUUID(), run);
@@ -576,107 +600,121 @@ app.whenReady().then(async () => {
           "identical replies to separate requests survive pagination");
       }
       if (!reopening) await check("dialogue.leaks.length === 0", "no status notice entered the live dialogue DOM");
-      const work = io(project, "work", null);
-      const workPages = {};
-      for (let cursor = work.nextCursor; cursor;) {
-        const page = workPages[cursor] = io(project, "work", cursor);
-        cursor = page.nextCursor;
-      }
-      await evaluate(`
+      const loadWork = () => {
+        const recent = io(project, "work", null);
+        const pages = {};
+        for (let cursor = recent.nextCursor; cursor;) {
+          const page = pages[cursor] = io(project, "work", cursor);
+          cursor = page.nextCursor;
+        }
+        return { recent, pages };
+      };
+      const setWork = ({ recent, pages }) => evaluate(`
         api.boardHistory = async (_project, cursor, view) => ({ ok: true, data: view === 'live'
-          ? { work: [], chat: ${JSON.stringify(transitionTools)} } : cursor ? (${JSON.stringify(workPages)})[cursor] : ${JSON.stringify(work)} });
-        dialogue.manager.querySelector('.board-work-toggle').click();
+          ? { work: [], chat: ${JSON.stringify(transitionTools)} } : cursor ? (${JSON.stringify(pages)})[cursor] : ${JSON.stringify(recent)} });
         new Promise(resolve => requestAnimationFrame(resolve))
       `);
-      await check(`dialogue.manager.querySelectorAll('.board-work [data-item^="final:notice-"]').length === 20`,
-        "work displays the latest 20 status notices");
-      const onlyNoticeResults = `
-        [...dialogue.manager.querySelectorAll('.board-work [data-item^="item:transition-"]')].every(tool =>
-          !tool.querySelector('summary').textContent.match(/T-00|отменена|запущена|заблокирована|принята/u) &&
-          !!tool.querySelector('button[data-task]') && !!tool.querySelector('time')) &&
-        dialogue.manager.querySelectorAll('.board-work [data-item^="item:transition-"]').length === 5
-      `;
-      await check(onlyNoticeResults, "live tool details have no duplicate status result");
-      await check(`dialogue.manager.querySelectorAll('[data-status-result]:not([hidden])').length === 4`,
-        "live results without a loaded notice have visible rows");
-      await evaluate(`dialogue.manager.querySelector('.board-work .board-chat-older').click();
-        new Promise(resolve => requestAnimationFrame(resolve))`);
-      await check(`
-        [...dialogue.manager.querySelectorAll('.board-work [data-item^="final:notice-"]')].every((row, index) =>
-          row.dataset.item === 'final:notice-' + index && row.querySelector('a[data-task]')?.dataset.task ===
-            'T-' + String(index + 1).padStart(4, '0') &&
-          row.querySelector('time')?.dateTime === new Date(${start} + 101 + index).toISOString()) &&
-        dialogue.manager.querySelectorAll('.board-work [data-item^="final:notice-"]').length === 24
-      `, "work pagination shows each dated notice once with a card link");
-      await check(onlyNoticeResults, "saved tool details have no duplicate status result after loading older notices");
-      await check(`!dialogue.manager.querySelector('[data-status-result]:not([hidden])')`,
-        "matching notices replace all five tool result rows");
-      await check(`
-        dialogue.manager.querySelector('[data-item="final:notice-0"]').textContent.includes('Релиз «Клиент» — v2.1') &&
-        dialogue.manager.querySelector('[data-item="final:notice-0"]').textContent.includes('Проверка') &&
-        dialogue.manager.querySelector('[data-item="final:notice-2"]').textContent.includes(${JSON.stringify(blockReason)}) &&
-        dialogue.manager.querySelector('[data-item="final:notice-1"]').textContent.includes('Вторая строка запуска')
-      `, "matching notices preserve separators in older card titles and status-like reasons");
-      if (keepArtifacts && paused) {
-        await evaluate(`document.fonts.ready.then(() => {
-          const work = dialogue.manager.querySelector('.board-work');
-          const notice = work.querySelector('[data-item="final:notice-0"]');
-          work.scrollTop += notice.getBoundingClientRect().top - work.getBoundingClientRect().top - 105;
-        })`);
-        await capture("manager-work-notice-with-separator.png");
+      let work = loadWork();
+      await setWork(work);
+      await evaluate(`dialogue.manager.querySelector('.board-work-toggle').click();
+        new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+      const noTransitions = `(() => {
+        const work = dialogue.manager.querySelector('.board-work');
+        return !work.querySelector('[data-item^="final:notice-"], [data-item^="status:"]') &&
+          !work.textContent.includes('batch-cancel-') && !work.textContent.includes('Проверка отчёта');
+      })()`;
+      await check(noTransitions, "open work hides stored notices and live tool fallback rows");
+      if (!reopening && noticesCheck) {
+        const late = io(project, "late-transitions", report);
+        assert.equal(late.status, "done");
+        assert.equal(late.result.summary, report);
+        for (const state of ["ready", "review", "done"]) {
+          assert.ok(late.history.some(event => event.to === state), state);
+          assert.ok(late.notices.some(item => item.statusTransition.status === state), state);
+        }
+        assert.equal(late.notices.filter(item => item.text.endsWith(report)).length, 2);
+        assert.ok(late.notices.every(item => !late.unread.includes(item.id)));
+        work = loadWork();
+        await setWork(work);
+        await evaluate(`dialogue.manager.invalidateWork();
+          new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+        await check(noTransitions, "late delivery leaves open work free of status messages");
       }
       await evaluate(`(async () => {
-        for (let i = 0; i < ${Object.keys(workPages).length}; i++) {
+        for (let i = 0; i < ${Object.keys(work.pages).length}; i++) {
           const older = dialogue.manager.querySelector('.board-work .board-chat-older');
           if (older.hidden) break;
           older.click();
           await new Promise(resolve => requestAnimationFrame(resolve));
         }
-        dialogue.manager.querySelector('[data-item="status:legacy-cancel:T-0001"]').scrollIntoView({ block: 'center' });
       })()`);
+      await check(noTransitions, "paginated work hides old notices and provider fallback rows");
       await check(`(() => {
-        const rows = [...dialogue.manager.querySelectorAll('[data-status-result]:not([hidden])')];
-        return rows.length === 1 && rows[0].dataset.item === 'status:legacy-cancel:T-0001' &&
-          rows[0].querySelector('time')?.dateTime === '${new Date(start - 20).toISOString()}' &&
-          rows[0].querySelector('button.board-chat-task')?.textContent === 'T-0001' &&
-          rows[0].checkVisibility();
-      })()`, "older provider cancellation without a notice has a visible date and card link");
-      if (keepArtifacts && paused) await capture("manager-work-status-notices.png");
+        const tools = [...dialogue.manager.querySelectorAll('.board-work [data-item^="item:transition-"]')];
+        return tools.length === 6 && tools.every(tool => tool.querySelector('summary') &&
+          tool.querySelector('button[data-task]') && tool.textContent.includes('Saved tool output')) &&
+          !!dialogue.manager.querySelector('.board-work [data-item="item:legacy-cancel"]');
+      })()`, "live and stored work retain expandable tools and their results");
+      if (noticesCheck && keepArtifacts && paused && reopening) {
+        await evaluate(`document.fonts.ready.then(() => {
+          const tool = dialogue.manager.querySelector('[data-item="item:transition-accept"]');
+          tool.open = true;
+          for (let node = tool.parentElement; node; node = node.parentElement) if (node.localName === 'details') node.open = true;
+          tool.scrollIntoView({ block: 'end' });
+        })`);
+        await capture("manager-work.png");
+      }
       const latest = history(null);
       await evaluate(`{
         const pages = ${JSON.stringify(olderPages(latest))};
         api.boardHistory = async (_project, cursor) => cursor ? pages[cursor] : (${JSON.stringify(latest)});
       }
         dialogue.manager.querySelector('.board-dialogue-toggle').click(); void 0`);
+      if (noticesCheck) await check(`(() => {
+        const replies = dialogue.log.querySelectorAll('[data-message-id="full-answer"]');
+        return replies.length === 1 && replies[0].textContent.includes(${JSON.stringify(report)});
+      })()`, "one substantive manager answer survives submission and acceptance");
       if (keepArtifacts && paused && reopening) {
         await evaluate(`document.fonts.ready.then(() => {
           dialogue.log.querySelector('[data-message-id="full-answer"]').scrollIntoView({ block: 'center' });
           return true;
         })`);
-        await capture(largeImage ? "dialogue-history-large-image-restart.png" : "dialogue-history-paused-restart.png");
+        await capture(noticesCheck ? "manager-dialog.png" : largeImage ? "dialogue-history-large-image-restart.png" : "dialogue-history-paused-restart.png");
       }
       await evaluate("dialogue.manager.dispose(); render = dialogue.renderBoard; void 0");
       console.log(`Dialogue history passed: ${paused ? "paused goal" : "no goal"}, ${reopening ? "restarted Electron" : "stream and reopened composer"}`);
     }
+    if (noticesCheck && reopening) writeFileSync(join(artifacts, "manager-notices-check.txt"), [
+      "T-0202 | Windows Electron " + process.versions.electron + " | " + process.arch + " | 1280×800",
+      "Isolated Chromium renderer with real manager composer and history projection. Provider IPC uses a synthetic fixture.",
+      "No goal and paused goal: live tools, actual CLI approval/submission/acceptance, late status delivery, repeated composer opening, Electron restart, and older provider history passed.",
+      "One substantive manager answer retained. Approval, submission and acceptance notices and tool fallback rows are absent. Tools retain expandable details.",
+      "Submission and acceptance notices carry the same report in raw history. Status records produce no unread entries. Card history retains transitions to ready, review and done.",
+      "Reproduce: node scripts/check-chat.mjs --manager-notices --artifacts .tasks/qa",
+    ].join("\n") + "\n");
     return;
   }
   if (process.argv.includes("--unicode-only")) {
     const fixture = spawnSync(process.env.TASKBOARD_CHECK_NODE, ["--input-type=module", "-e", `
       import { mkdirSync } from 'node:fs';
       import { callCli } from ${JSON.stringify(new URL('../src/desktop/cli.ts', import.meta.url).href)};
+      import { plannedDraft } from ${JSON.stringify(new URL("../tests/fixtures/planned-draft.ts", import.meta.url).href)};
       import { recordExecutorResult } from ${JSON.stringify(new URL('../src/desktop/executor-results.ts', import.meta.url).href)};
-      import { syncTaskStatusNotices, readManagerHistory } from ${JSON.stringify(new URL('../src/desktop/manager-history.ts', import.meta.url).href)};
+      import { saveManagerHistory, readManagerHistory } from ${JSON.stringify(new URL('../src/desktop/manager-history.ts', import.meta.url).href)};
       const root = process.argv[1]; mkdirSync(root);
       const cli = async (args, input) => { const r = await callCli(root, args, input); if (!r.ok) throw Error(JSON.stringify(r)); return r.data; };
       await cli(['init']);
-      const task = await cli(['create'], { title: 'Unicode fixture', criteria: ['Exact text'], workingDirectory: root });
-      await cli(['approve', task.id]); await cli(['start', task.id]); syncTaskStatusNotices(root);
+      const task = await cli(['create'], plannedDraft({ title: 'Unicode fixture', criteria: ['Exact text'], workingDirectory: root }));
+      await cli(['approve', task.id]); await cli(['start', task.id]);
       const sample = 'Результат: ёж, English; «готово» — да? C:\\\\Проект\\\\file.ts abc1234 ??? literal \\\\u041F';
       const preview = await cli(['preview', task.id]);
       const r = await recordExecutorResult(root, task.id, { action: 'submit', input: {
         token: preview.token, noChanges: true, summary: sample, checks: [sample], limitations: [sample] } });
       if (!r.ok) throw Error(JSON.stringify(r));
-      syncTaskStatusNotices(root);
+      const result = await cli(['show', task.id]);
+      saveManagerHistory(root, Date.now(), 'a0000000-0000-4000-8000-000000000001', { lane: 'work', items: [{
+        id: 'unicode-reply', type: 'agentMessage', status: 'completed', phase: 'final_answer', title: '', text: result.result.summary
+      }] });
       console.log(JSON.stringify({ sample, history: readManagerHistory(root, null, 'work') }));
     `, join(scratch, "unicode-board")], { encoding: "utf8", windowsHide: true });
     assert.equal(fixture.status, 0, fixture.stderr);

@@ -37,7 +37,15 @@ export function electronCheck(script, name, timeout, phases = [[]]) {
     } finally {
       // Electron can keep the profile open until its subprocesses exit.
       if (dirname(realpathSync(scratch)) !== temp) throw new Error("Unexpected Electron check directory: " + scratch);
-      rmSync(scratch, { recursive: true, maxRetries: 5, retryDelay: 100 });
+      if (process.platform === "win32") {
+        const cleanup = spawnSync(process.execPath, ["--input-type=module", "-e",
+          'import { rm } from "node:fs/promises"; await rm(process.argv[1], { recursive: true, maxRetries: 10, retryDelay: 250 });',
+          scratch], { cwd: temp, windowsHide: true, stdio: "inherit" });
+        if (cleanup.error) throw cleanup.error;
+        if (cleanup.status !== 0) status = 1;
+      } else {
+        rmSync(scratch, { recursive: true, maxRetries: 5, retryDelay: 100 });
+      }
     }
     process.exit(status);
   }

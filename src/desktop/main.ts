@@ -50,7 +50,7 @@ import { readReviewReports, saveReviewReports } from "./review-history.ts";
 import { readReviewerChat, reviewerActivity, withReviewerChat } from "./reviewer-chat.ts";
 import { goalMessages, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory } from "./manager-history.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
-import { createAgentSlots, parseAgentLimits } from "./agent-limits.ts";
+import { createAgentSlots, desktopAppName, parseAgentLimits, readProfileTaskLimits } from "./agent-limits.ts";
 import { nextReadyTask } from "./auto-queue.ts";
 import { automationDelivery } from "./automation-delivery.ts";
 import type { AgentRole } from "./agent-limits.ts";
@@ -326,6 +326,7 @@ function subscribe(project: string, board: Board): BoardWatch {
     try {
       const result = await callCli<{ changed: boolean }>(project, ["sync-notices"], {
         language: localization.locale,
+        profile: app.getPath("userData"),
       });
       if (stopped) return;
       if (!result.ok) {
@@ -1038,10 +1039,12 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       }, automatic === undefined ? undefined : "initial", task.status === "review", Boolean(task.closedAt))).finally(() => ready.reject(new Error("The agent session ended.")));
     if ("interrupted" in answer) return { saved, result: { ok: true as const, data: task } };
     signal.throwIfAborted();
-    const result = await callCli<Task>(project, ["chat", id], {
-      ...answer, actor: "agent", model, effort, replyTo, durationMs: Math.round(performance.now() - replyStarted),
-      ...(automatic ? { draftDiscussion: true, revision: task.revision } : {}),
-    });
+    const result = automatic && !answer.text
+      ? await callCli<Task>(project, ["draft-discussion", id], { revision: task.revision, phase: "completed" })
+      : await callCli<Task>(project, ["chat", id], {
+        ...answer, actor: "agent", model, effort, replyTo, durationMs: Math.round(performance.now() - replyStarted),
+        ...(automatic ? { draftDiscussion: true, revision: task.revision } : {}),
+      });
     if (result.ok) discussionStarted = false;
     else discussionFailure = result.error.message;
     return { saved, result };
@@ -2909,16 +2912,18 @@ ipcMain.handle("agents:limits", (event, value: unknown) => {
   }
   const limits = parseAgentLimits(value);
   if (!limits) return cliFailure("INVALID_INPUT", t("ui.enter_non_negative_whole_numbers_for_the_limits_e203cc5b"));
+  let savedAt: number;
   try {
     const profile = app.getPath("userData");
+    savedAt = Math.max(Date.now(), (readProfileTaskLimits(profile)?.savedAt ?? 0) + 1);
     mkdirSync(profile, { recursive: true });
-    writeJson(join(profile, "task-limits.json"), limits);
+    writeJson(join(profile, "task-limits.json"), { ...limits, savedAt });
   } catch {
     return cliFailure("STORAGE_ERROR", t("ui.could_not_save_agent_limits_a463f6f4"));
   }
-  agentSlots.configure(limits);
+  agentSlots.configure(limits, savedAt);
   for (const project of subscriptions.keys()) {
-    syncSettingsNotices(project, limits);
+    syncSettingsNotices(project, agentSlots.inherited(project));
     const key = projectIdentity(project);
     boardRequests.get(key)?.settingsChanged?.();
     boardWorkRequests.get(key)?.settingsChanged?.();
@@ -3730,7 +3735,7 @@ ipcMain.handle("codex:windowsSandbox", (event, mode: unknown) => {
   setCodexWindowsSandbox(profile, mode);
   return codexStatus(profile);
 });
-app.setName("AI Taskboard");
+app.setName(desktopAppName);
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on("second-instance", () => {
@@ -3758,12 +3763,8 @@ else {
       : new Response(null, { status: 404 }));
     localization.select("system", app.getPreferredSystemLanguages());
     loadTheme();
-    try {
-      const limits = parseAgentLimits(readJson(join(app.getPath("userData"), "task-limits.json")));
-      if (limits) agentSlots.configure(limits);
-    } catch {
-      // The application defaults also cover a missing or unreadable preference.
-    }
+    const preference = readProfileTaskLimits(app.getPath("userData"));
+    if (preference) agentSlots.configure(preference.limits, preference.savedAt);
     loadRecentBoards();
     Menu.setApplicationMenu(null);
     setInterval(scheduleRecurringTasks, 10_000).unref();

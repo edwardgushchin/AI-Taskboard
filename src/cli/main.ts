@@ -40,6 +40,7 @@ import { expertContext, expertSkill, listExperts, readExpert, saveExpert } from 
 import { approvalRequirements, createExpertPlan, expertStagesStatus, planNewTask, requireApprovalPlan, requireExpertPlan, requireExpertResults, reviewDecisionSequence, sendTeamMessage, taskExpertPhase, teamInbox, updateExpertStage } from "./expert-team.ts";
 import { syncTaskStatusNotices } from "../desktop/manager-history.ts";
 import { syncSettingsNotices } from "../desktop/settings-notices.ts";
+import { cachedTaskLimits, readProfileTaskLimits } from "../desktop/agent-limits.ts";
 import { deferExecutor, forgetExecutor, linkQueuedExecutor, matchesQueuedExecutor, registerRuntime, runtimeEntries } from "../desktop/board-runtime.ts";
 
 const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "checklist", "pause", "block", "resume", "unblock", "update"]);
@@ -763,13 +764,13 @@ function run(
     const phase = task.draftDiscussion?.phase;
     if (isManual(store.index.settings) || task.status !== "draft" ||
         !(input.phase === "running" && (phase === "queued" || phase === "failed") ||
-          input.phase === "failed" && phase === "running")) {
+          (input.phase === "failed" || input.phase === "completed") && phase === "running")) {
       throw new TaskboardError("CHAT_CHANGED", "The draft discussion is no longer in this state.");
     }
     const draftDiscussion: Task["draftDiscussion"] = input.phase === "failed"
       ? { phase: "failed", reason: text(input.reason, "reason", true).slice(0, 1500) }
-      : { phase: "running" };
-    return store.save(record({ ...task, draftDiscussion }, "draft-discussion-" + draftDiscussion.phase, "agent"));
+      : input.phase === "running" ? { phase: "running" } : undefined;
+    return store.save(record({ ...task, draftDiscussion }, "draft-discussion-" + input.phase, "agent"));
   }
   if (command === "run-log") {
     const logged = recordRunLog(task, input);
@@ -935,7 +936,8 @@ async function main() {
           data = readBoardSettings(location);
         } else if (command === "sync-notices") {
           if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "Notice synchronization takes no task ID.");
-          const limits = runtimeEntries(location.root).find(entry => entry.id === "task-defaults")?.limits ?? inheritedLimits;
+          const profile = input.profile === undefined ? undefined : text(input.profile, "profile", true);
+          const limits = cachedTaskLimits(runtimeEntries(location.root), readProfileTaskLimits(profile)) ?? inheritedLimits;
           syncSettingsNotices(location.root, limits);
           data = { changed: syncTaskStatusNotices(location.root, text(input.language, "language", true)) };
         } else if (command === "manager-usage") {
