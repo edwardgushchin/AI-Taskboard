@@ -1073,7 +1073,7 @@ test("task chat records a clarification once, with its sources and lifecycle int
     ok: false, error: { code: "INVALID_INPUT", message: "Use the parameters defined for this task action." },
   });
   const first = await edit("task_update", update);
-  assert.ok(first.ok && first.data.changed);
+  assert.ok(first.ok && (first.data as { changed: boolean }).changed);
   const edited = show();
   assert.deepEqual({ ...edited, description: sent.description, history: sent.history,
     revision: sent.revision, updatedAt: sent.updatedAt }, sent);
@@ -1087,7 +1087,7 @@ test("task chat records a clarification once, with its sources and lifecycle int
     text: "Уточнение добавлено в описание." });
   const repeated = send(clarification);
   const second = await action(repeated)("task_update", update);
-  assert.ok(second.ok && !second.data.changed);
+  assert.ok(second.ok && !(second.data as { changed: boolean }).changed);
   assert.deepEqual(show(), repeated);
   assert.equal(refreshes, 1);
 
@@ -1102,7 +1102,7 @@ test("task chat records a clarification once, with its sources and lifecycle int
   assert.ok(!stale.ok && stale.error.code === "REVISION_CONFLICT");
   assert.deepEqual(show(), concurrent);
   const saved = await action(show())("task_update", { authorization: latestText, criteria });
-  assert.ok(saved.ok && saved.data.changed);
+  assert.ok(saved.ok && (saved.data as { changed: boolean }).changed);
   assert.deepEqual(show().criteria, criteria);
   assert.equal(show().status, "draft");
   assert.equal(show().history.some(event => event.action === "start"), false);
