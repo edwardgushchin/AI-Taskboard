@@ -76,6 +76,7 @@ export function manualAction(store: BoardStore, command: string, id: string | un
     requireRevision(card, input.revision);
     // Reuse field validation without the agent lifecycle or approved-requirement rules.
     const updated = changeTask({ ...card, status: "draft" }, "update", input);
+    if (updated.revision === card.revision) return card;
     updated.status = card.status;
     if (input.tags !== undefined) {
       updated.tags = registerTags(store.index.tags ??= [], updated.tags);

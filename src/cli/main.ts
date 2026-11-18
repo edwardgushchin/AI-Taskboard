@@ -804,6 +804,7 @@ function run(
   if (command === "progress" && task.schedule && task.status === "in_progress") requireExpertResults(task, "work");
   if (command === "approve" && task.status === "draft") requireApprovalPlan(task, store.index.settings);
   let updated = changeTask(task, command, input);
+  if (command === "update" && updated === task) return task;
   if (command === "update" && task.acceptanceRepair &&
       ["title", "description", "criteria", "questions", "subtasks", "dependencies", "execution"].some(key => input[key] !== undefined)) {
     updated = { ...updated, acceptanceRepair: undefined };
