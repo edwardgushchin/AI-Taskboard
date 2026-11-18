@@ -200,6 +200,20 @@ function incomingMessages(run: Run) {
     item.status === "completed" && item.text.trim()).map(item => item.id);
 }
 
+export function hasManagerMessage(project: string, id: string, created: number) {
+  const folder = join(project, ".tasks", "manager-chat");
+  if (!exists(folder)) return false;
+  directory(folder);
+  // Compare only the runs that could have accepted this queued message.
+  return readdirSync(folder).some(name => {
+    if (!filePattern.test(name)) return false;
+    const path = join(folder, name);
+    if ((statSync(path, { throwIfNoEntry: false })?.mtimeMs ?? 0) < created - 1000) return false;
+    const run = readJson(path) as Run;
+    return run.message?.clientId === id || run.items.some(item => item.id === id && item.userMessage);
+  });
+}
+
 export function saveManagerHistory(project: string, startedAt: number, id: string, run: Run) {
   if (!codexThreadPattern.test(id)) throw new Error("Invalid manager history ID.");
   const board = join(project, ".tasks");
