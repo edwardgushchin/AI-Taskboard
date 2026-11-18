@@ -1,5 +1,5 @@
 import { beginBoardOperation } from "../desktop/board-worklog.ts";
-import { captureFileLink, isFileLink, verifyFileLink } from "./attachment-links.ts";
+import { captureFileLink, isFileLink, snapshotFileLink, verifyFileLink } from "./attachment-links.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { readdirSync, realpathSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
@@ -305,6 +305,11 @@ export function readAttachment(store: BoardStore, id: string, input: Record<stri
   const attachment = task.attachments.find(entry => entry.file === file);
   if (!attachment) throw new TaskboardError("ATTACHMENT_NOT_FOUND", "The task does not have that attachment.");
   if (attachment.link) {
+    if (input.snapshot === true) {
+      const path = resolve(text(input.destination, "destination", true));
+      snapshotFileLink(attachment.link, path);
+      return { ...attachment, path };
+    }
     const path = verifyFileLink(attachment.link);
     if (input.destination !== undefined) throw new TaskboardError("ATTACHMENT_LINK", "Open the linked source instead of copying it: " + path);
     return { ...attachment, path };

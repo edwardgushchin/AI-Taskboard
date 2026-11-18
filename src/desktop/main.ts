@@ -938,23 +938,16 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       let path = join(project, ".tasks", "attachments", id, file.file);
       const extension = extname(file.name).toLowerCase();
       const safeExtension = /^\.[a-z0-9]{1,10}$/.test(extension) ? extension : "";
-      if (file.link) {
-        if (inspectDraft) {
-          const source = await callCli<{ path: string }>(project, ["attachment", "read", id], { file: file.file });
-          if (source.ok) {
-            path = source.data.path;
-            if (imageTypes.has(safeExtension)) images.push(path);
-            attachments.push({ id: file.file, name: file.name, bytes: file.bytes, path, link: file.link });
-          } else attachments.push({ id: file.file, name: file.name, error: source.error.message });
-          continue;
-        }
+      if (file.link && !inspectDraft) {
         try { path = verifyFileLink(file.link); attachments.push({ id: file.file, name: file.name, bytes: file.bytes, path, link: file.link }); }
         catch (error) { attachments.push({ id: file.file, name: file.name, error: (error as Error).message }); }
         continue;
       }
       if (inspectDraft || activeFiles.has(file.file)) {
         path = join(scratch!, "attachment-" + index + safeExtension);
-        const copy = await callCli(project, ["attachment", "read", id], { file: file.file, destination: path });
+        const copy = await callCli(project, ["attachment", "read", id], {
+          file: file.file, destination: path, ...(file.link ? { snapshot: true } : {}),
+        });
         if (!copy.ok) {
           if (!inspectDraft) return { saved, result: copy };
           attachments.push({ id: file.file, name: file.name, error: copy.error.message });
@@ -962,7 +955,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
         }
         if (imageTypes.has(safeExtension)) images.push(path);
       }
-      attachments.push({ id: file.file, name: file.name, path });
+      attachments.push({ id: file.file, name: file.name, path, bytes: file.bytes, ...(file.link ? { linked: true } : {}) });
     }
     const context = inspectDraft ? await Promise.all((task.dependencies ?? []).map(async dependency => {
       const result = await callCli<Task>(project, ["show", dependency, "--compact"]);

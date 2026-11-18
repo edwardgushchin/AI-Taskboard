@@ -1,6 +1,6 @@
-// Real Electron, CLI and renderer with a deterministic task-chat provider.
+// Real Electron, CLI and renderer. Pass --live to exercise the installed Codex provider.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -8,8 +8,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { electronCheck } from "./electron-check.mjs";
 
-const { scratch, artifacts } = electronCheck(import.meta.url, "draft-discussion", 90000,
-  [["--first-pass"], ["--restart"]]);
+const live = process.argv.includes("--live");
+const { scratch, artifacts } = electronCheck(import.meta.url, "draft-discussion", live ? 240000 : 90000,
+  live ? [[]] : [["--first-pass"], ["--restart"]]);
 const require = createRequire(import.meta.url);
 const { app, BrowserWindow, dialog } = require("electron");
 const restart = process.argv.includes("--restart");
@@ -28,7 +29,7 @@ const cli = (args, input, root = project, error) => {
   return reply.data;
 };
 const until = async (predicate, label) => {
-  const deadline = Date.now() + 20000;
+  const deadline = Date.now() + (live ? 65000 : 20000);
   for (;;) {
     if (await predicate()) return;
     if (Date.now() >= deadline) throw Error("Timed out: " + label);
@@ -53,6 +54,7 @@ app.disableHardwareAcceleration();
 let selection = project;
 dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [selection] });
 const calls = [];
+let mutableSources = [];
 let failProvider = true;
 let staleGate;
 globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images, _commentary, _action, _scratch,
@@ -62,7 +64,11 @@ globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images,
   assert.equal(context.task.id, id);
   assert.equal(context.task.status, "draft");
   assert.equal(readFileSync(join(cwd, "AGENTS.md"), "utf8"), "Use the project fixture.");
-  calls.push({ context, configured, mode, images: images.length,
+  if (mode === "initial" && context.task.title === "CLI with attachments") {
+    // Change the originals after CLI staging, at the provider boundary.
+    for (const path of mutableSources) writeFileSync(path, "Changed after staging");
+  }
+  calls.push({ context, configured, mode, images: images.map(path => readFileSync(path).toString("base64")),
     documents: context.attachments.filter(file => file.path && file.name.endsWith(".txt")).map(file => readFileSync(file.path, "utf8")) });
   onControl({ interrupt: async () => {}, steer: async () => assert.fail("An automatic review must own its turn.") });
   if (context.task.title === "Provider inactive" && failProvider) throw Error("Fixture provider unavailable");
@@ -87,9 +93,9 @@ try {
       process.platform === "win32" ? "junction" : "dir");
   }
   const sourceUrl = new URL("../src/desktop/main.ts", import.meta.url);
-  const source = readFileSync(sourceUrl, "utf8").replaceAll("import.meta.url", JSON.stringify(sourceUrl.href))
-    .replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, sourceUrl).href))
-    .replace("writer.run(() => replyToTask(", "writer.run(() => globalThis.draftFixtureReply(");
+  let source = readFileSync(sourceUrl, "utf8").replaceAll("import.meta.url", JSON.stringify(sourceUrl.href))
+    .replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, sourceUrl).href));
+  if (!live) source = source.replace("writer.run(() => replyToTask(", "writer.run(() => globalThis.draftFixtureReply(");
   const entry = join(scratch, "main-under-test.mjs");
   writeFileSync(entry, require("esbuild").transformSync(source, { loader: "ts", format: "esm" }).code);
   process.on("unhandledRejection", error => { console.error(error); app.exit(1); });
@@ -113,7 +119,64 @@ try {
     await evaluate("document.fonts.ready.then(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))))");
     writeFileSync(join(artifacts, name), (await window.webContents.capturePage()).toPNG());
   };
-  if (restart) {
+  if (live) {
+    const catalog = await evaluate("window.taskboard.chatModels()");
+    assert.equal(catalog.ok, true, JSON.stringify(catalog));
+    const model = catalog.data.find(entry => entry.default) ?? catalog.data[0];
+    assert.ok(model?.id && model.effort);
+    const execution = { model: model.id, effort: model.effort };
+    const instructions = join(project, "AGENTS.md");
+    const schedule = join(project, "pilot-schedule.txt");
+    writeFileSync(instructions, "For the access-review pilot, the only variables in the handoff are the delivery time and the recipient email alias. Use pilot-schedule.txt if attached. The owner chooses the email alias. The deliverable is one sentence, with no tooling or implementation work.");
+    writeFileSync(schedule, "The access-review pilot sends the handoff on Tuesdays at 09:40 UTC.");
+    const brief = { title: "Document a weekly access-review handoff",
+      description: "Prepare a one-sentence handoff naming the existing delivery time and the exact recipient email alias. Use the attached schedule and project instructions. Keep the document in English.",
+      criteria: ["The handoff names the delivery time and exact recipient email alias."],
+      execution, attachmentSources: [{ path: schedule, link: true }] };
+    const unresolved = cli(["create"], brief);
+    const waitAgent = async (id, count) => {
+      await until(() => {
+        const card = show(id);
+        assert.notEqual(card.draftDiscussion?.phase, "failed", card.draftDiscussion?.reason);
+        return messages(card).filter(event => event.actor === "agent").length === count;
+      }, "Codex reply " + id);
+      const card = show(id);
+      assert.equal(card.status, "draft");
+      assert.equal(card.git, undefined);
+      return messages(card).at(-1).text;
+    };
+    const question = await waitAgent(unresolved.id, 1);
+    assert.match(question, /(?:recipient|alias|email)/i);
+    assert.equal((question.match(/\?/g) ?? []).length, 1, question);
+    assert.doesNotMatch(question, /(?:what|which)\s+(?:day|time|schedule)\b/i);
+    const answer = "Use audits+north@example.invalid as the recipient. Please confirm the delivery time and recipient.";
+    const followup = await evaluate(`window.taskboard.chatSend(${JSON.stringify(unresolved.id)}, ${JSON.stringify({ ...execution, text: answer, files: [] })})`);
+    assert.equal(followup.result.ok, true, JSON.stringify(followup));
+    const confirmation = await waitAgent(unresolved.id, 2);
+    assert.equal(messages(show(unresolved.id))[1].text, answer);
+    assert.match(confirmation, /Tuesday/i);
+    assert.match(confirmation, /09:40\s*UTC/i);
+    assert.match(confirmation, /audits\+north@example\.invalid/i);
+    assert.doesNotMatch(confirmation, /\?/);
+    const complete = cli(["create"], { ...brief, description: brief.description + " The recipient is audits+north@example.invalid." });
+    const completion = await waitAgent(complete.id, 1);
+    assert.doesNotMatch(completion, /\?/);
+    assert.match(completion, /(?:enough|sufficien|complete|no (?:material |further |open )?questions?|ready|clear)/i);
+    assert.equal(existsSync(join(project, ".worktrees")), false);
+    await until(() => !readdirSync(staging).some(name => name.startsWith("ai-taskboard-chat-")), "Codex staging cleanup");
+    const git = args => execFileSync("git", args, {
+      cwd: fileURLToPath(new URL("../", import.meta.url)), encoding: "utf8", windowsHide: true,
+    }).trim();
+    assert.equal(git(["status", "--porcelain"]), "", "Run the live scenario from the committed revision.");
+    writeFileSync(join(artifacts, "draft-discussion-live.json"), JSON.stringify({
+      commit: git(["rev-parse", "HEAD"]), platform: process.platform, electron: process.versions.electron,
+      chromium: process.versions.chrome, provider: "Codex App Server", execution,
+      fixture: { projectInstructions: readFileSync(instructions, "utf8"), attachedSchedule: readFileSync(schedule, "utf8"),
+        draft: brief.description, completeDraft: complete.description },
+      observed: { question, answer, confirmation, completion },
+    }, null, 2));
+    console.log("PASS Codex asked about the missing recipient, applied the answer and confirmed the independently complete draft");
+  } else if (restart) {
     await until(() => show(report.interrupted).draftDiscussion?.phase === "failed", "interrupted state after restart");
     assert.equal(calls.length, 0);
     await display(report.interrupted);
@@ -158,7 +221,9 @@ try {
     const original = join(scratch, "file.txt"), linked = join(scratch, "linked.txt"), changed = join(scratch, "changed.txt");
     const image = join(scratch, "image.png");
     writeFileSync(original, "copied contents"); writeFileSync(linked, "linked contents"); writeFileSync(changed, "old");
-    writeFileSync(image, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ZkAAAAASUVORK5CYII=", "base64"));
+    const imageBytes = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ZkAAAAASUVORK5CYII=";
+    writeFileSync(image, Buffer.from(imageBytes, "base64"));
+    mutableSources = [linked, image];
     const before = calls.length;
     const draft = cli(["create"], { title: "CLI with attachments", dependencies: [created.data.id], execution: settings,
       attachmentSources: [{ path: original, name: "same.txt" }, { path: linked, name: "same.txt", link: true },
@@ -169,7 +234,8 @@ try {
     assert.equal(input.mode, "initial");
     assert.deepEqual(input.configured, settings);
     assert.deepEqual(input.documents, ["copied contents", "linked contents"]);
-    assert.equal(input.images, 2);
+    assert.deepEqual(input.images, [imageBytes, imageBytes]);
+    assert.ok(input.context.attachments.filter(file => file.linked).every(file => !mutableSources.includes(file.path) && !file.link));
     assert.equal(new Set(input.context.attachments.map(file => file.id)).size, 5);
     assert.equal(input.context.attachments.filter(file => file.error).length, 1);
     assert.equal(input.context.attachments.find(file => file.error).name, "changed.txt");
@@ -183,9 +249,11 @@ try {
     assert.deepEqual(messages(show(draft.id)).map(event => event.text),
       ["Which viewport is required?", "1280 pixels", "User answer recorded: 1280 pixels"]);
     assert.equal(calls.at(-1).context.history.some(event => event.text === "Which viewport is required?"), true);
+    assert.deepEqual(calls.at(-1).context.attachments.filter(file => file.error).map(file => file.name),
+      ["same.txt", "changed.txt", "image.png"]);
     await until(() => evaluate("document.querySelector('.task-chat')?.textContent.includes('User answer recorded: 1280 pixels')"), "visible follow-up");
     await capture("draft-discussion-reply.png");
-    check("CLI passes distinct same-name files, copied and linked images, failed link, dependency, model and follow-up to the same chat");
+    check("CLI passes distinct same-name files and stable linked text/image snapshots despite edits at the provider boundary; the next turn reports changed sources");
 
     const failure = cli(["create"], { title: "Provider inactive", execution: settings });
     await until(() => show(failure.id).draftDiscussion?.phase === "failed", "provider failure");
@@ -233,7 +301,7 @@ try {
     report.interrupted = interrupted.id;
     check("Transient chat staging is cleaned");
   }
-  writeFileSync(evidence, JSON.stringify(report, null, 2));
+  if (!live) writeFileSync(evidence, JSON.stringify(report, null, 2));
 } catch (error) {
   console.error(error);
   process.exitCode = 1;
