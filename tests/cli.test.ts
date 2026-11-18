@@ -1433,13 +1433,15 @@ test("failed start without a branch or worktree keeps the ready task editable", 
   assert.ok(!existsSync(join(root, ".tasks", "pending", ready.id + ".json")));
 });
 
-test("a new worktree checkout releases the board while its own start remains reserved", t => {
+for (const restoring of [false, true]) test(
+  (restoring ? "a restored worktree checkout" : "a new worktree checkout") + " releases the board while its own start remains reserved", t => {
   const root = fixture(t, true);
-  cli(root, ["init"]);
+  const restored = restoring ? returnedWorktree(root) : undefined;
+  if (!restored) cli(root, ["init"]);
   const ready = (title: string) => cli(root, ["approve", cli(root, ["create"], {
     title, criteria: ["The worktree was created."],
   }).id]);
-  const task = ready("Slow checkout");
+  const task = restored?.ready ?? ready("Slow checkout");
   const other = ready("Independent checkout");
   const pending = join(root, ".tasks", "pending", task.id + ".json");
   const startLock = join(root, ".tasks", "pending", task.id + ".start.sqlite");
@@ -1450,12 +1452,18 @@ test("a new worktree checkout releases the board while its own start remains res
     import { syncBuiltinESMExports } from "node:module";
     import { DatabaseSync } from "node:sqlite";
     const spawnSync = child.spawnSync;
-    const run = (args, input) => JSON.parse(spawnSync(process.execPath, args, {
-      input: JSON.stringify(input), encoding: "utf8", windowsHide: true, timeout: 10000,
-    }).stdout);
+    const run = (args, input) => {
+      const result = spawnSync(process.execPath, args, {
+        input: JSON.stringify(input), encoding: "utf8", windowsHide: true, timeout: 18000,
+      });
+      assert.ifError(result.error);
+      return JSON.parse(result.stdout);
+    };
     child.spawnSync = (command, args, options) => {
       const gitArgs = args?.[0] === "-c" ? args.slice(2) : args;
       if (command === "git" && gitArgs[0] === "worktree" && gitArgs[1] === "add") {
+        const independent = run(${JSON.stringify(commandArgs(root, ["start", other.id]))});
+        assert.equal(independent.data?.task.status, "in_progress", JSON.stringify(independent));
         assert.ok(existsSync(${JSON.stringify(pending)}));
         const lock = new DatabaseSync(${JSON.stringify(startLock)});
         try { assert.throws(() => lock.exec("BEGIN IMMEDIATE"), { errcode: 5 }); }
@@ -1464,8 +1472,6 @@ test("a new worktree checkout releases the board while its own start remains res
         assert.equal(cancelled.error?.code, "PENDING_OPERATION");
         const sent = run(${JSON.stringify(commandArgs(root, ["manager-message", task.id], {}))}, { text: "Arrived during checkout" });
         assert.equal(sent.ok, true, JSON.stringify(sent));
-        const independent = run(${JSON.stringify(commandArgs(root, ["start", other.id]))});
-        assert.equal(independent.data?.task.status, "in_progress", JSON.stringify(independent));
       }
       return spawnSync(command, args, options);
     };
@@ -1482,7 +1488,7 @@ test("a new worktree checkout releases the board while its own start remains res
   assert.ok(started.task.history.some((event: { action: string; text?: string }) =>
     event.action === "coordination" && event.text === "Arrived during checkout"));
   assert.equal(cli(root, ["start", task.id]).worktree, started.worktree);
-  assert.equal(cli(root, ["metrics", task.id]).starts.length, 1);
+  assert.equal(cli(root, ["metrics", task.id]).starts.length, restoring ? 2 : 1);
   assert.ok(!existsSync(pending));
 });
 
@@ -2459,6 +2465,173 @@ test("interrupted start and submit recover the existing worktree and commit", t 
   assert.ok(!existsSync(pending));
 });
 
+function returnedWorktree(root: string) {
+  cli(root, ["init"]);
+  const card = cli(root, ["create"], { title: "Recover a worktree", criteria: ["Keep the branch tip."] });
+  cli(root, ["approve", card.id]);
+  const { task, worktree } = cli(root, ["start", card.id]);
+  const codexThreadId = "10000000-0000-0000-0000-000000000001";
+  cli(root, ["update", card.id], { codexThreadId });
+  writeFileSync(join(worktree, "source.txt"), "committed work\n");
+  git(worktree, "commit", "-am", "fix: preserve a task commit");
+  const head = git(worktree, "rev-parse", "HEAD");
+  writeFileSync(join(worktree, "source.txt"), "uncommitted work\n");
+  writeFileSync(join(worktree, "untracked.txt"), "keep this too\n");
+  const cancelled = cli(root, ["cancel", card.id], { reason: "Exercise normal cleanup" });
+  assert.equal(existsSync(worktree), false);
+  assert.doesNotMatch(git(root, "worktree", "list", "--porcelain"), new RegExp(task.git.branch));
+  const saved = cli(root, ["show", card.id]).savedChanges.sha;
+  const draft = cli(root, ["return-to-draft", card.id], { revision: cancelled.revision });
+  const ready = cli(root, ["approve", card.id], { revision: draft.revision, actor: "user" });
+  return { ready, worktree, head, branch: task.git.branch, saved, codexThreadId };
+}
+
+test("a returned task recovers its worktree during concurrent starts and keeps its saved edits", async t => {
+  const root = fixture(t, true);
+  const { ready, worktree, head, branch, saved, codexThreadId } = returnedWorktree(root);
+  const args = ["start", ready.id, "--compact"];
+  const input = { revision: ready.revision, launchDetails: true };
+  const start = () => promisify(childProcess.execFile)(process.execPath, commandArgs(root, args), { env, windowsHide: true });
+  const results = await Promise.all([start(), start()]);
+  for (const result of results) assert.equal(JSON.parse(result.stdout).data.worktree, worktree);
+  const started = cli(root, args, { ...input, revision: ready.revision + 1 });
+  assert.equal(started.task.id, ready.id);
+  assert.equal(started.task.codexThreadId, codexThreadId);
+  assert.equal(git(worktree, "rev-parse", "HEAD"), head);
+  assert.equal(git(worktree, "symbolic-ref", "HEAD"), branch);
+  assert.equal(git(root, "worktree", "list", "--porcelain").split("branch " + branch).length, 2);
+  const card = cli(root, ["show", ready.id]);
+  assert.equal(card.git.base, ready.git.base);
+  assert.equal(card.history.filter((event: { action: string }) => event.action === "start").length, 2);
+  assert.equal(card.savedChanges.sha, saved);
+  assert.equal(readFileSync(join(worktree, "source.txt"), "utf8").trim(), "committed work");
+  const restored = cli(root, ["restore-changes", card.id], { revision: card.revision, destination: "worktree" });
+  assert.equal(readFileSync(join(restored.path, "source.txt"), "utf8").trim(), "uncommitted work");
+  assert.equal(readFileSync(join(restored.path, "untracked.txt"), "utf8").trim(), "keep this too");
+});
+
+test("an interrupted worktree recovery can retry before checkout, after checkout or after saving the card", t => {
+  const root = fixture(t, true);
+  const { ready, worktree, head, branch, codexThreadId } = returnedWorktree(root);
+  const pending = join(root, ".tasks", "pending", ready.id + ".json");
+  const interrupted = (revision: number) =>
+    writeFileSync(pending, JSON.stringify({ action: "start", restore: true, revision, target: ready.git.target, base: head }));
+
+  interrupted(ready.revision);
+  const started = cli(root, ["start", ready.id]);
+  assert.equal(started.worktree, worktree);
+  assert.equal(started.task.codexThreadId, codexThreadId);
+  assert.equal(existsSync(pending), false);
+
+  interrupted(ready.revision);
+  cli(root, ["manager-message", ready.id], { text: "Arrived after the card was saved" });
+  const source = join(worktree, "source.txt");
+  writeFileSync(source, "edits after the card was saved\n");
+  const saved = cli(root, ["start", ready.id]);
+  assert.equal(saved.task.revision, started.task.revision);
+  assert.equal(readFileSync(source, "utf8").trim(), "edits after the card was saved");
+  assert.equal(existsSync(pending), false);
+  git(worktree, "restore", "--", "source.txt");
+
+  git(root, "worktree", "remove", worktree);
+  const continued = cli(root, ["start", ready.id]);
+  assert.equal(continued.worktree, worktree);
+  assert.equal(continued.task.revision, started.task.revision);
+  assert.equal(continued.task.git.base, ready.git.base);
+
+  git(root, "worktree", "remove", worktree);
+  interrupted(continued.task.revision);
+  git(root, "worktree", "add", worktree, branch.slice("refs/heads/".length));
+  writeFileSync(join(worktree, "local.txt"), "edits after checkout\n");
+  const resumed = cli(root, ["start", ready.id]);
+  assert.equal(resumed.worktree, worktree);
+  assert.equal(resumed.task.revision, continued.task.revision);
+  assert.equal(readFileSync(join(worktree, "local.txt"), "utf8").trim(), "edits after checkout");
+  assert.equal(git(worktree, "rev-parse", "HEAD"), head);
+  assert.equal(existsSync(pending), false);
+});
+
+test("an interrupted worktree recovery refuses a registered but incomplete checkout", t => {
+  const root = fixture(t, true);
+  const { ready, worktree, head, branch, saved } = returnedWorktree(root);
+  const pending = join(root, ".tasks", "pending", ready.id + ".json");
+  const intent = JSON.stringify({ action: "start", restore: true, revision: ready.revision, target: ready.git.target, base: head });
+  const source = join(worktree, "source.txt");
+  const local = join(worktree, "local.txt");
+  writeFileSync(pending, intent);
+  git(root, "worktree", "add", "--no-checkout", worktree, branch.slice("refs/heads/".length));
+  writeFileSync(local, "preserve this file");
+
+  const refuse = () => {
+    const error = cli(root, ["start", ready.id], { revision: ready.revision }, "WORKTREE_CHECKOUT_INCOMPLETE");
+    assert.equal(error.details.path, worktree);
+    assert.equal(git(worktree, "symbolic-ref", "HEAD"), branch);
+    assert.equal(git(worktree, "rev-parse", "HEAD"), head);
+    assert.equal(readFileSync(local, "utf8"), "preserve this file");
+    assert.equal(readFileSync(pending, "utf8"), intent);
+    const current = cli(root, ["show", ready.id]);
+    assert.equal(current.status, "ready");
+    assert.equal(current.revision, ready.revision);
+    assert.equal(current.savedChanges.sha, saved);
+  };
+  assert.equal(existsSync(source), false);
+  refuse();
+  cli(root, ["cancel", ready.id], { reason: "Keep the interrupted checkout intact" }, "PENDING_OPERATION");
+
+  // Model an interruption after the index was written but before the file was fully populated.
+  git(worktree, "read-tree", "HEAD");
+  git(worktree, "restore", "--source=HEAD", "--", ".gitignore");
+  writeFileSync(source, "partial");
+  assert.equal(git(worktree, "status", "--porcelain", "--untracked-files=no"), "M source.txt");
+  refuse();
+  assert.equal(readFileSync(source, "utf8"), "partial");
+
+  git(worktree, "restore", "--source=HEAD", "--", ".");
+  const started = cli(root, ["start", ready.id]);
+  assert.equal(started.worktree, worktree);
+  assert.equal(started.task.status, "in_progress");
+  assert.equal(existsSync(pending), false);
+  assert.equal(readFileSync(local, "utf8"), "preserve this file");
+});
+
+test("worktree recovery refuses occupied paths, stale or ambiguous Git registrations and unfinished operations", t => {
+  const root = fixture(t, true);
+  const { ready, worktree, head, branch, saved } = returnedWorktree(root);
+  const fail = (code: string) => {
+    const error = cli(root, ["start", ready.id], { revision: ready.revision }, code);
+    assert.equal(git(root, "rev-parse", branch), head);
+    assert.equal(cli(root, ["show", ready.id]).savedChanges.sha, saved);
+    return error;
+  };
+  mkdirSync(worktree);
+  writeFileSync(join(worktree, "local.txt"), "keep");
+  assert.equal(fail("WORKTREE_COLLISION").details.path, worktree);
+  assert.equal(readFileSync(join(worktree, "local.txt"), "utf8"), "keep");
+  rmSync(join(worktree, "local.txt"));
+  rmdirSync(worktree);
+  const previous = join(root, "previous");
+  git(root, "worktree", "add", previous, branch.slice("refs/heads/".length));
+  git(root, "worktree", "add", "--force", worktree, branch.slice("refs/heads/".length));
+  // show itself rejects ambiguous registrations.
+  cli(root, ["start", ready.id], { revision: ready.revision }, "AMBIGUOUS_WORKTREE");
+  assert.equal(git(previous, "rev-parse", "HEAD"), head);
+  assert.equal(git(worktree, "rev-parse", "HEAD"), head);
+  git(root, "worktree", "remove", worktree);
+  renameSync(previous, previous + "-offline");
+  assert.match(fail("WORKTREE_MISSING").details.path, /previous$/);
+  renameSync(previous + "-offline", previous);
+  git(root, "worktree", "remove", previous);
+  const merge = join(root, ".git", "MERGE_HEAD");
+  writeFileSync(merge, head + "\n");
+  assert.equal(fail("GIT_OPERATION_IN_PROGRESS").details.operation, "MERGE_HEAD");
+  rmSync(merge);
+  git(root, "tag", branch.slice("refs/heads/".length), head);
+  git(root, "update-ref", "-d", branch);
+  assert.equal(cli(root, ["start", ready.id], undefined, "TASK_BRANCH_MISSING").details.branch, branch);
+  assert.equal(cli(root, ["show", ready.id]).savedChanges.sha, saved);
+  assert.equal(existsSync(worktree), false);
+});
+
 test("an executor can resume its own unfinished rebase in the registered worktree", t => {
   const root = fixture(t, true);
   cli(root, ["init"]);
@@ -2466,7 +2639,7 @@ test("an executor can resume its own unfinished rebase in the registered worktre
   cli(root, ["approve", card.id]);
   const { task, worktree } = cli(root, ["start", card.id]);
   git(worktree, "switch", "--detach");
-  cli(root, ["start", card.id], { revision: task.revision }, "WORKTREE_MISSING");
+  cli(root, ["start", card.id], { revision: task.revision }, "WORKTREE_COLLISION");
   git(worktree, "switch", task.git.branch.slice("refs/heads/".length));
   writeFileSync(join(worktree, "source.txt"), "task version\n");
   git(worktree, "commit", "-am", "fix: update task source");
