@@ -1,4 +1,7 @@
 {
+  "ui.review_then_human": "Review + human",
+  "ui.awaiting_human_acceptance": "Awaiting human acceptance",
+  "ui.awaiting_reviewer_approval": "Awaiting reviewer approval",
   "draft_discussion.queued": "Draft discussion is queued.",
   "draft_discussion.running": "Reviewing the draft…",
   "draft_discussion.failed": "Draft review failed: {reason}",

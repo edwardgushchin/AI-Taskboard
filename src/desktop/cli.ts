@@ -19,13 +19,17 @@ export function cliFailure(code: string, message: string): CliReply<never> {
   return { ok: false, error: { code, message } };
 }
 
-export function cliChild(project: string, args: string[], input?: unknown): ChildProcessWithoutNullStreams {
+export function cliChild(project: string, args: string[], input?: unknown, userAcceptance = false): ChildProcessWithoutNullStreams {
   const packaged = existsSync(bundled);
   const command = packaged ? bundled : process.execPath;
   const prefix = packaged ? [] : ["--disable-warning=ExperimentalWarning", entry];
+  const env = { ...process.env };
+  // Only the board IPC handler supplies this marker. CLI JSON cannot set it.
+  delete env.TASKBOARD_DESKTOP_ACCEPTANCE;
+  if (userAcceptance) env.TASKBOARD_DESKTOP_ACCEPTANCE = "1";
   const child = spawn(command, [...prefix, "--project", project, "--json", ...args, ...(input === undefined ? [] : ["--stdin"])], {
     cwd: project,
-    env: packaged ? process.env : { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    env: packaged ? env : { ...env, ELECTRON_RUN_AS_NODE: "1" },
     windowsHide: true,
     stdio: "pipe",
   });
@@ -36,15 +40,15 @@ export function cliChild(project: string, args: string[], input?: unknown): Chil
   return child;
 }
 
-export async function callCli<T>(project: string, args: string[], input?: unknown): Promise<CliReply<T>> {
-  const result = await callCliOnce<T>(project, args, input);
+export async function callCli<T>(project: string, args: string[], input?: unknown, userAcceptance = false): Promise<CliReply<T>> {
+  const result = await callCliOnce<T>(project, args, input, userAcceptance);
   // BOARD_BUSY is returned before the CLI starts the operation.
-  return !result.ok && result.error.code === "BOARD_BUSY" ? callCliOnce<T>(project, args, input) : result;
+  return !result.ok && result.error.code === "BOARD_BUSY" ? callCliOnce<T>(project, args, input, userAcceptance) : result;
 }
 
-function callCliOnce<T>(project: string, args: string[], input?: unknown): Promise<CliReply<T>> {
+function callCliOnce<T>(project: string, args: string[], input: unknown, userAcceptance: boolean): Promise<CliReply<T>> {
   return new Promise(resolve => {
-    const child = cliChild(project, args, input);
+    const child = cliChild(project, args, input, userAcceptance);
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     let output = "";

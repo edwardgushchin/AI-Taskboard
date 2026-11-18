@@ -851,12 +851,14 @@ function renderAgentRunStatus(target, task) {
     if (!spinner.parentNode) target.replaceChildren(spinner);
   } else {
     const repair = frame.board?.tasks.find(card => card.id === task.id)?.acceptanceRepair;
-    const text = repair ? ({ queued: t("ui.waiting_for_a_reviewer_slot_8918dd95"), running: t("ui.resolving_acceptance_conflict"), checking: t("ui.accepting_task_39473c27"), failed: repair.reason }[repair.phase]) : frame.waitingTasks?.includes(task.id) ?
+    const hybridReview = task.status === "review" && frame.board?.settings.reviewMode === "reviewer-human";
+    const text = repair && !(hybridReview && repair.phase === "checking" && !task.reviewApproved) ? ({ queued: t("ui.waiting_for_a_reviewer_slot_8918dd95"), running: t("ui.resolving_acceptance_conflict"), checking: t("ui.accepting_task_39473c27"), failed: repair.reason }[repair.phase]) : frame.waitingTasks?.includes(task.id) ?
       (task.mergeRepair || frame.board?.tasks.find(card => card.id === task.id)?.mergeRepair
         ? t("ui.waiting_for_a_reviewer_slot_8918dd95")
         : t("ui.waiting_for_an_available_executor_cc0934a8")) :
       task.status === "in_progress" && task.codexThreadId ?
-      t("ui.board_run_inactive_2a932a2f") : "";
+      t("ui.board_run_inactive_2a932a2f") : hybridReview ?
+      t(task.reviewApproved ? "ui.awaiting_human_acceptance" : "ui.awaiting_reviewer_approval") : "";
     if (target.firstElementChild || target.textContent !== text) target.textContent = text;
   }
   target.hidden = !target.childNodes.length;
@@ -919,6 +921,7 @@ function card(task) {
     task.tags?.map(name => boardTags.get(tagKey(name)) ?? { name }), cover?.file,
     frame.runningTasks?.includes(task.id) ?? false, frame.waitingTasks?.includes(task.id) ?? false,
     frame.reviewingTasks?.[task.id], task.status, task.mergeRepair, task.acceptanceRepair, Boolean(task.codexThreadId),
+    frame.board?.settings.reviewMode, task.reviewApproved,
     task.unfinishedDependencies, task.blocked, task.subtasks?.map(entry => entry.done),
     task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule,
     manualColumns().find(c => c.id === task.status)]);
@@ -4155,9 +4158,18 @@ async function showReview(task, messageDraft, acceptanceError) {
   const review = await command("review", task.id);
   if (!review || generation !== projectGeneration) return;
   task = { ...task, revision: review.revision, result: review.result };
+  taskInSheet = task;
+  const hybrid = review.reviewMode === "reviewer-human";
+  const canAccept = !hybrid || review.pending || review.awaitingHumanAcceptance;
+  const decision = { revision: review.revision, targetHead: review.targetHead, reviewModeVersion: review.reviewModeVersion };
+  const showReviewStatus = editor => {
+    if (!hybrid) return;
+    editor.before(element("p", () => t(canAccept ? "ui.awaiting_human_acceptance" : "ui.awaiting_reviewer_approval"), "muted"));
+    if (!canAccept) editor.querySelector("button[type=submit]").disabled = true;
+  };
   if (review.noChanges) {
     const editor = form("review", () => (t("ui.review_result_29ed25fb")), [], () => (t("ui.accept_e596557e")), async () => {
-      const accepted = await command("accept", task.id, { revision: review.revision });
+      const accepted = await command("accept", task.id, decision);
       if (accepted && generation === projectGeneration) await showAcceptedTask(accepted);
     });
     section(() => (t("ui.acceptance_criteria_7e3779c2")), task.criteria);
@@ -4165,6 +4177,7 @@ async function showReview(task, messageDraft, acceptanceError) {
     showTaskArtifacts(task);
     body.prepend(element("p", () => t("ui.submitted_without_git_changes_f0133a15"), "muted"));
     body.append(editor);
+    showReviewStatus(editor);
     if (review.stale) {
       notice(t("ui.the_task_worktree_changed_submit_it_again_6605626c"));
       editor.querySelector("button[type=submit]").disabled = true;
@@ -4177,7 +4190,7 @@ async function showReview(task, messageDraft, acceptanceError) {
       value: messageDraft ?? review.message, required: true },
   ], () => (t("ui.accept_e596557e")), async ({ message }) => {
     const result = await api.command("accept", task.id, {
-      revision: task.revision, targetHead: review.targetHead, message,
+      ...decision, message,
     });
     if (generation !== projectGeneration) return;
     if (result.ok) {
@@ -4189,6 +4202,7 @@ async function showReview(task, messageDraft, acceptanceError) {
       else notice(boardError(result.error), [t("ui.accepting_task_39473c27"), task.id, projectName()].join(" · "));
     }
   });
+  showReviewStatus(editor);
   const diff = renderReviewDiff(review.diff);
   const caption = element("p", review.target + " · " + review.mode + " · " + review.submitted.slice(0, 12), "muted");
   body.prepend(caption, diff);
@@ -4232,11 +4246,11 @@ async function showReview(task, messageDraft, acceptanceError) {
     notice(t("ui.the_task_worktree_changed_submit_it_again_6605626c"));
     body.querySelector("button[type=submit]").disabled = true;
   } else if (conflict || acceptanceError) notice(boardError(conflict ?? acceptanceError));
-  body.append(button(() => t("ui.use_an_existing_acceptance_commit_90cb1c90"), () => {
+  if (canAccept) body.append(button(() => t("ui.use_an_existing_acceptance_commit_90cb1c90"), () => {
     form("review", () => (t("ui.existing_acceptance_commit_d9e22415")), [
       { name: "commit", label: () => (t("ui.full_commit_sha_79b43d04")), required: true },
     ], () => (t("ui.verify_and_accept_541b58d4")), async ({ commit }) => {
-      const accepted = await command("accept", task.id, { revision: task.revision, commit });
+      const accepted = await command("accept", task.id, { ...decision, commit });
       if (accepted) await showAcceptedTask(accepted);
     });
     body.prepend(element("p", review.target, "muted"));
@@ -4700,6 +4714,7 @@ function boardSettings() {
         ["human", t("ui.human_56f4a79e")],
         ["manager", t("ui.project_manager_48697fa0")],
         ["reviewer", t("ui.reviewer_50c42665")],
+        ["reviewer-human", t("ui.review_then_human")],
       ] },
     ...agentFields.flat(),
     { name: "executorLimit", type: "number", label: () => t("limits.work"), value: current.taskLimits?.executor },
@@ -5385,10 +5400,21 @@ function update(next) {
       else void showTask(current.id);
     }
   }
+  if (sheetKind === "review" && sheet.open && taskInSheet && !taskInSheet.acceptanceRepair &&
+      (previousBoard?.settings.reviewMode === "reviewer-human" || frame.board?.settings.reviewMode === "reviewer-human")) {
+    const current = frame.board?.tasks.find(task => task.id === taskInSheet.id);
+    const previous = previousBoard?.tasks.find(task => task.id === current?.id);
+    if (current && (current.revision !== previous?.revision || current.reviewApproved !== previous?.reviewApproved ||
+        current.reviewTargetHead !== previous?.reviewTargetHead ||
+        previousBoard?.settings.reviewModeVersion !== frame.board?.settings.reviewModeVersion)) {
+      if (current.status === "review") void showReview({ ...taskInSheet, ...current }, body.querySelector("[name=message]")?.value);
+      else void showTask(current.id);
+    }
+  }
   if (sheetKind === "task" && sheet.open && taskInSheet) {
     byId("task-side").firstElementChild?.syncAgentState?.();
     const runStatus = byId("task-agent-run");
-    if (runStatus) renderAgentRunStatus(runStatus, taskInSheet);
+    if (runStatus) renderAgentRunStatus(runStatus, frame.board?.tasks.find(task => task.id === taskInSheet.id) ?? taskInSheet);
     const launch = byId("task-launch");
     if (launch) launch.hidden = frame.runningTasks?.includes(taskInSheet.id) ?? false;
     if (tagsChanged) byId("task-sheet-tags")?.replaceChildren(...tagBadges(taskInSheet.tags));

@@ -85,7 +85,7 @@ export function validAgentLimitOverrides(value: unknown): value is Partial<Agent
 }
 
 export type BoardAgentSettings = ChatSettings & { provider?: "codex" };
-export const reviewModes = ["human", "manager", "reviewer"] as const;
+export const reviewModes = ["human", "manager", "reviewer", "reviewer-human"] as const;
 export type ReviewMode = typeof reviewModes[number];
 
 export interface ChatUsage {
@@ -117,7 +117,7 @@ export interface TaskEvent {
   text?: string;
   mergedInto?: { id: string; title: string; transferred: string };
   messageKind?: "question" | "update" | "decision";
-  reviewApproval?: { revision: number; targetHead: string | null; evidence: string[] };
+  reviewApproval?: { reviewModeVersion?: number; revision: number; targetHead: string | null; evidence: string[] };
   replyToMessage?: number;
   attachment?: string;
   from?: TaskState;
@@ -198,7 +198,7 @@ export interface Task {
   expertTeam?: { work?: ExpertPhase; review?: ExpertPhase };
   expertStage?: { parentId: string; key: string; inputs: string[]; outputs: string[] };
   expertStages?: { key: string; taskId: string; expertId: string; title: string; inputs: string[]; outputs: string[]; dependsOn: string[] }[];
-  acceptanceRepair?: { phase: "queued" | "running" | "checking" | "failed"; targetHead: string; attempts: number; message: string; reason?: string };
+  acceptanceRepair?: { phase: "queued" | "running" | "checking" | "failed"; reviewModeVersion?: number; targetHead: string; attempts: number; message: string; reason?: string };
   tokenUsage?: import("./token-usage.ts").TaskTokenUsage;
   id: string;
   title: string;
@@ -251,6 +251,7 @@ export interface BoardSettings {
   reviewer?: BoardAgentSettings | null;
   taskLimits?: Partial<AgentLimits>;
   reviewMode?: ReviewMode;
+  reviewModeVersion?: number;
   autoReview?: boolean;
   autoMode?: boolean;
   autoQueue?: { revision: number; paused: boolean; order: string[]; held: string[] };
@@ -263,6 +264,10 @@ export const defaultBoardAgents = {
 } satisfies Record<typeof boardAgentRoles[number], BoardAgentSettings>;
 
 export const reviewVerifier = { model: "gpt-6.1-sol", effort: "xhigh" } satisfies ChatSettings;
+
+export function usesIndependentReviewer(mode: ReviewMode): boolean {
+  return mode === "reviewer" || mode === "reviewer-human";
+}
 
 export function boardReviewMode(settings: Pick<BoardSettings, "reviewMode" | "autoReview">): ReviewMode {
   return settings.reviewMode ?? (settings.autoReview === true ? "reviewer" : "human");

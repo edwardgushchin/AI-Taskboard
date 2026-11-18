@@ -2,7 +2,7 @@ import { dirname, join, relative } from "node:path";
 import { artifactFiles } from "./artifacts.ts";
 import { isolatedWorktreesDirectory, excludeBoard, git, inspectMergeTree, isAncestor, localBranch, mergeTree, requireRepository, resolveCommit, skipAutoMaintenance, worktrees } from "./git.ts";
 import type { Repository, Worktree } from "./git.ts";
-import { member, number, object, record, requireRevision, requireState, TaskboardError, text } from "./model.ts";
+import { boardReviewMode, member, number, object, record, requireRevision, requireState, TaskboardError, text } from "./model.ts";
 import type { IntegrationMode, Task, TaskGit } from "./model.ts";
 import { checkPreserveChanges, describeSavedChanges, inspectLocalChanges, restoreSavedChanges, saveLocalChanges } from "./saved-changes.ts";
 import { directory, exists, readJson, removeFile, writeJson } from "./storage.ts";
@@ -22,6 +22,7 @@ interface AcceptIntent {
   mode: IntegrationMode;
   message: string;
   actor?: "manager" | "reviewer";
+  reviewModeVersion?: number;
   restoreLocalChanges?: true;
 }
 
@@ -66,16 +67,20 @@ export function inspectReviewQueue(store: BoardStore, tasks: Task[]) {
   const repo = store.location.repository;
   const entries = repo && tasks.some(task => !task.result?.noChanges) ? worktrees(repo.root) : [];
   const targets = new Map<string, { branch: string; head: string; path: string }>();
+  const settings = store.index.settings;
+  const hybrid = boardReviewMode(settings) === "reviewer-human";
   return tasks.map(task => {
     const { id, title, revision, history } = task;
     const submittedAt = history.findLast(event => event.action === "submit" && event.to === "review")?.at;
-    const entry = { id, title, revision, submittedAt, summary: task.result?.summary ?? task.summary,
-      ...(currentReviewApproval(task) ? { reviewerApproved: true } : {}) };
+    const approval = currentReviewApproval(task, settings)?.reviewApproval;
+    const reviewStatus = (head: string | null) => approval && (!hybrid || approval.targetHead === head)
+      ? { reviewerApproved: true } : {};
+    const entry = { id, title, revision, submittedAt, summary: task.result?.summary ?? task.summary };
     try {
       if (exists(store.pendingPath(id))) return { ...entry, status: "pending" as const };
       if (task.result?.noChanges) {
         const stale = noChangesReviewIsStale(store, task, task.result.noChanges.head);
-        return { ...entry, status: stale ? "stale" as const : "noChanges" as const };
+        return { ...entry, ...(!stale && reviewStatus(null)), status: stale ? "stale" as const : "noChanges" as const };
       }
       const { target, branch, submission: { sha } } = reviewed(task);
       const repository = requireRepository(repo);
@@ -89,7 +94,7 @@ export function inspectReviewQueue(store: BoardStore, tasks: Task[]) {
       const gitEntry = { ...entry, target: snapshot.branch, targetHead: snapshot.head };
       if (submissionIsStale(findWorktree(repository, branch, entries), sha)) return { ...gitEntry, status: "stale" as const };
       const base = git(repository.root, ["merge-base", snapshot.head, sha]).trim();
-      return { ...gitEntry, ...reviewMerge(snapshot.path, base, snapshot.head, sha) };
+      return { ...gitEntry, ...reviewStatus(snapshot.head), ...reviewMerge(snapshot.path, base, snapshot.head, sha) };
     } catch (error) {
       if (!(error instanceof TaskboardError)) throw error;
       return { ...entry, status: "unchecked" as const, error: { code: error.code, message: error.message } };
@@ -135,16 +140,24 @@ export function verifyReviewDecision(store: BoardStore, task: Task, expectedHead
 
 export function inspectReview(store: BoardStore, task: Task, snapshot: ReturnType<typeof reviewDetails>,
   compact: boolean, previousTargetHead?: unknown, previousSubmitted?: unknown) {
-  const approval = compact ? currentReviewApproval(task) : undefined;
+  const reviewMode = boardReviewMode(store.index.settings);
+  const reviewModeVersion = store.index.settings.reviewModeVersion;
+  const approval = currentReviewApproval(task, store.index.settings);
+  const approvalState = (head: string | null, stale: boolean) => ({
+    reviewMode, reviewModeVersion,
+    ...(compact && snapshot.pending ? { pending: true } : {}),
+    awaitingHumanAcceptance: reviewMode === "reviewer-human" && !stale && approval?.reviewApproval?.targetHead === head,
+  });
   const details = compact ? { title: task.title, description: task.description, criteria: task.criteria,
     artifacts: snapshot.artifacts,
     submissionSequence: task.history.findLastIndex(event => event.action === "submit" && event.to === "review") + 1,
     ...(approval?.reviewApproval ? { reviewerApproval: { summary: approval.text, ...approval.reviewApproval } } : {}),
   } : undefined;
   if (task.result?.noChanges) {
+    const stale = noChangesReviewIsStale(store, task, task.result.noChanges.head);
     return {
-      noChanges: true as const, revision: task.revision, targetHead: null, paths: [],
-      stale: noChangesReviewIsStale(store, task, task.result.noChanges.head), result: task.result,
+      ...approvalState(null, stale), noChanges: true as const, revision: task.revision, targetHead: null, paths: [],
+      stale, result: task.result,
       ...(details ?? { diff: "" }),
     };
   }
@@ -156,7 +169,7 @@ export function inspectReview(store: BoardStore, task: Task, snapshot: ReturnTyp
   const checkout = !details || (canCheckMerge && diverged) ? findWorktree(repo, target) : undefined;
   const checkoutPath = reviewWorktreePath(checkout);
   const merge = canCheckMerge ? reviewMerge(checkoutPath ?? repo.root, base, head, submitted) : undefined;
-  const summary = { revision: task.revision, targetHead: head, submitted, stale, paths, result: task.result, merge };
+  const summary = { ...approvalState(head, stale), revision: task.revision, targetHead: head, submitted, stale, paths, result: task.result, merge };
   if (details) {
     const targetChanges = base !== head && paths.length
       ? new Set(splitPaths(git(repo.root, ["diff", "--no-renames", "--name-only", "-z", base, head]))) : undefined;
@@ -421,6 +434,7 @@ function parseIntent(value: unknown, task: Task, target: string, submitted: stri
       (pending.mode !== "merge" && pending.mode !== "squash") ||
       (pending.restoreLocalChanges !== undefined && pending.restoreLocalChanges !== true) ||
       (pending.actor !== undefined && pending.actor !== "manager" && pending.actor !== "reviewer") ||
+      (pending.reviewModeVersion !== undefined && (!Number.isSafeInteger(pending.reviewModeVersion) || Number(pending.reviewModeVersion) < 1)) ||
       typeof pending.message !== "string" || conventionalMessage(pending.message, task.id) !== pending.message) {
     throw new TaskboardError("CORRUPT_STORAGE", "Invalid acceptance recovery record.");
   }
@@ -472,9 +486,9 @@ function preparedSquash(path: string, head: string, tree: string, status: string
     !collidingPaths(path, targetPaths(path, head, tree), local.working).length;
 }
 
-export function acceptTask(store: BoardStore, task: Task, input: Record<string, unknown>) {
+export function acceptTask(store: BoardStore, task: Task, input: Record<string, unknown>, userAcceptance: boolean) {
   try {
-    return integrateTask(store, task, input);
+    return integrateTask(store, task, input, userAcceptance);
   } finally {
     releaseTemporaryTarget(store, task);
   }
@@ -503,7 +517,8 @@ export function cleanAcceptedTask(store: BoardStore, task: Task) {
   }
 }
 
-function integrateTask(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
+function integrateTask(store: BoardStore, task: Task, input: Record<string, unknown>, userAcceptance: boolean): Task {
+  const reviewMode = boardReviewMode(store.index.settings);
   const actor = input.actor === "manager" || input.actor === "reviewer" ? input.actor : undefined;
   const pendingPath = store.pendingPath(task.id);
   if (task.status === "done" && (task.git?.accepted || task.result?.noChanges)) {
@@ -512,6 +527,22 @@ function integrateTask(store: BoardStore, task: Task, input: Record<string, unkn
     return compact === task ? task : store.save(compact);
   }
   requireState(task, ["review"]);
+  if (input.reviewModeVersion !== undefined && input.reviewModeVersion !== store.index.settings.reviewModeVersion) {
+    throw new TaskboardError("REVIEW_MODE_CHANGED", "Open the current review before accepting.");
+  }
+  if (reviewMode === "reviewer-human") {
+    if (!userAcceptance || input.actor !== "user" || input.autoMode === true) {
+      throw new TaskboardError("HUMAN_ACCEPTANCE_REQUIRED", "The user must accept this submission.");
+    }
+    if (input.reviewModeVersion === undefined) {
+      throw new TaskboardError("REVIEW_MODE_CHANGED", "Open the current review before accepting.");
+    }
+    requireRevision(task, input.revision, true);
+    const approval = currentReviewApproval(task, store.index.settings)?.reviewApproval;
+    if (!exists(pendingPath) && (!approval || approval.targetHead !== input.targetHead)) {
+      throw new TaskboardError("REVIEW_REQUIRED", "The reviewer must approve the current submission and target before acceptance.");
+    }
+  }
   if (task.result?.noChanges) {
     requireRevision(task, input.revision, true);
     if (exists(pendingPath)) throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation first.");
@@ -532,6 +563,10 @@ function integrateTask(store: BoardStore, task: Task, input: Record<string, unkn
   let intent = readIntent(pendingPath, task, target, submitted);
   const mode = input.integrationMode === undefined ? intent?.mode ?? store.index.settings.integrationMode :
     member(input.integrationMode, ["merge", "squash"], "integration mode");
+  if (head === intent?.parent && (intent.reviewModeVersion !== undefined || reviewMode === "reviewer-human") &&
+      (reviewMode !== "reviewer-human" || intent.reviewModeVersion !== store.index.settings.reviewModeVersion)) {
+    throw new TaskboardError("REVIEW_MODE_CHANGED", "The interrupted integration was confirmed under a different review mode.");
+  }
   if (!intent || input.revision !== undefined) requireRevision(task, input.revision, !intent);
   if (intent && input.commit !== undefined) {
     throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted local acceptance first.");
@@ -540,10 +575,11 @@ function integrateTask(store: BoardStore, task: Task, input: Record<string, unkn
     throw new TaskboardError("PENDING_OPERATION", "Retry with the originally confirmed integration mode.");
   }
   if (intent && head !== intent.parent) return finish(store, task, recoverCommit(repo, head, intent), intent.restoreLocalChanges, intent.actor);
-  if (!intent && input.commit !== undefined) return finish(store, task, verifyExternal(repo, task, head, submitted, input.commit));
   if (input.targetHead !== undefined && input.targetHead !== head) {
     throw new TaskboardError("TARGET_CHANGED", "The target branch advanced. Review the changes again.", { head });
   }
+
+  if (!intent && input.commit !== undefined) return finish(store, task, verifyExternal(repo, task, head, submitted, input.commit));
 
   const source = usableWorktree(findWorktree(repo, context.branch));
   requireNoGitOperation(source);
@@ -576,6 +612,7 @@ function integrateTask(store: BoardStore, task: Task, input: Record<string, unkn
       action: "accept", revision: task.revision, target, parent: head, submitted, tree,
       mode, message,
       ...(actor ? { actor } : {}),
+      ...(reviewMode === "reviewer-human" ? { reviewModeVersion: store.index.settings.reviewModeVersion } : {}),
     };
   } else {
     if (input.message !== undefined && conventionalMessage(input.message, task.id) !== intent.message) {

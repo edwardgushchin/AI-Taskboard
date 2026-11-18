@@ -1,4 +1,7 @@
 {
+  "ui.review_then_human": "Ревью + человек",
+  "ui.awaiting_human_acceptance": "Ожидает приёмки человеком",
+  "ui.awaiting_reviewer_approval": "Ожидает одобрения ревьюера",
   "draft_discussion.queued": "Разбор черновика в очереди.",
   "draft_discussion.running": "Агент разбирает черновик…",
   "draft_discussion.failed": "Разбор черновика прерван. {reason}",

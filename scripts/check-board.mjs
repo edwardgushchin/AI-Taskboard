@@ -341,6 +341,35 @@ app.whenReady().then(async () => {
     console.log('Cleanup Chromium checks passed: ' + checks);
     return;
   }
+  if (process.argv.includes("--reviewer-human-only")) {
+    await evaluate(`
+      fixture.board.settings.reviewMode = 'reviewer-human';
+      fixture.board.settings.reviewModeVersion = 1;
+      const hybridTask = task('T-0096', 'Проверка результата', { status: 'review', criteria: ['Результат проверен'],
+        result: { summary: 'Результат сохранён', checks: ['Проверено'], noChanges: {} } });
+      fixture.board.tasks = [hybridTask];
+      window.taskboard.command = async action => ({ ok: true, data: action === 'review' ? {
+        revision: hybridTask.revision, noChanges: true, targetHead: null, result: hybridTask.result,
+        reviewMode: 'reviewer-human', reviewModeVersion: 1, awaitingHumanAcceptance: hybridTask.reviewApproved === true
+      } : hybridTask });
+      push(); void 0;
+    `);
+    await check(`findCard('T-0096').querySelector('.task-run-status').textContent === 'Ожидает одобрения ревьюера'`, 'reviewing in Russian');
+    await evaluate(`showReview(hybridTask)`);
+    await check(`body.querySelector('button[type=submit]').disabled`, 'acceptance requires approval');
+    await evaluate(`hybridTask.reviewApproved = true; push(); settle()`);
+    await evaluate(`waitFor(() => !body.querySelector('button[type=submit]').disabled)`);
+    await check(`body.textContent.includes('Ожидает приёмки человеком') && !body.querySelector('button[type=submit]').disabled`, 'open review clears the gate after approval');
+    await capture('reviewer-human-approved-ru.png');
+    await evaluate(`sheet.close(); fixture.russian = false; push(); void 0`);
+    await check(`findCard('T-0096').querySelector('.task-run-status').textContent === 'Awaiting human acceptance'`, 'approved card remains in review in English');
+    await capture('reviewer-human-board-en.png');
+    await evaluate(`boardSettings(); settle()`);
+    await check(`body.querySelector('[name=reviewMode]').selectedOptions[0].textContent === 'Review + human'`, 'saved mode selected in board settings');
+    await capture('reviewer-human-settings-en.png');
+    console.log('Reviewer-human Chromium checks passed: ' + checks);
+    return;
+  }
   if (process.argv.includes("--run-status-only")) {
     await evaluate(`
       const queuedTask = task('T-0096', 'Проверка ожидания', { status: 'in_progress',

@@ -31,6 +31,7 @@ function cli(project, args, input) {
 if (!process.versions.electron) {
   const scratch = mkdtempSync(join(tmpdir(), "taskboard-shared-runtime-"));
   const managerOnly = process.argv.includes("--manager-only");
+  const hybridOnly = process.argv.includes("--reviewer-human-only");
   const outputIndex = process.argv.indexOf("--artifacts");
   const output = outputIndex < 0 ? undefined : resolve(process.argv[outputIndex + 1]);
   const workers = [], providerPids = new Set();
@@ -40,7 +41,7 @@ if (!process.versions.electron) {
   const project = join(scratch, "board"), other = join(scratch, "other");
   const record = text => { results.push(text); console.log(text); };
   const start = async name => {
-    const child = spawn(require("electron"), [script, "--worker", scratch, name], { cwd: scratch, env: { ...env, ELECTRON_LOG_FILE: join(scratch, name + "-electron.log") }, windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"] });
+    const child = spawn(require("electron"), [script, "--worker", scratch, name, ...(hybridOnly ? ["--reviewer-human-only"] : [])], { cwd: scratch, env: { ...env, ELECTRON_LOG_FILE: join(scratch, name + "-electron.log") }, windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"] });
     let logs = "", sequence = 0;
     const pending = new Map();
     child.stdout.on("data", data => { logs += data; }); child.stderr.on("data", data => { logs += data; });
@@ -68,6 +69,44 @@ if (!process.versions.electron) {
   checks: try {
     symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), join(scratch, "node_modules"), process.platform === "win32" ? "junction" : "dir");
     for (const board of [project, other]) { mkdirSync(board); cli(board, ["init"], { git: false }); cli(board, ["settings"], { autoMode: false, reviewMode: "human", taskLimits: { executor: 1, reviewer: 1 } }); }
+    if (hybridOnly) {
+      const git = (...args) => execFileSync("git", ["-C", project, ...args], { encoding: "utf8", windowsHide: true }).trim();
+      git("init", "-b", "main");
+      git("config", "user.name", "Taskboard Tests");
+      git("config", "user.email", "test@example.invalid");
+      git("commit", "--allow-empty", "-m", "chore: initialize fixture");
+      const initial = git("rev-parse", "HEAD");
+      const { reviewModeVersion } = cli(project, ["settings"], { reviewMode: "reviewer-human", autoMode: true, reviewer: { model: "fixture", effort: "low" } });
+      const task = cli(project, ["create"], { title: "Shared acceptance", criteria: ["Result exists"] });
+      cli(project, ["approve", task.id]);
+      const { worktree } = cli(project, ["start", task.id]);
+      writeFileSync(join(worktree, "result.txt"), "Checked result");
+      const { token } = cli(project, ["preview", task.id]);
+      const submitted = cli(project, ["submit", task.id], { token, message: "feat: submit fixture",
+        summary: "Submitted fixture", checks: ["Read the result"] });
+      const a = await start("profile-a"), b = await start("profile-b");
+      const bothApproved = async () => (await Promise.all([a.ask({ action: "frames" }), b.ask({ action: "frames" })])).flat().every(frame =>
+        frame.board.settings.reviewMode === "reviewer-human" &&
+        frame.board.tasks.some(card => card.id === task.id && card.status === "review" && card.reviewApproved));
+      await wait(bothApproved, "approval in both profiles");
+      assert.equal(await a.ask({ action: "reviews" }) + await b.ask({ action: "reviews" }), 1);
+      assert.equal(git("rev-parse", "HEAD"), initial);
+      await a.ask({ action: "exit" });
+      await once(a.child, "exit");
+      const restarted = await start("profile-a");
+      assert.equal((await restarted.ask({ action: "frames" }))[0].board.tasks.find(card => card.id === task.id).reviewApproved, true);
+      const input = { revision: submitted.revision, reviewModeVersion, targetHead: initial, message: "feat: accept fixture" };
+      const replies = await Promise.all([restarted, b].map(worker => worker.ask({ action: "acceptFixture", id: task.id, input })));
+      assert.ok(replies.every(reply => reply.ok && reply.data.status === "done"), JSON.stringify(replies));
+      assert.equal(git("rev-list", "--first-parent", "--count", initial + "..HEAD"), "1");
+      assert.equal(await restarted.ask({ action: "reviews" }), 0);
+      record("PASS: one reviewer across two profiles, approval survives restart, two desktop requests produce one integration");
+      if (output) {
+        mkdirSync(output, { recursive: true });
+        writeFileSync(join(output, "reviewer-human-runtime.txt"), results.join("\n") + "\n");
+      }
+      break checks;
+    }
     const tasks = [];
     for (let i = 0; !managerOnly && i < 6; i++) { const task = cli(project, ["create"], { title: "Isolated concurrency " + i, criteria: ["Fixture completes"], workingDirectory: project }); cli(project, ["approve", task.id]); tasks.push(task.id); }
     const a = await start("profile-a"), b = await start("profile-b");
@@ -483,6 +522,16 @@ if (!process.versions.electron) {
     .replace('codexStatus, configuredCodex,', 'codexStatus, configuredCodex as unusedConfiguredCodex,')
     .replace('replyToBoard, replyToTask', 'replyToBoard as unusedReplyToBoard, replyToTask');
   source = 'const configuredCodex = async () => ({}); const startCodexRun = globalThis.runtimeCheckStart; const replyToBoard = globalThis.runtimeCheckReply;\n' + source;
+  let reviews = 0;
+  if (process.argv.includes("--reviewer-human-only")) {
+    globalThis.runtimeCheckReview = async () => {
+      reviews++;
+      await delay(1200);
+      return { summary: "Checked the result", findings: [], needsHuman: false, evidence: ["Result exists"] };
+    };
+    source = source.replace(", reviewWithCodex,", ", reviewWithCodex as unusedReviewWithCodex,");
+    source = "const reviewWithCodex = globalThis.runtimeCheckReview;\n" + source;
+  }
   source = source.replaceAll("import.meta.url", JSON.stringify(sourceUrl.href)).replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, sourceUrl).href));
   const entry = join(scratch, name + ".mjs");
   writeFileSync(entry, transformSync(source + "\nglobalThis.sharedCheck = {createWindow,launchTask,agentSlots,reserveAgent,scheduleAgentWork,scheduleMaintenance,activeAgents,subscriptions};", { loader: "ts", format: "esm" }).code);
@@ -496,6 +545,9 @@ if (!process.versions.electron) {
       const qa = globalThis.sharedCheck; let data;
       const board = command.other ? other : project, key = command.role + (command.other ? ":other" : "") + (command.task ?? "");
       if (command.action === "ready") data = true;
+      if (command.action === "reviews") data = reviews;
+      if (command.action === "acceptFixture") data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(
+        `window.taskboard.command("accept", ${JSON.stringify(command.id)}, ${JSON.stringify(command.input)})`);
       if (command.action === "restoreBoards") { const state = qa.createWindow([project, other]); await state.ready; globalThis.restoredCheckWindow = state.window; data = true; }
       if (command.action === "closeRestored") { globalThis.restoredCheckWindow.close(); data = true; }
       if (command.action === "newWindow") { const state = qa.createWindow([project]); await state.ready; data = true; }

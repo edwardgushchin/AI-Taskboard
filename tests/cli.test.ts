@@ -58,9 +58,10 @@ function commandArgs(root: string, args: string[], input?: unknown): string[] {
     ...(input === undefined ? [] : ["--stdin"])];
 }
 
-function cli(root: string, args: string[], input?: unknown, expectedCode?: string) {
+function cli(root: string, args: string[], input?: unknown, expectedCode?: string, desktopAcceptance = false) {
   const result = spawnSync(process.execPath, commandArgs(root, args, input), {
-    env, encoding: "utf8", input: input === undefined ? undefined : JSON.stringify(input), windowsHide: true,
+    env: { ...env, TASKBOARD_DESKTOP_ACCEPTANCE: desktopAcceptance ? "1" : "" },
+    encoding: "utf8", input: input === undefined ? undefined : JSON.stringify(input), windowsHide: true,
   });
   assert.ok(result.stdout, result.stderr);
   const payload = JSON.parse(result.stdout);
@@ -3457,6 +3458,98 @@ test("doctor recovers archive cleanup after an index switch and preserves change
   assert.equal(cli(root, ["show", task.id]).status, "cancelled");
 });
 
+
+test("reviewer-human requires fresh reviewer approval and desktop acceptance", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  let settings = cli(root, ["settings"], { reviewMode: "reviewer-human", autoMode: true });
+  assert.equal(cli(root, ["settings"]).reviewMode, "reviewer-human");
+  const draft = cli(root, ["create"], { title: "External result", criteria: ["Result is checked"] });
+  const task = cli(root, ["start", cli(root, ["approve", draft.id]).id]).task;
+  const dependent = cli(root, ["create"], { title: "Dependent work", dependencies: [task.id] });
+  const submit = () => cli(root, ["submit", task.id], { token: cli(root, ["preview", task.id]).token,
+    noChanges: true, summary: "External result", checks: ["Checked"] });
+  let submission = submit();
+  const input = () => ({ revision: submission.revision, targetHead: null, actor: "user", reviewModeVersion: settings.reviewModeVersion });
+  const approve = () => cli(root, ["review-approve", task.id], { ...input(), actor: "reviewer", reviewMode: "reviewer-human",
+    summary: "Verified", evidence: ["Checked result"] });
+  const review = () => cli(root, ["review", task.id, "--compact"]);
+  cli(root, ["accept", task.id], input(), "REVIEW_REQUIRED", true);
+  approve();
+  assert.equal(review().awaitingHumanAcceptance, true);
+  assert.equal(cli(root, ["show", task.id]).status, "review");
+  assert.deepEqual(cli(root, ["show", dependent.id]).unfinishedDependencies, [task.id]);
+  cli(root, ["accept", task.id], input(), "HUMAN_ACCEPTANCE_REQUIRED");
+  cli(root, ["accept", task.id], { ...input(), actor: "manager", autoMode: true }, "AUTO_MODE_DISABLED");
+  const previous = input();
+  cli(root, ["settings"], { reviewMode: "reviewer" });
+  cli(root, ["accept", task.id], { ...previous, actor: "manager" }, "REVIEW_REQUIRED");
+  settings = cli(root, ["settings"], { reviewMode: "reviewer-human", autoMode: false });
+  assert.equal(review().awaitingHumanAcceptance, false);
+  cli(root, ["accept", task.id], previous, "REVIEW_MODE_CHANGED", true);
+  approve();
+  const returned = cli(root, ["request-changes", task.id], { ...input(), reason: "Recheck the result" });
+  assert.equal(returned.id, task.id);
+  assert.equal(returned.status, "in_progress");
+  submission = submit();
+  cli(root, ["accept", task.id], input(), "REVIEW_REQUIRED", true);
+  approve();
+  assert.equal(cli(root, ["accept", task.id], input(), undefined, true).status, "done");
+  assert.deepEqual(cli(root, ["show", dependent.id]).unfinishedDependencies, []);
+});
+
+for (const recover of [false, true]) test("reviewer-human repeats approval after target movement and conflict repair" + (recover ? " and recovers a saved integration" : ""), t => {
+  const root = fixture(t, true);
+  const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "source.txt"), "task version\n"));
+  const { reviewModeVersion } = cli(root, ["settings"], { reviewMode: "reviewer-human" });
+  const initial = git(root, "rev-parse", "HEAD");
+  const approve = (revision: number, targetHead: string) => cli(root, ["review-approve", task.id], {
+    revision, targetHead, reviewModeVersion, summary: "Verified", evidence: ["Checked result"],
+  });
+  const acceptance = { actor: "user", reviewModeVersion, revision: task.revision,
+    targetHead: initial, message: "feat: integrate checked result" };
+  approve(task.revision, initial);
+  writeFileSync(join(root, "source.txt"), "target version\n");
+  git(root, "commit", "-am", "fix: update target");
+  const head = git(root, "rev-parse", "HEAD");
+  assert.equal(cli(root, ["review", task.id, "--compact"]).awaitingHumanAcceptance, false);
+  cli(root, ["accept", task.id], acceptance, "TARGET_CHANGED", true);
+  approve(task.revision, head);
+  const queued = cli(root, ["accept", task.id], { ...acceptance, targetHead: head }, undefined, true);
+  assert.equal(queued.acceptanceRepair.phase, "queued");
+  cli(root, ["start", task.id], { revision: queued.revision, resolveConflicts: true });
+  assert.throws(() => git(worktree, "merge", "--no-edit", head));
+  writeFileSync(join(worktree, "source.txt"), "combined\n");
+  git(worktree, "add", "source.txt");
+  git(worktree, "commit", "-m", "fix: combine versions\n\nTask: " + task.id);
+  const preview = cli(root, ["preview", task.id]);
+  const repaired = cli(root, ["submit", task.id], { token: preview.token, message: preview.commitMessage,
+    summary: "Combined", checks: ["Checked merged source"] });
+  assert.equal(repaired.acceptanceRepair.phase, "checking");
+  const continuation = { revision: repaired.revision, targetHead: head, continueRepair: true };
+  cli(root, ["accept", task.id], continuation, "REVIEW_REQUIRED");
+  assert.equal(git(root, "rev-parse", "HEAD"), head);
+  approve(repaired.revision, head);
+  if (recover) {
+    const submitted = repaired.git.submission.sha;
+    const tree = git(root, "merge-tree", "--write-tree", "--no-messages", head, submitted);
+    const message = acceptance.message + "\n\nTask: " + task.id;
+    writeFileSync(join(root, ".tasks", "pending", task.id + ".json"), JSON.stringify({
+      action: "accept", revision: repaired.revision, target: "refs/heads/main", parent: head, submitted, tree,
+      mode: "merge", message, reviewModeVersion,
+    }));
+    git(root, "merge", "--no-ff", "-m", message, submitted);
+    continuation.targetHead = git(root, "rev-parse", "HEAD");
+  }
+  const accepted = cli(root, ["accept", task.id], continuation);
+  const integrated = git(root, "rev-parse", "HEAD");
+  assert.equal(git(root, "rev-list", "--first-parent", "--count", head + "..HEAD"), "1");
+  assert.equal(accepted.status, "done");
+  assert.equal(accepted.git.accepted, integrated);
+  cli(root, ["accept", task.id], continuation, "REPAIR_CANCELLED");
+  assert.equal(git(root, "rev-parse", "HEAD"), integrated);
+  assert.equal(readFileSync(join(root, "source.txt"), "utf8"), "combined\n");
+});
 
 test("user acceptance repairs remain review and continue only after checked submission", t => {
   for (const outcome of ["accept", "cancel", "advance", "fail", "return-queued", "return-running"]) {

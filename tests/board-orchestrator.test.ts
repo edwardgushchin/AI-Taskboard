@@ -16,7 +16,7 @@ import type { TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
-import { boardReviewMode, codexThreadPattern, defaultBoardAgents, hexTagColor, maxAttachmentBytes, reviewVerifier, TaskboardError, taskIdPattern } from "../src/cli/model.ts";
+import { boardReviewMode, codexThreadPattern, defaultBoardAgents, hexTagColor, maxAttachmentBytes, reviewVerifier, TaskboardError, taskIdPattern, usesIndependentReviewer } from "../src/cli/model.ts";
 import { managerInbox, needsManagerAttention } from "../src/cli/task-messages.ts";
 import type { RunActivity, Task } from "../src/cli/model.ts";
 import type { ChatSettings } from "../src/cli/model.ts";
@@ -75,7 +75,7 @@ function fixture(t: TestContext) {
   };
   const { autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools } = runInNewContext(
     boardSource + "\n({ autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools })",
-    { AbortSignal, expertActions, expertCommands, leadInstructions, autoQueueSettings, isManual, manualContext, locateBoard, readBoardSettings, boardReviewMode, callCli, cliFailure, defaultBoardAgents, hexTagColor, inspectProjectPath, managerInbox, needsManagerAttention, projectSha256, reviewVerifier, russianWriting, TaskboardError, taskIdPattern,
+    { AbortSignal, expertActions, expertCommands, leadInstructions, autoQueueSettings, isManual, manualContext, locateBoard, readBoardSettings, boardReviewMode, usesIndependentReviewer, callCli, cliFailure, defaultBoardAgents, hexTagColor, inspectProjectPath, managerInbox, needsManagerAttention, projectSha256, reviewVerifier, russianWriting, TaskboardError, taskIdPattern,
       taskFields: { title: {}, description: {}, criteria: {}, tags: {} },
     },
   );
@@ -113,12 +113,12 @@ function fixture(t: TestContext) {
   const activeAgents = new Map<string, { control: { steer: (text: string) => Promise<void> } }>();
   const sender = { isDestroyed: () => true };
   const runtime = runInNewContext(handlerSource + "\n({ frame, scheduleAutoReview, boardRequests, boardWorkRequests, backgroundManagerRequests, acceptanceWork, managerQuestion, runBoardRequest, scheduleRecurringTasks })", {
-    scheduleAutoBoard: () => {},
+    scheduleAutoBoard: () => {}, scheduleDraftDiscussions: () => {},
     activeRunSummary, runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
     captureFileLink, isFileLink, verifyFileLink, AbortSignal, AbortController, ArrayBuffer, Buffer, Error, basename, dirname, extname, join, mkdtemp, rm, writeFile, maxAttachmentBytes, boardActions, boardInstructions, boardTools, callCli,
     githubReadTool, readBoardGitHub: (cwd: string, args: unknown) => callCli(cwd, ["github-read"], args),
     executorFullAccess, managerAccess, setTaskExecutorAccess, phaseStageReporter,
-    autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, defaultBoardAgents, reviewVerifier,
+    autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, usesIndependentReviewer, defaultBoardAgents, reviewVerifier,
     existsSync, storageDirectory, readdirSync, rmSync, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
     goalMessages, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory,
     send() {},
@@ -654,6 +654,71 @@ test("manager can route a draft to Luna or Sol without changing board defaults",
   });
   assert.equal(routed.data?.answer, "Routed.", JSON.stringify(routed));
   assert.deepEqual((await f.cli(["settings"])).data.executor, defaultBoardAgents.executor);
+});
+
+test("reviewer-human uses the shared review queue with and without automatic mode", { timeout: 120_000 }, async t => {
+  const f = fixture(t);
+  await f.cli(["init"]);
+  f.agentSlots.configure({ executor: 1, manager: 1, reviewer: 1 });
+  for (const autoMode of [false, true]) {
+    assert.equal((await f.cli(["settings"], { reviewMode: "reviewer-human", autoMode, reviewer: { model: "fixture", effort: "low" } })).ok, true);
+    const ids: string[] = [];
+    const submit = async (id: string) => {
+      const { data: preview } = await f.cli(["preview", id]);
+      assert.equal((await f.cli(["submit", id], { token: preview.token, noChanges: true,
+        summary: "External result", checks: ["Read the result"] })).ok, true);
+    };
+    for (const title of ["First", "Second"]) {
+      const { data: task } = await f.cli(["create"], { title, criteria: ["Check the result"] });
+      await f.cli(["approve", task.id]);
+      assert.equal((await f.cli(["start", task.id])).ok, true);
+      await submit(task.id);
+      ids.push(task.id);
+    }
+    const release = Promise.withResolvers<void>();
+    const calls: string[] = [];
+    f.setReviewer(async ({ id }) => {
+      calls.push(id);
+      if (calls.length === 1) await release.promise;
+      const findings = id === ids[1] && calls.filter(call => call === id).length === 1 ? ["Fix the result"] : [];
+      return { summary: "Reviewed", findings, needsHuman: false, evidence: ["Checked"] };
+    });
+    const schedule = async () => f.schedule((await f.cli(["list", "--compact"])).data,
+      async () => assert.fail("Hybrid approval must not dispatch manager integration"));
+    const queue = await schedule();
+    queue.tick();
+    for (let i = 0; !calls.length && i < 250; i++) await wait(20);
+    try {
+      assert.equal(calls.length, 1);
+      assert.equal(Object.keys(queue.reviewing()).length, 1);
+      queue.tick();
+      assert.equal(calls.length, 1);
+    } finally {
+      release.resolve();
+    }
+    await queue.done();
+    await queue.refresh();
+    queue.tick();
+    await queue.done();
+    assert.equal(calls.length, 2);
+    const first = calls[0];
+    assert.equal((await f.cli(["show", first])).data.status, "review");
+    const returned = await f.cli(["show", ids[1]]);
+    assert.equal(returned.data.status, "in_progress");
+    await submit(ids[1]);
+    await queue.refresh();
+    queue.tick();
+    await queue.done();
+    assert.equal(calls.length, 3);
+    const restarted = await schedule();
+    restarted.tick();
+    await restarted.done();
+    assert.equal(calls.length, 3);
+    for (const id of ids) {
+      const { data } = await f.cli(["review", id, "--compact"]);
+      assert.equal(data.awaitingHumanAcceptance, true);
+    }
+  }
 });
 
 test("reviewers agree to submissions or return defects, and the manager controls integration", { timeout: 240_000 }, async t => {

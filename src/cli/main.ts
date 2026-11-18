@@ -15,13 +15,13 @@ import {
   addAttachment, addChatMessage, archiveDiagnostics, createWithAttachments, isArchived, reactivateArchivedTask, readAttachment, readTask, restoreReplyImages, sweepArchives,
   setAttachmentCover, upgradeTagCatalog,
 } from "./archive.ts";
-import { boardAgentRoles, boardReviewMode, hexTagColor, member, number, object, reasoningEffortPattern, record, registerTags, requireRevision, requireState, reviewModes, strings, tagKey, taskIdPattern, TaskboardError, text, validAgentLimitOverrides } from "./model.ts";
+import { boardAgentRoles, boardReviewMode, hexTagColor, member, number, object, reasoningEffortPattern, record, registerTags, requireRevision, requireState, reviewModes, strings, tagKey, taskIdPattern, TaskboardError, text, usesIndependentReviewer, validAgentLimitOverrides } from "./model.ts";
 import type { GitHubMilestone, Task } from "./model.ts";
 import { exists, initializeBoard, locateBoard, onBoard, readBoardSettings, withTaskStartLock } from "./storage.ts";
 import { inheritedLimits, recordSettings } from "./settings-notices.ts";
 import { requireAutoQueue, updateAutoQueue } from "./auto-queue.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
-import { discoverRepository, invokeGit, scheduleGitMaintenance } from "./git.ts";
+import { discoverRepository, invokeGit, resolveCommit, scheduleGitMaintenance } from "./git.ts";
 import { boardGitInfo, changeRepository, createGitHubMilestone, githubMilestones, githubRepository, inspectRepository, publishRepository, pushRepositoryBranch, readGitHub, repositoryRefs, setGitHubMilestoneDueDate } from "./repository.ts";
 import { previewSubmission, previewTask, submitTask } from "./submission.ts";
 import { changeTask, createTask, recordRunLog } from "./tasks.ts";
@@ -135,15 +135,17 @@ function reviewWithSettings(store: BoardStore, task: Task, review: ReturnType<ty
   if (input.includeReviewerSettings !== true) return review;
   return { ...review, reviewTeam: task.expertTeam?.review, reviewDecision: reviewDecisionSequence(task) || undefined, settings: {
     reviewMode: boardReviewMode(store.index.settings),
+    reviewModeVersion: store.index.settings.reviewModeVersion,
     reviewer: store.index.settings.reviewer,
   } };
 }
 
-type CachedCard = { file: Stats; task: CompactTask; inbox: ReturnType<typeof managerInbox> };
+type CachedCard = { file: Stats; task: CompactTask; approval?: NonNullable<Task["history"][number]["reviewApproval"]>; target?: string; inbox: ReturnType<typeof managerInbox> };
 
 function snapshotBoard(store: BoardStore, compact = false, cache = new Map<string, CachedCard>()) {
   upgradeTagCatalog(store, false);
   const archived = store.archivedCards();
+  const targetHeads = new Map<string, string | undefined>();
   const header = { project: store.location.root, settings: store.index.settings, tags: store.index.tags ?? [], archived };
   if (compact) {
     const ids = Object.keys(store.index.tasks);
@@ -154,13 +156,29 @@ function snapshotBoard(store: BoardStore, compact = false, cache = new Map<strin
       if (saved && saved.file.mtimeMs === file.mtimeMs && saved.file.ctimeMs === file.ctimeMs &&
           saved.file.ino === file.ino && saved.file.size === file.size) return saved;
       const task = store.card(id);
-      const card = { file, task: compactTask(task), inbox: managerInbox([task]) };
+      const card = { file, task: compactTask(task), approval: currentReviewApproval(task)?.reviewApproval,
+        target: task.status === "review" && !task.result?.noChanges ? task.git?.target : undefined, inbox: managerInbox([task]) };
       cache.set(id, card);
       return card;
     });
     const statuses = new Map([...cards.map(card => card.task), ...archived].map(task => [task.id, task.status]));
-    return { ...header, tasks: cards.map(({ task }) => task.dependencies?.length
-      ? { ...task, unfinishedDependencies: unfinishedDependencies(task, id => statuses.get(id)) } : task),
+    return { ...header, tasks: cards.map(({ task, target, approval }) => {
+      let reviewTargetHead: string | null | undefined;
+      let reviewPending: true | undefined;
+      if (task.status === "review" && boardReviewMode(header.settings) === "reviewer-human") {
+        if (target && !targetHeads.has(target)) {
+          targetHeads.set(target, store.location.repository && resolveCommit(store.location.repository.root, target) || undefined);
+        }
+        reviewTargetHead = target ? targetHeads.get(target) : null;
+        if (exists(store.pendingPath(task.id))) reviewPending = true;
+        task = { ...task, reviewApproved: Boolean(approval &&
+          approval.reviewModeVersion === header.settings.reviewModeVersion && approval.targetHead === reviewTargetHead) };
+      } else if (approval && approval.reviewModeVersion !== header.settings.reviewModeVersion) {
+        task = { ...task, reviewApproved: false };
+      }
+      return { ...task, reviewTargetHead, reviewPending, ...(task.dependencies?.length
+        ? { unfinishedDependencies: unfinishedDependencies(task, id => statuses.get(id)) } : {}) };
+    }),
       managerInbox: cards.flatMap(card => card.inbox).sort((left, right) => left.at.localeCompare(right.at) ||
         left.id.localeCompare(right.id) || left.sequence - right.sequence) };
   }
@@ -554,6 +572,7 @@ function run(
       }
       store.index.settings.showCardPreviews = input.showCardPreviews;
     }
+    const previousReviewMode = boardReviewMode(store.index.settings);
     if (input.autoReview !== undefined) {
       if (typeof input.autoReview !== "boolean") throw new TaskboardError("INVALID_INPUT", "autoReview must be a boolean.");
       store.index.settings.reviewMode = input.autoReview ? "reviewer" : "human";
@@ -566,6 +585,9 @@ function run(
     if (input.reviewMode !== undefined) {
       store.index.settings.reviewMode = member(input.reviewMode, reviewModes, "review mode");
       delete store.index.settings.autoReview;
+    }
+    if (boardReviewMode(store.index.settings) !== previousReviewMode) {
+      store.index.settings.reviewModeVersion = (store.index.settings.reviewModeVersion ?? 0) + 1;
     }
     const taskLimits = input.taskLimits === undefined ? input.agentLimits : input.taskLimits;
     if (taskLimits !== undefined) {
@@ -653,13 +675,16 @@ function run(
       throw new TaskboardError("AUTO_REVIEW_DISABLED", "This board uses manual acceptance.");
     }
     const actor = reviewerReport ? "reviewer" : input.actor;
-    const decisionActor = command === "accept" || input.actor === "manager" ? "manager" : mode;
-    if (actor !== decisionActor || (input.reviewMode !== undefined && input.reviewMode !== mode)) {
+    const decisionActor = command === "accept" || input.actor === "manager" ? "manager" :
+      usesIndependentReviewer(mode) ? "reviewer" : mode;
+    if (actor !== decisionActor || (input.reviewMode !== undefined && input.reviewMode !== mode) ||
+        (actor === "reviewer" && (mode === "reviewer-human" || input.reviewModeVersion !== undefined) &&
+          input.reviewModeVersion !== store.index.settings.reviewModeVersion)) {
       throw new TaskboardError("REVIEW_MODE_CHANGED", "The board's review mode changed. Review the submission again.");
     }
     if (command === "accept" && mode === "reviewer" && task.status === "review") {
       requireRevision(task, input.revision, true);
-      if (!currentReviewApproval(task) || input.targetHead === undefined) {
+      if (!currentReviewApproval(task, store.index.settings) || input.targetHead === undefined) {
         throw new TaskboardError("REVIEW_REQUIRED", "Use the current target HEAD and the reviewer's approval for this submission.");
       }
     }
@@ -668,7 +693,7 @@ function run(
       const verificationStarted = performance.now();
       const targetHead = verifyReviewDecision(store, task, input.targetHead);
       decisionTiming = { lockWaitMs, verificationMs: Math.round(performance.now() - verificationStarted) };
-      if (command === "request-changes" && mode !== "human" && input.actor === mode) {
+      if (command === "request-changes" && mode !== "human" && input.actor === (usesIndependentReviewer(mode) ? "reviewer" : mode)) {
         if (store.index.settings.requireExpertPlans) requireExpertPlan(task, "review");
         requireExpertResults(task, "review", targetHead);
       }
@@ -683,13 +708,15 @@ function run(
               evidence.some(entry => typeof entry !== "string" || !entry.trim())) {
             throw new TaskboardError("VERIFICATION_REQUIRED", "Provide evidence for each criterion.");
           }
-          if (currentReviewApproval(task)?.reviewApproval?.targetHead === targetHead) {
+          const version = store.index.settings.reviewModeVersion;
+          const approval = currentReviewApproval(task, store.index.settings)?.reviewApproval;
+          if (approval?.targetHead === targetHead) {
             const recorded = withReviewerUsage(task);
             if (recorded !== task) store.save(recorded);
             return filters.compact ? taskReceipt(recorded) : recorded;
           }
           const approved = record(task, command, "reviewer", task.status, summary);
-          approved.history.at(-1)!.reviewApproval = { revision: task.revision, targetHead, evidence };
+          approved.history.at(-1)!.reviewApproval = { revision: task.revision, targetHead, evidence, reviewModeVersion: version };
           const saved = store.save(withReviewerUsage({ ...approved, revision: task.revision }));
           return filters.compact ? taskReceipt(saved) : saved;
         }
@@ -727,27 +754,37 @@ function run(
       if (store.index.settings.requireExpertPlans) requireExpertPlan(task, "review");
       requireExpertResults(task, "review", verifyReviewDecision(store, task, input.targetHead));
     }
+    let userAcceptance = process.env.TASKBOARD_DESKTOP_ACCEPTANCE === "1";
     if (task.acceptanceRepair) {
       requireRevision(task, input.revision, true);
       if (input.continueRepair !== true) return task;
+      const repairVersion = task.acceptanceRepair.reviewModeVersion;
+      const hybrid = boardReviewMode(store.index.settings) === "reviewer-human";
+      if ((hybrid || repairVersion !== undefined) && (!hybrid || repairVersion !== store.index.settings.reviewModeVersion)) {
+        throw new TaskboardError("REVIEW_MODE_CHANGED", "Cancel acceptance and review the submission under the current mode.");
+      }
       if (task.acceptanceRepair.phase !== "checking") throw new TaskboardError("REPAIR_UNFINISHED", "Conflict repair has not passed its checks.");
-      if (input.targetHead !== task.acceptanceRepair.targetHead) {
+      const recovering = exists(store.pendingPath(task.id));
+      if (hybrid && !recovering) verifyReviewDecision(store, task, input.targetHead);
+      if (!recovering && input.targetHead !== task.acceptanceRepair.targetHead) {
         const reason = "The target advanced after repair checks. Verify the new target before accepting.";
         if (task.acceptanceRepair.attempts < 2) return store.save(record({ ...task, acceptanceRepair: {
           ...task.acceptanceRepair, phase: "queued" } }, "acceptance-target-changed", "agent"));
         return store.save(sendTaskMessage(record({ ...task, acceptanceRepair: { ...task.acceptanceRepair, phase: "failed", reason } },
           "acceptance-failed", "agent"), { kind: "question", text: reason }, "agent"));
       }
-      input = { ...input, actor: "user", message: task.acceptanceRepair.message };
+      userAcceptance = true;
+      input = { actor: "user", revision: task.revision, targetHead: input.targetHead,
+        reviewModeVersion: repairVersion, message: task.acceptanceRepair.message };
     } else if (input.continueRepair === true) throw new TaskboardError("REPAIR_CANCELLED", "Acceptance was cancelled.");
     if (input.autoMode === true && (!store.index.settings.autoMode || boardReviewMode(store.index.settings) !== "reviewer")) {
       throw new TaskboardError("AUTO_MODE_DISABLED", "Automatic integration is disabled.");
     }
-    if (input.autoMode === true && currentReviewApproval(task)?.reviewApproval?.targetHead !== input.targetHead) {
+    if (input.autoMode === true && currentReviewApproval(task, store.index.settings)?.reviewApproval?.targetHead !== input.targetHead) {
       throw new TaskboardError("REVIEW_REQUIRED", "Automatic integration requires reviewer approval for the current target.");
     }
     try {
-      return acceptTask(store, task, input);
+      return acceptTask(store, task, input, userAcceptance);
     } catch (error) {
       if (input.actor === "user" && error instanceof TaskboardError && error.code === "MERGE_CONFLICT") {
         const review = inspectReview(store, task, reviewDetails(store, task, true), true);
@@ -755,13 +792,14 @@ function run(
         const exhausted = previous && previous.attempts >= 2;
         const requested = record({ ...task, acceptanceRepair: {
           phase: exhausted ? "failed" as const : "queued" as const, attempts: previous?.attempts ?? 0,
+          reviewModeVersion: boardReviewMode(store.index.settings) === "reviewer-human" ? store.index.settings.reviewModeVersion : undefined,
           targetHead: review.targetHead!, message: text(input.message, "message", true),
           ...(exhausted ? { reason: "Repeated merge conflict; a decision is required." } : {}),
         } }, "acceptance-requested", "user");
         return store.save(exhausted ? sendTaskMessage(requested, { kind: "question", text: requested.acceptanceRepair!.reason }, "agent") : requested);
       }
       if (store.index.settings.autoMode && error instanceof TaskboardError &&
-          !["AUTO_REVIEW_DISABLED", "REVIEW_MODE_CHANGED", "REVISION_CONFLICT", "REVIEW_REQUIRED"].includes(error.code)) {
+          !["AUTO_REVIEW_DISABLED", "HUMAN_ACCEPTANCE_REQUIRED", "REVIEW_MODE_CHANGED", "REVISION_CONFLICT", "REVIEW_REQUIRED"].includes(error.code)) {
         const message = "AI Taskboard integration: " + error.code + "\n" + error.message + "\n" + JSON.stringify(error.details ?? {}).slice(0, 1800);
         const latest = store.card(task.id);
         const submitted = latest.history.findLastIndex(event => event.action === "submit");
@@ -1081,7 +1119,8 @@ async function main() {
             requireState(card, ["review"]);
             requireRevision(card, task.revision, true);
             if (exists(latest.pendingPath(id)) !== details.pending ||
-                latest.index.settings.integrationMode !== store.index.settings.integrationMode) {
+                latest.index.settings.integrationMode !== store.index.settings.integrationMode ||
+                latest.index.settings.reviewModeVersion !== store.index.settings.reviewModeVersion) {
               throw new TaskboardError("REVISION_CONFLICT", "The submission changed. Open the current review.");
             }
           });
