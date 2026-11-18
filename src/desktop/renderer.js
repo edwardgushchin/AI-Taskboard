@@ -1024,6 +1024,7 @@ function card(task) {
   }
   if (subtasks.length) {
     const progress = element("span", undefined, "task-subtask-progress");
+    progress.style.setProperty("--subtask-count", subtasks.length);
     progress.setAttribute("aria-hidden", "true");
     for (const subtask of subtasks) {
       const bar = element("span");
