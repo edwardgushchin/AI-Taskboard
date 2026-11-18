@@ -202,17 +202,20 @@ type TaskCheckout = {
   preparing: number; lockWaitMs: number;
 };
 
-function saveStart(store: BoardStore, task: Task, lockWaitMs: number, prepareMs: number, gitWorktreeAddMs?: number, actor: "user" | "agent" | "manager" = "agent") {
+function saveStart(store: BoardStore, task: Task, lockWaitMs: number, prepareMs: number, gitWorktreeAddMs?: number, actor: "user" | "agent" | "manager" = "agent",
+  beforeSave?: (task: Task) => void) {
   const updated = record({ ...task, discussionReturn: undefined }, "start", actor, "in_progress");
   updated.history.at(-1)!.startTiming = {
     lockWaitMs, prepareMs, ...(gitWorktreeAddMs !== undefined ? { gitWorktreeAddMs } : {}),
   };
+  beforeSave?.(updated);
   return store.save(updated);
 }
 
-export function prepareTaskStart(store: BoardStore, task: Task, input: Record<string, unknown>, lockWaitMs: number): StartedTask | TaskCheckout {
+export function prepareTaskStart(store: BoardStore, task: Task, input: Record<string, unknown>, lockWaitMs: number,
+  beforeSave?: (task: Task) => void): StartedTask | TaskCheckout {
   const preparing = performance.now();
-  const save = (card: Task) => saveStart(store, card, lockWaitMs, Math.round(performance.now() - preparing), undefined, boardActor(input));
+  const save = (card: Task) => saveStart(store, card, lockWaitMs, Math.round(performance.now() - preparing), undefined, boardActor(input), beforeSave);
   requireState(task, ["ready", "in_progress"]);
   skillProofScope(store, task, "work");
   for (const stage of task.expertTeam?.work?.stages ?? []) {
@@ -222,12 +225,12 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
     requireExpertPlan(task, "work");
     if (!task.schedule && boardReviewMode(store.index.settings) !== "human") requireExpertPlan(task, "review");
   }
-  if (task.status === "ready") {
+  if (task.status === "ready" || input.actor === "user") {
     const dependencies = unfinishedDependencies(task, id => dependencyStatus(store, id));
     if (dependencies.length) {
       throw new TaskboardError("DEPENDENCIES_INCOMPLETE", "Complete the task dependencies before starting.", { dependencies });
     }
-    if (task.schedule && !(Date.parse(task.schedule.nextAt) <= Date.now())) {
+    if (task.status === "ready" && task.schedule && !(Date.parse(task.schedule.nextAt) <= Date.now())) {
       throw new TaskboardError("INVALID_TRANSITION", "The task is not due to run.", { nextAt: task.schedule.nextAt });
     }
   }
@@ -380,11 +383,13 @@ export function checkoutTaskWorktree({ id, repo, branch, managedPath, intent: { 
 }
 
 export function finishTaskStart(store: BoardStore, plan: TaskCheckout, checkout: ReturnType<typeof checkoutTaskWorktree>,
-  finalLockWaitMs: number, isolate: boolean) {
+  finalLockWaitMs: number, isolate: boolean, beforeSave?: (task: Task) => void) {
   const { id, branch, intent, preparing, lockWaitMs } = plan;
   const task = store.card(id);
   requireState(task, intent.restore ? ["ready", "in_progress"] : ["ready"]);
   requireRevision(task, intent.revision, true);
+  const dependencies = unfinishedDependencies(task, id => dependencyStatus(store, id));
+  if (dependencies.length) throw new TaskboardError("DEPENDENCIES_INCOMPLETE", "Complete the task dependencies before starting.", { dependencies });
   const pendingPath = store.pendingPath(id);
   const pending = exists(pendingPath) && object(readJson(pendingPath));
   const { target, base, restore } = intent;
@@ -400,8 +405,10 @@ export function finishTaskStart(store: BoardStore, plan: TaskCheckout, checkout:
     throw new TaskboardError("PENDING_OPERATION", "The saved task branch or target changed during checkout.");
   }
   const updatedTask = { ...task, git: { ...(restore ? task.git! : { target, base, branch }), worktree } };
-  const updated = task.status === "in_progress" && task.discussionReturn === undefined ? store.save(updatedTask) : saveStart(store, updatedTask,
-    lockWaitMs + finalLockWaitMs, prepareMs, gitWorktreeAddMs, intent.actor);
+  const preserveRevision = task.status === "in_progress" && task.discussionReturn === undefined;
+  if (preserveRevision) beforeSave?.(updatedTask);
+  const updated = preserveRevision ? store.save(updatedTask) : saveStart(store, updatedTask,
+    lockWaitMs + finalLockWaitMs, prepareMs, gitWorktreeAddMs, intent.actor, beforeSave);
   removeFile(pendingPath);
   return { task: updated, worktree };
 }

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { directory, exists, locateBoard, readJson, withRuntimeLock, writeJson } from "../cli/storage.ts";
 import type { BoardLocation } from "../cli/storage.ts";
-import type { AgentLimits, RunActivity } from "../cli/model.ts";
+import type { AgentLimits, RunActivity, Task } from "../cli/model.ts";
 import type { BoardActivity } from "./codex-chat.ts";
 
 const context = new AsyncLocalStorage<string>();
@@ -18,6 +18,8 @@ export interface RuntimeEntry {
   parent?: string;
   limits?: AgentLimits;
   revision?: number;
+  linkedThread?: { revision: number; codexThreadId: string };
+  turnRequest?: { threadId: string; clientId: string; turnId?: string };
   continuation?: { afterDisconnect?: boolean; withoutProgress?: boolean };
   queuedMessageId?: string;
   steeringMessageId?: string;
@@ -87,6 +89,59 @@ export function runtimeTransaction<T>(project: string, action: (entries: Runtime
 export function runtimeEntries(project: string) {
   // Atomic replacement gives readers a complete snapshot without waiting for writers.
   return liveEntries(readEntries(join(runtimeLocation(project).directory, "runtime.json")));
+}
+
+export type DeferredExecutor = Pick<RuntimeEntry, "continuation"> & { revision: number };
+
+type QueuedTask = Pick<Task, "id" | "revision" | "status" | "codexThreadId">;
+
+export function matchesQueuedExecutor(entry: RuntimeEntry, task: QueuedTask) {
+  return entry.kind === "queue" && entry.task === task.id && task.status === "in_progress" &&
+    (entry.revision === task.revision || (entry.linkedThread?.revision === task.revision &&
+      entry.linkedThread.codexThreadId === task.codexThreadId));
+}
+
+export function linkQueuedExecutor(project: string, task: QueuedTask, updated: QueuedTask) {
+  return runtimeTransaction(project, entries => {
+    const entry = entries.find(entry => matchesQueuedExecutor(entry, task));
+    if (!entry) return false;
+    // Publish both revisions before saving the card, so either snapshot survives a crash.
+    if (updated.revision !== task.revision && updated.codexThreadId) {
+      entry.revision = task.revision;
+      entry.linkedThread = { revision: updated.revision, codexThreadId: updated.codexThreadId };
+    }
+    return true;
+  });
+}
+
+export function prepareQueuedTurn(project: string, task: QueuedTask, threadId: string) {
+  return runtimeTransaction(project, entries => {
+    const entry = entries.find(entry => matchesQueuedExecutor(entry, task));
+    if (!entry) return;
+    const previous = entry.turnRequest;
+    entry.turnRequest ??= { threadId, clientId: randomUUID() };
+    return { ...entry.turnRequest, recover: Boolean(previous) };
+  });
+}
+
+export function recordQueuedTurn(project: string, task: string, clientId: string, turnId: string) {
+  runtimeTransaction(project, entries => {
+    const entry = entries.find(entry => entry.kind === "queue" && entry.task === task);
+    if (entry?.turnRequest?.clientId === clientId) entry.turnRequest.turnId = turnId;
+  });
+}
+
+export function deferExecutor(project: string, task: string, pending?: DeferredExecutor, expectedRevision?: number, onlyIfIdle = false) {
+  return runtimeTransaction(project, entries => {
+    const index = entries.findIndex(entry => entry.kind === "queue" && entry.task === task);
+    const existing = entries[index];
+    if (pending && existing?.revision === pending.revision) return true;
+    if (expectedRevision !== undefined && existing?.revision !== expectedRevision) return false;
+    if (onlyIfIdle && entries.some(entry => entry.kind !== "queue" && taskWriterId(entry.task) === task)) return false;
+    if (existing) entries.splice(index, 1);
+    if (pending) entries.push({ id: "queue:" + task, owner: 0, kind: "queue", task, ...pending });
+    return Boolean(pending || existing);
+  });
 }
 
 export function taskWriterId(task: string | undefined) {

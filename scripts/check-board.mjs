@@ -376,7 +376,7 @@ app.whenReady().then(async () => {
           s.bottom <= m.top && s.width >= details.clientWidth - 25 &&
           status.scrollWidth <= status.clientWidth + 1 && card.scrollWidth <= card.clientWidth + 1 &&
           meta.scrollWidth <= meta.clientWidth + 1 && !meta.querySelector('.task-run-status') &&
-          (status.textContent.startsWith('Waiting') || status.textContent === 'Ожидает свободного исполнителя');
+          (status.textContent.startsWith('Waiting') || status.textContent === 'В очереди');
       })()`, `full-width waiting block: ${theme}, ${width}px, ${locale}, long milestone and attachments`);
       if (keepArtifacts && theme === 'light' && width === 200 && locale === 'ru') await capture('waiting-200.png');
     }
@@ -2591,7 +2591,7 @@ app.whenReady().then(async () => {
   await evaluate(`fixture.runningTasks = ['T-0001', 'T-0002']; push(); void 0`);
   await check(`byId('task-agent-run').textContent === 'Запуск с доски не активен'`, "occupied slots do not mark an interrupted task as queued");
   await evaluate(`fixture.waitingTasks = [interrupted.id]; push(); void 0`);
-  await check(`findCard(interrupted.id).querySelector('.task-run-status').textContent === 'Ожидает свободного исполнителя' && byId('task-agent-run').textContent === 'Ожидает свободного исполнителя'`, "confirmed queue is visible on the board and open task in Russian");
+  await check(`findCard(interrupted.id).querySelector('.task-run-status').textContent === 'В очереди' && byId('task-agent-run').textContent === 'В очереди' && !!byId('task-stop-waiting')`, "confirmed queue and its stop button are visible in Russian");
   await capture("executor-waiting-ru.png");
   await evaluate(`fixture.russian = false; push(); void 0`);
   await check(`findCard(interrupted.id).querySelector('.task-run-status').textContent === 'Waiting for an available executor' && byId('task-agent-run').textContent === 'Waiting for an available executor'`, "confirmed queue is visible in English in both views");
