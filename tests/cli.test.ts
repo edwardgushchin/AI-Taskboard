@@ -1156,6 +1156,7 @@ test("task chat stores messages and attachments together and archives the conver
   assert.equal(loggedReceipt.id, task.id);
   assert.equal(loggedReceipt.history, undefined);
   const logged = cli(root, ["show", task.id]);
+  assert.equal(loggedReceipt.runLogSequence, logged.history.length);
   assert.deepEqual(logged.history.at(-1).run, entries);
   const compact = cli(root, ["list", "--compact"]).tasks.find((entry: { id: string }) => entry.id === task.id);
   assert.equal(compact.revision, logged.revision);

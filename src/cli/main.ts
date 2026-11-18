@@ -799,7 +799,8 @@ function run(
   if (command === "run-log") {
     const logged = recordRunLog(task, input);
     if (logged !== task) store.save(logged);
-    return filters.compact ? taskReceipt(logged) : logged;
+    return filters.compact ? { ...taskReceipt(logged),
+      ...(logged !== task ? { runLogSequence: logged.history.length } : {}) } : logged;
   }
   if (command === "progress" && task.schedule && task.status === "in_progress") requireExpertResults(task, "work");
   if (command === "approve" && task.status === "draft") requireApprovalPlan(task, store.index.settings);

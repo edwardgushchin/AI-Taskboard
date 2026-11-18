@@ -2963,13 +2963,14 @@ function executorBusy(project: string, id: string) {
   return launchingTasks.has(key) || runningTasks.has(key) || chatRuns.has(key) || agentSlots.busy(project, id);
 }
 
-function publishRunActivity(project: string, id: string, items: RunActivity[]) {
+function publishRunActivity(project: string, id: string, items: RunActivity[],
+  savedRun?: { sequence: number; items: RunActivity[]; durationMs: number }) {
   const key = project + "\0" + id;
   if (items.length) runActivityByTask.set(key, items);
   else runActivityByTask.delete(key);
   for (const state of windowStates.values()) {
     if (state.active.project === project && !state.window.isDestroyed()) {
-      state.window.webContents.send("chat:update", { project, id, type: "run", items });
+      state.window.webContents.send("chat:update", { project, id, type: "run", items, savedRun });
     }
   }
 }
@@ -3033,8 +3034,12 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     }
     const items = runLog(activity);
     if (!items.length) return;
-    const saved = await callCli(project, ["run-log", id, "--compact"], { entries: items, durationMs: Math.round(performance.now() - runStarted) });
-    if (saved.ok) publishRunActivity(project, id, []);
+    const durationMs = Math.round(performance.now() - runStarted);
+    const saved = await callCli<{ runLogSequence?: number }>(project, ["run-log", id, "--compact"], { entries: items, durationMs });
+    if (saved.ok) {
+      const sequence = saved.data.runLogSequence;
+      publishRunActivity(project, id, [], sequence === undefined ? undefined : { sequence, items, durationMs });
+    }
     else publishRunActivity(project, id, [
       { id: "save-error", type: "error", title: "", text: saved.error.message, status: "failed" },
     ]);

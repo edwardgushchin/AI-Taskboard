@@ -1755,6 +1755,96 @@ app.whenReady().then(async () => {
     }
   }
 
+  // Reproduce the two incident timelines and a review that starts after the journal is saved.
+  await evaluate("var beforeHandoffCommand = api.command");
+  const captureHandoff = async name => {
+    await evaluate(`
+      var handoffFeed = byId('task-chat-work');
+      handoffFeed.querySelector('.chat-work').open = true;
+      handoffFeed.scrollTop = 0;
+    `);
+    await capture(name);
+  };
+  for (const times of [
+    ['10:20:00', '10:25:00', '10:29:57.639', '10:29:59', '10:30:34.597'],
+    ['11:48:00', '11:52:00', '12:03:28.406', '12:03:30', '12:04:19.149'],
+    ['11:48:00', '11:52:00', '12:03:28.406', '12:04:20', '12:04:19.149'],
+  ]) {
+    await evaluate("var handoffTimes = " + JSON.stringify(times.map(time => '2026-11-18T' + time + 'Z')));
+    await evaluate(`
+      var [firstAt, secondAt, submissionAt, reviewAt, savedAt] = handoffTimes;
+      var handoffItems = [
+        ['early', firstAt, 'First executor message', 'commentary'],
+        ['later', secondAt, 'Second executor message', 'commentary'],
+        ['final', savedAt, 'Final executor response', 'final_answer'],
+      ].map(([id, at, text, phase]) => ({
+        id: 'handoff-' + id, at, text, phase, type: 'agentMessage', title: '', status: 'completed',
+      }));
+      var handoff = { ...taskInSheet, title: 'Переход к ревью', status: 'review', tags: [], criteria: [], subtasks: [], questions: [], history: [
+        { action: 'submit', actor: 'agent', at: submissionAt, to: 'review' },
+      ], codexThreadId: '01234567-1234-5678-1234-123456789012' };
+      var attempt = { id: 'handoff-review', at: reviewAt, items: [{
+        id: 'handoff-prep', type: 'agentMessage', phase: 'commentary', title: '',
+        text: 'Reviewer preparation', status: 'completed', at: reviewAt,
+      }] };
+      api.reviewerChat = async () => ({ ok: true, data: [attempt] });
+      api.taskRunHistory = async () => ({ ok: true, data: { 1: handoffItems } });
+      var historyRead;
+      api.command = (action, id, ...args) => action === 'show' && id === handoff.id
+        ? historyRead ?? Promise.resolve({ ok: true, data: structuredClone(handoff) })
+        : beforeHandoffCommand(action, id, ...args);
+      var mountHandoff = async () => {
+        await showTask(handoff.id);
+        byId('task-side').querySelector('[aria-controls="task-chat-work"]').click();
+        await new Promise(resolve => setTimeout(resolve, 350));
+      };
+      var handoffOrder = () => {
+        const feed = byId('task-chat-work');
+        const submission = feed.querySelector('.chat-event');
+        const review = feed.querySelector('.task-review-attempt');
+        return review && submission.compareDocumentPosition(review) === Node.DOCUMENT_POSITION_FOLLOWING &&
+          submission.querySelector('time').dateTime === submissionAt &&
+          handoffItems.every(item => {
+            const rows = feed.querySelectorAll('[data-item="message:' + item.id + '"], [data-item="final:' + item.id + '"]');
+            return rows.length === 1 && rows[0].querySelector('time').dateTime === item.at &&
+              rows[0].compareDocumentPosition(submission) === Node.DOCUMENT_POSITION_FOLLOWING;
+          }) && review.querySelectorAll('[data-item="message:handoff-prep"]').length === 1 &&
+          review.querySelector('time').dateTime === reviewAt;
+      };
+      var handoffUpdate = (items, savedRun) => updateChat({
+        project: frame.project, id: handoff.id, type: 'run', items, savedRun,
+      });
+      mountHandoff().then(() => handoffUpdate(handoffItems));
+    `);
+    await check("handoffOrder()", "live executor response precedes submission and review: " + times[2]);
+    await evaluate(`
+      var waitingForHistory = Promise.withResolvers();
+      historyRead = waitingForHistory.promise;
+      var refreshingHandoff = showTask(handoff.id);
+      handoffUpdate([], { sequence: 2, items: handoffItems, durationMs: 947258 });
+    `);
+    await check("taskInSheet.history.length === 1 && handoffOrder()",
+      "the save receipt keeps one executor answer visible while the card waits for history: " + times[2]);
+    if (keepArtifacts && times[3] === '12:03:30') await captureHandoff('handoff-active-review.png');
+    await evaluate(`
+      var savedRun = { action: 'run-log', actor: 'agent', at: savedAt, durationMs: 947258, run: handoffItems };
+      handoff.history.push(savedRun);
+      historyRead = undefined;
+      waitingForHistory.resolve({ ok: true, data: structuredClone(handoff) });
+      refreshingHandoff.then(() => new Promise(resolve => setTimeout(resolve, 350)));
+    `);
+    await check("taskInSheet.history.length === 2 && !byId('task-chat-work').querySelector('.chat-run-live').textContent && handoffOrder()",
+      "the refreshed history replaces the pending copy: " + times[2]);
+    await evaluate(`
+      attempt.durationMs = 80000;
+      delete savedRun.run;
+      mountHandoff().then(() => byId('task-chat-work').querySelector('.task-work-controls button').click());
+    `);
+    await check("handoffOrder()", "restored executor log precedes the completed review: " + times[2]);
+    if (keepArtifacts && times[3] === '12:03:30') await captureHandoff('handoff-restored.png');
+  }
+  await evaluate("api.command = beforeHandoffCommand; byId('task-side').replaceChildren(); byId('task-side').hidden = true");
+
   // Work pagination uses the same IPC path for local and provider cursors.
   for (const prefix of ['local:', 'provider-cursor-']) {
     await evaluate(`
