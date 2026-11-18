@@ -25,6 +25,7 @@ import { managerCliContext } from "../src/desktop/manager-cli.ts";
 import { managerAccess } from "../src/desktop/codex.ts";
 import { projectIdentity } from "../src/desktop/project-tabs.ts";
 import { githubReadTool } from "../src/desktop/github-read.ts";
+import { chatTools } from "../src/desktop/chat-actions.ts";
 
 const source = readFileSync(new URL("../src/desktop/codex-chat.ts", import.meta.url), "utf8")
   .replace(/^import[\s\S]*?;\r?\n/gm, "").replace(/^export /gm, "");
@@ -244,6 +245,14 @@ test("discussion steering and interruption share the streaming connection, inclu
       if (method === 'model/list') result = { data: [{ model: 'test', defaultReasoningEffort: 'low', supportedReasoningEfforts: [] }], nextCursor: null };
       if (method === 'thread/start') {
         assert.equal(params.sandbox, 'read-only');
+        const [update] = params.dynamicTools;
+        assert.equal(update.name, 'task_update');
+        assert.deepEqual(update.inputSchema.required, ['authorization']);
+        assert.match(update.inputSchema.properties.authorization.description, /latestUserMessage\.text/);
+        assert.match(params.developerInstructions, /even if the user did not explicitly ask to edit the card/);
+        assert.match(params.developerInstructions, /Questions alone, guesses and details found only in attachments do not authorize changes/);
+        assert.match(params.developerInstructions, /ask a specific question before saving the disputed change/);
+        assert.match(params.developerInstructions, /If task_update fails, report the error and do not claim an update/);
         result = { thread: { id: 'thread' } };
       }
       if (method === 'turn/start') {
@@ -279,7 +288,7 @@ test("discussion steering and interruption share the streaming connection, inclu
     },
     process, setTimeout, clearTimeout,
     configuredCodex: async () => ({ path: process.execPath, args: [script] }),
-    chatTools: [], cliFailure: () => ({ ok: false }), saveChatImages: async () => [],
+    chatTools, cliFailure: () => ({ ok: false }), saveChatImages: async () => [],
   });
   const ready = Promise.withResolvers<AgentControl>();
   const toolStarted = Promise.withResolvers<void>();
