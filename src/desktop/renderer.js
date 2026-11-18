@@ -2075,11 +2075,13 @@ function draftComposer() {
     }
   }
   function renderLiveWork() {
-    if (!liveWorkItems) return;
-    const seenMessages = new Set([...workSaved.querySelectorAll("[data-coordination-key]")].map(node => node.dataset.coordinationKey));
-    const pending = items => items.filter(item => !savedWorkItems.has(item.id));
-    renderActivity(liveGoal, pending(liveWorkItems.work), false, { seenMessages });
-    renderActivity(liveChat, pending(liveWorkItems.chat), false, { seenMessages });
+    if (liveWorkItems) {
+      const seenMessages = new Set([...workSaved.querySelectorAll("[data-coordination-key]")].map(node => node.dataset.coordinationKey));
+      const pending = items => items.filter(item => !savedWorkItems.has(item.id));
+      renderActivity(liveGoal, pending(liveWorkItems.work), false, { seenMessages, managerWork: true });
+      renderActivity(liveChat, pending(liveWorkItems.chat), false, { seenMessages, managerWork: true });
+    }
+    reconcileWorkTransitions(work);
   }
   async function loadWork(cursor = null) {
     if (disposed || work.hidden) return;
@@ -2117,7 +2119,7 @@ function draftComposer() {
         if (!items.length) continue;
         for (const item of items) saved.add(item.id);
         const run = element("div", undefined, "chat-run");
-        renderRunActivity(run, items, true, turn.durationMs, undefined, { seenMessages: seen });
+        renderRunActivity(run, items, true, turn.durationMs, undefined, { seenMessages: seen, managerWork: true });
         if (previous) {
           for (const row of run.querySelectorAll("[data-item]")) {
             if (!previous.has(activityRowKey(row.dataset.item))) row.setAttribute("data-enter", "");

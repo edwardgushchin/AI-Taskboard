@@ -5,8 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
-import { writeJson } from "../src/cli/storage.ts";
-import { managerUnread, readManagerDialogue, readManagerHistory, readManagerMessages, saveManagerHistory } from "../src/desktop/manager-history.ts";
+import { initializeBoard, writeJson } from "../src/cli/storage.ts";
+import { sweepArchives } from "../src/cli/archive.ts";
+import { createTask } from "../src/cli/tasks.ts";
+import { statusNotice } from "../src/cli/task-messages.ts";
+import type { Task } from "../src/cli/model.ts";
+import { managerChatItems, managerUnread, managerWorkItems, readManagerDialogue, readManagerHistory, readManagerMessages, saveManagerHistory } from "../src/desktop/manager-history.ts";
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
 import type { ReviewedSubmission } from "../src/desktop/board-actions.ts";
 
@@ -68,7 +72,7 @@ test("manager history preserves steering order and pages through locally saved r
   assert.throws(() => readManagerHistory(project, "local:../project"), /Invalid manager history cursor/);
 });
 
-for (const pausedGoal of [false, true]) test(`dialogue reload preserves saved replies and notices ${pausedGoal ? "with the paused legacy goal" : "without a goal"}`, async t => {
+for (const pausedGoal of [false, true]) test(`dialogue reload preserves saved replies ${pausedGoal ? "with the paused legacy goal" : "without a goal"}`, async t => {
   const project = fixture(t);
   const start = Date.now();
   const at = (offset: number) => new Date(start + offset).toISOString();
@@ -100,9 +104,9 @@ for (const pausedGoal of [false, true]) test(`dialogue reload preserves saved re
   } : undefined;
   const first = await readManagerDialogue(project, null, readLegacy);
   assert.equal(providerCalls, 0);
-  assert.deepEqual(first?.turns.flatMap(turn => turn.messages.map(message => message.text)), ["prior-21", "question"]);
+  assert.deepEqual(first?.turns.flatMap(turn => turn.messages.map(message => message.text)).slice(-2), ["prior-21", "question"]);
   assert.equal(first?.turns.find(turn => turn.messages[0]?.text === "question")?.items[0]?.text, "Full streamed answer");
-  assert.equal(first?.turns.filter(turn => turn.lane === "notice").length, 24);
+  assert.equal(first?.turns.filter(turn => turn.lane === "notice").length, 0);
   assert.deepEqual(await readManagerDialogue(project, null, readLegacy), first);
   const pages = [first!];
   while (pages[0]?.nextCursor) pages.unshift((await readManagerDialogue(project, pages[0].nextCursor, readLegacy))!);
@@ -111,7 +115,7 @@ for (const pausedGoal of [false, true]) test(`dialogue reload preserves saved re
   assert.deepEqual(questions, [...(pausedGoal ? ["Legacy question"] : []), ...Array.from({ length: 22 }, (_, i) => `prior-${i}`), "question"]);
   const ids = turns.flatMap(turn => turn.items.map(item => item.id));
   assert.equal(ids.length, new Set(ids).size);
-  assert.equal(ids.length, 47 + Number(pausedGoal));
+  assert.equal(ids.length, 23 + Number(pausedGoal));
 });
 
 test("the newest question with a 4 MiB image stays on the first page after status notices", async t => {
@@ -126,7 +130,7 @@ test("the newest question with a 4 MiB image stays on the first page after statu
   }
   saveManagerHistory(project, start + 2, randomUUID(), { lane: "notice", items: [item("notice")] });
   const first = (await readManagerDialogue(project, null))!;
-  assert.deepEqual(first.turns.flatMap(turn => turn.items.map(item => item.id)), ["latest-answer", "notice"]);
+  assert.deepEqual(first.turns.flatMap(turn => turn.items.map(item => item.id)), ["latest-answer"]);
   assert.deepEqual(first.turns[0]?.messages[0]?.files, [image]);
   assert.deepEqual((await readManagerDialogue(project, first.nextCursor))?.turns.map(turn => turn.messages[0]?.text), ["prior"]);
   assert.deepEqual(await readManagerDialogue(project, null), first);
@@ -144,25 +148,111 @@ test("only delivered dialogue replies become unread and repeated saves preserve 
   saveManagerHistory(project, at + 1, randomUUID(), { lane: "work", items: [reply] });
   assert.deepEqual(managerUnread(project), []);
   assert.equal(saveManagerHistory(project, at, id, { ...run, items: [reply] }), true);
-  saveManagerHistory(project, at + 2, randomUUID(), { lane: "notice", items: [{ ...reply, id: "second" }] });
+  const statusId = randomUUID();
+  const text = "T-0042 «Работа» — отменена.";
+  saveManagerHistory(project, at + 2, statusId, { lane: "notice", items: [{ ...reply, id: statusId, text }] });
+  assert.deepEqual(managerUnread(project), ["first"]);
+  const unreadPath = join(project, ".tasks", "manager-unread.json");
+  writeJson(unreadPath, ["first", statusId]);
+  assert.deepEqual(managerUnread(project), ["first"]);
+  saveManagerHistory(project, at + 3, randomUUID(), {
+    lane: "notice", goalId: randomUUID(), items: [{ ...reply, id: "second", text }],
+  });
   assert.deepEqual(managerUnread(project), ["first", "second"]);
   assert.deepEqual(managerUnread(other), []);
   assert.equal(readManagerMessages(project, ["unknown", "first"]), true);
   assert.equal(saveManagerHistory(project, at, id, { ...run, items: [reply] }), false);
   assert.deepEqual(managerUnread(project), ["second"]);
-  assert.deepEqual(JSON.parse(readFileSync(join(project, ".tasks", "manager-unread.json"), "utf8")).unread, ["second"]);
+  assert.deepEqual(readManagerHistory(project, null, "chat")!.turns.flatMap(turn => turn.items.map(item => item.id)), ["first", "second"]);
+  assert.deepEqual(readManagerHistory(project, null, "work")!.turns.flatMap(turn => turn.items.map(item => item.id)), ["first", statusId]);
 });
 
-test("dialogue pages interleaved notices and chat runs in saved order", t => {
+test("work history identifies older status notices with multiline titles and embedded separators", t => {
+  const project = fixture(t);
+  const start = Date.now();
+  const titles = ["FirstSecond", "First\nSecond", "First\r\nSecond", "First\rSecond",
+    "Релиз «Клиент» — v2.1\nПроверка", "Release «Client» — preview» — cancelled.\nCheck"];
+  const notices = titles.map((title, index) => {
+    const task = { id: "T-0042", title } as Task;
+    const at = new Date(start + index).toISOString();
+    const text = statusNotice(task, { action: "cancel", actor: "manager", from: "ready", to: "cancelled", at }, index % 2 ? "ru" : "en");
+    assert.ok(text?.includes(title));
+    const item = { id: randomUUID(), text: text!, at, title: "", type: "agentMessage", status: "completed", phase: "final_answer" as const };
+    saveManagerHistory(project, start + index, item.id, { lane: "notice", items: [item] });
+    return item;
+  });
+  const reply = { ...notices[1]!, id: randomUUID() };
+  saveManagerHistory(project, start + notices.length, randomUUID(), { lane: "chat", items: [reply] });
+  assert.deepEqual(readManagerHistory(project, null, "work")!.turns.flatMap(turn => turn.items),
+    notices.map(item => ({ ...item, statusTransition: { task: "T-0042", status: "cancelled" } })));
+  assert.deepEqual(readManagerHistory(project, null, "chat")!.turns.flatMap(turn => turn.items), [reply]);
+  assert.deepEqual(managerUnread(project), [reply.id]);
+});
+
+test("work history resolves older status-like reasons against the card history", t => {
+  const project = fixture(t);
+  const start = Date.now();
+  const store = initializeBoard({ root: project, directory: join(project, ".tasks"), repository: null }, store => store);
+  const task = createTask("T-0042", { title: "Release «Client» — preview" });
+  const reasons = ["Retry «client» — v2.1.\nCheck access", "Review «previous attempt» — cancelled.",
+    "Review «previous attempt» — cancelled."];
+  const events: Task["history"] = [];
+  const changeAt = new Date(start + 10).toISOString();
+  const items = reasons.map((reason, index) => {
+    const at = new Date(start + index).toISOString();
+    const event = { action: "block", actor: "manager", from: "in_progress", to: "blocked", at, text: reason } as const;
+    if (index !== 2) events.push(event);
+    const text = statusNotice(task, event, "en")!;
+    const item = { id: randomUUID(), text, at, title: "", type: "agentMessage", status: "completed" };
+    saveManagerHistory(project, start + index, item.id, { lane: "notice", items: [item] });
+    return item;
+  });
+  store.create({ ...task, title: "Renamed after the block", status: "cancelled", updatedAt: changeAt, closedAt: changeAt,
+    history: [...task.history, ...events, { action: "cancel", actor: "manager", from: "blocked", to: "cancelled", at: changeAt }] });
+  const work = () => readManagerHistory(project, null, "work")!.turns.flatMap(turn => turn.items);
+  const expected = [
+    { ...items[0]!, statusTransition: { task: "T-0042", status: "blocked" } },
+    { ...items[1]!, statusTransition: { task: "T-0042", status: "blocked" } },
+    { ...items[2]!, statusTransition: undefined },
+  ];
+  assert.deepEqual(work(), expected);
+  store.index.settings.archiveAfterDays = 0;
+  store.saveIndex();
+  assert.deepEqual(sweepArchives(store, new Date(start + 20)).archived, [task.id]);
+  assert.deepEqual(work(), expected);
+  assert.deepEqual(managerUnread(project), []);
+});
+
+test("work pages interleaved notices and chat runs without losing or duplicating notices", t => {
   const project = fixture(t);
   const at = Date.now();
   for (let i = 0; i < 25; i++) saveManagerHistory(project, at + i, randomUUID(), {
     lane: i % 2 ? "notice" : "chat", items: [{ id: String(i), type: "agentMessage", title: "", text: String(i), status: "completed" }],
   });
-  const recent = readManagerHistory(project, null, "chat")!;
-  const older = readManagerHistory(project, recent.nextCursor!, "chat")!;
+  const recent = readManagerHistory(project, null, "work")!;
+  const older = readManagerHistory(project, recent.nextCursor!, "work")!;
   assert.equal(older.nextCursor, null);
-  assert.deepEqual([...older.turns, ...recent.turns].map(turn => turn.items[0]!.text), Array.from({ length: 25 }, (_, i) => String(i)));
+  assert.deepEqual([...older.turns, ...recent.turns].map(turn => turn.items[0]!.text), Array.from({ length: 12 }, (_, i) => String(i * 2 + 1)));
+});
+
+test("live and saved service operations use their Board tool identity before any result arrives", t => {
+  const project = fixture(t);
+  const call = (id: string, type: string, title: string) => ({ id, type, title, text: "", status: "inProgress" });
+  const work = [
+    call("cancel", "mcpToolCall", "ai_taskboard / task_cancel"),
+    call("block", "dynamicToolCall", "task_block"),
+    call("team", "mcpToolCall", "ai_taskboard / team_message"),
+  ];
+  const chat = [
+    call("other", "mcpToolCall", "other / task_cancel"),
+    { ...call("reply", "agentMessage", ""), text: "T-0042 отменена.", status: "completed" },
+  ];
+  const items = [...work, ...chat];
+  assert.deepEqual(managerChatItems(items), chat);
+  assert.deepEqual(managerWorkItems(items), work);
+  saveManagerHistory(project, Date.now(), randomUUID(), { lane: "chat", items });
+  assert.deepEqual(readManagerHistory(project, null, "chat")!.turns[0]!.items, chat);
+  assert.deepEqual(readManagerHistory(project, null, "work")!.turns[0]!.items, work);
 });
 
 test("review reports move into board storage and a cleared board cache supersedes old profile data", t => {
@@ -236,7 +326,7 @@ test("failed unread persistence retries without losing a concurrent arrival", t 
   assert.deepEqual(managerUnread(project), ["seen"]);
   rmSync(path, { recursive: true });
   renameSync(backup, path);
-  saveManagerHistory(project, 2, randomUUID(), { lane: "notice", items: [reply("arrival")] });
+  saveManagerHistory(project, 2, randomUUID(), { lane: "notice", goalId: randomUUID(), items: [reply("arrival")] });
   assert.equal(readManagerMessages(project, ["seen"]), true);
   assert.deepEqual(managerUnread(project), ["arrival"]);
   assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).unread, ["arrival"]);
@@ -255,7 +345,7 @@ test("read position covers unloaded pages, late delivery and restart but preserv
   assert.equal(managerUnread(project).length, 27);
   readManagerMessages(project, ["seen"]);
   assert.deepEqual(managerUnread(project), ["newer"]);
-  saveManagerHistory(project, 100, randomUUID(), { lane: "notice", items: [{ ...reply("late-old"), at: new Date(10).toISOString() }] });
+  saveManagerHistory(project, 100, randomUUID(), { lane: "notice", goalId: randomUUID(), items: [{ ...reply("late-old"), at: new Date(10).toISOString() }] });
   saveManagerHistory(project, 26, run, { lane: "chat", items: [reply("seen"), reply("newer"), reply("arrival")] });
   readManagerMessages(project, ["1"]);
   assert.deepEqual(managerUnread(project), ["newer", "arrival"]);
@@ -275,7 +365,7 @@ test("legacy unread arrays migrate when a later reply is read", t => {
   const project = fixture(t);
   writeJson(join(project, ".tasks", "manager-unread.json"), ["legacy"]);
   const reply = (id: string) => ({ id, type: "agentMessage", title: "", text: id, phase: "final_answer", status: "completed" } as const);
-  saveManagerHistory(project, 1, randomUUID(), { lane: "notice", items: [reply("legacy")] });
+  saveManagerHistory(project, 1, randomUUID(), { lane: "notice", goalId: randomUUID(), items: [reply("legacy")] });
   saveManagerHistory(project, 2, randomUUID(), { lane: "chat", items: [reply("later")] });
   readManagerMessages(project, ["later"]);
   const saved = JSON.parse(readFileSync(join(project, ".tasks", "manager-unread.json"), "utf8"));

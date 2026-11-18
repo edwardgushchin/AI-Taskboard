@@ -106,19 +106,44 @@ app.whenReady().then(async () => {
       id, text, at: new Date(start + offset).toISOString(), title: "", type: "agentMessage", status: "completed", phase: "final_answer",
     });
     const question = "current-question";
-    const reply = answer("full-answer", "full-streamed-answer", 130);
+    const reply = answer("full-answer", "full-streamed-answer: T-0001 отменена.", 130);
+    const blockReason = "Review «previous attempt» — cancelled.";
+    const transitionResults = [
+      ["cancel", "cancelled", "отменена"], ["start", "in_progress", "в работе"],
+      ["block", "blocked", "заблокирована"], ["submit", "review", "сдана на проверку"],
+      ["accept", "done", "завершена"],
+    ];
+    const transitionTools = transitionResults.map(([action, status], index) => ({
+      id: "transition-" + action, title: "ai_taskboard / task_" + action, type: "mcpToolCall", status: "completed",
+      at: new Date(start + 100).toISOString(), completedAt: new Date(start + 105).toISOString(), text: "Saved tool output",
+      taskChanges: [{ action, status, id: "T-" + String(index + 1).padStart(4, "0") }],
+    }));
     const io = (project, action, input) => {
       const result = spawnSync(process.env.TASKBOARD_CHECK_NODE, ["--input-type=module", "-e", `
         import { randomUUID } from "node:crypto";
         import { mkdirSync, readFileSync } from "node:fs";
         import { join } from "node:path";
-        import { readManagerDialogue, saveManagerHistory } from ${JSON.stringify(new URL("../src/desktop/manager-history.ts", import.meta.url).href)};
+        import { initializeBoard } from ${JSON.stringify(new URL("../src/cli/storage.ts", import.meta.url).href)};
+        import { createTask } from ${JSON.stringify(new URL("../src/cli/tasks.ts", import.meta.url).href)};
+        import { managerUnread, readManagerDialogue, readManagerView, saveManagerHistory } from ${JSON.stringify(new URL("../src/desktop/manager-history.ts", import.meta.url).href)};
         const [project, action] = process.argv.slice(1);
         const input = JSON.parse(readFileSync(0, "utf8"));
-        if (action === "write") {
+        if (action === "seed") {
+          const store = initializeBoard({ root: project, directory: join(project, ".tasks"), repository: null }, store => store);
+          const task = createTask("T-0003", { title: "batch-cancel-2" });
+          store.create({ ...task, status: "blocked", updatedAt: input.at, history: [...task.history, {
+            action: "block", actor: "manager", from: "in_progress", to: "blocked", at: input.at, text: input.reason,
+          }] });
+        } else if (action === "write") {
           mkdirSync(join(project, ".tasks"), { recursive: true });
           for (const { at, id, run } of input) saveManagerHistory(project, at, id ?? randomUUID(), run);
-        } else console.log(JSON.stringify(await readManagerDialogue(project, input)));
+        } else if (action === "work") console.log(JSON.stringify(await readManagerView(project, input, "work", async () => ({
+          turns: [{ messages: [], items: [${JSON.stringify({ ...transitionTools[0], id: "legacy-cancel",
+            at: new Date(start - 20).toISOString(), completedAt: new Date(start - 10).toISOString() })}] }],
+          nextCursor: null,
+        }))));
+        else if (action === "unread") console.log(JSON.stringify(managerUnread(project)));
+        else console.log(JSON.stringify(await readManagerDialogue(project, input)));
       `, project, action], { input: JSON.stringify(input), encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
       assert.equal(result.status, 0, result.stderr);
       return result.stdout ? JSON.parse(result.stdout) : undefined;
@@ -135,10 +160,20 @@ app.whenReady().then(async () => {
         run: chat("prior-question-" + index, index, [answer("prior-" + index, "prior-reply-" + index, index)]),
       })));
       const history = cursor => ({ ok: true, data: { ...io(project, "read", cursor), goal } });
+      const olderPages = first => {
+        const pages = {};
+        for (let cursor = first.data.nextCursor; cursor;) {
+          const page = pages[cursor] = history(cursor);
+          cursor = page.data.nextCursor;
+        }
+        return pages;
+      };
+      const initial = history(null);
       await evaluate(`(async () => {
-        window.dialogue = { initial: ${JSON.stringify(history(null))}, ready: Promise.withResolvers(), finish: Promise.withResolvers() };
+        window.dialogue = { initial: ${JSON.stringify(initial)}, ready: Promise.withResolvers(), finish: Promise.withResolvers() };
         frame = { project: ${JSON.stringify(project)}, russian: true };
-        api.boardHistory = async () => dialogue.initial;
+        const pages = ${JSON.stringify(olderPages(initial))};
+        api.boardHistory = async (_project, cursor) => cursor ? pages[cursor] : dialogue.initial;
         api.boardQueue = async (_project, action) => ({ ok: true, data: action === 'list' ? [] : 'current-user' });
         api.boardRequest = () => { dialogue.ready.resolve(true); return dialogue.finish.promise; };
         dialogue.open = () => {
@@ -158,12 +193,27 @@ app.whenReady().then(async () => {
         return true;
       })()`);
       if (!reopening) {
+        io(project, "seed", { at: new Date(start + 103).toISOString(), reason: blockReason });
+        await evaluate(`
+          dialogue.leaks = [];
+          dialogue.observer = new MutationObserver(records => {
+            for (const { addedNodes } of records) for (const node of addedNodes) {
+              if (node.textContent.includes('batch-cancel-')) dialogue.leaks.push(node.textContent);
+            }
+          });
+          dialogue.observer.observe(dialogue.log, { childList: true, subtree: true });
+        `);
         io(project, "write", [
           { at: start + 100, id: runId, run: chat(question, 100, [], "current-user") },
           ...Array.from({ length: 24 }, (_, index) => ({
-            at: start + 101 + index, run: { lane: "notice", items: [answer("notice-" + index, "status-" + index, 101 + index)] },
+            at: start + 101 + index, run: { lane: "notice", items: [
+              answer("notice-" + index, "T-" + String(index + 1).padStart(4, "0") +
+                " «batch-cancel-" + index + (index === 0 ? " Релиз «Клиент» — v2.1\nПроверка" : index === 1 ? "\r\nВторая строка запуска" : "") +
+                "» — " + (transitionResults[index]?.[2] ?? "отменена") + (index === 2 ? ": " + blockReason : "."), 101 + index),
+            ] },
           })),
         ]);
+        assert.ok(!io(project, "unread", null).some(id => id.startsWith("notice-")));
         const stale = history(null);
         await evaluate(`(() => {
           const partial = { ...${JSON.stringify(reply)}, text: 'partial-stream', status: 'inProgress' };
@@ -173,9 +223,11 @@ app.whenReady().then(async () => {
           dialogue.manager.invalidateHistory();
         })()`);
         await check(`dialogue.log.textContent.includes('partial-stream') && dialogue.log.textContent.includes('prior-reply-21')`, "stream coexists with previous history");
-        io(project, "write", [{ at: start + 100, id: runId, run: chat(question, 100, [reply], "current-user") }]);
+        io(project, "write", [{ at: start + 100, id: runId, run: chat(question, 100, [...transitionTools, reply], "current-user") }]);
+        const completed = history(null);
         await evaluate(`(async () => {
-          api.boardHistory = async () => (${JSON.stringify(history(null))});
+          const pages = ${JSON.stringify(olderPages(completed))};
+          api.boardHistory = async (_project, cursor) => cursor ? pages[cursor] : (${JSON.stringify(completed)});
           dialogue.finish.resolve({ ok: true, data: { items: [${JSON.stringify(reply)}] } });
           await new Promise(resolve => requestAnimationFrame(resolve));
           dialogue.stale.resolve(${JSON.stringify(stale)});
@@ -185,9 +237,11 @@ app.whenReady().then(async () => {
       }
       for (let open = 0; open < 2; open++) {
         const latest = history(null);
-        const older = history(latest.data.nextCursor);
+        assert.equal(latest.data.turns.some(turn => turn.items.some(item => item.id === "prior-21")), !largeImage);
+        const pages = olderPages(latest);
         await evaluate(`(async () => {
-          api.boardHistory = async (_project, cursor) => cursor ? ${JSON.stringify(older)} : ${JSON.stringify(latest)};
+          const pages = ${JSON.stringify(pages)};
+          api.boardHistory = async (_project, cursor) => cursor ? pages[cursor] : (${JSON.stringify(latest)});
           if (${open === 1}) {
             dialogue.manager.closeChat();
             if (dialogue.manager.hasAttribute('data-open')) throw new Error('Dialogue did not close');
@@ -205,26 +259,96 @@ app.whenReady().then(async () => {
         assert.deepEqual(await evaluate(`({
           answer: dialogue.log.textContent.includes('full-streamed-answer'),
           question: dialogue.log.textContent.includes('${question}'),
-          previous: dialogue.log.textContent.includes('prior-reply-21'),
           image: dialogue.log.querySelector('.chat-attachments img')?.naturalWidth ?? 0,
           notices: dialogue.log.querySelectorAll('[data-message-id^="notice-"]').length,
           paused: dialogue.manager.textContent.includes('Fixture objective'),
-        })`), { answer: true, question: true, previous: !largeImage, image: largeImage ? 1 : 0, notices: 24, paused },
-        "finished or reopened dialogue keeps the question, full answer, previous reply and notices");
-        await evaluate(`dialogue.log.querySelector('.board-chat-older').click(); new Promise(resolve => requestAnimationFrame(resolve))`);
-        if (older.data.nextCursor) {
-          const oldest = history(older.data.nextCursor);
-          await evaluate(`
-            api.boardHistory = async () => (${JSON.stringify(oldest)});
-            dialogue.log.querySelector('.board-chat-older').click();
-            new Promise(resolve => requestAnimationFrame(resolve))
-          `);
-        }
+        })`), { answer: true, question: true, image: largeImage ? 1 : 0, notices: 0, paused },
+        "finished or reopened dialogue keeps the question and replies without status notices");
+        await evaluate(`(async () => {
+          for (let i = 0; i < ${Object.keys(pages).length}; i++) {
+            const older = dialogue.log.querySelector('.board-chat-older');
+            if (older.hidden) break;
+            older.click();
+            await new Promise(resolve => requestAnimationFrame(resolve));
+          }
+        })()`);
         assert.deepEqual(await evaluate(`[...dialogue.log.querySelectorAll('[data-message-id]')].map(node => node.dataset.messageId)`), [
           ...Array.from({ length: 22 }, (_, index) => "prior-" + index), "full-answer",
-          ...Array.from({ length: 24 }, (_, index) => "notice-" + index),
         ], "older and recent pages preserve saved order and have no missing or duplicate replies");
       }
+      if (!reopening) await check("dialogue.leaks.length === 0", "no status notice entered the live dialogue DOM");
+      const work = io(project, "work", null);
+      const workPages = {};
+      for (let cursor = work.nextCursor; cursor;) {
+        const page = workPages[cursor] = io(project, "work", cursor);
+        cursor = page.nextCursor;
+      }
+      await evaluate(`
+        api.boardHistory = async (_project, cursor, view) => ({ ok: true, data: view === 'live'
+          ? { work: [], chat: ${JSON.stringify(transitionTools)} } : cursor ? (${JSON.stringify(workPages)})[cursor] : ${JSON.stringify(work)} });
+        dialogue.manager.querySelector('.board-work-toggle').click();
+        new Promise(resolve => requestAnimationFrame(resolve))
+      `);
+      await check(`dialogue.manager.querySelectorAll('.board-work [data-item^="final:notice-"]').length === 20`,
+        "work displays the latest 20 status notices");
+      const onlyNoticeResults = `
+        [...dialogue.manager.querySelectorAll('.board-work [data-item^="item:transition-"]')].every(tool =>
+          !tool.querySelector('summary').textContent.match(/T-00|отменена|запущена|заблокирована|принята/u) &&
+          !!tool.querySelector('button[data-task]') && !!tool.querySelector('time')) &&
+        dialogue.manager.querySelectorAll('.board-work [data-item^="item:transition-"]').length === 5
+      `;
+      await check(onlyNoticeResults, "live tool details have no duplicate status result");
+      await check(`dialogue.manager.querySelectorAll('[data-status-result]:not([hidden])').length === 4`,
+        "live results without a loaded notice have visible rows");
+      await evaluate(`dialogue.manager.querySelector('.board-work .board-chat-older').click();
+        new Promise(resolve => requestAnimationFrame(resolve))`);
+      await check(`
+        [...dialogue.manager.querySelectorAll('.board-work [data-item^="final:notice-"]')].every((row, index) =>
+          row.dataset.item === 'final:notice-' + index && row.querySelector('a[data-task]')?.dataset.task ===
+            'T-' + String(index + 1).padStart(4, '0') &&
+          row.querySelector('time')?.dateTime === new Date(${start} + 101 + index).toISOString()) &&
+        dialogue.manager.querySelectorAll('.board-work [data-item^="final:notice-"]').length === 24
+      `, "work pagination shows each dated notice once with a card link");
+      await check(onlyNoticeResults, "saved tool details have no duplicate status result after loading older notices");
+      await check(`!dialogue.manager.querySelector('[data-status-result]:not([hidden])')`,
+        "matching notices replace all five tool result rows");
+      await check(`
+        dialogue.manager.querySelector('[data-item="final:notice-0"]').textContent.includes('Релиз «Клиент» — v2.1') &&
+        dialogue.manager.querySelector('[data-item="final:notice-0"]').textContent.includes('Проверка') &&
+        dialogue.manager.querySelector('[data-item="final:notice-2"]').textContent.includes(${JSON.stringify(blockReason)}) &&
+        dialogue.manager.querySelector('[data-item="final:notice-1"]').textContent.includes('Вторая строка запуска')
+      `, "matching notices preserve separators in older card titles and status-like reasons");
+      if (keepArtifacts && paused) {
+        await evaluate(`document.fonts.ready.then(() => {
+          const work = dialogue.manager.querySelector('.board-work');
+          const notice = work.querySelector('[data-item="final:notice-0"]');
+          work.scrollTop += notice.getBoundingClientRect().top - work.getBoundingClientRect().top - 105;
+        })`);
+        await capture("manager-work-notice-with-separator.png");
+      }
+      await evaluate(`(async () => {
+        for (let i = 0; i < ${Object.keys(workPages).length}; i++) {
+          const older = dialogue.manager.querySelector('.board-work .board-chat-older');
+          if (older.hidden) break;
+          older.click();
+          await new Promise(resolve => requestAnimationFrame(resolve));
+        }
+        dialogue.manager.querySelector('[data-item="status:legacy-cancel:T-0001"]').scrollIntoView({ block: 'center' });
+      })()`);
+      await check(`(() => {
+        const rows = [...dialogue.manager.querySelectorAll('[data-status-result]:not([hidden])')];
+        return rows.length === 1 && rows[0].dataset.item === 'status:legacy-cancel:T-0001' &&
+          rows[0].querySelector('time')?.dateTime === '${new Date(start - 20).toISOString()}' &&
+          rows[0].querySelector('button.board-chat-task')?.textContent === 'T-0001' &&
+          rows[0].checkVisibility();
+      })()`, "older provider cancellation without a notice has a visible date and card link");
+      if (keepArtifacts && paused) await capture("manager-work-status-notices.png");
+      const latest = history(null);
+      await evaluate(`{
+        const pages = ${JSON.stringify(olderPages(latest))};
+        api.boardHistory = async (_project, cursor) => cursor ? pages[cursor] : (${JSON.stringify(latest)});
+      }
+        dialogue.manager.querySelector('.board-dialogue-toggle').click(); void 0`);
       if (keepArtifacts && paused && reopening) {
         await evaluate(`document.fonts.ready.then(() => {
           dialogue.log.querySelector('[data-message-id="full-answer"]').scrollIntoView({ block: 'center' });
@@ -254,7 +378,7 @@ app.whenReady().then(async () => {
         token: preview.token, noChanges: true, summary: sample, checks: [sample], limitations: [sample] } });
       if (!r.ok) throw Error(JSON.stringify(r));
       syncTaskStatusNotices(root);
-      console.log(JSON.stringify({ sample, history: readManagerHistory(root, null, 'chat') }));
+      console.log(JSON.stringify({ sample, history: readManagerHistory(root, null, 'work') }));
     `, join(scratch, "unicode-board")], { encoding: "utf8", windowsHide: true });
     assert.equal(fixture.status, 0, fixture.stderr);
     const unicodeData = JSON.parse(fixture.stdout);
@@ -263,7 +387,8 @@ app.whenReady().then(async () => {
       const unicodeFixture = ${fixture.stdout};
       api.boardQueue = async () => ({ ok: true, data: [] });
       body.style.paddingTop = '410px';
-      api.boardHistory = async () => ({ ok: true, data: unicodeFixture.history }); void 0;`);
+      api.boardHistory = async (_project, _cursor, view) => ({ ok: true, data: view === 'work' ? unicodeFixture.history :
+        view === 'live' ? { work: [], chat: [] } : { turns: [] } }); void 0;`);
     for (const theme of ["light", "dark"]) {
       nativeTheme.themeSource = theme;
       for (const reopened of [false, true]) {
@@ -271,13 +396,13 @@ app.whenReady().then(async () => {
           body.replaceChildren(window.unicodeManager);
           if (!window.unicodeManager.hasAttribute('data-pinned')) window.unicodeManager.querySelector('.board-chat-pin').click();
           window.unicodeManager.revealPinned(); window.unicodeManager.querySelector('.draft-input').click();
-          window.unicodeManager.invalidateHistory();
+          window.unicodeManager.querySelector('.board-work-toggle').click();
           new Promise((resolve, reject) => { const started = performance.now(); const check = () => {
-            const log = window.unicodeManager.querySelector('.board-chat-log:not(.board-work)');
+            const log = window.unicodeManager.querySelector('.board-work');
             if (log?.textContent.includes(unicodeFixture.sample) && log.getBoundingClientRect().height > 50) return resolve(true);
-            if (performance.now() - started > 5000) return reject(Error('Unicode dialogue differs: ' + log?.textContent));
+            if (performance.now() - started > 5000) return reject(Error('Unicode work history differs: ' + log?.textContent));
             requestAnimationFrame(check); }; check(); });`);
-        console.log(`Unicode dialogue ${theme}, reopened=${reopened}: exact text passed`);
+        console.log(`Unicode work history ${theme}, reopened=${reopened}: exact text passed`);
       }
       await capture(`unicode-${theme}.png`);
     }

@@ -149,6 +149,22 @@ const taskChangeLabels = {
   milestone: ["ui.milestone_updated_02dacc38"],
 };
 const visibleTaskActions = new Set(["comment", "approve", "start", "block", "unblock", "request_changes", "accept", "cancel"]);
+const statusNoticeActions = new Set(["approve", "start", "block", "unblock", "submit", "request_changes", "accept", "cancel"]);
+
+function reconcileWorkTransitions(work) {
+  const notices = new Map();
+  for (const notice of work.querySelectorAll("[data-status-notice]")) {
+    const key = notice.dataset.statusNotice;
+    if (!notices.has(key)) notices.set(key, []);
+    notices.get(key).push(Date.parse(notice.dataset.statusAt));
+  }
+  for (const result of work.querySelectorAll("[data-status-result]")) {
+    const at = Date.parse(result.dataset.statusAt);
+    const through = Math.max(at, Date.parse(result.dataset.statusThrough) || at);
+    const matches = notices.get(result.dataset.statusResult) ?? [];
+    result.hidden = matches.filter(time => time >= at && time <= through).length === 1;
+  }
+}
 
 function reviewerFindings(text, taskId) {
   const body = chatText(text, { taskId, coordination: true });
@@ -237,10 +253,11 @@ function renderRunActivity(container, items, completed = false, durationMs, task
     };
     const approvalLabel = item.type === "autoApprovalReview" && Object.hasOwn(approvalLabels, item.status) ? approvalLabels[item.status] : undefined;
     const taskChanges = item.taskChanges ?? [];
-    const changeLabel = taskChangeLabels[taskChanges[0]?.action];
-    const summaryLabel = taskChanges.length > 1 && taskChanges[0].action === "start" ? t("ui.tasks_started_50af3215") :
+    const noticeChanges = context?.managerWork && statusNoticeActions.has(taskChanges[0]?.action);
+    const changeLabel = noticeChanges ? undefined : taskChangeLabels[taskChanges[0]?.action];
+    const summaryLabel = !noticeChanges && taskChanges.length > 1 && taskChanges[0].action === "start" ? t("ui.tasks_started_50af3215") :
       changeLabel ? t(...changeLabel) : approvalLabel ? t(...approvalLabel) : label;
-    const taskPreview = taskChanges.map(({ id }) => id).join(", ");
+    const taskPreview = noticeChanges ? "" : taskChanges.map(({ id }) => id).join(", ");
     activitySummary(detail, summaryLabel, taskPreview || preview, kind, state);
     const image = taskId && runImageFile(item);
     if (image) {
@@ -272,6 +289,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
         links.append(open);
       }
       detail.append(links);
+      if (noticeChanges) appendChatTime(detail, item.at);
     }
     if (command) detail.append(element("pre", command, "chat-run-command"));
     detail.append(element("pre", () => item.text || t("ui.no_output_868de65b"), "chat-run-output"));
@@ -339,7 +357,23 @@ function renderRunActivity(container, items, completed = false, durationMs, task
       }
     }
     if (item.messagesOnly) continue;
-    const showTaskEvent = item.taskChanges?.some(({ action }) => visibleTaskActions.has(action));
+    if (context?.managerWork) for (const change of item.taskChanges ?? []) {
+      if (!statusNoticeActions.has(change.action)) continue;
+      flush();
+      const row = element("div", undefined, "chat-entry chat-event");
+      row.dataset.item = "status:" + item.id + ":" + change.id;
+      row.dataset.statusResult = change.id + "/" + change.status;
+      if (item.at) row.dataset.statusAt = item.at;
+      if (item.completedAt) row.dataset.statusThrough = item.completedAt;
+      const label = taskChangeLabels[change.action];
+      row.append(element("span", () => label ? t(...label) : t("status." + change.status)), " ",
+        button(change.id, () => showTask(change.id), "quiet board-chat-task"));
+      appendChatTime(row, item.at ?? item.completedAt);
+      taskEventRows.add(row);
+      nodes.push(row);
+    }
+    const showTaskEvent = item.taskChanges?.some(({ action }) =>
+      visibleTaskActions.has(action) && !(context?.managerWork && statusNoticeActions.has(action)));
     if (["agentMessage", "plan", "truncated", "error", "reasoning"].includes(item.type)) {
       flush();
       if (item.type === "agentMessage" || item.type === "plan") {
@@ -409,6 +443,10 @@ function renderRunActivity(container, items, completed = false, durationMs, task
     }
     final.append(chatText(item.text, messageContext));
     appendChatTime(final, item.at);
+    if (context?.managerWork && item.statusTransition && item.at) {
+      final.dataset.statusNotice = item.statusTransition.task + "/" + item.statusTransition.status;
+      final.dataset.statusAt = item.at;
+    }
     nodes.push(final);
   }
   const reportCounts = new Map();
