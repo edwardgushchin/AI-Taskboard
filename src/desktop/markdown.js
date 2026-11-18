@@ -112,7 +112,7 @@ if (chatMarkdown) {
     String.raw`[A-Z]\w*(?:${generic}|\?)`,
     String.raw`null|true|false|undefined|0x[\da-fA-F]+`,
   ];
-  const agentReferences = new RegExp(String.raw`(?<![\p{L}\p{N}_.\\/:])(?:${patterns.join("|")})(?![\p{L}\p{N}_\\/])`, "gu");
+  const agentReferences = new RegExp(String.raw`(?<![\p{L}\p{N}_#.\\/:])(?:${patterns.join("|")})(?![\p{L}\p{N}_\\/])`, "gu");
   const digest = /(?<![\p{L}\p{N}_.%/\\-])(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{40})(?![\p{L}\p{N}_%/\\-]|\.[\p{L}\p{N}])/u;
   const reportReferences = new RegExp(digest.source + "|" + agentReferences.source, "gu");
   chatMarkdown.core.ruler.after("local_markdown_links", "chat_references", state => {
@@ -375,14 +375,33 @@ function splitLongReportParagraphs(block) {
   }
 }
 
-function showHexColors(block) {
+function plainMessageLiteralRanges(text) {
+  const ranges = (chatMarkdown.linkify.match(text) ?? []).map(link => [link.index, link.lastIndex]);
+  const lineStarts = [0];
+  for (const newline of text.matchAll(/\r\n?|\n/g)) {
+    lineStarts.push(newline.index + newline[0].length);
+  }
+  for (const token of chatMarkdown.parse(text, {})) {
+    if (token.type === "fence" || token.type === "code_block") {
+      const [start, end] = token.map;
+      ranges.push([lineStarts[start], lineStarts[end] ?? text.length]);
+    }
+  }
+  return ranges;
+}
+
+function showHexColors(block, plainText = false) {
+  if (!block.textContent.includes("#")) return;
+  // Outgoing manager messages have one text node and retain their literal formatting.
+  const literalRanges = plainText && chatMarkdown ? plainMessageLiteralRanges(block.textContent) : [];
   const hexColor = /(?<![\p{L}\p{M}\p{N}_#/%\\])#[0-9a-f]{6}(?![\p{L}\p{M}\p{N}_#]|[./\\][\p{L}\p{N}])/giu;
   const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
   const matches = [];
   while (walker.nextNode()) {
     const node = walker.currentNode;
     if (!node.data.includes("#") || node.parentElement.closest("a, pre, button")) continue;
-    const colors = [...node.data.matchAll(hexColor)];
+    const colors = [...node.data.matchAll(hexColor)].filter(({ index }) =>
+      !literalRanges.some(([start, end]) => start <= index && index < end));
     if (colors.length) matches.push({ node, colors });
   }
   for (const { node, colors } of matches) {

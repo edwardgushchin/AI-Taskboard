@@ -2738,7 +2738,7 @@ function draftComposer() {
     }
     if (text) {
       const message = actor === "agent" ? chatText(text, { agent: true }) : element("p", text, "chat-text");
-      if (actor !== "agent") showHexColors(message);
+      if (actor !== "agent") showHexColors(message, true);
       entry.append(message);
     }
     appendChatTime(entry, at);

@@ -96,10 +96,13 @@ app.whenReady().then(async () => {
     window.focus();
     const colors = ["#FFFFFF", "#0E0E11", "#131316", "#D0D273", "#9161D2", "#5dB08d"];
     const tick = "\x60";
-    const sample = "Palette " + colors[0] + ", " + colors.slice(1).map(color => tick + color + tick).join(", ") +
+    const sample = "Подойдёт " + colors[0] + "? Palette " + colors.slice(1).map(color => tick + color + tick).join(", ") +
       ".\n\n[#abcdef](https://example.com/#123456) https://example.com/#abcdef. Commit abc1234, " +
       "#123 #12345 #1234567 #12345678 #12345G #123456z.\n\n" + tick.repeat(3) + "text\n#123456\n" + tick.repeat(3);
-    await evaluate('const hexSample = ' + JSON.stringify(sample));
+    const prompt = "Подойдёт #A0b1C2? Или " + tick + "#123ABC" + tick + "?\n" +
+      "https://example.com/?preview=#FFFFFF\n" + tick.repeat(3) + "css\n#FFFFFF\n" + tick.repeat(3) +
+      "\n\n> ~~~css\n> #223344\n> ~~~\n\nЦвет после блока #aBcDeF.";
+    await evaluate("const hexSample = " + JSON.stringify(sample) + "; const hexPrompt = " + JSON.stringify(prompt));
     await evaluate(`
       frame = { project: 'hex-fixture', russian: false };
       document.querySelector('#welcome').hidden = true;
@@ -117,7 +120,7 @@ app.whenReady().then(async () => {
       };
       api.boardHistory = async (_project, _cursor, view) => ({
         ok: true, data: view === 'live' ? { work: [], chat: [] } :
-          { turns: managerSaved ? [{ messages: [{ text: 'Show palette #A0b1C2', files: [], at }], items: [structuredClone(reply)] }] : [], nextCursor: null },
+          { turns: managerSaved ? [{ messages: [{ text: hexPrompt, files: [], at }], items: [structuredClone(reply)] }] : [], nextCursor: null },
       });
       const openManager = () => {
         manager?.dispose();
@@ -128,7 +131,7 @@ app.whenReady().then(async () => {
       };
       openManager();
       sheet.showModal();
-      manager.querySelector('.draft-input textarea').value = 'Show palette #A0b1C2';
+      manager.querySelector('.draft-input textarea').value = hexPrompt;
       manager.dispatchEvent(new Event('submit', { cancelable: true }));
       void 0;
     `);
@@ -141,11 +144,19 @@ app.whenReady().then(async () => {
       assert.deepEqual(values, colors, values.length ? label : label + ": " + await evaluate("body.textContent"));
     };
     const manager = ".board-chat-log:not(.board-work)";
+    const plainMessage = ".board-chat-log [data-actor=user] .chat-text";
+    const checkPlainMessage = async () => {
+      const message = await evaluate("document.querySelector(" + JSON.stringify(plainMessage) + ").innerHTML");
+      assert.deepEqual(await evaluate("Array.from(document.querySelectorAll(" + JSON.stringify(plainMessage + " .chat-hex-color") +
+        "), node => node.textContent)"), ["#A0b1C2", "#123ABC", "#aBcDeF"], message);
+      await check("document.querySelector(" + JSON.stringify(plainMessage) + ").textContent === hexPrompt", "manager prompt keeps its literal text");
+      await check("!document.querySelector(" + JSON.stringify(plainMessage + " :is(a, pre, code)") + ")", "manager prompt retains plain formatting");
+    };
     await expectColors(manager + " .chat-agent-text", "new manager reply");
-    await check("document.querySelector('.board-chat-log [data-actor=user] .chat-hex-color')?.textContent === '#A0b1C2'", "manager user message displays a swatch");
+    await checkPlainMessage();
     await evaluate("managerSaved = true; openManager(); void 0");
     await expectColors(manager + " .chat-agent-text", "reopened manager history");
-    await check("document.querySelector('.board-chat-log [data-actor=user] .chat-hex-color')?.textContent === '#A0b1C2'", "reopened manager user message displays a swatch");
+    await checkPlainMessage();
     await evaluate(`
       manager.dispose();
       const hexCard = { id: 'T-0184', createdAt: at, status: 'review', questions: [], attachments: [], history: [] };
@@ -175,6 +186,7 @@ app.whenReady().then(async () => {
       "Reproduce: node scripts/check-chat.mjs --hex-colors-only --artifacts .tasks/qa",
       JSON.stringify({ platform: process.platform, electron: process.versions.electron, chromium: process.versions.chrome }),
       "Manager dialogue, card dialogue and reviewer Work view: exact six codes, new and reopened with IPC fixtures.",
+      "A question mark stays outside the HEX swatch. Outgoing manager messages preserve literal URLs and code fences in live and saved views.",
     ];
     for (const theme of ["dark", "light"]) for (const width of [400, 1000]) {
       nativeTheme.themeSource = theme;
