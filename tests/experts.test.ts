@@ -12,7 +12,7 @@ import { createTask } from "../src/cli/tasks.ts";
 import { createExpertPlan, expertStagesStatus, reviewDecisionSequence, sendTeamMessage, teamInbox, updateExpertStage } from "../src/cli/expert-team.ts";
 import { managerInbox } from "../src/cli/task-messages.ts";
 import { callCli } from "../src/desktop/cli.ts";
-import { phaseStageReporter } from "../src/desktop/expert-tools.ts";
+import { leadSkillInstructions, phaseStageReporter } from "../src/desktop/expert-tools.ts";
 import type { Task } from "../src/cli/model.ts";
 
 function fixture(t: TestContext) {
@@ -248,6 +248,80 @@ test("one native specialist can finish multiple stages but cannot impersonate a 
     assert.equal(saved.revision, task.revision);
     assert.deepEqual(expertStagesStatus(saved, "work").map(stage => stage.state), ["done", "done", "done"]);
   });
+});
+
+test("legacy unchecked workflow is persisted as implicit context before manual and automatic starts", { timeout: 120_000 }, async t => {
+  const f = fixture(t);
+  const work = { lead: "product-owner", reason: "Coordinate", skills: [], stages: [brief("verify", "product-owner")] };
+  const review = { lead: "desktop-qa", reason: "Verify", skills: [], stages: [brief("review", "desktop-qa")] };
+  const input = { title: "Legacy plan", description: "Check migration", criteria: ["Starts"], workingDirectory: f.root, expertTeam: { work, review } };
+  const cli = async <T>(command: string, id?: string, args?: object) => {
+    const result = await callCli<T>(f.root, [command, ...(id ? [id] : [])], args);
+    if (!result.ok) assert.fail(JSON.stringify(result.error));
+    return result.data;
+  };
+  await cli("settings", undefined, { autoMode: true, reviewMode: "reviewer" });
+  for (const scenario of ["manual", "automatic", "unblocked"]) {
+    const draft = await cli<Task>("create", undefined, input);
+    const ready = await cli<Task>("approve", draft.id, { revision: draft.revision });
+    const card = scenario === "unblocked" ? await cli<Task>("block", ready.id, {
+      allowUnstarted: true, reason: "SKILL_CHECK_REQUIRED: workflow", condition: "Fix the launch error",
+    }) : ready;
+    const path = f.run(store => {
+      for (const plan of [card.expertTeam!.work!, card.expertTeam!.review!]) {
+        plan.skills = ["workflow"];
+        plan.stages[0].skills = ["workflow"];
+      }
+      store.save(card);
+      return store.cardPath(card.id);
+    });
+    const launchable = scenario === "unblocked" ? await cli<Task>("unblock", card.id, { revision: card.revision, reason: "Legacy plan can be migrated" }) : card;
+    const { task } = await cli<{ task: Task }>("start", card.id, {
+      revision: launchable.revision, ...(scenario === "automatic" ? { autoMode: true, autoQueueRevision: 0 } : { actor: "user" }),
+    });
+    const expected = { work: { ...work, stages: [{ ...work.stages[0], skills: [] }] },
+      review: { ...review, stages: [{ ...review.stages[0], skills: [] }] } };
+    assert.equal(task.status, "in_progress");
+    assert.equal(task.revision, launchable.revision + 1);
+    assert.deepEqual((readJson(path) as Task).expertTeam, expected);
+    assert.deepEqual(task.expertTeam, expected);
+    const instructions = await leadSkillInstructions(f.root, task.id, f.run(store => readExpert(store, work.lead)), task.expertTeam?.work, "agent", "");
+    assert.match(instructions[0], /Loaded board skill workflow/);
+    const stage = await phaseStageReporter(f.root, "work", task.id).report({ revision: task.revision, state: "running", key: "verify" });
+    assert.ok(stage.ok && "assignedSkills" in stage.data && stage.data.assignedSkills.length === 1);
+  }
+});
+
+test("missing explicit skill checks identify the phase before saving a plan or approving a draft", { timeout: 120_000 }, async t => {
+  const f = fixture(t);
+  const skill = f.run(store => readExpert(store, "cross-desktop-developer").skills.find(s => s.name === "electron")!.id);
+  const work = { lead: "cross-desktop-developer", reason: "Build", stages: [] };
+  const stage = { ...brief("verify", work.lead), skills: [skill] };
+  const review = { lead: "desktop-qa", reason: "Verify", stages: [] };
+  const input = { title: "Incomplete plan", description: "Check errors", criteria: ["Explained"], expertTeam: { work, review } };
+  const checkError = async (result: ReturnType<typeof callCli>, scope: string) => {
+    const reply = await result;
+    assert.ok(!reply.ok);
+    assert.equal(reply.error.code, "SKILL_CHECK_REQUIRED");
+    assert.ok(reply.error.message.includes(scope) && reply.error.message.includes(skill), reply.error.message);
+  };
+  await checkError(callCli(f.root, ["create"], { ...input, expertTeam: { ...input.expertTeam, work: { ...work, skills: [skill] } } }), "work lead");
+  const created = await callCli<Task>(f.root, ["create"], input);
+  assert.ok(created.ok);
+  const { id, revision } = created.data;
+  await checkError(callCli(f.root, ["expert-plan", id], { ...work, revision, stages: [stage] }), "work:verify");
+  const path = f.run(store => {
+    const task = store.card(id);
+    task.expertTeam!.work!.stages = [{ ...stage, skills: ["workflow", skill] }];
+    store.save(task);
+    return store.cardPath(id);
+  });
+  await checkError(callCli(f.root, ["approve", id], { revision }), "work:verify");
+  const saved = readJson(path) as Task;
+  assert.equal(saved.status, "draft");
+  assert.equal(saved.revision, revision);
+  assert.deepEqual(saved.expertTeam!.work!.stages[0].skills, [skill]);
+  await checkError(callCli(f.root, ["expert-plan", id], { ...work, revision }), "work:verify");
 });
 
 test("assigned skills require successful actions by the correct agent and preserve native outputs", { timeout: 120_000 }, async t => {
