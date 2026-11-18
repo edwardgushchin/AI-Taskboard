@@ -348,6 +348,9 @@ export function validateCard(value: unknown, id: string): Task {
         typeof value.milestone.title !== "string" || !value.milestone.title.trim())) ||
       (value.dependencies !== undefined && (!Array.isArray(value.dependencies) ||
         value.dependencies.some(entry => typeof entry !== "string" || !taskIdPattern.test(entry)))) ||
+      (value.reviewModeOverride !== undefined && (!isRecord(value.reviewModeOverride) ||
+        !reviewModes.some(mode => mode === (value.reviewModeOverride as Record<string, unknown>).mode) ||
+        !Number.isSafeInteger(value.reviewModeOverride.version) || Number(value.reviewModeOverride.version) < 1)) ||
       (value.dueDate !== undefined && !validDueDate(value.dueDate)) ||
       (value.schedule !== undefined && !validTaskSchedule(value.schedule)) ||
       (value.toolGrants !== undefined && (!Array.isArray(value.toolGrants) || value.toolGrants.length > 256 ||

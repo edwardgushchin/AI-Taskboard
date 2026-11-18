@@ -1,4 +1,4 @@
-import { boardReviewMode, member, object, strings, text, number, record, requireRevision, requireState, reviewsAcceptanceRepair, TaskboardError, usesIndependentReviewer } from "./model.ts";
+import { taskReviewMode, member, object, strings, text, number, record, requireRevision, requireState, reviewsAcceptanceRepair, TaskboardError, usesIndependentReviewer } from "./model.ts";
 import type { BoardSettings, ExpertPhase, SkillCheck, Task, TaskEvent } from "./model.ts";
 import type { BoardStore } from "./storage.ts";
 import { exists } from "./storage.ts";
@@ -29,14 +29,14 @@ export function approvalRequirements(task: Task, settings: BoardSettings) {
     ...(!task.description.trim() ? ["description"] : []),
     ...(!task.criteria.some(criterion => criterion.trim()) ? ["criteria"] : []),
     ...(!task.expertTeam?.work?.lead ? ["work"] : []),
-    ...(!task.schedule && boardReviewMode(settings) !== "human" && !task.expertTeam?.review?.lead ? ["review"] : []),
+    ...(!task.schedule && taskReviewMode(task, settings) !== "human" && !task.expertTeam?.review?.lead ? ["review"] : []),
   ];
 }
 
 export function requireApprovalPlan(task: Task, settings: BoardSettings, action: "creation" | "approval" = "approval") {
   const missing = approvalRequirements(task, settings);
   if (missing.length) throw new TaskboardError("EXPERT_PLAN_REQUIRED", "Missing required card fields for " + action + ": " + missing.join(", ") + ".");
-  const phases: Phase[] = task.schedule || boardReviewMode(settings) === "human" ? ["work"] : ["work", "review"];
+  const phases: Phase[] = task.schedule || taskReviewMode(task, settings) === "human" ? ["work"] : ["work", "review"];
   for (const phase of phases) {
     const plan = task.expertTeam?.[phase];
     if (!plan) continue;
@@ -173,7 +173,7 @@ export function createExpertPlan(store: BoardStore, parentId: string, input: Rec
   const fillsMissingRepairPlan = fillsMissingReviewPlan && reviewsAcceptanceRepair(parent, settings);
   const approval = currentReviewApproval(parent, settings)?.reviewApproval;
   const currentTarget = fillsMissingReviewPlan && approval?.targetHead && parent.git && store.location.repository &&
-    usesIndependentReviewer(boardReviewMode(settings)) && resolveCommit(store.location.repository.root, parent.git.target);
+    usesIndependentReviewer(taskReviewMode(parent, settings)) && resolveCommit(store.location.repository.root, parent.git.target);
   const hasCurrentApproval = approval && (!currentTarget || currentTarget === approval.targetHead);
   if (parent.status === "review" && (exists(store.pendingPath(parent.id)) ||
       (parent.acceptanceRepair && !fillsMissingRepairPlan) || hasCurrentApproval))
@@ -247,7 +247,7 @@ export function updateExpertStage(store: BoardStore, id: string, phase: Phase, i
   requireRevision(task, input.revision, true);
   const settings = store.index.settings;
   const approval = phase === "review" ? currentReviewApproval(task, settings)?.reviewApproval : undefined;
-  if (approval && (settings.reviewMode !== "reviewer-human" || approval.targetHead === targetHead)) {
+  if (approval && (taskReviewMode(task, settings) !== "reviewer-human" || approval.targetHead === targetHead)) {
     throw new TaskboardError("EXPERT_PHASE_CLOSED", "This submission already has a review decision.");
   }
   const stages = expertStagesStatus(task, phase, targetHead);

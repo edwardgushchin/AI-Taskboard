@@ -8,7 +8,7 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import { nextReadyTask } from "../src/desktop/auto-queue.ts";
-import { boardReviewMode, reviewsAcceptanceRepair } from "../src/cli/model.ts";
+import { reviewsAcceptanceRepair, taskReviewMode, taskReviewModeVersion } from "../src/cli/model.ts";
 
 const source = readFileSync(new URL("../src/desktop/main.ts", import.meta.url), "utf8");
 const parsed = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, true);
@@ -30,7 +30,7 @@ function fixture(mode = "human") {
   const runtime = runInNewContext(stripTypeScriptTypes(code) + "\n({scheduleAutoBoard, autoBoards})", {
     subscriptions: new Map([["project", watch]]), closingProjects: new Set(), boardWorkRequests: managers, boardRequests: dialogues,
     backgroundManagerRequests: new Map(),
-    isManual, nextReadyTask, boardReviewMode, reviewsAcceptanceRepair, agentSlots: slots, projectIdentity: (path: string) => path,
+    isManual, nextReadyTask, taskReviewMode, taskReviewModeVersion, reviewsAcceptanceRepair, agentSlots: slots, projectIdentity: (path: string) => path,
     executorBusy: (_: string, id: string) => busy.has(id), t: (key: string) => localization.text(key, {}, "en"),
     broadcastBoardChat: (_: string, __: string, value: any) => errors.push(value.error),
     reserveAgent: (_: string, role: "reviewer") => slots.acquire("project", role, board.settings.taskLimits),
@@ -38,7 +38,7 @@ function fixture(mode = "human") {
     reviewSubmission: async (_: unknown, id: string) => {
       reviews.push(id);
       const task = board.tasks.find((task: any) => task.id === id);
-      if (!task.needsHuman) task.approvalTarget = "target";
+      if (!task.needsHuman) task.approvalTarget = task.reviewApprovalTargetHead = "target";
     },
     runBoardRequest: async (...args: any[]) => { notices.push(args); return { ok: true, data: {} }; },
     callCli: async (_: string, args: string[], input: any) => {
@@ -50,7 +50,9 @@ function fixture(mode = "human") {
         return { ok: true, data: structuredClone(board) };
       }
       if (args[0] === "milestones") return { ok: true, data: { repository: "owner/repo", milestones: [{ number: 1, due_on: "2026-11-20T00:00:00Z" }] } };
-      if (args[0] === "review") return { ok: true, data: { revision: task.revision, targetHead: "target", stale: false, reviewerApproval: { targetHead: task.approvalTarget ?? "target" } } };
+      if (args[0] === "review") return { ok: true, data: { revision: task.revision, targetHead: "target", stale: false,
+        reviewMode: taskReviewMode(task, board.settings), reviewModeVersion: taskReviewModeVersion(task, board.settings),
+        reviewerApproval: { targetHead: task.approvalTarget ?? "target" } } };
       if (args[0] === "accept") {
         beforeAccept?.();
         if (!board.settings.autoMode || board.settings.reviewMode !== "reviewer") return fail("AUTO_MODE_DISABLED");
