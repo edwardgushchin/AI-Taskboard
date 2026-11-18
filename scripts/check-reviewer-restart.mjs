@@ -20,7 +20,7 @@ process.argv.push("--project", project);
 
 async function seed() {
   const { initializeBoard, locateBoard } = require("../src/cli/storage.ts");
-  const { createTask } = require("../src/cli/tasks.ts");
+  const { changeTask, createTask } = require("../src/cli/tasks.ts");
   const { record } = require("../src/cli/model.ts");
   const { withReviewerChat } = require("../src/desktop/reviewer-chat.ts");
   mkdirSync(project);
@@ -41,9 +41,21 @@ async function seed() {
     card = record(card, action, "reviewer", "review", summary);
     store.save(card);
   }
+  const reason = "Fix the finding from the saved report.";
+  card = record(card, "submit", "agent", "review");
+  await withReviewerChat(project, id, () => {}, async publish => publish([
+    { id: "result-3", type: "agentMessage", phase: "final_answer", title: "", status: "completed",
+      text: JSON.stringify({ summary: "Changes requested.", findings: [reason] }) },
+  ]));
+  store.save(changeTask(card, "request-changes", { actor: "reviewer", reason }));
   let fallback = store.create(createTask("T-0002", { title: "Decision without journal" }));
   fallback = record(fallback, "submit", "agent", "review");
   store.save(record(fallback, "review-note", "reviewer", "review", "Decision from the card history."));
+  let returned = store.create(createTask("T-0003", { title: "Return without journal" }));
+  returned = record(returned, "submit", "agent", "review");
+  store.save(changeTask(returned, "request-changes", {
+    actor: "reviewer", reason: "[P1] Criterion 1: Repair the missing evaluation.",
+  }));
   writeFileSync(join(scratch, "first-pid"), String(process.pid));
 }
 
@@ -73,7 +85,7 @@ async function run() {
   const rows = await waitFor(() => evaluate(`(() => {
     const feed = document.querySelector('#task-chat-work');
     const attempts = [...feed.querySelectorAll('.task-review-attempt')];
-    if (attempts.length !== 2) return null;
+    if (attempts.length !== 3) return null;
     return {
       text: feed.innerText,
       decisionCount: [...feed.querySelectorAll('.chat-event > .chat-author')]
@@ -87,13 +99,15 @@ async function run() {
   })()`));
   assert.match(rows.attempts[0].label, /Ревьюер #1/);
   assert.match(rows.attempts[1].label, /Ревьюер #2/);
-  assert.equal(rows.decisionCount, 2);
+  assert.match(rows.attempts[2].label, /Ревьюер #3/);
+  assert.equal(rows.decisionCount, 3);
   assert.deepEqual(rows.attempts.map(row => row.events), [
-    ["item:summary-1", "item:tool-1", "message:result-1"], ["item:tool-2", "message:result-2"],
+    ["item:summary-1", "item:tool-1", "message:result-1"], ["item:tool-2", "message:result-2"], ["message:result-3"],
   ]);
-  assert.deepEqual(rows.attempts.map(row => row.summaryVisible), [true, false]);
+  assert.deepEqual(rows.attempts.map(row => row.summaryVisible), [true, false, false]);
   for (const text of ["Provider summary for attempt one.", "task_review_diff 1", "task_review_diff 2",
-    "Need a human decision.", "Review approved.", "Evidence for attempt 1", "Evidence for attempt 2"]) {
+    "Need a human decision.", "Review approved.", "Evidence for attempt 1", "Evidence for attempt 2",
+    "Fix the finding from the saved report."]) {
     assert.equal(rows.text.split(text).length - 1, 1, text);
   }
   if (!writing && keepArtifacts) {
@@ -105,7 +119,19 @@ async function run() {
   await evaluate(`document.querySelector('[aria-controls="task-chat-work"]').click()`);
   assert.deepEqual(await evaluate(`api.reviewerChat("T-0002")`), { ok: true, data: [] });
   assert.match(await evaluate(`document.querySelector('#task-chat-work').innerText`), /Decision from the card history/);
-  console.log(`PASS Electron ${process.versions.electron}, ${process.platform}, PID ${process.pid} (${writing ? "initial process" : "restarted process"}): two ordered attempts, one copy of each decision, fallback without journal`);
+  await evaluate(`sheet.close(); showTask("T-0003")`);
+  assert.deepEqual(await evaluate(`api.reviewerChat("T-0003")`), { ok: true, data: [] });
+  assert.match(await evaluate(`document.querySelector('#task-chat-dialogue').innerText`), /Repair the missing evaluation/);
+  await evaluate(`document.querySelector('[aria-controls="task-chat-work"]').click()`);
+  const fallbackReason = await evaluate(`document.querySelector('#task-chat-work').innerText`);
+  assert.match(fallbackReason, /Ревьюер/);
+  assert.equal(fallbackReason.split("Repair the missing evaluation.").length - 1, 1);
+  if (!writing && keepArtifacts) {
+    await window.webContents.capturePage();
+    await delay(200);
+    writeFileSync(join(artifacts, "review-return-without-journal.png"), (await window.webContents.capturePage()).toPNG());
+  }
+  console.log(`PASS Electron ${process.versions.electron}, ${process.platform}, PID ${process.pid} (${writing ? "initial process" : "restarted process"}): three ordered attempts, one copy per decision, note and return available without a journal`);
 }
 
 run().then(() => app.quit(), error => { console.error(error); app.exit(1); });

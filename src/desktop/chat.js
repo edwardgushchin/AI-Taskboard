@@ -633,17 +633,18 @@ function reviewerChat(task, work, tail, decisions, onCollaboration) {
           " · " + t(node.finished ? "ui.completed_a863c619" : "ui.in_progress_15929530") + " · " + shortDate(attempt.at));
         node.error.textContent = attempt.error ?? "";
         node.error.hidden = !attempt.error;
-        node.summary = undefined;
+        node.report = undefined;
         const items = attempt.items.flatMap(item => {
           if (collaborationItem(item)) return [];
           if (item.type !== "agentMessage" || item.phase === "commentary") return [item];
           if (item.status !== "completed") return [];
-          node.summary = undefined;
+          node.report = undefined;
           try {
             const { summary, findings, evidence } = JSON.parse(item.text);
             if (typeof summary !== "string") return [item];
-            node.summary = summary.trim();
-            const notes = Array.isArray(findings) ? findings.map(text => "- " + text).join("\n") : "";
+            const reportFindings = Array.isArray(findings) ? findings.filter(text => typeof text === "string") : [];
+            node.report = { summary: summary.trim(), reason: reportFindings.join("\n\n").trim() };
+            const notes = reportFindings.map(text => "- " + text).join("\n");
             const checks = Array.isArray(evidence) ? evidence.flatMap((text, index) =>
               typeof text === "string" ? [(index + 1) + ". " + text] : []).join("\n") : "";
             return [{ ...item, text: [summary, notes, checks].filter(Boolean).join("\n\n") }];
@@ -656,8 +657,9 @@ function reviewerChat(task, work, tail, decisions, onCollaboration) {
         const attempt = attempts.findLast(attempt => attempt.at >= submittedAt && attempt.at <= event.at);
         const node = attempt && nodes.get(attempt.id);
         // Keep the card's decision event and hide only the text also shown in its attempt.
+        const reportText = event.action === "request-changes" ? node?.report?.reason : node?.report?.summary;
         entry.hidden = Boolean(node?.finished && !attempt.error && !matched.has(attempt.id) &&
-          node.summary === event.text.trim());
+          reportText === event.text.trim());
         if (entry.hidden) matched.add(attempt.id);
       }
       status.hidden = true;
@@ -800,7 +802,7 @@ function taskChat(task) {
       event.actor === "reviewer" ? t("ui.reviewer_50c42665") :
       event.actor === "user" ? t("ui.you_05444001") : t("ui.agent_262834de");
 
-    if (!conversation && event.action !== "coordination") {
+    if ((!conversation || returned) && event.action !== "coordination") {
       const status = lanes.find(([code]) => code === event.to);
       const service = element("li", undefined, "chat-entry chat-event");
       const stage = event.expertStageRun;
@@ -857,6 +859,14 @@ function taskChat(task) {
         chatText(text, { taskId: task.id, coordination, agent: event.action === "chat" && event.actor === "agent" }));
     }
     appendChatTime(entry, event.at);
+    if (returned && event.text) {
+      const fallback = element("li", undefined, "chat-entry chat-coordination");
+      fallback.dataset.actor = event.actor;
+      fallback.append(element("span", author, "chat-author"), reviewerFindings(event.text, task.id));
+      appendChatTime(fallback, event.at);
+      appendWork(fallback);
+      reviewDecisions.push({ entry: fallback, event, submittedAt });
+    }
     if (event.actor === "reviewer" && event.text && !attachments.length &&
         ["review-approve", "review-note"].includes(event.action)) {
       reviewDecisions.push({ entry, event, submittedAt });
