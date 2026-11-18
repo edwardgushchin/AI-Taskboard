@@ -2139,6 +2139,26 @@ function submitFixture(root: string, edit: (worktree: string) => void, target?: 
   return { task: reviewed, worktree };
 }
 
+test("review return transfers link feedback to the same Git worktree", t => {
+  const root = fixture(t, true);
+  const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "source.txt"), "# T-0096\n"));
+  cli(root, ["settings"], { reviewMode: "human" });
+  const before = cli(root, ["chat", task.id], { text: "Решетка должна быть частью гиперссылки", model: "test", effort: "low" });
+  const review = cli(root, ["review", task.id], { compact: true, includeReviewerSettings: true });
+  const reason = "Включить решётку и номер задачи в одну гиперссылку с общим подчёркиванием при наведении и фокусе.";
+  const decision = { reason, actor: "manager", revision: review.revision, targetHead: review.targetHead, reviewMode: review.settings.reviewMode };
+  cli(root, ["accept", task.id], decision, "AUTO_REVIEW_DISABLED");
+  const returned = cli(root, ["request-changes", task.id], decision);
+  cli(root, ["request-changes", task.id], decision, "REVISION_CONFLICT");
+  assert.equal(returned.status, "in_progress");
+  assert.deepEqual(returned.history.slice(0, -1), before.history);
+  assert.equal(returned.history.at(-1).text, reason);
+  const started = cli(root, ["start", task.id, "--compact"], { revision: returned.revision, launchDetails: true });
+  assert.equal(started.task.id, task.id);
+  assert.equal(started.worktree, worktree);
+  assert.equal(started.task.feedback, reason);
+});
+
 test("a full daily Worklog allows start, submit and accept", t => {
   const root = fixture(t, true);
   cli(root, ["init"]);
