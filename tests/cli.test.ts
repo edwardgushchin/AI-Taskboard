@@ -1,3 +1,4 @@
+import { plannedDraft } from "./fixtures/planned-draft.ts";
 import assert from "node:assert/strict";
 import childProcess, { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
@@ -17,7 +18,7 @@ import { saveLocalChanges, inspectLocalChanges } from "../src/cli/saved-changes.
 import { maxWorklogPartBytes } from "../src/cli/worklog-files.ts";
 import type { Task } from "../src/cli/model.ts";
 import { boardToolContent } from "../src/desktop/board-mcp.ts";
-import { taskChatActions } from "../src/desktop/chat-actions.ts";
+import { setReviewModeFromChat, taskChatActions } from "../src/desktop/chat-actions.ts";
 import { registerRuntime, runtimeEntries, runtimeTransaction } from "../src/desktop/board-runtime.ts";
 
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
@@ -61,6 +62,7 @@ function commandArgs(root: string, args: string[], input?: unknown): string[] {
 }
 
 function cli(root: string, args: string[], input?: unknown, expectedCode?: string, spoofDesktopEnvironment = false) {
+  if (args[0] === "create" && input && typeof input === "object") input = plannedDraft(input);
   const result = spawnSync(process.execPath, commandArgs(root, args, input), {
     env: { ...env, TASKBOARD_DESKTOP_ACCEPTANCE: spoofDesktopEnvironment ? "1" : "" },
     encoding: "utf8", input: input === undefined ? undefined : JSON.stringify(input), windowsHide: true,
@@ -938,10 +940,12 @@ test("normal commands enforce task state, criteria, and revisions", t => {
   git(root, "init", "-b", "main");
   cli(root, ["list"], undefined, "BOARD_NOT_FOUND");
   cli(root, ["init"]);
+  cli(root, ["create"], { title: "Build CSV export", criteria: [] }, "EXPERT_PLAN_REQUIRED");
   let task = cli(root, ["create"], { title: "Build CSV export" });
   assert.equal(task.id, "T-0001");
   cli(root, ["start", task.id], undefined, "INVALID_TRANSITION");
-  cli(root, ["approve", task.id], { revision: task.revision }, "CRITERIA_REQUIRED");
+  task = cli(root, ["update", task.id], { revision: task.revision, criteria: [] });
+  cli(root, ["approve", task.id], { revision: task.revision }, "EXPERT_PLAN_REQUIRED");
   task = cli(root, ["update", task.id], { criteria: ["A CSV file can be downloaded."], revision: task.revision });
   cli(root, ["approve", task.id], { revision: 1 }, "REVISION_CONFLICT");
   task = cli(root, ["approve", task.id], { revision: task.revision });
@@ -1073,8 +1077,7 @@ test("task chat records a clarification once, with its sources and lifecycle int
     ok: false, error: { code: "INVALID_INPUT", message: "Use the parameters defined for this task action." },
   });
   const first = await edit("task_update", update);
-  assert.ok(first.ok);
-  assert.partialDeepStrictEqual(first.data, { changed: true });
+  assert.ok(first.ok && (first.data as { changed: boolean }).changed);
   const edited = show();
   assert.deepEqual({ ...edited, description: sent.description, history: sent.history,
     revision: sent.revision, updatedAt: sent.updatedAt }, sent);
@@ -1088,8 +1091,7 @@ test("task chat records a clarification once, with its sources and lifecycle int
     text: "Уточнение добавлено в описание." });
   const repeated = send(clarification);
   const second = await action(repeated)("task_update", update);
-  assert.ok(second.ok);
-  assert.partialDeepStrictEqual(second.data, { changed: false });
+  assert.ok(second.ok && !(second.data as { changed: boolean }).changed);
   assert.deepEqual(show(), repeated);
   assert.equal(refreshes, 1);
 
@@ -1104,8 +1106,7 @@ test("task chat records a clarification once, with its sources and lifecycle int
   assert.ok(!stale.ok && stale.error.code === "REVISION_CONFLICT");
   assert.deepEqual(show(), concurrent);
   const saved = await action(show())("task_update", { authorization: latestText, criteria });
-  assert.ok(saved.ok);
-  assert.partialDeepStrictEqual(saved.data, { changed: true });
+  assert.ok(saved.ok && (saved.data as { changed: boolean }).changed);
   assert.deepEqual(show().criteria, criteria);
   assert.equal(show().status, "draft");
   assert.equal(show().history.some(event => event.action === "start"), false);
@@ -1249,7 +1250,8 @@ test("the board tag catalog migrates older tasks and shares names and colors acr
   assert.deepEqual(updated.tags, [name]);
   cli(root, ["update", active.id], { tags: ["Stale tag"], revision: active.revision }, "REVISION_CONFLICT");
   cli(root, ["tag", "set"], { name: "ошибки", color: "#91B6F9" });
-  assert.deepEqual(cli(root, ["show", active.id]), { ...updated, artifacts: [] });
+  assert.deepEqual(cli(root, ["show", active.id]), { ...updated, artifacts: [],
+    approvalRequirements: [], expertStageStatus: { work: [], review: [] } });
   cli(root, ["update", active.id], { tags: [], revision: updated.revision });
   const empty = cli(root, ["list", "--tag", name]);
   assert.deepEqual(empty.tasks, []);
@@ -1528,7 +1530,7 @@ test("parallel processes receive unique task IDs and share one catalog entry per
   const root = fixture(t);
   cli(root, ["init"]);
   const tasks = await Promise.all(Array.from({ length: 8 }, async (_, index) => {
-    const input = { title: "Parallel " + index, tags: [index % 2 ? "Shared" : "SHARED", "Tag " + index] };
+    const input = plannedDraft({ title: "Parallel " + index, tags: [index % 2 ? "Shared" : "SHARED", "Tag " + index] });
     const child = spawn(process.execPath, commandArgs(root, ["create"], input), {
       env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
     });
@@ -1666,7 +1668,7 @@ test("a recurring card starts only when due and approved and keeps its history f
   assert.equal(completed.status, "ready");
   assert.equal(completed.summary, "The check passed.");
   assert.deepEqual(completed.schedule, { ...schedule, nextAt: nextScheduledRun(schedule, new Date(completed.updatedAt)) });
-  assert.deepEqual(completed.history.map(event => event.action), ["create", "approve", "start", "progress"]);
+  assert.deepEqual(completed.history.map(event => event.action), ["create", "expert-plan", "expert-plan", "approve", "start", "progress"]);
   cli(root, ["start", task.id], { revision: completed.revision, scheduled: true }, "INVALID_TRANSITION");
   const interval: Task = cli(root, ["update", task.id], { schedule: { everyMinutes: 180 } });
   assert.equal(interval.schedule?.everyMinutes, 180);
@@ -2203,6 +2205,7 @@ test("discussion return does not decide the manager's independent review", t => 
   cli(root, ["init"]);
   cli(root, ["settings"], { reviewMode: "manager", autoMode: false });
   const { id } = cli(root, ["create"], { title: "Correct link", criteria: ["One link"], workingDirectory: root, expertTeam: {
+    work: plannedDraft({}).expertTeam.work,
     review: { lead: "qa-engineer", reason: "Independent verification", stages: [{
       key: "verify", expertId: "qa-engineer", title: "Verify", criteria: ["Checked"], outputs: ["Decision"],
     }] },
@@ -2891,7 +2894,7 @@ test("review pages can omit unchanged context without losing edits", t => {
   assert.equal(summary.status, 0, summary.stdout + summary.stderr);
   assert.match(summary.stderr, /merge-base runs outside board lock/);
   assert.match(summary.stderr, /merge-tree runs outside board lock/);
-  assert.deepEqual(JSON.parse(summary.stdout).data, { ...review, settings: {
+  assert.deepEqual(JSON.parse(summary.stdout).data, { ...review, reviewTeam: task.expertTeam.review, settings: {
     reviewMode: "reviewer", reviewer: cli(root, ["settings"]).reviewer,
   } });
 
@@ -2958,6 +2961,7 @@ test("required stage artifacts are pinned to the submitted snapshot and availabl
     artifactOutputs: { Screen: "png", Scenario: "text" },
   };
   const task = cli(root, ["create"], { title: "Verify the screen", criteria: stage.criteria, expertTeam: {
+    review: plannedDraft({}).expertTeam.review,
     work: { lead: "qa-engineer", reason: "Verify the screen and the action from the same version.", stages: [stage] },
   } });
   cli(root, ["approve", task.id]);
@@ -3705,6 +3709,69 @@ test("doctor recovers archive cleanup after an index switch and preserves change
 });
 
 
+test("card review mode validates owner scope and preserves other cards", async t => {
+  const root = fixture(t);
+  cli(root, ["init"], { git: false });
+  const card: Task = cli(root, ["create"], { title: "Pinned review", criteria: ["One result"] });
+  const { id: otherId } = cli(root, ["create"], { title: "Board default" });
+  const other: Task = cli(root, ["show", otherId]);
+  const authorization = "Set " + card.id + " to reviewer-human";
+  const input = { id: card.id, revision: card.revision, mode: "reviewer-human", authorization };
+  const errorCode = (reply: ReturnType<typeof setReviewModeFromChat>) => reply.ok ? undefined : reply.error.code;
+  assert.equal(errorCode(setReviewModeFromChat(root, "", input)), "USER_DIRECTION_REQUIRED");
+  assert.equal(errorCode(setReviewModeFromChat(root, authorization, { ...input, mode: "unknown" })), "INVALID_INPUT");
+  assert.equal(errorCode(setReviewModeFromChat(root, authorization, { ...input, id: other.id })), "USER_DIRECTION_REQUIRED");
+  const before = cli(root, ["show", card.id]);
+  const negative = [
+    { message: `What is the review mode of ${card.id}?`, mode: "reviewer-human" },
+    { message: `Set ${card.id} to reviewer-human or manager`, mode: "reviewer-human" },
+    { message: authorization, mode: "manager" },
+    { message: authorization, mode: null },
+    { message: `Restore board inheritance for ${card.id}`, mode: "reviewer-human" },
+    { message: `Before we decide, consider: ${authorization}`, mode: "reviewer-human", quote: authorization },
+    { message: `Не назначай ${card.id} режим «Ревью + человек»`, mode: "reviewer-human" },
+  ];
+  for (const { message, mode, quote } of negative) {
+    const authorization = quote ?? message;
+    assert.equal(errorCode(setReviewModeFromChat(root, message, { ...input, mode, authorization })), "USER_DIRECTION_REQUIRED", message);
+    const reply = await taskChatActions(root, before, message, () => assert.fail("Unexpected card write"))(
+      "task_set_review_mode", { mode, authorization });
+    assert.ok(!reply.ok && reply.error.code === "USER_DIRECTION_REQUIRED", message);
+  }
+  assert.deepEqual(cli(root, ["show", card.id]), before);
+
+  const set = setReviewModeFromChat(root, authorization, input);
+  assert.ok(set.ok);
+  assert.equal(set.data.effectiveReviewMode, "reviewer-human");
+  assert.deepEqual(set.data.history.slice(0, -1), card.history);
+  assert.equal(set.data.history.at(-1)?.actor, "user");
+  assert.equal(errorCode(setReviewModeFromChat(root, authorization, input)), "REVISION_CONFLICT");
+
+  cli(root, ["settings"], { reviewMode: "human" });
+  const cards = cli(root, ["list", "--compact"]).tasks;
+  assert.equal(cards.find((task: Task) => task.id === card.id).reviewModeOverride.mode, "reviewer-human");
+  assert.equal(cards.find((task: Task) => task.id === other.id).reviewModeOverride, undefined);
+  const restore = "Restore board inheritance";
+  const restored = await taskChatActions(root, set.data, restore, () => {})("task_set_review_mode", { mode: null, authorization: restore });
+  assert.ok(restored.ok);
+  assert.deepEqual(restored.data, { id: card.id, revision: set.data.revision + 1, reviewMode: "human", inherited: true });
+  assert.deepEqual(cli(root, ["show", other.id]), other);
+
+  const ready = cli(root, ["approve", card.id]);
+  cli(root, ["start", card.id], { revision: ready.revision });
+  const preview = cli(root, ["preview", card.id]);
+  const submission = cli(root, ["submit", card.id], { token: preview.token, noChanges: true, summary: "Result", checks: ["Checked"] });
+  const done = cli(root, ["accept", card.id], { revision: submission.revision });
+  assert.equal(done.status, "done");
+  assert.equal(errorCode(setReviewModeFromChat(root, authorization, { ...input, revision: done.revision })), "INVALID_TRANSITION");
+
+  const ordinary = fixture(t);
+  cli(ordinary, ["init"], { boardType: "manual" });
+  const personal = cli(ordinary, ["create"], { title: "Personal card", expertTeam: undefined });
+  const personalRequest = "Set " + personal.id + " to reviewer-human";
+  assert.equal(errorCode(setReviewModeFromChat(ordinary, personalRequest, { ...input, id: personal.id, authorization: personalRequest, revision: personal.revision })), "MANUAL_BOARD");
+});
+
 test("reviewer-human requires fresh reviewer approval and desktop acceptance", async t => {
   const root = fixture(t);
   cli(root, ["init"]);
@@ -3747,8 +3814,9 @@ test("reviewer-human requires fresh reviewer approval and desktop acceptance", a
 
 for (const recover of [false, true]) test("reviewer-human repeats approval after target movement and conflict repair" + (recover ? " and recovers a saved integration" : ""), t => {
   const root = fixture(t, true);
-  const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "source.txt"), "task version\n"));
-  const { reviewModeVersion } = cli(root, ["settings"], { reviewMode: "reviewer-human" });
+  const { task: original, worktree } = submitFixture(root, path => writeFileSync(join(path, "source.txt"), "task version\n"));
+  let task = original;
+  const { reviewModeVersion } = cli(root, ["settings"], { reviewMode: "reviewer-human", autoMode: recover });
   const initial = git(root, "rev-parse", "HEAD");
   const approve = (revision: number, targetHead: string) => cli(root, ["review-approve", task.id], {
     revision, targetHead, reviewModeVersion, summary: "Verified", evidence: ["Checked result"],
@@ -3756,11 +3824,19 @@ for (const recover of [false, true]) test("reviewer-human repeats approval after
   const acceptance = { actor: "user", reviewModeVersion, revision: task.revision,
     targetHead: initial, message: "feat: integrate checked result" };
   approve(task.revision, initial);
+  onBoard(locateBoard(root), store => {
+    const saved = store.card(task.id);
+    store.save({ ...saved, expertTeam: { work: saved.expertTeam?.work } });
+  });
+  const firstPlan = { phase: "review", revision: task.revision, lead: "qa-engineer", reason: "Review the changed target.", stages: [] };
+  cli(root, ["expert-plan", task.id], firstPlan, "INVALID_TRANSITION");
   writeFileSync(join(root, "source.txt"), "target version\n");
   git(root, "commit", "-am", "fix: update target");
   const head = git(root, "rev-parse", "HEAD");
   assert.equal(cli(root, ["review", task.id, "--compact"]).awaitingHumanAcceptance, false);
   cli(root, ["accept", task.id], acceptance, "HUMAN_ACCEPTANCE_REQUIRED", true);
+  task = cli(root, ["expert-plan", task.id], firstPlan).parent;
+  acceptance.revision = task.revision;
   approve(task.revision, head);
   cli(root, ["accept", task.id], { ...acceptance, targetHead: head, userAcceptance: true }, "HUMAN_ACCEPTANCE_REQUIRED", true);
   const queued = onBoard(locateBoard(root), store => store.save(record({ ...store.card(task.id), acceptanceRepair: {
@@ -3773,9 +3849,26 @@ for (const recover of [false, true]) test("reviewer-human repeats approval after
   git(worktree, "add", "source.txt");
   git(worktree, "commit", "-m", "fix: combine versions\n\nTask: " + task.id);
   const preview = cli(root, ["preview", task.id]);
-  const repaired = cli(root, ["submit", task.id], { token: preview.token, message: preview.commitMessage,
+  let repaired = cli(root, ["submit", task.id], { token: preview.token, message: preview.commitMessage,
     summary: "Combined", checks: ["Checked merged source"] });
   assert.equal(repaired.acceptanceRepair.phase, "checking");
+  onBoard(locateBoard(root), store => {
+    const saved = store.card(task.id);
+    store.save({ ...saved, expertTeam: { work: saved.expertTeam?.work } });
+  });
+  const reviewPlan = { phase: "review", lead: "qa-engineer", reason: "Review the repaired submission.",
+    revision: repaired.revision, stages: [{ key: "verify", expertId: "qa-engineer", title: "Verify repair",
+      criteria: ["Both edits preserved"], outputs: ["verification"] }] };
+  const decision = { revision: repaired.revision, targetHead: head, reviewModeVersion, summary: "Verified", evidence: ["Checked result"] };
+  cli(root, ["review-approve", task.id], decision, "EXPERT_PLAN_REQUIRED");
+  cli(root, ["expert-plan", task.id], { ...reviewPlan, phase: "work" }, "INVALID_TRANSITION");
+  const savedRepair = repaired.acceptanceRepair;
+  repaired = cli(root, ["expert-plan", task.id], reviewPlan).parent;
+  assert.deepEqual(repaired.acceptanceRepair, savedRepair);
+  cli(root, ["expert-plan", task.id], { ...reviewPlan, revision: repaired.revision, reason: "Replace the checking plan" }, "INVALID_TRANSITION");
+  const stage = { phase: "review", actor: "reviewer", key: "verify", revision: repaired.revision, targetHead: head };
+  cli(root, ["expert-stage", task.id], { ...stage, state: "running" });
+  cli(root, ["expert-stage", task.id], { ...stage, state: "done", result: "Checked", outputs: { verification: "Both edits preserved" } });
   const continuation = { revision: repaired.revision, targetHead: head, continueRepair: true };
   cli(root, ["accept", task.id], continuation, "REVIEW_REQUIRED");
   assert.equal(git(root, "rev-parse", "HEAD"), head);
@@ -3998,7 +4091,9 @@ test("recurring child work deduplicates local and external occurrences and recov
   const localResult = join(root, "check-result.json");
   writeFileSync(localResult, JSON.stringify({ check: "local:check:file:event1", error: "Local check found a failure" }));
   const finding = JSON.parse(readFileSync(localResult, "utf8"));
-  const brief = { title: "Repair finding", description: "Fix the observed problem", criteria: ["Check succeeds"], basis: finding.error, key: finding.check };
+  const scope = { title: "Repair finding", description: "Fix the observed problem", criteria: ["Check succeeds"], basis: finding.error, key: finding.check };
+  cli(root, ["spawn-child", p.id], scope, "EXPERT_PLAN_REQUIRED");
+  const brief = plannedDraft(scope);
   cli(root, ["spawn-child", p.id], { ...brief, criteria: [] }, "INVALID_INPUT");
   const first = cli(root, ["spawn-child", p.id], brief);
   assert.equal(first.status, "ready"); assert.equal(first.launchRequested, true);
@@ -4063,7 +4158,7 @@ test("recurring children use independent Git worktrees and ordinary review modes
   const directories = new Set<string>();
   for (const mode of ["human", "reviewer"]) {
     cli(root, ["settings"], { reviewMode: mode, autoMode: false });
-    const child = cli(root, ["spawn-child", created.id], { key: mode, basis: "Local finding " + mode, title: "Repair " + mode, description: "Fix local finding", criteria: ["Finding resolved"] });
+    const child = cli(root, ["spawn-child", created.id], plannedDraft({ key: mode, basis: "Local finding " + mode, title: "Repair " + mode, description: "Fix local finding", criteria: ["Finding resolved"] }));
     const started = cli(root, ["start", child.id], { revision: child.revision });
     assert.ok(started.worktree); assert.notEqual(started.worktree, root); directories.add(started.worktree);
     const current = cli(root, ["show", child.id]);

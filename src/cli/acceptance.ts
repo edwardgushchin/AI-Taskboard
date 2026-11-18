@@ -6,7 +6,7 @@ import { dirname, join, relative } from "node:path";
 import { artifactFiles } from "./artifacts.ts";
 import { isolatedWorktreesDirectory, excludeBoard, git, inspectMergeTree, isAncestor, localBranch, mergeTree, requireRepository, resolveCommit, scheduleGitMaintenance, skipAutoMaintenance, worktrees } from "./git.ts";
 import type { Repository, Worktree } from "./git.ts";
-import { boardReviewMode, member, number, object, record, requireRevision, requireState, TaskboardError, text } from "./model.ts";
+import { taskReviewMode, taskReviewModeVersion, member, number, object, record, requireRevision, requireState, TaskboardError, text } from "./model.ts";
 import type { IntegrationMode, Task, TaskGit } from "./model.ts";
 import { checkPreserveChanges, describeSavedChanges, inspectLocalChanges, restoreSavedChanges, saveLocalChanges } from "./saved-changes.ts";
 import { directory, exists, onBoard, readJson, removeFile, writeJson } from "./storage.ts";
@@ -73,8 +73,8 @@ export function inspectReviewQueue(store: BoardStore, tasks: Task[]) {
   const entries = repo && tasks.some(task => !task.result?.noChanges) ? worktrees(repo.root) : [];
   const targets = new Map<string, { branch: string; head: string; path: string }>();
   const settings = store.index.settings;
-  const hybrid = boardReviewMode(settings) === "reviewer-human";
   return tasks.map(task => {
+    const hybrid = taskReviewMode(task, settings) === "reviewer-human";
     const { id, title, revision, history } = task;
     const submittedAt = history.findLast(event => event.action === "submit" && event.to === "review")?.at;
     const approval = currentReviewApproval(task, settings)?.reviewApproval;
@@ -145,8 +145,8 @@ export function verifyReviewDecision(store: BoardStore, task: Task, expectedHead
 
 export function inspectReview(store: BoardStore, task: Task, snapshot: ReturnType<typeof reviewDetails>,
   compact: boolean, previousTargetHead?: unknown, previousSubmitted?: unknown) {
-  const reviewMode = boardReviewMode(store.index.settings);
-  const reviewModeVersion = store.index.settings.reviewModeVersion;
+  const reviewMode = taskReviewMode(task, store.index.settings);
+  const reviewModeVersion = taskReviewModeVersion(task, store.index.settings);
   const approval = currentReviewApproval(task, store.index.settings);
   const approvalState = (head: string | null, stale: boolean) => ({
     reviewMode, reviewModeVersion,
@@ -194,7 +194,7 @@ export function inspectReview(store: BoardStore, task: Task, snapshot: ReturnTyp
     };
   }
   const retry = snapshot.pending ? parseIntent(snapshot.intent, task, target, submitted) : undefined;
-  const pendingModeChanged = retry && acceptanceModeChanged(store, retry);
+  const pendingModeChanged = retry && acceptanceModeChanged(store, task, retry);
   const local = checkoutPath ? inspectLocalChanges(checkoutPath, head) : undefined;
   return {
     ...summary, target, message: retry?.message ?? context.submission.message,
@@ -499,10 +499,10 @@ function preparedSquash(path: string, head: string, tree: string, status: string
   return Boolean(local?.indexDirty && exists(squashMessagePath(path)) && integrationTreeIsPrepared(path, head, tree, local));
 }
 
-function acceptanceModeChanged(store: BoardStore, intent: AcceptIntent): boolean {
-  const hybrid = boardReviewMode(store.index.settings) === "reviewer-human";
+function acceptanceModeChanged(store: BoardStore, task: Task, intent: AcceptIntent): boolean {
+  const hybrid = taskReviewMode(task, store.index.settings) === "reviewer-human";
   return (hybrid || intent.reviewModeVersion !== undefined) &&
-    (!hybrid || intent.reviewModeVersion !== store.index.settings.reviewModeVersion);
+    (!hybrid || intent.reviewModeVersion !== taskReviewModeVersion(task, store.index.settings));
 }
 
 function recoverInterruptedAcceptance(store: BoardStore, task: Task) {
@@ -512,7 +512,7 @@ function recoverInterruptedAcceptance(store: BoardStore, task: Task) {
   const repo = requireRepository(store.location.repository);
   const target = localBranch(repo, context.target);
   const intent = readIntent(pendingPath, task, target, context.submission.sha);
-  if (!intent || !acceptanceModeChanged(store, intent)) {
+  if (!intent || !acceptanceModeChanged(store, task, intent)) {
     throw new TaskboardError("PENDING_OPERATION", "There is no interrupted acceptance from a different review mode.");
   }
   const head = targetHead(repo, target);
@@ -607,7 +607,7 @@ export function cleanAcceptedTask(store: BoardStore, task: Task) {
 }
 
 function integrateTask(store: BoardStore, task: Task, input: Record<string, unknown>, userAcceptance: boolean): Task {
-  const reviewMode = boardReviewMode(store.index.settings);
+  const reviewMode = taskReviewMode(task, store.index.settings);
   const actor = input.actor === "manager" || input.actor === "reviewer" ? input.actor : undefined;
   const pendingPath = store.pendingPath(task.id);
   if (task.status === "done" && (task.git?.accepted || task.result?.noChanges)) {
@@ -616,7 +616,7 @@ function integrateTask(store: BoardStore, task: Task, input: Record<string, unkn
     return compact === task ? task : store.save(compact);
   }
   requireState(task, ["review"]);
-  if (input.reviewModeVersion !== undefined && input.reviewModeVersion !== store.index.settings.reviewModeVersion) {
+  if (input.reviewModeVersion !== undefined && input.reviewModeVersion !== taskReviewModeVersion(task, store.index.settings)) {
     throw new TaskboardError("REVIEW_MODE_CHANGED", "Open the current review before accepting.");
   }
   if (reviewMode === "reviewer-human") {
@@ -652,7 +652,7 @@ function integrateTask(store: BoardStore, task: Task, input: Record<string, unkn
   let intent = readIntent(pendingPath, task, target, submitted);
   const mode = input.integrationMode === undefined ? intent?.mode ?? store.index.settings.integrationMode :
     member(input.integrationMode, ["merge", "squash"], "integration mode");
-  if (head === intent?.parent && acceptanceModeChanged(store, intent)) {
+  if (head === intent?.parent && acceptanceModeChanged(store, task, intent)) {
     throw new TaskboardError("REVIEW_MODE_CHANGED", "Recover the interrupted acceptance before reviewing the task again.");
   }
   if (!intent || input.revision !== undefined) requireRevision(task, input.revision, !intent);
@@ -700,7 +700,7 @@ function integrateTask(store: BoardStore, task: Task, input: Record<string, unkn
       action: "accept", revision: task.revision, target, parent: head, submitted, tree,
       mode, message,
       ...(actor ? { actor } : {}),
-      ...(reviewMode === "reviewer-human" ? { reviewModeVersion: store.index.settings.reviewModeVersion } : {}),
+      ...(reviewMode === "reviewer-human" ? { reviewModeVersion: taskReviewModeVersion(task, store.index.settings) } : {}),
     };
   } else {
     if (input.message !== undefined && conventionalMessage(input.message, task.id) !== intent.message) {
@@ -793,8 +793,8 @@ export async function applyDesktopAcceptance(location: BoardLocation, id: string
     const accept = () => onBoard(location, store => {
       if (window.isDestroyed() || !stillCurrent()) throw cancel();
       const task = store.card(id);
-      if (task.status !== "done" && (boardReviewMode(store.index.settings) !== "reviewer-human" ||
-          store.index.settings.reviewModeVersion !== reviewModeVersion)) {
+      if (task.status !== "done" && (taskReviewMode(task, store.index.settings) !== "reviewer-human" ||
+          taskReviewModeVersion(task, store.index.settings) !== reviewModeVersion)) {
         throw new TaskboardError("REVIEW_MODE_CHANGED", "Open the current review before accepting.");
       }
       return executeAcceptance(store, task, decision, true);
@@ -832,21 +832,23 @@ function executeAcceptance(store: BoardStore, task: Task, input: Record<string, 
     return store.save(sendTaskMessage(record({ ...task, acceptanceRepair: { ...task.acceptanceRepair, phase: "failed", reason } },
       "acceptance-failed", "agent"), { kind: "question", text: reason }, "agent"));
   }
-  const mode = boardReviewMode(store.index.settings);
+  const mode = taskReviewMode(task, store.index.settings);
   const plan = task.expertTeam?.review;
+  const managerReview = input.actor === "manager" && mode === "manager";
   const requiresAssignedSkills = mode !== "human" && (plan?.skills?.length || plan?.stages.some(stage => stage.skills?.length));
-  if (task.status === "review" && !task.acceptanceRepair && (requiresAssignedSkills ||
-      (input.actor === "manager" && mode === "manager" && (store.index.settings.requireExpertPlans || plan?.stages.length)))) {
-    if (store.index.settings.requireExpertPlans) requireExpertPlan(task, "review");
-    requireExpertResults(task, "review", verifyReviewDecision(store, task, input.targetHead ?? null));
+  if (task.status === "review" && !task.acceptanceRepair) {
+    if (managerReview) requireExpertPlan(task, "review");
+    if (requiresAssignedSkills || (managerReview && plan?.stages.length)) {
+      requireExpertResults(task, "review", verifyReviewDecision(store, task, input.targetHead ?? null));
+    }
   }
 
   if (task.acceptanceRepair) {
     requireRevision(task, input.revision, true);
     if (input.continueRepair !== true) return task;
     const repairVersion = task.acceptanceRepair.reviewModeVersion;
-    const hybrid = boardReviewMode(store.index.settings) === "reviewer-human";
-    if ((hybrid || repairVersion !== undefined) && (!hybrid || repairVersion !== store.index.settings.reviewModeVersion)) {
+    const hybrid = taskReviewMode(task, store.index.settings) === "reviewer-human";
+    if ((hybrid || repairVersion !== undefined) && (!hybrid || repairVersion !== taskReviewModeVersion(task, store.index.settings))) {
       throw new TaskboardError("REVIEW_MODE_CHANGED", "Cancel acceptance and review the submission under the current mode.");
     }
     if (task.acceptanceRepair.phase !== "checking") throw new TaskboardError("REPAIR_UNFINISHED", "Conflict repair has not passed its checks.");
@@ -863,7 +865,7 @@ function executeAcceptance(store: BoardStore, task: Task, input: Record<string, 
     input = { actor: "user", revision: task.revision, targetHead: input.targetHead,
       reviewModeVersion: repairVersion, message: task.acceptanceRepair.message };
   } else if (input.continueRepair === true) throw new TaskboardError("REPAIR_CANCELLED", "Acceptance was cancelled.");
-  if (input.autoMode === true && (!store.index.settings.autoMode || boardReviewMode(store.index.settings) !== "reviewer")) {
+  if (input.autoMode === true && (!store.index.settings.autoMode || taskReviewMode(task, store.index.settings) !== "reviewer")) {
     throw new TaskboardError("AUTO_MODE_DISABLED", "Automatic integration is disabled.");
   }
   if (input.autoMode === true && currentReviewApproval(task, store.index.settings)?.reviewApproval?.targetHead !== input.targetHead) {
@@ -878,7 +880,7 @@ function executeAcceptance(store: BoardStore, task: Task, input: Record<string, 
       const exhausted = previous && previous.attempts >= 2;
       const requested = record({ ...task, acceptanceRepair: {
         phase: exhausted ? "failed" as const : "queued" as const, attempts: previous?.attempts ?? 0,
-        reviewModeVersion: boardReviewMode(store.index.settings) === "reviewer-human" ? store.index.settings.reviewModeVersion : undefined,
+        reviewModeVersion: taskReviewMode(task, store.index.settings) === "reviewer-human" ? taskReviewModeVersion(task, store.index.settings) : undefined,
         targetHead: review.targetHead!, message: text(input.message, "message", true),
         ...(exhausted ? { reason: "Repeated merge conflict; a decision is required." } : {}),
       } }, "acceptance-requested", "user");

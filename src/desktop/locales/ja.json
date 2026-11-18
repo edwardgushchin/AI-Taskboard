@@ -1196,7 +1196,6 @@
   "experts.team": "専門家チーム",
   "experts.add_stage": "作業工程を追加",
   "experts.stage_title": "工程名",
-  "experts.require_plans": "タスクを開始する前に専門家の計画を必須にする",
   "experts.description": "説明",
   "experts.inputs": "入力 一行に一件",
   "experts.outputs": "成果物 一行に一件",

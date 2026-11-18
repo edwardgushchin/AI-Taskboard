@@ -852,7 +852,7 @@ function renderAgentRunStatus(target, task) {
     if (!spinner.parentNode) target.replaceChildren(spinner);
   } else {
     const repair = frame.board?.tasks.find(card => card.id === task.id)?.acceptanceRepair;
-    const hybridReview = task.status === "review" && frame.board?.settings.reviewMode === "reviewer-human";
+    const hybridReview = task.status === "review" && (task.reviewModeOverride?.mode ?? frame.board?.settings.reviewMode) === "reviewer-human";
     const text = repair && !(hybridReview && repair.phase === "checking" && !task.reviewApproved) ? ({ queued: t("ui.waiting_for_a_reviewer_slot_8918dd95"), running: t("ui.resolving_acceptance_conflict"), checking: t("ui.accepting_task_39473c27"), failed: repair.reason }[repair.phase]) : frame.waitingTasks?.includes(task.id) ?
       (task.mergeRepair || frame.board?.tasks.find(card => card.id === task.id)?.mergeRepair
         ? t("ui.waiting_for_a_reviewer_slot_8918dd95")
@@ -922,7 +922,7 @@ function card(task) {
     task.tags?.map(name => boardTags.get(tagKey(name)) ?? { name }), cover?.file,
     frame.runningTasks?.includes(task.id) ?? false, frame.waitingTasks?.includes(task.id) ?? false,
     frame.reviewingTasks?.[task.id], task.status, task.mergeRepair, task.acceptanceRepair, Boolean(task.codexThreadId),
-    frame.board?.settings.reviewMode, task.reviewApproved,
+    task.reviewModeOverride?.mode ?? frame.board?.settings.reviewMode, task.reviewApproved,
     task.unfinishedDependencies, task.blocked, task.subtasks?.map(entry => entry.done),
     task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule,
     manualColumns().find(c => c.id === task.status)]);
@@ -4871,8 +4871,6 @@ function boardSettings() {
       options: [["merge", "Merge"], ["squash", "Squash"]] },
     { name: "showCardPreviews", label: () => (t("ui.show_previews_on_board_cards_a3f2af17")),
       type: "checkbox", value: current.showCardPreviews !== false },
-    { name: "requireExpertPlans", label: () => t("experts.require_plans"),
-      type: "checkbox", value: current.requireExpertPlans === true },
     { name: "reviewMode", label: () => (t("ui.who_reviews_tasks_3636b553")),
       value: reviewMode, options: [
         ["human", t("ui.human_56f4a79e")],
@@ -4907,7 +4905,6 @@ function boardSettings() {
       ...(values.name.trim() !== (current.name ?? "") ? { name: values.name } : {}),
       archiveAfterDays: values.archive === "" ? null : Number(values.archive), integrationMode: values.mode,
       showCardPreviews: values.showCardPreviews,
-      ...(values.requireExpertPlans !== Boolean(current.requireExpertPlans) ? { requireExpertPlans: values.requireExpertPlans } : {}),
       ...(values.reviewMode !== reviewMode ? { reviewMode: values.reviewMode } : {}),
       ...(roles.some(([role]) => taskLimits[role] !== current.taskLimits?.[role]) ? { taskLimits } : {}),
       ...agents,
@@ -5565,13 +5562,16 @@ function update(next) {
       else void showTask(current.id);
     }
   }
-  if (sheetKind === "review" && sheet.open && taskInSheet && !taskInSheet.acceptanceRepair &&
-      (previousBoard?.settings.reviewMode === "reviewer-human" || frame.board?.settings.reviewMode === "reviewer-human")) {
+  if (sheetKind === "review" && sheet.open && taskInSheet && !taskInSheet.acceptanceRepair) {
     const current = frame.board?.tasks.find(task => task.id === taskInSheet.id);
     const previous = previousBoard?.tasks.find(task => task.id === current?.id);
-    if (current && (current.revision !== previous?.revision || current.reviewApproved !== previous?.reviewApproved ||
-        current.reviewTargetHead !== previous?.reviewTargetHead ||
-        previousBoard?.settings.reviewModeVersion !== frame.board?.settings.reviewModeVersion)) {
+    const previousMode = previous?.reviewModeOverride?.mode ?? previousBoard?.settings.reviewMode;
+    const currentMode = current?.reviewModeOverride?.mode ?? frame.board?.settings.reviewMode;
+    const previousVersion = previous?.reviewModeOverride?.version ?? previousBoard?.settings.reviewModeVersion;
+    const currentVersion = current?.reviewModeOverride?.version ?? frame.board?.settings.reviewModeVersion;
+    if (current && (previousMode !== currentMode || ((previousMode === "reviewer-human" || currentMode === "reviewer-human") &&
+        (current.revision !== previous?.revision || current.reviewApproved !== previous?.reviewApproved ||
+         current.reviewTargetHead !== previous?.reviewTargetHead || previousVersion !== currentVersion)))) {
       if (current.status === "review") void showReview({ ...taskInSheet, ...current }, body.querySelector("[name=message]")?.value);
       else void showTask(current.id);
     }
@@ -5587,7 +5587,6 @@ function update(next) {
     const archived = frame.board?.archived.find(entry => entry.id === taskInSheet.id);
     const cleaned = taskInSheet.cleanupAvailable && frame.board?.cleanedTasks?.includes(taskInSheet.id);
     if (Boolean(byId("task-stop-waiting")) !== Boolean(frame.waitingTasks?.includes(taskInSheet.id)) ||
-        previousBoard?.settings.requireExpertPlans !== frame.board?.settings.requireExpertPlans ||
         previousBoard?.settings.reviewMode !== frame.board?.settings.reviewMode ||
         JSON.stringify(previousBoard?.settings.manualColumns) !== JSON.stringify(frame.board?.settings.manualColumns) || cleaned || (task && (task.revision !== taskInSheet.revision ||
         (task.historyLength ?? task.history?.length) !== taskInSheet.history.length ||

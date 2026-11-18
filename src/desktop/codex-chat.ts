@@ -9,7 +9,7 @@ import type { AgentControl, RpcMessage } from "./codex-rpc.ts";
 import { configuredCodex, executorFullAccess, setTaskExecutorAccess } from "./codex.ts";
 import type { ManagerAccess } from "./codex.ts";
 import { codexThreadPattern, taskIdPattern } from "../cli/model.ts";
-import { chatTools } from "./chat-actions.ts";
+import { chatTools, reviewModeInstruction } from "./chat-actions.ts";
 import type { BoardChange } from "./board-actions.ts";
 import { boardToolContent, withBoardMcp } from "./board-mcp.ts";
 import { openComputerUse } from "./computer-use.ts";
@@ -256,11 +256,13 @@ export function replyToTask(
   onActivity?: (items: RunActivity[]) => void,
   mode?: "initial",
   reviewCard = false,
+  closedCard = false,
 ) {
   const worklog = boardWorklog(project, "executor", taskId);
   const manual = readBoardSettings(locateBoard(project)).boardType === "manual";
   const options = {
-    settings, tools: mode === "initial" ? [] : chatTools.filter(tool => tool.name !== "task_request_changes" || (reviewCard && !manual)), webSearch: true,
+    settings, tools: mode === "initial" ? [] : chatTools.filter(tool => (tool.name !== "task_request_changes" || (reviewCard && !manual)) &&
+      (tool.name !== "task_set_review_mode" || (!manual && !closedCard))), webSearch: true,
     instructions: boardAgentInstructions("executor", [
       "You are the agent in an AI Taskboard task discussion. Answer the latest user message in their language.",
       mode === "initial" ? "Start the discussion of the saved draft. There is no latest user message. Read all card fields, discussion history, dependency context and milestone. Inspect applicable project instructions and relevant files in the project without editing or running project tasks. Inspect every attachment, including images and verified linked sources, using its unique ID and supplied path. Report inaccessible or changed sources by exact filename and continue. Ask concrete questions only about material gaps not resolved by these sources. If the draft is sufficiently specified, briefly say so. Do not update the card, approve, start or implement the task. Write the reply in the language of the draft." :
@@ -272,6 +274,7 @@ export function replyToTask(
       "Merge new information into the appropriate fields. Preserve existing requirements, references and list entries unless the user clearly corrects them. If statements conflict or allow materially different interpretations, ask a specific question before saving the disputed change.",
       "For a review card, use task_request_changes when the user requests correction or their feedback establishes a confirmed defect. Include every necessary correction from the discussion in reason. This acts only on this card and preserves its history and worktree. No separate manager confirmation is needed. Other status changes and acceptance remain with the user. Never accept on their behalf.",
       "Confirm a return only from a successful operation result. executorState waiting_for_discussion means the return is queued and waits for this discussion to end and an executor slot to become available. Finish your reply after the handoff. On an error report it without claiming a transition; refresh the card before retrying a revision conflict.",
+      ...(!manual && mode !== "initial" ? [reviewModeInstruction, "In this chat the tool applies only to the current card."] : []),
       "Keep submitted and completed requirements intact.",
       "After a successful write, briefly describe what changed. If the information is already recorded, leave the card as it is. If task_update fails, report the error and do not claim an update. On revision conflict, do not replay stale field replacements; ask the user to refresh and retry.",
       "Use github_read for GitHub checks, including run-failed-log for Actions logs. The board uses its host login. Try the tool before asking the user to copy a log.",

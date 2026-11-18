@@ -201,6 +201,7 @@ export interface ExpertPhase {
 export type ArtifactKind = "png" | "text";
 
 export interface Task {
+  reviewModeOverride?: { mode: ReviewMode; version: number };
   draftDiscussion?: { phase: "queued" | "running" } | { phase: "failed"; reason: string };
   expertId?: string;
   expertTeam?: { work?: ExpertPhase; review?: ExpertPhase };
@@ -249,7 +250,6 @@ export interface Task {
 
 export interface BoardSettings {
   boardType?: "agent" | "manual";
-  requireExpertPlans?: boolean;
   manualColumns?: ManualColumn[];
   name?: string;
   archiveAfterDays: number | null;
@@ -276,6 +276,19 @@ export const reviewVerifier = { model: "gpt-6.1-sol", effort: "xhigh" } satisfie
 
 export function usesIndependentReviewer(mode: ReviewMode): boolean {
   return mode === "reviewer" || mode === "reviewer-human";
+}
+
+export function taskReviewMode(task: Pick<Task, "reviewModeOverride">, settings: BoardSettings): ReviewMode {
+  return task.reviewModeOverride?.mode ?? boardReviewMode(settings);
+}
+
+export function taskReviewModeVersion(task: Pick<Task, "reviewModeOverride">, settings: Pick<BoardSettings, "reviewModeVersion">) {
+  return task.reviewModeOverride?.version ?? settings.reviewModeVersion;
+}
+
+export function reviewsAcceptanceRepair(task: Pick<Task, "acceptanceRepair" | "reviewModeOverride">, settings: BoardSettings): boolean {
+  return taskReviewMode(task, settings) === "reviewer-human" && task.acceptanceRepair?.phase === "checking" &&
+    task.acceptanceRepair.reviewModeVersion === taskReviewModeVersion(task, settings);
 }
 
 export function boardReviewMode(settings: Pick<BoardSettings, "reviewMode" | "autoReview">): ReviewMode {

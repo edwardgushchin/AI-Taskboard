@@ -1,3 +1,4 @@
+import { plannedDraft } from "./fixtures/planned-draft.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync, statSync, utimesSync } from "node:fs";
@@ -251,8 +252,8 @@ test("CLI persists idempotent reports per task, validates counters and preserves
   assert.equal(cli(["init"]).project, root);
   assert.deepEqual(cli(["manager-usage"]), { reports: 0, total: null, incomplete: true, byModel: [] });
   assert.equal(cli(["project-usage"]).total, null);
-  const first = cli(["create"], { title: "First task" });
-  const second = cli(["create"], { title: "Other task" });
+  const first = cli(["create"], plannedDraft({ title: "First task" }));
+  const second = cli(["create"], plannedDraft({ title: "Other task" }));
   const record = { ...counts(100, 20, 50, 10), threadId: "root", turnId: "turn", model: "model-a", incomplete: false };
   const report: TokenUsageReport = { id: "run-1", sequence: 1, records: [record] };
   const manager = { ...report, id: "00000000-0000-0000-0000-000000000001" };

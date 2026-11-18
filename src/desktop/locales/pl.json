@@ -1212,7 +1212,6 @@
   "experts.team": "Zespół ekspertów",
   "experts.add_stage": "Dodaj etap pracy",
   "experts.stage_title": "Nazwa etapu",
-  "experts.require_plans": "Wymagaj planów ekspertów przed rozpoczęciem zadań",
   "experts.description": "Opis",
   "experts.inputs": "Dane wejściowe, jeden wpis w wierszu",
   "experts.outputs": "Wyniki, jeden wpis w wierszu",

@@ -1196,7 +1196,6 @@
   "experts.team": "Gruppo di esperti",
   "experts.add_stage": "Aggiungi fase di lavoro",
   "experts.stage_title": "Titolo della fase",
-  "experts.require_plans": "Richiedi un piano degli esperti prima di avviare le attività",
   "experts.description": "Descrizione",
   "experts.inputs": "Input, uno per riga",
   "experts.outputs": "Risultati, uno per riga",

@@ -282,7 +282,6 @@ function readIndex(path: string): BoardIndex {
       (index.settings.autoReview !== undefined && typeof index.settings.autoReview !== "boolean") ||
       (index.settings.reviewMode !== undefined && !reviewModes.some(mode => mode === (index.settings as Record<string, unknown>).reviewMode)) ||
       (index.settings.taskLimits !== undefined && !validAgentLimitOverrides(index.settings.taskLimits)) ||
-      (index.settings.requireExpertPlans !== undefined && typeof index.settings.requireExpertPlans !== "boolean") ||
       !boardAgentRoles.every(role => validRoleSettings((index.settings as Record<string, unknown>)[role])) ||
       !(index.settings.archiveAfterDays === null ||
         (Number.isSafeInteger(index.settings.archiveAfterDays) && Number(index.settings.archiveAfterDays) >= 0))) {
@@ -329,7 +328,7 @@ function readIndex(path: string): BoardIndex {
       return { name: tag.name, color: color.toUpperCase() };
     });
   }
-  const { agentLimits: _legacyLimits, ...settings } = index.settings;
+  const { agentLimits: _legacyLimits, requireExpertPlans: _legacyExpertPlans, ...settings } = index.settings;
   const manager = settings.manager;
   if (isRecord(manager) && manager.model === "gpt-6.1-sol" && manager.effort === "medium") {
     settings.manager = defaultBoardAgents.manager;
@@ -349,6 +348,9 @@ export function validateCard(value: unknown, id: string): Task {
         typeof value.milestone.title !== "string" || !value.milestone.title.trim())) ||
       (value.dependencies !== undefined && (!Array.isArray(value.dependencies) ||
         value.dependencies.some(entry => typeof entry !== "string" || !taskIdPattern.test(entry)))) ||
+      (value.reviewModeOverride !== undefined && (!isRecord(value.reviewModeOverride) ||
+        !reviewModes.some(mode => mode === (value.reviewModeOverride as Record<string, unknown>).mode) ||
+        !Number.isSafeInteger(value.reviewModeOverride.version) || Number(value.reviewModeOverride.version) < 1)) ||
       (value.dueDate !== undefined && !validDueDate(value.dueDate)) ||
       (value.schedule !== undefined && !validTaskSchedule(value.schedule)) ||
       (value.toolGrants !== undefined && (!Array.isArray(value.toolGrants) || value.toolGrants.length > 256 ||
@@ -418,6 +420,21 @@ export function validateCard(value: unknown, id: string): Task {
   return task;
 }
 
+function migrateImplicitWorkflow(task: Task): boolean {
+  let changed = false;
+  for (const plan of [task.expertTeam?.work, task.expertTeam?.review]) {
+    if (!plan) continue;
+    for (const scope of [plan, ...(plan.stages ?? [])]) {
+      if (!Array.isArray(scope.skills) || !scope.skills.includes("workflow") || Object.hasOwn(scope.skillChecks ?? {}, "workflow")) continue;
+      scope.skills = scope.skills.filter(id => id !== "workflow");
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+const lockedStores = new WeakSet<BoardStore>();
+
 export class BoardStore {
   location: BoardLocation;
   index: BoardIndex;
@@ -439,7 +456,10 @@ export class BoardStore {
       throw new TaskboardError("TASK_NOT_FOUND", "Unknown task " + id + ".", { id });
     }
     try {
-      return this.readCardFile(id);
+      const task = this.readCardFile(id);
+      // This storage upgrade leaves the plan epoch and card revision intact.
+      if (lockedStores.has(this) && migrateImplicitWorkflow(task)) this.save(task);
+      return task;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         throw new TaskboardError("CORRUPT_STORAGE", "The index points to a missing task file.", { id });
@@ -596,7 +616,13 @@ export function onBoard<T>(location: BoardLocation, callback: (store: BoardStore
   requireBoard(location);
   return withLock(location.directory, lockWaitMs => {
     finishTestRecovery(location);
-    return callback(new BoardStore(location), lockWaitMs);
+    const store = new BoardStore(location);
+    lockedStores.add(store);
+    try {
+      return callback(store, lockWaitMs);
+    } finally {
+      lockedStores.delete(store);
+    }
   }, timeoutMs);
 }
 

@@ -15,6 +15,16 @@ const string = { type: "string" };
 const taskWaitSeconds = 90;
 export const goalTaskWaitSeconds = 300;
 const taskReference = { id: { ...string, pattern: taskIdPattern.source }, revision: { type: "integer", minimum: 1 } };
+const expertTeam = {
+  type: "object", additionalProperties: false,
+  properties: Object.fromEntries(["work", "review"].map(phase => [phase, {
+    type: "object", additionalProperties: false,
+    properties: { lead: { type: "string", minLength: 1 }, reason: expertActions.expert_plan.properties.reason,
+      skills: expertActions.expert_plan.properties.skills, skillChecks: expertActions.expert_plan.properties.skillChecks,
+      stages: expertActions.expert_plan.properties.stages },
+    required: ["lead", "reason", "stages"],
+  }])),
+};
 const reason = { ...string, minLength: 1 };
 const messageReference = { id: taskReference.id, through: { type: "integer", minimum: 1 } };
 const attachmentIds = { type: "array", items: { type: "integer", minimum: 1 }, uniqueItems: true };
@@ -81,13 +91,8 @@ const actions = {
       replyTo: { type: "integer", minimum: 1 } }, required: ["id", "text"] },
   task_show: { description: "Read a task's current details and revision. For completed Git tasks, acceptedTreeMatchesSubmission compares the recorded accepted and submitted commits. Request up to 20 history entries when needed. Pass the oldest returned sequence as beforeSequence for the previous page. Detailed run logs are in the executor chat.",
     properties: { id: taskReference.id, historyLimit: { type: "integer", minimum: 1, maximum: 20 }, beforeSequence: { type: "integer", minimum: 1 } }, required: ["id"] },
-  task_create: { description: "Create an actionable draft for one independent deliverable after checking the current board and reading plausible matches with task_show. On agent boards, include the assigned expert plan in expertTeam in the same call. A board that requires expert plans rejects incomplete drafts. Select attachments from the latest message by numeric IDs.",
-    properties: { ...managerTaskFields, attachmentIds, expertTeam: { type: "object", additionalProperties: false,
-      properties: Object.fromEntries(["work", "review"].map(phase => [phase, { type: "object", additionalProperties: false,
-        properties: { lead: { type: "string", minLength: 1 }, reason: expertActions.expert_plan.properties.reason,
-          skills: expertActions.expert_plan.properties.skills, skillChecks: expertActions.expert_plan.properties.skillChecks,
-          stages: expertActions.expert_plan.properties.stages },
-        required: ["lead", "reason", "stages"] }])) } }, required: ["title"] },
+  task_create: { description: "Create an actionable draft for one independent deliverable after checking the current board and reading plausible matches with task_show. On agent boards, include the assigned expert plan in expertTeam in the same call. Agent boards reject drafts without plans for the applicable phases. Select attachments from the latest message by numeric IDs.",
+    properties: { ...managerTaskFields, attachmentIds, expertTeam }, required: ["title"] },
   task_update: { description: "Edit an existing task without changing its status. To edit tags on a completed, cancelled, or archived task, send only id, revision, note, and tags. Lists replace existing lists. Propose requirement changes in chat if applying them would reopen a submitted task.",
     properties: { ...taskReference, ...managerTaskFields,
       schedulePaused: { type: "boolean", description: "Pause (true) or resume (false) an existing recurring schedule. Keeps the rule, task status and running executor. Resume sets the next future run; manual starts keep the pause." },
@@ -174,7 +179,7 @@ export const reviewerTools = tools.filter(tool => ["task_review_diff", "task_rev
 
 export const autoReviewTaskTools = new Set(["task_review", "task_review_diff", "task_review_artifact", "task_accept", "task_request_changes", "task_return_to_draft", "expert_stage", "expert_verify_skills", "team_inbox", "team_message", "team_findings"]);
 export const autoReviewReadTools = new Set(["board_list", "task_show", "project_git", "project_path", "project_sha256", "expert_list", "expert_context", "expert_skill"]);
-const reviewInstructions = "Follow reviewMode from task_review. In reviewer-human mode, the independent reviewer verifies submissions and returns findings. After approval leave acceptance to the user. Carry out an explicit user request to return work with task_request_changes. In human mode, acceptance belongs to the user; execute an explicit user request to return work with task_request_changes. In reviewer mode, the reviewer handles verification and returns confirmed defects to the executor. After reviewerApproval, carry the task through integration without a separate user decision for ordinary integration. Read task_review for the current revision, targetHead and target changes since approval. Check affected criteria and merge readiness if the target advanced. If a Git conflict prevents integration, use task_start with resolveConflicts: true and the current revision on the same card. Have the executor resolve conflicts, run the applicable checks and resubmit; obtain reviewer approval for the updated submission, then accept it with the current revision and targetHead. Continue independent work while repair or review is running. If the result is no longer needed, use task_cancel with a reason. Use task_wait with reviewIds if you need to wait for an outcome. In manager mode, independently check each criterion using relevant diffs, saved reports or read-only project data. Return a task only for a concrete material issue with actionable feedback. Accept only with evidence for every criterion and no material issue remaining. A clean merge or the executor's claim alone is insufficient. If a criterion calls for subjective approval or cannot be verified, leave the task in review and name the gap. Use the current revision and targetHead.";
+const reviewInstructions = "Follow the effective mode of each card from task_review. In reviewer-human mode, the independent reviewer verifies submissions and returns findings. After approval leave acceptance to the user. Carry out an explicit user request to return work with task_request_changes. In human mode, acceptance belongs to the user; execute an explicit user request to return work with task_request_changes. In reviewer mode, the reviewer handles verification and returns confirmed defects to the executor. After reviewerApproval, carry the task through integration without a separate user decision for ordinary integration. Read task_review for the current revision, targetHead and target changes since approval. Check affected criteria and merge readiness if the target advanced. If a Git conflict prevents integration, use task_start with resolveConflicts: true and the current revision on the same card. Have the executor resolve conflicts, run the applicable checks and resubmit; obtain reviewer approval for the updated submission, then accept it with the current revision and targetHead. Continue independent work while repair or review is running. If the result is no longer needed, use task_cancel with a reason. Use task_wait with reviewIds if you need to wait for an outcome. In manager mode, independently check each criterion using relevant diffs, saved reports or read-only project data. Return a task only for a concrete material issue with actionable feedback. Accept only with evidence for every criterion and no material issue remaining. A clean merge or the executor's claim alone is insufficient. If a criterion calls for subjective approval or cannot be verified, leave the task in review and name the gap. Use the current revision and targetHead.";
 const evidenceInstructions = "Open each required artifact in result.artifactEvidence with task_review_artifact, passing its exact source, SHA-256 and kind as format. Assess screenshots and check reports against the corresponding criteria. Before accepting, check whether the project or task needs any evidence after acceptance. The board can remove temporary artifact copies and ignored worktree files during acceptance. If evidence only exists there, verify the paths and checksums of a durable copy or use a reproduction recipe when it suffices. Continue reviewing other tasks while material is missing.";
 export const autoReviewInstructions = [
   leadInstructions + " Read reviewTeam from task_review for your assigned review plan and lead specialization.",
@@ -199,7 +204,7 @@ export const boardInstructions = [
   "Use board_list with activeOnly: true when you only need the open queue. Use the revision already returned by a board tool for the next action on that card. Use task_show when you need card details or after a revision conflict. task_review provides the revision for acceptance and requesting changes.",
   "Decide whether a board change is useful from the user's feedback, decisions, and the conversation. Act on clear implications without waiting for a direct command or confirmation. Answer informational questions and discuss tentative options without changing the board unless the conversation establishes a reason to act.",
   "Use task_approve when a draft has clear scope and acceptance criteria and the conversation or active plan establishes that work should proceed. While a goal is paused, continue handling the user's messages and the relevant cards, including approving and starting tasks when appropriate. Resume the goal only when the user asks.",
-  "For each new agent-board draft, choose work and review leads and stage specialists with expert_list and expert_context. Supply skillChecks with the specific action for every explicitly assigned skill in skills. The general workflow is delivered implicitly. Pass expertTeam in task_create with a concrete reason for each composition. For an existing draft, fill missing phases with expert_plan and reread task_show. Complete scope, criteria and assignments before approval.",
+  "For each new agent-board draft, choose a work lead and stage specialists with expert_list and expert_context. Choose a review lead for a task without a schedule in manager, reviewer, and reviewer-human modes. Supply skillChecks with the specific action for every explicitly assigned skill in skills. The general workflow is delivered implicitly. Pass expertTeam in task_create with a concrete reason for each composition. For an existing draft, fill missing phases with expert_plan and reread task_show. Complete scope, criteria and assignments before approval.",
   "When the task creates a new public-facing offer, landing page, or positioning, plan a proportionate comparison of competitors or comparable alternatives before UX and copy. Assign the comparison to a relevant specialist, request cited public sources and actionable findings, and make design and copy depend on those findings. If the market is unspecified, label comparable examples as such and state the assumption. Skip this step for routine fixes unless the task calls for it.",
   "After task_create succeeds on an agent board, the app starts a read-only discussion in the saved draft's chat. Tell the user where to find the discussion. Approval and execution continue through their own board actions.",
   "Before every task_create, independently check the current board with board_list and identify semantic candidates by the requested outcome, not just titles, shared words or files. Include open tasks and relevant recently completed tasks (omit activeOnly to find closed candidates). Read each plausible candidate's full description and acceptance criteria with task_show before deciding. Reuse current details already read while their revisions remain unchanged; refresh after changes or session continuation. Do this in ordinary dialogue, new and resumed sessions, and every goal turn that creates work, without a user reminder. Do not reread the entire project history on every message.",
@@ -356,7 +361,7 @@ async function waitForTasks(project: string, ids: string[], reviewIds: string[],
 
 export function boardActions(project: string, attachments: { path: string; name: string; link?: import("../cli/attachment-links.ts").FileLink }[],
   changes: BoardChange[], signal: AbortSignal, startTask: (id: string, revision: number, options?: {
-    reason?: string; targetHead?: string | null; reviewMode?: ReviewMode; newThread?: boolean; resolveConflicts?: boolean;
+    reason?: string; targetHead?: string | null; reviewMode?: ReviewMode; reviewModeVersion?: number; newThread?: boolean; resolveConflicts?: boolean;
   }) => Promise<CliReply<TaskLink>>,
   activeGoal: () => { threadId: string; objective: string; signal: AbortSignal } | undefined,
   isTaskRunning: (id: string) => boolean, observe: ObserveTasks, notifyExecutor: (id: string, sequence: number) => Promise<boolean>,
@@ -364,7 +369,7 @@ export function boardActions(project: string, attachments: { path: string; name:
   runReview?: ReviewRunner, reviewReports = new Map<string, ReviewedSubmission>(),
   returnToDraft?: (id: string, revision: number) => Promise<CliReply<Task>>) {
   const reviewSnapshots = new Map<string, Pick<TaskReview, "revision" | "targetHead" | "artifacts"> & {
-    mode: ReviewMode; criteriaCount: number; reviewerApproved: boolean;
+    mode: ReviewMode; reviewModeVersion?: number; criteriaCount: number; reviewerApproved: boolean;
   }>();
   const deliverInbox = (messages: Inbox, replay = false) => summarizeInbox(messages.filter(({ id, sequence }) => {
     const key = id + "\0" + sequence;
@@ -611,7 +616,7 @@ export function boardActions(project: string, attachments: { path: string; name:
         const { revision, targetHead, criteria, description, submitted, mergeBase } = data;
         reviewSnapshots.delete(id);
         if (!data.stale) reviewSnapshots.set(id, {
-          revision, targetHead, artifacts: data.artifacts, mode: data.reviewMode, criteriaCount: criteria.length,
+          revision, targetHead, artifacts: data.artifacts, mode: data.reviewMode, reviewModeVersion: data.reviewModeVersion, criteriaCount: criteria.length,
           reviewerApproved: Boolean(data.reviewerApproval),
         });
         if (!runReview || !usesIndependentReviewer(data.reviewMode) || data.stale || data.reviewerApproval?.targetHead === targetHead) {
@@ -698,17 +703,16 @@ export function boardActions(project: string, attachments: { path: string; name:
           "Continue other work and include this executor in the next group wait.");
         waitSignal.throwIfAborted();
         if (action === "task_accept" || action === "task_request_changes") {
-          const settings = await callCli<BoardSettings>(project, ["settings"]);
-          if (!settings.ok) return settings;
-          const mode = boardReviewMode(settings.data);
-          if ((mode === "human" || mode === "reviewer-human") && action === "task_accept") return cliFailure("AUTO_REVIEW_DISABLED", "Leave the decision to the user.");
           const snapshot = reviewSnapshots.get(id);
-          if (!snapshot || snapshot.mode !== mode || snapshot.revision !== fields.revision ||
+          if (!snapshot || snapshot.revision !== fields.revision ||
               (action === "task_accept" && snapshot.targetHead !== fields.targetHead)) {
             return cliFailure("REVIEW_REQUIRED", "Use task_review for the current review mode, revision and target HEAD.");
           }
           waitSignal.throwIfAborted();
+          const { mode } = snapshot;
+          if ((mode === "human" || mode === "reviewer-human") && action === "task_accept") return cliFailure("AUTO_REVIEW_DISABLED", "Leave the decision to the user.");
           fields.reviewMode = mode;
+          fields.reviewModeVersion = snapshot.reviewModeVersion;
           if (action === "task_accept") {
             const { evidence } = fields;
             if (mode === "reviewer" && !snapshot.reviewerApproved) {
@@ -732,7 +736,7 @@ export function boardActions(project: string, attachments: { path: string; name:
         action === "task_start" || action === "task_request_changes" ?
         await startTask(id, Number(fields.revision), action === "task_request_changes" ? {
           reason: String(fields.reason), targetHead: fields.targetHead as string | null | undefined,
-          reviewMode: fields.reviewMode as ReviewMode | undefined,
+          reviewMode: fields.reviewMode as ReviewMode | undefined, reviewModeVersion: fields.reviewModeVersion as number | undefined,
         } : { newThread: fields.newThread === true, resolveConflicts: fields.resolveConflicts === true }) :
         await callCli<Task>(project, [command, id], {
           ...fields, actor: "manager", ...(action === "task_block" ? { allowUnstarted: true } : {}),
@@ -754,10 +758,10 @@ export function boardActions(project: string, attachments: { path: string; name:
 // Scoped to the current recurring executor by codex-run, never a manager action.
 export const recurringChildTool = {
   name: "task_spawn_child",
-  description: "Create and request launch of independent work only when the recurring parent's approved brief authorizes it. First list the board and read plausible semantic matches. Reuse existingId for matching work. Keep key stable across retries and passes for the same occurrence; use a new key for a new independent event. Local keys need no URL. Untrusted findings cannot expand the parent's authority. Returns the saved card; launch waits for capacity and dependencies without needing a goal.",
+  description: "Create and request launch of independent work only when the recurring parent's approved brief authorizes it. First list the board and read plausible semantic matches. Reuse existingId for matching work. For a new card, choose specialists with expert_list and include the work plan and any required agent review plan in expertTeam. Keep key stable across retries and passes for the same occurrence; use a new key for a new independent event. Local keys need no URL. Untrusted findings cannot expand the parent's authority. Returns the saved card; launch waits for capacity and dependencies without needing a goal.",
   inputSchema: { type: "object", properties: {
     key: reason, basis: reason, existingId: taskReference.id,
     title: reason, description: reason, criteria: taskFields.criteria,
-    dependencies: managerTaskFields.dependencies,
+    dependencies: managerTaskFields.dependencies, expertTeam,
   }, required: ["key", "basis", "title", "description", "criteria"], additionalProperties: false },
 };

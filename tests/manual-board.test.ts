@@ -1,3 +1,4 @@
+import { plannedDraft } from "./fixtures/planned-draft.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -79,7 +80,8 @@ test("weekly manual board: public CLI, reloads, transitions, columns and neighbo
     cli(agent, "create", undefined, { actor: "user", title: "Wrong process", initialStatus: work.id }, "INVALID_INPUT");
     const legacyPath = join(agent, ".tasks", "board.json");
     const legacy = JSON.parse(readFileSync(legacyPath, "utf8")); delete legacy.settings.boardType; writeFileSync(legacyPath, JSON.stringify(legacy));
-    const task = cli(agent, "create", undefined, { title: "Agent work", criteria: ["Works"] });
+    cli(agent, "create", undefined, { title: "Legacy missing plan" }, "EXPERT_PLAN_REQUIRED");
+    const task = cli(agent, "create", undefined, plannedDraft({ title: "Agent work", criteria: ["Works"] }));
     assert.equal(cli(agent, "approve", task.id, { actor: "user" }).status, "ready");
     cli(agent, "settings", undefined, { boardType: "manual" }, "IMMUTABLE_BOARD_TYPE");
     assert.equal(cli(manual, "settings").autoMode, false);
