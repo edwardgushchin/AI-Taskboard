@@ -897,7 +897,7 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 }
 .chat-attachment > span { overflow-wrap: anywhere; white-space: normal; }
 .chat-attachment.has-preview, .chat-composer .draft-attachments .has-preview { overflow: hidden; padding: 0; }
-.chat-attachment.has-preview > :is(.icon, span) { display: none; }
+.chat-attachment.has-preview > :is(.icon, span, small) { display: none; }
 .chat-attachment img { display: block; min-width: 0; width: auto; height: auto; max-width: 250px; max-height: 160px; object-fit: contain; }
 .chat-composer {
   display: grid; gap: 10px; min-width: 0; padding: 12px;
