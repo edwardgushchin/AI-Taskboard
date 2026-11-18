@@ -93,6 +93,13 @@ try {
   assert.equal(runCli(["--version"]), version);
   assert.deepEqual(JSON.parse(runCli(["--version", "--json"])), { ok: true, data: { version } });
   report.checks.cliVersion = version;
+  const project = join(profile, "board");
+  mkdirSync(project);
+  assert.equal(JSON.parse(runCli(["--project", project, "--json", "init"])).ok, true);
+  const board = JSON.parse(runCli(["--project", project, "--json", "list"]));
+  assert.equal(board.ok, true);
+  assert.deepEqual(board.data.tasks, []);
+  report.checks.cliBoard = true;
 
   report.packages = [];
   for (const extension of windows ? ["exe"] : mac ? ["zip"] : ["deb", "rpm"]) {
@@ -113,7 +120,7 @@ try {
   child = spawn(desktop, [
     `--user-data-dir=${profile}`, "--remote-debugging-address=127.0.0.1",
     "--remote-debugging-port=0", "--enable-logging=stderr",
-  ], { cwd: profile, env, stdio: ["ignore", "inherit", "inherit"] });
+  ], { cwd: profile, env, detached: !windows, stdio: ["ignore", "inherit", "inherit"] });
   child.on("error", error => { launchError = error; });
   exited = new Promise(done => child.once("close", done));
 
@@ -144,7 +151,7 @@ try {
   try {
     if (child?.pid && child.exitCode === null && child.signalCode === null) {
       if (windows) execFileSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { timeout: 10_000 });
-      else child.kill("SIGKILL");
+      else process.kill(-child.pid, "SIGKILL");
     }
     if (exited) await exited;
     rmSync(profile, { recursive: true, maxRetries: 12, retryDelay: 200 });

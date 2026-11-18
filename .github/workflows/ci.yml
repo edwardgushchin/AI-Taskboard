@@ -83,7 +83,7 @@ jobs:
           npm run check:docs 2>&1 | tee ci-results/docs.log
       - name: Run CLI and desktop board tests
         run: |
-          node --test tests/board-creation.test.ts tests/board-location.test.ts tests/localization.test.ts tests/localization-settings.test.ts tests/documentation.test.ts 2>&1 | tee ci-results/tests.log
+          node --test tests/board-creation.test.ts tests/board-location.test.ts tests/localization-settings.test.ts tests/documentation.test.ts 2>&1 | tee ci-results/tests.log
       - name: Build standalone CLI and Electron package
         run: npm run package -- --ci 2>&1 | tee ci-results/package.log
       - name: Verify packaged CLI and launch the packaged desktop
