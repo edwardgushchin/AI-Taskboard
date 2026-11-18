@@ -580,7 +580,7 @@ function chatEventAttachments(event, files) {
   return matches.length === 1 ? matches : [];
 }
 
-function reviewerChat(task, work, tail, onCollaboration) {
+function reviewerChat(task, work, tail, decisions, onCollaboration) {
   const project = frame.project;
   const status = element("li", undefined, "muted");
   status.setAttribute("role", "status");
@@ -633,13 +633,16 @@ function reviewerChat(task, work, tail, onCollaboration) {
           " · " + t(node.finished ? "ui.completed_a863c619" : "ui.in_progress_15929530") + " · " + shortDate(attempt.at));
         node.error.textContent = attempt.error ?? "";
         node.error.hidden = !attempt.error;
+        node.summary = undefined;
         const items = attempt.items.flatMap(item => {
           if (collaborationItem(item)) return [];
           if (item.type !== "agentMessage" || item.phase === "commentary") return [item];
           if (item.status !== "completed") return [];
+          node.summary = undefined;
           try {
             const { summary, findings, evidence } = JSON.parse(item.text);
             if (typeof summary !== "string") return [item];
+            node.summary = summary.trim();
             const notes = Array.isArray(findings) ? findings.map(text => "- " + text).join("\n") : "";
             const checks = Array.isArray(evidence) ? evidence.flatMap((text, index) =>
               typeof text === "string" ? [(index + 1) + ". " + text] : []).join("\n") : "";
@@ -647,6 +650,15 @@ function reviewerChat(task, work, tail, onCollaboration) {
           } catch { return [item]; }
         });
         renderRunActivity(node.activity, items, false, undefined, undefined, { taskId: task.id, reviewer: true });
+      }
+      const matched = new Set();
+      for (const { entry, event, submittedAt } of decisions) {
+        const attempt = attempts.findLast(attempt => attempt.at >= submittedAt && attempt.at <= event.at);
+        const node = attempt && nodes.get(attempt.id);
+        // Keep the card's decision event and hide only the text also shown in its attempt.
+        entry.hidden = Boolean(node?.finished && !attempt.error && !matched.has(attempt.id) &&
+          node.summary === event.text.trim());
+        if (entry.hidden) matched.add(attempt.id);
       }
       status.hidden = true;
       if (follow) work.scrollTop = work.scrollHeight;
@@ -740,9 +752,12 @@ function taskChat(task) {
   const missingRuns = new Map();
   const locale = localization.locale;
   const dayFormat = new Intl.DateTimeFormat(locale, { dateStyle: "medium" });
+  const reviewDecisions = [];
+  let submittedAt = "";
   let day;
   let lastMessage;
   for (const { event, index } of events) {
+    if (event.action === "submit") submittedAt = event.at;
     const returned = event.actor === "reviewer" && event.action === "request-changes";
     const conversation = ["chat", "comment", "questions"].includes(event.action) || returned;
     if (event.expertMessage) continue;
@@ -842,6 +857,10 @@ function taskChat(task) {
         chatText(text, { taskId: task.id, coordination, agent: event.action === "chat" && event.actor === "agent" }));
     }
     appendChatTime(entry, event.at);
+    if (event.actor === "reviewer" && event.text && !attachments.length &&
+        ["review-approve", "review-note"].includes(event.action)) {
+      reviewDecisions.push({ entry, event, submittedAt });
+    }
     if (conversation) list.append(entry);
     else appendWork(entry);
   }
@@ -890,7 +909,7 @@ function taskChat(task) {
   const progress = element("li", undefined, "chat-run");
   work.append(liveRun, progress);
   const refreshReview = task.status === "review" || task.history.some(event => event.actor === "reviewer" || event.action === "submit")
-    ? reviewerChat(task, work, liveRun, items => { reviewTeam = items; renderTeam(); }) : undefined;
+    ? reviewerChat(task, work, liveRun, reviewDecisions, items => { reviewTeam = items; renderTeam(); }) : undefined;
   list.append(element("li", undefined, "chat-turn"));
   renderChatTurn(list, draft);
   area.append(list, work, team);
