@@ -1153,7 +1153,8 @@
     "other": "{count} bestanden"
   },
   "limits.label": "Limieten",
-  "limits.weekly": "Weeklimiet",
+  "limits.provider": "Limieten van {provider}",
+  "limits.weekly": "Week",
   "limits.daily": "Daglimiet",
   "limits.duration": "Limiet voor {duration}",
   "limits.window": "Limiet",

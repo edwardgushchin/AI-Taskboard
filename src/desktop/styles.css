@@ -1167,7 +1167,7 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
   position: fixed; position-anchor: --provider-limits;
   inset: auto auto calc(anchor(top) + 8px) clamp(8px, anchor(left), calc(100vw - 398px));
   margin: 0; width: min(390px, calc(100vw - 16px)); max-height: min(65vh, 500px);
-  overflow: auto; padding: 12px; border: 1px solid var(--border); border-radius: 6px;
+  overflow: auto; padding: 16px; border: 1px solid var(--border); border-radius: 16px;
   color: var(--text); background: var(--panel); box-shadow: 0 6px 20px #0004;
   font-size: 13px; line-height: 1.5; opacity: 0; transform: translateY(4px);
   transition: opacity var(--hover-time) ease, transform var(--hover-time) ease,
@@ -1176,12 +1176,29 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 #provider-limits:popover-open { opacity: 1; transform: translateY(0); }
 @starting-style { #provider-limits:popover-open { opacity: 0; transform: translateY(4px); } }
 #provider-limits section + section { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
-#provider-limits h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+#provider-limits .limits-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+#provider-limits h3 { margin: 0; font-size: 14px; font-weight: 650; overflow-wrap: anywhere; }
+#provider-limits .limits-plan {
+  max-width: 50%; padding: 2px 8px; border-radius: 999px; overflow-wrap: anywhere;
+  background: color-mix(in srgb, var(--text) 8%, var(--panel)); color: var(--text); font-size: 11px;
+}
 #provider-limits p { overflow-wrap: anywhere; }
 #provider-limits .limits-overview { margin-bottom: 12px; color: var(--muted); }
 #provider-limits .limits-window + .limits-window { margin-top: 12px; }
+#provider-limits .limits-row { display: flex; justify-content: space-between; gap: 8px; font-weight: 600; }
+#provider-limits .limits-row > :last-child { white-space: nowrap; font-variant-numeric: tabular-nums; }
 #provider-limits .limits-reset { margin-top: 4px; color: var(--muted); font-size: 12px; }
-#provider-limits meter { display: block; width: 100%; height: 8px; margin-top: 6px; }
+#provider-limits meter { display: block; width: 100%; height: 7px; margin-top: 5px; }
+@media (forced-colors: none) {
+  #provider-limits meter { appearance: none; }
+  #provider-limits meter::-webkit-meter-bar {
+    height: 100%; border: 0; border-radius: 999px;
+    background: color-mix(in srgb, var(--text) 12%, var(--panel));
+  }
+  #provider-limits meter::-webkit-meter-optimum-value {
+    border-radius: 999px; background: color-mix(in srgb, var(--accent) 70%, var(--text));
+  }
+}
 #provider-limits:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
 /* Board-owned expert packages and task-scoped collaboration. */
 .expert-search { width: 100%; margin: 8px 0; }

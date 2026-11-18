@@ -1153,7 +1153,8 @@
     "other": "{count} ファイル"
   },
   "limits.label": "上限",
-  "limits.weekly": "週間上限",
+  "limits.provider": "{provider} の上限",
+  "limits.weekly": "週",
   "limits.daily": "日次上限",
   "limits.duration": "{duration}の上限",
   "limits.window": "上限",

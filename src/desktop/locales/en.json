@@ -1155,7 +1155,8 @@
     "other": "{count} files"
   },
   "limits.label": "Limits",
-  "limits.weekly": "Weekly limit",
+  "limits.provider": "{provider} limits",
+  "limits.weekly": "Week",
   "limits.daily": "Daily limit",
   "limits.duration": "Limit over {duration}",
   "limits.window": "Limit",
