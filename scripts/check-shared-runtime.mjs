@@ -154,8 +154,11 @@ if (!process.versions.electron) {
     await a.ask({ action: "closeRestored" });
     record("PASS: restored boards with autoMode off and no goals stay at zero while idle");
     const race = await Promise.all([a.ask({ action: "launch", id: tasks[0] }), b.ask({ action: "launch", id: tasks[1] })]);
-    assert.equal(race.filter(result => result.ok).length, 1, JSON.stringify(race));
-    const owner = race[0].ok ? a : b, peer = owner === a ? b : a, runningId = race[0].ok ? tasks[0] : tasks[1];
+    assert.ok(race.every(result => result.ok), JSON.stringify(race));
+    assert.equal(race.filter(result => result.data.codexThreadId).length, 1, JSON.stringify(race));
+    const firstRunning = Boolean(race[0].data.codexThreadId);
+    const owner = firstRunning ? a : b, peer = firstRunning ? b : a;
+    const runningId = firstRunning ? tasks[0] : tasks[1], queued = firstRunning ? tasks[1] : tasks[0];
     await expectCount(1);
     await wait(async () => (await frames()).every(frame => frame.runningTasks.includes(runningId)), "shared running task");
     const duplicate = await peer.ask({ action: "launch", id: runningId }); assert.equal(duplicate.ok, false);
@@ -164,11 +167,9 @@ if (!process.versions.electron) {
       await a.ask({ action: "screenshot", path: join(output, "process-a-running.png") });
       await b.ask({ action: "screenshot", path: join(output, "process-b-running.png") });
     }
-    record("PASS: concurrent launch gives exactly one provider; duplicate rejected; three windows agree");
-    // Persist a continuation while full. Both processes discover the same queue.
-    const queued = tasks[2]; cli(project, ["start", queued, "--compact"]);
-    const task = cli(project, ["show", queued, "--compact"]);
-    await peer.ask({ action: "queue", id: queued, revision: task.revision });
+    record("PASS: concurrent launches give one provider and one queued request across three windows");
+    const repeated = await Promise.all([a, b].map(worker => worker.ask({ action: "launch", id: queued })));
+    assert.ok(repeated.every(result => result.ok), JSON.stringify(repeated));
     await wait(async () => (await frames()).every(frame => frame.waitingTasks.includes(queued)), "shared waiting task");
     await wait(async () => [...await a.ask({action:"dom"}), ...await b.ask({action:"dom"})].every(view => view.waiting), "rendered waiting state in three windows");
     if (output) await peer.ask({ action: "screenshot", path: join(output, "waiting.png") });
@@ -178,7 +179,7 @@ if (!process.versions.electron) {
     await wait(async () => (await Promise.all([a, b].map(worker => worker.ask({ action: "canStop", id: queued })))).some(Boolean),
       "queued agent has registered its stop control");
     await Promise.all([a.ask({ action: "stop", id: queued }), b.ask({ action: "stop", id: queued })]); await expectCount(0);
-    record("PASS: shared waiting state and continuation queue drain after release");
+    record("PASS: both processes can repeat the waiting request; one provider starts it after release");
     assert.equal(await a.ask({ action: "reserve", role: "reviewer" }), true);
     assert.equal(await b.ask({ action: "reserve", role: "reviewer" }), false);
     await a.ask({ action: "release", role: "reviewer" });

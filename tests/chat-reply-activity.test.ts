@@ -12,13 +12,14 @@ import { changeTask, createTask } from "../src/cli/tasks.ts";
 import { TaskboardError } from "../src/cli/model.ts";
 import { projectLabels } from "../src/desktop/project-tabs.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
+import type { RuntimeEntry } from "../src/desktop/board-runtime.ts";
 
 const source = readFileSync(new URL("../src/desktop/main.ts", import.meta.url), "utf8");
 const parsed = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, true);
 const names = new Set([
   "activeAgents", "stopChat", "beginOperation", "projectOperations", "closingProjects", "frame", "send", "notifyRunChange", "sendChat", "saveTaskTokenUsage", "windowStates", "chatRuns", "replyingTasks",
   "launchingTasks", "runningTasks", "runActivityByTask", "imageExtensions", "imageTypes", "recentBoards", "russian", "theme",
-  "managerQuestion", "executorLimit", "deferredExecutors",
+  "managerQuestion", "executorLimit",
   "returnTaskToDraft", "returningDrafts", "reviewOperations", "managerReviewOperations", "taskOperations", "steeringOperations",
 ]);
 // Exercise the main-process lifecycle without starting Electron or a real provider.
@@ -39,9 +40,11 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   const writes: { actor?: string; replyTo?: number }[] = [];
   const started = Promise.withResolvers<void>();
   const slots = createAgentSlots();
+  const sharedRuns = new Map<string, RuntimeEntry[]>();
   const runtime = runInNewContext(stripTypeScriptTypes(activitySource) +
-    "\n({ sendChat, stopChat, returnTaskToDraft, activeAgents, frame, windowStates, runningTasks, launchingTasks, deferredExecutors, notifyRunChange, chatRuns, replyingTasks })", {
-    agentSlots: slots, registerRuntime: () => () => {}, activeRunSummary, basename, extname, join, performance, projectLabels, AbortController, AbortSignal, wait, subscriptions: new Map(),
+    "\n({ sendChat, stopChat, returnTaskToDraft, activeAgents, frame, windowStates, runningTasks, launchingTasks, notifyRunChange, chatRuns, replyingTasks })", {
+    agentSlots: { ...slots, entries: (project: string) => sharedRuns.get(project) ?? [] },
+    registerRuntime: () => () => {}, activeRunSummary, basename, extname, join, performance, projectLabels, AbortController, AbortSignal, wait, subscriptions: new Map(),
     isManual: () => false, runtimeLocation: (project: string) => project, readBoardSettings: () => ({}),
     scheduleAgentWork: () => { scheduled.push(true); }, reserveAgent: slots.acquire,
     boardRequests: new Map(), boardWorkRequests: new Map(), boardUnread: () => [], projectIdentity: (path: string) => path,
@@ -114,7 +117,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   const run = (retry = false) => runtime.sendChat("project-a", task.id,
     { ...request, ...(retry ? { retryAt: task.history.length - 1 } : {}) }, () => {});
   const active = (index = 0): string[] => Array.from(runtime.frame(windows[index].state).replyingTasks);
-  return { task, runtime, windows, run, active, request, response, delivered, writes, slots, removed, scheduled, started: started.promise };
+  return { task, runtime, sharedRuns, windows, run, active, request, response, delivered, writes, slots, removed, scheduled, started: started.promise };
 }
 
 test("confirmed queue snapshots agree across board windows and exclude interrupted or stale tasks", () => {
@@ -123,7 +126,7 @@ test("confirmed queue snapshots agree across board windows and exclude interrupt
   f.task.codexThreadId = "interrupted-thread";
   const waiting = (index: number) => Array.from(f.runtime.frame(f.windows[index].state).waitingTasks);
   assert.deepEqual(waiting(0), []);
-  f.runtime.deferredExecutors.set("project-a\0T-0001", { project: "project-a", id: f.task.id, revision: f.task.revision });
+  f.sharedRuns.set("project-a", [{ id: "queue:" + f.task.id, owner: 0, kind: "queue", task: f.task.id, revision: f.task.revision }]);
   assert.deepEqual(waiting(0), [f.task.id]);
   assert.deepEqual(waiting(1), [f.task.id]);
   assert.deepEqual(waiting(2), []);
@@ -135,7 +138,7 @@ test("confirmed queue snapshots agree across board windows and exclude interrupt
   f.task.revision--;
   f.task.status = "blocked";
   assert.deepEqual(waiting(1), []);
-  f.runtime.deferredExecutors.clear();
+  f.sharedRuns.clear();
   assert.deepEqual(waiting(0), []);
 });
 
