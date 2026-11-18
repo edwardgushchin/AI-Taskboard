@@ -171,6 +171,8 @@ if (!process.versions.electron) {
     await peer.ask({ action: "queue", id: queued, revision: task.revision });
     await wait(async () => (await frames()).every(frame => frame.waitingTasks.includes(queued)), "shared waiting task");
     await wait(async () => [...await a.ask({action:"dom"}), ...await b.ask({action:"dom"})].every(view => view.waiting), "rendered waiting state in three windows");
+    await wait(async () => [...await a.ask({action:"order"}), ...await b.ask({action:"order"})].every(view =>
+      view.execution[0] === "Isolated concurrency " + tasks.indexOf(runningId)), "running executor ahead of newer queued card");
     if (output) await peer.ask({ action: "screenshot", path: join(output, "waiting.png") });
     await owner.ask({ action: "stop", id: runningId });
     await wait(async () => (await frames()).every(frame => frame.runningTasks.includes(queued) && !frame.waitingTasks.includes(queued)), "queue continues after release");
@@ -216,6 +218,81 @@ if (!process.versions.electron) {
     await wait(async () => (await restarted.ask({ action: "frames" })).every(frame => frame.activeAgents.total === 0 && !frame.runningTasks.includes(tasks[5])), "dead owner and provider reclaimed");
     assert.equal(await restarted.ask({ action: "reserve", role: "executor" }), true); await restarted.ask({ action: "release", role: "executor" });
     record("PASS: launch failure releases slot; restart preserves living orphan; provider death reclaims slot");
+    cli(project, ["settings"], { taskLimits: { executor: 6, reviewer: 7 } });
+    const makeCards = (name, review) => Array.from({ length: 7 }, (_, index) => {
+      const task = cli(project, ["create"], { title: name + " " + index, criteria: ["Fixture completes"], workingDirectory: project });
+      cli(project, ["approve", task.id]);
+      cli(project, ["start", task.id, "--compact"]);
+      if (review) {
+        const preview = cli(project, ["preview", task.id, "--compact"]);
+        cli(project, ["submit", task.id, "--compact"], { token: preview.token, noChanges: true, summary: "Test submission", checks: ["Fixture checked"] });
+      }
+      return task.id;
+    });
+    const execution = makeCards("Execution order", false), reviews = makeCards("Review order", true);
+    await Promise.all([b, restarted].map(worker => worker.ask({ action: "compactWindows" })));
+    const readOrder = async () => [...await b.ask({ action: "order" }), ...await restarted.ask({ action: "order" })];
+    let idleOrder;
+    try {
+      await wait(async () => {
+        idleOrder = await readOrder();
+        return idleOrder.every(view => view.execution[0] === "Execution order 6" &&
+          view.review[0] === "Review order 6" && view.more && !view.execution.includes("Execution order 0") &&
+          !view.review.includes("Review order 0"));
+      }, "idle order and collapsed batches");
+    } catch (error) { throw new Error(error.message + ": " + JSON.stringify(idleOrder)); }
+    await restarted.ask({ action: "focusOrder" });
+    await b.ask({ action: "openOrderDialog" });
+    for (const id of execution.slice(0, 6)) assert.equal(await b.ask({ action: "reserve", role: "executor", task: id }), true);
+    assert.equal(await b.ask({ action: "reserve", role: "reviewer", task: "review:" + reviews[0] }), true);
+    assert.equal(await b.ask({ action: "reserve", role: "reviewer", task: reviews[1] }), true);
+    const executionPrefix = [5, 4, 3, 2, 1, 0].map(index => "Execution order " + index);
+    await wait(async () => (await readOrder()).every(view =>
+      JSON.stringify(view.execution.slice(0, 6)) === JSON.stringify(executionPrefix) &&
+      view.review[0] === "Review order 1" && view.review[1] === "Review order 0"), "active groups sorted before batch limit");
+    assert.ok(await b.ask({ action: "discussion", id: execution[6] }));
+    assert.ok(await restarted.ask({ action: "discussion", id: reviews[6] }));
+    await wait(async () => [...await b.ask({ action: "frames" }), ...await restarted.ask({ action: "frames" })].every(frame =>
+      frame.replyingTasks.includes(execution[6]) && frame.replyingTasks.includes(reviews[6])), "shared discussions in both columns");
+    await delay(1200); // Allow the fallback runtime poll to deliver the frame to the other renderers.
+    for (const view of await readOrder()) {
+      assert.deepEqual(view.execution.slice(0, 6), executionPrefix);
+      assert.deepEqual(view.review.slice(0, 2), ["Review order 1", "Review order 0"]);
+    }
+    await b.ask({ action: "endDiscussion" });
+    await restarted.ask({ action: "endDiscussion" });
+    record("PASS: standalone discussions in both columns stay below active execution, review and repair");
+    assert.equal(await restarted.ask({ action: "orderFocusPreserved" }), true);
+    assert.equal(await b.ask({ action: "orderDialogPreserved" }), true);
+    if (output) await restarted.ask({ action: "screenshot", path: join(output, "active-order.png") });
+    for (const id of execution.slice(0, 6)) await b.ask({ action: "release", role: "executor", task: id });
+    await b.ask({ action: "release", role: "reviewer", task: "review:" + reviews[0] });
+    await b.ask({ action: "release", role: "reviewer", task: reviews[1] });
+    await wait(async () => (await readOrder()).every(view => view.execution[0] === "Execution order 6" && view.review[0] === "Review order 6"), "idle order restored");
+    for (let attempt = 0; attempt < 2; attempt++) {
+      assert.equal(await restarted.ask({ action: "reserve", role: "reviewer", task: "review:" + reviews[0] }), true);
+      await wait(async () => (await readOrder()).every(view => view.review[0] === "Review order 0"), "repeated review starts");
+      await restarted.ask({ action: "release", role: "reviewer", task: "review:" + reviews[0] });
+      await wait(async () => (await readOrder()).every(view => view.review[0] === "Review order 6"), "repeated review ends");
+    }
+    record("PASS: active-first ordering in both columns across processes, including repeat review, repair, multiple runs and idle order; focus, scroll and dialog preserved");
+    await restarted.ask({ action: "focusReviewMore", overflow: true });
+    for (const id of reviews.slice(0, -1)) assert.equal(await b.ask({ action: "reserve", role: "reviewer", task: "review:" + id }), true);
+    await wait(async () => (await readOrder()).every(view => view.review[0] === "Review order 5"), "six active reviews sorted first");
+    await wait(() => restarted.ask({ action: "reviewMoreFitRetried" }), "last inactive card tried and removed");
+    const focus = await restarted.ask({ action: "reviewMoreFocusRestored" });
+    assert.equal(focus.restored, true, JSON.stringify(focus));
+    assert.deepEqual(focus.scroll, focus.initialScroll, "scroll after rejected fit");
+    await restarted.ask({ action: "resetReviewFit" });
+    for (const id of reviews.slice(0, -1)) await b.ask({ action: "release", role: "reviewer", task: "review:" + id });
+    await wait(async () => (await readOrder()).every(view => view.review[0] === "Review order 6" && view.review.length < reviews.length), "idle review batch restored");
+    record("PASS: rejected fit restores focus to Show more without scrolling");
+    await restarted.ask({ action: "focusReviewMore" });
+    for (const id of reviews) assert.equal(await b.ask({ action: "reserve", role: "reviewer", task: "review:" + id }), true);
+    await wait(async () => (await readOrder()).every(view => view.review.length === reviews.length), "all review cards visible after activation");
+    assert.equal(await restarted.ask({ action: "reviewMoreFocusTransferred" }), true);
+    for (const id of reviews) await b.ask({ action: "release", role: "reviewer", task: "review:" + id });
+    record("PASS: when activity removes Show more, focus moves to a newly shown card without scrolling");
     if (output) { mkdirSync(output, { recursive: true }); await restarted.ask({ action: "screenshot", path: join(output, "shared-windows.png") }); writeFileSync(join(output, "shared-runtime.txt"), results.join("\n") + "\n"); }
   } catch (error) {
     if (output) { mkdirSync(output, { recursive: true }); writeFileSync(join(output, "failure.txt"), error.stack + "\n" + workers.map(worker => worker.logs).join("\n")); }
@@ -306,12 +383,86 @@ if (!process.versions.electron) {
     try {
       await ready;
       const qa = globalThis.sharedCheck; let data;
-      const board = command.other ? other : project, key = command.role + (command.other ? ":other" : "");
+      const board = command.other ? other : project, key = command.role + (command.other ? ":other" : "") + (command.task ?? "");
       if (command.action === "ready") data = true;
       if (command.action === "restoreBoards") { const state = qa.createWindow([project, other]); await state.ready; globalThis.restoredCheckWindow = state.window; data = true; }
       if (command.action === "closeRestored") { globalThis.restoredCheckWindow.close(); data = true; }
       if (command.action === "newWindow") { const state = qa.createWindow([project]); await state.ready; data = true; }
+      if (command.action === "compactWindows") for (const win of BrowserWindow.getAllWindows()) win.setSize(700, 550);
       if (command.action === "dom") data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript(`({ count: Number(document.querySelector('#status-agents span')?.textContent), waiting: document.body.innerText.includes('Ожидает свободного исполнителя') || document.body.innerText.includes('Waiting for an available executor') })`)));
+      if (command.action === "order") data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript(`(() => {
+        const titles = state => [...document.querySelectorAll('#lane-cards-' + state + ' .task-card-heading strong')].map(node => node.textContent);
+        return { execution: titles('in_progress'), review: titles('review'), more: Boolean(document.querySelector('#lane-cards-in_progress .lane-more')) };
+      })()`)));
+      if (command.action === "focusReviewMore") {
+        const contents = BrowserWindow.getAllWindows()[0].webContents;
+        const style = command.overflow ? await contents.insertCSS(
+          "#lane-cards-review > .task-card { height: 42px; min-height: 0; overflow: hidden; } #lane-cards-review > .task-card:last-child { height: 1200px; }") : null;
+        await contents.executeJavaScript(`(() => {
+          const lane = document.querySelector('#lane-cards-review');
+          const more = lane.querySelector('.lane-more');
+          if (${Boolean(style)}) {
+            const fit = globalThis.reviewFit = { style: ${JSON.stringify(style)}, more, retried: false };
+            fit.observer = new MutationObserver(records => {
+              if (more.isConnected && records.some(record => [...record.addedNodes].some(node =>
+                  node.matches?.('.task-card') && !node.isConnected)) &&
+                  records.some(record => [...record.removedNodes].includes(more))) fit.retried = true;
+            });
+            fit.observer.observe(lane, { childList: true });
+          }
+          more.focus({ preventScroll: true });
+          const board = document.querySelector('#lanes');
+          board.scrollLeft = 80;
+          if (${Boolean(style)}) board.scrollTop = 0;
+          if (document.activeElement !== more || board.scrollLeft <= 0) throw Error("Show more focus fixture not set");
+          globalThis.reviewMoreFocus = { visible: new Set(lane.querySelectorAll('.task-card')), left: board.scrollLeft, top: board.scrollTop };
+        })()`);
+        data = true;
+      }
+      if (command.action === "reviewMoreFitRetried") data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript("reviewFit.retried");
+      if (command.action === "reviewMoreFocusRestored") {
+        data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(`(() => {
+          const board = document.querySelector('#lanes');
+          return { restored: document.activeElement === reviewFit.more,
+            focused: document.activeElement.className, visible: reviewFit.more.isConnected,
+            scroll: [board.scrollLeft, board.scrollTop], initialScroll: [reviewMoreFocus.left, reviewMoreFocus.top] };
+        })()`);
+      }
+      if (command.action === "resetReviewFit") {
+        const contents = BrowserWindow.getAllWindows()[0].webContents;
+        const key = await contents.executeJavaScript("reviewFit.observer.disconnect(); reviewFit.style");
+        await contents.removeInsertedCSS(key);
+        data = true;
+      }
+      if (command.action === "reviewMoreFocusTransferred") {
+        data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(`(() => {
+          const board = document.querySelector('#lanes');
+          const card = document.activeElement;
+          return card.matches('#lane-cards-review > .task-card') && !reviewMoreFocus.visible.has(card) &&
+            !document.querySelector('#lane-cards-review .lane-more') &&
+            board.scrollLeft === reviewMoreFocus.left && board.scrollTop === reviewMoreFocus.top;
+        })()`);
+      }
+      if (["focusOrder", "openOrderDialog", "orderFocusPreserved", "orderDialogPreserved"].includes(command.action)) {
+        const win = BrowserWindow.getAllWindows()[0];
+        if (command.action === "focusOrder") {
+          await win.webContents.executeJavaScript(`(() => {
+            globalThis.orderCard = document.querySelector('#lane-cards-in_progress .task-card');
+            orderCard.focus({ preventScroll: true });
+            const board = document.querySelector('#lanes');
+            board.scrollLeft = 80;
+            globalThis.orderScroll = board.scrollLeft;
+            if (orderScroll <= 0 || document.activeElement !== orderCard) throw Error("Focus and scroll fixture not set");
+          })()`);
+        }
+        if (command.action === "openOrderDialog") {
+          await win.webContents.executeJavaScript("document.querySelector('#lane-cards-review .task-card').click()");
+          await wait(() => win.webContents.executeJavaScript("document.querySelector('#sheet').open"), "task dialog");
+          await win.webContents.executeJavaScript("globalThis.orderDialogTitle = document.querySelector('#sheet-title').textContent");
+        }
+        if (command.action === "orderFocusPreserved") data = await win.webContents.executeJavaScript("document.activeElement === orderCard && document.querySelector('#lanes').scrollLeft === orderScroll");
+        if (command.action === "orderDialogPreserved") data = await win.webContents.executeJavaScript("document.querySelector('#sheet').open && document.querySelector('#sheet-title').textContent === orderDialogTitle");
+      }
       if (command.action === "frames") data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript("window.taskboard.bootstrap()")));
       if (command.action === "checkInput") {
         for (const win of BrowserWindow.getAllWindows()) {
@@ -336,7 +487,7 @@ if (!process.versions.electron) {
       if (command.action === "stopAll") { for (const agent of qa.activeAgents.values()) await agent.control.interrupt(); data = true; }
       if (command.action === "queue") { qa.agentSlots.defer(project, command.id, { revision: command.revision }); qa.scheduleAgentWork(); data = true; }
       if (command.action === "reserve") {
-        const lease = command.role === "manager" ? qa.agentSlots.claim(board, "manager:context") : qa.reserveAgent(board, command.role);
+        const lease = command.role === "manager" ? qa.agentSlots.claim(board, "manager:context") : qa.reserveAgent(board, command.role, command.task);
         if (lease) leases.set(key, lease);
         data = Boolean(lease);
       }

@@ -1248,6 +1248,7 @@ function laneTools(state, title, tasks, total, count, content) {
   }
   let empty;
   let matching = [];
+  let activeCount = 0;
   let visibleLimit = 4;
   let manualLimit = 0;
   const more = button("", () => {
@@ -1260,8 +1261,21 @@ function laneTools(state, title, tasks, total, count, content) {
   function updateCards() {
     matching = tasks.filter(task => (!priority.value || task.priority === priority.value) &&
       (!selected.size || task.tags.some(name => selected.has(tagKey(name)))));
-    visibleLimit = Math.max(visibleLimit, focusedCardPosition());
+    activeCount = 0;
+    if (!manualBoard() && (state === "in_progress" || state === "review")) {
+      const active = new Set([...(frame.runningTasks ?? []),
+        ...(state === "review" ? Object.keys(frame.reviewingTasks ?? {}) : [])]);
+      matching.sort((a, b) => Number(active.has(b.id)) - Number(active.has(a.id)));
+      activeCount = matching.filter(task => active.has(task.id)).length;
+    }
+    const previous = document.activeElement === more ? new Set(content.children) : undefined;
+    visibleLimit = Math.max(visibleLimit, activeCount, focusedCardPosition());
     renderBatch();
+    if (previous && !more.isConnected) {
+      const cards = [...content.querySelectorAll(":scope > .task-card")];
+      const next = cards.find(card => !previous.has(card)) ?? cards.at(-1) ?? summary;
+      next.focus({ preventScroll: true });
+    }
     scheduleLaneFit();
     const active = selected.size + Number(Boolean(priority.value));
     const label = matching.length === total ? String(total) : matching.length + t("ui.of_45303c22") + total;
@@ -1303,7 +1317,7 @@ function laneTools(state, title, tasks, total, count, content) {
     if (collapsed || !matching.length) return;
     const focused = document.activeElement;
     const firstNew = visibleLimit;
-    const minimum = Math.min(matching.length, Math.max(1, manualLimit, focusedCardPosition()));
+    const minimum = Math.min(matching.length, Math.max(1, manualLimit, activeCount, focusedCardPosition()));
     const fits = () => content.getBoundingClientRect().height <= availableHeight;
     const limit = Math.min(matching.length, Math.max(visibleLimit, minimum));
     if (visibleLimit !== limit) {
@@ -1322,7 +1336,10 @@ function laneTools(state, title, tasks, total, count, content) {
       renderBatch();
       break;
     }
-    if (focused === more && !more.isConnected) content.children[firstNew]?.focus({ preventScroll: true });
+    if (focused === more && document.activeElement !== more) {
+      const next = more.isConnected ? more : content.children[firstNew];
+      next?.focus({ preventScroll: true });
+    }
   }
   updateCards();
   updateCollapse();
