@@ -989,30 +989,28 @@ function card(task) {
     item.append(image);
   }
   const meta = element("span", undefined, "task-meta");
-  const identity = element("span", undefined, "task-identity");
   const id = element("span", undefined, "task-id task-stat");
   id.append(icon("symbol-number"), task.id);
-  identity.append(id);
+  meta.append(id);
   if (task.milestone) {
     const { title, repository, number } = task.milestone;
     const badge = element("span", undefined, "task-milestone task-stat");
     badge.append(icon("milestone"), element("span", title, "task-milestone-label"));
     bindLocalized(badge, "title", () => t("ui.github_milestone_11d33bfa") + " · " + title + " · " + repository + " #" + number);
-    identity.append(badge);
+    meta.append(badge);
   }
   if (task.schedule) {
     const badge = task.schedule.paused ? schedulePauseIndicator() : element("span", task.schedule.time ?? scheduleInterval(task.schedule.everyMinutes, "short"));
     badge.classList.add("task-schedule");
     badge.title = (task.schedule.paused ? t("ui.schedule_paused") + " · " : "") + scheduleLabel(task.schedule);
     badge.setAttribute("aria-label", badge.title);
-    identity.append(badge);
+    meta.append(badge);
   }
   if (task.dueDate) {
     const badge = element("span", task.dueDate, "task-stat");
     bindLocalized(badge, "title", () => t("ui.due_date_d764b025"));
-    identity.append(badge);
+    meta.append(badge);
   }
-  meta.append(identity);
   const runStatus = element("span", undefined, "task-run-status");
   renderAgentRunStatus(runStatus, task);
   if (task.unfinishedDependencies?.length && task.status === "draft") {
