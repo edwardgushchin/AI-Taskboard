@@ -32,8 +32,9 @@ import { taskChatActions } from "./chat-actions.ts";
 import type { CliReply } from "./cli.ts";
 import { executionModels } from "./codex-models.ts";
 import type { ArchiveLink, BoardSettings, BoardTag, ReviewMode, RunActivity, Task } from "../cli/model.ts";
-import { boardReviewMode, codexThreadPattern, defaultBoardAgents, maxAttachmentBytes, reviewVerifier, taskIdPattern } from "../cli/model.ts";
-import { BoardStore, directory as storageDirectory, readBoardSettings, readJson, writeJson } from "../cli/storage.ts";
+import { boardReviewMode, codexThreadPattern, defaultBoardAgents, maxAttachmentBytes, reviewVerifier, taskIdPattern, TaskboardError, usesIndependentReviewer } from "../cli/model.ts";
+import { BoardStore, directory as storageDirectory, locateBoard, readBoardSettings, readJson, writeJson } from "../cli/storage.ts";
+import { applyDesktopAcceptance } from "../cli/acceptance.ts";
 import { missingCodexThread, startCodexRun } from "./codex-run.ts";
 import type { ExecutorTask } from "./codex-run.ts";
 import { runLog } from "./run-activity.ts";
@@ -60,7 +61,7 @@ interface Board {
   project: string;
   settings: BoardSettings;
   tags: BoardTag[];
-  tasks: (Task & { historyLength?: number; reviewApproved?: true; reviewHasCommit?: true; mergeRepair?: true; unfinishedDependencies?: string[];
+  tasks: (Task & { historyLength?: number; reviewApproved?: boolean; reviewHasCommit?: true; reviewPending?: true; mergeRepair?: true; unfinishedDependencies?: string[];
     expertWorkPlanned?: boolean; expertReviewPlanned?: boolean })[];
   managerInbox?: ReturnType<typeof import("../cli/task-messages.ts").managerInbox>;
   archived: (ArchiveLink & { id: string })[];
@@ -1405,8 +1406,13 @@ async function continueAcceptance(project: string, task: Task) {
         }
       }
     } else if (task.acceptanceRepair?.phase === "checking") {
-      const review = await callCli<{ targetHead: string; revision: number }>(project, ["review", task.id, "--compact"]);
+      const review = await callCli<{ targetHead: string; revision: number; reviewMode: ReviewMode; reviewModeVersion?: number;
+        awaitingHumanAcceptance: boolean; pending?: boolean }>(project, ["review", task.id, "--compact"]);
       if (!review.ok) result = review;
+      else if (review.data.pending && review.data.reviewModeVersion !== task.acceptanceRepair.reviewModeVersion &&
+          (review.data.reviewMode === "reviewer-human" || task.acceptanceRepair.reviewModeVersion !== undefined)) return;
+      else if (review.data.reviewMode === "reviewer-human" && !review.data.pending && !review.data.awaitingHumanAcceptance &&
+          review.data.targetHead === task.acceptanceRepair.targetHead) return;
       else result = await callCli(project, ["accept", task.id, "--compact"], {
         actor: "user", continueRepair: true, revision: review.data.revision, targetHead: review.data.targetHead,
       });
@@ -1414,7 +1420,7 @@ async function continueAcceptance(project: string, task: Task) {
       result = await callCli(project, ["accept", task.id], { revision: task.revision,
         repairFailure: "The repair process ended before submitting checked results. Inspect its saved activity and worktree before retrying." });
     } else return;
-    if (!returningDrafts.has(key) && !result.ok && !["BOARD_BUSY", "TARGET_CHANGED", "REVISION_CONFLICT", "CHAT_BUSY", "LAUNCH_IN_PROGRESS", "REVIEWER_LIMIT", "BOARD_REQUEST_IN_PROGRESS"].includes(result.error.code)) {
+    if (!returningDrafts.has(key) && !result.ok && !["BOARD_BUSY", "TARGET_CHANGED", "REVISION_CONFLICT", "CHAT_BUSY", "LAUNCH_IN_PROGRESS", "REVIEWER_LIMIT", "BOARD_REQUEST_IN_PROGRESS", "REVIEW_REQUIRED"].includes(result.error.code)) {
       const current = await callCli<Task>(project, ["show", task.id]);
       if (current.ok && current.data.acceptanceRepair) await callCli(project, ["accept", task.id], {
         revision: current.data.revision, repairFailure: result.error.message });
@@ -2179,7 +2185,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       background ? "" : " You are the user's conversational manager. When asked about the goal, read goal_read. Direct messages can steer the active dialogue turn. " +
       "For user instructions affecting its running work, use goal_send and report them as queued until the goal confirms. " +
       "The goal handles its incoming executor and reviewer mail. Use board tools for the user's direct requests.");
-    const reviewTaskTools = reviewMode === "reviewer"
+    const reviewTaskTools = usesIndependentReviewer(reviewMode)
       ? new Set([...autoReviewTaskTools, "manager_ack", "task_cancel", "task_start"]) : autoReviewTaskTools;
     const stages = reviewMode === "manager" ? phaseStageReporter(project, "review") : undefined;
     const mcpTools: BoardMcpTool[] = boardMcpTools.filter(({ name }) =>
@@ -2188,7 +2194,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       (!isManual(settings.data) || ["expert_list", "expert_context", "expert_skill", "board_list", "task_show", "task_create", "task_update", "task_comment", "tag_set_color", "ask_user"].includes(name)) &&
       (reviewIds || cleanupJob || !["project_path", "project_sha256"].includes(name)) &&
       (!reviewIds || autoReviewReadTools.has(name) || reviewTaskTools.has(name)) &&
-      (name !== "task_accept" || reviewMode !== "human") &&
+      (name !== "task_accept" || (reviewMode !== "human" && reviewMode !== "reviewer-human")) &&
       (!repairTask || !["task_start", "task_start_batch", "task_accept", "task_request_changes", "task_return_to_draft"].includes(name)));
     if (!reviewIds && !cleanupJob) mcpTools.push(...(goal ? goalWorkTools : background ? [] : goalChatTools), githubReadTool);
     const attachments = await prepareBoardAttachments(queued ? queuedFiles(queued) : files, scratch);
@@ -2329,8 +2335,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         return pending.then(result => {
           if (reviewIds || cleanupJob) return result;
           if (name === "task_review" && result.ok) {
-            const { id, reviewMode, stale } = result.data as { id: string; reviewMode: string; stale: boolean };
-            if (!stale && reviewMode !== "reviewer" && !signal.aborted && requests.get(projectKey) === running) startReview([id]);
+            const { id, reviewMode, stale } = result.data as { id: string; reviewMode: ReviewMode; stale: boolean };
+            if (!stale && !usesIndependentReviewer(reviewMode) && !signal.aborted && requests.get(projectKey) === running) startReview([id]);
           }
           if (name === "task_wait" && goal && goalId && goalMessages(project, goalId).some(message => message.status === "pending")) {
             return { ...result, goalMessagesPending: true };
@@ -2633,17 +2639,20 @@ function scheduleAutoReview(watch: BoardWatch) {
   if (!tab) return;
   const managerBatchSize = 4;
   const capacity = agentSlots.available(projectKey, "reviewer", overrides);
-  const available = mode === "reviewer" ? capacity : Math.min(1, capacity);
-  const reviewAttempt = (task: Task & { reviewDecision?: number }) => mode + ":" + task.revision + ":" + (task.reviewDecision ?? 0);
-  const ready = submissions.filter(task => !task.acceptanceRepair && !watch.reviewerRuns.has(task.id) &&
+  const independent = usesIndependentReviewer(mode);
+  const available = independent ? capacity : Math.min(1, capacity);
+  const reviewAttempt = (task: Task & { reviewDecision?: number; reviewTargetHead?: string | null }) =>
+    JSON.stringify([mode, watch.board.settings.reviewModeVersion, task.revision, task.reviewDecision, task.reviewTargetHead]);
+  const ready = submissions.filter(task => !task.reviewPending && (!task.acceptanceRepair || (mode === "reviewer-human" && task.acceptanceRepair.phase === "checking" &&
+    task.acceptanceRepair.reviewModeVersion === watch.board.settings.reviewModeVersion)) && !watch.reviewerRuns.has(task.id) &&
     (!watch.board.settings.requireExpertPlans || task.expertReviewPlanned) &&
-    (mode !== "reviewer" || !task.reviewApproved) &&
+    (!independent || !task.reviewApproved) &&
     watch.reviewAttempts.get(task.id) !== reviewAttempt(task) &&
-    ((mode === "reviewer" && task.reviewHasCommit) || !executorBusy(project, task.id))).slice(0, available);
+    ((independent && task.reviewHasCommit) || !executorBusy(project, task.id))).slice(0, available);
   for (const task of ready) watch.reviewAttempts.set(task.id, reviewAttempt(task));
   let ids = ready.map(task => task.id);
   let prompt: string;
-  if (mode === "reviewer") {
+  if (independent) {
     for (const id of ids) {
       const release = reserveAgent(project, "reviewer", "review:" + id);
       if (!release) { watch.reviewAttempts.delete(id); continue; }
@@ -2654,10 +2663,12 @@ function scheduleAutoReview(watch: BoardWatch) {
       }));
     }
     if (ready.length) publishReviewActivity(project);
+    if (mode === "reviewer-human") return;
     if (watch.board.settings.autoMode) { scheduleAutoBoard(watch); return; }
     if (!managerAvailable) return;
+    const awaitingIntegration = new Set(submissions.filter(task => task.reviewApproved).map(task => task.id));
     const approvals = (watch.board.managerInbox ?? []).filter(({ id, kind, sequence }) =>
-      kind === "review-approve" && watch.integrationAttempts.get(id) !== sequence).slice(0, managerBatchSize);
+      kind === "review-approve" && awaitingIntegration.has(id) && watch.integrationAttempts.get(id) !== sequence).slice(0, managerBatchSize);
     for (const { id, sequence } of approvals) watch.integrationAttempts.set(id, sequence);
     ids = approvals.map(({ id }) => id);
     prompt = t("ui.ai_taskboard_the_reviewer_approved_these_submiss_7b01f774") + approvals.map(({ id, sequence }) => id + " (" + sequence + ")").join(", ");
@@ -2689,7 +2700,7 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
     const updated = (board: Board) => {
       const task = board.tasks.find(task => task.id === id);
       if (!task || task.revision > revision || (task.revision === revision && task.status !== "review") ||
-          boardReviewMode(board.settings) !== "reviewer") ready.resolve(false);
+          !usesIndependentReviewer(boardReviewMode(board.settings))) ready.resolve(false);
       else if (!executorBusy(project, id)) ready.resolve(true);
     };
     const unsubscribe = observeBoardTasks(watch.board, updated);
@@ -2756,11 +2767,11 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
         if (!["INVALID_TRANSITION", "REVISION_CONFLICT"].includes(result.error.code)) notify(result.error.message);
         return;
       }
-      const { reviewMode, stale, revision, targetHead, reviewer } = result.data as {
-        reviewMode: string; stale: boolean; revision: number; targetHead: string | null;
+      const { reviewMode, reviewModeVersion, stale, revision, targetHead, reviewer } = result.data as {
+        reviewMode: ReviewMode; reviewModeVersion?: number; stale: boolean; revision: number; targetHead: string | null;
         reviewer?: ReviewReport;
       };
-      if (reviewMode !== "reviewer") return;
+      if (!usesIndependentReviewer(reviewMode)) return;
       if (stale) {
         notify(t("ui.the_submission_changed_submit_it_again_38ed8598"));
         return;
@@ -2769,7 +2780,7 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
       if (reports.get(id) !== previous) saveReviewReports(project, reports);
       if (!(await waitForExecutor(revision)) || executorBusy(project, id)) return;
       signal.throwIfAborted();
-      const input = { revision, targetHead, reviewMode, actor: "reviewer", reviewerUsage: usage };
+      const input = { revision, targetHead, reviewMode, reviewModeVersion, actor: "reviewer", reviewerUsage: usage };
       const needsMoreEvidence = !reviewer.findings.length && (!reviewer.evidence.length || reviewer.evidence.includes(null));
       const recordDecision = () => {
         if (reviewer.needsHuman || needsMoreEvidence) {
@@ -2932,6 +2943,34 @@ ipcMain.handle("chat:transcribeVoice", async (event, samples: unknown, language:
     return cliFailure("DICTATION_UNAVAILABLE", t("ui.could_not_transcribe_the_recording_the_first_use_0a91c70e"));
   }
 });
+async function confirmHumanAcceptance(state: ProjectTab, project: string, id: string, input: Record<string, unknown>) {
+  const settings = await callCli<BoardSettings>(project, ["settings"]);
+  if (!settings.ok) return settings;
+  if (boardReviewMode(settings.data) !== "reviewer-human") return callCli(project, ["accept", id], input);
+  const card = await callCli<Task>(project, ["show", id, "--compact"]);
+  if (!card.ok || card.data.status === "done") return card;
+  const review = await callCli<{ revision: number; targetHead: string | null; reviewModeVersion?: number;
+    awaitingHumanAcceptance: boolean; pending?: boolean }>(project, ["review", id, "--compact"]);
+  if (!review.ok) return review;
+  const { revision, targetHead, reviewModeVersion, awaitingHumanAcceptance, pending } = review.data;
+  if (revision !== input.revision || targetHead !== input.targetHead || reviewModeVersion !== input.reviewModeVersion) {
+    return cliFailure("REVISION_CONFLICT", "Open the current review before accepting.");
+  }
+  if (!awaitingHumanAcceptance && !pending) {
+    return cliFailure("REVIEW_REQUIRED", "The reviewer must approve the current submission and target before acceptance.");
+  }
+  try {
+    const data = await applyDesktopAcceptance(locateBoard(project), id, {
+      revision, targetHead, reviewModeVersion, actor: "user", message: input.message, commit: input.commit,
+    }, state.window, card.data.title, () => state.project === project);
+    return { ok: true as const, data };
+  } catch (error) {
+    const code = error instanceof TaskboardError ? error.code : "IO_ERROR";
+    return { ok: false as const, error: { code, message: (error as Error).message,
+      details: error instanceof TaskboardError ? error.details : undefined } };
+  }
+}
+
 ipcMain.handle("board:command", async (event, command: unknown, id: unknown, input: unknown) => {
   const state = stateOf(event);
   const args = typeof command === "string" ? commands.get(command) : undefined;
@@ -2959,6 +2998,10 @@ ipcMain.handle("board:command", async (event, command: unknown, id: unknown, inp
     return { ok: true, data: { ...result.data, executorFullAccess: executorFullAccess(app.getPath("userData"), project, result.data) } };
   }
   if (args[0] !== "git") input = { ...(input as Record<string, unknown> ?? {}), actor: "user" };
+  const fields = input as Record<string, unknown>;
+  if (command === "accept" && typeof id === "string" && fields.cancelPending !== true && fields.cancelRepair !== true) {
+    return confirmHumanAcceptance(state, state.project, id, fields);
+  }
   const selection = state.selection;
   const result = await callCli<Board>(state.project, id === undefined ? args : [...args, id], input);
   if (command === "init" && result.ok && selection === state.selection && !state.window.isDestroyed()) {

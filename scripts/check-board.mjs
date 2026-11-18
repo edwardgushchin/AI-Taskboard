@@ -88,6 +88,7 @@ app.whenReady().then(async () => {
     };
     ${readFileSync(require.resolve("markdown-it/browser"), "utf8")}
     ${read("image-preview.js")}
+    ${read("review-diff.js")}
     ${read("source-files.cjs")}
     ${read("markdown.js")}
     ${read("chat.js")}
@@ -342,6 +343,52 @@ app.whenReady().then(async () => {
     await check(`![...body.querySelectorAll('button')].some(button => button.textContent === 'Уборка рабочей копии…')`, 'maintenance needs no manual cleanup control');
     await capture('cleanup-done.png');
     console.log('Cleanup Chromium checks passed: ' + checks);
+    return;
+  }
+  if (process.argv.includes("--reviewer-human-only")) {
+    await evaluate(`
+      fixture.board.settings.reviewMode = 'reviewer-human';
+      fixture.board.settings.reviewModeVersion = 1;
+      const hybridTask = task('T-0096', 'Проверка результата', { status: 'review', criteria: ['Результат проверен'],
+        result: { summary: 'Результат сохранён', checks: ['Проверено'], noChanges: {} } });
+      fixture.board.tasks = [hybridTask];
+      window.taskboard.command = async action => ({ ok: true, data: action === 'review' ? {
+        revision: hybridTask.revision, noChanges: true, targetHead: null, result: hybridTask.result,
+        reviewMode: 'reviewer-human', reviewModeVersion: 1, awaitingHumanAcceptance: hybridTask.reviewApproved === true
+      } : hybridTask });
+      push(); void 0;
+    `);
+    await check(`findCard('T-0096').querySelector('.task-run-status').textContent === 'Ожидает одобрения ревьюера'`, 'reviewing in Russian');
+    await evaluate(`showReview(hybridTask)`);
+    await check(`body.querySelector('button[type=submit]').disabled`, 'acceptance requires approval');
+    await evaluate(`hybridTask.reviewApproved = true; push(); settle()`);
+    await evaluate(`waitFor(() => !body.querySelector('button[type=submit]').disabled)`);
+    await check(`body.textContent.includes('Ожидает приёмки человеком') && !body.querySelector('button[type=submit]').disabled`, 'open review clears the gate after approval');
+    await capture('reviewer-human-approved-ru.png');
+    await evaluate(`sheet.close(); fixture.russian = false; push(); void 0`);
+    await check(`findCard('T-0096').querySelector('.task-run-status').textContent === 'Awaiting human acceptance'`, 'approved card remains in review in English');
+    await capture('reviewer-human-board-en.png');
+    await evaluate(`boardSettings(); settle()`);
+    await check(`body.querySelector('[name=reviewMode]').selectedOptions[0].textContent === 'Review + human'`, 'saved mode selected in board settings');
+    await check(`body.querySelector('[name=reviewMode]').parentElement.querySelector('small').textContent.includes('You decide')`, 'settings explain the human decision');
+    await capture('reviewer-human-settings-en.png');
+    await evaluate(`
+      sheet.close();
+      Object.assign(hybridTask, { result: { summary: 'Delivered', checks: ['Checked'] }, reviewApproved: false });
+      window.taskboard.command = async (action, id, fields) => {
+        if (action === 'accept') { window.recoveryRequest = { id, fields }; return { ok: false, error: { code: 'FIXTURE', message: 'Recorded recovery request' } }; }
+        return { ok: true, data: { revision: hybridTask.revision, result: hybridTask.result, targetHead: 'a'.repeat(40),
+          reviewMode: 'reviewer-human', reviewModeVersion: 2, pending: true, pendingModeChanged: true,
+          target: 'refs/heads/main', mode: 'squash', submitted: 'b'.repeat(40), message: 'feat: fixture', diff: '' } };
+      };
+      showReview(hybridTask);
+    `);
+    await check(`body.querySelector('button[type=submit]').disabled`, 'interrupted acceptance disables integration after a mode change');
+    await capture('reviewer-human-recovery-en.png');
+    await evaluate(`[...body.querySelectorAll('button')].find(button => button.textContent === 'Recover interrupted acceptance').click(); settle()`);
+    await check(`window.recoveryRequest.id === hybridTask.id && window.recoveryRequest.fields.cancelPending === true &&
+      window.recoveryRequest.fields.revision === hybridTask.revision`, 'recovery action pins the current revision');
+    console.log('Reviewer-human Chromium checks passed: ' + checks);
     return;
   }
   if (process.argv.includes("--run-status-only")) {

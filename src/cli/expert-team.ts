@@ -153,7 +153,7 @@ export function createExpertPlan(store: BoardStore, parentId: string, input: Rec
   requireRevision(parent, input.revision, true);
   if (runtimeEntries(store.location.root).some(entry => entry.kind === "slot" && [parent.id, "review:" + parent.id].includes(entry.task ?? "")))
     throw new TaskboardError("EXPERT_PHASE_RUNNING", "The responsible agent is already running this phase.");
-  if (parent.status === "review" && (parent.acceptanceRepair || currentReviewApproval(parent)))
+  if (parent.status === "review" && (parent.acceptanceRepair || currentReviewApproval(parent, store.index.settings)))
     throw new TaskboardError("INVALID_TRANSITION", "The submission already has a review decision or is being integrated.");
   const updated = record({ ...parent, expertTeam: { ...parent.expertTeam, [phase]: plan } }, "expert-plan", "manager", parent.status, plan.reason);
   updated.history.at(-1)!.expertPhase = phase;
@@ -222,7 +222,11 @@ export function updateExpertStage(store: BoardStore, id: string, phase: Phase, i
   const task = store.card(id);
   requireState(task, phase === "work" ? ["in_progress"] : ["review"]);
   requireRevision(task, input.revision, true);
-  if (phase === "review" && currentReviewApproval(task)) throw new TaskboardError("EXPERT_PHASE_CLOSED", "This submission already has a review decision.");
+  const settings = store.index.settings;
+  const approval = phase === "review" ? currentReviewApproval(task, settings)?.reviewApproval : undefined;
+  if (approval && (settings.reviewMode !== "reviewer-human" || approval.targetHead === targetHead)) {
+    throw new TaskboardError("EXPERT_PHASE_CLOSED", "This submission already has a review decision.");
+  }
   const stages = expertStagesStatus(task, phase, targetHead);
   const stage = stages.find(item => item.key === input.key);
   if (!stage) throw new TaskboardError("INVALID_INPUT", "Unknown specialist stage.");

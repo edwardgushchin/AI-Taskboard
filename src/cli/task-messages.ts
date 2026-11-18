@@ -1,6 +1,6 @@
 import localization from "../desktop/localization.cjs";
 import { member, number, requireState, TaskboardError, text } from "./model.ts";
-import type { Task, TaskEvent } from "./model.ts";
+import type { BoardSettings, Task, TaskEvent } from "./model.ts";
 
 export function statusNotice(task: Task, event: TaskEvent, language: string | boolean = true) {
   if (event.actor === "user") return;
@@ -29,10 +29,11 @@ function reviewerReturn(event: TaskEvent | undefined) {
   return event?.actor === "reviewer" && event.action === "request-changes";
 }
 
-export function currentReviewApproval(task: Task) {
+export function currentReviewApproval(task: Task, settings?: Pick<BoardSettings, "reviewModeVersion">) {
   if (task.status !== "review") return;
   return task.history.findLast(event => event.actor === "reviewer" && event.action === "review-approve" &&
-    event.reviewApproval?.revision === task.revision);
+    event.reviewApproval?.revision === task.revision &&
+    (!settings || event.reviewApproval.reviewModeVersion === settings.reviewModeVersion));
 }
 
 export function taskMessages(task: Task, recipient: "manager" | "agent") {
