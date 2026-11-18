@@ -5,6 +5,7 @@
   --warn-bg: color-mix(in srgb, var(--warn) 12%, var(--panel));
   --hover-time: 160ms;
   --press-offset: 1px;
+  --surface-radius: 16px;
 }
 @media (prefers-reduced-motion: reduce) { :root { --hover-time: 0ms; --press-offset: 0px; } }
 * { box-sizing: border-box; }
@@ -514,7 +515,7 @@ select:hover:not(:disabled) {
 }
 .task-card {
   position: relative; width: 100%; min-width: 0; display: grid; padding: 0;
-  border: 1px solid var(--border); border-radius: 10px;
+  border: 1px solid var(--border); border-radius: var(--surface-radius);
   background: var(--panel); overflow-wrap: anywhere; overflow: hidden;
   transition: background-color var(--hover-time) ease;
 }
@@ -1177,7 +1178,7 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
   position: fixed; position-anchor: --provider-limits;
   inset: auto auto calc(anchor(top) + 8px) clamp(8px, anchor(left), calc(100vw - 398px));
   margin: 0; width: min(390px, calc(100vw - 16px)); max-height: min(65vh, 500px);
-  overflow: auto; padding: 16px; border: 1px solid var(--border); border-radius: 16px;
+  overflow: auto; padding: 16px; border: 1px solid var(--border); border-radius: var(--surface-radius);
   color: var(--text); background: var(--panel); box-shadow: 0 6px 20px #0004;
   font-size: 13px; line-height: 1.5; opacity: 0; transform: translateY(4px);
   transition: opacity var(--hover-time) ease, transform var(--hover-time) ease,
