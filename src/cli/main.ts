@@ -40,6 +40,7 @@ import { expertContext, expertSkill, listExperts, readExpert, saveExpert } from 
 import { approvalRequirements, createExpertPlan, expertStagesStatus, planNewTask, requireApprovalPlan, requireExpertPlan, requireExpertResults, reviewDecisionSequence, sendTeamMessage, taskExpertPhase, teamInbox, updateExpertStage } from "./expert-team.ts";
 import { syncTaskStatusNotices } from "../desktop/manager-history.ts";
 import { syncSettingsNotices } from "../desktop/settings-notices.ts";
+import { cachedTaskLimits } from "../desktop/agent-limits.ts";
 import { deferExecutor, linkQueuedExecutor, matchesQueuedExecutor, registerRuntime, runtimeEntries, runtimeTransaction } from "../desktop/board-runtime.ts";
 
 const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "checklist", "pause", "block", "resume", "unblock", "update"]);
@@ -928,7 +929,7 @@ async function main() {
           data = readBoardSettings(location);
         } else if (command === "sync-notices") {
           if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "Notice synchronization takes no task ID.");
-          const limits = runtimeEntries(location.root).find(entry => entry.id === "task-defaults")?.limits ?? inheritedLimits;
+          const limits = cachedTaskLimits(runtimeEntries(location.root)) ?? inheritedLimits;
           syncSettingsNotices(location.root, limits);
           data = { changed: syncTaskStatusNotices(location.root, text(input.language, "language", true)) };
         } else if (command === "manager-usage") {

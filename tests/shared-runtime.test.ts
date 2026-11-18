@@ -48,7 +48,7 @@ test("runtime snapshots and reservations stay responsive during a board transact
   const slots = createAgentSlots(true);
   slots.remember(project);
   withLock(location.directory, () => {
-    assert.equal(slots.available(project, "executor"), 1);
+    assert.equal(slots.available(project, "executor"), 3);
     const release = slots.acquire(project, "executor", undefined, "T-0001")!;
     assert.ok(release);
     assert.equal(runtimeEntries(project).some(entry => entry.task === "T-0001"), true);

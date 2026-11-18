@@ -298,7 +298,7 @@ function releaseWatch(project: string, watch: BoardWatch): void {
 }
 
 function subscribe(project: string, board: Board): BoardWatch {
-  agentSlots.remember(project);
+  agentSlots.remember(project, true);
   const tabs = new Set<ProjectTab>();
   let child: ReturnType<typeof cliChild> | undefined;
   let retry: NodeJS.Timeout | undefined;
@@ -1378,7 +1378,7 @@ function scheduleDraftDiscussions({ board }: BoardWatch) {
 }
 
 function reserveAgent(project: string, role: AgentRole, task?: string, queuedRevision?: number) {
-  agentSlots.remember(project);
+  agentSlots.remember(project, true);
   // A tool call can race the watch snapshot after CLI settings were saved.
   const overrides = readBoardSettings(runtimeLocation(project)).taskLimits;
   const release = agentSlots.acquire(projectIdentity(project), role, overrides, task, queuedRevision);

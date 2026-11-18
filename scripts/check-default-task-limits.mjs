@@ -1,0 +1,179 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { electronCheck } from "./electron-check.mjs";
+import { createAgentSlots } from "../src/desktop/agent-limits.ts";
+import { locateBoard, onBoard } from "../src/cli/storage.ts";
+
+const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "task-limits", 60_000,
+  [["clean"], ["legacy-profile"], ["restart"]]);
+
+void (async () => {
+  const require = createRequire(import.meta.url);
+  const { app, BrowserWindow, dialog } = require("electron");
+  const { transformSync } = require("esbuild");
+  const phase = process.argv.at(-1);
+  const root = fileURLToPath(new URL("../", import.meta.url));
+  const profile = join(scratch, "profile");
+  const board = join(scratch, "board");
+  const manual = join(scratch, "manual");
+  const profileLimits = join(profile, "task-limits.json");
+  const runtime = join(board, ".tasks", "runtime.json");
+  const report = join(artifacts, "default-task-limits-check.txt");
+  const modules = join(scratch, "node_modules");
+  const record = line => {
+    console.log(line);
+    writeFileSync(report, line + "\n", { flag: "a" });
+  };
+  process.env.GIT_CEILING_DIRECTORIES = scratch;
+  app.setPath("userData", profile);
+  app.setPath("appData", join(scratch, "app-data"));
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch("lang", "ru");
+
+  function cli(project, command, input) {
+    const result = JSON.parse(execFileSync(process.env.TASKBOARD_CHECK_NODE, [
+      "--disable-warning=ExperimentalWarning", join(root, "src/cli/main.ts"), "--project", project,
+      "--json", command, ...(input ? ["--stdin"] : []),
+    ], { cwd: scratch, encoding: "utf8", windowsHide: true, input: input && JSON.stringify(input) }));
+    assert.equal(result.ok, true, JSON.stringify(result));
+    return result.data;
+  }
+  function notice(expected) {
+    cli(board, "sync-notices", { language: "ru" });
+    const { effective } = onBoard(locateBoard(board), ({ index }) => index.managerSettings);
+    assert.deepEqual([effective["Лимит задач в работе"], effective["Лимит задач на ревью"]], expected);
+  }
+  function reservations(executor, reviewer) {
+    const pool = createAgentSlots(true);
+    const releases = [];
+    try {
+      for (const [role, count] of Object.entries({ executor, reviewer })) {
+        assert.equal(pool.available(board, role), count);
+        for (let i = 0; i < count; i++) {
+          const release = pool.acquire(board, role, undefined, role + i);
+          assert.ok(release);
+          releases.push(release);
+        }
+        assert.equal(pool.available(board, role), 0);
+        assert.equal(pool.acquire(board, role, undefined, role + count), undefined);
+      }
+    } finally {
+      for (const release of releases) release();
+    }
+    assert.equal(pool.available(board, "executor"), executor);
+    assert.equal(pool.available(board, "reviewer"), reviewer);
+  }
+  const wait = async (predicate, label) => {
+    const deadline = Date.now() + 15000;
+    while (!await predicate()) {
+      if (Date.now() > deadline) throw Error("UI wait timed out: " + label);
+      await new Promise(resolve => setTimeout(resolve, 40));
+    }
+  };
+  let chosen = board;
+  dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [chosen] });
+
+  try {
+    const entry = join(scratch, "main-under-test.mjs");
+    if (phase === "clean") {
+      writeFileSync(report, "");
+      record(`Task limits — ${process.platform} ${process.arch}, Electron ${process.versions.electron}`);
+      mkdirSync(board);
+      mkdirSync(manual);
+      cli(board, "init", { git: false });
+      cli(manual, "init", { boardType: "manual" });
+      assert.equal(existsSync(profileLimits), false);
+      notice([3, 2]);
+      reservations(3, 2);
+      writeFileSync(runtime, JSON.stringify([{ id: "task-defaults", kind: "defaults", owner: 0,
+        limits: { executor: 1, manager: 0, reviewer: 1 } }]));
+      notice([3, 2]);
+      reservations(3, 2);
+      const url = new URL("../src/desktop/main.ts", import.meta.url);
+      const source = readFileSync(url, "utf8").replaceAll("import.meta.url", JSON.stringify(url.href))
+        .replace(/from "(\.\.?\/[^"\n]+)"/g, (_, specifier) => "from " + JSON.stringify(new URL(specifier, url).href));
+      writeFileSync(entry, transformSync(source, { loader: "ts", format: "esm" }).code);
+    } else if (phase === "legacy-profile") {
+      writeFileSync(profileLimits, JSON.stringify({ executor: 1, manager: 0, reviewer: 1 }));
+      writeFileSync(runtime, JSON.stringify([{ id: "task-defaults", kind: "defaults", owner: 0,
+        limits: { executor: 1, manager: 0, reviewer: 1 } }]));
+      cli(board, "settings", { taskLimits: { reviewer: 0 } });
+    }
+    symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), modules,
+      process.platform === "win32" ? "junction" : "dir");
+    app.on("web-contents-created", (_event, contents) => contents.setBackgroundThrottling(false));
+    await import(pathToFileURL(entry).href);
+    await wait(() => BrowserWindow.getAllWindows().length > 0, "main window");
+    const window = BrowserWindow.getAllWindows()[0];
+    const evaluate = code => window.webContents.executeJavaScript(code);
+    await wait(() => evaluate("Boolean(window.taskboard && document.querySelector('#app-menu button'))"), "renderer");
+    async function open(project) {
+      chosen = project;
+      await evaluate("window.taskboard.menuAction('open-project')");
+      await wait(() => evaluate("window.taskboard.bootstrap().then(f => !f.loading && Boolean(f.board))"), "board");
+    }
+    async function showLimits(expected) {
+      await evaluate("settings(); void 0");
+      const values = () => evaluate("Array.from(document.querySelectorAll('#agent-limits input[type=number]'), input => input.value)");
+      await wait(async () => JSON.stringify(await values()) === JSON.stringify(expected.map(String)), "application limits");
+    }
+    async function boardLimits(expected) {
+      await evaluate("boardSettings(); void 0");
+      const values = () => evaluate(`["executor", "reviewer"].map(role => {
+        const input = document.querySelector('input[name=' + role + 'Limit]');
+        return input && [input.value, input.placeholder];
+      })`);
+      await wait(async () => JSON.stringify(await values()) === JSON.stringify(expected), "board limits");
+    }
+
+    if (phase === "clean") {
+      await showLimits([3, 2]);
+      await open(board);
+      await boardLimits([["", "3"], ["", "2"]]);
+      await showLimits([3, 2]);
+      await evaluate("document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(resolve)))");
+      const screenshot = await window.webContents.capturePage();
+      assert.ok(!screenshot.isEmpty());
+      writeFileSync(join(artifacts, "default-task-limits.png"), screenshot.toPNG());
+      notice([3, 2]);
+      reservations(3, 2);
+      await open(manual);
+      await evaluate("boardSettings(); void 0");
+      assert.equal(await evaluate("document.querySelectorAll('input[name$=Limit]').length"), 0);
+      record("PASS clean profile and legacy board cache: application 3/2, inherited placeholders 3/2, CLI notices 3/2, 3+2 reservations and next denied; manual settings have no task limits.");
+    } else {
+      await open(board);
+      const appLimits = phase === "restart" ? [4, 2] : [1, 1];
+      await boardLimits([["", String(appLimits[0])], ["0", String(appLimits[1])]]);
+      await showLimits(appLimits);
+      assert.deepEqual(cli(board, "settings").taskLimits, { reviewer: 0 });
+      notice([appLimits[0], 0]);
+      const pool = createAgentSlots(true);
+      assert.equal(pool.available(board, "executor"), appLimits[0]);
+      assert.equal(pool.available(board, "reviewer"), Infinity);
+      if (phase === "legacy-profile") {
+        await evaluate(`(() => {
+          const form = document.querySelector('#agent-limits');
+          form.elements.executor.value = 4;
+          form.elements.reviewer.value = 2;
+          form.requestSubmit();
+        })()`);
+        await wait(() => JSON.parse(readFileSync(profileLimits, "utf8")).executor === 4, "saved application limits");
+        record("PASS explicit legacy profile 1/1 survives upgrade; saved board review 0 takes precedence in settings, notices and slot availability.");
+      } else {
+        record("PASS after application restart: saved app 4/2 and board review 0 persist; inherited work 4 and unlimited review are effective.");
+      }
+    }
+    if (keepArtifacts) console.log(report);
+    unlinkSync(modules);
+    app.quit();
+  } catch (error) {
+    console.error(error);
+    if (existsSync(modules)) unlinkSync(modules);
+    app.exit(1);
+  }
+})();
