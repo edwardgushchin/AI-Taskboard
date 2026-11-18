@@ -20,8 +20,8 @@ const chatPreviews = new IntersectionObserver(entries => {
     if (!isIntersecting) continue;
     chatPreviews.unobserve(target);
     if (!target.isConnected) continue;
-    const { task, file, path } = target.dataset;
-    const preview = path ? api.runImagePreview(task, path) : api.attachmentPreview(task, file);
+    const { task, file, path, reviewer } = target.dataset;
+    const preview = path ? api.runImagePreview(task, path, reviewer === "true") : api.attachmentPreview(task, file);
     void preview.then(src => {
       if (src && target.isConnected) showChatPreview(target, src);
       else if (path && target.isConnected) unavailableRunImage(target);
@@ -268,13 +268,14 @@ function renderRunActivity(container, items, completed = false, durationMs, task
       if (!tile || tile.dataset.path !== image.file || tile.dataset.task !== taskId) {
         tile = button("", () => openImagePreview(taskId, tile.imageFiles, tile.imageFiles.findIndex(file => file.file === image.file),
           tile.querySelector("img")?.src, {
-            preview: file => api.runImagePreview(taskId, file.file),
-            save: file => api.saveRunImage(taskId, file.file),
+            preview: file => api.runImagePreview(taskId, file.file, context?.reviewer),
+            save: file => api.saveRunImage(taskId, file.file, context?.reviewer),
           }), "quiet chat-attachment");
         controlLabelForIcon(tile, () => t("ui.view_7aa05de3") + image.name);
         tile.append(icon("images"), element("span", image.name));
         tile.dataset.task = taskId;
         tile.dataset.path = image.file;
+        if (context?.reviewer) tile.dataset.reviewer = "true";
         chatPreviews.observe(tile);
       }
       tile.imageFiles = images;
@@ -657,7 +658,7 @@ function reviewerChat(task, work, tail, decisions, onCollaboration) {
             return [{ ...item, text: [summary, notes, checks].filter(Boolean).join("\n\n") }];
           } catch { return [item]; }
         });
-        renderRunActivity(node.activity, items, false, undefined, undefined, { taskId: task.id, reviewer: true });
+        renderRunActivity(node.activity, items, false, undefined, task.id, { reviewer: true });
       }
       const matched = new Set();
       for (const { entry, event, submittedAt } of decisions) {
