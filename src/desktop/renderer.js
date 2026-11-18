@@ -2137,7 +2137,6 @@ function draftComposer() {
       renderActivity(liveGoal, pending(liveWorkItems.work), false, { seenMessages, managerWork: true });
       renderActivity(liveChat, pending(liveWorkItems.chat), false, { seenMessages, managerWork: true });
     }
-    reconcileWorkTransitions(work);
   }
   async function loadWork(cursor = null) {
     if (disposed || work.hidden) return;
