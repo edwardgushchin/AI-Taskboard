@@ -164,10 +164,10 @@ test("only delivered dialogue replies become unread and repeated saves preserve 
   assert.equal(saveManagerHistory(project, at, id, { ...run, items: [reply] }), false);
   assert.deepEqual(managerUnread(project), ["second"]);
   assert.deepEqual(readManagerHistory(project, null, "chat")!.turns.flatMap(turn => turn.items.map(item => item.id)), ["first", "second"]);
-  assert.deepEqual(readManagerHistory(project, null, "work")!.turns.flatMap(turn => turn.items.map(item => item.id)), ["first", statusId]);
+  assert.deepEqual(readManagerHistory(project, null, "work")!.turns.flatMap(turn => turn.items.map(item => item.id)), ["first"]);
 });
 
-test("work history identifies older status notices with multiline titles and embedded separators", t => {
+test("only service notices are hidden, even with identical user and agent text", t => {
   const project = fixture(t);
   const start = Date.now();
   const titles = ["FirstSecond", "First\nSecond", "First\r\nSecond", "First\rSecond",
@@ -182,14 +182,17 @@ test("work history identifies older status notices with multiline titles and emb
     return item;
   });
   const reply = { ...notices[1]!, id: randomUUID() };
-  saveManagerHistory(project, start + notices.length, randomUUID(), { lane: "chat", items: [reply] });
-  assert.deepEqual(readManagerHistory(project, null, "work")!.turns.flatMap(turn => turn.items),
-    notices.map(item => ({ ...item, statusTransition: { task: "T-0042", status: "cancelled" } })));
+  const message = { text: reply.text, files: [] };
+  saveManagerHistory(project, start + notices.length, randomUUID(), { lane: "chat", message, items: [reply] });
+  saveManagerHistory(project, start + notices.length + 1, randomUUID(), { lane: "work", items: [reply] });
+  assert.deepEqual(readManagerHistory(project, null, "work")!.turns.flatMap(turn => turn.items), [reply]);
+  assert.deepEqual(readManagerHistory(project, null, "chat")!.turns.flatMap(turn => turn.messages), [message]);
+  assert.deepEqual(readManagerHistory(project)!.turns.filter(turn => turn.lane === "notice").flatMap(turn => turn.items), notices);
   assert.deepEqual(readManagerHistory(project, null, "chat")!.turns.flatMap(turn => turn.items), [reply]);
   assert.deepEqual(managerUnread(project), [reply.id]);
 });
 
-test("work history resolves older status-like reasons against the card history", t => {
+test("saved status notices stay hidden before and after the card is archived", t => {
   const project = fixture(t);
   const start = Date.now();
   const store = initializeBoard({ root: project, directory: join(project, ".tasks"), repository: null }, store => store);
@@ -210,29 +213,26 @@ test("work history resolves older status-like reasons against the card history",
   store.create({ ...task, title: "Renamed after the block", status: "cancelled", updatedAt: changeAt, closedAt: changeAt,
     history: [...task.history, ...events, { action: "cancel", actor: "manager", from: "blocked", to: "cancelled", at: changeAt }] });
   const work = () => readManagerHistory(project, null, "work")!.turns.flatMap(turn => turn.items);
-  const expected = [
-    { ...items[0]!, statusTransition: { task: "T-0042", status: "blocked" } },
-    { ...items[1]!, statusTransition: { task: "T-0042", status: "blocked" } },
-    { ...items[2]!, statusTransition: undefined },
-  ];
-  assert.deepEqual(work(), expected);
+  assert.deepEqual(work(), []);
+  assert.deepEqual(readManagerHistory(project)!.turns.flatMap(turn => turn.items), items);
   store.index.settings.archiveAfterDays = 0;
   store.saveIndex();
   assert.deepEqual(sweepArchives(store, new Date(start + 20)).archived, [task.id]);
-  assert.deepEqual(work(), expected);
+  assert.deepEqual(work(), []);
+  assert.deepEqual(readManagerHistory(project)!.turns.flatMap(turn => turn.items), items);
   assert.deepEqual(managerUnread(project), []);
 });
 
-test("work pages interleaved notices and chat runs without losing or duplicating notices", t => {
+test("status notices do not consume work pages or hide older real activity", t => {
   const project = fixture(t);
   const at = Date.now();
-  for (let i = 0; i < 25; i++) saveManagerHistory(project, at + i, randomUUID(), {
-    lane: i % 2 ? "notice" : "chat", items: [{ id: String(i), type: "agentMessage", title: "", text: String(i), status: "completed" }],
+  for (let i = 0; i < 49; i++) saveManagerHistory(project, at + i, randomUUID(), {
+    lane: i % 2 ? "notice" : "work", items: [{ id: String(i), type: "agentMessage", title: "", text: String(i), status: "completed" }],
   });
   const recent = readManagerHistory(project, null, "work")!;
   const older = readManagerHistory(project, recent.nextCursor!, "work")!;
   assert.equal(older.nextCursor, null);
-  assert.deepEqual([...older.turns, ...recent.turns].map(turn => turn.items[0]!.text), Array.from({ length: 12 }, (_, i) => String(i * 2 + 1)));
+  assert.deepEqual([...older.turns, ...recent.turns].map(turn => turn.items[0]!.text), Array.from({ length: 25 }, (_, i) => String(i * 2)));
 });
 
 test("live and saved service operations use their Board tool identity before any result arrives", t => {
