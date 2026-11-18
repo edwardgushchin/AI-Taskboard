@@ -560,6 +560,10 @@ select:hover:not(:disabled) {
   white-space: normal; overflow-wrap: anywhere;
 }
 .task-identity { gap: 8px; }
+.task-card-footer {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 8px; min-width: 0;
+}
+.task-card-footer > .task-run-status { display: inline-flex; align-items: center; min-height: 15px; color: var(--muted); }
 .task-id { flex: none; }
 .task-stat { display: inline-flex; align-items: center; gap: 2px; }
 .task-stat .codicon { width: 14px; height: 12px; font-size: 12px; }

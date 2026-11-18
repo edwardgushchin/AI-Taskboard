@@ -375,18 +375,57 @@ app.whenReady().then(async () => {
           meta.scrollWidth <= meta.clientWidth + 1 && !meta.querySelector('.task-run-status') &&
           (status.textContent.startsWith('Waiting') || status.textContent === 'Ожидает свободного исполнителя');
       })()`, `full-width waiting block: ${theme}, ${width}px, ${locale}, long milestone and attachments`);
-      await capture(`waiting-${theme}-${width}-${locale}.png`);
+      if (keepArtifacts && theme === 'light' && width === 200 && locale === 'ru') await capture('waiting-200.png');
     }
     await evaluate(`fixture.russian = true; fixture.waitingTasks = []; push(); void 0`);
     await check(`findCard('T-0096').querySelector('.task-run-status').textContent === 'Запуск с доски не активен'`, 'dequeue replaces waiting with inactive status');
     await evaluate(`fixture.waitingTasks = ['T-0096']; fixture.runningTasks = ['T-0096']; push(); void 0`);
-    await check(`!!findCard('T-0096').querySelector('.agent-spinner') && !findCard('T-0096').textContent.includes('Ожидает свободного')`, 'running takes precedence over waiting');
+    for (const width of [320, 136]) {
+      await evaluate(`findCard('T-0096').style.width = '${width}px'; void 0`);
+      await check(`(() => {
+        const card = findCard('T-0096');
+        const details = card.querySelector('.task-card-details');
+        const footer = details.lastElementChild;
+        const meta = footer.querySelector('.task-meta');
+        const status = footer.querySelector('.task-run-status');
+        const spinner = status?.querySelector('.agent-spinner');
+        const s = status?.getBoundingClientRect(), m = meta?.getBoundingClientRect();
+        const f = footer.getBoundingClientRect();
+        return footer.classList.contains('task-card-footer') && details.querySelectorAll('.task-run-status').length === 1 &&
+          spinner?.getAttribute('role') === 'status' &&
+          spinner.getAttribute('aria-label') === t('ui.agent_is_working_28ccd334') &&
+          s.left >= m.right && s.right === f.right && s.bottom === f.bottom &&
+          card.scrollWidth <= card.clientWidth + 1 && meta.scrollWidth <= meta.clientWidth + 1 &&
+          [...meta.children].every(node => node.getBoundingClientRect().right <= m.right + 1) &&
+          meta.firstElementChild.textContent.includes('T-0096') &&
+          meta.children[1].textContent === '0/1' && meta.children[2].textContent === '1';
+      })()`, `accessible active indicator in the bottom right with full metadata at ${width}px`);
+      if (keepArtifacts) await capture(`running-${width}.png`);
+    }
+    await evaluate(`
+      window.taskboard.command = async () => ({ ok: true, data: structuredClone(queuedTask) });
+      showTask(queuedTask.id);
+    `);
+    await check(`(() => {
+      const title = byId('sheet-title');
+      const spinner = title.querySelector('#task-agent-run .agent-spinner');
+      if (!spinner) return false;
+      const style = getComputedStyle(spinner);
+      return spinner.getAttribute('aria-label') === t('ui.agent_is_working_28ccd334') &&
+        style.fontSize === getComputedStyle(title).fontSize &&
+        style.width === style.fontSize && style.height === style.fontSize;
+    })()`, 'open task title retains the accessible title-sized indicator');
+    if (keepArtifacts) await capture('running-open-task.png');
     await evaluate(`fixture.runningTasks = []; fixture.reviewingTasks = { 'T-0096': 'reviewer' }; push(); void 0`);
     await check(`!!findCard('T-0096').querySelector('.agent-spinner')`, 'active review takes precedence over waiting');
     await evaluate(`fixture.reviewingTasks = {}; fixture.board.tasks[0].mergeRepair = {}; fixture.board.tasks[0].revision++; push(); void 0`);
+    await check(`!byId('task-agent-run')?.querySelector('.agent-spinner')`, 'open task title clears the indicator when activity ends');
     await check(`findCard('T-0096').querySelector('.task-run-status').textContent === t('ui.waiting_for_a_reviewer_slot_8918dd95')`, 'repair queue retains reviewer waiting label');
     await evaluate(`fixture.waitingTasks = []; fixture.board.tasks[0].status = 'ready'; fixture.board.tasks[0].revision++; push(); void 0`);
-    await check(`!findCard('T-0096').querySelector('.task-run-status')`, 'no block remains when status has no run label');
+    await check(`findCard('T-0096').querySelector('.task-card-details').lastElementChild.classList.contains('task-meta') &&
+      !findCard('T-0096').querySelector('.task-run-status, .task-card-footer')`, 'inactive card has no extra row when status has no run label');
+    await evaluate(`sheet.close(); settle()`);
+    if (keepArtifacts) await capture('inactive-136.png');
     await evaluate(`delete queuedTask.milestone; queuedTask.attachments = []; queuedTask.subtasks = [];
       queuedTask.status = 'ready'; queuedTask.revision++; fixture.runningTasks = ['other-task'];
       push(); void 0`);

@@ -1022,8 +1022,14 @@ function card(task) {
     attachments.append(icon("attach"), String(task.attachments.length));
     meta.append(attachments);
   }
-  if (!runStatus.hidden) item.append(runStatus);
-  item.append(meta);
+  if (runStatus.firstElementChild) {
+    const footer = element("span", undefined, "task-card-footer");
+    footer.append(meta, runStatus);
+    item.append(footer);
+  } else {
+    if (!runStatus.hidden) item.append(runStatus);
+    item.append(meta);
+  }
   card.replaceChildren(item);
   boardCards.set(task.id, { node: card, signature });
   return card;
