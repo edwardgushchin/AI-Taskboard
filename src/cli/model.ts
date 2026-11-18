@@ -277,6 +277,11 @@ export function usesIndependentReviewer(mode: ReviewMode): boolean {
   return mode === "reviewer" || mode === "reviewer-human";
 }
 
+export function reviewsAcceptanceRepair(task: Pick<Task, "acceptanceRepair">, settings: BoardSettings): boolean {
+  return settings.reviewMode === "reviewer-human" && task.acceptanceRepair?.phase === "checking" &&
+    task.acceptanceRepair.reviewModeVersion === settings.reviewModeVersion;
+}
+
 export function boardReviewMode(settings: Pick<BoardSettings, "reviewMode" | "autoReview">): ReviewMode {
   return settings.reviewMode ?? (settings.autoReview === true ? "reviewer" : "human");
 }

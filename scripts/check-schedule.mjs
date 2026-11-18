@@ -7,7 +7,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { electronCheck } from "./electron-check.mjs";
-const { scratch, artifacts } = electronCheck(import.meta.url, "schedule", 90_000);
+const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "schedule", 90_000);
 const require = createRequire(import.meta.url);
 const { app, BrowserWindow, dialog } = require("electron");
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -39,6 +39,8 @@ const waitFor = async predicate => {
 };
 void (async () => { try {
   cli(["init"]);
+  cli(["settings"], { autoMode: false });
+  const indexPath = join(project, ".tasks", "board.json");
   for (const schedule of [{ everyMinutes: 60 }, { time: "09:00" }]) {
     const task = cli(["create"], plannedDraft({ title: "Schedule persistence", criteria: ["Checked"], schedule, workingDirectory: project }));
     cli(["approve", task.id]);
@@ -47,7 +49,13 @@ void (async () => { try {
     writeFileSync(join(project, ".tasks/tasks", task.id + ".json"), JSON.stringify(paused));
   }
   const sourceUrl = new URL("../src/desktop/main.ts", import.meta.url);
-  const source = (readFileSync(sourceUrl, "utf8") + "\nglobalThis.scheduleCheck = { scheduleRecurringTasks, boardActions };\n")
+  const source = (readFileSync(sourceUrl, "utf8") + `
+    globalThis.scheduleCheck = { scheduleRecurringTasks, boardActions, stubLegacy(id, plan, start) {
+      const request = runBoardRequest, launch = launchTask;
+      runBoardRequest = (...args) => args[2].includes("use expert_plan") && args[2].includes(id) ? plan() : request(...args);
+      launchTask = (...args) => args[1] === id ? start(args[4], args[6]) : launch(...args);
+    } };
+  `)
     .replaceAll("import.meta.url", JSON.stringify(sourceUrl.href))
     .replace(/from "(\.\.?\/[^"\n]+)"/g, (_match, path) => "from " + JSON.stringify(new URL(path, sourceUrl).href));
   const entry = join(scratch, "main.mjs");
@@ -87,9 +95,55 @@ void (async () => { try {
   assert.equal(paused.ok, true);
   await waitFor(async () => (await snapshot(first)).board.tasks[0].schedule.paused);
   cli(["start", initial.id], { revision: current.revision, scheduled: true }, "INVALID_TRANSITION");
-  await evaluate(first, "document.querySelector('[data-task-id=\"T-0001\"]')?.click()");
-  writeFileSync(join(artifacts, "schedule-two-windows.png"), (await first.webContents.capturePage()).toPNG());
-  console.log("Production schedule: persisted interval/calendar pauses at startup, two windows, manager resume, IPC pause, stale scheduler: passed");
+  // Simulate a due, already approved card written before the rule was mandatory.
+  const outdated = { ...cli(["show", initial.id]), expertTeam: undefined };
+  outdated.schedule = { ...outdated.schedule, paused: false, nextAt: "2000-01-01T00:00:00Z" };
+  const planning = Promise.withResolvers();
+  let requests = 0;
+  let starts = 0;
+  globalThis.scheduleCheck.stubLegacy(initial.id, async () => {
+    requests++;
+    await planning.promise;
+    return { ok: true, data: {} };
+  }, async (revision, scheduled) => {
+    assert.equal(scheduled, true);
+    const latest = cli(["show", initial.id]);
+    if (latest.status !== "ready" || latest.revision !== revision) return { ok: false, error: { code: "REVISION_CONFLICT" } };
+    const data = cli(["start", initial.id], { revision, scheduled });
+    starts++;
+    return { ok: true, data };
+  });
+  writeFileSync(join(project, ".tasks/tasks", initial.id + ".json"), JSON.stringify(outdated));
+  const legacyIndex = JSON.parse(readFileSync(indexPath, "utf8"));
+  legacyIndex.settings.requireExpertPlans = false;
+  writeFileSync(indexPath, JSON.stringify(legacyIndex));
+  await waitFor(async () => (await snapshot(first)).board.tasks.some(task => task.id === initial.id && !task.expertWorkPlanned));
+  cli(["start", initial.id], { revision: outdated.revision, scheduled: true }, "EXPERT_PLAN_REQUIRED");
+  globalThis.scheduleCheck.scheduleRecurringTasks();
+  await waitFor(() => requests === 1);
+  globalThis.scheduleCheck.scheduleRecurringTasks();
+  const waiting = cli(["show", initial.id]);
+  assert.equal(waiting.status, "ready");
+  assert.equal(waiting.schedule.nextAt, outdated.schedule.nextAt);
+  assert.equal(starts, 0);
+  const repaired = await act("expert_plan", { id: initial.id, revision: waiting.revision, phase: "work",
+    lead: "qa-engineer", reason: "Resume the saved schedule.", stages: [] });
+  assert.equal(repaired.ok, true, JSON.stringify(repaired));
+  planning.resolve();
+  await waitFor(async () => (await snapshot(first)).board.tasks.some(task => task.id === initial.id && task.expertWorkPlanned));
+  globalThis.scheduleCheck.scheduleRecurringTasks();
+  await waitFor(() => starts === 1 && cli(["show", initial.id]).status === "in_progress");
+  await waitFor(async () => [first, second].every(window => !window.isDestroyed()) &&
+    (await snapshot(first)).board.tasks.find(task => task.id === initial.id)?.status === "in_progress" &&
+    (await snapshot(second)).board.tasks.find(task => task.id === initial.id)?.status === "in_progress");
+  globalThis.scheduleCheck.scheduleRecurringTasks();
+  assert.equal(starts, 1);
+  assert.equal(requests, 1);
+  if (keepArtifacts) {
+    await evaluate(first, "document.querySelector('[data-task-id=\"T-0001\"]')?.click()");
+    writeFileSync(join(artifacts, "schedule-two-windows.png"), (await first.webContents.capturePage()).toPNG());
+  }
+  console.log("Production schedule: persisted pauses, two windows, and a due legacy card with auto mode off requesting a plan then starting once: passed");
 } catch (error) { console.error(error); process.exitCode = 1; }
 finally {
   for (const window of BrowserWindow.getAllWindows()) window.destroy();

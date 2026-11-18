@@ -3751,8 +3751,9 @@ test("reviewer-human requires fresh reviewer approval and desktop acceptance", a
 
 for (const recover of [false, true]) test("reviewer-human repeats approval after target movement and conflict repair" + (recover ? " and recovers a saved integration" : ""), t => {
   const root = fixture(t, true);
-  const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "source.txt"), "task version\n"));
-  const { reviewModeVersion } = cli(root, ["settings"], { reviewMode: "reviewer-human" });
+  const { task: original, worktree } = submitFixture(root, path => writeFileSync(join(path, "source.txt"), "task version\n"));
+  let task = original;
+  const { reviewModeVersion } = cli(root, ["settings"], { reviewMode: "reviewer-human", autoMode: recover });
   const initial = git(root, "rev-parse", "HEAD");
   const approve = (revision: number, targetHead: string) => cli(root, ["review-approve", task.id], {
     revision, targetHead, reviewModeVersion, summary: "Verified", evidence: ["Checked result"],
@@ -3760,11 +3761,19 @@ for (const recover of [false, true]) test("reviewer-human repeats approval after
   const acceptance = { actor: "user", reviewModeVersion, revision: task.revision,
     targetHead: initial, message: "feat: integrate checked result" };
   approve(task.revision, initial);
+  onBoard(locateBoard(root), store => {
+    const saved = store.card(task.id);
+    store.save({ ...saved, expertTeam: { work: saved.expertTeam?.work } });
+  });
+  const firstPlan = { phase: "review", revision: task.revision, lead: "qa-engineer", reason: "Review the changed target.", stages: [] };
+  cli(root, ["expert-plan", task.id], firstPlan, "INVALID_TRANSITION");
   writeFileSync(join(root, "source.txt"), "target version\n");
   git(root, "commit", "-am", "fix: update target");
   const head = git(root, "rev-parse", "HEAD");
   assert.equal(cli(root, ["review", task.id, "--compact"]).awaitingHumanAcceptance, false);
   cli(root, ["accept", task.id], acceptance, "HUMAN_ACCEPTANCE_REQUIRED", true);
+  task = cli(root, ["expert-plan", task.id], firstPlan).parent;
+  acceptance.revision = task.revision;
   approve(task.revision, head);
   cli(root, ["accept", task.id], { ...acceptance, targetHead: head, userAcceptance: true }, "HUMAN_ACCEPTANCE_REQUIRED", true);
   const queued = onBoard(locateBoard(root), store => store.save(record({ ...store.card(task.id), acceptanceRepair: {
@@ -3777,9 +3786,26 @@ for (const recover of [false, true]) test("reviewer-human repeats approval after
   git(worktree, "add", "source.txt");
   git(worktree, "commit", "-m", "fix: combine versions\n\nTask: " + task.id);
   const preview = cli(root, ["preview", task.id]);
-  const repaired = cli(root, ["submit", task.id], { token: preview.token, message: preview.commitMessage,
+  let repaired = cli(root, ["submit", task.id], { token: preview.token, message: preview.commitMessage,
     summary: "Combined", checks: ["Checked merged source"] });
   assert.equal(repaired.acceptanceRepair.phase, "checking");
+  onBoard(locateBoard(root), store => {
+    const saved = store.card(task.id);
+    store.save({ ...saved, expertTeam: { work: saved.expertTeam?.work } });
+  });
+  const reviewPlan = { phase: "review", lead: "qa-engineer", reason: "Review the repaired submission.",
+    revision: repaired.revision, stages: [{ key: "verify", expertId: "qa-engineer", title: "Verify repair",
+      criteria: ["Both edits preserved"], outputs: ["verification"] }] };
+  const decision = { revision: repaired.revision, targetHead: head, reviewModeVersion, summary: "Verified", evidence: ["Checked result"] };
+  cli(root, ["review-approve", task.id], decision, "EXPERT_PLAN_REQUIRED");
+  cli(root, ["expert-plan", task.id], { ...reviewPlan, phase: "work" }, "INVALID_TRANSITION");
+  const savedRepair = repaired.acceptanceRepair;
+  repaired = cli(root, ["expert-plan", task.id], reviewPlan).parent;
+  assert.deepEqual(repaired.acceptanceRepair, savedRepair);
+  cli(root, ["expert-plan", task.id], { ...reviewPlan, revision: repaired.revision, reason: "Replace the checking plan" }, "INVALID_TRANSITION");
+  const stage = { phase: "review", actor: "reviewer", key: "verify", revision: repaired.revision, targetHead: head };
+  cli(root, ["expert-stage", task.id], { ...stage, state: "running" });
+  cli(root, ["expert-stage", task.id], { ...stage, state: "done", result: "Checked", outputs: { verification: "Both edits preserved" } });
   const continuation = { revision: repaired.revision, targetHead: head, continueRepair: true };
   cli(root, ["accept", task.id], continuation, "REVIEW_REQUIRED");
   assert.equal(git(root, "rev-parse", "HEAD"), head);

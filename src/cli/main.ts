@@ -162,15 +162,16 @@ function snapshotBoard(store: BoardStore, compact = false, cache = new Map<strin
       return card;
     });
     const statuses = new Map([...cards.map(card => card.task), ...archived].map(task => [task.id, task.status]));
+    const mode = boardReviewMode(header.settings);
     return { ...header, tasks: cards.map(({ task, target, approval }) => {
       let reviewTargetHead: string | null | undefined;
-      let reviewPending: true | undefined;
-      if (task.status === "review" && boardReviewMode(header.settings) === "reviewer-human") {
+      const reviewPending = task.status === "review" && exists(store.pendingPath(task.id)) ? true as const : undefined;
+      const checkReviewTarget = mode === "reviewer-human" || (mode === "reviewer" && !task.expertReviewPlanned && approval);
+      if (task.status === "review" && checkReviewTarget) {
         if (target && !targetHeads.has(target)) {
           targetHeads.set(target, store.location.repository && resolveCommit(store.location.repository.root, target) || undefined);
         }
         reviewTargetHead = target ? targetHeads.get(target) : null;
-        if (exists(store.pendingPath(task.id))) reviewPending = true;
         task = { ...task, reviewApproved: Boolean(approval &&
           approval.reviewModeVersion === header.settings.reviewModeVersion && approval.targetHead === reviewTargetHead) };
       } else if (approval && approval.reviewModeVersion !== header.settings.reviewModeVersion) {
@@ -343,7 +344,8 @@ function run(
     const phase = taskExpertPhase(input.phase);
     if ((phase === "work" && input.actor !== "agent") || (phase === "review" && !["reviewer", "manager"].includes(String(input.actor))))
       throw new TaskboardError("INVALID_INPUT", "Only the responsible phase agent may report a stage.");
-    if (phase === "review" && (input.actor === "manager" ? "manager" : "reviewer") !== boardReviewMode(store.index.settings))
+    const mode = boardReviewMode(store.index.settings);
+    if (phase === "review" && !(input.actor === "manager" ? mode === "manager" : usesIndependentReviewer(mode)))
       throw new TaskboardError("REVIEW_MODE_CHANGED", "Use the responsible agent for the current review mode.");
     const targetHead = phase === "review" ? verifyReviewDecision(store, store.card(taskId), input.targetHead) : undefined;
     return updateExpertStage(store, taskId, phase, input, targetHead);

@@ -1,6 +1,8 @@
-import { boardReviewMode, member, object, strings, text, number, record, requireRevision, requireState, TaskboardError } from "./model.ts";
+import { boardReviewMode, member, object, strings, text, number, record, requireRevision, requireState, reviewsAcceptanceRepair, TaskboardError, usesIndependentReviewer } from "./model.ts";
 import type { BoardSettings, ExpertPhase, SkillCheck, Task, TaskEvent } from "./model.ts";
 import type { BoardStore } from "./storage.ts";
+import { exists } from "./storage.ts";
+import { resolveCommit } from "./git.ts";
 import { isManual } from "./manual-board.ts";
 import { readExpert } from "./experts.ts";
 import { readTask } from "./archive.ts";
@@ -158,7 +160,15 @@ export function createExpertPlan(store: BoardStore, parentId: string, input: Rec
   requireRevision(parent, input.revision, true);
   if (runtimeEntries(store.location.root).some(entry => entry.kind === "slot" && [parent.id, "review:" + parent.id].includes(entry.task ?? "")))
     throw new TaskboardError("EXPERT_PHASE_RUNNING", "The responsible agent is already running this phase.");
-  if (parent.status === "review" && (parent.acceptanceRepair || currentReviewApproval(parent, store.index.settings)))
+  const settings = store.index.settings;
+  const fillsMissingReviewPlan = phase === "review" && !previous?.lead && Boolean(plan.lead);
+  const fillsMissingRepairPlan = fillsMissingReviewPlan && reviewsAcceptanceRepair(parent, settings);
+  const approval = currentReviewApproval(parent, settings)?.reviewApproval;
+  const currentTarget = fillsMissingReviewPlan && approval?.targetHead && parent.git && store.location.repository &&
+    usesIndependentReviewer(boardReviewMode(settings)) && resolveCommit(store.location.repository.root, parent.git.target);
+  const hasCurrentApproval = approval && (!currentTarget || currentTarget === approval.targetHead);
+  if (parent.status === "review" && (exists(store.pendingPath(parent.id)) ||
+      (parent.acceptanceRepair && !fillsMissingRepairPlan) || hasCurrentApproval))
     throw new TaskboardError("INVALID_TRANSITION", "The submission already has a review decision or is being integrated.");
   const updated = record({ ...parent, expertTeam: { ...parent.expertTeam, [phase]: plan } }, "expert-plan", "manager", parent.status, plan.reason);
   updated.history.at(-1)!.expertPhase = phase;

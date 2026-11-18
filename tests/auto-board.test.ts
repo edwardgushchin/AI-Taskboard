@@ -8,7 +8,7 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import { nextReadyTask } from "../src/desktop/auto-queue.ts";
-import { boardReviewMode } from "../src/cli/model.ts";
+import { boardReviewMode, reviewsAcceptanceRepair } from "../src/cli/model.ts";
 
 const source = readFileSync(new URL("../src/desktop/main.ts", import.meta.url), "utf8");
 const parsed = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, true);
@@ -30,7 +30,7 @@ function fixture(mode = "human") {
   const runtime = runInNewContext(stripTypeScriptTypes(code) + "\n({scheduleAutoBoard, autoBoards})", {
     subscriptions: new Map([["project", watch]]), closingProjects: new Set(), boardWorkRequests: managers, boardRequests: dialogues,
     backgroundManagerRequests: new Map(),
-    isManual, nextReadyTask, boardReviewMode, agentSlots: slots, projectIdentity: (path: string) => path,
+    isManual, nextReadyTask, boardReviewMode, reviewsAcceptanceRepair, agentSlots: slots, projectIdentity: (path: string) => path,
     executorBusy: (_: string, id: string) => busy.has(id), t: (key: string) => localization.text(key, {}, "en"),
     broadcastBoardChat: (_: string, __: string, value: any) => errors.push(value.error),
     reserveAgent: (_: string, role: "reviewer") => slots.acquire("project", role, board.settings.taskLimits),
@@ -147,6 +147,45 @@ test("automatic dispatch preserves the assigned work of an older expert stage", 
   await f.tick();
   assert.deepEqual(f.launches, ["T-0001"]);
   assert.deepEqual(f.notices, []);
+});
+
+test("missing plans reach the manager for due schedules and reviews independently of automatic dispatch", async () => {
+  for (const autoMode of [false, true]) {
+    const f = fixture("reviewer-human");
+    Object.assign(f.board.settings, { autoMode, reviewModeVersion: 2, requireExpertPlans: false });
+    const overdue = { everyMinutes: 60, nextAt: "2000-01-01T00:00:00Z" };
+    const repair = { phase: "checking", reviewModeVersion: 2 };
+    f.add("T-0001", { schedule: overdue, expertWorkPlanned: false, expertReviewPlanned: false });
+    f.add("T-0002", { status: "review", expertReviewPlanned: false });
+    f.add("T-0003", { status: "review", expertReviewPlanned: false, acceptanceRepair: repair });
+    f.add("T-0004", { schedule: { ...overdue, paused: true }, expertWorkPlanned: false });
+    f.add("T-0005", { status: "review", expertReviewPlanned: false, acceptanceRepair: { ...repair, reviewModeVersion: 1 } });
+    f.add("T-0006", { status: "review", expertReviewPlanned: false, acceptanceRepair: { ...repair, phase: "running" } });
+    f.add("T-0007", { status: "review", expertReviewPlanned: false, acceptanceRepair: repair, reviewPending: true });
+    f.add("T-0008", { status: "review", expertReviewPlanned: false, reviewApproved: true });
+    await f.tick();
+    await f.tick();
+    assert.deepEqual(f.errors, []);
+    assert.equal(f.notices.length, 1);
+    assert.deepEqual(f.notices[0][2].match(/T-\d+/g), ["T-0001", "T-0002", "T-0003"]);
+    assert.deepEqual(f.launches, []);
+    assert.deepEqual(f.reviews, []);
+    f.board.tasks[0].expertWorkPlanned = true;
+    f.board.tasks[0].revision++;
+    await f.tick();
+    assert.deepEqual(f.launches, autoMode ? ["T-0001"] : []);
+  }
+});
+
+test("a legacy approval that becomes stale cannot launch an unplanned reviewer", async () => {
+  const f = fixture("reviewer");
+  f.add("T-0001", { status: "review", expertReviewPlanned: false, reviewApproved: true, approvalTarget: "old-target" });
+  await f.tick();
+  assert.deepEqual(f.reviews, []);
+  assert.deepEqual(f.accepted, []);
+  f.board.tasks[0].reviewApproved = false;
+  await f.tick();
+  assert.match(f.notices[0][2], /T-0001/);
 });
 
 test("an explicitly requested child gets a plan even with automatic dispatch off", async () => {

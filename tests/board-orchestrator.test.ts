@@ -17,7 +17,7 @@ import type { TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
-import { boardReviewMode, codexThreadPattern, defaultBoardAgents, hexTagColor, maxAttachmentBytes, reviewVerifier, TaskboardError, taskIdPattern, usesIndependentReviewer } from "../src/cli/model.ts";
+import { boardReviewMode, codexThreadPattern, defaultBoardAgents, hexTagColor, maxAttachmentBytes, reviewVerifier, TaskboardError, taskIdPattern, reviewsAcceptanceRepair, usesIndependentReviewer } from "../src/cli/model.ts";
 import { managerInbox, needsManagerAttention } from "../src/cli/task-messages.ts";
 import type { RunActivity, Task } from "../src/cli/model.ts";
 import type { ChatSettings } from "../src/cli/model.ts";
@@ -122,7 +122,7 @@ function fixture(t: TestContext) {
     captureFileLink, isFileLink, verifyFileLink, AbortSignal, AbortController, ArrayBuffer, Buffer, Error, basename, dirname, extname, join, mkdtemp, rm, writeFile, maxAttachmentBytes, boardActions, boardInstructions, boardTools, callCli,
     githubReadTool, readBoardGitHub: (cwd: string, args: unknown) => callCli(cwd, ["github-read"], args),
     executorFullAccess, managerAccess, setTaskExecutorAccess, phaseStageReporter,
-    autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, usesIndependentReviewer, defaultBoardAgents, reviewVerifier,
+    autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, reviewsAcceptanceRepair, usesIndependentReviewer, defaultBoardAgents, reviewVerifier,
     existsSync, storageDirectory, readdirSync, rmSync, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
     goalMessages, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory,
     send() {},
