@@ -5,6 +5,7 @@ import { grantTaskTool, requestTaskTool } from "../src/cli/task-tools.ts";
 import { managerInbox } from "../src/cli/task-messages.ts";
 import { executorToolConfig, providerActions, providerTools, verifyExecutorTools } from "../src/desktop/provider-tools.ts";
 import type { ProviderRequest } from "../src/desktop/provider-tools.ts";
+import { computerUseServer } from "../src/desktop/computer-use.ts";
 
 test("tool requests reach the manager and grants are task-scoped, revisioned and restart-only", () => {
   const first = { ...createTask("T-0001", { title: "First" }), status: "in_progress" as const };
@@ -80,4 +81,19 @@ test("recurring launch verifies the scoped child tool", async () => {
   await assert.rejects(verifyExecutorTools(request, "thread", [], ["task_spawn_child"]), /recurring executor tools/);
   const available: ProviderRequest = async <T>() => ({ data: [{ name: "ai_taskboard", tools: { task_spawn_child: {} } }] }) as T;
   assert.deepEqual(await verifyExecutorTools(available, "thread", [], ["task_spawn_child"]), ["task_spawn_child"]);
+});
+
+test("the Taskboard browser only accepts grants for an app-owned connection", async () => {
+  const grant = { server: computerUseServer, tool: "browser_use" };
+  const request: ProviderRequest = async <T>(method: string) => (method === "config/read"
+    ? { config: { mcp_servers: { ai_taskboard: { url: "http://board" }, [computerUseServer]: { url: "http://browser" } } } }
+    : method === "app/list" ? { data: [] }
+    : { data: [{ name: computerUseServer, tools: { computer_use: {}, browser_use: {} } }] }) as T;
+  assert.deepEqual((await providerTools(request, "thread", ".")).tools, []);
+  assert.ok((await providerTools(request, "thread", ".", true)).tools.every(tool => tool.assignable));
+  const reply = await providerActions(".", request, "thread")("task_tool_grant", { id: "T-0001", revision: 1, ...grant });
+  assert.ok(!reply.ok && reply.error.code === "TOOL_UNAVAILABLE" && reply.error.message.includes("Windows"));
+  await assert.rejects(executorToolConfig(request, ".", [grant]), /local Windows desktop app/);
+  assert.deepEqual((await executorToolConfig(request, ".", [grant], true)).mcp_servers[computerUseServer].enabled_tools, ["browser_use"]);
+  assert.equal((await executorToolConfig(request, ".", [])).mcp_servers[computerUseServer].enabled, false);
 });
