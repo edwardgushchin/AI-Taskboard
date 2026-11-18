@@ -641,6 +641,9 @@ function openSheet(kind, title) {
   if (kind !== "task") taskSheetRequest++;
   chatPreviews.disconnect();
   sheetKind = kind;
+  sheet.classList.toggle("task-sheet", kind === "task");
+  byId("task-side").hidden = true;
+  byId("task-side").replaceChildren();
   if (typeof title === "function") bindLocalized(byId("sheet-title"), "textContent", title);
   else byId("sheet-title").textContent = title;
   body.replaceChildren();
@@ -671,10 +674,17 @@ function section(title, content, target = body) {
   target.append(area);
 }
 
+function removeLegacyTaskHeadings(content) {
+  for (const heading of content.querySelectorAll(":scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > h5, :scope > h6")) {
+    if (/^(?:проблема|ожидаемый результат|ограничения|problem|expected result|constraints)$/iu.test(heading.textContent.trim())) heading.remove();
+  }
+}
+
 function taskDescription(text, taskId) {
   if (!text) return;
   const area = element("section", undefined, "sheet-section task-sheet-description");
   const content = chatText(text, { taskId });
+  removeLegacyTaskHeadings(content);
   foldTechnicalDetails(content, /^Диагностика и связанные файлы$/, "task-description-details", false);
   area.append(element("h3", () => t("ui.description_b4571c10")), content);
   body.append(area);
@@ -684,9 +694,11 @@ function cardDescription(text) {
   if (!chatMarkdown) return element("span", text, "task-description");
   // A template stays inert: no links, images or controls enter the card button.
   const template = document.createElement("template");
-  template.innerHTML = chatMarkdown.render(text);
-  for (const image of template.content.querySelectorAll("img")) image.replaceWith(image.alt);
-  return element("span", template.content.textContent.trim(), "task-description");
+  template.innerHTML = "<div>" + chatMarkdown.render(text) + "</div>";
+  const content = template.content.firstElementChild;
+  removeLegacyTaskHeadings(content);
+  for (const image of content.querySelectorAll("img")) image.replaceWith(image.alt);
+  return element("span", content.textContent.trim(), "task-description");
 }
 
 function checkCommandLabel(command) {
@@ -725,37 +737,50 @@ function showSubmissionResult(result, target = body) {
   if (result.checks?.length) {
     const area = element("section", undefined, "sheet-section task-checks");
     area.append(element("h3", () => t("ui.checks_33b2cadc")));
+    const totals = { passed: 0, failed: 0, skipped: 0 };
     for (const value of result.checks) {
       const parts = value.match(/^([\s\S]+?)\n(?:Command|Команда):\s*([\s\S]+)$/i);
       const statement = (parts?.[1] ?? value).trim();
-      const outcome = statement.match(/^([\s\S]+?)(?:\s+[-–—]\s+|:\s*)(pass(?:ed)?|fail(?:ed)?|skipped|not run|пройден[аоы]?|не пройден[аоы]?|пропущен[аоы]?|не запускал[аи]?)(?:\s*([;:.—–-])\s*([\s\S]*))?$/i);
+      const outcome = statement.match(/^([\s\S]+?)(?:\s+[-–—]\s+|:\s*)(pass(?:ed)?|fail(?:ed)?|skipped|not run|пройден[аоы]?|не пройден[аоы]?|пропущен[аоы]?|не запускал[аи]?)(?:[\s,;:.—–-]+([\s\S]*))?$/i);
       const name = outcome?.[1] ?? statement;
       const commandLabel = !parts && outcome ? checkCommandLabel(name) : undefined;
       const status = outcome?.[2].toLowerCase();
       const passed = status && /^(?:pass|пройден)/.test(status);
       const failed = status && /^(?:fail|не пройден)/.test(status);
       const command = parts?.[2] ?? (commandLabel && value);
-      const row = element(command ? "details" : "div", undefined, "task-check");
-      const line = element(command ? "summary" : "div", undefined, "task-check-line");
-      if (command) {
+      const note = outcome?.[3];
+      const expandedDetails = command || note?.length > 110;
+      const row = element(expandedDetails ? "details" : "div", undefined, "task-check");
+      const line = element(expandedDetails ? "summary" : "div", undefined, "task-check-line");
+      if (expandedDetails) {
         const arrow = element("i", undefined, "codicon codicon-chevron-right task-check-arrow");
         arrow.setAttribute("aria-hidden", "true");
         line.append(arrow);
       }
       const copy = element("span", undefined, "task-check-copy");
       copy.append(command || outcome ? element("span", commandLabel ?? name, "task-check-name") : chatText(name));
-      if (outcome?.[4]) copy.append(element("span", outcome[4], "task-check-note"));
+      if (note && !expandedDetails) copy.append(element("span", note, "task-check-note"));
       line.append(copy);
       if (status) {
         const label = passed ? t("ui.passed_68bec83e") : failed ? t("ui.failed_5f8945bd") : t("ui.skipped_8c40ee29");
         const badge = element("span", label, "task-check-status");
         badge.dataset.outcome = passed ? "passed" : failed ? "failed" : "skipped";
+        totals[badge.dataset.outcome]++;
         line.append(badge);
       }
       row.append(line);
+      if (note && expandedDetails) row.append(element("p", note, "task-check-detail"));
       if (command) row.append(element("pre", command, "task-check-command"));
       area.append(row);
     }
+    const counts = element("p", undefined, "task-check-counts");
+    for (const [outcome, label] of [["passed", "ui.passed_68bec83e"], ["failed", "ui.failed_5f8945bd"], ["skipped", "ui.skipped_8c40ee29"]]) {
+      if (!totals[outcome]) continue;
+      const count = element("span", () => t(label) + " " + totals[outcome], "task-check-status");
+      count.dataset.outcome = outcome;
+      counts.append(count);
+    }
+    if (counts.childElementCount) area.firstElementChild.after(counts);
     target.append(area);
   }
   section(() => (t("ui.limitations_499c4317")), result.limitations, target);
@@ -1426,6 +1451,7 @@ function render(previousBoard) {
   if (!byId("board-composer").firstChild) byId("board-composer").append(draftComposer());
   const composer = byId("board-composer").firstChild;
   composer.localize();
+  composer.updateManagerBusy(frame.managerBusy);
   composer.updateManagerRun(frame.managerRun);
   composer.updateManagerWork(frame.managerWork);
   composer.syncManagerUnread(frame.managerUnread);
@@ -1744,6 +1770,8 @@ function draftComposer() {
   let sendingQueuedMessage = false;
   let active;
   let managerRun;
+  let managerBusy = false;
+  let queueRetry;
   let managerWork;
   let startingWork = false;
   let disposed = false;
@@ -1830,6 +1858,7 @@ function draftComposer() {
   bar.append(views, resize, pin);
   let currentGoal;
   let goalRunning = false;
+  const activeGoalRunId = () => goalRunning && managerWork?.phase === "running" ? managerWork.id : undefined;
   let goalRevision = 0;
   let changingGoal = false;
   const goalPanel = element("details", undefined, "board-goal");
@@ -1939,6 +1968,7 @@ function draftComposer() {
   }
   function readVisibleMessages() {
     clearTimeout(readRetry);
+    clearTimeout(queueRetry);
     if (!api.readManagerMessages || !unread.size || readFrame || readingMessages) return;
     readFrame = requestAnimationFrame(async () => {
       readFrame = undefined;
@@ -2022,7 +2052,8 @@ function draftComposer() {
     const workStatus = item => item ? runningLabel(item).status : t("ui.working_85aeded8");
     if (managerWork) {
       const time = managerWork.startedAt ? new Date(managerWork.startedAt).toLocaleTimeString(localization.locale, { hour: "2-digit", minute: "2-digit" }) : "";
-      const detail = managerWork.phase === "running" ? workStatus(managerWork.item) :
+      const detail = managerWork.lane === "maintenance" ? t("ui.checking_worktree_cleanup_1f82f9a8") :
+        managerWork.phase === "running" ? workStatus(managerWork.item) :
         managerWork.phase === "waiting" ? t("ui.waiting_for_a_session_67475e7f") :
           t("ui.starting_39fd3c7e");
       const row = element("div", () => [t("ui.manager_92a95b5c"), detail, time].filter(Boolean).join(" · "), "board-work-row");
@@ -2035,12 +2066,7 @@ function draftComposer() {
       const title = frame.board?.tasks.find(task => task.id === id)?.title;
       const link = button(id + (title ? " · " + title : ""), protect(async () => {
         await showTask(id);
-        if (reviewing[id] !== "reviewer") return;
-        const reviewer = byId("task-reviewer-chat");
-        if (reviewer) {
-          reviewer.open = true;
-          reviewer.scrollIntoView({ block: "nearest" });
-        }
+        if (reviewing[id] === "reviewer" && taskInSheet?.id === id) byId("task-side").firstElementChild?.openReviewer();
       }), "quiet board-chat-task");
       const status = reviewing[id] === "reviewer" ? t("ui.reviewer_50c42665") + " · " + workStatus(activeReviewers[id]?.item) :
         reviewing[id] === "manager" ? t("ui.manager_is_reviewing_b8f46e42") :
@@ -2057,11 +2083,13 @@ function draftComposer() {
     }
   }
   function renderLiveWork() {
-    if (!liveWorkItems) return;
-    const seenMessages = new Set([...workSaved.querySelectorAll("[data-coordination-key]")].map(node => node.dataset.coordinationKey));
-    const pending = items => items.filter(item => !savedWorkItems.has(item.id));
-    renderActivity(liveGoal, pending(liveWorkItems.work), false, { seenMessages });
-    renderActivity(liveChat, pending(liveWorkItems.chat), false, { seenMessages });
+    if (liveWorkItems) {
+      const seenMessages = new Set([...workSaved.querySelectorAll("[data-coordination-key]")].map(node => node.dataset.coordinationKey));
+      const pending = items => items.filter(item => !savedWorkItems.has(item.id));
+      renderActivity(liveGoal, pending(liveWorkItems.work), false, { seenMessages, managerWork: true });
+      renderActivity(liveChat, pending(liveWorkItems.chat), false, { seenMessages, managerWork: true });
+    }
+    reconcileWorkTransitions(work);
   }
   async function loadWork(cursor = null) {
     if (disposed || work.hidden) return;
@@ -2099,7 +2127,7 @@ function draftComposer() {
         if (!items.length) continue;
         for (const item of items) saved.add(item.id);
         const run = element("div", undefined, "chat-run");
-        renderRunActivity(run, items, true, turn.durationMs, undefined, { seenMessages: seen });
+        renderRunActivity(run, items, true, turn.durationMs, undefined, { seenMessages: seen, managerWork: true });
         if (previous) {
           for (const row of run.querySelectorAll("[data-item]")) {
             if (!previous.has(activityRowKey(row.dataset.item))) row.setAttribute("data-enter", "");
@@ -2563,7 +2591,7 @@ function draftComposer() {
   progress.setAttribute("role", "status");
   const syncPrompt = () => {
     const status = !editor.matches("[data-open], [data-pinned]") && (active?.thinking.textContent || (managerWork &&
-      runningLabel(managerWork.item).status));
+      (managerWork.lane === "maintenance" ? t("ui.checking_worktree_cleanup_1f82f9a8") : runningLabel(managerWork.item).status)));
     const text = status || (goalMode ? t("ui.describe_the_goal_79e3a385") :
       t("ui.write_to_the_project_manager_49756120"));
     if (prompt.textContent !== text) prompt.textContent = text;
@@ -2817,6 +2845,7 @@ function draftComposer() {
   let historyLoaded = false;
   let hasDialogueHistory = false;
   let historyInvalidated = false;
+  let reloadAfterHistory = false;
   let loadingOlder = false;
   let historyGeneration = 0;
   let recentCursor;
@@ -2920,7 +2949,7 @@ function draftComposer() {
       const revision = goalRevision;
       loadingHistory = api.boardHistory(project).then(async result => {
         if (!result.ok) throw new Error(boardError(result.error));
-        if (disposed) return;
+        if (disposed || reloadAfterHistory) return;
         if (revision === goalRevision) editor.updateGoal(result.data.goal, result.data.goalRunning);
         const oldImages = [...log.querySelectorAll(".chat-attachments img")];
         let delivered;
@@ -2969,7 +2998,13 @@ function draftComposer() {
           }
           requestAnimationFrame(showDialoguePosition);
         }
-      }).finally(() => { loadingHistory = undefined; });
+      }).finally(() => {
+        loadingHistory = undefined;
+        if (reloadAfterHistory && !disposed) {
+          reloadAfterHistory = false;
+          editor.invalidateHistory();
+        }
+      });
     }
     return loadingHistory;
   };
@@ -2980,6 +3015,7 @@ function draftComposer() {
     }
     void restoreQueue().catch(() => {});
     void loadHistory()?.catch(error => message(error.message));
+    if (active?.shared && !active.items.length) refreshDialogue(active);
   };
   const openChat = () => {
     if (editor.hasAttribute("data-open") && (historyLoaded || loadingHistory)) return;
@@ -2999,6 +3035,10 @@ function draftComposer() {
   };
   editor.revealPinned = () => { if (pinned && !loadingHistory && !historyLoaded) revealHistory(); };
   editor.invalidateHistory = () => {
+    if (loadingHistory) {
+      reloadAfterHistory = true;
+      return;
+    }
     if (historyLoaded && !atEndOfHistory() && (olderNodes.length || loadingOlder)) {
       historyInvalidated = true;
       return;
@@ -3110,6 +3150,11 @@ function draftComposer() {
     });
     readVisibleMessages();
   };
+  function refreshDialogue(turn) {
+    void api.boardHistory(project, null, "live").then(result => {
+      if (!disposed && result.ok && active === turn && !turn.items.length) editor.updateActivity(result.data.dialogue ?? []);
+    }).catch(() => {});
+  }
   const pasteFiles = submitted => Promise.all(submitted.map(file => api.filePayload(file)));
   const queueStorage = async (action, id, draft, goal, attachments) => {
     const result = await api.boardQueue(project, action, id, draft, goal, attachments);
@@ -3117,11 +3162,47 @@ function draftComposer() {
     return result.data;
   };
   let restoredQueue;
+  let refreshingQueue = false;
+  let queueChanged = false;
+  editor.refreshQueue = () => {
+    if (disposed) return;
+    queueChanged = true;
+    if (refreshingQueue) return;
+    refreshingQueue = true;
+    void (async () => {
+      while (queueChanged && !disposed) {
+        queueChanged = false;
+        restoredQueue = undefined;
+        await restoreQueue();
+      }
+    })().catch(() => {}).finally(() => {
+      refreshingQueue = false;
+      sendNext();
+    });
+  };
   function restoreQueue() {
     restoredQueue ??= queueStorage("list").then(jobs => {
       if (disposed) return;
-      for (const [index, { id, draft, goal, files }] of jobs.entries()) {
-        enqueue(id, draft, goal, files.map(file => file.link ? { ...file, size: file.link.size } : new File([file.bytes], file.name, { type: file.type })), index === 0);
+      const ids = new Set(jobs.map(job => job.id));
+      for (const job of [...queued]) {
+        if (job.id && !ids.has(job.id) && !job.sending && !job.editing) removeWork(job);
+      }
+      for (const { id, draft, goal, files, failed = false } of jobs) {
+        if (active?.id === id) continue;
+        const job = queued.find(job => job.id === id);
+        if (!job) {
+          enqueue(id, draft, goal, files.map(file => file.link ? { ...file, size: file.link.size } : new File([file.bytes], file.name, { type: file.type })), failed);
+        } else if (!job.editing && !job.sending) {
+          if (draft !== job.draft) {
+            job.draft = draft;
+            job.request = draft.trim();
+            updateQueuedPreview(job);
+          }
+          if (failed !== job.failed) {
+            job.failed = failed;
+            renderQueuedActions(job);
+          }
+        }
       }
     }).catch(error => {
       restoredQueue = undefined;
@@ -3134,9 +3215,12 @@ function draftComposer() {
     const { status } = job;
     status.replaceChildren();
     if (job.failed) status.append(element("span", () => t("ui.not_sent_28bb3764"), "board-queued-failed"));
+    else if (managerBusy) status.append(element("span", () => t("ui.waiting_for_a_session_67475e7f")));
     if (job.failed) status.append(button(() => t("ui.retry_553b2066"), async () => {
       await loadHistory()?.catch(() => {});
       if (!queued.includes(job)) return;
+      try { await queueStorage("retry", job.id); }
+      catch (error) { message(error.message); return; }
       job.failed = false;
       renderQueuedActions(job);
       sendNext();
@@ -3217,34 +3301,38 @@ function draftComposer() {
     validate();
     edit.focus({ preventScroll: true });
   }
-  async function sendQueuedNow(job) {
+  async function sendQueuedNow(job, goalRunId = activeGoalRunId()) {
     if (disposed || sendingQueuedMessage || job.sending || job.editing || !queued.includes(job)) return;
     const turn = active;
-    if (!turn) {
+    if (!turn && !goalRunId) {
       await loadHistory()?.catch(() => {});
       if (disposed || !queued.includes(job) || job.sending || job.editing) return;
-      if (active) return sendQueuedNow(job);
+      if (active || activeGoalRunId()) return sendQueuedNow(job);
       queued.splice(queued.indexOf(job), 1);
       queued.unshift(job);
+      if (job.failed) {
+        try { await queueStorage("retry", job.id); }
+        catch (error) { message(error.message); return; }
+      }
       job.failed = false;
       sendNext();
       return;
     }
     sendingQueuedMessage = true;
     job.sending = true;
-    const delivery = { after: turn.lastItem };
-    turn.deliveries.set(job.id, delivery);
+    const delivery = { after: turn?.lastItem };
+    turn?.deliveries.set(job.id, delivery);
     job.status.replaceChildren(element("span", () => t("ui.sending_15dba7c5")));
     message("");
     try {
       const pasted = await pasteFiles(job.submitted);
       if (disposed) return;
-      const result = await api.boardRequest(job.request, pasted, project, false, true, job.id);
+      const result = await api.boardRequest(job.request, pasted, project, false, true, job.id, goalRunId);
       if (disposed) return;
       if (!result.ok) throw new Error(boardError(result.error));
       queued.splice(queued.indexOf(job), 1);
       job.row.remove();
-      if (turn.items.some(item => item.userMessage && item.id === job.id) || active !== turn) {
+      if (!turn || turn.items.some(item => item.userMessage && item.id === job.id) || active !== turn) {
         releaseMessagePreviews(job.messageFiles);
       } else {
         delivery.fallback = { id: job.id, type: "userMessage", status: "completed", text: job.request, title: "",
@@ -3253,7 +3341,7 @@ function draftComposer() {
       }
       releaseSubmittedPreviews(job.submitted);
     } catch (error) {
-      if (!turn.items.some(item => item.userMessage && item.id === job.id)) turn.deliveries.delete(job.id);
+      if (turn && !turn.items.some(item => item.userMessage && item.id === job.id)) turn.deliveries.delete(job.id);
       if (!disposed) {
         renderQueuedActions(job);
         message(error.message);
@@ -3298,15 +3386,24 @@ function draftComposer() {
       busy(false);
       syncGoal();
       greeting.hidden = log.childElementCount > 2;
+      editor.invalidateHistory();
       if (!run) sendNext();
     }
     if (!run) return;
-    if (!active) beginTurn(run.id, undefined, true);
+    if (!active) {
+      const turn = beginTurn(run.id, undefined, true);
+      if (editor.matches("[data-open], [data-pinned]")) refreshDialogue(turn);
+    }
     waitingForChat = run.phase === "waiting";
     canStop = run.phase !== "starting";
     if (waitingForChat) showActivityStatus(waitingLabel());
     else showRunningItem(run.item);
     syncAction();
+  };
+  editor.updateManagerBusy = busy => {
+    if (managerBusy === Boolean(busy)) return;
+    managerBusy = Boolean(busy);
+    for (const job of queued) if (!job.sending && !job.editing && job.row) renderQueuedActions(job);
   };
   editor.updateManagerWork = run => {
     if (disposed) return;
@@ -3315,11 +3412,11 @@ function draftComposer() {
     syncPrompt();
     syncGoal();
     renderWorkOverview();
-    if (!managerWork) sendWorkNext();
+    if (!managerWork) sendNext();
   };
   function sendWorkNext() {
     const next = queued.find(job => job.goal);
-    if (disposed || startingWork || managerWork || !next || next.failed || next.editing || next.sending) return;
+    if (disposed || queueRetry || managerBusy || active || startingWork || managerWork || !next || next.failed || next.editing || next.sending) return;
     startingWork = true;
     next.sending = true;
     bindLocalized(next.status, "textContent", () => t("ui.starting_39fd3c7e"));
@@ -3328,6 +3425,11 @@ function draftComposer() {
       const submitted = await pasteFiles(next.submitted);
       if (disposed) return;
       const result = await api.boardRequest(next.request, submitted, project, next.goal, false, next.id);
+      if (!result.ok && result.error.code === "BOARD_REQUEST_IN_PROGRESS") {
+        renderQueuedActions(next);
+        retryQueue();
+        return;
+      }
       if (!result.ok) throw new Error(boardError(result.error));
       if (result.data.error && result.data.keepQueued) throw new Error(result.data.error);
       removeWork(next);
@@ -3361,10 +3463,17 @@ function draftComposer() {
     const job = queued.find(job => job.goal && job.id === id);
     if (job) removeWork(job);
   };
+  function retryQueue() {
+    if (disposed || queueRetry) return;
+    queueRetry = setTimeout(() => {
+      queueRetry = undefined;
+      sendNext();
+    }, 1000);
+  }
   function sendNext() {
     sendWorkNext();
     const next = queued.find(job => !job.goal);
-    if (disposed || active || sendingQueuedMessage || !next || next.failed || next.editing || next.sending) return;
+    if (disposed || queueRetry || managerBusy || managerWork || startingWork || active || sendingQueuedMessage || !next || next.failed || next.editing || next.sending) return;
     queued.splice(queued.indexOf(next), 1);
     const { request, goal, submitted } = next;
     next.row?.remove();
@@ -3372,11 +3481,17 @@ function draftComposer() {
     const turn = beginTurn(next.id, entry);
     const { container, thinking } = turn;
     let accepted = false;
+    let deferred = false;
     void (async () => {
       void loadHistory()?.catch(() => {});
       const pasted = await pasteFiles(submitted);
       if (disposed) return;
       const result = await api.boardRequest(request, pasted, project, goal, false, next.id);
+      if (!result.ok && result.error.code === "BOARD_REQUEST_IN_PROGRESS") {
+        deferred = true;
+        retryQueue();
+        return;
+      }
       if (!result.ok && result.error.code === "BOARD_WAIT_CANCELLED") return;
       if (!result.ok) throw new Error(boardError(result.error));
       const { answer, error, items = [], keepQueued } = result.data;
@@ -3405,13 +3520,14 @@ function draftComposer() {
       editor.updateManagerRun(managerRun);
       if (accepted) {
         releaseSubmittedPreviews(submitted);
-        if ((historyInvalidated && atEndOfHistory()) || log.childElementCount - olderNodes.length - 2 > 120) {
+        if (loadingHistory || !container.childElementCount || (historyInvalidated && atEndOfHistory()) ||
+            log.childElementCount - olderNodes.length - 2 > 120) {
           editor.invalidateHistory();
         }
         sendNext();
         return;
       }
-      next.failed = true;
+      next.failed = !deferred;
       queued.unshift(next);
       renderQueuedActions(next);
       entry.remove();
@@ -3423,6 +3539,7 @@ function draftComposer() {
     if (dictation || savingQueuedMessage || !hasDraft()) return;
     const draft = input.value;
     const goal = goalMode;
+    const goalRunId = !goal && !work.hidden ? activeGoalRunId() : undefined;
     const submitted = [...files];
     let id;
     savingQueuedMessage = true;
@@ -3447,10 +3564,12 @@ function draftComposer() {
     dismissedMention = undefined;
     attachments.hidden = !files.length;
     if (goalMode === goal) setGoalMode(false);
-    enqueue(id, draft, goal, submitted);
+    if (active?.id !== id && !queued.some(job => job.id === id)) enqueue(id, draft, goal, submitted);
     openChat();
-    showWork(goal);
-    sendNext();
+    showWork(goal || Boolean(goalRunId));
+    const job = goalRunId && queued.find(job => job.id === id);
+    if (job) void sendQueuedNow(job, goalRunId);
+    else sendNext();
     syncAction();
   });
   function updateQueuedPreview(job) {
@@ -3677,150 +3796,6 @@ function taskEditor(task) {
   showFields();
 }
 
-async function editMilestone(task) {
-  const project = frame.project;
-  const generation = projectGeneration;
-  const current = task.milestone;
-  let repository = frame.board?.gitInfo?.githubRepository;
-  const view = form("milestone", () => (t("ui.github_milestone_11d33bfa")), [{
-    name: "milestone", label: () => (t("ui.milestone_82c768da")), value: current ? "current" : "",
-    options: [["", t("ui.no_milestone_e1c29664")], ...(current ? [["current", current.title + " · " + current.repository]] : [])],
-  }], () => (t("ui.save_7eea8139")), async values => {
-    if (values.milestone === "current" || (!values.milestone && !current)) return showTask(task.id);
-    const milestone = values.milestone ? { repository, number: Number(values.milestone) } : null;
-    const saved = await command("milestone", task.id, { revision: task.revision, milestone });
-    if (saved && frame.project === project && sheet.open && view.isConnected) await showTask(task.id);
-  });
-  const select = view.querySelector("select");
-  const save = view.querySelector('[type="submit"]');
-  const status = element("p", undefined, "muted");
-  status.setAttribute("role", "status");
-  save.before(status);
-  if (!repository) {
-    bindLocalized(status, "textContent", () => t("ui.configure_a_github_origin_to_choose_another_mile_0da284a2"));
-    return;
-  }
-  bindLocalized(status, "textContent", () => t("ui.loading_milestones_8a984d86"));
-  const result = await api.command("milestones").catch(error => ({ ok: false, error }));
-  if (!view.isConnected || !sheet.open || projectGeneration !== generation) return;
-  if (!result.ok) {
-    status.textContent = boardError(result.error);
-    return;
-  }
-  repository = result.data.repository;
-  bindLocalized(status, "textContent", () => result.data.milestones.length ? repository :
-    t("ui.this_repository_has_no_milestones_3e24cde2"));
-  for (const entry of result.data.milestones) {
-    if (current?.repository === repository && current.number === entry.number) {
-      select.querySelector('[value="current"]').textContent = entry.title + " · " + repository;
-      continue;
-    }
-    const closed = entry.state === "closed" ? t("ui.closed_e1ef79ba") : "";
-    select.add(localizedOption(entry.title + " · #" + entry.number + closed, String(entry.number)));
-  }
-}
-
-function editDependencies(task) {
-  const dependencies = new Set(task.dependencies ?? []);
-  const board = frame.board;
-  const entries = [...board.tasks, ...board.archived].filter(candidate => candidate.id !== task.id);
-  const editor = form("dependencies", () => (t("ui.task_dependencies_496b3742")), [],
-    () => (t("ui.save_7eea8139")), async () => {
-      const saved = await command("update", task.id, {
-        dependencies: [...dependencies], revision: task.revision, actor: "user",
-      });
-      if (saved) await showTask(saved.id);
-    });
-  const choices = element("fieldset", undefined, "dependency-choices");
-  choices.append(element("legend", () => t("ui.complete_before_starting_this_task_9c7caae7")));
-  for (const candidate of entries) {
-    const row = element("label", undefined, "dependency-option");
-    const checkbox = element("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = dependencies.has(candidate.id);
-    checkbox.addEventListener("change", () => {
-      if (checkbox.checked) dependencies.add(candidate.id);
-      else dependencies.delete(candidate.id);
-    });
-    row.append(checkbox, candidate.id + " · " + candidate.title);
-    choices.append(row);
-  }
-  if (!entries.length) choices.append(element("p", () => t("ui.no_other_tasks_on_this_board_6dfc48ad")));
-  editor.prepend(choices);
-}
-
-async function editExecution(task) {
-  const title = t("ui.execution_settings_aceb50d5");
-  openSheet("execution", title);
-  const loading = element("p", () => t("ui.loading_models_32c54be2"), "muted");
-  body.append(loading);
-  const result = await api.executionModels();
-  if (!sheet.open || !loading.isConnected) return;
-  const models = result.ok ? result.data : [];
-  const selected = task.execution?.model ?? "";
-  const defaultLabel = t("ui.board_default_cdea75f4");
-  const canSetDirectory = !task.git && !task.codexThreadId && !task.history.some(event => event.action === "start");
-  const modelOptions = [["", defaultLabel], ...models.map(model => [model.id, model.name])];
-  if (selected && !models.some(model => model.id === selected)) {
-    modelOptions.push([selected, selected + " · " + t("ui.unavailable_31fb3a55")]);
-  }
-  const editor = form("execution", title, [
-    { name: "model", label: () => (t("ui.model_a909c227")), value: selected, options: modelOptions },
-    { name: "effort", label: () => (t("ui.reasoning_effort_cea4174e")), options: [] },
-    ...(canSetDirectory ? [{ name: "workingDirectory", value: task.workingDirectory ?? "",
-      label: () => (t("ui.working_directory_empty_for_a_task_worktree_e8790ed1")) }] : []),
-  ], () => (t("ui.save_7eea8139")), async ({ model, effort, workingDirectory }) => {
-    if (model && !models.some(entry => entry.id === model)) {
-      notice(t("ui.choose_an_available_model_216af4d4"));
-      return;
-    }
-    const saved = await command("update", task.id, {
-      execution: model ? { model, effort: effort || undefined } : null,
-      ...(canSetDirectory ? { workingDirectory: workingDirectory.trim() || null } : {}),
-      revision: task.revision, actor: "user",
-    });
-    if (saved) await showTask(saved.id);
-  });
-  const [model, effort] = editor.querySelectorAll("select");
-  function setEfforts(value) {
-    const available = models.find(entry => entry.id === model.value)?.efforts ?? [];
-    effort.replaceChildren(localizedOption(t("ui.provider_default_69f2d8eb"), ""),
-      ...available.map(value => localizedOption(value, value)));
-    effort.disabled = !available.length;
-    if (available.includes(value)) effort.value = value;
-  }
-  model.addEventListener("change", () => setEfforts(""));
-  setEfforts(task.execution?.effort);
-  if (!result.ok) notice(boardError(result.error));
-}
-
-function editTaskAccess(task) {
-  const project = frame.project;
-  const title = t("ui.executor_access_7d02bf31");
-  const editor = form("task-access", title, [{
-    name: "mode", label: () => (t("ui.mode_45d0aa30")), value: task.executorFullAccess ? "full" : "auto",
-    options: [["auto", t("ui.approve_for_me_64ade20f")], ["full", t("ui.full_access_47d69a72")]],
-  }], () => (t("ui.save_7eea8139")), async ({ mode }) => {
-    const result = await api.setTaskAccess(project, task.id, task.createdAt, mode === "full");
-    if (frame.project !== project || sheetKind !== "task-access" || !editor.isConnected) return;
-    if (result.ok) await showTask(task.id);
-    else notice(boardError(result.error));
-  });
-  editor.prepend(element("p", () => t("ui.full_access_runs_commands_with_your_operating_sy_49e76291"), "muted"));
-}
-
-function editTaskTags(task) {
-  const editor = form("task-tags", () => (t("ui.edit_tags_fe276cc0") + " · " + task.id), [
-    { name: "tags", label: () => (t("ui.tags_comma_separated_d9e75f27")), value: task.tags.join(", ") },
-  ], () => (t("ui.save_7eea8139")), async ({ tags }) => {
-    const saved = await command("tag-assign", task.id, {
-      tags: tags.split(",").map(tag => tag.trim()).filter(Boolean), revision: task.revision,
-    });
-    if (saved && editor.isConnected && sheet.open) await showTask(task.id);
-  });
-  editor.querySelector("input").focus();
-}
-
 function openTaskSheet(task) {
   openSheet("task", task.id + (task.title ? " · " + task.title : ""));
   const runStatus = element("span", undefined, "task-agent-run muted");
@@ -3866,7 +3841,6 @@ async function showTask(id) {
   taskInSheet = task;
   openTaskSheet(task);
   if (task.status === "blocked" && task.blocked) body.append(blockerBanner(task.blocked));
-  if (task.executorFullAccess) body.append(element("p", () => t("ui.launch_mode_full_access_ed7fe948"), "task-state-label"));
   savedChangesSection(task, task.savedChanges);
   if (task.tags.length) {
     const tags = element("div", undefined, "task-tags");
@@ -3884,6 +3858,7 @@ async function showTask(id) {
     details.open = descriptionOpen[index] ?? false;
   });
   section(() => (t("ui.acceptance_criteria_7e3779c2")), task.criteria);
+  if (!manualBoard() && !task.expertStage) expertTeamSection(task);
   const stateLabel = (done, text) => {
     const label = element("div", undefined, "task-state-label");
     const state = icon(done ? "check" : "circle");
@@ -3894,6 +3869,9 @@ async function showTask(id) {
     return label;
   };
   section(() => (t("ui.subtasks_b409bda5")), task.subtasks.map(item => stateLabel(item.done, item.title)));
+  if (!manualBoard()) {
+    if (task.expertStage) body.append(button(task.expertStage.parentId, () => showTask(task.expertStage.parentId), "quiet"));
+  }
   if (task.status === "in_progress") section(() => (t("ui.submission_1577a02d")), t("ui.result_not_submitted_61369662"));
   section(() => (t("ui.progress_d4dff843")), task.summary);
   section(() => (t("ui.next_step_09895a4d")), task.nextStep);
@@ -3924,7 +3902,7 @@ async function showTask(id) {
   if (task.attachments.length) {
     const images = task.attachments.filter(isImageAttachment);
     const previous = selectedCover(task, images)?.file ?? "";
-    if ((images.length > 1 || (images.length === 1 && !previous)) && !frame.board?.archived.some(entry => entry.id === task.id)) {
+    if (manualBoard() && (images.length > 1 || (images.length === 1 && !previous)) && !frame.board?.archived.some(entry => entry.id === task.id)) {
       const label = element("label", undefined, "task-cover-setting");
       label.append(element("span", () => t("ui.card_cover_43d5cce6")));
       const picker = element("select");
@@ -3964,17 +3942,9 @@ async function showTask(id) {
     actions.append(button(() => t(task.schedule.paused ? "ui.resume_schedule" : "ui.pause_schedule"),
       () => act("update", { schedulePaused: !task.schedule.paused })));
   }
-  if (task.status === "draft") actions.append(button(() => t("ui.approve_535c27a7"), () => act("approve"), "primary"));
-  if (!frame.board?.archived.some(entry => entry.id === task.id) && (task.milestone || frame.board?.gitInfo?.githubRepository)) {
-    actions.append(button(() => t("ui.milestone_3df16b83"), () => editMilestone(task)));
-  }
-  if (task.status === "ready") actions.append(button(() => t("ui.return_to_draft_ccd17679"), () => act("return-to-draft")));
-  if (["draft", "ready"].includes(task.status)) {
-    actions.append(button(() => t("ui.dependencies_bbf4859b"), () => editDependencies(task)));
-    actions.append(button(() => t("ui.execution_settings_c1ef196e"), () => editExecution(task)));
-  }
-  if (!manualBoard() && !["done", "cancelled"].includes(task.status) && !frame.runningTasks?.includes(task.id)) {
-    actions.append(button(() => t("ui.executor_access_4c93bc80"), () => editTaskAccess(task)));
+  if (task.status === "draft" && !task.approvalRequirements?.length) actions.append(button(() => t("ui.approve_535c27a7"), () => act("approve"), "primary"));
+  if (["ready", "in_progress", "blocked", "review", "cancelled"].includes(task.status)) {
+    actions.append(button(() => t("ui.return_to_draft_ccd17679"), () => act("return-to-draft")));
   }
   if (task.workingDirectory) {
     const directory = element("section", undefined, "sheet-section");
@@ -3994,11 +3964,9 @@ async function showTask(id) {
     const result = await api.openWorktree(task.id);
     if (!result.ok) notice(boardError(result.error));
   }));
-  if (["done", "cancelled"].includes(task.status)) {
-    actions.append(button(() => t("ui.edit_tags_fe276cc0"), () => editTaskTags(task)));
-  } else {
-    actions.append(button(() => t("ui.edit_c25be9fb"), () => taskEditor(task)));
-    if (!manualBoard()) actions.append(button(() => t("ui.cancel_task_e9e056a5"), () => noteTask(task, "cancel"), "danger"));
+  if (!["done", "cancelled"].includes(task.status)) {
+    if (manualBoard()) actions.append(button(() => t("ui.edit_c25be9fb"), () => taskEditor(task)));
+    else actions.append(button(() => t("ui.cancel_task_e9e056a5"), () => noteTask(task, "cancel"), "danger"));
   }
   if (manualBoard()) {
     const history = task.history.filter(event => event.action === "manual-move");
@@ -4021,10 +3989,9 @@ async function showTask(id) {
   const codexAction = codexTaskAction(task);
   if (codexAction) actions.append(codexAction);
   body.append(actions);
-  if (task.status === "review" || task.history.some(event => event.actor === "reviewer" || event.action === "submit")) {
-    body.append(reviewerChat(task, openDetails.has("task-reviewer-chat")));
-  }
-  body.append(taskChat(task));
+  const side = byId("task-side");
+  side.replaceChildren(taskChat(task));
+  side.hidden = false;
   body.scrollTop = scroll;
   if (focusedChat && byId("task-chat-input")) {
     byId("task-chat-input").focus({ preventScroll: true });
@@ -4072,6 +4039,8 @@ function showTaskArtifacts(task, target = body, open = false) {
       }, "quiet task-review-file");
       link.title = source + "\nSHA-256 " + sha256;
       const label = element("span", name, "task-review-file-name");
+      const evidence = task.result?.artifactEvidence?.find(entry => entry.source === source && entry.sha256 === sha256);
+      if (evidence) label.append(element("small", evidence.output));
       const matching = byName.get(name);
       if (matching.length > 1) {
         const directory = source.slice(0, -name.length);
@@ -4176,7 +4145,7 @@ async function showReview(task, messageDraft, acceptanceError) {
   const generation = projectGeneration;
   const review = await command("review", task.id);
   if (!review || generation !== projectGeneration) return;
-  task = { ...task, revision: review.revision };
+  task = { ...task, revision: review.revision, result: review.result };
   if (review.noChanges) {
     const editor = form("review", () => (t("ui.review_result_29ed25fb")), [], () => (t("ui.accept_e596557e")), async () => {
       const accepted = await command("accept", task.id, { revision: review.revision });
@@ -4388,26 +4357,286 @@ function renderTagSettings(panel) {
   }
 }
 
+async function expertSettings() {
+  const entries = await command("experts");
+  if (!entries) return;
+  openSheet("experts", () => t("experts.title"));
+  const search = element("input", undefined, "expert-search");
+  search.type = "search"; search.placeholder = t("experts.search"); search.setAttribute("aria-label", t("experts.search"));
+  const list = element("div", undefined, "expert-list");
+  const render = () => {
+    const query = search.value.toLocaleLowerCase();
+    list.replaceChildren(...entries.filter(expert => (expert.name + " " + expert.group + " " + expert.id).toLocaleLowerCase().includes(query))
+      .map(expert => button(expert.name + " · " + expert.group + (expert.enabled ? "" : " · " + t("experts.disabled")), async () => {
+        const full = await command("expert-get", undefined, { expertId: expert.id });
+        if (full) editExpert(full, entries);
+      }, "quiet")));
+  };
+  search.addEventListener("input", render);
+  body.append(button(() => t("experts.new"), () => editExpert(undefined, entries)), search, list);
+  render(); search.focus();
+}
+
+function editExpert(expert, entries) {
+  const skills = structuredClone(expert?.skills ?? []);
+  const expertId = expert?.id ?? "custom-" + crypto.randomUUID();
+  const editor = form("expert-editor", expert?.name ?? (() => t("experts.new")), [
+    { name: "name", label: () => t("experts.name"), value: expert?.name, required: true },
+    { name: "group", label: () => t("experts.group"), value: expert?.group, required: true },
+    { name: "enabled", label: () => t("experts.enabled"), type: "checkbox", value: expert?.enabled ?? true },
+    { name: "prompt", label: () => t("experts.prompt"), type: "area", value: expert?.prompt, required: true },
+  ], () => t("ui.save_settings_2173b7d7"), async values => {
+    if (await command("expert-save", undefined, { ...values, id: expertId, skills,
+      ...(expert ? { revision: expert.revision } : {}), requirements: expert?.requirements ?? [], limitations: expert?.limitations ?? "" })) {
+      taskExpertCatalog = undefined;
+      await expertSettings();
+    }
+  });
+  const panel = element("section", undefined, "expert-skills");
+  const render = () => {
+    panel.replaceChildren(element("h3", () => t("experts.skills")));
+    for (const skill of skills) {
+      const row = element("div", undefined, "expert-skill");
+      const label = element("label", () => t("experts.name"));
+      const name = element("input"); name.value = skill.name; name.required = true;
+      name.addEventListener("input", () => { skill.name = name.value; }); label.append(name); row.append(label);
+      if (skill.library) row.append(button(() => t("experts.view"), async () => {
+        const source = expert?.skills.some(s => s.id === skill.id) ? expert : entries.find(e => e.skills.some(s => s.id === skill.id));
+        const value = source && await command("expert-skill", undefined, { expertId: source.id, skillId: skill.id });
+        if (value && row.isConnected) {
+          const preview = element("pre", value.content, "expert-skill-preview"); row.append(preview);
+        }
+      }, "quiet"));
+      else {
+        const label = element("label", () => t("experts.skill_content"));
+        const content = element("textarea"); content.value = skill.content; content.required = true;
+        content.addEventListener("input", () => { skill.content = content.value; }); label.append(content); row.append(label);
+      }
+      row.append(button(() => t("experts.remove"), () => { skills.splice(skills.indexOf(skill), 1); render(); }, "quiet"));
+      panel.append(row);
+    }
+    panel.append(button(() => t("experts.add_skill"), () => {
+      skills.push({ id: "skill-" + crypto.randomUUID(), name: t("experts.add_skill"), content: "" }); render();
+    }, "quiet"));
+  };
+  render();
+  const library = [...new Map(entries.flatMap(expert => expert.skills).filter(skill => skill.library).map(skill => [skill.library, skill])).values()];
+  const choose = element("select"); choose.setAttribute("aria-label", t("experts.add_library"));
+  for (const skill of library) { const option = element("option", skill.name); option.value = skill.id; choose.append(option); }
+  const add = button(() => t("experts.add_library"), () => {
+    const skill = library.find(skill => skill.id === choose.value);
+    if (skill && !skills.some(s => s.id === skill.id)) { skills.push({ ...skill, library: skill.id }); render(); }
+  }, "quiet");
+  editor.querySelector('button[type="submit"]').before(panel, choose, add);
+}
+
+let taskExpertCatalog;
+function expertRoleNames(project) {
+  if (taskExpertCatalog?.project !== project) {
+    const catalog = { project, names: api.command("experts").then(result => {
+      if (!result.ok) throw new Error(boardError(result.error));
+      return new Map(result.data.map(expert => [expert.id, expert.name]));
+    }).catch(() => {
+      if (taskExpertCatalog === catalog) taskExpertCatalog = undefined;
+      return new Map();
+    }) };
+    taskExpertCatalog = catalog;
+  }
+  return taskExpertCatalog.names;
+}
+
+function expertAvatar(id, name) {
+  const short = { "qa-engineer": "QA", "ux-designer": "UX", "ui-designer": "UI",
+    "frontend-developer": "FE", "backend-developer": "BE" };
+  const initials = short[id] ?? name.match(/[\p{L}\p{N}]+/gu)?.slice(0, 2).map(word => word[0]).join("").toUpperCase() ?? "?";
+  const avatar = element("span", initials, "expert-avatar");
+  avatar.style.setProperty("--expert-hue", [...id].reduce((hue, char) => (hue * 31 + char.codePointAt(0)) % 360, 0));
+  avatar.setAttribute("aria-hidden", "true");
+  return avatar;
+}
+
+function expertStageLabel(task, phase, key) {
+  return task.expertTeam?.[phase]?.stages.find(stage => stage.key === key)?.title;
+}
+
+function expertTeamSection(task) {
+  const area = element("section", undefined, "expert-team");
+  area.append(element("h3", () => t("experts.plan_title")));
+  if (task.approvalRequirements?.length) {
+    const reason = element("p", () => t("experts.approval_incomplete") + " " +
+      task.approvalRequirements.map(field => t("experts.missing_" + field)).join(", ") + ".", "muted");
+    reason.classList.add("expert-approval-requirements");
+    area.append(reason);
+  }
+  const labels = new Map();
+  const keyForTask = frame.project + "\0" + task.id;
+  const openStages = chatDrafts.get(keyForTask)?.openStages;
+  const role = id => {
+    const label = element("span", id?.replaceAll("-", " "));
+    if (id) {
+      if (!labels.has(id)) labels.set(id, []);
+      labels.get(id).push(label);
+    }
+    return label;
+  };
+  const phases = element("div", undefined, "expert-team-phases");
+  for (const phase of ["work", "review"]) {
+    const plan = task.expertTeam?.[phase];
+    const lead = phase === "work" && plan?.lead === undefined ? task.expertId : plan?.lead;
+    const phaseArea = element("section", undefined, "expert-phase");
+    const header = element("header", undefined, "expert-phase-header");
+    header.append(element("h4", () => t(phase === "work" ? "experts.work_phase" : "experts.review_phase")));
+    const assignment = element("div", undefined, "expert-lead");
+    if (lead) assignment.append(expertAvatar(lead, lead), role(lead), element("span", () => t("experts.lead"), "muted"));
+    else assignment.append(element("span", () => t("experts.no_lead"), "muted"));
+    header.append(assignment);
+    phaseArea.append(header);
+    if (plan?.reason) phaseArea.append(chatText(plan.reason, { taskId: task.id }));
+    for (const stage of plan?.stages ?? []) {
+      const state = task.expertStageStatus?.[phase]?.find(item => item.key === stage.key);
+      const details = element("details", undefined, "expert-stage");
+      const key = phase + ":" + stage.key;
+      details.open = openStages?.has(key) ?? false;
+      details.addEventListener("toggle", () => {
+        const draft = chatDrafts.get(keyForTask);
+        if (!draft || !details.isConnected) return;
+        const expanded = draft.openStages ??= new Set();
+        if (details.open) expanded.add(key);
+        else expanded.delete(key);
+      });
+      const title = element("summary", undefined, "expert-stage-row");
+      const copy = element("span", undefined, "expert-stage-copy");
+      copy.append(element("strong", stage.title), role(stage.expertId));
+      title.append(icon("chevron-right"), expertAvatar(stage.expertId, stage.expertId), copy);
+      if (state) {
+        const status = element("span", () => t("experts.stage_" + state.state), "expert-stage-status");
+        status.dataset.state = state.state;
+        title.append(status);
+      }
+      details.append(title);
+      if (stage.description) details.append(chatText(stage.description, { taskId: task.id }));
+      for (const [label, values] of [["stage_inputs", stage.inputs], ["stage_outputs", stage.outputs],
+        ["stage_prerequisites", stage.dependsOn.map(id => plan.stages.find(entry => entry.key === id)?.title ?? id)]]) {
+        if (values.length) details.append(element("p", () => t("experts." + label) + " · " + values.join(", "), "muted"));
+      }
+      section(() => t("ui.acceptance_criteria_7e3779c2"), stage.criteria, details);
+      if (state?.run?.result) details.append(chatText(state.run.result, { taskId: task.id }));
+      if (state?.run?.fallback) details.append(element("p", () => t("experts.local_execution") + " · " + state.run.fallback, "muted"));
+      for (const [output, evidence] of Object.entries(state?.run?.outputs ?? {})) details.append(chatText(output + " · " + evidence, { taskId: task.id }));
+      phaseArea.append(details);
+    }
+    const legacy = phase === "work" ? task.expertStages ?? [] : [];
+    for (const stage of legacy) {
+      const child = frame.board?.tasks.find(entry => entry.id === stage.taskId) ?? frame.board?.archived?.find(entry => entry.id === stage.taskId);
+      const link = button("", () => showTask(stage.taskId), "quiet");
+      link.append(stage.title + " · ", role(child?.expertId ?? stage.expertId));
+      if (child) link.append(element("span", () => " · " + t("status." + child.status)));
+      phaseArea.append(link);
+    }
+    if (!plan?.stages.length && !legacy.length) phaseArea.append(element("p", () => t("experts.no_stages"), "muted"));
+    phases.append(phaseArea);
+  }
+  area.append(phases);
+  body.append(area);
+  if (labels.size) void expertRoleNames(frame.project).then(names => {
+    if (!area.isConnected) return;
+    for (const [id, nodes] of labels) for (const label of nodes) {
+      label.textContent = names.get(id) ?? label.textContent;
+    }
+  });
+}
+
+function expertTeamMail(task) {
+  const log = element("section", undefined, "task-team-mail");
+  log.append(element("h4", () => t("experts.conversation")));
+  if (task.expertStage) {
+    log.append(button(task.expertStage.parentId, () => showTask(task.expertStage.parentId), "quiet"));
+    return log;
+  }
+  const list = element("ol", undefined, "expert-conversation");
+  const entries = [];
+  const address = id => {
+    const [phase, key] = id.split(":");
+    const stage = task.expertTeam?.[phase]?.stages.find(item => item.key === key);
+    if (stage) return { role: stage.expertId, name: stage.title };
+    if (id === task.id) return { role: task.expertTeam?.work?.lead ?? task.expertId, name: t("ui.executor_92197b27") };
+    if (id === "reviewer") return { role: task.expertTeam?.review?.lead, name: t("ui.reviewer_50c42665") };
+    const child = task.expertStages?.find(stage => stage.taskId === id);
+    if (child) return { role: child.expertId, name: child.title };
+    const labels = { owner: "experts.owner", manager: "experts.manager", team: "experts.all" };
+    return { name: Object.hasOwn(labels, id) ? t(labels[id]) : id };
+  };
+  task.history.forEach((event, index) => {
+    if (!event.expertMessage) return;
+    const { from, to, replyTo } = event.expertMessage;
+    const sender = address(from);
+    const recipient = address(to);
+    const row = element("li", undefined, "expert-message");
+    row.id = "team-message-" + (index + 1);
+    const bubble = element("article", undefined, "expert-bubble");
+    const header = element("div", undefined, "expert-bubble-header");
+    const author = element("strong", sender.name, "expert-author");
+    const route = element("small", undefined, "expert-recipient");
+    const recipientLabel = element("span", recipient.name);
+    route.append(icon("arrow-right"), recipientLabel);
+    header.append(author);
+    appendChatTime(header, event.at);
+    bubble.append(header, route);
+    if (replyTo && task.history[replyTo - 1]?.expertMessage) {
+      const jump = button(() => t("experts.referenced_message") + " #" + replyTo, () => {
+        const previous = list.querySelector("#team-message-" + replyTo);
+        previous?.scrollIntoView({ block: "nearest" });
+        previous?.focus({ preventScroll: true });
+      }, "quiet expert-message-reference");
+      bubble.append(jump);
+    }
+    bubble.append(chatText(event.text ?? "", { taskId: task.id }));
+    const avatar = expertAvatar(sender.role ?? from, sender.name);
+    row.tabIndex = -1;
+    row.append(avatar, bubble);
+    list.append(row);
+    entries.push({ sender, recipient, author, recipientLabel, avatar });
+  });
+  if (!entries.length) log.append(element("p", () => t("experts.no_mail"), "muted"));
+  else {
+    log.append(list);
+    void expertRoleNames(frame.project).then(names => {
+      for (const { sender, recipient, author, recipientLabel, avatar } of entries) {
+        const name = names.get(sender.role);
+        if (name) {
+          if (sender.name !== name) author.title = sender.name;
+          author.textContent = name;
+          avatar.replaceWith(expertAvatar(sender.role, name));
+        }
+        const target = names.get(recipient.role);
+        recipientLabel.textContent = target && target !== recipient.name ? target + " · " + recipient.name : recipient.name;
+      }
+    });
+  }
+  return log;
+}
+
 function settings() {
+  // The expert catalogue belongs to the selected board, including its overrides.
   const roles = [
-    ["executor", () => t("ui.executors_66276668")],
-    ["reviewer", () => t("ui.reviewers_fd4fe839")],
+    ["executor", () => t("limits.work")],
+    ["reviewer", () => t("limits.review")],
   ];
   const editor = form("settings", () => (t("ui.application_settings_b131bcd2")),
     roles.map(([name, label]) => ({ name, label, type: "number", required: true })),
     () => (t("ui.save_limits_5ec81bed")), async values => {
-      const result = await api.agentLimits(Object.fromEntries(Object.entries(values).map(([role, value]) => [role, Number(value)])));
+      const result = await api.taskLimits(Object.fromEntries(Object.entries(values).map(([role, value]) => [role, Number(value)])));
       if (!result.ok) return notice(boardError(result.error));
       if (editor.isConnected) sheet.close();
     });
   editor.id = "agent-limits";
-  editor.prepend(element("h3", () => t("ui.concurrent_agents_31683999")),
+  editor.prepend(element("h3", () => t("limits.title")),
     element("p", () => t("ui.defaults_for_each_board_board_settings_can_overr_e97efc09"), "muted"));
   const inputs = [...editor.querySelectorAll('input[type="number"]')];
   const save = editor.querySelector('button[type="submit"]');
   for (const input of inputs) input.disabled = true;
   save.disabled = true;
-  void api.agentLimits().then(result => {
+  void api.taskLimits().then(result => {
     if (!editor.isConnected) return;
     if (!result.ok) return notice(boardError(result.error));
     for (const [index, [role]] of roles.entries()) {
@@ -4418,6 +4647,7 @@ function settings() {
   }).catch(error => { if (editor.isConnected) notice(error.message); });
   appearanceSettings();
   codexSettings();
+  if (frame.board) body.append(button(() => t("experts.title"), () => expertSettings()));
 }
 
 function boardSettings() {
@@ -4443,9 +4673,6 @@ function boardSettings() {
         options: model ? [[model, model]] : [["", defaultModel]] },
       { name: role + "Effort", label: () => (t("ui.reasoning_effort_f0ee1b26")), value: effort,
         options: [[effort, effort ? reasoningName(effort) : defaultModel]] },
-      ...(role === "manager" ? [] : [{ name: role + "Limit", type: "number", value: current.agentLimits?.[role],
-        label: () => (role === "manager" ? t("ui.concurrent_background_runs_c8868724")
-          : t("ui.concurrent_agents_06461399")) }]),
     ];
   });
   let models = [];
@@ -4457,6 +4684,8 @@ function boardSettings() {
       options: [["merge", "Merge"], ["squash", "Squash"]] },
     { name: "showCardPreviews", label: () => (t("ui.show_previews_on_board_cards_a3f2af17")),
       type: "checkbox", value: current.showCardPreviews !== false },
+    { name: "requireExpertPlans", label: () => t("experts.require_plans"),
+      type: "checkbox", value: current.requireExpertPlans === true },
     { name: "reviewMode", label: () => (t("ui.who_reviews_tasks_3636b553")),
       value: reviewMode, options: [
         ["human", t("ui.human_56f4a79e")],
@@ -4464,6 +4693,8 @@ function boardSettings() {
         ["reviewer", t("ui.reviewer_50c42665")],
       ] },
     ...agentFields.flat(),
+    { name: "executorLimit", type: "number", label: () => t("limits.work"), value: current.taskLimits?.executor },
+    { name: "reviewerLimit", type: "number", label: () => t("limits.review"), value: current.taskLimits?.reviewer },
     { name: "managerAccess", label: () => (t("ui.access_mode_on_this_computer_d6a20a28")),
       value: managerAccess, options: [
         ["ask", t("ui.ask_for_approval_cc8bdc3b")],
@@ -4472,9 +4703,9 @@ function boardSettings() {
       ] },
   ], () => (t("ui.save_settings_2173b7d7")), async values => {
     const agents = {};
-    const agentLimits = {};
+    const taskLimits = {};
     for (const [role, title] of roles) {
-      if (role !== "manager" && values[role + "Limit"] !== "") agentLimits[role] = Number(values[role + "Limit"]);
+      if (role !== "manager" && values[role + "Limit"] !== "") taskLimits[role] = Number(values[role + "Limit"]);
       const { [role + "Provider"]: provider, [role + "Model"]: model, [role + "Effort"]: effort } = values;
       if (provider === (current[role]?.provider ?? "codex") && model === (current[role]?.model ?? "") &&
           effort === (current[role]?.effort ?? "")) continue;
@@ -4488,8 +4719,9 @@ function boardSettings() {
       ...(values.name.trim() !== (current.name ?? "") ? { name: values.name } : {}),
       archiveAfterDays: values.archive === "" ? null : Number(values.archive), integrationMode: values.mode,
       showCardPreviews: values.showCardPreviews,
+      ...(values.requireExpertPlans !== Boolean(current.requireExpertPlans) ? { requireExpertPlans: values.requireExpertPlans } : {}),
       ...(values.reviewMode !== reviewMode ? { reviewMode: values.reviewMode } : {}),
-      ...(roles.some(([role]) => agentLimits[role] !== current.agentLimits?.[role]) ? { agentLimits } : {}),
+      ...(roles.some(([role]) => taskLimits[role] !== current.taskLimits?.[role]) ? { taskLimits } : {}),
       ...agents,
     })) {
       if (values.managerAccess !== managerAccess) {
@@ -4500,6 +4732,7 @@ function boardSettings() {
     }
   });
   const [, review, ...selects] = editor.querySelectorAll("select");
+  body.append(button(() => t("experts.title"), () => expertSettings()));
   const reviewHint = element("small", undefined, "muted");
   const updateReviewHint = () => {
     bindLocalized(reviewHint, "textContent", () => ({
@@ -4511,18 +4744,21 @@ function boardSettings() {
   review.parentElement.append(reviewHint);
   review.addEventListener("change", updateReviewHint);
   updateReviewHint();
-  const limits = roles.map(([role]) => editor.elements.namedItem(role + "Limit"));
+  const limitPhases = ["executor", "reviewer"];
+  const limits = limitPhases.map(role => editor.elements.namedItem(role + "Limit"));
+  const limitGroup = element("fieldset", undefined, "board-agent-settings");
+  limits[0].parentElement.before(limitGroup);
+  limitGroup.append(element("legend", () => t("limits.title")), ...limits.map(input => input.parentElement));
   selects[0].parentElement.before(element("p", () => t("ui.an_empty_limit_uses_the_application_default_use__f19c1da9"), "muted"));
-  void api.agentLimits().then(result => {
+  void api.taskLimits().then(result => {
     if (!result.ok || !editor.isConnected) return;
-    roles.forEach(([role], index) => { if (limits[index]) limits[index].placeholder = String(result.data[role]); });
+    limitPhases.forEach((role, index) => { limits[index].placeholder = String(result.data[role]); });
   }).catch(() => {});
   const roleControls = roles.map(([role, title], index) => {
     const [provider, model, effort] = selects.slice(index * 3, index * 3 + 3);
     const group = element("fieldset", undefined, "board-agent-settings");
     provider.parentElement.before(group);
-    group.append(element("legend", title), provider.parentElement, model.parentElement, effort.parentElement,
-      ...(limits[index] ? [limits[index].parentElement] : []));
+    group.append(element("legend", title), provider.parentElement, model.parentElement, effort.parentElement);
     if (role === "manager") group.append(editor.elements.namedItem("managerAccess").parentElement);
     const savedModel = current[role]?.model ?? "";
     const savedEffort = current[role]?.effort ?? "";
@@ -5141,7 +5377,7 @@ function update(next) {
     }
   }
   if (sheetKind === "task" && sheet.open && taskInSheet) {
-    body.querySelector(".task-chat")?.syncAgentState?.();
+    byId("task-side").firstElementChild?.syncAgentState?.();
     const runStatus = byId("task-agent-run");
     if (runStatus) renderAgentRunStatus(runStatus, taskInSheet);
     const launch = byId("task-launch");
@@ -5150,7 +5386,9 @@ function update(next) {
     const task = frame.board?.tasks.find(entry => entry.id === taskInSheet.id);
     const archived = frame.board?.archived.find(entry => entry.id === taskInSheet.id);
     const cleaned = taskInSheet.cleanupAvailable && frame.board?.cleanedTasks?.includes(taskInSheet.id);
-    if (JSON.stringify(previousBoard?.settings.manualColumns) !== JSON.stringify(frame.board?.settings.manualColumns) || cleaned || (task && (task.revision !== taskInSheet.revision ||
+    if (previousBoard?.settings.requireExpertPlans !== frame.board?.settings.requireExpertPlans ||
+        previousBoard?.settings.reviewMode !== frame.board?.settings.reviewMode ||
+        JSON.stringify(previousBoard?.settings.manualColumns) !== JSON.stringify(frame.board?.settings.manualColumns) || cleaned || (task && (task.revision !== taskInSheet.revision ||
         (task.historyLength ?? task.history?.length) !== taskInSheet.history.length ||
         String(task.unfinishedDependencies) !== String(taskInSheet.unfinishedDependencies))) ||
         (archived && !task && (archived.status !== taskInSheet.status ||
@@ -5238,6 +5476,7 @@ document.addEventListener("keydown", event => {
 sheet.addEventListener("close", () => {
   if (sheet.open) return;
   chatPreviews.disconnect();
+  byId("task-side").replaceChildren();
   taskSheetRequest++;
   sheetKind = "";
   taskInSheet = undefined;

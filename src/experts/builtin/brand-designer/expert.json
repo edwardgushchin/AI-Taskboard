@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "id": "brand-designer",
+  "name": "Бренд дизайнер",
+  "group": "Исследования пользователей и дизайн",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Бренд дизайнер",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--skills--skills--brand-guidelines",
+      "name": "brand-guidelines",
+      "library": "anthropics--skills--skills--brand-guidelines"
+    },
+    {
+      "id": "anthropics--skills--skills--canvas-design",
+      "name": "canvas-design",
+      "library": "anthropics--skills--skills--canvas-design"
+    }
+  ],
+  "requirements": [],
+  "limitations": "brand-guidelines содержит конкретный бренд Anthropic: заменить на утверждённый бренд пользователя, не применять его палитру автоматически"
+}

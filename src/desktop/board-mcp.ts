@@ -9,6 +9,15 @@ export interface BoardMcpTool {
   inputSchema: object;
 }
 
+export function boardToolContent(name: string, reply: CliReply) {
+  if (name === "task_review_artifact" && reply.ok && reply.data && typeof reply.data === "object" &&
+      "pngBase64" in reply.data && typeof reply.data.pngBase64 === "string") {
+    const { pngBase64, ...data } = reply.data;
+    return { text: JSON.stringify({ ...reply, data }), pngBase64 };
+  }
+  return { text: JSON.stringify(reply) };
+}
+
 export async function withBoardMcp<T>(
   tools: BoardMcpTool[],
   call: (name: string, args: unknown) => Promise<CliReply>,
@@ -63,7 +72,9 @@ export async function openBoardMcp(
         try {
           const reply = await call(message.params.name, message.params.arguments, lifetime.signal);
           if (response.destroyed) return;
-          result = { content: [{ type: "text", text: JSON.stringify(reply) }], isError: !reply.ok };
+          const content = boardToolContent(message.params.name, reply);
+          result = { content: [{ type: "text", text: content.text },
+            ...(content.pngBase64 ? [{ type: "image", mimeType: "image/png", data: content.pngBase64 }] : [])], isError: !reply.ok };
         } finally {
           response.removeListener("close", closed);
         }

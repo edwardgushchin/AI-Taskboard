@@ -10,6 +10,8 @@ export interface MaintenanceJob {
   error: { code: string; message: string; details?: unknown };
   attempts: number;
   retryAt: number;
+  cleanupRetryAt?: number;
+  repairAttempts?: number;
   owner?: number;
 }
 
@@ -48,9 +50,17 @@ export function maintenanceFailure(store: BoardStore, operation: MaintenanceJob[
     const diagnostic = error instanceof TaskboardError
       ? { code: error.code, message: error.message, details: error.details }
       : { code: "MAINTENANCE_FAILED", message: String(error) };
-    if (existing) { existing.error = diagnostic; existing.attempts++; }
-    else jobs.push({ id, task, operation, error: diagnostic, attempts: 1, retryAt: Date.now() + 15_000 });
+    const retries = existing && existing.error.code === diagnostic.code ? existing.attempts : 0;
+    const now = Date.now();
+    const cleanupRetryAt = operation === "cleanup" ? now + Math.min(300_000, 15_000 * 2 ** Math.min(retries, 5)) : undefined;
+    if (existing) { existing.error = diagnostic; existing.attempts++; existing.cleanupRetryAt = cleanupRetryAt; }
+    else jobs.push({ id, task, operation, error: diagnostic, attempts: 1, retryAt: now + 15_000, cleanupRetryAt });
   });
+}
+
+export function cleanupRetryDeferred(store: BoardStore, task: string) {
+  return transaction(store, jobs => jobs.some(job => job.task === task && job.operation === "cleanup" &&
+    (alive(job.owner) || (job.cleanupRetryAt ?? 0) > Date.now())));
 }
 
 export function maintenanceSuccess(store: BoardStore, operation: MaintenanceJob["operation"], task?: string) {
@@ -76,6 +86,11 @@ export function claimMaintenance(store: BoardStore, id: string, owner: number) {
 export function releaseMaintenance(store: BoardStore, id: string, owner: number) {
   transaction(store, jobs => {
     const job = jobs.find(job => job.id === id && job.owner === owner);
-    if (job) { delete job.owner; job.retryAt = Date.now() + 120_000; }
+    if (job) {
+      delete job.owner;
+      const attempts = job.repairAttempts ?? 0;
+      job.repairAttempts = attempts + 1;
+      job.retryAt = Date.now() + Math.min(3_600_000, 120_000 * 2 ** Math.min(attempts, 5));
+    }
   });
 }

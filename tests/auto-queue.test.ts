@@ -45,3 +45,18 @@ test("ready selection excludes drafts, busy tasks, unfinished dependencies and f
   tasks[1].unfinishedDependencies = [];
   assert.equal(nextReadyTask(tasks, new Map(), () => false, now)?.id, "T-0002");
 });
+
+test("explicit queue ordering and holds preserve eligibility and restore default ordering", () => {
+  const tasks = [task("T-0001", { priority: "urgent" }), task("T-0002"), task("T-0003", { unfinishedDependencies: ["T-0001"] })];
+  const controls = { revision: 1, paused: false, order: ["T-0003", "T-0002"], held: [] as string[] };
+  const next = () => nextReadyTask(tasks, new Map(), () => false, Date.now(), controls)?.id;
+  assert.equal(next(), "T-0002");
+  controls.held = ["T-0002"];
+  assert.equal(next(), "T-0001");
+  controls.paused = true;
+  assert.equal(next(), undefined);
+  controls.paused = false;
+  controls.order = [];
+  controls.held = [];
+  assert.equal(next(), "T-0001");
+});

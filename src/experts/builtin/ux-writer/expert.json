@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "id": "ux-writer",
+  "name": "UX редактор",
+  "group": "Тексты и знания",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "UX редактор",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--design--skills--ux-copy",
+      "name": "ux-copy",
+      "library": "anthropics--knowledge-work-plugins--design--skills--ux-copy"
+    }
+  ],
+  "requirements": [],
+  "limitations": ""
+}

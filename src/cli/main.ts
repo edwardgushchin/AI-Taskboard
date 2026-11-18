@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { beginBoardOperation } from "../desktop/board-worklog.ts";
 import { migrateWorklog } from "./worklog-migration.ts";
+import { boardFindings } from "./findings.ts";
 import { maintainBoard, removeLegacyAttachments } from "./maintenance.ts";
 import { maintenanceQueue, claimMaintenance, releaseMaintenance, maintenanceFailure } from "./maintenance-state.ts";
 import { guardManual, manualAction, isManual } from "./manual-board.ts";
@@ -11,18 +12,19 @@ import { parseArgs } from "node:util";
 import { acceptTask, cleanAcceptedTask, compareAcceptedTree, inspectReview, inspectReviewDiff, inspectReviewQueue, reopenConflictingReview, reviewDetails, verifyReviewDecision } from "./acceptance.ts";
 import { describeSavedChanges, restoreSavedChanges } from "./saved-changes.ts";
 import {
-  addAttachment, addChatMessage, archiveDiagnostics, createWithAttachments, isArchived, readAttachment, readTask, restoreReplyImages, sweepArchives,
+  addAttachment, addChatMessage, archiveDiagnostics, createWithAttachments, isArchived, reactivateArchivedTask, readAttachment, readTask, restoreReplyImages, sweepArchives,
   setAttachmentCover, upgradeTagCatalog,
 } from "./archive.ts";
 import { boardAgentRoles, boardReviewMode, hexTagColor, member, number, object, reasoningEffortPattern, record, registerTags, requireRevision, requireState, reviewModes, strings, tagKey, taskIdPattern, TaskboardError, text, validAgentLimitOverrides } from "./model.ts";
 import type { GitHubMilestone, Task } from "./model.ts";
 import { exists, initializeBoard, locateBoard, onBoard, readBoardSettings, withTaskStartLock } from "./storage.ts";
-import { recordSettings } from "./settings-notices.ts";
+import { inheritedLimits, recordSettings } from "./settings-notices.ts";
+import { requireAutoQueue, updateAutoQueue } from "./auto-queue.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
 import { discoverRepository, invokeGit, scheduleGitMaintenance } from "./git.ts";
 import { boardGitInfo, changeRepository, createGitHubMilestone, githubMilestones, githubRepository, inspectRepository, publishRepository, pushRepositoryBranch, readGitHub, repositoryRefs, setGitHubMilestoneDueDate } from "./repository.ts";
 import { previewSubmission, previewTask, submitTask } from "./submission.ts";
-import { changeTask, createTask, recordRunLog, withoutVerification } from "./tasks.ts";
+import { changeTask, createTask, recordRunLog } from "./tasks.ts";
 import { recordTokenUsage, taskMetrics } from "./token-usage.ts";
 import type { ReviewDecisionTiming } from "./token-usage.ts";
 import { projectUsage } from "./project-usage.ts";
@@ -34,12 +36,18 @@ import { acknowledgeTaskMessages, currentReviewApproval, managerInbox, sendTaskM
 import packageInfo from "../../package.json" with { type: "json" };
 import { grantTaskTool, requestTaskTool } from "./task-tools.ts";
 import { recoverTestData } from "./test-recovery.ts";
+import { expertContext, expertSkill, listExperts, readExpert, saveExpert } from "./experts.ts";
+import { approvalRequirements, createExpertPlan, expertStagesStatus, initialExpertTeam, requireApprovalPlan, requireExpertPlan, requireExpertResults, reviewDecisionSequence, sendTeamMessage, taskExpertPhase, teamInbox, updateExpertStage } from "./expert-team.ts";
+import { syncTaskStatusNotices } from "../desktop/manager-history.ts";
+import { syncSettingsNotices } from "../desktop/settings-notices.ts";
+import { registerRuntime, runtimeEntries, runtimeTransaction } from "../desktop/board-runtime.ts";
 
-const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "pause", "block", "resume", "unblock", "update"]);
+const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "checklist", "pause", "block", "resume", "unblock", "update"]);
 const help = [
   "Usage: ai-taskboard [--project PATH] [--json] COMMAND [TASK-ID] [--stdin]",
   "Commands: init, list, show, create, update, comment, approve, return-to-draft, start, progress,",
   "          pause, block, resume, unblock, preview, submit, review, accept, restore-changes, request-changes, cancel, cleanup, cleanup-status, settings, watch, doctor",
+  "          auto-queue (read controls), auto-queue --stdin (revision, paused, order, hold, release)",
   "          list --archived, archive sweep, chat TASK-ID, attachment add TASK-ID, attachment read TASK-ID",
   "          review-artifact TASK-ID --stdin (revision, source, sha256 and optional offset)",
   "          review-queue (Git status and submission time for tasks in review)",
@@ -62,6 +70,7 @@ const help = [
   "          git refs, git inspect, git switch, git create, git detach, git publish --stdin, git push --stdin (branch and head)",
   "For init, pass git: true with --stdin to initialize Git in the chosen folder.",
   "worklog-migrate (copy and verify legacy project/worktree diaries; sources remain unchanged)",
+  "findings [TASK-ID] --stdin (query or finding with symptom, environment, cause and verification)",
   "recover-test-data --stdin (manifest, optional apply:true); explicit canonical --project required; defaults to dry-run.",
   "Pass one UTF-8 JSON object with --stdin or --input-file PATH.",
 ].join("\n");
@@ -96,9 +105,12 @@ function isMergeRepair(task: Task) {
 function compactTask(task: Task) {
   const { id, title, description, status, revision, tags, priority, attachments, coverAttachment, codexThreadId,
     createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep, dependencies, milestone, workingDirectory, schedule, origin, launchRequested } = task;
-  return { acceptanceRepair: task.acceptanceRepair, id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
+  return { expertId: task.expertId, expertTeam: task.expertTeam, expertStage: task.expertStage, expertStages: task.expertStages,
+    reviewDecision: status === "review" ? reviewDecisionSequence(task) : undefined, acceptanceRepair: task.acceptanceRepair, id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
     coverAttachment, codexThreadId, createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep,
     dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, origin, launchRequested, historyLength: task.history.length,
+    expertWorkPlanned: Boolean(task.expertTeam?.work?.lead || task.expertStage),
+    expertReviewPlanned: Boolean(task.expertTeam?.review?.lead),
     ...(status === "review" && task.git?.submission && !task.result?.noChanges ? { reviewHasCommit: true } : {}),
     ...(currentReviewApproval(task) ? { reviewApproved: true } : {}),
     ...(isMergeRepair(task) ? { mergeRepair: true as const } : {}),
@@ -114,13 +126,13 @@ function taskReceipt({ id, status, revision, git, result }: Task) {
 
 function taskLaunchState(task: Task) {
   const { id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep } = task;
-  return { acceptanceRepair: task.acceptanceRepair, id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep,
+  return { expertId: task.expertId, expertTeam: task.expertTeam, expertStage: task.expertStage, expertStages: task.expertStages, acceptanceRepair: task.acceptanceRepair, id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep,
     ...(isMergeRepair(task) ? { mergeRepair: true as const } : {}) };
 }
 
-function reviewWithSettings(store: BoardStore, review: ReturnType<typeof inspectReview>, input: Record<string, unknown>) {
+function reviewWithSettings(store: BoardStore, task: Task, review: ReturnType<typeof inspectReview>, input: Record<string, unknown>) {
   if (input.includeReviewerSettings !== true) return review;
-  return { ...review, settings: {
+  return { ...review, reviewTeam: task.expertTeam?.review, reviewDecision: reviewDecisionSequence(task) || undefined, settings: {
     reviewMode: boardReviewMode(store.index.settings),
     reviewer: store.index.settings.reviewer,
   } };
@@ -198,6 +210,8 @@ function watchBoard(location: BoardLocation, compact: boolean): void {
   const cards = new Map<string, CachedCard>();
   const cleanedTasks = new Set<string>();
   let nextCleanup = 0;
+  let nextGitRefresh = 0;
+  let gitChanged = false;
   let gitInfo: ReturnType<typeof boardGitInfo> = {};
   const read = (refreshGit: boolean) => {
     const previousRepository = location.repository;
@@ -216,7 +230,11 @@ function watchBoard(location: BoardLocation, compact: boolean): void {
       }
       nextCleanup = Date.now() + 15_000;
     }
-    if (refreshGit || previousRepository !== location.repository) gitInfo = boardGitInfo(location);
+    if (gitChanged || (refreshGit && Date.now() >= nextGitRefresh) || previousRepository !== location.repository) {
+      gitInfo = boardGitInfo(location);
+      nextGitRefresh = Date.now() + 4000;
+      gitChanged = false;
+    }
     return { ok: true, data: { ...board, gitInfo, cleanedTasks: [...cleanedTasks] } };
   };
   let previous = JSON.stringify(read(true));
@@ -238,23 +256,28 @@ function watchBoard(location: BoardLocation, compact: boolean): void {
       previous = current;
     }
   };
-  const schedule = () => {
+  const schedule = (gitEvent: boolean) => {
+    gitChanged ||= gitEvent;
     if (refreshTimer) clearTimeout(refreshTimer);
     refreshTimer = setTimeout(refresh, 25, false);
   };
-  for (const [path, relevant] of [
-    [location.directory, (name: string) => name === "board.json"],
-    [join(location.directory, "tasks"), (name: string) => /^T-[0-9]{4,}\.json$/.test(name)],
-  ] as const) {
+  const observe = (path: string, relevant: (name: string) => boolean, gitEvent = false, recursive = false) => {
     try {
-      const watcher = watch(path, (_event, filename) => {
-        if (!filename || relevant(filename)) schedule();
+      const watcher = watch(path, { recursive }, (_event, filename) => {
+        if (!filename || relevant(filename)) schedule(gitEvent);
       });
       watcher.on("error", () => watcher.close());
       watchers.push(watcher);
     } catch {
       // The periodic refresh covers filesystems that do not support watch.
     }
+  };
+  observe(location.directory, name => name === "board.json");
+  observe(join(location.directory, "tasks"), name => /^T-[0-9]{4,}\.json$/.test(name));
+  if (location.repository && !location.repository.bare) {
+    const gitDir = join(location.root, ".git");
+    observe(gitDir, name => ["HEAD", "config", "packed-refs"].includes(name), true);
+    observe(join(gitDir, "refs"), name => !name.endsWith(".lock"), true, true);
   }
   const interval = setInterval(refresh, 1500, true);
   const stop = () => {
@@ -276,6 +299,44 @@ function run(
   filters: { archived?: boolean; tag?: string; compact?: boolean },
   lockWaitMs: number,
 ) {
+  if (command === "experts") return listExperts(store, typeof input.query === "string" ? input.query : "");
+  if (command === "expert-get") return readExpert(store, text(input.expertId, "expert ID", true), false);
+  if (command === "expert-save") return saveExpert(store, input);
+  if (command === "expert-context") return expertContext(store, strings(input.ids, "expert IDs"));
+  if (command === "expert-skill") {
+    const task = id ? store.card(id) : undefined;
+    if (task) {
+      if (input.actor !== "agent" && input.actor !== "reviewer")
+        throw new TaskboardError("INVALID_INPUT", "Only the current executor or reviewer may log a task skill.");
+      requireState(task, [input.actor === "reviewer" || task.acceptanceRepair?.phase === "running" ? "review" : "in_progress"]);
+    }
+    const skill = expertSkill(store, text(input.expertId, "expert ID", true), text(input.skillId, "skill ID", true));
+    if (task) store.save({ ...task, history: [...task.history, {
+      at: new Date().toISOString(), action: "expert-skill", actor: input.actor === "reviewer" ? "reviewer" : "agent",
+      expertSkill: { expertId: skill.expertId, skillId: skill.skillId, name: skill.name, source: input.source === "plan" ? "plan" : "tool" },
+    }] });
+    return skill;
+  }
+  if (command === "expert-plan") return createExpertPlan(store, text(id, "parent task ID", true), input);
+  if (command === "findings") return boardFindings(store, id, input);
+  if (command === "expert-stage") {
+    const taskId = text(id, "task ID", true);
+    const phase = taskExpertPhase(input.phase);
+    if ((phase === "work" && input.actor !== "agent") || (phase === "review" && !["reviewer", "manager"].includes(String(input.actor))))
+      throw new TaskboardError("INVALID_INPUT", "Only the responsible phase agent may report a stage.");
+    if (phase === "review" && (input.actor === "manager" ? "manager" : "reviewer") !== boardReviewMode(store.index.settings))
+      throw new TaskboardError("REVIEW_MODE_CHANGED", "Use the responsible agent for the current review mode.");
+    const targetHead = phase === "review" ? verifyReviewDecision(store, store.card(taskId), input.targetHead) : undefined;
+    return updateExpertStage(store, taskId, phase, input, targetHead);
+  }
+  if (command === "expert-inbox") return teamInbox(store, text(id, "task ID", true),
+    input.actor === "manager" ? "manager" : input.actor === "user" ? "owner" : input.actor === "reviewer" ? "reviewer" : id!,
+    input.afterSequence === undefined ? 0 : number(input.afterSequence, "afterSequence", 0));
+  if (command === "expert-message") return sendTeamMessage(store, text(id, "task ID", true),
+    typeof input.stage === "string" && (input.actor === "agent" && input.stage.startsWith("work:") ||
+      ["reviewer", "manager"].includes(String(input.actor)) && input.stage.startsWith("review:")) ? input.stage :
+      input.actor === "manager" ? "manager" : input.actor === "user" ? "owner" : input.actor === "reviewer" ? "reviewer" : id!, input);
+  if (["create", "update"].includes(command) && input.expertId != null) readExpert(store, text(input.expertId, "expert ID", true));
   if (command === "worklog-migrate") return migrateWorklog(store.location.root);
   if (command === "maintenance") {
     if (input.action === "claim" && typeof input.id === "string" && Number.isSafeInteger(input.owner))
@@ -357,6 +418,15 @@ function run(
   }
   if (command === "create") {
     const task = createTask(store.allocateId(), input);
+    const expertTeam = initialExpertTeam(store, task, input.expertTeam);
+    if (expertTeam) {
+      task.expertTeam = expertTeam;
+      for (const [phase, plan] of Object.entries(expertTeam)) {
+        task.history.push({ at: task.createdAt, action: "expert-plan", actor: task.history[0].actor,
+          expertPhase: taskExpertPhase(phase), text: plan.reason });
+      }
+    }
+    requireApprovalPlan(task, store.index.settings, "creation");
     if (isManual(store.index.settings)) {
       if (input.initialStatus !== undefined && input.actor !== "user") throw new TaskboardError("MANUAL_BOARD", "Начальную колонку выбирает пользователь.");
       const column = store.index.settings.manualColumns!.find(c => c.id === (input.initialStatus ?? store.index.settings.manualColumns![0].id));
@@ -450,12 +520,18 @@ function run(
     const active = store.doctor(input.repair === true);
     return { issues: [...active.issues, ...archive.issues], recovered: active.recovered, cleanedArchives: archive.cleaned };
   }
+  if (command === "auto-queue") return updateAutoQueue(store, input);
   if (command === "settings") {
     if (input.boardType !== undefined && input.boardType !== (store.index.settings.boardType ?? "agent")) {
       throw new TaskboardError("IMMUTABLE_BOARD_TYPE", "Тип доски выбирается при создании и не может быть изменён.");
     }
     if (input.manualColumns !== undefined) throw new TaskboardError("INVALID_INPUT", "Используйте настройку колонок с явным переносом дел.");
     if (isManual(store.index.settings) && input.autoMode === true) throw new TaskboardError("MANUAL_BOARD", "На обычной доске авторежим недоступен.");
+    if (input.requireExpertPlans !== undefined) {
+      if (typeof input.requireExpertPlans !== "boolean") throw new TaskboardError("INVALID_INPUT", "requireExpertPlans must be a boolean.");
+      if (isManual(store.index.settings) && input.requireExpertPlans) throw new TaskboardError("MANUAL_BOARD", "Expert execution is unavailable on a manual board.");
+      store.index.settings.requireExpertPlans = input.requireExpertPlans;
+    }
     const settingsJournal = store.index.managerSettings ?? recordSettings(store.index.settings);
     if (input.name !== undefined) {
       const name = text(input.name, "Board name");
@@ -489,12 +565,13 @@ function run(
       store.index.settings.reviewMode = member(input.reviewMode, reviewModes, "review mode");
       delete store.index.settings.autoReview;
     }
-    if (input.agentLimits !== undefined) {
-      if (!validAgentLimitOverrides(input.agentLimits) || Object.hasOwn(input.agentLimits, "manager")) {
-        throw new TaskboardError("INVALID_INPUT", "Agent limits must be non-negative whole numbers for known roles.");
+    const taskLimits = input.taskLimits === undefined ? input.agentLimits : input.taskLimits;
+    if (taskLimits !== undefined) {
+      if (!validAgentLimitOverrides(taskLimits) || Object.hasOwn(taskLimits, "manager")) {
+        throw new TaskboardError("INVALID_INPUT", "Task limits must be non-negative whole numbers for work and review.");
       }
-      if (Object.keys(input.agentLimits).length) store.index.settings.agentLimits = input.agentLimits;
-      else delete store.index.settings.agentLimits;
+      if (Object.keys(taskLimits).length) store.index.settings.taskLimits = taskLimits;
+      else delete store.index.settings.taskLimits;
     }
     for (const role of boardAgentRoles) {
       if (input[role] === undefined) continue;
@@ -523,6 +600,10 @@ function run(
     const task = taskWithCurrentWorktree(store, stored);
     const details = {
       artifacts: artifactFiles(store, id), savedChanges: describeSavedChanges(store, task),
+      ...(task.status === "draft" ? { approvalRequirements: approvalRequirements(task, store.index.settings) } : {}),
+      ...(task.expertTeam ? { expertStageStatus: {
+        work: expertStagesStatus(task, "work"), review: expertStagesStatus(task, "review"),
+      } } : {}),
       ...(task.dependencies?.length ? {
         unfinishedDependencies: unfinishedDependencies(task, dependency => dependencyStatus(store, dependency)),
       } : {}),
@@ -544,7 +625,7 @@ function run(
   if (command === "restore-changes") return restoreSavedChanges(store, readTask(store, id), input);
   const tagsOnly = command === "update" && input.tags !== undefined && Object.keys(input).every(key =>
     ["tags", "revision", "actor", "note", "preserveStatus"].includes(key));
-  const task = tagsOnly ? readTask(store, id) : store.card(id);
+  const task = tagsOnly || command === "return-to-draft" ? readTask(store, id) : store.card(id);
   let decisionTiming: ReviewDecisionTiming | undefined;
   const withReviewerUsage = (card: Task) => {
     if (input.reviewerUsage === undefined) return card;
@@ -585,10 +666,16 @@ function run(
       const verificationStarted = performance.now();
       const targetHead = verifyReviewDecision(store, task, input.targetHead);
       decisionTiming = { lockWaitMs, verificationMs: Math.round(performance.now() - verificationStarted) };
+      if (command === "request-changes" && mode !== "human" && input.actor === mode) {
+        if (store.index.settings.requireExpertPlans) requireExpertPlan(task, "review");
+        requireExpertResults(task, "review", targetHead);
+      }
       if (reviewerReport) {
         if (hasPending(store, task)) throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation first.");
         const summary = text(input.summary, "review summary", true);
         if (command === "review-approve") {
+          if (store.index.settings.requireExpertPlans) requireExpertPlan(task, "review");
+          requireExpertResults(task, "review", targetHead);
           const evidence = input.evidence;
           if (!Array.isArray(evidence) || !evidence.length || evidence.length !== task.criteria.length ||
               evidence.some(entry => typeof entry !== "string" || !entry.trim())) {
@@ -633,6 +720,11 @@ function run(
       "acceptance-failed", "agent"), { kind: "question", text: reason }, "agent"));
   }
   if (command === "accept") {
+    if (input.actor === "manager" && !task.acceptanceRepair && boardReviewMode(store.index.settings) === "manager" &&
+        (store.index.settings.requireExpertPlans || task.expertTeam?.review?.stages.length)) {
+      if (store.index.settings.requireExpertPlans) requireExpertPlan(task, "review");
+      requireExpertResults(task, "review", verifyReviewDecision(store, task, input.targetHead));
+    }
     if (task.acceptanceRepair) {
       requireRevision(task, input.revision, true);
       if (input.continueRepair !== true) return task;
@@ -678,6 +770,13 @@ function run(
       throw error;
     }
   }
+  if (command === "return-to-draft") {
+    const draft = changeTask(task, command, input);
+    if (draft !== task && hasPending(store, task, true)) {
+      throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before returning the task to draft.");
+    }
+    return draft === task ? task : isArchived(store, id) ? reactivateArchivedTask(store, draft) : store.save(draft);
+  }
   if (hasPending(store, task)) {
     throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before modifying the task.");
   }
@@ -687,6 +786,8 @@ function run(
     if (logged !== task) store.save(logged);
     return filters.compact ? taskReceipt(logged) : logged;
   }
+  if (command === "progress" && task.schedule && task.status === "in_progress") requireExpertResults(task, "work");
+  if (command === "approve" && task.status === "draft") requireApprovalPlan(task, store.index.settings);
   let updated = changeTask(task, command, input);
   if (command === "update" && task.acceptanceRepair &&
       ["title", "description", "criteria", "questions", "subtasks", "dependencies", "execution"].some(key => input[key] !== undefined)) {
@@ -702,13 +803,13 @@ function run(
       updated.history.at(-1)!.mergedInto = { id: target.id, title: target.title,
         transferred: text(input.transferred, "transferred", true) };
     }
-    const closed = store.save(withoutVerification(updated));
-    return closed;
+    return store.save(updated);
   }
   if ((command === "update" || command === "unblock") && input.dependencies !== undefined) validateDependencies(store, updated);
   const saved = store.save(command === "request-changes" && input.actor === "reviewer" ? withReviewerUsage(updated) :
     command === "update" && input.tags !== undefined ? assignTags(store, updated) : updated);
   if (!filters.compact) return saved;
+  if (command === "checklist") return { id: saved.id, status: saved.status, revision: saved.revision, subtasks: saved.subtasks };
   if (input.launchDetails === true && ["request-changes", "resume", "update"].includes(command)) return taskLaunchState(saved);
   if (["progress", "pause", "block", "resume"].includes(command)) {
     return taskLaunchState(saved);
@@ -731,6 +832,7 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
       if (input.autoMode === true && !store.index.settings.autoMode) {
         throw new TaskboardError("AUTO_MODE_DISABLED", "Automatic starts are disabled.");
       }
+      if (input.autoMode === true) requireAutoQueue(store.index.settings, id, input.autoQueueRevision);
       if ((input.scheduled === true || input.autoMode === true) && task.schedule?.paused) {
         throw new TaskboardError("INVALID_TRANSITION", "The recurring schedule is paused.");
       }
@@ -802,13 +904,18 @@ async function main() {
     if (command === "watch") {
       watchBoard(location, values.compact === true);
     } else {
-      const audited = new Set(["start", "submit", "accept", "cancel", "cleanup", "archive", "restore-changes", "recover-test-data", "worklog-migrate", "git"]);
+      const audited = new Set(["start", "submit", "accept", "cancel", "return-to-draft", "cleanup", "archive", "restore-changes", "recover-test-data", "worklog-migrate", "git"]);
       const finishOperation = audited.has(command) && command !== "git" || command === "git" && !["refs", "inspect"].includes(id ?? "")
         ? beginBoardOperation(location.root, command + (extra ? "/" + extra : ""), id && /^T-\d+$/.test(id) ? id : undefined) : undefined;
       try {
         let data;
         if (command === "settings" && !Object.keys(input).length) {
           data = readBoardSettings(location);
+        } else if (command === "sync-notices") {
+          if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "Notice synchronization takes no task ID.");
+          const limits = runtimeEntries(location.root).find(entry => entry.id === "task-defaults")?.limits ?? inheritedLimits;
+          syncSettingsNotices(location.root, limits);
+          data = { changed: syncTaskStatusNotices(location.root, text(input.language, "language", true)) };
         } else if (command === "manager-usage") {
           if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "Manager usage takes no task ID.");
           readBoardSettings(location);
@@ -882,9 +989,24 @@ async function main() {
           const { store, task } = onBoard(location, (store, lockWaitMs) => ({
             store, task: run(store, command, id, extra, input, values, lockWaitMs) as Task,
           }));
-          try { withTaskStartLock(location, id, () => cleanTaskWorktree(store, task), 0); }
+          try { withTaskStartLock(location, id, () => {
+            const current = onBoard(location, fresh => readTask(fresh, id));
+            if (current.status === "cancelled" && current.revision === task.revision) cleanTaskWorktree(store, current);
+          }, 0); }
           catch { /* Private maintenance retries after the active operation releases it. */ }
           data = task;
+        } else if (command === "return-to-draft") {
+          if (!id || !taskIdPattern.test(id)) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
+          const release = registerRuntime(location.root, { kind: "task", task: "draft:" + id });
+          if (!release) throw new TaskboardError("CHAT_BUSY", "This task still has an active writer or is being returned in another process. Stop it or wait for it to finish.");
+          try {
+            data = withTaskStartLock(location, id, () => onBoard(location,
+              (store, lockWaitMs) => run(store, command, id, extra, input, values, lockWaitMs)));
+            runtimeTransaction(location.root, entries => {
+              const index = entries.findIndex(entry => entry.kind === "queue" && entry.task === id);
+              if (index >= 0) entries.splice(index, 1);
+            });
+          } finally { release(); }
         } else if (command === "accept") {
           if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
           data = withTaskStartLock(location, id, () => {
@@ -946,7 +1068,7 @@ async function main() {
               throw new TaskboardError("REVISION_CONFLICT", "The submission changed. Open the current review.");
             }
           });
-          data = reviewWithSettings(store, review, input);
+          data = reviewWithSettings(store, task, review, input);
         } else if (command === "git") {
           const action = member(id, ["refs", "inspect", "switch", "create", "detach", "publish", "push"], "action");
           if (action === "inspect") data = inspectRepository(location, input);

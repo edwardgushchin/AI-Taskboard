@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "id": "seo-specialist",
+  "name": "SEO специалист",
+  "group": "Маркетинг и коммуникации",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "SEO специалист",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "coreyhaines31--marketingskills--skills--seo-audit",
+      "name": "seo-audit",
+      "library": "coreyhaines31--marketingskills--skills--seo-audit"
+    },
+    {
+      "id": "coreyhaines31--marketingskills--skills--site-architecture",
+      "name": "site-architecture",
+      "library": "coreyhaines31--marketingskills--skills--site-architecture"
+    },
+    {
+      "id": "coreyhaines31--marketingskills--skills--ai-seo",
+      "name": "ai-seo",
+      "library": "coreyhaines31--marketingskills--skills--ai-seo"
+    }
+  ],
+  "requirements": [
+    "Доступ к сайту",
+    "Данные поиска для количественной проверки"
+  ],
+  "limitations": ""
+}

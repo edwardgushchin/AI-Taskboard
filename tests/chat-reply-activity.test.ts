@@ -5,9 +5,11 @@ import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import { basename, extname, join } from "node:path";
 import { test } from "node:test";
+import { setTimeout as wait } from "node:timers/promises";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
-import { createTask } from "../src/cli/tasks.ts";
+import { changeTask, createTask } from "../src/cli/tasks.ts";
+import { TaskboardError } from "../src/cli/model.ts";
 import { projectLabels } from "../src/desktop/project-tabs.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 
@@ -17,6 +19,7 @@ const names = new Set([
   "activeAgents", "stopChat", "beginOperation", "projectOperations", "closingProjects", "frame", "send", "notifyRunChange", "sendChat", "saveTaskTokenUsage", "windowStates", "chatRuns", "replyingTasks",
   "launchingTasks", "runningTasks", "runActivityByTask", "imageExtensions", "imageTypes", "recentBoards", "russian", "theme",
   "managerQuestion", "executorLimit", "deferredExecutors",
+  "returnTaskToDraft", "returningDrafts", "reviewOperations", "managerReviewOperations", "taskOperations", "steeringOperations",
 ]);
 // Exercise the main-process lifecycle without starting Electron or a real provider.
 const activitySource = parsed.statements.filter(node => {
@@ -25,7 +28,7 @@ const activitySource = parsed.statements.filter(node => {
     ts.isIdentifier(declaration.name) && names.has(declaration.name.text));
 }).map(node => node.getText(parsed)).join("\n");
 
-function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean; saveReplyFailure?: boolean; controlled?: boolean; steerFailure?: boolean; stopFailure?: boolean } = {}) {
+function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean; saveReplyFailure?: boolean; controlled?: boolean; steerFailure?: boolean; stopFailure?: boolean; beforeMessageWrite?: (text?: string) => Promise<void> } = {}) {
   const task = createTask("T-0001", { title: "Discussion" });
   task.status = "review";
   task.history.push({ at: new Date().toISOString(), actor: "user", action: "comment", text: "Discuss", chat: { model: "test", effort: "low", files: [] } });
@@ -37,8 +40,9 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   const started = Promise.withResolvers<void>();
   const slots = createAgentSlots();
   const runtime = runInNewContext(stripTypeScriptTypes(activitySource) +
-    "\n({ sendChat, stopChat, activeAgents, frame, windowStates, runningTasks, launchingTasks, deferredExecutors, notifyRunChange, chatRuns, replyingTasks })", {
-    agentSlots: slots, activeRunSummary, basename, extname, join, performance, projectLabels, AbortController, subscriptions: new Map(),
+    "\n({ sendChat, stopChat, returnTaskToDraft, activeAgents, frame, windowStates, runningTasks, launchingTasks, deferredExecutors, notifyRunChange, chatRuns, replyingTasks })", {
+    agentSlots: slots, registerRuntime: () => () => {}, activeRunSummary, basename, extname, join, performance, projectLabels, AbortController, AbortSignal, wait, subscriptions: new Map(),
+    isManual: () => false, runtimeLocation: (project: string) => project, readBoardSettings: () => ({}),
     scheduleAgentWork: () => { scheduled.push(true); }, reserveAgent: slots.acquire,
     boardRequests: new Map(), boardWorkRequests: new Map(), boardUnread: () => [], projectIdentity: (path: string) => path,
     app: { getPath: () => "profile" }, managerAccess: () => "auto",
@@ -56,9 +60,20 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
         return { ok: false, error: { code: "STORAGE_ERROR" } };
       }
       if (args[0] === "chat") {
+        await options.beforeMessageWrite?.(input.text);
         writes.push(input);
-        if (options.controlled) task.history.push({ at: new Date().toISOString(), actor: input.actor === "agent" ? "agent" : "user",
-          action: "chat", text: input.text, chat: { model: "test", effort: "low" } });
+        if (options.controlled) {
+          task.revision++;
+          task.history.push({ at: new Date().toISOString(), actor: input.actor === "agent" ? "agent" : "user",
+            action: "chat", text: input.text, chat: { model: "test", effort: "low" } });
+        }
+      }
+      if (args[0] === "return-to-draft") {
+        try { Object.assign(task, changeTask(task, args[0], input)); }
+        catch (error) {
+          if (!(error instanceof TaskboardError)) throw error;
+          return { ok: false, error: { code: error.code, message: error.message } };
+        }
       }
       return { ok: true, data: task };
     },
@@ -209,6 +224,29 @@ test("stop interrupts the discussion without saving a completed reply", async ()
   assert.deepEqual(f.removed, ["scratch/chat"]);
 });
 
+test("return waits for an already dispatched chat write and preserves its newer revision", async () => {
+  const writing = Promise.withResolvers<void>();
+  const finishWrite = Promise.withResolvers<void>();
+  const f = fixture({ controlled: true, async beforeMessageWrite(text) {
+    if (text !== "Already dispatched") return;
+    writing.resolve();
+    await finishWrite.promise;
+  } });
+  const original = f.run();
+  await f.started;
+  const steering = f.runtime.sendChat("project-a", f.task.id, { ...f.request, text: "Already dispatched" }, () => {});
+  await writing.promise;
+  const returned = f.runtime.returnTaskToDraft("project-a", f.task.id, f.task.revision, "user");
+  await Promise.race([original, returned.then(() => assert.fail("Return finished with a write in flight"))]);
+  assert.equal(f.task.status, "review");
+  finishWrite.resolve();
+  assert.equal((await steering).saved, true);
+  assert.equal((await returned).error.code, "REVISION_CONFLICT");
+  assert.equal(f.task.history.at(-1)?.text, "Already dispatched");
+  assert.equal((await f.runtime.returnTaskToDraft("project-a", f.task.id, f.task.revision, "user")).data.status, "draft");
+  assert.deepEqual(f.delivered, []);
+});
+
 test("a delivery rejection keeps the saved user message and does not start another reply", async () => {
   const f = fixture({ controlled: true, steerFailure: true, stopFailure: true });
   const pending = f.run();
@@ -252,10 +290,9 @@ test("a task being launched never starts a competing chat provider", async () =>
   assert.equal(f.writes.length, 0);
 });
 
-test("discussions bypass every role limit, preserve free executor slots and run independently", async () => {
+test("discussions bypass work and review task limits and run independently", async () => {
   const f = fixture();
-  const occupied = [f.slots.acquire("project-a", "executor")!, f.slots.acquire("project-a", "executor")!,
-    f.slots.acquire("project-a", "executor")!, f.slots.acquire("project-a", "manager")!, f.slots.acquire("project-a", "reviewer")!];
+  const occupied = [f.slots.acquire("project-a", "executor")!, f.slots.acquire("project-a", "reviewer")!];
   const first = f.run();
   await f.started;
   const second = f.runtime.sendChat("project-a", "T-0002", f.request, () => {});
@@ -285,7 +322,7 @@ test("discussion ignores status and unfinished dependencies and never starts exe
     f.task.dependencies = ["T-9999"];
     const pending = f.run();
     await f.started;
-    assert.equal(f.slots.available("project-a", "executor"), 3);
+    assert.equal(f.slots.available("project-a", "executor"), 1);
     assert.deepEqual(Array.from(f.runtime.frame(f.windows[0].state).runningTasks), []);
     f.response.resolve({ text: "Reply" });
     assert.equal((await pending).result.ok, true);

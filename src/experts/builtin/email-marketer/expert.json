@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "id": "email-marketer",
+  "name": "Специалист по email и CRM коммуникациям",
+  "group": "Маркетинг и коммуникации",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Специалист по email и CRM коммуникациям",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "coreyhaines31--marketingskills--skills--emails",
+      "name": "emails",
+      "library": "coreyhaines31--marketingskills--skills--emails"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--marketing--skills--email-sequence",
+      "name": "email-sequence",
+      "library": "anthropics--knowledge-work-plugins--marketing--skills--email-sequence"
+    }
+  ],
+  "requirements": [],
+  "limitations": ""
+}

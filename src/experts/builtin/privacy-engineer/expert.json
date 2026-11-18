@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "id": "privacy-engineer",
+  "name": "Инженер приватности",
+  "group": "Безопасность и управление рисками",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Инженер приватности",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--legal--skills--compliance-check",
+      "name": "compliance-check",
+      "library": "anthropics--knowledge-work-plugins--legal--skills--compliance-check"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--legal--skills--legal-risk-assessment",
+      "name": "legal-risk-assessment",
+      "library": "anthropics--knowledge-work-plugins--legal--skills--legal-risk-assessment"
+    }
+  ],
+  "requirements": [],
+  "limitations": "Дополнить моделированием потоков и локальными правилами обработки данных"
+}

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "id": "nutrition-research-specialist",
+  "name": "Специалист по питанию",
+  "group": "Здоровье и благополучие",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Специалист по питанию",
+      "file": "skills/workflow/SKILL.md"
+    }
+  ],
+  "requirements": [
+    "Ограничения и предпочтения человека"
+  ],
+  "limitations": "Узкий проверенный скилл питания в подборку не включён"
+}

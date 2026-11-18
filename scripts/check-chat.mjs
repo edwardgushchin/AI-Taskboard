@@ -1,5 +1,7 @@
 // Real Chromium checks for the chat renderer, without opening a board or contacting Codex.
 // Optional: --references <task attachment directory> --artifacts <screenshot directory>
+// For a dialogue round trip, use --dialogue-history <empty temp directory>, then repeat with --reopen-dialogue.
+// Pass --large-dialogue-image to both invocations to include a 4 MiB attachment.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -52,7 +54,7 @@ app.whenReady().then(async () => {
       '<p><a href="src/desktop/styles.css:582">styles.css</a></p>\n');
   } finally { smoke.destroy(); }
   window.webContents.on("console-message", details => {
-    if (details.level === "error") console.error(details.message);
+    if (details.level === "error") console.error(details.message + " (renderer line " + details.lineNumber + ")");
   });
   const html = read("index.html").replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, "")
     .replace(/<link\b[^>]*>/g, "").replace(/<meta http-equiv="Content-Security-Policy"[^>]*>/, "");
@@ -70,6 +72,7 @@ app.whenReady().then(async () => {
     };
     ${readFileSync(require.resolve("markdown-it/browser"), "utf8")}
     ${read("image-preview.js")}
+    ${read("keyboard-focus.js")}
     ${read("source-files.cjs")}
     ${read("markdown.js")}
     ${read("chat.js")}
@@ -78,12 +81,286 @@ app.whenReady().then(async () => {
     ${read("renderer.js")}
     void 0;
   `);
-  const evaluate = (code, userGesture = false) => window.webContents.executeJavaScript(code, userGesture);
+  const evaluate = async (code, userGesture = false) => {
+    try { return await window.webContents.executeJavaScript(code + "\n//# sourceURL=check-chat-evaluate.js", userGesture); }
+    catch (error) { throw new Error("Renderer check failed: " + code.trim().slice(0, 180), { cause: error }); }
+  };
   const check = async (code, message) => assert.equal(await evaluate(code), true, message);
   const capture = async name => {
     await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
     writeFileSync(join(artifacts, name), (await window.webContents.capturePage()).toPNG());
   };
+  const dialogueFixture = option("--dialogue-history");
+  if (dialogueFixture) {
+    const reopening = process.argv.includes("--reopen-dialogue");
+    const largeImage = process.argv.includes("--large-dialogue-image");
+    const files = [];
+    if (largeImage) {
+      // Pad a decodable PNG to the exact input size under test.
+      const bytes = Buffer.alloc(4 * 1024 * 1024);
+      Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=", "base64").copy(bytes);
+      files.push({ name: "large-image.png", url: "data:image/png;base64," + bytes.toString("base64") });
+    }
+    const start = Date.UTC(2026, 10, 18, 8);
+    const answer = (id, text, offset) => ({
+      id, text, at: new Date(start + offset).toISOString(), title: "", type: "agentMessage", status: "completed", phase: "final_answer",
+    });
+    const question = "current-question";
+    const reply = answer("full-answer", "full-streamed-answer: T-0001 отменена.", 130);
+    const blockReason = "Review «previous attempt» — cancelled.";
+    const transitionResults = [
+      ["cancel", "cancelled", "отменена"], ["start", "in_progress", "в работе"],
+      ["block", "blocked", "заблокирована"], ["submit", "review", "сдана на проверку"],
+      ["accept", "done", "завершена"],
+    ];
+    const transitionTools = transitionResults.map(([action, status], index) => ({
+      id: "transition-" + action, title: "ai_taskboard / task_" + action, type: "mcpToolCall", status: "completed",
+      at: new Date(start + 100).toISOString(), completedAt: new Date(start + 105).toISOString(), text: "Saved tool output",
+      taskChanges: [{ action, status, id: "T-" + String(index + 1).padStart(4, "0") }],
+    }));
+    const io = (project, action, input) => {
+      const result = spawnSync(process.env.TASKBOARD_CHECK_NODE, ["--input-type=module", "-e", `
+        import { randomUUID } from "node:crypto";
+        import { mkdirSync, readFileSync } from "node:fs";
+        import { join } from "node:path";
+        import { initializeBoard } from ${JSON.stringify(new URL("../src/cli/storage.ts", import.meta.url).href)};
+        import { createTask } from ${JSON.stringify(new URL("../src/cli/tasks.ts", import.meta.url).href)};
+        import { managerUnread, readManagerDialogue, readManagerView, saveManagerHistory } from ${JSON.stringify(new URL("../src/desktop/manager-history.ts", import.meta.url).href)};
+        const [project, action] = process.argv.slice(1);
+        const input = JSON.parse(readFileSync(0, "utf8"));
+        if (action === "seed") {
+          const store = initializeBoard({ root: project, directory: join(project, ".tasks"), repository: null }, store => store);
+          const task = createTask("T-0003", { title: "batch-cancel-2" });
+          store.create({ ...task, status: "blocked", updatedAt: input.at, history: [...task.history, {
+            action: "block", actor: "manager", from: "in_progress", to: "blocked", at: input.at, text: input.reason,
+          }] });
+        } else if (action === "write") {
+          mkdirSync(join(project, ".tasks"), { recursive: true });
+          for (const { at, id, run } of input) saveManagerHistory(project, at, id ?? randomUUID(), run);
+        } else if (action === "work") console.log(JSON.stringify(await readManagerView(project, input, "work", async () => ({
+          turns: [{ messages: [], items: [${JSON.stringify({ ...transitionTools[0], id: "legacy-cancel",
+            at: new Date(start - 20).toISOString(), completedAt: new Date(start - 10).toISOString() })}] }],
+          nextCursor: null,
+        }))));
+        else if (action === "unread") console.log(JSON.stringify(managerUnread(project)));
+        else console.log(JSON.stringify(await readManagerDialogue(project, input)));
+      `, project, action], { input: JSON.stringify(input), encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
+      assert.equal(result.status, 0, result.stderr);
+      return result.stdout ? JSON.parse(result.stdout) : undefined;
+    };
+    for (const paused of [false, true]) {
+      const project = join(dialogueFixture, paused ? "paused" : "no-goal");
+      const goal = paused ? { objective: "Fixture objective", status: "paused" } : null;
+      const chat = (text, offset, items, clientId) => ({
+        lane: "chat", message: { text, clientId, at: new Date(start + offset).toISOString(), files: clientId ? files : [] }, items,
+      });
+      const runId = "a0000000-0000-4000-8000-000000000001";
+      if (!reopening) io(project, "write", Array.from({ length: 22 }, (_, index) => ({
+        at: start + index,
+        run: chat("prior-question-" + index, index, [answer("prior-" + index, "prior-reply-" + index, index)]),
+      })));
+      const history = cursor => ({ ok: true, data: { ...io(project, "read", cursor), goal } });
+      const olderPages = first => {
+        const pages = {};
+        for (let cursor = first.data.nextCursor; cursor;) {
+          const page = pages[cursor] = history(cursor);
+          cursor = page.data.nextCursor;
+        }
+        return pages;
+      };
+      const initial = history(null);
+      await evaluate(`(async () => {
+        window.dialogue = { initial: ${JSON.stringify(initial)}, ready: Promise.withResolvers(), finish: Promise.withResolvers() };
+        frame = { project: ${JSON.stringify(project)}, russian: true };
+        const pages = ${JSON.stringify(olderPages(initial))};
+        api.boardHistory = async (_project, cursor) => cursor ? pages[cursor] : dialogue.initial;
+        api.boardQueue = async (_project, action) => ({ ok: true, data: action === 'list' ? [] : 'current-user' });
+        api.boardRequest = () => { dialogue.ready.resolve(true); return dialogue.finish.promise; };
+        dialogue.open = () => {
+          dialogue.manager = draftComposer();
+          (${reopening} ? byId('board-composer') : body).replaceChildren(dialogue.manager);
+          dialogue.manager.querySelector('.draft-input textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+          dialogue.log = dialogue.manager.querySelector('.board-chat-log:not(.board-work)');
+        };
+        if (${reopening}) byId('workspace').hidden = false;
+        else if (!sheet.open) sheet.showModal();
+        dialogue.open();
+        if (${!reopening}) {
+          dialogue.manager.querySelector('.draft-input textarea').value = '${question}';
+          dialogue.manager.requestSubmit();
+          await dialogue.ready.promise;
+        }
+        return true;
+      })()`);
+      if (!reopening) {
+        io(project, "seed", { at: new Date(start + 103).toISOString(), reason: blockReason });
+        await evaluate(`
+          dialogue.leaks = [];
+          dialogue.observer = new MutationObserver(records => {
+            for (const { addedNodes } of records) for (const node of addedNodes) {
+              if (node.textContent.includes('batch-cancel-')) dialogue.leaks.push(node.textContent);
+            }
+          });
+          dialogue.observer.observe(dialogue.log, { childList: true, subtree: true });
+        `);
+        io(project, "write", [
+          { at: start + 100, id: runId, run: chat(question, 100, [], "current-user") },
+          ...Array.from({ length: 24 }, (_, index) => ({
+            at: start + 101 + index, run: { lane: "notice", items: [
+              answer("notice-" + index, "T-" + String(index + 1).padStart(4, "0") +
+                " «batch-cancel-" + index + (index === 0 ? " Релиз «Клиент» — v2.1\nПроверка" : index === 1 ? "\r\nВторая строка запуска" : "") +
+                "» — " + (transitionResults[index]?.[2] ?? "отменена") + (index === 2 ? ": " + blockReason : "."), 101 + index),
+            ] },
+          })),
+        ]);
+        assert.ok(!io(project, "unread", null).some(id => id.startsWith("notice-")));
+        const stale = history(null);
+        await evaluate(`(() => {
+          const partial = { ...${JSON.stringify(reply)}, text: 'partial-stream', status: 'inProgress' };
+          dialogue.manager.updateActivity([partial]);
+          dialogue.stale = Promise.withResolvers();
+          api.boardHistory = () => dialogue.stale.promise;
+          dialogue.manager.invalidateHistory();
+        })()`);
+        await check(`dialogue.log.textContent.includes('partial-stream') && dialogue.log.textContent.includes('prior-reply-21')`, "stream coexists with previous history");
+        io(project, "write", [{ at: start + 100, id: runId, run: chat(question, 100, [...transitionTools, reply], "current-user") }]);
+        const completed = history(null);
+        await evaluate(`(async () => {
+          const pages = ${JSON.stringify(olderPages(completed))};
+          api.boardHistory = async (_project, cursor) => cursor ? pages[cursor] : (${JSON.stringify(completed)});
+          dialogue.finish.resolve({ ok: true, data: { items: [${JSON.stringify(reply)}] } });
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          dialogue.stale.resolve(${JSON.stringify(stale)});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          return true;
+        })()`);
+      }
+      for (let open = 0; open < 2; open++) {
+        const latest = history(null);
+        assert.equal(latest.data.turns.some(turn => turn.items.some(item => item.id === "prior-21")), !largeImage);
+        const pages = olderPages(latest);
+        await evaluate(`(async () => {
+          const pages = ${JSON.stringify(pages)};
+          api.boardHistory = async (_project, cursor) => cursor ? pages[cursor] : (${JSON.stringify(latest)});
+          if (${open === 1}) {
+            dialogue.manager.closeChat();
+            if (dialogue.manager.hasAttribute('data-open')) throw new Error('Dialogue did not close');
+            dialogue.manager.dispose();
+            dialogue.open();
+          }
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          const preview = dialogue.log.querySelector('.chat-attachments img');
+          if (preview) {
+            preview.loading = 'eager';
+            await preview.decode();
+          }
+          return true;
+        })()`);
+        assert.deepEqual(await evaluate(`({
+          answer: dialogue.log.textContent.includes('full-streamed-answer'),
+          question: dialogue.log.textContent.includes('${question}'),
+          image: dialogue.log.querySelector('.chat-attachments img')?.naturalWidth ?? 0,
+          notices: dialogue.log.querySelectorAll('[data-message-id^="notice-"]').length,
+          paused: dialogue.manager.textContent.includes('Fixture objective'),
+        })`), { answer: true, question: true, image: largeImage ? 1 : 0, notices: 0, paused },
+        "finished or reopened dialogue keeps the question and replies without status notices");
+        await evaluate(`(async () => {
+          for (let i = 0; i < ${Object.keys(pages).length}; i++) {
+            const older = dialogue.log.querySelector('.board-chat-older');
+            if (older.hidden) break;
+            older.click();
+            await new Promise(resolve => requestAnimationFrame(resolve));
+          }
+        })()`);
+        assert.deepEqual(await evaluate(`[...dialogue.log.querySelectorAll('[data-message-id]')].map(node => node.dataset.messageId)`), [
+          ...Array.from({ length: 22 }, (_, index) => "prior-" + index), "full-answer",
+        ], "older and recent pages preserve saved order and have no missing or duplicate replies");
+      }
+      if (!reopening) await check("dialogue.leaks.length === 0", "no status notice entered the live dialogue DOM");
+      const work = io(project, "work", null);
+      const workPages = {};
+      for (let cursor = work.nextCursor; cursor;) {
+        const page = workPages[cursor] = io(project, "work", cursor);
+        cursor = page.nextCursor;
+      }
+      await evaluate(`
+        api.boardHistory = async (_project, cursor, view) => ({ ok: true, data: view === 'live'
+          ? { work: [], chat: ${JSON.stringify(transitionTools)} } : cursor ? (${JSON.stringify(workPages)})[cursor] : ${JSON.stringify(work)} });
+        dialogue.manager.querySelector('.board-work-toggle').click();
+        new Promise(resolve => requestAnimationFrame(resolve))
+      `);
+      await check(`dialogue.manager.querySelectorAll('.board-work [data-item^="final:notice-"]').length === 20`,
+        "work displays the latest 20 status notices");
+      const onlyNoticeResults = `
+        [...dialogue.manager.querySelectorAll('.board-work [data-item^="item:transition-"]')].every(tool =>
+          !tool.querySelector('summary').textContent.match(/T-00|отменена|запущена|заблокирована|принята/u) &&
+          !!tool.querySelector('button[data-task]') && !!tool.querySelector('time')) &&
+        dialogue.manager.querySelectorAll('.board-work [data-item^="item:transition-"]').length === 5
+      `;
+      await check(onlyNoticeResults, "live tool details have no duplicate status result");
+      await check(`dialogue.manager.querySelectorAll('[data-status-result]:not([hidden])').length === 4`,
+        "live results without a loaded notice have visible rows");
+      await evaluate(`dialogue.manager.querySelector('.board-work .board-chat-older').click();
+        new Promise(resolve => requestAnimationFrame(resolve))`);
+      await check(`
+        [...dialogue.manager.querySelectorAll('.board-work [data-item^="final:notice-"]')].every((row, index) =>
+          row.dataset.item === 'final:notice-' + index && row.querySelector('a[data-task]')?.dataset.task ===
+            'T-' + String(index + 1).padStart(4, '0') &&
+          row.querySelector('time')?.dateTime === new Date(${start} + 101 + index).toISOString()) &&
+        dialogue.manager.querySelectorAll('.board-work [data-item^="final:notice-"]').length === 24
+      `, "work pagination shows each dated notice once with a card link");
+      await check(onlyNoticeResults, "saved tool details have no duplicate status result after loading older notices");
+      await check(`!dialogue.manager.querySelector('[data-status-result]:not([hidden])')`,
+        "matching notices replace all five tool result rows");
+      await check(`
+        dialogue.manager.querySelector('[data-item="final:notice-0"]').textContent.includes('Релиз «Клиент» — v2.1') &&
+        dialogue.manager.querySelector('[data-item="final:notice-0"]').textContent.includes('Проверка') &&
+        dialogue.manager.querySelector('[data-item="final:notice-2"]').textContent.includes(${JSON.stringify(blockReason)}) &&
+        dialogue.manager.querySelector('[data-item="final:notice-1"]').textContent.includes('Вторая строка запуска')
+      `, "matching notices preserve separators in older card titles and status-like reasons");
+      if (keepArtifacts && paused) {
+        await evaluate(`document.fonts.ready.then(() => {
+          const work = dialogue.manager.querySelector('.board-work');
+          const notice = work.querySelector('[data-item="final:notice-0"]');
+          work.scrollTop += notice.getBoundingClientRect().top - work.getBoundingClientRect().top - 105;
+        })`);
+        await capture("manager-work-notice-with-separator.png");
+      }
+      await evaluate(`(async () => {
+        for (let i = 0; i < ${Object.keys(workPages).length}; i++) {
+          const older = dialogue.manager.querySelector('.board-work .board-chat-older');
+          if (older.hidden) break;
+          older.click();
+          await new Promise(resolve => requestAnimationFrame(resolve));
+        }
+        dialogue.manager.querySelector('[data-item="status:legacy-cancel:T-0001"]').scrollIntoView({ block: 'center' });
+      })()`);
+      await check(`(() => {
+        const rows = [...dialogue.manager.querySelectorAll('[data-status-result]:not([hidden])')];
+        return rows.length === 1 && rows[0].dataset.item === 'status:legacy-cancel:T-0001' &&
+          rows[0].querySelector('time')?.dateTime === '${new Date(start - 20).toISOString()}' &&
+          rows[0].querySelector('button.board-chat-task')?.textContent === 'T-0001' &&
+          rows[0].checkVisibility();
+      })()`, "older provider cancellation without a notice has a visible date and card link");
+      if (keepArtifacts && paused) await capture("manager-work-status-notices.png");
+      const latest = history(null);
+      await evaluate(`{
+        const pages = ${JSON.stringify(olderPages(latest))};
+        api.boardHistory = async (_project, cursor) => cursor ? pages[cursor] : (${JSON.stringify(latest)});
+      }
+        dialogue.manager.querySelector('.board-dialogue-toggle').click(); void 0`);
+      if (keepArtifacts && paused && reopening) {
+        await evaluate(`document.fonts.ready.then(() => {
+          dialogue.log.querySelector('[data-message-id="full-answer"]').scrollIntoView({ block: 'center' });
+          return true;
+        })`);
+        await capture(largeImage ? "dialogue-history-large-image-restart.png" : "dialogue-history-paused-restart.png");
+      }
+      await evaluate("dialogue.manager.dispose()");
+      console.log(`Dialogue history passed: ${paused ? "paused goal" : "no goal"}, ${reopening ? "restarted Electron" : "stream and reopened composer"}`);
+    }
+    return;
+  }
   if (process.argv.includes("--unicode-only")) {
     const fixture = spawnSync(process.env.TASKBOARD_CHECK_NODE, ["--input-type=module", "-e", `
       import { mkdirSync } from 'node:fs';
@@ -101,7 +378,7 @@ app.whenReady().then(async () => {
         token: preview.token, noChanges: true, summary: sample, checks: [sample], limitations: [sample] } });
       if (!r.ok) throw Error(JSON.stringify(r));
       syncTaskStatusNotices(root);
-      console.log(JSON.stringify({ sample, history: readManagerHistory(root, null, 'chat') }));
+      console.log(JSON.stringify({ sample, history: readManagerHistory(root, null, 'work') }));
     `, join(scratch, "unicode-board")], { encoding: "utf8", windowsHide: true });
     assert.equal(fixture.status, 0, fixture.stderr);
     const unicodeData = JSON.parse(fixture.stdout);
@@ -110,7 +387,8 @@ app.whenReady().then(async () => {
       const unicodeFixture = ${fixture.stdout};
       api.boardQueue = async () => ({ ok: true, data: [] });
       body.style.paddingTop = '410px';
-      api.boardHistory = async () => ({ ok: true, data: unicodeFixture.history }); void 0;`);
+      api.boardHistory = async (_project, _cursor, view) => ({ ok: true, data: view === 'work' ? unicodeFixture.history :
+        view === 'live' ? { work: [], chat: [] } : { turns: [] } }); void 0;`);
     for (const theme of ["light", "dark"]) {
       nativeTheme.themeSource = theme;
       for (const reopened of [false, true]) {
@@ -118,13 +396,13 @@ app.whenReady().then(async () => {
           body.replaceChildren(window.unicodeManager);
           if (!window.unicodeManager.hasAttribute('data-pinned')) window.unicodeManager.querySelector('.board-chat-pin').click();
           window.unicodeManager.revealPinned(); window.unicodeManager.querySelector('.draft-input').click();
-          window.unicodeManager.invalidateHistory();
+          window.unicodeManager.querySelector('.board-work-toggle').click();
           new Promise((resolve, reject) => { const started = performance.now(); const check = () => {
-            const log = window.unicodeManager.querySelector('.board-chat-log:not(.board-work)');
+            const log = window.unicodeManager.querySelector('.board-work');
             if (log?.textContent.includes(unicodeFixture.sample) && log.getBoundingClientRect().height > 50) return resolve(true);
-            if (performance.now() - started > 5000) return reject(Error('Unicode dialogue differs: ' + log?.textContent));
+            if (performance.now() - started > 5000) return reject(Error('Unicode work history differs: ' + log?.textContent));
             requestAnimationFrame(check); }; check(); });`);
-        console.log(`Unicode dialogue ${theme}, reopened=${reopened}: exact text passed`);
+        console.log(`Unicode work history ${theme}, reopened=${reopened}: exact text passed`);
       }
       await capture(`unicode-${theme}.png`);
     }
@@ -172,7 +450,12 @@ app.whenReady().then(async () => {
     document.querySelector('#welcome').hidden = true;
     body.replaceChildren(taskChat(taskInSheet));
     sheet.showModal();
-    const log = body.querySelector('.chat-log');
+    const taskDialogue = body.querySelector('.task-dialogue');
+    const log = body.querySelector('.task-work');
+    const showTaskChatView = view => body.querySelector('[aria-controls="task-chat-' + view + '"]').click();
+    showTaskChatView('work');
+  `);
+  await evaluate(`
     const savedLog = log.querySelector('.chat-run');
     const completedWork = savedLog.querySelector('.chat-work');
     const saved = completedWork.querySelector('.chat-run-body');
@@ -642,8 +925,8 @@ app.whenReady().then(async () => {
       statusRows()[1]?.includes('Задача принята T-0002') && statusRows()[2]?.includes('Задача запущена T-0003') &&
       manager.lastElementChild.matches('.chat-run-final');
   })()`, "confirmed status events stay visible and ordered even with the tool chronology collapsed");
-  await check(`(() => { const times = [...log.querySelectorAll('.chat-entry > time')];
-    return times.length > 2 && times.every(time => time.dateTime && /^\\d{2}:\\d{2}$/.test(time.textContent) && time.title === time.getAttribute('aria-label')) && !!log.querySelector('.chat-day');
+  await check(`(() => { const times = [...taskDialogue.querySelectorAll('.chat-entry > time'), ...log.querySelectorAll('.chat-entry > time')];
+    return times.length > 2 && times.every(time => time.dateTime && /^\\d{2}:\\d{2}$/.test(time.textContent) && time.title === time.getAttribute('aria-label')) && !!taskDialogue.querySelector('.chat-day');
   })()`, 'task messages use compact accessible times and preserve date dividers');
   await check(`log.querySelectorAll('.chat-work').length === 2 && log.querySelectorAll('.chat-work')[1].textContent.includes('Проверяю оформление обсуждения.')`, "discussion commentary folds above its final answer too");
   await check(`getComputedStyle(log).backgroundColor !== getComputedStyle(body).backgroundColor`, "chat restores its distinct theme background");
@@ -688,7 +971,7 @@ app.whenReady().then(async () => {
   await check(`log.scrollWidth <= log.clientWidth + 1 && row('cmd-1').querySelector('pre').scrollHeight > 0`, "expanded long commands stay inside the log");
   await capture("chat-expanded.png");
   // Open the actual attachment tile, using the existing viewer and supplied reference images.
-  await evaluate(`log.scrollTop = 0; log.querySelector('.chat-attachment').click()`);
+  await evaluate(`showTaskChatView('dialogue'); taskDialogue.scrollTop = 0; taskDialogue.querySelector('.chat-attachment').click()`);
   await check(`document.querySelector('.image-preview').open`, "clicking an attachment opens image preview");
   await evaluate(`new Promise(resolve => { const poll = () => document.querySelector('.image-preview-stage img:not([hidden])') ? resolve() : requestAnimationFrame(poll); poll(); })`);
   await check(`document.querySelector('.image-preview-stage img').naturalWidth > 0 &&
@@ -702,11 +985,12 @@ app.whenReady().then(async () => {
   await evaluate(`document.querySelector('.image-preview').close(); localization.select("en"); renderRunActivity(saved, activity)`);
   await check(`firstGroup().querySelector('.chat-run-label').textContent.includes('3 actions')`, "English activity labels are available");
   await evaluate(`const testDraft = chatDrafts.get('fixture' + String.fromCharCode(0) + 'T-0032');
-    testDraft.pending = 'replying'; testDraft.commentary = ['Live discussion update']; renderChatTurn(log, testDraft)`);
-  await check(`!log.querySelector('.chat-turn').hidden && log.querySelector('.chat-turn').textContent.includes('Live discussion update') && !log.querySelector('.chat-turn details')`, "discussion progress stays visible while replying");
-  await evaluate(`testDraft.pending = undefined; testDraft.commentary = []; renderChatTurn(log, testDraft);
-    updateChat({ project: 'fixture', id: 'T-0032', type: 'run', items: activity })`);
-  await check(`!live.hidden && !live.querySelector('.chat-work') && live.textContent.includes('Проверяю карточку')`, "live run chronology stays visible through the normal update handler");
+    testDraft.pending = 'replying'; testDraft.commentary = ['Live discussion update']; body.querySelector('.task-chat').updateDiscussion()`);
+  await check(`!taskDialogue.querySelector('.chat-turn').hidden && log.textContent.includes('Live discussion update') &&
+    !taskDialogue.textContent.includes('Live discussion update')`, "the dialogue shows its pending state and commentary appears in Work");
+  await evaluate(`testDraft.pending = undefined; testDraft.commentary = []; body.querySelector('.task-chat').updateDiscussion(); showTaskChatView('work');
+    body.querySelector('.task-chat').updateRun(activity)`);
+  await check(`!live.hidden && !live.querySelector('.chat-work') && live.textContent.includes('Проверяю карточку')`, "live run chronology stays visible in Work");
   await evaluate(`updateChat({ project: 'fixture', id: 'T-0032', type: 'run', items: [] }); body.replaceChildren(taskChat(taskInSheet))`);
   await check(`!body.querySelector('.chat-work').open && body.querySelector('.chat-run-final').textContent.includes('Готово.') && body.querySelector('.chat-run-live').hidden`, "reopening restores folded work and a visible final reply without duplicating the live log");
 
@@ -726,7 +1010,8 @@ app.whenReady().then(async () => {
         text: JSON.stringify({ path, startedAtMs: 1, completedAtMs: 1 }) }));
     taskInSheet.history = [{ at: '2026-11-12T15:00:00Z', actor: 'agent', action: 'run-log', run: viewedImages }];
     body.replaceChildren(taskChat(taskInSheet));
-    const imageLog = body.querySelector('.chat-log');
+    showTaskChatView('work');
+    const imageLog = body.querySelector('.task-work');
     const imageWork = imageLog.querySelector('.chat-work');
     imageWork.open = true;
     imageWork.querySelector('.chat-run-group').open = true;
@@ -766,13 +1051,13 @@ app.whenReady().then(async () => {
   await evaluate(`document.querySelector('.image-preview').close();
     body.replaceChildren(taskChat(taskInSheet));
     const restoredImages = body.querySelector('.chat-work'); restoredImages.open = true; restoredImages.querySelector('.chat-run-group').open = true;
-    updateChat({ project: 'fixture', id: 'T-0032', type: 'run', items: viewedImages });
+    body.querySelector('.task-chat').updateRun(viewedImages);
     const liveImages = body.querySelector('.chat-run-live'); liveImages.querySelector('.chat-run-group').open = true;
   `);
   await check(`body.querySelector('.chat-work').querySelectorAll('.chat-run-images').length === viewedImages.length && liveImages.querySelectorAll('.chat-run-images').length === viewedImages.length`, "reopening and live updates both retain every viewed image");
   await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
   await evaluate(`const retainedImageTile = liveImages.querySelector('.chat-attachment'); retainedImageTile.focus();
-    const readsBeforeUpdate = imageReads.length; updateChat({ project: 'fixture', id: 'T-0032', type: 'run', items: viewedImages });`);
+    const readsBeforeUpdate = imageReads.length; body.querySelector('.task-chat').updateRun(viewedImages);`);
   await check(`liveImages.querySelector('.chat-attachment') === retainedImageTile`, "stream updates retain image tiles");
   await check(`document.activeElement === retainedImageTile`, "stream updates retain image keyboard focus");
   await check(`imageReads.length === readsBeforeUpdate`, "stream updates do not repeat image reads");
@@ -795,6 +1080,7 @@ app.whenReady().then(async () => {
     body.replaceChildren();
     section('Описание', mdLink);
     body.append(taskChat(taskInSheet));
+    showTaskChatView('dialogue');
     const descriptionLink = body.querySelector('.sheet-section a');
     const chatLink = [...body.querySelectorAll('.chat-entry a')].find(node => node.textContent === 'Подробная диагностика');
     const waitMarkdown = selector => new Promise((resolve, reject) => {
@@ -952,7 +1238,9 @@ app.whenReady().then(async () => {
       'Проверка экспорта — не пройдена; файл отсутствует.\\nКоманда: npm run export',
       'Проверка Windows — пропущена; доступна только сборка Linux.',
       'Проверен состав пакета вручную.',
-    ], limitations: ['Приёмка macOS не выполнялась.'] };
+    ], limitations: ['Приёмка macOS не выполнялась.'], artifactEvidence: [
+      { stage: 'verify', output: 'Проверка сборки', kind: 'text', ...reviewFiles[3] },
+    ] };
     api.command = async () => ({ ok: true, data: { revision: 2, target: 'main', mode: 'merge', submitted: '1234567890123',
       targetHead: '1234567890123', message: 'feat: add package', diff: '', result: reportedResult } });
     showReview(reviewTask).then(() => true);
@@ -964,7 +1252,7 @@ app.whenReady().then(async () => {
     rows[1].querySelector('summary').click();
     return { length: rows.length, build: rows[0].querySelector('.task-check-name').textContent,
       result: rows[0].querySelector('.task-check-status').textContent,
-      note: rows[0].querySelector('.task-check-note').textContent,
+      note: rows[0].querySelector('.task-check-detail').textContent,
       command: rows[1].querySelector('pre').textContent === savedCommand,
       initiallyClosed, opened: rows[1].open && rows[1].querySelector('pre').getBoundingClientRect().height > 0,
       exportCommand: rows[2].querySelector('pre').textContent,
@@ -982,6 +1270,10 @@ app.whenReady().then(async () => {
     return !files.open && summary.textContent.includes('Материалы проверки') && summary.textContent.includes('7 файлов') &&
       files.compareDocumentPosition(body.querySelector('form')) === Node.DOCUMENT_POSITION_FOLLOWING;
   })()`, "review offers a collapsed count of files before the acceptance form");
+  await check(`[...body.querySelectorAll('.task-review-file')].filter(file =>
+    file.textContent.includes('Проверка сборки')).map(file => file.title).join('') ===
+    reviewFiles[3].source + '\\nSHA-256 ' + reviewFiles[3].sha256`,
+  "review labels the exact version of a required stage artifact");
   await evaluate(`
     api.command = async () => ({ ok: true, data: { revision: 2, noChanges: true, result: reportedResult } });
     showReview(reviewTask).then(() => true);
@@ -1035,7 +1327,7 @@ app.whenReady().then(async () => {
   await check(`!body.querySelector('.task-details')`, "task card omits empty sections");
   await evaluate(`
     const previewTask = { ...sourceTask, id: 'T-0018', title: 'Карточка с большой историей', description: 'Описание из снимка' };
-    frame.board = { tasks: [previewTask], archived: [] };
+    frame.board = { tasks: [previewTask], archived: [], settings: {} };
     let taskRead = Promise.withResolvers();
     api.command = () => taskRead.promise;
     let pendingTask = showTask(previewTask.id);
@@ -1056,7 +1348,7 @@ app.whenReady().then(async () => {
     });
   `);
   await check(`body.textContent.includes('Актуальное описание') && !body.textContent.includes('Описание из снимка') &&
-    !!body.querySelector('.task-chat')`, "fresh task details replace the preview when retry completes");
+    !!byId('task-side').querySelector('.task-chat')`, "fresh task details replace the preview when retry completes");
   await evaluate(`
     taskRead = Promise.withResolvers();
     pendingTask = showTask(sourceTask.id);
@@ -1084,13 +1376,14 @@ app.whenReady().then(async () => {
     api.command = async () => ({ ok: true, data: closedTask });
     showTask(closedTask.id).then(() => true);
   `);
-  await check(`historyCalls === 0 && !body.querySelector('.chat-work')`, "a completed card reads Codex history only on request");
-  await evaluate(`const restoreRun = body.querySelector('.chat-header > button.button.quiet'); restoreRun.click(); void 0`);
-  await check(`!restoreRun.disabled && body.querySelector('.chat-header [role=status]').textContent.includes('Codex unavailable')`,
+  await check(`historyCalls === 0 && !byId('task-side').querySelector('.chat-work')`, "a completed card reads Codex history only on request");
+  await evaluate(`const historyChat = byId('task-side'); historyChat.querySelector('[aria-controls="task-chat-work"]').click();`);
+  await evaluate(`const restoreRun = historyChat.querySelector('.task-work button'); restoreRun.click(); void 0`);
+  await check(`!restoreRun.disabled && historyChat.querySelector('.task-work [role=status]').textContent.includes('Codex unavailable')`,
     "a history failure leaves the load action available");
   await evaluate(`restoreRun.click(); void 0`);
   await check(`(() => {
-    const log = body.querySelector('.chat-log');
+    const log = historyChat.querySelector('.task-work');
     const entries = [...log.querySelectorAll('.chat-coordination')];
     const run = log.querySelector('.chat-work');
     return historyCalls === 2 && !restoreRun.isConnected && !run.open &&
@@ -1111,7 +1404,10 @@ app.whenReady().then(async () => {
       return { ok: true };
     };
     const manager = draftComposer();
-    body.replaceChildren(manager);
+    sheet.close();
+    const workspaceWasHidden = byId('workspace').hidden;
+    byId('workspace').hidden = false;
+    byId('board-composer').replaceChildren(manager);
     const actionButton = manager.querySelector('.draft-send');
     manager.querySelector('.draft-input textarea').value = 'Проверь доску';
     manager.requestSubmit();
@@ -1192,7 +1488,8 @@ app.whenReady().then(async () => {
   await evaluate(`actionButton.click(); turn.promise.then(() => new Promise(resolve => requestAnimationFrame(() => resolve(true))))`);
   await check(`stopCallsForManager === 1 && actionButton.matches('[data-action="send"]') && !!actionButton.querySelector('.codicon-arrow-up')`,
     "the same manager button stops the reply and returns to send");
-  await evaluate(`manager.dispose()`);
+  await evaluate(`manager.dispose(); byId('board-composer').replaceChildren();
+    byId('workspace').hidden = workspaceWasHidden; sheet.showModal()`);
   // Use the production projection, also asserted at all request exits by the
   // orchestrator test. Observe added nodes, including ones removed before paint.
   const projection = spawnSync(process.env.TASKBOARD_CHECK_NODE, ['--input-type=module', '-e', `
@@ -1438,12 +1735,12 @@ app.whenReady().then(async () => {
     taskInSheet = { id: 'T-0067', createdAt: executorAt, status: 'in_progress', questions: [], attachments: [], history: [] };
     byId('sheet-title').textContent = 'T-0067 · Время исполнителя';
     body.replaceChildren(taskChat(taskInSheet));
-    updateChat({ project: frame.project, id: 'T-0067', type: 'run', items: [executorItem] });
+    showTaskChatView('work');
+    body.querySelector('.task-chat').updateRun([executorItem]);
   `);
   await check(`body.querySelector('[data-item="message:executor-message"] time')?.dateTime === executorAt`, 'ordinary executor commentary has time during streaming without dialogue context');
   await capture('executor-live.png');
   await evaluate(`
-    updateChat({ project: frame.project, id: 'T-0067', type: 'run', items: [] });
     executorItem.status = 'completed';
     taskInSheet.history = [{ action: 'run-log', actor: 'agent', at: '2026-11-14T22:05:00.000Z', durationMs: 360000,
       run: [executorItem, { ...executorItem, id: 'executor-final', phase: 'final_answer', text: 'Время исполнителя сохранено' }] }];

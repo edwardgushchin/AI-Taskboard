@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "id": "contract-specialist",
+  "name": "Специалист по договорам",
+  "group": "Право и регулирование",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Специалист по договорам",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--legal--skills--review-contract",
+      "name": "review-contract",
+      "library": "anthropics--knowledge-work-plugins--legal--skills--review-contract"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--legal--skills--compliance-check",
+      "name": "compliance-check",
+      "library": "anthropics--knowledge-work-plugins--legal--skills--compliance-check"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--legal--skills--legal-risk-assessment",
+      "name": "legal-risk-assessment",
+      "library": "anthropics--knowledge-work-plugins--legal--skills--legal-risk-assessment"
+    }
+  ],
+  "requirements": [
+    "Юрисдикция",
+    "Дата применимых норм",
+    "Первичные правовые источники"
+  ],
+  "limitations": "Шаблоны адаптировать к стране и правовой системе"
+}

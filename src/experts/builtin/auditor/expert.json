@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "id": "auditor",
+  "name": "Аудитор аналитик",
+  "group": "Финансы и учёт",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Аудитор аналитик",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--finance--skills--reconciliation",
+      "name": "reconciliation",
+      "library": "anthropics--knowledge-work-plugins--finance--skills--reconciliation"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--finance--skills--journal-entry-prep",
+      "name": "journal-entry-prep",
+      "library": "anthropics--knowledge-work-plugins--finance--skills--journal-entry-prep"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--finance--skills--audit-support",
+      "name": "audit-support",
+      "library": "anthropics--knowledge-work-plugins--finance--skills--audit-support"
+    }
+  ],
+  "requirements": [
+    "Первичные документы",
+    "Правила учёта организации"
+  ],
+  "limitations": ""
+}

@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "id": "medical-device-analyst",
+  "name": "Аналитик медицинских изделий",
+  "group": "Здоровье и благополучие",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Аналитик медицинских изделий",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "alirezarezvani--claude-skills--ra-qm-team--skills--regulatory-affairs-head",
+      "name": "regulatory-affairs-head",
+      "library": "alirezarezvani--claude-skills--ra-qm-team--skills--regulatory-affairs-head"
+    }
+  ],
+  "requirements": [
+    "Юрисдикция",
+    "Актуальные нормы и класс изделия",
+    "Профессиональная проверка применимости"
+  ],
+  "limitations": "Шаблоны и процедуры требуют адаптации к рынку и назначению изделия"
+}

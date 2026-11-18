@@ -10,7 +10,7 @@ import type { ArchiveLink, Attachment, BoardTag, Task } from "./model.ts";
 import { directory, exists, readBinary, removeFile, validateCard, writeAtomic } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
 import { managerInbox } from "./task-messages.ts";
-import { actorFor, withoutVerification } from "./tasks.ts";
+import { actorFor, parseRunEntries, withoutVerification } from "./tasks.ts";
 
 const maxCard = 16 * 1024 * 1024;
 const day = 24 * 60 * 60 * 1000;
@@ -111,6 +111,22 @@ export function readTask(store: BoardStore, id: string): Task {
   const edit = link.tagOverride;
   return edit ? { ...task, tags: edit.tags, history: [...task.history, ...edit.history],
     revision: task.revision + edit.history.length, updatedAt: edit.history.at(-1)!.at } : task;
+}
+
+export function reactivateArchivedTask(store: BoardStore, draft: Task): Task {
+  const link = store.index.archive[draft.id];
+  const archive = openArchive(store, draft.id, link);
+  const bytes = archivedBytes(archive, draft.attachments);
+  for (const file of draft.attachments.filter(file => !file.link)) {
+    const path = join(attachmentFolder(store, draft, true), file.file);
+    if (exists(path)) verifyBytes(file, readBinary(path));
+    else writeAtomic(path, bytes["attachments/" + file.file]);
+  }
+  store.save(draft);
+  delete store.index.archive[draft.id];
+  store.index.tasks[draft.id] = "tasks/" + draft.id + ".json";
+  store.saveIndex();
+  return draft;
 }
 
 export function setAttachmentCover(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
@@ -220,6 +236,7 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
   const usage = actor === "agent" && input.usage !== undefined ? object(input.usage) : undefined;
   const commentary = actor === "agent" && input.commentary !== undefined ? strings(input.commentary, "commentary") : [];
   const durationMs = actor === "agent" && input.durationMs !== undefined ? number(input.durationMs, "durationMs", 0) : undefined;
+  const run = actor === "agent" && input.run !== undefined ? parseRunEntries(input.run) : undefined;
   const chat = {
     model, effort,
     ...(commentary.length ? { commentary } : {}),
@@ -236,6 +253,7 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
       ...(actor === "user" || attachments.length ? { files: attachments.map(attachment => attachment.file) } : {}),
     };
     if (durationMs !== undefined) updated.history.at(-1)!.durationMs = durationMs;
+    if (run) updated.history.at(-1)!.run = run;
     return store.save(updated);
   });
 }
@@ -400,7 +418,7 @@ export function sweepArchives(store: BoardStore, now = new Date()) {
     try {
       let task = store.card(id);
       if (task.status !== "done" && task.status !== "cancelled") continue;
-      const compact = withoutVerification(task);
+      const compact = task.status === "done" ? withoutVerification(task) : task;
       if (compact !== task && !exists(store.pendingPath(id))) task = store.save(compact);
       const closure = closedAt(task);
       if (!closure || !(now.getTime() - Date.parse(closure) >= afterDays * day)) continue;

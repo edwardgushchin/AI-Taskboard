@@ -69,7 +69,7 @@ function renderChatTurn(list, draft) {
   const turn = list.querySelector(".chat-turn");
   const atBottom = draft.scroll === undefined;
   turn.hidden = draft.pending !== "replying";
-  turn.replaceChildren(...(draft.commentary ?? []).map(text => chatText(text, { taskId: taskInSheet?.id, agent: true })));
+  turn.replaceChildren();
   if (!turn.hidden) {
     const thinking = element("p", () => t("ui.thinking_14a886f3"), "chat-thinking");
     thinking.setAttribute("role", "status");
@@ -146,9 +146,26 @@ const taskChangeLabels = {
   block: ["ui.task_blocked_2a3a359f"], unblock: ["ui.task_unblocked_9a6c3578"],
   start: ["ui.task_started_888ca190"], approve: ["ui.task_approved_b9a6d14e"],
   accept: ["ui.task_accepted_c7c75e62"], request_changes: ["ui.changes_requested_ef2e2c25"],
+  return_to_draft: ["ui.returned_the_task_to_draft_0224ff4e"],
   milestone: ["ui.milestone_updated_02dacc38"],
 };
-const visibleTaskActions = new Set(["comment", "approve", "start", "block", "unblock", "request_changes", "accept", "cancel"]);
+const visibleTaskActions = new Set(["comment", "approve", "start", "block", "unblock", "request_changes", "return_to_draft", "accept", "cancel"]);
+const statusNoticeActions = new Set(["approve", "start", "block", "unblock", "submit", "request_changes", "accept", "cancel"]);
+
+function reconcileWorkTransitions(work) {
+  const notices = new Map();
+  for (const notice of work.querySelectorAll("[data-status-notice]")) {
+    const key = notice.dataset.statusNotice;
+    if (!notices.has(key)) notices.set(key, []);
+    notices.get(key).push(Date.parse(notice.dataset.statusAt));
+  }
+  for (const result of work.querySelectorAll("[data-status-result]")) {
+    const at = Date.parse(result.dataset.statusAt);
+    const through = Math.max(at, Date.parse(result.dataset.statusThrough) || at);
+    const matches = notices.get(result.dataset.statusResult) ?? [];
+    result.hidden = matches.filter(time => time >= at && time <= through).length === 1;
+  }
+}
 
 function reviewerFindings(text, taskId) {
   const body = chatText(text, { taskId, coordination: true });
@@ -220,7 +237,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
     const detail = element("details", undefined, "chat-run-item");
     nodeActivities.set(detail, [item]);
     detail.dataset.item = "item:" + item.id;
-    detail.open = previous.get(detail.dataset.item) ?? false;
+    detail.open = previous.get(detail.dataset.item) ?? Boolean(context?.reviewer && kind === "reasoning");
     const state = activityState([item]);
     const label = state.code === "running" ? t("ui.in_progress_15929530") :
       state.code === "failed" ? t("ui.action_failed_0dcd9696") :
@@ -237,10 +254,11 @@ function renderRunActivity(container, items, completed = false, durationMs, task
     };
     const approvalLabel = item.type === "autoApprovalReview" && Object.hasOwn(approvalLabels, item.status) ? approvalLabels[item.status] : undefined;
     const taskChanges = item.taskChanges ?? [];
-    const changeLabel = taskChangeLabels[taskChanges[0]?.action];
-    const summaryLabel = taskChanges.length > 1 && taskChanges[0].action === "start" ? t("ui.tasks_started_50af3215") :
+    const noticeChanges = context?.managerWork && statusNoticeActions.has(taskChanges[0]?.action);
+    const changeLabel = noticeChanges ? undefined : taskChangeLabels[taskChanges[0]?.action];
+    const summaryLabel = !noticeChanges && taskChanges.length > 1 && taskChanges[0].action === "start" ? t("ui.tasks_started_50af3215") :
       changeLabel ? t(...changeLabel) : approvalLabel ? t(...approvalLabel) : label;
-    const taskPreview = taskChanges.map(({ id }) => id).join(", ");
+    const taskPreview = noticeChanges ? "" : taskChanges.map(({ id }) => id).join(", ");
     activitySummary(detail, summaryLabel, taskPreview || preview, kind, state);
     const image = taskId && runImageFile(item);
     if (image) {
@@ -272,6 +290,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
         links.append(open);
       }
       detail.append(links);
+      if (noticeChanges) appendChatTime(detail, item.at);
     }
     if (command) detail.append(element("pre", command, "chat-run-command"));
     detail.append(element("pre", () => item.text || t("ui.no_output_868de65b"), "chat-run-output"));
@@ -306,6 +325,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
   for (const item of items) {
     if (finalItems.has(item)) continue;
     if (item.type === "reasoning" && !item.text.trim()) continue;
+    if (item.userMessage?.text?.startsWith("AI Taskboard queue: handle these addressed notices without a goal. [")) continue;
     if (item.userMessage && context?.userMessage) {
       flush();
       const entry = context.userMessage(item.userMessage);
@@ -338,7 +358,23 @@ function renderRunActivity(container, items, completed = false, durationMs, task
       }
     }
     if (item.messagesOnly) continue;
-    const showTaskEvent = item.taskChanges?.some(({ action }) => visibleTaskActions.has(action));
+    if (context?.managerWork) for (const change of item.taskChanges ?? []) {
+      if (!statusNoticeActions.has(change.action)) continue;
+      flush();
+      const row = element("div", undefined, "chat-entry chat-event");
+      row.dataset.item = "status:" + item.id + ":" + change.id;
+      row.dataset.statusResult = change.id + "/" + change.status;
+      if (item.at) row.dataset.statusAt = item.at;
+      if (item.completedAt) row.dataset.statusThrough = item.completedAt;
+      const label = taskChangeLabels[change.action];
+      row.append(element("span", () => label ? t(...label) : t("status." + change.status)), " ",
+        button(change.id, () => showTask(change.id), "quiet board-chat-task"));
+      appendChatTime(row, item.at ?? item.completedAt);
+      taskEventRows.add(row);
+      nodes.push(row);
+    }
+    const showTaskEvent = item.taskChanges?.some(({ action }) =>
+      visibleTaskActions.has(action) && !(context?.managerWork && statusNoticeActions.has(action)));
     if (["agentMessage", "plan", "truncated", "error", "reasoning"].includes(item.type)) {
       flush();
       if (item.type === "agentMessage" || item.type === "plan") {
@@ -408,6 +444,10 @@ function renderRunActivity(container, items, completed = false, durationMs, task
     }
     final.append(chatText(item.text, messageContext));
     appendChatTime(final, item.at);
+    if (context?.managerWork && item.statusTransition && item.at) {
+      final.dataset.statusNotice = item.statusTransition.task + "/" + item.statusTransition.status;
+      final.dataset.statusAt = item.at;
+    }
     nodes.push(final);
   }
   const reportCounts = new Map();
@@ -459,6 +499,7 @@ function updateChat({ project, id, type, text, items, goal, goalRunning, error, 
       }
       if (frame.project === project) renderActiveAgents();
     }
+    else if (type === "orchestrator-queue") composer?.refreshQueue?.();
     else if (type === "orchestrator-work-activity") composer?.refreshWork?.();
     else if (type === "orchestrator-work-history") composer?.invalidateWork?.();
     else if (type === "orchestrator-work-accepted") composer?.acceptWork?.(id);
@@ -473,18 +514,13 @@ function updateChat({ project, id, type, text, items, goal, goalRunning, error, 
   const open = frame.project === project && sheet.open && sheetKind === "task" && taskInSheet?.id === id;
   if (type === "reviewer-chat") {
     if (frame.project === project) byId("board-composer").firstChild?.refreshWork();
-    if (open) byId("task-reviewer-chat")?.refresh();
+    if (open) byId("task-side").firstElementChild?.refreshReview();
     return;
   }
   if (type === "run" && frame.project === project) {
     (frame.runActivity ??= {})[id] = items;
     byId("board-composer").firstChild?.updateManagerWork();
-    const list = open && body.querySelector(".task-chat .chat-log");
-    if (list) {
-      const atBottom = list.scrollHeight - list.clientHeight - list.scrollTop <= 8;
-      renderRunActivity(list.querySelector(".chat-run-live"), items, false, undefined, id);
-      if (atBottom) list.scrollTop = list.scrollHeight;
-    }
+    if (open) byId("task-side").firstElementChild?.updateRun(items);
     return;
   }
   const draft = chatDrafts.get(project + "\0" + id);
@@ -500,8 +536,7 @@ function updateChat({ project, id, type, text, items, goal, goalRunning, error, 
     if (open) void protect(() => showTask(id))();
   } else if (type === "commentary" && draft?.pending) {
     (draft.commentary ??= []).push(text);
-    const list = open && body.querySelector(".task-chat .chat-log");
-    if (list) renderChatTurn(list, draft);
+    if (open) byId("task-side").firstElementChild?.updateDiscussion();
   }
 }
 
@@ -517,6 +552,7 @@ function chatEventLabel(action) {
     approve: ["ui.approved_the_task_52081998"], start: ["ui.started_work_86e3b286"],
     "return-to-draft": ["ui.returned_the_task_to_draft_0224ff4e"],
     progress: ["ui.updated_progress_fde6405d"], block: ["ui.blocked_the_task_c97388fb"],
+    checklist: ["ui.updated_progress_fde6405d"],
     pause: ["ui.paused_work_5608a24c"],
     resume: ["ui.resumed_work_8bc90aaa"], submit: ["ui.submitted_for_review_99b989f4"],
     accept: ["ui.accepted_the_task_f6df7973"], cancel: ["ui.cancelled_the_task_07a3cdd4"],
@@ -524,6 +560,7 @@ function chatEventLabel(action) {
     "request-changes": ["ui.requested_changes_480ce0d7"], attach: ["ui.attached_a_file_f4ead942"],
     "review-note": ["ui.left_on_review_8da49b68"],
     "review-approve": ["ui.approved_the_submission_04c4f1df"],
+    "expert-plan": ["experts.plan_event"], "expert-stage": ["experts.stage_event"],
   };
   return Object.hasOwn(labels, action) ? t(...labels[action]) : action;
 }
@@ -544,105 +581,139 @@ function chatEventAttachments(event, files) {
   return matches.length === 1 ? matches : [];
 }
 
-function reviewerChat(task, open) {
+function reviewerChat(task, work, tail, decisions, onCollaboration) {
   const project = frame.project;
-  const legacy = task.history.filter(event => event.actor === "reviewer" && event.text &&
-    ["review-note", "review-approve", "request-changes"].includes(event.action));
-  const details = taskDetails("task-reviewer-chat", t("ui.reviewer_chat_ffaa4f19"), "", open);
-  const content = element("div", undefined, "task-details-content");
-  const status = element("p", undefined, "muted");
+  const status = element("li", undefined, "muted");
   status.setAttribute("role", "status");
-  const log = element("ol", undefined, "chat-log");
-  bindLocalized(log, "aria-label", () => t("ui.reviewer_messages_d84eb921"), true);
-  log.tabIndex = 0;
-  log.hidden = true;
-  content.append(status, log);
-  details.append(content);
+  status.hidden = true;
+  work.insertBefore(status, tail);
   const nodes = new Map();
   let timer;
   let generation = 0;
-  const refresh = () => {
-    if (!details.open || timer !== undefined) return;
+  return () => {
+    if (timer !== undefined) return;
     timer = setTimeout(() => {
       timer = undefined;
-      if (details.isConnected && details.open) void load();
+      if (work.isConnected) void load();
     }, 200);
   };
-  details.refresh = refresh;
-  details.addEventListener("toggle", refresh);
 
   async function load() {
     const request = ++generation;
-    if (log.hidden) bindLocalized(status, "textContent", () => t("ui.loading_4f987027"));
     try {
       const result = await api.reviewerChat(task.id);
-      if (!details.isConnected || project !== frame.project || request !== generation) return;
+      if (!work.isConnected || project !== frame.project || request !== generation) return;
       if (!result.ok) throw new Error(boardError(result.error));
-      const { scrollHeight, clientHeight, scrollTop } = log;
+      const follow = !work.hidden && work.scrollHeight - work.clientHeight - work.scrollTop <= 8;
       const attempts = result.data;
+      onCollaboration(attempts.flatMap(attempt => attempt.items.filter(collaborationItem)));
+      const ids = new Set(attempts.map(attempt => attempt.id));
       for (const [id, node] of nodes) {
-        if (attempts.some(attempt => attempt.id === id)) continue;
+        if (ids.has(id)) continue;
         node.entry.remove();
         nodes.delete(id);
       }
-      for (const attempt of attempts) {
+      const history = [...work.children].filter(entry => entry.dataset.historyAt);
+      for (const [index, attempt] of attempts.entries()) {
         let node = nodes.get(attempt.id);
         if (!node) {
-          const entry = element("li", undefined, "chat-entry");
-          const label = element("span", undefined, "chat-author");
+          const entry = element("li", undefined, "chat-entry task-review-attempt");
+          entry.dataset.actor = "reviewer";
+          const label = element("span", undefined, "chat-coordination-header");
           const activity = element("div", undefined, "chat-run");
-          const error = element("p", undefined, "muted");
+          const error = element("p", undefined, "chat-run-error");
           entry.append(label, activity, error);
-          log.append(entry);
+          work.insertBefore(entry, history.find(row => row.dataset.historyAt > attempt.at) ?? status);
           node = { entry, label, activity, error };
           nodes.set(attempt.id, node);
         }
-        if (node.finished) continue;
+        if (node.finished && node.index === index) continue;
+        node.index = index;
         node.finished = attempt.durationMs !== undefined;
-        bindLocalized(node.label, "textContent", () => shortDate(attempt.at) + " · " + (node.finished ?
-          t("ui.reviewer_50c42665") : t("ui.reviewing_8e90650a")));
+        bindLocalized(node.label, "textContent", () => t("ui.reviewer_50c42665") + " #" + (index + 1) +
+          " · " + t(node.finished ? "ui.completed_a863c619" : "ui.in_progress_15929530") + " · " + shortDate(attempt.at));
         node.error.textContent = attempt.error ?? "";
         node.error.hidden = !attempt.error;
+        node.report = undefined;
         const items = attempt.items.flatMap(item => {
+          if (collaborationItem(item)) return [];
           if (item.type !== "agentMessage" || item.phase === "commentary") return [item];
           if (item.status !== "completed") return [];
+          node.report = undefined;
           try {
             const { summary, findings, evidence } = JSON.parse(item.text);
             if (typeof summary !== "string") return [item];
-            const notes = Array.isArray(findings) ? findings.map(text => "- " + text).join("\n") : "";
+            const reportFindings = Array.isArray(findings) ? findings.filter(text => typeof text === "string") : [];
+            node.report = { summary: summary.trim(), reason: reportFindings.join("\n\n").trim() };
+            const notes = reportFindings.map(text => "- " + text).join("\n");
             const checks = Array.isArray(evidence) ? evidence.flatMap((text, index) =>
               typeof text === "string" ? [(index + 1) + ". " + text] : []).join("\n") : "";
             return [{ ...item, text: [summary, notes, checks].filter(Boolean).join("\n\n") }];
           } catch { return [item]; }
         });
-        renderRunActivity(node.activity, items, node.finished, attempt.durationMs, undefined, { taskId: task.id });
+        renderRunActivity(node.activity, items, false, undefined, undefined, { taskId: task.id, reviewer: true });
       }
-      if (!attempts.length && legacy.length && !log.childElementCount) {
-        for (const event of legacy) {
-          const entry = element("li", undefined, "chat-entry");
-          entry.append(element("span", shortDate(event.at), "chat-author"),
-            event.action === "request-changes" ? reviewerFindings(event.text, task.id) :
-              chatText(event.text, { taskId: task.id, agent: true }));
-          log.append(entry);
-        }
+      const matched = new Set();
+      for (const { entry, event, submittedAt } of decisions) {
+        const attempt = attempts.findLast(attempt => attempt.at >= submittedAt && attempt.at <= event.at);
+        const node = attempt && nodes.get(attempt.id);
+        // Keep the card's decision event and hide only the text also shown in its attempt.
+        const reportText = event.action === "request-changes" ? node?.report?.reason : node?.report?.summary;
+        entry.hidden = Boolean(node?.finished && !attempt.error && !matched.has(attempt.id) &&
+          reportText === event.text.trim());
+        if (entry.hidden) matched.add(attempt.id);
       }
-      if (attempts.length) {
-        for (const entry of [...log.children]) {
-          if (!entry.querySelector(".chat-run")) entry.remove();
-        }
-      }
-      log.hidden = !log.childElementCount;
-      bindLocalized(status, "textContent", () => log.hidden ? t("ui.no_reviewer_messages_yet_25b5caaf") :
-        attempts.length ? "" : t("ui.saved_review_decisions_2fbae036"));
-      status.hidden = !status.textContent;
-      if (scrollHeight - clientHeight - scrollTop <= 8) log.scrollTop = log.scrollHeight;
+      status.hidden = true;
+      if (follow) work.scrollTop = work.scrollHeight;
     } catch (error) {
-      if (!details.isConnected || request !== generation) return;
+      if (!work.isConnected || project !== frame.project || request !== generation) return;
       status.hidden = false;
       bindLocalized(status, "textContent", () => t("ui.could_not_load_reviewer_chat_5c01ba32") + error.message);
     }
   }
-  return details;
+}
+
+function collaborationItem(item) {
+  return item.type === "collabAgentToolCall" || item.type === "subAgentActivity";
+}
+
+function collaborationData(item) {
+  try { return JSON.parse(item.text) ?? {}; } catch { return {}; }
+}
+
+function teamActivity(task, item, details, agents) {
+  const operation = item.type === "subAgentActivity" ? { started: "spawn", interacted: "interaction", completed: "completed" }[details.kind] :
+    { spawnAgent: "spawn", sendInput: "send", wait: "wait", closeAgent: "close", resumeAgent: "resume" }[details.tool ?? item.title];
+  if (!operation) return;
+  const ids = [...new Set([...(details.receiverThreadIds ?? []), ...Object.keys(details.agentsStates ?? {}),
+    ...(details.agentThreadId ? [details.agentThreadId] : [])])];
+  const active = operation === "wait" && !ids.length && details.startedAtMs ? [...agents.values()].filter(agent =>
+    agent.startedAtMs && agent.startedAtMs <= details.startedAtMs && (!agent.firstCompletion || agent.firstCompletion >= details.startedAtMs)) : [];
+  const labels = [...new Set(ids.map(id => agents.get(id)?.name ?? t("experts.unnamed_agent")))];
+  const expand = Boolean(details.prompt || Object.values(details.agentsStates ?? {}).some(state => state?.message));
+  const row = element(expand ? "details" : "div", undefined, "expert-agent-event");
+  const summary = element(expand ? "summary" : "div", undefined, "expert-agent-event-line");
+  const glyph = operation === "completed" ? "check" : operation === "wait" ? "debug-pause" :
+    operation === "send" || operation === "interaction" ? "comment-discussion" : "hubot";
+  const caption = element("span", undefined, "expert-agent-caption");
+  caption.append(element("strong", () => t("experts.agent_" + operation)));
+  if (labels.length) caption.append(element("span", labels.join(", "), "muted"));
+  else if (active.length) caption.append(element("span", () => t("experts.active_at_wait") + " " +
+    [...new Set(active.map(agent => agent.name))].join(", "), "muted"));
+  else if (operation === "wait") caption.append(element("span", () => t("experts.wait_target_unavailable"), "muted"));
+  const model = details.model && [details.model, details.reasoningEffort && reasoningName(details.reasoningEffort)].filter(Boolean).join(" · ");
+  if (model) caption.append(element("span", model, "muted"));
+  const state = activityState([item]);
+  if (state.code === "running" || state.code === "failed") caption.append(element("span", state.text, "muted"));
+  summary.append(icon(glyph), caption);
+  appendChatTime(summary, item.at);
+  row.dataset.agentCall = item.id;
+  row.append(summary);
+  for (const status of Object.values(details.agentsStates ?? {})) {
+    if (typeof status?.message === "string" && status.message) row.append(chatText(status.message, { taskId: task.id, agent: true }));
+  }
+  if (typeof details.prompt === "string") row.append(chatText(details.prompt, { taskId: task.id, agent: true }));
+  return row;
 }
 
 function taskChat(task) {
@@ -659,11 +730,23 @@ function taskChat(task) {
   heading.id = "task-chat-heading";
   area.setAttribute("aria-labelledby", heading.id);
   const header = element("div", undefined, "chat-header");
-  header.append(heading);
+  const tabs = element("div", undefined, "board-chat-views");
+  header.append(heading, tabs);
   area.append(header);
-  const list = element("ol", undefined, "chat-log");
+  const list = element("ol", undefined, "chat-log task-dialogue");
   bindLocalized(list, "aria-label", () => t("ui.messages_e8e13717"), true);
   list.tabIndex = 0;
+  const work = element("ol", undefined, "chat-log task-work");
+  work.hidden = true;
+  bindLocalized(work, "aria-label", () => t("ui.work_activity_e01957b7"), true);
+  work.tabIndex = 0;
+  const team = element("div", undefined, "chat-log task-team");
+  team.hidden = true;
+  bindLocalized(team, "aria-label", () => t("experts.team"), true);
+  team.tabIndex = 0;
+  const teamLog = element("div", undefined, "task-team-activity");
+  const savedTeam = [];
+  const savedWork = [];
   const files = new Map(task.attachments.map(file => [file.file, file]));
   const events = task.history.map((event, index) => ({ event, index }));
   if (task.questions.length) events.splice(1, 0, {
@@ -672,50 +755,68 @@ function taskChat(task) {
   const missingRuns = new Map();
   const locale = localization.locale;
   const dayFormat = new Intl.DateTimeFormat(locale, { dateStyle: "medium" });
+  const reviewDecisions = [];
+  let submittedAt = "";
   let day;
   let lastMessage;
   for (const { event, index } of events) {
+    if (event.action === "submit") submittedAt = event.at;
+    const returned = event.actor === "reviewer" && event.action === "request-changes";
+    const conversation = ["chat", "comment", "questions"].includes(event.action) || returned;
+    if (event.expertMessage) continue;
+    const appendWork = row => {
+      row.dataset.historyAt = event.at;
+      work.append(row);
+    };
     if (event.chat) lastMessage = event;
     const timestamp = new Date(event.at);
     const eventDay = !event.at || Number.isNaN(+timestamp) ? "" : dayFormat.format(timestamp);
-    if (eventDay && eventDay !== day) {
+    if (conversation && eventDay && eventDay !== day) {
       day = eventDay;
       const divider = element("li", undefined, "chat-day");
       divider.append(element("span", () => new Intl.DateTimeFormat(localization.locale, { dateStyle: "medium" }).format(timestamp)));
       list.append(divider);
     }
-    if (event.action === "run-log") {
+    if (event.action === "run-log" || event.run?.length) {
       const log = element("li", undefined, "chat-run");
       if (event.run?.length) {
-        renderRunActivity(log, event.run, true, event.durationMs, task.id);
-        list.append(log);
+        savedTeam.push(...event.run.filter(collaborationItem));
+        const activity = event.action === "chat" ? event.run.filter(item => item.phase !== "final_answer") : event.run;
+        savedWork.push(() => renderRunActivity(log, activity.filter(item => !collaborationItem(item)), true, event.durationMs, task.id));
+        appendWork(log);
       } else if (task.codexThreadId && event.durationMs !== undefined) {
         log.hidden = true;
-        list.append(log);
+        appendWork(log);
         missingRuns.set(index, { log, durationMs: event.durationMs });
       }
-      continue;
+      if (event.action === "run-log") continue;
     }
-    if (event.chat?.commentary?.length) {
+    if (!event.run?.length && event.chat?.commentary?.length) {
       const commentary = element("li", undefined, "chat-run");
-      renderRunActivity(commentary, event.chat.commentary.map((text, index) => ({
+      savedWork.push(() => renderRunActivity(commentary, event.chat.commentary.map((text, index) => ({
         id: String(index), type: "agentMessage", phase: "commentary", title: "", text, status: "completed",
-      })), true, event.durationMs);
-      list.append(commentary);
+      })), true, event.durationMs));
+      appendWork(commentary);
     }
-    const conversation = ["chat", "comment", "questions", "coordination"].includes(event.action);
     const attachments = chatEventAttachments(event, files);
     const author = () => event.actor === "manager" ? t("ui.project_manager_48697fa0") :
       event.actor === "reviewer" ? t("ui.reviewer_50c42665") :
       event.actor === "user" ? t("ui.you_05444001") : t("ui.agent_262834de");
 
-    if (!conversation) {
+    if ((!conversation || returned) && event.action !== "coordination") {
       const status = lanes.find(([code]) => code === event.to);
       const service = element("li", undefined, "chat-entry chat-event");
-      service.append(element("span", author, "chat-author"),
-        element("span", () => chatEventLabel(event.action) + (status ? " · " + t(status[1]) : ""), "chat-action"));
+      const stage = event.expertStageRun;
+      const label = () => stage ? [
+        expertStageLabel(task, stage.phase, stage.key) ?? t("experts.stage_event"),
+        t("experts.stage_" + stage.state),
+      ].join(" · ") : event.expertSkill ? [
+        t(event.expertSkill.source === "plan" ? "experts.skill_preloaded" : "experts.skill_loaded"),
+        event.expertSkill.name, event.expertSkill.expertId,
+      ].join(" · ") : chatEventLabel(event.action) + (status ? " · " + t(status[1]) : "");
+      service.append(element("span", author, "chat-author"), element("span", label, "chat-action"));
       appendChatTime(service, event.at);
-      list.append(service);
+      appendWork(service);
       if (!event.text && !attachments.length) continue;
       // A chat edit can quote the pending request as its audit note.
       if (event.action === "update" && event.actor === "user" &&
@@ -723,7 +824,6 @@ function taskChat(task) {
     }
     const entry = element("li", undefined, "chat-entry");
     entry.dataset.actor = event.actor;
-    const returned = event.actor === "reviewer" && event.action === "request-changes";
     const coordination = returned || event.action === "coordination" || (event.actor === "manager" && event.text);
     if (coordination) entry.classList.add("chat-coordination");
     const label = () => event.action === "coordination" && event.actor === "agent" ? t("ui.executor_92197b27") : author();
@@ -760,8 +860,22 @@ function taskChat(task) {
         chatText(text, { taskId: task.id, coordination, agent: event.action === "chat" && event.actor === "agent" }));
     }
     appendChatTime(entry, event.at);
-    list.append(entry);
+    if (returned && event.text) {
+      const fallback = element("li", undefined, "chat-entry chat-coordination");
+      fallback.dataset.actor = event.actor;
+      fallback.append(element("span", author, "chat-author"), reviewerFindings(event.text, task.id));
+      appendChatTime(fallback, event.at);
+      appendWork(fallback);
+      reviewDecisions.push({ entry: fallback, event, submittedAt });
+    }
+    if (event.actor === "reviewer" && event.text && !attachments.length &&
+        ["review-approve", "review-note"].includes(event.action)) {
+      reviewDecisions.push({ entry, event, submittedAt });
+    }
+    if (conversation) list.append(entry);
+    else appendWork(entry);
   }
+  const workControls = element("li", undefined, "task-work-controls");
   if (missingRuns.size) {
     const status = element("span", undefined, "muted");
     status.setAttribute("role", "status");
@@ -777,12 +891,14 @@ function taskChat(task) {
         for (const [index, { log, durationMs }] of missingRuns) {
           const items = result.data[index];
           if (!items?.length) continue;
-          renderRunActivity(log, items, true, durationMs, undefined, { taskId: task.id });
-          if (!log.hidden) {
+          savedTeam.push(...items.filter(collaborationItem));
+          renderRunActivity(log, items.filter(item => !collaborationItem(item)), true, durationMs, task.id);
+          if (items.length) {
             restored++;
             lastRestored = log;
           }
         }
+        renderTeam();
         if (restored) load.remove();
         bindLocalized(status, "textContent", () => restored === missingRuns.size ? "" : restored
           ? t("ui.some_runs_are_unavailable_in_the_saved_codex_cha_7d8bfad3")
@@ -797,17 +913,90 @@ function taskChat(task) {
         load.disabled = false;
       }
     }, "quiet");
-    header.append(load, status);
+    workControls.append(load, status);
   }
+  if (workControls.childElementCount) work.prepend(workControls);
   const liveRun = element("li", undefined, "chat-run chat-run-live");
-  renderRunActivity(liveRun, frame.runActivity?.[task.id] ?? [], false, undefined, task.id);
-  list.append(liveRun, element("li", undefined, "chat-turn"));
+  const progress = element("li", undefined, "chat-run");
+  work.append(liveRun, progress);
+  const refreshReview = task.status === "review" || task.history.some(event => event.actor === "reviewer" || event.action === "submit")
+    ? reviewerChat(task, work, liveRun, reviewDecisions, items => { reviewTeam = items; renderTeam(); }) : undefined;
+  list.append(element("li", undefined, "chat-turn"));
   renderChatTurn(list, draft);
-  area.append(list);
-  requestAnimationFrame(() => { list.scrollTop = draft.scroll ?? list.scrollHeight; });
-  list.addEventListener("scroll", () => {
-    draft.scroll = list.scrollHeight - list.clientHeight - list.scrollTop > 8 ? list.scrollTop : undefined;
-  });
+  area.append(list, work, team);
+
+  let liveTeam = [];
+  let reviewTeam = [];
+  let renderedTeam;
+  let teamRoleNames;
+  let loadingTeamRoles = false;
+  function renderTeam() {
+    if (team.hidden) return;
+    if (!loadingTeamRoles && task.expertTeam) {
+      loadingTeamRoles = true;
+      void expertRoleNames(project).then(names => {
+        if (!team.isConnected) return;
+        teamRoleNames = names;
+        renderedTeam = undefined;
+        renderTeam();
+      });
+    }
+    const items = [...savedTeam, ...liveTeam, ...reviewTeam];
+    const byId = new Map(items.map(item => [item.id, item]));
+    const snapshot = JSON.stringify([...byId.values()]);
+    if (snapshot === renderedTeam) return;
+    renderedTeam = snapshot;
+    const opened = new Set([...teamLog.querySelectorAll("details[open]")].map(row => row.dataset.agentCall));
+    const plan = Object.values(task.expertTeam ?? {}).flatMap(phase => phase.stages);
+    const roleAndStage = stage => [teamRoleNames?.get(stage.expertId), stage.title].filter(Boolean).join(" · ");
+    const agents = new Map();
+    for (const stages of Object.values(task.expertStageStatus ?? {})) for (const stage of stages) {
+      if (stage.run?.agentId) agents.set(stage.run.agentId, { name: roleAndStage(stage) });
+    }
+    const activity = [...byId.values()].sort((a, b) => (a.at ?? "").localeCompare(b.at ?? ""))
+      .map(item => [item, collaborationData(item)]);
+    for (const [item, data] of activity) {
+      if (item.type !== "subAgentActivity" || !data.agentThreadId) continue;
+      const key = data.agentPath?.split("/").at(-1);
+      const matching = plan.filter(stage => stage.key === key || stage.expertId === key);
+      const agent = agents.get(data.agentThreadId) ?? {
+        name: matching.length === 1 ? roleAndStage(matching[0]) : key?.replaceAll("-", " ") || t("experts.unnamed_agent"),
+      };
+      if (data.kind === "started") agent.startedAtMs ??= data.startedAtMs;
+      if (data.kind === "completed") agent.firstCompletion ??= data.completedAtMs;
+      agents.set(data.agentThreadId, agent);
+    }
+    const rows = [];
+    for (const [item, data] of activity) {
+      const row = teamActivity(task, item, data, agents);
+      if (!row) continue;
+      if (row.tagName === "DETAILS") row.open = opened.has(item.id);
+      rows.push(row);
+    }
+    if (!rows.length) rows.push(element("p", () => t("experts.no_agent_activity"), "muted"));
+    teamLog.replaceChildren(...rows);
+  }
+  let liveItems = [];
+  function renderLiveWork() {
+    const follow = work.scrollHeight - work.clientHeight - work.scrollTop <= 8;
+    renderRunActivity(liveRun, liveItems.filter(item => !collaborationItem(item) && item.phase !== "final_answer"),
+      false, undefined, task.id);
+    if (follow) work.scrollTop = work.scrollHeight;
+  }
+  area.updateRun = (items = []) => {
+    liveItems = items;
+    liveTeam = items.filter(collaborationItem);
+    if (!work.hidden) renderLiveWork();
+    area.updateDiscussion();
+    renderTeam();
+  };
+  area.updateDiscussion = () => {
+    renderChatTurn(list, draft);
+    const commentary = frame.runActivity?.[task.id]?.some(item => item.phase === "commentary") ? [] : draft.commentary ?? [];
+    progress.replaceChildren(...commentary.map(text => chatText(text, { taskId: task.id, agent: true })));
+    progress.hidden = !commentary.length;
+  };
+  area.updateRun(frame.runActivity?.[task.id]);
 
   const composer = element("form", undefined, "chat-composer");
   const input = element("textarea");
@@ -841,6 +1030,50 @@ function taskChat(task) {
   controls.append(attach, microphone, send);
   composer.append(pendingFiles, input, fileInput, controls, feedback);
   area.append(composer);
+
+  if (!manualBoard()) {
+    const agents = element("details", undefined, "expert-agent-history");
+    agents.open = draft.agentHistoryOpen ?? false;
+    agents.addEventListener("toggle", () => {
+      if (agents.isConnected) draft.agentHistoryOpen = agents.open;
+    });
+    agents.append(element("summary", () => t("experts.subagents")), teamLog);
+    team.append(agents, expertTeamMail(task));
+  }
+  const views = [
+    ["dialogue", "ui.dialogue_e154ab04", list], ["work", "ui.work_activity_e01957b7", work],
+    ...(!manualBoard() ? [["team", "experts.team", team]] : []),
+  ].map(([name, label, panel]) => {
+    const control = button(() => t(label), () => selectView(name), "quiet");
+    control.setAttribute("aria-controls", panel.id = "task-chat-" + name);
+    tabs.append(control);
+    panel.addEventListener("scroll", () => {
+      if (panel.hidden) return;
+      (draft.viewScroll ??= {})[name] = panel.scrollHeight - panel.clientHeight - panel.scrollTop > 8 ? panel.scrollTop : undefined;
+      if (name === "dialogue") draft.scroll = draft.viewScroll[name];
+    });
+    return { name, control, panel };
+  });
+  function selectView(name) {
+    draft.view = name;
+    composer.hidden = name !== "dialogue";
+    for (const view of views) {
+      view.panel.hidden = view.name !== name;
+      view.control.setAttribute("aria-pressed", String(!view.panel.hidden));
+      if (!view.panel.hidden) requestAnimationFrame(() => {
+        if (!view.panel.hidden) view.panel.scrollTop = draft.viewScroll?.[name] ?? view.panel.scrollHeight;
+      });
+    }
+    if (name === "work") {
+      for (const render of savedWork.splice(0)) render();
+      renderLiveWork();
+    }
+    if (name === "team") renderTeam();
+    area.refreshReview();
+  }
+  area.refreshReview = () => { if (draft.view !== "dialogue") refreshReview?.(); };
+  area.openReviewer = () => selectView("work");
+  selectView(views.some(view => view.name === draft.view) ? draft.view : "dialogue");
 
   function working() { return Boolean(draft.pending || frame.runningTasks?.includes(task.id) || frame.replyingTasks?.includes(task.id)); }
   function stopping() { return working() && !draft.text.trim() && !draft.files.length; }

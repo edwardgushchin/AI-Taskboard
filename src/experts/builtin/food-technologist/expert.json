@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "id": "food-technologist",
+  "name": "Технолог пищевых процессов",
+  "group": "Отрасли и общественные проекты",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Технолог пищевых процессов",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "trailofbits--skills--plugins--dimensional-analysis--skills--dimensional-analysis",
+      "name": "dimensional-analysis",
+      "library": "trailofbits--skills--plugins--dimensional-analysis--skills--dimensional-analysis"
+    }
+  ],
+  "requirements": [
+    "Расчётные исходные данные",
+    "CAD или solver для соответствующей задачи"
+  ],
+  "limitations": "Контроль размерностей не заменяет отраслевые нормы и инженерный расчёт"
+}

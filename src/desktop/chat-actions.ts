@@ -12,6 +12,7 @@ const authorization = {
 };
 
 export const taskFields = {
+  expertId: { type: ["string", "null"], description: "Board-owned expert specialization ID from expert_list. Set before starting. Null restores a general executor." },
   title: string, description: string, criteria: strings, questions: strings,
   tags: strings, dependencies: strings, priority: { ...string, enum: priorities },
   dueDate: { type: ["string", "null"], description: "Task deadline in YYYY-MM-DD format. Null removes it. This is not a scheduled start." },

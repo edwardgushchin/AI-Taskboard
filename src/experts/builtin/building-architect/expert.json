@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "id": "building-architect",
+  "name": "Архитектор зданий и пространств",
+  "group": "Инженерия и производство",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Архитектор зданий и пространств",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "trailofbits--skills--plugins--dimensional-analysis--skills--dimensional-analysis",
+      "name": "dimensional-analysis",
+      "library": "trailofbits--skills--plugins--dimensional-analysis--skills--dimensional-analysis"
+    }
+  ],
+  "requirements": [
+    "Расчётные исходные данные",
+    "CAD или solver для соответствующей задачи"
+  ],
+  "limitations": "Контроль размерностей не заменяет отраслевые нормы и инженерный расчёт"
+}

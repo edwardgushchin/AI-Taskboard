@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "id": "biologist",
+  "name": "Биолог исследователь",
+  "group": "Наука и исследования",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Биолог исследователь",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "k-dense-ai--claude-scientific-skills--skills--biopython",
+      "name": "biopython",
+      "library": "k-dense-ai--claude-scientific-skills--skills--biopython"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--bio-research--skills--single-cell-rna-qc",
+      "name": "single-cell-rna-qc",
+      "library": "anthropics--knowledge-work-plugins--bio-research--skills--single-cell-rna-qc"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--bio-research--skills--nextflow-development",
+      "name": "nextflow-development",
+      "library": "anthropics--knowledge-work-plugins--bio-research--skills--nextflow-development"
+    }
+  ],
+  "requirements": [
+    "Python",
+    "Nextflow по типу данных"
+  ],
+  "limitations": "RNA скиллы использовать только для соответствующих экспериментов"
+}

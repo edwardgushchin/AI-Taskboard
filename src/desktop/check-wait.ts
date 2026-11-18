@@ -9,6 +9,7 @@ export const executorToolTimeoutSeconds = maxWaitSeconds + 20;
 export const checkWaitInstructions = [
   "For a long check launched with exec_command, keep its session_id and use write_stdin with empty chars to wait for the exit code and output on that session. When waiting is the only work left, use a 60000 ms yield. Inspect partial logs only to answer a specific diagnostic question.",
   "For a detached or delegated check without a session_id, arrange before launch to save the exit code and create a unique marker in the working directory after exit, including on failure. When waiting is the only work left, call check_wait with that marker and omit timeoutSeconds. If the wait times out while the check is still running, wait on the same marker again. Read the saved exit code and report when the marker appears.",
+  "Before waiting on a delegated check, confirm the actual marker path with the specialist. When it already reports completion, read its saved result and exit status. If the launch did not arrange a marker, use the existing process handle or ask the specialist for its completion report.",
   "In functions.exec, use a 60000 ms yield when waiting is your only action. If it returns a running cell, continue waiting on that cell with functions.wait.",
 ].join(" ");
 

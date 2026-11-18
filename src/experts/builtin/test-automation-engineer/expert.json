@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "id": "test-automation-engineer",
+  "name": "Инженер автоматизации тестирования",
+  "group": "Обеспечение качества",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Инженер автоматизации тестирования",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "trailofbits--skills--plugins--property-based-testing--skills--property-based-testing",
+      "name": "property-based-testing",
+      "library": "trailofbits--skills--plugins--property-based-testing--skills--property-based-testing"
+    },
+    {
+      "id": "obra--superpowers--skills--verification-before-completion",
+      "name": "verification-before-completion",
+      "library": "obra--superpowers--skills--verification-before-completion"
+    }
+  ],
+  "requirements": [
+    "Рантайм и библиотека тестирования выбранного языка"
+  ],
+  "limitations": ""
+}

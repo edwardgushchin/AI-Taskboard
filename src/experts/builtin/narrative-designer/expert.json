@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "id": "narrative-designer",
+  "name": "Сценарист и нарративный дизайнер",
+  "group": "Визуальные и аудиовизуальные материалы",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Сценарист и нарративный дизайнер",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--skills--skills--doc-coauthoring",
+      "name": "doc-coauthoring",
+      "library": "anthropics--skills--skills--doc-coauthoring"
+    }
+  ],
+  "requirements": [],
+  "limitations": ""
+}

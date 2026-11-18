@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "id": "academic-methodologist",
+  "name": "Методист",
+  "group": "Образование и обучение",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Методист",
+      "file": "skills/workflow/SKILL.md"
+    }
+  ],
+  "requirements": [
+    "Цели ученика и критерии освоения"
+  ],
+  "limitations": "Готовый проверенный педагогический скилл в подборку не включён; docx pptx только оформляют материал"
+}

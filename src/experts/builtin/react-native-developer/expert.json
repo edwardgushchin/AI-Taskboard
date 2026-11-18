@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "id": "react-native-developer",
+  "name": "Разработчик React Native",
+  "group": "Платформенная разработка",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Разработчик React Native",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "vercel-labs--agent-skills--skills--react-native-skills",
+      "name": "vercel-react-native-skills",
+      "library": "vercel-labs--agent-skills--skills--react-native-skills"
+    },
+    {
+      "id": "expo--skills--plugins--expo--skills--expo-router",
+      "name": "expo-router",
+      "library": "expo--skills--plugins--expo--skills--expo-router"
+    },
+    {
+      "id": "expo--skills--plugins--expo--skills--expo-dev-client",
+      "name": "expo-dev-client",
+      "library": "expo--skills--plugins--expo--skills--expo-dev-client"
+    }
+  ],
+  "requirements": [
+    "Android SDK для Android",
+    "macOS и Xcode для iOS"
+  ],
+  "limitations": ""
+}

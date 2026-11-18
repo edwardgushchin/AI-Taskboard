@@ -10,6 +10,11 @@ const activeStates = ["draft", "ready", "in_progress", "blocked", "review"] as c
 
 function fields(task: Task, input: Record<string, unknown>): Task {
   const updated = { ...task };
+  if (input.expertId !== undefined) {
+    requireState(task, ["draft", "ready"]);
+    if (input.expertId === null) delete updated.expertId;
+    else updated.expertId = text(input.expertId, "expert ID", true);
+  }
   if (input.title !== undefined) updated.title = text(input.title, "title", true);
   if (input.description !== undefined) updated.description = text(input.description, "description");
   for (const key of ["criteria", "questions", "tags"] as const) {
@@ -27,6 +32,9 @@ function fields(task: Task, input: Record<string, unknown>): Task {
     requireState(task, ["draft", "ready", "blocked"]);
     if (input.schedule === null) delete updated.schedule;
     else {
+      if (task.expertTeam?.work?.stages.some(stage => stage.artifactOutputs)) {
+        throw new TaskboardError("INVALID_INPUT", "Remove required submission artifacts from the work plan before making this task recurring.");
+      }
       const schedule = object(input.schedule);
       let rule: TaskScheduleRule;
       if (schedule.everyMinutes !== undefined) {
@@ -132,12 +140,11 @@ export function createTask(id: string, input: Record<string, unknown>): Task {
   }, input);
 }
 
-export function recordRunLog(task: Task, input: Record<string, unknown>): Task {
-  if (task.status === "done" || task.status === "cancelled") return task;
-  if (!Array.isArray(input.entries) || !input.entries.length || Buffer.byteLength(JSON.stringify(input.entries)) > 1_000_000) {
+export function parseRunEntries(value: unknown) {
+  if (!Array.isArray(value) || !value.length || Buffer.byteLength(JSON.stringify(value)) > 1_000_000) {
     throw new TaskboardError("INVALID_INPUT", "Expected a run log of at most 1 MB.");
   }
-  const entries = input.entries.map(value => {
+  return value.map(value => {
     const item = object(value);
     if (typeof item.text !== "string") throw new TaskboardError("INVALID_INPUT", "Expected item text.");
     if (item.at !== undefined && (typeof item.at !== "string" || !item.at.trim() || !Number.isFinite(Date.parse(item.at)))) {
@@ -150,8 +157,12 @@ export function recordRunLog(task: Task, input: Record<string, unknown>): Task {
       ...(item.phase === undefined ? {} : { phase: member(item.phase, ["commentary", "final_answer"], "item phase") }),
     };
   });
+}
+
+export function recordRunLog(task: Task, input: Record<string, unknown>): Task {
+  if (task.status === "done" || task.status === "cancelled") return task;
   const updated = record(task, "run-log", "agent");
-  updated.history.at(-1)!.run = entries;
+  updated.history.at(-1)!.run = parseRunEntries(input.entries);
   if (input.durationMs !== undefined) updated.history.at(-1)!.durationMs = number(input.durationMs, "durationMs", 0);
   return { ...updated, revision: task.revision, closedAt: task.closedAt };
 }
@@ -168,6 +179,17 @@ export function withoutVerification(task: Task): Task {
 
 export function changeTask(task: Task, action: string, input: Record<string, unknown>): Task {
   requireRevision(task, input.revision);
+  if (action === "return-to-draft") {
+    requireState(task, [...activeStates, "cancelled"]);
+    if (task.status === "draft") return task;
+    requireRevision(task, input.revision, true);
+    const draft = record(task, action, boardActor(input, "user"), "draft");
+    delete draft.closedAt;
+    delete draft.blocked;
+    delete draft.acceptanceRepair;
+    delete draft.launchRequested;
+    return draft;
+  }
   if (action === "comment" && task.status === "done") {
     return { ...record(task, action, boardActor(input), task.status, text(input.text, "text", true)), closedAt: task.closedAt };
   }
@@ -175,13 +197,14 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
   switch (action) {
     case "approve":
       requireState(task, ["draft"]);
+      if (boardActor(input, "user") !== "user" &&
+          task.history.findLast(event => event.action === "approve" || event.action === "return-to-draft")?.action === "return-to-draft") {
+        throw new TaskboardError("USER_APPROVAL_REQUIRED", "The user must approve this returned draft on the board.");
+      }
       if (!task.criteria.length) {
         throw new TaskboardError("CRITERIA_REQUIRED", "Add acceptance criteria before approving the task.");
       }
       return record(task, action, boardActor(input, "user"), "ready");
-    case "return-to-draft":
-      requireState(task, ["ready"]);
-      return record(task, action, "user", "draft");
     case "request-changes":
       requireState(task, ["review"]);
       return record(task, action, input.actor === "reviewer" ? "reviewer" : boardActor(input, "user"),
@@ -193,6 +216,17 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
       return record(task, action, boardActor(input, "user"), "cancelled", text(input.reason, "reason", true));
     case "comment":
       return record(task, action, boardActor(input), task.status, text(input.text, "text", true));
+    case "checklist": {
+      requireState(task, task.acceptanceRepair?.phase === "running" ? ["review"] : ["in_progress"]);
+      requireRevision(task, input.revision, true);
+      const index = number(input.index, "checklist item number") - 1;
+      const item = task.subtasks[index];
+      if (!item || typeof input.done !== "boolean") throw new TaskboardError("INVALID_INPUT", "Select an existing checklist item and supply its completed state.");
+      if (item.done === input.done) return task;
+      const subtasks = task.subtasks.slice();
+      subtasks[index] = { ...item, done: input.done };
+      return record({ ...task, subtasks }, action, "agent", task.status, item.title);
+    }
     case "progress": {
       requireState(task, task.acceptanceRepair?.phase === "running" ? ["review"] : ["in_progress", "blocked"]);
       const summary = text(input.summary, "summary", true);

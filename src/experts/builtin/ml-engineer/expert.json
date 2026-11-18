@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "id": "ml-engineer",
+  "name": "Инженер машинного обучения",
+  "group": "Данные и искусственный интеллект",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Инженер машинного обучения",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "k-dense-ai--claude-scientific-skills--skills--scikit-learn",
+      "name": "scikit-learn",
+      "library": "k-dense-ai--claude-scientific-skills--skills--scikit-learn"
+    },
+    {
+      "id": "k-dense-ai--claude-scientific-skills--skills--pytorch-lightning",
+      "name": "pytorch-lightning",
+      "library": "k-dense-ai--claude-scientific-skills--skills--pytorch-lightning"
+    },
+    {
+      "id": "k-dense-ai--claude-scientific-skills--skills--statistical-analysis",
+      "name": "statistical-analysis",
+      "library": "k-dense-ai--claude-scientific-skills--skills--statistical-analysis"
+    }
+  ],
+  "requirements": [
+    "Python",
+    "Библиотеки выбранного метода",
+    "GPU только при необходимости"
+  ],
+  "limitations": ""
+}

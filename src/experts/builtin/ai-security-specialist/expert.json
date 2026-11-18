@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "id": "ai-security-specialist",
+  "name": "Специалист по безопасности AI систем",
+  "group": "Безопасность и управление рисками",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Специалист по безопасности AI систем",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "trailofbits--skills--plugins--agentic-actions-auditor--skills--agentic-actions-auditor",
+      "name": "agentic-actions-auditor",
+      "library": "trailofbits--skills--plugins--agentic-actions-auditor--skills--agentic-actions-auditor"
+    },
+    {
+      "id": "openai--plugins--plugins--codex-security--skills--threat-model",
+      "name": "threat-model",
+      "library": "openai--plugins--plugins--codex-security--skills--threat-model"
+    }
+  ],
+  "requirements": [
+    "Описание инструментов и полномочий агента"
+  ],
+  "limitations": ""
+}

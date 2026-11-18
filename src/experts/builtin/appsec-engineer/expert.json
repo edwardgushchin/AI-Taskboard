@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "id": "appsec-engineer",
+  "name": "Инженер безопасности приложений",
+  "group": "Безопасность и управление рисками",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Инженер безопасности приложений",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "openai--plugins--plugins--codex-security--skills--threat-model",
+      "name": "threat-model",
+      "library": "openai--plugins--plugins--codex-security--skills--threat-model"
+    },
+    {
+      "id": "trailofbits--skills--plugins--differential-review--skills--differential-review",
+      "name": "differential-review",
+      "library": "trailofbits--skills--plugins--differential-review--skills--differential-review"
+    },
+    {
+      "id": "trailofbits--skills--plugins--sharp-edges--skills--sharp-edges",
+      "name": "sharp-edges",
+      "library": "trailofbits--skills--plugins--sharp-edges--skills--sharp-edges"
+    }
+  ],
+  "requirements": [
+    "Среда анализа кода",
+    "Явная область проверки"
+  ],
+  "limitations": ""
+}

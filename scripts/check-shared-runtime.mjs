@@ -30,6 +30,7 @@ function cli(project, args, input) {
 }
 if (!process.versions.electron) {
   const scratch = mkdtempSync(join(tmpdir(), "taskboard-shared-runtime-"));
+  const managerOnly = process.argv.includes("--manager-only");
   const outputIndex = process.argv.indexOf("--artifacts");
   const output = outputIndex < 0 ? undefined : resolve(process.argv[outputIndex + 1]);
   const workers = [], providerPids = new Set();
@@ -64,13 +65,70 @@ if (!process.versions.electron) {
     await ask({ action: "ready" });
     return worker;
   };
-  try {
+  checks: try {
     symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), join(scratch, "node_modules"), process.platform === "win32" ? "junction" : "dir");
-    for (const board of [project, other]) { mkdirSync(board); cli(board, ["init"], { git: false }); cli(board, ["settings"], { autoMode: false, reviewMode: "human", agentLimits: { executor: 1, reviewer: 1 } }); }
+    for (const board of [project, other]) { mkdirSync(board); cli(board, ["init"], { git: false }); cli(board, ["settings"], { autoMode: false, reviewMode: "human", taskLimits: { executor: 1, reviewer: 1 } }); }
     const tasks = [];
-    for (let i = 0; i < 6; i++) { const task = cli(project, ["create"], { title: "Isolated concurrency " + i, criteria: ["Fixture completes"], workingDirectory: project }); cli(project, ["approve", task.id]); tasks.push(task.id); }
+    for (let i = 0; !managerOnly && i < 6; i++) { const task = cli(project, ["create"], { title: "Isolated concurrency " + i, criteria: ["Fixture completes"], workingDirectory: project }); cli(project, ["approve", task.id]); tasks.push(task.id); }
     const a = await start("profile-a"), b = await start("profile-b");
     await a.ask({ action: "newWindow" });
+    const frames = async () => [...await a.ask({ action: "frames" }), ...await b.ask({ action: "frames" })];
+    const calls = async () => (await a.ask({ action: "managerCalls" })) + (await b.ask({ action: "managerCalls" }));
+    const queueRows = async () => [...await a.ask({ action: "queueRows" }), ...await b.ask({ action: "queueRows" })];
+    assert.equal(await a.ask({ action: "reserve", role: "manager" }), true);
+    assert.equal(await b.ask({ action: "reserve", role: "manager" }), false);
+    for (const phase of ["waiting", "running"]) {
+      await a.ask({ action: "managerPhase", phase, lane: "chat" });
+      await wait(async () => (await frames()).every(frame => frame.managerBusy && frame.managerRun?.phase === phase &&
+        frame.managerWork === null), "shared manager dialogue phase " + phase);
+    }
+    await a.ask({ action: "managerPhase", phase: "running", lane: "maintenance" });
+    await wait(async () => (await frames()).every(frame => frame.managerBusy && frame.managerWork?.lane === "maintenance" &&
+      frame.managerRun === null), "shared maintenance state");
+    const queuedMessage = "Queued while the other profile is doing maintenance";
+    await b.ask({ action: "addMessage", text: queuedMessage });
+    await wait(async () => (await queueRows()).every(rows => rows.length === 1 && rows[0] === queuedMessage),
+      "same queued message in three windows");
+    assert.equal(await calls(), 0);
+    await a.ask({ action: "release", role: "manager" });
+    await wait(async () => [...await a.ask({ action: "dialogue" }), ...await b.ask({ action: "dialogue" })]
+      .every(text => text.includes("Isolated manager is working")), "live manager activity in three windows");
+    await wait(async () => await calls() === 1 && (await queueRows()).every(rows => rows.length === 0),
+      "queued message delivered across profiles");
+    let finalDialogue;
+    try {
+      await wait(async () => {
+        finalDialogue = [...await a.ask({ action: "dialogue" }), ...await b.ask({ action: "dialogue" })];
+        return finalDialogue.every(text => text.includes("Isolated manager fixture"));
+      }, "final reply in three windows");
+    } catch (error) {
+      console.error(JSON.stringify({ finalDialogue, history: await a.ask({ action: "history" }) }, null, 2));
+      throw error;
+    }
+    await delay(1200);
+    assert.equal(await calls(), 1);
+    record("PASS: shared manager lane, visible maintenance, live activity and one automatic queue delivery across three windows");
+    await a.ask({ action: "addMessage", text: "Fixture provider failure" });
+    await wait(async () => [...await a.ask({ action: "queueFailures" }), ...await b.ask({ action: "queueFailures" })]
+      .every(count => count === 1), "shared terminal queue failure");
+    assert.equal(await calls(), 2);
+    record("PASS: a terminal failure is visible in every queue without a competing retry");
+    const gitBoard = join(scratch, "git-board"), remote = join(scratch, "remote");
+    const git = (cwd, ...args) => execFileSync("git", args, { cwd, env, windowsHide: true, encoding: "utf8" }).trim();
+    git(scratch, "init", "--bare", remote);
+    git(scratch, "init", "-b", "main", gitBoard);
+    git(gitBoard, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "Fixture");
+    git(gitBoard, "remote", "add", "origin", remote);
+    cli(gitBoard, ["init"]);
+    await a.ask({ action: "openGitBoard", project: gitBoard });
+    await b.ask({ action: "openGitBoard", project: gitBoard });
+    await a.ask({ action: "pushFromStatus" });
+    await wait(async () => (await a.ask({ action: "gitStatus" })) === "0↓ 0↑" &&
+      (await b.ask({ action: "gitStatus" })) === "0↓ 0↑", "both windows show the successful push");
+    assert.equal(git(remote, "rev-parse", "refs/heads/main"), git(gitBoard, "rev-parse", "HEAD"));
+    await a.ask({ action: "closeGitBoard" });
+    await b.ask({ action: "closeGitBoard" });
+    record("PASS: desktop Push sends the pinned commit to the local remote and both profiles update their Git counts");
     const boardLock = new DatabaseSync(join(project, ".tasks", ".lock.sqlite"));
     try {
       boardLock.exec("PRAGMA busy_timeout=2000");
@@ -84,7 +142,7 @@ if (!process.versions.electron) {
       } finally { clearTimeout(timer); }
     } finally { boardLock.close(); }
     record("PASS: focus, click and board IPC stay responsive while the board transaction lock is held");
-    const frames = async () => [...await a.ask({ action: "frames" }), ...await b.ask({ action: "frames" })];
+    if (managerOnly) break checks;
     const expectCount = async total => {
       let latest;
       try { await wait(async () => { latest = await frames(); return latest.every(frame => frame.activeAgents.total === total) && [...await a.ask({action:"dom"}), ...await b.ask({action:"dom"})].every(view => view.count === total); }, "all windows count " + total); }
@@ -123,28 +181,20 @@ if (!process.versions.electron) {
       "queued agent has registered its stop control");
     await Promise.all([a.ask({ action: "stop", id: queued }), b.ask({ action: "stop", id: queued })]); await expectCount(0);
     record("PASS: shared waiting state and continuation queue drain after release");
-    for (const role of ["manager", "reviewer"]) {
-      assert.equal(await a.ask({ action: "reserve", role }), true);
-      assert.equal(await b.ask({ action: "reserve", role }), false);
-      if (role === "manager") {
-        for (const phase of ["waiting", "running"]) {
-          await a.ask({ action: "managerPhase", phase });
-          await wait(async () => (await frames()).every(frame => frame.managerWork?.phase === phase), "shared manager phase " + phase);
-        }
-      }
-      await a.ask({ action: "release", role });
-      assert.equal(await b.ask({ action: "reserve", role }), true);
-      await b.ask({ action: "release", role });
-    }
+    assert.equal(await a.ask({ action: "reserve", role: "reviewer" }), true);
+    assert.equal(await b.ask({ action: "reserve", role: "reviewer" }), false);
+    await a.ask({ action: "release", role: "reviewer" });
+    assert.equal(await b.ask({ action: "reserve", role: "reviewer" }), true);
+    await b.ask({ action: "release", role: "reviewer" });
     const discussion = await a.ask({ action: "discussion", id: tasks[3] }); assert.ok(discussion);
-    assert.equal(await b.ask({ action: "reserve", role: "executor" }), true);
+    await wait(() => b.ask({ action: "reserve", role: "executor" }), "executor slot is released after the provider turn");
     assert.equal(await b.ask({ action: "reserve", role: "executor", other: true }), true);
     await b.ask({ action: "release", role: "executor" }); await b.ask({ action: "release", role: "executor", other: true });
     await a.ask({ action: "endDiscussion" }); await expectCount(0);
-    record("PASS: manager context and reviewer limit cross processes; discussion uses no executor slot; boards isolated");
-    cli(project, ["settings"], { autoMode: false, reviewMode: "reviewer", agentLimits: { executor: 2, reviewer: 2 } });
-    await wait(async () => (await frames()).every(frame => frame.board.settings.reviewMode === "reviewer" && frame.board.settings.agentLimits.executor === 2), "settings propagation");
-    cli(project, ["settings"], { reviewMode: "human", agentLimits: { executor: 1, reviewer: 1 }, autoMode: true });
+    record("PASS: manager/reviewer limits cross processes; discussion uses no executor slot; boards isolated");
+    cli(project, ["settings"], { autoMode: false, reviewMode: "reviewer", taskLimits: { executor: 2, reviewer: 2 } });
+    await wait(async () => (await frames()).every(frame => frame.board.settings.reviewMode === "reviewer" && frame.board.settings.taskLimits.executor === 2), "settings propagation");
+    cli(project, ["settings"], { reviewMode: "human", taskLimits: { executor: 1, reviewer: 1 }, autoMode: true });
     await expectCount(1);
     cli(project, ["settings"], { autoMode: false });
     await wait(async () => (await frames()).every(frame => !frame.board.settings.autoMode), "auto false propagation");
@@ -168,7 +218,7 @@ if (!process.versions.electron) {
     await wait(async () => (await restarted.ask({ action: "frames" })).every(frame => frame.activeAgents.total === 0 && !frame.runningTasks.includes(tasks[5])), "dead owner and provider reclaimed");
     assert.equal(await restarted.ask({ action: "reserve", role: "executor" }), true); await restarted.ask({ action: "release", role: "executor" });
     record("PASS: launch failure releases slot; restart preserves living orphan; provider death reclaims slot");
-    cli(project, ["settings"], { agentLimits: { executor: 6, reviewer: 2 } });
+    cli(project, ["settings"], { taskLimits: { executor: 6, reviewer: 2 } });
     const makeCards = (name, review) => Array.from({ length: 7 }, (_, index) => {
       const task = cli(project, ["create"], { title: name + " " + index, criteria: ["Fixture completes"], workingDirectory: project });
       cli(project, ["approve", task.id]);
@@ -213,12 +263,37 @@ if (!process.versions.electron) {
     if (output) { mkdirSync(output, { recursive: true }); writeFileSync(join(output, "failure.txt"), error.stack + "\n" + workers.map(worker => worker.logs).join("\n")); }
     throw error;
   } finally {
-    for (const worker of workers) { if (worker.child.exitCode === null && !worker.child.killed) { try { await worker.ask({ action: "exit" }); } catch {} } }
-    for (const worker of workers) if (worker.child.exitCode === null && !worker.child.killed) worker.child.kill();
+    await Promise.all(workers.map(async worker => {
+      const child = worker.child;
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      const exited = once(child, "exit");
+      if (!child.killed) {
+        try { await worker.ask({ action: "exit" }); } catch { child.kill(); }
+      }
+      await exited;
+    }));
     for (const pid of providerPids) { try { process.kill(pid); } catch {} }
     await delay(1000);
     for (const pid of providerPids) assert.throws(() => process.kill(pid, 0), "fixture provider must be dead");
-    rmSync(scratch, { recursive: true, maxRetries: 10, retryDelay: 200 });
+    if (process.platform === "win32") {
+      // Windows Git uses hidden metadata and read-only loose objects.
+      const modules = join(scratch, "node_modules");
+      if (existsSync(modules)) rmSync(modules);
+      execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `
+        $ErrorActionPreference = 'Stop'
+        $base = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar)
+        $fixture = [IO.Path]::GetFullPath($env:TASKBOARD_SHARED_RUNTIME_FIXTURE)
+        if ([IO.Path]::GetDirectoryName($fixture) -ne $base -or [IO.Path]::GetFileName($fixture) -notlike 'taskboard-shared-runtime-*') {
+          throw 'Unexpected fixture directory'
+        }
+        $flags = [IO.FileAttributes]::ReadOnly -bor [IO.FileAttributes]::Hidden
+        foreach ($entry in [IO.Directory]::EnumerateFileSystemEntries($fixture, '*', [IO.SearchOption]::AllDirectories)) {
+          $attributes = [IO.File]::GetAttributes($entry)
+          if ($attributes -band $flags) { [IO.File]::SetAttributes($entry, $attributes -band (-bnot $flags)) }
+        }
+        Remove-Item -LiteralPath $fixture -Recurse
+      `], { env: { ...process.env, TASKBOARD_SHARED_RUNTIME_FIXTURE: scratch }, windowsHide: true });
+    } else rmSync(scratch, { recursive: true, maxRetries: 10, retryDelay: 200 });
     assert.equal(existsSync(scratch), false);
     console.log("PASS: private profiles, boards and fixture providers cleaned");
   }
@@ -228,7 +303,16 @@ if (!process.versions.electron) {
   app.setPath("userData", join(scratch, name)); app.setPath("appData", join(scratch, "app-data-" + name));
   app.disableHardwareAcceleration(); app.requestSingleInstanceLock = () => true;
   const runs = new Map(), leases = new Map(), pids = new Set(), providerRequests = new Map(); let failNext = false, providerSequence = 0;
+  let gitWindow;
   const active = await import(new URL("../src/desktop/active-runs.ts", import.meta.url));
+  let managerCalls = 0;
+  globalThis.runtimeCheckReply = async (_profile, _project, text, _images, _action, _tools, _instructions, _signal, hooks) => {
+    managerCalls++;
+    if (text === "Fixture provider failure") throw Error("Isolated provider failure");
+    hooks.onActivity([{ id: "fixture-live", type: "agentMessage", title: "", text: "Isolated manager is working", phase: "commentary", status: "inProgress" }]);
+    await delay(3000);
+    return { text: "Isolated manager fixture" };
+  };
   globalThis.runtimeCheckStart = async (_client, board, _cwd, task, _activity, _usage, _signal, beforeTurn) => {
     if (failNext) { failNext = false; throw Error("Isolated provider launch failure"); }
     const request = ++providerSequence;
@@ -252,7 +336,7 @@ if (!process.versions.electron) {
   let source = readFileSync(sourceUrl, "utf8").replace('missingCodexThread, startCodexRun', 'missingCodexThread')
     .replace('codexStatus, configuredCodex,', 'codexStatus, configuredCodex as unusedConfiguredCodex,')
     .replace('replyToBoard, replyToTask', 'replyToBoard as unusedReplyToBoard, replyToTask');
-  source = 'const configuredCodex = async () => ({}); const startCodexRun = globalThis.runtimeCheckStart; const replyToBoard = async () => ({text: "Isolated manager fixture"});\n' + source;
+  source = 'const configuredCodex = async () => ({}); const startCodexRun = globalThis.runtimeCheckStart; const replyToBoard = globalThis.runtimeCheckReply;\n' + source;
   source = source.replaceAll("import.meta.url", JSON.stringify(sourceUrl.href)).replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, sourceUrl).href));
   const entry = join(scratch, name + ".mjs");
   writeFileSync(entry, transformSync(source + "\nglobalThis.sharedCheck = {createWindow,launchTask,agentSlots,reserveAgent,scheduleAgentWork,activeAgents,subscriptions};", { loader: "ts", format: "esm" }).code);
@@ -323,7 +407,40 @@ if (!process.versions.electron) {
         if (lease) leases.set(key, lease);
         data = Boolean(lease);
       }
-      if (command.action === "managerPhase") { qa.agentSlots.update(project, "manager:context", { id: "fixture-manager", phase: command.phase, startedAt: Date.now() }); data = true; }
+      if (command.action === "managerPhase") { qa.agentSlots.update(project, "manager:context", { id: "fixture-manager", phase: command.phase, startedAt: Date.now(), lane: command.lane }); data = true; }
+      if (command.action === "addMessage") {
+        data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(
+          `window.taskboard.boardQueue(${JSON.stringify(project)}, "add", undefined, ${JSON.stringify(command.text)}, false, [])`);
+        assert.equal(data.ok, true, JSON.stringify(data));
+      }
+      if (command.action === "queueRows") data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript(
+        'Array.from(document.querySelectorAll(".board-queued-preview"), node => node.textContent)')));
+      if (command.action === "queueFailures") data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript(
+        'document.querySelectorAll(".board-queued-failed").length')));
+      if (command.action === "dialogue") data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript(`(() => {
+        const input = document.querySelector("#board-composer .draft-input textarea");
+        const composer = input.closest("form");
+        if (!composer.matches("[data-open], [data-pinned]")) {
+          input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+        }
+        if (!composer.matches("[data-open], [data-pinned]")) throw new Error("Could not open the manager dialogue");
+        return composer.textContent;
+      })()`)));
+      if (command.action === "managerCalls") data = managerCalls;
+      if (command.action === "history") data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript("window.taskboard.boardHistory()");
+      if (command.action === "openGitBoard") {
+        const state = qa.createWindow([command.project]);
+        gitWindow = state.window;
+        await state.ready;
+        data = true;
+      }
+      if (command.action === "pushFromStatus") {
+        await wait(() => gitWindow.webContents.executeJavaScript('Boolean(document.querySelector("#status-tracking:not([hidden]):enabled"))'), "Push button");
+        await gitWindow.webContents.executeJavaScript('document.querySelector("#status-tracking").click()');
+        data = true;
+      }
+      if (command.action === "gitStatus") data = await gitWindow.webContents.executeJavaScript('document.querySelector("#status-tracking span").textContent');
+      if (command.action === "closeGitBoard") { gitWindow.close(); data = true; }
       if (command.action === "release") { leases.get(key)?.(); leases.delete(key); data = true; }
       if (command.action === "discussion") { const lease = active.claimDiscussion(project, command.id); const finish = lease.run(() => active.trackActiveRun(project)); leases.set("discussion", () => { finish(); lease(); }); data = true; }
       if (command.action === "endDiscussion") { leases.get("discussion")?.(); leases.delete("discussion"); data = true; }

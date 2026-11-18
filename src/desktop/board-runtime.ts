@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { directory, exists, locateBoard, readJson, withRuntimeLock, writeJson } from "../cli/storage.ts";
 import type { BoardLocation } from "../cli/storage.ts";
-import type { AgentLimits } from "../cli/model.ts";
+import type { AgentLimits, RunActivity } from "../cli/model.ts";
+import type { BoardActivity } from "./codex-chat.ts";
 
 const context = new AsyncLocalStorage<string>();
 
@@ -18,7 +19,16 @@ export interface RuntimeEntry {
   limits?: AgentLimits;
   revision?: number;
   continuation?: { afterDisconnect?: boolean; withoutProgress?: boolean };
-  state?: { id: string; phase: "starting" | "waiting" | "running"; startedAt: number; reviewing?: string[] };
+  state?: {
+    id: string;
+    phase: "starting" | "waiting" | "running";
+    startedAt: number;
+    lane?: "chat" | "work" | "maintenance";
+    reviewing?: string[];
+    item?: Pick<RunActivity, "type" | "title" | "text" | "status">;
+    live?: { sequence: number; items: BoardActivity[] };
+    goalRunning?: boolean;
+  };
   startedAt?: number;
 }
 
@@ -77,10 +87,17 @@ export function runtimeEntries(project: string) {
   return liveEntries(readEntries(join(runtimeLocation(project).directory, "runtime.json")));
 }
 
+export function taskWriterId(task: string | undefined) {
+  return task?.replace(/^(review|draft):/, "");
+}
+
 export function registerRuntime(project: string, value: Omit<RuntimeEntry, "id" | "owner">,
   accept: (entries: RuntimeEntry[]) => boolean = () => true) {
   const id = randomUUID();
   const accepted = runtimeTransaction(project, entries => {
+    if (value.task && entries.some(entry => entry.kind !== "queue" &&
+        (value.task?.startsWith("draft:") || entry.task?.startsWith("draft:")) &&
+        taskWriterId(entry.task) === taskWriterId(value.task))) return false;
     if (!accept(entries)) return false;
     entries.push({ parent: value.kind === "provider" || value.kind === "turn" ? context.getStore() : undefined,
       startedAt: Date.now(), ...value, id, owner: process.pid });

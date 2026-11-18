@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "id": "performance-marketer",
+  "name": "Специалист по платному продвижению",
+  "group": "Маркетинг и коммуникации",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Специалист по платному продвижению",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "coreyhaines31--marketingskills--skills--ads",
+      "name": "ads",
+      "library": "coreyhaines31--marketingskills--skills--ads"
+    },
+    {
+      "id": "coreyhaines31--marketingskills--skills--ad-creative",
+      "name": "ad-creative",
+      "library": "coreyhaines31--marketingskills--skills--ad-creative"
+    }
+  ],
+  "requirements": [
+    "Рекламный кабинет только для исполнения согласованного запуска"
+  ],
+  "limitations": ""
+}

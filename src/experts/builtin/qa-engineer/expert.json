@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "id": "qa-engineer",
+  "name": "QA инженер",
+  "group": "Обеспечение качества",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "QA инженер",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--engineering--skills--testing-strategy",
+      "name": "testing-strategy",
+      "library": "anthropics--knowledge-work-plugins--engineering--skills--testing-strategy"
+    },
+    {
+      "id": "anthropics--skills--skills--webapp-testing",
+      "name": "webapp-testing",
+      "library": "anthropics--skills--skills--webapp-testing"
+    },
+    {
+      "id": "alirezarezvani--claude-skills--engineering-team--skills--senior-qa",
+      "name": "senior-qa",
+      "library": "alirezarezvani--claude-skills--engineering-team--skills--senior-qa"
+    }
+  ],
+  "requirements": [
+    "Python",
+    "Playwright для webapp-testing"
+  ],
+  "limitations": "webapp-testing проверяет браузерные сценарии; senior-qa ориентирован на React и Next.js. Для мобильных и других продуктов выбирать соответствующие проверки"
+}

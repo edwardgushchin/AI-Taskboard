@@ -104,6 +104,11 @@ export interface RunActivity {
 }
 
 export interface TaskEvent {
+  expertMessage?: { from: string; to: string; replyTo?: number };
+  expertSkill?: { expertId: string; skillId: string; name: string; source: "plan" | "tool" };
+  expertPhase?: "work" | "review";
+  expertStageRun?: { phase: "work" | "review"; key: string; state: "running" | "blocked" | "done";
+    result?: string; outputs?: Record<string, string>; agentId?: string; sessionId?: string; fallback?: string; targetHead?: string | null };
   at: string;
   durationMs?: number;
   startTiming?: { lockWaitMs: number; prepareMs: number; gitWorktreeAddMs?: number };
@@ -177,7 +182,21 @@ export function nextScheduledRun(rule: TaskScheduleRule, after: Date, previous?:
   return next.toISOString();
 }
 
+export interface ExpertPhase {
+  lead?: string | null;
+  reason?: string;
+  skills?: string[];
+  stages: { key: string; expertId: string; title: string; description: string; criteria: string[];
+    inputs: string[]; outputs: string[]; dependsOn: string[]; artifactOutputs?: Record<string, ArtifactKind> }[];
+}
+
+export type ArtifactKind = "png" | "text";
+
 export interface Task {
+  expertId?: string;
+  expertTeam?: { work?: ExpertPhase; review?: ExpertPhase };
+  expertStage?: { parentId: string; key: string; inputs: string[]; outputs: string[] };
+  expertStages?: { key: string; taskId: string; expertId: string; title: string; inputs: string[]; outputs: string[]; dependsOn: string[] }[];
   acceptanceRepair?: { phase: "queued" | "running" | "checking" | "failed"; targetHead: string; attempts: number; message: string; reason?: string };
   tokenUsage?: import("./token-usage.ts").TaskTokenUsage;
   id: string;
@@ -211,7 +230,8 @@ export interface Task {
   launchRequested?: boolean;
   childWork?: { key: string; basis: string; id: string }[];
   blocked?: { reason: string; condition: string; previousStatus?: "draft" | "ready" };
-  result?: { summary: string; checks: string[]; limitations: string[]; noChanges?: { head: string | null } };
+  result?: { summary: string; checks: string[]; limitations: string[]; noChanges?: { head: string | null };
+    artifactEvidence?: { stage: string; output: string; kind: ArtifactKind; source: string; sha256: string }[] };
   artifacts?: { source: string; file: string; sha256: string }[];
   git?: TaskGit;
   history: TaskEvent[];
@@ -219,6 +239,7 @@ export interface Task {
 
 export interface BoardSettings {
   boardType?: "agent" | "manual";
+  requireExpertPlans?: boolean;
   manualColumns?: ManualColumn[];
   name?: string;
   archiveAfterDays: number | null;
@@ -227,19 +248,20 @@ export interface BoardSettings {
   manager?: BoardAgentSettings | null;
   executor?: BoardAgentSettings | null;
   reviewer?: BoardAgentSettings | null;
-  agentLimits?: Partial<AgentLimits>;
+  taskLimits?: Partial<AgentLimits>;
   reviewMode?: ReviewMode;
   autoReview?: boolean;
   autoMode?: boolean;
+  autoQueue?: { revision: number; paused: boolean; order: string[]; held: string[] };
 }
 
 export const defaultBoardAgents = {
-  manager: { provider: "codex", model: "gpt-6.1-sol", effort: "medium" },
+  manager: { provider: "codex", model: "gpt-6.2-sol", effort: "medium" },
   executor: { provider: "codex", model: "gpt-6.1-sol", effort: "high" },
   reviewer: { provider: "codex", model: "gpt-6.1-terra", effort: "high" },
 } satisfies Record<typeof boardAgentRoles[number], BoardAgentSettings>;
 
-export const reviewVerifier = { model: defaultBoardAgents.manager.model, effort: "xhigh" } satisfies ChatSettings;
+export const reviewVerifier = { model: "gpt-6.1-sol", effort: "xhigh" } satisfies ChatSettings;
 
 export function boardReviewMode(settings: Pick<BoardSettings, "reviewMode" | "autoReview">): ReviewMode {
   return settings.reviewMode ?? (settings.autoReview === true ? "reviewer" : "human");

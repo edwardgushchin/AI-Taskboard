@@ -11,7 +11,7 @@ export function localizationFixture(locale = "ru") {
     `\nObject.assign(window.taskboardLocalization.catalogs, ${JSON.stringify(localization.catalogs)});\nwindow.taskboardLocalization.select(${JSON.stringify(locale)});\n`;
 }
 
-export function electronCheck(script, name, timeout) {
+export function electronCheck(script, name, timeout, phases = [[]]) {
   if (!process.versions.electron) {
     const temp = realpathSync(tmpdir());
     const scratch = mkdtempSync(join(temp, "ai-taskboard-" + name + "-"));
@@ -24,12 +24,16 @@ export function electronCheck(script, name, timeout) {
     let status = 1;
     try {
       const electron = createRequire(script)("electron");
-      const result = spawnSync(electron, [fileURLToPath(script), ...args], {
-        cwd: scratch, env, windowsHide: true, stdio: "inherit", timeout,
-      });
-      if (result.error) console.error(result.error);
-      else if (result.status !== 0) console.error("Electron check failed: " + (result.signal ?? result.status));
-      status = result.status ?? 1;
+      for (const phase of phases) {
+        const result = spawnSync(electron, [fileURLToPath(script), ...args, ...phase], {
+          // Desktop helpers can briefly retain their inherited working directory after exit.
+          cwd: phases.length > 1 ? temp : scratch, env, windowsHide: true, stdio: "inherit", timeout,
+        });
+        if (result.error) console.error(result.error);
+        else if (result.status !== 0) console.error("Electron check failed: " + (result.signal ?? result.status));
+        status = result.status ?? 1;
+        if (status !== 0) break;
+      }
     } finally {
       // Electron can keep the profile open until its subprocesses exit.
       if (dirname(realpathSync(scratch)) !== temp) throw new Error("Unexpected Electron check directory: " + scratch);

@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "id": "cross-desktop-developer",
+  "name": "Разработчик кроссплатформенных desktop приложений",
+  "group": "Платформенная разработка",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Разработчик кроссплатформенных desktop приложений",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "vercel-labs--agent-browser--skill-data--electron",
+      "name": "electron",
+      "library": "vercel-labs--agent-browser--skill-data--electron"
+    }
+  ],
+  "requirements": [
+    "Browser automation",
+    "Целевая ОС"
+  ],
+  "limitations": "electron покрывает только Electron; Qt Tauri WPF требуют отдельного скилла"
+}

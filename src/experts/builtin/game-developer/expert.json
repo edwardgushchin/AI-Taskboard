@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "id": "game-developer",
+  "name": "Разработчик игр",
+  "group": "Платформенная разработка",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Разработчик игр",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "openai--plugins--plugins--game-studio--skills--three-webgl-game",
+      "name": "three-webgl-game",
+      "library": "openai--plugins--plugins--game-studio--skills--three-webgl-game"
+    },
+    {
+      "id": "openai--plugins--plugins--game-studio--skills--react-three-fiber-game",
+      "name": "react-three-fiber-game",
+      "library": "openai--plugins--plugins--game-studio--skills--react-three-fiber-game"
+    }
+  ],
+  "requirements": [
+    "Node.js",
+    "Браузер с WebGL"
+  ],
+  "limitations": "Unity Unreal Godot требуют отдельного движкового скилла"
+}

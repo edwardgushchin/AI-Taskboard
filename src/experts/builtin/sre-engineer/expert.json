@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "id": "sre-engineer",
+  "name": "Инженер надёжности",
+  "group": "Инфраструктура и эксплуатация",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Инженер надёжности",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--engineering--skills--incident-response",
+      "name": "incident-response",
+      "library": "anthropics--knowledge-work-plugins--engineering--skills--incident-response"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--operations--skills--runbook",
+      "name": "runbook",
+      "library": "anthropics--knowledge-work-plugins--operations--skills--runbook"
+    }
+  ],
+  "requirements": [
+    "Доступ к логам и метрикам"
+  ],
+  "limitations": ""
+}

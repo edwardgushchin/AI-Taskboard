@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "id": "linux-developer",
+  "name": "Linux разработчик",
+  "group": "Платформенная разработка",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Linux разработчик",
+      "file": "skills/workflow/SKILL.md"
+    }
+  ],
+  "requirements": [
+    "Linux host или VM для целевого окружения"
+  ],
+  "limitations": "Узкий подтверждённый универсальный Linux desktop скилл в подборку не включён; нужны дистрибутив, GUI стек и упаковка"
+}

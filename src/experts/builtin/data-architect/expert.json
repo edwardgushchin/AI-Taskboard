@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "id": "data-architect",
+  "name": "Архитектор данных",
+  "group": "Данные и искусственный интеллект",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Архитектор данных",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--engineering--skills--architecture",
+      "name": "architecture",
+      "library": "anthropics--knowledge-work-plugins--engineering--skills--architecture"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--engineering--skills--system-design",
+      "name": "system-design",
+      "library": "anthropics--knowledge-work-plugins--engineering--skills--system-design"
+    }
+  ],
+  "requirements": [],
+  "limitations": ""
+}

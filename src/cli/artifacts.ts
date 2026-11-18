@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readSync, readdirSync, renameSync, rmSync, rmdirSync, writeSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, win32 } from "node:path";
-import { maxAttachmentBytes, number, object, TaskboardError, strings, taskIdPattern } from "./model.ts";
+import { maxAttachmentBytes, member, number, object, TaskboardError, strings, taskIdPattern } from "./model.ts";
+import type { ArtifactKind } from "./model.ts";
 import { directory, exists, readJson, removeFile, writeJson } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
 
@@ -54,21 +55,23 @@ export function openReviewArtifact(store: BoardStore, id: string, input: Record<
   const artifact = artifactFiles(store, id).find(entry => entry.source === input.source && entry.sha256 === input.sha256);
   if (!artifact) throw new TaskboardError("ARTIFACT_NOT_FOUND", "Select the source and SHA-256 from this submission's saved materials.");
   const offset = input.offset === undefined ? 0 : number(input.offset, "offset", 0);
+  const format = member(input.format ?? "text", ["text", "png"], "artifact format");
+  if (format === "png" && offset !== 0) throw new TaskboardError("INVALID_INPUT", "Read the PNG without an offset.");
   directory(dirname(artifact.file));
   if (!lstatSync(artifact.file, { throwIfNoEntry: false })?.isFile()) {
     throw new TaskboardError("ARTIFACT_NOT_FOUND", "The saved material is unavailable.");
   }
   const fd = openSync(artifact.file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
-  return { fd, offset, source: artifact.source, sha256: artifact.sha256 };
+  return { fd, offset, source: artifact.source, sha256: artifact.sha256, format };
 }
 
-export function readReviewArtifact({ fd, offset, source, sha256 }: ReturnType<typeof openReviewArtifact>) {
-  const limit = 1024 * 1024;
-  let content: string;
+function readArtifactBytes(fd: number, kind: ArtifactKind) {
+  const limit = 1024 * 1024 * (kind === "png" ? 4 : 1);
   try {
     const entry = fstatSync(fd);
     if (!entry.isFile() || entry.size > limit) {
-      throw new TaskboardError("ARTIFACT_LIMIT", "Choose a text report or excerpt no larger than 1 MiB.");
+      throw new TaskboardError("ARTIFACT_LIMIT", kind === "png" ? "Choose a PNG no larger than 4 MiB." :
+        "Choose a text report or excerpt no larger than 1 MiB.");
     }
     const buffer = Buffer.allocUnsafe(entry.size + 1);
     let size = 0;
@@ -77,19 +80,41 @@ export function readReviewArtifact({ fd, offset, source, sha256 }: ReturnType<ty
       if (!read) break;
       size += read;
     }
-    const bytes = buffer.subarray(0, size);
-    if (size !== entry.size || createHash("sha256").update(bytes).digest("hex") !== sha256) {
-      throw new TaskboardError("ARTIFACT_CHANGED", "The saved material does not match the reviewed SHA-256.");
+    if (size !== entry.size) {
+      throw new TaskboardError("ARTIFACT_CHANGED", "The file changed size while reading.");
     }
-    try {
-      content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-      if (content.includes("\0")) throw new Error("NUL in text");
-    } catch {
-      throw new TaskboardError("ARTIFACT_NOT_TEXT", "Choose a UTF-8 text file.");
-    }
+    return buffer.subarray(0, size);
   } finally {
     closeSync(fd);
   }
+}
+
+function artifactText(bytes: Buffer) {
+  try {
+    const content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    if (content.includes("\0")) throw new Error("NUL in text");
+    return content;
+  } catch {
+    throw new TaskboardError("ARTIFACT_NOT_TEXT", "Choose a UTF-8 text file.");
+  }
+}
+
+function pngDimensions(bytes: Buffer) {
+  if (bytes.length >= 45 && bytes.subarray(0, 16).equals(Buffer.from("89504e470d0a1a0a0000000d49484452", "hex")) &&
+      bytes.subarray(-12).equals(Buffer.from("0000000049454e44ae426082", "hex"))) {
+    const width = bytes.readUInt32BE(16), height = bytes.readUInt32BE(20);
+    if (width > 0 && height > 0 && width * height <= 16_000_000) return { width, height };
+  }
+  throw new TaskboardError("ARTIFACT_NOT_PNG", "Choose a PNG screenshot up to 16 megapixels.");
+}
+
+export function readReviewArtifact({ fd, offset, source, sha256, format }: ReturnType<typeof openReviewArtifact>) {
+  const bytes = readArtifactBytes(fd, format);
+  if (createHash("sha256").update(bytes).digest("hex") !== sha256) {
+    throw new TaskboardError("ARTIFACT_CHANGED", "The saved material does not match the reviewed SHA-256.");
+  }
+  if (format === "png") return { source, sha256, ...pngDimensions(bytes), pngBase64: bytes.toString("base64") };
+  const content = artifactText(bytes);
   if (offset > content.length || /[\uDC00-\uDFFF]/.test(content.charAt(offset))) {
     throw new TaskboardError("INVALID_INPUT", "Use the nextOffset returned for this artifact.");
   }
@@ -112,6 +137,10 @@ function pathParts(value: string): string[] {
   return parts;
 }
 
+export function artifactSource(value: string) {
+  return pathParts(value).join("/");
+}
+
 function sourcePath(root: string, parts: string[], allowMissing = false) {
   let path = root;
   for (const part of parts.slice(0, -1)) {
@@ -126,6 +155,17 @@ function sourcePath(root: string, parts: string[], allowMissing = false) {
     throw new TaskboardError("INVALID_ARTIFACT_PATH", "Select regular files and directories without links.", { path });
   }
   return { path, entry };
+}
+
+export function inspectRequiredArtifact(root: string, source: string, kind: ArtifactKind) {
+  const file = sourcePath(root, pathParts(source), true);
+  if (!file?.entry.isFile()) {
+    throw new TaskboardError("ARTIFACT_NOT_FOUND", "Capture the required artifact before preview and submission.", { source });
+  }
+  const bytes = readArtifactBytes(openSync(file.path, "r"), kind);
+  if (kind === "png") pngDimensions(bytes);
+  else if (!artifactText(bytes).trim()) throw new TaskboardError("ARTIFACT_NOT_TEXT", "Include a non-empty check report.", { source });
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 function checksum(path: string, copy?: number, expectedBytes?: number): string {
@@ -154,15 +194,19 @@ function checksum(path: string, copy?: number, expectedBytes?: number): string {
   }
 }
 
-export function saveArtifacts(store: BoardStore, id: string, root: string, input: unknown, allowMissing = false) {
+export function saveArtifacts(store: BoardStore, id: string, root: string, input: unknown, allowMissing = false,
+  pinned?: ReadonlyMap<string, string>) {
   const selected = strings(input, "artifacts");
   if (!selected.length) return;
   const paths = new Map<string, { path: string; bytes: number }>();
   for (const value of selected) {
     const parts = pathParts(value);
     const source = parts.join("/");
-    const original = sourcePath(root, parts, allowMissing);
-    if (!original) continue;
+    const original = sourcePath(root, parts, allowMissing || pinned?.has(source));
+    if (!original) {
+      if (pinned?.has(source)) throw new TaskboardError("ARTIFACT_NOT_FOUND", "Capture the required artifact before submitting.", { source });
+      continue;
+    }
     const { path, entry } = original;
     if (entry.isDirectory()) {
       throw new TaskboardError("ARTIFACT_DIRECTORY", "Select individual files needed for review.", { path: source });
@@ -192,6 +236,9 @@ export function saveArtifacts(store: BoardStore, id: string, root: string, input
       throw new TaskboardError("ARTIFACT_CHANGED", "The selected file changed before copying.", { path });
     }
     const sha256 = checksum(path, undefined, bytes);
+    if (pinned?.has(source) && pinned.get(source) !== sha256) {
+      throw new TaskboardError("ARTIFACT_CHANGED", "The required artifact changed after preview.", { source });
+    }
     const file = join(folder, sha256, basename(source));
     if (!stored.has(file)) {
       stored.set(file, bytes);

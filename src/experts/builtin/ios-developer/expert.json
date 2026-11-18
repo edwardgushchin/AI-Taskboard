@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "id": "ios-developer",
+  "name": "iOS разработчик",
+  "group": "Платформенная разработка",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "iOS разработчик",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "avdlee--swiftui-agent-skill--skills--swiftui-expert-skill",
+      "name": "swiftui-expert-skill",
+      "library": "avdlee--swiftui-agent-skill--skills--swiftui-expert-skill"
+    },
+    {
+      "id": "openai--plugins--plugins--build-ios-apps--skills--swiftui-performance-audit",
+      "name": "swiftui-performance-audit",
+      "library": "openai--plugins--plugins--build-ios-apps--skills--swiftui-performance-audit"
+    }
+  ],
+  "requirements": [
+    "macOS",
+    "Xcode и iOS Simulator для сборки и выполнения"
+  ],
+  "limitations": "SwiftUI не покрывает весь UIKit и все способы разработки iOS"
+}
