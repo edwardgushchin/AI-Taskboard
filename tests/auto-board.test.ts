@@ -29,6 +29,7 @@ function fixture(mode = "human") {
   const fail = (code: string) => ({ ok: false, error: { code, message: code } });
   const runtime = runInNewContext(stripTypeScriptTypes(code) + "\n({scheduleAutoBoard, autoBoards})", {
     subscriptions: new Map([["project", watch]]), closingProjects: new Set(), boardWorkRequests: managers, boardRequests: dialogues,
+    backgroundManagerRequests: new Map(),
     isManual, nextReadyTask, boardReviewMode, agentSlots: slots, projectIdentity: (path: string) => path,
     executorBusy: (_: string, id: string) => busy.has(id), t: (key: string) => localization.text(key, {}, "en"),
     broadcastBoardChat: (_: string, __: string, value: any) => errors.push(value.error),
@@ -82,7 +83,9 @@ function fixture(mode = "human") {
     }
     throw new Error("Dispatcher did not settle");
   };
-  const add = (id: string, fields: any = {}) => board.tasks.push({ id, status: "ready", priority: "normal", revision: 1, ...fields });
+  const add = (id: string, fields: any = {}) => board.tasks.push({
+    id, status: "ready", priority: "normal", revision: 1, expertWorkPlanned: true, expertReviewPlanned: true, ...fields,
+  });
   const finish = (id: string) => {
     busy.get(id)?.(); busy.delete(id);
     const task = board.tasks.find((task: any) => task.id === id);
@@ -120,8 +123,7 @@ test("off and lowered limits apply before the next decision without interrupting
 
 test("automatic planning requests missing plans once and dispatches already planned work within the limit", async () => {
   const f = fixture("reviewer");
-  f.board.settings.requireExpertPlans = true;
-  f.add("T-0001", { priority: "high" });
+  f.add("T-0001", { priority: "high", expertWorkPlanned: false, expertReviewPlanned: false });
   f.add("T-0002", { expertWorkPlanned: true, expertReviewPlanned: true });
   f.add("T-0003", { status: "draft" });
   await f.tick();
@@ -139,10 +141,18 @@ test("automatic planning requests missing plans once and dispatches already plan
   assert.deepEqual(f.launches, ["T-0002", "T-0001"]);
 });
 
+test("automatic dispatch preserves the assigned work of an older expert stage", async () => {
+  const f = fixture("reviewer");
+  f.add("T-0001", { expertStage: { parentId: "T-0002" }, expertReviewPlanned: false });
+  await f.tick();
+  assert.deepEqual(f.launches, ["T-0001"]);
+  assert.deepEqual(f.notices, []);
+});
+
 test("an explicitly requested child gets a plan even with automatic dispatch off", async () => {
   const f = fixture();
-  Object.assign(f.board.settings, { requireExpertPlans: true, autoMode: false });
-  f.add("T-0001", { launchRequested: true });
+  f.board.settings.autoMode = false;
+  f.add("T-0001", { launchRequested: true, expertWorkPlanned: false });
   f.add("T-0002");
   await f.tick();
   assert.deepEqual(f.launches, []);

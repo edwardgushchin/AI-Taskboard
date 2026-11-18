@@ -1,3 +1,4 @@
+import { plannedDraft } from "./fixtures/planned-draft.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, readFileSync, readdirSync } from "node:fs";
@@ -28,7 +29,7 @@ test("CLI transitions replay in order without goals, windows or a running manage
   cli(["init"]);
   cli(["settings"], { reviewMode: "manager" });
   const sync = () => cli(["sync-notices"], { language: "ru" }).changed;
-  const task = cli(["create"], { title: "Проверка доступа", criteria: ["Доступ проверен"], workingDirectory: root });
+  const task = cli(["create"], plannedDraft({ title: "Проверка доступа", criteria: ["Доступ проверен"], workingDirectory: root }));
   cli(["approve", task.id]);
   assert.equal(sync(), false); // First enable skips old events.
   const work = () => readManagerHistory(root, null, "work")?.turns.flatMap(turn => turn.items) ?? [];
@@ -69,7 +70,7 @@ test("CLI transitions replay in order without goals, windows or a running manage
     `import {syncTaskStatusNotices} from ${JSON.stringify(new URL("../src/desktop/manager-history.ts", import.meta.url).href)};syncTaskStatusNotices(process.argv[1]);`, root], { encoding: "utf8", windowsHide: true });
   assert.equal(restart.status, 0, restart.stderr);
   assert.deepEqual(messages(), texts);
-  const cancelled = Array.from({ length: 5 }, (_, i) => cli(["create"], { title: "Отмена " + i }));
+  const cancelled = Array.from({ length: 5 }, (_, i) => cli(["create"], plannedDraft({ title: "Отмена " + i })));
   for (const card of cancelled) cli(["cancel", card.id], { actor: "manager", reason: "больше не требуется" });
   cli(["settings"], { archiveAfterDays: 0 });
   cli(["archive", "sweep"]);
@@ -110,7 +111,7 @@ test("manual lifecycle actions retain audit history without notices; agents stil
   };
   cli(["init"]);
   syncTaskStatusNotices(root);
-  const task = cli(["create"], { title: "Manual", criteria: ["Checked"], workingDirectory: root });
+  const task = cli(["create"], plannedDraft({ title: "Manual", criteria: ["Checked"], workingDirectory: root }));
   const manual = (action: string, input = {}) => {
     cli([action, task.id], { ...input, actor: "user" });
     assert.equal(syncTaskStatusNotices(root), false, action);
@@ -142,8 +143,8 @@ test("manual lifecycle actions retain audit history without notices; agents stil
   manual("request-changes", { reason: "feedback" });
   submit(); syncTaskStatusNotices(root); readManagerMessages(root, [...managerUnread(root)]);
   manual("accept", { revision: cli(["show", task.id]).revision });
-  const source = cli(["create"], { title: "Source", criteria: ["Checked"] });
-  const target = cli(["create"], { title: "Main", criteria: ["Checked"] });
+  const source = cli(["create"], plannedDraft({ title: "Source", criteria: ["Checked"] }));
+  const target = cli(["create"], plannedDraft({ title: "Main", criteria: ["Checked"] }));
   cli(["cancel", source.id], { actor: "manager", reason, mergedInto: source.id, transferred: "hash wrapping" }, false);
   assert.equal(cli(["show", source.id]).status, "draft");
   cli(["cancel", source.id], { actor: "manager", reason, mergedInto: target.id, transferred: "hash wrapping" });
@@ -151,7 +152,7 @@ test("manual lifecycle actions retain audit history without notices; agents stil
   const text = readManagerHistory(root, null, "work")!.turns.at(-1)!.items[0]!.text;
   assert.ok(text.includes(source.id) && text.includes(target.id) && text.includes("Source") && text.includes("Main") && text.includes("hash wrapping"));
   assert.ok(!text.includes(reason));
-  const cancelled = cli(["create"], { title: "Manual cancel" });
+  const cancelled = cli(["create"], plannedDraft({ title: "Manual cancel" }));
   cli(["cancel", cancelled.id], { actor: "user", reason });
   assert.equal(syncTaskStatusNotices(root), false);
   const restart = spawnSync(process.execPath, ["--input-type=module", "-e",
@@ -172,7 +173,7 @@ test("manual Git checkout and resumed checkout preserve the actor of each start"
     return JSON.parse(result.stdout).data;
   };
   cli(["init"], { git: true });
-  const task = cli(["create"], { title: "Git source", criteria: ["Checked"] });
+  const task = cli(["create"], plannedDraft({ title: "Git source", criteria: ["Checked"] }));
   cli(["approve", task.id], { actor: "user" });
   syncTaskStatusNotices(root);
   cli(["start", task.id], { actor: "user" });

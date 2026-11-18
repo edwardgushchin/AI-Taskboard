@@ -241,7 +241,6 @@ export interface Task {
 
 export interface BoardSettings {
   boardType?: "agent" | "manual";
-  requireExpertPlans?: boolean;
   manualColumns?: ManualColumn[];
   name?: string;
   archiveAfterDays: number | null;

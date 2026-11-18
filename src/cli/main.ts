@@ -37,7 +37,7 @@ import packageInfo from "../../package.json" with { type: "json" };
 import { grantTaskTool, requestTaskTool } from "./task-tools.ts";
 import { recoverTestData } from "./test-recovery.ts";
 import { expertContext, expertSkill, listExperts, readExpert, saveExpert } from "./experts.ts";
-import { approvalRequirements, createExpertPlan, expertStagesStatus, initialExpertTeam, requireApprovalPlan, requireExpertPlan, requireExpertResults, reviewDecisionSequence, sendTeamMessage, taskExpertPhase, teamInbox, updateExpertStage } from "./expert-team.ts";
+import { approvalRequirements, createExpertPlan, expertStagesStatus, planNewTask, requireApprovalPlan, requireExpertPlan, requireExpertResults, reviewDecisionSequence, sendTeamMessage, taskExpertPhase, teamInbox, updateExpertStage } from "./expert-team.ts";
 import { syncTaskStatusNotices } from "../desktop/manager-history.ts";
 import { syncSettingsNotices } from "../desktop/settings-notices.ts";
 import { registerRuntime, runtimeEntries, runtimeTransaction } from "../desktop/board-runtime.ts";
@@ -57,7 +57,7 @@ const help = [
   "          project-usage (all available project token usage, including archived tasks and manager)",
   "          manager-usage (known board manager token usage) or manager-usage --stdin (record a run snapshot)",
   "          message TASK-ID --stdin (text, optional kind), messages TASK-ID (optional afterSequence with --stdin), manager-inbox",
-  "          spawn-child PARENT --stdin (key, basis, title, description, criteria; optional existingId and dependencies)",
+  "          spawn-child PARENT --stdin (key, basis, title, description, criteria, expertTeam; optional existingId and dependencies)",
   "          tool-request TASK-ID --stdin (server, tool, reason), tool-grant TASK-ID --stdin (revision, server, tool; restart required)",
   "          tool-revoke TASK-ID --stdin (revision, server, tool; restart required)",
   "          manager-ack [TASK-ID] --stdin (through for one card, messages with id and through for a batch)",
@@ -412,6 +412,7 @@ function run(
       }
     }
     validateDependencies(store, child);
+    planNewTask(store, child, input.expertTeam);
     child = changeTask(child, "approve", { revision: child.revision, actor: "agent" });
     child.origin = { parent: id, key, basis };
     child.launchRequested = true;
@@ -419,15 +420,6 @@ function run(
   }
   if (command === "create") {
     const task = createTask(store.allocateId(), input);
-    const expertTeam = initialExpertTeam(store, task, input.expertTeam);
-    if (expertTeam) {
-      task.expertTeam = expertTeam;
-      for (const [phase, plan] of Object.entries(expertTeam)) {
-        task.history.push({ at: task.createdAt, action: "expert-plan", actor: task.history[0].actor,
-          expertPhase: taskExpertPhase(phase), text: plan.reason });
-      }
-    }
-    requireApprovalPlan(task, store.index.settings, "creation");
     if (isManual(store.index.settings)) {
       if (input.initialStatus !== undefined && input.actor !== "user") throw new TaskboardError("MANUAL_BOARD", "Начальную колонку выбирает пользователь.");
       const column = store.index.settings.manualColumns!.find(c => c.id === (input.initialStatus ?? store.index.settings.manualColumns![0].id));
@@ -436,6 +428,7 @@ function run(
       if (column.terminal) task.closedAt = task.updatedAt;
     } else if (input.initialStatus !== undefined) throw new TaskboardError("INVALID_INPUT", "Выбор начальной колонки доступен только на обычной доске.");
     else task.draftDiscussion = { phase: "queued" };
+    planNewTask(store, task, input.expertTeam);
     validateDependencies(store, task);
     return createWithAttachments(store, task.tags.length ? assignTags(store, task) : task, input.attachmentSources);
   }
@@ -530,9 +523,7 @@ function run(
     if (input.manualColumns !== undefined) throw new TaskboardError("INVALID_INPUT", "Используйте настройку колонок с явным переносом дел.");
     if (isManual(store.index.settings) && input.autoMode === true) throw new TaskboardError("MANUAL_BOARD", "На обычной доске авторежим недоступен.");
     if (input.requireExpertPlans !== undefined) {
-      if (typeof input.requireExpertPlans !== "boolean") throw new TaskboardError("INVALID_INPUT", "requireExpertPlans must be a boolean.");
-      if (isManual(store.index.settings) && input.requireExpertPlans) throw new TaskboardError("MANUAL_BOARD", "Expert execution is unavailable on a manual board.");
-      store.index.settings.requireExpertPlans = input.requireExpertPlans;
+      throw new TaskboardError("INVALID_INPUT", "Expert plans are required on agent boards. Remove requireExpertPlans from the settings request.");
     }
     const settingsJournal = store.index.managerSettings ?? recordSettings(store.index.settings);
     if (input.name !== undefined) {
@@ -674,14 +665,14 @@ function run(
       const targetHead = verifyReviewDecision(store, task, input.targetHead);
       decisionTiming = { lockWaitMs, verificationMs: Math.round(performance.now() - verificationStarted) };
       if (command === "request-changes" && mode !== "human" && input.actor === mode) {
-        if (store.index.settings.requireExpertPlans) requireExpertPlan(task, "review");
+        requireExpertPlan(task, "review");
         requireExpertResults(task, "review", targetHead);
       }
       if (reviewerReport) {
         if (hasPending(store, task)) throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation first.");
         const summary = text(input.summary, "review summary", true);
         if (command === "review-approve") {
-          if (store.index.settings.requireExpertPlans) requireExpertPlan(task, "review");
+          requireExpertPlan(task, "review");
           requireExpertResults(task, "review", targetHead);
           const evidence = input.evidence;
           if (!Array.isArray(evidence) || !evidence.length || evidence.length !== task.criteria.length ||
@@ -727,10 +718,11 @@ function run(
       "acceptance-failed", "agent"), { kind: "question", text: reason }, "agent"));
   }
   if (command === "accept") {
-    if (input.actor === "manager" && !task.acceptanceRepair && boardReviewMode(store.index.settings) === "manager" &&
-        (store.index.settings.requireExpertPlans || task.expertTeam?.review?.stages.length)) {
-      if (store.index.settings.requireExpertPlans) requireExpertPlan(task, "review");
-      requireExpertResults(task, "review", verifyReviewDecision(store, task, input.targetHead));
+    if (input.actor === "manager" && !task.acceptanceRepair && boardReviewMode(store.index.settings) === "manager") {
+      requireExpertPlan(task, "review");
+      if (task.expertTeam?.review?.stages.length) {
+        requireExpertResults(task, "review", verifyReviewDecision(store, task, input.targetHead));
+      }
     }
     if (task.acceptanceRepair) {
       requireRevision(task, input.revision, true);

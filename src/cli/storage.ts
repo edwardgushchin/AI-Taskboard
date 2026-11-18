@@ -282,7 +282,6 @@ function readIndex(path: string): BoardIndex {
       (index.settings.autoReview !== undefined && typeof index.settings.autoReview !== "boolean") ||
       (index.settings.reviewMode !== undefined && !reviewModes.some(mode => mode === (index.settings as Record<string, unknown>).reviewMode)) ||
       (index.settings.taskLimits !== undefined && !validAgentLimitOverrides(index.settings.taskLimits)) ||
-      (index.settings.requireExpertPlans !== undefined && typeof index.settings.requireExpertPlans !== "boolean") ||
       !boardAgentRoles.every(role => validRoleSettings((index.settings as Record<string, unknown>)[role])) ||
       !(index.settings.archiveAfterDays === null ||
         (Number.isSafeInteger(index.settings.archiveAfterDays) && Number(index.settings.archiveAfterDays) >= 0))) {
@@ -329,7 +328,7 @@ function readIndex(path: string): BoardIndex {
       return { name: tag.name, color: color.toUpperCase() };
     });
   }
-  const { agentLimits: _legacyLimits, ...settings } = index.settings;
+  const { agentLimits: _legacyLimits, requireExpertPlans: _legacyExpertPlans, ...settings } = index.settings;
   const manager = settings.manager;
   if (isRecord(manager) && manager.model === "gpt-6.1-sol" && manager.effort === "medium") {
     settings.manager = defaultBoardAgents.manager;

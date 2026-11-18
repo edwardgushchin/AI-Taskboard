@@ -1173,7 +1173,7 @@ function scheduleAutoBoard(watch: BoardWatch) {
       if (isManual(board.settings)) return;
       const controls = board.settings.autoMode ? board.settings.autoQueue : undefined;
       const reviewMode = boardReviewMode(board.settings);
-      const planned = (task: Board["tasks"][number]) => !board.settings.requireExpertPlans || task.mergeRepair ||
+      const planned = (task: Board["tasks"][number]) => task.mergeRepair || task.expertStage ||
         (task.expertWorkPlanned && (task.schedule || reviewMode === "human" || task.expertReviewPlanned));
       const queued = board.settings.autoMode ? board.tasks : board.tasks.filter(task => task.launchRequested);
       if (!board.settings.autoMode && !queued.some(task => task.status === "ready")) return;
@@ -1235,7 +1235,7 @@ function scheduleAutoBoard(watch: BoardWatch) {
       const tab = [...watch.tabs].find(tab => !tab.window.isDestroyed());
       const needsPlan = controls?.paused ? [] : queued.filter(task =>
         ((task.status === "ready" && !controls?.held.includes(task.id) && !planned(task) && !task.unfinishedDependencies?.length) ||
-         (task.status === "review" && board.settings.requireExpertPlans && reviewMode !== "human" && !task.expertReviewPlanned && !task.acceptanceRepair)) &&
+         (task.status === "review" && reviewMode !== "human" && !task.expertReviewPlanned && !task.acceptanceRepair)) &&
         !queue.notices.has("expert-plan:" + task.id + ":" + task.revision)).slice(0, 4);
       const addressed = board.settings.autoMode ? notices : [];
       if ((addressed.length || needsPlan.length) && tab && !boardWorkRequests.has(key) &&
@@ -2638,7 +2638,7 @@ function scheduleAutoReview(watch: BoardWatch) {
   const available = mode === "reviewer" ? capacity : Math.min(1, capacity);
   const reviewAttempt = (task: Task & { reviewDecision?: number }) => mode + ":" + task.revision + ":" + (task.reviewDecision ?? 0);
   const ready = submissions.filter(task => !task.acceptanceRepair && !watch.reviewerRuns.has(task.id) &&
-    (!watch.board.settings.requireExpertPlans || task.expertReviewPlanned) &&
+    task.expertReviewPlanned &&
     (mode !== "reviewer" || !task.reviewApproved) &&
     watch.reviewAttempts.get(task.id) !== reviewAttempt(task) &&
     ((mode === "reviewer" && task.reviewHasCommit) || !executorBusy(project, task.id))).slice(0, available);

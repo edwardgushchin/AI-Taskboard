@@ -1,3 +1,4 @@
+import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -81,7 +82,7 @@ if (!process.versions.electron) {
       for (const [project, title] of [[first, "First project task"], [second, "Second project task"]]) {
         mkdirSync(project, { recursive: true });
         assert.equal(cli(project, ["init"], { git: true }).ok, true);
-        assert.equal(cli(project, ["create"], { title }).ok, true);
+        assert.equal(cli(project, ["create"], plannedDraft({ title })).ok, true);
       }
     }
     // Run the main process unchanged, with one private hook for simulating a long operation.

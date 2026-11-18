@@ -1,3 +1,4 @@
+import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
 // Production IPC, manager action, persistence and two-window schedule checks.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -39,7 +40,7 @@ const waitFor = async predicate => {
 void (async () => { try {
   cli(["init"]);
   for (const schedule of [{ everyMinutes: 60 }, { time: "09:00" }]) {
-    const task = cli(["create"], { title: "Schedule persistence", criteria: ["Checked"], schedule, workingDirectory: project });
+    const task = cli(["create"], plannedDraft({ title: "Schedule persistence", criteria: ["Checked"], schedule, workingDirectory: project }));
     cli(["approve", task.id]);
     const paused = cli(["update", task.id], { schedulePaused: true });
     paused.schedule.nextAt = "2000-01-01T00:00:00Z";

@@ -1,3 +1,4 @@
+import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
 // Exercise the real Electron IPC, board CLI, scheduler and App Server protocol on isolated cards.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -58,14 +59,14 @@ try {
   const cases = [false, true].map(occupied => {
     const cwd = join(project, occupied ? "occupied" : "free");
     mkdirSync(cwd);
-    const { id } = cli("create", null, { title: "Link includes #", criteria: ["One link includes the # and ID"], workingDirectory: cwd });
+    const { id } = cli("create", null, plannedDraft({ title: "Link includes #", criteria: ["One link includes the # and ID"], workingDirectory: cwd }));
     cli("approve", id);
     cli("start", id);
     const { token } = cli("preview", id);
     cli("submit", id, { token, noChanges: true, summary: "Initial link", checks: ["Fixture"] });
     return { id, cwd, occupied };
   });
-  const { id: unavailableId } = cli("create", null, { title: "Link includes #, unavailable worktree", criteria: ["One link includes the # and ID"] });
+  const { id: unavailableId } = cli("create", null, plannedDraft({ title: "Link includes #, unavailable worktree", criteria: ["One link includes the # and ID"] }));
   cli("approve", unavailableId);
   const { worktree } = cli("start", unavailableId);
   const { token } = cli("preview", unavailableId);

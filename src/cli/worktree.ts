@@ -13,6 +13,7 @@ import {
 } from "./git.ts";
 import type { Repository, Worktree } from "./git.ts";
 import { boardReviewMode, object, record, requireRevision, requireState, taskIdPattern, TaskboardError, text } from "./model.ts";
+import { isManual } from "./manual-board.ts";
 import { requireExpertPlan } from "./expert-team.ts";
 import { boardActor } from "./tasks.ts";
 import type { Task, TaskGit } from "./model.ts";
@@ -214,7 +215,7 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
   const preparing = performance.now();
   const save = (card: Task) => saveStart(store, card, lockWaitMs, Math.round(performance.now() - preparing), undefined, boardActor(input));
   requireState(task, ["ready", "in_progress"]);
-  if (store.index.settings.requireExpertPlans && !task.expertStage) {
+  if (!isManual(store.index.settings) && !task.expertStage) {
     requireExpertPlan(task, "work");
     if (!task.schedule && boardReviewMode(store.index.settings) !== "human") requireExpertPlan(task, "review");
   }

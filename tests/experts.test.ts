@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import type { TestContext } from "node:test";
-import { BoardStore, initializeBoard, onBoard, readJson } from "../src/cli/storage.ts";
+import { BoardStore, initializeBoard, onBoard, readJson, writeJson } from "../src/cli/storage.ts";
 import { expertAssets, expertContext, expertSkill, listExperts, readExpert, saveExpert } from "../src/cli/experts.ts";
 import { createTask } from "../src/cli/tasks.ts";
 import { createExpertPlan, expertStagesStatus, reviewDecisionSequence, sendTeamMessage, teamInbox, updateExpertStage } from "../src/cli/expert-team.ts";
@@ -125,7 +125,9 @@ test("public CLI exposes specialization in launch state and rejects unknown assi
     assert.ok(result.stdout, result.stderr); return JSON.parse(result.stdout);
   };
   assert.equal(call(["experts"]).data.length, 220);
-  const created = call(["create"], { title: "Research", expertId: "research-scientist" }).data;
+  const lead = { lead: "research-scientist", reason: "Research the topic.", stages: [] };
+  const created = call(["create"], { title: "Research", description: "Research the topic.", criteria: ["Findings recorded"],
+    expertId: "research-scientist", expertTeam: { work: lead, review: lead } }).data;
   assert.equal(call(["show", created.id, "--compact"], { launchDetails: true }).data.expertId, "research-scientist");
   assert.equal(call(["update", created.id], { revision: 1, expertId: "unknown-role" }).error.code, "EXPERT_NOT_FOUND");
 });
@@ -147,8 +149,14 @@ test("planned work and review enforce stage order, evidence and independent mail
   const workPlan = { lead: "product-owner", reason: "The product owner checks scope and QA tests the result.", stages: work };
   const scope = { title: "Check scope", description: "Verify the changes.", criteria: ["Checked"], workingDirectory: f.root,
     subtasks: [{ title: "Check the scope" }, { title: "Verify the output" }] };
-  const task = call(["create"], scope);
-  call(["settings"], { requireExpertPlans: true, reviewMode: "reviewer" });
+  call(["create"], { ...scope, actor: "user" }, "EXPERT_PLAN_REQUIRED");
+  const task = f.run(store => store.create(createTask(store.allocateId(), scope)));
+  const path = join(f.location.directory, "board.json");
+  const index = readJson(path) as { settings: Record<string, unknown> };
+  index.settings.requireExpertPlans = false;
+  writeJson(path, index);
+  call(["settings"], { requireExpertPlans: false }, "INVALID_INPUT");
+  assert.equal(call(["settings"]).requireExpertPlans, undefined);
   call(["create"], { ...scope, actor: "manager" }, "EXPERT_PLAN_REQUIRED");
   call(["create"], { ...scope, actor: "user" }, "EXPERT_PLAN_REQUIRED");
   call(["create"], { ...scope, actor: "manager", expertTeam: {
@@ -164,7 +172,22 @@ test("planned work and review enforce stage order, evidence and independent mail
   let revision = task.revision;
   const command = (name: string, input: object = {}, error?: string) => call([name, task.id], input, error);
   assert.deepEqual(command("show").approvalRequirements, ["work", "review"]);
+  assert.equal(command("show").description, scope.description);
+  assert.deepEqual(command("show").criteria, scope.criteria);
   command("approve", { revision }, "EXPERT_PLAN_REQUIRED");
+  for (const reviewMode of ["human", "manager", "reviewer"]) {
+    call(["settings"], { reviewMode });
+    const expertTeam = { work: { ...workPlan, stages: [] } };
+    if (reviewMode === "human") {
+      const draft = call(["create"], { ...scope, expertTeam });
+      assert.equal(call(["approve", draft.id], { revision: draft.revision }).status, "ready");
+    } else {
+      call(["create"], { ...scope, expertTeam }, "EXPERT_PLAN_REQUIRED");
+      const draft = call(["create"], { ...scope, expertTeam, schedule: { everyMinutes: 60 } });
+      assert.equal(call(["approve", draft.id], { revision: draft.revision }).status, "ready");
+      call(["create"], { ...scope, schedule: { everyMinutes: 60 } }, "EXPERT_PLAN_REQUIRED");
+    }
+  }
   revision = command("expert-plan", { revision, ...workPlan }).parent.revision;
   command("approve", { revision }, "EXPERT_PLAN_REQUIRED");
   revision = command("expert-plan", { revision, phase: "review", ...review }).parent.revision;

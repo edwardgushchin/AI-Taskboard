@@ -1196,7 +1196,6 @@
   "experts.team": "Equipa de especialistas",
   "experts.add_stage": "Adicionar etapa de trabalho",
   "experts.stage_title": "Título da etapa",
-  "experts.require_plans": "Exigir planos de especialistas antes de iniciar tarefas",
   "experts.description": "Descrição",
   "experts.inputs": "Entradas, uma por linha",
   "experts.outputs": "Resultados, um por linha",

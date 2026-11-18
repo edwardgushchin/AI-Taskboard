@@ -1,3 +1,4 @@
+import { plannedDraft } from "./fixtures/planned-draft.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -28,7 +29,7 @@ async function fixture(t: import("node:test").TestContext) {
     return reply.data;
   }
   await cli(["init"]);
-  const task = await cli<Task>(["create"], { title: "Unicode fixture", criteria: ["Exact text"], workingDirectory: root });
+  const task = await cli<Task>(["create"], plannedDraft({ title: "Unicode fixture", criteria: ["Exact text"], workingDirectory: root }));
   await cli(["approve", task.id]);
   await cli(["start", task.id]);
   syncTaskStatusNotices(root);

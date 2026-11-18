@@ -1,3 +1,4 @@
+import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
 // Real main process, private profile and empty boards: never touches a user's queue.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -95,7 +96,7 @@ try {
   await wait(() => second.webContents.executeJavaScript("window.taskboard?.bootstrap().then(f => Boolean(f.board))"));
   if (returnCheck) {
     const project = boards[1];
-    const created = cli(project, ["create"], { title: "Return from two windows", criteria: ["Checked"], workingDirectory: project });
+    const created = cli(project, ["create"], plannedDraft({ title: "Return from two windows", criteria: ["Checked"], workingDirectory: project }));
     const ready = cli(project, ["approve", created.id], { revision: created.revision });
     const running = cli(project, ["start", ready.id], { revision: ready.revision }).task;
     const send = (win, revision) => win.webContents.executeJavaScript(
@@ -117,7 +118,7 @@ try {
     console.log("Return to draft through real IPC passed in two windows with one shared card");
 
     const startCard = title => {
-      const card = cli(project, ["create"], { title, criteria: ["Checked"], workingDirectory: project });
+      const card = cli(project, ["create"], plannedDraft({ title, criteria: ["Checked"], workingDirectory: project }));
       const approved = cli(project, ["approve", card.id], { revision: card.revision });
       return cli(project, ["start", card.id], { revision: approved.revision }).task;
     };

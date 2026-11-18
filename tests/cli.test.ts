@@ -1,3 +1,4 @@
+import { plannedDraft } from "./fixtures/planned-draft.ts";
 import assert from "node:assert/strict";
 import childProcess, { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
@@ -59,6 +60,7 @@ function commandArgs(root: string, args: string[], input?: unknown): string[] {
 }
 
 function cli(root: string, args: string[], input?: unknown, expectedCode?: string) {
+  if (args[0] === "create" && input && typeof input === "object") input = plannedDraft(input);
   const result = spawnSync(process.execPath, commandArgs(root, args, input), {
     env, encoding: "utf8", input: input === undefined ? undefined : JSON.stringify(input), windowsHide: true,
   });
@@ -935,10 +937,12 @@ test("normal commands enforce task state, criteria, and revisions", t => {
   git(root, "init", "-b", "main");
   cli(root, ["list"], undefined, "BOARD_NOT_FOUND");
   cli(root, ["init"]);
+  cli(root, ["create"], { title: "Build CSV export", criteria: [] }, "EXPERT_PLAN_REQUIRED");
   let task = cli(root, ["create"], { title: "Build CSV export" });
   assert.equal(task.id, "T-0001");
   cli(root, ["start", task.id], undefined, "INVALID_TRANSITION");
-  cli(root, ["approve", task.id], { revision: task.revision }, "CRITERIA_REQUIRED");
+  task = cli(root, ["update", task.id], { revision: task.revision, criteria: [] });
+  cli(root, ["approve", task.id], { revision: task.revision }, "EXPERT_PLAN_REQUIRED");
   task = cli(root, ["update", task.id], { criteria: ["A CSV file can be downloaded."], revision: task.revision });
   cli(root, ["approve", task.id], { revision: 1 }, "REVISION_CONFLICT");
   task = cli(root, ["approve", task.id], { revision: task.revision });
@@ -1243,7 +1247,8 @@ test("the board tag catalog migrates older tasks and shares names and colors acr
   assert.deepEqual(updated.tags, [name]);
   cli(root, ["update", active.id], { tags: ["Stale tag"], revision: active.revision }, "REVISION_CONFLICT");
   cli(root, ["tag", "set"], { name: "ошибки", color: "#91B6F9" });
-  assert.deepEqual(cli(root, ["show", active.id]), { ...updated, artifacts: [] });
+  assert.deepEqual(cli(root, ["show", active.id]), { ...updated, artifacts: [],
+    approvalRequirements: [], expertStageStatus: { work: [], review: [] } });
   cli(root, ["update", active.id], { tags: [], revision: updated.revision });
   const empty = cli(root, ["list", "--tag", name]);
   assert.deepEqual(empty.tasks, []);
@@ -1522,7 +1527,7 @@ test("parallel processes receive unique task IDs and share one catalog entry per
   const root = fixture(t);
   cli(root, ["init"]);
   const tasks = await Promise.all(Array.from({ length: 8 }, async (_, index) => {
-    const input = { title: "Parallel " + index, tags: [index % 2 ? "Shared" : "SHARED", "Tag " + index] };
+    const input = plannedDraft({ title: "Parallel " + index, tags: [index % 2 ? "Shared" : "SHARED", "Tag " + index] });
     const child = spawn(process.execPath, commandArgs(root, ["create"], input), {
       env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
     });
@@ -1660,7 +1665,7 @@ test("a recurring card starts only when due and approved and keeps its history f
   assert.equal(completed.status, "ready");
   assert.equal(completed.summary, "The check passed.");
   assert.deepEqual(completed.schedule, { ...schedule, nextAt: nextScheduledRun(schedule, new Date(completed.updatedAt)) });
-  assert.deepEqual(completed.history.map(event => event.action), ["create", "approve", "start", "progress"]);
+  assert.deepEqual(completed.history.map(event => event.action), ["create", "expert-plan", "expert-plan", "approve", "start", "progress"]);
   cli(root, ["start", task.id], { revision: completed.revision, scheduled: true }, "INVALID_TRANSITION");
   const interval: Task = cli(root, ["update", task.id], { schedule: { everyMinutes: 180 } });
   assert.equal(interval.schedule?.everyMinutes, 180);
@@ -2197,6 +2202,7 @@ test("discussion return does not decide the manager's independent review", t => 
   cli(root, ["init"]);
   cli(root, ["settings"], { reviewMode: "manager", autoMode: false });
   const { id } = cli(root, ["create"], { title: "Correct link", criteria: ["One link"], workingDirectory: root, expertTeam: {
+    work: plannedDraft({}).expertTeam.work,
     review: { lead: "qa-engineer", reason: "Independent verification", stages: [{
       key: "verify", expertId: "qa-engineer", title: "Verify", criteria: ["Checked"], outputs: ["Decision"],
     }] },
@@ -2885,7 +2891,7 @@ test("review pages can omit unchanged context without losing edits", t => {
   assert.equal(summary.status, 0, summary.stdout + summary.stderr);
   assert.match(summary.stderr, /merge-base runs outside board lock/);
   assert.match(summary.stderr, /merge-tree runs outside board lock/);
-  assert.deepEqual(JSON.parse(summary.stdout).data, { ...review, settings: {
+  assert.deepEqual(JSON.parse(summary.stdout).data, { ...review, reviewTeam: task.expertTeam.review, settings: {
     reviewMode: "reviewer", reviewer: cli(root, ["settings"]).reviewer,
   } });
 
@@ -2952,6 +2958,7 @@ test("required stage artifacts are pinned to the submitted snapshot and availabl
     artifactOutputs: { Screen: "png", Scenario: "text" },
   };
   const task = cli(root, ["create"], { title: "Verify the screen", criteria: stage.criteria, expertTeam: {
+    review: plannedDraft({}).expertTeam.review,
     work: { lead: "qa-engineer", reason: "Verify the screen and the action from the same version.", stages: [stage] },
   } });
   cli(root, ["approve", task.id]);
@@ -3784,7 +3791,9 @@ test("recurring child work deduplicates local and external occurrences and recov
   const localResult = join(root, "check-result.json");
   writeFileSync(localResult, JSON.stringify({ check: "local:check:file:event1", error: "Local check found a failure" }));
   const finding = JSON.parse(readFileSync(localResult, "utf8"));
-  const brief = { title: "Repair finding", description: "Fix the observed problem", criteria: ["Check succeeds"], basis: finding.error, key: finding.check };
+  const scope = { title: "Repair finding", description: "Fix the observed problem", criteria: ["Check succeeds"], basis: finding.error, key: finding.check };
+  cli(root, ["spawn-child", p.id], scope, "EXPERT_PLAN_REQUIRED");
+  const brief = plannedDraft(scope);
   cli(root, ["spawn-child", p.id], { ...brief, criteria: [] }, "INVALID_INPUT");
   const first = cli(root, ["spawn-child", p.id], brief);
   assert.equal(first.status, "ready"); assert.equal(first.launchRequested, true);
@@ -3849,7 +3858,7 @@ test("recurring children use independent Git worktrees and ordinary review modes
   const directories = new Set<string>();
   for (const mode of ["human", "reviewer"]) {
     cli(root, ["settings"], { reviewMode: mode, autoMode: false });
-    const child = cli(root, ["spawn-child", created.id], { key: mode, basis: "Local finding " + mode, title: "Repair " + mode, description: "Fix local finding", criteria: ["Finding resolved"] });
+    const child = cli(root, ["spawn-child", created.id], plannedDraft({ key: mode, basis: "Local finding " + mode, title: "Repair " + mode, description: "Fix local finding", criteria: ["Finding resolved"] }));
     const started = cli(root, ["start", child.id], { revision: child.revision });
     assert.ok(started.worktree); assert.notEqual(started.worktree, root); directories.add(started.worktree);
     const current = cli(root, ["show", child.id]);

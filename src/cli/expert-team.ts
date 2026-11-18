@@ -1,6 +1,7 @@
 import { boardReviewMode, member, object, strings, text, number, record, requireRevision, requireState, TaskboardError } from "./model.ts";
 import type { BoardSettings, ExpertPhase, Task, TaskEvent } from "./model.ts";
 import type { BoardStore } from "./storage.ts";
+import { isManual } from "./manual-board.ts";
 import { readExpert } from "./experts.ts";
 import { readTask } from "./archive.ts";
 import { artifactSource } from "./artifacts.ts";
@@ -21,7 +22,7 @@ export function requireExpertPlan(task: Task, phase: Phase) {
 }
 
 export function approvalRequirements(task: Task, settings: BoardSettings) {
-  if (!settings.requireExpertPlans || settings.boardType === "manual") return [];
+  if (isManual(settings)) return [];
   return [
     ...(!task.description.trim() ? ["description"] : []),
     ...(!task.criteria.some(criterion => criterion.trim()) ? ["criteria"] : []),
@@ -35,14 +36,18 @@ export function requireApprovalPlan(task: Task, settings: BoardSettings, action:
   if (missing.length) throw new TaskboardError("EXPERT_PLAN_REQUIRED", "Missing required card fields for " + action + ": " + missing.join(", ") + ".");
 }
 
-export function initialExpertTeam(store: BoardStore, task: Pick<Task, "schedule">, value: unknown): Task["expertTeam"] {
-  if (value === undefined) return;
-  if (store.index.settings.boardType === "manual") throw new TaskboardError("MANUAL_BOARD", "Expert plans require an agent board.");
-  const team = object(value);
-  return Object.fromEntries(Object.entries(team).map(([key, plan]) => {
-    const phase = taskExpertPhase(key);
-    return [phase, parseExpertPlan(store, task, phase, object(plan))];
-  }));
+export function planNewTask(store: BoardStore, task: Task, value: unknown) {
+  if (value !== undefined) {
+    if (isManual(store.index.settings)) throw new TaskboardError("MANUAL_BOARD", "Expert plans require an agent board.");
+    task.expertTeam = Object.fromEntries(Object.entries(object(value)).map(([key, plan]) => {
+      const phase = taskExpertPhase(key);
+      const parsed = parseExpertPlan(store, task, phase, object(plan));
+      task.history.push({ at: task.createdAt, action: "expert-plan", actor: task.history[0].actor,
+        expertPhase: phase, text: parsed.reason });
+      return [phase, parsed];
+    }));
+  }
+  requireApprovalPlan(task, store.index.settings, "creation");
 }
 
 function parseExpertPlan(store: BoardStore, task: Pick<Task, "schedule">, phase: Phase, input: Record<string, unknown>, previous?: ExpertPhase): ExpertPhase {
