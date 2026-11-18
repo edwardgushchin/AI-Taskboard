@@ -3767,7 +3767,7 @@ test("card review mode validates owner scope and preserves other cards", async t
 
   const ordinary = fixture(t);
   cli(ordinary, ["init"], { boardType: "manual" });
-  const personal = cli(ordinary, ["create"], { title: "Personal card" });
+  const personal = cli(ordinary, ["create"], { title: "Personal card", expertTeam: undefined });
   const personalRequest = "Set " + personal.id + " to reviewer-human";
   assert.equal(errorCode(setReviewModeFromChat(ordinary, personalRequest, { ...input, id: personal.id, authorization: personalRequest, revision: personal.revision })), "MANUAL_BOARD");
 });
