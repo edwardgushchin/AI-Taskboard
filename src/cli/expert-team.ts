@@ -1,4 +1,4 @@
-import { boardReviewMode, member, object, strings, text, number, record, requireRevision, requireState, TaskboardError } from "./model.ts";
+import { taskReviewMode, member, object, strings, text, number, record, requireRevision, requireState, TaskboardError } from "./model.ts";
 import type { BoardSettings, ExpertPhase, SkillCheck, Task, TaskEvent } from "./model.ts";
 import type { BoardStore } from "./storage.ts";
 import { readExpert } from "./experts.ts";
@@ -26,7 +26,7 @@ export function approvalRequirements(task: Task, settings: BoardSettings) {
     ...(!task.description.trim() ? ["description"] : []),
     ...(!task.criteria.some(criterion => criterion.trim()) ? ["criteria"] : []),
     ...(!task.expertTeam?.work?.lead ? ["work"] : []),
-    ...(!task.schedule && boardReviewMode(settings) !== "human" && !task.expertTeam?.review?.lead ? ["review"] : []),
+    ...(!task.schedule && taskReviewMode(task, settings) !== "human" && !task.expertTeam?.review?.lead ? ["review"] : []),
   ];
 }
 
@@ -224,7 +224,7 @@ export function updateExpertStage(store: BoardStore, id: string, phase: Phase, i
   requireRevision(task, input.revision, true);
   const settings = store.index.settings;
   const approval = phase === "review" ? currentReviewApproval(task, settings)?.reviewApproval : undefined;
-  if (approval && (settings.reviewMode !== "reviewer-human" || approval.targetHead === targetHead)) {
+  if (approval && (taskReviewMode(task, settings) !== "reviewer-human" || approval.targetHead === targetHead)) {
     throw new TaskboardError("EXPERT_PHASE_CLOSED", "This submission already has a review decision.");
   }
   const stages = expertStagesStatus(task, phase, targetHead);

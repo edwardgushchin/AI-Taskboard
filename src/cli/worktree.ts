@@ -12,7 +12,7 @@ import {
   requireRepository, resolveCommit, worktrees,
 } from "./git.ts";
 import type { Repository, Worktree } from "./git.ts";
-import { boardReviewMode, object, record, requireRevision, requireState, taskIdPattern, TaskboardError, text } from "./model.ts";
+import { taskReviewMode, object, record, requireRevision, requireState, taskIdPattern, TaskboardError, text } from "./model.ts";
 import { requireExpertPlan, skillProofScope } from "./expert-team.ts";
 import { boardActor } from "./tasks.ts";
 import type { Task, TaskGit } from "./model.ts";
@@ -223,7 +223,7 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
   }
   if (store.index.settings.requireExpertPlans && !task.expertStage) {
     requireExpertPlan(task, "work");
-    if (!task.schedule && boardReviewMode(store.index.settings) !== "human") requireExpertPlan(task, "review");
+    if (!task.schedule && taskReviewMode(task, store.index.settings) !== "human") requireExpertPlan(task, "review");
   }
   if (task.status === "ready" || input.actor === "user") {
     const dependencies = unfinishedDependencies(task, id => dependencyStatus(store, id));
