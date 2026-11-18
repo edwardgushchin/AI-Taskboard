@@ -1890,6 +1890,10 @@ function draftComposer() {
   goalText.rows = 2;
   const goalError = element("div", undefined, "board-goal-error");
   goalError.setAttribute("role", "alert");
+  const goalPending = element("div");
+  goalPending.setAttribute("role", "status");
+  goalPending.hidden = true;
+  bindLocalized(goalPending, "textContent", () => t("ui.waiting_for_the_codex_chat_to_become_available_ddb2e85f"));
   const goalActions = element("div", undefined, "board-goal-actions");
   const saveGoal = button("", () => changeGoal("edit", goalText.value.trim()), "quiet");
   const pauseGoal = button("", () => changeGoal("pause"), "quiet");
@@ -1906,7 +1910,7 @@ function draftComposer() {
   }, "quiet");
   const clearGoal = button("", () => changeGoal("clear"), "quiet danger");
   goalActions.append(saveGoal, pauseGoal, resumeGoal, clearGoal);
-  goalBody.append(goalText, goalActions, goalError);
+  goalBody.append(goalText, goalActions, goalPending, goalError);
   goalPanel.append(goalSummary, goalBody);
   const goalLabels = {
     active: ["ui.active_goal_4b86aa5f"], paused: ["ui.goal_paused_9030eeb9"],
@@ -1946,6 +1950,7 @@ function draftComposer() {
     if (changingGoal) return;
     changingGoal = true;
     goalError.textContent = "";
+    goalPending.hidden = kind !== "clear";
     const revision = goalRevision;
     syncGoal();
     try {
@@ -1957,6 +1962,7 @@ function draftComposer() {
       goalError.textContent = error.message;
     } finally {
       changingGoal = false;
+      goalPending.hidden = true;
       syncGoal();
     }
   }
@@ -4045,8 +4051,17 @@ async function showTask(id) {
       body.append(label);
     }
     const chatFiles = new Set(task.history.flatMap(event => event.chat?.files ?? []));
+    const cardAttachments = task.attachments.filter(file => !chatFiles.has(file.file));
+    const cardImages = cardAttachments.filter(isImageAttachment);
     const downloads = element("div", undefined, "sheet-actions");
-    for (const attachment of task.attachments.filter(file => !chatFiles.has(file.file))) {
+    for (const attachment of cardAttachments) {
+      const index = cardImages.indexOf(attachment);
+      if (index >= 0) {
+        const view = button("", () => openImagePreview(task.id, cardImages, index), "quiet");
+        view.append(icon("search"));
+        controlLabelForIcon(view, () => t("ui.view_7aa05de3") + attachment.name);
+        downloads.append(view);
+      }
       downloads.append(taskAttachmentButton(task.id, attachment));
     }
     if (downloads.childElementCount) body.append(downloads);
