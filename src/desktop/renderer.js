@@ -3942,8 +3942,17 @@ async function showTask(id) {
       body.append(label);
     }
     const chatFiles = new Set(task.history.flatMap(event => event.chat?.files ?? []));
+    const cardAttachments = task.attachments.filter(file => !chatFiles.has(file.file));
+    const cardImages = cardAttachments.filter(isImageAttachment);
     const downloads = element("div", undefined, "sheet-actions");
-    for (const attachment of task.attachments.filter(file => !chatFiles.has(file.file))) {
+    for (const attachment of cardAttachments) {
+      const index = cardImages.indexOf(attachment);
+      if (index >= 0) {
+        const view = button("", () => openImagePreview(task.id, cardImages, index), "quiet");
+        view.append(icon("search"));
+        controlLabelForIcon(view, () => t("ui.view_7aa05de3") + attachment.name);
+        downloads.append(view);
+      }
       downloads.append(taskAttachmentButton(task.id, attachment));
     }
     if (downloads.childElementCount) body.append(downloads);

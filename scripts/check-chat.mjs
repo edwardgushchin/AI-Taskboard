@@ -1013,7 +1013,7 @@ app.whenReady().then(async () => {
   await capture("chat-image-preview.png");
   for (let index = 1; index < images.length; index++) {
     await evaluate(`document.querySelector('.image-preview').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))`);
-    await evaluate(`new Promise(resolve => { const poll = () => document.querySelector('.image-preview-toolbar strong').textContent === 'reference-${index}.png' ? resolve() : requestAnimationFrame(poll); poll(); })`);
+    await evaluate(`new Promise(resolve => { const poll = () => document.querySelector('.image-preview-header strong').textContent === 'reference-${index}.png' ? resolve() : requestAnimationFrame(poll); poll(); })`);
     await check(`document.querySelector('.image-preview-stage img').src === window.testImages[${index}]`, "reference images can be navigated in order");
   }
   await evaluate(`document.querySelector('.image-preview').close(); localization.select("en"); renderRunActivity(saved, activity)`);
@@ -1074,7 +1074,7 @@ app.whenReady().then(async () => {
   await check(`parseInt(document.querySelector('.image-preview-toolbar output').value) > 0`, "viewed images can be zoomed");
   for (let index = 1; index < images.length; index++) {
     await evaluate(`document.querySelector('.image-preview').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))`);
-    await evaluate(`new Promise(resolve => { const poll = () => document.querySelector('.image-preview-toolbar strong').textContent === 'viewed-${index}.png' ? resolve() : requestAnimationFrame(poll); poll(); })`);
+    await evaluate(`new Promise(resolve => { const poll = () => document.querySelector('.image-preview-header strong').textContent === 'viewed-${index}.png' ? resolve() : requestAnimationFrame(poll); poll(); })`);
     await check(`document.querySelector('.image-preview-stage img').src === window.testImages[${index}]`, "all viewed images can be navigated in order");
   }
   await evaluate(`document.querySelector('.image-preview').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))`);
