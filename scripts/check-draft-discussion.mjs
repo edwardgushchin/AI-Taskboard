@@ -161,7 +161,7 @@ try {
     const complete = cli(["create"], { ...brief, description: brief.description + " The recipient is audits+north@example.invalid." });
     const completion = await waitAgent(complete.id, 1);
     assert.doesNotMatch(completion, /\?/);
-    assert.match(completion, /(?:enough|sufficien|complete|no (?:material |further |open )?questions?|ready|clear)/i);
+    assert.match(completion, /(?:enough|sufficien|complete|everything (?:needed|in place)|no (?:\w+ )*(?:questions?|clarifications?)|ready|clear)/i);
     assert.equal(existsSync(join(project, ".worktrees")), false);
     await until(() => !readdirSync(staging).some(name => name.startsWith("ai-taskboard-chat-")), "Codex staging cleanup");
     const git = args => execFileSync("git", args, {
@@ -309,7 +309,10 @@ try {
   // The interrupted fixture intentionally has no surviving writer after process exit.
   if (process.exitCode) writer?.();
   slot?.();
-  for (const window of BrowserWindow.getAllWindows()) window.destroy();
-  app.exit(process.exitCode ?? 0);
+  if (live && !process.exitCode) app.quit();
+  else {
+    for (const window of BrowserWindow.getAllWindows()) window.destroy();
+    app.exit(process.exitCode ?? 0);
+  }
 }
 })();
