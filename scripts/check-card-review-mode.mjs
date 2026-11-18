@@ -7,7 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { electronCheck } from "./electron-check.mjs";
 
-const { scratch, artifacts } = electronCheck(import.meta.url, "card-review-mode", 180_000,
+const { scratch, artifacts } = electronCheck(import.meta.url, "card-review-mode", 240_000,
   [["auto-on"], ["auto-off"], ["restart"]]);
 const phase = process.argv.at(-1);
 const autoMode = phase === "auto-on";
@@ -88,7 +88,9 @@ async function run() {
   }
 
   const release = Promise.withResolvers();
+  const resumeNormal = Promise.withResolvers();
   let held, raced;
+  let pausedAcceptance, retryRejection, retryCount = 0;
   const observed = [];
   const receipts = [];
   const replies = new Map();
@@ -97,6 +99,15 @@ async function run() {
       held = input;
       await release.promise;
       return raced = await call(board, args, input);
+    }
+    if (autoMode && args[0] === "accept" && args[1] === normal && input?.autoMode) {
+      retryCount++;
+      if (retryCount === 1) {
+        pausedAcceptance = input;
+        await resumeNormal.promise;
+        return retryRejection = await call(board, args, input);
+      }
+      assert.deepEqual(input, pausedAcceptance);
     }
     const result = await call(board, args, input);
     if (args[1] === hybrid && ["review", "review-approve", "accept"].includes(args[0])) {
@@ -109,9 +120,9 @@ async function run() {
     let text = prompt;
     if (session.separateTurn) {
       assert.ok(!session.mcpTools.some(tool => tool.name === action));
-      for (const id of [hybrid, normal]) {
-        if (!prompt.includes(id)) continue;
-        if (id === hybrid) continue; // Keep this acceptance decision in flight in the auto-off scenario.
+      // During the toggle test only the automatic queue may accept the inherited card.
+      if (!autoMode && prompt.includes(normal)) {
+        const id = normal;
         const snapshot = await call("task_review", { id });
         assert.ok(snapshot.ok, JSON.stringify(snapshot));
         const { revision, targetHead } = snapshot.data;
@@ -130,7 +141,9 @@ async function run() {
   };
   globalThis.fixtureDiscussion = async (_profile, _project, _settings, prompt, _images, _update, call) => {
     const authorization = JSON.parse(prompt).latestUserMessage.text;
+    const before = show(hybrid).revision;
     const receipt = await call(action, { ...replies.get(authorization), authorization });
+    if (!receipt.ok) assert.equal(show(hybrid).revision, before);
     receipts.push(receipt);
     return { text: JSON.stringify(receipt) };
   };
@@ -184,8 +197,20 @@ const callCli = (...args) => globalThis.fixtureCli(realCallCli, ...args);
     return receipts.at(-1);
   };
   assert.equal((await discussion("Use reviewer-human for " + normal, { mode: "reviewer-human" })).error.code, "USER_DIRECTION_REQUIRED");
-  assert.equal((await discussion("Use reviewer-human for this card", { mode: "reviewer-human" })).data.inherited, false);
-  assert.equal((await discussion("Restore board inheritance", { mode: null })).data.inherited, true);
+  const rejected = [
+    [hybrid + " currently uses reviewer mode.", "reviewer-human"],
+    ["Set " + hybrid + " to reviewer-human or manager", "reviewer-human"],
+    ["Set " + hybrid + " to reviewer-human", "manager"],
+    ["Set " + hybrid + " to reviewer-human", null],
+  ];
+  for (const [prompt, mode] of rejected) {
+    const before = show(hybrid).revision;
+    assert.equal((await manager(prompt, { id: hybrid, mode, revision: before, authorization: prompt })).error.code, "USER_DIRECTION_REQUIRED");
+    assert.equal(show(hybrid).revision, before);
+    assert.equal((await discussion(prompt, { mode })).error.code, "USER_DIRECTION_REQUIRED");
+  }
+  assert.equal((await discussion("Установи режим «Ревью + человек» для этой карточки", { mode: "reviewer-human" })).data.inherited, false);
+  assert.equal((await discussion("Верни наследование режима доски", { mode: null })).data.inherited, true);
   const ambiguous = "Use reviewer-human for " + hybrid + " or " + normal;
   assert.equal((await manager(ambiguous, { id: hybrid, mode: "reviewer-human", revision: show(hybrid).revision, authorization: ambiguous })).error.code,
     "USER_DIRECTION_REQUIRED");
@@ -201,7 +226,7 @@ const callCli = (...args) => globalThis.fixtureCli(realCallCli, ...args);
     throw error;
   });
   const history = show(hybrid).history;
-  const authorization = "Set " + hybrid + " to reviewer-human";
+  const authorization = "Назначь " + hybrid + " режим «Ревью + человек»";
   assert.equal((await manager(authorization, { id: hybrid, mode: "reviewer-human", revision: approved.revision, authorization })).data.reviewMode,
     "reviewer-human");
   if (autoMode) {
@@ -213,12 +238,26 @@ const callCli = (...args) => globalThis.fixtureCli(realCallCli, ...args);
   }
   assert.equal(raced.error.code, "REVIEW_MODE_CHANGED");
   assert.deepEqual(show(hybrid).history.slice(0, history.length), history);
-  log("PASS: both chat routes, cross-card denial, ambiguous target, inheritance and stale acceptance (" + raced.error.code + ").");
+  log("PASS: both chats rejected mentions, ambiguity, a different mode and an unrequested reset without changing the revision. Assignment, inheritance and stale acceptance (" + raced.error.code + ") verified.");
 
   const second = globalThis.fixtureWindow([project]).window;
   await waitFor(async () => !second.webContents.isLoading() && (await bootstrap(second)).board, "the second board window");
   submit(normal);
+  if (autoMode) {
+    await waitFor(() => pausedAcceptance, "the inherited card's first acceptance request");
+    cli(["settings"], { autoMode: false });
+    resumeNormal.resolve();
+    const rejection = await waitFor(() => retryRejection, "the temporary acceptance rejection");
+    assert.equal(rejection.error.code, "AUTO_MODE_DISABLED");
+    assert.equal(show(normal).status, "review");
+    assert.equal(show(normal).revision, pausedAcceptance.revision);
+    cli(["settings"], { autoMode: true });
+  }
   await waitFor(() => show(normal).status === "done", "the inherited card to integrate");
+  if (autoMode) {
+    assert.equal(retryCount, 2);
+    log("PASS: AUTO_MODE_DISABLED released the attempt. Re-enabling auto mode integrated the same approved revision exactly once.");
+  }
   const waiting = await waitFor(() => {
     const snapshot = review(hybrid);
     return snapshot.awaitingHumanAcceptance && snapshot;

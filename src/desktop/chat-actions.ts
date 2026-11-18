@@ -3,7 +3,7 @@ import type { CliReply } from "./cli.ts";
 import { exists, locateBoard, onBoard } from "../cli/storage.ts";
 import { readTask } from "../cli/archive.ts";
 import { member, requireRevision, requireState, record, reviewModes, taskReviewMode, taskIdPattern, TaskboardError, priorities } from "../cli/model.ts";
-import type { Task } from "../cli/model.ts";
+import type { ReviewMode, Task } from "../cli/model.ts";
 
 const string = { type: "string" };
 const strings = { type: "array", items: string };
@@ -34,11 +34,11 @@ const returnTool = {
   description: "Return this review card for correction. Include all user feedback and confirmed defects in reason. The executor waits for this discussion to finish and for an available slot. Confirm only the operation result; do not claim it has started.",
   inputSchema: { type: "object", properties: returnProperties, required: ["reason"], additionalProperties: false },
 };
-export const reviewModeInstruction = "Use task_set_review_mode only for an explicit request in the latest owner message to set an existing review mode or restore inheritance. Ask for clarification before writing if the target or mode is ambiguous. Confirm the effective mode and whether it is assigned or inherited using the tool result.";
+export const reviewModeInstruction = "Use task_set_review_mode only when the latest owner message is an unambiguous standalone command. Examples: 'Set T-0194 to reviewer-human', 'Назначь T-0194 режим «Ревью + человек»', 'Верни наследование для T-0194'. The card chat may omit the ID. Pass the whole owner message unchanged as authorization. If the request cannot be verified, ask the owner for one clear command. Confirm the effective mode and inheritance using the tool result.";
 
 const reviewModeProperties = {
   mode: { type: ["string", "null"], enum: [...reviewModes, null], description: "Existing review mode. Null restores inheritance from the board." },
-  authorization: { ...string, description: "Exact quote from the latest owner message containing the explicit request and mode or inheritance. Include the card ID if specified." },
+  authorization: { ...string, description: "The complete latest owner message with the explicit command." },
 };
 const reviewModeTool = {
   type: "function", name: "task_set_review_mode", description: reviewModeInstruction,
@@ -52,7 +52,31 @@ export const boardReviewModeTool = {
 };
 export const chatTools = [updateTool, returnTool, reviewModeTool];
 
-export function setReviewModeFromChat(project: string, userText: string, args: unknown, current?: Task): CliReply<Task & { effectiveReviewMode: string }> {
+const reviewModeNames = new Map<string, ReviewMode>([
+  ...reviewModes.map(mode => [mode, mode] as const),
+  ["project manager", "manager"], ["review", "reviewer"], ["review + human", "reviewer-human"],
+  ["человек", "human"], ["менеджер", "manager"], ["менеджер проекта", "manager"], ["ревью", "reviewer"],
+  ["ревьюер", "reviewer"], ["ревью + человек", "reviewer-human"],
+]);
+
+function requestedReviewMode(message: string, id: string, scoped: boolean): ReviewMode | null | undefined {
+  const command = message.trim().toLowerCase().replace(/\s+/g, " ").replace(/[.!]$/, "");
+  const match = /^(?:(?:пожалуйста|please),? )?(?:(?:для|for) (t-\d+)[,]? )?(назначь(?:те)?|установи(?:те)?|поставь(?:те)?|set|use|верни(?:те)?|восстанови(?:те)?|restore|reset) (?:(?:(?:для|for) )?(t-\d+) )?(.+?)(?: (?:для|for) (t-\d+|этой карточки|this card))?$/u.exec(command);
+  if (!match) return;
+  const [, before, verb, after, value, trailing] = match;
+  const targets = [before, after, trailing].filter(Boolean);
+  if (targets.length > 1 || (!scoped && !targets.length) ||
+      targets.some(target => target.toUpperCase() !== id && !(scoped && ["этой карточки", "this card"].includes(target)))) return;
+
+  if (/^(?:верни|восстанови|restore|reset)/u.test(verb)) {
+    return /^(?:наследование(?: (?:режима )?доски)?|(?:board )?inheritance|to board default)$/u.test(value) ? null : undefined;
+  }
+  const name = value.replace(/^(?:to |режим(?: ревью)? |review mode )/u, "");
+  const quoted = /^(?:"([^"]+)"|«([^»]+)»|„([^“]+)“|“([^”]+)”|`([^`]+)`)$/u.exec(name);
+  return reviewModeNames.get((quoted?.slice(1).find(Boolean) ?? name).replace(/\s*\+\s*/g, " + "));
+}
+
+export function setReviewModeFromChat(project: string, userText: string, args: unknown, current?: Task): CliReply<Task & { effectiveReviewMode: ReviewMode }> {
   const fields = current ? reviewModeProperties : boardReviewModeTool.inputSchema.properties;
   if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).some(key => !Object.hasOwn(fields, key))) {
     return cliFailure("INVALID_INPUT", "Use the parameters defined for this task action.");
@@ -60,13 +84,15 @@ export function setReviewModeFromChat(project: string, userText: string, args: u
   const input = args as Record<string, unknown>;
   const id = current?.id ?? input.id;
   const { authorization } = input;
-  const referenced = userText.match(/\bT-\d+\b/gi) ?? [];
-  if (typeof id !== "string" || !taskIdPattern.test(id) || typeof authorization !== "string" || !authorization.trim() || !userText.includes(authorization) ||
-      (!current && !(authorization.match(/\bT-\d+\b/gi) ?? []).some(reference => reference.toUpperCase() === id)) || referenced.some(reference => reference.toUpperCase() !== id)) {
-    return cliFailure("USER_DIRECTION_REQUIRED", "Quote the latest owner's explicit request for this card.");
+  if (typeof id !== "string" || !taskIdPattern.test(id) || typeof authorization !== "string" || authorization.trim() !== userText.trim()) {
+    return cliFailure("USER_DIRECTION_REQUIRED", "Use the latest owner's complete command for this card.");
   }
   try {
-    const mode = input.mode === null ? undefined : member(input.mode, reviewModes, "review mode");
+    const selection = input.mode === null ? null : member(input.mode, reviewModes, "review mode");
+    if (requestedReviewMode(userText, id, Boolean(current)) !== selection) {
+      return cliFailure("USER_DIRECTION_REQUIRED", "Ask the owner for one explicit command naming this card and the requested mode or inheritance.");
+    }
+    const mode = selection ?? undefined;
     const data = onBoard(locateBoard(project), store => {
       const settings = store.index.settings;
       if (settings.boardType === "manual") throw new TaskboardError("MANUAL_BOARD", "Review modes require an agent board.");
@@ -88,7 +114,7 @@ export function setReviewModeFromChat(project: string, userText: string, args: u
   }
 }
 
-export function reviewModeReceipt(task: Task & { effectiveReviewMode: string }) {
+export function reviewModeReceipt(task: Task & { effectiveReviewMode: ReviewMode }) {
   return { id: task.id, revision: task.revision, reviewMode: task.effectiveReviewMode, inherited: !task.reviewModeOverride };
 }
 

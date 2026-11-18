@@ -1219,7 +1219,11 @@ function scheduleAutoBoard(watch: BoardWatch) {
             targetHead: review.data.targetHead, ...(review.data.message ? { message: review.data.message } : {}),
           });
           if (!accepted.ok) {
-            if (["REVISION_CONFLICT", "REVIEW_MODE_CHANGED", "HUMAN_ACCEPTANCE_REQUIRED", "AUTO_MODE_DISABLED"].includes(accepted.error.code)) continue;
+            if (accepted.error.code === "AUTO_MODE_DISABLED") {
+              queue.integrations.delete(attempt);
+              continue;
+            }
+            if (["REVISION_CONFLICT", "REVIEW_MODE_CHANGED", "HUMAN_ACCEPTANCE_REQUIRED"].includes(accepted.error.code)) continue;
             if (accepted.error.code === "REVIEW_REQUIRED") {
               // Accept checks approval before the revision and status. A
               // concurrent decision can invalidate the approval we just read.

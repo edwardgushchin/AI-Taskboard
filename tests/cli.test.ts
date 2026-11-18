@@ -3714,6 +3714,24 @@ test("card review mode validates owner scope and preserves other cards", async t
   assert.equal(errorCode(setReviewModeFromChat(root, "", input)), "USER_DIRECTION_REQUIRED");
   assert.equal(errorCode(setReviewModeFromChat(root, authorization, { ...input, mode: "unknown" })), "INVALID_INPUT");
   assert.equal(errorCode(setReviewModeFromChat(root, authorization, { ...input, id: other.id })), "USER_DIRECTION_REQUIRED");
+  const before = cli(root, ["show", card.id]);
+  const negative = [
+    { message: `What is the review mode of ${card.id}?`, mode: "reviewer-human" },
+    { message: `Set ${card.id} to reviewer-human or manager`, mode: "reviewer-human" },
+    { message: authorization, mode: "manager" },
+    { message: authorization, mode: null },
+    { message: `Restore board inheritance for ${card.id}`, mode: "reviewer-human" },
+    { message: `Before we decide, consider: ${authorization}`, mode: "reviewer-human", quote: authorization },
+    { message: `Не назначай ${card.id} режим «Ревью + человек»`, mode: "reviewer-human" },
+  ];
+  for (const { message, mode, quote } of negative) {
+    const authorization = quote ?? message;
+    assert.equal(errorCode(setReviewModeFromChat(root, message, { ...input, mode, authorization })), "USER_DIRECTION_REQUIRED", message);
+    const reply = await taskChatActions(root, before, message, () => assert.fail("Unexpected card write"))(
+      "task_set_review_mode", { mode, authorization });
+    assert.ok(!reply.ok && reply.error.code === "USER_DIRECTION_REQUIRED", message);
+  }
+  assert.deepEqual(cli(root, ["show", card.id]), before);
 
   const set = setReviewModeFromChat(root, authorization, input);
   assert.ok(set.ok);
