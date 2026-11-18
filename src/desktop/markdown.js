@@ -15,10 +15,19 @@ function localDocumentLink(value) {
   } catch { return false; }
 }
 
+function localPngPath(value) {
+  try {
+    const path = decodeURIComponent(value);
+    if (!/[\0-\x1f\x7f]/.test(path) && /\.png$/i.test(path) &&
+        /^(?:[a-z]:[\\/]|[\\/]|\.tasks[\\/])/i.test(path)) return path;
+  } catch {}
+}
+
 if (chatMarkdown) {
   const web = url => /^https?:\/\//i.test(url);
   const inlineImage = url => /^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$/i.test(url);
-  chatMarkdown.validateLink = url => web(url) || /^mailto:/i.test(url) || inlineImage(url) || localDocumentLink(url);
+  chatMarkdown.validateLink = url => web(url) || /^mailto:/i.test(url) || inlineImage(url) ||
+    localDocumentLink(url) || Boolean(localPngPath(url));
   const parseDestination = chatMarkdown.helpers.parseLinkDestination;
   chatMarkdown.helpers = { ...chatMarkdown.helpers };
   chatMarkdown.helpers.parseLinkDestination = (text, start, max) => {
@@ -33,7 +42,7 @@ if (chatMarkdown) {
       if (!angle && char === ")" && depth-- === 0) break;
     }
     const path = text.slice(start + (angle ? 1 : 0), end).trimEnd();
-    if (depth <= 0 && (!angle || text[end] === ">") && localDocumentLink(path)) {
+    if (depth <= 0 && (!angle || text[end] === ">") && (localDocumentLink(path) || localPngPath(path))) {
       return { ok: true, str: path, pos: angle ? end + 1 : start + path.length };
     }
     return parseDestination(text, start, max);
@@ -112,7 +121,7 @@ if (chatMarkdown) {
     String.raw`[A-Z]\w*(?:${generic}|\?)`,
     String.raw`null|true|false|undefined|0x[\da-fA-F]+`,
   ];
-  const agentReferences = new RegExp(String.raw`(?<![\p{L}\p{N}_.\\/:])(?:${patterns.join("|")})(?![\p{L}\p{N}_\\/])`, "gu");
+  const agentReferences = new RegExp(String.raw`(?<![\p{L}\p{N}_#.\\/:])(?:${patterns.join("|")})(?![\p{L}\p{N}_\\/])`, "gu");
   const digest = /(?<![\p{L}\p{N}_.%/\\-])(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{40})(?![\p{L}\p{N}_%/\\-]|\.[\p{L}\p{N}])/u;
   const reportReferences = new RegExp(digest.source + "|" + agentReferences.source, "gu");
   chatMarkdown.core.ruler.after("local_markdown_links", "chat_references", state => {
@@ -375,6 +384,85 @@ function splitLongReportParagraphs(block) {
   }
 }
 
+function showArtifactThumbnail(link, path) {
+  const label = link.textContent || path.split(/[\\/]/).at(-1);
+  const tile = element("span", undefined, "chat-artifact");
+  const status = element("span", () => t("ui.loading_image_2f7fd2f5"), "muted");
+  status.setAttribute("role", "status");
+  tile.append(status);
+  link.replaceWith(tile);
+  void (async () => {
+    try {
+      const src = await api.artifactPreview(path);
+      if (!src) throw new Error();
+      const image = element("img");
+      image.alt = label;
+      image.src = src;
+      await image.decode();
+      const file = { name: label };
+      const preview = button("", () => openImagePreview(undefined, [file], 0, src, {
+        preview: () => src,
+        save: () => {
+          const download = element("a");
+          download.href = src;
+          download.download = path.split(/[\\/]/).at(-1);
+          download.click();
+          return { ok: true };
+        },
+      }), "quiet chat-attachment has-preview");
+      preview.title = label;
+      preview.append(image);
+      tile.replaceChildren(preview);
+    } catch {
+      bindLocalized(status, "textContent", () => t("ui.image_unavailable_024abc1d") + label);
+    }
+  })();
+}
+
+function plainMessageLiteralRanges(text) {
+  const ranges = (chatMarkdown.linkify.match(text) ?? []).map(link => [link.index, link.lastIndex]);
+  const lineStarts = [0];
+  for (const newline of text.matchAll(/\r\n?|\n/g)) {
+    lineStarts.push(newline.index + newline[0].length);
+  }
+  for (const token of chatMarkdown.parse(text, {})) {
+    if (token.type === "fence" || token.type === "code_block") {
+      const [start, end] = token.map;
+      ranges.push([lineStarts[start], lineStarts[end] ?? text.length]);
+    }
+  }
+  return ranges;
+}
+
+function showHexColors(block, plainText = false) {
+  if (!block.textContent.includes("#")) return;
+  // Outgoing manager messages have one text node and retain their literal formatting.
+  const literalRanges = plainText && chatMarkdown ? plainMessageLiteralRanges(block.textContent) : [];
+  const hexColor = /(?<![\p{L}\p{M}\p{N}_#/%\\])#[0-9a-f]{6}(?![\p{L}\p{M}\p{N}_#]|[./\\][\p{L}\p{N}])/giu;
+  const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+  const matches = [];
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    if (!node.data.includes("#") || node.parentElement.closest("a, pre, button")) continue;
+    const colors = [...node.data.matchAll(hexColor)].filter(({ index }) =>
+      !literalRanges.some(([start, end]) => start <= index && index < end));
+    if (colors.length) matches.push({ node, colors });
+  }
+  for (const { node, colors } of matches) {
+    const fragment = document.createDocumentFragment();
+    let offset = 0;
+    for (const { 0: color, index } of colors) {
+      fragment.append(node.data.slice(offset, index));
+      const label = element("span", color, "chat-hex-color");
+      label.style.setProperty("--chat-hex", color);
+      fragment.append(label);
+      offset = index + color.length;
+    }
+    fragment.append(node.data.slice(offset));
+    node.replaceWith(fragment);
+  }
+}
+
 function chatText(text, context = { taskId: taskInSheet?.id }) {
   const block = element("div", undefined, "chat-text");
   if (!chatMarkdown) {
@@ -394,7 +482,12 @@ function chatText(text, context = { taskId: taskInSheet?.id }) {
     splitLongReportParagraphs(block);
   }
   formatReportReferences(block);
+  for (const link of block.querySelectorAll("a[href]")) {
+    const path = localPngPath(link.getAttribute("href"));
+    if (path) showArtifactThumbnail(link, path);
+  }
   for (const code of block.querySelectorAll("pre > code")) addCodeCopy(code.parentElement, code);
+  if (!context.source) showHexColors(block);
   block.addEventListener("click", event => {
     const link = event.target.closest("a");
     if (!link) return;

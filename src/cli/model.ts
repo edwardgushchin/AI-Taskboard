@@ -229,6 +229,7 @@ export interface Task {
   schedule?: TaskSchedule;
   origin?: { parent: string; key: string; basis: string };
   launchRequested?: boolean;
+  discussionReturn?: number;
   childWork?: { key: string; basis: string; id: string }[];
   blocked?: { reason: string; condition: string; previousStatus?: "draft" | "ready" };
   result?: { summary: string; checks: string[]; limitations: string[]; noChanges?: { head: string | null };
@@ -386,6 +387,7 @@ export function record(
       ? { schedule: { ...task.schedule, nextAt: nextScheduledRun(task.schedule, new Date(at),
         task.status === "in_progress" ? task.schedule.nextAt : undefined) } } : {}),
     ...(next !== "draft" && task.draftDiscussion ? { draftDiscussion: undefined } : {}),
+    ...(next !== "in_progress" && task.discussionReturn !== undefined ? { discussionReturn: undefined } : {}),
     status: next,
     revision: task.revision + 1,
     updatedAt: at,

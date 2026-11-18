@@ -8,6 +8,7 @@ export interface ProviderLimits {
   state: "ready" | "unknown" | "no_windows" | "unsupported" | "auth" | "error" | "stale";
   windows: LimitWindow[];
   observedAt?: number;
+  plan?: string;
 }
 
 // Missing or invalid values never become a full or empty quota.
@@ -40,19 +41,24 @@ export async function readCodexLimits(profile: string): Promise<ProviderLimits |
   });
   const rpc = codexRpc(child, () => {});
   const timeout = setTimeout(() => rpc.fail(new Error("Rate limits request timed out")), 20_000);
+  let plan: string | undefined;
   try {
     await rpc.request("initialize", { clientInfo: { name: "ai_taskboard", version: "0.1.0" } });
     rpc.send({ method: "initialized" });
     const account: any = await rpc.request("account/read", {});
     if (!account.account) return { provider: "Codex", state: "auth", windows: [] };
     if (account.account.type !== "chatgpt") return { provider: "Codex", state: "unsupported", windows: [] };
+    const planType = account.account.planType;
+    if (typeof planType === "string" && planType.trim() && planType.trim().toLowerCase() !== "unknown") {
+      plan = planType.trim();
+    }
     const data = await rpc.request("account/rateLimits/read", {});
     const windows = codexLimitWindows(data);
-    return { provider: "Codex", state: codexLimitState(data, windows), windows, observedAt: Date.now() };
+    return { provider: "Codex", state: codexLimitState(data, windows), windows, observedAt: Date.now(), plan };
   } catch (error) {
     const message = String(error);
     return { provider: "Codex", state: /auth|unauthorized|login|401/i.test(message) ? "auth" :
-      /not supported|method not found/i.test(message) ? "unsupported" : "error", windows: [] };
+      /not supported|method not found/i.test(message) ? "unsupported" : "error", windows: [], plan };
   } finally {
     clearTimeout(timeout);
     rpc.close();

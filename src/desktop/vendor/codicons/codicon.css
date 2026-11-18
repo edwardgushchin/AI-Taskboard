@@ -24,6 +24,7 @@
 .codicon-debug-pause::before { content: "\ead1"; }
 .codicon-stop-circle::before { content: "\eba5"; }
 .codicon-tasklist::before { content: "\eb67"; }
+.codicon-gripper::before { content: "\eb04"; }
 .codicon-symbol-number::before { content: "\ea90"; }
 .codicon-milestone::before { content: "\eb20"; }
 .codicon-link::before { content: "\eb15"; }

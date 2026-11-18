@@ -19,6 +19,8 @@ export interface RuntimeEntry {
   limits?: AgentLimits;
   revision?: number;
   continuation?: { afterDisconnect?: boolean; withoutProgress?: boolean };
+  queuedMessageId?: string;
+  steeringMessageId?: string;
   state?: {
     id: string;
     phase: "starting" | "waiting" | "running";

@@ -2,6 +2,7 @@
 // Optional: --references <task attachment directory> --artifacts <screenshot directory>
 // For a dialogue round trip, use --dialogue-history <empty temp directory>, then repeat with --reopen-dialogue.
 // Pass --large-dialogue-image to both invocations to include a 4 MiB attachment.
+// Use --artifact-links to check submission and dialogue screenshots across an Electron restart.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -12,11 +13,12 @@ import { electronCheck, localizationFixture } from "./electron-check.mjs";
 
 const script = fileURLToPath(import.meta.url);
 const root = resolve(dirname(script), "..");
-const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "chat", 150_000);
+const phases = process.argv.includes("--artifact-links") ? [["--live-artifacts"], ["--reopen-artifacts"]] : [[]];
+const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "chat", 150_000, phases);
 const { app, BrowserWindow, nativeTheme, ipcMain } = await import("electron");
 const option = name => { const index = process.argv.indexOf(name); return index < 0 ? undefined : process.argv[index + 1]; };
 const profile = join(scratch, "profile");
-mkdirSync(profile);
+mkdirSync(profile, { recursive: true });
 app.setPath("userData", profile);
 app.disableHardwareAcceleration();
 const read = name => readFileSync(join(root, "src", "desktop", name), "utf8");
@@ -28,6 +30,7 @@ const require = createRequire(import.meta.url);
 const sourcePreload = join(scratch, "source-preload.cjs");
 writeFileSync(sourcePreload, `const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('readSourceFixture', (id, link, source) => ipcRenderer.invoke('check:source', id, link, source));`);
+writeFileSync(sourcePreload, "\ncontextBridge.exposeInMainWorld('readArtifactFixture', path => ipcRenderer.invoke('board:artifactPreview', path));", { flag: "a" });
 ipcMain.handle("check:source", (_event, _id, link, source) => {
   // Run the production reader with Node's TypeScript support; Electron's loader differs.
   const result = spawnSync(process.env.TASKBOARD_CHECK_NODE, ["--input-type=module", "-e",
@@ -90,7 +93,269 @@ app.whenReady().then(async () => {
     await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
     writeFileSync(join(artifacts, name), (await window.webContents.capturePage()).toPNG());
   };
+  if (process.argv.includes("--hex-colors-only")) {
+    const { clipboard } = await import("electron");
+    window.show();
+    window.focus();
+    const colors = ["#FFFFFF", "#0E0E11", "#131316", "#D0D273", "#9161D2", "#5dB08d"];
+    const tick = "\x60";
+    const sample = "Подойдёт " + colors[0] + "? Palette " + colors.slice(1).map(color => tick + color + tick).join(", ") +
+      ".\n\n[#abcdef](https://example.com/#123456) https://example.com/#abcdef. Commit abc1234, " +
+      "#123 #12345 #1234567 #12345678 #12345G #123456z.\n\n" + tick.repeat(3) + "text\n#123456\n" + tick.repeat(3);
+    const prompt = "Подойдёт #A0b1C2? Или " + tick + "#123ABC" + tick + "?\n" +
+      "https://example.com/?preview=#FFFFFF\n" + tick.repeat(3) + "css\n#FFFFFF\n" + tick.repeat(3) +
+      "\n\n> ~~~css\n> #223344\n> ~~~\n\nЦвет после блока #aBcDeF.";
+    await evaluate("const hexSample = " + JSON.stringify(sample) + "; const hexPrompt = " + JSON.stringify(prompt));
+    await evaluate(`
+      frame = { project: 'hex-fixture', russian: false };
+      document.querySelector('#welcome').hidden = true;
+      sheetKind = 'task';
+      byId('sheet-title').textContent = 'HEX colors';
+      const at = '2026-11-18T12:00:00Z';
+      const reply = { id: 'palette', type: 'agentMessage', phase: 'final_answer', status: 'completed', text: hexSample, at };
+      let managerSaved = false;
+      let manager;
+      api.boardQueue = async (_project, action) => ({ ok: true, data: action === 'list' ? [] : 'hex-queued' });
+      api.boardRequest = async () => {
+        manager.enableStop();
+        await new Promise(resolve => setTimeout(resolve, 100));
+        return { ok: true, data: { answer: hexSample, items: [reply] } };
+      };
+      api.boardHistory = async (_project, _cursor, view) => ({
+        ok: true, data: view === 'live' ? { work: [], chat: [] } :
+          { turns: managerSaved ? [{ messages: [{ text: hexPrompt, files: [], at }], items: [structuredClone(reply)] }] : [], nextCursor: null },
+      });
+      const openManager = () => {
+        manager?.dispose();
+        manager = draftComposer();
+        body.replaceChildren(manager);
+        if (!manager.hasAttribute('data-pinned')) manager.querySelector('.board-chat-pin').click();
+        manager.querySelector('.draft-input textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+      };
+      openManager();
+      sheet.showModal();
+      manager.querySelector('.draft-input textarea').value = hexPrompt;
+      manager.dispatchEvent(new Event('submit', { cancelable: true }));
+      void 0;
+    `);
+    const expectColors = async (selector, label) => {
+      const query = JSON.stringify(selector + " .chat-hex-color");
+      for (let attempt = 0; attempt < 50 && !await evaluate("!!document.querySelector(" + query + ")"); attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      const values = await evaluate("Array.from(document.querySelectorAll(" + query + "), node => node.textContent)");
+      assert.deepEqual(values, colors, values.length ? label : label + ": " + await evaluate("body.textContent"));
+    };
+    const manager = ".board-chat-log:not(.board-work)";
+    const plainMessage = ".board-chat-log [data-actor=user] .chat-text";
+    const checkPlainMessage = async () => {
+      const message = await evaluate("document.querySelector(" + JSON.stringify(plainMessage) + ").innerHTML");
+      assert.deepEqual(await evaluate("Array.from(document.querySelectorAll(" + JSON.stringify(plainMessage + " .chat-hex-color") +
+        "), node => node.textContent)"), ["#A0b1C2", "#123ABC", "#aBcDeF"], message);
+      await check("document.querySelector(" + JSON.stringify(plainMessage) + ").textContent === hexPrompt", "manager prompt keeps its literal text");
+      await check("!document.querySelector(" + JSON.stringify(plainMessage + " :is(a, pre, code)") + ")", "manager prompt retains plain formatting");
+    };
+    await expectColors(manager + " .chat-agent-text", "new manager reply");
+    await checkPlainMessage();
+    await evaluate("managerSaved = true; openManager(); void 0");
+    await expectColors(manager + " .chat-agent-text", "reopened manager history");
+    await checkPlainMessage();
+    await evaluate(`
+      manager.dispose();
+      const hexCard = { id: 'T-0184', createdAt: at, status: 'review', questions: [], attachments: [], history: [] };
+      let reviewSaved = false;
+      api.reviewerChat = async () => ({ ok: true, data: [{
+        id: 'hex-review', at, ...(reviewSaved ? { durationMs: 500 } : {}), items: [structuredClone(reply)],
+      }] });
+      const openCard = () => {
+        taskInSheet = structuredClone(hexCard);
+        body.replaceChildren(taskChat(taskInSheet));
+      };
+      const showWork = () => body.querySelector('[aria-controls="task-chat-work"]').click();
+      openCard();
+      hexCard.history.push({ action: 'chat', actor: 'agent', at, text: hexSample, chat: { model: 'test', effort: 'high' } });
+      openCard();
+      void 0;
+    `);
+    await expectColors(".task-dialogue", "new card reply");
+    await evaluate("sheet.close(); openCard(); sheet.showModal(); void 0");
+    await expectColors(".task-dialogue", "reopened card dialogue");
+    await evaluate("showWork(); void 0");
+    await expectColors(".task-review-attempt", "active reviewer attempt");
+    await evaluate("reviewSaved = true; sheet.close(); openCard(); sheet.showModal(); showWork(); void 0");
+    await expectColors(".task-review-attempt", "reopened reviewer attempt");
+
+    const report = [
+      "Reproduce: node scripts/check-chat.mjs --hex-colors-only --artifacts .tasks/qa",
+      JSON.stringify({ platform: process.platform, electron: process.versions.electron, chromium: process.versions.chrome }),
+      "Manager dialogue, card dialogue and reviewer Work view: exact six codes, new and reopened with IPC fixtures.",
+      "A question mark stays outside the HEX swatch. Outgoing manager messages preserve literal URLs and code fences in live and saved views.",
+    ];
+    for (const theme of ["dark", "light"]) for (const width of [400, 1000]) {
+      nativeTheme.themeSource = theme;
+      window.setSize(width, 740);
+      await evaluate("applyTheme(" + JSON.stringify(theme) + "); void 0");
+      const layout = await evaluate(`(() => {
+        const message = document.querySelector('.task-review-attempt .chat-text');
+        const labels = [...message.querySelectorAll('.chat-hex-color')];
+        const feed = document.querySelector('.task-work');
+        return {
+          lines: new Set(labels.map(label => label.getBoundingClientRect().top)).size,
+          fits: feed.scrollWidth <= feed.clientWidth + 1,
+          swatches: labels.map(label => {
+            const style = getComputedStyle(label, '::after');
+            return [style.backgroundColor, style.borderTopWidth, style.borderTopColor, style.width, style.height];
+          }),
+          links: [...message.querySelectorAll('a')].map(link => link.getAttribute('href')),
+          hash: message.querySelector('.chat-digest')?.title,
+          code: message.querySelector('pre code')?.textContent.trim(),
+          inline: labels.slice(1).every(label => label.parentElement.matches('code')),
+        };
+      })()`);
+      assert.ok(layout.fits && layout.inline);
+      if (width === 400) assert.ok(layout.lines > 1, JSON.stringify(layout));
+      assert.deepEqual(layout.links, ["https://example.com/#123456", "https://example.com/#abcdef"]);
+      assert.equal(layout.hash, "abc1234");
+      assert.equal(layout.code, "#123456");
+      for (const [index, [fill, border, borderColor, w, h]] of layout.swatches.entries()) {
+        const rgb = colors[index].slice(1).match(/../g).map(pair => parseInt(pair, 16));
+        assert.equal(fill, "rgb(" + rgb.join(", ") + ")");
+        assert.equal(border, "1px");
+        assert.notEqual(borderColor, fill);
+        assert.equal(w, h);
+      }
+      for (const index of [0, 5]) {
+        const selected = await evaluate("getSelection().selectAllChildren(document.querySelectorAll('.task-review-attempt .chat-hex-color')[" + index + "]); getSelection().toString()");
+        await clipboard.clear();
+        window.webContents.copy();
+        assert.equal(selected, colors[index]);
+        for (let attempt = 0; attempt < 20 && !await clipboard.readText(); attempt++) {
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        assert.equal(await clipboard.readText(), colors[index]);
+      }
+      await evaluate("getSelection().removeAllRanges()");
+      if (width === (theme === "dark" ? 1000 : 400)) await capture("hex-colors-" + theme + ".png");
+      report.push(theme + " " + width + "px: wrapping, six RGB fills and borders, intact links/code/hash, exact clipboard text.");
+    }
+    writeFileSync(join(artifacts, "hex-colors-check.txt"), report.join("\n") + "\n");
+    console.log("Chat HEX Chromium checks passed");
+    return;
+  }
   const dialogueFixture = option("--dialogue-history");
+  if (process.argv.includes("--artifact-links")) {
+    const project = join(scratch, "board with spaces");
+    const reopening = process.argv.includes("--reopen-artifacts");
+    const runNode = (code, args, input) => {
+      const result = spawnSync(process.env.TASKBOARD_CHECK_NODE, ["--input-type=module", "-e", code, ...args], {
+        input, encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024,
+      });
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      return JSON.parse(result.stdout);
+    };
+    const { work, dialogue } = runNode(`
+      import { createHash } from 'node:crypto';
+      import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+      import { join } from 'node:path';
+      import { callCli } from ${JSON.stringify(new URL('../src/desktop/cli.ts', import.meta.url).href)};
+      import { readManagerDialogue, readManagerHistory, saveManagerHistory, syncTaskStatusNotices }
+        from ${JSON.stringify(new URL('../src/desktop/manager-history.ts', import.meta.url).href)};
+      const [root, reopen, source] = process.argv.slice(1);
+      const cli = async (args, input) => {
+        const result = await callCli(root, args, input);
+        if (!result.ok) throw Error(JSON.stringify(result));
+        return result.data;
+      };
+      let reply;
+      if (reopen !== "true") {
+        mkdirSync(root);
+        await cli(['init']);
+        const task = await cli(['create'], { title: 'Artifact fixture', workingDirectory: root, criteria: ['Show the screenshot'] });
+        await cli(['approve', task.id]);
+        await cli(['start', task.id]);
+        syncTaskStatusNotices(root);
+        const name = 'manager work status.png';
+        const bytes = source ? readFileSync(source) : readFileSync(0);
+        const digest = createHash('sha256').update(bytes).digest('hex');
+        writeFileSync(join(root, name), bytes);
+        const path = join(root, '.tasks', 'artifacts', task.id, digest, name).replaceAll('\\\\', '/');
+        const missing = path.replace(name, 'missing.png');
+        writeFileSync(join(root, 'missing.png'), bytes);
+        const outside = join(root, name).replaceAll('\\\\', '/');
+        const report = label => 'Before [' + label + '](<' + path + '>) after. [Web](https://example.com/) ' +
+          '[Missing](<' + missing + '>) [Outside](<' + outside + '>)';
+        const submit = async (summary, artifacts) => {
+          const preview = await cli(['preview', task.id]);
+          await cli(['submit', task.id], { token: preview.token, noChanges: true, summary, artifacts,
+            checks: ['Fixture screenshot saved'] });
+          syncTaskStatusNotices(root);
+        };
+        await submit('First submission', [name]);
+        await cli(['request-changes', task.id], { reason: 'Include the screenshot link' });
+        await submit(report('Submission screenshot'), [name, 'missing.png']);
+        unlinkSync(missing);
+        const at = new Date().toISOString();
+        reply = { id: 'artifact-reply', type: 'agentMessage', phase: 'final_answer', status: 'completed',
+          text: report('Open screenshot'), title: '', at };
+        saveManagerHistory(root, Date.parse(at), 'a0000000-0000-4000-8000-000000000001',
+          { lane: 'chat', message: { text: 'Show the screenshot', files: [], at }, items: [reply] });
+      }
+      const work = readManagerHistory(root, null, 'work').turns.flatMap(turn => turn.items);
+      const dialogue = reply ? [reply] : (await readManagerDialogue(root, null)).turns.flatMap(turn => turn.items);
+      console.log(JSON.stringify({ work, dialogue }));
+    `, [project, String(reopening), option("--artifact-png") ?? ""], (await window.webContents.capturePage()).toPNG());
+    ipcMain.handle("board:artifactPreview", (_event, path) => runNode(`
+      import { BoardStore, locateBoard } from ${JSON.stringify(new URL('../src/cli/storage.ts', import.meta.url).href)};
+      import { readSavedPng } from ${JSON.stringify(new URL('../src/cli/artifacts.ts', import.meta.url).href)};
+      let image;
+      try { image = readSavedPng(new BoardStore(locateBoard(process.argv[1])), process.argv[2]); }
+      catch (error) { if (error.code !== 'ARTIFACT_NOT_FOUND') throw error; }
+      console.log(JSON.stringify(image ? 'data:image/png;base64,' + image.base64 : null));
+    `, [project, path]));
+    await evaluate("api.artifactPreview = window.readArtifactFixture; frame = { russian: true }; sheet.showModal(); void 0");
+    for (const [view, items, context, label] of [
+      ["work", work, { managerWork: true }, "Submission screenshot"],
+      ["dialogue", dialogue, { dialogue: true }, "Open screenshot"],
+    ]) {
+      const tile = "body.querySelector('.chat-artifact button')";
+      const wait = condition => evaluate(`new Promise((resolve, reject) => {
+        const deadline = Date.now() + 5000;
+        function poll() {
+          if (${condition}) resolve();
+          else if (Date.now() > deadline) reject(new Error(${JSON.stringify(condition)}));
+          else setTimeout(poll, 16);
+        }
+        poll();
+      })`);
+      await evaluate(`body.replaceChildren(); renderRunActivity(body, ${JSON.stringify(items)}, true,
+        undefined, undefined, ${JSON.stringify(context)}); void 0`);
+      await wait(`${tile}?.querySelector('img')?.naturalWidth > 0 &&
+        [...body.querySelectorAll('.chat-artifact [role=status]')].filter(x => /Missing|Outside/.test(x.textContent)).length === 2`);
+      await check(`body.textContent.includes('Before') && body.textContent.includes('after.') &&
+        body.querySelector('a[href="https://example.com/"]')?.textContent === 'Web' &&
+        ${tile}.querySelector('img').alt === ${JSON.stringify(label)}`, "report text, web link and image label");
+      await evaluate(`${tile}.scrollIntoView({ block: 'center' }); void 0`);
+      if (keepArtifacts) {
+        await window.webContents.capturePage();
+        await capture("artifact-" + view + (reopening ? "-reopened" : "-live") + ".png");
+      }
+      const point = await evaluate(`(() => { const r = ${tile}.getBoundingClientRect();
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()`);
+      for (const type of ["mouseDown", "mouseUp"]) window.webContents.sendInputEvent({ type, ...point, button: "left", clickCount: 1 });
+      const open = `document.querySelector('.image-preview[open] img')?.naturalWidth === ${tile}.querySelector('img').naturalWidth`;
+      await wait(open);
+      if (keepArtifacts && reopening && view === "work") await capture("artifact-full-preview.png");
+      await evaluate(`document.querySelector('.image-preview').close(); ${tile}.focus(); void 0`);
+      await check(`document.activeElement === ${tile}`, "thumbnail receives keyboard focus");
+      window.webContents.sendInputEvent({ type: "keyDown", keyCode: "Enter" });
+      window.webContents.sendInputEvent({ type: "char", keyCode: "\r" });
+      window.webContents.sendInputEvent({ type: "keyUp", keyCode: "Enter" });
+      await wait(open);
+      await evaluate("document.querySelector('.image-preview[open]').close(); void 0");
+      console.log(`Artifact links passed: ${view}, ${reopening ? "restarted Electron" : "live submission or reply"}`);
+    }
+    return;
+  }
   if (dialogueFixture) {
     const reopening = process.argv.includes("--reopen-dialogue");
     const largeImage = process.argv.includes("--large-dialogue-image");
@@ -107,6 +372,8 @@ app.whenReady().then(async () => {
     });
     const question = "current-question";
     const reply = answer("full-answer", "full-streamed-answer: T-0001 отменена.", 130);
+    const partial = { ...answer("partial-answer", "partial-stream: T-0001 отме", 128), status: "inProgress" };
+    const progress = { ...answer("progress", "Проверяю состояние карточки T-0001.", 127), phase: "commentary" };
     const blockReason = "Review «previous attempt» — cancelled.";
     const transitionResults = [
       ["cancel", "cancelled", "отменена"], ["start", "in_progress", "в работе"],
@@ -125,7 +392,7 @@ app.whenReady().then(async () => {
         import { join } from "node:path";
         import { initializeBoard } from ${JSON.stringify(new URL("../src/cli/storage.ts", import.meta.url).href)};
         import { createTask } from ${JSON.stringify(new URL("../src/cli/tasks.ts", import.meta.url).href)};
-        import { managerUnread, readManagerDialogue, readManagerView, saveManagerHistory } from ${JSON.stringify(new URL("../src/desktop/manager-history.ts", import.meta.url).href)};
+        import { managerChatItems, managerUnread, readManagerDialogue, readManagerView, saveManagerHistory } from ${JSON.stringify(new URL("../src/desktop/manager-history.ts", import.meta.url).href)};
         const [project, action] = process.argv.slice(1);
         const input = JSON.parse(readFileSync(0, "utf8"));
         if (action === "seed") {
@@ -143,6 +410,7 @@ app.whenReady().then(async () => {
           nextCursor: null,
         }))));
         else if (action === "unread") console.log(JSON.stringify(managerUnread(project)));
+        else if (action === "live") console.log(JSON.stringify(managerChatItems(input)));
         else console.log(JSON.stringify(await readManagerDialogue(project, input)));
       `, project, action], { input: JSON.stringify(input), encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
       assert.equal(result.status, 0, result.stderr);
@@ -157,7 +425,7 @@ app.whenReady().then(async () => {
       const runId = "a0000000-0000-4000-8000-000000000001";
       if (!reopening) io(project, "write", Array.from({ length: 22 }, (_, index) => ({
         at: start + index,
-        run: chat("prior-question-" + index, index, [answer("prior-" + index, "prior-reply-" + index, index)]),
+        run: chat("prior-question-" + index, index, [answer("prior-" + index, index === 0 ? reply.text : "prior-reply-" + index, index)]),
       })));
       const history = cursor => ({ ok: true, data: { ...io(project, "read", cursor), goal } });
       const olderPages = first => {
@@ -171,19 +439,21 @@ app.whenReady().then(async () => {
       const initial = history(null);
       await evaluate(`(async () => {
         window.dialogue = { initial: ${JSON.stringify(initial)}, ready: Promise.withResolvers(), finish: Promise.withResolvers() };
+        // Only chat IPC is supplied, so skip the outer board refresh after a reply.
+        dialogue.renderBoard = render;
+        render = () => {};
         frame = { project: ${JSON.stringify(project)}, russian: true };
         const pages = ${JSON.stringify(olderPages(initial))};
         api.boardHistory = async (_project, cursor) => cursor ? pages[cursor] : dialogue.initial;
         api.boardQueue = async (_project, action) => ({ ok: true, data: action === 'list' ? [] : 'current-user' });
         api.boardRequest = () => { dialogue.ready.resolve(true); return dialogue.finish.promise; };
         dialogue.open = () => {
+          byId('workspace').hidden = false;
           dialogue.manager = draftComposer();
-          (${reopening} ? byId('board-composer') : body).replaceChildren(dialogue.manager);
+          byId('board-composer').replaceChildren(dialogue.manager);
           dialogue.manager.querySelector('.draft-input textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
           dialogue.log = dialogue.manager.querySelector('.board-chat-log:not(.board-work)');
         };
-        if (${reopening}) byId('workspace').hidden = false;
-        else if (!sheet.open) sheet.showModal();
         dialogue.open();
         if (${!reopening}) {
           dialogue.manager.querySelector('.draft-input textarea').value = '${question}';
@@ -216,19 +486,23 @@ app.whenReady().then(async () => {
         assert.ok(!io(project, "unread", null).some(id => id.startsWith("notice-")));
         const stale = history(null);
         await evaluate(`(() => {
-          const partial = { ...${JSON.stringify(reply)}, text: 'partial-stream', status: 'inProgress' };
-          dialogue.manager.updateActivity([partial]);
+          dialogue.manager.updateActivity(${JSON.stringify(io(project, "live", [progress, partial]))});
           dialogue.stale = Promise.withResolvers();
           api.boardHistory = () => dialogue.stale.promise;
           dialogue.manager.invalidateHistory();
         })()`);
         await check(`dialogue.log.textContent.includes('partial-stream') && dialogue.log.textContent.includes('prior-reply-21')`, "stream coexists with previous history");
-        io(project, "write", [{ at: start + 100, id: runId, run: chat(question, 100, [...transitionTools, reply], "current-user") }]);
+        const rawItems = [progress, partial, reply];
+        const liveItems = io(project, "live", rawItems);
+        await evaluate(`dialogue.manager.updateActivity(${JSON.stringify(liveItems)})`);
+        await check(`!dialogue.log.textContent.includes('partial-stream') && dialogue.log.textContent.includes('full-streamed-answer')`,
+          "a completed live answer supersedes the abandoned draft");
+        io(project, "write", [{ at: start + 100, id: runId, run: chat(question, 100, [...transitionTools, ...rawItems], "current-user") }]);
         const completed = history(null);
         await evaluate(`(async () => {
           const pages = ${JSON.stringify(olderPages(completed))};
           api.boardHistory = async (_project, cursor) => cursor ? pages[cursor] : (${JSON.stringify(completed)});
-          dialogue.finish.resolve({ ok: true, data: { items: [${JSON.stringify(reply)}] } });
+          dialogue.finish.resolve({ ok: true, data: { items: ${JSON.stringify(liveItems)} } });
           await new Promise(resolve => requestAnimationFrame(resolve));
           dialogue.stale.resolve(${JSON.stringify(stale)});
           await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -264,6 +538,28 @@ app.whenReady().then(async () => {
           paused: dialogue.manager.textContent.includes('Fixture objective'),
         })`), { answer: true, question: true, image: largeImage ? 1 : 0, notices: 0, paused },
         "finished or reopened dialogue keeps the question and replies without status notices");
+        await check(`!dialogue.log.textContent.includes('partial-stream') &&
+          dialogue.log.querySelectorAll('[data-message-id="full-answer"]').length === 1 &&
+          dialogue.log.querySelectorAll('[data-item="message:progress"]').length === 1`,
+          "the finished or restored dialogue keeps one full answer and the standalone progress message");
+        if (keepArtifacts && !paused && open === (reopening ? 1 : 0)) {
+          const viewport = await evaluate(`document.fonts.ready.then(async () => {
+            const progress = dialogue.log.querySelector('[data-item="message:progress"]');
+            const work = progress.closest('details');
+            if (work) work.open = true;
+            const reply = dialogue.log.querySelector('[data-message-id="full-answer"]');
+            await new Promise(resolve => setTimeout(resolve, 250));
+            reply.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+            const log = dialogue.log.getBoundingClientRect();
+            const bubble = reply.getBoundingClientRect();
+            return { log: [log.top, log.bottom], reply: [bubble.top, bubble.bottom],
+              mounted: reply.isConnected, open: dialogue.manager.hasAttribute('data-open'),
+              hidden: [dialogue.log.hidden, byId('board-composer').hidden, byId('workspace').hidden] };
+          })`);
+          assert.ok(viewport.reply[1] > viewport.reply[0] && viewport.reply[0] >= viewport.log[0] - 1 &&
+            viewport.reply[1] <= viewport.log[1] + 1, "Reply outside the screenshot viewport: " + JSON.stringify(viewport));
+          await capture(reopening ? "manager-answer-restored.png" : "manager-answer-live.png");
+        }
         await evaluate(`(async () => {
           for (let i = 0; i < ${Object.keys(pages).length}; i++) {
             const older = dialogue.log.querySelector('.board-chat-older');
@@ -275,6 +571,9 @@ app.whenReady().then(async () => {
         assert.deepEqual(await evaluate(`[...dialogue.log.querySelectorAll('[data-message-id]')].map(node => node.dataset.messageId)`), [
           ...Array.from({ length: 22 }, (_, index) => "prior-" + index), "full-answer",
         ], "older and recent pages preserve saved order and have no missing or duplicate replies");
+        await check(`['prior-0', 'full-answer'].every(id =>
+          dialogue.log.querySelector('[data-message-id="' + id + '"]').textContent.includes('full-streamed-answer'))`,
+          "identical replies to separate requests survive pagination");
       }
       if (!reopening) await check("dialogue.leaks.length === 0", "no status notice entered the live dialogue DOM");
       const work = io(project, "work", null);
@@ -356,7 +655,7 @@ app.whenReady().then(async () => {
         })`);
         await capture(largeImage ? "dialogue-history-large-image-restart.png" : "dialogue-history-paused-restart.png");
       }
-      await evaluate("dialogue.manager.dispose()");
+      await evaluate("dialogue.manager.dispose(); render = dialogue.renderBoard; void 0");
       console.log(`Dialogue history passed: ${paused ? "paused goal" : "no goal"}, ${reopening ? "restarted Electron" : "stream and reopened composer"}`);
     }
     return;
@@ -979,7 +1278,7 @@ app.whenReady().then(async () => {
   await capture("chat-image-preview.png");
   for (let index = 1; index < images.length; index++) {
     await evaluate(`document.querySelector('.image-preview').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))`);
-    await evaluate(`new Promise(resolve => { const poll = () => document.querySelector('.image-preview-toolbar strong').textContent === 'reference-${index}.png' ? resolve() : requestAnimationFrame(poll); poll(); })`);
+    await evaluate(`new Promise(resolve => { const poll = () => document.querySelector('.image-preview-header strong').textContent === 'reference-${index}.png' ? resolve() : requestAnimationFrame(poll); poll(); })`);
     await check(`document.querySelector('.image-preview-stage img').src === window.testImages[${index}]`, "reference images can be navigated in order");
   }
   await evaluate(`document.querySelector('.image-preview').close(); localization.select("en"); renderRunActivity(saved, activity)`);
@@ -1040,7 +1339,7 @@ app.whenReady().then(async () => {
   await check(`parseInt(document.querySelector('.image-preview-toolbar output').value) > 0`, "viewed images can be zoomed");
   for (let index = 1; index < images.length; index++) {
     await evaluate(`document.querySelector('.image-preview').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))`);
-    await evaluate(`new Promise(resolve => { const poll = () => document.querySelector('.image-preview-toolbar strong').textContent === 'viewed-${index}.png' ? resolve() : requestAnimationFrame(poll); poll(); })`);
+    await evaluate(`new Promise(resolve => { const poll = () => document.querySelector('.image-preview-header strong').textContent === 'viewed-${index}.png' ? resolve() : requestAnimationFrame(poll); poll(); })`);
     await check(`document.querySelector('.image-preview-stage img').src === window.testImages[${index}]`, "all viewed images can be navigated in order");
   }
   await evaluate(`document.querySelector('.image-preview').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))`);

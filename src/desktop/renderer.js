@@ -934,11 +934,20 @@ function card(task) {
   card.className = "task-card";
   card.dataset.state = task.status;
   card.style.borderLeft = manualBoard() ? `3px solid ${manualColumns().find(c => c.id === task.status)?.color ?? "transparent"}` : "";
-  if (task.priority && task.priority !== "normal") {
+  const hasPriority = task.priority && task.priority !== "normal";
+  if (hasPriority) {
     card.dataset.priority = task.priority;
-    bindLocalized(card, "aria-description", () => t("ui.priority_b114c9b5") + " · " + priorityName(task.priority), true);
   } else {
     delete card.dataset.priority;
+  }
+  const subtasks = task.subtasks ?? [];
+  const completed = subtasks.filter(entry => entry.done).length;
+  if (hasPriority || subtasks.length) {
+    bindLocalized(card, "aria-description", () => [
+      hasPriority ? t("ui.priority_b114c9b5") + " · " + priorityName(task.priority) : "",
+      subtasks.length ? t("ui.subtasks_b409bda5") + " " + completed + "/" + subtasks.length : "",
+    ].filter(Boolean).join(". "), true);
+  } else {
     card.removeAttribute("aria-description");
   }
   const item = element("span", undefined, "task-card-details");
@@ -1012,12 +1021,15 @@ function card(task) {
   if (block && !manualWait) {
     item.append(blockerBanner(block));
   }
-  if (task.subtasks?.length) {
-    const count = task.subtasks.filter(entry => entry.done).length + "/" + task.subtasks.length;
-    const subtasks = element("span", undefined, "task-stat");
-    bindLocalized(subtasks, "title", () => t("ui.subtasks_b409bda5") + " " + count);
-    subtasks.append(icon("checklist"), count);
-    meta.append(subtasks);
+  if (subtasks.length) {
+    const progress = element("span", undefined, "task-subtask-progress");
+    progress.setAttribute("aria-hidden", "true");
+    for (const subtask of subtasks) {
+      const bar = element("span");
+      if (subtask.done) bar.classList.add("is-done");
+      progress.append(bar);
+    }
+    item.append(progress);
   }
   if (task.attachments?.length) {
     const attachments = element("span", undefined, "task-stat");
@@ -1025,8 +1037,14 @@ function card(task) {
     attachments.append(icon("attach"), String(task.attachments.length));
     meta.append(attachments);
   }
-  if (!runStatus.hidden) item.append(runStatus);
-  item.append(meta);
+  if (runStatus.firstElementChild) {
+    const footer = element("span", undefined, "task-card-footer");
+    footer.append(meta, runStatus);
+    item.append(footer);
+  } else {
+    if (!runStatus.hidden) item.append(runStatus);
+    item.append(meta);
+  }
   card.replaceChildren(item);
   boardCards.set(task.id, { node: card, signature });
   return card;
@@ -1887,6 +1905,10 @@ function draftComposer() {
   goalText.rows = 2;
   const goalError = element("div", undefined, "board-goal-error");
   goalError.setAttribute("role", "alert");
+  const goalPending = element("div");
+  goalPending.setAttribute("role", "status");
+  goalPending.hidden = true;
+  bindLocalized(goalPending, "textContent", () => t("ui.waiting_for_the_codex_chat_to_become_available_ddb2e85f"));
   const goalActions = element("div", undefined, "board-goal-actions");
   const saveGoal = button("", () => changeGoal("edit", goalText.value.trim()), "quiet");
   const pauseGoal = button("", () => changeGoal("pause"), "quiet");
@@ -1903,7 +1925,7 @@ function draftComposer() {
   }, "quiet");
   const clearGoal = button("", () => changeGoal("clear"), "quiet danger");
   goalActions.append(saveGoal, pauseGoal, resumeGoal, clearGoal);
-  goalBody.append(goalText, goalActions, goalError);
+  goalBody.append(goalText, goalActions, goalPending, goalError);
   goalPanel.append(goalSummary, goalBody);
   const goalLabels = {
     active: ["ui.active_goal_4b86aa5f"], paused: ["ui.goal_paused_9030eeb9"],
@@ -1943,6 +1965,7 @@ function draftComposer() {
     if (changingGoal) return;
     changingGoal = true;
     goalError.textContent = "";
+    goalPending.hidden = kind !== "clear";
     const revision = goalRevision;
     syncGoal();
     try {
@@ -1954,6 +1977,7 @@ function draftComposer() {
       goalError.textContent = error.message;
     } finally {
       changingGoal = false;
+      goalPending.hidden = true;
       syncGoal();
     }
   }
@@ -2733,7 +2757,11 @@ function draftComposer() {
       }
       entry.append(tiles);
     }
-    if (text) entry.append(actor === "agent" ? chatText(text, { agent: true }) : element("p", text, "chat-text"));
+    if (text) {
+      const message = actor === "agent" ? chatText(text, { agent: true }) : element("p", text, "chat-text");
+      if (actor !== "agent") showHexColors(message, true);
+      entry.append(message);
+    }
     appendChatTime(entry, at);
     if (insert) log.append(entry);
     return entry;
@@ -3176,6 +3204,52 @@ function draftComposer() {
   let restoredQueue;
   let refreshingQueue = false;
   let queueChanged = false;
+  let movingQueue = false;
+  let draggedJob;
+  let dropRow;
+  const canMove = job => !job.goal && !job.editing && !job.sending && !job.inFlight && queued.includes(job);
+  function clearQueueDrop() {
+    dropRow?.removeAttribute("data-queue-drop");
+    dropRow = undefined;
+  }
+  function queueDropTarget(event) {
+    const row = event.target.closest(".board-queued-row");
+    const target = queued.find(job => job.row === row);
+    if (!draggedJob || !canMove(draggedJob) || !target || target === draggedJob || !canMove(target)) return;
+    const bounds = row.getBoundingClientRect();
+    return { target, after: event.clientY >= bounds.top + bounds.height / 2 };
+  }
+  queue.addEventListener("dragover", event => {
+    clearQueueDrop();
+    const drop = queueDropTarget(event);
+    if (!drop) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    dropRow = drop.target.row;
+    dropRow.dataset.queueDrop = drop.after ? "after" : "before";
+  });
+  queue.addEventListener("dragleave", event => {
+    if (!queue.contains(event.relatedTarget)) clearQueueDrop();
+  });
+  queue.addEventListener("drop", event => {
+    const drop = queueDropTarget(event);
+    clearQueueDrop();
+    if (!drop) return;
+    event.preventDefault();
+    void moveQueueJob(draggedJob, drop.target, drop.after);
+  });
+  async function moveQueueJob(job, target, after) {
+    if (disposed || movingQueue || !canMove(job) || (target && !canMove(target))) return;
+    movingQueue = true;
+    try {
+      await queueStorage(target ? "move" : "promote", job.id, target?.id, after);
+    } catch (error) {
+      if (!disposed) message(error.message);
+    } finally {
+      movingQueue = false;
+      editor.refreshQueue();
+    }
+  }
   editor.refreshQueue = () => {
     if (disposed) return;
     queueChanged = true;
@@ -3199,22 +3273,39 @@ function draftComposer() {
       for (const job of [...queued]) {
         if (job.id && !ids.has(job.id) && !job.sending && !job.editing) removeWork(job);
       }
-      for (const { id, draft, goal, files, failed = false } of jobs) {
+      for (const { id, draft, goal, files, failed = false, inFlight } of jobs) {
         if (active?.id === id) continue;
         const job = queued.find(job => job.id === id);
         if (!job) {
-          enqueue(id, draft, goal, files.map(file => file.link ? { ...file, size: file.link.size } : new File([file.bytes], file.name, { type: file.type })), failed);
-        } else if (!job.editing && !job.sending) {
+          enqueue(id, draft, goal, files.map(file => file.link ? { ...file, size: file.link.size } : new File([file.bytes], file.name, { type: file.type })), failed, inFlight);
+          continue;
+        }
+        const changedFlight = job.inFlight !== inFlight;
+        job.inFlight = inFlight;
+        if (!job.editing && !job.sending) {
           if (draft !== job.draft) {
             job.draft = draft;
             job.request = draft.trim();
             updateQueuedPreview(job);
           }
-          if (failed !== job.failed) {
+          if (failed !== job.failed || changedFlight) {
             job.failed = failed;
             renderQueuedActions(job);
           }
         }
+      }
+      const positions = new Map(jobs.map(({ id }, index) => [id, index]));
+      const position = job => job.id ? positions.get(job.id) ?? jobs.length : -1;
+      queued.sort((left, right) => position(left) - position(right));
+      const focused = document.activeElement;
+      let row = queue.firstElementChild;
+      for (const job of queued) {
+        if (!job.row) continue;
+        if (row === job.row) row = row.nextElementSibling;
+        else queue.insertBefore(job.row, row);
+      }
+      if (focused?.isConnected && queue.contains(focused) && document.activeElement !== focused) {
+        focused.focus({ preventScroll: true });
       }
     }).catch(error => {
       restoredQueue = undefined;
@@ -3226,6 +3317,14 @@ function draftComposer() {
   function renderQueuedActions(job) {
     const { status } = job;
     status.replaceChildren();
+    if (job.handle) {
+      job.handle.draggable = !job.inFlight;
+      job.handle.setAttribute("aria-disabled", String(Boolean(job.inFlight)));
+    }
+    if (job.inFlight) {
+      status.append(element("span", () => t("ui.sending_15dba7c5")));
+      return;
+    }
     if (job.failed) status.append(element("span", () => t("ui.not_sent_28bb3764"), "board-queued-failed"));
     if (job.failed) status.append(button(() => t("ui.retry_553b2066"), async () => {
       await loadHistory()?.catch(() => {});
@@ -3319,14 +3418,7 @@ function draftComposer() {
       await loadHistory()?.catch(() => {});
       if (disposed || !queued.includes(job) || job.sending || job.editing) return;
       if (active) return sendQueuedNow(job);
-      queued.splice(queued.indexOf(job), 1);
-      queued.unshift(job);
-      if (job.failed) {
-        try { await queueStorage("retry", job.id); }
-        catch (error) { message(error.message); return; }
-      }
-      job.failed = false;
-      sendNext();
+      await moveQueueJob(job);
       return;
     }
     sendingQueuedMessage = true;
@@ -3427,7 +3519,8 @@ function draftComposer() {
   };
   function sendWorkNext() {
     const next = queued.find(job => job.goal);
-    if (disposed || queueRetry || managerBusy || active || startingWork || !next || next.failed || next.editing || next.sending) return;
+    if (disposed || refreshingQueue || movingQueue || queueRetry || managerBusy || active || startingWork ||
+        !next || next.failed || next.editing || next.sending || next.inFlight) return;
     startingWork = true;
     next.sending = true;
     bindLocalized(next.status, "textContent", () => t("ui.starting_39fd3c7e"));
@@ -3436,6 +3529,10 @@ function draftComposer() {
       const submitted = await pasteFiles(next.submitted);
       if (disposed) return;
       const result = await api.boardRequest(next.request, submitted, project, next.goal, false, next.id);
+      if (!result.ok && result.error.code === "BOARD_QUEUE_CHANGED") {
+        editor.refreshQueue();
+        return;
+      }
       if (!result.ok && result.error.code === "BOARD_REQUEST_IN_PROGRESS") {
         renderQueuedActions(next);
         retryQueue();
@@ -3482,9 +3579,10 @@ function draftComposer() {
     }, 1000);
   }
   function sendNext() {
+    if (refreshingQueue || movingQueue) return;
     sendWorkNext();
     const next = queued.find(job => !job.goal && !job.failed);
-    if (disposed || queueRetry || managerBusy || startingWork || active || sendingQueuedMessage || !next || next.editing || next.sending) return;
+    if (disposed || queueRetry || managerBusy || startingWork || active || sendingQueuedMessage || !next || next.editing || next.sending || next.inFlight) return;
     queued.splice(queued.indexOf(next), 1);
     const { request, goal, submitted } = next;
     next.row?.remove();
@@ -3493,11 +3591,16 @@ function draftComposer() {
     const { container, thinking } = turn;
     let accepted = false;
     let deferred = false;
+    let orderChanged = false;
     void (async () => {
       void loadHistory()?.catch(() => {});
       const pasted = await pasteFiles(submitted);
       if (disposed) return;
       const result = await api.boardRequest(request, pasted, project, goal, false, next.id);
+      if (!result.ok && result.error.code === "BOARD_QUEUE_CHANGED") {
+        orderChanged = deferred = true;
+        return;
+      }
       if (!result.ok && result.error.code === "BOARD_REQUEST_IN_PROGRESS") {
         deferred = true;
         retryQueue();
@@ -3543,7 +3646,8 @@ function draftComposer() {
       renderQueuedActions(next);
       entry.remove();
       queue.prepend(next.row);
-      sendNext();
+      if (orderChanged) editor.refreshQueue();
+      else sendNext();
     });
   }
   editor.addEventListener("submit", async event => {
@@ -3587,8 +3691,9 @@ function draftComposer() {
   function updateQueuedPreview(job) {
     job.preview.textContent = job.request.replace(/\s+/g, " ") || job.messageFiles.map(file => file.name).join(", ");
     job.preview.title = job.preview.textContent.slice(0, 180);
+    if (job.handle) controlLabelForIcon(job.handle, () => t("ui.reorder_queued_message", { message: job.preview.title }));
   }
-  function enqueue(id, draft, goal, submitted, failed = false) {
+  function enqueue(id, draft, goal, submitted, failed = false, inFlight = false) {
     const request = draft.trim();
     const messageFiles = submitted.map(file => {
       if (!previewSource(file)) return { name: file.name, size: file.size, link: file.link };
@@ -3598,7 +3703,8 @@ function draftComposer() {
     });
     const row = element("div", undefined, "board-queued-row");
     row.setAttribute("role", "listitem");
-    row.append(icon(goal ? "target" : "tasklist"));
+    const handle = goal ? undefined : element("button", undefined, "button quiet board-queue-handle");
+    row.append(handle ?? icon("target"));
     const images = messageFiles.filter(file => file.url);
     if (images.length) {
       const thumbnail = button("", () => previewImages(images, images[0]), "quiet board-queued-thumbnail");
@@ -3616,8 +3722,33 @@ function draftComposer() {
     const status = element("div", undefined, "board-queued-status");
     row.append(preview, status);
     queue.append(row);
-    const job = { id, row, preview, status, draft, request, goal, submitted, messageFiles, failed };
+    const job = { id, row, preview, status, handle, draft, request, goal, submitted, messageFiles, failed, inFlight };
     queued.push(job);
+    if (handle) {
+      handle.type = "button";
+      handle.setAttribute("aria-keyshortcuts", "ArrowUp ArrowDown");
+      handle.append(icon("gripper"));
+      handle.addEventListener("dragstart", event => {
+        if (!canMove(job) || movingQueue) { event.preventDefault(); return; }
+        draggedJob = job;
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", job.id);
+        event.dataTransfer.setDragImage(row, 12, row.offsetHeight / 2);
+      });
+      handle.addEventListener("dragend", () => {
+        draggedJob = undefined;
+        clearQueueDrop();
+      });
+      handle.addEventListener("keydown", event => {
+        if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+        event.preventDefault();
+        const pending = queued.filter(canMove);
+        const index = pending.indexOf(job);
+        const after = event.key === "ArrowDown";
+        const target = pending[index + (after ? 1 : -1)];
+        if (index >= 0 && target) void moveQueueJob(job, target, after);
+      });
+    }
     updateQueuedPreview(job);
     renderQueuedActions(job);
   }
@@ -3939,8 +4070,17 @@ async function showTask(id) {
       body.append(label);
     }
     const chatFiles = new Set(task.history.flatMap(event => event.chat?.files ?? []));
+    const cardAttachments = task.attachments.filter(file => !chatFiles.has(file.file));
+    const cardImages = cardAttachments.filter(isImageAttachment);
     const downloads = element("div", undefined, "sheet-actions");
-    for (const attachment of task.attachments.filter(file => !chatFiles.has(file.file))) {
+    for (const attachment of cardAttachments) {
+      const index = cardImages.indexOf(attachment);
+      if (index >= 0) {
+        const view = button("", () => openImagePreview(task.id, cardImages, index), "quiet");
+        view.append(icon("search"));
+        controlLabelForIcon(view, () => t("ui.view_7aa05de3") + attachment.name);
+        downloads.append(view);
+      }
       downloads.append(taskAttachmentButton(task.id, attachment));
     }
     if (downloads.childElementCount) body.append(downloads);
