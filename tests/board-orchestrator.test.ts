@@ -26,7 +26,7 @@ import type { BoardGoal, BoardGoalAction, readBoardHistory } from "../src/deskto
 import { inspectProjectPath, projectSha256 } from "../src/desktop/project-files.ts";
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
 import { reviewerActivity, withReviewerChat } from "../src/desktop/reviewer-chat.ts";
-import { goalMessages, managerChatItems, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory } from "../src/desktop/manager-history.ts";
+import { goalMessages, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory } from "../src/desktop/manager-history.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { autoQueueSettings } from "../src/cli/auto-queue.ts";
 import { automationDelivery } from "../src/desktop/automation-delivery.ts";
@@ -45,7 +45,7 @@ const source = (file: string) => readFileSync(new URL("../src/desktop/" + file, 
 const boardSource = stripTypeScriptTypes(source("board-actions.ts").replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, ""));
 const main = ts.createSourceFile("main.ts", source("main.ts"), ts.ScriptTarget.Latest, true);
 const handlerSource = stripTypeScriptTypes(main.statements.map(node => node.getText(main)).filter(text =>
-  /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|returnTaskToDraft|scheduleMaintenance|scheduleRecurringTasks|taskRunLimit|readQueuedMessage|hasPendingManagerMessages|queuedFiles)\(|const (?:imageExtensions|imageTypes|boardRequests|boardWorkRequests|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork|maintenanceWork|returningDrafts|reviewOperations|managerReviewOperations|taskOperations|steeringOperations) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
+  /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|returnTaskToDraft|scheduleMaintenance|scheduleRecurringTasks|taskRunLimit|readQueuedMessage|queuedFiles)\(|const (?:imageExtensions|imageTypes|boardRequests|boardWorkRequests|backgroundManagerRequests|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork|maintenanceWork|returningDrafts|reviewOperations|managerReviewOperations|taskOperations|steeringOperations) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
 const cliFailure = (code: string, message: string) => ({ ok: false, error: { code, message } });
 
@@ -112,7 +112,7 @@ function fixture(t: TestContext) {
   });
   const activeAgents = new Map<string, { control: { steer: (text: string) => Promise<void> } }>();
   const sender = { isDestroyed: () => true };
-  const runtime = runInNewContext(handlerSource + "\n({ frame, scheduleAutoReview, boardRequests, boardWorkRequests, managerQuestion, runBoardRequest, scheduleRecurringTasks })", {
+  const runtime = runInNewContext(handlerSource + "\n({ frame, scheduleAutoReview, boardRequests, boardWorkRequests, backgroundManagerRequests, acceptanceWork, managerQuestion, runBoardRequest, scheduleRecurringTasks })", {
     scheduleAutoBoard: () => {},
     activeRunSummary, runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
     captureFileLink, isFileLink, verifyFileLink, AbortSignal, AbortController, ArrayBuffer, Buffer, Error, basename, dirname, extname, join, mkdtemp, rm, writeFile, maxAttachmentBytes, boardActions, boardInstructions, boardTools, callCli,
@@ -120,7 +120,7 @@ function fixture(t: TestContext) {
     executorFullAccess, managerAccess, setTaskExecutorAccess, phaseStageReporter,
     autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, defaultBoardAgents, reviewVerifier,
     existsSync, storageDirectory, readdirSync, rmSync, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
-    goalMessages, managerChatItems, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory,
+    goalMessages, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory,
     send() {},
     readBoardHistory: (_profile: string, _project: string, _id: string, cursor: string | null) => {
       providerHistoryReads++;
@@ -222,12 +222,12 @@ function fixture(t: TestContext) {
         [...expectedTools.filter(name => (name !== "task_accept" || mode !== "human") && (!instructions.includes("This turn repairs") || !["task_start", "task_start_batch", "task_accept", "task_request_changes"].includes(name))),
         ...(!manualTurn && !cleanupTurn && !instructions.includes("This turn repairs") ? ["task_return_to_draft"] : []),
         ...(!manualTurn && !cleanupTurn && mode === "manager" ? ["expert_stage"] : []),
-        ...(!reviewTurn && !cleanupTurn ? (session.goal || session.resumeGoal ? ["goal_inbox", "goal_report"] : ["goal_read", "goal_send"]) : []),
+        ...(!reviewTurn && !cleanupTurn && !instructions.includes("This turn repairs") ? (session.goal || session.resumeGoal ? ["goal_inbox", "goal_report"] : ["goal_read", "goal_send"]) : []),
         ...(reviewTurn && mode === "reviewer" ? ["manager_ack", "task_cancel", "task_start"] : [])].sort());
       if (reviewTurn) {
         assert.doesNotMatch(instructions, /manager_inbox|task_cleanup_status/);
         assert.equal(session.attachmentContext, undefined);
-        assert.equal(session.separateTurn, undefined);
+        assert.equal(session.separateTurn, true);
         assert.equal((_tools as unknown[]).length, 0);
       }
       const newThread = reviewTurn ? dialogueId :
@@ -274,7 +274,12 @@ function fixture(t: TestContext) {
         reloadReviewReports: () => { watch.reviewReports = readReviewReports(folder, project); return watch.reviewReports; },
         reviewing,
         refresh: async () => { watch.board = (await callCli(project, ["list", "--compact"])).data; },
-        done: () => Promise.all([...watch.reviewerRuns.values(), runtime.boardWorkRequests.get(project)?.automaticDone]),
+        done: async () => {
+          await Promise.all(watch.reviewerRuns.values());
+          while (runtime.backgroundManagerRequests.has(project) || runtime.acceptanceWork.size) {
+            await new Promise<void>(resolve => setTimeout(resolve, 10));
+          }
+        },
       };
     },
     connectExecutor: (id: string) => activeAgents.set(project + "\0" + id, {
@@ -967,12 +972,18 @@ test("an interrupted manager request preserves the durable queue until Codex rec
   assert.equal(new TextDecoder().decode(saved.files[0].bytes), "Сохрани русский текст");
   assert.equal(saved.failed, true);
   assert.equal((await f.queue("retry", id)).ok, true);
+  const queuePath = join(f.project, ".tasks", "manager-queue", id + ".json");
+  const queuedBeforeDelivery = readFileSync(queuePath);
   const sent = await f.run(saved.draft, async (_act, _prompt, _images, _id, _context, _waiting, _signal, goal) => {
     goal!.delivered(id);
     assert.equal((await f.queue("list")).data.length, 0);
     return { interrupted: true };
   }, attachments, false, id);
   assert.equal(sent.data.keepQueued, false);
+  // Recreate the state after a crash between the history write and queue removal.
+  await writeFile(queuePath, queuedBeforeDelivery);
+  assert.equal((await f.run(saved.draft, async () => assert.fail("Already delivered"), attachments, false, id)).ok, true);
+  assert.equal((await f.queue("list")).data.length, 0);
   const archived = await f.history();
   assert.equal(archived.ok, true);
   assert.equal(archived.data.turns.length, 1);
@@ -2449,7 +2460,7 @@ test("private cleanup repair persists, shares reviewer capacity and preserves a 
   assert.equal((await f.cli(["maintenance"])).data.length, 1);
   release();
   const result = await f.cleanup(pending[0], async (action, _prompt, _images, id, _context, _waiting, _signal, meta) => {
-    assert.equal(id, f.dialogueId);
+    assert.equal(id, undefined);
     assert.equal(meta?.role, "reviewer"); assert.equal(meta?.objective, undefined); assert.equal(meta?.resume, false);
     assert.equal(f.agentSlots.available(f.project, "reviewer", { reviewer: 1 }), 0);
     assert.equal(f.agentSlots.available(f.project, "executor", { executor: 1 }), 1);
@@ -2472,7 +2483,7 @@ test("private cleanup repair persists, shares reviewer capacity and preserves a 
   assert.equal(f.agentSlots.available(f.project, "reviewer", { reviewer: 1 }), 1);
 });
 
-test("acceptance repair reuses manager context and waits only for reviewer capacity", async t => {
+test("acceptance repair has an isolated context and waits for shared reviewer capacity", async t => {
   const f = fixture(t);
   const git = (...args: string[]) => {
     const result = spawnSync("git", ["-C", f.project, ...args], { encoding: "utf8", windowsHide: true });
@@ -2495,7 +2506,7 @@ test("acceptance repair reuses manager context and waits only for reviewer capac
   assert.equal((await f.cli(["show", card.id])).data.acceptanceRepair.phase, "queued");
   release();
   const scheduler = f.schedule((await f.cli(["list", "--compact"])).data, async (_act, _prompt, _images, id, _context, _waiting, _signal, session) => {
-    assert.equal(id, f.dialogueId); assert.deepEqual(session?.settings, defaultBoardAgents.manager);
+    assert.equal(id, undefined); assert.deepEqual(session?.settings, defaultBoardAgents.manager);
     assert.equal(f.agentSlots.available(f.project, "reviewer", { reviewer: 1 }), 0);
     assert.equal(f.agentSlots.available(f.project, "executor", { executor: 1 }), 1);
     const running = (await f.cli(["show", card.id])).data;

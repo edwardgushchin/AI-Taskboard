@@ -3207,7 +3207,6 @@ function draftComposer() {
     const { status } = job;
     status.replaceChildren();
     if (job.failed) status.append(element("span", () => t("ui.not_sent_28bb3764"), "board-queued-failed"));
-    else if (managerBusy) status.append(element("span", () => t("ui.waiting_for_a_session_67475e7f")));
     if (job.failed) status.append(button(() => t("ui.retry_553b2066"), async () => {
       await loadHistory()?.catch(() => {});
       if (!queued.includes(job)) return;
@@ -3293,13 +3292,13 @@ function draftComposer() {
     validate();
     edit.focus({ preventScroll: true });
   }
-  async function sendQueuedNow(job, goalRunId = activeGoalRunId()) {
+  async function sendQueuedNow(job, goalRunId) {
     if (disposed || sendingQueuedMessage || job.sending || job.editing || !queued.includes(job)) return;
     const turn = active;
     if (!turn && !goalRunId) {
       await loadHistory()?.catch(() => {});
       if (disposed || !queued.includes(job) || job.sending || job.editing) return;
-      if (active || activeGoalRunId()) return sendQueuedNow(job);
+      if (active) return sendQueuedNow(job);
       queued.splice(queued.indexOf(job), 1);
       queued.unshift(job);
       if (job.failed) {
@@ -3395,7 +3394,7 @@ function draftComposer() {
   editor.updateManagerBusy = busy => {
     if (managerBusy === Boolean(busy)) return;
     managerBusy = Boolean(busy);
-    for (const job of queued) if (!job.sending && !job.editing && job.row) renderQueuedActions(job);
+    if (!managerBusy) sendNext();
   };
   editor.updateManagerWork = run => {
     if (disposed) return;
@@ -3408,7 +3407,7 @@ function draftComposer() {
   };
   function sendWorkNext() {
     const next = queued.find(job => job.goal);
-    if (disposed || queueRetry || managerBusy || active || startingWork || managerWork || !next || next.failed || next.editing || next.sending) return;
+    if (disposed || queueRetry || managerBusy || active || startingWork || !next || next.failed || next.editing || next.sending) return;
     startingWork = true;
     next.sending = true;
     bindLocalized(next.status, "textContent", () => t("ui.starting_39fd3c7e"));
@@ -3464,8 +3463,8 @@ function draftComposer() {
   }
   function sendNext() {
     sendWorkNext();
-    const next = queued.find(job => !job.goal);
-    if (disposed || queueRetry || managerBusy || managerWork || startingWork || active || sendingQueuedMessage || !next || next.failed || next.editing || next.sending) return;
+    const next = queued.find(job => !job.goal && !job.failed);
+    if (disposed || queueRetry || managerBusy || startingWork || active || sendingQueuedMessage || !next || next.editing || next.sending) return;
     queued.splice(queued.indexOf(next), 1);
     const { request, goal, submitted } = next;
     next.row?.remove();
@@ -3524,6 +3523,7 @@ function draftComposer() {
       renderQueuedActions(next);
       entry.remove();
       queue.prepend(next.row);
+      sendNext();
     });
   }
   editor.addEventListener("submit", async event => {
