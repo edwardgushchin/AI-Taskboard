@@ -73,14 +73,7 @@ When a Windows x64 installer is published, download it from [Releases](https://g
 <a id="platforms"></a>
 ## Platform status
 
-| Platform | Current evidence | Distribution |
-| --- | --- | --- |
-| Windows x64 | Development UI checks recorded in the repository; first implementation target | NSIS `.exe` packaging configured; no public release yet |
-| Windows ARM64 | Not verified | No verified release |
-| Linux x64 / ARM64 | Planned; not verified by a completed CI/release matrix | `.deb` / `.rpm` targets configured |
-| macOS x64 / ARM64 | Planned; not verified by a completed CI/release matrix | `.pkg` target configured; signing and notarization required for distribution |
-
-Status checked on **2026-11-17**: CI and release tasks T-0100 / T-0101 are still drafts. Packaging configuration does not establish platform support. The screenshot above was captured from the Windows development renderer; it does not qualify the installer on a clean machine.
+Native CI builds and checks x64 and ARM64 packages for Windows, Linux, and macOS. See the [build and signing guide](docs/development.md) and the [CI results for each platform](https://github.com/edwardgushchin/AI-Taskboard/actions/workflows/ci.yml). Public packages appear separately under [Releases](https://github.com/edwardgushchin/AI-Taskboard/releases).
 
 ## Data and boundaries
 
