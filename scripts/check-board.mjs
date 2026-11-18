@@ -503,6 +503,75 @@ app.whenReady().then(async () => {
     console.log('Automatic mode Chromium checks passed: ' + checks);
     return;
   }
+  if (process.argv.includes("--subtasks-only")) {
+    await evaluate(`
+      const progressTask = fixture.board.tasks[0];
+      progressTask.priority = 'high';
+      progressTask.subtasks = ['Первая', 'Вторая', 'Третья'].map(title => ({ title, done: false }));
+      const progressCard = findCard(progressTask.id);
+      const progress = () => progressCard.querySelector('.task-subtask-progress');
+      const meta = () => progressCard.querySelector('.task-meta');
+      const bars = () => [...progress().children];
+      push();
+      waitFor(() => progressCard.querySelector('.task-card-cover')?.naturalWidth > 0);
+    `);
+    for (const [theme, width, cardWidth] of [["light", 1380, 320], ["dark", 900, 200]]) {
+      nativeTheme.themeSource = theme;
+      window.setContentSize(width, 900);
+      await evaluate(`
+        fixture.theme = '${theme}';
+        fixture.board.settings.showCardPreviews = true;
+        progressCard.style.width = '${cardWidth}px';
+        push();
+        waitFor(() => matchMedia('(prefers-color-scheme: dark)').matches === ${theme === "dark"});
+      `);
+      for (const states of [[false, false, false], [true, false, true], [false, true, true], [true, true, true]]) {
+        const count = states.filter(Boolean).length;
+        await evaluate(`
+          progressTask.subtasks.forEach((entry, index) => { entry.done = ${JSON.stringify(states)}[index]; });
+          progressTask.revision++;
+          push(); settle();
+        `);
+        await check(`(() => {
+          const fills = bars().map(bar => getComputedStyle(bar).backgroundColor);
+          const expected = ${JSON.stringify(states)}.map(done => done ? 'rgb(118, 255, 52)' :
+            '${theme === "light" ? "rgb(109, 115, 126)" : "rgb(144, 149, 159)"}');
+          const bounds = meta().getBoundingClientRect();
+          const cover = progressCard.querySelector('.task-card-cover');
+          return findCard(progressTask.id) === progressCard && fills.join() === expected.join() &&
+            cover && !cover.hidden && cover.nextElementSibling === progress() && progress().nextElementSibling === meta() &&
+            bars().every(bar => {
+              const rect = bar.getBoundingClientRect();
+              return rect.left === bounds.left && rect.right === bounds.right && rect.height === 6 &&
+                parseFloat(getComputedStyle(bar).borderTopLeftRadius) >= 3;
+            }) &&
+            meta().scrollWidth <= meta().clientWidth && meta().querySelector('.task-id').textContent === progressTask.id &&
+            meta().querySelector('.codicon-attach') && !meta().querySelector('.codicon-checklist') &&
+            !progressCard.innerText.includes('${count}/3') && progress().getAttribute('aria-hidden') === 'true' &&
+            progressCard.getAttribute('aria-description').includes(t('ui.priority_b114c9b5')) &&
+            progressCard.getAttribute('aria-description').endsWith(t('ui.subtasks_b409bda5') + ' ${count}/3') &&
+            !findCard('T-0002').querySelector('.task-subtask-progress');
+        })()`, `ordered bars and unchanged metadata: ${theme}, ${cardWidth}px, ${states}`);
+        if (states[0] && !states[1]) await capture(`subtasks-${theme}-${cardWidth}.png`);
+      }
+      await evaluate(`fixture.board.settings.showCardPreviews = false; push(); settle()`);
+      await check(`!progressCard.querySelector('.task-card-cover') && progress().nextElementSibling === meta()`,
+        `progress remains above metadata without a cover: ${theme}`);
+    }
+    await evaluate(`fixture.russian = false; push(); settle()`);
+    await check(`progressCard.getAttribute('aria-description').endsWith('Subtasks 3/3')`, "progress description follows the locale");
+    await evaluate(`
+      progressTask.priority = 'normal'; progressTask.status = 'in_progress';
+      fixture.runningTasks = [progressTask.id]; push(); settle();
+    `);
+    await check(`progressCard.querySelector('.task-run-status .agent-spinner') &&
+      progress().getBoundingClientRect().bottom <= meta().getBoundingClientRect().top &&
+      progressCard.getAttribute('aria-description') === 'Subtasks 3/3'`, "progress coexists with the active run indicator");
+    await evaluate(`delete progressTask.subtasks; progressTask.priority = 'normal'; push(); settle()`);
+    await check(`!progress() && !progressCard.hasAttribute('aria-description')`, "no progress for a card without subtasks");
+    console.log("Subtask Chromium checks passed: " + checks);
+    return;
+  }
   if (process.argv.includes("--covers-only")) {
     await evaluate(`
       const sizes = [[400, 8000], [800, 200], [40, 30], [80, 80]];
