@@ -208,6 +208,21 @@ if (!process.versions.electron) {
       } finally { clearTimeout(timer); }
     } finally { boardLock.close(); }
     record("PASS: focus, click and board IPC stay responsive while the board transaction lock is held");
+    await a.ask({ action: "addMessage", text: "Hold manager: clear paused goal" });
+    await wait(async () => (await frames()).every(frame => frame.managerRun?.phase === "running"), "ordinary reply before goal removal");
+    const dialogueOwner = (await a.ask({ action: "hasHeldTurn" })) ? a : b;
+    const otherWindow = dialogueOwner === a ? b : a;
+    await otherWindow.ask({ action: "clickClearGoal" });
+    await dialogueOwner.ask({ action: "clickClearGoal" });
+    assert.deepEqual(JSON.parse(readFileSync(binding, "utf8")).goal, goal);
+    assert.equal(await a.ask({ action: "goalClearCalls" }) + await b.ask({ action: "goalClearCalls" }), 0);
+    if (output) await otherWindow.ask({ action: "screenshot", path: join(output, "goal-clear-waiting.png") });
+    await dialogueOwner.ask({ action: "finishManager" });
+    await wait(async () => (await a.ask({ action: "goalPanels" }))[0]?.visible === false &&
+      (await b.ask({ action: "goalPanels" }))[0]?.visible === false, "paused goal removed after the ordinary reply");
+    assert.equal(await a.ask({ action: "goalClearCalls" }) + await b.ask({ action: "goalClearCalls" }), 1);
+    await start("profile-reopen-cleared").then(worker => worker.ask({ action: "reopenGoalBoard", expectedReply: "Finished held turn" }));
+    record("PASS: one provider clear after the ordinary reply, across two processes; reopened board displays the preserved reply without the goal");
     for (const mode of ["resume", true]) {
       await a.ask({ action: "startGoal", mode });
       await wait(async () => (await a.ask({ action: "goalPanels" })).every(
@@ -421,7 +436,12 @@ if (!process.versions.electron) {
   const runs = new Map(), leases = new Map(), pids = new Set(), providerRequests = new Map(); let failNext = false, providerSequence = 0;
   let gitWindow;
   const active = await import(new URL("../src/desktop/active-runs.ts", import.meta.url));
-  let managerCalls = 0, maintenanceCalls = 0, heldTurn, goalDone, goalRequest;
+  let managerCalls = 0, maintenanceCalls = 0, goalClearCalls = 0, heldTurn, goalDone, goalRequest;
+  globalThis.runtimeCheckUpdateGoal = async (_profile, _project, _thread, action) => {
+    assert.equal(action.kind, "clear");
+    goalClearCalls++;
+    return null;
+  };
   const maintenanceDone = Promise.withResolvers();
   globalThis.runtimeCheckReply = async (_profile, _project, text, _images, _action, _tools, _instructions, _signal, hooks) => {
     if (hooks.goal || hooks.resumeGoal) {
@@ -481,8 +501,9 @@ if (!process.versions.electron) {
   const sourceUrl = new URL("../src/desktop/main.ts", import.meta.url);
   let source = readFileSync(sourceUrl, "utf8").replace('missingCodexThread, startCodexRun', 'missingCodexThread')
     .replace('codexStatus, configuredCodex,', 'codexStatus, configuredCodex as unusedConfiguredCodex,')
-    .replace('replyToBoard, replyToTask', 'replyToBoard as unusedReplyToBoard, replyToTask');
-  source = 'const configuredCodex = async () => ({}); const startCodexRun = globalThis.runtimeCheckStart; const replyToBoard = globalThis.runtimeCheckReply;\n' + source;
+    .replace('replyToBoard, replyToTask', 'replyToBoard as unusedReplyToBoard, replyToTask')
+    .replace('reviewWithCodex, updateBoardGoal', 'reviewWithCodex, updateBoardGoal as unusedUpdateBoardGoal');
+  source = 'const configuredCodex = async () => ({}); const startCodexRun = globalThis.runtimeCheckStart; const replyToBoard = globalThis.runtimeCheckReply; const updateBoardGoal = globalThis.runtimeCheckUpdateGoal;\n' + source;
   source = source.replaceAll("import.meta.url", JSON.stringify(sourceUrl.href)).replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, sourceUrl).href));
   const entry = join(scratch, name + ".mjs");
   writeFileSync(entry, transformSync(source + "\nglobalThis.sharedCheck = {createWindow,launchTask,agentSlots,reserveAgent,scheduleAgentWork,scheduleMaintenance,activeAgents,subscriptions};", { loader: "ts", format: "esm" }).code);
@@ -658,6 +679,20 @@ if (!process.versions.electron) {
       }
       if (command.action === "clearGoal") data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(
         'window.taskboard.boardGoal("clear")');
+      if (command.action === "goalClearCalls") data = goalClearCalls;
+      if (command.action === "clickClearGoal") {
+        const contents = BrowserWindow.getAllWindows()[0].webContents;
+        await wait(() => contents.executeJavaScript('Boolean(document.querySelector(".board-goal:not([hidden])[data-status=paused]"))'), "paused goal visible");
+        data = await contents.executeJavaScript(`(async () => {
+          const panel = document.querySelector(".board-goal");
+          panel.open = true;
+          const button = panel.querySelector("button.danger");
+          button.click();
+          await Promise.resolve();
+          return button.disabled && Boolean(panel.querySelector('.board-goal-body [role="status"]').textContent);
+        })()`);
+        assert.equal(data, true);
+      }
       if (command.action === "finishGoal") {
         goalDone.resolve();
         data = await goalRequest;
@@ -673,6 +708,7 @@ if (!process.versions.electron) {
           await ready;
           const history = await window.webContents.executeJavaScript("window.taskboard.boardHistory()");
           assert.equal(history.data.goal, null);
+          if (command.expectedReply) assert.ok(JSON.stringify(history.data.turns).includes(command.expectedReply));
           assert.equal(await window.webContents.executeJavaScript('document.querySelector(".board-goal").hidden'), true);
           data = true;
         } finally { window.close(); }
