@@ -110,6 +110,16 @@ try {
     await paint();
   };
   const gitStyle = () => evaluate(`(() => { const g = document.querySelector('.status-repository'), s = getComputedStyle(g); return [s.backgroundColor, s.borderTopColor]; })()`);
+  await evaluate("document.querySelector('#status-branch').hidden = false");
+  for (const [button, panel] of [["#status-branch", "#git-branches"], ["#status-limits", "#provider-limits"]]) {
+    await move(button);
+    assert.equal(await evaluate(`document.querySelector('${button}').matches(':hover')`), true);
+    window.webContents.sendInputEvent({ type: "mouseMove", x: 500, y: 100 });
+    await evaluate(`document.querySelector('${button}').focus()`);
+    for (const type of ["keyDown", "char", "keyUp"]) window.webContents.sendInputEvent({ type, keyCode: "Return" });
+    await wait(() => evaluate(`document.querySelector('${panel}').matches(':popover-open')`));
+    await evaluate(`document.querySelector('${panel}').hidePopover()`);
+  }
   // Git presentations are renderer fixtures; settings and activation above use real empty boards.
   for (const motion of ["no-preference", "reduce"]) {
   await window.webContents.debugger.sendCommand("Emulation.setEmulatedMedia", {
@@ -143,9 +153,11 @@ try {
         const b = document.querySelector('#status-auto-mode'), i = b.querySelector('i');
         const r = b.getBoundingClientRect(), ir = i.getBoundingClientRect();
         const before = document.querySelector('.status-repository');
+        const limits = document.querySelector('#status-limits').getBoundingClientRect();
         const style = getComputedStyle(i);
         return { content: getComputedStyle(i, '::before').content, font: getComputedStyle(i).fontFamily,
           width: ir.width, height: ir.height, left: r.left, right: r.right, viewport: innerWidth,
+          nextLeft: limits.left, barHeight: b.parentElement.getBoundingClientRect().height,
           previousRight: before.getBoundingClientRect().right, parent: b.parentElement.className,
           animation: style.animationName, duration: style.animationDuration, transform: style.transform,
           gitHover: before.matches(':hover'),
@@ -157,7 +169,12 @@ try {
       assert.equal(result.gitHover, false);
       assert.ok(result.width >= 16 && result.height >= 16 && result.hit);
       assert.ok(result.left >= 0 && result.right <= result.viewport);
-      if (git !== "hidden") assert.ok(Math.abs(result.left - result.previousRight - 12) <= 1, "12px separation from Git");
+      assert.equal(result.barHeight, 36);
+      assert.ok(Math.abs(result.nextLeft - result.right - 4) <= 1, "4px separation before Limits");
+      if (git !== "hidden") {
+        assert.ok(Math.abs((result.left - result.previousRight) - (result.nextLeft - result.right)) <= 1,
+          "Git, Auto and Limits have equal gaps");
+      }
       else assert.equal(result.left, 8, "no extra leading gap without Git");
       assert.equal(result.animation, on && motion === "no-preference" ? "agent-spin" : "none");
       if (on && motion === "no-preference") {
@@ -166,6 +183,50 @@ try {
       }
       assert.ok(result.label.length > 0);
       results.push({ motion, theme, width, zoom, git, on, ...result });
+      if (motion === "no-preference" && theme === "dark" && zoom === 1) {
+        const textVariants = await evaluate(`(() => {
+          const auto = document.querySelector('#status-auto-mode');
+          const git = document.querySelector('.status-repository');
+          const counters = document.querySelector('#status-tracking span');
+          const limits = document.querySelector('#status-limits');
+          const quota = limits.querySelector('span');
+          const originals = [counters.textContent, quota.textContent, limits.classList.contains('quota-low')];
+          const variants = [];
+          for (const counts of ['0↓ 138↑', '12345↓ 67890↑']) {
+            for (const percent of [7, 36, 100]) {
+              counters.textContent = counts;
+              quota.textContent = 'Лимиты ' + percent + '%';
+              limits.classList.toggle('quota-low', percent <= 10);
+              const a = auto.getBoundingClientRect();
+              variants.push({ counts, percent, before: a.left - git.getBoundingClientRect().right,
+                after: limits.getBoundingClientRect().left - a.right, left: a.left });
+            }
+          }
+          counters.textContent = originals[0];
+          quota.textContent = originals[1];
+          limits.classList.toggle('quota-low', originals[2]);
+          return variants;
+        })()`);
+        for (const variant of textVariants) {
+          assert.ok(Math.abs(variant.after - 4) <= 1);
+          if (git === "hidden") assert.equal(variant.left, 8);
+          else assert.ok(Math.abs(variant.before - variant.after) <= 1);
+        }
+        results.at(-1).textVariants = textVariants;
+        if ((git === "tracking" && on === (width === 1200)) || (git === "hidden" && width === 800 && !on)) {
+          await evaluate(`(() => {
+            document.querySelector('#status-tracking span').textContent = '0↓ 138↑';
+            document.querySelector('#status-limits span').textContent = 'Лимиты 36%';
+            document.querySelector('#status-limits').classList.remove('quota-low');
+          })()`);
+          window.webContents.sendInputEvent({ type: "mouseMove", x: 500, y: 100 });
+          await paint();
+          const height = await evaluate("innerHeight");
+          const image = await window.webContents.capturePage({ x: 0, y: height - 36, width, height: 36 });
+          writeFileSync(join(artifacts, `status-${width}-${git}.png`), image.toPNG());
+          await evaluate("window.renderProviderLimits()");
+        }
+      }
       if (motion === "no-preference" && width === 800 && git === "publish") writeFileSync(join(artifacts, `auto-${theme}-${zoom}-${on}.png`), (await window.webContents.capturePage()).toPNG());
       if (git !== "hidden") {
         await move('#status-branch');
