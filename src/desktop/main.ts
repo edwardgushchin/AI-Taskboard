@@ -6,7 +6,7 @@ import type { FileLink } from "../cli/attachment-links.ts";
 import { providerLimitSource, readCodexLimits } from "./provider-limits.ts";
 import localization from "./localization.cjs";
 import { activeRunSummary, observeActiveRuns, enableSharedRuns } from "./active-runs.ts";
-import { matchesQueuedExecutor, prepareQueuedTurn, recordQueuedTurn, registerRuntime, runtimeLocation, runtimeTransaction } from "./board-runtime.ts";
+import { forgetExecutor, matchesQueuedExecutor, prepareQueuedTurn, recordQueuedTurn, registerRuntime, rememberExecutor, runtimeLocation, runtimeTransaction } from "./board-runtime.ts";
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, Notification, protocol, session, shell } from "electron";
 import type { IpcMainInvokeEvent } from "electron";
 import { randomUUID } from "node:crypto";
@@ -23,16 +23,16 @@ import { githubReadTool, readBoardGitHub } from "./github-read.ts";
 import { codexStatus, configuredCodex, executorFullAccess, isManagerAccess, managerAccess, setCodexExecutable, setCodexWindowsSandbox, setTaskExecutorAccess } from "./codex.ts";
 import { chatModels, readBoardHistory, readLastTaskTurn, readTaskRunHistory, replyToBoard, replyToTask, reviewWithCodex, updateBoardGoal } from "./codex-chat.ts";
 import type { BoardActivity, BoardGoal, BoardGoalAction } from "./codex-chat.ts";
+import { boardReviewModeTool, reviewModeReceipt, setReviewModeFromChat, taskChatActions } from "./chat-actions.ts";
 import { autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools } from "./board-actions.ts";
 import { phaseStageReporter } from "./expert-tools.ts";
 import type { BoardChange, ReviewedSubmission, ReviewReport } from "./board-actions.ts";
 import type { AgentControl } from "./codex-rpc.ts";
 import type { TaskUsageRole, TokenUsageReport } from "../cli/token-usage.ts";
-import { taskChatActions } from "./chat-actions.ts";
 import type { CliReply } from "./cli.ts";
 import { executionModels } from "./codex-models.ts";
 import type { ArchiveLink, BoardSettings, BoardTag, ReviewMode, RunActivity, Task } from "../cli/model.ts";
-import { boardReviewMode, codexThreadPattern, defaultBoardAgents, maxAttachmentBytes, reviewsAcceptanceRepair, reviewVerifier, taskIdPattern, TaskboardError, usesIndependentReviewer } from "../cli/model.ts";
+import { boardReviewMode, taskReviewMode, taskReviewModeVersion, codexThreadPattern, defaultBoardAgents, maxAttachmentBytes, reviewsAcceptanceRepair, reviewVerifier, taskIdPattern, TaskboardError, usesIndependentReviewer } from "../cli/model.ts";
 import { BoardStore, directory as storageDirectory, locateBoard, readBoardSettings, readJson, writeJson } from "../cli/storage.ts";
 import { applyDesktopAcceptance } from "../cli/acceptance.ts";
 import { missingCodexThread, startCodexRun } from "./codex-run.ts";
@@ -61,7 +61,7 @@ interface Board {
   project: string;
   settings: BoardSettings;
   tags: BoardTag[];
-  tasks: (Task & { historyLength?: number; reviewApproved?: boolean; reviewHasCommit?: true; reviewPending?: true; mergeRepair?: true; unfinishedDependencies?: string[];
+  tasks: (Task & { historyLength?: number; reviewApproved?: boolean; reviewApprovalTargetHead?: string | null; reviewHasCommit?: true; reviewPending?: true; mergeRepair?: true; unfinishedDependencies?: string[];
     expertWorkPlanned?: boolean; expertReviewPlanned?: boolean })[];
   managerInbox?: ReturnType<typeof import("../cli/task-messages.ts").managerInbox>;
   archived: (ArchiveLink & { id: string })[];
@@ -1037,13 +1037,15 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       control => ready.resolve(control), signal, id, items => {
         streamed = true;
         notify({ type: "run", items });
-      }, automatic === undefined ? undefined : "initial", task.status === "review")).finally(() => ready.reject(new Error("The agent session ended.")));
+      }, automatic === undefined ? undefined : "initial", task.status === "review", Boolean(task.closedAt))).finally(() => ready.reject(new Error("The agent session ended.")));
     if ("interrupted" in answer) return { saved, result: { ok: true as const, data: task } };
     signal.throwIfAborted();
-    const result = await callCli<Task>(project, ["chat", id], {
-      ...answer, actor: "agent", model, effort, replyTo, durationMs: Math.round(performance.now() - replyStarted),
-      ...(automatic ? { draftDiscussion: true, revision: task.revision } : {}),
-    });
+    const result = automatic && !answer.text
+      ? await callCli<Task>(project, ["draft-discussion", id], { revision: task.revision, phase: "completed" })
+      : await callCli<Task>(project, ["chat", id], {
+        ...answer, actor: "agent", model, effort, replyTo, durationMs: Math.round(performance.now() - replyStarted),
+        ...(automatic ? { draftDiscussion: true, revision: task.revision } : {}),
+      });
     if (result.ok) discussionStarted = false;
     else discussionFailure = result.error.message;
     return { saved, result };
@@ -1155,9 +1157,9 @@ let schedulingAgentWork = false;
 function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
   const { project } = watch.board;
   const planned = (task: Board["tasks"][number], settings: BoardSettings) => task.mergeRepair || task.expertStage ||
-    (task.expertWorkPlanned && (task.schedule || boardReviewMode(settings) === "human" || task.expertReviewPlanned));
+    (task.expertWorkPlanned && (task.schedule || taskReviewMode(task, settings) === "human" || task.expertReviewPlanned));
   const missingPlan = (task: Board["tasks"][number], settings: BoardSettings) => {
-    if (task.status === "review") return boardReviewMode(settings) !== "human" && !task.expertReviewPlanned &&
+    if (task.status === "review") return taskReviewMode(task, settings) !== "human" && !task.expertReviewPlanned &&
       !task.reviewPending && !task.reviewApproved && (!task.acceptanceRepair || reviewsAcceptanceRepair(task, settings));
     const controls = settings.autoMode ? settings.autoQueue : undefined;
     return task.status === "ready" && !controls?.paused && !controls?.held.includes(task.id) &&
@@ -1193,13 +1195,16 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
       const queued = board.settings.autoMode ? board.tasks : board.tasks.filter(task => task.launchRequested);
       const eligibleTasks = queued.filter(task => planned(task, board.settings));
       const key = projectIdentity(project);
-      if (board.settings.autoMode && boardReviewMode(board.settings) === "reviewer") {
-        const task = board.tasks.find(task => task.status === "review" && !task.acceptanceRepair && task.reviewApproved && !executorBusy(project, task.id) &&
-          !watch.reviewerRuns.has(task.id) && !queue.integrations.has(task.id + ":" + task.revision));
+      if (board.settings.autoMode) {
+        const integrationKey = (task: Board["tasks"][number]) =>
+          JSON.stringify([task.id, task.revision, taskReviewModeVersion(task, board.settings), task.reviewApprovalTargetHead]);
+        const task = board.tasks.find(task => task.status === "review" && taskReviewMode(task, board.settings) === "reviewer" &&
+          !task.acceptanceRepair && task.reviewApproved && !executorBusy(project, task.id) &&
+          !watch.reviewerRuns.has(task.id) && !queue.integrations.has(integrationKey(task)));
         if (task) {
-          const attempt = task.id + ":" + task.revision;
+          const attempt = integrationKey(task);
           queue.integrations.add(attempt);
-          const review = await callCli<{ revision: number; targetHead: string | null; message?: string; stale: boolean;
+          const review = await callCli<{ revision: number; targetHead: string | null; message?: string; stale: boolean; reviewMode: ReviewMode; reviewModeVersion?: number;
             reviewerApproval?: { targetHead: string | null } }>(project, ["review", task.id, "--compact"]);
           if (!review.ok) {
             // The card may have left review after the queue snapshot.
@@ -1210,36 +1215,38 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
             }
             continue;
           }
+          if (review.data.reviewMode !== "reviewer" || review.data.revision !== task.revision) continue;
           if (review.data.stale) { failed(task.id + ": submission changed"); continue; }
           if (review.data.reviewerApproval?.targetHead !== review.data.targetHead) {
             if (!task.expertReviewPlanned) { queue.integrations.delete(attempt); return; }
             const release = reserveAgent(project, "reviewer", "review:" + task.id);
             if (!release) { queue.integrations.delete(attempt); return; }
-            watch.reviewerRuns.set(task.id, release.run(() => reviewSubmission(watch, task.id, 4)).finally(async () => {
-              try {
-                const checked = await callCli<{ targetHead: string | null; reviewerApproval?: { targetHead: string | null } }>(project, ["review", task.id, "--compact"]);
-                if (checked.ok && checked.data.reviewerApproval?.targetHead === checked.data.targetHead) queue.integrations.delete(attempt);
-              } finally {
-                watch.reviewerRuns.delete(task.id); release(); publishReviewActivity(project);
-              }
+            watch.reviewerRuns.set(task.id, release.run(() => reviewSubmission(watch, task.id, 4)).finally(() => {
+              watch.reviewerRuns.delete(task.id);
+              release();
+              publishReviewActivity(project);
             }));
             continue;
           }
           const accepted = await callCli(project, ["accept", task.id, "--compact"], {
-            autoMode: true, actor: "manager", reviewMode: "reviewer", revision: review.data.revision,
+            autoMode: true, actor: "manager", reviewMode: "reviewer", reviewModeVersion: review.data.reviewModeVersion, revision: review.data.revision,
             targetHead: review.data.targetHead, ...(review.data.message ? { message: review.data.message } : {}),
           });
           if (!accepted.ok) {
-            if (accepted.error.code === "REVISION_CONFLICT") continue;
+            if (accepted.error.code === "AUTO_MODE_DISABLED") {
+              queue.integrations.delete(attempt);
+              continue;
+            }
+            if (["REVISION_CONFLICT", "REVIEW_MODE_CHANGED", "HUMAN_ACCEPTANCE_REQUIRED"].includes(accepted.error.code)) continue;
             if (accepted.error.code === "REVIEW_REQUIRED") {
               // Accept checks approval before the revision and status. A
               // concurrent decision can invalidate the approval we just read.
               const latest = await callCli<{ status: string; revision: number }>(project, ["show", task.id, "--compact"]);
               if (latest.ok && (latest.data.status !== "review" || latest.data.revision !== review.data.revision)) continue;
             }
-            if (["BOARD_BUSY", "TARGET_CHANGED", "AUTO_MODE_DISABLED", "AUTO_REVIEW_DISABLED", "REVIEW_MODE_CHANGED"].includes(accepted.error.code)) queue.integrations.delete(attempt);
+            if (["BOARD_BUSY", "TARGET_CHANGED", "AUTO_REVIEW_DISABLED"].includes(accepted.error.code)) queue.integrations.delete(attempt);
             else failed("accept " + task.id + ": " + accepted.error.message);
-            if (["BOARD_BUSY", "AUTO_MODE_DISABLED", "AUTO_REVIEW_DISABLED", "REVIEW_MODE_CHANGED"].includes(accepted.error.code)) return;
+            if (["BOARD_BUSY", "AUTO_REVIEW_DISABLED"].includes(accepted.error.code)) return;
           }
           continue;
         }
@@ -1384,8 +1391,8 @@ function reserveAgent(project: string, role: AgentRole, task?: string, queuedRev
   const overrides = readBoardSettings(runtimeLocation(project)).taskLimits;
   const release = agentSlots.acquire(projectIdentity(project), role, overrides, task, queuedRevision);
   if (!release) return;
-  return Object.assign(() => {
-    release();
+  return Object.assign((restart = false) => {
+    release(restart);
     scheduleAgentWork();
     void callCli(project, ["maintain"]).catch(error => console.warn("Private lifecycle maintenance deferred", error));
   }, { run: release.run });
@@ -2039,6 +2046,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   }
   const changes: BoardChange[] = [];
   let requestText = queued?.draft.trim() ?? request.trim();
+  let ownerReviewRequest = !background && !goal ? requestText : "";
   let pendingAction: Promise<unknown> = Promise.resolve();
   const scratch = new Set<string>();
   let sendingNow: Promise<void> | undefined;
@@ -2174,8 +2182,10 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         await wait(250, undefined, { signal });
       }
     }
-    const reviewMode = boardReviewMode(settings.data);
-    if (expectedReviewMode && reviewMode !== expectedReviewMode) {
+    const reviewMode = expectedReviewMode ?? boardReviewMode(settings.data);
+    const hasMode = (mode: ReviewMode) => reviewMode === mode ||
+      (!reviewIds && board.tasks?.some(task => taskReviewMode(task, settings.data) === mode));
+    if (expectedReviewMode && !board.tasks.some(task => reviewIds?.includes(task.id) && taskReviewMode(task, settings.data) === expectedReviewMode)) {
       return cliFailure("REVIEW_MODE_CHANGED", t("errors.5842130646fd0b88"));
     }
     const instructions = cleanupJob ? boardInstructions.replace("Do not edit files, run project code, or change Git state yourself.", "Diagnose and repair only the assigned internal maintenance fault yourself.") +
@@ -2204,16 +2214,18 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       "The goal handles its incoming executor and reviewer mail. Use board tools for the user's direct requests.");
     const reviewTaskTools = usesIndependentReviewer(reviewMode)
       ? new Set([...autoReviewTaskTools, "manager_ack", "task_cancel", "task_start"]) : autoReviewTaskTools;
-    const stages = reviewMode === "manager" ? phaseStageReporter(project, "review") : undefined;
+    const stages = hasMode("manager") ? phaseStageReporter(project, "review") : undefined;
     const mcpTools: BoardMcpTool[] = boardMcpTools.filter(({ name }) =>
-      (!["expert_stage", "expert_verify_skills"].includes(name) || reviewMode === "manager") &&
+      (!["expert_stage", "expert_verify_skills"].includes(name) || hasMode("manager")) &&
       (!cleanupJob || ["board_list", "task_show", "task_cleanup_status", "task_cleanup", "project_path", "project_sha256"].includes(name)) &&
       (!isManual(settings.data) || ["expert_list", "expert_context", "expert_skill", "board_list", "task_show", "task_create", "task_update", "task_comment", "tag_set_color", "ask_user"].includes(name)) &&
       (reviewIds || cleanupJob || !["project_path", "project_sha256"].includes(name)) &&
       (!reviewIds || autoReviewReadTools.has(name) || reviewTaskTools.has(name)) &&
-      (name !== "task_accept" || (reviewMode !== "human" && reviewMode !== "reviewer-human")) &&
+      (name !== "task_accept" || hasMode("reviewer") || hasMode("manager")) &&
       (!repairTask || !["task_start", "task_start_batch", "task_accept", "task_request_changes", "task_return_to_draft"].includes(name)));
     if (!reviewIds && !cleanupJob) mcpTools.push(...(goal ? goalWorkTools : background ? [] : goalChatTools), githubReadTool);
+    const allowReviewModeChange = !background && !goal && !isManual(settings.data);
+    if (allowReviewModeChange) mcpTools.push(boardReviewModeTool);
     const attachments = await prepareBoardAttachments(queued ? queuedFiles(queued) : files, scratch);
     if (!reviewIds && !autoNotice && goal !== "resume") {
       historyMessage = {
@@ -2239,8 +2251,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       previousConversation: priorChat?.length ? priorChat : undefined,
     }) : undefined;
     const runAction = boardActions(board.project, attachments, changes, signal,
-      (id, revision, { reason, targetHead, reviewMode, newThread, resolveConflicts } = {}) => reason ?
-        launchTask(board.project, id, { input: { revision, reason, targetHead, reviewMode, actor: "manager" } }) :
+      (id, revision, { reason, targetHead, reviewMode, reviewModeVersion, newThread, resolveConflicts } = {}) => reason ?
+        launchTask(board.project, id, { input: { revision, reason, targetHead, reviewMode, reviewModeVersion, actor: "manager" } }) :
         launchTask(board.project, id, undefined, newThread ? "manager" : false, revision, undefined, false, resolveConflicts),
       () => activeGoal && threadId ? { threadId, objective: activeGoal.objective, signal: goalWork.signal } : undefined,
       id => executorBusy(board.project, id), listener => observeBoardTasks(board, listener), async (id, sequence) => {
@@ -2256,6 +2268,15 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         : returnTaskToDraft(board.project, id, revision, "manager"));
     const run = async (name: string, args: unknown): Promise<CliReply> => {
       try {
+        if (name === boardReviewModeTool.name) {
+          if (!allowReviewModeChange) return cliFailure("USER_DIRECTION_REQUIRED", "Use the owner's manager chat to change review mode.");
+          signal.throwIfAborted();
+          const result = setReviewModeFromChat(board.project, ownerReviewRequest, args);
+          if (!result.ok) return result;
+          const { id, status, title, revision } = result.data;
+          changes.push({ id, status, title, revision, action: "set_review_mode" });
+          return { ok: true, data: reviewModeReceipt(result.data) };
+        }
         if (name === "task_set_executor_access") return await setTaskExecutorAccess(app.getPath("userData"), board.project, args);
         const result = await runAction(name, args);
         if (name === "task_show" && result.ok && !reviewIds) {
@@ -2369,7 +2390,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
             action: "Read manager_inbox for executor questions, blockers, submissions and review decisions.",
           } } : result;
         });
-      }, cleanupJob ? boardTools.filter(tool => ["board_list", "task_show"].includes(tool.name)) : reviewIds ? [] : isManual(settings.data) ? boardTools.filter(tool => ["board_list", "task_show", "task_create", "task_update", "tag_set_color", "ask_user"].includes(tool.name)) : boardTools, instructions + "\n" + initialSettings.text, signal, {
+      }, cleanupJob ? boardTools.filter(tool => ["board_list", "task_show"].includes(tool.name)) : reviewIds ? [] : isManual(settings.data) ? boardTools.filter(tool => ["board_list", "task_show", "task_create", "task_update", "tag_set_color", "ask_user"].includes(tool.name)) : boardTools, instructions + (allowReviewModeChange ? "\n" + boardReviewModeTool.description : "") + "\n" + initialSettings.text, signal, {
         id: threadId,
         separateTurn: reviewIds ? true : undefined,
         role: cleanupJob || repairTask ? "reviewer" : "manager",
@@ -2516,9 +2537,12 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
               attachments.push(...prepared);
               const receipt = messageId ? Promise.withResolvers<boolean>() : undefined;
               if (messageId && receipt) steering.set(messageId, receipt);
+              const previousReviewRequest = ownerReviewRequest;
+              if (allowReviewModeChange) ownerReviewRequest = text;
               try {
                 await control.steer(prompt, prepared.flatMap(file => file.image ? [file.image] : []), messageId);
               } catch (error) {
+                ownerReviewRequest = previousReviewRequest;
                 attachments.length = firstAttachment;
                 throw error;
               }
@@ -2623,9 +2647,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
 function scheduleAutoReview(watch: BoardWatch) {
   if (isManual(watch.board.settings)) return;
   if (subscriptions.get(watch.board.project) !== watch) return;
-  const mode = boardReviewMode(watch.board.settings);
-  const { project, tasks } = watch.board;
-  if (mode === "human") {
+  const { project, tasks, settings } = watch.board;
+  const modeOf = (task: Task) => taskReviewMode(task, settings);
+  if (tasks.every(task => modeOf(task) === "human")) {
     watch.reviewAttempts.clear();
     watch.integrationAttempts.clear();
     if (watch.reviewReports.size) {
@@ -2651,25 +2675,25 @@ function scheduleAutoReview(watch: BoardWatch) {
   const projectKey = projectIdentity(project);
   const overrides = watch.board.settings?.taskLimits;
   const managerAvailable = agentSlots.available(projectKey, "manager", overrides) > 0 && !backgroundManagerRequests.has(projectKey);
-  if (closingProjects.has(project) || (mode === "manager" && (watch.reviewerRuns.size || !managerAvailable))) return;
+  if (closingProjects.has(project)) return;
   const tab = [...watch.tabs].find(tab => !tab.window.isDestroyed());
   if (!tab) return;
   const managerBatchSize = 4;
   const capacity = agentSlots.available(projectKey, "reviewer", overrides);
-  const independent = usesIndependentReviewer(mode);
-  const available = independent ? capacity : Math.min(1, capacity);
+
   const reviewAttempt = (task: Task & { reviewDecision?: number; reviewTargetHead?: string | null }) =>
-    JSON.stringify([mode, watch.board.settings.reviewModeVersion, task.revision, task.reviewDecision, task.reviewTargetHead]);
-  const ready = submissions.filter(task => !task.reviewPending && (!task.acceptanceRepair || reviewsAcceptanceRepair(task, watch.board.settings)) &&
-    !watch.reviewerRuns.has(task.id) &&
-    task.expertReviewPlanned &&
-    (!independent || !task.reviewApproved) &&
+    JSON.stringify([modeOf(task), taskReviewModeVersion(task, settings), task.revision, task.reviewDecision, task.reviewTargetHead]);
+  const ready = submissions.filter(task => modeOf(task) !== "human" && !task.reviewPending &&
+    (!task.acceptanceRepair || reviewsAcceptanceRepair(task, settings)) && !watch.reviewerRuns.has(task.id) &&
+    task.expertReviewPlanned && (!usesIndependentReviewer(modeOf(task)) || !task.reviewApproved) &&
     watch.reviewAttempts.get(task.id) !== reviewAttempt(task) &&
-    ((independent && task.reviewHasCommit) || !executorBusy(project, task.id))).slice(0, available);
-  for (const task of ready) watch.reviewAttempts.set(task.id, reviewAttempt(task));
-  let ids = ready.map(task => task.id);
+    ((usesIndependentReviewer(modeOf(task)) && task.reviewHasCommit) || !executorBusy(project, task.id)));
+  const independent = ready.filter(task => usesIndependentReviewer(modeOf(task))).slice(0, capacity);
+  for (const task of independent) watch.reviewAttempts.set(task.id, reviewAttempt(task));
+  let ids = independent.map(task => task.id);
+  let mode: ReviewMode = "reviewer";
   let prompt: string;
-  if (independent) {
+  {
     for (const id of ids) {
       const release = reserveAgent(project, "reviewer", "review:" + id);
       if (!release) { watch.reviewAttempts.delete(id); continue; }
@@ -2679,17 +2703,22 @@ function scheduleAutoReview(watch: BoardWatch) {
         publishReviewActivity(project);
       }));
     }
-    if (ready.length) publishReviewActivity(project);
-    if (mode === "reviewer-human") return;
-    if (watch.board.settings.autoMode) { scheduleAutoBoard(watch); return; }
+    if (independent.length) publishReviewActivity(project);
+    if (settings.autoMode) scheduleAutoBoard(watch);
     if (!managerAvailable) return;
-    const awaitingIntegration = new Set(submissions.filter(task => task.reviewApproved).map(task => task.id));
+    const awaitingIntegration = new Set(settings.autoMode ? [] : submissions.filter(task => modeOf(task) === "reviewer" && task.reviewApproved).map(task => task.id));
     const approvals = (watch.board.managerInbox ?? []).filter(({ id, kind, sequence }) =>
       kind === "review-approve" && awaitingIntegration.has(id) && watch.integrationAttempts.get(id) !== sequence).slice(0, managerBatchSize);
     for (const { id, sequence } of approvals) watch.integrationAttempts.set(id, sequence);
     ids = approvals.map(({ id }) => id);
     prompt = t("ui.ai_taskboard_the_reviewer_approved_these_submiss_7b01f774") + approvals.map(({ id, sequence }) => id + " (" + sequence + ")").join(", ");
-  } else {
+  }
+  if (!ids.length && capacity > independent.length) {
+    const task = ready.find(task => modeOf(task) === "manager");
+    if (!task) return;
+    mode = "manager";
+    ids = [task.id];
+    watch.reviewAttempts.set(task.id, reviewAttempt(task));
     prompt = t("ui.ai_taskboard_automatic_review_follow_the_board_s_d65f54d4") + ids.join(", ");
   }
   if (!ids.length) return;
@@ -2717,7 +2746,7 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
     const updated = (board: Board) => {
       const task = board.tasks.find(task => task.id === id);
       if (!task || task.revision > revision || (task.revision === revision && task.status !== "review") ||
-          !usesIndependentReviewer(boardReviewMode(board.settings))) ready.resolve(false);
+          !usesIndependentReviewer(taskReviewMode(task, board.settings))) ready.resolve(false);
       else if (!executorBusy(project, id)) ready.resolve(true);
     };
     const unsubscribe = observeBoardTasks(watch.board, updated);
@@ -2965,9 +2994,9 @@ ipcMain.handle("chat:transcribeVoice", async (event, samples: unknown, language:
 async function confirmHumanAcceptance(state: ProjectTab, project: string, id: string, input: Record<string, unknown>) {
   const settings = await callCli<BoardSettings>(project, ["settings"]);
   if (!settings.ok) return settings;
-  if (boardReviewMode(settings.data) !== "reviewer-human") return callCli(project, ["accept", id], input);
   const card = await callCli<Task>(project, ["show", id, "--compact"]);
   if (!card.ok || card.data.status === "done") return card;
+  if (taskReviewMode(card.data, settings.data) !== "reviewer-human") return callCli(project, ["accept", id], input);
   const review = await callCli<{ revision: number; targetHead: string | null; reviewModeVersion?: number;
     awaitingHumanAcceptance: boolean; pending?: boolean }>(project, ["review", id, "--compact"]);
   if (!review.ok) return review;
@@ -3251,7 +3280,8 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   let prepared = false;
   let monitoring = false;
   let recoveringThreadId: string | undefined;
-  let release: (() => void) | undefined;
+  let restart: import("./board-runtime.ts").RuntimeEntry["restart"];
+  let release: ((restart?: boolean) => void) | undefined;
   let updateTimer: NodeJS.Timeout | undefined;
   const publish = () => {
     updateTimer = undefined;
@@ -3316,7 +3346,10 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     }
     if (queued) {
       const task = current.data;
-      recoveringThreadId = agentSlots.entries(project).find(entry => matchesQueuedExecutor(entry, task))?.turnRequest?.threadId;
+      const pending = agentSlots.entries(project).find(entry => matchesQueuedExecutor(entry, task));
+      if (!pending) return cliFailure("INVALID_TRANSITION", "The queued start is no longer pending.");
+      recoveringThreadId = pending.turnRequest?.threadId;
+      restart = pending.restart;
     }
     const attemptedRevision = current.data.revision;
     // Record a permanent failure while this launch still owns the task slot.
@@ -3336,7 +3369,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     const client = await configuredCodex(app.getPath("userData"));
     if (!client) {
       const reason = t("ui.choose_the_codex_executable_in_settings_06a08a7e");
-      if (prepared || recoveringThreadId) throw new Error(reason);
+      if (prepared || recoveringThreadId || restart) throw new Error(reason);
       await failDiscussionStart("CODEX_UNAVAILABLE", reason);
       return cliFailure("CODEX_UNAVAILABLE", reason);
     }
@@ -3399,6 +3432,9 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         ...(resolveConflicts ? { resolveConflicts } : {}),
         ...(process.platform === "win32" && client.windowsSandbox === "elevated" ? { isolatedWorktree: true } : {}) });
     if (!started.ok) {
+      if (restart && !["BOARD_BUSY", "REVISION_CONFLICT", "INVALID_TRANSITION"].includes(started.error.code)) {
+        throw new Error(started.error.code + ": " + started.error.message);
+      }
       if (prepared && started.error.code !== "BOARD_BUSY") throw new Error(started.error.message);
       await failDiscussionStart(started.error.code, started.error.message);
       return started;
@@ -3414,7 +3450,10 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       activity.set(item.id, item);
       updateTimer ??= setTimeout(publish, 80);
     }, report => saveTaskTokenUsage(project, id, role, report), signal, async codexThreadId => {
-      if (!queued && linked.codexThreadId === codexThreadId) return;
+      if (!queued && linked.codexThreadId === codexThreadId) {
+        rememberExecutor(project, linked, cwd, continuation);
+        return;
+      }
       const previousCodexThreadId = linked.codexThreadId;
       // Preserve edits made while Codex was starting and link the chat before it can run.
       const saved = await callCli<LaunchState>(project, ["update", id, "--compact"], {
@@ -3430,6 +3469,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
           (queued && ["INVALID_TRANSITION", "REVISION_CONFLICT"].includes(saved.error.code)) ? saved.error.code : "CODEX_LINK_FAILED",
       });
       linked = saved.data;
+      rememberExecutor(project, linked, cwd, continuation);
       if (!queued) return;
       const pending = prepareQueuedTurn(project, linked, codexThreadId);
       if (!pending) throw Object.assign(new Error("The queued start is no longer pending."), { code: "INVALID_TRANSITION" });
@@ -3437,11 +3477,12 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         throw Object.assign(new Error("The queued start belongs to another Codex thread."), { code: "CODEX_START_UNCONFIRMED" });
       }
       return { ...pending, accepted: (turnId: string) => recordQueuedTurn(project, id, pending.clientId, turnId) };
-    }, desktopProfile, recoveringThreadId));
+    }, desktopProfile, recoveringThreadId, Boolean(restart)));
     const { threadId: codexThreadId, completion } = run;
     const directories = new Set<string>();
     let stopRequested = false;
     activeAgents.set(key, { control: { ...run, interrupt: () => {
+      forgetExecutor(project, id);
       stopRequested = true;
       return run.interrupt();
     } }, directories });
@@ -3449,8 +3490,10 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     runningTasks.add(key);
     notifyRunChange(project);
     let retry: { revision: number; reason: string; continuation: ExecutorContinuation } | undefined;
+    let requeueRecoveredTurn = false;
     void completion.then(async outcome => {
-      if (run.recovered && !stopRequested && (!outcome || outcome.interrupted)) {
+      if (run.recovered && !stopRequested && (!outcome || outcome.interrupted) && (!restart || outcome?.interrupted)) {
+        requeueRecoveredTurn = Boolean(restart && outcome?.interrupted);
         await saveActivity();
         return;
       }
@@ -3467,7 +3510,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       const reconnect = outcome?.disconnected && !continuation.afterDisconnect;
       const accessGranted = !task.fullAccess && !signal.aborted && !stopRequested && executorFullAccess(desktopProfile, project, task);
       let unfinishedRevision: number | undefined;
-      if (!run.recovered && (accessGranted || reconnect || (!outcome && !task.schedule)) &&
+      if ((!run.recovered || restart) && (accessGranted || reconnect || (!outcome && !task.schedule)) &&
           !signal.aborted && !stopRequested && (!rejected || accessGranted)) {
         const current = await callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
         if (current.ok) {
@@ -3532,7 +3575,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       for (const directory of directories) await rm(directory, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
       runningTasks.delete(key);
       launchingTasks.delete(key);
-      releaseSlot();
+      releaseSlot(requeueRecoveredTurn || (signal.aborted && closingProjects.has(project)));
       try {
         if (retry && !signal.aborted && !stopRequested && !closingProjects.has(project)) {
           const resumed = await launchTask(project, id, undefined, false, retry.revision, retry.continuation);
@@ -3569,7 +3612,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     if (code === "BOARD_BUSY" || (queued && (code === "INVALID_TRANSITION" || code === "REVISION_CONFLICT"))) {
       return cliFailure(code, (error as Error).message);
     }
-    if (recoveringThreadId || code === "CODEX_START_UNCONFIRMED") {
+    if ((recoveringThreadId && !restart) || code === "CODEX_START_UNCONFIRMED") {
       queuedRecoveryDelay.add(key);
       setTimeout(() => queuedRecoveryDelay.delete(key), 5_000).unref();
       return cliFailure("CODEX_START_UNCONFIRMED", (error as Error).message);
@@ -3578,7 +3621,8 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     const reason = busy ? t("ui.this_codex_chat_is_already_open_in_another_proce_9d6a0201") + "\n\n" + (error as Error).message : (error as Error).message;
     await saveActivity();
     const condition = busy ? t("ui.continue_in_the_existing_chat_or_stop_work_there_635dd251") : undefined;
-    const failure = prepared && !signal.aborted ? await recordRunFailure(project, id, reason, condition) : undefined;
+    const failure = (prepared || restart) && !signal.aborted
+      ? await recordRunFailure(project, id, reason, condition, restart ? revision : undefined) : undefined;
     // The feedback was saved even when starting its follow-up run failed.
     if (revisionRequest && prepared && !failure) return callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
     return cliFailure(code === "CODEX_THREAD_BUSY" || code === "CODEX_LINK_FAILED" ? code : "CODEX_LAUNCH_FAILED",
@@ -3586,7 +3630,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   } finally {
     if (!monitoring) {
       launchingTasks.delete(key);
-      release?.();
+      release?.(signal.aborted && closingProjects.has(project));
       notifyRunChange(project);
       operation.finish();
     }

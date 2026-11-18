@@ -432,6 +432,11 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(recoveredCalls[3].params.threadId, unavailable);
   assert.equal(recoveredCalls[4].params.cwd, worktree);
   assert.ok(!("projectId" in recoveredCalls[4].params));
+  await assert.rejects(
+    startCodexRun(client("missing"), folder, worktree, { ...task, codexThreadId: unavailable },
+      undefined, undefined, undefined, async () => assert.fail("Restart must not open a new chat"), undefined, undefined, true),
+    { message: "no rollout found for thread id " + unavailable },
+  );
   const externalFolder = join(folder, "external");
   mkdirSync(externalFolder);
   const external = await startCodexRun(client("ok"), folder, externalFolder,

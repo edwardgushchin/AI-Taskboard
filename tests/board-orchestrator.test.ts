@@ -1,3 +1,4 @@
+import { boardReviewModeTool, reviewModeReceipt, setReviewModeFromChat } from "../src/desktop/chat-actions.ts";
 import { plannedDraft } from "./fixtures/planned-draft.ts";
 import { isManual, manualContext } from "../src/cli/manual-board.ts";
 import { captureFileLink, isFileLink, verifyFileLink } from "../src/cli/attachment-links.ts";
@@ -17,7 +18,7 @@ import type { TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
-import { boardReviewMode, codexThreadPattern, defaultBoardAgents, hexTagColor, maxAttachmentBytes, reviewVerifier, TaskboardError, taskIdPattern, reviewsAcceptanceRepair, usesIndependentReviewer } from "../src/cli/model.ts";
+import { boardReviewMode, taskReviewMode, taskReviewModeVersion, codexThreadPattern, defaultBoardAgents, hexTagColor, maxAttachmentBytes, reviewVerifier, TaskboardError, taskIdPattern, reviewsAcceptanceRepair, usesIndependentReviewer } from "../src/cli/model.ts";
 import { managerInbox, needsManagerAttention } from "../src/cli/task-messages.ts";
 import type { RunActivity, Task } from "../src/cli/model.ts";
 import type { ChatSettings } from "../src/cli/model.ts";
@@ -122,7 +123,7 @@ function fixture(t: TestContext) {
     captureFileLink, isFileLink, verifyFileLink, AbortSignal, AbortController, ArrayBuffer, Buffer, Error, basename, dirname, extname, join, mkdtemp, rm, writeFile, maxAttachmentBytes, boardActions, boardInstructions, boardTools, callCli,
     githubReadTool, readBoardGitHub: (cwd: string, args: unknown) => callCli(cwd, ["github-read"], args),
     executorFullAccess, managerAccess, setTaskExecutorAccess, phaseStageReporter,
-    autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, reviewsAcceptanceRepair, usesIndependentReviewer, defaultBoardAgents, reviewVerifier,
+    autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, taskReviewMode, taskReviewModeVersion, boardReviewModeTool, reviewModeReceipt, setReviewModeFromChat, reviewsAcceptanceRepair, usesIndependentReviewer, defaultBoardAgents, reviewVerifier,
     existsSync, storageDirectory, readdirSync, rmSync, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
     goalMessages, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory,
     send() {},
@@ -224,10 +225,13 @@ function fixture(t: TestContext) {
       ];
       const mode = boardReviewMode((await callCli(project, ["settings"], undefined, false)).data);
       assert.deepEqual(Array.from(session.mcpTools, tool => tool.name).sort(),
-        [...expectedTools.filter(name => (name !== "task_accept" || mode !== "human") && (!instructions.includes("This turn repairs") || !["task_start", "task_start_batch", "task_accept", "task_request_changes"].includes(name))),
+        [...expectedTools.filter(name => (name !== "task_accept" || (mode !== "human" && mode !== "reviewer-human")) && (!instructions.includes("This turn repairs") || !["task_start", "task_start_batch", "task_accept", "task_request_changes"].includes(name))),
         ...(!manualTurn && !cleanupTurn && !instructions.includes("This turn repairs") ? ["task_return_to_draft"] : []),
         ...(!manualTurn && !cleanupTurn && mode === "manager" ? ["expert_stage", "expert_verify_skills"] : []),
         ...(!reviewTurn && !cleanupTurn && !instructions.includes("This turn repairs") ? (session.goal || session.resumeGoal ? ["goal_inbox", "goal_report"] : ["goal_read", "goal_send"]) : []),
+        ...(!reviewTurn && !manualTurn && !cleanupTurn && !session.goal && !session.resumeGoal &&
+          !instructions.includes("This turn repairs") && session.role === "manager" && !prompt.startsWith("AI Taskboard queue:") ?
+          ["task_set_review_mode"] : []),
         ...(reviewTurn && mode === "reviewer" ? ["manager_ack", "task_cancel", "task_start"] : [])].sort());
       if (reviewTurn) {
         assert.doesNotMatch(instructions, /manager_inbox|task_cleanup_status/);

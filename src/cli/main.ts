@@ -15,7 +15,7 @@ import {
   addAttachment, addChatMessage, archiveDiagnostics, createWithAttachments, isArchived, reactivateArchivedTask, readAttachment, readTask, restoreReplyImages, sweepArchives,
   setAttachmentCover, upgradeTagCatalog,
 } from "./archive.ts";
-import { boardAgentRoles, boardReviewMode, hexTagColor, member, number, object, reasoningEffortPattern, record, registerTags, requireRevision, requireState, reviewModes, strings, tagKey, taskIdPattern, TaskboardError, text, usesIndependentReviewer, validAgentLimitOverrides } from "./model.ts";
+import { boardAgentRoles, boardReviewMode, taskReviewMode, taskReviewModeVersion, hexTagColor, member, number, object, reasoningEffortPattern, record, registerTags, requireRevision, requireState, reviewModes, strings, tagKey, taskIdPattern, TaskboardError, text, usesIndependentReviewer, validAgentLimitOverrides } from "./model.ts";
 import type { GitHubMilestone, Task } from "./model.ts";
 import { exists, initializeBoard, locateBoard, onBoard, readBoardSettings, withTaskStartLock } from "./storage.ts";
 import { inheritedLimits, recordSettings } from "./settings-notices.ts";
@@ -41,7 +41,7 @@ import { approvalRequirements, createExpertPlan, expertStagesStatus, planNewTask
 import { syncTaskStatusNotices } from "../desktop/manager-history.ts";
 import { syncSettingsNotices } from "../desktop/settings-notices.ts";
 import { cachedTaskLimits, readProfileTaskLimits } from "../desktop/agent-limits.ts";
-import { deferExecutor, linkQueuedExecutor, matchesQueuedExecutor, registerRuntime, runtimeEntries, runtimeTransaction } from "../desktop/board-runtime.ts";
+import { deferExecutor, forgetExecutor, linkQueuedExecutor, matchesQueuedExecutor, registerRuntime, runtimeEntries } from "../desktop/board-runtime.ts";
 
 const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "checklist", "pause", "block", "resume", "unblock", "update"]);
 const help = [
@@ -106,7 +106,7 @@ function isMergeRepair(task: Task) {
 function compactTask(task: Task) {
   const { id, title, description, status, revision, tags, priority, attachments, coverAttachment, codexThreadId,
     createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep, dependencies, milestone, workingDirectory, schedule, origin, launchRequested } = task;
-  return { expertId: task.expertId, expertTeam: task.expertTeam, expertStage: task.expertStage, expertStages: task.expertStages,
+  return { reviewModeOverride: task.reviewModeOverride, expertId: task.expertId, expertTeam: task.expertTeam, expertStage: task.expertStage, expertStages: task.expertStages,
     reviewDecision: status === "review" ? reviewDecisionSequence(task) : undefined, acceptanceRepair: task.acceptanceRepair, id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
     coverAttachment, codexThreadId, createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep,
     dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, origin, launchRequested, discussionReturn: task.discussionReturn,
@@ -135,8 +135,8 @@ function taskLaunchState(task: Task) {
 function reviewWithSettings(store: BoardStore, task: Task, review: ReturnType<typeof inspectReview>, input: Record<string, unknown>) {
   if (input.includeReviewerSettings !== true) return review;
   return { ...review, reviewTeam: task.expertTeam?.review, reviewDecision: reviewDecisionSequence(task) || undefined, settings: {
-    reviewMode: boardReviewMode(store.index.settings),
-    reviewModeVersion: store.index.settings.reviewModeVersion,
+    reviewMode: review.reviewMode,
+    reviewModeVersion: review.reviewModeVersion,
     reviewer: store.index.settings.reviewer,
   } };
 }
@@ -163,9 +163,9 @@ function snapshotBoard(store: BoardStore, compact = false, cache = new Map<strin
       return card;
     });
     const statuses = new Map([...cards.map(card => card.task), ...archived].map(task => [task.id, task.status]));
-    const mode = boardReviewMode(header.settings);
     return { ...header, tasks: cards.map(({ task, target, approval }) => {
       let reviewTargetHead: string | null | undefined;
+      const mode = taskReviewMode(task, header.settings);
       const reviewPending = task.status === "review" && exists(store.pendingPath(task.id)) ? true as const : undefined;
       const checkReviewTarget = mode === "reviewer-human" || (mode === "reviewer" && !task.expertReviewPlanned && approval);
       if (task.status === "review" && checkReviewTarget) {
@@ -174,11 +174,11 @@ function snapshotBoard(store: BoardStore, compact = false, cache = new Map<strin
         }
         reviewTargetHead = target ? targetHeads.get(target) : null;
         task = { ...task, reviewApproved: Boolean(approval &&
-          approval.reviewModeVersion === header.settings.reviewModeVersion && approval.targetHead === reviewTargetHead) };
-      } else if (approval && approval.reviewModeVersion !== header.settings.reviewModeVersion) {
+          approval.reviewModeVersion === taskReviewModeVersion(task, header.settings) && approval.targetHead === reviewTargetHead) };
+      } else if (approval && approval.reviewModeVersion !== taskReviewModeVersion(task, header.settings)) {
         task = { ...task, reviewApproved: false };
       }
-      return { ...task, reviewTargetHead, reviewPending, ...(task.dependencies?.length
+      return { ...task, reviewTargetHead, reviewPending, reviewApprovalTargetHead: approval?.targetHead, ...(task.dependencies?.length
         ? { unfinishedDependencies: unfinishedDependencies(task, id => statuses.get(id)) } : {}) };
     }),
       managerInbox: cards.flatMap(card => card.inbox).sort((left, right) => left.at.localeCompare(right.at) ||
@@ -345,9 +345,11 @@ function run(
     const phase = taskExpertPhase(input.phase);
     if ((phase === "work" && input.actor !== "agent") || (phase === "review" && !["reviewer", "manager"].includes(String(input.actor))))
       throw new TaskboardError("INVALID_INPUT", "Only the responsible phase agent may report a stage.");
-    const mode = boardReviewMode(store.index.settings);
-    if (phase === "review" && !(input.actor === "manager" ? mode === "manager" : usesIndependentReviewer(mode)))
-      throw new TaskboardError("REVIEW_MODE_CHANGED", "Use the responsible agent for the current review mode.");
+    if (phase === "review") {
+      const mode = taskReviewMode(store.card(taskId), store.index.settings);
+      if (input.actor === "manager" ? mode !== "manager" : !usesIndependentReviewer(mode))
+        throw new TaskboardError("REVIEW_MODE_CHANGED", "Use the responsible agent for the current review mode.");
+    }
     const targetHead = phase === "review" ? verifyReviewDecision(store, store.card(taskId), input.targetHead) : undefined;
     return updateExpertStage(store, taskId, phase, input, targetHead);
   }
@@ -669,7 +671,7 @@ function run(
   }
   if (reviewerReport || ((input.actor === "manager" || input.actor === "reviewer") &&
       (command === "accept" || command === "request-changes"))) {
-    const mode = boardReviewMode(store.index.settings);
+    const mode = taskReviewMode(task, store.index.settings);
     if (mode === "human" && !(command === "request-changes" && input.actor === "manager")) {
       throw new TaskboardError("AUTO_REVIEW_DISABLED", "This board uses manual acceptance.");
     }
@@ -677,8 +679,8 @@ function run(
     const decisionActor = command === "accept" || input.actor === "manager" ? "manager" :
       usesIndependentReviewer(mode) ? "reviewer" : mode;
     if (actor !== decisionActor || (input.reviewMode !== undefined && input.reviewMode !== mode) ||
-        (actor === "reviewer" && (mode === "reviewer-human" || input.reviewModeVersion !== undefined) &&
-          input.reviewModeVersion !== store.index.settings.reviewModeVersion)) {
+        (command !== "accept" && (input.reviewModeVersion !== undefined || (actor === "reviewer" && mode === "reviewer-human")) &&
+          input.reviewModeVersion !== taskReviewModeVersion(task, store.index.settings))) {
       throw new TaskboardError("REVIEW_MODE_CHANGED", "The board's review mode changed. Review the submission again.");
     }
     if (command === "accept" && mode === "reviewer" && task.status === "review") {
@@ -707,7 +709,7 @@ function run(
               evidence.some(entry => typeof entry !== "string" || !entry.trim())) {
             throw new TaskboardError("VERIFICATION_REQUIRED", "Provide evidence for each criterion.");
           }
-          const version = store.index.settings.reviewModeVersion;
+          const version = taskReviewModeVersion(task, store.index.settings);
           const approval = currentReviewApproval(task, store.index.settings)?.reviewApproval;
           if (approval?.targetHead === targetHead) {
             const recorded = withReviewerUsage(task);
@@ -735,6 +737,7 @@ function run(
   }
   if (command === "submit") {
     const submitted = submitTask(store, task, input);
+    forgetExecutor(store.location.root, id);
     return filters.compact ? taskReceipt(submitted) : submitted;
   }
   if (command === "accept") return applyAcceptance(store, task, input);
@@ -743,7 +746,9 @@ function run(
     if (draft !== task && hasPending(store, task, true)) {
       throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before returning the task to draft.");
     }
-    return draft === task ? task : isArchived(store, id) ? reactivateArchivedTask(store, draft) : store.save(draft);
+    const saved = draft === task ? task : isArchived(store, id) ? reactivateArchivedTask(store, draft) : store.save(draft);
+    forgetExecutor(store.location.root, id);
+    return saved;
   }
   if (hasPending(store, task)) {
     throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before modifying the task.");
@@ -759,13 +764,13 @@ function run(
     const phase = task.draftDiscussion?.phase;
     if (isManual(store.index.settings) || task.status !== "draft" ||
         !(input.phase === "running" && (phase === "queued" || phase === "failed") ||
-          input.phase === "failed" && phase === "running")) {
+          (input.phase === "failed" || input.phase === "completed") && phase === "running")) {
       throw new TaskboardError("CHAT_CHANGED", "The draft discussion is no longer in this state.");
     }
     const draftDiscussion: Task["draftDiscussion"] = input.phase === "failed"
       ? { phase: "failed", reason: text(input.reason, "reason", true).slice(0, 1500) }
-      : { phase: "running" };
-    return store.save(record({ ...task, draftDiscussion }, "draft-discussion-" + draftDiscussion.phase, "agent"));
+      : input.phase === "running" ? { phase: "running" } : undefined;
+    return store.save(record({ ...task, draftDiscussion }, "draft-discussion-" + input.phase, "agent"));
   }
   if (command === "run-log") {
     const logged = recordRunLog(task, input);
@@ -801,12 +806,13 @@ function run(
         transferred: text(input.transferred, "transferred", true) };
     }
     const cancelled = store.save(updated);
-    deferExecutor(store.location.root, id);
+    forgetExecutor(store.location.root, id);
     return cancelled;
   }
   if ((command === "update" || command === "unblock") && input.dependencies !== undefined) validateDependencies(store, updated);
   const saved = store.save(command === "request-changes" && input.actor === "reviewer" ? withReviewerUsage(updated) :
     command === "update" && input.tags !== undefined ? assignTags(store, updated) : updated);
+  if (task.status === "in_progress" && saved.status !== "in_progress") forgetExecutor(store.location.root, id);
   if (!filters.compact) return saved;
   if (command === "checklist") return { id: saved.id, status: saved.status, revision: saved.revision, subtasks: saved.subtasks };
   if (input.launchDetails === true && ["request-changes", "resume", "update"].includes(command)) return taskLaunchState(saved);
@@ -837,11 +843,12 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
           isMergeRepair(task) || task.acceptanceRepair)) {
         throw new TaskboardError("INVALID_INPUT", "Only manual executor starts can be queued.");
       }
-      const isQueued = () => runtimeEntries(location.root).some(entry => matchesQueuedExecutor(entry, task));
-      if (enqueue && isQueued()) {
+      const queued = (enqueue || input.queuedExecutor === true)
+        ? runtimeEntries(location.root).find(entry => matchesQueuedExecutor(entry, task)) : undefined;
+      if (enqueue && queued) {
         return { started: { task: taskLaunchState(task) } };
       }
-      if (input.queuedExecutor === true && !isQueued()) {
+      if (input.queuedExecutor === true && !queued) {
         throw new TaskboardError("INVALID_TRANSITION", "The queued start is no longer pending.");
       }
       if (input.autoMode === true && !store.index.settings.autoMode) {
@@ -861,7 +868,7 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
       if (task.status !== "in_progress" && input.resolveConflicts === true) {
         return { started: reply(store, reopenConflictingReview(store, task, input)) };
       }
-      const result = prepareTaskStart(store, task, input, startLockWaitMs + lockWaitMs, enqueue);
+      const result = prepareTaskStart(store, task, input, startLockWaitMs + lockWaitMs, enqueue, queued?.restart?.cwd);
       if ("task" in result && task.status === "in_progress") enqueue?.(result.task);
       return "task" in result ? { started: reply(store, result) } : { checkout: result };
     });
@@ -1019,10 +1026,6 @@ async function main() {
           try {
             data = withTaskStartLock(location, id, () => onBoard(location,
               (store, lockWaitMs) => run(store, command, id, extra, input, values, lockWaitMs)));
-            runtimeTransaction(location.root, entries => {
-              const index = entries.findIndex(entry => entry.kind === "queue" && entry.task === id);
-              if (index >= 0) entries.splice(index, 1);
-            });
           } finally { release(); }
         } else if (command === "accept") {
           if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
@@ -1082,7 +1085,7 @@ async function main() {
             requireRevision(card, task.revision, true);
             if (exists(latest.pendingPath(id)) !== details.pending ||
                 latest.index.settings.integrationMode !== store.index.settings.integrationMode ||
-                latest.index.settings.reviewModeVersion !== store.index.settings.reviewModeVersion) {
+                taskReviewModeVersion(card, latest.index.settings) !== review.reviewModeVersion) {
               throw new TaskboardError("REVISION_CONFLICT", "The submission changed. Open the current review.");
             }
           });

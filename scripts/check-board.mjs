@@ -631,6 +631,14 @@ app.whenReady().then(async () => {
         context.fillRect(0, 0, 1, 1);
         return [...context.getImageData(0, 0, 1, 1).data].slice(0, 3);
       };
+      const activeAccent = () => {
+        const probe = document.createElement('span');
+        probe.style.color = 'var(--accent)';
+        progressCard.append(probe);
+        const accent = getComputedStyle(probe).color;
+        probe.remove();
+        return accent;
+      };
       push();
       waitFor(() => progressCard.querySelector('.task-card-cover')?.naturalWidth > 0);
     `);
@@ -654,7 +662,7 @@ app.whenReady().then(async () => {
       `);
       const cardWidth = await evaluate("progressCard.getBoundingClientRect().width");
       if (narrow) assert.equal(cardWidth, 120);
-      const colors = theme === "light" ? [[209, 213, 219], [33, 74, 72]] : [[69, 73, 89], [185, 220, 212]];
+      const neutral = theme === "light" ? [209, 213, 219] : [69, 73, 89];
       for (const states of [[false, false, false], [true, false, true], [false, true, true], [true, true, true]]) {
         const count = states.filter(Boolean).length;
         await evaluate(`
@@ -664,11 +672,15 @@ app.whenReady().then(async () => {
         `);
         await check(`(() => {
           const states = ${JSON.stringify(states)};
-          const colors = ${JSON.stringify(colors)};
+          const neutral = ${JSON.stringify(neutral)};
+          const accent = activeAccent();
           const cover = progressCard.querySelector('.task-card-cover');
           return findCard(progressTask.id) === progressCard && fitsInOneRow(states) &&
-            bars().every((bar, i) => segmentColor(bar).every((channel, j) =>
-              Math.abs(channel - colors[Number(states[i])][j]) <= 1)) &&
+            bars().every((bar, i) => {
+              const color = getComputedStyle(bar).backgroundColor;
+              return states[i] ? color === accent : color !== accent &&
+                segmentColor(bar).every((channel, j) => Math.abs(channel - neutral[j]) <= 1);
+            }) &&
             cover && !cover.hidden && cover.nextElementSibling === progress() && progress().nextElementSibling === meta() &&
             meta().scrollWidth <= meta().clientWidth && meta().querySelector('.task-id').textContent === progressTask.id &&
             meta().querySelector('.codicon-attach') && !meta().querySelector('.codicon-checklist') &&
@@ -680,7 +692,12 @@ app.whenReady().then(async () => {
         const accessible = await axCard();
         assert.equal(accessible.role.value, "button");
         assert.match(accessible.description.value, new RegExp(`${count}/3$`));
-        if (!narrow && states[0] && !states[1]) await capture(`progress-${theme}.png`);
+        if (!narrow && states[0] && !states[1]) {
+          const { accent, segments } = await evaluate(`({ accent: activeAccent(),
+            segments: bars().map(bar => getComputedStyle(bar).backgroundColor) })`);
+          console.log(`Progress colors (${theme}): --accent = ${accent}, segments = ${segments.join(" / ")}`);
+          await capture(`progress-accent-${theme}.png`);
+        }
       }
       await evaluate(`fixture.board.settings.showCardPreviews = false; push(); settle()`);
       await check(`!progressCard.querySelector('.task-card-cover') && progress().nextElementSibling === meta() &&

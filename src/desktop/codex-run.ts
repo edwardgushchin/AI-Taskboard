@@ -114,7 +114,7 @@ export function missingCodexThread(message: string | undefined, threadId: string
 export async function startCodexRun(client: Client, project: string, cwd: string, task: ExecutorTask,
   onActivity?: (item: RunActivity) => void, onTokenUsage?: (report: TokenUsageReport) => Promise<void>, signal?: AbortSignal,
   beforeTurn?: (threadId: string) => Promise<void | QueuedTurn>, desktopProfile?: string,
-  recoveringThreadId?: string): Promise<Run> {
+  recoveringThreadId?: string, requireSavedThread = false): Promise<Run> {
   signal?.throwIfAborted();
   const fullAccess = task.fullAccess === true;
   const profile = fullAccess ? ":danger-full-access" : taskProfile;
@@ -381,6 +381,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
         started = await request<ThreadReply>("thread/resume", { ...threadOptions, threadId: existing });
       } catch (error) {
         if (!missingCodexThread((error as Error).message, existing)) throw error;
+        if (requireSavedThread) throw error;
         if (recoveringThreadId) throw Object.assign(error as Error, { code: "CODEX_START_UNCONFIRMED" });
         signal?.throwIfAborted();
         existing = undefined;

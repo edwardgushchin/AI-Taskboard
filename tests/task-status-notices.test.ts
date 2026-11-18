@@ -32,7 +32,7 @@ test("CLI transitions replay in order without goals, windows or a running manage
   const task = cli(["create"], plannedDraft({ title: "Проверка доступа", criteria: ["Доступ проверен"], workingDirectory: root }));
   cli(["approve", task.id]);
   assert.equal(sync(), false); // First enable skips old events.
-  const work = () => readManagerHistory(root, null, "work")?.turns.flatMap(turn => turn.items) ?? [];
+  const work = () => readManagerHistory(root)?.turns.flatMap(turn => turn.items) ?? [];
   const messages = () => work().map(item => item.text);
   cli(["update", task.id], { title: "Доступ к SSH" });
   assert.equal(syncTaskStatusNotices(root), false);
@@ -56,6 +56,7 @@ test("CLI transitions replay in order without goals, windows or a running manage
   const history = cli(["show", task.id]).history as Task["history"];
   assert.deepEqual(work().map(item => item.at), history.filter(event => statusNotice(task, event)).map(event => event.at));
   assert.deepEqual(readManagerHistory(root, null, "chat")?.turns, []);
+  assert.deepEqual(readManagerHistory(root, null, "work")?.turns, []);
   assert.deepEqual(managerUnread(root), []);
   assert.equal(syncTaskStatusNotices(root), false);
   assert.deepEqual(messages(), texts);
@@ -84,6 +85,7 @@ test("CLI transitions replay in order without goals, windows or a running manage
     assert.equal(work().filter(item => item.text.startsWith(card.id + " ") && item.at === event.at).length, 1);
   }
   assert.deepEqual(readManagerHistory(root, null, "chat")?.turns, []);
+  assert.deepEqual(readManagerHistory(root, null, "work")?.turns, []);
   assert.deepEqual(managerUnread(root), []);
 });
 
@@ -132,7 +134,7 @@ test("manual lifecycle actions retain audit history without notices; agents stil
   cli(["unblock", task.id], { actor: "manager", reason });
   assert.equal(cli(["show", task.id]).history.at(-1).text, reason);
   assert.equal(syncTaskStatusNotices(root), true);
-  const texts = readManagerHistory(root, null, "work")!.turns.flatMap(turn => turn.items.map(item => item.text));
+  const texts = readManagerHistory(root)!.turns.flatMap(turn => turn.items.map(item => item.text));
   assert.ok(texts.some(text => text.includes("useful blocker")));
   assert.ok(!texts.some(text => text.includes(reason)));
   readManagerMessages(root, [...managerUnread(root)]);
@@ -149,7 +151,7 @@ test("manual lifecycle actions retain audit history without notices; agents stil
   assert.equal(cli(["show", source.id]).status, "draft");
   cli(["cancel", source.id], { actor: "manager", reason, mergedInto: target.id, transferred: "hash wrapping" });
   assert.equal(syncTaskStatusNotices(root), true);
-  const text = readManagerHistory(root, null, "work")!.turns.at(-1)!.items[0]!.text;
+  const text = readManagerHistory(root)!.turns.at(-1)!.items[0]!.text;
   assert.ok(text.includes(source.id) && text.includes(target.id) && text.includes("Source") && text.includes("Main") && text.includes("hash wrapping"));
   assert.ok(!text.includes(reason));
   const cancelled = cli(["create"], plannedDraft({ title: "Manual cancel" }));

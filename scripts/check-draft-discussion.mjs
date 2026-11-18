@@ -11,7 +11,7 @@ import { electronCheck } from "./electron-check.mjs";
 
 const live = process.argv.includes("--live");
 const creationOnly = process.argv.includes("--creation-only");
-const { scratch, artifacts } = electronCheck(import.meta.url, "draft-discussion", live ? 240000 : 150000,
+const { scratch, artifacts } = electronCheck(import.meta.url, "draft-discussion", 240000,
   live || creationOnly ? [[]] : [["--first-pass"], ["--restart"]]);
 const require = createRequire(import.meta.url);
 const { app, BrowserWindow, dialog } = require("electron");
@@ -67,6 +67,10 @@ globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images,
   assert.equal(cwd, project);
   assert.equal(context.task.id, id);
   assert.equal(context.task.status, "draft");
+  if (mode === "initial") {
+    assert.equal(_commentary, undefined);
+    assert.equal(_activity, undefined);
+  }
   assert.equal(readFileSync(join(cwd, "AGENTS.md"), "utf8"), "Use the project fixture.");
   if (mode === "initial" && context.task.title === "CLI with attachments") {
     // Change the originals after CLI staging, at the provider boundary.
@@ -88,8 +92,9 @@ globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images,
   if (mode === "initial" && context.task.title === "Provider inactive" && failProvider) throw Error("Fixture provider unavailable");
   if (context.task.title === "Stale draft") await new Promise(resolve => { staleGate = resolve; });
   await delay(450);
-  return { text: context.latestUserMessage ? "User answer recorded: " + context.latestUserMessage.text :
-    context.task.title === "CLI with attachments" ? "Which viewport is required?" : "The draft has enough information." };
+  return { text: mode === "initial"
+    ? JSON.stringify({ questions: context.task.title === "CLI with attachments" ? "Which viewport is required?" : "" })
+    : "User answer recorded: " + context.latestUserMessage.text };
 };
 
 let writer;
@@ -119,7 +124,7 @@ try {
     assert.equal(chat.split(providerCall).length, 2);
     const chatEntry = join(scratch, "codex-chat-under-test.mjs");
     writeFileSync(chatEntry, compile(chat.replace(providerCall,
-      "globalThis.draftFixtureReply(profile, project, settings, prompt, images, onCommentary, runAction, imageDirectory, imageLimit, onTokenUsage, onControl, signal, taskId, onActivity, mode)")));
+      "globalThis.draftFixtureReply(profile, project, settings, prompt, images, options.onCommentary, runAction, options.imageDirectory, imageLimit, onTokenUsage, onControl, signal, taskId, options.onActivity, mode)")));
     source = source.replace(chatUrl.href, pathToFileURL(chatEntry).href);
   }
   const entry = join(scratch, "main-under-test.mjs");
@@ -129,6 +134,7 @@ try {
   require(entry);
   await until(() => BrowserWindow.getAllWindows().length > 0, "window");
   const window = BrowserWindow.getAllWindows()[0];
+  window.setContentSize(1280, 800);
   const evaluate = code => window.webContents.executeJavaScript(code);
   await until(() => evaluate("Boolean(window.taskboard && document.querySelector('#app-menu button'))"), "renderer");
   const open = async (path, run = evaluate) => {
@@ -138,12 +144,40 @@ try {
   };
   if (!(await evaluate(`window.taskboard.bootstrap().then(f => f.board?.project === ${JSON.stringify(project)})`))) await open(project);
   const display = id => evaluate(`showTask(${JSON.stringify(id)})`);
-  const retry = () => evaluate("document.querySelector('.task-chat .chat-status button').click()");
+  const retry = async id => {
+    const failed = show(id);
+    assert.equal(failed.draftDiscussion?.phase, "failed");
+    await until(async () => {
+      if (show(id).revision > failed.revision) return true;
+      await evaluate("document.querySelector('.task-chat .chat-status button:enabled')?.click()");
+      return false;
+    }, "visible draft retry " + id);
+  };
   const waitReply = (id, count = 1) => until(() => messages(show(id)).length === count, "chat reply " + id);
+  const waitSilent = async id => {
+    await until(() => {
+      const card = show(id);
+      assert.notEqual(card.draftDiscussion?.phase, "failed", card.draftDiscussion?.reason);
+      return !card.draftDiscussion;
+    }, "silent completion " + id);
+    const card = show(id);
+    assert.equal(card.status, "draft");
+    assert.equal(card.git, undefined);
+    assert.equal(messages(card).length, 0);
+    assert.ok(card.history.some(event => event.action === "draft-discussion-completed"));
+  };
+  const reopen = async id => {
+    await evaluate("document.querySelector('#close-sheet').click()");
+    await display(id);
+  };
+  const emptyDialogue = async () => assert.equal(await evaluate(
+    "document.querySelector('.task-dialogue:not([hidden])')?.querySelectorAll('.chat-entry').length"), 0);
   const capture = async name => {
     window.focus();
     await evaluate("document.fonts.ready.then(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))))");
-    writeFileSync(join(artifacts, name), (await window.webContents.capturePage()).toPNG());
+    const image = await window.webContents.capturePage();
+    assert.deepEqual(window.getContentSize(), [1280, 800]);
+    writeFileSync(join(artifacts, name), image.toPNG());
   };
   if (live) {
     const catalog = await evaluate("window.taskboard.chatModels()");
@@ -175,6 +209,9 @@ try {
     assert.match(question, /(?:recipient|alias|email)/i);
     assert.equal((question.match(/\?/g) ?? []).length, 1, question);
     assert.doesNotMatch(question, /(?:what|which)\s+(?:day|time|schedule)\b/i);
+    await display(unresolved.id);
+    await reopen(unresolved.id);
+    await capture("draft-with-question.png");
     const answer = "Use audits+north@example.invalid as the recipient. Please confirm the delivery time and recipient.";
     await until(() => evaluate(`window.taskboard.bootstrap().then(f => !f.replyingTasks?.includes(${JSON.stringify(unresolved.id)}))`),
       "released discussion writer before follow-up");
@@ -187,32 +224,45 @@ try {
     assert.match(confirmation, /audits\+north@example\.invalid/i);
     assert.doesNotMatch(confirmation, /\?/);
     const complete = cli(["create"], plannedDraft({ ...brief, description: brief.description + " The recipient is audits+north@example.invalid." }));
-    const completion = await waitAgent(complete.id, 1);
-    assert.doesNotMatch(completion, /\?/);
-    assert.match(completion, /(?:enough|sufficien|complete|everything (?:needed|in place)|no (?:\w+ )*(?:questions?|clarifications?)|ready|clear)/i);
+    await waitSilent(complete.id);
+    await display(complete.id);
+    await reopen(complete.id);
+    await emptyDialogue();
+    await capture("clear-draft.png");
     assert.equal(existsSync(join(project, ".worktrees")), false);
     await until(() => !readdirSync(staging).some(name => name.startsWith("ai-taskboard-chat-")), "Codex staging cleanup");
     const git = args => execFileSync("git", args, {
       cwd: fileURLToPath(new URL("../", import.meta.url)), encoding: "utf8", windowsHide: true,
     }).trim();
-    assert.equal(git(["status", "--porcelain"]), "", "Run the live scenario from the committed revision.");
     writeFileSync(join(artifacts, "draft-discussion-live.json"), JSON.stringify({
-      commit: git(["rev-parse", "HEAD"]), platform: process.platform, electron: process.versions.electron,
+      head: git(["rev-parse", "HEAD"]), workingTreeChanged: Boolean(git(["status", "--porcelain"])),
+      platform: process.platform, electron: process.versions.electron,
       chromium: process.versions.chrome, provider: "Codex App Server", execution,
       fixture: { projectInstructions: readFileSync(instructions, "utf8"), attachedSchedule: readFileSync(schedule, "utf8"),
         draft: brief.description, completeDraft: complete.description },
-      observed: { question, answer, confirmation, completion },
+      observed: { question, answer, confirmation, completeDraftMessages: messages(show(complete.id)).length },
     }, null, 2));
-    console.log("PASS Codex asked about the missing recipient, applied the answer and confirmed the independently complete draft");
+    console.log("PASS Codex asked about the missing recipient, applied the answer and completed the clear draft silently");
   } else if (restart) {
     await until(() => show(report.interrupted).draftDiscussion?.phase === "failed", "interrupted state after restart");
     assert.equal(calls.length, 0);
     await display(report.interrupted);
-    await retry();
-    await waitReply(report.interrupted);
+    await retry(report.interrupted);
+    await waitSilent(report.interrupted);
     assert.deepEqual(calls.map(call => call.context.task.id), [report.interrupted]);
-    assert.equal(messages(show(report.ui)).length, 1);
-    check("A fresh Electron process exposes a retry for an orphaned turn and keeps existing replies single");
+    await waitSilent(report.ui);
+    await display(report.ui);
+    await emptyDialogue();
+    await display(report.question);
+    assert.match(await evaluate("document.querySelector('.task-dialogue').textContent"), /Which viewport is required\?/);
+    assert.equal(messages(show(report.question)).length, 3);
+    assert.deepEqual(calls.map(call => call.context.task.id), [report.interrupted]);
+    check("Restart retains silent completion and question with its answer, and only retries the interrupted draft on request");
+    writeFileSync(join(artifacts, "draft-discussion-check.txt"), [
+      "Windows Electron draft discussion (deterministic provider fixture)", "node scripts/check-draft-discussion.mjs --artifacts .tasks/qa",
+      `Platform: ${report.platform}; Electron: ${report.electron}; Chromium: ${report.chromium}; viewport: 1280x800`,
+      ...report.checks.map(line => "PASS " + line), "",
+    ].join("\n"));
   } else {
     const { registerRuntime, runtimeEntries } = await import("../src/desktop/board-runtime.ts");
     slot = registerRuntime(project, { kind: "slot", role: "executor", task: "T-9999" });
@@ -222,14 +272,20 @@ try {
     })`);
     assert.equal(missingPlan.error?.code, "EXPERT_PLAN_REQUIRED", JSON.stringify(missingPlan));
     check("Desktop creation rejects an agent draft without an expert plan");
-    const response = await evaluate(`window.taskboard.command("create", undefined, ${JSON.stringify(plannedDraft({ title: "Created in desktop" }))})`);
+    const response = await evaluate(`window.taskboard.command("create", undefined, ${JSON.stringify(plannedDraft({
+      title: "Document the screenshot viewport",
+      description: "Add one sentence to README.md stating that desktop screenshots use a 1280 × 800 viewport.",
+      criteria: ["README.md names the 1280 × 800 desktop screenshot viewport."],
+    }))})`);
     assert.equal(response.ok, true, JSON.stringify(response));
     report.ui = response.data.id;
-    await waitReply(report.ui);
-    assert.equal(show(report.ui).status, "draft");
-    assert.equal(messages(show(report.ui))[0].actor, "agent");
+    await waitSilent(report.ui);
+    await display(report.ui);
+    await reopen(report.ui);
+    await emptyDialogue();
+    await capture("clear-draft.png");
     assert.deepEqual(calls[0].configured, { model: "gpt-6.1-sol", effort: "medium" });
-    check("Desktop creation starts in the background with the executor pool occupied and uses board settings");
+    check("Desktop creation completes silently with the executor pool occupied and stays empty after reopening the dialogue");
     if (creationOnly) {
       await open(manual);
       const personal = await evaluate(`window.taskboard.command("create", undefined, {
@@ -287,8 +343,16 @@ try {
       assert.equal(runtimeEntries(project).some(entry => entry.task === ordinary.id), false);
     } finally { unlinkSync(pendingFile); }
     check("A pending Git operation blocks both send and retry before a provider call");
-    await evaluate("document.querySelector('.chat-retry-reply').click()");
-    await waitReply(ordinary.id, 6);
+    try {
+      await until(async () => {
+        if (messages(show(ordinary.id)).length === 6) return true;
+        await evaluate("document.querySelector('.chat-retry-reply:not([hidden]):enabled')?.click()");
+        return false;
+      }, "visible retry of the saved message");
+    } catch (error) {
+      throw new Error(error.message + ": " + await evaluate(
+        "document.querySelector('.chat-status:not([hidden])')?.textContent"));
+    }
     assert.deepEqual(messages(show(ordinary.id)).slice(-2).map(event => [event.actor, event.text]),
       [["user", "Fail once"], ["agent", "User answer recorded: Fail once"]]);
     await until(() => !runtimeEntries(project).some(entry => entry.task === ordinary.id), "writer released after retry");
@@ -341,14 +405,13 @@ try {
     const never = () => assert.fail("Unrelated manager action");
     const manager = boardActions(project, [], [], new AbortController().signal, never, () => undefined,
       () => false, never, never, undefined, never);
-    const created = await manager("task_create", { title: "Created by manager", description: "Complete draft", criteria: ["Observable result"] });
+    const created = await manager("task_create", plannedDraft({ title: "Created by manager" }));
     assert.equal(created.ok, true, JSON.stringify(created));
-    await waitReply(created.data.id);
-    assert.equal(messages(show(created.data.id))[0].text, "The draft has enough information.");
+    await waitSilent(created.data.id);
     await evaluateOther(`showTask(${JSON.stringify(created.data.id)})`);
-    await until(() => evaluateOther("document.querySelector('.task-chat')?.textContent.includes('The draft has enough information.')"), "second window receives reply");
+    assert.equal(await evaluateOther("document.querySelector('.task-dialogue')?.querySelectorAll('.chat-entry').length"), 0);
     assert.equal(calls.filter(call => call.context.task.id === created.data.id).length, 1);
-    check("Manager tool starts one reply for its saved draft and the second window receives it without a duplicate");
+    check("Manager creation reviews the draft once and the second window shows an empty dialogue");
 
     const original = join(scratch, "file.txt"), linked = join(scratch, "linked.txt"), changed = join(scratch, "changed.txt");
     const image = join(scratch, "image.png");
@@ -357,11 +420,14 @@ try {
     writeFileSync(image, Buffer.from(imageBytes, "base64"));
     mutableSources = [linked, image];
     const before = calls.length;
-    const draft = cli(["create"], plannedDraft({ title: "CLI with attachments", dependencies: [created.data.id], execution: settings,
+    const draft = cli(["create"], plannedDraft({ title: "CLI with attachments",
+      description: "Capture the desktop board at the viewport selected by the owner.",
+      criteria: ["The capture uses the owner's viewport."], dependencies: [created.data.id], execution: settings,
       attachmentSources: [{ path: original, name: "same.txt" }, { path: linked, name: "same.txt", link: true },
         { path: changed, link: true }, { path: image }, { path: image, link: true }] }));
     writeFileSync(changed, "changed contents of different length");
     await waitReply(draft.id);
+    report.question = draft.id;
     const input = calls[before];
     assert.equal(input.mode, "initial");
     assert.deepEqual(input.configured, settings);
@@ -373,7 +439,9 @@ try {
     assert.equal(input.context.attachments.find(file => file.error).name, "changed.txt");
     assert.equal(input.context.dependencyContext[0].title, "Created by manager");
     await display(draft.id);
+    await reopen(draft.id);
     await until(() => evaluate("document.querySelector('.task-chat').textContent.includes('Which viewport is required?')"), "persisted question");
+    await capture("draft-with-question.png");
     const answer = await evaluate(`window.taskboard.chatSend(${JSON.stringify(draft.id)}, {
       model: "fixture-sol", effort: "high", text: "1280 pixels", files: []
     })`);
@@ -393,9 +461,9 @@ try {
     await until(() => evaluate("document.querySelector('.task-chat').textContent.includes('Fixture provider unavailable')"), "visible failure");
     await capture("draft-discussion-error.png");
     failProvider = false;
-    await retry();
-    await waitReply(failure.id);
-    check("Provider failure is persistent and the visible retry saves a single reply");
+    await retry(failure.id);
+    await waitSilent(failure.id);
+    check("Provider failure stays visible until the retry completes silently");
 
     const stale = cli(["create"], plannedDraft({ title: "Stale draft", execution: settings }));
     await until(() => staleGate, "in-flight response");
@@ -404,7 +472,10 @@ try {
     await until(() => show(stale.id).draftDiscussion?.phase === "failed", "stale result rejected");
     assert.equal(show(stale.id).title, "Fresh draft");
     assert.equal(messages(show(stale.id)).length, 0);
-    check("Editing during the turn prevents a stale reply");
+    await display(stale.id);
+    await retry(stale.id);
+    await waitSilent(stale.id);
+    check("Editing during the turn rejects stale silent completion and the current revision can be retried");
 
     const busy = cli(["create"], plannedDraft({ title: "Writer occupied", execution: settings }));
     writer = registerRuntime(project, { kind: "task", task: busy.id });
@@ -412,7 +483,7 @@ try {
     await delay(2000);
     assert.equal(show(busy.id).draftDiscussion?.phase, "queued");
     writer(); writer = undefined;
-    await waitReply(busy.id);
+    await waitSilent(busy.id);
     check("The shared writer keeps a draft queued until released");
     const count = calls.length;
     cli(["create"], plannedDraft({ title: "Invalid creation", attachmentSources: [{ path: join(scratch, "missing") }] }), project, "IO_ERROR");
