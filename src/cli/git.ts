@@ -76,8 +76,8 @@ export function git(cwd: string, args: string[], overrides?: NodeJS.ProcessEnv):
   return result.stdout;
 }
 
-export function isAncestor(path: string, older: string, newer: string): boolean {
-  const result = invokeGit(path, ["merge-base", "--is-ancestor", older, newer]);
+export function isAncestor(path: string, older: string, newer: string, env?: NodeJS.ProcessEnv): boolean {
+  const result = invokeGit(path, ["merge-base", "--is-ancestor", older, newer], env);
   if (result.code === 0 || result.code === 1) return result.code === 0;
   throw new TaskboardError("GIT_FAILED", "Git could not compare commits.", { output: result.stderr.trim() });
 }

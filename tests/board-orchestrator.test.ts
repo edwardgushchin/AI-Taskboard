@@ -221,11 +221,12 @@ function fixture(t: TestContext) {
         "board_auto_queue", "task_cancel", "provider_tools", "task_tool_grant", "task_tool_revoke", "task_set_executor_access", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_approve", "task_wait", "task_review_queue", "task_review", "task_review_diff",
         "task_review_artifact", "task_accept", "task_request_changes",
         "task_cleanup_status", "task_cleanup", "project_git", "project_git_push",
+        "project_git_branches", "project_git_fetch", "project_git_fast_forward", "project_git_branch_create", "project_git_branch_delete",
         "milestones_list", "github_create_milestone", "github_set_milestone_due", "task_set_milestone", "tag_set_color", "github_read",
       ];
       const mode = boardReviewMode((await callCli(project, ["settings"], undefined, false)).data);
       assert.deepEqual(Array.from(session.mcpTools, tool => tool.name).sort(),
-        [...expectedTools.filter(name => (name !== "task_accept" || (mode !== "human" && mode !== "reviewer-human")) && (!instructions.includes("This turn repairs") || !["task_start", "task_start_batch", "task_accept", "task_request_changes"].includes(name))),
+        [...expectedTools.filter(name => (name !== "task_accept" || (mode !== "human" && mode !== "reviewer-human")) && (!instructions.includes("This turn repairs") || (!name.startsWith("project_git_") && !["task_start", "task_start_batch", "task_accept", "task_request_changes"].includes(name)))),
         ...(!manualTurn && !cleanupTurn && !instructions.includes("This turn repairs") ? ["task_return_to_draft"] : []),
         ...(!manualTurn && !cleanupTurn && mode === "manager" ? ["expert_stage", "expert_verify_skills"] : []),
         ...(!reviewTurn && !cleanupTurn && !instructions.includes("This turn repairs") ? (session.goal || session.resumeGoal ? ["goal_inbox", "goal_report"] : ["goal_read", "goal_send"]) : []),
@@ -2649,4 +2650,180 @@ test("acceptance repair has an isolated context and waits for shared reviewer ca
   assert.equal(f.agentSlots.available(f.project, "reviewer", { reviewer: 1 }), 1);
   assert.equal((await f.cli(["show", card.id])).data.acceptanceRepair.phase, "failed");
   assert.equal(f.cliCalls.filter(args => args[0] === "start" && args[1] === card.id).length, 2);
+});
+
+test("manager Git branch workflow stays scoped and uses checked commits", { timeout: 180_000 }, async t => {
+  const f = fixture(t);
+  const project = f.project;
+  const remote = join(f.folder, "remote.git");
+  const neighbor = join(f.folder, "neighbor");
+  const publisher = join(f.folder, "publisher");
+  const git = (cwd: string, ...args: string[]) => {
+    const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8", windowsHide: true });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  const configure = (cwd: string) => {
+    git(cwd, "config", "user.name", "Taskboard");
+    git(cwd, "config", "user.email", "test@example.invalid");
+  };
+  git(project, "init", "-b", "main");
+  configure(project);
+  await writeFile(join(project, "tracked"), "before\n");
+  git(project, "add", "tracked");
+  git(project, "commit", "-m", "Base");
+  const base = git(project, "rev-parse", "HEAD");
+  git(f.folder, "init", "--bare", "-b", "trunk", remote);
+  git(project, "remote", "add", "upstream", remote);
+  git(project, "push", "upstream", base + ":refs/heads/trunk");
+  git(f.folder, "clone", remote, publisher);
+  configure(publisher);
+  await writeFile(join(publisher, "tracked"), "after\n");
+  git(publisher, "commit", "-am", "Incoming");
+  const incoming = git(publisher, "rev-parse", "HEAD");
+  git(publisher, "push", "origin", "trunk");
+  git(f.folder, "clone", remote, neighbor);
+  const neighborCli = spawnSync(process.execPath, [entry, "--project", neighbor, "--json", "init"], { encoding: "utf8" });
+  assert.equal(neighborCli.status, 0, neighborCli.stdout + neighborCli.stderr);
+  const neighborIndex = readFileSync(join(neighbor, ".tasks", "board.json"));
+  const neighborRefs = git(neighbor, "show-ref");
+  assert.equal((await f.cli(["init"])).ok, true);
+  let thread: string | undefined;
+  const first = await f.run("Fetch and fast-forward main", async (act, _prompt, _images, id) => {
+    assert.equal(id, undefined);
+    const refs = await act("project_git_branches", {});
+    assert.equal(refs.data.head, base);
+    assert.deepEqual(Array.from(refs.data.remotes), ["upstream"]);
+    const fetched = await act("project_git_fetch", { remote: "upstream" });
+    assert.equal(fetched.ok, true, JSON.stringify(fetched.error));
+    assert.equal(fetched.data.branches.find((entry: { ref: string }) => entry.ref === "refs/remotes/upstream/trunk").head, incoming);
+    assert.equal(git(project, "rev-parse", "HEAD"), base);
+    assert.equal(readFileSync(join(project, "tracked"), "utf8"), "before\n");
+    assert.equal(git(project, "status", "--porcelain"), "");
+
+    const snapshot = { branch: "main", head: base };
+    const source = { ...snapshot, remote: "upstream", remoteBranch: "trunk" };
+    assert.equal((await act("project_git_fast_forward", snapshot)).error.code, "GIT_REMOTE_REQUIRED");
+    assert.equal((await act("project_git_fast_forward", { ...source, head: incoming })).error.code, "STALE_REPOSITORY");
+    git(project, "switch", "-c", "other");
+    assert.equal((await act("project_git_fast_forward", source)).error.code, "STALE_REPOSITORY");
+    git(project, "switch", "main");
+    await writeFile(join(project, "tracked"), "local edit");
+    assert.equal((await act("project_git_fetch", { remote: "upstream" })).ok, true);
+    assert.equal(git(project, "rev-parse", "HEAD"), base);
+    assert.equal((await act("project_git_fast_forward", source)).error.code, "GIT_DIRTY_WORKTREE");
+    assert.equal(readFileSync(join(project, "tracked"), "utf8"), "local edit");
+    await writeFile(join(project, "tracked"), "before\n");
+    const ff = await act("project_git_fast_forward", source);
+    assert.equal(ff.ok, true, JSON.stringify(ff.error));
+    assert.equal(ff.data.head, incoming);
+    assert.equal(git(project, "rev-parse", "HEAD"), incoming);
+    assert.equal(readFileSync(join(project, "tracked"), "utf8"), "after\n");
+    assert.equal(git(project, "for-each-ref", "--format=%(upstream)", "refs/heads/main"), "");
+    return { text: "Fetched and updated." };
+  });
+  assert.equal(first.ok, true, JSON.stringify(first.error));
+  thread = first.data.id;
+  assert.equal(typeof thread, "string");
+
+  git(project, "branch", "--set-upstream-to=upstream/trunk", "main");
+  git(publisher, "commit", "--allow-empty", "-m", "Second incoming");
+  const current = git(publisher, "rev-parse", "HEAD");
+  git(publisher, "push", "origin", "trunk");
+  const second = await f.run("Continue with the branches", async (act, _prompt, _images, id) => {
+    assert.equal(id, thread);
+    const ff = await act("project_git_fast_forward", { branch: "main", head: incoming });
+    assert.equal(ff.ok, true, JSON.stringify(ff.error));
+    assert.equal(ff.data.head, current);
+    assert.equal(git(project, "config", "branch.main.merge"), "refs/heads/trunk");
+    assert.equal((await act("project_git_fast_forward", { branch: "main", head: current })).data.updated, false);
+    const create = await act("project_git_branch_create", { branch: "merged", head: incoming });
+    assert.equal(create.ok, true, JSON.stringify(create.error));
+    assert.equal(git(project, "branch", "--show-current"), "main");
+    const published = await act("project_git_push", { branch: "merged", head: incoming, remote: "upstream", remoteBranch: "published" });
+    assert.equal(published.ok, true, JSON.stringify(published.error));
+    assert.equal(published.data.remoteRef, "refs/heads/published");
+    assert.equal(git(project, "config", "branch.merged.merge"), "refs/heads/published");
+    git(project, "switch", "other");
+    git(project, "commit", "--allow-empty", "-m", "Only in other");
+    const unique = git(project, "rev-parse", "HEAD");
+    const diverged = await act("project_git_fast_forward", { branch: "other", head: unique, remote: "upstream", remoteBranch: "trunk" });
+    assert.equal(diverged.error.code, "GIT_DIVERGED");
+    assert.equal(git(project, "rev-parse", "HEAD"), unique);
+    git(project, "switch", "main");
+    git(project, "push", "upstream", unique + ":refs/heads/unmerged");
+    git(project, "remote", "add", "missing", join(f.folder, "missing.git"));
+    const failed = await act("project_git_fetch", { remote: "missing" });
+    assert.equal(failed.error.code, "GIT_REMOTE_FAILED");
+    assert.match(failed.error.message, /connection and permissions/);
+    return { text: "Checked the branches." };
+  });
+  assert.equal(second.ok, true, JSON.stringify(second.error));
+
+  const remove = async (scope: string, branch: string, head: string, allow = true, beforeConfirm?: () => void) => {
+    const shown = Promise.withResolvers<void>();
+    let outcome: any;
+    const turn = f.run("Delete the " + scope + " branch " + branch, async act => {
+      const pending = act("project_git_branch_delete", { scope, branch, head, remote: "upstream" });
+      shown.resolve();
+      outcome = await pending;
+      return { text: "Deletion checked." };
+    });
+    await Promise.race([shown.promise, turn.then(result => assert.fail("Deletion did not open a confirmation: " + JSON.stringify(result)))]);
+    for (let attempt = 0; !f.pendingQuestion() && attempt < 100; attempt++) await wait(10);
+    const question = f.pendingQuestion();
+    assert.ok(question);
+    assert.ok(question.approval);
+    assert.ok(question.text.includes(branch) && question.text.includes(head) && question.text.includes("upstream"));
+    beforeConfirm?.();
+    assert.equal((await f.answerQuestion(question.id, allow ? "Allow once" : "Deny")).ok, true);
+    assert.equal((await turn).ok, true);
+    return outcome;
+  };
+  assert.equal((await f.cli(["git", "branch-delete"], { scope: "local", branch: "merged", head: incoming, remote: "upstream" })).error.code, "USER_DIRECTION_REQUIRED");
+  assert.equal((await remove("local", "merged", incoming, false)).error.code, "USER_DIRECTION_REQUIRED");
+  assert.equal(git(project, "rev-parse", "merged"), incoming);
+  assert.equal((await remove("local", "main", current)).error.code, "GIT_PROTECTED_BRANCH");
+  assert.equal((await remove("remote", "trunk", current)).error.code, "GIT_PROTECTED_BRANCH");
+  const unique = git(project, "rev-parse", "other");
+  const linked = join(f.folder, "linked");
+  git(project, "worktree", "add", linked, "other");
+  assert.equal((await remove("local", "other", unique)).error.code, "GIT_BRANCH_IN_USE");
+  git(project, "worktree", "remove", linked);
+  assert.equal((await remove("local", "other", unique)).error.code, "GIT_UNMERGED_BRANCH");
+  assert.equal((await remove("remote", "unmerged", unique)).error.code, "GIT_UNMERGED_BRANCH");
+  assert.equal(git(remote, "rev-parse", "unmerged"), unique);
+
+  git(project, "branch", "card-target", incoming);
+  const { data: task } = await f.cli(["create"], plannedDraft({ title: "Use a target branch" }));
+  const approved = await f.cli(["approve", task.id], { revision: task.revision });
+  assert.equal(approved.ok, true, JSON.stringify(approved.error));
+  const started = await f.cli(["start", task.id], { revision: approved.data.revision, target: "card-target" });
+  assert.equal(started.ok, true, JSON.stringify(started.error));
+  assert.equal((await remove("local", "card-target", incoming)).error.code, "GIT_PROTECTED_BRANCH");
+  assert.equal((await remove("local", "merged", incoming, true, () => {
+    git(project, "update-ref", "refs/heads/merged", current, incoming);
+  })).error.code, "STALE_REPOSITORY");
+  assert.equal(git(project, "rev-parse", "merged"), current);
+
+  const hook = join(project, ".git", "hooks", "pre-push");
+  await writeFile(hook, "#!/bin/sh\nunset GIT_DIR GIT_WORK_TREE\n" +
+    "git --git-dir=\"$2\" update-ref refs/heads/published " + unique + " " + incoming + "\n", { mode: 0o755 });
+  const deniedRace = await remove("remote", "published", incoming);
+  assert.equal(deniedRace.error.code, "GIT_REMOTE_FAILED", JSON.stringify(deniedRace));
+  assert.equal(git(remote, "rev-parse", "published"), unique);
+  rmSync(hook);
+  git(remote, "update-ref", "refs/heads/published", incoming, unique);
+
+  git(remote, "symbolic-ref", "HEAD", "refs/heads/missing");
+  assert.equal((await remove("local", "merged", current)).error.code, "GIT_REMOTE_DEFAULT_UNKNOWN");
+  assert.equal((await remove("remote", "published", incoming)).error.code, "GIT_REMOTE_DEFAULT_UNKNOWN");
+  git(remote, "symbolic-ref", "HEAD", "refs/heads/trunk");
+  assert.equal((await remove("local", "merged", current)).data.deleted, true);
+  assert.equal((await remove("remote", "published", incoming)).data.deleted, true);
+  assert.equal(git(project, "branch", "--list", "merged"), "");
+  assert.equal(git(remote, "branch", "--list", "published"), "");
+  assert.equal(git(project, "rev-parse", "HEAD"), current);
+  assert.equal(git(neighbor, "show-ref"), neighborRefs);
+  assert.deepEqual(readFileSync(join(neighbor, ".tasks", "board.json")), neighborIndex);
 });

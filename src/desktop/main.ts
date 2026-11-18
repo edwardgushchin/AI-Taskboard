@@ -2100,7 +2100,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     if (changed) publishManagerUnread(project);
     broadcastMaintenanceSafe(project, "orchestrator-history");
   }
-  async function askUser(args: unknown, approval = false): Promise<CliReply> {
+  async function askUser(args: unknown, approval = false, timeoutMs = 120_000): Promise<CliReply> {
     signal.throwIfAborted();
     if (running.changingGoal) return cliFailure("QUESTION_CLOSED", t("errors.e39a8618c13d7aae"));
     const { question, options = [] } = (args ?? {}) as { question?: unknown; options?: unknown };
@@ -2123,7 +2123,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     }
     running.question = { view, settle };
     // Leave time to deliver the response before the MCP call's 140-second deadline.
-    const timeout = setTimeout(() => settle(null), 120_000);
+    const timeout = setTimeout(() => settle(null), timeoutMs);
     const aborted = () => settle(null);
     signal.addEventListener("abort", aborted, { once: true });
     try {
@@ -2221,7 +2221,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       (reviewIds || cleanupJob || !["project_path", "project_sha256"].includes(name)) &&
       (!reviewIds || autoReviewReadTools.has(name) || reviewTaskTools.has(name)) &&
       (name !== "task_accept" || hasMode("reviewer") || hasMode("manager")) &&
-      (!repairTask || !["task_start", "task_start_batch", "task_accept", "task_request_changes", "task_return_to_draft"].includes(name)));
+      (!repairTask || (!name.startsWith("project_git_") &&
+        !["task_start", "task_start_batch", "task_accept", "task_request_changes", "task_return_to_draft"].includes(name))));
     if (!reviewIds && !cleanupJob) mcpTools.push(...(goal ? goalWorkTools : background ? [] : goalChatTools), githubReadTool);
     const allowReviewModeChange = !background && !goal && !isManual(settings.data);
     if (allowReviewModeChange) mcpTools.push(boardReviewModeTool);
@@ -2264,7 +2265,13 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       }, deliveredMessages, () => waitWork.signal, undefined, undefined,
       (id, revision) => id === managerReviewId
         ? Promise.resolve(cliFailure("CHAT_BUSY", "Return this task from its card or the manager chat after this automatic review ends."))
-        : returnTaskToDraft(board.project, id, revision, "manager"));
+        : returnTaskToDraft(board.project, id, revision, "manager"),
+      async ({ branch, head, remote, scope }) => {
+        const question = t(scope === "local" ? "ui.git_delete_local_branch" : "ui.git_delete_remote_branch", { branch, head, remote });
+        const allow = t("ui.allow_once_8539a30b");
+        const result = await askUser({ question, options: [allow, t("ui.deny_ffcf9a77")] }, true, 45_000);
+        return result.ok && (result.data as { answer?: string }).answer === allow;
+      });
     const run = async (name: string, args: unknown): Promise<CliReply> => {
       try {
         if (name === boardReviewModeTool.name) {
@@ -2275,6 +2282,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           const { id, status, title, revision } = result.data;
           changes.push({ id, status, title, revision, action: "set_review_mode" });
           return { ok: true, data: reviewModeReceipt(result.data) };
+        }
+        if (name.startsWith("project_git_") && !mcpTools.some(tool => tool.name === name)) {
+          return cliFailure("INVALID_INPUT", "This Git action is unavailable in this board session.");
         }
         if (name === "task_set_executor_access") return await setTaskExecutorAccess(app.getPath("userData"), board.project, args);
         const result = await runAction(name, args);

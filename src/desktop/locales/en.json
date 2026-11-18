@@ -480,6 +480,8 @@
   "ui.project_manager_ae7410e8": "Project manager · ",
   "ui.english_e7d843ef": "English",
   "ui.see_attachments_863aa6f1": "See attachments.",
+  "ui.git_delete_local_branch": "Delete local branch \"{branch}\" at {head}, after checking its history on remote \"{remote}\"?",
+  "ui.git_delete_remote_branch": "Delete branch \"{branch}\" at {head} from remote \"{remote}\"?",
   "ui.allow_once_8539a30b": "Allow once",
   "ui.deny_ffcf9a77": "Deny",
   "ui.project_manager_for_3f3547d6": "Project manager for ",
