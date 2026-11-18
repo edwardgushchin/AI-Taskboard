@@ -1244,7 +1244,6 @@
   "experts.missing_review": "review lead",
   "experts.add_stage": "Add work stage",
   "experts.stage_title": "Stage title",
-  "experts.require_plans": "Require an expert plan when creating a task",
   "experts.description": "Description",
   "experts.inputs": "Inputs, one per line",
   "experts.outputs": "Outputs, one per line",

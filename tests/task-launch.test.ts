@@ -236,7 +236,7 @@ test("the scheduler launches a due approved card once, waits for an executor slo
   const dueAt = new Date(2000, 0, 1, 9).toISOString();
   f.task.status = "ready";
   f.task.schedule = { time: "09:00", nextAt: dueAt };
-  const snapshot = structuredClone(f.task);
+  const snapshot = { ...structuredClone(f.task), expertWorkPlanned: true };
   const taskLimits = { executor: 1 };
   const tasks = [
     { ...snapshot, id: "T-0000", schedule: { ...snapshot.schedule, paused: true } },
@@ -269,6 +269,7 @@ test("pausing while waiting for a slot prevents launch across windows; an active
     const f = fixture("started", { id: "result", type: "agentMessage", phase: "final_answer", status: "completed", title: "", text: "Completed" });
     f.task.status = "ready";
     f.task.schedule = { ...rule, nextAt: "2000-01-01T00:00:00Z" };
+    Object.assign(f.task, { expertWorkPlanned: true });
     const watch = { board: { tasks: [f.task], settings: { taskLimits: { executor: 1 } } }, listeners: [], tabs: new Set([1, 2]) };
     f.subscriptions.set("project", watch);
     const release = f.slots.acquire("project", "executor", { executor: 1 })!;

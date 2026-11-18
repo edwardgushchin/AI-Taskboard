@@ -170,7 +170,6 @@ app.whenReady().then(async () => {
         ],
       });
       fixture.board.tasks = [planned];
-      fixture.board.settings.requireExpertPlans = true;
       window.taskboard.command = async action => ({ ok: true, data: action === 'experts' ?
         [{ id: 'product-owner', name: 'Product Owner' }, { id: 'qa-engineer', name: 'QA Engineer' }] : structuredClone(planned) });
       window.taskboard.themes = async () => [];
@@ -260,7 +259,7 @@ app.whenReady().then(async () => {
     window.setContentSize(1380, 900);
     if (keepArtifacts) writeFileSync(join(artifacts, "task-card-team.png"), (await window.webContents.capturePage()).toPNG());
     await evaluate(`boardSettings(); settle()`);
-    await check(`body.querySelector('[name="requireExpertPlans"]')?.checked === true`, 'board settings display the persisted plan requirement');
+    await check(`!body.querySelector('[name="requireExpertPlans"]')`, 'board settings have no expert plan switch');
     console.log(`Expert team Chromium checks passed: ${checks}`);
     return;
   }

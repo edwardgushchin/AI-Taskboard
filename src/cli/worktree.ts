@@ -13,6 +13,7 @@ import {
 } from "./git.ts";
 import type { Repository, Worktree } from "./git.ts";
 import { boardReviewMode, object, record, requireRevision, requireState, taskIdPattern, TaskboardError, text } from "./model.ts";
+import { isManual } from "./manual-board.ts";
 import { requireExpertPlan, skillProofScope } from "./expert-team.ts";
 import { boardActor } from "./tasks.ts";
 import type { Task, TaskGit } from "./model.ts";
@@ -221,7 +222,7 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
   for (const stage of task.expertTeam?.work?.stages ?? []) {
     if (stage.skills?.length) skillProofScope(store, task, "work", stage.key);
   }
-  if (store.index.settings.requireExpertPlans && !task.expertStage) {
+  if (!isManual(store.index.settings) && !task.expertStage) {
     requireExpertPlan(task, "work");
     if (!task.schedule && boardReviewMode(store.index.settings) !== "human") requireExpertPlan(task, "review");
   }

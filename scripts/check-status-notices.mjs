@@ -1,3 +1,4 @@
+import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
 // Exercise the production main process, watch, CLI, history and renderer.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -40,7 +41,7 @@ void (async () => { try {
   for (const project of [first, second]) {
     mkdirSync(project);
     cli(project, ["init"], { git: true });
-    cli(project, ["create"], { title: "Проверка доступа к серверу", criteria: ["Доступ проверен"], workingDirectory: project });
+    cli(project, ["create"], plannedDraft({ title: "Проверка доступа к серверу", criteria: ["Доступ проверен"], workingDirectory: project }));
   }
   // A legacy conversation must show notices without launching its provider.
   writeFileSync(join(first, ".tasks/orchestrator.json"), JSON.stringify({ provider: "codex", id: randomUUID() }));

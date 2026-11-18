@@ -4871,8 +4871,6 @@ function boardSettings() {
       options: [["merge", "Merge"], ["squash", "Squash"]] },
     { name: "showCardPreviews", label: () => (t("ui.show_previews_on_board_cards_a3f2af17")),
       type: "checkbox", value: current.showCardPreviews !== false },
-    { name: "requireExpertPlans", label: () => t("experts.require_plans"),
-      type: "checkbox", value: current.requireExpertPlans === true },
     { name: "reviewMode", label: () => (t("ui.who_reviews_tasks_3636b553")),
       value: reviewMode, options: [
         ["human", t("ui.human_56f4a79e")],
@@ -4907,7 +4905,6 @@ function boardSettings() {
       ...(values.name.trim() !== (current.name ?? "") ? { name: values.name } : {}),
       archiveAfterDays: values.archive === "" ? null : Number(values.archive), integrationMode: values.mode,
       showCardPreviews: values.showCardPreviews,
-      ...(values.requireExpertPlans !== Boolean(current.requireExpertPlans) ? { requireExpertPlans: values.requireExpertPlans } : {}),
       ...(values.reviewMode !== reviewMode ? { reviewMode: values.reviewMode } : {}),
       ...(roles.some(([role]) => taskLimits[role] !== current.taskLimits?.[role]) ? { taskLimits } : {}),
       ...agents,
@@ -5587,7 +5584,6 @@ function update(next) {
     const archived = frame.board?.archived.find(entry => entry.id === taskInSheet.id);
     const cleaned = taskInSheet.cleanupAvailable && frame.board?.cleanedTasks?.includes(taskInSheet.id);
     if (Boolean(byId("task-stop-waiting")) !== Boolean(frame.waitingTasks?.includes(taskInSheet.id)) ||
-        previousBoard?.settings.requireExpertPlans !== frame.board?.settings.requireExpertPlans ||
         previousBoard?.settings.reviewMode !== frame.board?.settings.reviewMode ||
         JSON.stringify(previousBoard?.settings.manualColumns) !== JSON.stringify(frame.board?.settings.manualColumns) || cleaned || (task && (task.revision !== taskInSheet.revision ||
         (task.historyLength ?? task.history?.length) !== taskInSheet.history.length ||

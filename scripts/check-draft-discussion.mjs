@@ -1,3 +1,4 @@
+import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
 // Real Electron, CLI and renderer. Pass --live to exercise the installed Codex provider.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -9,8 +10,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { electronCheck } from "./electron-check.mjs";
 
 const live = process.argv.includes("--live");
+const creationOnly = process.argv.includes("--creation-only");
 const { scratch, artifacts } = electronCheck(import.meta.url, "draft-discussion", live ? 240000 : 150000,
-  live ? [[]] : [["--first-pass"], ["--restart"]]);
+  live || creationOnly ? [[]] : [["--first-pass"], ["--restart"]]);
 const require = createRequire(import.meta.url);
 const { app, BrowserWindow, dialog } = require("electron");
 const restart = process.argv.includes("--restart");
@@ -157,7 +159,7 @@ try {
       description: "Prepare a one-sentence handoff naming the existing delivery time and the exact recipient email alias. Use the attached schedule and project instructions. Keep the document in English.",
       criteria: ["The handoff names the delivery time and exact recipient email alias."],
       execution, attachmentSources: [{ path: schedule, link: true }] };
-    const unresolved = cli(["create"], brief);
+    const unresolved = cli(["create"], plannedDraft(brief));
     const waitAgent = async (id, count) => {
       await until(() => {
         const card = show(id);
@@ -184,7 +186,7 @@ try {
     assert.match(confirmation, /09:40\s*UTC/i);
     assert.match(confirmation, /audits\+north@example\.invalid/i);
     assert.doesNotMatch(confirmation, /\?/);
-    const complete = cli(["create"], { ...brief, description: brief.description + " The recipient is audits+north@example.invalid." });
+    const complete = cli(["create"], plannedDraft({ ...brief, description: brief.description + " The recipient is audits+north@example.invalid." }));
     const completion = await waitAgent(complete.id, 1);
     assert.doesNotMatch(completion, /\?/);
     assert.match(completion, /(?:enough|sufficien|complete|everything (?:needed|in place)|no (?:\w+ )*(?:questions?|clarifications?)|ready|clear)/i);
@@ -215,7 +217,12 @@ try {
     const { registerRuntime, runtimeEntries } = await import("../src/desktop/board-runtime.ts");
     slot = registerRuntime(project, { kind: "slot", role: "executor", task: "T-9999" });
     assert.ok(slot);
-    const response = await evaluate(`window.taskboard.command("create", undefined, { title: "Created in desktop" })`);
+    const missingPlan = await evaluate(`window.taskboard.command("create", undefined, {
+      title: "Unplanned desktop draft", description: "Verify the creation guard.", criteria: ["The draft is rejected"]
+    })`);
+    assert.equal(missingPlan.error?.code, "EXPERT_PLAN_REQUIRED", JSON.stringify(missingPlan));
+    check("Desktop creation rejects an agent draft without an expert plan");
+    const response = await evaluate(`window.taskboard.command("create", undefined, ${JSON.stringify(plannedDraft({ title: "Created in desktop" }))})`);
     assert.equal(response.ok, true, JSON.stringify(response));
     report.ui = response.data.id;
     await waitReply(report.ui);
@@ -223,6 +230,19 @@ try {
     assert.equal(messages(show(report.ui))[0].actor, "agent");
     assert.deepEqual(calls[0].configured, { model: "gpt-6.1-sol", effort: "medium" });
     check("Desktop creation starts in the background with the executor pool occupied and uses board settings");
+    if (creationOnly) {
+      await open(manual);
+      const personal = await evaluate(`window.taskboard.command("create", undefined, {
+        title: "Personal desktop task", actor: "user"
+      })`);
+      assert.equal(personal.ok, true, JSON.stringify(personal));
+      const saved = cli(["show", personal.data.id], undefined, manual);
+      assert.equal(saved.expertTeam, undefined);
+      assert.equal(saved.draftDiscussion, undefined);
+      check("Desktop creation persists a personal task without an expert plan");
+      writeFileSync(evidence, JSON.stringify(report, null, 2));
+      return;
+    }
 
     const startMessage = (id, text, run = evaluate) => run(`window.taskboard.chatSend(
       ${JSON.stringify(id)}, ${JSON.stringify({ ...settings, text, files: [] })})`);
@@ -234,7 +254,7 @@ try {
       assert.equal(reply.result.ok, true, JSON.stringify(reply));
     };
     // Leave a new draft with no chat history, ready for a user's first message.
-    const ordinary = cli(["create"], { title: "Provider inactive", execution: settings });
+    const ordinary = cli(["create"], plannedDraft({ title: "Provider inactive", execution: settings }));
     await until(() => show(ordinary.id).draftDiscussion?.phase === "failed", "new draft before ordinary chat");
     await until(() => !runtimeEntries(project).some(entry => entry.task === ordinary.id), "initial writer released");
     await say(ordinary.id, "First message");
@@ -337,9 +357,9 @@ try {
     writeFileSync(image, Buffer.from(imageBytes, "base64"));
     mutableSources = [linked, image];
     const before = calls.length;
-    const draft = cli(["create"], { title: "CLI with attachments", dependencies: [created.data.id], execution: settings,
+    const draft = cli(["create"], plannedDraft({ title: "CLI with attachments", dependencies: [created.data.id], execution: settings,
       attachmentSources: [{ path: original, name: "same.txt" }, { path: linked, name: "same.txt", link: true },
-        { path: changed, link: true }, { path: image }, { path: image, link: true }] });
+        { path: changed, link: true }, { path: image }, { path: image, link: true }] }));
     writeFileSync(changed, "changed contents of different length");
     await waitReply(draft.id);
     const input = calls[before];
@@ -367,7 +387,7 @@ try {
     await capture("draft-discussion-reply.png");
     check("CLI passes distinct same-name files and stable linked text/image snapshots despite edits at the provider boundary; the next turn reports changed sources");
 
-    const failure = cli(["create"], { title: "Provider inactive", execution: settings });
+    const failure = cli(["create"], plannedDraft({ title: "Provider inactive", execution: settings }));
     await until(() => show(failure.id).draftDiscussion?.phase === "failed", "provider failure");
     await display(failure.id);
     await until(() => evaluate("document.querySelector('.task-chat').textContent.includes('Fixture provider unavailable')"), "visible failure");
@@ -377,7 +397,7 @@ try {
     await waitReply(failure.id);
     check("Provider failure is persistent and the visible retry saves a single reply");
 
-    const stale = cli(["create"], { title: "Stale draft", execution: settings });
+    const stale = cli(["create"], plannedDraft({ title: "Stale draft", execution: settings }));
     await until(() => staleGate, "in-flight response");
     cli(["update", stale.id], { title: "Fresh draft", revision: show(stale.id).revision });
     staleGate();
@@ -386,7 +406,7 @@ try {
     assert.equal(messages(show(stale.id)).length, 0);
     check("Editing during the turn prevents a stale reply");
 
-    const busy = cli(["create"], { title: "Writer occupied", execution: settings });
+    const busy = cli(["create"], plannedDraft({ title: "Writer occupied", execution: settings }));
     writer = registerRuntime(project, { kind: "task", task: busy.id });
     assert.ok(writer);
     await delay(2000);
@@ -395,7 +415,7 @@ try {
     await waitReply(busy.id);
     check("The shared writer keeps a draft queued until released");
     const count = calls.length;
-    cli(["create"], { title: "Invalid creation", attachmentSources: [{ path: join(scratch, "missing") }] }, project, "IO_ERROR");
+    cli(["create"], plannedDraft({ title: "Invalid creation", attachmentSources: [{ path: join(scratch, "missing") }] }), project, "IO_ERROR");
     await open(manual);
     const personal = cli(["create"], { title: "Personal card" }, manual);
     await delay(1600);
@@ -406,7 +426,7 @@ try {
     check("Failed create and personal board schedule no review, and project/worktree contents stay untouched");
 
     await until(() => !readdirSync(staging).some(name => name.startsWith("ai-taskboard-chat-")), "staging cleanup");
-    const interrupted = cli(["create"], { title: "Interrupted draft", execution: settings });
+    const interrupted = cli(["create"], plannedDraft({ title: "Interrupted draft", execution: settings }));
     writer = registerRuntime(project, { kind: "task", task: interrupted.id });
     assert.ok(writer);
     cli(["draft-discussion", interrupted.id], { revision: interrupted.revision, phase: "running" });

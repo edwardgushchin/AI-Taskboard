@@ -1,3 +1,4 @@
+import { plannedDraft } from "./fixtures/planned-draft.ts";
 import { activeRunSummary } from "../src/desktop/active-runs.ts";
 import assert from "node:assert/strict";
 import { callCli } from "../src/desktop/cli.ts";
@@ -481,9 +482,9 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(activeRunSummary().total, 1);
   assert.deepEqual(await interrupted.completion, { reason: "Turn interrupted", interrupted: true });
   assert.equal(activeRunSummary().total, 0);
-  const card = await callCli<{ id: string; createdAt: string }>(folder, ["create"], {
+  const card = await callCli<{ id: string; createdAt: string }>(folder, ["create"], plannedDraft({
     title: "Verify UI", criteria: ["Run the required UI check."], workingDirectory: folder,
-  });
+  }));
   assert.ok(card.ok);
   assert.equal(card.data.id, task.id);
   assert.equal((await callCli(folder, ["approve", card.data.id])).ok, true);

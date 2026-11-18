@@ -37,7 +37,7 @@ import packageInfo from "../../package.json" with { type: "json" };
 import { grantTaskTool, requestTaskTool } from "./task-tools.ts";
 import { recoverTestData } from "./test-recovery.ts";
 import { expertContext, expertSkill, listExperts, readExpert, saveExpert } from "./experts.ts";
-import { approvalRequirements, createExpertPlan, expertStagesStatus, initialExpertTeam, requireApprovalPlan, requireExpertPlan, requireExpertResults, reviewDecisionSequence, sendTeamMessage, taskExpertPhase, teamInbox, updateExpertStage } from "./expert-team.ts";
+import { approvalRequirements, createExpertPlan, expertStagesStatus, planNewTask, requireApprovalPlan, requireExpertPlan, requireExpertResults, reviewDecisionSequence, sendTeamMessage, taskExpertPhase, teamInbox, updateExpertStage } from "./expert-team.ts";
 import { syncTaskStatusNotices } from "../desktop/manager-history.ts";
 import { syncSettingsNotices } from "../desktop/settings-notices.ts";
 import { deferExecutor, forgetExecutor, linkQueuedExecutor, matchesQueuedExecutor, registerRuntime, runtimeEntries, runtimeTransaction } from "../desktop/board-runtime.ts";
@@ -57,7 +57,7 @@ const help = [
   "          project-usage (all available project token usage, including archived tasks and manager)",
   "          manager-usage (known board manager token usage) or manager-usage --stdin (record a run snapshot)",
   "          message TASK-ID --stdin (text, optional kind), messages TASK-ID (optional afterSequence with --stdin), manager-inbox",
-  "          spawn-child PARENT --stdin (key, basis, title, description, criteria; optional existingId and dependencies)",
+  "          spawn-child PARENT --stdin (key, basis, title, description, criteria, expertTeam; optional existingId and dependencies)",
   "          tool-request TASK-ID --stdin (server, tool, reason), tool-grant TASK-ID --stdin (revision, server, tool; restart required)",
   "          tool-revoke TASK-ID --stdin (revision, server, tool; restart required)",
   "          manager-ack [TASK-ID] --stdin (through for one card, messages with id and through for a batch)",
@@ -162,15 +162,16 @@ function snapshotBoard(store: BoardStore, compact = false, cache = new Map<strin
       return card;
     });
     const statuses = new Map([...cards.map(card => card.task), ...archived].map(task => [task.id, task.status]));
+    const mode = boardReviewMode(header.settings);
     return { ...header, tasks: cards.map(({ task, target, approval }) => {
       let reviewTargetHead: string | null | undefined;
-      let reviewPending: true | undefined;
-      if (task.status === "review" && boardReviewMode(header.settings) === "reviewer-human") {
+      const reviewPending = task.status === "review" && exists(store.pendingPath(task.id)) ? true as const : undefined;
+      const checkReviewTarget = mode === "reviewer-human" || (mode === "reviewer" && !task.expertReviewPlanned && approval);
+      if (task.status === "review" && checkReviewTarget) {
         if (target && !targetHeads.has(target)) {
           targetHeads.set(target, store.location.repository && resolveCommit(store.location.repository.root, target) || undefined);
         }
         reviewTargetHead = target ? targetHeads.get(target) : null;
-        if (exists(store.pendingPath(task.id))) reviewPending = true;
         task = { ...task, reviewApproved: Boolean(approval &&
           approval.reviewModeVersion === header.settings.reviewModeVersion && approval.targetHead === reviewTargetHead) };
       } else if (approval && approval.reviewModeVersion !== header.settings.reviewModeVersion) {
@@ -343,7 +344,8 @@ function run(
     const phase = taskExpertPhase(input.phase);
     if ((phase === "work" && input.actor !== "agent") || (phase === "review" && !["reviewer", "manager"].includes(String(input.actor))))
       throw new TaskboardError("INVALID_INPUT", "Only the responsible phase agent may report a stage.");
-    if (phase === "review" && (input.actor === "manager" ? "manager" : "reviewer") !== boardReviewMode(store.index.settings))
+    const mode = boardReviewMode(store.index.settings);
+    if (phase === "review" && !(input.actor === "manager" ? mode === "manager" : usesIndependentReviewer(mode)))
       throw new TaskboardError("REVIEW_MODE_CHANGED", "Use the responsible agent for the current review mode.");
     const targetHead = phase === "review" ? verifyReviewDecision(store, store.card(taskId), input.targetHead) : undefined;
     return updateExpertStage(store, taskId, phase, input, targetHead);
@@ -430,6 +432,7 @@ function run(
       }
     }
     validateDependencies(store, child);
+    planNewTask(store, child, input.expertTeam);
     child = changeTask(child, "approve", { revision: child.revision, actor: "agent" });
     child.origin = { parent: id, key, basis };
     child.launchRequested = true;
@@ -437,15 +440,6 @@ function run(
   }
   if (command === "create") {
     const task = createTask(store.allocateId(), input);
-    const expertTeam = initialExpertTeam(store, task, input.expertTeam);
-    if (expertTeam) {
-      task.expertTeam = expertTeam;
-      for (const [phase, plan] of Object.entries(expertTeam)) {
-        task.history.push({ at: task.createdAt, action: "expert-plan", actor: task.history[0].actor,
-          expertPhase: taskExpertPhase(phase), text: plan.reason });
-      }
-    }
-    requireApprovalPlan(task, store.index.settings, "creation");
     if (isManual(store.index.settings)) {
       if (input.initialStatus !== undefined && input.actor !== "user") throw new TaskboardError("MANUAL_BOARD", "Начальную колонку выбирает пользователь.");
       const column = store.index.settings.manualColumns!.find(c => c.id === (input.initialStatus ?? store.index.settings.manualColumns![0].id));
@@ -454,6 +448,7 @@ function run(
       if (column.terminal) task.closedAt = task.updatedAt;
     } else if (input.initialStatus !== undefined) throw new TaskboardError("INVALID_INPUT", "Выбор начальной колонки доступен только на обычной доске.");
     else task.draftDiscussion = { phase: "queued" };
+    planNewTask(store, task, input.expertTeam);
     validateDependencies(store, task);
     return createWithAttachments(store, task.tags.length ? assignTags(store, task) : task, input.attachmentSources);
   }
@@ -548,9 +543,7 @@ function run(
     if (input.manualColumns !== undefined) throw new TaskboardError("INVALID_INPUT", "Используйте настройку колонок с явным переносом дел.");
     if (isManual(store.index.settings) && input.autoMode === true) throw new TaskboardError("MANUAL_BOARD", "На обычной доске авторежим недоступен.");
     if (input.requireExpertPlans !== undefined) {
-      if (typeof input.requireExpertPlans !== "boolean") throw new TaskboardError("INVALID_INPUT", "requireExpertPlans must be a boolean.");
-      if (isManual(store.index.settings) && input.requireExpertPlans) throw new TaskboardError("MANUAL_BOARD", "Expert execution is unavailable on a manual board.");
-      store.index.settings.requireExpertPlans = input.requireExpertPlans;
+      throw new TaskboardError("INVALID_INPUT", "Expert plans are required on agent boards. Remove requireExpertPlans from the settings request.");
     }
     const settingsJournal = store.index.managerSettings ?? recordSettings(store.index.settings);
     if (input.name !== undefined) {
@@ -699,14 +692,14 @@ function run(
       const targetHead = verifyReviewDecision(store, task, input.targetHead);
       decisionTiming = { lockWaitMs, verificationMs: Math.round(performance.now() - verificationStarted) };
       if (command === "request-changes" && mode !== "human" && input.actor === (usesIndependentReviewer(mode) ? "reviewer" : mode)) {
-        if (store.index.settings.requireExpertPlans) requireExpertPlan(task, "review");
+        requireExpertPlan(task, "review");
         requireExpertResults(task, "review", targetHead);
       }
       if (reviewerReport) {
         if (hasPending(store, task)) throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation first.");
         const summary = text(input.summary, "review summary", true);
         if (command === "review-approve") {
-          if (store.index.settings.requireExpertPlans) requireExpertPlan(task, "review");
+          requireExpertPlan(task, "review");
           requireExpertResults(task, "review", targetHead);
           const evidence = input.evidence;
           if (!Array.isArray(evidence) || !evidence.length || evidence.length !== task.criteria.length ||

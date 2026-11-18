@@ -7,6 +7,7 @@ import { electronCheck, localizationFixture } from "./electron-check.mjs";
 const { scratch, artifacts } = electronCheck(import.meta.url, "experts", 90_000);
 const require = createRequire(import.meta.url);
 const { app, BrowserWindow } = require("electron");
+app.setPath("userData", join(scratch, "profile"));
 const read = name => readFileSync(new URL("../src/desktop/" + name, import.meta.url), "utf8");
 const catalog = JSON.parse(readFileSync(new URL("../src/experts/catalog.json", import.meta.url)));
 const experts = catalog.map(id => {
@@ -38,11 +39,11 @@ app.whenReady().then(async () => {
       ${read("source-files.cjs")} ${read("markdown.js")} ${read("chat.js")} ${read("review-diff.js")}
       ${localizationFixture()} ${read("renderer.js")}
       window.catalog = ${JSON.stringify(experts)};
-      window.calls = []; window.navigated = [];
-      window.parentCard = {id:'T-0001',title:'Команда спринта',revision:1,status:'draft',expertStages:[],history:[],criteria:[],subtasks:[],attachments:[],tags:[],description:'',summary:'',nextStep:''};
-      frame = {project:'synthetic-board',board:{project:'synthetic-board',settings:{boardType:'agent'},tasks:[parentCard],archived:[],tags:[]}};
+      window.calls = [];
+      window.parentCard = {id:'T-0001',title:'Команда спринта',revision:1,status:'draft',expertStages:[],history:[],criteria:[],questions:[],subtasks:[],attachments:[],tags:[],description:'',summary:'',nextStep:''};
+      frame = {project:'Agent board fixture',board:{project:'Agent board fixture',
+        settings:{boardType:'agent', integrationMode:'merge', reviewMode:'reviewer-human'},tasks:[parentCard],archived:[],tags:[]}};
       api.taskLimits = async () => ({ok:true,data:{executor:1,reviewer:1}});
-      showTask = async id => { navigated.push(id); };
       api.command = async (action,id,input={}) => {
         calls.push({action,id,input:structuredClone(input)});
         if(action==='experts')return {ok:true,data:catalog.map(({id,name,group,enabled,revision,skills})=>({id,name,group,enabled,revision,skills}))};
@@ -70,7 +71,15 @@ app.whenReady().then(async () => {
     await check("body.querySelectorAll('.expert-message').length===1 && !body.querySelector('.expert-message img')", "human questions are visible and message HTML remains inert");
     writeFileSync(join(artifacts, "expert-team.png"), (await window.webContents.capturePage()).toPNG());
     await check("!body.querySelector('.task-team-mail button, .task-team-mail textarea')", "expert conversation is read-only for the operator");
-    await evaluate("boardSettings(); void 0;"); await settled();
+    await evaluate(`Object.assign(parentCard, { description: 'Saved draft', approvalRequirements: ['work', 'review'] }); showTask(parentCard.id);`);
+    await check(`body.querySelector('.expert-approval-requirements')?.textContent.includes(t("experts.missing_work")) &&
+      body.querySelector('.expert-approval-requirements')?.textContent.includes(t("experts.missing_review")) &&
+      ![...body.querySelectorAll('button')].some(button => button.textContent === t("ui.approve_535c27a7"))`, "old draft explains both missing leads and prevents approval");
+    window.setContentSize(800, 760);
+    await evaluate("frame.board.settings.requireExpertPlans = false; boardSettings(); void 0;"); await settled();
+    await check(`sheet.open && !body.querySelector('[name=requireExpertPlans]') &&
+      body.querySelector('[name=reviewMode]')?.value === 'reviewer-human'`, "legacy settings show the saved review mode without an expert plan switch");
+    writeFileSync(join(artifacts, "expert-plan-settings.png"), (await window.webContents.capturePage()).toPNG());
     await check("[...body.querySelectorAll('[name$=Limit]')].map(input=>input.placeholder).join(',')==='1,1' && !body.querySelector('[name=managerLimit]')", "board settings inherit one work task and one review task");
     await evaluate("body.querySelector('[name=executorLimit]').value='2'; body.querySelector('[name=reviewerLimit]').value='0'; body.querySelector('form').requestSubmit(); void 0;"); await settled();
     await check("calls.some(c=>c.action==='settings' && c.input.taskLimits?.executor===2 && c.input.taskLimits?.reviewer===0)", "board settings save phase-specific task limits");
