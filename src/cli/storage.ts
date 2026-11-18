@@ -418,6 +418,21 @@ export function validateCard(value: unknown, id: string): Task {
   return task;
 }
 
+function migrateImplicitWorkflow(task: Task): boolean {
+  let changed = false;
+  for (const plan of [task.expertTeam?.work, task.expertTeam?.review]) {
+    if (!plan) continue;
+    for (const scope of [plan, ...(plan.stages ?? [])]) {
+      if (!Array.isArray(scope.skills) || !scope.skills.includes("workflow") || Object.hasOwn(scope.skillChecks ?? {}, "workflow")) continue;
+      scope.skills = scope.skills.filter(id => id !== "workflow");
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+const lockedStores = new WeakSet<BoardStore>();
+
 export class BoardStore {
   location: BoardLocation;
   index: BoardIndex;
@@ -439,7 +454,10 @@ export class BoardStore {
       throw new TaskboardError("TASK_NOT_FOUND", "Unknown task " + id + ".", { id });
     }
     try {
-      return this.readCardFile(id);
+      const task = this.readCardFile(id);
+      // This storage upgrade leaves the plan epoch and card revision intact.
+      if (lockedStores.has(this) && migrateImplicitWorkflow(task)) this.save(task);
+      return task;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         throw new TaskboardError("CORRUPT_STORAGE", "The index points to a missing task file.", { id });
@@ -596,7 +614,13 @@ export function onBoard<T>(location: BoardLocation, callback: (store: BoardStore
   requireBoard(location);
   return withLock(location.directory, lockWaitMs => {
     finishTestRecovery(location);
-    return callback(new BoardStore(location), lockWaitMs);
+    const store = new BoardStore(location);
+    lockedStores.add(store);
+    try {
+      return callback(store, lockWaitMs);
+    } finally {
+      lockedStores.delete(store);
+    }
   }, timeoutMs);
 }
 

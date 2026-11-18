@@ -136,12 +136,15 @@ export function phaseStageReporter(project: string, phase: "work" | "review", id
         const proof = await evidence.verify(input, input.key, agentId);
         if (!proof.ok) return proof;
       }
-      const updated = await callCli<{ skills?: string[]; expertId: string }>(project, ["expert-stage", taskId], { ...input, agentId, sessionId,
+      const updated = await callCli<{ skills?: string[]; expertId: string; package: Expert }>(project, ["expert-stage", taskId], { ...input, agentId, sessionId,
         actor: phase === "work" ? "agent" : id ? "reviewer" : "manager", phase,
         targetHead: id ? targetHead : input.targetHead });
-      if (!updated.ok || input.state !== "running" || !updated.data.skills?.length) return updated;
+      if (!updated.ok || input.state !== "running") return updated;
+      const skills = new Set(updated.data.skills);
+      if (updated.data.package.skills.some(skill => skill.id === "workflow")) skills.add("workflow");
+      if (!skills.size) return updated;
       const assignedSkills = [];
-      for (const skillId of updated.data.skills) {
+      for (const skillId of skills) {
         const skill = await callCli(project, ["expert-skill", ...(id ? [id] : [])],
           { expertId: updated.data.expertId, skillId, actor: phase === "work" ? "agent" : id ? "reviewer" : "manager", source: "plan" });
         if (!skill.ok) return skill;

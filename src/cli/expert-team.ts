@@ -33,6 +33,13 @@ export function approvalRequirements(task: Task, settings: BoardSettings) {
 export function requireApprovalPlan(task: Task, settings: BoardSettings, action: "creation" | "approval" = "approval") {
   const missing = approvalRequirements(task, settings);
   if (missing.length) throw new TaskboardError("EXPERT_PLAN_REQUIRED", "Missing required card fields for " + action + ": " + missing.join(", ") + ".");
+  const phases: Phase[] = task.schedule || boardReviewMode(settings) === "human" ? ["work"] : ["work", "review"];
+  for (const phase of phases) {
+    const plan = task.expertTeam?.[phase];
+    if (!plan) continue;
+    checkSkillAssignments(plan, phase + " lead");
+    for (const stage of plan.stages) checkSkillAssignments(stage, phase + ":" + stage.key);
+  }
 }
 
 export function initialExpertTeam(store: BoardStore, task: Pick<Task, "schedule">, value: unknown): Task["expertTeam"] {
@@ -99,7 +106,7 @@ function parseExpertPlan(store: BoardStore, task: Pick<Task, "schedule">, phase:
       throw new TaskboardError("INVALID_INPUT", "Select distinct skills from the stage specialization.");
     }
     const stageChecks = parseSkillChecks(stage.skillChecks, stageSkills);
-    checkSkillAssignments({ skills: stageSkills, skillChecks: stageChecks }, key);
+    checkSkillAssignments({ skills: stageSkills, skillChecks: stageChecks }, phase + ":" + key);
     const criteria = strings(stage.criteria, "stage criteria");
     const outputs = strings(stage.outputs, "outputs");
     if (!criteria.length || !outputs.length) throw new TaskboardError("INVALID_INPUT", "Each stage needs criteria and outputs.");
@@ -126,6 +133,7 @@ function parseExpertPlan(store: BoardStore, task: Pick<Task, "schedule">, phase:
   }
   const all = input.replace ? proposed : [...existing, ...proposed.filter(stage => !existing.some(old => old.key === stage.key))];
   if (all.length > 32) throw new TaskboardError("INVALID_INPUT", "Each phase can have at most 32 stages.");
+  for (const stage of input.replace ? [] : existing) checkSkillAssignments(stage, phase + ":" + stage.key);
   const visiting = new Set<string>();
   const done = new Set<string>();
   const visit = (key: string) => {
@@ -194,7 +202,7 @@ export function requireSkillProof(task: Task, phase: Phase, key?: string, target
   const plan = task.expertTeam?.[phase];
   const scope = key ? plan?.stages.find(stage => stage.key === key) : plan;
   if (!scope?.skills?.length) return;
-  checkSkillAssignments(scope, key ?? phase + " lead");
+  checkSkillAssignments(scope, key ? phase + ":" + key : phase + " lead");
   const event = task.history.slice(stageEpoch(task, phase) + 1).findLast(({ expertSkillProof: proof }) =>
     proof?.phase === phase && proof.key === key && proof.targetHead === targetHead && proof.expertRevision === scope.skillExpertRevision &&
     (!agentId || proof.agentId === agentId) && (!sessionId || proof.sessionId === sessionId));
@@ -210,7 +218,7 @@ export function skillProofScope(store: BoardStore, task: Task, phase: Phase, key
   if (key && !stage) throw new TaskboardError("INVALID_INPUT", "Unknown specialist stage.");
   const scope = stage ?? plan;
   if (!scope?.skills?.length) return;
-  checkSkillAssignments(scope, key ?? phase + " lead");
+  checkSkillAssignments(scope, key ? phase + ":" + key : phase + " lead");
   const expert = readExpert(store, stage?.expertId ?? plan!.lead!);
   if (expert.revision !== scope.skillExpertRevision) {
     throw new TaskboardError("SKILL_PLAN_OUTDATED", "The expert package changed. Refresh the assigned skills in the plan.");
