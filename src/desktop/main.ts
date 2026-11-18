@@ -50,7 +50,7 @@ import { readReviewReports, saveReviewReports } from "./review-history.ts";
 import { readReviewerChat, reviewerActivity, withReviewerChat } from "./reviewer-chat.ts";
 import { goalMessages, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory } from "./manager-history.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
-import { createAgentSlots, parseAgentLimits } from "./agent-limits.ts";
+import { createAgentSlots, desktopAppName, parseAgentLimits, readProfileTaskLimits } from "./agent-limits.ts";
 import { nextReadyTask } from "./auto-queue.ts";
 import { automationDelivery } from "./automation-delivery.ts";
 import type { AgentRole } from "./agent-limits.ts";
@@ -298,7 +298,7 @@ function releaseWatch(project: string, watch: BoardWatch): void {
 }
 
 function subscribe(project: string, board: Board): BoardWatch {
-  agentSlots.remember(project, true);
+  agentSlots.remember(project);
   const tabs = new Set<ProjectTab>();
   let child: ReturnType<typeof cliChild> | undefined;
   let retry: NodeJS.Timeout | undefined;
@@ -327,6 +327,7 @@ function subscribe(project: string, board: Board): BoardWatch {
     try {
       const result = await callCli<{ changed: boolean }>(project, ["sync-notices"], {
         language: localization.locale,
+        profile: app.getPath("userData"),
       });
       if (stopped) return;
       if (!result.ok) {
@@ -1378,7 +1379,7 @@ function scheduleDraftDiscussions({ board }: BoardWatch) {
 }
 
 function reserveAgent(project: string, role: AgentRole, task?: string, queuedRevision?: number) {
-  agentSlots.remember(project, true);
+  agentSlots.remember(project);
   // A tool call can race the watch snapshot after CLI settings were saved.
   const overrides = readBoardSettings(runtimeLocation(project)).taskLimits;
   const release = agentSlots.acquire(projectIdentity(project), role, overrides, task, queuedRevision);
@@ -3675,7 +3676,7 @@ ipcMain.handle("codex:windowsSandbox", (event, mode: unknown) => {
   setCodexWindowsSandbox(profile, mode);
   return codexStatus(profile);
 });
-app.setName("AI Taskboard");
+app.setName(desktopAppName);
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on("second-instance", () => {
@@ -3703,12 +3704,8 @@ else {
       : new Response(null, { status: 404 }));
     localization.select("system", app.getPreferredSystemLanguages());
     loadTheme();
-    try {
-      const limits = parseAgentLimits(readJson(join(app.getPath("userData"), "task-limits.json")));
-      if (limits) agentSlots.configure(limits);
-    } catch {
-      // The application defaults also cover a missing or unreadable preference.
-    }
+    const limits = readProfileTaskLimits(app.getPath("userData"));
+    if (limits) agentSlots.configure(limits);
     loadRecentBoards();
     Menu.setApplicationMenu(null);
     setInterval(scheduleRecurringTasks, 10_000).unref();

@@ -1,10 +1,13 @@
+import { homedir } from "node:os";
+import { isAbsolute, join } from "node:path";
 import type { AgentLimits } from "../cli/model.ts";
 import { inheritedLimits } from "../cli/settings-notices.ts";
 import { deferExecutor, registerRuntime, runtimeEntries, runtimeLocation, runtimeTransaction } from "./board-runtime.ts";
 import type { DeferredExecutor, RuntimeEntry } from "./board-runtime.ts";
 import { projectIdentity } from "./project-tabs.ts";
-import { readBoardSettings } from "../cli/storage.ts";
+import { readBoardSettings, readJson } from "../cli/storage.ts";
 
+export const desktopAppName = "AI Taskboard";
 export const defaultAgentLimits: AgentLimits = inheritedLimits;
 export type AgentRole = keyof AgentLimits;
 
@@ -14,8 +17,8 @@ export function cachedTaskLimits(entries: RuntimeEntry[]): AgentLimits | undefin
   const current = entries.find(entry => entry.id === defaultsId)?.limits;
   if (current) return current;
   const legacy = entries.find(entry => entry.id === "task-defaults")?.limits;
-  // The old cache stored 1/1 even without a profile override. Opening the
-  // board republishes the profile's actual values, including an explicit 1/1.
+  // The old cache stored 1/1 even without a profile override. Let callers
+  // resolve that ambiguous value from the desktop profile.
   if (legacy && (legacy.executor !== 1 || legacy.reviewer !== 1)) return legacy;
 }
 
@@ -25,6 +28,20 @@ export function parseAgentLimits(value: unknown): AgentLimits | undefined {
   const manager = 0;
   if (![executor, manager, reviewer].every(limit => Number.isSafeInteger(limit) && limit >= 0)) return;
   return { executor, manager, reviewer };
+}
+
+function defaultProfile() {
+  const home = homedir();
+  const xdg = process.env.XDG_CONFIG_HOME;
+  const appData = process.platform === "win32" ? process.env.APPDATA || join(home, "AppData", "Roaming")
+    : process.platform === "darwin" ? join(home, "Library", "Application Support")
+    : xdg && isAbsolute(xdg) ? xdg : join(home, ".config");
+  return join(appData, desktopAppName);
+}
+
+export function readProfileTaskLimits(profile = defaultProfile()): AgentLimits | undefined {
+  try { return parseAgentLimits(readJson(join(profile, "task-limits.json"))); }
+  catch { return undefined; }
 }
 
 export function createAgentSlots(shared = false) {
@@ -58,12 +75,10 @@ export function createAgentSlots(shared = false) {
     return limit === 0 ? Infinity : Math.max(0, limit - (active.get(project)?.[role] ?? 0));
   };
   return {
-    remember(project: string, refreshDefaults = false) {
+    remember(project: string) {
       if (shared) {
-        const identity = projectIdentity(project);
-        const refresh = refreshDefaults && !projects.has(identity);
-        projects.set(identity, project);
-        if (refresh || !savedDefaults(runtimeEntries(project))) persistDefaults(project, refresh);
+        if (!savedDefaults(runtimeEntries(project))) persistDefaults(project);
+        projects.set(projectIdentity(project), project);
       }
     },
     claim(project: string, task: string) {

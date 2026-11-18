@@ -9,7 +9,7 @@ import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import { locateBoard, onBoard } from "../src/cli/storage.ts";
 
 const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "task-limits", 60_000,
-  [["clean"], ["legacy-profile"], ["restart"]]);
+  [["clean"], ["legacy-profile"], ["second-profile"], ["save"], ["restart"]]);
 
 void (async () => {
   const require = createRequire(import.meta.url);
@@ -17,7 +17,9 @@ void (async () => {
   const { transformSync } = require("esbuild");
   const phase = process.argv.at(-1);
   const root = fileURLToPath(new URL("../", import.meta.url));
-  const profile = join(scratch, "profile");
+  const appData = process.platform === "darwin" ? join(scratch, "Library", "Application Support") : join(scratch, "app-data");
+  const profile = join(appData, phase === "second-profile" ? "second-profile" : "AI Taskboard");
+  const cliEnv = { ...process.env, GIT_CEILING_DIRECTORIES: scratch, APPDATA: appData, XDG_CONFIG_HOME: appData, HOME: scratch };
   const board = join(scratch, "board");
   const manual = join(scratch, "manual");
   const profileLimits = join(profile, "task-limits.json");
@@ -30,7 +32,7 @@ void (async () => {
   };
   process.env.GIT_CEILING_DIRECTORIES = scratch;
   app.setPath("userData", profile);
-  app.setPath("appData", join(scratch, "app-data"));
+  app.setPath("appData", appData);
   app.disableHardwareAcceleration();
   app.commandLine.appendSwitch("lang", "ru");
 
@@ -38,12 +40,12 @@ void (async () => {
     const result = JSON.parse(execFileSync(process.env.TASKBOARD_CHECK_NODE, [
       "--disable-warning=ExperimentalWarning", join(root, "src/cli/main.ts"), "--project", project,
       "--json", command, ...(input ? ["--stdin"] : []),
-    ], { cwd: scratch, encoding: "utf8", windowsHide: true, input: input && JSON.stringify(input) }));
+    ], { cwd: scratch, env: cliEnv, encoding: "utf8", windowsHide: true, input: input && JSON.stringify(input) }));
     assert.equal(result.ok, true, JSON.stringify(result));
     return result.data;
   }
-  function notice(expected) {
-    cli(board, "sync-notices", { language: "ru" });
+  function notice(expected, selectedProfile) {
+    cli(board, "sync-notices", { language: "ru", profile: selectedProfile });
     const { effective } = onBoard(locateBoard(board), ({ index }) => index.managerSettings);
     assert.deepEqual([effective["Лимит задач в работе"], effective["Лимит задач на ревью"]], expected);
   }
@@ -90,6 +92,9 @@ void (async () => {
       notice([3, 2]);
       reservations(3, 2);
       writeFileSync(runtime, JSON.stringify([{ id: "task-defaults", kind: "defaults", owner: 0,
+        limits: { executor: 5, manager: 0, reviewer: 1 } }]));
+      notice([5, 1]);
+      writeFileSync(runtime, JSON.stringify([{ id: "task-defaults", kind: "defaults", owner: 0,
         limits: { executor: 1, manager: 0, reviewer: 1 } }]));
       notice([3, 2]);
       reservations(3, 2);
@@ -101,6 +106,10 @@ void (async () => {
       writeFileSync(profileLimits, JSON.stringify({ executor: 1, manager: 0, reviewer: 1 }));
       writeFileSync(runtime, JSON.stringify([{ id: "task-defaults", kind: "defaults", owner: 0,
         limits: { executor: 1, manager: 0, reviewer: 1 } }]));
+      notice([1, 1]);
+      notice([3, 2], join(appData, "unused-profile"));
+      notice([1, 1], profile);
+    } else if (phase === "save") {
       cli(board, "settings", { taskLimits: { reviewer: 0 } });
     }
     symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), modules,
@@ -144,7 +153,25 @@ void (async () => {
       await open(manual);
       await evaluate("boardSettings(); void 0");
       assert.equal(await evaluate("document.querySelectorAll('input[name$=Limit]').length"), 0);
-      record("PASS clean profile and legacy board cache: application 3/2, inherited placeholders 3/2, CLI notices 3/2, 3+2 reservations and next denied; manual settings have no task limits.");
+      record("PASS clean profile and legacy board cache: implicit 1/1 becomes 3/2 in UI, CLI notices and both slot pools; legacy 5/1 remains readable; manual settings have no task limits.");
+    } else if (phase === "legacy-profile" || phase === "second-profile") {
+      if (phase === "second-profile") {
+        assert.equal(existsSync(profileLimits), false);
+        await showLimits([3, 2]);
+        notice([1, 1], profile);
+        reservations(1, 1);
+      }
+      await open(board);
+      await boardLimits([["", "1"], ["", "1"]]);
+      await showLimits([1, 1]);
+      notice([1, 1], profile);
+      reservations(1, 1);
+      if (phase === "second-profile") {
+        assert.equal(existsSync(profileLimits), false);
+        record("PASS second clean Electron profile opens the shared board without replacing 1/1; both pools still deny the next slot.");
+      } else {
+        record("PASS explicit legacy profile 1/1 is used by standalone CLI before Electron opens the board, then published to both slot pools.");
+      }
     } else {
       await open(board);
       const appLimits = phase === "restart" ? [4, 2] : [1, 1];
@@ -155,7 +182,7 @@ void (async () => {
       const pool = createAgentSlots(true);
       assert.equal(pool.available(board, "executor"), appLimits[0]);
       assert.equal(pool.available(board, "reviewer"), Infinity);
-      if (phase === "legacy-profile") {
+      if (phase === "save") {
         await evaluate(`(() => {
           const form = document.querySelector('#agent-limits');
           form.elements.executor.value = 4;
@@ -163,7 +190,7 @@ void (async () => {
           form.requestSubmit();
         })()`);
         await wait(() => JSON.parse(readFileSync(profileLimits, "utf8")).executor === 4, "saved application limits");
-        record("PASS explicit legacy profile 1/1 survives upgrade; saved board review 0 takes precedence in settings, notices and slot availability.");
+        record("PASS saved board review 0 takes precedence over app review 1 in settings, notices and slot availability.");
       } else {
         record("PASS after application restart: saved app 4/2 and board review 0 persist; inherited work 4 and unlimited review are effective.");
       }
