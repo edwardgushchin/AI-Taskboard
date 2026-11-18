@@ -100,7 +100,7 @@
   "ui.project_manager_is_reviewing_730137f9": "Проверяет менеджер проекта",
   "ui.agent_is_working_28ccd334": "Агент работает",
   "ui.waiting_for_a_reviewer_slot_8918dd95": "Ожидает свободного места ревьюера",
-  "ui.waiting_for_an_available_executor_cc0934a8": "Ожидает свободного исполнителя",
+  "ui.waiting_for_an_available_executor_cc0934a8": "В очереди",
   "ui.board_run_inactive_2a932a2f": "Запуск с доски не активен",
   "ui.a_task_1d59338e": "задачу",
   "ui.waiting_for_dfc25d0d": "Ожидает",

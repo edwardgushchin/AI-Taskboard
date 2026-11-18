@@ -229,7 +229,7 @@ function frame(state: ProjectTab) {
     replyingTasks: state.board?.tasks.filter(task => (replyingTasks.has(state.project + "\0" + task.id) || sharedRuns.some(entry => entry.kind === "task" && entry.task === task.id))).map(task => task.id),
     waitingTasks: state.board?.tasks.filter(task => {
       const key = state.project + "\0" + task.id;
-      return task.status === "in_progress" && (deferredExecutors.get(key)?.revision === task.revision || sharedRuns.some(entry => entry.kind === "queue" && entry.task === task.id && entry.revision === task.revision)) &&
+      return task.status === "in_progress" && sharedRuns.some(entry => entry.kind === "queue" && entry.task === task.id && entry.revision === task.revision) &&
         !runningTasks.has(key) && !replyingTasks.has(key) && !sharedRuns.some(entry => entry.kind === "slot" && entry.task === task.id);
     }).map(task => task.id),
     reviewingTasks: Object.fromEntries(state.board?.tasks.flatMap(task => {
@@ -785,9 +785,7 @@ async function returnTaskToDraft(project: string, id: string, revision: unknown,
     } finally {
       deadline.abort();
     }
-    const result = await callCli<Task>(project, ["return-to-draft", id], { revision, actor });
-    if (result.ok) deferredExecutors.delete(key);
-    return result;
+    return await callCli<Task>(project, ["return-to-draft", id], { revision, actor });
   } finally {
     returningDrafts.delete(key);
   }
@@ -795,6 +793,10 @@ async function returnTaskToDraft(project: string, id: string, revision: unknown,
 
 async function stopChat(project: string, id: string) {
   const active = activeAgents.get(project + "\0" + id);
+  if (!active && agentSlots.defer(project, id)) {
+    notifyRunChange(project);
+    return { ok: true as const, data: null };
+  }
   if (!active) return cliFailure("CHAT_NOT_RUNNING", t("ui.the_agent_is_no_longer_running_72c32478"));
   try {
     await active.control.interrupt();
@@ -1042,7 +1044,6 @@ const boardWorkRequests = new Map<string, ManagerRequest>();
 enableSharedRuns();
 const agentSlots = createAgentSlots(true);
 type ExecutorContinuation = { afterDisconnect?: boolean; withoutProgress?: boolean };
-const deferredExecutors = new Map<string, { project: string; id: string; revision: number; continuation?: ExecutorContinuation }>();
 const autoBoards = new WeakMap<BoardWatch, {
   running: boolean; milestonesAt: number; dates: Map<number, string | null>; milestonesError?: string;
   launches: Set<string>; integrations: Set<string>; notices: Set<string>;
@@ -1181,42 +1182,30 @@ function scheduleAgentWork() {
     schedulingAgentWork = false;
     try {
       for (const watch of subscriptions.values()) {
-        for (const entry of agentSlots.entries(watch.board.project)) {
-          if (entry.kind === "queue" && entry.task && entry.revision !== undefined)
-            deferredExecutors.set(watch.board.project + "\0" + entry.task, {
-              project: watch.board.project, id: entry.task, revision: entry.revision, continuation: entry.continuation });
-        }
-      }
-      for (const [key, pending] of deferredExecutors) {
-        const { project, id, revision, continuation } = pending;
-        const watch = subscriptions.get(project);
-        const task = watch?.board.tasks.find(task => task.id === id);
-        // request-changes can finish before the watch receives its new revision.
-        if (watch && task && task.revision < revision) continue;
-        if (!watch || closingProjects.has(project)) {
-          deferredExecutors.delete(key);
-          continue;
-        }
-        if (!task || task.status !== "in_progress" || task.revision !== revision) {
-          deferredExecutors.delete(key);
-          agentSlots.defer(project, id);
-          notifyRunChange(project);
-          continue;
-        }
-        const role = task.mergeRepair ? "reviewer" : "executor";
-        if (!agentSlots.available(projectIdentity(project), role, watch.board.settings?.taskLimits) || executorBusy(project, id)) continue;
-        deferredExecutors.delete(key);
-        notifyRunChange(project);
-        const failed = (error: string) => broadcastBoardChat(project, "orchestrator-review-error", { error: id + " · " + error });
-        void launchTask(project, id, undefined, false, revision, continuation).then(result => {
-          if (!result.ok && ["EXECUTOR_LIMIT", "REVIEWER_LIMIT"].includes(result.error.code)) {
-            deferredExecutors.set(key, pending);
-            agentSlots.defer(project, id, pending);
+        const { project, tasks, settings } = watch.board;
+        if (closingProjects.has(project)) continue;
+        for (const { kind, task: id, revision, continuation } of agentSlots.entries(project)) {
+          if (kind !== "queue" || !id || revision === undefined) continue;
+          const task = tasks.find(task => task.id === id);
+          // The queue can be saved before the watch sees the new card revision.
+          if (task && task.revision < revision) continue;
+          if (!task || task.status !== "in_progress" || task.revision !== revision) {
+            agentSlots.defer(project, id, undefined, revision);
             notifyRunChange(project);
-            return;
+            continue;
           }
-          if (!result.ok && !["REVISION_CONFLICT", "INVALID_TRANSITION"].includes(result.error.code)) failed(result.error.message);
-        }).catch(error => failed((error as Error).message));
+          const role = task.mergeRepair ? "reviewer" : "executor";
+          if (!agentSlots.available(projectIdentity(project), role, settings?.taskLimits) || executorBusy(project, id)) continue;
+          const failed = (error: string) => broadcastBoardChat(project, "orchestrator-review-error", { error: id + " · " + error });
+          void launchTask(project, id, undefined, false, revision, continuation,
+            false, false, false, false, false, undefined, true).then(result => {
+            if (result.ok || ["EXECUTOR_LIMIT", "REVIEWER_LIMIT", "BOARD_BUSY", "CHAT_BUSY",
+              "LAUNCH_IN_PROGRESS", "PROJECT_CLOSING"].includes(result.error.code)) return;
+            agentSlots.defer(project, id, undefined, revision);
+            notifyRunChange(project);
+            if (!["REVISION_CONFLICT", "INVALID_TRANSITION"].includes(result.error.code)) failed(result.error.message);
+          }).catch(error => failed((error as Error).message));
+        }
       }
       for (const watch of subscriptions.values()) {
         scheduleAutoReview(watch);
@@ -1226,11 +1215,11 @@ function scheduleAgentWork() {
   });
 }
 
-function reserveAgent(project: string, role: AgentRole, task?: string) {
+function reserveAgent(project: string, role: AgentRole, task?: string, queuedRevision?: number) {
   agentSlots.remember(project);
   // A tool call can race the watch snapshot after CLI settings were saved.
   const overrides = readBoardSettings(runtimeLocation(project)).taskLimits;
-  const release = agentSlots.acquire(projectIdentity(project), role, overrides, task);
+  const release = agentSlots.acquire(projectIdentity(project), role, overrides, task, queuedRevision);
   if (!release) return;
   return Object.assign(() => {
     release();
@@ -2909,7 +2898,8 @@ type LaunchState = Pick<Task, "acceptanceRepair" | "id" | "title" | "status" | "
 
 async function launchTask(project: string, id: string, revisionRequest?: { input: Record<string, unknown> },
   newThread: false | "user" | "manager" = false, revision?: number,
-  continuation: ExecutorContinuation = {}, scheduled = false, resolveConflicts = false, resumeWithFullAccess = false, autoMode = false, manual = false, autoQueueRevision?: number): Promise<CliReply<LaunchState>> {
+  continuation: ExecutorContinuation = {}, scheduled = false, resolveConflicts = false, resumeWithFullAccess = false,
+  autoMode = false, manual = false, autoQueueRevision?: number, queued = false): Promise<CliReply<LaunchState>> {
   if (isManual(readBoardSettings(runtimeLocation(project)))) return cliFailure("MANUAL_BOARD", "На обычной доске исполнители недоступны.");
   const key = project + "\0" + id;
   if (returningDrafts.has(key)) return cliFailure("CHAT_BUSY", "This task is being returned to draft.");
@@ -2961,18 +2951,28 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     if (!current.ok) return current;
     if (current.data.acceptanceRepair) return cliFailure("ACCEPTANCE_PENDING", "The board manager handles this pending acceptance in its existing context.");
     prepared = Boolean(revisionRequest);
+    const ordinaryManualStart = manual && !newThread && !resumeWithFullAccess && current.data.status !== "blocked";
+    if (ordinaryManualStart && !["ready", "in_progress"].includes(current.data.status)) {
+      return cliFailure("INVALID_TRANSITION", "Only a ready or in-progress task can be started.");
+    }
     const role = current.data.mergeRepair || (resolveConflicts && current.data.status === "review") ? "reviewer" : "executor";
-    const releaseSlot = reserveAgent(project, role, id);
+    const releaseSlot = reserveAgent(project, role, id, queued ? revision : undefined);
     release = releaseSlot;
     if (!releaseSlot) {
-      if (!revisionRequest) return taskRunLimit(role);
-      deferredExecutors.set(key, { project, id, revision: current.data.revision });
+      if (!revisionRequest) {
+        if (!ordinaryManualStart || role !== "executor") return taskRunLimit(role);
+        signal.throwIfAborted();
+        const pending = await callCli<{ task: LaunchState }>(project, ["start", id, "--compact"], {
+          revision: current.data.revision, actor: "user", launchDetails: true, queueExecutor: true,
+        });
+        if (!pending.ok) return pending;
+        scheduleAgentWork();
+        return { ok: true, data: pending.data.task };
+      }
       agentSlots.defer(project, id, { revision: current.data.revision });
       scheduleAgentWork();
       return current;
     }
-    deferredExecutors.delete(key);
-    agentSlots.defer(project, id);
     const client = await configuredCodex(app.getPath("userData"));
     if (!client) {
       const reason = t("ui.choose_the_codex_executable_in_settings_06a08a7e");
@@ -3032,6 +3032,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     signal.throwIfAborted();
     const started = await callCli<{ task: LaunchState & ExecutorTask } & ({ worktree: string } | { cwd: string })>(project, ["start", id, "--compact"],
       { revision: revision ?? current.data.revision, actor: manual ? "user" : "agent", launchDetails: true, ...(scheduled ? { scheduled } : {}),
+        ...(queued ? { queuedExecutor: true } : {}),
         ...(autoMode ? { autoMode: true, autoQueueRevision } : {}),
         ...(resolveConflicts ? { resolveConflicts } : {}),
         ...(process.platform === "win32" && client.windowsSandbox === "elevated" ? { isolatedWorktree: true } : {}) });
@@ -3160,7 +3161,6 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
           const resumed = await launchTask(project, id, undefined, false, retry.revision, retry.continuation);
           if (!signal.aborted && !resumed.ok) {
             if (["EXECUTOR_LIMIT", "REVIEWER_LIMIT"].includes(resumed.error.code) && subscriptions.has(project)) {
-              deferredExecutors.set(key, { project, id, revision: retry.revision, continuation: retry.continuation });
               agentSlots.defer(project, id, retry);
               scheduleAgentWork();
             } else if (!["REVISION_CONFLICT", "CHAT_BUSY", "LAUNCH_IN_PROGRESS", "BOARD_BUSY", "EXECUTOR_LIMIT", "REVIEWER_LIMIT"].includes(resumed.error.code)) {
@@ -3200,6 +3200,8 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   }
 }
 
+const manualTaskLaunches = new Map<string, Promise<CliReply<LaunchState>>>();
+
 ipcMain.handle("board:launchTask", async (event, id: unknown, options: unknown = {}) => {
   const { project, window } = stateOf(event);
   const input = options as { newThread?: unknown; resumeWithFullAccess?: unknown } | null;
@@ -3225,7 +3227,16 @@ ipcMain.handle("board:launchTask", async (event, id: unknown, options: unknown =
     });
     if (choice.response !== 1) return { ok: true, data: null };
   }
-  return launchTask(project, id, undefined, input.newThread ? "user" : false, undefined, undefined, false, false, input.resumeWithFullAccess === true, false, true);
+  if (input.newThread || input.resumeWithFullAccess) {
+    return launchTask(project, id, undefined, input.newThread ? "user" : false, undefined, undefined, false, false, input.resumeWithFullAccess === true, false, true);
+  }
+  const key = project + "\0" + id;
+  const existing = manualTaskLaunches.get(key);
+  if (existing) return existing;
+  const launch = launchTask(project, id, undefined, false, undefined, undefined, false, false, false, false, true);
+  manualTaskLaunches.set(key, launch);
+  try { return await launch; }
+  finally { manualTaskLaunches.delete(key); }
 });
 
 const readProviderLimits = providerLimitSource(() => readCodexLimits(app.getPath("userData")));

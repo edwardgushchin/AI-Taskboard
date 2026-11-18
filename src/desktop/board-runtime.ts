@@ -87,6 +87,21 @@ export function runtimeEntries(project: string) {
   return liveEntries(readEntries(join(runtimeLocation(project).directory, "runtime.json")));
 }
 
+export type DeferredExecutor = Pick<RuntimeEntry, "continuation"> & { revision: number };
+
+export function deferExecutor(project: string, task: string, pending?: DeferredExecutor, expectedRevision?: number, onlyIfIdle = false) {
+  return runtimeTransaction(project, entries => {
+    const index = entries.findIndex(entry => entry.kind === "queue" && entry.task === task);
+    const existing = entries[index];
+    if (pending && existing?.revision === pending.revision) return true;
+    if (expectedRevision !== undefined && existing?.revision !== expectedRevision) return false;
+    if (onlyIfIdle && entries.some(entry => entry.kind !== "queue" && taskWriterId(entry.task) === task)) return false;
+    if (existing) entries.splice(index, 1);
+    if (pending) entries.push({ id: "queue:" + task, owner: 0, kind: "queue", task, ...pending });
+    return Boolean(pending || existing);
+  });
+}
+
 export function taskWriterId(task: string | undefined) {
   return task?.replace(/^(review|draft):/, "");
 }

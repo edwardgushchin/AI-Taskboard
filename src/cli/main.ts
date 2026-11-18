@@ -40,7 +40,7 @@ import { expertContext, expertSkill, listExperts, readExpert, saveExpert } from 
 import { approvalRequirements, createExpertPlan, expertStagesStatus, initialExpertTeam, requireApprovalPlan, requireExpertPlan, requireExpertResults, reviewDecisionSequence, sendTeamMessage, taskExpertPhase, teamInbox, updateExpertStage } from "./expert-team.ts";
 import { syncTaskStatusNotices } from "../desktop/manager-history.ts";
 import { syncSettingsNotices } from "../desktop/settings-notices.ts";
-import { registerRuntime, runtimeEntries, runtimeTransaction } from "../desktop/board-runtime.ts";
+import { deferExecutor, registerRuntime, runtimeEntries, runtimeTransaction } from "../desktop/board-runtime.ts";
 
 const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "checklist", "pause", "block", "resume", "unblock", "update"]);
 const help = [
@@ -818,6 +818,11 @@ function run(
 }
 
 function startTask(location: BoardLocation, id: string, input: Record<string, unknown>, compact: boolean) {
+  const enqueue = input.queueExecutor === true ? (task: Task) => {
+    if (!deferExecutor(location.root, id, { revision: task.revision }, undefined, true)) {
+      throw new TaskboardError("CHAT_BUSY", "This task already has an active writer.");
+    }
+  } : undefined;
   const reply = <T extends { task: Task }>(store: BoardStore, started: T) => {
     if (!compact) return started;
     if (input.launchDetails !== true) return { ...started, task: taskReceipt(started.task) };
@@ -829,6 +834,14 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
   return withTaskStartLock(location, id, startLockWaitMs => {
     const prepared = onBoard(location, (store, lockWaitMs) => {
       const task = store.card(id);
+      if (enqueue && (input.actor !== "user" || input.autoMode || input.scheduled || input.resolveConflicts ||
+          isMergeRepair(task) || task.acceptanceRepair)) {
+        throw new TaskboardError("INVALID_INPUT", "Only manual executor starts can be queued.");
+      }
+      if (enqueue && task.status === "in_progress" && runtimeEntries(location.root).some(entry =>
+        entry.kind === "queue" && entry.task === id && entry.revision === task.revision)) {
+        return { started: { task: taskLaunchState(task) } };
+      }
       if (input.autoMode === true && !store.index.settings.autoMode) {
         throw new TaskboardError("AUTO_MODE_DISABLED", "Automatic starts are disabled.");
       }
@@ -846,14 +859,19 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
       if (task.status !== "in_progress" && input.resolveConflicts === true) {
         return { started: reply(store, reopenConflictingReview(store, task, input)) };
       }
-      const result = prepareTaskStart(store, task, input, startLockWaitMs + lockWaitMs);
+      const result = prepareTaskStart(store, task, input, startLockWaitMs + lockWaitMs, enqueue);
+      if ("task" in result && task.status === "in_progress") enqueue?.(result.task);
+      if (input.queuedExecutor === true && (task.status !== "in_progress" ||
+          !deferExecutor(location.root, id, undefined, task.revision))) {
+        throw new TaskboardError("INVALID_TRANSITION", "The queued start is no longer pending.");
+      }
       return "task" in result ? { started: reply(store, result) } : { checkout: result };
     });
     if (!prepared.checkout) return prepared.started;
     const plan = prepared.checkout;
     const worktree = checkoutTaskWorktree(plan);
     return onBoard(location, (store, lockWaitMs) =>
-      reply(store, finishTaskStart(store, plan, worktree, lockWaitMs, input.isolatedWorktree === true)));
+      reply(store, finishTaskStart(store, plan, worktree, lockWaitMs, input.isolatedWorktree === true, enqueue)));
   });
 }
 
