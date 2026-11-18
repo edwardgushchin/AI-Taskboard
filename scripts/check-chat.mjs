@@ -107,6 +107,16 @@ app.whenReady().then(async () => {
     });
     const question = "current-question";
     const reply = answer("full-answer", "full-streamed-answer: T-0001 отменена.", 130);
+    const transitionResults = [
+      ["cancel", "cancelled", "отменена"], ["start", "in_progress", "в работе"],
+      ["block", "blocked", "заблокирована"], ["submit", "review", "сдана на проверку"],
+      ["accept", "done", "завершена"],
+    ];
+    const transitionTools = transitionResults.map(([action, status], index) => ({
+      id: "transition-" + action, title: "ai_taskboard / task_" + action, type: "mcpToolCall", status: "completed",
+      at: new Date(start + 100).toISOString(), text: "Saved tool output",
+      taskChanges: [{ action, status, id: "T-" + String(index + 1).padStart(4, "0") }],
+    }));
     const io = (project, action, input) => {
       const result = spawnSync(process.env.TASKBOARD_CHECK_NODE, ["--input-type=module", "-e", `
         import { randomUUID } from "node:crypto";
@@ -183,7 +193,8 @@ app.whenReady().then(async () => {
           { at: start + 100, id: runId, run: chat(question, 100, [], "current-user") },
           ...Array.from({ length: 24 }, (_, index) => ({
             at: start + 101 + index, run: { lane: "notice", items: [
-              answer("notice-" + index, "T-" + String(index + 1).padStart(4, "0") + " «batch-cancel-" + index + "» — отменена.", 101 + index),
+              answer("notice-" + index, "T-" + String(index + 1).padStart(4, "0") +
+                " «batch-cancel-" + index + "» — " + (transitionResults[index]?.[2] ?? "отменена") + ".", 101 + index),
             ] },
           })),
         ]);
@@ -197,7 +208,7 @@ app.whenReady().then(async () => {
           dialogue.manager.invalidateHistory();
         })()`);
         await check(`dialogue.log.textContent.includes('partial-stream') && dialogue.log.textContent.includes('prior-reply-21')`, "stream coexists with previous history");
-        io(project, "write", [{ at: start + 100, id: runId, run: chat(question, 100, [reply], "current-user") }]);
+        io(project, "write", [{ at: start + 100, id: runId, run: chat(question, 100, [...transitionTools, reply], "current-user") }]);
         const completed = history(null);
         await evaluate(`(async () => {
           const pages = ${JSON.stringify(olderPages(completed))};
@@ -255,12 +266,19 @@ app.whenReady().then(async () => {
       const olderWork = io(project, "work", work.nextCursor);
       await evaluate(`
         api.boardHistory = async (_project, cursor, view) => ({ ok: true, data: view === 'live'
-          ? { work: [], chat: [] } : cursor ? ${JSON.stringify(olderWork)} : ${JSON.stringify(work)} });
+          ? { work: [], chat: ${JSON.stringify(transitionTools)} } : cursor ? ${JSON.stringify(olderWork)} : ${JSON.stringify(work)} });
         dialogue.manager.querySelector('.board-work-toggle').click();
         new Promise(resolve => requestAnimationFrame(resolve))
       `);
       await check(`dialogue.manager.querySelectorAll('.board-work [data-item^="final:notice-"]').length === 20`,
         "work displays the latest 20 status notices");
+      const onlyNoticeResults = `
+        [...dialogue.manager.querySelectorAll('.board-work [data-item^="item:transition-"]')].every(tool =>
+          !tool.querySelector('summary').textContent.match(/T-00|отменена|запущена|заблокирована|принята/u) &&
+          !!tool.querySelector('button[data-task]') && !!tool.querySelector('time')) &&
+        dialogue.manager.querySelectorAll('.board-work [data-item^="item:transition-"]').length === 5
+      `;
+      await check(onlyNoticeResults, "live tool details have no duplicate status result");
       await evaluate(`dialogue.manager.querySelector('.board-work .board-chat-older').click();
         new Promise(resolve => requestAnimationFrame(resolve))`);
       await check(`
@@ -270,6 +288,7 @@ app.whenReady().then(async () => {
           row.querySelector('time')?.dateTime === new Date(${start} + 101 + index).toISOString()) &&
         dialogue.manager.querySelectorAll('.board-work [data-item^="final:notice-"]').length === 24
       `, "work pagination shows each dated notice once with a card link");
+      await check(onlyNoticeResults, "saved tool details have no duplicate status result after loading older notices");
       if (keepArtifacts && paused) await capture("manager-work-status-notices.png");
       const latest = history(null);
       await evaluate(`{

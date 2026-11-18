@@ -284,8 +284,12 @@ type LegacyHistoryReader = (cursor: string | null) => ReturnType<typeof readBoar
 const providerCursorPrefix = "provider:";
 
 export async function readManagerDialogue(project: string, cursor: string | null, readLegacy?: LegacyHistoryReader) {
+  return readManagerView(project, cursor, "chat", readLegacy);
+}
+
+export async function readManagerView(project: string, cursor: string | null, view: "chat" | "work", readLegacy?: LegacyHistoryReader) {
   if (!cursor?.startsWith(providerCursorPrefix)) {
-    const local = readManagerHistory(project, cursor, "chat");
+    const local = readManagerHistory(project, cursor, view);
     if (local?.turns.length || local?.nextCursor || !readLegacy) {
       return local && { ...local, nextCursor: local.nextCursor ?? (readLegacy ? providerCursorPrefix : null) };
     }
@@ -297,7 +301,9 @@ export async function readManagerDialogue(project: string, cursor: string | null
   const firstRun = exists(folder) ? readdirSync(folder).filter(name => filePattern.test(name)).sort()
     .find(name => {
       const run = readJson(join(folder, name)) as Run;
-      return run.lane !== "notice" && managerHistoryForView(displayTurns(run), "chat").some(turn => turn.messages.length);
+      if (run.lane === "notice") return false;
+      if (view === "work") return Boolean(run.message || run.items.length);
+      return managerHistoryForView(displayTurns(run), "chat").some(turn => turn.messages.length);
     }) : undefined;
   const cutoff = firstRun ? Number(firstRun.slice(0, 13)) : Infinity;
   const beforeLocal = ({ at }: { at?: string }) => !at || Date.parse(at) < cutoff;
@@ -307,7 +313,7 @@ export async function readManagerDialogue(project: string, cursor: string | null
     visited.add(next);
     const legacy = await readLegacy(next);
     if (!legacy) return;
-    const turns = managerHistoryForView(legacy.turns, "chat").map(turn => ({
+    const turns = managerHistoryForView(legacy.turns, view).map(turn => ({
       ...turn, messages: turn.messages.filter(beforeLocal), items: turn.items.filter(beforeLocal),
     })).filter(turn => turn.messages.length || turn.items.length);
     next = legacy.nextCursor;

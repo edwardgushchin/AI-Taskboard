@@ -149,6 +149,7 @@ const taskChangeLabels = {
   milestone: ["ui.milestone_updated_02dacc38"],
 };
 const visibleTaskActions = new Set(["comment", "approve", "start", "block", "unblock", "request_changes", "accept", "cancel"]);
+const statusNoticeActions = new Set(["approve", "start", "block", "unblock", "submit", "request_changes", "accept", "cancel"]);
 
 function reviewerFindings(text, taskId) {
   const body = chatText(text, { taskId, coordination: true });
@@ -237,10 +238,11 @@ function renderRunActivity(container, items, completed = false, durationMs, task
     };
     const approvalLabel = item.type === "autoApprovalReview" && Object.hasOwn(approvalLabels, item.status) ? approvalLabels[item.status] : undefined;
     const taskChanges = item.taskChanges ?? [];
-    const changeLabel = taskChangeLabels[taskChanges[0]?.action];
-    const summaryLabel = taskChanges.length > 1 && taskChanges[0].action === "start" ? t("ui.tasks_started_50af3215") :
+    const noticeChanges = context?.managerWork && statusNoticeActions.has(taskChanges[0]?.action);
+    const changeLabel = noticeChanges ? undefined : taskChangeLabels[taskChanges[0]?.action];
+    const summaryLabel = !noticeChanges && taskChanges.length > 1 && taskChanges[0].action === "start" ? t("ui.tasks_started_50af3215") :
       changeLabel ? t(...changeLabel) : approvalLabel ? t(...approvalLabel) : label;
-    const taskPreview = taskChanges.map(({ id }) => id).join(", ");
+    const taskPreview = noticeChanges ? "" : taskChanges.map(({ id }) => id).join(", ");
     activitySummary(detail, summaryLabel, taskPreview || preview, kind, state);
     const image = taskId && runImageFile(item);
     if (image) {
@@ -272,6 +274,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
         links.append(open);
       }
       detail.append(links);
+      if (noticeChanges) appendChatTime(detail, item.at);
     }
     if (command) detail.append(element("pre", command, "chat-run-command"));
     detail.append(element("pre", () => item.text || t("ui.no_output_868de65b"), "chat-run-output"));
@@ -339,7 +342,8 @@ function renderRunActivity(container, items, completed = false, durationMs, task
       }
     }
     if (item.messagesOnly) continue;
-    const showTaskEvent = item.taskChanges?.some(({ action }) => visibleTaskActions.has(action));
+    const showTaskEvent = item.taskChanges?.some(({ action }) =>
+      visibleTaskActions.has(action) && !(context?.managerWork && statusNoticeActions.has(action)));
     if (["agentMessage", "plan", "truncated", "error", "reasoning"].includes(item.type)) {
       flush();
       if (item.type === "agentMessage" || item.type === "plan") {

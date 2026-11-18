@@ -22,11 +22,11 @@ import type { RunActivity, Task } from "../src/cli/model.ts";
 import type { ChatSettings } from "../src/cli/model.ts";
 import { directory as storageDirectory, locateBoard, readBoardSettings, readJson, writeJson } from "../src/cli/storage.ts";
 import { runtimeLocation, runtimeTransaction } from "../src/desktop/board-runtime.ts";
-import type { BoardGoal, BoardGoalAction } from "../src/desktop/codex-chat.ts";
+import type { BoardGoal, BoardGoalAction, readBoardHistory } from "../src/desktop/codex-chat.ts";
 import { inspectProjectPath, projectSha256 } from "../src/desktop/project-files.ts";
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
 import { reviewerActivity, withReviewerChat } from "../src/desktop/reviewer-chat.ts";
-import { goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryForView, managerUnread, managerWorkItems, readManagerDialogue, readManagerHistory, readManagerMessages, saveManagerHistory } from "../src/desktop/manager-history.ts";
+import { goalMessages, managerChatItems, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory } from "../src/desktop/manager-history.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { autoQueueSettings } from "../src/cli/auto-queue.ts";
 import { automationDelivery } from "../src/desktop/automation-delivery.ts";
@@ -95,6 +95,9 @@ function fixture(t: TestContext) {
   const chatBinding = join(project, ".tasks", "manager-dialog.json");
   const idleGoalActions: BoardGoalAction[] = [];
   let providerHistoryReads = 0;
+  let legacyHistory: (cursor: string | null) => ReturnType<typeof readBoardHistory> = async () => {
+    throw new Error("Codex history unavailable.");
+  };
   const runningTasks = new Set<string>();
   const boardListeners = new Set<(tasks: Task[]) => void>();
   const subscriptions = new Map();
@@ -117,9 +120,12 @@ function fixture(t: TestContext) {
     executorFullAccess, managerAccess, setTaskExecutorAccess, phaseStageReporter,
     autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, defaultBoardAgents, reviewVerifier,
     existsSync, storageDirectory, readdirSync, rmSync, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
-    goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryForView, managerUnread, managerWorkItems, readManagerDialogue, readManagerHistory, readManagerMessages, saveManagerHistory,
+    goalMessages, managerChatItems, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory,
     send() {},
-    readBoardHistory: async () => { providerHistoryReads++; throw new Error("Codex history unavailable."); },
+    readBoardHistory: (_profile: string, _project: string, _id: string, cursor: string | null) => {
+      providerHistoryReads++;
+      return legacyHistory(cursor);
+    },
     codexThreadPattern, projectIdentity: (path: string) => path, windowStates, boardMcpTools,
     Notification: class {
       static isSupported() { return true; }
@@ -289,6 +295,7 @@ function fixture(t: TestContext) {
     },
     stop: () => handlers.get("board:stopOrchestrator")!({ sender }),
     history: (cursor?: string, view?: string) => handlers.get("board:history")!({ sender }, project, cursor, view),
+    setLegacyHistory: (reader: typeof legacyHistory) => { legacyHistory = reader; },
     markRead: (ids: string[], board = project) => handlers.get("board:readManagerMessages")!({ sender }, board, ids),
     providerHistoryReads: () => providerHistoryReads,
     pendingQuestion: () => runtime.managerQuestion(project)?.view,
@@ -986,6 +993,55 @@ test("an interrupted manager request preserves the durable queue until Codex rec
   assert.equal(f.providerHistoryReads(), 0);
   assert.equal((await f.history(legacy.data.nextCursor)).error.code, "BOARD_HISTORY_FAILED");
   assert.equal(f.providerHistoryReads(), 1);
+});
+
+test("work history continues from local pages to earlier provider operations", async t => {
+  const f = fixture(t);
+  await f.cli(["init"]);
+  const start = Date.now();
+  const tool = (id: string, name: string, offset: number) => ({
+    id, title: "ai_taskboard / " + name, type: "mcpToolCall", status: "completed",
+    text: name, at: new Date(start + offset).toISOString(),
+  });
+  const local = tool("local", "task_cancel", 1);
+  const cancel = tool("old-cancel", "task_cancel", -2);
+  const message = tool("old-mail", "team_message", -1);
+  const cursors: (string | null)[] = [];
+  f.setLegacyHistory(async cursor => {
+    cursors.push(cursor);
+    const items = cursor === null ? [local] : cursor === "older" ? [message] : [cancel];
+    return { model: undefined, goal: undefined,
+      turns: [{ items, messages: [], durationMs: undefined }],
+      nextCursor: cursor === null ? "older" : cursor === "older" ? "oldest" : null };
+  });
+  writeJson(f.chatBinding, { provider: "codex", id: f.threadId });
+  assert.equal((await f.history(undefined, "work")).data.turns[0].items[0].id, "local");
+  cursors.length = 0;
+  saveManagerHistory(f.project, start, randomUUID(), {
+    lane: "chat", message: { text: "Cancel T-0001", files: [] }, items: [local],
+  });
+  for (let i = 1; i <= 20; i++) saveManagerHistory(f.project, start + i, randomUUID(), {
+    lane: "notice", items: [{ id: "notice-" + i, type: "agentMessage", title: "", status: "completed", text: "Cancelled" }],
+  });
+  const first = await f.history(undefined, "work");
+  assert.equal(first.data.turns.length, 20);
+  assert.match(first.data.nextCursor, /^local:/);
+  const lastLocal = await f.history(first.data.nextCursor, "work");
+  assert.equal(lastLocal.data.turns[0].items[0].id, "local");
+  assert.deepEqual(cursors, []);
+  const provider = await f.history(lastLocal.data.nextCursor, "work");
+  assert.deepEqual(cursors, [null, "older"]);
+  assert.deepEqual(provider.data.turns[0].items, [message]);
+  const last = await f.history(provider.data.nextCursor, "work");
+  assert.deepEqual(last.data.turns[0].items, [cancel]);
+  assert.equal(last.data.nextCursor, null);
+  const chat = await f.history();
+  assert.equal(chat.data.turns[0].messages[0].text, "Cancel T-0001");
+  assert.deepEqual((await f.history(chat.data.nextCursor)).data.turns, []);
+  const reopened = await f.history(undefined, "work");
+  assert.deepEqual(reopened.data, first.data);
+  writeJson(f.chatBinding, { provider: "codex", id: f.threadId, history: "local" });
+  assert.equal((await f.history(first.data.nextCursor, "work")).data.nextCursor, null);
 });
 
 test("only a background goal uses the longer board wait", async t => {

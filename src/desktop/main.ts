@@ -46,7 +46,7 @@ import { startWindowsDictation } from "./windows-dictation.ts";
 import { needsManagerAttention } from "../cli/task-messages.ts";
 import { readReviewReports, saveReviewReports } from "./review-history.ts";
 import { readReviewerChat, reviewerActivity, withReviewerChat } from "./reviewer-chat.ts";
-import { goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryForView, managerUnread, managerWorkItems, readManagerDialogue, readManagerHistory, readManagerMessages, saveManagerHistory } from "./manager-history.ts";
+import { goalMessages, managerChatItems, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory } from "./manager-history.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
 import { createAgentSlots, parseAgentLimits } from "./agent-limits.ts";
 import { nextReadyTask } from "./auto-queue.ts";
@@ -1436,30 +1436,8 @@ ipcMain.handle("board:history", async (event, project?: string, cursor: unknown 
         [id, reviewerActivity(board.project, id)])),
     } };
     const background = readBoardThread(boardThreadPath(project));
-    const loadHistory = async () => {
-      const historyCursor = cursor as string | null;
-      const thread = background;
-      if (view === "chat") {
-        return readManagerDialogue(project, historyCursor, thread && thread.history !== "local" ?
-          next => readBoardHistory(app.getPath("userData"), project, thread.id, next) : undefined);
-      }
-      try {
-        if (historyCursor === null) {
-          const local = readManagerHistory(project, null, view);
-          if (local) return local;
-        }
-        if (isLocalManagerCursor(historyCursor)) return readManagerHistory(project, historyCursor, view);
-        if (!thread || thread.history === "local") return readManagerHistory(project, historyCursor, view);
-        const legacy = await readBoardHistory(app.getPath("userData"), project, thread.id, historyCursor);
-        if (!legacy) return;
-        return { ...legacy, turns: managerHistoryForView(legacy.turns, view) };
-      } catch (error) {
-        const local = cursor === null && thread?.history !== "local" && readManagerHistory(project, null, view);
-        if (local) return local;
-        throw error;
-      }
-    };
-    const data = await loadHistory();
+    const data = await readManagerView(project, cursor, view, background && background.history !== "local" ?
+      next => readBoardHistory(app.getPath("userData"), project, background.id, next) : undefined);
     const goalRunning = Boolean(boardWorkRequests.get(key)?.goalRunning ?? shared?.goalRunning);
     return { ok: true, data: { turns: [], nextCursor: null, ...data,
       goal: background?.goal !== undefined ? background.goal : (data && "goal" in data ? data.goal : undefined),
