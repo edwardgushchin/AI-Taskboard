@@ -130,6 +130,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   let guiEvidence: ReturnType<typeof windowsGuiEvidence> | undefined;
   const mcp = await openBoardMcp(tools, async (name, args, requestSignal) => {
     if (name === "expert_stage") return worklog.remind(await stages.report(args));
+    if (name === "expert_verify_skills") return worklog.remind(await stages.verify(args));
     if (Object.hasOwn(expertCommands, name)) {
       const input = args as Record<string, unknown>;
       if (assigned.size && ((name === "expert_context" && (!Array.isArray(input.ids) || input.ids.some(id => !assigned.has(id)))) ||
@@ -391,6 +392,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       ...(task.feedback ? ["Замечание к последней сдаче: " + task.feedback] : []),
     ].join("\n");
     activeThreadId = threadId;
+    stages.bind(request, threadId);
     tokens.track(threadId, started.model ?? started.thread.model ?? null, true);
     const { turn } = await request<{ turn: Turn }>("turn/start", {
       threadId, effort: task.execution?.effort, input: [{ type: "text", text: prompt, text_elements: [] }],

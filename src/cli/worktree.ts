@@ -13,7 +13,7 @@ import {
 } from "./git.ts";
 import type { Repository, Worktree } from "./git.ts";
 import { boardReviewMode, object, record, requireRevision, requireState, taskIdPattern, TaskboardError, text } from "./model.ts";
-import { requireExpertPlan } from "./expert-team.ts";
+import { requireExpertPlan, skillProofScope } from "./expert-team.ts";
 import { boardActor } from "./tasks.ts";
 import type { Task, TaskGit } from "./model.ts";
 import { directory, exists, locateBoard, readBinary, readJson, removeFile, taskStartInProgress, taskWorkingDirectory, writeJson } from "./storage.ts";
@@ -214,6 +214,10 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
   const preparing = performance.now();
   const save = (card: Task) => saveStart(store, card, lockWaitMs, Math.round(performance.now() - preparing), undefined, boardActor(input));
   requireState(task, ["ready", "in_progress"]);
+  skillProofScope(store, task, "work");
+  for (const stage of task.expertTeam?.work?.stages ?? []) {
+    if (stage.skills?.length) skillProofScope(store, task, "work", stage.key);
+  }
   if (store.index.settings.requireExpertPlans && !task.expertStage) {
     requireExpertPlan(task, "work");
     if (!task.schedule && boardReviewMode(store.index.settings) !== "human") requireExpertPlan(task, "review");

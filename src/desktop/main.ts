@@ -2188,7 +2188,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       ? new Set([...autoReviewTaskTools, "manager_ack", "task_cancel", "task_start"]) : autoReviewTaskTools;
     const stages = reviewMode === "manager" ? phaseStageReporter(project, "review") : undefined;
     const mcpTools: BoardMcpTool[] = boardMcpTools.filter(({ name }) =>
-      (name !== "expert_stage" || reviewMode === "manager") &&
+      (!["expert_stage", "expert_verify_skills"].includes(name) || reviewMode === "manager") &&
       (!cleanupJob || ["board_list", "task_show", "task_cleanup_status", "task_cleanup", "project_path", "project_sha256"].includes(name)) &&
       (!isManual(settings.data) || ["expert_list", "expert_context", "expert_skill", "board_list", "task_show", "task_create", "task_update", "task_comment", "tag_set_color", "ask_user"].includes(name)) &&
       (reviewIds || cleanupJob || !["project_path", "project_sha256"].includes(name)) &&
@@ -2328,7 +2328,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         // Starts can overlap, but they must see any board edits queued before them.
         const independent = name === "task_wait" || name === "task_start" || name === "task_start_batch" || name === "task_review";
         const pending = name === "task_wait" ? run(name, args) : pendingAction.then(() =>
-          name === "expert_stage" && stages ? stages.report(args) : run(name, args));
+          name === "expert_stage" && stages ? stages.report(args) :
+            name === "expert_verify_skills" && stages ? stages.verify(args) : run(name, args));
         if (!independent) pendingAction = pending;
         return pending.then(result => {
           if (reviewIds || cleanupJob) return result;
@@ -2365,6 +2366,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         attachmentContext,
         mcpTools,
         observeProvider: stages?.observe,
+        bindProvider: stages?.bind,
         goal: goal === true ? requestText : undefined,
         resumeGoal: goal === "resume",
         readOnly: Boolean(reviewIds),
