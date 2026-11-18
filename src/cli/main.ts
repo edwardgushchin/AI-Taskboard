@@ -1070,7 +1070,7 @@ async function main() {
           data = inspectReviewDiff(location.repository, task, input);
         } else if (command === "review") {
           if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
-          const compact = input.compact === true;
+          const compact = values.compact === true || input.compact === true;
           const { store, task, details } = onBoard(location, store => {
             const task = store.card(id);
             return { store, task, details: reviewDetails(store, task, compact) };
