@@ -1406,8 +1406,11 @@ async function continueAcceptance(project: string, task: Task) {
         }
       }
     } else if (task.acceptanceRepair?.phase === "checking") {
-      const review = await callCli<{ targetHead: string; revision: number; reviewMode: ReviewMode; awaitingHumanAcceptance: boolean; pending?: boolean }>(project, ["review", task.id, "--compact"]);
+      const review = await callCli<{ targetHead: string; revision: number; reviewMode: ReviewMode; reviewModeVersion?: number;
+        awaitingHumanAcceptance: boolean; pending?: boolean }>(project, ["review", task.id, "--compact"]);
       if (!review.ok) result = review;
+      else if (review.data.pending && review.data.reviewModeVersion !== task.acceptanceRepair.reviewModeVersion &&
+          (review.data.reviewMode === "reviewer-human" || task.acceptanceRepair.reviewModeVersion !== undefined)) return;
       else if (review.data.reviewMode === "reviewer-human" && !review.data.pending && !review.data.awaitingHumanAcceptance &&
           review.data.targetHead === task.acceptanceRepair.targetHead) return;
       else result = await callCli(project, ["accept", task.id, "--compact"], {
