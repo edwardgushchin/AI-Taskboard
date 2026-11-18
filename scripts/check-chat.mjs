@@ -107,6 +107,8 @@ app.whenReady().then(async () => {
     });
     const question = "current-question";
     const reply = answer("full-answer", "full-streamed-answer: T-0001 отменена.", 130);
+    const partial = { ...answer("partial-answer", "partial-stream: T-0001 отме", 128), status: "inProgress" };
+    const progress = { ...answer("progress", "Проверяю состояние карточки T-0001.", 127), phase: "commentary" };
     const blockReason = "Review «previous attempt» — cancelled.";
     const transitionResults = [
       ["cancel", "cancelled", "отменена"], ["start", "in_progress", "в работе"],
@@ -125,7 +127,7 @@ app.whenReady().then(async () => {
         import { join } from "node:path";
         import { initializeBoard } from ${JSON.stringify(new URL("../src/cli/storage.ts", import.meta.url).href)};
         import { createTask } from ${JSON.stringify(new URL("../src/cli/tasks.ts", import.meta.url).href)};
-        import { managerUnread, readManagerDialogue, readManagerView, saveManagerHistory } from ${JSON.stringify(new URL("../src/desktop/manager-history.ts", import.meta.url).href)};
+        import { managerChatItems, managerUnread, readManagerDialogue, readManagerView, saveManagerHistory } from ${JSON.stringify(new URL("../src/desktop/manager-history.ts", import.meta.url).href)};
         const [project, action] = process.argv.slice(1);
         const input = JSON.parse(readFileSync(0, "utf8"));
         if (action === "seed") {
@@ -143,6 +145,7 @@ app.whenReady().then(async () => {
           nextCursor: null,
         }))));
         else if (action === "unread") console.log(JSON.stringify(managerUnread(project)));
+        else if (action === "live") console.log(JSON.stringify(managerChatItems(input)));
         else console.log(JSON.stringify(await readManagerDialogue(project, input)));
       `, project, action], { input: JSON.stringify(input), encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
       assert.equal(result.status, 0, result.stderr);
@@ -157,7 +160,7 @@ app.whenReady().then(async () => {
       const runId = "a0000000-0000-4000-8000-000000000001";
       if (!reopening) io(project, "write", Array.from({ length: 22 }, (_, index) => ({
         at: start + index,
-        run: chat("prior-question-" + index, index, [answer("prior-" + index, "prior-reply-" + index, index)]),
+        run: chat("prior-question-" + index, index, [answer("prior-" + index, index === 0 ? reply.text : "prior-reply-" + index, index)]),
       })));
       const history = cursor => ({ ok: true, data: { ...io(project, "read", cursor), goal } });
       const olderPages = first => {
@@ -171,19 +174,21 @@ app.whenReady().then(async () => {
       const initial = history(null);
       await evaluate(`(async () => {
         window.dialogue = { initial: ${JSON.stringify(initial)}, ready: Promise.withResolvers(), finish: Promise.withResolvers() };
+        // Only chat IPC is supplied, so skip the outer board refresh after a reply.
+        dialogue.renderBoard = render;
+        render = () => {};
         frame = { project: ${JSON.stringify(project)}, russian: true };
         const pages = ${JSON.stringify(olderPages(initial))};
         api.boardHistory = async (_project, cursor) => cursor ? pages[cursor] : dialogue.initial;
         api.boardQueue = async (_project, action) => ({ ok: true, data: action === 'list' ? [] : 'current-user' });
         api.boardRequest = () => { dialogue.ready.resolve(true); return dialogue.finish.promise; };
         dialogue.open = () => {
+          byId('workspace').hidden = false;
           dialogue.manager = draftComposer();
-          (${reopening} ? byId('board-composer') : body).replaceChildren(dialogue.manager);
+          byId('board-composer').replaceChildren(dialogue.manager);
           dialogue.manager.querySelector('.draft-input textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
           dialogue.log = dialogue.manager.querySelector('.board-chat-log:not(.board-work)');
         };
-        if (${reopening}) byId('workspace').hidden = false;
-        else if (!sheet.open) sheet.showModal();
         dialogue.open();
         if (${!reopening}) {
           dialogue.manager.querySelector('.draft-input textarea').value = '${question}';
@@ -216,19 +221,23 @@ app.whenReady().then(async () => {
         assert.ok(!io(project, "unread", null).some(id => id.startsWith("notice-")));
         const stale = history(null);
         await evaluate(`(() => {
-          const partial = { ...${JSON.stringify(reply)}, text: 'partial-stream', status: 'inProgress' };
-          dialogue.manager.updateActivity([partial]);
+          dialogue.manager.updateActivity(${JSON.stringify(io(project, "live", [progress, partial]))});
           dialogue.stale = Promise.withResolvers();
           api.boardHistory = () => dialogue.stale.promise;
           dialogue.manager.invalidateHistory();
         })()`);
         await check(`dialogue.log.textContent.includes('partial-stream') && dialogue.log.textContent.includes('prior-reply-21')`, "stream coexists with previous history");
-        io(project, "write", [{ at: start + 100, id: runId, run: chat(question, 100, [...transitionTools, reply], "current-user") }]);
+        const rawItems = [progress, partial, reply];
+        const liveItems = io(project, "live", rawItems);
+        await evaluate(`dialogue.manager.updateActivity(${JSON.stringify(liveItems)})`);
+        await check(`!dialogue.log.textContent.includes('partial-stream') && dialogue.log.textContent.includes('full-streamed-answer')`,
+          "a completed live answer supersedes the abandoned draft");
+        io(project, "write", [{ at: start + 100, id: runId, run: chat(question, 100, [...transitionTools, ...rawItems], "current-user") }]);
         const completed = history(null);
         await evaluate(`(async () => {
           const pages = ${JSON.stringify(olderPages(completed))};
           api.boardHistory = async (_project, cursor) => cursor ? pages[cursor] : (${JSON.stringify(completed)});
-          dialogue.finish.resolve({ ok: true, data: { items: [${JSON.stringify(reply)}] } });
+          dialogue.finish.resolve({ ok: true, data: { items: ${JSON.stringify(liveItems)} } });
           await new Promise(resolve => requestAnimationFrame(resolve));
           dialogue.stale.resolve(${JSON.stringify(stale)});
           await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -264,6 +273,28 @@ app.whenReady().then(async () => {
           paused: dialogue.manager.textContent.includes('Fixture objective'),
         })`), { answer: true, question: true, image: largeImage ? 1 : 0, notices: 0, paused },
         "finished or reopened dialogue keeps the question and replies without status notices");
+        await check(`!dialogue.log.textContent.includes('partial-stream') &&
+          dialogue.log.querySelectorAll('[data-message-id="full-answer"]').length === 1 &&
+          dialogue.log.querySelectorAll('[data-item="message:progress"]').length === 1`,
+          "the finished or restored dialogue keeps one full answer and the standalone progress message");
+        if (keepArtifacts && !paused && open === (reopening ? 1 : 0)) {
+          const viewport = await evaluate(`document.fonts.ready.then(async () => {
+            const progress = dialogue.log.querySelector('[data-item="message:progress"]');
+            const work = progress.closest('details');
+            if (work) work.open = true;
+            const reply = dialogue.log.querySelector('[data-message-id="full-answer"]');
+            await new Promise(resolve => setTimeout(resolve, 250));
+            reply.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+            const log = dialogue.log.getBoundingClientRect();
+            const bubble = reply.getBoundingClientRect();
+            return { log: [log.top, log.bottom], reply: [bubble.top, bubble.bottom],
+              mounted: reply.isConnected, open: dialogue.manager.hasAttribute('data-open'),
+              hidden: [dialogue.log.hidden, byId('board-composer').hidden, byId('workspace').hidden] };
+          })`);
+          assert.ok(viewport.reply[1] > viewport.reply[0] && viewport.reply[0] >= viewport.log[0] - 1 &&
+            viewport.reply[1] <= viewport.log[1] + 1, "Reply outside the screenshot viewport: " + JSON.stringify(viewport));
+          await capture(reopening ? "manager-answer-restored.png" : "manager-answer-live.png");
+        }
         await evaluate(`(async () => {
           for (let i = 0; i < ${Object.keys(pages).length}; i++) {
             const older = dialogue.log.querySelector('.board-chat-older');
@@ -275,6 +306,9 @@ app.whenReady().then(async () => {
         assert.deepEqual(await evaluate(`[...dialogue.log.querySelectorAll('[data-message-id]')].map(node => node.dataset.messageId)`), [
           ...Array.from({ length: 22 }, (_, index) => "prior-" + index), "full-answer",
         ], "older and recent pages preserve saved order and have no missing or duplicate replies");
+        await check(`['prior-0', 'full-answer'].every(id =>
+          dialogue.log.querySelector('[data-message-id="' + id + '"]').textContent.includes('full-streamed-answer'))`,
+          "identical replies to separate requests survive pagination");
       }
       if (!reopening) await check("dialogue.leaks.length === 0", "no status notice entered the live dialogue DOM");
       const work = io(project, "work", null);
@@ -356,7 +390,7 @@ app.whenReady().then(async () => {
         })`);
         await capture(largeImage ? "dialogue-history-large-image-restart.png" : "dialogue-history-paused-restart.png");
       }
-      await evaluate("dialogue.manager.dispose()");
+      await evaluate("dialogue.manager.dispose(); render = dialogue.renderBoard; void 0");
       console.log(`Dialogue history passed: ${paused ? "paused goal" : "no goal"}, ${reopening ? "restarted Electron" : "stream and reopened composer"}`);
     }
     return;
