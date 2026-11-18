@@ -87,6 +87,7 @@ interface WindowState {
 }
 
 interface BoardWatch {
+  failedDiscussionStarts?: Map<string, number>;
   tabs: Set<ProjectTab>;
   listeners: Set<(board: Board, runChanged?: boolean) => void>;
   board: Board;
@@ -231,7 +232,8 @@ function frame(state: ProjectTab) {
     replyingTasks: state.board?.tasks.filter(task => (replyingTasks.has(state.project + "\0" + task.id) || sharedRuns.some(entry => entry.kind === "task" && entry.task === task.id))).map(task => task.id),
     waitingTasks: state.board?.tasks.filter(task => {
       const key = state.project + "\0" + task.id;
-      return task.status === "in_progress" && (task.discussionReturn !== undefined || deferredExecutors.get(key)?.revision === task.revision ||
+      const failedRevision = subscriptions.get(state.project ?? "")?.failedDiscussionStarts?.get(task.id);
+      return task.status === "in_progress" && ((task.discussionReturn !== undefined && (failedRevision ?? -1) < task.revision) || deferredExecutors.get(key)?.revision === task.revision ||
         sharedRuns.some(entry => entry.kind === "queue" && entry.task === task.id && entry.revision === task.revision)) &&
         !runningTasks.has(key) && !replyingTasks.has(key) && !sharedRuns.some(entry => entry.kind === "slot" && entry.task === task.id);
     }).map(task => task.id),
@@ -1340,6 +1342,7 @@ function scheduleAgentWork() {
         const { project, settings, tasks } = watch.board;
         if (!closingProjects.has(project) && !isManual(settings)) for (const task of tasks) {
           if (task.status !== "in_progress" || task.discussionReturn === undefined || executorBusy(project, task.id) ||
+              (watch.failedDiscussionStarts?.get(task.id) ?? -1) >= task.revision ||
               !agentSlots.available(projectIdentity(project), "executor", settings?.taskLimits)) continue;
           void launchTask(project, task.id, undefined, false, undefined, undefined, false, false, false, false, false, undefined, task.discussionReturn)
             .catch(error => broadcastBoardChat(project, "orchestrator-review-error", { error: task.id + " · " + (error as Error).message }));
@@ -3226,10 +3229,26 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     }
     deferredExecutors.delete(key);
     if (discussionReturn === undefined) agentSlots.defer(project, id);
+    const queuedRevision = current.data.revision;
+    // Record a permanent failure while this launch still owns the task slot.
+    // Use the attempted revision so an obsolete launch cannot block newer work.
+    const failDiscussionStart = async (code: string, reason: string) => {
+      if (discussionReturn === undefined || signal.aborted || ["BOARD_BUSY", "REVISION_CONFLICT", "INVALID_TRANSITION"].includes(code)) return;
+      const message = code + ": " + reason;
+      const failure = await recordRunFailure(project, id, message, undefined, queuedRevision);
+      if (failure) {
+        // A pending Git operation can prevent blocking the card. Keep its return
+        // intact, but wait for a changed card or a reopened board before retrying.
+        const watch = subscriptions.get(project);
+        if (watch) (watch.failedDiscussionStarts ??= new Map()).set(id, queuedRevision);
+        publishRunActivity(project, id, [{ id: "discussion-launch-error", type: "error", title: "", text: message + "\n" + failure, status: "failed" }]);
+      }
+    };
     const client = await configuredCodex(app.getPath("userData"));
     if (!client) {
       const reason = t("ui.choose_the_codex_executable_in_settings_06a08a7e");
       if (prepared) throw new Error(reason);
+      await failDiscussionStart("CODEX_UNAVAILABLE", reason);
       return cliFailure("CODEX_UNAVAILABLE", reason);
     }
     if (newThread) {
@@ -3291,6 +3310,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         ...(process.platform === "win32" && client.windowsSandbox === "elevated" ? { isolatedWorktree: true } : {}) });
     if (!started.ok) {
       if (prepared && started.error.code !== "BOARD_BUSY") throw new Error(started.error.message);
+      await failDiscussionStart(started.error.code, started.error.message);
       return started;
     }
     prepared = true;

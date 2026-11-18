@@ -274,10 +274,10 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
           const intent: StartIntent = { action: "start", revision, target, base, actor: boardActor(pending), restore: true };
           return { id: task.id, repo, branch, managedPath, intent, preparing, lockWaitMs };
         }
-        // A ready task may have been saved successfully just before removal of the intent was interrupted.
+        // The restored worktree and its start event may already be saved if removal of the intent was interrupted.
         const last = task.history.findLast(event => event.action !== "coordination");
         if (task.status !== "in_progress" || task.revision !== revision + 1 ||
-            last?.action !== "start" || last.from !== "ready" || !task.git.worktree ||
+            last?.action !== "start" || (last.from !== "ready" && last.from !== undefined) || !task.git.worktree ||
             relative(managedPath, task.git.worktree) || relative(managedPath, existing.path) || existing.head !== base) {
           throw new TaskboardError("PENDING_OPERATION", "The interrupted worktree recovery does not match this task revision or target.");
         }
@@ -396,7 +396,7 @@ export function finishTaskStart(store: BoardStore, plan: TaskCheckout, checkout:
     throw new TaskboardError("PENDING_OPERATION", "The saved task branch or target changed during checkout.");
   }
   const updatedTask = { ...task, git: { ...(restore ? task.git! : { target, base, branch }), worktree } };
-  const updated = task.status === "in_progress" ? store.save(updatedTask) : saveStart(store, updatedTask,
+  const updated = task.status === "in_progress" && task.discussionReturn === undefined ? store.save(updatedTask) : saveStart(store, updatedTask,
     lockWaitMs + finalLockWaitMs, prepareMs, gitWorktreeAddMs, intent.actor);
   removeFile(pendingPath);
   return { task: updated, worktree };

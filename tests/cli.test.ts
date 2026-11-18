@@ -2173,6 +2173,25 @@ test("review return transfers link feedback to the same Git worktree", t => {
   assert.equal(started.task.feedback, reason);
 });
 
+test("restoring a removed worktree consumes its discussion return exactly once", t => {
+  const root = fixture(t, true);
+  const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "source.txt"), "# T-0096\n"));
+  const review = cli(root, ["review", task.id], { compact: true });
+  const reason = "Include the # in the link";
+  const returned = cli(root, ["request-changes", task.id], { actor: "discussion", reason, revision: review.revision, targetHead: review.targetHead });
+  git(root, "worktree", "remove", worktree);
+  const request = { revision: returned.revision, discussionReturn: returned.discussionReturn, launchDetails: true };
+  const started = cli(root, ["start", task.id, "--compact"], request);
+  assert.equal(started.worktree, worktree);
+  assert.equal(started.task.feedback, reason);
+  assert.equal(started.task.discussionReturn, undefined);
+  assert.equal(readFileSync(join(worktree, "source.txt"), "utf8"), "# T-0096\n");
+  const restored = cli(root, ["show", task.id]);
+  assert.equal(restored.discussionReturn, undefined);
+  assert.equal(restored.history.at(-1).action, "start");
+  cli(root, ["start", task.id, "--compact"], { ...request, revision: restored.revision }, "INVALID_TRANSITION");
+});
+
 test("discussion return does not decide the manager's independent review", t => {
   const root = fixture(t);
   cli(root, ["init"]);

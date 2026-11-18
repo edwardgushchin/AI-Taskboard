@@ -1,7 +1,7 @@
 // Exercise the real Electron IPC, board CLI, scheduler and App Server protocol on isolated cards.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -50,6 +50,9 @@ try {
   app.setPath("appData", scratch);
   app.disableHardwareAcceleration();
   app.requestSingleInstanceLock = () => true;
+  const git = (...args) => execFileSync("git", ["-C", project, ...args], { windowsHide: true });
+  git("init", "-b", "main");
+  git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "--no-gpg-sign", "-m", "Fixture base");
   cli("init", null, { git: false });
   cli("settings", null, { reviewMode: "human", autoMode: false, taskLimits: { executor: 1, reviewer: 1 } });
   const cases = [false, true].map(occupied => {
@@ -62,6 +65,12 @@ try {
     cli("submit", id, { token, noChanges: true, summary: "Initial link", checks: ["Fixture"] });
     return { id, cwd, occupied };
   });
+  const { id: unavailableId } = cli("create", null, { title: "Link includes #, unavailable worktree", criteria: ["One link includes the # and ID"] });
+  cli("approve", unavailableId);
+  const { worktree } = cli("start", unavailableId);
+  const { token } = cli("preview", unavailableId);
+  cli("submit", unavailableId, { token, noChanges: true, summary: "Initial link", checks: ["Fixture"] });
+  cases.push({ id: unavailableId, cwd: worktree, unavailable: true });
 
   const stub = join(scratch, "app-server.cjs");
   writeFileSync(stub, `
@@ -169,7 +178,7 @@ async function run(cases) {
     return frame?.board && !frame.loading && window;
   }, "board window");
   const userText = "Решётка должна быть частью гиперссылки.";
-  for (const { id, cwd, occupied } of cases) {
+  for (const { id, cwd, occupied, unavailable } of cases) {
     const baseline = events().filter(event => event.executorInput).length;
     const lease = occupied ? await waitFor(() => qa.reserveAgent(project, "executor", "other-work"), "fixture executor slot") : undefined;
     rmSync(unblock, { force: true });
@@ -189,6 +198,32 @@ async function run(cases) {
     assert.equal(queued.status, "in_progress");
     assert.equal(queued.discussionReturn, receipt.revision);
     assert.equal(events().filter(event => event.executorInput).length, baseline);
+    if (unavailable) {
+      const moved = join(scratch, "unavailable-worktree");
+      renameSync(cwd, moved); // Leave the old path registered in Git.
+      try {
+        writeFileSync(unblock, "");
+        assert.equal((await operation).result.ok, true);
+        const blocked = await waitFor(async () => {
+          const frame = await win.webContents.executeJavaScript("window.taskboard.bootstrap()");
+          const card = frame.board?.tasks.find(task => task.id === id);
+          if (card?.status !== "blocked") return false;
+          assert.equal(frame.waitingTasks.includes(id), false);
+          return card;
+        }, "worktree failure visible in the card");
+        assert.match(blocked.blocked.reason, /WORKTREE_MISSING/);
+        assert.equal(blocked.discussionReturn, undefined);
+        const task = cli("show", id);
+        assert.equal(task.history.filter(event => event.action === "request-changes" && event.text === reason).length, 1);
+        for (let i = 0; i < 3; i++) { qa.scheduleAgentWork(); await delay(500); }
+        assert.deepEqual(starts.filter(start => start.id === id).map(start => start.code), ["WORKTREE_MISSING"]);
+        assert.equal(events().filter(event => event.executorInput).length, baseline);
+        summary.push("Unavailable registered Git worktree: tool confirmed the return; the card showed WORKTREE_MISSING, left the queue and retained the feedback; no retry or executor turn.");
+      } finally {
+        renameSync(moved, cwd);
+      }
+      continue;
+    }
     writeFileSync(unblock, "");
     assert.equal((await operation).result.ok, true);
     if (occupied) {
