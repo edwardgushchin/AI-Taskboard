@@ -40,6 +40,31 @@ test("shared defaults, overrides and canonical aliases use one pool without inte
   assert.equal(runtimeEntries(project).filter(entry => entry.kind === "slot" || entry.kind === "task").length, 0);
 });
 
+test("a profile save only replaces an older shared task limit", t => {
+  const project = mkdtempSync(join(tmpdir(), "taskboard-profile-limits-"));
+  t.after(() => rmSync(project, { recursive: true, maxRetries: 5 }));
+  initializeBoard(locateBoard(project, true), () => {});
+  const first = createAgentSlots(true), second = createAgentSlots(true);
+  first.configure({ executor: 4, manager: 0, reviewer: 3 }, 10);
+  first.remember(project);
+  const active = first.acquire(project, "executor", undefined, "T-0001");
+  assert.ok(active);
+  try {
+    second.configure({ executor: 1, manager: 0, reviewer: 1 }, 20);
+    second.remember(project);
+    first.remember(project);
+    // A save that reached the shared lock late must also keep the newer limits.
+    first.configure({ executor: 2, manager: 0, reviewer: 2 }, 15);
+    assert.equal(first.available(project, "executor"), 0);
+    assert.equal(first.acquire(project, "executor", undefined, "T-0002"), undefined);
+    assert.equal(first.available(project, "reviewer"), 1);
+    assert.deepEqual(second.inherited(project), { executor: 1, manager: 0, reviewer: 1 });
+  } finally {
+    active();
+  }
+  assert.equal(second.available(project, "executor"), 1);
+});
+
 test("runtime snapshots and reservations stay responsive during a board transaction", t => {
   const project = mkdtempSync(join(tmpdir(), "taskboard-runtime-lock-"));
   t.after(() => rmSync(project, { recursive: true, maxRetries: 5 }));

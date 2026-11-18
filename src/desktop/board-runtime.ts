@@ -17,6 +17,7 @@ export interface RuntimeEntry {
   pid?: number;
   parent?: string;
   limits?: AgentLimits;
+  limitsSavedAt?: number;
   revision?: number;
   linkedThread?: { revision: number; codexThreadId: string };
   turnRequest?: { threadId: string; clientId: string; turnId?: string };

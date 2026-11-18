@@ -12,14 +12,21 @@ export const defaultAgentLimits: AgentLimits = inheritedLimits;
 export type AgentRole = keyof AgentLimits;
 
 const defaultsId = "task-defaults-v2";
+type TaskLimitsPreference = { limits: AgentLimits; savedAt?: number };
 
-export function cachedTaskLimits(entries: RuntimeEntry[]): AgentLimits | undefined {
-  const current = entries.find(entry => entry.id === defaultsId)?.limits;
-  if (current) return current;
+const savedDefaults = (entries: RuntimeEntry[]) => entries.find(entry => entry.id === defaultsId);
+const isNewerPreference = (current: RuntimeEntry | undefined, preference?: TaskLimitsPreference) =>
+  (preference?.savedAt ?? 0) > (current?.limitsSavedAt ?? 0);
+
+export function cachedTaskLimits(entries: RuntimeEntry[], preference?: TaskLimitsPreference): AgentLimits | undefined {
+  const current = savedDefaults(entries);
+  if (preference && isNewerPreference(current, preference)) return preference.limits;
+  if (current?.limits) return current.limits;
   const legacy = entries.find(entry => entry.id === "task-defaults")?.limits;
   // The old cache stored 1/1 even without a profile override. Let callers
   // resolve that ambiguous value from the desktop profile.
   if (legacy && (legacy.executor !== 1 || legacy.reviewer !== 1)) return legacy;
+  return preference?.limits;
 }
 
 export function parseAgentLimits(value: unknown): AgentLimits | undefined {
@@ -39,27 +46,39 @@ function defaultProfile() {
   return join(appData, desktopAppName);
 }
 
-export function readProfileTaskLimits(profile = defaultProfile()): AgentLimits | undefined {
-  try { return parseAgentLimits(readJson(join(profile, "task-limits.json"))); }
-  catch { return undefined; }
+export function readProfileTaskLimits(profile = defaultProfile()): TaskLimitsPreference | undefined {
+  try {
+    const value = readJson(join(profile, "task-limits.json"));
+    const limits = parseAgentLimits(value);
+    if (!limits) return;
+    const { savedAt } = value as { savedAt?: number };
+    return { limits, savedAt: typeof savedAt === "number" && Number.isSafeInteger(savedAt) && savedAt > 0 ? savedAt : undefined };
+  } catch {
+    return undefined;
+  }
 }
 
 export function createAgentSlots(shared = false) {
   const projects = new Map<string, string>();
   const sharedProject = shared ? (identity: string) => projects.get(identity) ?? identity : undefined;
   let limits = { ...defaultAgentLimits };
+  let preference: TaskLimitsPreference | undefined;
   const active = new Map<string, AgentLimits>();
   const taskId = (key: string | undefined) => key?.replace(/^review:/, "");
-  const savedDefaults = (entries: RuntimeEntry[]) => entries.find(entry => entry.id === defaultsId);
   const inherited = (path: string) => cachedTaskLimits(runtimeEntries(path)) ?? limits;
   const persistDefaults = (path: string, replace = false) => runtimeTransaction(path, entries => {
     const saved = savedDefaults(entries);
-    if (saved) { if (replace) saved.limits = { ...limits }; }
-    else {
-      const next = replace ? limits : cachedTaskLimits(entries) ?? limits;
+    const useProfile = isNewerPreference(saved, preference) || (replace && preference?.savedAt === undefined);
+    if (saved?.limits && !useProfile) return;
+    const next = useProfile ? limits : cachedTaskLimits(entries, preference) ?? limits;
+    const limitsSavedAt = useProfile ? preference?.savedAt : undefined;
+    if (saved) {
+      saved.limits = { ...next };
+      saved.limitsSavedAt = limitsSavedAt;
+    } else {
       const legacy = entries.findIndex(entry => entry.kind === "defaults");
       if (legacy >= 0) entries.splice(legacy, 1);
-      entries.push({ id: defaultsId, owner: 0, kind: "defaults", limits: { ...next } });
+      entries.push({ id: defaultsId, owner: 0, kind: "defaults", limits: { ...next }, limitsSavedAt });
     }
   });
   const available = (project: string, role: AgentRole, overrides?: Partial<AgentLimits>) => {
@@ -77,7 +96,8 @@ export function createAgentSlots(shared = false) {
   return {
     remember(project: string) {
       if (shared) {
-        if (!savedDefaults(runtimeEntries(project))) persistDefaults(project);
+        const saved = savedDefaults(runtimeEntries(project));
+        if (!saved?.limits || isNewerPreference(saved, preference)) persistDefaults(project);
         projects.set(projectIdentity(project), project);
       }
     },
@@ -101,8 +121,9 @@ export function createAgentSlots(shared = false) {
       return sharedProject ? runtimeEntries(sharedProject(project)).some(entry => entry.kind !== "queue" && entry.task === task) : false;
     },
     get limits() { return { ...limits }; },
-    configure(next: AgentLimits) {
+    configure(next: AgentLimits, savedAt?: number) {
       limits = { ...next, manager: 0 };
+      preference = { limits, savedAt };
       if (shared) for (const path of projects.values()) persistDefaults(path, true);
     },
     available,

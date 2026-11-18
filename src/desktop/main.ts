@@ -2870,16 +2870,18 @@ ipcMain.handle("agents:limits", (event, value: unknown) => {
   }
   const limits = parseAgentLimits(value);
   if (!limits) return cliFailure("INVALID_INPUT", t("ui.enter_non_negative_whole_numbers_for_the_limits_e203cc5b"));
+  let savedAt: number;
   try {
     const profile = app.getPath("userData");
+    savedAt = Math.max(Date.now(), (readProfileTaskLimits(profile)?.savedAt ?? 0) + 1);
     mkdirSync(profile, { recursive: true });
-    writeJson(join(profile, "task-limits.json"), limits);
+    writeJson(join(profile, "task-limits.json"), { ...limits, savedAt });
   } catch {
     return cliFailure("STORAGE_ERROR", t("ui.could_not_save_agent_limits_a463f6f4"));
   }
-  agentSlots.configure(limits);
+  agentSlots.configure(limits, savedAt);
   for (const project of subscriptions.keys()) {
-    syncSettingsNotices(project, limits);
+    syncSettingsNotices(project, agentSlots.inherited(project));
     const key = projectIdentity(project);
     boardRequests.get(key)?.settingsChanged?.();
     boardWorkRequests.get(key)?.settingsChanged?.();
@@ -3704,8 +3706,8 @@ else {
       : new Response(null, { status: 404 }));
     localization.select("system", app.getPreferredSystemLanguages());
     loadTheme();
-    const limits = readProfileTaskLimits(app.getPath("userData"));
-    if (limits) agentSlots.configure(limits);
+    const preference = readProfileTaskLimits(app.getPath("userData"));
+    if (preference) agentSlots.configure(preference.limits, preference.savedAt);
     loadRecentBoards();
     Menu.setApplicationMenu(null);
     setInterval(scheduleRecurringTasks, 10_000).unref();

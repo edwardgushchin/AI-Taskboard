@@ -930,7 +930,7 @@ async function main() {
         } else if (command === "sync-notices") {
           if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "Notice synchronization takes no task ID.");
           const profile = input.profile === undefined ? undefined : text(input.profile, "profile", true);
-          const limits = cachedTaskLimits(runtimeEntries(location.root)) ?? readProfileTaskLimits(profile) ?? inheritedLimits;
+          const limits = cachedTaskLimits(runtimeEntries(location.root), readProfileTaskLimits(profile)) ?? inheritedLimits;
           syncSettingsNotices(location.root, limits);
           data = { changed: syncTaskStatusNotices(location.root, text(input.language, "language", true)) };
         } else if (command === "manager-usage") {

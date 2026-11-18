@@ -9,7 +9,7 @@ import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import { locateBoard, onBoard } from "../src/cli/storage.ts";
 
 const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "task-limits", 60_000,
-  [["clean"], ["legacy-profile"], ["second-profile"], ["save"], ["restart"]]);
+  [["clean"], ["save-before-open"], ["open-after-save"], ["second-profile"], ["legacy-profile"], ["save"], ["restart"]]);
 
 void (async () => {
   const require = createRequire(import.meta.url);
@@ -18,7 +18,9 @@ void (async () => {
   const phase = process.argv.at(-1);
   const root = fileURLToPath(new URL("../", import.meta.url));
   const appData = process.platform === "darwin" ? join(scratch, "Library", "Application Support") : join(scratch, "app-data");
-  const profile = join(appData, phase === "second-profile" ? "second-profile" : "AI Taskboard");
+  const profileName = phase === "second-profile" ? "second-profile"
+    : ["save-before-open", "open-after-save"].includes(phase) ? "later-profile" : "AI Taskboard";
+  const profile = join(appData, profileName);
   const cliEnv = { ...process.env, GIT_CEILING_DIRECTORIES: scratch, APPDATA: appData, XDG_CONFIG_HOME: appData, HOME: scratch };
   const board = join(scratch, "board");
   const manual = join(scratch, "manual");
@@ -138,6 +140,16 @@ void (async () => {
       })`);
       await wait(async () => JSON.stringify(await values()) === JSON.stringify(expected), "board limits");
     }
+    async function saveLimits(executor, reviewer) {
+      await evaluate(`(() => {
+        const form = document.querySelector('#agent-limits');
+        form.elements.executor.value = ${executor};
+        form.elements.reviewer.value = ${reviewer};
+        form.requestSubmit();
+      })()`);
+      await wait(() => existsSync(profileLimits) &&
+        JSON.parse(readFileSync(profileLimits, "utf8")).executor === executor, "saved application limits");
+    }
 
     if (phase === "clean") {
       await showLimits([3, 2]);
@@ -154,12 +166,22 @@ void (async () => {
       await evaluate("boardSettings(); void 0");
       assert.equal(await evaluate("document.querySelectorAll('input[name$=Limit]').length"), 0);
       record("PASS clean profile and legacy board cache: implicit 1/1 becomes 3/2 in UI, CLI notices and both slot pools; legacy 5/1 remains readable; manual settings have no task limits.");
-    } else if (phase === "legacy-profile" || phase === "second-profile") {
+    } else if (phase === "save-before-open") {
+      assert.equal(await evaluate("window.taskboard.bootstrap().then(f => Boolean(f.board))"), false);
+      await showLimits([3, 2]);
+      reservations(3, 2);
+      await saveLimits(1, 1);
+      reservations(3, 2);
+      record("PASS app saved 1/1 with no board open; the existing shared cache still contains 3/2.");
+    } else if (phase === "legacy-profile" || phase === "second-profile" || phase === "open-after-save") {
       if (phase === "second-profile") {
         assert.equal(existsSync(profileLimits), false);
         await showLimits([3, 2]);
         notice([1, 1], profile);
         reservations(1, 1);
+      } else if (phase === "open-after-save") {
+        reservations(3, 2);
+        notice([1, 1], profile);
       }
       await open(board);
       await boardLimits([["", "1"], ["", "1"]]);
@@ -169,6 +191,8 @@ void (async () => {
       if (phase === "second-profile") {
         assert.equal(existsSync(profileLimits), false);
         record("PASS second clean Electron profile opens the shared board without replacing 1/1; both pools still deny the next slot.");
+      } else if (phase === "open-after-save") {
+        record("PASS reopening the app applies explicit 1/1 to the existing 3/2 cache on first board open; CLI and both pools use 1/1.");
       } else {
         record("PASS explicit legacy profile 1/1 is used by standalone CLI before Electron opens the board, then published to both slot pools.");
       }
@@ -183,13 +207,7 @@ void (async () => {
       assert.equal(pool.available(board, "executor"), appLimits[0]);
       assert.equal(pool.available(board, "reviewer"), Infinity);
       if (phase === "save") {
-        await evaluate(`(() => {
-          const form = document.querySelector('#agent-limits');
-          form.elements.executor.value = 4;
-          form.elements.reviewer.value = 2;
-          form.requestSubmit();
-        })()`);
-        await wait(() => JSON.parse(readFileSync(profileLimits, "utf8")).executor === 4, "saved application limits");
+        await saveLimits(4, 2);
         record("PASS saved board review 0 takes precedence over app review 1 in settings, notices and slot availability.");
       } else {
         record("PASS after application restart: saved app 4/2 and board review 0 persist; inherited work 4 and unlimited review are effective.");
