@@ -1173,7 +1173,15 @@ function scheduleAutoBoard(watch: BoardWatch) {
           queue.integrations.add(attempt);
           const review = await callCli<{ revision: number; targetHead: string | null; message?: string; stale: boolean;
             reviewerApproval?: { targetHead: string | null } }>(project, ["review", task.id, "--compact"]);
-          if (!review.ok) { failed(review.error.message); continue; }
+          if (!review.ok) {
+            // The card may have left review after the queue snapshot.
+            const details = review.error.details as { id?: string; status?: string } | undefined;
+            if (review.error.code !== "INVALID_TRANSITION" || details?.id !== task.id ||
+                !details.status || details.status === "review") {
+              failed("review " + task.id + ": " + review.error.message);
+            }
+            continue;
+          }
           if (review.data.stale) { failed(task.id + ": submission changed"); continue; }
           if (review.data.reviewerApproval?.targetHead !== review.data.targetHead) {
             const release = reserveAgent(project, "reviewer", "review:" + task.id);
@@ -1193,8 +1201,15 @@ function scheduleAutoBoard(watch: BoardWatch) {
             targetHead: review.data.targetHead, ...(review.data.message ? { message: review.data.message } : {}),
           });
           if (!accepted.ok) {
+            if (accepted.error.code === "REVISION_CONFLICT") continue;
+            if (accepted.error.code === "REVIEW_REQUIRED") {
+              // Accept checks approval before the revision and status. A
+              // concurrent decision can invalidate the approval we just read.
+              const latest = await callCli<{ status: string; revision: number }>(project, ["show", task.id, "--compact"]);
+              if (latest.ok && (latest.data.status !== "review" || latest.data.revision !== review.data.revision)) continue;
+            }
             if (["BOARD_BUSY", "TARGET_CHANGED", "AUTO_MODE_DISABLED", "AUTO_REVIEW_DISABLED", "REVIEW_MODE_CHANGED"].includes(accepted.error.code)) queue.integrations.delete(attempt);
-            else failed(task.id + ": " + accepted.error.message);
+            else failed("accept " + task.id + ": " + accepted.error.message);
             if (["BOARD_BUSY", "AUTO_MODE_DISABLED", "AUTO_REVIEW_DISABLED", "REVIEW_MODE_CHANGED"].includes(accepted.error.code)) return;
           }
           continue;
