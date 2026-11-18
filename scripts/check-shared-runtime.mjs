@@ -66,7 +66,7 @@ if (!process.versions.electron) {
   };
   try {
     symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), join(scratch, "node_modules"), process.platform === "win32" ? "junction" : "dir");
-    for (const board of [project, other]) { mkdirSync(board); cli(board, ["init"], { git: false }); cli(board, ["settings"], { autoMode: false, reviewMode: "human", agentLimits: { executor: 1, manager: 1, reviewer: 1 } }); }
+    for (const board of [project, other]) { mkdirSync(board); cli(board, ["init"], { git: false }); cli(board, ["settings"], { autoMode: false, reviewMode: "human", agentLimits: { executor: 1, reviewer: 1 } }); }
     const tasks = [];
     for (let i = 0; i < 6; i++) { const task = cli(project, ["create"], { title: "Isolated concurrency " + i, criteria: ["Fixture completes"], workingDirectory: project }); cli(project, ["approve", task.id]); tasks.push(task.id); }
     const a = await start("profile-a"), b = await start("profile-b");
@@ -113,6 +113,8 @@ if (!process.versions.electron) {
     await peer.ask({ action: "queue", id: queued, revision: task.revision });
     await wait(async () => (await frames()).every(frame => frame.waitingTasks.includes(queued)), "shared waiting task");
     await wait(async () => [...await a.ask({action:"dom"}), ...await b.ask({action:"dom"})].every(view => view.waiting), "rendered waiting state in three windows");
+    await wait(async () => [...await a.ask({action:"order"}), ...await b.ask({action:"order"})].every(view =>
+      view.execution[0] === "Isolated concurrency " + tasks.indexOf(runningId)), "running executor ahead of newer queued card");
     if (output) await peer.ask({ action: "screenshot", path: join(output, "waiting.png") });
     await owner.ask({ action: "stop", id: runningId });
     await wait(async () => (await frames()).every(frame => frame.runningTasks.includes(queued) && !frame.waitingTasks.includes(queued)), "queue continues after release");
@@ -139,10 +141,10 @@ if (!process.versions.electron) {
     assert.equal(await b.ask({ action: "reserve", role: "executor", other: true }), true);
     await b.ask({ action: "release", role: "executor" }); await b.ask({ action: "release", role: "executor", other: true });
     await a.ask({ action: "endDiscussion" }); await expectCount(0);
-    record("PASS: manager/reviewer limits cross processes; discussion uses no executor slot; boards isolated");
-    cli(project, ["settings"], { autoMode: false, reviewMode: "reviewer", agentLimits: { executor: 2, manager: 2, reviewer: 2 } });
+    record("PASS: manager context and reviewer limit cross processes; discussion uses no executor slot; boards isolated");
+    cli(project, ["settings"], { autoMode: false, reviewMode: "reviewer", agentLimits: { executor: 2, reviewer: 2 } });
     await wait(async () => (await frames()).every(frame => frame.board.settings.reviewMode === "reviewer" && frame.board.settings.agentLimits.executor === 2), "settings propagation");
-    cli(project, ["settings"], { reviewMode: "human", agentLimits: { executor: 1, manager: 1, reviewer: 1 }, autoMode: true });
+    cli(project, ["settings"], { reviewMode: "human", agentLimits: { executor: 1, reviewer: 1 }, autoMode: true });
     await expectCount(1);
     cli(project, ["settings"], { autoMode: false });
     await wait(async () => (await frames()).every(frame => !frame.board.settings.autoMode), "auto false propagation");
@@ -166,6 +168,46 @@ if (!process.versions.electron) {
     await wait(async () => (await restarted.ask({ action: "frames" })).every(frame => frame.activeAgents.total === 0 && !frame.runningTasks.includes(tasks[5])), "dead owner and provider reclaimed");
     assert.equal(await restarted.ask({ action: "reserve", role: "executor" }), true); await restarted.ask({ action: "release", role: "executor" });
     record("PASS: launch failure releases slot; restart preserves living orphan; provider death reclaims slot");
+    cli(project, ["settings"], { agentLimits: { executor: 6, reviewer: 2 } });
+    const makeCards = (name, review) => Array.from({ length: 7 }, (_, index) => {
+      const task = cli(project, ["create"], { title: name + " " + index, criteria: ["Fixture completes"], workingDirectory: project });
+      cli(project, ["approve", task.id]);
+      cli(project, ["start", task.id, "--compact"]);
+      if (review) {
+        const preview = cli(project, ["preview", task.id, "--compact"]);
+        cli(project, ["submit", task.id, "--compact"], { token: preview.token, noChanges: true, summary: "Test submission", checks: ["Fixture checked"] });
+      }
+      return task.id;
+    });
+    const execution = makeCards("Execution order", false), reviews = makeCards("Review order", true);
+    await Promise.all([b, restarted].map(worker => worker.ask({ action: "compactWindows" })));
+    const readOrder = async () => [...await b.ask({ action: "order" }), ...await restarted.ask({ action: "order" })];
+    await wait(async () => (await readOrder()).every(view => view.execution[0] === "Execution order 6" &&
+      view.review[0] === "Review order 6" && view.more && !view.execution.includes("Execution order 0") &&
+      !view.review.includes("Review order 0")), "idle order and collapsed batches");
+    await restarted.ask({ action: "focusOrder" });
+    await b.ask({ action: "openOrderDialog" });
+    for (const id of execution.slice(0, 6)) assert.equal(await b.ask({ action: "reserve", role: "executor", task: id }), true);
+    assert.equal(await b.ask({ action: "reserve", role: "reviewer", task: "review:" + reviews[0] }), true);
+    assert.equal(await b.ask({ action: "reserve", role: "reviewer", task: reviews[1] }), true);
+    const executionPrefix = [5, 4, 3, 2, 1, 0].map(index => "Execution order " + index);
+    await wait(async () => (await readOrder()).every(view =>
+      JSON.stringify(view.execution.slice(0, 6)) === JSON.stringify(executionPrefix) &&
+      view.review[0] === "Review order 1" && view.review[1] === "Review order 0"), "active groups sorted before batch limit");
+    assert.equal(await restarted.ask({ action: "orderFocusPreserved" }), true);
+    assert.equal(await b.ask({ action: "orderDialogPreserved" }), true);
+    if (output) await restarted.ask({ action: "screenshot", path: join(output, "active-order.png") });
+    for (const id of execution.slice(0, 6)) await b.ask({ action: "release", role: "executor", task: id });
+    await b.ask({ action: "release", role: "reviewer", task: "review:" + reviews[0] });
+    await b.ask({ action: "release", role: "reviewer", task: reviews[1] });
+    await wait(async () => (await readOrder()).every(view => view.execution[0] === "Execution order 6" && view.review[0] === "Review order 6"), "idle order restored");
+    for (let attempt = 0; attempt < 2; attempt++) {
+      assert.equal(await restarted.ask({ action: "reserve", role: "reviewer", task: "review:" + reviews[0] }), true);
+      await wait(async () => (await readOrder()).every(view => view.review[0] === "Review order 0"), "repeated review starts");
+      await restarted.ask({ action: "release", role: "reviewer", task: "review:" + reviews[0] });
+      await wait(async () => (await readOrder()).every(view => view.review[0] === "Review order 6"), "repeated review ends");
+    }
+    record("PASS: active-first ordering in both columns across processes, including repeat review, repair, multiple runs and idle order; focus, scroll and dialog preserved");
     if (output) { mkdirSync(output, { recursive: true }); await restarted.ask({ action: "screenshot", path: join(output, "shared-windows.png") }); writeFileSync(join(output, "shared-runtime.txt"), results.join("\n") + "\n"); }
   } catch (error) {
     if (output) { mkdirSync(output, { recursive: true }); writeFileSync(join(output, "failure.txt"), error.stack + "\n" + workers.map(worker => worker.logs).join("\n")); }
@@ -222,12 +264,37 @@ if (!process.versions.electron) {
     try {
       await ready;
       const qa = globalThis.sharedCheck; let data;
-      const board = command.other ? other : project, key = command.role + (command.other ? ":other" : "");
+      const board = command.other ? other : project, key = command.role + (command.other ? ":other" : "") + (command.task ?? "");
       if (command.action === "ready") data = true;
       if (command.action === "restoreBoards") { const state = qa.createWindow([project, other]); await state.ready; globalThis.restoredCheckWindow = state.window; data = true; }
       if (command.action === "closeRestored") { globalThis.restoredCheckWindow.close(); data = true; }
       if (command.action === "newWindow") { const state = qa.createWindow([project]); await state.ready; data = true; }
+      if (command.action === "compactWindows") for (const win of BrowserWindow.getAllWindows()) win.setSize(700, 550);
       if (command.action === "dom") data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript(`({ count: Number(document.querySelector('#status-agents span')?.textContent), waiting: document.body.innerText.includes('Ожидает свободного исполнителя') || document.body.innerText.includes('Waiting for an available executor') })`)));
+      if (command.action === "order") data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript(`(() => {
+        const titles = state => [...document.querySelectorAll('#lane-cards-' + state + ' .task-card-heading strong')].map(node => node.textContent);
+        return { execution: titles('in_progress'), review: titles('review'), more: Boolean(document.querySelector('#lane-cards-in_progress .lane-more')) };
+      })()`)));
+      if (["focusOrder", "openOrderDialog", "orderFocusPreserved", "orderDialogPreserved"].includes(command.action)) {
+        const win = BrowserWindow.getAllWindows()[0];
+        if (command.action === "focusOrder") {
+          await win.webContents.executeJavaScript(`(() => {
+            globalThis.orderCard = document.querySelector('#lane-cards-in_progress .task-card');
+            orderCard.focus({ preventScroll: true });
+            const board = document.querySelector('#lanes');
+            board.scrollLeft = 80;
+            globalThis.orderScroll = board.scrollLeft;
+            if (orderScroll <= 0 || document.activeElement !== orderCard) throw Error("Focus and scroll fixture not set");
+          })()`);
+        }
+        if (command.action === "openOrderDialog") {
+          await win.webContents.executeJavaScript("document.querySelector('#lane-cards-review .task-card').click()");
+          await wait(() => win.webContents.executeJavaScript("document.querySelector('#sheet').open"), "task dialog");
+          await win.webContents.executeJavaScript("globalThis.orderDialogTitle = document.querySelector('#sheet-title').textContent");
+        }
+        if (command.action === "orderFocusPreserved") data = await win.webContents.executeJavaScript("document.activeElement === orderCard && document.querySelector('#lanes').scrollLeft === orderScroll");
+        if (command.action === "orderDialogPreserved") data = await win.webContents.executeJavaScript("document.querySelector('#sheet').open && document.querySelector('#sheet-title').textContent === orderDialogTitle");
+      }
       if (command.action === "frames") data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript("window.taskboard.bootstrap()")));
       if (command.action === "checkInput") {
         for (const win of BrowserWindow.getAllWindows()) {
@@ -251,8 +318,12 @@ if (!process.versions.electron) {
       if (command.action === "stopWatches") { for (const watch of qa.subscriptions.values()) watch.stop(); data = true; }
       if (command.action === "stopAll") { for (const agent of qa.activeAgents.values()) await agent.control.interrupt(); data = true; }
       if (command.action === "queue") { qa.agentSlots.defer(project, command.id, { revision: command.revision }); qa.scheduleAgentWork(); data = true; }
-      if (command.action === "reserve") { const lease = qa.reserveAgent(board, command.role, command.role === "manager" ? "manager:work" : undefined); if (lease) leases.set(key, lease); data = Boolean(lease); }
-      if (command.action === "managerPhase") { qa.agentSlots.update(project, "manager:work", { id: "fixture-manager", phase: command.phase, startedAt: Date.now() }); data = true; }
+      if (command.action === "reserve") {
+        const lease = command.role === "manager" ? qa.agentSlots.claim(board, "manager:context") : qa.reserveAgent(board, command.role, command.task);
+        if (lease) leases.set(key, lease);
+        data = Boolean(lease);
+      }
+      if (command.action === "managerPhase") { qa.agentSlots.update(project, "manager:context", { id: "fixture-manager", phase: command.phase, startedAt: Date.now() }); data = true; }
       if (command.action === "release") { leases.get(key)?.(); leases.delete(key); data = true; }
       if (command.action === "discussion") { const lease = active.claimDiscussion(project, command.id); const finish = lease.run(() => active.trackActiveRun(project)); leases.set("discussion", () => { finish(); lease(); }); data = true; }
       if (command.action === "endDiscussion") { leases.get("discussion")?.(); leases.delete("discussion"); data = true; }

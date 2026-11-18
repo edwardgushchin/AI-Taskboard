@@ -1223,6 +1223,7 @@ function laneTools(state, title, tasks, total, count, content) {
   }
   let empty;
   let matching = [];
+  let activeCount = 0;
   let visibleLimit = 4;
   let manualLimit = 0;
   const more = button("", () => {
@@ -1235,7 +1236,14 @@ function laneTools(state, title, tasks, total, count, content) {
   function updateCards() {
     matching = tasks.filter(task => (!priority.value || task.priority === priority.value) &&
       (!selected.size || task.tags.some(name => selected.has(tagKey(name)))));
-    visibleLimit = Math.max(visibleLimit, focusedCardPosition());
+    activeCount = 0;
+    if (!manualBoard() && (state === "in_progress" || state === "review")) {
+      const active = new Set([...(frame.runningTasks ?? []), ...(frame.replyingTasks ?? []),
+        ...(state === "review" ? Object.keys(frame.reviewingTasks ?? {}) : [])]);
+      matching.sort((a, b) => Number(active.has(b.id)) - Number(active.has(a.id)));
+      activeCount = matching.filter(task => active.has(task.id)).length;
+    }
+    visibleLimit = Math.max(visibleLimit, activeCount, focusedCardPosition());
     renderBatch();
     scheduleLaneFit();
     const active = selected.size + Number(Boolean(priority.value));
@@ -1278,7 +1286,7 @@ function laneTools(state, title, tasks, total, count, content) {
     if (collapsed || !matching.length) return;
     const focused = document.activeElement;
     const firstNew = visibleLimit;
-    const minimum = Math.min(matching.length, Math.max(1, manualLimit, focusedCardPosition()));
+    const minimum = Math.min(matching.length, Math.max(1, manualLimit, activeCount, focusedCardPosition()));
     const fits = () => content.getBoundingClientRect().height <= availableHeight;
     const limit = Math.min(matching.length, Math.max(visibleLimit, minimum));
     if (visibleLimit !== limit) {
