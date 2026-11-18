@@ -1,5 +1,6 @@
 import { join } from "node:path";
-import type { AgentLimits } from "../cli/model.ts";
+import { setTimeout as wait } from "node:timers/promises";
+import { TaskboardError, type AgentLimits } from "../cli/model.ts";
 import { onBoard, readJson, exists, writeJson } from "../cli/storage.ts";
 import { runtimeLocation } from "./board-runtime.ts";
 import { recordSettings, settingsContext } from "../cli/settings-notices.ts";
@@ -26,17 +27,28 @@ export function settingsDelivery(project: string, lane: string, read: () => Sett
     through = Math.max(through, sequence);
     writeJson(path, { through });
   };
+  const readForDelivery = async (signal?: AbortSignal) => {
+    for (let attempt = 0; ; attempt++) {
+      signal?.throwIfAborted();
+      try { return read(); }
+      catch (error) {
+        if (!(error instanceof TaskboardError) || error.code !== "BOARD_BUSY" || attempt === 4) throw error;
+        await wait(100, undefined, { signal });
+      }
+    }
+  };
   return {
     initial() {
       const journal = read();
       return { text: settingsContext(journal, through), sequence: journal.events.at(-1)?.sequence ?? 0 };
     },
     acknowledge,
-    flush(send: (text: string) => Promise<void>) {
+    flush(send: (text: string) => Promise<void>, signal?: AbortSignal) {
       queue = queue.catch(() => {}).then(async () => {
-        const journal = read();
+        const journal = await readForDelivery(signal);
         const sequence = journal.events.at(-1)?.sequence ?? 0;
         if (sequence <= through) return;
+        signal?.throwIfAborted();
         await send(settingsContext(journal, through));
         acknowledge(sequence);
       });

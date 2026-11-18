@@ -2181,7 +2181,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       !isManual(settings.data) && reviewMode === "human" ? " " + manualReviewInstructions : "") + (goal ?
       " You run the board goal in the background. Read goal_inbox at the start of each turn, before waiting, " +
       "and when notified. Apply user directions, then confirm or decline with goal_inbox and a factual reply. " +
-      "Use goal_report for decisions and milestones. In goal mode, progress text shows up in Work Activity and does not open an answer form. If a user decision is necessary, call ask_user directly instead of putting a question in progress text and calling task_wait. Approve clear drafts covered by the user's goal without asking again." :
+      "Use goal_report for decisions and milestones in Work Activity. If a user decision is necessary, call ask_user before waiting. Approve clear drafts covered by the user's goal without asking again. " +
+      "In independent reviewer mode, integrate approved submissions yourself while the automatic queue is off. With the automatic queue on, follow its integration result and handle only reported exceptions." :
       background ? "" : " You are the user's conversational manager. When asked about the goal, read goal_read. Direct messages can steer the active dialogue turn. " +
       "For user instructions affecting its running work, use goal_send and report them as queued until the goal confirms. " +
       "The goal handles its incoming executor and reviewer mail. Use board tools for the user's direct requests.");
@@ -2445,7 +2446,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
                 "; рассуждение этого запуска: " + JSON.stringify(settings.data.manager?.effort ?? "по умолчанию провайдера") + ".", []);
               waitWork.abort();
               waitWork = new AbortController();
-            }).catch(error => console.warn("Settings delivery deferred until next run.", (error as Error).message));
+            }, signal).catch(error => {
+              if (!signal.aborted) console.warn("Settings delivery deferred until next run.", (error as Error).message);
+            });
           };
           running.settingsChanged();
           historyModel = model;
@@ -2665,7 +2668,8 @@ function scheduleAutoReview(watch: BoardWatch) {
     if (ready.length) publishReviewActivity(project);
     if (mode === "reviewer-human") return;
     if (watch.board.settings.autoMode) { scheduleAutoBoard(watch); return; }
-    if (!managerAvailable) return;
+    if (!managerAvailable || boardWorkRequests.get(projectKey)?.goalRunning ||
+        agentSlots.entries(project).some(entry => entry.task === "manager:context" && entry.state?.goalRunning)) return;
     const awaitingIntegration = new Set(submissions.filter(task => task.reviewApproved).map(task => task.id));
     const approvals = (watch.board.managerInbox ?? []).filter(({ id, kind, sequence }) =>
       kind === "review-approve" && awaitingIntegration.has(id) && watch.integrationAttempts.get(id) !== sequence).slice(0, managerBatchSize);
@@ -3397,11 +3401,12 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     }, report => saveTaskTokenUsage(project, id, role, report), signal, async codexThreadId => {
       if (!queued && linked.codexThreadId === codexThreadId) return;
       const previousCodexThreadId = linked.codexThreadId;
+      const replacing = Boolean(previousCodexThreadId && previousCodexThreadId !== codexThreadId);
       // Preserve edits made while Codex was starting and link the chat before it can run.
       const saved = await callCli<LaunchState>(project, ["update", id, "--compact"], {
-        codexThreadId, actor: "user", launchDetails: true,
+        codexThreadId, actor: replacing ? "user" : "agent", launchDetails: true,
         ...(queued ? { queuedExecutor: true, revision: linked.revision, preserveStatus: true } : {}),
-        ...(previousCodexThreadId && previousCodexThreadId !== codexThreadId ? { previousCodexThreadId,
+        ...(replacing ? { previousCodexThreadId,
           note: (newThread ? t("ui.continued_in_a_new_chat_previous_chat_6e40fb2d") :
             t("ui.codex_could_not_find_the_previous_chat_continued_726501de")) +
             "`" + previousCodexThreadId + "`" } : {}),

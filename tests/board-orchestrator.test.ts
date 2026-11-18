@@ -21,7 +21,7 @@ import { managerInbox, needsManagerAttention } from "../src/cli/task-messages.ts
 import type { RunActivity, Task } from "../src/cli/model.ts";
 import type { ChatSettings } from "../src/cli/model.ts";
 import { directory as storageDirectory, locateBoard, readBoardSettings, readJson, writeJson } from "../src/cli/storage.ts";
-import { registerRuntime, runtimeLocation, runtimeTransaction } from "../src/desktop/board-runtime.ts";
+import { registerRuntime, runtimeEntries, runtimeLocation, runtimeTransaction } from "../src/desktop/board-runtime.ts";
 import type { BoardGoal, BoardGoalAction, readBoardHistory } from "../src/desktop/codex-chat.ts";
 import { inspectProjectPath, projectSha256 } from "../src/desktop/project-files.ts";
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
@@ -618,6 +618,33 @@ test("a board snapshot with auto-review on wakes the manager once per submitted 
   await watch.done();
   assert.equal(calls, 2);
   assert.deepEqual(readJson(f.binding), goalBinding);
+});
+
+test("approved reviewer integration yields to a running goal and resumes after release", async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"])).ok, true);
+  const release = f.agentSlots.claim(f.project, "manager:context");
+  assert.ok(release);
+  f.agentSlots.entries = runtimeEntries;
+  runtimeTransaction(f.project, entries => {
+    entries.find(entry => entry.task === "manager:context")!.state = { id: "active-goal", phase: "running",
+      lane: "work", startedAt: Date.now(), goalRunning: true };
+  });
+  let backgroundCalls = 0;
+  const watch = f.schedule({
+    project: f.project, settings: { reviewMode: "reviewer" },
+    tasks: [{ id: "T-0001", status: "review", revision: 7, reviewApproved: true }],
+    managerInbox: [{ id: "T-0001", kind: "review-approve", sequence: 12 }],
+  }, async () => { backgroundCalls++; return { text: "Handled outstanding approval." }; });
+  try {
+    watch.tick();
+    await watch.done();
+    assert.equal(backgroundCalls, 0);
+  } finally { release(); }
+  watch.tick();
+  await watch.done();
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(backgroundCalls, 1);
 });
 
 test("manager has no configurable capacity limit and shares one board context", async t => {
@@ -1318,6 +1345,7 @@ test("manager adopts expert roles, loads a board skill and plans an addressed sp
   const reply = await f.run("Подготовь команду спринта", async act => {
     const experts = await act("expert_list", {});
     assert.equal(experts.ok, true); assert.equal(experts.data.length, 220);
+    assert.deepEqual(Object.keys(experts.data[0]).sort(), ["enabled", "group", "id", "name"]);
     const context = await act("expert_context", { ids: ["business-analyst", "product-owner"] });
     assert.equal(context.ok, true); assert.equal(context.data.length, 2);
     const skill = await act("expert_skill", { expertId: "product-owner", skillId: "workflow" });
@@ -1329,15 +1357,23 @@ test("manager adopts expert roles, loads a board skill and plans an addressed sp
     const brief = { title: "Sprint", description: "Prepare requirements and a test plan.", criteria: ["Both plans are ready."] };
     const incomplete = await act("task_create", brief);
     assert.equal(incomplete.error.code, "EXPERT_PLAN_REQUIRED");
+    const invalidArtifact = await act("task_create", { ...brief,
+      expertTeam: { work: { lead: "product-owner", reason: "Plan work.", stages: [
+        { ...stages[1], dependsOn: [], artifactOutputs: { desktop: "png" } },
+      ] }, review: { lead: "qa-engineer", reason: "Verify the output.", stages: [] } } });
+    assert.equal(invalidArtifact.error.code, "INVALID_INPUT");
+    assert.match(invalidArtifact.error.message, /Stage test.*"desktop".*outputs/);
     assert.equal((await act("board_list", {})).data.tasks.length, 0);
     const planned = await act("task_create", { ...brief,
-      expertTeam: { work: { lead: "product-owner", reason: "Coordinate requirements and test planning.", stages },
+      expertTeam: { work: { lead: "product-owner", reason: "Coordinate requirements and test planning.",
+        stages: [stages[0], { ...stages[1], artifactOutputs: { "test-plan.md": "text" } }] },
         review: { lead: "qa-engineer", reason: "One QA specialist can verify both outputs.", stages: [] } } });
     assert.equal(planned.ok, true, JSON.stringify(planned.error));
     const parent = planned.data;
     assert.equal(parent.revision, 1);
     const saved = await act("task_show", { id: parent.id });
     assert.equal(saved.data.expertTeam.work.stages[1].dependsOn[0], stages[0].key);
+    assert.deepEqual(saved.data.expertTeam.work.stages[1].artifactOutputs, { "test-plan.md": "text" });
     const sent = await act("team_message", { id: parent.id, to: parent.id, kind: "decision", text: "Start with the EU market" });
     assert.equal(sent.ok, true, JSON.stringify(sent.error));
     const inbox = await act("team_inbox", { id: parent.id });

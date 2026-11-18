@@ -318,7 +318,10 @@ function run(
   filters: { archived?: boolean; tag?: string; compact?: boolean },
   lockWaitMs: number,
 ) {
-  if (command === "experts") return listExperts(store, typeof input.query === "string" ? input.query : "");
+  if (command === "experts") {
+    const roles = listExperts(store, typeof input.query === "string" ? input.query : "");
+    return input.catalogOnly === true ? roles.map(({ id, name, group, enabled }) => ({ id, name, group, enabled })) : roles;
+  }
   if (command === "expert-get") return readExpert(store, text(input.expertId, "expert ID", true), false);
   if (command === "expert-save") return saveExpert(store, input);
   if (command === "expert-context") return expertContext(store, strings(input.ids, "expert IDs"));

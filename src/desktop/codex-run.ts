@@ -74,7 +74,7 @@ const instructions = new URL("./agent-instructions/", import.meta.url);
 function executorInstructions() {
   const readInstructions = (name: string) => readFileSync(new URL(name + ".md", instructions), "utf8").trim();
   return boardAgentInstructions("executor", [
-    "AI Taskboard has already started this card and assigned its working directory. Read the current card, then work in that directory. Pass --project with the board root in every CLI invocation.",
+    "AI Taskboard has already started this card and assigned its working directory. Read the current card, then work in that directory. Pass --project with the board root in every CLI invocation. After a restart use the current TEMP for disposable files; the previous run's temporary directory has been retired.",
     "If a provider MCP tool is missing, use task_tool_request with server, tool and a reason. The manager discovers tools with provider_tools and saves an assignment with task_tool_grant. Assignments apply on the next task run. Keep working on independent steps. If the missing tool prevents further work on a required step, record that blocker and the condition for resuming.",
     checkWaitInstructions,
     readInstructions("executor").replace("__AI_TASKBOARD_CLI__", () => JSON.stringify(taskboardCliLaunch(bundled, entry))),
@@ -168,7 +168,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       if (assigned.size && ((name === "expert_context" && (!Array.isArray(input.ids) || input.ids.some(id => !assigned.has(id)))) ||
           (name === "expert_skill" && !assigned.has(input.expertId as string)))) return { ok: false, error: { code: "EXPERT_SCOPE", message: "Use the assigned specializations or ask the manager to change them." } };
       return worklog.remind(await callCli(project, [expertCommands[name], ...(name.startsWith("team_") || name === "expert_skill" ? [task.id] : [])],
-        { ...input, actor: "agent", ...(name === "expert_skill" ? { source: "tool" } : {}) }));
+        { ...input, actor: "agent", ...(name === "expert_skill" ? { source: "tool" } : {}),
+          ...(name === "expert_list" ? { catalogOnly: true } : {}) }));
     }
     if (name === recurringChildTool.name && task.schedule) return worklog.remind(await callCli(project, ["spawn-child", task.id, "--compact"], args));
     if (name === executorResultTool.name) return worklog.remind(await recordExecutorResult(project, task.id, args));
