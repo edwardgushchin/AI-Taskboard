@@ -12,7 +12,7 @@ import { parseArgs } from "node:util";
 import { acceptTask, cleanAcceptedTask, compareAcceptedTree, inspectReview, inspectReviewDiff, inspectReviewQueue, reopenConflictingReview, reviewDetails, verifyReviewDecision } from "./acceptance.ts";
 import { describeSavedChanges, restoreSavedChanges } from "./saved-changes.ts";
 import {
-  addAttachment, addChatMessage, archiveDiagnostics, createWithAttachments, isArchived, readAttachment, readTask, restoreReplyImages, sweepArchives,
+  addAttachment, addChatMessage, archiveDiagnostics, createWithAttachments, isArchived, reactivateArchivedTask, readAttachment, readTask, restoreReplyImages, sweepArchives,
   setAttachmentCover, upgradeTagCatalog,
 } from "./archive.ts";
 import { boardAgentRoles, boardReviewMode, hexTagColor, member, number, object, reasoningEffortPattern, record, registerTags, requireRevision, requireState, reviewModes, strings, tagKey, taskIdPattern, TaskboardError, text, validAgentLimitOverrides } from "./model.ts";
@@ -24,7 +24,7 @@ import type { BoardLocation, BoardStore } from "./storage.ts";
 import { discoverRepository, invokeGit, scheduleGitMaintenance } from "./git.ts";
 import { boardGitInfo, changeRepository, createGitHubMilestone, githubMilestones, githubRepository, inspectRepository, publishRepository, pushRepositoryBranch, readGitHub, repositoryRefs, setGitHubMilestoneDueDate } from "./repository.ts";
 import { previewSubmission, previewTask, submitTask } from "./submission.ts";
-import { changeTask, createTask, recordRunLog, withoutVerification } from "./tasks.ts";
+import { changeTask, createTask, recordRunLog } from "./tasks.ts";
 import { recordTokenUsage, taskMetrics } from "./token-usage.ts";
 import type { ReviewDecisionTiming } from "./token-usage.ts";
 import { projectUsage } from "./project-usage.ts";
@@ -40,7 +40,7 @@ import { expertContext, expertSkill, listExperts, readExpert, saveExpert } from 
 import { approvalRequirements, createExpertPlan, expertStagesStatus, initialExpertTeam, requireApprovalPlan, requireExpertPlan, requireExpertResults, reviewDecisionSequence, sendTeamMessage, taskExpertPhase, teamInbox, updateExpertStage } from "./expert-team.ts";
 import { syncTaskStatusNotices } from "../desktop/manager-history.ts";
 import { syncSettingsNotices } from "../desktop/settings-notices.ts";
-import { runtimeEntries } from "../desktop/board-runtime.ts";
+import { registerRuntime, runtimeEntries, runtimeTransaction } from "../desktop/board-runtime.ts";
 
 const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "checklist", "pause", "block", "resume", "unblock", "update"]);
 const help = [
@@ -625,7 +625,7 @@ function run(
   if (command === "restore-changes") return restoreSavedChanges(store, readTask(store, id), input);
   const tagsOnly = command === "update" && input.tags !== undefined && Object.keys(input).every(key =>
     ["tags", "revision", "actor", "note", "preserveStatus"].includes(key));
-  const task = tagsOnly ? readTask(store, id) : store.card(id);
+  const task = tagsOnly || command === "return-to-draft" ? readTask(store, id) : store.card(id);
   let decisionTiming: ReviewDecisionTiming | undefined;
   const withReviewerUsage = (card: Task) => {
     if (input.reviewerUsage === undefined) return card;
@@ -770,6 +770,13 @@ function run(
       throw error;
     }
   }
+  if (command === "return-to-draft") {
+    const draft = changeTask(task, command, input);
+    if (draft !== task && hasPending(store, task, true)) {
+      throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before returning the task to draft.");
+    }
+    return draft === task ? task : isArchived(store, id) ? reactivateArchivedTask(store, draft) : store.save(draft);
+  }
   if (hasPending(store, task)) {
     throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before modifying the task.");
   }
@@ -796,8 +803,7 @@ function run(
       updated.history.at(-1)!.mergedInto = { id: target.id, title: target.title,
         transferred: text(input.transferred, "transferred", true) };
     }
-    const closed = store.save(withoutVerification(updated));
-    return closed;
+    return store.save(updated);
   }
   if ((command === "update" || command === "unblock") && input.dependencies !== undefined) validateDependencies(store, updated);
   const saved = store.save(command === "request-changes" && input.actor === "reviewer" ? withReviewerUsage(updated) :
@@ -898,7 +904,7 @@ async function main() {
     if (command === "watch") {
       watchBoard(location, values.compact === true);
     } else {
-      const audited = new Set(["start", "submit", "accept", "cancel", "cleanup", "archive", "restore-changes", "recover-test-data", "worklog-migrate", "git"]);
+      const audited = new Set(["start", "submit", "accept", "cancel", "return-to-draft", "cleanup", "archive", "restore-changes", "recover-test-data", "worklog-migrate", "git"]);
       const finishOperation = audited.has(command) && command !== "git" || command === "git" && !["refs", "inspect"].includes(id ?? "")
         ? beginBoardOperation(location.root, command + (extra ? "/" + extra : ""), id && /^T-\d+$/.test(id) ? id : undefined) : undefined;
       try {
@@ -983,9 +989,24 @@ async function main() {
           const { store, task } = onBoard(location, (store, lockWaitMs) => ({
             store, task: run(store, command, id, extra, input, values, lockWaitMs) as Task,
           }));
-          try { withTaskStartLock(location, id, () => cleanTaskWorktree(store, task), 0); }
+          try { withTaskStartLock(location, id, () => {
+            const current = onBoard(location, fresh => readTask(fresh, id));
+            if (current.status === "cancelled" && current.revision === task.revision) cleanTaskWorktree(store, current);
+          }, 0); }
           catch { /* Private maintenance retries after the active operation releases it. */ }
           data = task;
+        } else if (command === "return-to-draft") {
+          if (!id || !taskIdPattern.test(id)) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
+          const release = registerRuntime(location.root, { kind: "task", task: "draft:" + id });
+          if (!release) throw new TaskboardError("CHAT_BUSY", "This task still has an active writer or is being returned in another process. Stop it or wait for it to finish.");
+          try {
+            data = withTaskStartLock(location, id, () => onBoard(location,
+              (store, lockWaitMs) => run(store, command, id, extra, input, values, lockWaitMs)));
+            runtimeTransaction(location.root, entries => {
+              const index = entries.findIndex(entry => entry.kind === "queue" && entry.task === id);
+              if (index >= 0) entries.splice(index, 1);
+            });
+          } finally { release(); }
         } else if (command === "accept") {
           if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
           data = withTaskStartLock(location, id, () => {

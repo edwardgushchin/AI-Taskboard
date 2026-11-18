@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import { test } from "node:test";
+import { setTimeout as wait } from "node:timers/promises";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { changeTask, createTask } from "../src/cli/tasks.ts";
@@ -17,7 +18,8 @@ const parsed = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, tr
 const names = new Set(["launchTask", "recordRunFailure", "publishRunActivity", "notifyRunChange", "saveTaskTokenUsage",
   "beginOperation", "confirmProjectClose", "projectOperations", "closingProjects", "launchingTasks", "runningTasks", "runActivityByTask",
   "activeAgents", "chatRuns", "windowStates", "executorBusy", "reserveAgent", "scheduleAgentWork", "scheduleRecurringTasks",
-  "deferredExecutors", "schedulingAgentWork", "taskRunLimit", "acceptanceWork", "continueAcceptance"]);
+  "deferredExecutors", "schedulingAgentWork", "taskRunLimit", "acceptanceWork", "continueAcceptance",
+  "returnTaskToDraft", "returningDrafts", "reviewOperations", "managerReviewOperations", "taskOperations", "steeringOperations"]);
 const lifecycle = parsed.statements.filter(node => {
   if (ts.isFunctionDeclaration(node)) return node.name && names.has(node.name.text);
   return ts.isVariableStatement(node) && node.declarationList.declarations.some(declaration =>
@@ -45,8 +47,8 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
   const finalCompletion = Promise.withResolvers<Completion>();
   const completions = [completion, retryCompletion, finalCompletion];
   const slots = createAgentSlots();
-  const runtime = runInNewContext(stripTypeScriptTypes(lifecycle) + "\n({launchTask, scheduleAgentWork, scheduleRecurringTasks, beginOperation, confirmProjectClose, projectOperations, runningTasks, activeAgents, deferredExecutors})", {
-    AbortController, performance, setTimeout, clearTimeout, setImmediate, subscriptions, agentSlots: slots,
+  const runtime = runInNewContext(stripTypeScriptTypes(lifecycle) + "\n({launchTask, returnTaskToDraft, scheduleAgentWork, scheduleRecurringTasks, beginOperation, confirmProjectClose, projectOperations, runningTasks, activeAgents, deferredExecutors})", {
+    AbortController, AbortSignal, wait, performance, setTimeout, clearTimeout, setImmediate, subscriptions, agentSlots: slots,
     isManual, runtimeLocation: (project: string) => project,
     readBoardSettings: (project: string) => savedSettings.get(project) ?? subscriptions.get(project)?.board.settings ?? {},
     scheduleMaintenance: async () => {}, scheduleAutoReview: () => {}, scheduleAutoBoard: () => {}, projectIdentity: (project: string) => project,
@@ -107,6 +109,7 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "disconnec
         Object.assign(task, changeTask(task, "update", input));
       }
       if (args[0] === "progress") Object.assign(task, changeTask(task, "progress", input));
+      if (args[0] === "return-to-draft") Object.assign(task, changeTask(task, "return-to-draft", input));
       return { ok: true, data: structuredClone(task) };
     },
     startCodexRun: async (_client: unknown, _project: string, _cwd: string, snapshot: { codexThreadId?: string; fullAccess?: boolean },
@@ -139,6 +142,24 @@ test("manual boards reject direct launches and stale recurring schedules", async
   f.runtime.scheduleRecurringTasks();
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.launched.length, 0);
+});
+
+test("return to draft waits for the active executor to finish writing", async () => {
+  const f = fixture("started");
+  f.task.status = "in_progress";
+  assert.equal((await f.runtime.launchTask("project", f.task.id)).ok, true);
+  const key = "project\0" + f.task.id;
+  const active = f.runtime.activeAgents.get(key);
+  const interrupted = Promise.withResolvers<void>();
+  const interrupt = active.control.interrupt;
+  active.control.interrupt = async () => { await interrupt(); interrupted.resolve(); };
+  const returned = f.runtime.returnTaskToDraft("project", f.task.id, f.task.revision, "user");
+  await interrupted.promise;
+  assert.ok(!f.calls.some(call => call.args[0] === "return-to-draft"));
+  assert.equal((await f.runtime.launchTask("project", f.task.id)).error.code, "CHAT_BUSY");
+  f.completion.resolve({ reason: "Stopped", interrupted: true });
+  assert.equal((await returned).data.status, "draft");
+  assert.ok(!f.calls.some(call => call.args[0] === "block"));
 });
 
 test("launch uses saved limits when the watch still has the previous value", async () => {

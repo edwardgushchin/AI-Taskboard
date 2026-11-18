@@ -15,6 +15,7 @@ import { locateBoard } from "../src/cli/storage.ts";
 import { maxWorklogPartBytes } from "../src/cli/worklog-files.ts";
 import type { Task } from "../src/cli/model.ts";
 import { boardToolContent } from "../src/desktop/board-mcp.ts";
+import { registerRuntime, runtimeEntries, runtimeTransaction } from "../src/desktop/board-runtime.ts";
 
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
 const env = {
@@ -921,12 +922,97 @@ test("normal commands enforce task state, criteria, and revisions", t => {
   task = cli(root, ["return-to-draft", task.id], { revision: task.revision });
   assert.equal(cli(root, ["show", task.id]).status, "draft");
   assert.equal(task.history.at(-1).from, "ready");
-  cli(root, ["return-to-draft", task.id], undefined, "INVALID_TRANSITION");
+  assert.deepEqual(cli(root, ["return-to-draft", task.id], { revision: task.revision }), task);
+  cli(root, ["approve", task.id], { actor: "manager", revision: task.revision }, "USER_APPROVAL_REQUIRED");
   task = cli(root, ["approve", task.id], { revision: task.revision });
   cli(root, ["update", task.id], { criteria: ["Download XLSX."] }, "USER_REQUIREMENTS_REQUIRED");
   task = cli(root, ["update", task.id], { criteria: ["Download XLSX."], actor: "user", note: "Use XLSX" });
   assert.equal(task.status, "ready");
   assert.equal(cli(root, ["list"]).tasks.length, 1);
+});
+
+test("return to draft preserves the card and invalidates queued and late lifecycle operations", async t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const restore = (task: Task) => {
+    const draft = cli(root, ["return-to-draft", task.id], { revision: task.revision });
+    assert.equal(draft.status, "draft");
+    assert.equal(draft.id, task.id);
+    assert.equal(draft.createdAt, task.createdAt);
+    assert.equal(draft.closedAt, undefined);
+    assert.equal(draft.blocked, undefined);
+    assert.equal(draft.acceptanceRepair, undefined);
+    assert.deepEqual(draft.history.slice(0, -1), task.history);
+    for (const key of ["description", "criteria", "subtasks", "attachments", "dependencies", "result", "git"] as const) {
+      assert.deepEqual(draft[key], task[key], key);
+    }
+    return draft;
+  };
+  const create = () => cli(root, ["create"], { title: "Fixture", description: "Keep this brief", criteria: ["Confirmed"], workingDirectory: root });
+  const approve = (task: Task) => cli(root, ["approve", task.id], { revision: task.revision });
+  const start = (task: Task) => cli(root, ["start", task.id], { revision: task.revision }).task;
+  const submit = (task: Task) => {
+    const { token } = cli(root, ["preview", task.id]);
+    return cli(root, ["submit", task.id], { token, noChanges: true, summary: "Test result", checks: ["Evidence"] });
+  };
+  restore(approve(create()));
+  const running = start(approve(create()));
+  runtimeTransaction(root, entries => entries.push({ id: "queue:" + running.id, owner: 0, kind: "queue",
+    task: running.id, revision: running.revision }));
+  const release = registerRuntime(root, { kind: "slot", role: "executor", task: running.id })!;
+  try {
+    cli(root, ["return-to-draft", running.id], { revision: running.revision }, "CHAT_BUSY");
+    assert.deepEqual(cli(root, ["show", running.id]).history, running.history);
+  } finally { release(); }
+  const { token } = cli(root, ["preview", running.id]);
+  restore(running);
+  assert.ok(!runtimeEntries(root).some(entry => entry.task === running.id));
+  cli(root, ["start", running.id], { revision: running.revision }, "INVALID_TRANSITION");
+  cli(root, ["submit", running.id], { token, noChanges: true, summary: "Late", checks: ["Late"] }, "INVALID_TRANSITION");
+  const blocked = start(approve(create()));
+  restore(cli(root, ["block", blocked.id], { reason: "Fixture", condition: "Retry" }));
+  const review = submit(start(approve(create())));
+  restore(review);
+  cli(root, ["accept", review.id], { actor: "user", revision: review.revision, message: "Late acceptance" }, "INVALID_TRANSITION");
+  const cancelledReview = submit(start(approve(create())));
+  const cancelled = cli(root, ["cancel", cancelledReview.id], { reason: "Fixture" });
+  assert.deepEqual(cancelled.result, cancelledReview.result);
+  restore(cancelled);
+  const doneReview = submit(start(approve(create())));
+  const done = cli(root, ["accept", doneReview.id], { actor: "user", revision: doneReview.revision });
+  cli(root, ["return-to-draft", done.id], { revision: done.revision }, "INVALID_TRANSITION");
+  assert.deepEqual(cli(root, ["show", done.id]).history, done.history);
+  const file = join(root, "archive-evidence.txt");
+  writeFileSync(file, "Keep archived bytes\n");
+  const attached = cli(root, ["attachment", "add", create().id], { path: file });
+  const archived = cli(root, ["cancel", approve(attached).id], { reason: "Archive fixture" });
+  cli(root, ["settings"], { archiveAfterDays: 0 });
+  assert.ok(cli(root, ["archive", "sweep"]).archived.includes(archived.id));
+  restore(archived);
+  assert.ok(cli(root, ["list"]).tasks.some((task: Task) => task.id === archived.id));
+  const destination = join(root, "restored-evidence.txt");
+  cli(root, ["attachment", "read", archived.id], { file: attached.attachments[0].file, destination });
+  assert.equal(readFileSync(destination, "utf8"), "Keep archived bytes\n");
+  const run = async (task: Task, command: string, input: object) => {
+    const child = spawn(process.execPath, commandArgs(root, [command, task.id], input), { env, windowsHide: true });
+    let output = "";
+    child.stdout.on("data", chunk => { output += chunk; });
+    child.stdin.end(JSON.stringify(input));
+    await once(child, "close");
+    return JSON.parse(output);
+  };
+  const racingReady = approve(create());
+  const racingWork = start(approve(create()));
+  const racingReview = submit(start(approve(create())));
+  for (const [task, action, args, winnerState] of [
+    [racingReady, "start", { revision: racingReady.revision }, "in_progress"],
+    [racingWork, "submit", { token: cli(root, ["preview", racingWork.id]).token, noChanges: true, summary: "Racing", checks: ["Evidence"] }, "review"],
+    [racingReview, "accept", { actor: "user", revision: racingReview.revision }, "done"],
+  ] as const) {
+    const [returned, competing] = await Promise.all([run(task, "return-to-draft", { revision: task.revision }), run(task, action, args)]);
+    assert.notEqual(returned.ok, competing.ok, JSON.stringify({ returned, competing }));
+    assert.equal(cli(root, ["show", task.id]).status, returned.ok ? "draft" : winnerState);
+  }
 });
 
 test("task chat stores messages and attachments together and archives the conversation", t => {
@@ -3267,7 +3353,7 @@ test("doctor recovers archive cleanup after an index switch and preserves change
 
 
 test("user acceptance repairs remain review and continue only after checked submission", t => {
-  for (const outcome of ["accept", "cancel", "advance", "fail"]) {
+  for (const outcome of ["accept", "cancel", "advance", "fail", "return-queued", "return-running"]) {
     const root = fixture(t, true);
     const { task, worktree } = submitFixture(root, path => writeFileSync(join(path, "source.txt"), "task version\n"));
     cli(root, ["settings"], { autoMode: false, reviewMode: "human", reviewer: { provider: "codex", model: "review-model", effort: "high" } });
@@ -3279,10 +3365,24 @@ test("user acceptance repairs remain review and continue only after checked subm
     assert.equal(queued.status, "review"); assert.equal(queued.acceptanceRepair.phase, "queued");
     const repeated = cli(root, ["accept", task.id], { ...input, revision: queued.revision });
     assert.equal(repeated.revision, queued.revision);
+    const returnRepair = (current: Task) => {
+      writeFileSync(join(worktree, "uncommitted.txt"), "Do not discard");
+      const branchHead = git(worktree, "rev-parse", "HEAD");
+      const draft = cli(root, ["return-to-draft", task.id], { revision: current.revision });
+      assert.equal(draft.status, "draft");
+      assert.equal(draft.acceptanceRepair, undefined);
+      assert.deepEqual(draft.result, current.result);
+      assert.equal(git(worktree, "rev-parse", "HEAD"), branchHead);
+      assert.equal(readFileSync(join(worktree, "uncommitted.txt"), "utf8"), "Do not discard");
+      cli(root, ["accept", task.id], { ...input, continueRepair: true, revision: draft.revision }, "REPAIR_CANCELLED");
+      assert.equal(git(root, "rev-parse", "HEAD"), head);
+    };
+    if (outcome === "return-queued") { returnRepair(queued); continue; }
     const run = cli(root, ["start", task.id, "--compact"], { revision: queued.revision, resolveConflicts: true, launchDetails: true });
     assert.equal(run.worktree, worktree); assert.equal(run.task.status, "review");
     assert.equal(run.task.execution.model, "review-model");
     const running = cli(root, ["show", task.id]);
+    if (outcome === "return-running") { returnRepair(running); continue; }
     cli(root, ["start", task.id], { revision: running.revision, resolveConflicts: true }, "REPAIR_UNFINISHED");
     if (outcome === "fail") {
       const failed = cli(root, ["block", task.id], { reason: "Required check failed", condition: "Fix check" });

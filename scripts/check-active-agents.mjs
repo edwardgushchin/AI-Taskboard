@@ -1,26 +1,31 @@
 // Real main process, private profile and empty boards: never touches a user's queue.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, symlinkSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { electronCheck } from "./electron-check.mjs";
 import { saveManagerHistory } from "../src/desktop/manager-history.ts";
+import { registerRuntime, runtimeEntries } from "../src/desktop/board-runtime.ts";
 
-const { scratch, artifacts } = electronCheck(import.meta.url, "active-agents", 120_000);
+const returnCheck = process.argv.includes("--return-to-draft-only");
+const restart = process.argv.includes("--verify-return-restart");
+const { scratch, artifacts } = electronCheck(import.meta.url, "active-agents", 120_000,
+  returnCheck ? [[], ["--verify-return-restart"]] : [[]]);
 void (async () => {
 const require = createRequire(import.meta.url);
 const { app, BrowserWindow, dialog } = require("electron");
 const { transformSync } = require("esbuild");
 const root = fileURLToPath(new URL("../", import.meta.url));
 process.env.GIT_CEILING_DIRECTORIES = scratch;
-app.setPath("userData", join(scratch, "profile"));
+app.setPath("userData", join(scratch, restart ? "restart-profile" : "profile"));
 app.setPath("appData", join(scratch, "app-data"));
 app.requestSingleInstanceLock = () => true;
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch("lang", "ru");
-symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), join(scratch, "node_modules"), "junction");
+if (!restart) symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), join(scratch, "node_modules"), "junction");
 const boards = [join(scratch, "first"), join(scratch, "second")];
 const cli = (project, args, input) => {
   const result = JSON.parse(execFileSync(process.env.TASKBOARD_CHECK_NODE, [
@@ -42,7 +47,7 @@ let chosen;
 dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [chosen] });
 let window;
 try {
-  for (const board of boards) {
+  for (const board of restart ? [] : boards) {
     mkdirSync(board);
     cli(board, ["init"], { git: false });
     cli(board, ["settings"], { name: "Shared board" });
@@ -50,8 +55,13 @@ try {
       items: [{ id: "qa-unread", type: "agentMessage", title: "", text: "QA notice", phase: "final_answer", status: "completed" }] });
   }
   const sourceUrl = new URL("../src/desktop/main.ts", import.meta.url);
-  const source = ('import { trackActiveRun } from "./active-runs.ts";\n' + readFileSync(sourceUrl, "utf8")).replaceAll("import.meta.url", JSON.stringify(sourceUrl.href))
+  let source = ('import { trackActiveRun } from "./active-runs.ts";\n' + readFileSync(sourceUrl, "utf8")).replaceAll("import.meta.url", JSON.stringify(sourceUrl.href))
     .replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, sourceUrl).href));
+  if (returnCheck && !restart) {
+    source = source.replace("release.run(() => replyToBoard(", "release.run(() => globalThis.returnCheck.replyToBoard(")
+      .replace("writer.run(() => replyToTask(", "writer.run(() => globalThis.returnCheck.replyToTask(")
+      .replace("await writeFile(path, Buffer.from(file.bytes));", "await globalThis.returnCheck.copyAttachment(path, Buffer.from(file.bytes));");
+  }
   const entry = join(scratch, "main-under-test.mjs");
   writeFileSync(entry, transformSync(source + "\nglobalThis.agentCheck = { trackActiveRun, createWindow };", { loader: "ts", format: "esm" }).code);
   app.on("web-contents-created", (_event, contents) => contents.setBackgroundThrottling(false));
@@ -68,7 +78,14 @@ try {
   await evaluate("window.taskboard.setLanguage('ru')");
   await open(boards[0]);
   await open(boards[1]);
-  const second = globalThis.agentCheck.createWindow([boards[0]]).window;
+  if (restart) {
+    assert.equal(cli(boards[1], ["show", "T-0001"]).status, "draft");
+    assert.equal(await evaluate("window.taskboard.bootstrap().then(f => f.board?.tasks.find(task => task.id === 'T-0001')?.status)"), "draft");
+    console.log("A fresh Electron process reads the returned draft");
+    app.exit(0);
+    return;
+  }
+  const second = globalThis.agentCheck.createWindow([boards[returnCheck ? 1 : 0]]).window;
   const read = win => win.webContents.executeJavaScript(`(() => {
     const el = document.querySelector('#status-agents');
     const tip = document.querySelector('#status-agents-tooltip');
@@ -76,6 +93,149 @@ try {
       visible: getComputedStyle(tip).display !== 'none', label: el.getAttribute('aria-label') };
   })()`);
   await wait(() => second.webContents.executeJavaScript("window.taskboard?.bootstrap().then(f => Boolean(f.board))"));
+  if (returnCheck) {
+    const project = boards[1];
+    const created = cli(project, ["create"], { title: "Return from two windows", criteria: ["Checked"], workingDirectory: project });
+    const ready = cli(project, ["approve", created.id], { revision: created.revision });
+    const running = cli(project, ["start", ready.id], { revision: ready.revision }).task;
+    const send = (win, revision) => win.webContents.executeJavaScript(
+      `window.taskboard.command('return-to-draft', ${JSON.stringify(running.id)}, ${JSON.stringify({ revision })})`);
+    const release = registerRuntime(project, { kind: "slot", role: "executor", task: running.id });
+    try {
+      assert.equal((await send(second, running.revision)).error.code, "CHAT_BUSY");
+      assert.equal(cli(project, ["show", running.id]).status, "in_progress");
+    } finally { release(); }
+    const replies = await Promise.all([send(window, running.revision), send(second, running.revision)]);
+    assert.equal(replies.filter(reply => reply.ok && reply.data.status === "draft").length, 1, JSON.stringify(replies));
+    assert.ok(["CHAT_BUSY", "REVISION_CONFLICT"].includes(replies.find(reply => !reply.ok)?.error.code), JSON.stringify(replies));
+    const draft = cli(project, ["show", running.id]);
+    assert.equal(draft.createdAt, running.createdAt);
+    assert.equal(draft.status, "draft");
+    assert.equal((await send(second, draft.revision)).data.revision, draft.revision);
+    for (const win of [window, second]) await wait(() => win.webContents.executeJavaScript(
+      `window.taskboard.bootstrap().then(f => f.board?.tasks.some(task => task.id === ${JSON.stringify(draft.id)} && task.status === 'draft'))`));
+    console.log("Return to draft through real IPC passed in two windows with one shared card");
+
+    const startCard = title => {
+      const card = cli(project, ["create"], { title, criteria: ["Checked"], workingDirectory: project });
+      const approved = cli(project, ["approve", card.id], { revision: card.revision });
+      return cli(project, ["start", card.id], { revision: approved.revision }).task;
+    };
+    const returnCard = card => second.webContents.executeJavaScript(
+      `window.taskboard.command('return-to-draft', ${JSON.stringify(card.id)}, { revision: ${card.revision} })`);
+    const untilStopped = async (stopped, pending) => Promise.race([
+      stopped,
+      pending.then(result => assert.fail("Return completed before stopping the writer: " + JSON.stringify(result))),
+    ]);
+    const reviewStarted = Promise.withResolvers();
+    const reviewStopped = Promise.withResolvers();
+    const finishReview = Promise.withResolvers();
+    globalThis.returnCheck = {
+      async replyToBoard(_profile, _project, _prompt, _images, _tool, _tools, _instructions, signal) {
+        signal.addEventListener("abort", () => reviewStopped.resolve(), { once: true });
+        reviewStarted.resolve();
+        await finishReview.promise;
+        return { interrupted: true };
+      },
+    };
+    cli(project, ["settings"], { reviewMode: "manager", autoMode: false });
+    const submitted = startCard("Active manager review");
+    const preview = cli(project, ["preview", submitted.id]);
+    const review = cli(project, ["submit", submitted.id], { token: preview.token, noChanges: true,
+      summary: "Fixture", checks: ["Fixture"] });
+    await reviewStarted.promise;
+    const returningReview = returnCard(review);
+    await untilStopped(reviewStopped.promise, returningReview);
+    assert.equal(cli(project, ["show", review.id]).status, "review");
+    finishReview.resolve();
+    const returnedReview = await returningReview;
+    assert.equal(returnedReview.data?.status, "draft", JSON.stringify(returnedReview));
+    assert.equal(returnedReview.data.result.summary, review.result.summary);
+    console.log("A window interrupts the local manager review and waits for its reservation to release");
+
+    const checkDelayedAttachment = async returning => {
+      const discussion = startCard(returning ? "Return with delayed attachment" : "Reply ends with delayed attachment");
+      const chatReady = Promise.withResolvers();
+      const chatFinished = Promise.withResolvers();
+      const copyStarted = Promise.withResolvers();
+      const finishCopy = Promise.withResolvers();
+      let copied = false;
+      let uploadPath;
+      let providerRuns = 0;
+      let steers = 0;
+      Object.assign(globalThis.returnCheck, {
+        async replyToTask(...args) {
+          providerRuns++;
+          args[10]({
+            steer: async () => { steers++; },
+            interrupt: async () => {
+              assert.equal(returning, true);
+              chatFinished.resolve({ interrupted: true });
+            },
+          });
+          chatReady.resolve();
+          return chatFinished.promise;
+        },
+        async copyAttachment(path, bytes) {
+          uploadPath = path;
+          copyStarted.resolve();
+          await finishCopy.promise;
+          await writeFile(path, bytes);
+          copied = true;
+        },
+      });
+      const chat = (text, files = "[]") => evaluate(
+        `window.taskboard.chatSend(${JSON.stringify(discussion.id)}, { model: 'fixture', effort: 'low', text: ${JSON.stringify(text)}, files: ${files} })`);
+      const original = chat("Keep this message");
+      await chatReady.promise;
+      const before = cli(project, ["show", discussion.id]);
+      const steering = chat("Late attachment", "[{ name: 'late.txt', type: 'text/plain', bytes: new Uint8Array([65]).buffer }]");
+      await copyStarted.promise;
+      if (!returning) {
+        chatFinished.resolve({ text: "Completed reply" });
+        assert.equal((await original).result.ok, true);
+        finishCopy.resolve();
+        const message = await steering;
+        assert.equal(message.saved, true, JSON.stringify(message));
+        assert.equal(message.result.error.code, "CHAT_FAILED");
+        assert.equal(copied, true);
+        assert.equal(providerRuns, 1);
+        assert.equal(steers, 0);
+        assert.equal(existsSync(dirname(uploadPath)), false);
+        const after = cli(project, ["show", discussion.id]);
+        assert.equal(after.status, "in_progress");
+        assert.deepEqual(after.history.filter(event => event.chat).map(event => event.text),
+          ["Keep this message", "Completed reply", "Late attachment"]);
+        const [attachment] = after.attachments;
+        assert.equal(attachment.name, "late.txt");
+        const destination = join(scratch, "verified-late.txt");
+        cli(project, ["attachment", "read", discussion.id], { file: attachment.file, destination });
+        assert.equal(readFileSync(destination, "utf8"), "A");
+        console.log("Normal completion preserves the delayed message and attachment without steering another turn");
+        return;
+      }
+      const returningChat = returnCard(before);
+      await untilStopped(chatFinished.promise, returningChat);
+      assert.equal((await original).saved, true);
+      assert.equal(cli(project, ["show", discussion.id]).status, "in_progress");
+      assert.ok(runtimeEntries(project).some(entry => entry.kind === "task" && entry.task === discussion.id));
+      finishCopy.resolve();
+      assert.equal((await steering).saved, false);
+      assert.equal(copied, true);
+      assert.equal(providerRuns, 1);
+      assert.equal(steers, 0);
+      assert.equal(existsSync(dirname(uploadPath)), false);
+      const returnedChat = await returningChat;
+      assert.equal(returnedChat.data?.status, "draft", JSON.stringify(returnedChat));
+      assert.deepEqual(returnedChat.data.attachments, before.attachments);
+      assert.deepEqual(returnedChat.data.history.slice(0, -1), before.history);
+      console.log("Return waits for the delayed attachment and leaves the saved conversation intact");
+    };
+    await checkDelayedAttachment(false);
+    await checkDelayedAttachment(true);
+    app.exit(0);
+    return;
+  }
   const expect = async count => {
     await wait(async () => (await read(window)).count === count && (await read(second)).count === count);
   };

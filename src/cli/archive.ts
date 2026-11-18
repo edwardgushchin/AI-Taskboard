@@ -113,6 +113,22 @@ export function readTask(store: BoardStore, id: string): Task {
     revision: task.revision + edit.history.length, updatedAt: edit.history.at(-1)!.at } : task;
 }
 
+export function reactivateArchivedTask(store: BoardStore, draft: Task): Task {
+  const link = store.index.archive[draft.id];
+  const archive = openArchive(store, draft.id, link);
+  const bytes = archivedBytes(archive, draft.attachments);
+  for (const file of draft.attachments.filter(file => !file.link)) {
+    const path = join(attachmentFolder(store, draft, true), file.file);
+    if (exists(path)) verifyBytes(file, readBinary(path));
+    else writeAtomic(path, bytes["attachments/" + file.file]);
+  }
+  store.save(draft);
+  delete store.index.archive[draft.id];
+  store.index.tasks[draft.id] = "tasks/" + draft.id + ".json";
+  store.saveIndex();
+  return draft;
+}
+
 export function setAttachmentCover(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
   requireRevision(task, input.revision);
   const file = text(input.file, "file", true);
@@ -402,7 +418,7 @@ export function sweepArchives(store: BoardStore, now = new Date()) {
     try {
       let task = store.card(id);
       if (task.status !== "done" && task.status !== "cancelled") continue;
-      const compact = withoutVerification(task);
+      const compact = task.status === "done" ? withoutVerification(task) : task;
       if (compact !== task && !exists(store.pendingPath(id))) task = store.save(compact);
       const closure = closedAt(task);
       if (!closure || !(now.getTime() - Date.parse(closure) >= afterDays * day)) continue;

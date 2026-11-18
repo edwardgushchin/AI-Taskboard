@@ -284,6 +284,43 @@ app.whenReady().then(async () => {
     console.log(`Acceptance repair Chromium checks passed: ${checks}`);
     return;
   }
+  if (process.argv.includes("--return-to-draft-only")) {
+    await evaluate(`
+      const returned = task('T-0139', 'Return fixture', { status: 'ready' });
+      const findReturn = () => [...body.querySelectorAll('button')].find(button => button.textContent === 'Вернуть в черновик');
+      let lastReturn, rejectReturn = false;
+      window.taskboard.command = async (action, id, input) => {
+        if (action === 'return-to-draft') {
+          lastReturn = { id, revision: input.revision };
+          if (rejectReturn) return { ok: false, error: { code: 'CHAT_BUSY', message: 'Fixture writer is active' } };
+          returned.status = 'draft';
+          returned.revision++;
+          push();
+        }
+        return { ok: true, data: structuredClone(returned) };
+      };
+      fixture.board.tasks = [returned];
+      const showReturn = async status => {
+        returned.status = status; push();
+        await showTask(returned.id);
+      };
+      showReturn('ready');
+    `);
+    for (const status of ["ready", "in_progress", "blocked", "review", "cancelled", "done", "draft"]) {
+      await evaluate(`showReturn(${JSON.stringify(status)})`);
+      await check(`Boolean(findReturn()) === ${!["done", "draft"].includes(status)}`, status + " return action");
+    }
+    await evaluate(`rejectReturn = true; showReturn('in_progress')`);
+    await capture('return-active-card.png');
+    await evaluate(`findReturn().click(); waitFor(() => document.body.textContent.includes('Fixture writer is active'))`);
+    await check(`taskInSheet.status === 'in_progress'`, 'writer failure leaves current state visible');
+    await evaluate(`rejectReturn = false; findReturn().click(); waitFor(() => taskInSheet?.status === 'draft')`);
+    await check(`lastReturn.id === returned.id && lastReturn.revision === returned.revision - 1`, 'return uses the current card revision');
+    window.setContentSize(710, 820);
+    await capture('returned-draft-narrow.png');
+    console.log(`Return to draft Chromium checks passed: ${checks}`);
+    return;
+  }
   if (process.argv.includes("--cleanup-only")) {
     await evaluate(`
       const accepted = task('T-0138', 'Completed cleanup fixture', { status: 'done', cleanupAvailable: true,

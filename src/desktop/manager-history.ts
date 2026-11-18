@@ -247,7 +247,7 @@ function displayTurns({ message, items, durationMs, lane, goalId }: Run, started
 const workTools = new Set([
   "manager_ack", "manager_inbox", "task_wait", "task_message", "team_inbox", "team_message",
   "task_approve", "task_start", "task_start_batch", "task_block", "task_unblock",
-  "task_submit", "task_request_changes", "task_accept", "task_cancel",
+  "task_submit", "task_request_changes", "task_accept", "task_cancel", "task_return_to_draft",
 ]);
 
 const isWorkActivity = (item: BoardActivity) =>

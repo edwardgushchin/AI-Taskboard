@@ -96,6 +96,8 @@ const actions = {
   task_cancel: { description: "Cancel an unfinished task. Record the reason in history. For consolidation, transfer requirements first, then supply mergedInto and transferred for a contextual notification.",
     properties: { ...taskReference, reason, mergedInto: taskReference.id,
       transferred: { ...reason, description: "What requirements were transferred to mergedInto; required with mergedInto." } }, required: ["id", "revision", "reason"] },
+  task_return_to_draft: { description: "Return the same card to draft, only on an explicit user instruction. Read task_show for the current revision. Ready, in-progress, blocked, review and cancelled cards can return. Completed cards cannot. Confirm only from the tool result. The user must approve the draft on the board before work can start again.",
+    properties: taskReference, required: ["id", "revision"] },
   task_block: { description: "Block a draft, ready, or in-progress task. Record the obstacle and how it can be resolved.",
     properties: { ...taskReference, reason, condition: reason }, required: ["id", "revision", "reason", "condition"] },
   task_unblock: { description: "Remove a resolved blocker, or replace a blocker that only needs another card to be accepted with task dependencies. Restore a draft or return the task to ready without starting work. If supplied, dependencies replaces the full list.",
@@ -154,6 +156,7 @@ const tools = Object.entries(actions).map(([name, { description, properties, req
 const reviewActions = new Set(["task_approve", "task_accept", "task_request_changes"]);
 const mcpNames = new Set(["task_cancel", "task_tool_revoke", "provider_tools", "task_tool_grant", "task_set_executor_access", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_wait", ...reviewActions, "task_review_queue", "task_review", "task_review_diff", "task_review_artifact", "task_cleanup_status", "task_cleanup", "project_git", "project_git_push", "project_path", "project_sha256", "milestones_list", "github_create_milestone", "github_set_milestone_due", "task_set_milestone", "tag_set_color"]);
 mcpNames.add("board_auto_queue");
+mcpNames.add("task_return_to_draft");
 Object.keys(expertActions).forEach(name => mcpNames.add(name));
 export const boardTools = tools.filter(tool => !mcpNames.has(tool.name));
 export const boardMcpTools = tools.filter(tool => mcpNames.has(tool.name));
@@ -168,7 +171,7 @@ export const reviewerTools = tools.filter(tool => ["task_review_diff", "task_rev
       comparison: { type: "string", enum: ["previous-submission", "previous-target"] } } },
   } : tool);
 
-export const autoReviewTaskTools = new Set(["task_review", "task_review_diff", "task_review_artifact", "task_accept", "task_request_changes", "expert_stage", "team_inbox", "team_message", "team_findings"]);
+export const autoReviewTaskTools = new Set(["task_review", "task_review_diff", "task_review_artifact", "task_accept", "task_request_changes", "task_return_to_draft", "expert_stage", "team_inbox", "team_message", "team_findings"]);
 export const autoReviewReadTools = new Set(["board_list", "task_show", "project_git", "project_path", "project_sha256", "expert_list", "expert_context", "expert_skill"]);
 const reviewInstructions = "Follow reviewMode from task_review. In human mode, acceptance belongs to the user; execute an explicit user request to return work with task_request_changes. In reviewer mode, the reviewer handles verification and returns confirmed defects to the executor. After reviewerApproval, carry the task through integration without a separate user decision for ordinary integration. Read task_review for the current revision, targetHead and target changes since approval. Check affected criteria and merge readiness if the target advanced. If a Git conflict prevents integration, use task_start with resolveConflicts: true and the current revision on the same card. Have the executor resolve conflicts, run the applicable checks and resubmit; obtain reviewer approval for the updated submission, then accept it with the current revision and targetHead. Continue independent work while repair or review is running. If the result is no longer needed, use task_cancel with a reason. Use task_wait with reviewIds if you need to wait for an outcome. In manager mode, independently check each criterion using relevant diffs, saved reports or read-only project data. Return a task only for a concrete material issue with actionable feedback. Accept only with evidence for every criterion and no material issue remaining. A clean merge or the executor's claim alone is insufficient. If a criterion calls for subjective approval or cannot be verified, leave the task in review and name the gap. Use the current revision and targetHead.";
 const evidenceInstructions = "Open each required artifact in result.artifactEvidence with task_review_artifact, passing its exact source, SHA-256 and kind as format. Assess screenshots and check reports against the corresponding criteria. Before accepting, check whether the project or task needs any evidence after acceptance. The board can remove temporary artifact copies and ignored worktree files during acceptance. If evidence only exists there, verify the paths and checksums of a durable copy or use a reproduction recipe when it suffices. Continue reviewing other tasks while material is missing.";
@@ -356,7 +359,8 @@ export function boardActions(project: string, attachments: { path: string; name:
   activeGoal: () => { threadId: string; objective: string; signal: AbortSignal } | undefined,
   isTaskRunning: (id: string) => boolean, observe: ObserveTasks, notifyExecutor: (id: string, sequence: number) => Promise<boolean>,
   deliveredMessages: Set<string> | undefined, waitInterrupt: () => AbortSignal,
-  runReview?: ReviewRunner, reviewReports = new Map<string, ReviewedSubmission>()) {
+  runReview?: ReviewRunner, reviewReports = new Map<string, ReviewedSubmission>(),
+  returnToDraft?: (id: string, revision: number) => Promise<CliReply<Task>>) {
   const reviewSnapshots = new Map<string, Pick<TaskReview, "revision" | "targetHead" | "artifacts"> & {
     mode: ReviewMode; criteriaCount: number; reviewerApproved: boolean;
   }>();
@@ -722,7 +726,8 @@ export function boardActions(project: string, attachments: { path: string; name:
           return cliFailure("INVALID_INPUT", "Describe the changes the executor needs to make.");
         }
       }
-      result = action === "task_start" || action === "task_request_changes" ?
+      result = action === "task_return_to_draft" && returnToDraft ? await returnToDraft(id, Number(fields.revision)) :
+        action === "task_start" || action === "task_request_changes" ?
         await startTask(id, Number(fields.revision), action === "task_request_changes" ? {
           reason: String(fields.reason), targetHead: fields.targetHead as string | null | undefined,
           reviewMode: fields.reviewMode as ReviewMode | undefined,

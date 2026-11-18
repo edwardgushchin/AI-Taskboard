@@ -3935,7 +3935,9 @@ async function showTask(id) {
       () => act("update", { schedulePaused: !task.schedule.paused })));
   }
   if (task.status === "draft" && !task.approvalRequirements?.length) actions.append(button(() => t("ui.approve_535c27a7"), () => act("approve"), "primary"));
-  if (task.status === "ready") actions.append(button(() => t("ui.return_to_draft_ccd17679"), () => act("return-to-draft")));
+  if (["ready", "in_progress", "blocked", "review", "cancelled"].includes(task.status)) {
+    actions.append(button(() => t("ui.return_to_draft_ccd17679"), () => act("return-to-draft")));
+  }
   if (task.workingDirectory) {
     const directory = element("section", undefined, "sheet-section");
     const location = element("p", () => t("ui.working_directory_b37ab351") + " · ");

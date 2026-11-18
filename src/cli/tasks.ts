@@ -179,6 +179,17 @@ export function withoutVerification(task: Task): Task {
 
 export function changeTask(task: Task, action: string, input: Record<string, unknown>): Task {
   requireRevision(task, input.revision);
+  if (action === "return-to-draft") {
+    requireState(task, [...activeStates, "cancelled"]);
+    if (task.status === "draft") return task;
+    requireRevision(task, input.revision, true);
+    const draft = record(task, action, boardActor(input, "user"), "draft");
+    delete draft.closedAt;
+    delete draft.blocked;
+    delete draft.acceptanceRepair;
+    delete draft.launchRequested;
+    return draft;
+  }
   if (action === "comment" && task.status === "done") {
     return { ...record(task, action, boardActor(input), task.status, text(input.text, "text", true)), closedAt: task.closedAt };
   }
@@ -186,13 +197,14 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
   switch (action) {
     case "approve":
       requireState(task, ["draft"]);
+      if (boardActor(input, "user") !== "user" &&
+          task.history.findLast(event => event.action === "approve" || event.action === "return-to-draft")?.action === "return-to-draft") {
+        throw new TaskboardError("USER_APPROVAL_REQUIRED", "The user must approve this returned draft on the board.");
+      }
       if (!task.criteria.length) {
         throw new TaskboardError("CRITERIA_REQUIRED", "Add acceptance criteria before approving the task.");
       }
       return record(task, action, boardActor(input, "user"), "ready");
-    case "return-to-draft":
-      requireState(task, ["ready"]);
-      return record(task, action, "user", "draft");
     case "request-changes":
       requireState(task, ["review"]);
       return record(task, action, input.actor === "reviewer" ? "reviewer" : boardActor(input, "user"),
