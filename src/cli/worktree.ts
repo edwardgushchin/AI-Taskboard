@@ -142,14 +142,14 @@ function isolatedRoot(repo: Repository, create = false): string {
   return path;
 }
 
-export function hasPending(store: BoardStore, task: Task): boolean {
+export function hasPending(store: BoardStore, task: Task, holdsStartLock = false): boolean {
   const path = store.pendingPath(task.id);
   if (!exists(path)) return false;
   const repo = store.location.repository;
   if (!repo || task.status !== "ready") return true;
   const pending = object(readJson(path));
   if (pending.action !== "start" || pending.revision !== task.revision) return true;
-  if (taskStartInProgress(store.location, task.id)) return true;
+  if (!holdsStartLock && taskStartInProgress(store.location, task.id)) return true;
 
   const branch = worktreeBranch(task);
   const managedPaths = [isolatedRoot(repo), join(store.location.directory, "worktrees"), join(repo.root, ".taskboard-worktrees")]

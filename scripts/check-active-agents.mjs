@@ -7,20 +7,24 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { electronCheck } from "./electron-check.mjs";
 import { saveManagerHistory } from "../src/desktop/manager-history.ts";
+import { registerRuntime } from "../src/desktop/board-runtime.ts";
 
-const { scratch, artifacts } = electronCheck(import.meta.url, "active-agents", 120_000);
+const returnCheck = process.argv.includes("--return-to-draft-only");
+const restart = process.argv.includes("--verify-return-restart");
+const { scratch, artifacts } = electronCheck(import.meta.url, "active-agents", 120_000,
+  returnCheck ? [[], ["--verify-return-restart"]] : [[]]);
 void (async () => {
 const require = createRequire(import.meta.url);
 const { app, BrowserWindow, dialog } = require("electron");
 const { transformSync } = require("esbuild");
 const root = fileURLToPath(new URL("../", import.meta.url));
 process.env.GIT_CEILING_DIRECTORIES = scratch;
-app.setPath("userData", join(scratch, "profile"));
+app.setPath("userData", join(scratch, restart ? "restart-profile" : "profile"));
 app.setPath("appData", join(scratch, "app-data"));
 app.requestSingleInstanceLock = () => true;
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch("lang", "ru");
-symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), join(scratch, "node_modules"), "junction");
+if (!restart) symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), join(scratch, "node_modules"), "junction");
 const boards = [join(scratch, "first"), join(scratch, "second")];
 const cli = (project, args, input) => {
   const result = JSON.parse(execFileSync(process.env.TASKBOARD_CHECK_NODE, [
@@ -42,7 +46,7 @@ let chosen;
 dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [chosen] });
 let window;
 try {
-  for (const board of boards) {
+  for (const board of restart ? [] : boards) {
     mkdirSync(board);
     cli(board, ["init"], { git: false });
     cli(board, ["settings"], { name: "Shared board" });
@@ -68,7 +72,14 @@ try {
   await evaluate("window.taskboard.setLanguage('ru')");
   await open(boards[0]);
   await open(boards[1]);
-  const second = globalThis.agentCheck.createWindow([boards[0]]).window;
+  if (restart) {
+    assert.equal(cli(boards[1], ["show", "T-0001"]).status, "draft");
+    assert.equal(await evaluate("window.taskboard.bootstrap().then(f => f.board?.tasks.find(task => task.id === 'T-0001')?.status)"), "draft");
+    console.log("A fresh Electron process reads the returned draft");
+    app.exit(0);
+    return;
+  }
+  const second = globalThis.agentCheck.createWindow([boards[returnCheck ? 1 : 0]]).window;
   const read = win => win.webContents.executeJavaScript(`(() => {
     const el = document.querySelector('#status-agents');
     const tip = document.querySelector('#status-agents-tooltip');
@@ -76,6 +87,31 @@ try {
       visible: getComputedStyle(tip).display !== 'none', label: el.getAttribute('aria-label') };
   })()`);
   await wait(() => second.webContents.executeJavaScript("window.taskboard?.bootstrap().then(f => Boolean(f.board))"));
+  if (returnCheck) {
+    const project = boards[1];
+    const created = cli(project, ["create"], { title: "Return from two windows", criteria: ["Checked"], workingDirectory: project });
+    const ready = cli(project, ["approve", created.id], { revision: created.revision });
+    const running = cli(project, ["start", ready.id], { revision: ready.revision }).task;
+    const send = (win, revision) => win.webContents.executeJavaScript(
+      `window.taskboard.command('return-to-draft', ${JSON.stringify(running.id)}, ${JSON.stringify({ revision })})`);
+    const release = registerRuntime(project, { kind: "slot", role: "executor", task: running.id });
+    try {
+      assert.equal((await send(second, running.revision)).error.code, "CHAT_BUSY");
+      assert.equal(cli(project, ["show", running.id]).status, "in_progress");
+    } finally { release(); }
+    const replies = await Promise.all([send(window, running.revision), send(second, running.revision)]);
+    assert.equal(replies.filter(reply => reply.ok && reply.data.status === "draft").length, 1, JSON.stringify(replies));
+    assert.ok(["CHAT_BUSY", "REVISION_CONFLICT"].includes(replies.find(reply => !reply.ok)?.error.code), JSON.stringify(replies));
+    const draft = cli(project, ["show", running.id]);
+    assert.equal(draft.createdAt, running.createdAt);
+    assert.equal(draft.status, "draft");
+    assert.equal((await send(second, draft.revision)).data.revision, draft.revision);
+    for (const win of [window, second]) await wait(() => win.webContents.executeJavaScript(
+      `window.taskboard.bootstrap().then(f => f.board?.tasks.some(task => task.id === ${JSON.stringify(draft.id)} && task.status === 'draft'))`));
+    console.log("Return to draft through real IPC passed in two windows with one shared card");
+    app.exit(0);
+    return;
+  }
   const expect = async count => {
     await wait(async () => (await read(window)).count === count && (await read(second)).count === count);
   };

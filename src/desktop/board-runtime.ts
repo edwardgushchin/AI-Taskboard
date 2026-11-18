@@ -87,10 +87,17 @@ export function runtimeEntries(project: string) {
   return liveEntries(readEntries(join(runtimeLocation(project).directory, "runtime.json")));
 }
 
+export function taskWriterId(task: string | undefined) {
+  return task?.replace(/^(review|draft):/, "");
+}
+
 export function registerRuntime(project: string, value: Omit<RuntimeEntry, "id" | "owner">,
   accept: (entries: RuntimeEntry[]) => boolean = () => true) {
   const id = randomUUID();
   const accepted = runtimeTransaction(project, entries => {
+    if (value.task && entries.some(entry => entry.kind !== "queue" &&
+        (value.task?.startsWith("draft:") || entry.task?.startsWith("draft:")) &&
+        taskWriterId(entry.task) === taskWriterId(value.task))) return false;
     if (!accept(entries)) return false;
     entries.push({ parent: value.kind === "provider" || value.kind === "turn" ? context.getStore() : undefined,
       startedAt: Date.now(), ...value, id, owner: process.pid });

@@ -45,7 +45,7 @@ const source = (file: string) => readFileSync(new URL("../src/desktop/" + file, 
 const boardSource = stripTypeScriptTypes(source("board-actions.ts").replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, ""));
 const main = ts.createSourceFile("main.ts", source("main.ts"), ts.ScriptTarget.Latest, true);
 const handlerSource = stripTypeScriptTypes(main.statements.map(node => node.getText(main)).filter(text =>
-  /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|scheduleMaintenance|scheduleRecurringTasks|taskRunLimit|readQueuedMessage|hasPendingManagerMessages|queuedFiles)\(|const (?:imageExtensions|imageTypes|boardRequests|boardWorkRequests|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork|maintenanceWork) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
+  /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|returnTaskToDraft|scheduleMaintenance|scheduleRecurringTasks|taskRunLimit|readQueuedMessage|hasPendingManagerMessages|queuedFiles)\(|const (?:imageExtensions|imageTypes|boardRequests|boardWorkRequests|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork|maintenanceWork|returningDrafts|reviewOperations|repairOperations|taskOperations) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
 const cliFailure = (code: string, message: string) => ({ ok: false, error: { code, message } });
 
@@ -220,6 +220,7 @@ function fixture(t: TestContext) {
       const mode = boardReviewMode((await callCli(project, ["settings"], undefined, false)).data);
       assert.deepEqual(Array.from(session.mcpTools, tool => tool.name).sort(),
         [...expectedTools.filter(name => (name !== "task_accept" || mode !== "human") && (!instructions.includes("This turn repairs") || !["task_start", "task_start_batch", "task_accept", "task_request_changes"].includes(name))),
+        ...(!manualTurn && !cleanupTurn && !instructions.includes("This turn repairs") ? ["task_return_to_draft"] : []),
         ...(!manualTurn && !cleanupTurn && mode === "manager" ? ["expert_stage"] : []),
         ...(!reviewTurn && !cleanupTurn ? (session.goal || session.resumeGoal ? ["goal_inbox", "goal_report"] : ["goal_read", "goal_send"]) : []),
         ...(reviewTurn && mode === "reviewer" ? ["manager_ack", "task_cancel", "task_start"] : [])].sort());
@@ -1963,6 +1964,16 @@ test("orchestrator discusses a board, remembers the turn, and cancels the origin
   assert.deepEqual(saved.tags, ["Интерфейс"]);
   assert.equal(saved.closedAt, board.tasks[0].closedAt);
   assert.equal(saved.history.at(-1).actor, "manager");
+  const returned = await f.run("Верни отменённую задачу в черновик", async act => {
+    const { data: current } = await act("task_show", { id: task.id });
+    assert.equal((await act("task_return_to_draft", { id: task.id, revision: current.revision - 1 })).error.code, "REVISION_CONFLICT");
+    const result = await act("task_return_to_draft", { id: task.id, revision: current.revision });
+    assert.equal(result.data.status, "draft", JSON.stringify(result.error));
+    assert.equal((await act("task_approve", { id: task.id, revision: result.data.revision })).error.code, "USER_APPROVAL_REQUIRED");
+    return { text: "Задача возвращена в черновик." };
+  });
+  assert.equal(returned.data.changes[0].action, "return_to_draft");
+  assert.equal((await f.cli(["show", task.id])).data.closedAt, undefined);
 });
 
 test("the project manager can revise an approved task and resolve its blocker from a discussion", async t => {

@@ -117,7 +117,9 @@ test("manual lifecycle actions retain audit history without notices; agents stil
     assert.deepEqual(managerUnread(root), []);
     assert.equal(cli(["show", task.id]).history.at(-1).actor, "user");
   };
-  manual("approve"); manual("return-to-draft"); manual("approve"); manual("start");
+  manual("approve");
+  manual("return-to-draft", { revision: cli(["show", task.id]).revision });
+  manual("approve"); manual("start");
   cli(["block", task.id], { reason: "useful blocker", condition: "access" });
   assert.equal(syncTaskStatusNotices(root), true);
   readManagerMessages(root, [...managerUnread(root)]);

@@ -146,9 +146,10 @@ const taskChangeLabels = {
   block: ["ui.task_blocked_2a3a359f"], unblock: ["ui.task_unblocked_9a6c3578"],
   start: ["ui.task_started_888ca190"], approve: ["ui.task_approved_b9a6d14e"],
   accept: ["ui.task_accepted_c7c75e62"], request_changes: ["ui.changes_requested_ef2e2c25"],
+  return_to_draft: ["ui.returned_the_task_to_draft_0224ff4e"],
   milestone: ["ui.milestone_updated_02dacc38"],
 };
-const visibleTaskActions = new Set(["comment", "approve", "start", "block", "unblock", "request_changes", "accept", "cancel"]);
+const visibleTaskActions = new Set(["comment", "approve", "start", "block", "unblock", "request_changes", "return_to_draft", "accept", "cancel"]);
 const statusNoticeActions = new Set(["approve", "start", "block", "unblock", "submit", "request_changes", "accept", "cancel"]);
 
 function reconcileWorkTransitions(work) {

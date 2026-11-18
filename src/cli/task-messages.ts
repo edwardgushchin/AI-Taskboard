@@ -39,7 +39,7 @@ export function taskMessages(task: Task, recipient: "manager" | "agent") {
   const lifecycle = task.history.findLastIndex(event => event.to !== undefined || executorOutcome(event));
   const approval = recipient === "manager" ? currentReviewApproval(task) : undefined;
   const latestSubmissionEvent = recipient === "manager" && !["done", "cancelled"].includes(task.status)
-    ? task.history.findLastIndex(event => event.action === "submit" || event.action === "request-changes") : -1;
+    ? task.history.findLastIndex(event => ["submit", "request-changes", "return-to-draft"].includes(event.action)) : -1;
   return task.history.flatMap((event, index) => {
     if (event.expertMessage && (recipient !== "manager" || event.expertMessage.from === "manager" ||
         event.expertMessage.from !== "owner" && !["manager", "owner", "team"].includes(event.expertMessage.to))) return [];
