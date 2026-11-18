@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld("taskboard", {
   windowsSpeech: (action, language) => ipcRenderer.invoke("chat:windowsSpeech", action, language),
   chatStop: id => ipcRenderer.invoke("chat:stop", id),
   chatSend: (id, request) => ipcRenderer.invoke("chat:send", id, request),
+  retryDraftDiscussion: id => ipcRenderer.invoke("chat:retry-draft-discussion", id),
   onChatUpdate: listener => { ipcRenderer.on("chat:update", (_event, update) => listener(update)); },
   createBoard: type => ipcRenderer.invoke("board:create", type),
   openRecent: path => ipcRenderer.invoke("board:recent", path),

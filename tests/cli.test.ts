@@ -15,6 +15,7 @@ import { locateBoard } from "../src/cli/storage.ts";
 import { maxWorklogPartBytes } from "../src/cli/worklog-files.ts";
 import type { Task } from "../src/cli/model.ts";
 import { boardToolContent } from "../src/desktop/board-mcp.ts";
+import { taskChatActions } from "../src/desktop/chat-actions.ts";
 import { registerRuntime, runtimeEntries, runtimeTransaction } from "../src/desktop/board-runtime.ts";
 
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
@@ -821,6 +822,30 @@ test("linked attachments survive chat, restart and archive without copying large
     Buffer.from("keep source").toString("base64"));
 });
 
+test("linked attachment snapshots preserve verified bytes and reject stale sources", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const source = join(root, "source.txt");
+  const destination = join(root, "snapshot.txt");
+  const original = Buffer.concat([Buffer.alloc(64 * 1024, 1), Buffer.alloc(256, 2)]);
+  writeFileSync(source, original);
+  const task = cli(root, ["create"], { title: "Draft", attachmentSources: [{ path: source, link: true }] });
+  const args = ["attachment", "read", task.id];
+  const file = task.attachments[0].file;
+  cli(root, args, { file, destination }, "ATTACHMENT_LINK");
+  assert.equal(cli(root, args, { file, destination, snapshot: true }).path, destination);
+  assert.deepEqual(readFileSync(destination), original);
+  cli(root, args, { file, destination, snapshot: true }, "IO_ERROR");
+  writeFileSync(source, "changed");
+  assert.deepEqual(readFileSync(destination), original);
+  const rejected = join(root, "rejected.txt");
+  cli(root, args, { file, destination: rejected, snapshot: true }, "ATTACHMENT_CHANGED");
+  assert.equal(existsSync(rejected), false);
+  rmSync(source);
+  cli(root, args, { file, destination: rejected, snapshot: true }, "ATTACHMENT_UNAVAILABLE");
+  assert.equal(existsSync(rejected), false);
+});
+
 test("create saves attachments with the draft and rejects incomplete batches", t => {
   const root = fixture(t);
   cli(root, ["init"]);
@@ -1015,6 +1040,86 @@ test("return to draft preserves the card and invalidates queued and late lifecyc
   }
 });
 
+test("task chat records a clarification once, with its sources and lifecycle intact", async t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const draft: Task = cli(root, ["create"], {
+    title: "Границы колонок", description: "Проверить раскладку доски.", criteria: ["Колонки помещаются в окно."],
+    questions: ["На какой ширине?"],
+  });
+  const { id: otherId } = cli(root, ["create"], { title: "Другая карточка" });
+  const other = cli(root, ["show", otherId]);
+  const request = { model: "fixture-model", effort: "medium" };
+  const clarification = "Карточки выходят за границу собственной колонки.";
+  const description = draft.description + "\n\n" + clarification;
+  const show = () => cli(root, ["show", draft.id]) as Task;
+  const send = (text: string, sources?: { path: string }[]) => {
+    cli(root, ["chat", draft.id], { ...request, text, attachmentSources: sources });
+    return show();
+  };
+  let refreshes = 0;
+  const action = (card: Task) => taskChatActions(root, card, card.history.findLast(event =>
+    event.action === "chat" && event.actor === "user")?.text ?? "", () => refreshes++);
+
+  const source = join(root, "layout.txt");
+  writeFileSync(source, "The right card edge is outside its own column.");
+  const sent = send(clarification, [{ path: source }]);
+  const update = { authorization: clarification, description };
+  const edit = action(sent);
+  assert.deepEqual(await edit("task_update", { ...update, id: other.id }), {
+    ok: false, error: { code: "INVALID_INPUT", message: "Use the parameters defined for this task action." },
+  });
+  const first = await edit("task_update", update);
+  assert.ok(first.ok && first.data.changed);
+  const edited = show();
+  assert.deepEqual({ ...edited, description: sent.description, history: sent.history,
+    revision: sent.revision, updatedAt: sent.updatedAt }, sent);
+  assert.equal(edited.description, description);
+  assert.deepEqual(edited.history.slice(0, -1), sent.history);
+  assert.equal(edited.history.at(-1)?.text, clarification);
+  assert.equal(edited.attachments.length, 1);
+  assert.deepEqual(edited.history.at(-2)?.chat?.files, edited.attachments.map(file => file.file));
+
+  cli(root, ["chat", draft.id], { ...request, actor: "agent", replyTo: sent.history.length - 1,
+    text: "Уточнение добавлено в описание." });
+  const repeated = send(clarification);
+  const second = await action(repeated)("task_update", update);
+  assert.ok(second.ok && !second.data.changed);
+  assert.deepEqual(show(), repeated);
+  assert.equal(refreshes, 1);
+
+  const continued = send("Это видно на ширине окна 1024 px.");
+  const latestText = continued.history.at(-1)!.text;
+  const criteria = [...draft.criteria, latestText!];
+  const oldQuote = await action(continued)("task_update", update);
+  assert.ok(!oldQuote.ok && oldQuote.error.code === "USER_DIRECTION_REQUIRED");
+  cli(root, ["update", draft.id], { revision: continued.revision, questions: [] });
+  const concurrent = show();
+  const stale = await action(continued)("task_update", { authorization: latestText, criteria });
+  assert.ok(!stale.ok && stale.error.code === "REVISION_CONFLICT");
+  assert.deepEqual(show(), concurrent);
+  const saved = await action(show())("task_update", { authorization: latestText, criteria });
+  assert.ok(saved.ok && saved.data.changed);
+  assert.deepEqual(show().criteria, criteria);
+  assert.equal(show().status, "draft");
+  assert.equal(show().history.some(event => event.action === "start"), false);
+  assert.deepEqual(cli(root, ["show", other.id]), other);
+
+  cli(root, ["approve", draft.id]);
+  cli(root, ["start", draft.id]);
+  const token = cli(root, ["preview", draft.id]).token;
+  cli(root, ["submit", draft.id], { token, noChanges: true, summary: "Layout checked", checks: ["Checked"] });
+  for (const status of ["review", "done"]) {
+    const card = send("Уточнение после сдачи.");
+    assert.equal(card.status, status);
+    const locked = await action(card)("task_update", { authorization: card.history.at(-1)!.text, description: "Другие условия" });
+    assert.ok(!locked.ok && locked.error.code === "REQUIREMENTS_LOCKED");
+    assert.deepEqual(show(), card);
+    if (status === "review") cli(root, ["accept", draft.id], { revision: card.revision });
+  }
+  assert.equal(refreshes, 2);
+});
+
 test("task chat stores messages and attachments together and archives the conversation", t => {
   const root = fixture(t);
   cli(root, ["init"]);
@@ -1051,6 +1156,7 @@ test("task chat stores messages and attachments together and archives the conver
   assert.equal(loggedReceipt.id, task.id);
   assert.equal(loggedReceipt.history, undefined);
   const logged = cli(root, ["show", task.id]);
+  assert.equal(loggedReceipt.runLogSequence, logged.history.length);
   assert.deepEqual(logged.history.at(-1).run, entries);
   const compact = cli(root, ["list", "--compact"]).tasks.find((entry: { id: string }) => entry.id === task.id);
   assert.equal(compact.revision, logged.revision);

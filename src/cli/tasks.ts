@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import {
   member, nextScheduledRun, number, object, priorities, reasoningEffortPattern, record, requireRevision, requireState, scheduleTimePattern, strings, taskIdPattern,
   TaskboardError, text, validScheduleDate, validDueDate,
@@ -282,6 +283,7 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
       if (input.preserveStatus === true && status !== task.status) {
         throw new TaskboardError("STATUS_CHANGE_REQUIRED", "These requirements would reopen the task. Ask the user to apply the changes on the board.");
       }
+      if (input.preserveStatus === true && isDeepStrictEqual(updated, task)) return task;
       return record(updated, action, actor, status, note);
     }
     default:

@@ -477,7 +477,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
   }
 }
 
-function updateChat({ project, id, type, text, items, goal, goalRunning, error, question, managerRun, managerWork, at }) {
+function updateChat({ project, id, type, text, items, savedRun, goal, goalRunning, error, question, managerRun, managerWork, at }) {
   if (type === "orchestrator-question") {
     if (frame.project === project) {
       frame.managerQuestion = question;
@@ -520,7 +520,13 @@ function updateChat({ project, id, type, text, items, goal, goalRunning, error, 
   if (type === "run" && frame.project === project) {
     (frame.runActivity ??= {})[id] = items;
     byId("board-composer").firstChild?.updateManagerWork();
-    if (open) byId("task-side").firstElementChild?.updateRun(items);
+    if (open) {
+      if (savedRun && savedRun.sequence > taskInSheet.history.length) {
+        const draft = chatDrafts.get(project + "\0" + id);
+        if (draft) draft.savedRun = savedRun;
+      }
+      byId("task-side").firstElementChild?.updateRun(items);
+    }
     return;
   }
   const draft = chatDrafts.get(project + "\0" + id);
@@ -725,6 +731,7 @@ function taskChat(task) {
     draft = { text: "", files: [] };
     chatDrafts.set(key, draft);
   }
+  if (draft.savedRun?.sequence <= task.history.length) delete draft.savedRun;
   const area = element("section", undefined, "task-chat");
   const heading = element("h3", () => t("ui.agent_chat_065b4b62"));
   heading.id = "task-chat-heading";
@@ -757,10 +764,13 @@ function taskChat(task) {
   const dayFormat = new Intl.DateTimeFormat(locale, { dateStyle: "medium" });
   const reviewDecisions = [];
   let submittedAt = "";
+  let submissionRow;
+  const savedRunItems = new Set();
   let day;
   let lastMessage;
   for (const { event, index } of events) {
     if (event.action === "submit") submittedAt = event.at;
+    if (event.action === "start" || (event.to && event.to !== "review")) submissionRow = undefined;
     const returned = event.actor === "reviewer" && event.action === "request-changes";
     const conversation = ["chat", "comment", "questions"].includes(event.action) || returned;
     if (event.expertMessage) continue;
@@ -789,7 +799,17 @@ function taskChat(task) {
         appendWork(log);
         missingRuns.set(index, { log, durationMs: event.durationMs });
       }
-      if (event.action === "run-log") continue;
+      if (event.action === "run-log") {
+        // The turn that submitted the card can finish saving after review has started.
+        // Keep the history index for restoration and use the submission only for placement.
+        if (submissionRow && log.parentNode === work) {
+          for (const item of event.run ?? []) savedRunItems.add(item.id);
+          log.dataset.historyAt = submissionRow.dataset.historyAt;
+          work.insertBefore(log, submissionRow);
+          submissionRow = undefined;
+        }
+        continue;
+      }
     }
     if (!event.run?.length && event.chat?.commentary?.length) {
       const commentary = element("li", undefined, "chat-run");
@@ -817,6 +837,7 @@ function taskChat(task) {
       service.append(element("span", author, "chat-author"), element("span", label, "chat-action"));
       appendChatTime(service, event.at);
       appendWork(service);
+      if (event.action === "submit" && event.actor === "agent") submissionRow = service;
       if (!event.text && !attachments.length) continue;
       // A chat edit can quote the pending request as its audit note.
       if (event.action === "update" && event.actor === "user" &&
@@ -918,9 +939,11 @@ function taskChat(task) {
   if (workControls.childElementCount) work.prepend(workControls);
   const liveRun = element("li", undefined, "chat-run chat-run-live");
   const progress = element("li", undefined, "chat-run");
-  work.append(liveRun, progress);
+  if (submissionRow) work.insertBefore(liveRun, submissionRow);
+  else work.append(liveRun);
+  work.append(progress);
   const refreshReview = task.status === "review" || task.history.some(event => event.actor === "reviewer" || event.action === "submit")
-    ? reviewerChat(task, work, liveRun, reviewDecisions, items => { reviewTeam = items; renderTeam(); }) : undefined;
+    ? reviewerChat(task, work, submissionRow ? progress : liveRun, reviewDecisions, items => { reviewTeam = items; renderTeam(); }) : undefined;
   list.append(element("li", undefined, "chat-turn"));
   renderChatTurn(list, draft);
   area.append(list, work, team);
@@ -979,8 +1002,11 @@ function taskChat(task) {
   let liveItems = [];
   function renderLiveWork() {
     const follow = work.scrollHeight - work.clientHeight - work.scrollTop <= 8;
-    renderRunActivity(liveRun, liveItems.filter(item => !collaborationItem(item) && item.phase !== "final_answer"),
-      false, undefined, task.id);
+    // A save receipt can reach the window before its card history is refreshed.
+    const saved = draft.savedRun;
+    const items = saved?.items ?? liveItems;
+    renderRunActivity(liveRun, items.filter(item => !collaborationItem(item) && !savedRunItems.has(item.id) &&
+      (submissionRow || saved || item.phase !== "final_answer")), Boolean(saved), saved?.durationMs, task.id);
     if (follow) work.scrollTop = work.scrollHeight;
   }
   area.updateRun = (items = []) => {
@@ -1029,6 +1055,28 @@ function taskChat(task) {
   controlLabelForIcon(microphone, () => t("ui.voice_input_a05b7480"));
   controls.append(attach, microphone, send);
   composer.append(pendingFiles, input, fileInput, controls, feedback);
+  if (task.status === "draft" && task.draftDiscussion) {
+    const { phase, reason } = task.draftDiscussion;
+    const discussion = element("div", undefined, "chat-status");
+    discussion.setAttribute("role", "status");
+    discussion.append(element("span", () => t("draft_discussion." + phase, { reason })));
+    if (phase === "failed") {
+      const retry = button(() => t("draft_discussion.retry"), async () => {
+        retry.disabled = true;
+        draft.error = "";
+        try {
+          const result = await api.retryDraftDiscussion(task.id);
+          if (!result.ok) draft.error = boardError(result.error);
+        } catch (error) { draft.error = error.message; }
+        finally {
+          retry.disabled = false;
+          if (frame.project === project && sheet.open && sheetKind === "task" && taskInSheet?.id === task.id) await showTask(task.id);
+        }
+      }, "quiet");
+      discussion.append(" ", retry);
+    }
+    composer.prepend(discussion);
+  }
   area.append(composer);
 
   if (!manualBoard()) {

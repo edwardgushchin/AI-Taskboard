@@ -108,7 +108,8 @@ function compactTask(task: Task) {
   return { expertId: task.expertId, expertTeam: task.expertTeam, expertStage: task.expertStage, expertStages: task.expertStages,
     reviewDecision: status === "review" ? reviewDecisionSequence(task) : undefined, acceptanceRepair: task.acceptanceRepair, id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
     coverAttachment, codexThreadId, createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep,
-    dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, origin, launchRequested, historyLength: task.history.length,
+    dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, origin, launchRequested,
+    draftDiscussion: status === "draft" ? task.draftDiscussion : undefined, historyLength: task.history.length,
     expertWorkPlanned: Boolean(task.expertTeam?.work?.lead || task.expertStage),
     expertReviewPlanned: Boolean(task.expertTeam?.review?.lead),
     ...(status === "review" && task.git?.submission && !task.result?.noChanges ? { reviewHasCommit: true } : {}),
@@ -434,6 +435,7 @@ function run(
       task.status = column.id;
       if (column.terminal) task.closedAt = task.updatedAt;
     } else if (input.initialStatus !== undefined) throw new TaskboardError("INVALID_INPUT", "Выбор начальной колонки доступен только на обычной доске.");
+    else task.draftDiscussion = { phase: "queued" };
     validateDependencies(store, task);
     return createWithAttachments(store, task.tags.length ? assignTags(store, task) : task, input.attachmentSources);
   }
@@ -590,7 +592,7 @@ function run(
     return store.index.settings;
   }
   const reviewerReport = command === "review-note" || command === "review-approve";
-  if (command !== "show" && command !== "cleanup" && command !== "cleanup-status" && command !== "submit" && command !== "review" && !reviewerReport && command !== "accept" && command !== "restore-changes" && command !== "chat" && command !== "run-log" && command !== "token-usage" && !taskActions.has(command)) {
+  if (command !== "show" && command !== "cleanup" && command !== "cleanup-status" && command !== "submit" && command !== "review" && !reviewerReport && command !== "accept" && command !== "restore-changes" && command !== "chat" && command !== "draft-discussion" && command !== "run-log" && command !== "token-usage" && !taskActions.has(command)) {
     throw new TaskboardError("UNKNOWN_COMMAND", "Unknown command " + command + ".");
   }
   if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
@@ -781,14 +783,29 @@ function run(
     throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before modifying the task.");
   }
   if (command === "chat") return addChatMessage(store, task, input);
+  if (command === "draft-discussion") {
+    requireRevision(task, input.revision, true);
+    const phase = task.draftDiscussion?.phase;
+    if (isManual(store.index.settings) || task.status !== "draft" ||
+        !(input.phase === "running" && (phase === "queued" || phase === "failed") ||
+          input.phase === "failed" && phase === "running")) {
+      throw new TaskboardError("CHAT_CHANGED", "The draft discussion is no longer in this state.");
+    }
+    const draftDiscussion: Task["draftDiscussion"] = input.phase === "failed"
+      ? { phase: "failed", reason: text(input.reason, "reason", true).slice(0, 1500) }
+      : { phase: "running" };
+    return store.save(record({ ...task, draftDiscussion }, "draft-discussion-" + draftDiscussion.phase, "agent"));
+  }
   if (command === "run-log") {
     const logged = recordRunLog(task, input);
     if (logged !== task) store.save(logged);
-    return filters.compact ? taskReceipt(logged) : logged;
+    return filters.compact ? { ...taskReceipt(logged),
+      ...(logged !== task ? { runLogSequence: logged.history.length } : {}) } : logged;
   }
   if (command === "progress" && task.schedule && task.status === "in_progress") requireExpertResults(task, "work");
   if (command === "approve" && task.status === "draft") requireApprovalPlan(task, store.index.settings);
   let updated = changeTask(task, command, input);
+  if (command === "update" && updated === task) return task;
   if (command === "update" && task.acceptanceRepair &&
       ["title", "description", "criteria", "questions", "subtasks", "dependencies", "execution"].some(key => input[key] !== undefined)) {
     updated = { ...updated, acceptanceRepair: undefined };

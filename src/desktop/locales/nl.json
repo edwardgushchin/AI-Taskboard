@@ -1,4 +1,9 @@
 {
+  "draft_discussion.queued": "De conceptbeoordeling staat in de wachtrij.",
+  "draft_discussion.running": "Concept wordt beoordeeld…",
+  "draft_discussion.failed": "Conceptbeoordeling mislukt: {reason}",
+  "draft_discussion.retry": "Opnieuw beoordelen",
+  "draft_discussion.interrupted": "De vorige conceptbeoordeling is onderbroken.",
   "ui.resolving_acceptance_conflict": "Conflict oplossen",
   "ui.dismiss_notification_9a17797e": "Melding afwijzen",
   "ui.board_refresh_4c949d36": "Bord vernieuwen",
