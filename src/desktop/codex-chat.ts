@@ -695,7 +695,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
     const publish = () => {
       activityTimer = undefined;
       session?.onActivity([...activity.values()]);
-      if (onActivity) onActivity(runLog(activity, 96_000));
+      if (onActivity) onActivity(runLog(activity, 96_000, options.role === "reviewer"));
     };
     let currentGoal: BoardGoal | null | undefined;
     let followingGoal = false;

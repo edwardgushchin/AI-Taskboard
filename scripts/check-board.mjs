@@ -915,7 +915,8 @@ app.whenReady().then(async () => {
         at: reviewed.updatedAt });
       let attempts = [];
       let reviewerReads = 0;
-      const openReviewer = () => byId('task-reviewer-chat');
+      const work = () => byId('task-chat-work');
+      const reviewRows = () => [...work().querySelectorAll('.task-review-attempt')];
       window.taskboard.command = async () => ({ ok: true, data: structuredClone(reviewed) });
       window.taskboard.chatModels = async () => ({ ok: true, data: [] });
       window.taskboard.reviewerChat = async () => {
@@ -924,42 +925,63 @@ app.whenReady().then(async () => {
       };
       push();
       showTask(reviewed.id);
-      waitFor(openReviewer);
+      waitFor(work);
     `);
-    await check(`!openReviewer().open && reviewerReads === 0`, "opening a task does not load review history");
-    await evaluate(`document.querySelector('[aria-controls="task-chat-work"]').click(); openReviewer().querySelector('summary').click();
-      waitFor(() => openReviewer().textContent.includes('Сохранённое согласование.'))`);
-    await check(`openReviewer().textContent.includes('Сохранённые решения по проверке')`, "older cards show the decisions that were saved");
+    await check(`reviewRows().length === 0 && reviewerReads === 0`, "the dialogue leaves review history unloaded");
+    await evaluate(`document.querySelector('[aria-controls="task-chat-work"]').click();
+      waitFor(() => reviewerReads === 1 && work().textContent.includes('Сохранённое согласование.'))`);
+    await check(`reviewRows().length === 0`, "legacy decisions appear in the work feed without an attempt record");
     await evaluate(`
-      const live = { id: 'review-1', at: reviewed.updatedAt, items: [
+      const summary = { id: 'summary', title: '', type: 'reasoning', text: 'Сводка проверки', status: 'inProgress' };
+      const live = { id: 'review-1', at: '2025-03-01T00:00:00.000Z', items: [
         { id: 'commentary', title: '', type: 'agentMessage', phase: 'commentary', text: 'Сверяю критерии.', status: 'completed' },
+        summary,
         { id: 'tool', title: 'task_review_diff', type: 'dynamicToolCall', text: '[]', status: 'completed' }
       ] };
       attempts = [live];
       const publishReview = () => window.pushChat({ project: fixture.project, id: reviewed.id, type: 'reviewer-chat' });
       publishReview();
-      waitFor(() => openReviewer().textContent.includes('Сверяю критерии.'));
+      waitFor(() => reviewRows()[0]?.textContent.includes('Сводка проверки'));
     `);
-    await check(`openReviewer().textContent.includes('Ревьюер проверяет') && openReviewer().textContent.includes('task_review_diff')`,
-      "the open reviewer chat shows live commentary and a tool call");
+    await check(`getComputedStyle(reviewRows()[0].firstElementChild).clipPath === 'none' &&
+      reviewRows()[0].firstElementChild.checkVisibility() && reviewRows()[0].textContent.includes('Ревьюер #1') &&
+      reviewRows()[0].querySelector('[data-item="item:summary"] pre').checkVisibility() &&
+      reviewRows()[0].textContent.includes('Сверяю критерии.') &&
+      reviewRows()[0].textContent.includes('task_review_diff')`, "the open work feed shows a live summary, commentary and action");
+    if (keepArtifacts) await capture("review-live.png");
     await evaluate(`
       live.durationMs = 1200;
+      summary.status = 'completed';
+      summary.text += ' завершена';
       live.items.push({ id: 'result', title: '', type: 'agentMessage', phase: 'final_answer', status: 'completed',
         text: JSON.stringify({ summary: 'Результат согласован.', findings: [], evidence: ['Критерий проверен.'], needsHuman: false }) });
+      attempts.push({ id: 'review-2', at: '2025-03-02T00:00:00.000Z', durationMs: 900, items: [
+        { ...summary, text: ' ' }, { ...live.items[2] }, { ...live.items[3], text: '{"summary":"Повторная проверка завершена."}' }
+      ] });
       publishReview();
-      waitFor(() => openReviewer().textContent.includes('Результат согласован.'));
+      waitFor(() => reviewRows().length === 2);
     `);
-    await check(`openReviewer().textContent.includes('Критерий проверен.') && !openReviewer().textContent.includes('needsHuman')`,
-      "the final report is readable without provider JSON");
+    await check(`reviewRows()[0].textContent.includes('Критерий проверен.') &&
+      !reviewRows()[0].textContent.includes('needsHuman') &&
+      reviewRows()[0].querySelectorAll('[data-item="item:summary"]').length === 1 &&
+      [...reviewRows()[0].querySelector('.chat-run').children].map(node => node.dataset.item).join(',') ===
+        'message:commentary,item:summary,item:tool,message:result' &&
+      reviewRows()[1].textContent.includes('Ревьюер #2') && reviewRows()[1].textContent.includes('task_review_diff') &&
+      reviewRows()[1].textContent.includes('Повторная проверка завершена.') &&
+      !reviewRows()[1].querySelector('[data-item="item:summary"]')`, "completed attempts keep event order and show checks and outcome without a summary");
     await evaluate(`(async () => {
       sheet.close();
+      chatDrafts.clear();
       reviewed.status = 'done';
       await showTask(reviewed.id);
       document.querySelector('[aria-controls="task-chat-work"]').click();
-      if (!openReviewer().open) openReviewer().querySelector('summary').click();
-      await waitFor(() => openReviewer().textContent.includes('Результат согласован.'));
+      await waitFor(() => reviewRows().length === 2);
+      publishReview();
+      await waitFor(() => reviewerReads >= 5);
     })()`);
-    await check(`openReviewer().open && document.querySelector('.task-chat .chat-composer').hidden`, "a closed card still has the saved reviewer chat");
+    await check(`reviewRows().length === 2 && reviewRows()[0].textContent.includes('Сводка проверки завершена') &&
+      reviewRows()[1].textContent.includes('Повторная проверка завершена.')`, "reopening and refreshing load each saved attempt once");
+    if (keepArtifacts) await capture("review-reopened.png");
     console.log("Reviewer chat Chromium checks passed: " + checks);
     return;
   }

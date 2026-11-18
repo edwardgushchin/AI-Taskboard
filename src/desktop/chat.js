@@ -236,7 +236,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
     const detail = element("details", undefined, "chat-run-item");
     nodeActivities.set(detail, [item]);
     detail.dataset.item = "item:" + item.id;
-    detail.open = previous.get(detail.dataset.item) ?? false;
+    detail.open = previous.get(detail.dataset.item) ?? Boolean(context?.reviewer && kind === "reasoning");
     const state = activityState([item]);
     const label = state.code === "running" ? t("ui.in_progress_15929530") :
       state.code === "failed" ? t("ui.action_failed_0dcd9696") :
@@ -580,107 +580,96 @@ function chatEventAttachments(event, files) {
   return matches.length === 1 ? matches : [];
 }
 
-function reviewerChat(task, open, onCollaboration) {
+function reviewerChat(task, work, tail, decisions, onCollaboration) {
   const project = frame.project;
-  const legacy = task.history.filter(event => event.actor === "reviewer" && event.text &&
-    ["review-note", "review-approve", "request-changes"].includes(event.action));
-  const details = taskDetails("task-reviewer-chat", t("ui.reviewer_chat_ffaa4f19"), "", open);
-  const content = element("div", undefined, "task-details-content");
-  const status = element("p", undefined, "muted");
+  const status = element("li", undefined, "muted");
   status.setAttribute("role", "status");
-  const log = element("ol", undefined, "chat-log");
-  bindLocalized(log, "aria-label", () => t("ui.reviewer_messages_d84eb921"), true);
-  log.tabIndex = 0;
-  log.hidden = true;
-  content.append(status, log);
-  details.append(content);
+  status.hidden = true;
+  work.insertBefore(status, tail);
   const nodes = new Map();
   let timer;
   let generation = 0;
-  const refresh = (force = false) => {
-    if (force !== true && !details.open || timer !== undefined) return;
+  return () => {
+    if (timer !== undefined) return;
     timer = setTimeout(() => {
       timer = undefined;
-      if (details.isConnected && (force === true || details.open)) void load();
+      if (work.isConnected) void load();
     }, 200);
   };
-  details.refresh = refresh;
-  details.addEventListener("toggle", refresh);
 
   async function load() {
     const request = ++generation;
-    if (log.hidden) bindLocalized(status, "textContent", () => t("ui.loading_4f987027"));
     try {
       const result = await api.reviewerChat(task.id);
-      if (!details.isConnected || project !== frame.project || request !== generation) return;
+      if (!work.isConnected || project !== frame.project || request !== generation) return;
       if (!result.ok) throw new Error(boardError(result.error));
-      const { scrollHeight, clientHeight, scrollTop } = log;
+      const follow = !work.hidden && work.scrollHeight - work.clientHeight - work.scrollTop <= 8;
       const attempts = result.data;
-      onCollaboration?.(attempts.flatMap(attempt => attempt.items.filter(collaborationItem)));
+      onCollaboration(attempts.flatMap(attempt => attempt.items.filter(collaborationItem)));
+      const ids = new Set(attempts.map(attempt => attempt.id));
       for (const [id, node] of nodes) {
-        if (attempts.some(attempt => attempt.id === id)) continue;
+        if (ids.has(id)) continue;
         node.entry.remove();
         nodes.delete(id);
       }
-      for (const attempt of attempts) {
+      const history = [...work.children].filter(entry => entry.dataset.historyAt);
+      for (const [index, attempt] of attempts.entries()) {
         let node = nodes.get(attempt.id);
         if (!node) {
-          const entry = element("li", undefined, "chat-entry");
-          const label = element("span", undefined, "chat-author");
+          const entry = element("li", undefined, "chat-entry task-review-attempt");
+          entry.dataset.actor = "reviewer";
+          const label = element("span", undefined, "chat-coordination-header");
           const activity = element("div", undefined, "chat-run");
-          const error = element("p", undefined, "muted");
+          const error = element("p", undefined, "chat-run-error");
           entry.append(label, activity, error);
-          log.append(entry);
+          work.insertBefore(entry, history.find(row => row.dataset.historyAt > attempt.at) ?? status);
           node = { entry, label, activity, error };
           nodes.set(attempt.id, node);
         }
-        if (node.finished) continue;
+        if (node.finished && node.index === index) continue;
+        node.index = index;
         node.finished = attempt.durationMs !== undefined;
-        bindLocalized(node.label, "textContent", () => shortDate(attempt.at) + " · " + (node.finished ?
-          t("ui.reviewer_50c42665") : t("ui.reviewing_8e90650a")));
+        bindLocalized(node.label, "textContent", () => t("ui.reviewer_50c42665") + " #" + (index + 1) +
+          " · " + t(node.finished ? "ui.completed_a863c619" : "ui.in_progress_15929530") + " · " + shortDate(attempt.at));
         node.error.textContent = attempt.error ?? "";
         node.error.hidden = !attempt.error;
+        node.report = undefined;
         const items = attempt.items.flatMap(item => {
-          if (onCollaboration && collaborationItem(item)) return [];
+          if (collaborationItem(item)) return [];
           if (item.type !== "agentMessage" || item.phase === "commentary") return [item];
           if (item.status !== "completed") return [];
+          node.report = undefined;
           try {
             const { summary, findings, evidence } = JSON.parse(item.text);
             if (typeof summary !== "string") return [item];
-            const notes = Array.isArray(findings) ? findings.map(text => "- " + text).join("\n") : "";
+            const reportFindings = Array.isArray(findings) ? findings.filter(text => typeof text === "string") : [];
+            node.report = { summary: summary.trim(), reason: reportFindings.join("\n\n").trim() };
+            const notes = reportFindings.map(text => "- " + text).join("\n");
             const checks = Array.isArray(evidence) ? evidence.flatMap((text, index) =>
               typeof text === "string" ? [(index + 1) + ". " + text] : []).join("\n") : "";
             return [{ ...item, text: [summary, notes, checks].filter(Boolean).join("\n\n") }];
           } catch { return [item]; }
         });
-        renderRunActivity(node.activity, items, node.finished, attempt.durationMs, undefined, { taskId: task.id });
+        renderRunActivity(node.activity, items, false, undefined, undefined, { taskId: task.id, reviewer: true });
       }
-      if (!attempts.length && legacy.length && !log.childElementCount) {
-        for (const event of legacy) {
-          const entry = element("li", undefined, "chat-entry");
-          entry.append(element("span", shortDate(event.at), "chat-author"),
-            event.action === "request-changes" ? reviewerFindings(event.text, task.id) :
-              chatText(event.text, { taskId: task.id, agent: true }));
-          log.append(entry);
-        }
+      const matched = new Set();
+      for (const { entry, event, submittedAt } of decisions) {
+        const attempt = attempts.findLast(attempt => attempt.at >= submittedAt && attempt.at <= event.at);
+        const node = attempt && nodes.get(attempt.id);
+        // Keep the card's decision event and hide only the text also shown in its attempt.
+        const reportText = event.action === "request-changes" ? node?.report?.reason : node?.report?.summary;
+        entry.hidden = Boolean(node?.finished && !attempt.error && !matched.has(attempt.id) &&
+          reportText === event.text.trim());
+        if (entry.hidden) matched.add(attempt.id);
       }
-      if (attempts.length) {
-        for (const entry of [...log.children]) {
-          if (!entry.querySelector(".chat-run")) entry.remove();
-        }
-      }
-      log.hidden = !log.childElementCount;
-      bindLocalized(status, "textContent", () => log.hidden ? t("ui.no_reviewer_messages_yet_25b5caaf") :
-        attempts.length ? "" : t("ui.saved_review_decisions_2fbae036"));
-      status.hidden = !status.textContent;
-      if (scrollHeight - clientHeight - scrollTop <= 8) log.scrollTop = log.scrollHeight;
+      status.hidden = true;
+      if (follow) work.scrollTop = work.scrollHeight;
     } catch (error) {
-      if (!details.isConnected || request !== generation) return;
+      if (!work.isConnected || project !== frame.project || request !== generation) return;
       status.hidden = false;
       bindLocalized(status, "textContent", () => t("ui.could_not_load_reviewer_chat_5c01ba32") + error.message);
     }
   }
-  return details;
 }
 
 function collaborationItem(item) {
@@ -765,13 +754,19 @@ function taskChat(task) {
   const missingRuns = new Map();
   const locale = localization.locale;
   const dayFormat = new Intl.DateTimeFormat(locale, { dateStyle: "medium" });
+  const reviewDecisions = [];
+  let submittedAt = "";
   let day;
   let lastMessage;
   for (const { event, index } of events) {
+    if (event.action === "submit") submittedAt = event.at;
     const returned = event.actor === "reviewer" && event.action === "request-changes";
     const conversation = ["chat", "comment", "questions"].includes(event.action) || returned;
     if (event.expertMessage) continue;
-    const timeline = conversation ? list : work;
+    const appendWork = row => {
+      row.dataset.historyAt = event.at;
+      work.append(row);
+    };
     if (event.chat) lastMessage = event;
     const timestamp = new Date(event.at);
     const eventDay = !event.at || Number.isNaN(+timestamp) ? "" : dayFormat.format(timestamp);
@@ -787,10 +782,10 @@ function taskChat(task) {
         savedTeam.push(...event.run.filter(collaborationItem));
         const activity = event.action === "chat" ? event.run.filter(item => item.phase !== "final_answer") : event.run;
         savedWork.push(() => renderRunActivity(log, activity.filter(item => !collaborationItem(item)), true, event.durationMs, task.id));
-        work.append(log);
+        appendWork(log);
       } else if (task.codexThreadId && event.durationMs !== undefined) {
         log.hidden = true;
-        work.append(log);
+        appendWork(log);
         missingRuns.set(index, { log, durationMs: event.durationMs });
       }
       if (event.action === "run-log") continue;
@@ -800,14 +795,14 @@ function taskChat(task) {
       savedWork.push(() => renderRunActivity(commentary, event.chat.commentary.map((text, index) => ({
         id: String(index), type: "agentMessage", phase: "commentary", title: "", text, status: "completed",
       })), true, event.durationMs));
-      work.append(commentary);
+      appendWork(commentary);
     }
     const attachments = chatEventAttachments(event, files);
     const author = () => event.actor === "manager" ? t("ui.project_manager_48697fa0") :
       event.actor === "reviewer" ? t("ui.reviewer_50c42665") :
       event.actor === "user" ? t("ui.you_05444001") : t("ui.agent_262834de");
 
-    if (!conversation && event.action !== "coordination") {
+    if ((!conversation || returned) && event.action !== "coordination") {
       const status = lanes.find(([code]) => code === event.to);
       const service = element("li", undefined, "chat-entry chat-event");
       const stage = event.expertStageRun;
@@ -820,7 +815,7 @@ function taskChat(task) {
       ].join(" · ") : chatEventLabel(event.action) + (status ? " · " + t(status[1]) : "");
       service.append(element("span", author, "chat-author"), element("span", label, "chat-action"));
       appendChatTime(service, event.at);
-      work.append(service);
+      appendWork(service);
       if (!event.text && !attachments.length) continue;
       // A chat edit can quote the pending request as its audit note.
       if (event.action === "update" && event.actor === "user" &&
@@ -864,7 +859,20 @@ function taskChat(task) {
         chatText(text, { taskId: task.id, coordination, agent: event.action === "chat" && event.actor === "agent" }));
     }
     appendChatTime(entry, event.at);
-    timeline.append(entry);
+    if (returned && event.text) {
+      const fallback = element("li", undefined, "chat-entry chat-coordination");
+      fallback.dataset.actor = event.actor;
+      fallback.append(element("span", author, "chat-author"), reviewerFindings(event.text, task.id));
+      appendChatTime(fallback, event.at);
+      appendWork(fallback);
+      reviewDecisions.push({ entry: fallback, event, submittedAt });
+    }
+    if (event.actor === "reviewer" && event.text && !attachments.length &&
+        ["review-approve", "review-note"].includes(event.action)) {
+      reviewDecisions.push({ entry, event, submittedAt });
+    }
+    if (conversation) list.append(entry);
+    else appendWork(entry);
   }
   const workControls = element("li", undefined, "task-work-controls");
   if (missingRuns.size) {
@@ -906,16 +914,12 @@ function taskChat(task) {
     }, "quiet");
     workControls.append(load, status);
   }
-  let review;
-  if (task.status === "review" || task.history.some(event => event.actor === "reviewer" || event.action === "submit")) {
-    review = reviewerChat(task, draft.reviewerOpen, items => { reviewTeam = items; renderTeam(); });
-    review.addEventListener("toggle", () => { draft.reviewerOpen = review.open; });
-    workControls.append(review);
-  }
   if (workControls.childElementCount) work.prepend(workControls);
   const liveRun = element("li", undefined, "chat-run chat-run-live");
   const progress = element("li", undefined, "chat-run");
   work.append(liveRun, progress);
+  const refreshReview = task.status === "review" || task.history.some(event => event.actor === "reviewer" || event.action === "submit")
+    ? reviewerChat(task, work, liveRun, reviewDecisions, items => { reviewTeam = items; renderTeam(); }) : undefined;
   list.append(element("li", undefined, "chat-turn"));
   renderChatTurn(list, draft);
   area.append(list, work, team);
@@ -1066,13 +1070,8 @@ function taskChat(task) {
     if (name === "team") renderTeam();
     area.refreshReview();
   }
-  area.refreshReview = () => { if (draft.view !== "dialogue") review?.refresh(draft.view === "team"); };
-  area.openReviewer = () => {
-    if (!review) return;
-    selectView("work");
-    review.open = true;
-    requestAnimationFrame(() => review.scrollIntoView({ block: "nearest" }));
-  };
+  area.refreshReview = () => { if (draft.view !== "dialogue") refreshReview?.(); };
+  area.openReviewer = () => selectView("work");
   selectView(views.some(view => view.name === draft.view) ? draft.view : "dialogue");
 
   function working() { return Boolean(draft.pending || frame.runningTasks?.includes(task.id) || frame.replyingTasks?.includes(task.id)); }
