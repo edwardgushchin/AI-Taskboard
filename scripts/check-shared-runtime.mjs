@@ -232,9 +232,15 @@ if (!process.versions.electron) {
     const execution = makeCards("Execution order", false), reviews = makeCards("Review order", true);
     await Promise.all([b, restarted].map(worker => worker.ask({ action: "compactWindows" })));
     const readOrder = async () => [...await b.ask({ action: "order" }), ...await restarted.ask({ action: "order" })];
-    await wait(async () => (await readOrder()).every(view => view.execution[0] === "Execution order 6" &&
-      view.review[0] === "Review order 6" && view.more && !view.execution.includes("Execution order 0") &&
-      !view.review.includes("Review order 0")), "idle order and collapsed batches");
+    let idleOrder;
+    try {
+      await wait(async () => {
+        idleOrder = await readOrder();
+        return idleOrder.every(view => view.execution[0] === "Execution order 6" &&
+          view.review[0] === "Review order 6" && view.more && !view.execution.includes("Execution order 0") &&
+          !view.review.includes("Review order 0"));
+      }, "idle order and collapsed batches");
+    } catch (error) { throw new Error(error.message + ": " + JSON.stringify(idleOrder)); }
     await restarted.ask({ action: "focusOrder" });
     await b.ask({ action: "openOrderDialog" });
     for (const id of execution.slice(0, 6)) assert.equal(await b.ask({ action: "reserve", role: "executor", task: id }), true);
@@ -274,7 +280,9 @@ if (!process.versions.electron) {
     for (const id of reviews.slice(0, -1)) assert.equal(await b.ask({ action: "reserve", role: "reviewer", task: "review:" + id }), true);
     await wait(async () => (await readOrder()).every(view => view.review[0] === "Review order 5"), "six active reviews sorted first");
     await wait(() => restarted.ask({ action: "reviewMoreFitRetried" }), "last inactive card tried and removed");
-    assert.equal(await restarted.ask({ action: "reviewMoreFocusRestored" }), true, "focus and scroll after rejected fit");
+    const focus = await restarted.ask({ action: "reviewMoreFocusRestored" });
+    assert.equal(focus.restored, true, JSON.stringify(focus));
+    assert.deepEqual(focus.scroll, focus.initialScroll, "scroll after rejected fit");
     await restarted.ask({ action: "resetReviewFit" });
     for (const id of reviews.slice(0, -1)) await b.ask({ action: "release", role: "reviewer", task: "review:" + id });
     await wait(async () => (await readOrder()).every(view => view.review[0] === "Review order 6" && view.review.length < reviews.length), "idle review batch restored");
@@ -389,16 +397,15 @@ if (!process.versions.electron) {
       if (command.action === "focusReviewMore") {
         const contents = BrowserWindow.getAllWindows()[0].webContents;
         const style = command.overflow ? await contents.insertCSS(
-          "#lane-cards-review > .task-card { height: 42px; min-height: 0; overflow: hidden; } #lane-cards-review > .qa-tall.task-card { height: 1200px; }") : null;
+          "#lane-cards-review > .task-card { height: 42px; min-height: 0; overflow: hidden; } #lane-cards-review > .task-card:last-child { height: 1200px; }") : null;
         await contents.executeJavaScript(`(() => {
           const lane = document.querySelector('#lane-cards-review');
           const more = lane.querySelector('.lane-more');
           if (${Boolean(style)}) {
-            const tall = lane.querySelector('.task-card');
-            tall.classList.add('qa-tall');
-            const fit = globalThis.reviewFit = { style: ${JSON.stringify(style)}, tall, more, retried: false };
+            const fit = globalThis.reviewFit = { style: ${JSON.stringify(style)}, more, retried: false };
             fit.observer = new MutationObserver(records => {
-              if (more.isConnected && !tall.isConnected && records.some(record => [...record.addedNodes].includes(tall)) &&
+              if (more.isConnected && records.some(record => [...record.addedNodes].some(node =>
+                  node.matches?.('.task-card') && !node.isConnected)) &&
                   records.some(record => [...record.removedNodes].includes(more))) fit.retried = true;
             });
             fit.observer.observe(lane, { childList: true });
@@ -406,6 +413,7 @@ if (!process.versions.electron) {
           more.focus({ preventScroll: true });
           const board = document.querySelector('#lanes');
           board.scrollLeft = 80;
+          if (${Boolean(style)}) board.scrollTop = 0;
           if (document.activeElement !== more || board.scrollLeft <= 0) throw Error("Show more focus fixture not set");
           globalThis.reviewMoreFocus = { visible: new Set(lane.querySelectorAll('.task-card')), left: board.scrollLeft, top: board.scrollTop };
         })()`);
@@ -415,12 +423,14 @@ if (!process.versions.electron) {
       if (command.action === "reviewMoreFocusRestored") {
         data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(`(() => {
           const board = document.querySelector('#lanes');
-          return document.activeElement === reviewFit.more && board.scrollLeft === reviewMoreFocus.left && board.scrollTop === reviewMoreFocus.top;
+          return { restored: document.activeElement === reviewFit.more,
+            focused: document.activeElement.className, visible: reviewFit.more.isConnected,
+            scroll: [board.scrollLeft, board.scrollTop], initialScroll: [reviewMoreFocus.left, reviewMoreFocus.top] };
         })()`);
       }
       if (command.action === "resetReviewFit") {
         const contents = BrowserWindow.getAllWindows()[0].webContents;
-        const key = await contents.executeJavaScript("reviewFit.observer.disconnect(); reviewFit.tall.classList.remove('qa-tall'); reviewFit.style");
+        const key = await contents.executeJavaScript("reviewFit.observer.disconnect(); reviewFit.style");
         await contents.removeInsertedCSS(key);
         data = true;
       }
