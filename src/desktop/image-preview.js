@@ -5,10 +5,12 @@ function openImagePreview(taskId, files, initialIndex, initialSrc, source = {
   save: file => api.saveAttachment(taskId, file.file, file.name),
 }) {
   const dialog = element("dialog", undefined, "image-preview");
-  const toolbar = element("header", undefined, "image-preview-toolbar");
+  const header = element("header", undefined, "image-preview-header");
+  const toolbar = element("footer", undefined, "image-preview-toolbar");
   const title = element("strong");
   const viewport = element("div", undefined, "image-preview-viewport");
   viewport.tabIndex = 0;
+  viewport.setAttribute("autofocus", "");
   bindLocalized(viewport, "aria-label", () => t("ui.image_0ef98c9b"), true);
   const stage = element("div", undefined, "image-preview-stage");
   let image = element("img");
@@ -72,25 +74,30 @@ function openImagePreview(taskId, files, initialIndex, initialSrc, source = {
     }
   }, "quiet");
   const move = delta => show((index + delta + files.length) % files.length);
-  toolbar.append(title);
+  header.append(title);
+  const navigation = [];
   if (files.length > 1) {
     const previous = button("", () => move(-1), "quiet");
     previous.append(icon("arrow-left"));
+    previous.classList.add("image-preview-previous");
     const next = button("", () => move(1), "quiet");
     next.append(icon("arrow-right"));
+    next.classList.add("image-preview-next");
     controlLabelForIcon(previous, () => t("ui.previous_image_4a7f8790"));
     controlLabelForIcon(next, () => t("ui.next_image_d867f6ec"));
-    toolbar.append(previous, position, next);
+    header.append(position);
+    navigation.push(previous, next);
     dialog.addEventListener("keydown", event => {
       if (event.altKey || event.ctrlKey || event.metaKey || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
       event.preventDefault();
       move(event.key === "ArrowLeft" ? -1 : 1);
     });
   }
-  toolbar.append(zoomOut, scaleLabel, zoomIn, button(() => t("ui.fit_9a002f36"), fit, "quiet"), original, save, close);
-  stage.append(image, status);
+  header.append(close);
+  toolbar.append(zoomOut, scaleLabel, zoomIn, button(() => t("ui.fit_9a002f36"), fit, "quiet"), original, save);
+  stage.append(image);
   viewport.append(stage);
-  dialog.append(toolbar, viewport);
+  dialog.append(header, viewport, status, ...navigation, toolbar);
 
   viewport.addEventListener("wheel", event => {
     event.preventDefault();

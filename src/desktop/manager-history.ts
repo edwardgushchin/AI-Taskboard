@@ -200,6 +200,20 @@ function incomingMessages(run: Run) {
     item.status === "completed" && item.text.trim()).map(item => item.id);
 }
 
+export function hasManagerMessage(project: string, id: string, created: number) {
+  const folder = join(project, ".tasks", "manager-chat");
+  if (!exists(folder)) return false;
+  directory(folder);
+  // Compare only the runs that could have accepted this queued message.
+  return readdirSync(folder).some(name => {
+    if (!filePattern.test(name)) return false;
+    const path = join(folder, name);
+    if ((statSync(path, { throwIfNoEntry: false })?.mtimeMs ?? 0) < created - 1000) return false;
+    const run = readJson(path) as Run;
+    return run.message?.clientId === id || run.items.some(item => item.id === id && item.userMessage);
+  });
+}
+
 export function saveManagerHistory(project: string, startedAt: number, id: string, run: Run) {
   if (!codexThreadPattern.test(id)) throw new Error("Invalid manager history ID.");
   const board = join(project, ".tasks");
@@ -256,8 +270,21 @@ const isWorkActivity = (item: BoardActivity) =>
     (item.type === "dynamicToolCall" && workTools.has(item.title)));
 
 export function managerChatItems(items: BoardActivity[]): BoardActivity[] {
-  return items.filter(item => !isWorkActivity(item)).map(item =>
-    item.title === "ai_taskboard / goal_read" || item.title === "ai_taskboard / goal_send" ? { ...item, text: "" } : item);
+  const dialogue: BoardActivity[] = [];
+  let hasLaterAnswer = false;
+  // Codex can restart a final answer under a new item ID without completing the draft.
+  for (let index = items.length - 1; index >= 0; index--) {
+    const item = items[index]!;
+    if (isWorkActivity(item)) continue;
+    if (item.userMessage) hasLaterAnswer = false;
+    if (item.type === "agentMessage" && item.phase === "final_answer") {
+      if (item.status === "completed" && item.text.trim()) hasLaterAnswer = true;
+      else if (hasLaterAnswer && item.status === "inProgress") continue;
+    }
+    dialogue.push(item.title === "ai_taskboard / goal_read" || item.title === "ai_taskboard / goal_send"
+      ? { ...item, text: "" } : item);
+  }
+  return dialogue.reverse();
 }
 
 export function managerWorkItems(items: BoardActivity[], lane?: Turn["lane"]) {

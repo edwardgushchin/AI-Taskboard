@@ -21,12 +21,12 @@ import { managerInbox, needsManagerAttention } from "../src/cli/task-messages.ts
 import type { RunActivity, Task } from "../src/cli/model.ts";
 import type { ChatSettings } from "../src/cli/model.ts";
 import { directory as storageDirectory, locateBoard, readBoardSettings, readJson, writeJson } from "../src/cli/storage.ts";
-import { runtimeLocation, runtimeTransaction } from "../src/desktop/board-runtime.ts";
+import { registerRuntime, runtimeLocation, runtimeTransaction } from "../src/desktop/board-runtime.ts";
 import type { BoardGoal, BoardGoalAction, readBoardHistory } from "../src/desktop/codex-chat.ts";
 import { inspectProjectPath, projectSha256 } from "../src/desktop/project-files.ts";
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
 import { reviewerActivity, withReviewerChat } from "../src/desktop/reviewer-chat.ts";
-import { goalMessages, managerChatItems, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory } from "../src/desktop/manager-history.ts";
+import { goalMessages, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory } from "../src/desktop/manager-history.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { autoQueueSettings } from "../src/cli/auto-queue.ts";
 import { automationDelivery } from "../src/desktop/automation-delivery.ts";
@@ -45,7 +45,7 @@ const source = (file: string) => readFileSync(new URL("../src/desktop/" + file, 
 const boardSource = stripTypeScriptTypes(source("board-actions.ts").replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, ""));
 const main = ts.createSourceFile("main.ts", source("main.ts"), ts.ScriptTarget.Latest, true);
 const handlerSource = stripTypeScriptTypes(main.statements.map(node => node.getText(main)).filter(text =>
-  /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|returnTaskToDraft|scheduleMaintenance|scheduleRecurringTasks|taskRunLimit|readQueuedMessage|hasPendingManagerMessages|queuedFiles)\(|const (?:imageExtensions|imageTypes|boardRequests|boardWorkRequests|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork|maintenanceWork|returningDrafts|reviewOperations|managerReviewOperations|taskOperations|steeringOperations) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
+  /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|changeBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|returnTaskToDraft|scheduleMaintenance|scheduleRecurringTasks|taskRunLimit|readQueuedMessage|queuedFiles|listQueuedMessages)\(|const (?:imageExtensions|imageTypes|boardRequests|boardGoalClears|boardWorkRequests|backgroundManagerRequests|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork|maintenanceWork|returningDrafts|reviewOperations|managerReviewOperations|taskOperations|steeringOperations) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
 const cliFailure = (code: string, message: string) => ({ ok: false, error: { code, message } });
 
@@ -102,6 +102,9 @@ function fixture(t: TestContext) {
   const boardListeners = new Set<(tasks: Task[]) => void>();
   const subscriptions = new Map();
   const agentSlots = createAgentSlots();
+  agentSlots.claim = (project, task) => registerRuntime(project, { kind: "task", task },
+    entries => !entries.some(entry => entry.kind !== "queue" && entry.task === task));
+  let clearGoalError: string | undefined;
   const executorNotifications: string[] = [];
   const managerNotifications: string[] = [];
   const questionNotifications: { title: string; body: string; click?: () => void; closed?: boolean }[] = [];
@@ -112,7 +115,7 @@ function fixture(t: TestContext) {
   });
   const activeAgents = new Map<string, { control: { steer: (text: string) => Promise<void> } }>();
   const sender = { isDestroyed: () => true };
-  const runtime = runInNewContext(handlerSource + "\n({ frame, scheduleAutoReview, boardRequests, boardWorkRequests, managerQuestion, runBoardRequest, scheduleRecurringTasks })", {
+  const runtime = runInNewContext(handlerSource + "\n({ frame, scheduleAutoReview, boardRequests, boardWorkRequests, backgroundManagerRequests, acceptanceWork, managerQuestion, runBoardRequest, scheduleRecurringTasks })", {
     scheduleAutoBoard: () => {},
     activeRunSummary, runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
     captureFileLink, isFileLink, verifyFileLink, AbortSignal, AbortController, ArrayBuffer, Buffer, Error, basename, dirname, extname, join, mkdtemp, rm, writeFile, maxAttachmentBytes, boardActions, boardInstructions, boardTools, callCli,
@@ -120,7 +123,7 @@ function fixture(t: TestContext) {
     executorFullAccess, managerAccess, setTaskExecutorAccess, phaseStageReporter,
     autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, defaultBoardAgents, reviewVerifier,
     existsSync, storageDirectory, readdirSync, rmSync, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
-    goalMessages, managerChatItems, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory,
+    goalMessages, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory,
     send() {},
     readBoardHistory: (_profile: string, _project: string, _id: string, cursor: string | null) => {
       providerHistoryReads++;
@@ -163,6 +166,7 @@ function fixture(t: TestContext) {
       assert.equal(cwd, project);
       assert.equal(id, threadId);
       idleGoalActions.push(action);
+      if (clearGoalError) throw new Error(clearGoalError);
       return null;
     },
     launchTask: async (cwd: string, id: string, review?: { input: unknown }, newThread?: false | "manager", revision?: number, _retryDisconnect?: boolean, _scheduled?: boolean, resolveConflicts?: boolean) => {
@@ -222,12 +226,12 @@ function fixture(t: TestContext) {
         [...expectedTools.filter(name => (name !== "task_accept" || mode !== "human") && (!instructions.includes("This turn repairs") || !["task_start", "task_start_batch", "task_accept", "task_request_changes"].includes(name))),
         ...(!manualTurn && !cleanupTurn && !instructions.includes("This turn repairs") ? ["task_return_to_draft"] : []),
         ...(!manualTurn && !cleanupTurn && mode === "manager" ? ["expert_stage"] : []),
-        ...(!reviewTurn && !cleanupTurn ? (session.goal || session.resumeGoal ? ["goal_inbox", "goal_report"] : ["goal_read", "goal_send"]) : []),
+        ...(!reviewTurn && !cleanupTurn && !instructions.includes("This turn repairs") ? (session.goal || session.resumeGoal ? ["goal_inbox", "goal_report"] : ["goal_read", "goal_send"]) : []),
         ...(reviewTurn && mode === "reviewer" ? ["manager_ack", "task_cancel", "task_start"] : [])].sort());
       if (reviewTurn) {
         assert.doesNotMatch(instructions, /manager_inbox|task_cleanup_status/);
         assert.equal(session.attachmentContext, undefined);
-        assert.equal(session.separateTurn, undefined);
+        assert.equal(session.separateTurn, true);
         assert.equal((_tools as unknown[]).length, 0);
       }
       const newThread = reviewTurn ? dialogueId :
@@ -249,7 +253,7 @@ function fixture(t: TestContext) {
   const reviewing = () => runtime.frame({ project, board: subscriptions.get(project)?.board, window: { webContents: {} } }).reviewingTasks;
   return {
     folder, project, threadId, dialogueId, binding, chatBinding, idleGoalActions, cliCalls, boardListeners, executorNotifications, managerNotifications,
-    reviewing, agentSlots,
+    reviewing, agentSlots, failGoalClear: (message?: string) => { clearGoalError = message; },
     repair: (task: Task, reply: Reply) => {
       respond = reply;
       return runtime.runBoardRequest(sender, { project, tasks: [task] }, "Repair this acceptance", [], false, false, undefined, undefined, undefined, false, task);
@@ -274,7 +278,12 @@ function fixture(t: TestContext) {
         reloadReviewReports: () => { watch.reviewReports = readReviewReports(folder, project); return watch.reviewReports; },
         reviewing,
         refresh: async () => { watch.board = (await callCli(project, ["list", "--compact"])).data; },
-        done: () => Promise.all([...watch.reviewerRuns.values(), runtime.boardWorkRequests.get(project)?.automaticDone]),
+        done: async () => {
+          await Promise.all(watch.reviewerRuns.values());
+          while (runtime.backgroundManagerRequests.has(project) || runtime.acceptanceWork.size) {
+            await new Promise<void>(resolve => setTimeout(resolve, 10));
+          }
+        },
       };
     },
     connectExecutor: (id: string) => activeAgents.set(project + "\0" + id, {
@@ -967,12 +976,18 @@ test("an interrupted manager request preserves the durable queue until Codex rec
   assert.equal(new TextDecoder().decode(saved.files[0].bytes), "Сохрани русский текст");
   assert.equal(saved.failed, true);
   assert.equal((await f.queue("retry", id)).ok, true);
+  const queuePath = join(f.project, ".tasks", "manager-queue", id + ".json");
+  const queuedBeforeDelivery = readFileSync(queuePath);
   const sent = await f.run(saved.draft, async (_act, _prompt, _images, _id, _context, _waiting, _signal, goal) => {
     goal!.delivered(id);
     assert.equal((await f.queue("list")).data.length, 0);
     return { interrupted: true };
   }, attachments, false, id);
   assert.equal(sent.data.keepQueued, false);
+  // Recreate the state after a crash between the history write and queue removal.
+  await writeFile(queuePath, queuedBeforeDelivery);
+  assert.equal((await f.run(saved.draft, async () => assert.fail("Already delivered"), attachments, false, id)).ok, true);
+  assert.equal((await f.queue("list")).data.length, 0);
   const archived = await f.history();
   assert.equal(archived.ok, true);
   assert.equal(archived.data.turns.length, 1);
@@ -2204,6 +2219,63 @@ test("goal actions use the running chat connection and resume requires an existi
   assert.equal(f.idleGoalActions[0]?.kind, "clear");
 });
 
+test("clearing a paused goal waits for dialogue and shares the result between requests", async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"])).ok, true);
+  const goal = { objective: "Saved objective", status: "paused" };
+  writeJson(f.chatBinding, { provider: "codex", id: f.threadId, history: "local", goal });
+  const connected = Promise.withResolvers<void>();
+  const done = Promise.withResolvers<void>();
+  const activeWriter = "failed to record goal instruction: thread already has an active writer";
+  f.failGoalClear(activeWriter);
+  const dialogue = f.run("Ordinary question", async (_act, _prompt, _images, id, _context, _waiting, signal) => {
+    assert.equal(id, f.threadId);
+    connected.resolve();
+    await done.promise;
+    assert.equal(signal?.aborted, false);
+    return { text: "Ordinary answer" };
+  });
+  await Promise.race([connected.promise, dialogue.then(result => assert.fail(JSON.stringify(result)))]);
+  try {
+    const first = f.goal("clear");
+    const duplicate = f.goal("clear");
+    const early = await Promise.race([first, wait(50, "pending")]);
+    assert.equal(early, "pending", JSON.stringify(early));
+    assert.equal(f.idleGoalActions.length, 0);
+    assert.deepEqual((await f.history()).data.goal, goal);
+    f.failGoalClear();
+    done.resolve();
+    assert.equal((await dialogue).data.answer, "Ordinary answer");
+    for (const result of await Promise.all([first, duplicate])) {
+      assert.equal(result.ok, true);
+      assert.equal(result.data, null);
+    }
+    assert.equal((await f.goal("clear")).data, null);
+    assert.equal(f.idleGoalActions.length, 1);
+    const history = await f.history();
+    assert.equal(history.data.goal, null);
+    assert.match(JSON.stringify(history.data.turns), /Ordinary question.*Ordinary answer/);
+  } finally {
+    done.resolve();
+    await dialogue;
+  }
+});
+
+test("a provider refusal leaves a paused goal in history and permits retry", async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"])).ok, true);
+  const goal = { objective: "Saved objective", status: "paused" };
+  writeJson(f.chatBinding, { provider: "codex", id: f.threadId, history: "local", goal });
+  f.failGoalClear("Provider refused");
+  const rejected = await f.goal("clear");
+  assert.equal(rejected.error.code, "BOARD_GOAL_FAILED");
+  assert.equal(rejected.error.message, "Provider refused");
+  assert.deepEqual((await f.history()).data.goal, goal);
+  f.failGoalClear();
+  assert.equal((await f.goal("clear")).data, null);
+  assert.equal(f.idleGoalActions.length, 2);
+});
+
 test("two windows sharing a board cannot start separate orchestrator chats", async t => {
   const f = fixture(t);
   assert.equal((await f.cli(["init"])).ok, true);
@@ -2449,7 +2521,7 @@ test("private cleanup repair persists, shares reviewer capacity and preserves a 
   assert.equal((await f.cli(["maintenance"])).data.length, 1);
   release();
   const result = await f.cleanup(pending[0], async (action, _prompt, _images, id, _context, _waiting, _signal, meta) => {
-    assert.equal(id, f.dialogueId);
+    assert.equal(id, undefined);
     assert.equal(meta?.role, "reviewer"); assert.equal(meta?.objective, undefined); assert.equal(meta?.resume, false);
     assert.equal(f.agentSlots.available(f.project, "reviewer", { reviewer: 1 }), 0);
     assert.equal(f.agentSlots.available(f.project, "executor", { executor: 1 }), 1);
@@ -2472,7 +2544,7 @@ test("private cleanup repair persists, shares reviewer capacity and preserves a 
   assert.equal(f.agentSlots.available(f.project, "reviewer", { reviewer: 1 }), 1);
 });
 
-test("acceptance repair reuses manager context and waits only for reviewer capacity", async t => {
+test("acceptance repair has an isolated context and waits for shared reviewer capacity", async t => {
   const f = fixture(t);
   const git = (...args: string[]) => {
     const result = spawnSync("git", ["-C", f.project, ...args], { encoding: "utf8", windowsHide: true });
@@ -2495,7 +2567,7 @@ test("acceptance repair reuses manager context and waits only for reviewer capac
   assert.equal((await f.cli(["show", card.id])).data.acceptanceRepair.phase, "queued");
   release();
   const scheduler = f.schedule((await f.cli(["list", "--compact"])).data, async (_act, _prompt, _images, id, _context, _waiting, _signal, session) => {
-    assert.equal(id, f.dialogueId); assert.deepEqual(session?.settings, defaultBoardAgents.manager);
+    assert.equal(id, undefined); assert.deepEqual(session?.settings, defaultBoardAgents.manager);
     assert.equal(f.agentSlots.available(f.project, "reviewer", { reviewer: 1 }), 0);
     assert.equal(f.agentSlots.available(f.project, "executor", { executor: 1 }), 1);
     const running = (await f.cli(["show", card.id])).data;

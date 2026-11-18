@@ -37,7 +37,7 @@ import { directory as storageDirectory, readBoardSettings, readJson, writeJson }
 import { missingCodexThread, startCodexRun } from "./codex-run.ts";
 import type { ExecutorTask } from "./codex-run.ts";
 import { runLog } from "./run-activity.ts";
-import { readRunImage } from "./run-images.ts";
+import { readReviewerImage, readRunImage } from "./run-images.ts";
 import { projectIdentity, projectLabels, projectPath, savedWindows } from "./project-tabs.ts";
 import { readMarkdownFile } from "./markdown-files.ts";
 import { normalizeRecentBoards, readRecentBoards, rememberRecentBoard } from "./recent-boards.ts";
@@ -46,7 +46,7 @@ import { startWindowsDictation } from "./windows-dictation.ts";
 import { needsManagerAttention } from "../cli/task-messages.ts";
 import { readReviewReports, saveReviewReports } from "./review-history.ts";
 import { readReviewerChat, reviewerActivity, withReviewerChat } from "./reviewer-chat.ts";
-import { goalMessages, managerChatItems, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory } from "./manager-history.ts";
+import { goalMessages, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory } from "./manager-history.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
 import { createAgentSlots, parseAgentLimits } from "./agent-limits.ts";
 import { nextReadyTask } from "./auto-queue.ts";
@@ -87,13 +87,14 @@ interface WindowState {
 }
 
 interface BoardWatch {
+  failedDiscussionStarts?: Map<string, number>;
   tabs: Set<ProjectTab>;
   listeners: Set<(board: Board, runChanged?: boolean) => void>;
   board: Board;
   stop: () => void;
   reviewAttempts: Map<string, string>;
   integrationAttempts: Map<string, number>;
-  shared?: { runtime: string; context?: string; activity: string; queue: number; history: number; unread: number };
+  shared?: { runtime: string; context?: string; activity: string; queue: number; history: number; binding: number; unread: number };
   reviewReports: Map<string, ReviewedSubmission>;
   reviewerRuns: Map<string, Promise<void>>;
 }
@@ -204,6 +205,7 @@ function frame(state: ProjectTab) {
   const sharedRuns = state.board ? agentSlots.entries(state.board.project) : [];
   const managerContext = sharedRuns.find(entry => entry.task === "manager:context");
   const sharedManager = managerContext?.state && { ...managerContext.state, live: undefined };
+  const background = sharedRuns.find(entry => entry.task === "manager:background")?.state;
   const openTabs = windowStates.get(state.window.webContents.id)?.tabs ?? [];
   const unreadTabs = new Set(openTabs.flatMap(tab =>
     tab.project && boardUnread(tab.board?.project).length ? [tab.project] : []));
@@ -221,7 +223,8 @@ function frame(state: ProjectTab) {
     managerAccess: state.project ? managerAccess(app.getPath("userData"), state.project) : "auto",
     managerBusy: Boolean(managerContext),
     managerRun: request?.managerRun ?? (sharedManager?.lane === "chat" ? sharedManager : null),
-    managerWork: work?.managerRun ?? (sharedManager?.lane !== "chat" ? sharedManager ?? null : null),
+    managerWork: work?.managerRun ?? (sharedManager?.lane !== "chat" ? sharedManager : undefined) ??
+      (background ? { ...background, live: undefined } : null),
     runningTasks: state.board?.tasks.filter(task => {
       const key = state.project + "\0" + task.id;
       return runningTasks.has(key) || sharedRuns.some(entry => entry.kind === "slot" && entry.task === task.id);
@@ -229,7 +232,9 @@ function frame(state: ProjectTab) {
     replyingTasks: state.board?.tasks.filter(task => (replyingTasks.has(state.project + "\0" + task.id) || sharedRuns.some(entry => entry.kind === "task" && entry.task === task.id))).map(task => task.id),
     waitingTasks: state.board?.tasks.filter(task => {
       const key = state.project + "\0" + task.id;
-      return sharedRuns.some(entry => matchesQueuedExecutor(entry, task)) &&
+      const failedRevision = subscriptions.get(state.project ?? "")?.failedDiscussionStarts?.get(task.id);
+      return task.status === "in_progress" && ((task.discussionReturn !== undefined && (failedRevision ?? -1) < task.revision) ||
+        sharedRuns.some(entry => matchesQueuedExecutor(entry, task))) &&
         !runningTasks.has(key) && !replyingTasks.has(key) && !sharedRuns.some(entry => entry.kind === "slot" && entry.task === task.id);
     }).map(task => task.id),
     reviewingTasks: Object.fromEntries(state.board?.tasks.flatMap(task => {
@@ -261,7 +266,7 @@ observeActiveRuns(() => {
 });
 
 function publishReviewActivity(project: string) {
-  for (const requests of [boardRequests, boardWorkRequests]) {
+  for (const requests of [boardRequests, boardWorkRequests, backgroundManagerRequests]) {
     requests.get(projectIdentity(project))?.publishRun?.();
   }
   for (const { active } of windowStates.values()) {
@@ -337,6 +342,7 @@ function subscribe(project: string, board: Board): BoardWatch {
       const key = projectIdentity(project);
       boardRequests.get(key)?.settingsChanged?.();
       boardWorkRequests.get(key)?.settingsChanged?.();
+      backgroundManagerRequests.get(key)?.settingsChanged?.();
     } catch (error) {
       if (!stopped) console.error("Could not synchronize board notices.", error);
     } finally {
@@ -743,6 +749,7 @@ interface ActiveAgent {
   control: AgentControl;
   directories: Set<string>;
   draftDiscussion?: true;
+  chatWindow?: number;
   updateMessage?: (task: Task, index: number) => () => void;
 }
 const activeAgents = new Map<string, ActiveAgent>();
@@ -840,18 +847,19 @@ async function saveTaskTokenUsage(project: string, id: string, role: TaskUsageRo
 }
 
 async function sendChat(project: string, id: string, request: ChatRequest, notify: (update: ChatUpdate) => void,
-  automatic?: NonNullable<Task["draftDiscussion"]>["phase"]) {
+  automatic?: NonNullable<Task["draftDiscussion"]>["phase"], chatWindow?: number) {
   const key = project + "\0" + id;
   const active = activeAgents.get(key);
   if (returningDrafts.has(key) || (!active && (chatRuns.has(key) || launchingTasks.has(key))) ||
-      (active && (automatic || active.draftDiscussion || request.retryAt !== undefined))) {
+      (active && (automatic || active.draftDiscussion || request.retryAt !== undefined ||
+        active.chatWindow !== undefined && active.chatWindow !== chatWindow))) {
     return { saved: false, result: cliFailure("CHAT_BUSY", t("ui.the_agent_is_already_replying_to_this_task_234378d8")) };
   }
   if (closingProjects.has(project)) return { saved: false, result: cliFailure("PROJECT_CLOSING",
     t("ui.the_project_is_closing_beb637fb")) };
   // A steering request can outlive the provider turn whose files it is preparing.
   const writer = active ? registerRuntime(project, { kind: "task", task: id }) : agentSlots.claim(project, id);
-  if (!writer) return { saved: false, result: cliFailure("CHAT_BUSY", "This task already has an active writer.") };
+  if (!writer) return { saved: false, result: cliFailure("CHAT_BUSY", t("task_chat.writer_busy")) };
   const operation = beginOperation(project, t("ui.task_discussion_97daf76e") + " · " + id);
   const signal = operation.controller.signal;
   const steering = active ? steeringOperations.get(key) ?? new Set<ProjectOperation>() : undefined;
@@ -921,7 +929,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       saved = reply.ok;
       if (saved) notify({ type: "saved" });
     } else {
-      reply = await callCli<Task>(project, ["show", id]);
+      reply = await callCli<Task>(project, ["chat", id], { retryAt });
     }
     if (!reply.ok) return { saved, result: reply };
     signal.throwIfAborted();
@@ -994,17 +1002,28 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     }
     const replyStarted = performance.now();
     let replyTo = last;
-    let runAction = taskChatActions(project, task, message?.text ?? "", () => notify({ type: "changed" }));
+    const requestChanges = async (card: Task, reason: string): Promise<CliReply> => {
+      if (isManual(readBoardSettings(runtimeLocation(project)))) return cliFailure("MANUAL_BOARD", "На обычной доске статусы меняет пользователь.");
+      const review = await callCli<{ revision: number; targetHead: string | null }>(project, ["review", id], { compact: true });
+      if (!review.ok) return review;
+      if (review.data.revision !== card.revision) return cliFailure("REVISION_CONFLICT", "The card changed. Read the current card before returning it.");
+      const returned = await callCli<LaunchState>(project, ["request-changes", id, "--compact"], {
+        revision: card.revision, reason, actor: "discussion", targetHead: review.data.targetHead, launchDetails: true,
+      });
+      if (!returned.ok) return returned;
+      return { ok: true, data: { ...returned.data, feedback: reason, executorState: "waiting_for_discussion" } };
+    };
+    let runAction = taskChatActions(project, task, message?.text ?? "", () => notify({ type: "changed" }), requestChanges);
     const ready = Promise.withResolvers<AgentControl>();
     void ready.promise.catch(() => {});
-    activeAgents.set(key, { directories, draftDiscussion: automatic ? true : undefined, control: {
+    activeAgents.set(key, { directories, chatWindow, draftDiscussion: automatic ? true : undefined, control: {
       steer: async (text, images) => (await ready.promise).steer(text, images),
       interrupt: async () => (await ready.promise).interrupt(),
     }, updateMessage: (latest, index) => {
       if (index < replyTo) return () => {};
       const previousIndex = replyTo, previousAction = runAction;
       replyTo = index;
-      runAction = taskChatActions(project, latest, latest.history[index].text ?? "", () => notify({ type: "changed" }));
+      runAction = taskChatActions(project, latest, latest.history[index].text ?? "", () => notify({ type: "changed" }), requestChanges);
       return () => { if (replyTo === index) { replyTo = previousIndex; runAction = previousAction; } };
     } });
     const answer = await writer.run(() => replyToTask(app.getPath("userData"), project, { model, effort }, prompt, images,
@@ -1015,7 +1034,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       control => ready.resolve(control), signal, id, items => {
         streamed = true;
         notify({ type: "run", items });
-      }, automatic === undefined ? undefined : "initial")).finally(() => ready.reject(new Error("The agent session ended.")));
+      }, automatic === undefined ? undefined : "initial", task.status === "review")).finally(() => ready.reject(new Error("The agent session ended.")));
     if ("interrupted" in answer) return { saved, result: { ok: true as const, data: task } };
     signal.throwIfAborted();
     const result = await callCli<Task>(project, ["chat", id], {
@@ -1078,7 +1097,7 @@ ipcMain.handle("chat:send", async (event, id: unknown, request: unknown) => {
   return sendChat(project, id, input as ChatRequest, update => {
     if (update.type === "run") return publishRunActivity(project, id, update.items);
     if (!event.sender.isDestroyed()) event.sender.send("chat:update", { project, id, ...update });
-  });
+  }, undefined, event.sender.id);
 });
 
 function runDraftDiscussion(project: string, id: string, phase: NonNullable<Task["draftDiscussion"]>["phase"]) {
@@ -1109,7 +1128,6 @@ type ManagerRequest = {
   goal?: (action: BoardGoalAction) => Promise<BoardGoal | null>;
   goalRunning?: boolean;
   changingGoal?: boolean;
-  automaticDone?: Promise<void>;
   reviewing?: Set<string>;
   items?: BoardActivity[];
   publishRun?: () => void;
@@ -1119,7 +1137,9 @@ type ManagerRequest = {
   question?: { view: ManagerQuestion; settle: (answer: string | null) => void };
 };
 const boardRequests = new Map<string, ManagerRequest>();
+const boardGoalClears = new Map<string, ReturnType<typeof changeBoardGoal>>();
 const boardWorkRequests = new Map<string, ManagerRequest>();
+const backgroundManagerRequests = new Map<string, ManagerRequest>();
 enableSharedRuns();
 const agentSlots = createAgentSlots(true);
 type ExecutorContinuation = { afterDisconnect?: boolean; withoutProgress?: boolean };
@@ -1169,7 +1189,15 @@ function scheduleAutoBoard(watch: BoardWatch) {
           queue.integrations.add(attempt);
           const review = await callCli<{ revision: number; targetHead: string | null; message?: string; stale: boolean;
             reviewerApproval?: { targetHead: string | null } }>(project, ["review", task.id, "--compact"]);
-          if (!review.ok) { failed(review.error.message); continue; }
+          if (!review.ok) {
+            // The card may have left review after the queue snapshot.
+            const details = review.error.details as { id?: string; status?: string } | undefined;
+            if (review.error.code !== "INVALID_TRANSITION" || details?.id !== task.id ||
+                !details.status || details.status === "review") {
+              failed("review " + task.id + ": " + review.error.message);
+            }
+            continue;
+          }
           if (review.data.stale) { failed(task.id + ": submission changed"); continue; }
           if (review.data.reviewerApproval?.targetHead !== review.data.targetHead) {
             const release = reserveAgent(project, "reviewer", "review:" + task.id);
@@ -1189,8 +1217,15 @@ function scheduleAutoBoard(watch: BoardWatch) {
             targetHead: review.data.targetHead, ...(review.data.message ? { message: review.data.message } : {}),
           });
           if (!accepted.ok) {
+            if (accepted.error.code === "REVISION_CONFLICT") continue;
+            if (accepted.error.code === "REVIEW_REQUIRED") {
+              // Accept checks approval before the revision and status. A
+              // concurrent decision can invalidate the approval we just read.
+              const latest = await callCli<{ status: string; revision: number }>(project, ["show", task.id, "--compact"]);
+              if (latest.ok && (latest.data.status !== "review" || latest.data.revision !== review.data.revision)) continue;
+            }
             if (["BOARD_BUSY", "TARGET_CHANGED", "AUTO_MODE_DISABLED", "AUTO_REVIEW_DISABLED", "REVIEW_MODE_CHANGED"].includes(accepted.error.code)) queue.integrations.delete(attempt);
-            else failed(task.id + ": " + accepted.error.message);
+            else failed("accept " + task.id + ": " + accepted.error.message);
             if (["BOARD_BUSY", "AUTO_MODE_DISABLED", "AUTO_REVIEW_DISABLED", "REVIEW_MODE_CHANGED"].includes(accepted.error.code)) return;
           }
           continue;
@@ -1205,14 +1240,21 @@ function scheduleAutoBoard(watch: BoardWatch) {
          (task.status === "review" && board.settings.requireExpertPlans && reviewMode !== "human" && !task.expertReviewPlanned && !task.acceptanceRepair)) &&
         !queue.notices.has("expert-plan:" + task.id + ":" + task.revision)).slice(0, 4);
       const addressed = board.settings.autoMode ? notices : [];
-      if ((addressed.length || needsPlan.length) && tab && !boardWorkRequests.has(key) && agentSlots.available(key, "manager", board.settings.taskLimits)) {
-        for (const notice of addressed) queue.notices.add(notice.id + ":" + notice.sequence);
-        for (const task of needsPlan) queue.notices.add("expert-plan:" + task.id + ":" + task.revision);
+      if ((addressed.length || needsPlan.length) && tab && !boardWorkRequests.has(key) &&
+          !backgroundManagerRequests.has(key) && agentSlots.available(key, "manager", board.settings.taskLimits)) {
+        const noticeKeys = [...addressed.map(notice => notice.id + ":" + notice.sequence),
+          ...needsPlan.map(task => "expert-plan:" + task.id + ":" + task.revision)];
+        for (const notice of noticeKeys) queue.notices.add(notice);
         const prompt = "AI Taskboard queue: handle these addressed notices without a goal. " + JSON.stringify(addressed) +
           (needsPlan.length ? "\nThese existing cards need specialist plans. Read each card and use expert_plan to save the missing work or review phase. Do not approve, start or accept a card in this planning request. " +
             JSON.stringify(needsPlan.map(({ id, status, revision }) => ({ id, status, revision }))) : "");
         void runBoardRequest(tab.window.webContents, board, prompt, [], false, false, undefined, undefined, undefined, true)
-          .then(result => { if (!result.ok) failed(result.error.message); else if (result.data?.error) failed(result.data.error); })
+          .then(result => {
+            if (!result.ok && result.error.code === "BOARD_REQUEST_IN_PROGRESS") {
+              for (const notice of noticeKeys) queue.notices.delete(notice);
+            } else if (!result.ok) failed(result.error.message);
+            else if (result.data?.error) failed(result.data.error);
+          })
           .catch(error => failed((error as Error).message));
       }
       if (controls?.paused) return;
@@ -1292,6 +1334,14 @@ function scheduleAgentWork() {
         }
       }
       for (const watch of subscriptions.values()) {
+        const { project, settings, tasks } = watch.board;
+        if (!closingProjects.has(project) && !isManual(settings)) for (const task of tasks) {
+          if (task.status !== "in_progress" || task.discussionReturn === undefined || executorBusy(project, task.id) ||
+              (watch.failedDiscussionStarts?.get(task.id) ?? -1) >= task.revision ||
+              !agentSlots.available(projectIdentity(project), "executor", settings?.taskLimits)) continue;
+          void launchTask(project, task.id, undefined, false, undefined, undefined, false, false, false, false, false, undefined, undefined, task.discussionReturn)
+            .catch(error => broadcastBoardChat(project, "orchestrator-review-error", { error: task.id + " · " + (error as Error).message }));
+        }
         scheduleAutoReview(watch);
         scheduleAutoBoard(watch);
         scheduleDraftDiscussions(watch);
@@ -1341,10 +1391,10 @@ async function continueAcceptance(project: string, task: Task) {
       const tab = watch && [...watch.tabs].find(tab => !tab.window.isDestroyed());
       if (!watch || !tab) return;
       result = await runBoardRequest(tab.window.webContents, watch.board,
-        "Resolve the pending acceptance conflict yourself in the board manager context. " + JSON.stringify({ id: task.id,
+        "Resolve the pending acceptance conflict yourself as board manager. " + JSON.stringify({ id: task.id,
           worktree: task.git?.worktree, acceptanceRepair: task.acceptanceRepair }) +
         " Read the current card with show --compact; use the AI Taskboard CLI with --project " + project +
-        " for preview, submit or block. No new agent context is authorized.", [], false, false, undefined, undefined, undefined, false, task);
+        " for preview, submit or block. Do not launch another agent.", [], false, false, undefined, undefined, undefined, false, task);
       if (result.ok && !returningDrafts.has(key)) {
         const current = await callCli<Task>(project, ["show", task.id]);
         if (current.ok && current.data.acceptanceRepair?.phase === "running") {
@@ -1381,8 +1431,6 @@ async function scheduleMaintenance(project: string, watch: BoardWatch) {
     const tab = [...watch.tabs].find(tab => !tab.window.isDestroyed());
     if (!jobs.ok || !tab) return;
     for (const job of jobs.data) {
-      // Let the visible queue acquire the context between maintenance jobs.
-      if (hasPendingManagerMessages(project)) return;
       const result = await runBoardRequest(tab.window.webContents, watch.board,
         "Repair the assigned private lifecycle maintenance fault. Use --project " + project + " for the task CLI.",
         [], false, false, undefined, undefined, undefined, false, undefined, job);
@@ -1419,7 +1467,7 @@ function scheduleRecurringTasks(now = Date.now()) {
 }
 
 function managerQuestion(key: string, id?: unknown) {
-  const questions = [boardWorkRequests.get(key)?.question, boardRequests.get(key)?.question];
+  const questions = [boardWorkRequests.get(key)?.question, boardRequests.get(key)?.question, backgroundManagerRequests.get(key)?.question];
   return questions.find(question => question && (id === undefined || question.view.id === id));
 }
 
@@ -1470,7 +1518,7 @@ function broadcastBoardChat(project: string, type: string, details: { id?: strin
   }
 }
 
-function boardThreadPath(project: string, lane: "chat" | "work" = "work") {
+function boardThreadPath(project: string) {
   const dialog = join(project, ".tasks", "manager-dialog.json");
   const legacy = join(project, ".tasks", "orchestrator.json");
   return existsSync(legacy) ? legacy : dialog;
@@ -1488,19 +1536,19 @@ function readQueuedMessage(path: string) {
   }
 }
 
-function hasPendingManagerMessages(project: string) {
-  const directory = join(project, ".tasks", "manager-queue");
-  if (!existsSync(directory)) return false;
-  storageDirectory(directory);
-  return readdirSync(directory).some(name => {
-    if (!name.endsWith(".json")) return false;
-    const job = readQueuedMessage(join(directory, name));
-    return Boolean(job && !job.failed);
-  });
-}
-
 function queuedFiles(job: QueuedBoardMessage): PastedFile[] {
   return job.files.map(file => ({ ...file, bytes: Uint8Array.from(Buffer.from(file.bytes, "base64")).buffer }));
+}
+
+function listQueuedMessages(directory: string) {
+  if (!existsSync(directory)) return [];
+  const orderPath = join(directory, "order");
+  const order = new Map((existsSync(orderPath) ? readJson(orderPath) as string[] : []).map((id, index) => [id, index]));
+  return readdirSync(directory).filter(name => name.endsWith(".json")).flatMap(name => {
+    const job = readQueuedMessage(join(directory, name));
+    return job ? [job] : [];
+  }).sort((left, right) => (order.get(left.id) ?? order.size) - (order.get(right.id) ?? order.size) ||
+    left.created - right.created || left.id.localeCompare(right.id));
 }
 
 ipcMain.handle("board:queue", async (event, project: string, action: unknown, id?: unknown, draft?: unknown,
@@ -1513,18 +1561,36 @@ ipcMain.handle("board:queue", async (event, project: string, action: unknown, id
   try {
     if (existsSync(directory)) storageDirectory(directory);
     if (action === "list") {
-      if (!existsSync(directory)) return { ok: true, data: [] };
-      const jobs = readdirSync(directory).filter(name => name.endsWith(".json")).flatMap(name => {
-        const job = readQueuedMessage(join(directory, name));
-        return job ? [{ ...job, files: queuedFiles(job) }] : [];
-      });
-      return { ok: true, data: jobs.sort((left, right) => left.created - right.created || left.id.localeCompare(right.id)) };
+      const context = agentSlots.entries(board.project).find(entry => entry.task === "manager:context");
+      return { ok: true, data: listQueuedMessages(directory).map(job => ({
+        ...job, files: queuedFiles(job), inFlight: context?.queuedMessageId === job.id || context?.steeringMessageId === job.id,
+      })) };
     }
     if (action === "add" && id === undefined) id = randomUUID();
     if (typeof id !== "string" || !codexThreadPattern.test(id)) return cliFailure("INVALID_INPUT", t("errors.9784747447fcf118"));
     const path = join(directory, id + ".json");
-    if (action === "remove" || action === "retry" || (action === "edit" && typeof draft === "string")) {
-      const error = runtimeTransaction(board.project, () => {
+    if (action === "promote" || (action === "move" && typeof draft === "string" &&
+        codexThreadPattern.test(draft) && typeof goal === "boolean")) {
+      runtimeTransaction(board.project, entries => {
+        const context = entries.find(entry => entry.task === "manager:context");
+        const jobs = listQueuedMessages(directory);
+        const canMove = (job: QueuedBoardMessage) => !job.goal &&
+          job.id !== context?.queuedMessageId && job.id !== context?.steeringMessageId;
+        const pending = jobs.filter(canMove);
+        const index = pending.findIndex(job => job.id === id);
+        if (index < 0 || id === draft) return;
+        const [job] = pending.splice(index, 1);
+        const target = action === "promote" ? 0 : pending.findIndex(candidate => candidate.id === draft);
+        if (target < 0) return;
+        pending.splice(target + (action === "move" && goal ? 1 : 0), 0, job);
+        let next = 0;
+        writeJson(join(directory, "order"), jobs.map(job => (canMove(job) ? pending[next++] : job).id));
+        if (action === "promote" && job.failed) writeJson(path, { ...job, failed: undefined });
+      });
+    } else if (action === "remove" || action === "retry" || (action === "edit" && typeof draft === "string")) {
+      const error = runtimeTransaction(board.project, entries => {
+        const context = entries.find(entry => entry.task === "manager:context");
+        if (context?.queuedMessageId === id || context?.steeringMessageId === id) return;
         if (action === "remove") { rmSync(path, { force: true }); return; }
         const job = readQueuedMessage(path);
         if (!job) return;
@@ -1556,7 +1622,7 @@ function readBoardThread(path: string) {
   return { provider: stored.provider, id: stored.id, history: stored.history, goal: stored.goal, goalId: stored.goalId };
 }
 
-function saveBoardGoal(path: string, goal: BoardGoal | null) {
+function saveBoardGoal(path: string, goal: BoardGoal | null, required = false) {
   try {
     const thread = readBoardThread(path);
     const snapshot = goal && { objective: goal.objective, status: goal.status };
@@ -1564,6 +1630,7 @@ function saveBoardGoal(path: string, goal: BoardGoal | null) {
       writeJson(path, { ...thread, goal: snapshot });
     }
   } catch (error) {
+    if (required) throw error;
     console.warn("Could not save the manager goal locally.", (error as Error).message);
   }
 }
@@ -1579,21 +1646,24 @@ ipcMain.handle("board:history", async (event, project?: string, cursor: unknown 
   project = board.project;
   try {
     const key = projectIdentity(project);
-    const shared = agentSlots.entries(project).find(entry => entry.task === "manager:context")?.state;
+    const entries = agentSlots.entries(project);
+    const shared = entries.find(entry => entry.task === "manager:context")?.state;
+    const background = entries.find(entry => entry.task === "manager:background")?.state;
     const live = shared?.live?.items ?? [];
     if (view === "live") return { ok: true, data: {
       dialogue: managerChatItems(boardRequests.get(key)?.items ?? (shared?.lane === "chat" ? live : [])).slice(-45),
-      work: managerWorkItems(boardWorkRequests.get(key)?.items ?? (shared?.lane === "work" ? live : []), "work").slice(-80),
+      work: managerWorkItems(boardWorkRequests.get(key)?.items ?? (shared?.lane === "work" ? live :
+        backgroundManagerRequests.get(key)?.items ?? background?.live?.items ?? []), "work").slice(-80),
       chat: managerWorkItems(boardRequests.get(key)?.items ?? (shared?.lane === "chat" ? live : [])).slice(-45),
       reviewers: Object.fromEntries([...(subscriptions.get(project)?.reviewerRuns.keys() ?? [])].map(id =>
         [id, reviewerActivity(board.project, id)])),
     } };
-    const background = readBoardThread(boardThreadPath(project));
-    const data = await readManagerView(project, cursor, view, background && background.history !== "local" ?
-      next => readBoardHistory(app.getPath("userData"), project, background.id, next) : undefined);
+    const saved = readBoardThread(boardThreadPath(project));
+    const data = await readManagerView(project, cursor, view, saved && saved.history !== "local" ?
+      next => readBoardHistory(app.getPath("userData"), project, saved.id, next) : undefined);
     const goalRunning = Boolean(boardWorkRequests.get(key)?.goalRunning ?? shared?.goalRunning);
     return { ok: true, data: { turns: [], nextCursor: null, ...data,
-      goal: background?.goal !== undefined ? background.goal : (data && "goal" in data ? data.goal : undefined),
+      goal: saved?.goal !== undefined ? saved.goal : (data && "goal" in data ? data.goal : undefined),
       model: data?.model ?? board.settings.manager?.model, goalRunning } };
   } catch (error) {
     return cliFailure("BOARD_HISTORY_FAILED", (error as Error).message);
@@ -1677,31 +1747,65 @@ ipcMain.handle("board:goal", async (event, kind: unknown, objective: unknown) =>
   }
   const action: BoardGoalAction = kind === "edit" ? { kind, objective: (objective as string).trim() } : { kind };
   const key = projectIdentity(project);
+  if (kind !== "clear") return changeBoardGoal(project, key, action);
+  const pending = boardGoalClears.get(key);
+  if (pending) return pending;
+  const clear = changeBoardGoal(project, key, action);
+  boardGoalClears.set(key, clear);
+  try { return await clear; }
+  finally { boardGoalClears.delete(key); }
+});
+
+async function changeBoardGoal(project: string, key: string, action: BoardGoalAction) {
   const running = boardWorkRequests.get(key);
-  if (running && (!running.goal || running.changingGoal)) {
-    return cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_project_manager_is_connecting_or_changing_th_eb7d3eec"));
-  }
-  const operation = running ?? {};
-  operation.changingGoal = true;
-  if (!running) boardWorkRequests.set(key, operation);
+  const busy = () => cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_agent_is_already_handling_a_request_72b4da49"));
+  let writer: ReturnType<typeof agentSlots.claim>;
+  let activity: ReturnType<typeof beginOperation> | undefined;
+  let operation: ManagerRequest | undefined;
   try {
     const binding = boardThreadPath(project);
-    const id = readBoardThread(binding)?.id;
-    if (!id) return cliFailure("INVALID_INPUT", t("ui.there_is_no_saved_goal_67c98597"));
-    if (kind === "pause" || kind === "clear") running?.question?.settle(null);
-    const goal = running?.goal ? await running.goal(action) : await updateBoardGoal(app.getPath("userData"), project, id, action);
+    const saved = readBoardThread(binding);
+    if (!saved) return cliFailure("INVALID_INPUT", t("ui.there_is_no_saved_goal_67c98597"));
+    if (running && (!running.goal || running.changingGoal)) {
+      return cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_project_manager_is_connecting_or_changing_th_eb7d3eec"));
+    }
     if (!running) {
-      saveBoardGoal(binding, goal);
+      if (action.kind === "clear") activity = beginOperation(project, t("ui.clear_goal_a38efd6d"));
+      while (!(writer = boardRequests.has(key) ? undefined : agentSlots.claim(project, "manager:context"))) {
+        if (!activity || boardWorkRequests.has(key) ||
+          agentSlots.entries(project).some(entry => entry.task === "manager:context" && entry.state?.lane === "work")) return busy();
+        await wait(100, undefined, { signal: activity.controller.signal });
+      }
+      if (boardThreadPath(project) !== binding) return busy();
+      const current = readBoardThread(binding);
+      if (current?.id !== saved.id || current.goalId !== saved.goalId) return busy();
+      if (action.kind === "clear" && current.goal === null) {
+        broadcastBoardChat(project, "orchestrator-goal", { goal: null, goalRunning: false });
+        return { ok: true, data: null };
+      }
+    }
+    operation = running ?? {};
+    operation.changingGoal = true;
+    if (!running) boardWorkRequests.set(key, operation);
+    if (action.kind === "pause" || action.kind === "clear") running?.question?.settle(null);
+    const goal = running?.goal ? await running.goal(action) :
+      await writer!.run(() => updateBoardGoal(app.getPath("userData"), project, saved.id, action));
+    if (!running) {
+      saveBoardGoal(binding, goal, action.kind === "clear");
       broadcastBoardChat(project, "orchestrator-goal", { goal, goalRunning: false });
     }
     return { ok: true, data: goal };
   } catch (error) {
     return cliFailure("BOARD_GOAL_FAILED", (error as Error).message);
   } finally {
-    operation.changingGoal = false;
-    if (!running) boardWorkRequests.delete(key);
+    if (operation) {
+      operation.changingGoal = false;
+      if (!running) boardWorkRequests.delete(key);
+    }
+    writer?.();
+    activity?.finish();
   }
-});
+}
 
 ipcMain.handle("board:request", async (event, request: unknown, files: unknown = [], project?: string, goal: unknown = false,
   immediate: unknown = false, messageId?: unknown, goalRunId?: unknown) => {
@@ -1714,11 +1818,12 @@ ipcMain.handle("board:request", async (event, request: unknown, files: unknown =
       return cliFailure("CHAT_NOT_RUNNING", t("ui.the_manager_has_no_active_reply_the_message_is_s_1148c98d"));
     }
   }
-  return runBoardRequest(event.sender, board, request, files, goal, immediate, messageId);
+  return runBoardRequest(event.sender, board, request, files, goal, immediate, messageId,
+    undefined, undefined, false, undefined, undefined, typeof goalRunId === "string" ? goalRunId : undefined);
 });
 
 async function runBoardRequest(sender: Electron.WebContents, board: Board | undefined, request: unknown, files: unknown = [],
-  goal: unknown = false, immediate: unknown = false, messageId?: unknown, reviewIds?: string[], expectedReviewMode?: ReviewMode, autoNotice = false, repairTask?: Task, cleanupJob?: MaintenanceJob) {
+  goal: unknown = false, immediate: unknown = false, messageId?: unknown, reviewIds?: string[], expectedReviewMode?: ReviewMode, autoNotice = false, repairTask?: Task, cleanupJob?: MaintenanceJob, goalRunId?: string) {
   if (!board || typeof request !== "string" || typeof immediate !== "boolean" || (immediate && goal !== false) || !Array.isArray(files) ||
       (messageId !== undefined && (typeof messageId !== "string" || !codexThreadPattern.test(messageId))) ||
       !files.every(isPastedFile) || (goal === "resume" ? Boolean(request.trim() || files.length) :
@@ -1737,40 +1842,87 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   };
   const broadcastMaintenanceSafe: typeof broadcastBoardChat = (...args) => { if (!cleanupJob) broadcastBoardChat(...args); };
   const projectKey = projectIdentity(board.project);
-  const lane = goal || reviewIds || autoNotice || repairTask || cleanupJob ? "work" : "chat";
-  const requests = lane === "work" ? boardWorkRequests : boardRequests;
+  const background = Boolean(reviewIds || autoNotice || repairTask || cleanupJob);
+  const lane = goal || background ? "work" : "chat";
+  const requests = background ? backgroundManagerRequests : goal ? boardWorkRequests : boardRequests;
+  const context = background ? "manager:background" : "manager:context";
   if (files.reduce((total, file) => total + file.bytes.byteLength, 0) > maxAttachmentBytes) {
     return cliFailure("ATTACHMENT_LIMIT", t("ui.attachments_are_limited_to_64_mib_per_task_ae680c16"));
   }
-  let current = boardRequests.get(projectKey) ?? boardWorkRequests.get(projectKey);
   if (queuedPath && !existsSync(queuedPath)) {
     return immediate ? { ok: true as const, data: null } :
       { ok: true as const, data: { answer: "", changes: [] } };
   }
   if (immediate) {
+    const current = (goalRunId ? boardWorkRequests : boardRequests).get(projectKey);
     if (!current?.sendNow || current.changingGoal) {
       return cliFailure("CHAT_NOT_RUNNING", t("ui.the_manager_has_no_active_reply_the_message_is_s_1148c98d"));
     }
+    let claimed = false;
     try {
-      await current.sendNow(request.trim(), files, typeof messageId === "string" ? messageId : undefined);
+      const queued = queuedPath && runtimeTransaction(board.project, entries => {
+        const writer = entries.find(entry => entry.task === context && entry.owner === process.pid);
+        if (!writer || writer.steeringMessageId || writer.queuedMessageId === messageId) {
+          throw new Error(t("ui.a_message_is_already_being_sent_ed690319"));
+        }
+        const pending = readQueuedMessage(queuedPath);
+        if (pending) {
+          writer.steeringMessageId = pending.id;
+          claimed = true;
+        }
+        return pending;
+      });
+      if (!queuedPath || queued) {
+        if (claimed) broadcastBoardChat(board.project, "orchestrator-queue", {}, sender);
+        await current.sendNow(queued ? queued.draft.trim() : request.trim(), queued ? queuedFiles(queued) : files,
+          typeof messageId === "string" ? messageId : undefined);
+      }
       return { ok: true as const, data: null };
     } catch (error) {
       return cliFailure("CHAT_SEND_FAILED", (error as Error).message);
+    } finally {
+      if (claimed) {
+        runtimeTransaction(board.project, entries => {
+          const writer = entries.find(entry => entry.task === context && entry.steeringMessageId === messageId);
+          if (writer) delete writer.steeringMessageId;
+        });
+        // The sender may have read the in-flight state during a refresh from another window.
+        broadcastBoardChat(board.project, "orchestrator-queue");
+      }
     }
   }
-  if (!reviewIds && current?.automaticDone) {
-    await current.automaticDone;
-    if (sender.isDestroyed()) return cliFailure("BOARD_WAIT_CANCELLED", "");
-    current = requests.get(projectKey);
-  }
-  if (current) return cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_agent_is_already_handling_a_request_72b4da49"));
+  const busy = background ? backgroundManagerRequests.has(projectKey) :
+    boardRequests.has(projectKey) || boardWorkRequests.has(projectKey);
+  if (busy) return cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_agent_is_already_handling_a_request_72b4da49"));
   if (closingProjects.has(board.project)) return cliFailure("PROJECT_CLOSING", t("ui.the_project_is_closing_beb637fb"));
-  const writer = agentSlots.claim(board.project, "manager:context");
+  const writer = agentSlots.claim(board.project, context);
   if (!writer) return cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_agent_is_already_handling_a_request_72b4da49"));
   // Another window may have delivered, edited or removed the message before this claim.
   let queued: QueuedBoardMessage | undefined;
   try {
-    if (queuedPath) queued = readQueuedMessage(queuedPath);
+    if (queuedPath) {
+      const selection = runtimeTransaction(board.project, entries => {
+        const pending = readQueuedMessage(queuedPath);
+        if (!pending) return;
+        if (hasManagerMessage(board.project, pending.id, pending.created)) {
+          rmSync(queuedPath, { force: true });
+          return;
+        }
+        if (pending.failed) return "failed";
+        if (!pending.goal && listQueuedMessages(dirname(queuedPath)).find(job => !job.goal && !job.failed)?.id !== pending.id) {
+          return "changed";
+        }
+        const claim = entries.find(entry => entry.task === context && entry.owner === process.pid);
+        if (claim) claim.queuedMessageId = pending.id;
+        return pending;
+      });
+      if (selection === "failed" || selection === "changed") {
+        writer();
+        return cliFailure("BOARD_QUEUE_CHANGED", t("ui.not_sent_28bb3764"));
+      }
+      queued = selection;
+      if (queued) broadcastBoardChat(board.project, "orchestrator-queue", {}, sender);
+    }
   } catch (error) {
     writer();
     return cliFailure("BOARD_QUEUE_FAILED", (error as Error).message);
@@ -1779,13 +1931,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     writer();
     return { ok: true as const, data: { answer: "", changes: [] } };
   }
-  if (queued?.failed) {
-    writer();
-    return cliFailure("BOARD_QUEUE_FAILED", t("ui.not_sent_28bb3764"));
-  }
   const managerReviewId = repairTask?.id ?? (expectedReviewMode === "manager" ? reviewIds?.[0] : undefined);
   const managerReviewKey = managerReviewId ? board.project + "\0" + managerReviewId : undefined;
-  const reviewTask = repairTask?.id ?? (cleanupJob?.task ? "review:" + cleanupJob.task : undefined) ??
+  const reviewTask = repairTask?.id ?? (cleanupJob ? (cleanupJob.task ? "review:" + cleanupJob.task : "maintenance:" + cleanupJob.id) : undefined) ??
     (managerReviewId ? "review:" + managerReviewId : undefined);
   const repairSlot = reviewTask && !(managerReviewKey && returningDrafts.has(managerReviewKey))
     ? reserveAgent(board.project, "reviewer", reviewTask) : undefined;
@@ -1803,22 +1951,25 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     : [t("ui.project_manager_48697fa0"), repairTask?.id ?? reviewIds?.join(", ")].filter(Boolean).join(" · "));
   const signal = operation.controller.signal;
   if (managerReviewKey) managerReviewOperations.set(managerReviewKey, operation);
-  const automaticDone = reviewIds || autoNotice || repairTask || cleanupJob ? Promise.withResolvers<void>() : undefined;
   const startedAt = Date.now();
   const managerRun: ManagerRun = { id: randomUUID(), phase: "starting", startedAt, lane: cleanupJob ? "maintenance" : lane };
-  const running: ManagerRequest = { automaticDone: automaticDone?.promise, managerRun };
+  const running: ManagerRequest = { managerRun };
   requests.set(projectKey, running);
   let live: NonNullable<import("./board-runtime.ts").RuntimeEntry["state"]>["live"];
   let liveTimer: NodeJS.Timeout | undefined;
   let activityTimer: NodeJS.Timeout | undefined;
   let stopAutomation = () => {};
   const broadcastRun = () => {
-    if (cleanupJob) return;
-    broadcastMaintenanceSafe(project, "orchestrator-run", lane === "work"
+    if (!background) broadcastBoardChat(project, "orchestrator-run", goal
       ? { managerWork: running.managerRun ?? null } : { managerRun: running.managerRun ?? null });
+    if (background || (goal && !running.managerRun)) {
+      for (const { active, tabs } of windowStates.values()) {
+        if (tabs.some(tab => tab.project === project)) send(active);
+      }
+    }
   };
   const publishRun = running.publishRun = (updateWindows = true) => {
-    agentSlots.update(project, "manager:context", running.managerRun
+    agentSlots.update(project, context, running.managerRun
       ? { ...running.managerRun, goalRunning: running.goalRunning, reviewing: [...running.reviewing ?? []], live } : undefined);
     if (updateWindows) broadcastRun();
   };
@@ -1983,14 +2134,14 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       requestText += "\nAssigned repair context: " + JSON.stringify(started.data);
       startReview([repairTask.id]);
     }
-    const binding = boardThreadPath(project, lane);
-    const stored = readBoardThread(binding);
+    const binding = boardThreadPath(project);
+    const stored = background ? undefined : readBoardThread(binding);
     threadId = stored?.id;
     goalId = goal === true ? randomUUID() : stored?.goalId ?? stored?.id;
     if (goal === "resume" && !threadId) return cliFailure("INVALID_INPUT", t("ui.there_is_no_saved_goal_67c98597"));
     const settings = await callCli<BoardSettings>(board.project, ["settings"]);
     if (!settings.ok) return settings;
-    const settingsNotices = settingsDelivery(project, lane, () => syncSettingsNotices(project, agentSlots.inherited(project)));
+    const settingsNotices = settingsDelivery(project, background ? "background" : lane, () => syncSettingsNotices(project, agentSlots.inherited(project)));
     let initialSettings;
     while (!initialSettings) {
       try { initialSettings = settingsNotices.initial(); }
@@ -2011,7 +2162,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       "and remove only matching reproducible dependency files after verifying no active users. Unknown/changed files must remain; never archive dependencies. Clean your temp directory. " +
       "Then call task_cleanup for the original closed card or the maintain CLI for migration/legacy attachments. Never force git worktree remove. " +
       "If safe repair is impossible, keep the private diagnostic and end; automatic retries retain the job. Do not ask the user. Assigned job: " + JSON.stringify(cleanupJob) : repairTask ? boardInstructions.replace("Do not edit files, run project code, or change Git state yourself.", "For this acceptance repair, edit and check only the assigned task worktree.") +
-      " This turn repairs one user's pending acceptance in your existing board manager context. Do the repair yourself; do not launch an executor or reviewer. " +
+      " This turn repairs one user's pending acceptance as board manager. Do the repair yourself; do not launch an executor or reviewer. " +
       "Work only in the assigned task worktree. Read the current card and acceptanceRepair.targetHead, merge that target without destructive Git operations, " +
       "resolve conflicts without changing requirements, run required project checks, then preview and submit with the task CLI. Keep review throughout. " +
       "Use block with a reason and condition for failed checks, missing access, or a product decision. Do not accept directly; the board resumes the persisted user request after checked submission. "
@@ -2024,7 +2175,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       " You run the board goal in the background. Read goal_inbox at the start of each turn, before waiting, " +
       "and when notified. Apply user directions, then confirm or decline with goal_inbox and a factual reply. " +
       "Use goal_report for decisions and milestones. In goal mode, progress text shows up in Work Activity and does not open an answer form. If a user decision is necessary, call ask_user directly instead of putting a question in progress text and calling task_wait. Approve clear drafts covered by the user's goal without asking again." :
-      " You are the user's conversational manager. When asked about the goal, read goal_read. The board uses one manager context; direct messages can steer the active turn. " +
+      background ? "" : " You are the user's conversational manager. When asked about the goal, read goal_read. Direct messages can steer the active dialogue turn. " +
       "For user instructions affecting its running work, use goal_send and report them as queued until the goal confirms. " +
       "The goal handles its incoming executor and reviewer mail. Use board tools for the user's direct requests.");
     const reviewTaskTools = reviewMode === "reviewer"
@@ -2038,7 +2189,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       (!reviewIds || autoReviewReadTools.has(name) || reviewTaskTools.has(name)) &&
       (name !== "task_accept" || reviewMode !== "human") &&
       (!repairTask || !["task_start", "task_start_batch", "task_accept", "task_request_changes", "task_return_to_draft"].includes(name)));
-    if (!reviewIds && !cleanupJob) mcpTools.push(...(goal ? goalWorkTools : goalChatTools), githubReadTool);
+    if (!reviewIds && !cleanupJob) mcpTools.push(...(goal ? goalWorkTools : background ? [] : goalChatTools), githubReadTool);
     const attachments = await prepareBoardAttachments(queued ? queuedFiles(queued) : files, scratch);
     if (!reviewIds && !autoNotice && goal !== "resume") {
       historyMessage = {
@@ -2195,6 +2346,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         });
       }, cleanupJob ? boardTools.filter(tool => ["board_list", "task_show"].includes(tool.name)) : reviewIds ? [] : isManual(settings.data) ? boardTools.filter(tool => ["board_list", "task_show", "task_create", "task_update", "tag_set_color", "ask_user"].includes(tool.name)) : boardTools, instructions + "\n" + initialSettings.text, signal, {
         id: threadId,
+        separateTurn: reviewIds ? true : undefined,
         role: cleanupJob || repairTask ? "reviewer" : "manager",
         access: reviewIds ? undefined : managerAccess(app.getPath("userData"), project),
         confirmApproval: cleanupJob ? async () => false : reviewIds ? undefined : async details => {
@@ -2232,20 +2384,21 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
             notify("orchestrator-message-time", { at: historyMessage?.at });
             delivered();
           }
+          if (steering.has(id)) saveHistory();
           steering.get(id)?.resolve(true);
         },
-        onGoal: goal => {
-          if (cleanupJob || lane !== "work" || reviewIds) return;
-          saveBoardGoal(binding, goal);
-          activeGoal = goal?.status === "active" ? goal : undefined;
+        onGoal: updatedGoal => {
+          if (!goal) return;
+          saveBoardGoal(binding, updatedGoal);
+          activeGoal = updatedGoal?.status === "active" ? updatedGoal : undefined;
           if (activeGoal && goalWork.signal.aborted) goalWork = new AbortController();
           if (!activeGoal) goalWork.abort();
-          const goalRunning = Boolean(activeGoal && !reviewIds);
+          const goalRunning = Boolean(activeGoal);
           running.goalRunning = goalRunning;
           publishRun(false);
-          publishGoal({ goal, goalRunning });
+          publishGoal({ goal: updatedGoal, goalRunning });
         },
-        onGoalControl: control => { if (!cleanupJob) running.goal = control; },
+        onGoalControl: control => { if (goal) running.goal = control; },
         onTurnEnded: () => { endReview(); saveHistory(); },
         onTokenUsage: async report => {
           if (cleanupJob?.task) return saveTaskTokenUsage(project, cleanupJob.task, "reviewer", report);
@@ -2256,7 +2409,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         },
         title: t("ui.project_manager_for_3f3547d6") + (basename(board.project) || board.project),
         save: id => {
-          writeJson(binding, { ...readBoardThread(binding), provider: "codex", id, history: "local" });
+          if (!background) writeJson(binding, { ...readBoardThread(binding), provider: "codex", id, history: "local" });
           threadId = id;
         },
         onActivity: activity => {
@@ -2320,6 +2473,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
               void control.steer("AI Taskboard: new user directions are available. Read goal_inbox.", []).catch(() => {});
             };
           }
+          if (background) return;
           running.sendNow = (text, files, messageId) => {
             if (sendingNow) throw new Error(t("ui.a_message_is_already_being_sent_ed690319"));
             sendingNow = (async () => {
@@ -2382,7 +2536,11 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       items = [...items, { id: managerRun.id, at: new Date().toISOString(), type: "agentMessage", title: "", phase: "final_answer",
         text: response.text, status: "completed" }];
     }
-    if (!error) delivered();
+    if (!error && queuedPath && !acceptedMessage) {
+      acceptedMessage = true;
+      saveHistory();
+      delivered();
+    }
     return { ok: true as const, data: { answer: response.text, items: lane === "chat" ? managerChatItems(items) : items, changes, model: response.model, error, id: threadId,
       keepQueued: Boolean(queuedPath && error && !acceptedMessage) } };
   } catch (error) {
@@ -2425,8 +2583,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     if (managerReviewKey) managerReviewOperations.delete(managerReviewKey);
     if (running.goalRunning) publishGoal({ goalRunning: false });
     running.managerRun = undefined;
-    publishRun();
-    automaticDone?.resolve();
+    broadcastRun();
     operation.finish();
     if (threadId || historyAccepted || items.length) {
       broadcastMaintenanceSafe(project, "orchestrator-work-history");
@@ -2467,7 +2624,7 @@ function scheduleAutoReview(watch: BoardWatch) {
   }
   const projectKey = projectIdentity(project);
   const overrides = watch.board.settings?.taskLimits;
-  const managerAvailable = agentSlots.available(projectKey, "manager", overrides) > 0 && !boardWorkRequests.has(projectKey);
+  const managerAvailable = agentSlots.available(projectKey, "manager", overrides) > 0 && !backgroundManagerRequests.has(projectKey);
   if (closingProjects.has(project) || (mode === "manager" && (watch.reviewerRuns.size || !managerAvailable))) return;
   const tab = [...watch.tabs].find(tab => !tab.window.isDestroyed());
   if (!tab) return;
@@ -2695,6 +2852,7 @@ ipcMain.handle("agents:limits", (event, value: unknown) => {
     const key = projectIdentity(project);
     boardRequests.get(key)?.settingsChanged?.();
     boardWorkRequests.get(key)?.settingsChanged?.();
+    backgroundManagerRequests.get(key)?.settingsChanged?.();
   }
   scheduleAgentWork();
   return { ok: true, data: limits };
@@ -2861,21 +3019,22 @@ ipcMain.handle("board:attachmentPreview", async (event, id: unknown, file: unkno
   return type ? "data:" + type + ";base64," + result.data.base64 : null;
 });
 
-async function taskRunImage(event: IpcMainInvokeEvent, id: unknown, path: unknown) {
+async function taskRunImage(event: IpcMainInvokeEvent, id: unknown, path: unknown, reviewer: unknown) {
   const { project } = stateOf(event);
   if (!project || typeof id !== "string" || !taskIdPattern.test(id) || typeof path !== "string") return null;
   const task = await callCli<Task>(project, ["show", id]);
   if (!task.ok) return null;
+  if (reviewer === true) return readReviewerImage(project, task.data.id, path);
   return readRunImage(project, task.data, runActivityByTask.get(project + "\0" + id) ?? [], path);
 }
 
-ipcMain.handle("board:runImagePreview", async (event, id: unknown, path: unknown) => {
-  const image = await taskRunImage(event, id, path);
+ipcMain.handle("board:runImagePreview", async (event, id: unknown, path: unknown, reviewer: unknown) => {
+  const image = await taskRunImage(event, id, path, reviewer);
   return image ? "data:" + image.type + ";base64," + image.data.toString("base64") : null;
 });
 
-ipcMain.handle("board:saveRunImage", async (event, id: unknown, path: unknown) => {
-  const image = await taskRunImage(event, id, path);
+ipcMain.handle("board:saveRunImage", async (event, id: unknown, path: unknown, reviewer: unknown) => {
+  const image = await taskRunImage(event, id, path, reviewer);
   if (!image) return cliFailure("IMAGE_UNAVAILABLE", t("ui.image_unavailable_f6c21e43"));
   const result = await dialog.showSaveDialog(stateOf(event).window, { defaultPath: image.name });
   if (result.canceled || !result.filePath) return { ok: true, data: null };
@@ -2991,12 +3150,12 @@ async function recordRunFailure(project: string, id: string, reason: string, con
   if (!result.ok && result.error.code !== "INVALID_TRANSITION" && result.error.code !== "REVISION_CONFLICT") return result.error.message;
 }
 
-type LaunchState = Pick<Task, "acceptanceRepair" | "id" | "title" | "status" | "revision" | "createdAt" | "codexThreadId" | "blocked" | "summary" | "nextStep"> & { mergeRepair?: true };
+type LaunchState = Pick<Task, "acceptanceRepair" | "discussionReturn" | "id" | "title" | "status" | "revision" | "createdAt" | "codexThreadId" | "blocked" | "summary" | "nextStep"> & { mergeRepair?: true };
 
 async function launchTask(project: string, id: string, revisionRequest?: { input: Record<string, unknown> },
   newThread: false | "user" | "manager" = false, revision?: number,
   continuation: ExecutorContinuation = {}, scheduled = false, resolveConflicts = false, resumeWithFullAccess = false,
-  autoMode = false, manual = false, autoQueueRevision?: number, queuedRevision?: number): Promise<CliReply<LaunchState>> {
+  autoMode = false, manual = false, autoQueueRevision?: number, queuedRevision?: number, discussionReturn?: number): Promise<CliReply<LaunchState>> {
   const queued = queuedRevision !== undefined;
   if (isManual(readBoardSettings(runtimeLocation(project)))) return cliFailure("MANUAL_BOARD", "На обычной доске исполнители недоступны.");
   const key = project + "\0" + id;
@@ -3052,6 +3211,9 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       : known ? { ok: true, data: known }
         : await callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
     if (!current.ok) return current;
+    if (discussionReturn !== undefined && current.data.discussionReturn !== discussionReturn) {
+      return cliFailure("INVALID_TRANSITION", "This discussion return is no longer waiting to launch.");
+    }
     if (current.data.acceptanceRepair) return cliFailure("ACCEPTANCE_PENDING", "The board manager handles this pending acceptance in its existing context.");
     prepared = Boolean(revisionRequest);
     const ordinaryManualStart = manual && !newThread && !resumeWithFullAccess && current.data.status !== "blocked";
@@ -3080,10 +3242,26 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       const task = current.data;
       recoveringThreadId = agentSlots.entries(project).find(entry => matchesQueuedExecutor(entry, task))?.turnRequest?.threadId;
     }
+    const attemptedRevision = current.data.revision;
+    // Record a permanent failure while this launch still owns the task slot.
+    // Use the attempted revision so an obsolete launch cannot block newer work.
+    const failDiscussionStart = async (code: string, reason: string) => {
+      if (discussionReturn === undefined || signal.aborted || ["BOARD_BUSY", "REVISION_CONFLICT", "INVALID_TRANSITION"].includes(code)) return;
+      const message = code + ": " + reason;
+      const failure = await recordRunFailure(project, id, message, undefined, attemptedRevision);
+      if (failure) {
+        // A pending Git operation can prevent blocking the card. Keep its return
+        // intact, but wait for a changed card or a reopened board before retrying.
+        const watch = subscriptions.get(project);
+        if (watch) (watch.failedDiscussionStarts ??= new Map()).set(id, attemptedRevision);
+        publishRunActivity(project, id, [{ id: "discussion-launch-error", type: "error", title: "", text: message + "\n" + failure, status: "failed" }]);
+      }
+    };
     const client = await configuredCodex(app.getPath("userData"));
     if (!client) {
       const reason = t("ui.choose_the_codex_executable_in_settings_06a08a7e");
       if (prepared || recoveringThreadId) throw new Error(reason);
+      await failDiscussionStart("CODEX_UNAVAILABLE", reason);
       return cliFailure("CODEX_UNAVAILABLE", reason);
     }
     if (newThread) {
@@ -3140,11 +3318,13 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     const started = await callCli<{ task: LaunchState & ExecutorTask } & ({ worktree: string } | { cwd: string })>(project, ["start", id, "--compact"],
       { revision: revision ?? current.data.revision, actor: manual ? "user" : "agent", launchDetails: true, ...(scheduled ? { scheduled } : {}),
         ...(queued ? { queuedExecutor: true } : {}),
+        ...(discussionReturn !== undefined ? { discussionReturn } : {}),
         ...(autoMode ? { autoMode: true, autoQueueRevision } : {}),
         ...(resolveConflicts ? { resolveConflicts } : {}),
         ...(process.platform === "win32" && client.windowsSandbox === "elevated" ? { isolatedWorktree: true } : {}) });
     if (!started.ok) {
       if (prepared && started.error.code !== "BOARD_BUSY") throw new Error(started.error.message);
+      await failDiscussionStart(started.error.code, started.error.message);
       return started;
     }
     prepared = true;
@@ -3466,15 +3646,19 @@ else {
         try {
           const entries = agentSlots.entries(project);
           const context = entries.find(entry => entry.task === "manager:context");
+          const background = entries.find(entry => entry.task === "manager:background");
           const live = context?.owner !== process.pid ? context?.state?.live : undefined;
+          const backgroundLive = background?.owner !== process.pid ? background?.state?.live : undefined;
           const stamp = (name: string) => statSync(join(project, ".tasks", name), { throwIfNoEntry: false })?.mtimeMs ?? 0;
           const previous = watch.shared;
           const next = watch.shared = {
             runtime: JSON.stringify(entries, (key, value) => key === "live" ? undefined : value),
             context: context?.id,
-            activity: live ? context!.id + ":" + live.sequence : "",
+            activity: [live && context!.id + ":" + live.sequence,
+              backgroundLive && background!.id + ":" + backgroundLive.sequence].join("|"),
             queue: stamp("manager-queue"),
             history: stamp("manager-chat"),
+            binding: statSync(boardThreadPath(project), { throwIfNoEntry: false })?.mtimeMs ?? 0,
             unread: stamp("manager-unread.json"),
           };
           if (previous?.runtime !== next.runtime) {
@@ -3482,7 +3666,8 @@ else {
           } else if (previous?.unread !== next.unread) {
             publishManagerUnread(project);
           }
-          if (previous?.history !== next.history || (previous?.context && previous.context !== next.context)) {
+          if (previous?.history !== next.history || previous?.binding !== next.binding ||
+              (previous?.context && previous.context !== next.context)) {
             broadcastBoardChat(project, "orchestrator-history");
             broadcastBoardChat(project, "orchestrator-work-history");
           }

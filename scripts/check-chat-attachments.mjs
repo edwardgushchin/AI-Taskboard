@@ -116,7 +116,7 @@ app.whenReady().then(async () => {
     const tile = `body.querySelector('.chat-attachment[data-file="${file.file}"]')`;
     await evaluate(`${tile}.click()`);
     await waitFor(`document.querySelector('.image-preview-stage img:not([hidden])')?.naturalWidth > 0`);
-    await check(`document.querySelector('.image-preview-toolbar strong').textContent === ${JSON.stringify(file.name)} &&
+    await check(`document.querySelector('.image-preview-header strong').textContent === ${JSON.stringify(file.name)} &&
       document.querySelector('.image-preview-stage img').src === window.fixtureImages['${file.file}']`, file.name + " opens in viewer");
     await evaluate(`document.querySelector('[aria-label="Увеличить"]').click();
       [...document.querySelectorAll('.image-preview button')].find(button => button.textContent === 'Сохранить').click()`);
@@ -124,7 +124,7 @@ app.whenReady().then(async () => {
       file.name + " zooms and saves the correct attachment");
     await capture("viewer-" + file.name);
     await evaluate(`document.querySelector('.image-preview').close();
-      [...body.querySelectorAll('.sheet-actions button')].find(button => button.textContent === ${JSON.stringify("↓ " + file.name)}).click()`);
+      [...body.querySelectorAll('.sheet-actions button')].find(button => button.textContent.startsWith(${JSON.stringify(file.name + " / ")})).click()`);
     await check(`window.saves.at(-1).file === '${file.file}'`, file.name + " remains downloadable from card");
     const destination = join(downloads, file.file);
     cli(["attachment", "read", id], { file: file.file, destination });

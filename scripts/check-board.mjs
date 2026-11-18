@@ -245,9 +245,12 @@ app.whenReady().then(async () => {
       }, status: 'completed', title: '', text: '' }], true);
       return !target.textContent.includes('AI Taskboard queue');
     })()`, 'historical automatic notice payload is hidden');
-    await check(`[...document.querySelectorAll('.task-stat')].some(stat => stat.textContent === '0/1')`, 'the task has one unchecked item');
+    await check(`findCard(planned.id).querySelectorAll('.task-subtask-progress > span:not(.is-done)').length === 1 &&
+      findCard(planned.id).getAttribute('aria-description').endsWith(t('ui.subtasks_b409bda5') + ' 0/1')`,
+    'the task has one unchecked item');
     await evaluate(`planned.status = 'in_progress'; planned.subtasks[0].done = true; planned.revision++; push(); settle()`);
-    await check(`[...document.querySelectorAll('.task-stat')].some(stat => stat.textContent === '1/1') &&
+    await check(`findCard(planned.id).querySelectorAll('.task-subtask-progress > .is-done').length === 1 &&
+      findCard(planned.id).getAttribute('aria-description').endsWith(t('ui.subtasks_b409bda5') + ' 1/1') &&
       [...body.querySelectorAll('.task-state-label .codicon-check')].some(icon => icon.parentElement.textContent.includes('Verify keyboard focus'))`,
     'a board update refreshes checklist progress while the task is open');
     window.setContentSize(710, 820);
@@ -375,18 +378,64 @@ app.whenReady().then(async () => {
           meta.scrollWidth <= meta.clientWidth + 1 && !meta.querySelector('.task-run-status') &&
           (status.textContent.startsWith('Waiting') || status.textContent === 'В очереди');
       })()`, `full-width waiting block: ${theme}, ${width}px, ${locale}, long milestone and attachments`);
-      await capture(`waiting-${theme}-${width}-${locale}.png`);
+      if (keepArtifacts && theme === 'light' && width === 200 && locale === 'ru') await capture('waiting-200.png');
     }
     await evaluate(`fixture.russian = true; fixture.waitingTasks = []; push(); void 0`);
     await check(`findCard('T-0096').querySelector('.task-run-status').textContent === 'Запуск с доски не активен'`, 'dequeue replaces waiting with inactive status');
     await evaluate(`fixture.waitingTasks = ['T-0096']; fixture.runningTasks = ['T-0096']; push(); void 0`);
-    await check(`!!findCard('T-0096').querySelector('.agent-spinner') && !findCard('T-0096').textContent.includes('Ожидает свободного')`, 'running takes precedence over waiting');
+    for (const width of [320, 136]) {
+      await evaluate(`findCard('T-0096').style.width = '${width}px'; void 0`);
+      await check(`(() => {
+        const card = findCard('T-0096');
+        const details = card.querySelector('.task-card-details');
+        const footer = details.lastElementChild;
+        const meta = footer.querySelector('.task-meta');
+        const status = footer.querySelector('.task-run-status');
+        const spinner = status?.querySelector('.agent-spinner');
+        const s = status?.getBoundingClientRect(), m = meta?.getBoundingClientRect();
+        const f = footer.getBoundingClientRect();
+        const progress = details.querySelector('.task-subtask-progress');
+        const bar = progress?.firstElementChild;
+        const b = bar?.getBoundingClientRect();
+        return footer.classList.contains('task-card-footer') && details.querySelectorAll('.task-run-status').length === 1 &&
+          spinner?.getAttribute('role') === 'status' &&
+          spinner.getAttribute('aria-label') === t('ui.agent_is_working_28ccd334') &&
+          s.left >= m.right && s.right === f.right && s.bottom === f.bottom &&
+          progress?.children.length === 1 && progress.nextElementSibling === footer &&
+          !bar.classList.contains('is-done') && b.left === f.left && b.right === f.right && b.height === 6 &&
+          card.getAttribute('aria-description') === t('ui.subtasks_b409bda5') + ' 0/1' &&
+          !card.innerText.includes('0/1') &&
+          card.scrollWidth <= card.clientWidth + 1 && meta.scrollWidth <= meta.clientWidth + 1 &&
+          [...meta.children].every(node => node.getBoundingClientRect().right <= m.right + 1) &&
+          meta.querySelector('.task-id')?.textContent === 'T-0096' &&
+          meta.querySelector('.codicon-attach')?.parentElement.textContent === '1';
+      })()`, `accessible active indicator in the bottom right with full metadata at ${width}px`);
+      if (keepArtifacts) await capture(`running-${width}.png`);
+    }
+    await evaluate(`
+      window.taskboard.command = async () => ({ ok: true, data: structuredClone(queuedTask) });
+      showTask(queuedTask.id);
+    `);
+    await check(`(() => {
+      const title = byId('sheet-title');
+      const spinner = title.querySelector('#task-agent-run .agent-spinner');
+      if (!spinner) return false;
+      const style = getComputedStyle(spinner);
+      return spinner.getAttribute('aria-label') === t('ui.agent_is_working_28ccd334') &&
+        style.fontSize === getComputedStyle(title).fontSize &&
+        style.width === style.fontSize && style.height === style.fontSize;
+    })()`, 'open task title retains the accessible title-sized indicator');
+    if (keepArtifacts) await capture('running-open-task.png');
     await evaluate(`fixture.runningTasks = []; fixture.reviewingTasks = { 'T-0096': 'reviewer' }; push(); void 0`);
     await check(`!!findCard('T-0096').querySelector('.agent-spinner')`, 'active review takes precedence over waiting');
     await evaluate(`fixture.reviewingTasks = {}; fixture.board.tasks[0].mergeRepair = {}; fixture.board.tasks[0].revision++; push(); void 0`);
+    await check(`!byId('task-agent-run')?.querySelector('.agent-spinner')`, 'open task title clears the indicator when activity ends');
     await check(`findCard('T-0096').querySelector('.task-run-status').textContent === t('ui.waiting_for_a_reviewer_slot_8918dd95')`, 'repair queue retains reviewer waiting label');
     await evaluate(`fixture.waitingTasks = []; fixture.board.tasks[0].status = 'ready'; fixture.board.tasks[0].revision++; push(); void 0`);
-    await check(`!findCard('T-0096').querySelector('.task-run-status')`, 'no block remains when status has no run label');
+    await check(`findCard('T-0096').querySelector('.task-card-details').lastElementChild.classList.contains('task-meta') &&
+      !findCard('T-0096').querySelector('.task-run-status, .task-card-footer')`, 'inactive card has no extra row when status has no run label');
+    await evaluate(`sheet.close(); settle()`);
+    if (keepArtifacts) await capture('inactive-136.png');
     await evaluate(`delete queuedTask.milestone; queuedTask.attachments = []; queuedTask.subtasks = [];
       queuedTask.status = 'ready'; queuedTask.revision++; fixture.runningTasks = ['other-task'];
       push(); void 0`);
@@ -501,6 +550,75 @@ app.whenReady().then(async () => {
     await evaluate(`waitFor(() => fixture.board.tasks[1].dueDate === '2026-11-20')`);
     await check(`findCard('T-0002').textContent.includes('2026-11-20')`, "saving a deadline updates the visible card");
     console.log('Automatic mode Chromium checks passed: ' + checks);
+    return;
+  }
+  if (process.argv.includes("--subtasks-only")) {
+    await evaluate(`
+      const progressTask = fixture.board.tasks[0];
+      progressTask.priority = 'high';
+      progressTask.subtasks = ['Первая', 'Вторая', 'Третья'].map(title => ({ title, done: false }));
+      const progressCard = findCard(progressTask.id);
+      const progress = () => progressCard.querySelector('.task-subtask-progress');
+      const meta = () => progressCard.querySelector('.task-meta');
+      const bars = () => [...progress().children];
+      push();
+      waitFor(() => progressCard.querySelector('.task-card-cover')?.naturalWidth > 0);
+    `);
+    for (const [theme, width, cardWidth] of [["light", 1380, 320], ["dark", 900, 200]]) {
+      nativeTheme.themeSource = theme;
+      window.setContentSize(width, 900);
+      await evaluate(`
+        fixture.theme = '${theme}';
+        fixture.board.settings.showCardPreviews = true;
+        progressCard.style.width = '${cardWidth}px';
+        push();
+        waitFor(() => matchMedia('(prefers-color-scheme: dark)').matches === ${theme === "dark"});
+      `);
+      for (const states of [[false, false, false], [true, false, true], [false, true, true], [true, true, true]]) {
+        const count = states.filter(Boolean).length;
+        await evaluate(`
+          progressTask.subtasks.forEach((entry, index) => { entry.done = ${JSON.stringify(states)}[index]; });
+          progressTask.revision++;
+          push(); settle();
+        `);
+        await check(`(() => {
+          const fills = bars().map(bar => getComputedStyle(bar).backgroundColor);
+          const expected = ${JSON.stringify(states)}.map(done => done ? 'rgb(118, 255, 52)' :
+            '${theme === "light" ? "rgb(109, 115, 126)" : "rgb(144, 149, 159)"}');
+          const bounds = meta().getBoundingClientRect();
+          const cover = progressCard.querySelector('.task-card-cover');
+          return findCard(progressTask.id) === progressCard && fills.join() === expected.join() &&
+            cover && !cover.hidden && cover.nextElementSibling === progress() && progress().nextElementSibling === meta() &&
+            bars().every(bar => {
+              const rect = bar.getBoundingClientRect();
+              return rect.left === bounds.left && rect.right === bounds.right && rect.height === 6 &&
+                parseFloat(getComputedStyle(bar).borderTopLeftRadius) >= 3;
+            }) &&
+            meta().scrollWidth <= meta().clientWidth && meta().querySelector('.task-id').textContent === progressTask.id &&
+            meta().querySelector('.codicon-attach') && !meta().querySelector('.codicon-checklist') &&
+            !progressCard.innerText.includes('${count}/3') && progress().getAttribute('aria-hidden') === 'true' &&
+            progressCard.getAttribute('aria-description').includes(t('ui.priority_b114c9b5')) &&
+            progressCard.getAttribute('aria-description').endsWith(t('ui.subtasks_b409bda5') + ' ${count}/3') &&
+            !findCard('T-0002').querySelector('.task-subtask-progress');
+        })()`, `ordered bars and unchanged metadata: ${theme}, ${cardWidth}px, ${states}`);
+        if (states[0] && !states[1]) await capture(`subtasks-${theme}-${cardWidth}.png`);
+      }
+      await evaluate(`fixture.board.settings.showCardPreviews = false; push(); settle()`);
+      await check(`!progressCard.querySelector('.task-card-cover') && progress().nextElementSibling === meta()`,
+        `progress remains above metadata without a cover: ${theme}`);
+    }
+    await evaluate(`fixture.russian = false; push(); settle()`);
+    await check(`progressCard.getAttribute('aria-description').endsWith('Subtasks 3/3')`, "progress description follows the locale");
+    await evaluate(`
+      progressTask.priority = 'normal'; progressTask.status = 'in_progress';
+      fixture.runningTasks = [progressTask.id]; push(); settle();
+    `);
+    await check(`progressCard.querySelector('.task-run-status .agent-spinner') &&
+      progress().getBoundingClientRect().bottom <= meta().getBoundingClientRect().top &&
+      progressCard.getAttribute('aria-description') === 'Subtasks 3/3'`, "progress coexists with the active run indicator");
+    await evaluate(`delete progressTask.subtasks; progressTask.priority = 'normal'; push(); settle()`);
+    await check(`!progress() && !progressCard.hasAttribute('aria-description')`, "no progress for a card without subtasks");
+    console.log("Subtask Chromium checks passed: " + checks);
     return;
   }
   if (process.argv.includes("--covers-only")) {

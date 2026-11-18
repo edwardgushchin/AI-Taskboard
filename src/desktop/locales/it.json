@@ -1,4 +1,5 @@
 {
+  "ui.reorder_queued_message": "Sposta il messaggio in attesa «{message}». Usa le frecce su e giù.",
   "draft_discussion.queued": "La revisione della bozza è in coda.",
   "draft_discussion.running": "Revisione della bozza in corso…",
   "draft_discussion.failed": "Revisione della bozza non riuscita: {reason}",
@@ -1152,7 +1153,8 @@
     "other": "{count} file"
   },
   "limits.label": "Limiti",
-  "limits.weekly": "Limite settimanale",
+  "limits.provider": "Limiti di {provider}",
+  "limits.weekly": "Settimana",
   "limits.daily": "Limite giornaliero",
   "limits.duration": "Limite per {duration}",
   "limits.window": "Limite",

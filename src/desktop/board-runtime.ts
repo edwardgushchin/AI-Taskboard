@@ -21,6 +21,8 @@ export interface RuntimeEntry {
   linkedThread?: { revision: number; codexThreadId: string };
   turnRequest?: { threadId: string; clientId: string; turnId?: string };
   continuation?: { afterDisconnect?: boolean; withoutProgress?: boolean };
+  queuedMessageId?: string;
+  steeringMessageId?: string;
   state?: {
     id: string;
     phase: "starting" | "waiting" | "running";

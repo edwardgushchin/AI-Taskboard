@@ -31,6 +31,7 @@ function cli(project, args, input) {
 if (!process.versions.electron) {
   const scratch = mkdtempSync(join(tmpdir(), "taskboard-shared-runtime-"));
   const managerOnly = process.argv.includes("--manager-only");
+  const recoveryOnly = process.argv.includes("--worktree-recovery-only");
   const outputIndex = process.argv.indexOf("--artifacts");
   const output = outputIndex < 0 ? undefined : resolve(process.argv[outputIndex + 1]);
   const workers = [], providerPids = new Set();
@@ -67,6 +68,50 @@ if (!process.versions.electron) {
   };
   checks: try {
     symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), join(scratch, "node_modules"), process.platform === "win32" ? "junction" : "dir");
+    if (recoveryOnly) {
+      const git = (...args) => execFileSync("git", args, { cwd: project, env, windowsHide: true, encoding: "utf8" }).trim();
+      mkdirSync(project);
+      git("init", "-b", "main");
+      git("config", "user.name", "Fixture");
+      git("config", "user.email", "fixture@example.invalid");
+      git("commit", "--allow-empty", "-m", "Fixture");
+      cli(project, ["init"]);
+      cli(project, ["settings"], { autoMode: false, reviewMode: "human" });
+      const returned = ["manual", "auto"].map((mode, index) => {
+        const thread = "10000000-0000-0000-0000-00000000000" + (index + 1);
+        const { id } = cli(project, ["create"], { title: mode, criteria: ["Recover existing checkout"] });
+        cli(project, ["approve", id]);
+        const { task, worktree } = cli(project, ["start", id]);
+        cli(project, ["update", id], { codexThreadId: thread });
+        git("-C", worktree, "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", mode);
+        const head = git("rev-parse", task.git.branch);
+        const cancelled = cli(project, ["cancel", id], { reason: "Remove checkout" });
+        assert.equal(existsSync(worktree), false);
+        const draft = cli(project, ["return-to-draft", id], { revision: cancelled.revision });
+        cli(project, ["approve", id], { revision: draft.revision });
+        return { id, worktree, branch: task.git.branch, head, thread };
+      });
+      const worker = await start("recovery-profile");
+      for (const [index, { id, worktree, branch, head, thread }] of returned.entries()) {
+        if (index === 0) assert.equal((await worker.ask({ action: "launch", id })).ok, true);
+        else cli(project, ["settings"], { autoMode: true });
+        await wait(async () => (await worker.ask({ action: "canStop", id })), "executor launched for " + id);
+        assert.deepEqual(await worker.ask({ action: "executorBinding", id }), { cwd: worktree, thread });
+        const card = cli(project, ["show", id]);
+        assert.equal(card.status, "in_progress");
+        assert.equal(card.codexThreadId, thread);
+        assert.equal(git("-C", worktree, "symbolic-ref", "HEAD"), branch);
+        assert.equal(git("-C", worktree, "rev-parse", "HEAD"), head);
+        record("PASS: " + (index === 0 ? "manual launch" : "auto mode") + " restores the checkout and supplies the original chat to the executor");
+        await worker.ask({ action: "stop", id });
+        await wait(async () => !await worker.ask({ action: "canStop", id }), "executor stopped");
+      }
+      if (output) {
+        mkdirSync(output, { recursive: true });
+        writeFileSync(join(output, "worktree-recovery.txt"), [...results, JSON.stringify(await worker.ask({ action: "versions" }))].join("\n") + "\n");
+      }
+      break checks;
+    }
     for (const board of [project, other]) { mkdirSync(board); cli(board, ["init"], { git: false }); cli(board, ["settings"], { autoMode: false, reviewMode: "human", taskLimits: { executor: 1, reviewer: 1 } }); }
     const tasks = [];
     for (let i = 0; !managerOnly && i < 6; i++) { const task = cli(project, ["create"], { title: "Isolated concurrency " + i, criteria: ["Fixture completes"], workingDirectory: project }); cli(project, ["approve", task.id]); tasks.push(task.id); }
@@ -82,13 +127,36 @@ if (!process.versions.electron) {
       await wait(async () => (await frames()).every(frame => frame.managerBusy && frame.managerRun?.phase === phase &&
         frame.managerWork === null), "shared manager dialogue phase " + phase);
     }
-    await a.ask({ action: "managerPhase", phase: "running", lane: "maintenance" });
-    await wait(async () => (await frames()).every(frame => frame.managerBusy && frame.managerWork?.lane === "maintenance" &&
-      frame.managerRun === null), "shared maintenance state");
-    const queuedMessage = "Queued while the other profile is doing maintenance";
+    await a.ask({ action: "release", role: "manager" });
+    const binding = join(project, ".tasks", "manager-dialog.json");
+    const goal = { objective: "Paused fixture goal", status: "paused" };
+    const threadId = "20000000-0000-0000-0000-000000000001";
+    writeFileSync(binding, JSON.stringify({ provider: "codex", id: threadId, history: "local", goal }));
+    writeFileSync(join(project, ".tasks", "maintenance.json"), JSON.stringify([{
+      id: "T-9999:cleanup", task: "T-9999", operation: "cleanup", attempts: 1, retryAt: 0,
+      error: { code: "FIXTURE", message: "Closed-card worktree cleanup" },
+    }]));
+    await a.ask({ action: "startMaintenance" });
+    await wait(async () => (await frames()).every(frame => !frame.managerBusy && frame.managerWork?.lane === "maintenance" &&
+      frame.managerRun === null), "independent maintenance visible in all windows");
+    assert.equal(await b.ask({ action: "reserve", role: "reviewer" }), false);
+    assert.equal((await b.ask({ action: "sendNow", text: "Do not steer cleanup" })).error.code, "CHAT_NOT_RUNNING");
+
+    const queuedMessage = "Queued while another window owns the dialogue";
+    await a.ask({ action: "reserve", role: "manager" });
+    await a.ask({ action: "managerPhase", phase: "running", lane: "chat" });
+    await wait(async () => (await frames()).every(frame => frame.managerBusy), "dialogue lock visible");
     await b.ask({ action: "addMessage", text: queuedMessage });
     await wait(async () => (await queueRows()).every(rows => rows.length === 1 && rows[0] === queuedMessage),
       "same queued message in three windows");
+    assert.equal(await calls(), 0);
+    await b.ask({ action: "dialogue" });
+    await b.ask({ action: "checkQueueActions" });
+    if (output) {
+      mkdirSync(output, { recursive: true });
+      await b.ask({ action: "screenshot", path: join(output, "manager-queue.png") });
+    }
+    await b.ask({ action: "clickSendNow" });
     assert.equal(await calls(), 0);
     await a.ask({ action: "release", role: "manager" });
     await wait(async () => [...await a.ask({ action: "dialogue" }), ...await b.ask({ action: "dialogue" })]
@@ -107,11 +175,54 @@ if (!process.versions.electron) {
     }
     await delay(1200);
     assert.equal(await calls(), 1);
-    record("PASS: shared manager lane, visible maintenance, live activity and one automatic queue delivery across three windows");
+    assert.deepEqual(JSON.parse(readFileSync(binding, "utf8")).goal, goal);
+    assert.ok((await frames()).every(frame => frame.managerWork?.lane === "maintenance"));
+    assert.equal(await a.ask({ action: "maintenanceCalls" }), 1);
+    await a.ask({ action: "finishMaintenance" });
+    await wait(async () => (await frames()).every(frame => frame.managerWork === null), "maintenance released");
+    record("PASS: closed-card maintenance uses the shared reviewer slot without blocking dialogue or receiving Send Now; paused goal preserved");
+    record("PASS: queued text and actions without waiting caption; dialogue lock and exactly one delivery across three windows");
+    let expectedCalls = 1;
+    for (const outcome of ["finish", "stop", "fail"]) {
+      const first = "Hold manager: " + outcome;
+      const second = "After " + outcome;
+      await a.ask({ action: "addMessage", text: first });
+      await wait(async () => await calls() === expectedCalls + 1 && (await frames())
+        .every(frame => frame.managerRun?.phase === "running"), "active dialogue before " + outcome);
+      await b.ask({ action: "addMessage", text: second });
+      await wait(async () => (await queueRows()).every(rows => rows.includes(second)), "durable queue before " + outcome);
+      assert.equal(await calls(), expectedCalls + 1);
+      const owner = (await a.ask({ action: "hasHeldTurn" })) ? a : b;
+      await owner.ask({ action: outcome === "stop" ? "stopManager" : "finishManager" });
+      expectedCalls += 2;
+      await wait(async () => await calls() === expectedCalls &&
+        (await frames()).every(frame => !frame.managerBusy) &&
+        (await queueRows()).every(rows => rows.length === (outcome === "fail" ? 1 : 0) &&
+          (outcome !== "fail" || rows[0] === first)), "one delivery after " + outcome);
+      if (outcome === "fail") await a.ask({ action: "removeFailed" });
+    }
+    record("PASS: the next queued message was delivered once after reply completion, stop and provider error");
+
+    const crashed = await start("profile-crash-dialogue");
+    assert.equal(await crashed.ask({ action: "reserve", role: "manager" }), true);
+    await crashed.ask({ action: "managerPhase", phase: "running", lane: "chat" });
+    await wait(async () => (await frames()).every(frame => frame.managerBusy), "crash fixture owns dialogue");
+    await b.ask({ action: "addMessage", text: "Survives process restart" });
+    await wait(async () => (await queueRows()).every(rows => rows.includes("Survives process restart")), "queue saved before restart");
+    const crashedExit = once(crashed.child, "exit");
+    crashed.child.kill();
+    await crashedExit;
+    const reloaded = await start("profile-crash-dialogue");
+    await wait(async () => await calls() + (await reloaded.ask({ action: "managerCalls" })) === expectedCalls + 1 &&
+      [...await frames(), ...await reloaded.ask({ action: "frames" })].every(frame => !frame.managerBusy) &&
+      (await queueRows()).every(rows => rows.length === 0), "one delivery after restart");
+    const countBeforeFailure = await calls() + await reloaded.ask({ action: "managerCalls" });
+    record("PASS: a persisted message survived the dialogue owner's process restart and was delivered once");
+
     await a.ask({ action: "addMessage", text: "Fixture provider failure" });
     await wait(async () => [...await a.ask({ action: "queueFailures" }), ...await b.ask({ action: "queueFailures" })]
       .every(count => count === 1), "shared terminal queue failure");
-    assert.equal(await calls(), 2);
+    assert.equal(await calls() + await reloaded.ask({ action: "managerCalls" }), countBeforeFailure + 1);
     record("PASS: a terminal failure is visible in every queue without a competing retry");
     const gitBoard = join(scratch, "git-board"), remote = join(scratch, "remote");
     const git = (cwd, ...args) => execFileSync("git", args, { cwd, env, windowsHide: true, encoding: "utf8" }).trim();
@@ -142,7 +253,37 @@ if (!process.versions.electron) {
       } finally { clearTimeout(timer); }
     } finally { boardLock.close(); }
     record("PASS: focus, click and board IPC stay responsive while the board transaction lock is held");
-    if (managerOnly) break checks;
+    await a.ask({ action: "addMessage", text: "Hold manager: clear paused goal" });
+    await wait(async () => (await frames()).every(frame => frame.managerRun?.phase === "running"), "ordinary reply before goal removal");
+    const dialogueOwner = (await a.ask({ action: "hasHeldTurn" })) ? a : b;
+    const otherWindow = dialogueOwner === a ? b : a;
+    await otherWindow.ask({ action: "clickClearGoal" });
+    await dialogueOwner.ask({ action: "clickClearGoal" });
+    assert.deepEqual(JSON.parse(readFileSync(binding, "utf8")).goal, goal);
+    assert.equal(await a.ask({ action: "goalClearCalls" }) + await b.ask({ action: "goalClearCalls" }), 0);
+    if (output) await otherWindow.ask({ action: "screenshot", path: join(output, "goal-clear-waiting.png") });
+    await dialogueOwner.ask({ action: "finishManager" });
+    await wait(async () => (await a.ask({ action: "goalPanels" }))[0]?.visible === false &&
+      (await b.ask({ action: "goalPanels" }))[0]?.visible === false, "paused goal removed after the ordinary reply");
+    assert.equal(await a.ask({ action: "goalClearCalls" }) + await b.ask({ action: "goalClearCalls" }), 1);
+    await start("profile-reopen-cleared").then(worker => worker.ask({ action: "reopenGoalBoard", expectedReply: "Finished held turn" }));
+    record("PASS: one provider clear after the ordinary reply, across two processes; reopened board displays the preserved reply without the goal");
+    for (const mode of ["resume", true]) {
+      await a.ask({ action: "startGoal", mode });
+      await wait(async () => (await a.ask({ action: "goalPanels" })).every(
+        panel => panel.visible && panel.status === "active"), "active goal visible in both windows");
+      assert.deepEqual((await a.ask({ action: "clearGoal" })).data, null);
+      await wait(async () => (await a.ask({ action: "goalPanels" })).every(
+        panel => !panel.visible), "cleared goal removed from both open windows");
+      assert.equal(JSON.parse(readFileSync(binding, "utf8")).goal, null);
+      await a.ask({ action: "finishGoal" });
+    }
+    await reloaded.ask({ action: "reopenGoalBoard" });
+    record("PASS: clearing a new or resumed goal removes it from both windows and from the reopened board");
+    if (managerOnly) {
+      if (output) writeFileSync(join(output, "shared-runtime.txt"), results.join("\n") + "\n");
+      break checks;
+    }
     const expectCount = async total => {
       let latest;
       try { await wait(async () => { latest = await frames(); return latest.every(frame => frame.activeAgents.total === total) && [...await a.ask({action:"dom"}), ...await b.ask({action:"dom"})].every(view => view.count === total); }, "all windows count " + total); }
@@ -339,23 +480,60 @@ if (!process.versions.electron) {
   app.setPath("userData", join(scratch, name)); app.setPath("appData", join(scratch, "app-data-" + name));
   app.disableHardwareAcceleration(); app.requestSingleInstanceLock = () => true;
   const runs = new Map(), leases = new Map(), pids = new Set(), providerRequests = new Map(); let failNext = false, providerSequence = 0;
+  const executorBindings = new Map();
   let gitWindow;
   const active = await import(new URL("../src/desktop/active-runs.ts", import.meta.url));
-  let managerCalls = 0;
+  let managerCalls = 0, maintenanceCalls = 0, goalClearCalls = 0, heldTurn, goalDone, goalRequest;
+  globalThis.runtimeCheckUpdateGoal = async (_profile, _project, _thread, action) => {
+    assert.equal(action.kind, "clear");
+    goalClearCalls++;
+    return null;
+  };
+  const maintenanceDone = Promise.withResolvers();
   globalThis.runtimeCheckReply = async (_profile, _project, text, _images, _action, _tools, _instructions, _signal, hooks) => {
+    if (hooks.goal || hooks.resumeGoal) {
+      goalDone = Promise.withResolvers();
+      hooks.onGoalControl(async ({ kind }) => {
+        assert.equal(kind, "clear");
+        hooks.onGoal(null);
+        return null;
+      });
+      hooks.onGoal({ objective: hooks.goal ?? "Paused fixture goal", status: "active" });
+      await goalDone.promise;
+      return { text: "", goalStatus: "cleared" };
+    }
+    if (hooks.role === "reviewer") {
+      assert.equal(hooks.id, undefined);
+      assert.equal(hooks.resumeGoal, false);
+      maintenanceCalls++;
+      hooks.onControl({ steer: async () => assert.fail("Maintenance received a user message") });
+      await maintenanceDone.promise;
+      return { text: "Isolated maintenance fixture" };
+    }
     managerCalls++;
     if (text === "Fixture provider failure") throw Error("Isolated provider failure");
+    if (text.startsWith("Hold manager: ")) {
+      heldTurn = Promise.withResolvers();
+      hooks.onControl({ interrupt: async () => heldTurn.resolve("stop") });
+      if (!text.endsWith("fail")) hooks.onMessage(hooks.messageId);
+      const result = await heldTurn.promise;
+      heldTurn = undefined;
+      if (result === "stop") return { interrupted: true };
+      if (text.endsWith("fail")) throw Error("Isolated active-turn failure");
+      return { text: "Finished held turn" };
+    }
     hooks.onActivity([{ id: "fixture-live", type: "agentMessage", title: "", text: "Isolated manager is working", phase: "commentary", status: "inProgress" }]);
     await delay(3000);
     return { text: "Isolated manager fixture" };
   };
   globalThis.runtimeCheckStart = async (_client, board, _cwd, task, _activity, _usage, _signal, beforeTurn) => {
     if (failNext) { failNext = false; throw Error("Isolated provider launch failure"); }
+    executorBindings.set(task.id, { cwd: _cwd, thread: task.codexThreadId });
     const request = ++providerSequence;
     const pid = await new Promise(resolve => { providerRequests.set(request, resolve); process.send({spawnProvider: request}); });
     pids.add(pid);
     const provider = active.trackProvider(board, pid), finish = provider.run(() => active.trackActiveRun(board));
-    const threadId = "10000000-0000-0000-0000-" + String(pid).padStart(12, "0");
+    const threadId = task.codexThreadId ?? ("10000000-0000-0000-0000-" + String(pid).padStart(12, "0"));
     await beforeTurn(threadId);
     const completion = new Promise(resolve => {
       const timer = setInterval(() => {
@@ -371,11 +549,12 @@ if (!process.versions.electron) {
   const sourceUrl = new URL("../src/desktop/main.ts", import.meta.url);
   let source = readFileSync(sourceUrl, "utf8").replace('missingCodexThread, startCodexRun', 'missingCodexThread')
     .replace('codexStatus, configuredCodex,', 'codexStatus, configuredCodex as unusedConfiguredCodex,')
-    .replace('replyToBoard, replyToTask', 'replyToBoard as unusedReplyToBoard, replyToTask');
-  source = 'const configuredCodex = async () => ({}); const startCodexRun = globalThis.runtimeCheckStart; const replyToBoard = globalThis.runtimeCheckReply;\n' + source;
+    .replace('replyToBoard, replyToTask', 'replyToBoard as unusedReplyToBoard, replyToTask')
+    .replace('reviewWithCodex, updateBoardGoal', 'reviewWithCodex, updateBoardGoal as unusedUpdateBoardGoal');
+  source = 'const configuredCodex = async () => ({}); const startCodexRun = globalThis.runtimeCheckStart; const replyToBoard = globalThis.runtimeCheckReply; const updateBoardGoal = globalThis.runtimeCheckUpdateGoal;\n' + source;
   source = source.replaceAll("import.meta.url", JSON.stringify(sourceUrl.href)).replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, sourceUrl).href));
   const entry = join(scratch, name + ".mjs");
-  writeFileSync(entry, transformSync(source + "\nglobalThis.sharedCheck = {createWindow,launchTask,agentSlots,reserveAgent,scheduleAgentWork,activeAgents,subscriptions};", { loader: "ts", format: "esm" }).code);
+  writeFileSync(entry, transformSync(source + "\nglobalThis.sharedCheck = {createWindow,launchTask,agentSlots,reserveAgent,scheduleAgentWork,scheduleMaintenance,activeAgents,subscriptions};", { loader: "ts", format: "esm" }).code);
   process.argv.push("--project", project);
   require(entry);
   const ready = wait(async () => BrowserWindow.getAllWindows().length && BrowserWindow.getAllWindows()[0].webContents.executeJavaScript("window.taskboard?.bootstrap().then(frame => Boolean(frame.board) && !frame.loading)"), "initial window");
@@ -386,6 +565,8 @@ if (!process.versions.electron) {
       const qa = globalThis.sharedCheck; let data;
       const board = command.other ? other : project, key = command.role + (command.other ? ":other" : "") + (command.task ?? "");
       if (command.action === "ready") data = true;
+      if (command.action === "versions") data = process.versions;
+      if (command.action === "executorBinding") data = executorBindings.get(command.id);
       if (command.action === "restoreBoards") { const state = qa.createWindow([project, other]); await state.ready; globalThis.restoredCheckWindow = state.window; data = true; }
       if (command.action === "closeRestored") { globalThis.restoredCheckWindow.close(); data = true; }
       if (command.action === "newWindow") { const state = qa.createWindow([project]); await state.ready; data = true; }
@@ -493,6 +674,34 @@ if (!process.versions.electron) {
         data = Boolean(lease);
       }
       if (command.action === "managerPhase") { qa.agentSlots.update(project, "manager:context", { id: "fixture-manager", phase: command.phase, startedAt: Date.now(), lane: command.lane }); data = true; }
+      if (command.action === "startMaintenance") { void qa.scheduleMaintenance(project, qa.subscriptions.get(project)); data = true; }
+      if (command.action === "finishMaintenance") { maintenanceDone.resolve(); data = true; }
+      if (command.action === "maintenanceCalls") data = maintenanceCalls;
+      if (command.action === "hasHeldTurn") data = Boolean(heldTurn);
+      if (command.action === "finishManager") { heldTurn.resolve("finish"); data = true; }
+      if (command.action === "stopManager") data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(
+        "window.taskboard.stopOrchestrator()");
+      if (command.action === "sendNow") data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(
+        `window.taskboard.boardRequest(${JSON.stringify(command.text)}, [], undefined, false, true)`);
+      if (command.action === "checkQueueActions") data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(`(() => {
+        const status = document.querySelector(".board-queued-status");
+        if (!status || status.querySelector(":scope > span") || status.querySelectorAll("button").length !== 3) {
+          throw Error("Queued row should show only edit, send and remove controls");
+        }
+        return true;
+      })()`);
+      if (command.action === "clickSendNow") data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(
+        'document.querySelectorAll(".board-queued-status button")[1].click()');
+      if (command.action === "removeFailed") {
+        const win = BrowserWindow.getAllWindows()[0];
+        data = await win.webContents.executeJavaScript(`(async () => {
+          const { data } = await window.taskboard.boardQueue(${JSON.stringify(project)}, "list");
+          const job = data.find(job => job.failed);
+          if (!job) throw Error("Expected the failed predecessor in the queue");
+          return window.taskboard.boardQueue(${JSON.stringify(project)}, "remove", job.id);
+        })()`);
+        assert.equal(data.ok, true);
+      }
       if (command.action === "addMessage") {
         data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(
           `window.taskboard.boardQueue(${JSON.stringify(project)}, "add", undefined, ${JSON.stringify(command.text)}, false, [])`);
@@ -513,6 +722,47 @@ if (!process.versions.electron) {
       })()`)));
       if (command.action === "managerCalls") data = managerCalls;
       if (command.action === "history") data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript("window.taskboard.boardHistory()");
+      if (command.action === "startGoal") {
+        goalRequest = BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(
+          `window.taskboard.boardRequest(${JSON.stringify(command.mode === "resume" ? "" : "New fixture goal")}, [], undefined, ${JSON.stringify(command.mode)})`);
+        data = true;
+      }
+      if (command.action === "clearGoal") data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(
+        'window.taskboard.boardGoal("clear")');
+      if (command.action === "goalClearCalls") data = goalClearCalls;
+      if (command.action === "clickClearGoal") {
+        const contents = BrowserWindow.getAllWindows()[0].webContents;
+        await wait(() => contents.executeJavaScript('Boolean(document.querySelector(".board-goal:not([hidden])[data-status=paused]"))'), "paused goal visible");
+        data = await contents.executeJavaScript(`(async () => {
+          const panel = document.querySelector(".board-goal");
+          panel.open = true;
+          const button = panel.querySelector("button.danger");
+          button.click();
+          await Promise.resolve();
+          return button.disabled && Boolean(panel.querySelector('.board-goal-body [role="status"]').textContent);
+        })()`);
+        assert.equal(data, true);
+      }
+      if (command.action === "finishGoal") {
+        goalDone.resolve();
+        data = await goalRequest;
+        assert.equal(data.ok, true, JSON.stringify(data));
+      }
+      if (command.action === "goalPanels") data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript(`(() => {
+        const panel = document.querySelector(".board-goal");
+        return { visible: !panel.hidden, status: panel.dataset.status };
+      })()`)));
+      if (command.action === "reopenGoalBoard") {
+        const { window, ready } = qa.createWindow([project]);
+        try {
+          await ready;
+          const history = await window.webContents.executeJavaScript("window.taskboard.boardHistory()");
+          assert.equal(history.data.goal, null);
+          if (command.expectedReply) assert.ok(JSON.stringify(history.data.turns).includes(command.expectedReply));
+          assert.equal(await window.webContents.executeJavaScript('document.querySelector(".board-goal").hidden'), true);
+          data = true;
+        } finally { window.close(); }
+      }
       if (command.action === "openGitBoard") {
         const state = qa.createWindow([command.project]);
         gitWindow = state.window;
