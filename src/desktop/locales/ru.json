@@ -1171,7 +1171,8 @@
     "many": "{count} файлов"
   },
   "limits.label": "Лимиты",
-  "limits.weekly": "Недельный лимит",
+  "limits.provider": "Лимиты {provider}",
+  "limits.weekly": "Неделя",
   "limits.daily": "Суточный лимит",
   "limits.duration": "Лимит на {duration}",
   "limits.window": "Лимит",

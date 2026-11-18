@@ -1169,7 +1169,8 @@
     "many": "{count} plików"
   },
   "limits.label": "Limity",
-  "limits.weekly": "Limit tygodniowy",
+  "limits.provider": "Limity {provider}",
+  "limits.weekly": "Tydzień",
   "limits.daily": "Limit dzienny",
   "limits.duration": "Limit na {duration}",
   "limits.window": "Limit",
