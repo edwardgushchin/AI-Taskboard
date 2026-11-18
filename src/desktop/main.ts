@@ -33,13 +33,14 @@ import type { CliReply } from "./cli.ts";
 import { executionModels } from "./codex-models.ts";
 import type { ArchiveLink, BoardSettings, BoardTag, ReviewMode, RunActivity, Task } from "../cli/model.ts";
 import { boardReviewMode, codexThreadPattern, defaultBoardAgents, maxAttachmentBytes, reviewVerifier, taskIdPattern } from "../cli/model.ts";
-import { directory as storageDirectory, readBoardSettings, readJson, writeJson } from "../cli/storage.ts";
+import { BoardStore, directory as storageDirectory, readBoardSettings, readJson, writeJson } from "../cli/storage.ts";
 import { missingCodexThread, startCodexRun } from "./codex-run.ts";
 import type { ExecutorTask } from "./codex-run.ts";
 import { runLog } from "./run-activity.ts";
 import { readReviewerImage, readRunImage } from "./run-images.ts";
 import { projectIdentity, projectLabels, projectPath, savedWindows } from "./project-tabs.ts";
 import { readMarkdownFile } from "./markdown-files.ts";
+import { readSavedPng } from "../cli/artifacts.ts";
 import { normalizeRecentBoards, readRecentBoards, rememberRecentBoard } from "./recent-boards.ts";
 import { transcribeVoice } from "./voice-transcription.ts";
 import { startWindowsDictation } from "./windows-dictation.ts";
@@ -3013,6 +3014,17 @@ ipcMain.handle("board:saveAttachment", async (event, id: unknown, file: unknown,
   const result = await dialog.showSaveDialog(state.window, { defaultPath: basename(name.replaceAll("\\", "/")) });
   if (result.canceled || !result.filePath) return { ok: true, data: null };
   return callCli(project, ["attachment", "read", id], { file, destination: result.filePath });
+});
+
+ipcMain.handle("board:artifactPreview", (event, path: unknown) => {
+  const { project } = stateOf(event);
+  if (!project || typeof path !== "string") return null;
+  try {
+    const image = readSavedPng(new BoardStore(runtimeLocation(project)), path);
+    return image ? "data:image/png;base64," + image.base64 : null;
+  } catch {
+    return null;
+  }
 });
 
 ipcMain.handle("board:attachmentPreview", async (event, id: unknown, file: unknown) => {

@@ -2,6 +2,7 @@
 // Optional: --references <task attachment directory> --artifacts <screenshot directory>
 // For a dialogue round trip, use --dialogue-history <empty temp directory>, then repeat with --reopen-dialogue.
 // Pass --large-dialogue-image to both invocations to include a 4 MiB attachment.
+// Use --artifact-links to check submission and dialogue screenshots across an Electron restart.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -12,11 +13,12 @@ import { electronCheck, localizationFixture } from "./electron-check.mjs";
 
 const script = fileURLToPath(import.meta.url);
 const root = resolve(dirname(script), "..");
-const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "chat", 150_000);
+const phases = process.argv.includes("--artifact-links") ? [["--live-artifacts"], ["--reopen-artifacts"]] : [[]];
+const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "chat", 150_000, phases);
 const { app, BrowserWindow, nativeTheme, ipcMain } = await import("electron");
 const option = name => { const index = process.argv.indexOf(name); return index < 0 ? undefined : process.argv[index + 1]; };
 const profile = join(scratch, "profile");
-mkdirSync(profile);
+mkdirSync(profile, { recursive: true });
 app.setPath("userData", profile);
 app.disableHardwareAcceleration();
 const read = name => readFileSync(join(root, "src", "desktop", name), "utf8");
@@ -28,6 +30,7 @@ const require = createRequire(import.meta.url);
 const sourcePreload = join(scratch, "source-preload.cjs");
 writeFileSync(sourcePreload, `const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('readSourceFixture', (id, link, source) => ipcRenderer.invoke('check:source', id, link, source));`);
+writeFileSync(sourcePreload, "\ncontextBridge.exposeInMainWorld('readArtifactFixture', path => ipcRenderer.invoke('board:artifactPreview', path));", { flag: "a" });
 ipcMain.handle("check:source", (_event, _id, link, source) => {
   // Run the production reader with Node's TypeScript support; Electron's loader differs.
   const result = spawnSync(process.env.TASKBOARD_CHECK_NODE, ["--input-type=module", "-e",
@@ -240,6 +243,119 @@ app.whenReady().then(async () => {
     return;
   }
   const dialogueFixture = option("--dialogue-history");
+  if (process.argv.includes("--artifact-links")) {
+    const project = join(scratch, "board with spaces");
+    const reopening = process.argv.includes("--reopen-artifacts");
+    const runNode = (code, args, input) => {
+      const result = spawnSync(process.env.TASKBOARD_CHECK_NODE, ["--input-type=module", "-e", code, ...args], {
+        input, encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024,
+      });
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      return JSON.parse(result.stdout);
+    };
+    const { work, dialogue } = runNode(`
+      import { createHash } from 'node:crypto';
+      import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+      import { join } from 'node:path';
+      import { callCli } from ${JSON.stringify(new URL('../src/desktop/cli.ts', import.meta.url).href)};
+      import { readManagerDialogue, readManagerHistory, saveManagerHistory, syncTaskStatusNotices }
+        from ${JSON.stringify(new URL('../src/desktop/manager-history.ts', import.meta.url).href)};
+      const [root, reopen, source] = process.argv.slice(1);
+      const cli = async (args, input) => {
+        const result = await callCli(root, args, input);
+        if (!result.ok) throw Error(JSON.stringify(result));
+        return result.data;
+      };
+      let reply;
+      if (reopen !== "true") {
+        mkdirSync(root);
+        await cli(['init']);
+        const task = await cli(['create'], { title: 'Artifact fixture', workingDirectory: root, criteria: ['Show the screenshot'] });
+        await cli(['approve', task.id]);
+        await cli(['start', task.id]);
+        syncTaskStatusNotices(root);
+        const name = 'manager work status.png';
+        const bytes = source ? readFileSync(source) : readFileSync(0);
+        const digest = createHash('sha256').update(bytes).digest('hex');
+        writeFileSync(join(root, name), bytes);
+        const path = join(root, '.tasks', 'artifacts', task.id, digest, name).replaceAll('\\\\', '/');
+        const missing = path.replace(name, 'missing.png');
+        writeFileSync(join(root, 'missing.png'), bytes);
+        const outside = join(root, name).replaceAll('\\\\', '/');
+        const report = label => 'Before [' + label + '](<' + path + '>) after. [Web](https://example.com/) ' +
+          '[Missing](<' + missing + '>) [Outside](<' + outside + '>)';
+        const submit = async (summary, artifacts) => {
+          const preview = await cli(['preview', task.id]);
+          await cli(['submit', task.id], { token: preview.token, noChanges: true, summary, artifacts,
+            checks: ['Fixture screenshot saved'] });
+          syncTaskStatusNotices(root);
+        };
+        await submit('First submission', [name]);
+        await cli(['request-changes', task.id], { reason: 'Include the screenshot link' });
+        await submit(report('Submission screenshot'), [name, 'missing.png']);
+        unlinkSync(missing);
+        const at = new Date().toISOString();
+        reply = { id: 'artifact-reply', type: 'agentMessage', phase: 'final_answer', status: 'completed',
+          text: report('Open screenshot'), title: '', at };
+        saveManagerHistory(root, Date.parse(at), 'a0000000-0000-4000-8000-000000000001',
+          { lane: 'chat', message: { text: 'Show the screenshot', files: [], at }, items: [reply] });
+      }
+      const work = readManagerHistory(root, null, 'work').turns.flatMap(turn => turn.items);
+      const dialogue = reply ? [reply] : (await readManagerDialogue(root, null)).turns.flatMap(turn => turn.items);
+      console.log(JSON.stringify({ work, dialogue }));
+    `, [project, String(reopening), option("--artifact-png") ?? ""], (await window.webContents.capturePage()).toPNG());
+    ipcMain.handle("board:artifactPreview", (_event, path) => runNode(`
+      import { BoardStore, locateBoard } from ${JSON.stringify(new URL('../src/cli/storage.ts', import.meta.url).href)};
+      import { readSavedPng } from ${JSON.stringify(new URL('../src/cli/artifacts.ts', import.meta.url).href)};
+      let image;
+      try { image = readSavedPng(new BoardStore(locateBoard(process.argv[1])), process.argv[2]); }
+      catch (error) { if (error.code !== 'ARTIFACT_NOT_FOUND') throw error; }
+      console.log(JSON.stringify(image ? 'data:image/png;base64,' + image.base64 : null));
+    `, [project, path]));
+    await evaluate("api.artifactPreview = window.readArtifactFixture; frame = { russian: true }; sheet.showModal(); void 0");
+    for (const [view, items, context, label] of [
+      ["work", work, { managerWork: true }, "Submission screenshot"],
+      ["dialogue", dialogue, { dialogue: true }, "Open screenshot"],
+    ]) {
+      const tile = "body.querySelector('.chat-artifact button')";
+      const wait = condition => evaluate(`new Promise((resolve, reject) => {
+        const deadline = Date.now() + 5000;
+        function poll() {
+          if (${condition}) resolve();
+          else if (Date.now() > deadline) reject(new Error(${JSON.stringify(condition)}));
+          else setTimeout(poll, 16);
+        }
+        poll();
+      })`);
+      await evaluate(`body.replaceChildren(); renderRunActivity(body, ${JSON.stringify(items)}, true,
+        undefined, undefined, ${JSON.stringify(context)}); void 0`);
+      await wait(`${tile}?.querySelector('img')?.naturalWidth > 0 &&
+        [...body.querySelectorAll('.chat-artifact [role=status]')].filter(x => /Missing|Outside/.test(x.textContent)).length === 2`);
+      await check(`body.textContent.includes('Before') && body.textContent.includes('after.') &&
+        body.querySelector('a[href="https://example.com/"]')?.textContent === 'Web' &&
+        ${tile}.querySelector('img').alt === ${JSON.stringify(label)}`, "report text, web link and image label");
+      await evaluate(`${tile}.scrollIntoView({ block: 'center' }); void 0`);
+      if (keepArtifacts) {
+        await window.webContents.capturePage();
+        await capture("artifact-" + view + (reopening ? "-reopened" : "-live") + ".png");
+      }
+      const point = await evaluate(`(() => { const r = ${tile}.getBoundingClientRect();
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()`);
+      for (const type of ["mouseDown", "mouseUp"]) window.webContents.sendInputEvent({ type, ...point, button: "left", clickCount: 1 });
+      const open = `document.querySelector('.image-preview[open] img')?.naturalWidth === ${tile}.querySelector('img').naturalWidth`;
+      await wait(open);
+      if (keepArtifacts && reopening && view === "work") await capture("artifact-full-preview.png");
+      await evaluate(`document.querySelector('.image-preview').close(); ${tile}.focus(); void 0`);
+      await check(`document.activeElement === ${tile}`, "thumbnail receives keyboard focus");
+      window.webContents.sendInputEvent({ type: "keyDown", keyCode: "Enter" });
+      window.webContents.sendInputEvent({ type: "char", keyCode: "\r" });
+      window.webContents.sendInputEvent({ type: "keyUp", keyCode: "Enter" });
+      await wait(open);
+      await evaluate("document.querySelector('.image-preview[open]').close(); void 0");
+      console.log(`Artifact links passed: ${view}, ${reopening ? "restarted Electron" : "live submission or reply"}`);
+    }
+    return;
+  }
   if (dialogueFixture) {
     const reopening = process.argv.includes("--reopen-dialogue");
     const largeImage = process.argv.includes("--large-dialogue-image");
