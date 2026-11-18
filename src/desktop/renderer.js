@@ -2075,11 +2075,13 @@ function draftComposer() {
     }
   }
   function renderLiveWork() {
-    if (!liveWorkItems) return;
-    const seenMessages = new Set([...workSaved.querySelectorAll("[data-coordination-key]")].map(node => node.dataset.coordinationKey));
-    const pending = items => items.filter(item => !savedWorkItems.has(item.id));
-    renderActivity(liveGoal, pending(liveWorkItems.work), false, { seenMessages, managerWork: true });
-    renderActivity(liveChat, pending(liveWorkItems.chat), false, { seenMessages, managerWork: true });
+    if (liveWorkItems) {
+      const seenMessages = new Set([...workSaved.querySelectorAll("[data-coordination-key]")].map(node => node.dataset.coordinationKey));
+      const pending = items => items.filter(item => !savedWorkItems.has(item.id));
+      renderActivity(liveGoal, pending(liveWorkItems.work), false, { seenMessages, managerWork: true });
+      renderActivity(liveChat, pending(liveWorkItems.chat), false, { seenMessages, managerWork: true });
+    }
+    reconcileWorkTransitions(work);
   }
   async function loadWork(cursor = null) {
     if (disposed || work.hidden) return;

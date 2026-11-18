@@ -114,7 +114,7 @@ app.whenReady().then(async () => {
     ];
     const transitionTools = transitionResults.map(([action, status], index) => ({
       id: "transition-" + action, title: "ai_taskboard / task_" + action, type: "mcpToolCall", status: "completed",
-      at: new Date(start + 100).toISOString(), text: "Saved tool output",
+      at: new Date(start + 100).toISOString(), completedAt: new Date(start + 105).toISOString(), text: "Saved tool output",
       taskChanges: [{ action, status, id: "T-" + String(index + 1).padStart(4, "0") }],
     }));
     const io = (project, action, input) => {
@@ -122,13 +122,17 @@ app.whenReady().then(async () => {
         import { randomUUID } from "node:crypto";
         import { mkdirSync, readFileSync } from "node:fs";
         import { join } from "node:path";
-        import { managerUnread, readManagerDialogue, readManagerHistory, saveManagerHistory } from ${JSON.stringify(new URL("../src/desktop/manager-history.ts", import.meta.url).href)};
+        import { managerUnread, readManagerDialogue, readManagerView, saveManagerHistory } from ${JSON.stringify(new URL("../src/desktop/manager-history.ts", import.meta.url).href)};
         const [project, action] = process.argv.slice(1);
         const input = JSON.parse(readFileSync(0, "utf8"));
         if (action === "write") {
           mkdirSync(join(project, ".tasks"), { recursive: true });
           for (const { at, id, run } of input) saveManagerHistory(project, at, id ?? randomUUID(), run);
-        } else if (action === "work") console.log(JSON.stringify(readManagerHistory(project, input, "work")));
+        } else if (action === "work") console.log(JSON.stringify(await readManagerView(project, input, "work", async () => ({
+          turns: [{ messages: [], items: [${JSON.stringify({ ...transitionTools[0], id: "legacy-cancel",
+            at: new Date(start - 20).toISOString(), completedAt: new Date(start - 10).toISOString() })}] }],
+          nextCursor: null,
+        }))));
         else if (action === "unread") console.log(JSON.stringify(managerUnread(project)));
         else console.log(JSON.stringify(await readManagerDialogue(project, input)));
       `, project, action], { input: JSON.stringify(input), encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
@@ -263,10 +267,14 @@ app.whenReady().then(async () => {
       }
       if (!reopening) await check("dialogue.leaks.length === 0", "no status notice entered the live dialogue DOM");
       const work = io(project, "work", null);
-      const olderWork = io(project, "work", work.nextCursor);
+      const workPages = {};
+      for (let cursor = work.nextCursor; cursor;) {
+        const page = workPages[cursor] = io(project, "work", cursor);
+        cursor = page.nextCursor;
+      }
       await evaluate(`
         api.boardHistory = async (_project, cursor, view) => ({ ok: true, data: view === 'live'
-          ? { work: [], chat: ${JSON.stringify(transitionTools)} } : cursor ? ${JSON.stringify(olderWork)} : ${JSON.stringify(work)} });
+          ? { work: [], chat: ${JSON.stringify(transitionTools)} } : cursor ? (${JSON.stringify(workPages)})[cursor] : ${JSON.stringify(work)} });
         dialogue.manager.querySelector('.board-work-toggle').click();
         new Promise(resolve => requestAnimationFrame(resolve))
       `);
@@ -279,6 +287,8 @@ app.whenReady().then(async () => {
         dialogue.manager.querySelectorAll('.board-work [data-item^="item:transition-"]').length === 5
       `;
       await check(onlyNoticeResults, "live tool details have no duplicate status result");
+      await check(`dialogue.manager.querySelectorAll('[data-status-result]:not([hidden])').length === 4`,
+        "live results without a loaded notice have visible rows");
       await evaluate(`dialogue.manager.querySelector('.board-work .board-chat-older').click();
         new Promise(resolve => requestAnimationFrame(resolve))`);
       await check(`
@@ -289,6 +299,24 @@ app.whenReady().then(async () => {
         dialogue.manager.querySelectorAll('.board-work [data-item^="final:notice-"]').length === 24
       `, "work pagination shows each dated notice once with a card link");
       await check(onlyNoticeResults, "saved tool details have no duplicate status result after loading older notices");
+      await check(`!dialogue.manager.querySelector('[data-status-result]:not([hidden])')`,
+        "matching notices replace all five tool result rows");
+      await evaluate(`(async () => {
+        for (let i = 0; i < ${Object.keys(workPages).length}; i++) {
+          const older = dialogue.manager.querySelector('.board-work .board-chat-older');
+          if (older.hidden) break;
+          older.click();
+          await new Promise(resolve => requestAnimationFrame(resolve));
+        }
+        dialogue.manager.querySelector('[data-item="status:legacy-cancel:T-0001"]').scrollIntoView({ block: 'center' });
+      })()`);
+      await check(`(() => {
+        const rows = [...dialogue.manager.querySelectorAll('[data-status-result]:not([hidden])')];
+        return rows.length === 1 && rows[0].dataset.item === 'status:legacy-cancel:T-0001' &&
+          rows[0].querySelector('time')?.dateTime === '${new Date(start - 20).toISOString()}' &&
+          rows[0].querySelector('button.board-chat-task')?.textContent === 'T-0001' &&
+          rows[0].checkVisibility();
+      })()`, "older provider cancellation without a notice has a visible date and card link");
       if (keepArtifacts && paused) await capture("manager-work-status-notices.png");
       const latest = history(null);
       await evaluate(`{

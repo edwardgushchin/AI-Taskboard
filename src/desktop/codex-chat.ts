@@ -397,6 +397,7 @@ interface BoardSession {
 type BoardMessage = { at?: string; id: string; sequence: number; actor: "manager" | "agent" | "reviewer"; text: string;
   kind?: "request-changes" };
 export type BoardActivity = RunActivity & { taskChanges?: BoardChange[]; messages?: BoardMessage[]; messagesOnly?: boolean;
+  completedAt?: string; statusTransition?: { task: string; status: string };
   userMessage?: ReturnType<typeof boardMessage> & { at?: string } };
 
 export function updateBoardGoal(profile: string, project: string, threadId: string, action: BoardGoalAction) {
@@ -477,6 +478,9 @@ export function readBoardHistory(profile: string, project: string, threadId: str
         if (activity) {
           if (activity.type === "agentMessage" && typeof item.text === "string") activity.text = item.text;
           activity.at = savedAt;
+          if (activity.taskChanges?.length && typeof completedAtMs === "number" && Number.isFinite(completedAtMs)) {
+            activity.completedAt = new Date(completedAtMs).toISOString();
+          }
           turn.items.push(activity);
         }
       }
@@ -517,7 +521,10 @@ function boardActivity(entries: Map<string, BoardActivity>, method: string, para
     }
   } else {
     const changes = boardChanges(item, data);
-    if (changes.length) activity.taskChanges = changes;
+    if (changes.length) {
+      activity.taskChanges = changes;
+      activity.completedAt = at;
+    }
   }
   return activity;
 }
