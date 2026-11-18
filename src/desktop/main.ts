@@ -1039,10 +1039,12 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       }, automatic === undefined ? undefined : "initial", task.status === "review", Boolean(task.closedAt))).finally(() => ready.reject(new Error("The agent session ended.")));
     if ("interrupted" in answer) return { saved, result: { ok: true as const, data: task } };
     signal.throwIfAborted();
-    const result = await callCli<Task>(project, ["chat", id], {
-      ...answer, actor: "agent", model, effort, replyTo, durationMs: Math.round(performance.now() - replyStarted),
-      ...(automatic ? { draftDiscussion: true, revision: task.revision } : {}),
-    });
+    const result = automatic && !answer.text
+      ? await callCli<Task>(project, ["draft-discussion", id], { revision: task.revision, phase: "completed" })
+      : await callCli<Task>(project, ["chat", id], {
+        ...answer, actor: "agent", model, effort, replyTo, durationMs: Math.round(performance.now() - replyStarted),
+        ...(automatic ? { draftDiscussion: true, revision: task.revision } : {}),
+      });
     if (result.ok) discussionStarted = false;
     else discussionFailure = result.error.message;
     return { saved, result };
