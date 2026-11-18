@@ -245,9 +245,12 @@ app.whenReady().then(async () => {
       }, status: 'completed', title: '', text: '' }], true);
       return !target.textContent.includes('AI Taskboard queue');
     })()`, 'historical automatic notice payload is hidden');
-    await check(`[...document.querySelectorAll('.task-stat')].some(stat => stat.textContent === '0/1')`, 'the task has one unchecked item');
+    await check(`findCard(planned.id).querySelectorAll('.task-subtask-progress > span:not(.is-done)').length === 1 &&
+      findCard(planned.id).getAttribute('aria-description').endsWith(t('ui.subtasks_b409bda5') + ' 0/1')`,
+    'the task has one unchecked item');
     await evaluate(`planned.status = 'in_progress'; planned.subtasks[0].done = true; planned.revision++; push(); settle()`);
-    await check(`[...document.querySelectorAll('.task-stat')].some(stat => stat.textContent === '1/1') &&
+    await check(`findCard(planned.id).querySelectorAll('.task-subtask-progress > .is-done').length === 1 &&
+      findCard(planned.id).getAttribute('aria-description').endsWith(t('ui.subtasks_b409bda5') + ' 1/1') &&
       [...body.querySelectorAll('.task-state-label .codicon-check')].some(icon => icon.parentElement.textContent.includes('Verify keyboard focus'))`,
     'a board update refreshes checklist progress while the task is open');
     window.setContentSize(710, 820);
@@ -391,14 +394,21 @@ app.whenReady().then(async () => {
         const spinner = status?.querySelector('.agent-spinner');
         const s = status?.getBoundingClientRect(), m = meta?.getBoundingClientRect();
         const f = footer.getBoundingClientRect();
+        const progress = details.querySelector('.task-subtask-progress');
+        const bar = progress?.firstElementChild;
+        const b = bar?.getBoundingClientRect();
         return footer.classList.contains('task-card-footer') && details.querySelectorAll('.task-run-status').length === 1 &&
           spinner?.getAttribute('role') === 'status' &&
           spinner.getAttribute('aria-label') === t('ui.agent_is_working_28ccd334') &&
           s.left >= m.right && s.right === f.right && s.bottom === f.bottom &&
+          progress?.children.length === 1 && progress.nextElementSibling === footer &&
+          !bar.classList.contains('is-done') && b.left === f.left && b.right === f.right && b.height === 6 &&
+          card.getAttribute('aria-description') === t('ui.subtasks_b409bda5') + ' 0/1' &&
+          !card.innerText.includes('0/1') &&
           card.scrollWidth <= card.clientWidth + 1 && meta.scrollWidth <= meta.clientWidth + 1 &&
           [...meta.children].every(node => node.getBoundingClientRect().right <= m.right + 1) &&
-          meta.firstElementChild.textContent.includes('T-0096') &&
-          meta.children[1].textContent === '0/1' && meta.children[2].textContent === '1';
+          meta.querySelector('.task-id')?.textContent === 'T-0096' &&
+          meta.querySelector('.codicon-attach')?.parentElement.textContent === '1';
       })()`, `accessible active indicator in the bottom right with full metadata at ${width}px`);
       if (keepArtifacts) await capture(`running-${width}.png`);
     }
