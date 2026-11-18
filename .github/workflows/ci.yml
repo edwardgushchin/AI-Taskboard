@@ -73,7 +73,7 @@ jobs:
         if: matrix.os == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends xvfb xauth libgtk-3-0t64 libnss3 libgbm1 libasound2t64 libopenjp2-tools rpm
+          sudo apt-get install -y --no-install-recommends xvfb xauth libgtk-3-0t64 libnss3 libgbm1 libasound2t64 libopenjp2-tools rpm libarchive-tools
 
       - name: Install dependencies
         run: npm ci 2>&1 | tee ci-results/npm-ci.log

@@ -53,6 +53,36 @@ function binaryArchitecture(path) {
   }
 }
 
+function extractCli(packagePath, extension, destination) {
+  mkdirSync(destination);
+  const extract = (tool, args) => execFileSync(tool, args, { stdio: "inherit", timeout: 180_000, windowsHide: true });
+  if (extension === "exe") {
+    // electron-builder's NSIS template stores one nested archive per architecture.
+    const installed = join(process.env.ProgramFiles ?? "C:/Program Files", "7-Zip", "7z.exe");
+    const sevenZip = existsSync(installed) ? installed : "7z";
+    const archive = `$PLUGINSDIR/app-${arch === "x64" ? "64" : "arm64"}.7z`;
+    const entry = "resources/bin/ai-taskboard.exe";
+    extract(sevenZip, ["x", "-y", `-o${destination}`, packagePath, archive]);
+    extract(sevenZip, ["x", "-y", `-o${destination}`, join(destination, archive), entry]);
+    return join(destination, entry);
+  }
+  if (extension === "zip") {
+    const entry = "AI Taskboard.app/Contents/Resources/bin/ai-taskboard";
+    extract("tar", ["-xf", packagePath, "-C", destination, entry]);
+    return join(destination, entry);
+  }
+  const entry = "opt/AI Taskboard/resources/bin/ai-taskboard";
+  if (extension === "deb") extract("dpkg-deb", ["--extract", packagePath, destination]);
+  else extract("bsdtar", ["-xf", packagePath, "-C", destination, "--include=*/resources/bin/ai-taskboard"]);
+  return join(destination, entry);
+}
+
+function checkCliVersion(path, cwd) {
+  const run = args => execFileSync(path, args, { cwd, encoding: "utf8", timeout: 20_000 }).trim();
+  assert.equal(run(["--version"]), version);
+  assert.deepEqual(JSON.parse(run(["--version", "--json"])), { ok: true, data: { version } });
+}
+
 async function devtools(url, method, params) {
   const socket = new WebSocket(url);
   try {
@@ -89,8 +119,7 @@ try {
   assert.equal(report.checks.cliArch, arch);
 
   const runCli = args => execFileSync(cli, args, { cwd: profile, encoding: "utf8", timeout: 20_000 }).trim();
-  assert.equal(runCli(["--version"]), version);
-  assert.deepEqual(JSON.parse(runCli(["--version", "--json"])), { ok: true, data: { version } });
+  checkCliVersion(cli, profile);
   report.checks.cliVersion = version;
   const project = join(profile, "board");
   mkdirSync(project);
@@ -103,13 +132,23 @@ try {
   report.packages = [];
   for (const extension of windows ? ["exe"] : mac ? ["zip"] : ["deb", "rpm"]) {
     const file = `${name}.${extension}`;
+    report.checkingPackage = file;
     const path = join(release, file);
     const size = statSync(path).size;
     assert.ok(size > 0);
     const hash = createHash("sha256");
     for await (const chunk of createReadStream(path)) hash.update(chunk);
-    report.packages.push({ file, size, sha256: hash.digest("hex") });
+    const evidence = { file, size, sha256: hash.digest("hex") };
+    report.packages.push(evidence);
+    const destination = join(profile, extension);
+    const extracted = extractCli(path, extension, destination);
+    evidence.cliArch = binaryArchitecture(extracted);
+    assert.equal(evidence.cliArch, arch, `${file} contains the wrong CLI architecture`);
+    checkCliVersion(extracted, profile);
+    evidence.cliVersion = version;
+    rmSync(destination, { recursive: true, maxRetries: 5, retryDelay: 200 });
   }
+  delete report.checkingPackage;
 
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
@@ -153,6 +192,8 @@ try {
   report.error = error.message;
   throw error;
 } finally {
+  let shutdownError;
+  let cleanupError;
   try {
     if (browserSocket && child.exitCode === null && child.signalCode === null) {
       await devtools(browserSocket, "Browser.close").catch(() => {});
@@ -162,13 +203,23 @@ try {
       if (windows) execFileSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { timeout: 10_000 });
       else process.kill(-child.pid, "SIGKILL");
     }
-    if (exited) await exited;
+    if (exited) {
+      const closed = await Promise.race([exited.then(() => true), delay(10_000, false, { ref: false })]);
+      if (!closed) throw new Error("Packaged Electron did not exit");
+    }
+  } catch (error) {
+    shutdownError = error;
+    report.shutdownError = error.message;
+  }
+  try {
     rmSync(profile, { recursive: true, maxRetries: 12, retryDelay: 200 });
     report.checks.profileRemoved = true;
   } catch (error) {
+    cleanupError = error;
     report.cleanupError = error.message;
-    throw error;
   } finally {
     writeFileSync(join(output, "package.json"), JSON.stringify(report, null, 2) + "\n");
   }
+  // Keep the original smoke failure as the thrown error when shutdown or cleanup also fails.
+  if (!Object.hasOwn(report, "error") && (shutdownError || cleanupError)) throw shutdownError ?? cleanupError;
 }
