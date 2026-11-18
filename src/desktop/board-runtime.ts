@@ -17,6 +17,7 @@ export interface RuntimeEntry {
   parent?: string;
   limits?: AgentLimits;
   revision?: number;
+  afterDiscussion?: boolean;
   continuation?: { afterDisconnect?: boolean; withoutProgress?: boolean };
   state?: { id: string; phase: "starting" | "waiting" | "running"; startedAt: number; reviewing?: string[] };
   startedAt?: number;

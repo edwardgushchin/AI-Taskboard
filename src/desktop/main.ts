@@ -756,7 +756,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
   const directories = active?.directories ?? new Set<string>();
   let scratch: string | undefined;
   let saved = request.retryAt !== undefined;
-  let handoff: LaunchState | undefined;
+  let releaseDiscussion: (() => void) | undefined;
   try {
     const { model, effort, text, files, retryAt } = request;
     signal.throwIfAborted();
@@ -833,6 +833,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     const replyStarted = performance.now();
     let replyTo = last;
     const requestChanges = async (card: Task, reason: string): Promise<CliReply> => {
+      if (isManual(readBoardSettings(runtimeLocation(project)))) return cliFailure("MANUAL_BOARD", "На обычной доске статусы меняет пользователь.");
       const review = await callCli<{ revision: number; targetHead: string | null; settings: { reviewMode: string } }>(project, ["review", id], { compact: true, includeReviewerSettings: true });
       if (!review.ok) return review;
       if (review.data.revision !== card.revision) return cliFailure("REVISION_CONFLICT", "The card changed. Read the current card before returning it.");
@@ -841,7 +842,10 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
         reviewMode: review.data.settings.reviewMode, launchDetails: true,
       });
       if (!returned.ok) return returned;
-      handoff = returned.data;
+      const pending = { project, id, revision: returned.data.revision, afterDiscussion: true };
+      try { agentSlots.defer(project, id, pending); }
+      catch (error) { return cliFailure("HANDOFF_FAILED", "The card was returned with its feedback, but queue persistence failed: " + (error as Error).message); }
+      deferredExecutors.set(key, pending);
       return { ok: true, data: { ...returned.data, feedback: reason, executorState: "waiting_for_discussion" } };
     };
     let runAction = taskChatActions(project, task, message.text ?? "", () => notify({ type: "changed" }), requestChanges);
@@ -862,7 +866,8 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       (name, args) => runAction(name, args),
       scratch, maxAttachmentBytes - task.attachments.reduce((sum, file) => sum + (file.link ? 0 : file.bytes), 0),
       report => saveTaskTokenUsage(project, id, "discussion", report),
-      control => ready.resolve(control), signal, id, task.status === "review").finally(() => ready.reject(new Error("The agent session ended.")));
+      control => ready.resolve(control), signal, id, task.status === "review",
+      release => { releaseDiscussion = release; }).finally(() => ready.reject(new Error("The agent session ended.")));
     if ("interrupted" in answer) return { saved, result: { ok: true as const, data: task } };
     signal.throwIfAborted();
     const result = await callCli<Task>(project, ["chat", id], {
@@ -874,20 +879,11 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     return { saved, result: cliFailure("CHAT_FAILED", message.slice(0, 1500)) };
   } finally {
     if (!active) {
-      if (handoff) {
-        // Saving the final chat reply advances the revision. Queue only after all
-        // discussion writes finish, while chatRuns still prevents a local launch.
-        const latest = await callCli<LaunchState>(project, ["show", id, "--compact"]);
-        if (latest.ok && latest.data.status === "in_progress") {
-          const pending = { project, id, revision: latest.data.revision };
-          deferredExecutors.set(key, pending);
-          agentSlots.defer(project, id, pending);
-        }
-      }
       activeAgents.delete(key);
       const wasReplying = replyingTasks.delete(key);
       for (const directory of directories) await rm(directory, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
       chatRuns.delete(key);
+      releaseDiscussion?.();
       scheduleAgentWork();
       if (wasReplying) notifyRunChange(project);
     } else if (scratch && activeAgents.get(key) !== active) {
@@ -941,7 +937,7 @@ const boardWorkRequests = new Map<string, ManagerRequest>();
 enableSharedRuns();
 const agentSlots = createAgentSlots(true);
 type ExecutorContinuation = { afterDisconnect?: boolean; withoutProgress?: boolean };
-const deferredExecutors = new Map<string, { project: string; id: string; revision: number; continuation?: ExecutorContinuation }>();
+const deferredExecutors = new Map<string, { project: string; id: string; revision: number; afterDiscussion?: boolean; continuation?: ExecutorContinuation }>();
 const autoBoards = new WeakMap<BoardWatch, {
   running: boolean; milestonesAt: number; dates: Map<number, string | null>; milestonesError?: string;
   launches: Set<string>; integrations: Set<string>; notices: Set<string>;
@@ -1064,11 +1060,12 @@ function scheduleAgentWork() {
         for (const entry of agentSlots.entries(watch.board.project)) {
           if (entry.kind === "queue" && entry.task && entry.revision !== undefined)
             deferredExecutors.set(watch.board.project + "\0" + entry.task, {
-              project: watch.board.project, id: entry.task, revision: entry.revision, continuation: entry.continuation });
+              project: watch.board.project, id: entry.task, revision: entry.revision, afterDiscussion: entry.afterDiscussion, continuation: entry.continuation });
         }
       }
       for (const [key, pending] of deferredExecutors) {
-        const { project, id, revision, continuation } = pending;
+        const { project, id, continuation } = pending;
+        let { revision } = pending;
         const watch = subscriptions.get(project);
         const task = watch?.board.tasks.find(task => task.id === id);
         // request-changes can finish before the watch receives its new revision.
@@ -1076,6 +1073,12 @@ function scheduleAgentWork() {
         if (!watch || closingProjects.has(project)) {
           deferredExecutors.delete(key);
           continue;
+        }
+        if (pending.afterDiscussion && executorBusy(project, id)) continue;
+        // Discussion messages advance the revision without cancelling the handoff.
+        if (pending.afterDiscussion && task?.status === "in_progress" && task.revision > revision) {
+          revision = task.revision;
+          pending.revision = revision;
         }
         if (!task || task.status !== "in_progress" || task.revision !== revision) {
           deferredExecutors.delete(key);

@@ -230,10 +230,12 @@ export function replyToTask(
   signal?: AbortSignal,
   taskId?: string,
   reviewCard = false,
+  holdDiscussion?: (release: () => void) => void,
 ) {
   const worklog = boardWorklog(project, "executor", taskId);
   const options = {
-    settings, tools: chatTools.filter(tool => tool.name !== "task_request_changes" || reviewCard), webSearch: true,
+    settings, tools: chatTools.filter(tool => tool.name !== "task_request_changes" ||
+      (reviewCard && readBoardSettings(locateBoard(project)).boardType !== "manual")), webSearch: true,
     instructions: boardAgentInstructions("executor", [
       "You are the agent in an AI Taskboard task discussion. Answer the latest user message in their language.",
       "Use the supplied card and conversation as context. Ask unresolved questions in your reply when needed.",
@@ -249,9 +251,10 @@ export function replyToTask(
     onCommentary, onTokenUsage, onControl, signal, imageDirectory, imageLimit,
   };
   const release = claimDiscussion(project, taskId);
+  holdDiscussion?.(release);
   return release.run(() => withBoardMcp([worklogTool, githubReadTool], async (name, args) => name === githubReadTool.name
     ? worklog.remind(await readBoardGitHub(project, args)) : worklog.submit(args), (config, env) =>
-    reply(profile, project, prompt, images, runAction, { ...options, worklog, mcp: { config, env } }))).finally(release);
+    reply(profile, project, prompt, images, runAction, { ...options, worklog, mcp: { config, env } }))).finally(() => { if (!holdDiscussion) release(); });
 }
 
 export async function requestExecutorAccess(profile: string, project: string, id: string, args: unknown,

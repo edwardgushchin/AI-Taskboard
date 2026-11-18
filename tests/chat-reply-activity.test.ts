@@ -45,6 +45,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
     scheduleAgentWork: () => { scheduled.push(true); }, reserveAgent: slots.acquire,
     boardRequests: new Map(), boardWorkRequests: new Map(), boardUnread: () => [], projectIdentity: (path: string) => path,
     app: { getPath: () => "profile" }, managerAccess: () => "auto",
+    isManual: (settings: any) => settings?.boardType === "manual", readBoardSettings: () => ({}), runtimeLocation: () => ({}),
     t: (key: string, parameters = {}) => localization.text(key, parameters, "en"), localization,
     tmpdir: () => "scratch",
     mkdtemp: async () => "scratch/chat",
@@ -128,7 +129,7 @@ test("review correction hands off after the last chat write and respects occupie
     assert.equal(result.data.executorState, "waiting_for_discussion");
     assert.equal(result.data.feedback, reason);
     assert.equal(f.task.status, "in_progress");
-    assert.equal(f.runtime.deferredExecutors.size, 0);
+    assert.equal(f.runtime.deferredExecutors.size, 1);
     assert.equal(f.runtime.chatRuns.size, 1);
     assert.equal((await f.action({ reason })).error.code, "INVALID_TRANSITION");
     f.response.resolve({ text: "Возвращено, исполнитель ожидает завершения диалога." });
