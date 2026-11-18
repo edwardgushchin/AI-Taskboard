@@ -141,7 +141,7 @@ function isolatedRoot(repo: Repository, create = false): string {
   return path;
 }
 
-function restoreMissingWorktree(store: BoardStore, repo: Repository, id: string, taskGit: TaskGit, entries: Worktree[]): string {
+function prepareMissingWorktree(store: BoardStore, repo: Repository, id: string, taskGit: TaskGit, entries: Worktree[]) {
   const { branch, worktree: recorded } = taskGit;
   const path = join(isolatedRoot(repo), id);
   const candidates = new Set([path, join(store.location.directory, "worktrees", id),
@@ -152,27 +152,33 @@ function restoreMissingWorktree(store: BoardStore, repo: Repository, id: string,
       throw new TaskboardError("WORKTREE_COLLISION", "A previous or canonical task worktree path is occupied.", { path: candidate });
     }
   }
+  const base = retainedBranchHead(repo, branch);
+  isolatedRoot(repo, true);
+  return { managedPath: path, base };
+}
+
+function retainedBranchHead(repo: Repository, branch: string): string {
   // Resolve only the local branch. A tag or remote-tracking ref cannot replace it.
-  const head = invokeGit(repo.root, ["show-ref", "--verify", "--hash", branch]);
-  if (head.code !== 0 || resolveCommit(repo.root, head.stdout.trim()) !== head.stdout.trim()) {
+  const ref = invokeGit(repo.root, ["show-ref", "--verify", "--hash", branch]);
+  const head = ref.stdout.trim();
+  if (ref.code !== 0 || !head || resolveCommit(repo.root, head) !== head) {
     throw new TaskboardError("TASK_BRANCH_MISSING", "The task's local Git branch has no commit.", { branch });
   }
-  requireNoGitOperation(repo.root);
-  isolatedRoot(repo, true);
-  git(repo.root, ["worktree", "add", "--no-guess-remote", "--", path, branch.slice("refs/heads/".length)]);
-  const created = findWorktree(repo, branch);
-  if (!created || relative(path, created.path) || created.head !== head.stdout.trim()) {
-    throw new TaskboardError("WORKTREE_COLLISION", "The recovered worktree does not match the task branch and commit.", { path, branch });
-  }
-  return usableWorktree(created);
+  return head;
 }
 
 export function hasPending(store: BoardStore, task: Task, holdsStartLock = false): boolean {
   const path = store.pendingPath(task.id);
   if (!exists(path)) return false;
   const repo = store.location.repository;
-  if (!repo || task.status !== "ready") return true;
   const pending = object(readJson(path));
+  if (pending.action === "start" && pending.restore === true) {
+    if (!holdsStartLock && taskStartInProgress(store.location, task.id)) return true;
+    // The saved branch already identifies the task. Keep any checkout left by the interrupted start.
+    removeFile(path);
+    return false;
+  }
+  if (!repo || task.status !== "ready") return true;
   if (pending.action !== "start" || pending.revision !== task.revision) return true;
   if (!holdsStartLock && taskStartInProgress(store.location, task.id)) return true;
 
@@ -188,7 +194,7 @@ export function hasPending(store: BoardStore, task: Task, holdsStartLock = false
 }
 
 type StartedTask = { task: Task } & ({ worktree: string } | { cwd: string });
-type StartIntent = { action: "start"; revision: number; target: string; base: string; actor?: "user" | "agent" | "manager"; isolatedWorktree?: true };
+type StartIntent = { action: "start"; revision: number; target: string; base: string; actor?: "user" | "agent" | "manager"; isolatedWorktree?: true; restore?: true };
 type TaskCheckout = {
   id: string; repo: Repository; branch: string; managedPath: string; intent: StartIntent;
   preparing: number; lockWaitMs: number;
@@ -232,7 +238,7 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
   }
   const branch = worktreeBranch(task);
   const pendingPath = store.pendingPath(task.id);
-  const pending = exists(pendingPath) ? object(readJson(pendingPath)) : undefined;
+  let pending = exists(pendingPath) ? object(readJson(pendingPath)) : undefined;
   if (pending && pending.action !== "start") {
     throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before starting.");
   }
@@ -248,14 +254,23 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
     }
     const entries = worktrees(repo.root);
     const existing = findTaskWorktree(repo, task.git, entries);
-    if (!existing && pending) {
-      throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted start before restoring a missing worktree.");
+    if (pending?.restore === true) {
+      // The task start lock proves the previous checkout has released its reservation.
+      removeFile(pendingPath);
+      pending = undefined;
     }
-    if (existing && (existing.prunable || !exists(existing.path))) {
+    if (!existing) {
+      if (pending) throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted start before restoring a missing worktree.");
+      const { managedPath, base } = prepareMissingWorktree(store, repo, task.id, task.git, entries);
+      const intent: StartIntent = { action: "start", revision: task.revision, target: task.git.target,
+        base, actor: boardActor(input), restore: true };
+      writeJson(pendingPath, intent);
+      return { id: task.id, repo, branch, managedPath, intent, preparing, lockWaitMs };
+    }
+    if (existing.prunable || !exists(existing.path)) {
       throw new TaskboardError("WORKTREE_MISSING", "Git still registers the task worktree at an unavailable path.", { path: existing.path });
     }
-    const currentPath = existing ? usableWorktree(existing) : restoreMissingWorktree(store, repo, task.id, task.git, entries);
-    const worktree = isolateTaskWorktree(store, repo, task.id, currentPath);
+    const worktree = isolateTaskWorktree(store, repo, task.id, usableWorktree(existing));
     const updated = { ...task, git: { ...task.git, worktree } };
     if (pending) removeFile(pendingPath);
     if (task.status === "in_progress") return { task: worktree === task.git.worktree ? task : store.save(updated), worktree };
@@ -292,20 +307,21 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
   return { id: task.id, repo, branch, managedPath, intent, preparing, lockWaitMs };
 }
 
-export function checkoutTaskWorktree({ id, repo, branch, managedPath, intent: { base, isolatedWorktree } }: TaskCheckout) {
+export function checkoutTaskWorktree({ id, repo, branch, managedPath, intent: { base, restore } }: TaskCheckout) {
+  if (restore) requireNoGitOperation(repo.root);
   const existing = findWorktree(repo, branch);
   let gitWorktreeAddMs: number | undefined;
   if (!existing) {
     if (exists(managedPath)) {
       throw new TaskboardError("WORKTREE_COLLISION", "The worktree path already contains files.", { path: managedPath });
     }
-    const existingCommit = resolveCommit(repo.root, branch);
+    const existingCommit = restore ? retainedBranchHead(repo, branch) : resolveCommit(repo.root, branch);
     if (existingCommit && existingCommit !== base) {
       throw new TaskboardError("WORKTREE_COLLISION", "The task branch changed during the interrupted start.");
     }
     const name = branch.slice("refs/heads/".length);
     const args = existingCommit
-      ? ["worktree", "add", "--no-guess-remote", managedPath, name]
+      ? ["worktree", "add", "--no-guess-remote", "--", managedPath, name]
       : ["worktree", "add", "--no-guess-remote", "-b", name, managedPath, base];
     if (process.platform === "win32" && availableParallelism() >= 4 &&
         invokeGit(repo.root, ["config", "--get", "checkout.workers"]).code === 1) {
@@ -321,7 +337,7 @@ export function checkoutTaskWorktree({ id, repo, branch, managedPath, intent: { 
   const matches = exists(managedPath) && realpathSync(managedPath) === worktree;
   // A previous Elevated start may have moved a legacy pending checkout before the card was saved.
   const moved = [join(repo.root, ".tasks", "worktrees", id), join(repo.root, ".taskboard-worktrees", id), join(isolatedRoot(repo), id)].some(path => !relative(path, worktree));
-  if (item?.head !== base || (!matches && !moved)) {
+  if (item?.head !== base || (!matches && (restore || !moved))) {
     throw new TaskboardError("WORKTREE_COLLISION", "The task worktree does not match the pending checkout.");
   }
   return { worktree, gitWorktreeAddMs };
@@ -331,19 +347,24 @@ export function finishTaskStart(store: BoardStore, plan: TaskCheckout, checkout:
   finalLockWaitMs: number, isolate: boolean) {
   const { id, branch, intent, preparing, lockWaitMs } = plan;
   const task = store.card(id);
-  requireState(task, ["ready"]);
+  requireState(task, intent.restore ? ["ready", "in_progress"] : ["ready"]);
   requireRevision(task, intent.revision, true);
   const pendingPath = store.pendingPath(id);
   const pending = exists(pendingPath) && object(readJson(pendingPath));
-  const { target, base } = intent;
+  const { target, base, restore } = intent;
   if (!pending || pending.action !== intent.action || pending.revision !== intent.revision ||
-      pending.target !== target || pending.base !== base || pending.isolatedWorktree !== intent.isolatedWorktree) {
+      pending.target !== target || pending.base !== base || pending.restore !== restore ||
+      pending.isolatedWorktree !== intent.isolatedWorktree) {
     throw new TaskboardError("PENDING_OPERATION", "The pending task checkout changed.");
   }
   const { gitWorktreeAddMs } = checkout;
   const worktree = isolateTaskWorktree(store, plan.repo, id, checkout.worktree);
   const prepareMs = Math.max(0, Math.round(performance.now() - preparing) - finalLockWaitMs);
-  const updated = saveStart(store, { ...task, git: { target, base, branch, worktree } },
+  if (restore && (!task.git || task.git.branch !== branch || task.git.target !== target)) {
+    throw new TaskboardError("PENDING_OPERATION", "The saved task branch or target changed during checkout.");
+  }
+  const updatedTask = { ...task, git: { ...(restore ? task.git! : { target, base, branch }), worktree } };
+  const updated = task.status === "in_progress" ? store.save(updatedTask) : saveStart(store, updatedTask,
     lockWaitMs + finalLockWaitMs, prepareMs, gitWorktreeAddMs, intent.actor);
   removeFile(pendingPath);
   return { task: updated, worktree };

@@ -1433,13 +1433,15 @@ test("failed start without a branch or worktree keeps the ready task editable", 
   assert.ok(!existsSync(join(root, ".tasks", "pending", ready.id + ".json")));
 });
 
-test("a new worktree checkout releases the board while its own start remains reserved", t => {
+for (const restoring of [false, true]) test(
+  (restoring ? "a restored worktree checkout" : "a new worktree checkout") + " releases the board while its own start remains reserved", t => {
   const root = fixture(t, true);
-  cli(root, ["init"]);
+  const restored = restoring ? returnedWorktree(root) : undefined;
+  if (!restored) cli(root, ["init"]);
   const ready = (title: string) => cli(root, ["approve", cli(root, ["create"], {
     title, criteria: ["The worktree was created."],
   }).id]);
-  const task = ready("Slow checkout");
+  const task = restored?.ready ?? ready("Slow checkout");
   const other = ready("Independent checkout");
   const pending = join(root, ".tasks", "pending", task.id + ".json");
   const startLock = join(root, ".tasks", "pending", task.id + ".start.sqlite");
@@ -1450,12 +1452,18 @@ test("a new worktree checkout releases the board while its own start remains res
     import { syncBuiltinESMExports } from "node:module";
     import { DatabaseSync } from "node:sqlite";
     const spawnSync = child.spawnSync;
-    const run = (args, input) => JSON.parse(spawnSync(process.execPath, args, {
-      input: JSON.stringify(input), encoding: "utf8", windowsHide: true, timeout: 10000,
-    }).stdout);
+    const run = (args, input) => {
+      const result = spawnSync(process.execPath, args, {
+        input: JSON.stringify(input), encoding: "utf8", windowsHide: true, timeout: 18000,
+      });
+      assert.ifError(result.error);
+      return JSON.parse(result.stdout);
+    };
     child.spawnSync = (command, args, options) => {
       const gitArgs = args?.[0] === "-c" ? args.slice(2) : args;
       if (command === "git" && gitArgs[0] === "worktree" && gitArgs[1] === "add") {
+        const independent = run(${JSON.stringify(commandArgs(root, ["start", other.id]))});
+        assert.equal(independent.data?.task.status, "in_progress", JSON.stringify(independent));
         assert.ok(existsSync(${JSON.stringify(pending)}));
         const lock = new DatabaseSync(${JSON.stringify(startLock)});
         try { assert.throws(() => lock.exec("BEGIN IMMEDIATE"), { errcode: 5 }); }
@@ -1464,8 +1472,6 @@ test("a new worktree checkout releases the board while its own start remains res
         assert.equal(cancelled.error?.code, "PENDING_OPERATION");
         const sent = run(${JSON.stringify(commandArgs(root, ["manager-message", task.id], {}))}, { text: "Arrived during checkout" });
         assert.equal(sent.ok, true, JSON.stringify(sent));
-        const independent = run(${JSON.stringify(commandArgs(root, ["start", other.id]))});
-        assert.equal(independent.data?.task.status, "in_progress", JSON.stringify(independent));
       }
       return spawnSync(command, args, options);
     };
@@ -1482,7 +1488,7 @@ test("a new worktree checkout releases the board while its own start remains res
   assert.ok(started.task.history.some((event: { action: string; text?: string }) =>
     event.action === "coordination" && event.text === "Arrived during checkout"));
   assert.equal(cli(root, ["start", task.id]).worktree, started.worktree);
-  assert.equal(cli(root, ["metrics", task.id]).starts.length, 1);
+  assert.equal(cli(root, ["metrics", task.id]).starts.length, restoring ? 2 : 1);
   assert.ok(!existsSync(pending));
 });
 
@@ -2446,12 +2452,44 @@ test("a returned task recovers its worktree during concurrent starts and keeps i
   assert.equal(git(worktree, "symbolic-ref", "HEAD"), branch);
   assert.equal(git(root, "worktree", "list", "--porcelain").split("branch " + branch).length, 2);
   const card = cli(root, ["show", ready.id]);
+  assert.equal(card.git.base, ready.git.base);
   assert.equal(card.history.filter((event: { action: string }) => event.action === "start").length, 2);
   assert.equal(card.savedChanges.sha, saved);
   assert.equal(readFileSync(join(worktree, "source.txt"), "utf8").trim(), "committed work");
   const restored = cli(root, ["restore-changes", card.id], { revision: card.revision, destination: "worktree" });
   assert.equal(readFileSync(join(restored.path, "source.txt"), "utf8").trim(), "uncommitted work");
   assert.equal(readFileSync(join(restored.path, "untracked.txt"), "utf8").trim(), "keep this too");
+});
+
+test("an interrupted worktree recovery can retry before or after checkout", t => {
+  const root = fixture(t, true);
+  const { ready, worktree, head, branch, codexThreadId } = returnedWorktree(root);
+  const pending = join(root, ".tasks", "pending", ready.id + ".json");
+  const interrupted = (revision: number) =>
+    writeFileSync(pending, JSON.stringify({ action: "start", restore: true, revision, target: ready.git.target, base: head }));
+
+  interrupted(ready.revision);
+  const started = cli(root, ["start", ready.id]);
+  assert.equal(started.worktree, worktree);
+  assert.equal(started.task.codexThreadId, codexThreadId);
+  assert.equal(existsSync(pending), false);
+
+  git(root, "worktree", "remove", worktree);
+  const continued = cli(root, ["start", ready.id]);
+  assert.equal(continued.worktree, worktree);
+  assert.equal(continued.task.revision, started.task.revision);
+  assert.equal(continued.task.git.base, ready.git.base);
+
+  git(root, "worktree", "remove", worktree);
+  interrupted(continued.task.revision);
+  git(root, "worktree", "add", worktree, branch.slice("refs/heads/".length));
+  writeFileSync(join(worktree, "source.txt"), "edits after checkout\n");
+  const resumed = cli(root, ["start", ready.id]);
+  assert.equal(resumed.worktree, worktree);
+  assert.equal(resumed.task.revision, continued.task.revision);
+  assert.equal(readFileSync(join(worktree, "source.txt"), "utf8").trim(), "edits after checkout");
+  assert.equal(git(worktree, "rev-parse", "HEAD"), head);
+  assert.equal(existsSync(pending), false);
 });
 
 test("worktree recovery refuses occupied paths, stale or ambiguous Git registrations and unfinished operations", t => {
