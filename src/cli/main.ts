@@ -108,7 +108,7 @@ function compactTask(task: Task) {
   return { expertId: task.expertId, expertTeam: task.expertTeam, expertStage: task.expertStage, expertStages: task.expertStages,
     reviewDecision: status === "review" ? reviewDecisionSequence(task) : undefined, acceptanceRepair: task.acceptanceRepair, id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
     coverAttachment, codexThreadId, createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep,
-    dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, origin, launchRequested,
+    dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, origin, launchRequested, discussionReturn: task.discussionReturn,
     draftDiscussion: status === "draft" ? task.draftDiscussion : undefined, historyLength: task.history.length,
     expertWorkPlanned: Boolean(task.expertTeam?.work?.lead || task.expertStage),
     expertReviewPlanned: Boolean(task.expertTeam?.review?.lead),
@@ -127,7 +127,7 @@ function taskReceipt({ id, status, revision, git, result }: Task) {
 
 function taskLaunchState(task: Task) {
   const { id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep } = task;
-  return { expertId: task.expertId, expertTeam: task.expertTeam, expertStage: task.expertStage, expertStages: task.expertStages, acceptanceRepair: task.acceptanceRepair, id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep,
+  return { expertId: task.expertId, expertTeam: task.expertTeam, expertStage: task.expertStage, expertStages: task.expertStages, acceptanceRepair: task.acceptanceRepair, discussionReturn: task.discussionReturn, id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep,
     ...(isMergeRepair(task) ? { mergeRepair: true as const } : {}) };
 }
 
@@ -646,6 +646,11 @@ function run(
   if (tagsOnly && (task.status === "done" || task.status === "cancelled")) {
     return changeTags(store, task, input, "agent");
   }
+  const discussionReturn = command === "request-changes" && input.actor === "discussion";
+  if (discussionReturn) {
+    requireRevision(task, input.revision, true);
+    verifyReviewDecision(store, task, input.targetHead);
+  }
   if (reviewerReport || ((input.actor === "manager" || input.actor === "reviewer") &&
       (command === "accept" || command === "request-changes"))) {
     const mode = boardReviewMode(store.index.settings);
@@ -804,7 +809,8 @@ function run(
   }
   if (command === "progress" && task.schedule && task.status === "in_progress") requireExpertResults(task, "work");
   if (command === "approve" && task.status === "draft") requireApprovalPlan(task, store.index.settings);
-  let updated = changeTask(task, command, input);
+  let updated = changeTask(task, command, discussionReturn ? { ...input, actor: "agent" } : input);
+  if (discussionReturn) updated.discussionReturn = updated.revision;
   if (command === "update" && updated === task) return task;
   if (command === "update" && task.acceptanceRepair &&
       ["title", "description", "criteria", "questions", "subtasks", "dependencies", "execution"].some(key => input[key] !== undefined)) {

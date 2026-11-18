@@ -52,8 +52,9 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
     noteSchedule: () => scheduled.push(true), setImmediate: (callback: () => void) => callback(), reserveAgent: slots.acquire,
     scheduleAutoReview: () => {}, scheduleAutoBoard: () => {}, scheduleDraftDiscussions: () => {},
     executorBusy: (project: string, id: string) => runtime.chatRuns.has(project + "\0" + id),
-    launchTask: async (_project: string, _id: string, _request: unknown, _newThread: boolean, revision: number) => {
-      launches.push(revision);
+    launchTask: async () => {
+      launches.push(task.revision);
+      task.discussionReturn = undefined;
       return { ok: true };
     },
     boardRequests: new Map(), boardWorkRequests: new Map(), backgroundManagerRequests: new Map(), boardUnread: () => [], projectIdentity: (path: string) => path,
@@ -75,6 +76,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
         corrections.push(input.reason!);
         task.status = "in_progress";
         task.revision++;
+        task.discussionReturn = task.revision;
       }
       if (args[0] === "attachment") return { ok: false, error: { code: "ATTACHMENT_MISSING" } };
       if (args[0] === "chat" && (options.writeFailure || input?.actor === "agent" && options.saveReplyFailure)) {
@@ -156,7 +158,7 @@ test("review correction hands off after the last chat write and respects occupie
     assert.equal(result.data.feedback, reason);
     assert.equal(duplicate.error.code, "REVISION_CONFLICT");
     assert.equal(f.task.status, "in_progress");
-    assert.equal(f.runtime.deferredExecutors.size, 1);
+    assert.equal(f.task.discussionReturn, result.data.revision);
     assert.equal(f.runtime.chatRuns.size, 1);
     f.runtime.scheduleAgentWork();
     assert.deepEqual(f.launches, []);
@@ -188,7 +190,7 @@ test("correction rejects foreign cards, stale revisions, unavailable actions and
     assert.equal(f.corrections.length, 0);
     f.response.resolve({ text: "Возврат не выполнен." });
     await pending;
-    assert.equal(f.runtime.deferredExecutors.size, 0);
+    assert.equal(f.task.discussionReturn, undefined);
   }
 });
 
@@ -199,7 +201,7 @@ test("a confirmed correction survives reply-storage failure and a resumed discus
   assert.equal((await f.action({ reason: "Решётка должна быть частью гиперссылки" })).ok, true);
   f.response.resolve({ text: "Возвращено" });
   assert.equal((await pending).result.ok, false);
-  assert.equal(f.runtime.deferredExecutors.get("project-a\0T-0001").revision, f.task.revision);
+  assert.equal(f.task.discussionReturn, f.task.revision);
   const resumed = taskChatActions("project-a", structuredClone(f.task), "Повтори", () => {}, async () => {
     throw new Error("A completed return must not be dispatched twice");
   });

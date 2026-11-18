@@ -18,7 +18,6 @@ export interface RuntimeEntry {
   parent?: string;
   limits?: AgentLimits;
   revision?: number;
-  afterDiscussion?: boolean;
   continuation?: { afterDisconnect?: boolean; withoutProgress?: boolean };
   state?: {
     id: string;

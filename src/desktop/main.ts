@@ -231,9 +231,8 @@ function frame(state: ProjectTab) {
     replyingTasks: state.board?.tasks.filter(task => (replyingTasks.has(state.project + "\0" + task.id) || sharedRuns.some(entry => entry.kind === "task" && entry.task === task.id))).map(task => task.id),
     waitingTasks: state.board?.tasks.filter(task => {
       const key = state.project + "\0" + task.id;
-      const queued = (entry?: { revision?: number; afterDiscussion?: boolean }) => entry?.revision !== undefined &&
-        (entry.revision === task.revision || (entry.afterDiscussion && entry.revision < task.revision));
-      return task.status === "in_progress" && (queued(deferredExecutors.get(key)) || sharedRuns.some(entry => entry.kind === "queue" && entry.task === task.id && queued(entry))) &&
+      return task.status === "in_progress" && (task.discussionReturn !== undefined || deferredExecutors.get(key)?.revision === task.revision ||
+        sharedRuns.some(entry => entry.kind === "queue" && entry.task === task.id && entry.revision === task.revision)) &&
         !runningTasks.has(key) && !replyingTasks.has(key) && !sharedRuns.some(entry => entry.kind === "slot" && entry.task === task.id);
     }).map(task => task.id),
     reviewingTasks: Object.fromEntries(state.board?.tasks.flatMap(task => {
@@ -998,18 +997,13 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     let replyTo = last;
     const requestChanges = async (card: Task, reason: string): Promise<CliReply> => {
       if (isManual(readBoardSettings(runtimeLocation(project)))) return cliFailure("MANUAL_BOARD", "На обычной доске статусы меняет пользователь.");
-      const review = await callCli<{ revision: number; targetHead: string | null; settings: { reviewMode: string } }>(project, ["review", id], { compact: true, includeReviewerSettings: true });
+      const review = await callCli<{ revision: number; targetHead: string | null }>(project, ["review", id], { compact: true });
       if (!review.ok) return review;
       if (review.data.revision !== card.revision) return cliFailure("REVISION_CONFLICT", "The card changed. Read the current card before returning it.");
       const returned = await callCli<LaunchState>(project, ["request-changes", id, "--compact"], {
-        revision: card.revision, reason, actor: "manager", targetHead: review.data.targetHead,
-        reviewMode: review.data.settings.reviewMode, launchDetails: true,
+        revision: card.revision, reason, actor: "discussion", targetHead: review.data.targetHead, launchDetails: true,
       });
       if (!returned.ok) return returned;
-      const pending = { project, id, revision: returned.data.revision, afterDiscussion: true };
-      try { agentSlots.defer(project, id, pending); }
-      catch (error) { return cliFailure("HANDOFF_FAILED", "The card was returned with its feedback, but queue persistence failed: " + (error as Error).message); }
-      deferredExecutors.set(key, pending);
       return { ok: true, data: { ...returned.data, feedback: reason, executorState: "waiting_for_discussion" } };
     };
     let runAction = taskChatActions(project, task, message?.text ?? "", () => notify({ type: "changed" }), requestChanges);
@@ -1141,7 +1135,7 @@ const backgroundManagerRequests = new Map<string, ManagerRequest>();
 enableSharedRuns();
 const agentSlots = createAgentSlots(true);
 type ExecutorContinuation = { afterDisconnect?: boolean; withoutProgress?: boolean };
-const deferredExecutors = new Map<string, { project: string; id: string; revision: number; afterDiscussion?: boolean; continuation?: ExecutorContinuation }>();
+const deferredExecutors = new Map<string, { project: string; id: string; revision: number; continuation?: ExecutorContinuation }>();
 const autoBoards = new WeakMap<BoardWatch, {
   running: boolean; milestonesAt: number; dates: Map<number, string | null>; milestonesError?: string;
   launches: Set<string>; integrations: Set<string>; notices: Set<string>;
@@ -1290,12 +1284,11 @@ function scheduleAgentWork() {
         for (const entry of agentSlots.entries(watch.board.project)) {
           if (entry.kind === "queue" && entry.task && entry.revision !== undefined)
             deferredExecutors.set(watch.board.project + "\0" + entry.task, {
-              project: watch.board.project, id: entry.task, revision: entry.revision, afterDiscussion: entry.afterDiscussion, continuation: entry.continuation });
+              project: watch.board.project, id: entry.task, revision: entry.revision, continuation: entry.continuation });
         }
       }
       for (const [key, pending] of deferredExecutors) {
-        const { project, id, continuation } = pending;
-        let { revision } = pending;
+        const { project, id, revision, continuation } = pending;
         const watch = subscriptions.get(project);
         const task = watch?.board.tasks.find(task => task.id === id);
         // request-changes can finish before the watch receives its new revision.
@@ -1303,12 +1296,6 @@ function scheduleAgentWork() {
         if (!watch || closingProjects.has(project)) {
           deferredExecutors.delete(key);
           continue;
-        }
-        if (pending.afterDiscussion && executorBusy(project, id)) continue;
-        // Discussion messages advance the revision without cancelling the handoff.
-        if (pending.afterDiscussion && task?.status === "in_progress" && task.revision > revision) {
-          revision = task.revision;
-          pending.revision = revision;
         }
         if (!task || task.status !== "in_progress" || task.revision !== revision) {
           deferredExecutors.delete(key);
@@ -1332,6 +1319,13 @@ function scheduleAgentWork() {
         }).catch(error => failed((error as Error).message));
       }
       for (const watch of subscriptions.values()) {
+        const { project, settings, tasks } = watch.board;
+        if (!closingProjects.has(project) && !isManual(settings)) for (const task of tasks) {
+          if (task.status !== "in_progress" || task.discussionReturn === undefined || executorBusy(project, task.id) ||
+              !agentSlots.available(projectIdentity(project), "executor", settings?.taskLimits)) continue;
+          void launchTask(project, task.id, undefined, false, undefined, undefined, false, false, false, false, false, undefined, task.discussionReturn)
+            .catch(error => broadcastBoardChat(project, "orchestrator-review-error", { error: task.id + " · " + (error as Error).message }));
+        }
         scheduleAutoReview(watch);
         scheduleAutoBoard(watch);
         scheduleDraftDiscussions(watch);
@@ -3040,11 +3034,11 @@ async function recordRunFailure(project: string, id: string, reason: string, con
   if (!result.ok && result.error.code !== "INVALID_TRANSITION" && result.error.code !== "REVISION_CONFLICT") return result.error.message;
 }
 
-type LaunchState = Pick<Task, "acceptanceRepair" | "id" | "title" | "status" | "revision" | "createdAt" | "codexThreadId" | "blocked" | "summary" | "nextStep"> & { mergeRepair?: true };
+type LaunchState = Pick<Task, "acceptanceRepair" | "discussionReturn" | "id" | "title" | "status" | "revision" | "createdAt" | "codexThreadId" | "blocked" | "summary" | "nextStep"> & { mergeRepair?: true };
 
 async function launchTask(project: string, id: string, revisionRequest?: { input: Record<string, unknown> },
   newThread: false | "user" | "manager" = false, revision?: number,
-  continuation: ExecutorContinuation = {}, scheduled = false, resolveConflicts = false, resumeWithFullAccess = false, autoMode = false, manual = false, autoQueueRevision?: number): Promise<CliReply<LaunchState>> {
+  continuation: ExecutorContinuation = {}, scheduled = false, resolveConflicts = false, resumeWithFullAccess = false, autoMode = false, manual = false, autoQueueRevision?: number, discussionReturn?: number): Promise<CliReply<LaunchState>> {
   if (isManual(readBoardSettings(runtimeLocation(project)))) return cliFailure("MANUAL_BOARD", "На обычной доске исполнители недоступны.");
   const key = project + "\0" + id;
   if (returningDrafts.has(key)) return cliFailure("CHAT_BUSY", "This task is being returned to draft.");
@@ -3098,6 +3092,9 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       : known ? { ok: true, data: known }
         : await callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
     if (!current.ok) return current;
+    if (discussionReturn !== undefined && current.data.discussionReturn !== discussionReturn) {
+      return cliFailure("INVALID_TRANSITION", "This discussion return is no longer waiting to launch.");
+    }
     if (current.data.acceptanceRepair) return cliFailure("ACCEPTANCE_PENDING", "The board manager handles this pending acceptance in its existing context.");
     prepared = Boolean(revisionRequest);
     const role = current.data.mergeRepair || (resolveConflicts && current.data.status === "review") ? "reviewer" : "executor";
@@ -3111,7 +3108,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       return current;
     }
     deferredExecutors.delete(key);
-    agentSlots.defer(project, id);
+    if (discussionReturn === undefined) agentSlots.defer(project, id);
     const client = await configuredCodex(app.getPath("userData"));
     if (!client) {
       const reason = t("ui.choose_the_codex_executable_in_settings_06a08a7e");
@@ -3171,6 +3168,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     signal.throwIfAborted();
     const started = await callCli<{ task: LaunchState & ExecutorTask } & ({ worktree: string } | { cwd: string })>(project, ["start", id, "--compact"],
       { revision: revision ?? current.data.revision, actor: manual ? "user" : "agent", launchDetails: true, ...(scheduled ? { scheduled } : {}),
+        ...(discussionReturn !== undefined ? { discussionReturn } : {}),
         ...(autoMode ? { autoMode: true, autoQueueRevision } : {}),
         ...(resolveConflicts ? { resolveConflicts } : {}),
         ...(process.platform === "win32" && client.windowsSandbox === "elevated" ? { isolatedWorktree: true } : {}) });

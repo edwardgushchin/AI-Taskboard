@@ -63,7 +63,7 @@ export function createAgentSlots(shared = false) {
         if (entry) entry.state = state;
       });
     },
-    defer(project: string, task: string, pending?: { revision: number; afterDiscussion?: boolean; continuation?: { afterDisconnect?: boolean; withoutProgress?: boolean } }) {
+    defer(project: string, task: string, pending?: { revision: number; continuation?: { afterDisconnect?: boolean; withoutProgress?: boolean } }) {
       if (sharedProject) runtimeTransaction(sharedProject(project), entries => {
         const index = entries.findIndex(entry => entry.kind === "queue" && entry.task === task);
         if (index >= 0) entries.splice(index, 1);

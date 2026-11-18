@@ -170,7 +170,7 @@ type TaskCheckout = {
 };
 
 function saveStart(store: BoardStore, task: Task, lockWaitMs: number, prepareMs: number, gitWorktreeAddMs?: number, actor: "user" | "agent" | "manager" = "agent") {
-  const updated = record(task, "start", actor, "in_progress");
+  const updated = record({ ...task, discussionReturn: undefined }, "start", actor, "in_progress");
   updated.history.at(-1)!.startTiming = {
     lockWaitMs, prepareMs, ...(gitWorktreeAddMs !== undefined ? { gitWorktreeAddMs } : {}),
   };
@@ -195,6 +195,9 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
     }
   }
   requireRevision(task, input.revision);
+  if (input.discussionReturn !== undefined && input.discussionReturn !== task.discussionReturn) {
+    throw new TaskboardError("INVALID_TRANSITION", "This discussion return is no longer waiting to launch.");
+  }
   if (task.workingDirectory) {
     if (task.git || input.target !== undefined || input.resolveConflicts === true) {
       throw new TaskboardError("INVALID_INPUT", "This task uses an existing directory and has no task branch.");
@@ -203,7 +206,7 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
       throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted operation before starting.");
     }
     const cwd = taskWorkingDirectory(task.workingDirectory, true);
-    return { task: task.status === "in_progress" ? task : save(task), cwd };
+    return { task: task.status === "in_progress" && task.discussionReturn === undefined ? task : save(task), cwd };
   }
   const branch = worktreeBranch(task);
   const pendingPath = store.pendingPath(task.id);
@@ -225,7 +228,7 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
     const worktree = isolateTaskWorktree(store, repo, task.id, currentPath);
     const updated = { ...task, git: { ...task.git, worktree } };
     if (pending) removeFile(pendingPath);
-    if (task.status === "in_progress") return { task: worktree === task.git.worktree ? task : store.save(updated), worktree };
+    if (task.status === "in_progress" && task.discussionReturn === undefined) return { task: worktree === task.git.worktree ? task : store.save(updated), worktree };
     return { task: save(updated), worktree };
   }
 
