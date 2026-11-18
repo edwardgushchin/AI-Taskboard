@@ -3856,6 +3856,60 @@ for (const scenario of ["before-write", "prepared-merge", "prepared-squash", "me
   });
 }
 
+for (const localEdits of [false, true]) {
+  test("reviewer-human recovers prepared merge with clean index" + (localEdits ? " and local edits" : ""), t => {
+    const root = fixture(t, true);
+    git(root, "config", "core.autocrlf", "false");
+    const { task } = submitFixture(root, path => writeFileSync(join(path, "result.txt"), "delivered\n"));
+    const { reviewModeVersion } = cli(root, ["settings"], { reviewMode: "reviewer-human" });
+    const submitted = task.git.submission.sha;
+    writeFileSync(join(root, "result.txt"), "delivered\n");
+    git(root, "add", "result.txt");
+    git(root, "commit", "-m", "fix: deliver the same content independently");
+    const parent = git(root, "rev-parse", "HEAD");
+    const tree = git(root, "merge-tree", "--write-tree", "--no-messages", parent, submitted);
+    assert.equal(git(root, "rev-parse", "HEAD^{tree}"), tree);
+    const pending = join(root, ".tasks", "pending", task.id + ".json");
+    const intent = { action: "accept", revision: task.revision, target: "refs/heads/main",
+      parent, submitted, tree, mode: "merge", message: task.git.submission.message, reviewModeVersion };
+    writeFileSync(pending, JSON.stringify(intent));
+    git(root, "merge", "--no-ff", "--no-commit", submitted);
+    assert.equal(git(root, "rev-parse", "MERGE_HEAD"), submitted);
+    assert.equal(git(root, "rev-parse", "ORIG_HEAD"), parent);
+    assert.equal(git(root, "diff", "--cached", "--name-only"), "");
+    if (localEdits) {
+      writeFileSync(join(root, "source.txt"), "local working content\n");
+      writeFileSync(join(root, "untracked.txt"), "preserve me\n");
+    }
+    const status = git(root, "status", "--porcelain");
+    cli(root, ["settings"], { reviewMode: "human" });
+    const current = cli(root, ["settings"], { reviewMode: "reviewer-human" });
+    const cancel = { revision: task.revision, cancelPending: true };
+    if (localEdits) {
+      writeFileSync(pending, JSON.stringify({ ...intent, tree: git(root, "rev-parse", "HEAD^1^{tree}") }));
+      cli(root, ["accept", task.id], cancel, "GIT_OPERATION_IN_PROGRESS");
+      assert.equal(git(root, "rev-parse", "MERGE_HEAD"), submitted);
+      assert.ok(existsSync(pending));
+      writeFileSync(pending, JSON.stringify(intent));
+    }
+    const recovered = cli(root, ["accept", task.id], cancel);
+    assert.equal(recovered.status, "review");
+    assert.equal(git(root, "rev-parse", "HEAD"), parent);
+    assert.equal(git(root, "status", "--porcelain"), status);
+    assert.equal(readFileSync(join(root, "result.txt"), "utf8"), "delivered\n");
+    if (localEdits) {
+      assert.equal(readFileSync(join(root, "source.txt"), "utf8"), "local working content\n");
+      assert.equal(readFileSync(join(root, "untracked.txt"), "utf8"), "preserve me\n");
+    }
+    assert.equal(existsSync(join(root, ".git", "MERGE_HEAD")), false);
+    assert.equal(existsSync(pending), false);
+    assert.equal(cli(root, ["review", task.id, "--compact"]).awaitingHumanAcceptance, false);
+    cli(root, ["review-approve", task.id], { revision: recovered.revision, targetHead: parent,
+      reviewModeVersion: current.reviewModeVersion, summary: "Verified again", evidence: ["Result checked"] });
+    assert.equal(cli(root, ["review", task.id, "--compact"]).awaitingHumanAcceptance, true);
+  });
+}
+
 test("user acceptance repairs remain review and continue only after checked submission", t => {
   for (const outcome of ["accept", "cancel", "advance", "fail", "return-queued", "return-running"]) {
     const root = fixture(t, true);

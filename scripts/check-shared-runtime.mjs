@@ -129,6 +129,12 @@ if (!process.versions.electron) {
       const { token } = cli(project, ["preview", task.id]);
       const submitted = cli(project, ["submit", task.id], { token, message: "feat: submit fixture",
         summary: "Submitted fixture", checks: ["Read the result"] });
+      // Prepare CLI-driven cards before opening windows, so no draft discussion owns their executor.
+      const external = cli(project, ["create"], { title: "External result", criteria: ["Result exists"] });
+      const dependent = cli(project, ["create"], { title: "Dependent", criteria: ["Dependency is accepted"], dependencies: [external.id] });
+      cli(project, ["approve", external.id]);
+      cli(project, ["start", external.id]);
+      cli(project, ["approve", dependent.id]);
       const a = await start("profile-a"), b = await start("profile-b");
       const bothApproved = async () => (await Promise.all([a.ask({ action: "frames" }), b.ask({ action: "frames" })])).flat().every(frame =>
         frame.board.settings.reviewMode === "reviewer-human" &&
@@ -156,10 +162,7 @@ if (!process.versions.electron) {
       assert.equal(git("rev-list", "--first-parent", "--count", initial + "..HEAD"), "1");
       assert.equal(await restarted.ask({ action: "reviews" }), 0);
       record("PASS: one reviewer across two profiles; approval survives restart; cancel preserves the Git target; two native confirmations produce one integration");
-      const external = cli(project, ["create"], { title: "External result", criteria: ["Result exists"] });
-      const dependent = cli(project, ["create"], { title: "Dependent", dependencies: [external.id] });
-      cli(project, ["approve", external.id]);
-      cli(project, ["start", external.id]);
+      cli(project, ["settings"], { autoMode: false });
       const externalToken = cli(project, ["preview", external.id]).token;
       const externalSubmission = cli(project, ["submit", external.id], { token: externalToken,
         noChanges: true, summary: "External result", checks: ["Read the result"] });

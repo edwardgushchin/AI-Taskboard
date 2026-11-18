@@ -484,10 +484,10 @@ function verifyExternal(repo: Repository, task: Task, head: string, submitted: s
   return sha;
 }
 
-function integrationTreeIsPrepared(path: string, head: string, tree: string, status: string): boolean {
-  const local = inspectLocalChanges(path, head, status);
-  return Boolean(local?.token && local.indexDirty && git(path, ["write-tree"]).trim() === tree &&
-    !collidingPaths(path, targetPaths(path, head, tree), local.working).length);
+function integrationTreeIsPrepared(path: string, head: string, tree: string,
+  local: ReturnType<typeof inspectLocalChanges>): boolean {
+  return (!local || Boolean(local.token)) && git(path, ["write-tree"]).trim() === tree &&
+    !collidingPaths(path, targetPaths(path, head, tree), local?.working ?? []).length;
 }
 
 function squashMessagePath(path: string): string {
@@ -495,7 +495,8 @@ function squashMessagePath(path: string): string {
 }
 
 function preparedSquash(path: string, head: string, tree: string, status: string): boolean {
-  return exists(squashMessagePath(path)) && integrationTreeIsPrepared(path, head, tree, status);
+  const local = inspectLocalChanges(path, head, status);
+  return Boolean(local?.indexDirty && exists(squashMessagePath(path)) && integrationTreeIsPrepared(path, head, tree, local));
 }
 
 function acceptanceModeChanged(store: BoardStore, intent: AcceptIntent): boolean {
@@ -530,7 +531,7 @@ function recoverInterruptedAcceptance(store: BoardStore, task: Task) {
       const status = gitStatus(path);
       if (head === intent.parent && intent.mode === "merge" &&
           resolveCommit(path, "MERGE_HEAD") === intent.submitted && resolveCommit(path, "ORIG_HEAD") === head &&
-          integrationTreeIsPrepared(path, head, intent.tree, status)) {
+          integrationTreeIsPrepared(path, head, intent.tree, inspectLocalChanges(path, head, status))) {
         checkProtectedPaths(path, targetPaths(path, head, intent.tree));
         if (targetHead(repo, target) !== head || gitStatus(path) !== status) {
           throw new TaskboardError("TARGET_CHANGED", "The target checkout changed during acceptance recovery.");
