@@ -26,7 +26,7 @@ import type { BoardGoal, BoardGoalAction } from "../src/desktop/codex-chat.ts";
 import { inspectProjectPath, projectSha256 } from "../src/desktop/project-files.ts";
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
 import { reviewerActivity, withReviewerChat } from "../src/desktop/reviewer-chat.ts";
-import { goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryForView, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, saveManagerHistory } from "../src/desktop/manager-history.ts";
+import { goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryForView, managerUnread, managerWorkItems, readManagerDialogue, readManagerHistory, readManagerMessages, saveManagerHistory } from "../src/desktop/manager-history.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { autoQueueSettings } from "../src/cli/auto-queue.ts";
 import { automationDelivery } from "../src/desktop/automation-delivery.ts";
@@ -117,7 +117,7 @@ function fixture(t: TestContext) {
     executorFullAccess, managerAccess, setTaskExecutorAccess, phaseStageReporter,
     autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, defaultBoardAgents, reviewVerifier,
     existsSync, storageDirectory, readdirSync, rmSync, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
-    goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryForView, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, saveManagerHistory,
+    goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryForView, managerUnread, managerWorkItems, readManagerDialogue, readManagerHistory, readManagerMessages, saveManagerHistory,
     send() {},
     readBoardHistory: async () => { providerHistoryReads++; throw new Error("Codex history unavailable."); },
     codexThreadPattern, projectIdentity: (path: string) => path, windowStates, boardMcpTools,
@@ -975,7 +975,16 @@ test("an interrupted manager request preserves the durable queue until Codex rec
   assert.deepEqual(message, { text: "Новый текст", clientId: id, files: [] });
   assert.equal(f.providerHistoryReads(), 0);
   writeJson(f.chatBinding, { provider: "codex", id: f.threadId });
-  assert.deepEqual((await f.history()).data.turns, archived.data.turns);
+  const legacy = await f.history();
+  assert.deepEqual(legacy.data.turns, archived.data.turns);
+  assert.equal(f.providerHistoryReads(), 0);
+  const paused = { objective: "Resume later", status: "paused" };
+  writeJson(join(f.project, ".tasks", "orchestrator.json"), { provider: "codex", id: f.threadId, goal: paused });
+  const withPausedGoal = await f.history();
+  assert.deepEqual(withPausedGoal.data.goal, paused);
+  assert.deepEqual(withPausedGoal.data.turns, archived.data.turns);
+  assert.equal(f.providerHistoryReads(), 0);
+  assert.equal((await f.history(legacy.data.nextCursor)).error.code, "BOARD_HISTORY_FAILED");
   assert.equal(f.providerHistoryReads(), 1);
 });
 

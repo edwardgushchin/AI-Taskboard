@@ -46,7 +46,7 @@ import { startWindowsDictation } from "./windows-dictation.ts";
 import { needsManagerAttention } from "../cli/task-messages.ts";
 import { readReviewReports, saveReviewReports } from "./review-history.ts";
 import { readReviewerChat, reviewerActivity, withReviewerChat } from "./reviewer-chat.ts";
-import { goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryForView, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, saveManagerHistory } from "./manager-history.ts";
+import { goalMessages, isLocalManagerCursor, managerChatItems, managerHistoryForView, managerUnread, managerWorkItems, readManagerDialogue, readManagerHistory, readManagerMessages, saveManagerHistory } from "./manager-history.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
 import { createAgentSlots, parseAgentLimits } from "./agent-limits.ts";
 import { nextReadyTask } from "./auto-queue.ts";
@@ -1438,27 +1438,22 @@ ipcMain.handle("board:history", async (event, project?: string, cursor: unknown 
     } };
     const background = readBoardThread(boardThreadPath(project));
     const loadHistory = async () => {
-      let historyCursor = cursor as string | null;
-      let thread: ReturnType<typeof readBoardThread>;
+      const historyCursor = cursor as string | null;
+      const thread = background;
+      if (view === "chat") {
+        return readManagerDialogue(project, historyCursor, thread && thread.history !== "local" ?
+          next => readBoardHistory(app.getPath("userData"), project, thread.id, next) : undefined);
+      }
       try {
-        if (view === "work" && historyCursor === null) {
+        if (historyCursor === null) {
           const local = readManagerHistory(project, null, view);
           if (local) return local;
         }
-        thread = view === "work" ? background : readBoardThread(boardThreadPath(project, "chat")) ?? background;
-        if (view === "chat" && thread && thread.history !== "local") {
-          // Local notices exist even when the conversation still lives at the
-          // provider. Page them before continuing the legacy conversation.
-          if (!historyCursor?.startsWith("provider:")) {
-            const local = readManagerHistory(project, historyCursor, view, true);
-            if (local?.turns.length) return { ...local, nextCursor: local.nextCursor ?? "provider:" };
-          } else historyCursor = historyCursor.slice("provider:".length) || null;
-        } else if (isLocalManagerCursor(historyCursor)) return readManagerHistory(project, historyCursor, view);
+        if (isLocalManagerCursor(historyCursor)) return readManagerHistory(project, historyCursor, view);
         if (!thread || thread.history === "local") return readManagerHistory(project, historyCursor, view);
         const legacy = await readBoardHistory(app.getPath("userData"), project, thread.id, historyCursor);
         if (!legacy) return;
-        return { ...legacy, turns: managerHistoryForView(legacy.turns, view),
-          nextCursor: view === "chat" && legacy.nextCursor ? "provider:" + legacy.nextCursor : legacy.nextCursor };
+        return { ...legacy, turns: managerHistoryForView(legacy.turns, view) };
       } catch (error) {
         const local = cursor === null && thread?.history !== "local" && readManagerHistory(project, null, view);
         if (local) return local;

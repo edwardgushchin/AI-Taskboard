@@ -1,5 +1,6 @@
 // Real Chromium checks for the chat renderer, without opening a board or contacting Codex.
 // Optional: --references <task attachment directory> --artifacts <screenshot directory>
+// For a dialogue round trip, use --dialogue-history <empty temp directory>, then repeat with --reopen-dialogue.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -52,7 +53,7 @@ app.whenReady().then(async () => {
       '<p><a href="src/desktop/styles.css:582">styles.css</a></p>\n');
   } finally { smoke.destroy(); }
   window.webContents.on("console-message", details => {
-    if (details.level === "error") console.error(details.message);
+    if (details.level === "error") console.error("Renderer line " + details.lineNumber, details.message);
   });
   const html = read("index.html").replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, "")
     .replace(/<link\b[^>]*>/g, "").replace(/<meta http-equiv="Content-Security-Policy"[^>]*>/, "");
@@ -70,6 +71,7 @@ app.whenReady().then(async () => {
     };
     ${readFileSync(require.resolve("markdown-it/browser"), "utf8")}
     ${read("image-preview.js")}
+    ${read("keyboard-focus.js")}
     ${read("source-files.cjs")}
     ${read("markdown.js")}
     ${read("chat.js")}
@@ -78,12 +80,134 @@ app.whenReady().then(async () => {
     ${read("renderer.js")}
     void 0;
   `);
-  const evaluate = (code, userGesture = false) => window.webContents.executeJavaScript(code, userGesture);
+  const evaluate = async (code, userGesture = false) => {
+    try { return await window.webContents.executeJavaScript(code, userGesture); }
+    catch (error) { throw new Error("Renderer check failed: " + code.trim().slice(0, 160), { cause: error }); }
+  };
   const check = async (code, message) => assert.equal(await evaluate(code), true, message);
   const capture = async name => {
     await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
     writeFileSync(join(artifacts, name), (await window.webContents.capturePage()).toPNG());
   };
+  const dialogueFixture = option("--dialogue-history");
+  if (dialogueFixture) {
+    const reopening = process.argv.includes("--reopen-dialogue");
+    const start = Date.UTC(2026, 10, 18, 8);
+    const answer = (id, text, offset) => ({
+      id, text, at: new Date(start + offset).toISOString(), title: "", type: "agentMessage", status: "completed", phase: "final_answer",
+    });
+    const question = "current-question";
+    const reply = answer("full-answer", "full-streamed-answer", 130);
+    const io = (project, action, input) => {
+      const result = spawnSync(process.env.TASKBOARD_CHECK_NODE, ["--input-type=module", "-e", `
+        import { randomUUID } from "node:crypto";
+        import { mkdirSync, readFileSync } from "node:fs";
+        import { join } from "node:path";
+        import { readManagerDialogue, saveManagerHistory } from ${JSON.stringify(new URL("../src/desktop/manager-history.ts", import.meta.url).href)};
+        const [project, action] = process.argv.slice(1);
+        const input = JSON.parse(readFileSync(0, "utf8"));
+        if (action === "write") {
+          mkdirSync(join(project, ".tasks"), { recursive: true });
+          for (const { at, id, run } of input) saveManagerHistory(project, at, id ?? randomUUID(), run);
+        } else console.log(JSON.stringify(await readManagerDialogue(project, input)));
+      `, project, action], { input: JSON.stringify(input), encoding: "utf8", windowsHide: true });
+      assert.equal(result.status, 0, result.stderr);
+      return result.stdout ? JSON.parse(result.stdout) : undefined;
+    };
+    for (const paused of [false, true]) {
+      const project = join(dialogueFixture, paused ? "paused" : "no-goal");
+      const goal = paused ? { objective: "Fixture objective", status: "paused" } : null;
+      const chat = (text, offset, items, clientId) => ({
+        lane: "chat", message: { text, clientId, at: new Date(start + offset).toISOString(), files: [] }, items,
+      });
+      const runId = "a0000000-0000-4000-8000-000000000001";
+      if (!reopening) io(project, "write", Array.from({ length: 22 }, (_, index) => ({
+        at: start + index,
+        run: chat("prior-question-" + index, index, [answer("prior-" + index, "prior-reply-" + index, index)]),
+      })));
+      const history = cursor => ({ ok: true, data: { ...io(project, "read", cursor), goal } });
+      await evaluate(`(async () => {
+        window.dialogue = { initial: ${JSON.stringify(history(null))}, ready: Promise.withResolvers(), finish: Promise.withResolvers() };
+        frame = { project: ${JSON.stringify(project)}, russian: true };
+        api.boardHistory = async () => dialogue.initial;
+        api.boardQueue = async (_project, action) => ({ ok: true, data: action === 'list' ? [] : 'current-user' });
+        api.boardRequest = () => { dialogue.ready.resolve(true); return dialogue.finish.promise; };
+        dialogue.open = () => {
+          dialogue.manager = draftComposer();
+          body.replaceChildren(dialogue.manager);
+          dialogue.manager.querySelector('.draft-input textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+          dialogue.log = dialogue.manager.querySelector('.board-chat-log:not(.board-work)');
+        };
+        if (!sheet.open) sheet.showModal();
+        dialogue.open();
+        if (${!reopening}) {
+          dialogue.manager.querySelector('.draft-input textarea').value = '${question}';
+          dialogue.manager.requestSubmit();
+          await dialogue.ready.promise;
+        }
+        return true;
+      })()`);
+      if (!reopening) {
+        io(project, "write", [
+          { at: start + 100, id: runId, run: chat(question, 100, [], "current-user") },
+          ...Array.from({ length: 24 }, (_, index) => ({
+            at: start + 101 + index, run: { lane: "notice", items: [answer("notice-" + index, "status-" + index, 101 + index)] },
+          })),
+        ]);
+        const stale = history(null);
+        await evaluate(`(() => {
+          const partial = { ...${JSON.stringify(reply)}, text: 'partial-stream', status: 'inProgress' };
+          dialogue.manager.updateActivity([partial]);
+          dialogue.stale = Promise.withResolvers();
+          api.boardHistory = () => dialogue.stale.promise;
+          dialogue.manager.invalidateHistory();
+        })()`);
+        await check(`dialogue.log.textContent.includes('partial-stream') && dialogue.log.textContent.includes('prior-reply-21')`, "stream coexists with previous history");
+        io(project, "write", [{ at: start + 100, id: runId, run: chat(question, 100, [reply], "current-user") }]);
+        await evaluate(`(async () => {
+          api.boardHistory = async () => (${JSON.stringify(history(null))});
+          dialogue.finish.resolve({ ok: true, data: { items: [${JSON.stringify(reply)}] } });
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          dialogue.stale.resolve(${JSON.stringify(stale)});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          return true;
+        })()`);
+      }
+      for (let open = 0; open < 2; open++) {
+        const latest = history(null);
+        const older = history(latest.data.nextCursor);
+        const expected = [...older.data.turns, ...latest.data.turns].flatMap(turn => turn.items.map(item => item.id));
+        await evaluate(`
+          api.boardHistory = async (_project, cursor) => cursor ? ${JSON.stringify(older)} : ${JSON.stringify(latest)};
+          if (${open === 1}) {
+            dialogue.manager.closeChat();
+            if (dialogue.manager.hasAttribute('data-open')) throw new Error('Dialogue did not close');
+            dialogue.manager.dispose();
+            dialogue.open();
+          }
+          new Promise(resolve => requestAnimationFrame(resolve))
+        `);
+        assert.deepEqual(await evaluate(`({
+          answer: dialogue.log.textContent.includes('full-streamed-answer'),
+          question: dialogue.log.textContent.includes('${question}'),
+          previous: dialogue.log.textContent.includes('prior-reply-21'),
+          notices: dialogue.log.querySelectorAll('[data-message-id^="notice-"]').length,
+          paused: dialogue.manager.textContent.includes('Fixture objective'),
+        })`), { answer: true, question: true, previous: true, notices: 24, paused },
+        "finished or reopened dialogue keeps the question, full answer, previous reply and notices");
+        await evaluate(`
+          dialogue.log.querySelector('.board-chat-older').click();
+          new Promise(resolve => requestAnimationFrame(resolve))
+        `);
+        await check(`JSON.stringify([...dialogue.log.querySelectorAll('[data-message-id]')].map(node => node.dataset.messageId)) ===
+          ${JSON.stringify(JSON.stringify(expected))}`, "older and recent pages preserve saved order and have no missing or duplicate replies");
+      }
+      if (keepArtifacts && paused && reopening) await capture("dialogue-history-paused-restart.png");
+      await evaluate("dialogue.manager.dispose()");
+      console.log(`Dialogue history passed: ${paused ? "paused goal" : "no goal"}, ${reopening ? "restarted Electron" : "stream and reopened composer"}`);
+    }
+    return;
+  }
   if (process.argv.includes("--unicode-only")) {
     const fixture = spawnSync(process.env.TASKBOARD_CHECK_NODE, ["--input-type=module", "-e", `
       import { mkdirSync } from 'node:fs';
