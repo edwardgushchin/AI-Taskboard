@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { codexThreadPattern, taskStates } from "../cli/model.ts";
-import { directory, exists, readJson, writeJson } from "../cli/storage.ts";
+import type { TaskEvent } from "../cli/model.ts";
+import { BoardStore, directory, exists, readJson, writeJson } from "../cli/storage.ts";
 import type { BoardActivity, readBoardHistory } from "./codex-chat.ts";
 import { onBoard, withRuntimeLock } from "../cli/storage.ts";
 import { runtimeLocation } from "./board-runtime.ts";
@@ -82,19 +83,28 @@ const mergedPrefixes = Object.keys(localization.catalogs).map(locale => {
 });
 
 // Only older records produced by status sync need their formatted fields recovered.
-function noticeTransition(text: string): BoardActivity["statusTransition"] {
+function noticeTransition({ text, at }: BoardActivity, taskHistory?: (task: string) => TaskEvent[]): BoardActivity["statusTransition"] {
   const task = /^(T-\d+) «/u.exec(text)?.[1];
   if (task) {
-    let status: typeof taskStates[number] | undefined;
+    const candidates = new Set<string>();
     // Titles and reasons are unescaped. Only a known status followed by the
     // notice's ending or reason separator can mark the end of the title.
     for (const [, label] of text.matchAll(/» — (?=([^»\r\n.:]+)(?:\.$|: \S))/gu)) {
       const candidate = statusLabels.get(label!);
-      if (!candidate) continue;
-      if (status && status !== candidate) return;
-      status = candidate;
+      if (candidate) candidates.add(candidate);
     }
-    if (status) return { task, status };
+    if (candidates.size === 1) return { task, status: candidates.values().next().value! };
+    if (candidates.size > 1) {
+      const time = at ? Date.parse(at) : NaN;
+      if (!Number.isFinite(time) || !taskHistory) return;
+      const recorded = new Set<string>();
+      for (const event of taskHistory(task)) {
+        if (event.actor !== "user" && event.from && event.to && event.from !== event.to &&
+            Date.parse(event.at) === time && candidates.has(event.to)) recorded.add(event.to);
+      }
+      if (recorded.size === 1) return { task, status: recorded.values().next().value! };
+      return;
+    }
   }
   for (const { prefix, suffix } of mergedPrefixes) {
     if (!suffix || !text.startsWith(prefix!)) continue;
@@ -262,7 +272,7 @@ const automaticReviewPrefixes = [
   "Автоматическая проверка AI Taskboard. Проверь сдачи в режиме, выбранном на доске",
 ];
 
-export function managerHistoryForView(turns: Turn[], view?: "chat" | "work") {
+export function managerHistoryForView(turns: Turn[], view?: "chat" | "work", taskHistory?: (task: string) => TaskEvent[]) {
   return turns.flatMap(turn => {
     if (!view) return [turn];
     const first = turn.messages[0];
@@ -272,7 +282,7 @@ export function managerHistoryForView(turns: Turn[], view?: "chat" | "work") {
       return turn.lane === "work" || isStatusNotice(turn) || automatic ? [] : [{ ...turn, items: managerChatItems(turn.items) }];
     }
     const notice = isStatusNotice(turn);
-    const items = notice ? turn.items.map(item => ({ ...item, statusTransition: item.statusTransition ?? noticeTransition(item.text) })) :
+    const items = notice ? turn.items.map(item => ({ ...item, statusTransition: item.statusTransition ?? noticeTransition(item, taskHistory) })) :
       managerWorkItems(turn.items, automatic ? "work" : turn.lane);
     const messages = turn.lane === "work" ? turn.messages : [];
     return items.length || messages.length ? [{ ...turn, items, messages }] : [];
@@ -290,6 +300,21 @@ export function readManagerHistory(project: string, cursor: string | null = null
   if (!exists(folder)) return undefined;
   directory(folder);
   const names = readdirSync(folder).filter(name => filePattern.test(name) && (!before || name < before)).sort().reverse();
+  let store: BoardStore | undefined;
+  const taskHistories = new Map<string, TaskEvent[]>();
+  function taskHistory(task: string) {
+    const cached = taskHistories.get(task);
+    if (cached) return cached;
+    let history: TaskEvent[] = [];
+    try {
+      store ??= new BoardStore({ root: project, directory: board, repository: null });
+      history = readTask(store, task).history;
+    } catch {
+      // A chat log can outlive its board or card. Keep the original notice in that case.
+    }
+    taskHistories.set(task, history);
+    return history;
+  }
   const pages: Turn[][] = [];
   let model: string | undefined;
   let consumed = 0;
@@ -303,7 +328,7 @@ export function readManagerHistory(project: string, cursor: string | null = null
     const needsConversation = view === "chat" && conversations === 0;
     if (exceedsBudget && view !== "chat") break;
     const run = readJson(path) as Run;
-    const turns = managerHistoryForView(displayTurns(run, view === "work" ? Number(name.slice(0, 13)) : undefined), view);
+    const turns = managerHistoryForView(displayTurns(run, view === "work" ? Number(name.slice(0, 13)) : undefined), view, taskHistory);
     if (view !== "chat" || turns.some(turn => turn.messages.length || turn.items.length)) {
       // An inline image can exceed the page budget after Base64 encoding.
       // Keep the first conversation together even if goal notices started the page.

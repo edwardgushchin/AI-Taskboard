@@ -107,6 +107,7 @@ app.whenReady().then(async () => {
     });
     const question = "current-question";
     const reply = answer("full-answer", "full-streamed-answer: T-0001 отменена.", 130);
+    const blockReason = "Review «previous attempt» — cancelled.";
     const transitionResults = [
       ["cancel", "cancelled", "отменена"], ["start", "in_progress", "в работе"],
       ["block", "blocked", "заблокирована"], ["submit", "review", "сдана на проверку"],
@@ -122,10 +123,18 @@ app.whenReady().then(async () => {
         import { randomUUID } from "node:crypto";
         import { mkdirSync, readFileSync } from "node:fs";
         import { join } from "node:path";
+        import { initializeBoard } from ${JSON.stringify(new URL("../src/cli/storage.ts", import.meta.url).href)};
+        import { createTask } from ${JSON.stringify(new URL("../src/cli/tasks.ts", import.meta.url).href)};
         import { managerUnread, readManagerDialogue, readManagerView, saveManagerHistory } from ${JSON.stringify(new URL("../src/desktop/manager-history.ts", import.meta.url).href)};
         const [project, action] = process.argv.slice(1);
         const input = JSON.parse(readFileSync(0, "utf8"));
-        if (action === "write") {
+        if (action === "seed") {
+          const store = initializeBoard({ root: project, directory: join(project, ".tasks"), repository: null }, store => store);
+          const task = createTask("T-0003", { title: "batch-cancel-2" });
+          store.create({ ...task, status: "blocked", updatedAt: input.at, history: [...task.history, {
+            action: "block", actor: "manager", from: "in_progress", to: "blocked", at: input.at, text: input.reason,
+          }] });
+        } else if (action === "write") {
           mkdirSync(join(project, ".tasks"), { recursive: true });
           for (const { at, id, run } of input) saveManagerHistory(project, at, id ?? randomUUID(), run);
         } else if (action === "work") console.log(JSON.stringify(await readManagerView(project, input, "work", async () => ({
@@ -184,6 +193,7 @@ app.whenReady().then(async () => {
         return true;
       })()`);
       if (!reopening) {
+        io(project, "seed", { at: new Date(start + 103).toISOString(), reason: blockReason });
         await evaluate(`
           dialogue.leaks = [];
           dialogue.observer = new MutationObserver(records => {
@@ -199,7 +209,7 @@ app.whenReady().then(async () => {
             at: start + 101 + index, run: { lane: "notice", items: [
               answer("notice-" + index, "T-" + String(index + 1).padStart(4, "0") +
                 " «batch-cancel-" + index + (index === 0 ? " Релиз «Клиент» — v2.1\nПроверка" : index === 1 ? "\r\nВторая строка запуска" : "") +
-                "» — " + (transitionResults[index]?.[2] ?? "отменена") + (index === 2 ? ": Повтор «Клиент» — v2.1." : "."), 101 + index),
+                "» — " + (transitionResults[index]?.[2] ?? "отменена") + (index === 2 ? ": " + blockReason : "."), 101 + index),
             ] },
           })),
         ]);
@@ -305,9 +315,9 @@ app.whenReady().then(async () => {
       await check(`
         dialogue.manager.querySelector('[data-item="final:notice-0"]').textContent.includes('Релиз «Клиент» — v2.1') &&
         dialogue.manager.querySelector('[data-item="final:notice-0"]').textContent.includes('Проверка') &&
-        dialogue.manager.querySelector('[data-item="final:notice-2"]').textContent.includes('Повтор «Клиент» — v2.1.') &&
+        dialogue.manager.querySelector('[data-item="final:notice-2"]').textContent.includes(${JSON.stringify(blockReason)}) &&
         dialogue.manager.querySelector('[data-item="final:notice-1"]').textContent.includes('Вторая строка запуска')
-      `, "matching notices preserve separators in older card titles and reasons");
+      `, "matching notices preserve separators in older card titles and status-like reasons");
       if (keepArtifacts && paused) {
         await evaluate(`document.fonts.ready.then(() => {
           const work = dialogue.manager.querySelector('.board-work');

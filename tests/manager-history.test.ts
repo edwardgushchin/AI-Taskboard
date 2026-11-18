@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
-import { writeJson } from "../src/cli/storage.ts";
+import { initializeBoard, writeJson } from "../src/cli/storage.ts";
+import { sweepArchives } from "../src/cli/archive.ts";
+import { createTask } from "../src/cli/tasks.ts";
 import { statusNotice } from "../src/cli/task-messages.ts";
 import type { Task } from "../src/cli/model.ts";
 import { managerChatItems, managerUnread, managerWorkItems, readManagerDialogue, readManagerHistory, readManagerMessages, saveManagerHistory } from "../src/desktop/manager-history.ts";
@@ -187,22 +189,38 @@ test("work history identifies older status notices with multiline titles and emb
   assert.deepEqual(managerUnread(project), [reply.id]);
 });
 
-test("work history reads older status reasons with embedded separators and preserves ambiguous notices", t => {
+test("work history resolves older status-like reasons against the card history", t => {
   const project = fixture(t);
   const start = Date.now();
-  const task = { id: "T-0042", title: "Release «Client» — preview" } as Task;
-  const reasons = ["Retry «client» — v2.1.\nCheck access", "Review «previous attempt» — cancelled."];
+  const store = initializeBoard({ root: project, directory: join(project, ".tasks"), repository: null }, store => store);
+  const task = createTask("T-0042", { title: "Release «Client» — preview" });
+  const reasons = ["Retry «client» — v2.1.\nCheck access", "Review «previous attempt» — cancelled.",
+    "Review «previous attempt» — cancelled."];
+  const events: Task["history"] = [];
+  const changeAt = new Date(start + 10).toISOString();
   const items = reasons.map((reason, index) => {
     const at = new Date(start + index).toISOString();
-    const text = statusNotice(task, { action: "block", actor: "manager", from: "in_progress", to: "blocked", at, text: reason }, "en")!;
+    const event = { action: "block", actor: "manager", from: "in_progress", to: "blocked", at, text: reason } as const;
+    if (index !== 2) events.push(event);
+    const text = statusNotice(task, event, "en")!;
     const item = { id: randomUUID(), text, at, title: "", type: "agentMessage", status: "completed" };
     saveManagerHistory(project, start + index, item.id, { lane: "notice", items: [item] });
     return item;
   });
-  assert.deepEqual(readManagerHistory(project, null, "work")!.turns.flatMap(turn => turn.items), [
+  store.create({ ...task, title: "Renamed after the block", status: "cancelled", updatedAt: changeAt, closedAt: changeAt,
+    history: [...task.history, ...events, { action: "cancel", actor: "manager", from: "blocked", to: "cancelled", at: changeAt }] });
+  const work = () => readManagerHistory(project, null, "work")!.turns.flatMap(turn => turn.items);
+  const expected = [
     { ...items[0]!, statusTransition: { task: "T-0042", status: "blocked" } },
-    { ...items[1]!, statusTransition: undefined },
-  ]);
+    { ...items[1]!, statusTransition: { task: "T-0042", status: "blocked" } },
+    { ...items[2]!, statusTransition: undefined },
+  ];
+  assert.deepEqual(work(), expected);
+  store.index.settings.archiveAfterDays = 0;
+  store.saveIndex();
+  assert.deepEqual(sweepArchives(store, new Date(start + 20)).archived, [task.id]);
+  assert.deepEqual(work(), expected);
+  assert.deepEqual(managerUnread(project), []);
 });
 
 test("work pages interleaved notices and chat runs without losing or duplicating notices", t => {
