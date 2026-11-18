@@ -3374,7 +3374,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     notifyRunChange(project);
     let retry: { revision: number; reason: string; continuation: ExecutorContinuation } | undefined;
     void completion.then(async outcome => {
-      if (run.recovered && !stopRequested) {
+      if (run.recovered && !stopRequested && (!outcome || outcome.interrupted)) {
         await saveActivity();
         return;
       }
@@ -3391,7 +3391,8 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       const reconnect = outcome?.disconnected && !continuation.afterDisconnect;
       const accessGranted = !task.fullAccess && !signal.aborted && !stopRequested && executorFullAccess(desktopProfile, project, task);
       let unfinishedRevision: number | undefined;
-      if ((accessGranted || reconnect || (!outcome && !task.schedule)) && !signal.aborted && !stopRequested && (!rejected || accessGranted)) {
+      if (!run.recovered && (accessGranted || reconnect || (!outcome && !task.schedule)) &&
+          !signal.aborted && !stopRequested && (!rejected || accessGranted)) {
         const current = await callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
         if (current.ok) {
           if (current.data.status === "review" && current.data.acceptanceRepair?.phase === "running" && current.data.codexThreadId === codexThreadId) {
