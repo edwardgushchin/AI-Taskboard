@@ -31,6 +31,7 @@ function cli(project, args, input) {
 if (!process.versions.electron) {
   const scratch = mkdtempSync(join(tmpdir(), "taskboard-shared-runtime-"));
   const managerOnly = process.argv.includes("--manager-only");
+  const recoveryOnly = process.argv.includes("--worktree-recovery-only");
   const outputIndex = process.argv.indexOf("--artifacts");
   const output = outputIndex < 0 ? undefined : resolve(process.argv[outputIndex + 1]);
   const workers = [], providerPids = new Set();
@@ -67,6 +68,50 @@ if (!process.versions.electron) {
   };
   checks: try {
     symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), join(scratch, "node_modules"), process.platform === "win32" ? "junction" : "dir");
+    if (recoveryOnly) {
+      const git = (...args) => execFileSync("git", args, { cwd: project, env, windowsHide: true, encoding: "utf8" }).trim();
+      mkdirSync(project);
+      git("init", "-b", "main");
+      git("config", "user.name", "Fixture");
+      git("config", "user.email", "fixture@example.invalid");
+      git("commit", "--allow-empty", "-m", "Fixture");
+      cli(project, ["init"]);
+      cli(project, ["settings"], { autoMode: false, reviewMode: "human" });
+      const returned = ["manual", "auto"].map((mode, index) => {
+        const thread = "10000000-0000-0000-0000-00000000000" + (index + 1);
+        const { id } = cli(project, ["create"], { title: mode, criteria: ["Recover existing checkout"] });
+        cli(project, ["approve", id]);
+        const { task, worktree } = cli(project, ["start", id]);
+        cli(project, ["update", id], { codexThreadId: thread });
+        git("-C", worktree, "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", mode);
+        const head = git("rev-parse", task.git.branch);
+        const cancelled = cli(project, ["cancel", id], { reason: "Remove checkout" });
+        assert.equal(existsSync(worktree), false);
+        const draft = cli(project, ["return-to-draft", id], { revision: cancelled.revision });
+        cli(project, ["approve", id], { revision: draft.revision });
+        return { id, worktree, branch: task.git.branch, head, thread };
+      });
+      const worker = await start("recovery-profile");
+      for (const [index, { id, worktree, branch, head, thread }] of returned.entries()) {
+        if (index === 0) assert.equal((await worker.ask({ action: "launch", id })).ok, true);
+        else cli(project, ["settings"], { autoMode: true });
+        await wait(async () => (await worker.ask({ action: "canStop", id })), "executor launched for " + id);
+        assert.deepEqual(await worker.ask({ action: "executorBinding", id }), { cwd: worktree, thread });
+        const card = cli(project, ["show", id]);
+        assert.equal(card.status, "in_progress");
+        assert.equal(card.codexThreadId, thread);
+        assert.equal(git("-C", worktree, "symbolic-ref", "HEAD"), branch);
+        assert.equal(git("-C", worktree, "rev-parse", "HEAD"), head);
+        record("PASS: " + (index === 0 ? "manual launch" : "auto mode") + " restores the checkout and supplies the original chat to the executor");
+        await worker.ask({ action: "stop", id });
+        await wait(async () => !await worker.ask({ action: "canStop", id }), "executor stopped");
+      }
+      if (output) {
+        mkdirSync(output, { recursive: true });
+        writeFileSync(join(output, "worktree-recovery.txt"), [...results, JSON.stringify(await worker.ask({ action: "versions" }))].join("\n") + "\n");
+      }
+      break checks;
+    }
     for (const board of [project, other]) { mkdirSync(board); cli(board, ["init"], { git: false }); cli(board, ["settings"], { autoMode: false, reviewMode: "human", taskLimits: { executor: 1, reviewer: 1 } }); }
     const tasks = [];
     for (let i = 0; !managerOnly && i < 6; i++) { const task = cli(project, ["create"], { title: "Isolated concurrency " + i, criteria: ["Fixture completes"], workingDirectory: project }); cli(project, ["approve", task.id]); tasks.push(task.id); }
@@ -419,6 +464,7 @@ if (!process.versions.electron) {
   app.setPath("userData", join(scratch, name)); app.setPath("appData", join(scratch, "app-data-" + name));
   app.disableHardwareAcceleration(); app.requestSingleInstanceLock = () => true;
   const runs = new Map(), leases = new Map(), pids = new Set(), providerRequests = new Map(); let failNext = false, providerSequence = 0;
+  const executorBindings = new Map();
   let gitWindow;
   const active = await import(new URL("../src/desktop/active-runs.ts", import.meta.url));
   let managerCalls = 0, maintenanceCalls = 0, heldTurn, goalDone, goalRequest;
@@ -461,11 +507,12 @@ if (!process.versions.electron) {
   };
   globalThis.runtimeCheckStart = async (_client, board, _cwd, task, _activity, _usage, _signal, beforeTurn) => {
     if (failNext) { failNext = false; throw Error("Isolated provider launch failure"); }
+    executorBindings.set(task.id, { cwd: _cwd, thread: task.codexThreadId });
     const request = ++providerSequence;
     const pid = await new Promise(resolve => { providerRequests.set(request, resolve); process.send({spawnProvider: request}); });
     pids.add(pid);
     const provider = active.trackProvider(board, pid), finish = provider.run(() => active.trackActiveRun(board));
-    const threadId = "10000000-0000-0000-0000-" + String(pid).padStart(12, "0");
+    const threadId = task.codexThreadId ?? ("10000000-0000-0000-0000-" + String(pid).padStart(12, "0"));
     await beforeTurn(threadId);
     const completion = new Promise(resolve => {
       const timer = setInterval(() => {
@@ -496,6 +543,8 @@ if (!process.versions.electron) {
       const qa = globalThis.sharedCheck; let data;
       const board = command.other ? other : project, key = command.role + (command.other ? ":other" : "") + (command.task ?? "");
       if (command.action === "ready") data = true;
+      if (command.action === "versions") data = process.versions;
+      if (command.action === "executorBinding") data = executorBindings.get(command.id);
       if (command.action === "restoreBoards") { const state = qa.createWindow([project, other]); await state.ready; globalThis.restoredCheckWindow = state.window; data = true; }
       if (command.action === "closeRestored") { globalThis.restoredCheckWindow.close(); data = true; }
       if (command.action === "newWindow") { const state = qa.createWindow([project]); await state.ready; data = true; }

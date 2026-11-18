@@ -35,8 +35,7 @@ export function usableWorktree(item: Worktree | undefined): string {
   return realpathSync(item.path);
 }
 
-export function findTaskWorktree(repo: Repository, { branch, worktree: recorded }: TaskGit): Worktree | undefined {
-  const entries = worktrees(repo.root);
+export function findTaskWorktree(repo: Repository, { branch, worktree: recorded }: TaskGit, entries = worktrees(repo.root)): Worktree | undefined {
   const attached = findWorktree(repo, branch, entries);
   if (attached || !recorded || !isAbsolute(recorded)) return attached;
   let expected = recorded;
@@ -142,6 +141,32 @@ function isolatedRoot(repo: Repository, create = false): string {
   return path;
 }
 
+function restoreMissingWorktree(store: BoardStore, repo: Repository, id: string, taskGit: TaskGit, entries: Worktree[]): string {
+  const { branch, worktree: recorded } = taskGit;
+  const path = join(isolatedRoot(repo), id);
+  const candidates = new Set([path, join(store.location.directory, "worktrees", id),
+    join(repo.root, ".taskboard-worktrees", id)]);
+  if (recorded && isAbsolute(recorded)) candidates.add(recorded);
+  for (const candidate of candidates) {
+    if (exists(candidate) || entries.some(entry => !relative(candidate, entry.path))) {
+      throw new TaskboardError("WORKTREE_COLLISION", "A previous or canonical task worktree path is occupied.", { path: candidate });
+    }
+  }
+  // Resolve only the local branch. A tag or remote-tracking ref cannot replace it.
+  const head = invokeGit(repo.root, ["show-ref", "--verify", "--hash", branch]);
+  if (head.code !== 0 || resolveCommit(repo.root, head.stdout.trim()) !== head.stdout.trim()) {
+    throw new TaskboardError("TASK_BRANCH_MISSING", "The task's local Git branch has no commit.", { branch });
+  }
+  requireNoGitOperation(repo.root);
+  isolatedRoot(repo, true);
+  git(repo.root, ["worktree", "add", "--no-guess-remote", "--", path, branch.slice("refs/heads/".length)]);
+  const created = findWorktree(repo, branch);
+  if (!created || relative(path, created.path) || created.head !== head.stdout.trim()) {
+    throw new TaskboardError("WORKTREE_COLLISION", "The recovered worktree does not match the task branch and commit.", { path, branch });
+  }
+  return usableWorktree(created);
+}
+
 export function hasPending(store: BoardStore, task: Task, holdsStartLock = false): boolean {
   const path = store.pendingPath(task.id);
   if (!exists(path)) return false;
@@ -221,7 +246,15 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
         throw new TaskboardError("INVALID_INPUT", "Resume the task on its original target branch.");
       }
     }
-    const currentPath = usableWorktree(findTaskWorktree(repo, task.git));
+    const entries = worktrees(repo.root);
+    const existing = findTaskWorktree(repo, task.git, entries);
+    if (!existing && pending) {
+      throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted start before restoring a missing worktree.");
+    }
+    if (existing && (existing.prunable || !exists(existing.path))) {
+      throw new TaskboardError("WORKTREE_MISSING", "Git still registers the task worktree at an unavailable path.", { path: existing.path });
+    }
+    const currentPath = existing ? usableWorktree(existing) : restoreMissingWorktree(store, repo, task.id, task.git, entries);
     const worktree = isolateTaskWorktree(store, repo, task.id, currentPath);
     const updated = { ...task, git: { ...task.git, worktree } };
     if (pending) removeFile(pendingPath);
