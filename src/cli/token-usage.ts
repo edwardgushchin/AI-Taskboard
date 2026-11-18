@@ -185,6 +185,9 @@ export function summarizeTokenUsage(models: ModelTokenUsage[]) {
 
 export function taskMetrics(task: Task, now = Date.now()) {
   const accepted = task.history.findLast(event => event.action === "accept" && event.to === "done");
+  const firstReady = task.history.find(event => event.to === "ready");
+  const readyToAcceptanceMs = accepted && firstReady ? Date.parse(accepted.at) - Date.parse(firstReady.at) : NaN;
+  const submissions = task.history.filter(event => event.action === "submit" && event.to === "review").length;
   const timeByStatusMs = timeByStatus(task, accepted, now);
   const returns = task.history.filter(event => event.action === "request-changes");
   const starts = task.history.flatMap(({ at, startTiming }) => startTiming ? [{ at, ...startTiming }] : []);
@@ -201,9 +204,13 @@ export function taskMetrics(task: Task, now = Date.now()) {
     id: task.id, status: task.status, createdAt: task.createdAt,
     completedAt: accepted?.at ?? null, acceptedBy: accepted?.actor ?? null,
     cycleMs: accepted ? Date.parse(accepted.at) - Date.parse(task.createdAt) : null,
+    ...(accepted ? {
+      readyToAcceptanceMs: Number.isFinite(readyToAcceptanceMs) && readyToAcceptanceMs >= 0 ? readyToAcceptanceMs : null,
+      acceptedOnFirstSubmission: submissions ? submissions === 1 && !returns.length : null,
+    } : {}),
     timeByStatusMs,
     ...(timeByStatusMs && !accepted ? { observedAt: new Date(now).toISOString() } : {}),
-    submissions: task.history.filter(event => event.action === "submit" && event.to === "review").length,
+    submissions,
     returns: returns.length,
     reviewerReturns: returns.filter(event => event.actor === "reviewer").length,
     ...(starts.length ? { starts } : {}),

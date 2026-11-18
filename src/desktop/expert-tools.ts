@@ -14,26 +14,31 @@ export const expertActions = {
     properties: { ids: { ...list, minItems: 1, maxItems: 6, uniqueItems: true } }, required: ["ids"] },
   expert_skill: { description: "Read and materialize a skill in the expert's board-owned directory, including bundled scripts and references. Use returned absolute paths. This does not install provider plugins, dependencies or grant tool access.",
     properties: { expertId: s, skillId: s }, required: ["expertId", "skillId"] },
-  expert_plan: { description: "Assign a phase's lead, relevant lead skill IDs and stages. Explain why these specialists cover the work, including why the lead can work alone if stages is empty. Stage dependencies reference stable keys.",
+  expert_plan: { description: "Assign a lead, lead skills and stages, with a rationale for the team. Dependencies reference stable stage keys. For work stages submitted for review, artifactOutputs maps exact output names to png or text so submission requires and saves those files.",
     properties: { ...task, revision: { type: "integer", minimum: 1 }, phase: { type: "string", enum: ["work", "review"] },
       reason: { ...s, maxLength: 2000 }, skills: list,
       lead: { type: ["string", "null"] }, replace: { type: "boolean" }, stages: { type: "array", maxItems: 32, items: {
       type: "object", properties: { key: s, expertId: s, title: s, description: { type: "string" },
-        criteria: { ...list, minItems: 1 }, inputs: list, outputs: { ...list, minItems: 1 }, dependsOn: list },
+        criteria: { ...list, minItems: 1 }, inputs: list, outputs: { ...list, minItems: 1 }, dependsOn: list,
+        artifactOutputs: { type: "object", additionalProperties: { type: "string", enum: ["png", "text"] } } },
       required: ["key", "expertId", "title", "criteria", "outputs"], additionalProperties: false } } }, required: ["id", "revision", "reason", "stages"] },
-  expert_stage: { description: "Start, block, or finish a stage in your assigned phase. Start before working. Returns the specialist package and prerequisite results. For done, provide evidence for every exact declared output and the provider agent ID when delegated. For local execution of another specialization, give the actual fallback reason.",
+  expert_stage: { description: "Start, block, or finish an assigned stage. Returns the specialist package and prerequisite results. For done, provide each exact output. For artifactOutputs, give the path of the individual file relative to the worktree. For delegated work, give the actual provider agent ID.",
     properties: { ...task, phase: { type: "string", enum: ["work", "review"] }, targetHead: { type: ["string", "null"] },
       revision: { type: "integer", minimum: 1 }, key: s, state: { type: "string", enum: ["running", "blocked", "done"] },
       result: s, outputs: { type: "object", additionalProperties: s }, agentId: s, fallback: s },
     required: ["id", "revision", "key", "state"] },
   team_inbox: { description: "Read the task team's stage status, results and addressed mail. Use afterSequence to avoid rereading mail.",
     properties: { ...task, afterSequence: { type: "integer", minimum: 0 } }, required: ["id"] },
+  team_findings: { description: "Search verified findings across cards with keywords, or record a confirmed finding from the current card. Include the exact environment and the check or evidence that confirmed the cause. Use id when publishing as manager.",
+    properties: { ...task, query: { type: "string", maxLength: 300 }, finding: { type: "object",
+      properties: { symptom: s, environment: s, cause: s, verification: s },
+      required: ["symptom", "environment", "cause", "verification"], additionalProperties: false } }, required: [] },
   team_message: { description: "Send persistent mail to a stage address like work:verify, a legacy stage card, manager, owner, or team. The lead may relay mail from its own phase using stage. Use question for an answer and replyTo to retain the conversation.",
     properties: { ...task, to: s, stage: s, text: { ...s, maxLength: 4000 }, kind: { type: "string", enum: ["update", "question", "decision"] }, replyTo: { type: "integer", minimum: 1 } },
     required: ["id", "to", "text"] },
 };
 export const expertCommands: Record<string, string> = { expert_list: "experts", expert_context: "expert-context", expert_skill: "expert-skill",
-  expert_plan: "expert-plan", expert_stage: "expert-stage", team_inbox: "expert-inbox", team_message: "expert-message" };
+  expert_plan: "expert-plan", expert_stage: "expert-stage", team_inbox: "expert-inbox", team_message: "expert-message", team_findings: "findings" };
 export const executorExpertTools = Object.entries(expertActions).filter(([name]) => name !== "expert_plan").map(([name, action]) => {
   const properties: Record<string, unknown> = { ...action.properties };
   for (const key of ["id", "phase", "targetHead"]) delete properties[key];
@@ -60,10 +65,13 @@ export const expertInstructions = "Board experts are internal instruction packag
   "(for example business-analyst and product-owner) and expert_skill for the relevant methods. You may combine or change specializations for the current phase; " +
   "they never change your process authority or tool permissions. Before launching or queuing work, save the expert_plan for work and review on the same card. " +
   "Use one responsible specialization for a simple phase, with stages only where another distinct deliverable or expertise is needed. " +
+  "Run ready cards in parallel when their worktrees, write scopes and exclusive resources allow it. Use card dependencies for required results and queue holds for temporary resource contention. Run the final integration check after its prerequisites. " +
   "The responsible agent completes stages of its own specialization directly. Expect a native subagent for a different specialization when the provider supports it. " +
   "Read the updated card revision after each plan change. Give each stage explicit inputs, outputs, criteria and dependencies. " +
+  "For a visible UI change, plan a verification work stage with PNG outputs for relevant viewports or window sizes and a text report of the key interaction. Specify the screens, sizes, states, and visible outcomes to verify. Let the review phase inspect these materials against those criteria. " +
   "Each specialization is one shared package, with no expert-specific model or permanent agent identity. " +
   "Use team_inbox/team_message for peer coordination and questions to manager or owner. A question to owner needs a human answer; do not invent it. " +
+  "Use team_findings to reuse confirmed diagnoses across cards. Check the stated environment before applying a finding to a new task. " +
   "When an owner decision unblocks the card, resume its responsible lead through the normal board lifecycle. " +
   "Do not globally install skills or enable provider plugins. Read only the skills relevant to this phase and use their returned board paths.";
 
@@ -71,7 +79,9 @@ export const leadInstructions = "You are responsible for this card's current pha
   "Read the current revision and recorded stage states before opening work with expert_stage. On REVISION_CONFLICT, reread the card and reconcile changed requirements before retrying. A completed stage already has a result; reuse it. After collecting the result, use expert_stage with state done, a summary, and an outputs object keyed by each exact declared output. For delegated work pass the actual child agent ID after waiting for its result. " +
   "Apply the preloaded lead skills. Load any additional relevant skills and the skills of delegated specialists via expert_skill before using them. Pass the prompt, applicable skill instructions or readable skill paths, scope, inputs and outputs to the specialist. Report which skills actually affected the result. Handle your own stages yourself and reuse the same native subagent for later stages of its specialization. " +
   "Run only independent, non-conflicting stages in parallel. Wait for prerequisites and pass their results to dependent specialists. Use the provider's messaging and wait mechanisms to coordinate. " +
+  "For declared artifact outputs, save individual evidence files in the task's ignored .tasks/qa/ directory. Finish the stage with the file path for each declared artifact output. Capture from the same revision you will submit. If you change affected code after checking, rerun the scenario and refresh the files before submitting. The board saves these outputs automatically with the submission. " +
   "Use team_message for meaningful handoffs and questions between assigned roles. Include the decision or artifact the receiving stage needs and route it to its stage address. Deliver incoming mail from team_inbox to its native agent. If a decision blocks a stage, mark it blocked and leave a persistent question. " +
+  "Search team_findings when a failure or diagnostic is likely to recur. Record confirmed reusable causes with the environment and verification. Treat findings from other cards as evidence and recheck applicability when conditions differ. " +
   "If delegation is unavailable or fails, apply the package yourself and give the factual fallback reason when recording its result. Check every result before submitting or giving the review decision. The same task permission and review scope apply to all delegates.";
 
 export function phaseStageReporter(project: string, phase: "work" | "review", id?: string, targetHead?: string | null) {

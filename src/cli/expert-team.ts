@@ -1,8 +1,9 @@
-import { boardReviewMode, object, strings, text, number, record, requireRevision, requireState, TaskboardError } from "./model.ts";
+import { boardReviewMode, member, object, strings, text, number, record, requireRevision, requireState, TaskboardError } from "./model.ts";
 import type { BoardSettings, ExpertPhase, Task, TaskEvent } from "./model.ts";
 import type { BoardStore } from "./storage.ts";
 import { readExpert } from "./experts.ts";
 import { readTask } from "./archive.ts";
+import { artifactSource } from "./artifacts.ts";
 import { currentReviewApproval } from "./task-messages.ts";
 import { runtimeEntries } from "../desktop/board-runtime.ts";
 
@@ -34,14 +35,17 @@ export function requireApprovalPlan(task: Task, settings: BoardSettings, action:
   if (missing.length) throw new TaskboardError("EXPERT_PLAN_REQUIRED", "Missing required card fields for " + action + ": " + missing.join(", ") + ".");
 }
 
-export function initialExpertTeam(store: BoardStore, value: unknown): Task["expertTeam"] {
+export function initialExpertTeam(store: BoardStore, task: Pick<Task, "schedule">, value: unknown): Task["expertTeam"] {
   if (value === undefined) return;
   if (store.index.settings.boardType === "manual") throw new TaskboardError("MANUAL_BOARD", "Expert plans require an agent board.");
   const team = object(value);
-  return Object.fromEntries(Object.entries(team).map(([phase, plan]) => [taskExpertPhase(phase), parseExpertPlan(store, object(plan))]));
+  return Object.fromEntries(Object.entries(team).map(([key, plan]) => {
+    const phase = taskExpertPhase(key);
+    return [phase, parseExpertPlan(store, task, phase, object(plan))];
+  }));
 }
 
-function parseExpertPlan(store: BoardStore, input: Record<string, unknown>, previous?: ExpertPhase): ExpertPhase {
+function parseExpertPlan(store: BoardStore, task: Pick<Task, "schedule">, phase: Phase, input: Record<string, unknown>, previous?: ExpertPhase): ExpertPhase {
   const lead = input.lead === undefined ? previous?.lead : input.lead === null ? null : text(input.lead, "lead specialization", true);
   const expert = lead ? readExpert(store, lead) : undefined;
   const reason = text(input.reason, "team rationale", true);
@@ -62,8 +66,14 @@ function parseExpertPlan(store: BoardStore, input: Record<string, unknown>, prev
     if (!criteria.length || !outputs.length) throw new TaskboardError("INVALID_INPUT", "Each stage needs criteria and outputs.");
     if (new Set(outputs).size !== outputs.length || outputs.some(output => !output.trim()))
       throw new TaskboardError("INVALID_INPUT", "Stage outputs must be distinct and non-empty.");
+    const artifacts = Object.entries(object(stage.artifactOutputs ?? {})).map(([name, kind]) => {
+      if (phase !== "work" || task.schedule || !outputs.includes(name))
+        throw new TaskboardError("INVALID_INPUT", "Artifact outputs must name declared outputs on a work stage of a task submitted for review.");
+      return [name, member(kind, ["png", "text"], "artifact kind")] as const;
+    });
     return { key, expertId, title: text(stage.title, "stage title", true), description: text(stage.description ?? "", "stage description"),
-      criteria, inputs: strings(stage.inputs ?? [], "inputs"), outputs, dependsOn: strings(stage.dependsOn ?? [], "stage dependencies") };
+      criteria, inputs: strings(stage.inputs ?? [], "inputs"), outputs, dependsOn: strings(stage.dependsOn ?? [], "stage dependencies"),
+      ...(artifacts.length ? { artifactOutputs: Object.fromEntries(artifacts) } : {}) };
   });
   const existing = previous?.stages ?? [];
   if (new Set(proposed.map(s => s.key)).size !== proposed.length) throw new TaskboardError("INVALID_INPUT", "Stage keys must be unique.");
@@ -96,7 +106,7 @@ export function createExpertPlan(store: BoardStore, parentId: string, input: Rec
   const phase = taskExpertPhase(input.phase ?? "work");
   requireState(parent, ["draft", "ready", "in_progress", "blocked", "review"]);
   const previous = parent.expertTeam?.[phase];
-  const plan = parseExpertPlan(store, input, previous);
+  const plan = parseExpertPlan(store, parent, phase, input, previous);
   if (previous && JSON.stringify(plan) === JSON.stringify(previous)) return { parent, phase, ...plan };
   requireRevision(parent, input.revision, true);
   if (runtimeEntries(store.location.root).some(entry => entry.kind === "slot" && [parent.id, "review:" + parent.id].includes(entry.task ?? "")))
@@ -163,6 +173,19 @@ export function updateExpertStage(store: BoardStore, id: string, phase: Phase, i
         stage.outputs.some(name => !Object.hasOwn(outputs, name) || typeof outputs[name] !== "string" || !outputs[name].trim() || outputs[name].length > 4000))
       throw new TaskboardError("INVALID_INPUT", "Supply evidence for each declared output, keyed by its exact name.");
     run.outputs = Object.fromEntries(stage.outputs.map(name => [name, (outputs[name] as string).trim()]));
+    const artifactNames = Object.keys(stage.artifactOutputs ?? {});
+    if (artifactNames.length) {
+      const used = stages.filter(other => other.key !== stage.key && other.state === "done").flatMap(other =>
+        Object.keys(other.artifactOutputs ?? {}).map(name => other.run!.outputs![name]));
+      const assigned = new Set(used.map(source => process.platform === "win32" ? source.toLowerCase() : source));
+      for (const name of artifactNames) {
+        const source = artifactSource(run.outputs[name]);
+        const key = process.platform === "win32" ? source.toLowerCase() : source;
+        if (assigned.has(key)) throw new TaskboardError("ARTIFACT_OUTPUT_CONFLICT", "Use a distinct file for each required stage output.");
+        assigned.add(key);
+        run.outputs[name] = source;
+      }
+    }
     const ownRole = stage.expertId === task.expertTeam?.[phase]?.lead;
     if (!ownRole && input.agentId == null) {
       run.fallback = text(input.fallback, "reason for local execution", true);

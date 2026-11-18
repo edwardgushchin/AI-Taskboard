@@ -14,6 +14,7 @@ import { nextScheduledRun } from "../src/cli/model.ts";
 import { locateBoard } from "../src/cli/storage.ts";
 import { maxWorklogPartBytes } from "../src/cli/worklog-files.ts";
 import type { Task } from "../src/cli/model.ts";
+import { boardToolContent } from "../src/desktop/board-mcp.ts";
 
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
 const env = {
@@ -2507,6 +2508,83 @@ test("accepted task cleanup removes legacy attachments, saves QA and refuses to 
   assert.equal(existsSync(worktree), false);
   assert.ok(existsSync(join(root, ".tasks", "artifacts")));
   assert.equal(cli(root, ["cleanup", task.id]).removed, false);
+});
+
+test("required stage artifacts are pinned to the submitted snapshot and available in review", { timeout: 90_000 }, t => {
+  const root = fixture(t, true);
+  cli(root, ["init"]);
+  const stage = {
+    key: "verify", expertId: "qa-engineer", title: "Verify the visible result",
+    criteria: ["Inspect the screen and exercise the action."], outputs: ["Screen", "Scenario"],
+    artifactOutputs: { Screen: "png", Scenario: "text" },
+  };
+  const task = cli(root, ["create"], { title: "Verify the screen", criteria: stage.criteria, expertTeam: {
+    work: { lead: "qa-engineer", reason: "Verify the screen and the action from the same version.", stages: [stage] },
+  } });
+  cli(root, ["approve", task.id]);
+  const { task: active, worktree } = cli(root, ["start", task.id]);
+  const args = { revision: active.revision, key: stage.key, phase: "work", actor: "agent" };
+  cli(root, ["expert-stage", task.id], { ...args, state: "running" });
+  const record = { ...args, state: "done", result: "Checked", outputs: { Screen: "screen.local", Scenario: "scenario.local" } };
+  cli(root, ["expert-stage", task.id], { ...record, outputs: { ...record.outputs, Screen: "../screen.png" } }, "INVALID_ARTIFACT_PATH");
+  cli(root, ["expert-stage", task.id], { ...record, outputs: { ...record.outputs, Screen: "scenario.local" } }, "ARTIFACT_OUTPUT_CONFLICT");
+  cli(root, ["expert-stage", task.id], record);
+  writeFileSync(join(worktree, "source.txt"), "Visible change\n");
+  const preview = () => cli(root, ["preview", task.id]);
+  cli(root, ["preview", task.id], undefined, "ARTIFACT_NOT_FOUND");
+  writeFileSync(join(worktree, "screen.local"), "Renamed text");
+  cli(root, ["preview", task.id], undefined, "ARTIFACT_NOT_PNG");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+  writeFileSync(join(worktree, "screen.local"), png);
+  writeFileSync(join(worktree, "scenario.local"), "Action produced the expected state");
+  const stale = preview();
+  writeFileSync(join(worktree, "scenario.local"), "Action still passes after rechecking");
+  const submission = { token: stale.token, message: "feat: change visible result", summary: "Verified UI", checks: ["Action passed"] };
+  cli(root, ["submit", task.id], submission, "STALE_SNAPSHOT");
+  const fresh = preview();
+  writeFileSync(join(worktree, "source.txt"), "More visible changes\n");
+  cli(root, ["submit", task.id], { ...submission, token: fresh.token }, "STALE_SNAPSHOT");
+  const expected = preview();
+  const submitted = cli(root, ["submit", task.id], { ...submission, token: expected.token });
+  const review = cli(root, ["review", task.id]);
+  assert.equal(review.submitted, submitted.git.submission.sha);
+  assert.deepEqual(review.result.artifactEvidence, expected.artifactEvidence);
+  const [screen, scenario] = review.result.artifactEvidence;
+  const reply = (file: { source: string; sha256: string; kind: string }) => cli(root, ["review-artifact", task.id], {
+    revision: review.revision, source: file.source, sha256: file.sha256, format: file.kind,
+  });
+  const image = reply(screen);
+  assert.deepEqual(Buffer.from(image.pngBase64, "base64"), png);
+  assert.equal(image.width, 1);
+  const content = boardToolContent("task_review_artifact", { ok: true, data: image });
+  assert.equal(content.pngBase64, png.toString("base64"));
+  assert.equal(JSON.parse(content.text).data.pngBase64, undefined);
+  assert.equal(reply(scenario).text, "Action still passes after rechecking");
+  assert.equal(cli(root, ["accept", task.id], { revision: review.revision, targetHead: review.targetHead }).status, "done");
+  const metrics = cli(root, ["metrics", task.id]);
+  assert.ok(metrics.readyToAcceptanceMs >= 0 && metrics.readyToAcceptanceMs <= metrics.cycleMs);
+  assert.equal(metrics.acceptedOnFirstSubmission, true);
+});
+
+test("confirmed findings can be reused from another card after archiving the source", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const source = cli(root, ["create"], { title: "Diagnose a Windows failure" });
+  const input = { finding: {
+    symptom: "Electron exits with 0x80000003", environment: "Windows with MXC",
+    cause: "CreateWindowStationW returns ERROR_ACCESS_DENIED",
+    verification: "Repeat the same probe inside and outside MXC.",
+  } };
+  cli(root, ["findings", source.id], { ...input, actor: "agent" }, "INVALID_TRANSITION");
+  const saved = cli(root, ["findings", source.id], input);
+  assert.equal(saved.revision, source.revision);
+  assert.deepEqual(cli(root, ["findings", source.id], input), saved);
+  cli(root, ["cancel", source.id], { reason: "Archive the diagnostic card" });
+  cli(root, ["settings"], { archiveAfterDays: 0 });
+  cli(root, ["archive", "sweep"]);
+  const next = cli(root, ["create"], { title: "Verify another Electron launch" });
+  assert.deepEqual(cli(root, ["findings", next.id], { query: "electron  MXC", actor: "agent" }), [saved]);
+  assert.deepEqual(cli(root, ["findings"], { query: "linux MXC" }), []);
 });
 
 test("artifact retention is bounded until cleanup and changed or unknown originals stay put", t => {

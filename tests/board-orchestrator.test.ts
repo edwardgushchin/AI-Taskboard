@@ -202,10 +202,10 @@ function fixture(t: TestContext) {
       }
       assert.equal(session.title, "Project manager for project");
       const expectedTools = cleanupTurn ? ["task_cleanup_status", "task_cleanup", "project_path", "project_sha256"] : manualTurn ? ["expert_list", "expert_context", "expert_skill", "ask_user", "tag_set_color", "github_read"] : reviewTurn ? [
-        "expert_list", "expert_context", "expert_skill", "team_inbox", "team_message",
+        "expert_list", "expert_context", "expert_skill", "team_inbox", "team_message", "team_findings",
         "task_review", "task_review_diff", "task_review_artifact", "task_accept", "task_request_changes", "project_git", "project_path", "project_sha256",
       ] : [
-        "expert_list", "expert_context", "expert_skill", "expert_plan", "team_inbox", "team_message",
+        "expert_list", "expert_context", "expert_skill", "expert_plan", "team_inbox", "team_message", "team_findings",
         "board_auto_queue", "task_cancel", "provider_tools", "task_tool_grant", "task_tool_revoke", "task_set_executor_access", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_approve", "task_wait", "task_review_queue", "task_review", "task_review_diff",
         "task_review_artifact", "task_accept", "task_request_changes",
         "task_cleanup_status", "task_cleanup", "project_git", "project_git_push",
@@ -1206,6 +1206,12 @@ test("manager adopts expert roles, loads a board skill and plans an addressed sp
     const inbox = await act("team_inbox", { id: parent.id });
     assert.equal(inbox.ok, true); assert.equal(inbox.data.messages[0].from, "manager");
     assert.equal(inbox.data.expertTeam.work.stages.length, 2);
+    const finding = { symptom: "Test target is unavailable", environment: "QA on Windows",
+      cause: "The selected test uses a Linux-only fixture.", verification: "Reproduced on both target platforms." };
+    const recorded = await act("team_findings", { id: parent.id, finding });
+    assert.equal(recorded.ok, true, JSON.stringify(recorded.error));
+    assert.equal(recorded.data.taskId, parent.id);
+    assert.deepEqual((await act("team_findings", { query: "Linux-only Windows" })).data, [recorded.data]);
     return { text: "Команда подготовлена." };
   });
   assert.equal(reply.ok, true, JSON.stringify(reply.error));

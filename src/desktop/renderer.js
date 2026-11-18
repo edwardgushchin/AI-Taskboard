@@ -4027,6 +4027,8 @@ function showTaskArtifacts(task, target = body, open = false) {
       }, "quiet task-review-file");
       link.title = source + "\nSHA-256 " + sha256;
       const label = element("span", name, "task-review-file-name");
+      const evidence = task.result?.artifactEvidence?.find(entry => entry.source === source && entry.sha256 === sha256);
+      if (evidence) label.append(element("small", evidence.output));
       const matching = byName.get(name);
       if (matching.length > 1) {
         const directory = source.slice(0, -name.length);
@@ -4131,7 +4133,7 @@ async function showReview(task, messageDraft, acceptanceError) {
   const generation = projectGeneration;
   const review = await command("review", task.id);
   if (!review || generation !== projectGeneration) return;
-  task = { ...task, revision: review.revision };
+  task = { ...task, revision: review.revision, result: review.result };
   if (review.noChanges) {
     const editor = form("review", () => (t("ui.review_result_29ed25fb")), [], () => (t("ui.accept_e596557e")), async () => {
       const accepted = await command("accept", task.id, { revision: review.revision });

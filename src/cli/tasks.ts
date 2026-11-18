@@ -32,6 +32,9 @@ function fields(task: Task, input: Record<string, unknown>): Task {
     requireState(task, ["draft", "ready", "blocked"]);
     if (input.schedule === null) delete updated.schedule;
     else {
+      if (task.expertTeam?.work?.stages.some(stage => stage.artifactOutputs)) {
+        throw new TaskboardError("INVALID_INPUT", "Remove required submission artifacts from the work plan before making this task recurring.");
+      }
       const schedule = object(input.schedule);
       let rule: TaskScheduleRule;
       if (schedule.everyMinutes !== undefined) {

@@ -1113,7 +1113,9 @@ app.whenReady().then(async () => {
       'Проверка экспорта — не пройдена; файл отсутствует.\\nКоманда: npm run export',
       'Проверка Windows — пропущена; доступна только сборка Linux.',
       'Проверен состав пакета вручную.',
-    ], limitations: ['Приёмка macOS не выполнялась.'] };
+    ], limitations: ['Приёмка macOS не выполнялась.'], artifactEvidence: [
+      { stage: 'verify', output: 'Проверка сборки', kind: 'text', ...reviewFiles[3] },
+    ] };
     api.command = async () => ({ ok: true, data: { revision: 2, target: 'main', mode: 'merge', submitted: '1234567890123',
       targetHead: '1234567890123', message: 'feat: add package', diff: '', result: reportedResult } });
     showReview(reviewTask).then(() => true);
@@ -1143,6 +1145,10 @@ app.whenReady().then(async () => {
     return !files.open && summary.textContent.includes('Материалы проверки') && summary.textContent.includes('7 файлов') &&
       files.compareDocumentPosition(body.querySelector('form')) === Node.DOCUMENT_POSITION_FOLLOWING;
   })()`, "review offers a collapsed count of files before the acceptance form");
+  await check(`[...body.querySelectorAll('.task-review-file')].filter(file =>
+    file.textContent.includes('Проверка сборки')).map(file => file.title).join('') ===
+    reviewFiles[3].source + '\\nSHA-256 ' + reviewFiles[3].sha256`,
+  "review labels the exact version of a required stage artifact");
   await evaluate(`
     api.command = async () => ({ ok: true, data: { revision: 2, noChanges: true, result: reportedResult } });
     showReview(reviewTask).then(() => true);

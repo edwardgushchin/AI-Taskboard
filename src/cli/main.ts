@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { beginBoardOperation } from "../desktop/board-worklog.ts";
 import { migrateWorklog } from "./worklog-migration.ts";
+import { boardFindings } from "./findings.ts";
 import { maintainBoard, removeLegacyAttachments } from "./maintenance.ts";
 import { maintenanceQueue, claimMaintenance, releaseMaintenance, maintenanceFailure } from "./maintenance-state.ts";
 import { guardManual, manualAction, isManual } from "./manual-board.ts";
@@ -69,6 +70,7 @@ const help = [
   "          git refs, git inspect, git switch, git create, git detach, git publish --stdin, git push --stdin (branch and head)",
   "For init, pass git: true with --stdin to initialize Git in the chosen folder.",
   "worklog-migrate (copy and verify legacy project/worktree diaries; sources remain unchanged)",
+  "findings [TASK-ID] --stdin (query or finding with symptom, environment, cause and verification)",
   "recover-test-data --stdin (manifest, optional apply:true); explicit canonical --project required; defaults to dry-run.",
   "Pass one UTF-8 JSON object with --stdin or --input-file PATH.",
 ].join("\n");
@@ -316,6 +318,7 @@ function run(
     return skill;
   }
   if (command === "expert-plan") return createExpertPlan(store, text(id, "parent task ID", true), input);
+  if (command === "findings") return boardFindings(store, id, input);
   if (command === "expert-stage") {
     const taskId = text(id, "task ID", true);
     const phase = taskExpertPhase(input.phase);
@@ -415,7 +418,7 @@ function run(
   }
   if (command === "create") {
     const task = createTask(store.allocateId(), input);
-    const expertTeam = initialExpertTeam(store, input.expertTeam);
+    const expertTeam = initialExpertTeam(store, task, input.expertTeam);
     if (expertTeam) {
       task.expertTeam = expertTeam;
       for (const [phase, plan] of Object.entries(expertTeam)) {

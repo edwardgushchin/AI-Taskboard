@@ -7,8 +7,8 @@ import type { Task, TaskGit } from "./model.ts";
 import { exists, readJson, removeFile, taskWorkingDirectory, writeJson } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
 import { findTaskWorktree, gitStatus, requireNoGitOperation, usableWorktree } from "./worktree.ts";
-import { saveArtifacts } from "./artifacts.ts";
-import { requireExpertResults } from "./expert-team.ts";
+import { inspectRequiredArtifact, saveArtifacts } from "./artifacts.ts";
+import { expertStagesStatus, requireExpertResults } from "./expert-team.ts";
 
 interface Snapshot {
   head: string;
@@ -39,7 +39,8 @@ function taskCheckout(store: BoardStore, task: Task): { path: string; context: T
   return { path, context };
 }
 
-function capture(store: BoardStore, task: Task, path: string, includeDiff: boolean) {
+function capture(store: BoardStore, task: Task, path: string, includeDiff: boolean, storedResult?: SubmitIntent["result"]) {
+  const artifactEvidence = storedResult ? storedResult.artifactEvidence : captureArtifactEvidence(task, path);
   const head = resolveCommit(path, "HEAD");
   if (!head) throw new TaskboardError("GIT_FAILED", "The task branch has no commit.");
   const index = git(path, ["rev-parse", "--path-format=absolute", "--git-path", "index"]).trimEnd();
@@ -67,10 +68,11 @@ function capture(store: BoardStore, task: Task, path: string, includeDiff: boole
     }
     const identity = [task.id, task.revision, head, tree];
     if (base) identity.push(base);
+    if (artifactEvidence?.length) identity.push(JSON.stringify(artifactEvidence));
     const token = createHash("sha256").update(JSON.stringify(identity)).digest("hex");
     const diff = includeDiff
       ? git(path, ["diff", "--no-ext-diff", "--no-textconv", "--binary", ...range], env) : undefined;
-    return { head, tree, token, paths, diff, commitMessage, base };
+    return { head, tree, token, paths, diff, commitMessage, base, artifactEvidence };
   } finally {
     removeFile(temporary);
     removeFile(temporary + ".lock");
@@ -111,6 +113,30 @@ function resultOf(input: Record<string, unknown>): SubmitIntent["result"] {
   };
 }
 
+function captureArtifactEvidence(task: Task, path: string): SubmitIntent["result"]["artifactEvidence"] {
+  const outputs = task.acceptanceRepair ? task.result?.artifactEvidence ?? [] :
+    expertStagesStatus(task, "work").filter(stage => stage.state === "done").flatMap(stage =>
+      Object.entries(stage.artifactOutputs ?? {}).map(([output, kind]) => ({
+        stage: stage.key, output, kind, source: stage.run!.outputs![output],
+      })));
+  if (!outputs.length) return;
+  return outputs.map(({ stage, output, kind, source }) => ({
+    stage, output, kind, source, sha256: inspectRequiredArtifact(path, source, kind),
+  }));
+}
+
+function withArtifactEvidence(store: BoardStore, id: string, path: string, input: Record<string, unknown>,
+  result: SubmitIntent["result"], evidence: SubmitIntent["result"]["artifactEvidence"]): SubmitIntent["result"] {
+  if (!evidence) {
+    if (input.artifacts !== undefined) saveArtifacts(store, id, path, input.artifacts);
+    return result;
+  }
+  const pinned = new Map(evidence.map(({ source, sha256 }) => [source, sha256]));
+  const files = [...pinned.keys(), ...strings(input.artifacts ?? [], "artifacts")];
+  saveArtifacts(store, id, path, files, false, pinned);
+  return { ...result, artifactEvidence: evidence };
+}
+
 export function previewTask(store: BoardStore, id: string, revision?: number): Task {
   const task = store.card(id);
   requireRevision(task, revision);
@@ -124,7 +150,8 @@ export function previewTask(store: BoardStore, id: string, revision?: number): T
 export function previewSubmission(store: BoardStore, task: Task, compact: boolean, input: Record<string, unknown>) {
   if (task.workingDirectory && !task.git) {
     if (input.paths !== undefined) throw new TaskboardError("INVALID_INPUT", "This task has no Git diff.");
-    return { token: directorySubmissionToken(task), paths: [], targetHead: null, noChanges: true, ...(compact ? {} : { diff: "" }) };
+    const { token, artifactEvidence } = directorySubmissionSnapshot(task);
+    return { token, artifactEvidence, paths: [], targetHead: null, noChanges: true, ...(compact ? {} : { diff: "" }) };
   }
   const { path, context } = taskCheckout(store, task);
   const page = input.paths !== undefined;
@@ -196,8 +223,12 @@ function verifyCommit(path: string, head: string, intent: SubmitIntent, id: stri
   return message;
 }
 
-function directorySubmissionToken(task: Task) {
-  return createHash("sha256").update(JSON.stringify([task.id, task.revision, task.workingDirectory])).digest("hex");
+function directorySubmissionSnapshot(task: Task) {
+  const path = taskWorkingDirectory(task.workingDirectory!, true);
+  const artifactEvidence = captureArtifactEvidence(task, path);
+  const identity: unknown[] = [task.id, task.revision, task.workingDirectory];
+  if (artifactEvidence?.length) identity.push(artifactEvidence);
+  return { path, artifactEvidence, token: createHash("sha256").update(JSON.stringify(identity)).digest("hex") };
 }
 
 export function submitTask(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
@@ -223,15 +254,14 @@ export function submitTask(store: BoardStore, task: Task, input: Record<string, 
     if (input.noChanges !== true || input.message !== undefined) {
       throw new TaskboardError("INVALID_INPUT", "Submit this result with noChanges: true and without a commit message.");
     }
-    if (directorySubmissionToken(task) !== text(input.token, "token", true)) {
+    const { path, artifactEvidence, token } = directorySubmissionSnapshot(task);
+    if (token !== text(input.token, "token", true)) {
       throw new TaskboardError("STALE_SNAPSHOT", "The task changed. Prepare a new submission.");
     }
     const result = resultOf(input);
     if (!result.checks.length) throw new TaskboardError("CHECKS_REQUIRED", "Report how you verified the result outside Git.");
-    if (input.artifacts !== undefined) {
-      saveArtifacts(store, task.id, taskWorkingDirectory(task.workingDirectory, true), input.artifacts);
-    }
-    return store.save(record({ ...task, result: { ...result, noChanges: { head: null } } },
+    const verified = withArtifactEvidence(store, task.id, path, input, result, artifactEvidence);
+    return store.save(record({ ...task, result: { ...verified, noChanges: { head: null } } },
       "submit", "agent", "review", result.summary));
   }
   const { path, context } = taskCheckout(store, task);
@@ -257,9 +287,9 @@ export function submitTask(store: BoardStore, task: Task, input: Record<string, 
       if (snapshot.paths.length || gitStatus(path).length) {
         throw new TaskboardError("CHANGES_PRESENT", "Submit the Git changes with a commit message.");
       }
-      if (input.artifacts !== undefined) saveArtifacts(store, task.id, path, input.artifacts);
+      const verified = withArtifactEvidence(store, task.id, path, input, result, snapshot.artifactEvidence);
       return store.save(record({
-        ...task, git: { ...context, submission: undefined }, result: { ...result, noChanges: { head: snapshot.head } },
+        ...task, git: { ...context, submission: undefined }, result: { ...verified, noChanges: { head: snapshot.head } },
       }, "submit", "agent", "review", result.summary));
     }
     checkSubmissionMerge(path, context, snapshot);
@@ -267,16 +297,16 @@ export function submitTask(store: BoardStore, task: Task, input: Record<string, 
       if (snapshot.commitMessage !== message) {
         throw new TaskboardError("INVALID_COMMIT_MESSAGE", "Confirm the existing Conventional Commit message with this task's trailer.");
       }
-      if (input.artifacts !== undefined) saveArtifacts(store, task.id, path, input.artifacts);
+      const verified = withArtifactEvidence(store, task.id, path, input, result, snapshot.artifactEvidence);
       return store.save(record({
-        ...task, result, git: { ...context, submission: { sha: snapshot.head, message } },
+        ...task, result: verified, git: { ...context, submission: { sha: snapshot.head, message } },
       }, "submit", "agent", "review", result.summary));
     }
     if (!snapshot.paths.length) {
       throw new TaskboardError("NO_CHANGES", "Use noChanges: true to submit a completed result without Git changes.");
     }
-    if (input.artifacts !== undefined) saveArtifacts(store, task.id, path, input.artifacts);
-    intent = { action: "submit", revision: task.revision, snapshot, message, result };
+    const verified = withArtifactEvidence(store, task.id, path, input, result, snapshot.artifactEvidence);
+    intent = { action: "submit", revision: task.revision, snapshot, message, result: verified };
     writeJson(pendingPath, intent);
   }
 
@@ -286,7 +316,7 @@ export function submitTask(store: BoardStore, task: Task, input: Record<string, 
     if (staged !== originalTree && staged !== intent.snapshot.tree) {
       throw new TaskboardError("DIRTY_INDEX", "The real Git index no longer matches the prepared submission.", { path });
     }
-    const current = capture(store, task, path, false);
+    const current = capture(store, task, path, false, intent.result);
     if (current.token !== intent.snapshot.token) {
       if (staged !== originalTree) git(path, ["reset", "--mixed", "--quiet", head]);
       removeFile(pendingPath);

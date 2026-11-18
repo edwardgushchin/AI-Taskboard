@@ -187,8 +187,10 @@ export interface ExpertPhase {
   reason?: string;
   skills?: string[];
   stages: { key: string; expertId: string; title: string; description: string; criteria: string[];
-    inputs: string[]; outputs: string[]; dependsOn: string[] }[];
+    inputs: string[]; outputs: string[]; dependsOn: string[]; artifactOutputs?: Record<string, ArtifactKind> }[];
 }
+
+export type ArtifactKind = "png" | "text";
 
 export interface Task {
   expertId?: string;
@@ -228,7 +230,8 @@ export interface Task {
   launchRequested?: boolean;
   childWork?: { key: string; basis: string; id: string }[];
   blocked?: { reason: string; condition: string; previousStatus?: "draft" | "ready" };
-  result?: { summary: string; checks: string[]; limitations: string[]; noChanges?: { head: string | null } };
+  result?: { summary: string; checks: string[]; limitations: string[]; noChanges?: { head: string | null };
+    artifactEvidence?: { stage: string; output: string; kind: ArtifactKind; source: string; sha256: string }[] };
   artifacts?: { source: string; file: string; sha256: string }[];
   git?: TaskGit;
   history: TaskEvent[];
