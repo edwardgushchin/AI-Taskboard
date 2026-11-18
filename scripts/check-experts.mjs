@@ -42,7 +42,7 @@ app.whenReady().then(async () => {
       window.calls = [];
       window.parentCard = {id:'T-0001',title:'Команда спринта',revision:1,status:'draft',expertStages:[],history:[],criteria:[],questions:[],subtasks:[],attachments:[],tags:[],description:'',summary:'',nextStep:''};
       frame = {project:'Agent board fixture',board:{project:'Agent board fixture',
-        settings:{boardType:'agent', integrationMode:'merge', reviewMode:'reviewer'},tasks:[parentCard],archived:[],tags:[]}};
+        settings:{boardType:'agent', integrationMode:'merge', reviewMode:'reviewer-human'},tasks:[parentCard],archived:[],tags:[]}};
       api.taskLimits = async () => ({ok:true,data:{executor:1,reviewer:1}});
       api.command = async (action,id,input={}) => {
         calls.push({action,id,input:structuredClone(input)});
@@ -77,7 +77,8 @@ app.whenReady().then(async () => {
       ![...body.querySelectorAll('button')].some(button => button.textContent === t("ui.approve_535c27a7"))`, "old draft explains both missing leads and prevents approval");
     window.setContentSize(800, 760);
     await evaluate("frame.board.settings.requireExpertPlans = false; boardSettings(); void 0;"); await settled();
-    await check("sheet.open && !body.querySelector('[name=requireExpertPlans]')", "legacy settings show no expert plan switch");
+    await check(`sheet.open && !body.querySelector('[name=requireExpertPlans]') &&
+      body.querySelector('[name=reviewMode]')?.value === 'reviewer-human'`, "legacy settings show the saved review mode without an expert plan switch");
     writeFileSync(join(artifacts, "expert-plan-settings.png"), (await window.webContents.capturePage()).toPNG());
     await check("[...body.querySelectorAll('[name$=Limit]')].map(input=>input.placeholder).join(',')==='1,1' && !body.querySelector('[name=managerLimit]')", "board settings inherit one work task and one review task");
     await evaluate("body.querySelector('[name=executorLimit]').value='2'; body.querySelector('[name=reviewerLimit]').value='0'; body.querySelector('form').requestSubmit(); void 0;"); await settled();

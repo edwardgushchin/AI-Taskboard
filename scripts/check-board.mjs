@@ -88,6 +88,7 @@ app.whenReady().then(async () => {
     };
     ${readFileSync(require.resolve("markdown-it/browser"), "utf8")}
     ${read("image-preview.js")}
+    ${read("review-diff.js")}
     ${read("source-files.cjs")}
     ${read("markdown.js")}
     ${read("chat.js")}
@@ -343,6 +344,52 @@ app.whenReady().then(async () => {
     console.log('Cleanup Chromium checks passed: ' + checks);
     return;
   }
+  if (process.argv.includes("--reviewer-human-only")) {
+    await evaluate(`
+      fixture.board.settings.reviewMode = 'reviewer-human';
+      fixture.board.settings.reviewModeVersion = 1;
+      const hybridTask = task('T-0096', 'Проверка результата', { status: 'review', criteria: ['Результат проверен'],
+        result: { summary: 'Результат сохранён', checks: ['Проверено'], noChanges: {} } });
+      fixture.board.tasks = [hybridTask];
+      window.taskboard.command = async action => ({ ok: true, data: action === 'review' ? {
+        revision: hybridTask.revision, noChanges: true, targetHead: null, result: hybridTask.result,
+        reviewMode: 'reviewer-human', reviewModeVersion: 1, awaitingHumanAcceptance: hybridTask.reviewApproved === true
+      } : hybridTask });
+      push(); void 0;
+    `);
+    await check(`findCard('T-0096').querySelector('.task-run-status').textContent === 'Ожидает одобрения ревьюера'`, 'reviewing in Russian');
+    await evaluate(`showReview(hybridTask)`);
+    await check(`body.querySelector('button[type=submit]').disabled`, 'acceptance requires approval');
+    await evaluate(`hybridTask.reviewApproved = true; push(); settle()`);
+    await evaluate(`waitFor(() => !body.querySelector('button[type=submit]').disabled)`);
+    await check(`body.textContent.includes('Ожидает приёмки человеком') && !body.querySelector('button[type=submit]').disabled`, 'open review clears the gate after approval');
+    await capture('reviewer-human-approved-ru.png');
+    await evaluate(`sheet.close(); fixture.russian = false; push(); void 0`);
+    await check(`findCard('T-0096').querySelector('.task-run-status').textContent === 'Awaiting human acceptance'`, 'approved card remains in review in English');
+    await capture('reviewer-human-board-en.png');
+    await evaluate(`boardSettings(); settle()`);
+    await check(`body.querySelector('[name=reviewMode]').selectedOptions[0].textContent === 'Review + human'`, 'saved mode selected in board settings');
+    await check(`body.querySelector('[name=reviewMode]').parentElement.querySelector('small').textContent.includes('You decide')`, 'settings explain the human decision');
+    await capture('reviewer-human-settings-en.png');
+    await evaluate(`
+      sheet.close();
+      Object.assign(hybridTask, { result: { summary: 'Delivered', checks: ['Checked'] }, reviewApproved: false });
+      window.taskboard.command = async (action, id, fields) => {
+        if (action === 'accept') { window.recoveryRequest = { id, fields }; return { ok: false, error: { code: 'FIXTURE', message: 'Recorded recovery request' } }; }
+        return { ok: true, data: { revision: hybridTask.revision, result: hybridTask.result, targetHead: 'a'.repeat(40),
+          reviewMode: 'reviewer-human', reviewModeVersion: 2, pending: true, pendingModeChanged: true,
+          target: 'refs/heads/main', mode: 'squash', submitted: 'b'.repeat(40), message: 'feat: fixture', diff: '' } };
+      };
+      showReview(hybridTask);
+    `);
+    await check(`body.querySelector('button[type=submit]').disabled`, 'interrupted acceptance disables integration after a mode change');
+    await capture('reviewer-human-recovery-en.png');
+    await evaluate(`[...body.querySelectorAll('button')].find(button => button.textContent === 'Recover interrupted acceptance').click(); settle()`);
+    await check(`window.recoveryRequest.id === hybridTask.id && window.recoveryRequest.fields.cancelPending === true &&
+      window.recoveryRequest.fields.revision === hybridTask.revision`, 'recovery action pins the current revision');
+    console.log('Reviewer-human Chromium checks passed: ' + checks);
+    return;
+  }
   if (process.argv.includes("--run-status-only")) {
     await evaluate(`
       const queuedTask = task('T-0096', 'Проверка ожидания', { status: 'in_progress',
@@ -552,27 +599,62 @@ app.whenReady().then(async () => {
     return;
   }
   if (process.argv.includes("--subtasks-only")) {
+    window.setContentSize(1280, 800);
     await evaluate(`
       const progressTask = fixture.board.tasks[0];
+      progressTask.title = 'Прогресс подзадач';
+      fixture.board.tasks[1].title = 'Карточка без подзадач';
       progressTask.priority = 'high';
       progressTask.subtasks = ['Первая', 'Вторая', 'Третья'].map(title => ({ title, done: false }));
       const progressCard = findCard(progressTask.id);
       const progress = () => progressCard.querySelector('.task-subtask-progress');
       const meta = () => progressCard.querySelector('.task-meta');
       const bars = () => [...progress().children];
+      const fitsInOneRow = states => {
+        const row = progress().getBoundingClientRect();
+        const segments = bars();
+        const rects = segments.map(bar => bar.getBoundingClientRect());
+        return segments.length === states.length && rects[0].left === row.left &&
+          Math.abs(rects.at(-1).right - row.right) <= 1 &&
+          row.bottom <= meta().getBoundingClientRect().top &&
+          segments.every((bar, index) => {
+            const rect = rects[index];
+            return bar.classList.contains('is-done') === states[index] &&
+              rect.top === row.top && rect.height === 6 && rect.width > 0 &&
+              Math.abs(rect.width - rects[0].width) <= 0.1 &&
+              (index === 0 || rect.left > rects[index - 1].right);
+          });
+      };
+      const segmentColor = bar => {
+        const context = document.createElement('canvas').getContext('2d');
+        context.fillStyle = getComputedStyle(bar).backgroundColor;
+        context.fillRect(0, 0, 1, 1);
+        return [...context.getImageData(0, 0, 1, 1).data].slice(0, 3);
+      };
       push();
       waitFor(() => progressCard.querySelector('.task-card-cover')?.naturalWidth > 0);
     `);
-    for (const [theme, width, cardWidth] of [["light", 1380, 320], ["dark", 900, 200]]) {
+    const cdp = window.webContents.debugger;
+    cdp.attach("1.3");
+    const axCard = async () => {
+      const { result } = await cdp.sendCommand("Runtime.evaluate", { expression: "progressCard" });
+      const { nodes } = await cdp.sendCommand("Accessibility.getPartialAXTree", { objectId: result.objectId });
+      await cdp.sendCommand("Runtime.releaseObject", { objectId: result.objectId });
+      return nodes[0];
+    };
+    for (const theme of ["light", "dark"]) for (const narrow of [false, true]) {
       nativeTheme.themeSource = theme;
-      window.setContentSize(width, 900);
       await evaluate(`
         fixture.theme = '${theme}';
         fixture.board.settings.showCardPreviews = true;
-        progressCard.style.width = '${cardWidth}px';
+        byId('lanes').style.gridAutoColumns = '${narrow ? "120px" : ""}';
+        progressTask.subtasks = ['Первая', 'Вторая', 'Третья'].map(title => ({ title, done: false }));
         push();
         waitFor(() => matchMedia('(prefers-color-scheme: dark)').matches === ${theme === "dark"});
       `);
+      const cardWidth = await evaluate("progressCard.getBoundingClientRect().width");
+      if (narrow) assert.equal(cardWidth, 120);
+      const colors = theme === "light" ? [[209, 213, 219], [33, 74, 72]] : [[69, 73, 89], [185, 220, 212]];
       for (const states of [[false, false, false], [true, false, true], [false, true, true], [true, true, true]]) {
         const count = states.filter(Boolean).length;
         await evaluate(`
@@ -581,18 +663,13 @@ app.whenReady().then(async () => {
           push(); settle();
         `);
         await check(`(() => {
-          const fills = bars().map(bar => getComputedStyle(bar).backgroundColor);
-          const expected = ${JSON.stringify(states)}.map(done => done ? 'rgb(118, 255, 52)' :
-            '${theme === "light" ? "rgb(109, 115, 126)" : "rgb(144, 149, 159)"}');
-          const bounds = meta().getBoundingClientRect();
+          const states = ${JSON.stringify(states)};
+          const colors = ${JSON.stringify(colors)};
           const cover = progressCard.querySelector('.task-card-cover');
-          return findCard(progressTask.id) === progressCard && fills.join() === expected.join() &&
+          return findCard(progressTask.id) === progressCard && fitsInOneRow(states) &&
+            bars().every((bar, i) => segmentColor(bar).every((channel, j) =>
+              Math.abs(channel - colors[Number(states[i])][j]) <= 1)) &&
             cover && !cover.hidden && cover.nextElementSibling === progress() && progress().nextElementSibling === meta() &&
-            bars().every(bar => {
-              const rect = bar.getBoundingClientRect();
-              return rect.left === bounds.left && rect.right === bounds.right && rect.height === 6 &&
-                parseFloat(getComputedStyle(bar).borderTopLeftRadius) >= 3;
-            }) &&
             meta().scrollWidth <= meta().clientWidth && meta().querySelector('.task-id').textContent === progressTask.id &&
             meta().querySelector('.codicon-attach') && !meta().querySelector('.codicon-checklist') &&
             !progressCard.innerText.includes('${count}/3') && progress().getAttribute('aria-hidden') === 'true' &&
@@ -600,12 +677,47 @@ app.whenReady().then(async () => {
             progressCard.getAttribute('aria-description').endsWith(t('ui.subtasks_b409bda5') + ' ${count}/3') &&
             !findCard('T-0002').querySelector('.task-subtask-progress');
         })()`, `ordered bars and unchanged metadata: ${theme}, ${cardWidth}px, ${states}`);
-        if (states[0] && !states[1]) await capture(`subtasks-${theme}-${cardWidth}.png`);
+        const accessible = await axCard();
+        assert.equal(accessible.role.value, "button");
+        assert.match(accessible.description.value, new RegExp(`${count}/3$`));
+        if (!narrow && states[0] && !states[1]) await capture(`progress-${theme}.png`);
       }
       await evaluate(`fixture.board.settings.showCardPreviews = false; push(); settle()`);
-      await check(`!progressCard.querySelector('.task-card-cover') && progress().nextElementSibling === meta()`,
+      await check(`!progressCard.querySelector('.task-card-cover') && progress().nextElementSibling === meta() &&
+        fitsInOneRow([true, true, true])`,
         `progress remains above metadata without a cover: ${theme}`);
+      await evaluate(`
+        Object.assign(fixture.board.tasks[1], {
+          title: 'Одна подзадача', subtasks: [{ title: 'Проверка', done: false }]
+        });
+        push(); settle();
+      `);
+      await check(`(() => {
+        const card = findCard('T-0002');
+        const row = card.querySelector('.task-subtask-progress');
+        return row.children.length === 1 && row.firstElementChild.offsetWidth === row.offsetWidth &&
+          card.getAttribute('aria-description').endsWith('0/1');
+      })()`, `one subtask fills the row: ${theme}, ${cardWidth}px`);
+      const many = Array.from({ length: 40 }, (_, index) => index % 3 !== 2);
+      await evaluate(`
+        progressTask.title = '40 подзадач';
+        progressTask.subtasks = ${JSON.stringify(many)}.map((done, i) => ({ title: String(i), done }));
+        push(); settle();
+      `);
+      await check(`fitsInOneRow(${JSON.stringify(many)}) && meta().scrollWidth <= meta().clientWidth`,
+        `long checklist fits above metadata: ${theme}, ${cardWidth}px`);
+      assert.match((await axCard()).description.value, /27\/40$/);
+      if (narrow && theme === "dark") await capture("progress-narrow.png");
+      await evaluate(`
+        progressTask.title = 'Прогресс подзадач';
+        progressTask.subtasks = progressTask.subtasks.slice(0, 3).map(entry => ({ ...entry, done: true }));
+        fixture.board.tasks[1].title = 'Карточка без подзадач';
+        fixture.board.tasks[1].subtasks = [];
+        push(); settle();
+      `);
+      console.log(`Progress layout: ${theme}, content ${window.getContentSize().join("x")}, card ${cardWidth} CSS px. Counts 0, 1, 3, 40; live board snapshots; Chromium accessibility descriptions.`);
     }
+    cdp.detach();
     await evaluate(`fixture.russian = false; push(); settle()`);
     await check(`progressCard.getAttribute('aria-description').endsWith('Subtasks 3/3')`, "progress description follows the locale");
     await evaluate(`

@@ -178,7 +178,7 @@ test("planned work and review enforce stage order, evidence and independent mail
   assert.equal(command("show").description, scope.description);
   assert.deepEqual(command("show").criteria, scope.criteria);
   command("approve", { revision }, "EXPERT_PLAN_REQUIRED");
-  for (const reviewMode of ["human", "manager", "reviewer"]) {
+  for (const reviewMode of ["human", "manager", "reviewer-human", "reviewer"]) {
     call(["settings"], { reviewMode });
     const expertTeam = { work: { ...workPlan, stages: [] } };
     if (reviewMode === "human") {

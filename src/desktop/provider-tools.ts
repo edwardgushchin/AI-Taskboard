@@ -1,6 +1,7 @@
 import { TaskboardError } from "../cli/model.ts";
 import type { Task } from "../cli/model.ts";
 import { callCli, cliFailure } from "./cli.ts";
+import { computerUseServer, computerUseUnavailable } from "./computer-use.ts";
 
 export type ProviderRequest = <T>(method: string, params: object) => Promise<T>;
 type ServerConfig = { enabled?: boolean; required?: boolean; enabled_tools?: string[]; disabled_tools?: string[];
@@ -25,14 +26,14 @@ async function pages<T>(request: ProviderRequest, method: string, params: object
   return result;
 }
 
-export async function providerTools(request: ProviderRequest, threadId: string, cwd: string) {
+export async function providerTools(request: ProviderRequest, threadId: string, cwd: string, browserConnected = false) {
   // Config can contain credentials. It stays in memory and is never included in a tool reply.
   const { config } = await request<{ config: { mcp_servers?: Record<string, ServerConfig> } }>("config/read", { cwd, includeLayers: false });
   const servers = config.mcp_servers ?? {};
   const statuses = await pages<ServerStatus>(request, "mcpServerStatus/list", { threadId, detail: "toolsAndAuthOnly" });
   const tools: ProviderTool[] = [];
   for (const status of statuses) {
-    if (status.name === "ai_taskboard") continue;
+    if (status.name === "ai_taskboard" || (status.name === computerUseServer && !browserConnected)) continue;
     const settings = servers[status.name];
     const names = Object.keys(status.tools ?? {});
     for (const tool of names.length ? names : [""]) {
@@ -58,7 +59,7 @@ export async function providerTools(request: ProviderRequest, threadId: string, 
   return { tools, appsReason, builtins: "Built-in tools are supplied by the provider and governed by its permission profile. App Server does not expose a complete built-in tool catalog for assignment." };
 }
 
-export function providerActions(project: string, request: ProviderRequest, threadId: string) {
+export function providerActions(project: string, request: ProviderRequest, threadId: string, browserConnected = false) {
   return async (name: string, args: unknown) => {
     try {
       if (name === "task_tool_revoke") {
@@ -66,9 +67,10 @@ export function providerActions(project: string, request: ProviderRequest, threa
         if (typeof input?.id !== "string") return cliFailure("INVALID_INPUT", "Supply the task ID and current revision.");
         return callCli(project, ["tool-revoke", input.id, "--compact"], { revision: input.revision, server: input.server, tool: input.tool });
       }
-      const catalog = await providerTools(request, threadId, project);
+      const catalog = await providerTools(request, threadId, project, browserConnected);
       if (name === "provider_tools") return { ok: true as const, data: catalog };
       const input = args as Record<string, unknown> | null;
+      if (input?.server === computerUseServer && !browserConnected) return cliFailure("TOOL_UNAVAILABLE", computerUseUnavailable);
       const selected = catalog.tools.find(tool => tool.kind === "mcp" && tool.server === input?.server && tool.tool === input?.tool);
       if (!selected?.assignable) return cliFailure("TOOL_UNAVAILABLE", selected?.reason ?? "Tool was not discovered for this provider session. Use provider_tools; no assignment was saved.");
       if (typeof input?.id !== "string") return cliFailure("INVALID_INPUT", "Supply the task ID and current revision.");
@@ -79,7 +81,7 @@ export function providerActions(project: string, request: ProviderRequest, threa
   };
 }
 
-export async function executorToolConfig(request: ProviderRequest, cwd: string, grants: Task["toolGrants"]) {
+export async function executorToolConfig(request: ProviderRequest, cwd: string, grants: Task["toolGrants"], browserConnected = false) {
   const { config } = await request<{ config: { mcp_servers?: Record<string, ServerConfig> } }>("config/read", { cwd, includeLayers: false })
     .catch(() => { throw new TaskboardError("PROVIDER_TOOLS_UNAVAILABLE", "Provider tool configuration could not be read. Check the connected version, account and policy."); });
   const servers = config?.mcp_servers;
@@ -90,6 +92,9 @@ export async function executorToolConfig(request: ProviderRequest, cwd: string, 
   }
   for (const grant of grants ?? []) {
     const original = servers[grant.server];
+    if (grant.server === computerUseServer && !browserConnected) {
+      throw new TaskboardError("TOOL_UNAVAILABLE", computerUseUnavailable + " Check the assigned tool and relaunch the task.");
+    }
     if (!original || original.enabled === false || (!original.command && !original.url) ||
         original.enabled_tools && !original.enabled_tools.includes(grant.tool) || original.disabled_tools?.includes(grant.tool) ||
         original.tools?.[grant.tool]?.enabled === false) {

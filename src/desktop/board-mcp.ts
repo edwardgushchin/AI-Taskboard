@@ -10,7 +10,7 @@ export interface BoardMcpTool {
 }
 
 export function boardToolContent(name: string, reply: CliReply) {
-  if (name === "task_review_artifact" && reply.ok && reply.data && typeof reply.data === "object" &&
+  if ((name === "task_review_artifact" || name === "computer_use") && reply.ok && reply.data && typeof reply.data === "object" &&
       "pngBase64" in reply.data && typeof reply.data.pngBase64 === "string") {
     const { pngBase64, ...data } = reply.data;
     return { text: JSON.stringify({ ...reply, data }), pngBase64 };
@@ -35,9 +35,10 @@ export async function withBoardMcp<T>(
 export async function openBoardMcp(
   tools: BoardMcpTool[], call: (name: string, args: unknown, signal: AbortSignal) => Promise<CliReply>,
   toolTimeoutSeconds = 140,
+  name = "ai_taskboard",
 ) {
   const token = randomBytes(32).toString("hex");
-  const tokenVariable = "AI_TASKBOARD_MCP_TOKEN";
+  const tokenVariable = name.toUpperCase() + "_MCP_TOKEN";
   const server = createServer((request, response) => {
     const end = (status: number) => { response.writeHead(status).end(); };
     if (request.headers.origin !== undefined || request.headers.authorization !== "Bearer " + token) return end(403);
@@ -61,7 +62,7 @@ export async function openBoardMcp(
       if (message.method === "initialize") {
         const version = message.params?.protocolVersion;
         result = { protocolVersion: ["2025-03-26", "2025-06-18", "2025-11-25"].includes(version) ? version : "2025-11-25",
-          capabilities: { tools: {} }, serverInfo: { name: "ai_taskboard", version: "0.1.0" } };
+          capabilities: { tools: {} }, serverInfo: { name, version: "0.1.0" } };
       } else if (message.method === "tools/list") {
         result = { tools };
       } else if (message.method === "tools/call" && tools.some(tool => tool.name === message.params?.name)) {
@@ -98,7 +99,7 @@ export async function openBoardMcp(
   // AI Taskboard authorizes these tools within the scope of the current chat.
   const policies = tools.map(tool => `${tool.name}={approval_mode="approve"}`).join(",");
   return {
-    config: `mcp_servers.ai_taskboard={url="http://127.0.0.1:${port}/mcp",bearer_token_env_var="${tokenVariable}",required=true,tool_timeout_sec=${toolTimeoutSeconds},tools={${policies}}}`,
+    config: `mcp_servers.${name}={url="http://127.0.0.1:${port}/mcp",bearer_token_env_var="${tokenVariable}",required=true,tool_timeout_sec=${toolTimeoutSeconds},tools={${policies}}}`,
     env: { [tokenVariable]: token },
     close: () => new Promise<void>(resolve => {
       server.close(() => resolve());

@@ -32,6 +32,7 @@ function cli(project, args, input) {
 if (!process.versions.electron) {
   const scratch = mkdtempSync(join(tmpdir(), "taskboard-shared-runtime-"));
   const managerOnly = process.argv.includes("--manager-only");
+  const hybridOnly = process.argv.includes("--reviewer-human-only");
   const recoveryOnly = process.argv.includes("--worktree-recovery-only");
   const outputIndex = process.argv.indexOf("--artifacts");
   const output = outputIndex < 0 ? undefined : resolve(process.argv[outputIndex + 1]);
@@ -42,7 +43,7 @@ if (!process.versions.electron) {
   const project = join(scratch, "board"), other = join(scratch, "other");
   const record = text => { results.push(text); console.log(text); };
   const start = async name => {
-    const child = spawn(require("electron"), [script, "--worker", scratch, name], { cwd: scratch, env: { ...env, ELECTRON_LOG_FILE: join(scratch, name + "-electron.log") }, windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"] });
+    const child = spawn(require("electron"), [script, "--worker", scratch, name, ...(hybridOnly ? ["--reviewer-human-only"] : [])], { cwd: scratch, env: { ...env, ELECTRON_LOG_FILE: join(scratch, name + "-electron.log") }, windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"] });
     let logs = "", sequence = 0;
     const pending = new Map();
     child.stdout.on("data", data => { logs += data; }); child.stderr.on("data", data => { logs += data; });
@@ -114,6 +115,84 @@ if (!process.versions.electron) {
       break checks;
     }
     for (const board of [project, other]) { mkdirSync(board); cli(board, ["init"], { git: false }); cli(board, ["settings"], { autoMode: false, reviewMode: "human", taskLimits: { executor: 1, reviewer: 1 } }); }
+    if (hybridOnly) {
+      const git = (...args) => execFileSync("git", ["-C", project, ...args], { encoding: "utf8", windowsHide: true }).trim();
+      git("init", "-b", "main");
+      git("config", "user.name", "Taskboard Tests");
+      git("config", "user.email", "test@example.invalid");
+      git("commit", "--allow-empty", "-m", "chore: initialize fixture");
+      const initial = git("rev-parse", "HEAD");
+      const { reviewModeVersion } = cli(project, ["settings"], { reviewMode: "reviewer-human", autoMode: true, reviewer: { model: "fixture", effort: "low" } });
+      const task = cli(project, ["create"], { title: "Shared acceptance", criteria: ["Result exists"] });
+      cli(project, ["approve", task.id]);
+      const { worktree } = cli(project, ["start", task.id]);
+      writeFileSync(join(worktree, "result.txt"), "Checked result");
+      const { token } = cli(project, ["preview", task.id]);
+      const submitted = cli(project, ["submit", task.id], { token, message: "feat: submit fixture",
+        summary: "Submitted fixture", checks: ["Read the result"] });
+      // Prepare CLI-driven cards before opening windows, so no draft discussion owns their executor.
+      const external = cli(project, ["create"], { title: "External result", criteria: ["Result exists"] });
+      const dependent = cli(project, ["create"], { title: "Dependent", criteria: ["Dependency is accepted"], dependencies: [external.id] });
+      cli(project, ["approve", external.id]);
+      cli(project, ["start", external.id]);
+      cli(project, ["approve", dependent.id]);
+      const a = await start("profile-a"), b = await start("profile-b");
+      const bothApproved = async () => (await Promise.all([a.ask({ action: "frames" }), b.ask({ action: "frames" })])).flat().every(frame =>
+        frame.board.settings.reviewMode === "reviewer-human" &&
+        frame.board.tasks.some(card => card.id === task.id && card.status === "review" && card.reviewApproved));
+      await wait(bothApproved, "approval in both profiles");
+      assert.equal(await a.ask({ action: "reviews" }) + await b.ask({ action: "reviews" }), 1);
+      assert.equal(git("rev-parse", "HEAD"), initial);
+      await a.ask({ action: "exit" });
+      await once(a.child, "exit");
+      const restarted = await start("profile-a");
+      assert.equal((await restarted.ask({ action: "frames" }))[0].board.tasks.find(card => card.id === task.id).reviewApproved, true);
+      const input = { revision: submitted.revision, reviewModeVersion, targetHead: initial, message: "feat: accept fixture" };
+      const cancelled = restarted.ask({ action: "acceptFixture", id: task.id, input: { ...input, userAcceptance: true } });
+      await wait(async () => await restarted.ask({ action: "confirmations" }) === 1, "native Git confirmation");
+      assert.equal(git("rev-parse", "HEAD"), initial);
+      await restarted.ask({ action: "answerConfirmation", response: 0 });
+      assert.equal((await cancelled).error.code, "ACCEPTANCE_CANCELLED");
+      assert.equal(cli(project, ["show", task.id]).status, "review");
+      const requests = [restarted, b].map(worker => worker.ask({ action: "acceptFixture", id: task.id, input }));
+      await wait(async () => await restarted.ask({ action: "confirmations" }) === 2 && await b.ask({ action: "confirmations" }) === 1,
+        "native confirmation in both windows");
+      await Promise.all([restarted, b].map(worker => worker.ask({ action: "answerConfirmation", response: 1 })));
+      const replies = await Promise.all(requests);
+      assert.ok(replies.every(reply => reply.ok && reply.data.status === "done"), JSON.stringify(replies));
+      assert.equal(git("rev-list", "--first-parent", "--count", initial + "..HEAD"), "1");
+      assert.equal(await restarted.ask({ action: "reviews" }), 0);
+      record("PASS: one reviewer across two profiles; approval survives restart; cancel preserves the Git target; two native confirmations produce one integration");
+      cli(project, ["settings"], { autoMode: false });
+      const externalToken = cli(project, ["preview", external.id]).token;
+      const externalSubmission = cli(project, ["submit", external.id], { token: externalToken,
+        noChanges: true, summary: "External result", checks: ["Read the result"] });
+      await wait(() => cli(project, ["review", external.id, "--compact"]).awaitingHumanAcceptance, "external result approval");
+      const request = restarted.ask({ action: "acceptFixture", id: external.id,
+        input: { revision: externalSubmission.revision, targetHead: null, reviewModeVersion } });
+      await wait(async () => await restarted.ask({ action: "confirmations" }) === 3, "native confirmation for non-Git result");
+      assert.deepEqual(cli(project, ["show", dependent.id]).unfinishedDependencies, [external.id]);
+      cli(project, ["settings"], { reviewMode: "human" });
+      const updatedSettings = cli(project, ["settings"], { reviewMode: "reviewer-human" });
+      await restarted.ask({ action: "answerConfirmation", response: 1 });
+      assert.equal((await request).error.code, "REVIEW_MODE_CHANGED");
+      assert.deepEqual(cli(project, ["show", dependent.id]).unfinishedDependencies, [external.id]);
+      await wait(() => cli(project, ["review", external.id, "--compact"]).awaitingHumanAcceptance, "fresh approval for external result");
+      const freshRequest = restarted.ask({ action: "acceptFixture", id: external.id,
+        input: { revision: externalSubmission.revision, targetHead: null, reviewModeVersion: updatedSettings.reviewModeVersion } });
+      await wait(async () => await restarted.ask({ action: "confirmations" }) === 4, "fresh native confirmation");
+      await restarted.ask({ action: "answerConfirmation", response: 1 });
+      const accepted = await freshRequest;
+      assert.ok(accepted.ok && accepted.data.status === "done", JSON.stringify(accepted));
+      assert.deepEqual(cli(project, ["show", dependent.id]).unfinishedDependencies, []);
+      assert.equal(git("rev-list", "--first-parent", "--count", initial + "..HEAD"), "1");
+      record("PASS: mode change during confirmation invalidates it; result without Git changes unblocks dependencies only after fresh review and confirmation");
+      if (output) {
+        mkdirSync(output, { recursive: true });
+        writeFileSync(join(output, "reviewer-human-runtime.txt"), results.join("\n") + "\n");
+      }
+      break checks;
+    }
     const tasks = [];
     for (let i = 0; !managerOnly && i < 6; i++) { const task = cli(project, ["create"], plannedDraft({ title: "Isolated concurrency " + i, criteria: ["Fixture completes"], workingDirectory: project })); cli(project, ["approve", task.id]); tasks.push(task.id); }
     const a = await start("profile-a"), b = await start("profile-b");
@@ -476,7 +555,7 @@ if (!process.versions.electron) {
     console.log("PASS: private profiles, boards and fixture providers cleaned");
   }
 } else {
-  const { app, BrowserWindow } = require("electron"), { transformSync } = require("esbuild");
+  const { app, BrowserWindow, dialog } = require("electron"), { transformSync } = require("esbuild");
   const scratch = process.argv[3], name = process.argv[4], project = join(scratch, "board"), other = join(scratch, "other");
   app.setPath("userData", join(scratch, name)); app.setPath("appData", join(scratch, "app-data-" + name));
   app.disableHardwareAcceleration(); app.requestSingleInstanceLock = () => true;
@@ -553,6 +632,23 @@ if (!process.versions.electron) {
     .replace('replyToBoard, replyToTask', 'replyToBoard as unusedReplyToBoard, replyToTask')
     .replace('reviewWithCodex, updateBoardGoal', 'reviewWithCodex, updateBoardGoal as unusedUpdateBoardGoal');
   source = 'const configuredCodex = async () => ({}); const startCodexRun = globalThis.runtimeCheckStart; const replyToBoard = globalThis.runtimeCheckReply; const updateBoardGoal = globalThis.runtimeCheckUpdateGoal;\n' + source;
+  let reviews = 0, confirmations = 0, pendingConfirmation;
+  if (process.argv.includes("--reviewer-human-only")) {
+    dialog.showMessageBox = async (_window, options) => {
+      assert.equal(options.defaultId, 0);
+      assert.equal(options.cancelId, 0);
+      assert.match(options.detail, /T-\d+/);
+      confirmations++;
+      return { response: await new Promise(resolve => { pendingConfirmation = resolve; }) };
+    };
+    globalThis.runtimeCheckReview = async () => {
+      reviews++;
+      await delay(1200);
+      return { summary: "Checked the result", findings: [], needsHuman: false, evidence: ["Result exists"] };
+    };
+    source = source.replace(", reviewWithCodex,", ", reviewWithCodex as unusedReviewWithCodex,");
+    source = "const reviewWithCodex = globalThis.runtimeCheckReview;\n" + source;
+  }
   source = source.replaceAll("import.meta.url", JSON.stringify(sourceUrl.href)).replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, sourceUrl).href));
   const entry = join(scratch, name + ".mjs");
   writeFileSync(entry, transformSync(source + "\nglobalThis.sharedCheck = {createWindow,launchTask,agentSlots,reserveAgent,scheduleAgentWork,scheduleMaintenance,activeAgents,subscriptions};", { loader: "ts", format: "esm" }).code);
@@ -566,6 +662,17 @@ if (!process.versions.electron) {
       const qa = globalThis.sharedCheck; let data;
       const board = command.other ? other : project, key = command.role + (command.other ? ":other" : "") + (command.task ?? "");
       if (command.action === "ready") data = true;
+      if (command.action === "reviews") data = reviews;
+      if (command.action === "confirmations") data = confirmations;
+      if (command.action === "answerConfirmation") {
+        const answer = pendingConfirmation;
+        assert.ok(answer, "native confirmation is pending");
+        pendingConfirmation = undefined;
+        answer(command.response);
+        data = true;
+      }
+      if (command.action === "acceptFixture") data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(
+        `window.taskboard.command("accept", ${JSON.stringify(command.id)}, ${JSON.stringify(command.input)})`);
       if (command.action === "versions") data = process.versions;
       if (command.action === "executorBinding") data = executorBindings.get(command.id);
       if (command.action === "restoreBoards") { const state = qa.createWindow([project, other]); await state.ready; globalThis.restoredCheckWindow = state.window; data = true; }

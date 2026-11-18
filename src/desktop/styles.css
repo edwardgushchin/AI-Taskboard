@@ -564,14 +564,16 @@ select:hover:not(:disabled) {
   );
   font-weight: 600;
 }
-.task-subtask-progress { display: grid; gap: 4px; }
+.task-subtask-progress {
+  display: flex; min-width: 0;
+  gap: min(4px, calc(22% / var(--subtask-count)));
+}
 .task-subtask-progress > span {
-  height: 6px; border-radius: 999px;
-  background: light-dark(#6d737e, #90959f);
+  flex: 1 1 0; min-width: 0; height: 6px; border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 27%, var(--panel));
 }
 .task-subtask-progress > .is-done {
-  background: #76ff34;
-  border: 1px solid light-dark(#386812, transparent);
+  background: color-mix(in srgb, var(--green) 45%, var(--text));
 }
 .task-meta { min-width: 0; gap: 5px 8px; color: var(--muted); font-size: 11px; line-height: 15px; font-variant-numeric: tabular-nums; }
 .task-meta > span { display: inline-flex; align-items: center; min-width: 0; max-width: 100%; }

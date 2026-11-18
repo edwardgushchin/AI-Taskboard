@@ -12,6 +12,7 @@ import { codexThreadPattern, taskIdPattern } from "../cli/model.ts";
 import { chatTools } from "./chat-actions.ts";
 import type { BoardChange } from "./board-actions.ts";
 import { boardToolContent, withBoardMcp } from "./board-mcp.ts";
+import { openComputerUse } from "./computer-use.ts";
 import { goalTaskWaitSeconds } from "./board-actions.ts";
 import { boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "./board-agent-hooks.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
@@ -43,7 +44,7 @@ interface ModelEntry {
 type Notification = (message: RpcMessage) => void | Promise<void>;
 type ServerRequest = (message: RpcMessage) => Promise<object | undefined>;
 type RunAction = (name: string, args: unknown) => Promise<CliReply>;
-type BoardMcpConnection = { config: string; env: Record<string, string> };
+type BoardMcpConnection = { config: string; env: Record<string, string>; browserConfig?: string };
 type CodexClient = NonNullable<Awaited<ReturnType<typeof configuredCodex>>>;
 type RpcRequest = <R>(method: string, params: object) => Promise<R>;
 const idleTimeoutMs = 180_000;
@@ -69,6 +70,7 @@ async function withServer<T>(
     ...client.args, ...(providerTools ? managerCodexArgs : boardCodexArgs),
     ...(providerTools ? mcp ? ["-c", mcp.config] : [] :
       ["-c", mcp ? `mcp_servers={${mcp.config.slice("mcp_servers.".length)}}` : "mcp_servers={}"]),
+    ...(providerTools && mcp?.browserConfig ? ["-c", mcp.browserConfig] : []),
     "-c", webSearch ? 'web_search="live"' : 'web_search="disabled"',
     ...(research ? [
       // Native SSH needs direct TCP; the optional command proxy only serves proxy-aware clients.
@@ -340,7 +342,7 @@ export async function requestExecutorAccess(profile: string, project: string, id
   }
 }
 
-export function replyToBoard(
+export async function replyToBoard(
   profile: string, project: string, prompt: string, images: string[], runAction: RunAction,
   tools: object[], instructions: string, signal: AbortSignal,
   session: BoardSession,
@@ -359,12 +361,14 @@ export function replyToBoard(
       "Use Codex's native approval request when the sandbox blocks a required operation. If the operation needs the regular OS user, " +
       "tell the user that Full access is available under Board settings, Project manager, Access mode. ";
   const mcpTools = [...session.mcpTools, worklogTool];
+  const browser = await openComputerUse(!session.readOnly && session.role !== "reviewer", undefined, signal);
   return withBoardMcp(mcpTools,
     async (name, args) => name === worklogTool.name ? worklog.submit(args) : worklog.remind(await dispatch(name, args)),
     (config, env) => reply(profile, project, prompt, images, dispatch, {
       tools, instructions: boardAgentInstructions("manager", instructions + accessInstructions + (accessInstructions ?
         "Use existing credentials for authorized operations without exposing them. Keep SSH host key checking enabled and report server authentication failures separately from local permission failures." : ""), { dialogue, manual: readBoardSettings(locateBoard(project)).boardType === "manual" }),
-      signal, session, worklog, role: session.role, onTokenUsage: session.onTokenUsage, mcp: { config, env },
+      signal, session, worklog, role: session.role, onTokenUsage: session.onTokenUsage,
+      mcp: { config, env: { ...env, ...browser?.env }, browserConfig: browser?.config },
       observeProvider: session.observeProvider,
       prepareResearch: async (request, client) => {
         const launchKey = JSON.stringify([profile, client.path, client.args, client.version, client.windowsSandbox, permissionProfile]);
@@ -376,8 +380,9 @@ export function replyToBoard(
         mcpTools.splice(0, mcpTools.length, ...native.tools);
         return native.instructions;
       },
-      onProviderReady: (request, id) => { providerAction = providerActions(project, request, id); session.bindProvider?.(request, id); },
-    }), session.goal || session.resumeGoal ? goalTaskWaitSeconds + 20 : undefined);
+      onProviderReady: (request, id) => { providerAction = providerActions(project, request, id, Boolean(browser)); session.bindProvider?.(request, id); },
+    }), session.goal || session.resumeGoal ? goalTaskWaitSeconds + 20 : undefined)
+    .finally(() => browser?.close());
 }
 
 interface BoardSession {

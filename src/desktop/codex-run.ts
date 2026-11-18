@@ -13,6 +13,7 @@ import { runActivity } from "./run-activity.ts";
 import { boardAgentInstructions, boardCodexArgs, boardWorklog, worklogReminder, worklogTool } from "./board-agent-hooks.ts";
 import { githubCreateMilestoneTool, githubSetMilestoneDueTool, milestonesListTool, recurringChildTool } from "./board-actions.ts";
 import { openBoardMcp } from "./board-mcp.ts";
+import { openComputerUse } from "./computer-use.ts";
 import { githubReadTool, readBoardGitHub } from "./github-read.ts";
 import { checkWaitInstructions, checkWaitTool, executorToolTimeoutSeconds, waitForCheck } from "./check-wait.ts";
 import { executorToolConfig, verifyExecutorTools } from "./provider-tools.ts";
@@ -202,6 +203,10 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     if (name === githubSetMilestoneDueTool.name) return worklog.remind(await callCli(project, ["github-milestone-due"], args));
     return worklog.submit(args);
   }, executorToolTimeoutSeconds);
+  let browser: Awaited<ReturnType<typeof openComputerUse>>;
+  const closeTools = async () => {
+    try { await browser?.close(); } finally { await mcp.close(); }
+  };
   let child: ChildProcessWithoutNullStreams;
   let runTemp: string | undefined;
   const removeRunTemp = async () => {
@@ -209,8 +214,9 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       .catch(error => console.warn("Could not remove the executor's temporary directory.", runTemp, error.message));
   };
   try {
+    browser = await openComputerUse(true, task.toolGrants ?? [], signal);
     signal?.throwIfAborted();
-    const env: NodeJS.ProcessEnv = { ...(client.env ?? process.env), ...mcp.env };
+    const env: NodeJS.ProcessEnv = { ...(client.env ?? process.env), ...mcp.env, ...browser?.env };
     if (process.platform === "win32") {
       runTemp = mkdtempSync(join(realpathSync(tmpdir()), "ai-taskboard-executor-temp-"));
       paths.push(runTemp);
@@ -227,6 +233,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       : env;
     child = spawn(client.path, [
       ...client.args, ...boardCodexArgs, "-c", mcp.config,
+      ...(browser ? ["-c", browser.config] : []),
       "-c", 'web_search="live"',
       "--disable", "network_proxy",
       ...(fullAccess ? ["-c", 'approval_policy="never"'] :
@@ -235,7 +242,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       ...(!fullAccess && process.platform === "win32" ? ["--disable", "prefer_mxc", "-c", "windows.sandbox=" + JSON.stringify(client.windowsSandbox ?? "mxc")] : []),
     ], { cwd: project, env: runEnv, windowsHide: true, stdio: "pipe" });
   } catch (error) {
-    try { await mcp.close(); } finally { await removeRunTemp(); }
+    try { await closeTools(); } finally { await removeRunTemp(); }
     throw error;
   }
   const exited = new Promise<void>(resolve => child.once("close", resolve));
@@ -244,7 +251,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   catch (error) {
     child.kill();
     await exited;
-    try { await mcp.close(); } finally { await removeRunTemp(); }
+    try { await closeTools(); } finally { await removeRunTemp(); }
     throw error;
   }
   child.once("close", releaseProvider);
@@ -271,7 +278,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     child.stdin.end();
     child.kill();
     await exited;
-    try { await mcp.close(); } finally { await removeRunTemp(); }
+    try { await closeTools(); } finally { await removeRunTemp(); }
   };
   child.stderr.resume();
   const rpc = codexRpc(child, message => {
@@ -366,7 +373,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       cwd, model: task.execution?.model, permissions: profile,
       approvalPolicy, approvalsReviewer, developerInstructions: plan?.stages.length
         ? developerInstructions + "\n" + await subagentInstructions(request) : developerInstructions,
-      config: await executorToolConfig(request, cwd, task.toolGrants),
+      config: await executorToolConfig(request, cwd, task.toolGrants, Boolean(browser)),
     };
     let started: ThreadReply | undefined;
     if (existing) {
