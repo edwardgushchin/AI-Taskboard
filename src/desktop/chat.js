@@ -476,7 +476,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
   }
 }
 
-function updateChat({ project, id, type, text, items, goal, goalRunning, error, question, managerRun, managerWork, at }) {
+function updateChat({ project, id, type, text, items, savedRun, goal, goalRunning, error, question, managerRun, managerWork, at }) {
   if (type === "orchestrator-question") {
     if (frame.project === project) {
       frame.managerQuestion = question;
@@ -519,7 +519,13 @@ function updateChat({ project, id, type, text, items, goal, goalRunning, error, 
   if (type === "run" && frame.project === project) {
     (frame.runActivity ??= {})[id] = items;
     byId("board-composer").firstChild?.updateManagerWork();
-    if (open) byId("task-side").firstElementChild?.updateRun(items);
+    if (open) {
+      if (savedRun && savedRun.sequence > taskInSheet.history.length) {
+        const draft = chatDrafts.get(project + "\0" + id);
+        if (draft) draft.savedRun = savedRun;
+      }
+      byId("task-side").firstElementChild?.updateRun(items);
+    }
     return;
   }
   const draft = chatDrafts.get(project + "\0" + id);
@@ -724,6 +730,7 @@ function taskChat(task) {
     draft = { text: "", files: [] };
     chatDrafts.set(key, draft);
   }
+  if (draft.savedRun?.sequence <= task.history.length) delete draft.savedRun;
   const area = element("section", undefined, "task-chat");
   const heading = element("h3", () => t("ui.agent_chat_065b4b62"));
   heading.id = "task-chat-heading";
@@ -994,9 +1001,11 @@ function taskChat(task) {
   let liveItems = [];
   function renderLiveWork() {
     const follow = work.scrollHeight - work.clientHeight - work.scrollTop <= 8;
-    renderRunActivity(liveRun, liveItems.filter(item => !collaborationItem(item) && !savedRunItems.has(item.id) &&
-      (submissionRow || item.phase !== "final_answer")),
-      false, undefined, task.id);
+    // A save receipt can reach the window before its card history is refreshed.
+    const saved = draft.savedRun;
+    const items = saved?.items ?? liveItems;
+    renderRunActivity(liveRun, items.filter(item => !collaborationItem(item) && !savedRunItems.has(item.id) &&
+      (submissionRow || saved || item.phase !== "final_answer")), Boolean(saved), saved?.durationMs, task.id);
     if (follow) work.scrollTop = work.scrollHeight;
   }
   area.updateRun = (items = []) => {

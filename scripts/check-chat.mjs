@@ -1756,21 +1756,14 @@ app.whenReady().then(async () => {
   }
 
   // Reproduce the two incident timelines and a review that starts after the journal is saved.
+  await evaluate("var beforeHandoffCommand = api.command");
   const captureHandoff = async name => {
     await evaluate(`
-      var handoffSide = byId('task-side');
-      var handoffChat = body.querySelector('.task-chat');
-      var handoffSideWasHidden = handoffSide.hidden;
-      handoffSide.hidden = false;
-      handoffSide.append(handoffChat);
-      var handoffFeed = handoffChat.querySelector('.task-work');
+      var handoffFeed = byId('task-chat-work');
       handoffFeed.querySelector('.chat-work').open = true;
       handoffFeed.scrollTop = 0;
     `);
-    try { await capture(name); }
-    finally {
-      await evaluate("body.append(handoffChat); handoffSide.hidden = handoffSideWasHidden");
-    }
+    await capture(name);
   };
   for (const times of [
     ['10:20:00', '10:25:00', '10:29:57.639', '10:29:59', '10:30:34.597'],
@@ -1787,7 +1780,7 @@ app.whenReady().then(async () => {
       ].map(([id, at, text, phase]) => ({
         id: 'handoff-' + id, at, text, phase, type: 'agentMessage', title: '', status: 'completed',
       }));
-      var handoff = { ...taskInSheet, status: 'review', questions: [], history: [
+      var handoff = { ...taskInSheet, title: 'Переход к ревью', status: 'review', tags: [], criteria: [], subtasks: [], questions: [], history: [
         { action: 'submit', actor: 'agent', at: submissionAt, to: 'review' },
       ], codexThreadId: '01234567-1234-5678-1234-123456789012' };
       var attempt = { id: 'handoff-review', at: reviewAt, items: [{
@@ -1796,13 +1789,17 @@ app.whenReady().then(async () => {
       }] };
       api.reviewerChat = async () => ({ ok: true, data: [attempt] });
       api.taskRunHistory = async () => ({ ok: true, data: { 1: handoffItems } });
+      var historyRead;
+      api.command = (action, id, ...args) => action === 'show' && id === handoff.id
+        ? historyRead ?? Promise.resolve({ ok: true, data: structuredClone(handoff) })
+        : beforeHandoffCommand(action, id, ...args);
       var mountHandoff = async () => {
-        body.replaceChildren(taskChat(handoff));
-        showTaskChatView('work');
+        await showTask(handoff.id);
+        byId('task-side').querySelector('[aria-controls="task-chat-work"]').click();
         await new Promise(resolve => setTimeout(resolve, 350));
       };
       var handoffOrder = () => {
-        const feed = body.querySelector('.task-work');
+        const feed = byId('task-chat-work');
         const submission = feed.querySelector('.chat-event');
         const review = feed.querySelector('.task-review-attempt');
         return review && submission.compareDocumentPosition(review) === Node.DOCUMENT_POSITION_FOLLOWING &&
@@ -1814,24 +1811,39 @@ app.whenReady().then(async () => {
           }) && review.querySelectorAll('[data-item="message:handoff-prep"]').length === 1 &&
           review.querySelector('time').dateTime === reviewAt;
       };
-      mountHandoff().then(() => body.querySelector('.task-chat').updateRun(handoffItems));
+      var handoffUpdate = (items, savedRun) => updateChat({
+        project: frame.project, id: handoff.id, type: 'run', items, savedRun,
+      });
+      mountHandoff().then(() => handoffUpdate(handoffItems));
     `);
     await check("handoffOrder()", "live executor response precedes submission and review: " + times[2]);
     await evaluate(`
+      var waitingForHistory = Promise.withResolvers();
+      historyRead = waitingForHistory.promise;
+      var refreshingHandoff = showTask(handoff.id);
+      handoffUpdate([], { sequence: 2, items: handoffItems, durationMs: 947258 });
+    `);
+    await check("taskInSheet.history.length === 1 && handoffOrder()",
+      "the save receipt keeps one executor answer visible while the card waits for history: " + times[2]);
+    if (keepArtifacts && times[3] === '12:03:30') await captureHandoff('handoff-active-review.png');
+    await evaluate(`
       var savedRun = { action: 'run-log', actor: 'agent', at: savedAt, durationMs: 947258, run: handoffItems };
       handoff.history.push(savedRun);
-      mountHandoff().then(() => body.querySelector('.task-chat').updateRun(handoffItems));
+      historyRead = undefined;
+      waitingForHistory.resolve({ ok: true, data: structuredClone(handoff) });
+      refreshingHandoff.then(() => new Promise(resolve => setTimeout(resolve, 350)));
     `);
-    await check("handoffOrder()", "saved and still-live entries are shown once: " + times[2]);
-    if (keepArtifacts && times[3] === '12:03:30') await captureHandoff('handoff-active-review.png');
+    await check("taskInSheet.history.length === 2 && !byId('task-chat-work').querySelector('.chat-run-live').textContent && handoffOrder()",
+      "the refreshed history replaces the pending copy: " + times[2]);
     await evaluate(`
       attempt.durationMs = 80000;
       delete savedRun.run;
-      mountHandoff().then(() => body.querySelector('.task-work-controls button').click());
+      mountHandoff().then(() => byId('task-chat-work').querySelector('.task-work-controls button').click());
     `);
     await check("handoffOrder()", "restored executor log precedes the completed review: " + times[2]);
     if (keepArtifacts && times[3] === '12:03:30') await captureHandoff('handoff-restored.png');
   }
+  await evaluate("api.command = beforeHandoffCommand; byId('task-side').replaceChildren(); byId('task-side').hidden = true");
 
   // Work pagination uses the same IPC path for local and provider cursors.
   for (const prefix of ['local:', 'provider-cursor-']) {
