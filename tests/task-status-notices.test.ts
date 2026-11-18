@@ -26,11 +26,13 @@ test("CLI transitions replay in order without goals, windows or a running manage
     return JSON.parse(result.stdout).data;
   };
   cli(["init"]);
+  cli(["settings"], { reviewMode: "manager" });
   const sync = () => cli(["sync-notices"], { language: "ru" }).changed;
   const task = cli(["create"], { title: "Проверка доступа", criteria: ["Доступ проверен"], workingDirectory: root });
   cli(["approve", task.id]);
   assert.equal(sync(), false); // First enable skips old events.
-  const messages = () => readManagerHistory(root, null, "chat")?.turns.flatMap(turn => turn.items.map(item => item.text)) ?? [];
+  const work = () => readManagerHistory(root, null, "work")?.turns.flatMap(turn => turn.items) ?? [];
+  const messages = () => work().map(item => item.text);
   cli(["update", task.id], { title: "Доступ к SSH" });
   assert.equal(syncTaskStatusNotices(root), false);
   cli(["start", task.id]);
@@ -41,17 +43,19 @@ test("CLI transitions replay in order without goals, windows or a running manage
   submit();
   cli(["request-changes", task.id], { actor: "user", reason: "проверь повторно" });
   submit();
-  cli(["accept", task.id], { revision: cli(["show", task.id]).revision });
+  cli(["accept", task.id], { actor: "manager", revision: cli(["show", task.id]).revision });
   assert.equal(sync(), true);
   const texts = messages();
-  assert.equal(texts.length, 5);
+  assert.equal(texts.length, 6);
   for (const [i, label] of ["в работе.", "заблокирована: нужен доступ к серверу", "в работе.",
     "сдана на проверку: доступ к SSH проверен",
-    "сдана на проверку: доступ к SSH проверен"].entries()) {
+    "сдана на проверку: доступ к SSH проверен", "завершена: доступ к SSH проверен"].entries()) {
     assert.ok(texts[i]!.includes(`T-0001 «Доступ к SSH» — ${label}`), texts[i]);
   }
-  assert.equal(managerUnread(root).length, 5);
-  readManagerMessages(root, [...managerUnread(root)]);
+  const history = cli(["show", task.id]).history as Task["history"];
+  assert.deepEqual(work().map(item => item.at), history.filter(event => statusNotice(task, event)).map(event => event.at));
+  assert.deepEqual(readManagerHistory(root, null, "chat")?.turns, []);
+  assert.deepEqual(managerUnread(root), []);
   assert.equal(syncTaskStatusNotices(root), false);
   assert.deepEqual(messages(), texts);
   assert.deepEqual(managerUnread(root), []);
@@ -59,19 +63,27 @@ test("CLI transitions replay in order without goals, windows or a running manage
   const positionPath = join(root, ".tasks", "manager-status-position.json");
   const position = JSON.parse(readFileSync(positionPath, "utf8"));
   const name = readdirSync(join(root, ".tasks", "manager-chat")).sort().at(-1)!;
-  position.pending = [{ id: name.slice(14, -5), at: Number(name.slice(0, 13)), text: texts.at(-1) }];
+  position.pending = [{ id: name.slice(14, -5), at: Number(name.slice(0, 13)), eventAt: work().at(-1)!.at, text: texts.at(-1) }];
   writeJson(positionPath, position);
   const restart = spawnSync(process.execPath, ["--input-type=module", "-e",
     `import {syncTaskStatusNotices} from ${JSON.stringify(new URL("../src/desktop/manager-history.ts", import.meta.url).href)};syncTaskStatusNotices(process.argv[1]);`, root], { encoding: "utf8", windowsHide: true });
   assert.equal(restart.status, 0, restart.stderr);
   assert.deepEqual(messages(), texts);
-  const cancelled = cli(["create"], { title: "Отмена" });
-  cli(["cancel", cancelled.id], { actor: "manager", reason: "больше не требуется" });
+  const cancelled = Array.from({ length: 5 }, (_, i) => cli(["create"], { title: "Отмена " + i }));
+  for (const card of cancelled) cli(["cancel", card.id], { actor: "manager", reason: "больше не требуется" });
   cli(["settings"], { archiveAfterDays: 0 });
   cli(["archive", "sweep"]);
-  assert.ok(cli(["list"]).archived.some((task: Task) => task.id === cancelled.id));
+  const archived: Task[] = cli(["list"]).archived;
+  for (const card of cancelled) assert.ok(archived.some(task => task.id === card.id));
   assert.equal(syncTaskStatusNotices(root), true);
-  assert.ok(messages().at(-1)!.includes("отменена."));
+  for (const card of cancelled) {
+    const event = cli(["show", card.id]).history.at(-1);
+    assert.equal(event.action, "cancel");
+    assert.equal(event.text, "больше не требуется");
+    assert.equal(work().filter(item => item.text.startsWith(card.id + " ") && item.at === event.at).length, 1);
+  }
+  assert.deepEqual(readManagerHistory(root, null, "chat")?.turns, []);
+  assert.deepEqual(managerUnread(root), []);
 });
 
 test("review approval is not completion; absent reasons stay absent; boards remain isolated", t => {
@@ -117,7 +129,7 @@ test("manual lifecycle actions retain audit history without notices; agents stil
   cli(["unblock", task.id], { actor: "manager", reason });
   assert.equal(cli(["show", task.id]).history.at(-1).text, reason);
   assert.equal(syncTaskStatusNotices(root), true);
-  const texts = readManagerHistory(root, null, "chat")!.turns.flatMap(turn => turn.items.map(item => item.text));
+  const texts = readManagerHistory(root, null, "work")!.turns.flatMap(turn => turn.items.map(item => item.text));
   assert.ok(texts.some(text => text.includes("useful blocker")));
   assert.ok(!texts.some(text => text.includes(reason)));
   readManagerMessages(root, [...managerUnread(root)]);
@@ -134,7 +146,7 @@ test("manual lifecycle actions retain audit history without notices; agents stil
   assert.equal(cli(["show", source.id]).status, "draft");
   cli(["cancel", source.id], { actor: "manager", reason, mergedInto: target.id, transferred: "hash wrapping" });
   assert.equal(syncTaskStatusNotices(root), true);
-  const text = readManagerHistory(root, null, "chat")!.turns.at(-1)!.items[0]!.text;
+  const text = readManagerHistory(root, null, "work")!.turns.at(-1)!.items[0]!.text;
   assert.ok(text.includes(source.id) && text.includes(target.id) && text.includes("Source") && text.includes("Main") && text.includes("hash wrapping"));
   assert.ok(!text.includes(reason));
   const cancelled = cli(["create"], { title: "Manual cancel" });

@@ -21,10 +21,11 @@ export function syncTaskStatusNotices(project: string, language: string | boolea
     let changed = false;
     const deliver = () => {
       for (const notice of position.pending) {
-        changed = saveManagerHistory(project, notice.at, notice.id, { lane: "notice", items: [{
+        saveManagerHistory(project, notice.at, notice.id, { lane: "notice", items: [{
           id: notice.id, at: notice.eventAt ?? new Date(notice.at).toISOString(), type: "agentMessage", title: "", phase: "final_answer",
           status: "completed", text: notice.text,
-        }] }) || changed;
+        }] });
+        changed = true;
       }
       position.pending = [];
     };
@@ -68,6 +69,8 @@ type Run = {
   goalId?: string;
 };
 type Turn = { messages: Message[]; items: BoardActivity[]; durationMs?: number; lane?: Run["lane"]; goalId?: string };
+// Status sync writes unscoped notices. Goal notices record exchanges with the owner.
+const isStatusNotice = ({ lane, goalId }: Pick<Run, "lane" | "goalId">) => lane === "notice" && !goalId;
 const cursorPrefix = "local:";
 const filePattern = /^\d{13}-[0-9a-f-]{36}\.json$/i;
 type ReadPosition = { at: number; file: string; index: number };
@@ -84,6 +87,17 @@ function unreadState(project: string): UnreadState {
       (state.through && (!Number.isFinite(state.through.at) || !filePattern.test(state.through.file) || !Number.isSafeInteger(state.through.index) || state.through.index < 0))) {
     throw new Error("Invalid manager unread messages.");
   }
+  const folder = join(project, ".tasks", "manager-chat");
+  // Older versions used the same UUID for the notice item and its run file.
+  // Preserve pending dialogue delivery and the saved read position.
+  const candidates = new Set(state.unread.filter(id => codexThreadPattern.test(id)));
+  const statusIds = new Set<string>();
+  if (candidates.size && exists(folder)) for (const file of readdirSync(folder)) {
+    if (!filePattern.test(file)) continue;
+    const id = file.slice(14, -5);
+    if (candidates.has(id) && isStatusNotice(readJson(join(folder, file)) as Run)) statusIds.add(id);
+  }
+  state.unread = state.unread.filter(id => !statusIds.has(id));
   lastUnread.set(project, [...state.unread]);
   return state;
 }
@@ -139,9 +153,9 @@ export function readManagerMessages(project: string, ids: string[]) {
   });
 }
 
-function incomingMessages({ lane, items }: Run) {
-  if (lane !== "chat" && lane !== "notice") return [];
-  return items.filter(item => item.type === "agentMessage" && item.phase === "final_answer" &&
+function incomingMessages(run: Run) {
+  if (run.lane !== "chat" && (run.lane !== "notice" || isStatusNotice(run))) return [];
+  return run.items.filter(item => item.type === "agentMessage" && item.phase === "final_answer" &&
     item.status === "completed" && item.text.trim()).map(item => item.id);
 }
 
@@ -183,20 +197,25 @@ function displayTurns({ message, items, durationMs, lane, goalId }: Run): Turn[]
   return turns;
 }
 
+const workTools = new Set([
+  "manager_ack", "manager_inbox", "task_wait", "task_message", "team_inbox", "team_message",
+  "task_approve", "task_start", "task_start_batch", "task_block", "task_unblock",
+  "task_submit", "task_request_changes", "task_accept", "task_cancel",
+]);
+
+const isWorkActivity = (item: BoardActivity) =>
+  Boolean(item.messagesOnly || item.messages?.length ||
+    (item.type === "mcpToolCall" && item.title.startsWith("ai_taskboard / ") && workTools.has(item.title.slice("ai_taskboard / ".length))) ||
+    (item.type === "dynamicToolCall" && workTools.has(item.title)));
+
 export function managerChatItems(items: BoardActivity[]): BoardActivity[] {
-  return items.flatMap(item => {
-    if (item.messagesOnly) return [];
-    if (item.title === "ai_taskboard / goal_read" || item.title === "ai_taskboard / goal_send") return [{ ...item, text: "" }];
-    if (!item.messages?.length) return [item];
-    const { messages: _messages, ...activity } = item;
-    // The tool result can contain the same conversation as the extracted messages.
-    return [{ ...activity, text: "" }];
-  });
+  return items.filter(item => !isWorkActivity(item)).map(item =>
+    item.title === "ai_taskboard / goal_read" || item.title === "ai_taskboard / goal_send" ? { ...item, text: "" } : item);
 }
 
 export function managerWorkItems(items: BoardActivity[], lane?: Turn["lane"]) {
   if (lane === "work") return items;
-  return items.filter(item => item.messages?.length);
+  return items.filter(isWorkActivity);
 }
 
 const automaticReviewPrefixes = [
@@ -213,9 +232,9 @@ export function managerHistoryForView(turns: Turn[], view?: "chat" | "work") {
     const automatic = !turn.lane && turn.messages.length === 1 && first && !first.clientId && !first.files.length &&
       automaticReviewPrefixes.some(prefix => first.text.startsWith(prefix));
     if (view === "chat") {
-      return turn.lane === "work" || automatic ? [] : [{ ...turn, items: managerChatItems(turn.items) }];
+      return turn.lane === "work" || isStatusNotice(turn) || automatic ? [] : [{ ...turn, items: managerChatItems(turn.items) }];
     }
-    const items = managerWorkItems(turn.items, automatic ? "work" : turn.lane);
+    const items = managerWorkItems(turn.items, automatic || isStatusNotice(turn) ? "work" : turn.lane);
     const messages = turn.lane === "work" ? turn.messages : [];
     return items.length || messages.length ? [{ ...turn, items, messages }] : [];
   });
@@ -243,13 +262,13 @@ export function readManagerHistory(project: string, cursor: string | null = null
     const size = statSync(path).size;
     const exceedsBudget = size > remaining && pages.length > 0;
     const needsConversation = view === "chat" && conversations === 0;
-    if (exceedsBudget && !needsConversation) break;
+    if (exceedsBudget && view !== "chat") break;
     const run = readJson(path) as Run;
     const turns = managerHistoryForView(displayTurns(run), view);
     if (view !== "chat" || turns.some(turn => turn.messages.length || turn.items.length)) {
       // An inline image can exceed the page budget after Base64 encoding.
-      // Keep the first conversation together even if notices started the page.
-      if (exceedsBudget && run.lane === "notice") break;
+      // Keep the first conversation together even if goal notices started the page.
+      if (exceedsBudget && (!needsConversation || run.lane === "notice")) break;
       remaining -= size;
       pages.push(turns);
       model ??= run.model;

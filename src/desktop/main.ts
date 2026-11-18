@@ -332,8 +332,7 @@ function subscribe(project: string, board: Board): BoardWatch {
         return;
       }
       if (result.data.changed) {
-        publishManagerUnread(project);
-        broadcastBoardChat(project, "orchestrator-history");
+        broadcastBoardChat(project, "orchestrator-work-history");
       }
       const key = projectIdentity(project);
       boardRequests.get(key)?.settingsChanged?.();
@@ -1706,7 +1705,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   function showLatestActivity() {
     activityTimer = undefined;
     if (lane === "chat") broadcastBoardChat(project, "orchestrator", { items: managerChatItems(items) });
-    if (lane === "work" || items.some(item => item.messages?.length)) {
+    if (lane === "work" || managerWorkItems(items).length) {
       broadcastMaintenanceSafe(project, "orchestrator-work-activity");
     }
     const live = items.findLast(item => item.status === "inProgress");
