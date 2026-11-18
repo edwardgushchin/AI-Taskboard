@@ -1,7 +1,7 @@
 // Real main process, private profile and empty boards: never touches a user's queue.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, symlinkSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -153,49 +153,86 @@ try {
     assert.equal(returnedReview.data.result.summary, review.result.summary);
     console.log("A window interrupts the local manager review and waits for its reservation to release");
 
-    const discussion = startCard("Active discussion with delayed attachment");
-    const chatReady = Promise.withResolvers();
-    const chatFinished = Promise.withResolvers();
-    const copyStarted = Promise.withResolvers();
-    const finishCopy = Promise.withResolvers();
-    let copied = false;
-    Object.assign(globalThis.returnCheck, {
-      async replyToTask(...args) {
-        args[10]({
-          steer: async () => assert.fail("The delayed attachment was steered after interruption"),
-          interrupt: async () => chatFinished.resolve({ interrupted: true }),
-        });
-        chatReady.resolve();
-        return chatFinished.promise;
-      },
-      async copyAttachment(path, bytes) {
-        copyStarted.resolve();
-        await finishCopy.promise;
-        mkdirSync(dirname(path), { recursive: true });
-        await writeFile(path, bytes);
-        copied = true;
-      },
-    });
-    const chat = (text, files = "[]") => evaluate(
-      `window.taskboard.chatSend(${JSON.stringify(discussion.id)}, { model: 'fixture', effort: 'low', text: ${JSON.stringify(text)}, files: ${files} })`);
-    const original = chat("Keep this message");
-    await chatReady.promise;
-    const before = cli(project, ["show", discussion.id]);
-    const steering = chat("Late attachment", "[{ name: 'late.txt', type: 'text/plain', bytes: new Uint8Array([65]).buffer }]");
-    await copyStarted.promise;
-    const returningChat = returnCard(before);
-    await untilStopped(chatFinished.promise, returningChat);
-    assert.equal((await original).saved, true);
-    assert.equal(cli(project, ["show", discussion.id]).status, "in_progress");
-    assert.ok(runtimeEntries(project).some(entry => entry.kind === "task" && entry.task === discussion.id));
-    finishCopy.resolve();
-    assert.equal((await steering).saved, false);
-    assert.equal(copied, true);
-    const returnedChat = await returningChat;
-    assert.equal(returnedChat.data?.status, "draft", JSON.stringify(returnedChat));
-    assert.deepEqual(returnedChat.data.attachments, before.attachments);
-    assert.deepEqual(returnedChat.data.history.slice(0, -1), before.history);
-    console.log("Return waits for the delayed attachment and leaves the saved conversation intact");
+    const checkDelayedAttachment = async returning => {
+      const discussion = startCard(returning ? "Return with delayed attachment" : "Reply ends with delayed attachment");
+      const chatReady = Promise.withResolvers();
+      const chatFinished = Promise.withResolvers();
+      const copyStarted = Promise.withResolvers();
+      const finishCopy = Promise.withResolvers();
+      let copied = false;
+      let uploadPath;
+      let providerRuns = 0;
+      let steers = 0;
+      Object.assign(globalThis.returnCheck, {
+        async replyToTask(...args) {
+          providerRuns++;
+          args[10]({
+            steer: async () => { steers++; },
+            interrupt: async () => {
+              assert.equal(returning, true);
+              chatFinished.resolve({ interrupted: true });
+            },
+          });
+          chatReady.resolve();
+          return chatFinished.promise;
+        },
+        async copyAttachment(path, bytes) {
+          uploadPath = path;
+          copyStarted.resolve();
+          await finishCopy.promise;
+          await writeFile(path, bytes);
+          copied = true;
+        },
+      });
+      const chat = (text, files = "[]") => evaluate(
+        `window.taskboard.chatSend(${JSON.stringify(discussion.id)}, { model: 'fixture', effort: 'low', text: ${JSON.stringify(text)}, files: ${files} })`);
+      const original = chat("Keep this message");
+      await chatReady.promise;
+      const before = cli(project, ["show", discussion.id]);
+      const steering = chat("Late attachment", "[{ name: 'late.txt', type: 'text/plain', bytes: new Uint8Array([65]).buffer }]");
+      await copyStarted.promise;
+      if (!returning) {
+        chatFinished.resolve({ text: "Completed reply" });
+        assert.equal((await original).result.ok, true);
+        finishCopy.resolve();
+        const message = await steering;
+        assert.equal(message.saved, true, JSON.stringify(message));
+        assert.equal(message.result.error.code, "CHAT_FAILED");
+        assert.equal(copied, true);
+        assert.equal(providerRuns, 1);
+        assert.equal(steers, 0);
+        assert.equal(existsSync(dirname(uploadPath)), false);
+        const after = cli(project, ["show", discussion.id]);
+        assert.equal(after.status, "in_progress");
+        assert.deepEqual(after.history.filter(event => event.chat).map(event => event.text),
+          ["Keep this message", "Completed reply", "Late attachment"]);
+        const [attachment] = after.attachments;
+        assert.equal(attachment.name, "late.txt");
+        const destination = join(scratch, "verified-late.txt");
+        cli(project, ["attachment", "read", discussion.id], { file: attachment.file, destination });
+        assert.equal(readFileSync(destination, "utf8"), "A");
+        console.log("Normal completion preserves the delayed message and attachment without steering another turn");
+        return;
+      }
+      const returningChat = returnCard(before);
+      await untilStopped(chatFinished.promise, returningChat);
+      assert.equal((await original).saved, true);
+      assert.equal(cli(project, ["show", discussion.id]).status, "in_progress");
+      assert.ok(runtimeEntries(project).some(entry => entry.kind === "task" && entry.task === discussion.id));
+      finishCopy.resolve();
+      assert.equal((await steering).saved, false);
+      assert.equal(copied, true);
+      assert.equal(providerRuns, 1);
+      assert.equal(steers, 0);
+      assert.equal(existsSync(dirname(uploadPath)), false);
+      const returnedChat = await returningChat;
+      assert.equal(returnedChat.data?.status, "draft", JSON.stringify(returnedChat));
+      assert.deepEqual(returnedChat.data.attachments, before.attachments);
+      assert.deepEqual(returnedChat.data.history.slice(0, -1), before.history);
+      console.log("Return waits for the delayed attachment and leaves the saved conversation intact");
+    };
+    await checkDelayedAttachment(false);
+    await checkDelayedAttachment(true);
     app.exit(0);
     return;
   }

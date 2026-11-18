@@ -856,7 +856,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     chatRuns.add(key);
     taskOperations.set(key, operation);
   }
-  const directories = active?.directories ?? new Set<string>();
+  const directories = new Set<string>();
   let scratch: string | undefined;
   let saved = request.retryAt !== undefined;
   let streamed = false;
@@ -877,9 +877,6 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
         sources.push({ path, name: suffix && !imageTypes.has(extname(name).toLowerCase()) ? name + suffix : name });
       }
       signal.throwIfAborted();
-      if (active && activeAgents.get(key) !== active) {
-        throw new Error(t("ui.the_agent_finished_before_receiving_this_message_88246090"));
-      }
       reply = await callCli<Task>(project, ["chat", id], { text, model, effort, attachmentSources: sources });
       saved = reply.ok;
       if (saved) notify({ type: "saved" });
@@ -932,6 +929,9 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     if (active) {
       // A finished turn must not silently turn a steering message into another run.
       if (activeAgents.get(key) !== active) throw new Error(t("ui.the_agent_finished_before_receiving_this_message_88246090"));
+      // The request owns its staging files until it hands them to the active turn.
+      active.directories.add(scratch);
+      directories.delete(scratch);
       const undo = active.updateMessage?.(task, last);
       try { await active.control.steer(prompt, images); }
       catch (error) { undo?.(); throw error; }
@@ -982,8 +982,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       scheduleAgentWork();
       if (wasReplying) notifyRunChange(project);
     } else {
-      if (scratch && (signal.aborted || activeAgents.get(key) !== active)) {
-        directories.delete(scratch);
+      if (scratch && directories.has(scratch)) {
         await rm(scratch, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
       }
       writer();
