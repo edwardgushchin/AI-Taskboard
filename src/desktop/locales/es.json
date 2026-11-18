@@ -1,4 +1,9 @@
 {
+  "draft_discussion.queued": "La revisión del borrador está en cola.",
+  "draft_discussion.running": "Revisando el borrador…",
+  "draft_discussion.failed": "Error al revisar el borrador: {reason}",
+  "draft_discussion.retry": "Reintentar revisión",
+  "draft_discussion.interrupted": "Se interrumpió la revisión anterior del borrador.",
   "ui.resolving_acceptance_conflict": "Resolviendo el conflicto",
   "ui.dismiss_notification_9a17797e": "Descartar notificación",
   "ui.board_refresh_4c949d36": "Actualización del tablero",

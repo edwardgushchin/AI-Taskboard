@@ -1,4 +1,9 @@
 {
+  "draft_discussion.queued": "Draft discussion is queued.",
+  "draft_discussion.running": "Reviewing the draft…",
+  "draft_discussion.failed": "Draft review failed: {reason}",
+  "draft_discussion.retry": "Retry draft review",
+  "draft_discussion.interrupted": "The previous draft review was interrupted.",
   "ui.resolving_acceptance_conflict": "Resolving conflict",
   "ui.dismiss_notification_9a17797e": "Dismiss notification",
   "ui.board_refresh_4c949d36": "Board refresh",

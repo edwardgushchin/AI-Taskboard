@@ -1,4 +1,9 @@
 {
+  "draft_discussion.queued": "La revisione della bozza è in coda.",
+  "draft_discussion.running": "Revisione della bozza in corso…",
+  "draft_discussion.failed": "Revisione della bozza non riuscita: {reason}",
+  "draft_discussion.retry": "Riprova la revisione",
+  "draft_discussion.interrupted": "La revisione precedente della bozza è stata interrotta.",
   "ui.resolving_acceptance_conflict": "Risoluzione del conflitto",
   "ui.dismiss_notification_9a17797e": "Ignora notifica",
   "ui.board_refresh_4c949d36": "Aggiornamento della scheda",

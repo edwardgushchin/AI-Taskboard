@@ -222,12 +222,17 @@ function withNewAttachments(
 }
 
 export function addChatMessage(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
-  requireRevision(task, input.revision);
+  const draftDiscussion = input.draftDiscussion === true;
+  requireRevision(task, input.revision, draftDiscussion);
   const actor = actorFor(input, "user");
   const message = text(input.text, "text");
   const model = text(input.model, "model", true);
   const effort = text(input.effort, "effort", true);
-  if (actor === "agent") {
+  if (draftDiscussion) {
+    if (actor !== "agent" || task.status !== "draft" || task.draftDiscussion?.phase !== "running") {
+      throw new TaskboardError("CHAT_CHANGED", "The draft discussion is no longer awaiting a reply.");
+    }
+  } else if (actor === "agent") {
     const last = task.history.findLastIndex(event => event.chat);
     if (last !== number(input.replyTo, "replyTo", 0) || task.history[last]?.actor !== "user") {
       throw new TaskboardError("CHAT_CHANGED", "The last chat message changed before the reply was saved.");
@@ -247,6 +252,7 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
     if (!message && !attachments.length) throw new TaskboardError("INVALID_INPUT", "Write a message or attach a file.");
     const updated = record({
       ...task, attachments: [...task.attachments, ...attachments],
+      draftDiscussion: draftDiscussion || actor === "user" ? undefined : task.draftDiscussion,
     }, "chat", actor, task.status, message);
     updated.history.at(-1)!.chat = {
       ...chat,
