@@ -1139,7 +1139,8 @@ function taskChat(task) {
     send.replaceChildren(icon(stop ? "stop" : "play"));
     controlLabelForIcon(send, () => stop ? t("ui.stop_agent_f50db092") : t("ui.send_message_173c4807"));
     send.disabled = Boolean(draft.saving || draft.stopping) || (!stop && !draft.text.trim() && !draft.files.length);
-    retryReply.hidden = lastMessage?.actor !== "user" || working();
+    retryReply.hidden = lastMessage?.actor !== "user" || working() ||
+      Boolean(frame.board?.archived?.some(card => card.id === task.id));
     retryReply.disabled = retryReply.hidden || Boolean(draft.saving || draft.stopping);
     feedback.textContent = draft.error ?? "";
     feedback.hidden = !feedback.textContent;

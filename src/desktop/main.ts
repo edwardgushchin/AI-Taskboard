@@ -923,7 +923,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       saved = reply.ok;
       if (saved) notify({ type: "saved" });
     } else {
-      reply = await callCli<Task>(project, ["show", id]);
+      reply = await callCli<Task>(project, ["chat", id], { retryAt });
     }
     if (!reply.ok) return { saved, result: reply };
     signal.throwIfAborted();

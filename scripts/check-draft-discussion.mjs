@@ -1,7 +1,7 @@
 // Real Electron, CLI and renderer. Pass --live to exercise the installed Codex provider.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -226,6 +226,9 @@ try {
 
     const startMessage = (id, text, run = evaluate) => run(`window.taskboard.chatSend(
       ${JSON.stringify(id)}, ${JSON.stringify({ ...settings, text, files: [] })})`);
+    const retryMessage = task => evaluate(`window.taskboard.chatSend(${JSON.stringify(task.id)}, ${JSON.stringify({
+      ...settings, text: "", files: [], retryAt: task.history.findLastIndex(event => event.chat),
+    })})`);
     const say = async (id, text, run) => {
       const reply = await startMessage(id, text, run);
       assert.equal(reply.result.ok, true, JSON.stringify(reply));
@@ -250,8 +253,20 @@ try {
     }`);
     await until(() => evaluate(`document.querySelector(".chat-retry-reply")?.disabled === false &&
       document.querySelector(".chat-status:not([hidden])")?.textContent === "Fixture provider unavailable"`), "saved-message retry");
-    assert.equal(messages(show(ordinary.id)).at(-1).text, "Fail once");
+    const unanswered = show(ordinary.id);
+    assert.equal(messages(unanswered).at(-1).text, "Fail once");
     await capture("task-chat-retry.png");
+    const pendingFile = join(project, ".tasks", "pending", ordinary.id + ".json");
+    const callsBeforePending = calls.length;
+    writeFileSync(pendingFile, JSON.stringify({ action: "start", revision: unanswered.revision }));
+    try {
+      assert.equal((await startMessage(ordinary.id, "New while pending")).result.error?.code, "PENDING_OPERATION");
+      assert.equal((await retryMessage(unanswered)).result.error?.code, "PENDING_OPERATION");
+      assert.equal(calls.length, callsBeforePending);
+      assert.deepEqual(show(ordinary.id), unanswered);
+      assert.equal(runtimeEntries(project).some(entry => entry.task === ordinary.id), false);
+    } finally { unlinkSync(pendingFile); }
+    check("A pending Git operation blocks both send and retry before a provider call");
     await evaluate("document.querySelector('.chat-retry-reply').click()");
     await waitReply(ordinary.id, 6);
     assert.deepEqual(messages(show(ordinary.id)).slice(-2).map(event => [event.actor, event.text]),
@@ -283,6 +298,24 @@ try {
     assert.equal(show(ordinary.id).git, undefined);
     assert.equal(runtimeEntries(project).some(entry => entry.task === ordinary.id), false);
     check("The second window is rejected while one writer is active and can send after stopping it");
+
+    cli(["chat", ordinary.id], { ...settings, text: "Unanswered before archive" });
+    cli(["cancel", ordinary.id], { reason: "Archive fixture" });
+    cli(["settings"], { archiveAfterDays: 0 });
+    assert.ok(cli(["archive", "sweep"]).archived.includes(ordinary.id));
+    await until(() => evaluate(`window.taskboard.bootstrap().then(f =>
+      f.board.archived.some(card => card.id === ${JSON.stringify(ordinary.id)}))`), "archived card on desktop");
+    await display(ordinary.id);
+    await until(() => evaluate(`document.querySelector(".task-chat")?.textContent.includes("Unanswered before archive") &&
+      document.querySelector(".chat-retry-reply")?.hidden`), "archived message without retry control");
+    const archived = show(ordinary.id);
+    const callsBeforeArchive = calls.length;
+    assert.equal((await startMessage(ordinary.id, "New in archive")).result.error?.code, "TASK_NOT_FOUND");
+    assert.equal((await retryMessage(archived)).result.error?.code, "TASK_NOT_FOUND");
+    assert.equal(calls.length, callsBeforeArchive);
+    assert.deepEqual(show(ordinary.id), archived);
+    assert.equal(runtimeEntries(project).some(entry => entry.task === ordinary.id), false);
+    check("Archived chat stays readable, hides retry, and rejects direct send and retry before the provider");
 
     const { boardActions } = await import("../src/desktop/board-actions.ts");
     const never = () => assert.fail("Unrelated manager action");

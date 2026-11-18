@@ -54,8 +54,9 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
     cliFailure: (code: string, message: string) => ({ ok: false, error: { code, message } }),
     taskChatActions: () => ({}),
     maxAttachmentBytes: 64 * 1024 * 1024,
-    callCli: async (_project: string, args: string[], input: { actor?: string; text?: string; model?: string; effort?: string; replyTo?: number }) => {
+    callCli: async (_project: string, args: string[], input: { actor?: string; text?: string; model?: string; effort?: string; replyTo?: number; retryAt?: number }) => {
       if (args[0] === "attachment") return { ok: false, error: { code: "ATTACHMENT_MISSING" } };
+      if (args[0] === "chat" && input.retryAt !== undefined) return { ok: true, data: task };
       if (args[0] === "chat" && (options.writeFailure || input?.actor === "agent" && options.saveReplyFailure)) {
         return { ok: false, error: { code: "STORAGE_ERROR" } };
       }
