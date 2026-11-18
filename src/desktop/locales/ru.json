@@ -1260,7 +1260,6 @@
   "experts.missing_review": "ответственного за ревью",
   "experts.add_stage": "Добавить этап работы",
   "experts.stage_title": "Название этапа",
-  "experts.require_plans": "Требовать экспертный план при создании задачи",
   "experts.description": "Описание",
   "experts.inputs": "Входы, по одному на строку",
   "experts.outputs": "Результаты, по одному на строку",

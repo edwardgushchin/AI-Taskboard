@@ -249,7 +249,6 @@ export interface Task {
 
 export interface BoardSettings {
   boardType?: "agent" | "manual";
-  requireExpertPlans?: boolean;
   manualColumns?: ManualColumn[];
   name?: string;
   archiveAfterDays: number | null;
@@ -276,6 +275,11 @@ export const reviewVerifier = { model: "gpt-6.1-sol", effort: "xhigh" } satisfie
 
 export function usesIndependentReviewer(mode: ReviewMode): boolean {
   return mode === "reviewer" || mode === "reviewer-human";
+}
+
+export function reviewsAcceptanceRepair(task: Pick<Task, "acceptanceRepair">, settings: BoardSettings): boolean {
+  return settings.reviewMode === "reviewer-human" && task.acceptanceRepair?.phase === "checking" &&
+    task.acceptanceRepair.reviewModeVersion === settings.reviewModeVersion;
 }
 
 export function boardReviewMode(settings: Pick<BoardSettings, "reviewMode" | "autoReview">): ReviewMode {

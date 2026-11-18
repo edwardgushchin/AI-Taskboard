@@ -1,3 +1,4 @@
+import { plannedDraft } from "./fixtures/planned-draft.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
@@ -23,7 +24,7 @@ test("queue controls persist, reject stale edits and gate an automatic start und
     return JSON.parse(result.stdout);
   };
   assert.equal(cli(["init"], { git: false }).ok, true);
-  const task = cli(["create"], { title: "Controlled task", criteria: ["Done"] }).data;
+  const task = cli(["create"], plannedDraft({ title: "Controlled task", criteria: ["Done"] })).data;
   const ready = cli(["approve", task.id]).data;
   assert.equal(cli(["settings"], { autoMode: true }).ok, true);
   const controls = cli(["auto-queue"], { revision: 0, order: [task.id], hold: [task.id] });

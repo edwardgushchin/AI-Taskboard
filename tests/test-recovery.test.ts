@@ -1,3 +1,4 @@
+import { plannedDraft } from "./fixtures/planned-draft.ts";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -26,7 +27,7 @@ test("incident recovery: success, refusal matrix, and interrupted commit", t => 
   const initialized = cli(["init"], { git: true });
   assert.equal(initialized.ok, true, JSON.stringify(initialized));
   assert.equal(initialized.data.project, root);
-  const created = cli(["create"], { title: "First" });
+  const created = cli(["create"], plannedDraft({ title: "First" }));
   assert.equal(created.ok, true, JSON.stringify(created));
   const task = created.data;
   assert.ok(task.id);
@@ -78,7 +79,7 @@ test("incident recovery: success, refusal matrix, and interrupted commit", t => 
   lock.exec("BEGIN IMMEDIATE");
   try { refuse(manifest); } finally { lock.close(); }
   // A second public card references the fixture through an unknown field.
-  const other = cli(["create"], { title: "Preserved" }).data;
+  const other = cli(["create"], plannedDraft({ title: "Preserved" })).data;
   const otherPath = join(root, ".tasks/tasks/" + other.id + ".json");
   const otherCard = JSON.parse(readFileSync(otherPath, "utf8"));
   writeJson(otherPath, { ...otherCard, unknownReference: task.id });
@@ -112,7 +113,7 @@ test("incident recovery: success, refusal matrix, and interrupted commit", t => 
   writeFileSync(path, beforeCard);
   assert.equal(cli(["doctor"]).ok, true);
   assert.equal(existsSync(path), false); assert.equal(existsSync(journalPath), false);
-  assert.equal(Number(cli(["create"], { title: "Next" }).data.id.slice(2)), current.nextId);
+  assert.equal(Number(cli(["create"], plannedDraft({ title: "Next" })).data.id.slice(2)), current.nextId);
 });
 
 test("recovery and journal continuation exclude a competing start until pending deletion", async t => {
@@ -126,9 +127,9 @@ test("recovery and journal continuation exclude a competing start until pending 
     return JSON.parse(run.stdout);
   };
   assert.equal(cli(["init"], { git: true }).data.project, root);
-  const card = cli(["create"], { title: "First" }).data;
+  const card = cli(["create"], plannedDraft({ title: "First" })).data;
   assert.equal(cli(["cancel", card.id], { revision: card.revision, reason: "Fixture" }).ok, true);
-  const other = cli(["create"], { title: "Unrelated" }).data;
+  const other = cli(["create"], plannedDraft({ title: "Unrelated" })).data;
   const location = locateBoard(root);
   const cardPath = join(root, ".tasks/tasks/" + card.id + ".json");
   writeJson(cardPath, { ...JSON.parse(readFileSync(cardPath, "utf8")), workingDirectory: join(root, "T-0068-live-absent") });

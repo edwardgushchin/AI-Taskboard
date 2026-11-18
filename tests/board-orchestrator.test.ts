@@ -1,3 +1,4 @@
+import { plannedDraft } from "./fixtures/planned-draft.ts";
 import { isManual, manualContext } from "../src/cli/manual-board.ts";
 import { captureFileLink, isFileLink, verifyFileLink } from "../src/cli/attachment-links.ts";
 import localization from "../src/desktop/localization.cjs";
@@ -16,7 +17,7 @@ import type { TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
-import { boardReviewMode, codexThreadPattern, defaultBoardAgents, hexTagColor, maxAttachmentBytes, reviewVerifier, TaskboardError, taskIdPattern, usesIndependentReviewer } from "../src/cli/model.ts";
+import { boardReviewMode, codexThreadPattern, defaultBoardAgents, hexTagColor, maxAttachmentBytes, reviewVerifier, TaskboardError, taskIdPattern, reviewsAcceptanceRepair, usesIndependentReviewer } from "../src/cli/model.ts";
 import { managerInbox, needsManagerAttention } from "../src/cli/task-messages.ts";
 import type { RunActivity, Task } from "../src/cli/model.ts";
 import type { ChatSettings } from "../src/cli/model.ts";
@@ -121,7 +122,7 @@ function fixture(t: TestContext) {
     captureFileLink, isFileLink, verifyFileLink, AbortSignal, AbortController, ArrayBuffer, Buffer, Error, basename, dirname, extname, join, mkdtemp, rm, writeFile, maxAttachmentBytes, boardActions, boardInstructions, boardTools, callCli,
     githubReadTool, readBoardGitHub: (cwd: string, args: unknown) => callCli(cwd, ["github-read"], args),
     executorFullAccess, managerAccess, setTaskExecutorAccess, phaseStageReporter,
-    autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, usesIndependentReviewer, defaultBoardAgents, reviewVerifier,
+    autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, reviewsAcceptanceRepair, usesIndependentReviewer, defaultBoardAgents, reviewVerifier,
     existsSync, storageDirectory, readdirSync, rmSync, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
     goalMessages, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory,
     send() {},
@@ -364,7 +365,7 @@ test("manual manager edits personal tasks but cannot launch or move them", async
 test("manager can set and read the board tag palette in HEX", async t => {
   const f = fixture(t);
   assert.equal((await f.cli(["init"])).ok, true);
-  const { data: card } = await f.cli(["create"], { title: "Verify tag color", tags: ["Интеграции"] });
+  const { data: card } = await f.cli(["create"], plannedDraft({ title: "Verify tag color", tags: ["Интеграции"] }));
   const result = await f.run("Set the tag color", async act => {
     const saved = await act("tag_set_color", { name: "интеграции", color: "#217d79" });
     assert.equal(saved.data.name, "Интеграции");
@@ -384,8 +385,8 @@ test("a goal controls the persistent automatic queue and receives live board cha
   const f = fixture(t);
   assert.equal((await f.cli(["init"], { git: false })).ok, true);
   assert.equal((await f.cli(["settings"], { autoMode: true, reviewMode: "reviewer" })).ok, true);
-  const first = (await f.cli(["create"], { title: "First slice", criteria: ["First result"] })).data;
-  const second = (await f.cli(["create"], { title: "Second slice", criteria: ["Second result"] })).data;
+  const first = (await f.cli(["create"], plannedDraft({ title: "First slice", criteria: ["First result"] }))).data;
+  const second = (await f.cli(["create"], plannedDraft({ title: "Second slice", criteria: ["Second result"] }))).data;
   await f.cli(["approve", first.id]); await f.cli(["approve", second.id]);
   await f.pushBoard();
   let queueRevision = 0;
@@ -436,8 +437,8 @@ test("manager grants and revokes executor access for a task", async t => {
   const f = fixture(t);
   const initialized = await f.cli(["init"]);
   assert.ok(initialized.ok);
-  const card = (await f.cli(["create"], { title: "Run an Electron check", criteria: ["The window loads."],
-    workingDirectory: initialized.data.project })).data;
+  const card = (await f.cli(["create"], plannedDraft({ title: "Run an Electron check", criteria: ["The window loads."],
+    workingDirectory: initialized.data.project }))).data;
   const accepted = (await f.cli(["approve", card.id])).data;
   const started = (await f.cli(["start", card.id])).data.task;
   assert.equal(started.status, "in_progress");
@@ -463,7 +464,7 @@ test("manager grants and revokes executor access for a task", async t => {
 test("manager milestone tools use the board origin and return per-card results", async t => {
   const f = fixture(t);
   assert.equal((await f.cli(["init"])).ok, true);
-  const { data: card } = await f.cli(["create"], { title: "Remove old release task" });
+  const { data: card } = await f.cli(["create"], plannedDraft({ title: "Remove old release task" }));
   const { data: closed } = await f.cli(["cancel", card.id], { reason: "Obsolete" });
   const result = await f.run("Clear the milestone from this card", async act => {
     const listed = await act("milestones_list", {});
@@ -587,7 +588,7 @@ test("a board snapshot with auto-review on wakes the manager once per submitted 
     return { text: "Waiting for human judgment." };
   };
   const board = { project: join(f.folder, "project"), settings: { reviewMode: "human" },
-    tasks: [{ id: "T-0001", status: "review", revision: 7 }] };
+    tasks: [{ id: "T-0001", status: "review", revision: 7, expertReviewPlanned: true }] };
   const watch = f.schedule(board, respond);
   activity = watch.reviewing;
   watch.tick();
@@ -643,7 +644,7 @@ test("manager can route a draft to Luna or Sol without changing board defaults",
   const routed = await f.run("Assign a small inventory", async (act, _prompt, _images, _id, _context, _waiting, _signal, session) => {
     assert.deepEqual(session?.settings, defaultBoardAgents.manager);
     const execution = { model: "gpt-6-luna", effort: "high" };
-    const created = await act("task_create", { title: "Inventory fixtures", execution });
+    const created = await act("task_create", plannedDraft({ title: "Inventory fixtures", execution }));
     assert.equal(created.ok, true, JSON.stringify(created.error));
     const { id, revision } = created.data;
     assert.deepEqual((await f.cli(["show", id])).data.execution, execution);
@@ -673,7 +674,7 @@ test("reviewer-human uses the shared review queue with and without automatic mod
         summary: "External result", checks: ["Read the result"] })).ok, true);
     };
     for (const title of ["First", "Second"]) {
-      const { data: task } = await f.cli(["create"], { title, criteria: ["Check the result"] });
+      const { data: task } = await f.cli(["create"], plannedDraft({ title, criteria: ["Check the result"] }));
       await f.cli(["approve", task.id]);
       assert.equal((await f.cli(["start", task.id])).ok, true);
       await submit(task.id);
@@ -744,7 +745,7 @@ test("reviewers agree to submissions or return defects, and the manager controls
   await writeFile(join(project, ".git", "info", "exclude"), "\n/review.log\n", { flag: "a" });
   const tasks: Task[] = [];
   for (const name of ["pass", "fail", "hold-a", "hold-b", "queued"]) {
-    const { data: task } = await f.cli(["create"], { title: name, criteria: ["Expected content exists."] });
+    const { data: task } = await f.cli(["create"], plannedDraft({ title: name, criteria: ["Expected content exists."] }));
     assert.equal((await f.cli(["approve", task.id])).ok, true);
     const { data: started } = await f.cli(["start", task.id]);
     const noChanges = name !== "pass" && name !== "fail";
@@ -1128,7 +1129,7 @@ test("work history continues from local pages to earlier provider operations", a
 test("only a background goal uses the longer board wait", async t => {
   const f = fixture(t);
   await f.cli(["init"]);
-  const { data: task } = await f.cli(["create"], { title: "Running task" });
+  const { data: task } = await f.cli(["create"], plannedDraft({ title: "Running task" }));
   f.setRunning(task.id, true);
   const timeout = AbortSignal.timeout.bind(AbortSignal);
   const delays: number[] = [];
@@ -1152,7 +1153,7 @@ test("only a background goal uses the longer board wait", async t => {
 test("send now steers the active manager with attachments and releases its executor wait", { timeout: 15_000 }, async t => {
   const f = fixture(t);
   await f.cli(["init"]);
-  const { data: task } = await f.cli(["create"], { title: "Running task" });
+  const { data: task } = await f.cli(["create"], plannedDraft({ title: "Running task" }));
   f.setRunning(task.id, true);
   const ready = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
@@ -1165,7 +1166,7 @@ test("send now steers the active manager with attachments and releases its execu
     const waiting = act("task_wait", { ids: [task.id] });
     ready.resolve();
     assert.equal((await waiting).error.code, "USER_MESSAGE_RECEIVED");
-    const created = await act("task_create", { title: "Use attached notes", attachmentIds: [2] });
+    const created = await act("task_create", plannedDraft({ title: "Use attached notes", attachmentIds: [2] }));
     assert.equal(created.ok, true);
     assert.equal((await f.cli(["show", created.data.id])).data.attachments[0].name, "new.png");
     await release.promise;
@@ -1314,7 +1315,6 @@ test("manager pushes a pinned local branch to its configured remote without a co
 test("manager adopts expert roles, loads a board skill and plans an addressed specialist team", async t => {
   const f = fixture(t);
   assert.equal((await f.cli(["init"])).ok, true);
-  assert.equal((await f.cli(["settings"], { requireExpertPlans: true, reviewMode: "reviewer" })).ok, true);
   const reply = await f.run("Подготовь команду спринта", async act => {
     const experts = await act("expert_list", {});
     assert.equal(experts.ok, true); assert.equal(experts.data.length, 220);
@@ -1425,9 +1425,9 @@ test("manager launches multiple tasks through the task start path and reports ea
   const f = fixture(t);
   const initialized = await f.cli(["init"]);
   assert.equal(initialized.ok, true);
-  const { data: first } = await f.cli(["create"], { title: "First", criteria: ["First result"] });
-  const { data: second } = await f.cli(["create"], { title: "Second", criteria: ["Second result"] });
-  const { data: draft } = await f.cli(["create"], { title: "Draft", criteria: ["Draft result"] });
+  const { data: first } = await f.cli(["create"], plannedDraft({ title: "First", criteria: ["First result"] }));
+  const { data: second } = await f.cli(["create"], plannedDraft({ title: "Second", criteria: ["Second result"] }));
+  const { data: draft } = await f.cli(["create"], plannedDraft({ title: "Draft", criteria: ["Draft result"] }));
   const { data: firstReady } = await f.cli(["approve", first.id]);
   const { data: secondReady } = await f.cli(["approve", second.id]);
   writeJson(f.chatBinding, { provider: "codex", id: f.threadId });
@@ -1464,9 +1464,9 @@ test("manager can create and dispatch a task in an existing working directory", 
   const f = fixture(t);
   assert.equal((await f.cli(["init"])).ok, true);
   const result = await f.run("Сохрани проверку в указанной папке", async act => {
-    const draft = (await act("task_create", {
+    const draft = (await act("task_create", plannedDraft({
       title: "Save a report", criteria: ["The report is present."], workingDirectory: f.folder,
-    })).data;
+    }))).data;
     const approved = (await act("task_approve", { id: draft.id, revision: draft.revision })).data;
     const launched = await act("task_start", { id: draft.id, revision: approved.revision });
     assert.equal(launched.data.status, "in_progress");
@@ -1486,8 +1486,8 @@ test("the manager can approve drafts created while the goal was paused", async t
   let pending: { id: string; revision: number } | undefined;
   const paused = await f.run("Prepare the release cards while the goal is paused.", async act => {
     assert.equal((await act("goal_read", {})).data.goal.status, "paused");
-    const { data: draft } = await act("task_create", { title: "Verify the release archive", criteria: ["The archive opens."] });
-    const { data: other } = await act("task_create", { title: "Update release notes", criteria: ["The notes list user-visible changes."] });
+    const { data: draft } = await act("task_create", plannedDraft({ title: "Verify the release archive", criteria: ["The archive opens."] }));
+    const { data: other } = await act("task_create", plannedDraft({ title: "Update release notes", criteria: ["The notes list user-visible changes."] }));
     pending = other;
     assert.equal((await f.cli(["show", draft.id])).data.goalThreadId, undefined);
     const approval = await act("task_approve", { id: draft.id, revision: draft.revision });
@@ -1528,22 +1528,22 @@ test("a goal delegates a bounded slice, waits for submission, and reviews before
   git("config", "user.email", "taskboard@example.invalid");
   git("commit", "--allow-empty", "-m", "chore: initialize");
   await writeFile(join(project, ".git", "info", "exclude"), "\n/report.local\n", { flag: "a" });
-  const unrelated = (await f.cli(["create"], { title: "Manual task", criteria: ["Manual review"] })).data;
+  const unrelated = (await f.cli(["create"], plannedDraft({ title: "Manual task", criteria: ["Manual review"] }))).data;
   const objective = "Cover every applicable public API in the project";
   let sliceId = "";
   const result = await f.run(objective, async (act, _text, _images, _id, _context, _waiting, _signal, goal) => {
     goal!.update({ objective, status: "active" });
     assert.equal((await act("task_create", { title: "All coverage", description: objective, criteria: ["100%"] })).error.code, "GOAL_SLICE_REQUIRED");
-    const slice = (await act("task_create", {
+    const slice = (await act("task_create", plannedDraft({
       title: "Cover empty names", description: "Specify the empty-name result in the parser.", criteria: ["Empty names return a validation error."],
-    })).data;
+    }))).data;
     sliceId = slice.id;
     assert.equal((await f.cli(["show", slice.id])).data.goalThreadId, f.threadId);
     const ready = (await act("task_approve", { id: slice.id, revision: slice.revision })).data;
     assert.equal(ready.status, "ready");
-    const another = (await act("task_create", {
+    const another = (await act("task_create", plannedDraft({
       title: "Cover missing config", description: "Specify behavior for an absent config file.", criteria: ["Missing config uses defaults."],
-    })).data;
+    }))).data;
     const anotherReady = (await act("task_approve", { id: another.id, revision: another.revision })).data;
     const { data: backlog } = await act("board_list", {});
     assert.equal(backlog.tasks.find((task: { id: string }) => task.id === another.id).revision, anotherReady.revision);
@@ -1838,7 +1838,7 @@ test("a reviewer leaves gaps on review and wakes the waiting manager on approval
   const head = git("rev-parse", "HEAD");
   assert.equal((await f.cli(["init"])).ok, true);
   assert.equal((await f.cli(["settings"], { reviewMode: "human" })).ok, true);
-  const { data: task } = await f.cli(["create"], { title: "Check local data", criteria: ["Obsolete folder is absent."] });
+  const { data: task } = await f.cli(["create"], plannedDraft({ title: "Check local data", criteria: ["Obsolete folder is absent."] }));
   assert.equal((await f.cli(["approve", task.id])).ok, true);
   const started = await f.cli(["start", task.id]);
   assert.equal(started.ok, true);
@@ -1908,7 +1908,7 @@ test("a reviewer leaves gaps on review and wakes the waiting manager on approval
   const { data: unread } = await f.cli(["manager-inbox"]);
   assert.deepEqual(unread.map((message: { kind: string }) => message.kind), ["submit"]);
   assert.equal((await f.cli(["manager-ack", task.id], { through: unread[0].sequence })).ok, true);
-  const { data: other } = await f.cli(["create"], { title: "Independent work", criteria: ["Complete independent work."] });
+  const { data: other } = await f.cli(["create"], plannedDraft({ title: "Independent work", criteria: ["Complete independent work."] }));
   assert.equal((await f.cli(["approve", other.id])).ok, true);
   assert.equal((await f.cli(["start", other.id])).ok, true);
   assert.equal((await f.cli(["settings"], { archiveAfterDays: 0 })).ok, true);
@@ -1993,7 +1993,7 @@ test("cancelling a waiting request keeps the board thread and releases its tempo
 test("orchestrator discusses a board, remembers the turn, and cancels the original task through the CLI", async t => {
   const f = fixture(t);
   assert.equal((await f.cli(["init"])).ok, true);
-  const created = await f.cli(["create"], { title: "Fix card preview", criteria: ["Corners match"] });
+  const created = await f.cli(["create"], plannedDraft({ title: "Fix card preview", criteria: ["Corners match"] }));
   assert.equal(created.ok, true, JSON.stringify(created.error));
   const task = created.data;
   await f.cli(["approve", task.id]);
@@ -2059,7 +2059,7 @@ test("orchestrator discusses a board, remembers the turn, and cancels the origin
 test("the project manager can revise an approved task and resolve its blocker from a discussion", async t => {
   const f = fixture(t);
   assert.equal((await f.cli(["init"])).ok, true);
-  const { data: task } = await f.cli(["create"], { title: "Group task chats", criteria: ["Use the original integration"] });
+  const { data: task } = await f.cli(["create"], plannedDraft({ title: "Group task chats", criteria: ["Use the original integration"] }));
   const { data: ready } = await f.cli(["approve", task.id]);
   const { data: blocked } = await f.cli(["block", task.id], {
     revision: ready.revision, allowUnstarted: true, reason: "Original integration is unavailable", condition: "Use a supported integration",
@@ -2109,7 +2109,7 @@ test("manager keeps large file links through queue, provider context and card cr
     assert.equal(images.length, 0);
     assert.equal(context.attachments[0].path, link.path);
     assert.equal(context.attachments[0].link.size, link.size);
-    const created = await act("task_create", { title: "Linked", attachmentIds: [1] });
+    const created = await act("task_create", plannedDraft({ title: "Linked", attachmentIds: [1] }));
     assert.equal(created.ok, true, JSON.stringify(created));
     assert.equal(created.data.attachments[0].link.path, link.path);
     return { text: "Linked" };
@@ -2139,7 +2139,7 @@ test("orchestrator preserves selected attachments, restores blocked drafts, and 
     ]);
     assert.deepEqual(Array.from(images, image => Buffer.from(image.split(",")[1], "base64").toString()), ["first", "second"]);
     assert.equal((await act("task_create", { title: "Draft", attachmentIds: [4] })).error.code, "INVALID_INPUT");
-    const draft = await act("task_create", { title: "Draft", attachmentIds: [1, 2, 3] });
+    const draft = await act("task_create", plannedDraft({ title: "Draft", attachmentIds: [1, 2, 3] }));
     assert.equal(draft.ok, true);
     throw new Error("Provider failed after creation");
   }, files);
@@ -2363,7 +2363,7 @@ test("two windows sharing a board cannot start separate orchestrator chats", asy
 
 test("a running goal accepts a question answer and steering during task_wait in the same context", { timeout: 15_000 }, async t => {
   const f = fixture(t); await f.cli(["init"]);
-  const { data: task } = await f.cli(["create"], { title: "Running task" });
+  const { data: task } = await f.cli(["create"], plannedDraft({ title: "Running task" }));
   f.setRunning(task.id, true);
   const { managerRun } = f.backgroundWindow();
   const asked = Promise.withResolvers<void>(), ready = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>();
@@ -2413,14 +2413,14 @@ test("a running goal accepts a question answer and steering during task_wait in 
 test("the manager can read the open queue without closed or archived cards", async t => {
   const f = fixture(t);
   assert.equal((await f.cli(["init"])).ok, true);
-  const { data: archived } = await f.cli(["create"], { title: "Archived work" });
+  const { data: archived } = await f.cli(["create"], plannedDraft({ title: "Archived work" }));
   assert.equal((await f.cli(["cancel", archived.id], { reason: "Obsolete" })).ok, true);
   assert.equal((await f.cli(["settings"], { archiveAfterDays: 0 })).ok, true);
   assert.equal((await f.cli(["archive", "sweep"])).ok, true);
 
-  const { data: closed } = await f.cli(["create"], { title: "Closed work" });
+  const { data: closed } = await f.cli(["create"], plannedDraft({ title: "Closed work" }));
   assert.equal((await f.cli(["cancel", closed.id], { reason: "Obsolete" })).ok, true);
-  const { data: open } = await f.cli(["create"], { title: "Open work", tags: ["Runtime"], criteria: ["Work is verified."] });
+  const { data: open } = await f.cli(["create"], plannedDraft({ title: "Open work", tags: ["Runtime"], criteria: ["Work is verified."] }));
   const approved = await f.cli(["approve", open.id]);
   assert.equal(approved.ok, true, JSON.stringify(approved.error));
   const { data: ready } = approved;
@@ -2462,7 +2462,7 @@ test("manager reopens a conflicting approved submission and integrates its revie
   git(f.project, "commit", "-m", "Initial");
   await f.cli(["init"]);
   await f.cli(["settings"], { reviewMode: "reviewer" });
-  const { data: card } = await f.cli(["create"], { title: "Conflict repair", criteria: ["Both changes preserved"] });
+  const { data: card } = await f.cli(["create"], plannedDraft({ title: "Conflict repair", criteria: ["Both changes preserved"] }));
   await f.cli(["approve", card.id]);
   const { data: started } = await f.cli(["start", card.id]);
   const cwd = started.worktree;
@@ -2514,7 +2514,7 @@ test("manager returns the same card in every review mode and preserves human acc
   assert.equal((await f.cli(["init"])).ok, true);
   for (const mode of ["human", "manager", "reviewer"] as const) {
     assert.equal((await f.cli(["settings"], { reviewMode: mode })).ok, true);
-    const { data: task } = await f.cli(["create"], { title: "T-0115 return scenario", criteria: ["Feedback reaches executor"] });
+    const { data: task } = await f.cli(["create"], plannedDraft({ title: "T-0115 return scenario", criteria: ["Feedback reaches executor"] }));
     await f.cli(["approve", task.id]);
     await f.cli(["start", task.id]);
     const { data: preview } = await f.cli(["preview", task.id]);
@@ -2564,7 +2564,7 @@ test("private cleanup repair persists, shares reviewer capacity and preserves a 
   await f.cli(["init"]); await f.cli(["settings"], { reviewMode: "human", autoMode: false });
   await f.run("Initial conversation", async () => ({ text: "Remembered" }));
   const historyBefore = await f.history();
-  const { data: card } = await f.cli(["create"], { title: "T-0138 fixture", criteria: ["Keep evidence"] });
+  const { data: card } = await f.cli(["create"], plannedDraft({ title: "T-0138 fixture", criteria: ["Keep evidence"] }));
   await f.cli(["approve", card.id]); const { data: started } = await f.cli(["start", card.id]);
   await writeFile(join(started.worktree, "result.txt"), "result");
   const { data: preview } = await f.cli(["preview", card.id]);
@@ -2619,7 +2619,7 @@ test("acceptance repair has an isolated context and waits for shared reviewer ca
   await writeFile(join(f.project, "source.txt"), "base\n"); git("add", "."); git("commit", "-m", "chore: initial");
   await f.cli(["init"]); await f.cli(["settings"], { reviewMode: "human", autoMode: false });
   await f.run("Initial conversation", async () => ({ text: "Remembered" }));
-  const { data: card } = await f.cli(["create"], { title: "Repair", criteria: ["Verified"] });
+  const { data: card } = await f.cli(["create"], plannedDraft({ title: "Repair", criteria: ["Verified"] }));
   await f.cli(["approve", card.id]); const { data: started } = await f.cli(["start", card.id]);
   await writeFile(join(started.worktree, "source.txt"), "task\n");
   const { data: preview } = await f.cli(["preview", card.id]);

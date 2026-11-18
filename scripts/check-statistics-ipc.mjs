@@ -1,3 +1,4 @@
+import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
 // Exercise the real preload/main/CLI statistics API with an isolated application profile.
 import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
@@ -42,7 +43,7 @@ try {
   const initialized = cli(["init"]);
   assert.equal(initialized.ok, true);
   assert.equal(initialized.data.project, project);
-  const task = cli(["create"], {title: "IPC statistics"}).data;
+  const task = cli(["create"], plannedDraft({title: "IPC statistics"})).data;
   const record = {threadId: "test", turnId: "test", model: "future-model", incomplete: false,
     totalTokens: 120, inputTokens: 100, outputTokens: 20, cachedInputTokens: 50, cacheWriteInputTokens: 5, reasoningOutputTokens: 10};
   assert.equal(cli(["token-usage", task.id], {id: "test", sequence: 1, role: "executor", records: [record]}).ok, true);

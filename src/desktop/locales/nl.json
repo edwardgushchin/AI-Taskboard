@@ -1196,7 +1196,6 @@
   "experts.team": "Expertteam",
   "experts.add_stage": "Werkstap toevoegen",
   "experts.stage_title": "Titel van fase",
-  "experts.require_plans": "Expertplannen vereisen voordat taken starten",
   "experts.description": "Beschrijving",
   "experts.inputs": "Invoer, één per regel",
   "experts.outputs": "Resultaten, één per regel",
