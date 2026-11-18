@@ -1819,7 +1819,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           const writer = entries.find(entry => entry.task === context && entry.steeringMessageId === messageId);
           if (writer) delete writer.steeringMessageId;
         });
-        broadcastBoardChat(board.project, "orchestrator-queue", {}, sender);
+        // The sender may have read the in-flight state during a refresh from another window.
+        broadcastBoardChat(board.project, "orchestrator-queue");
       }
     }
   }
