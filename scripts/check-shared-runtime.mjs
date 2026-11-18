@@ -208,6 +208,18 @@ if (!process.versions.electron) {
       } finally { clearTimeout(timer); }
     } finally { boardLock.close(); }
     record("PASS: focus, click and board IPC stay responsive while the board transaction lock is held");
+    for (const mode of ["resume", true]) {
+      await a.ask({ action: "startGoal", mode });
+      await wait(async () => (await a.ask({ action: "goalPanels" })).every(
+        panel => panel.visible && panel.status === "active"), "active goal visible in both windows");
+      assert.deepEqual((await a.ask({ action: "clearGoal" })).data, null);
+      await wait(async () => (await a.ask({ action: "goalPanels" })).every(
+        panel => !panel.visible), "cleared goal removed from both open windows");
+      assert.equal(JSON.parse(readFileSync(binding, "utf8")).goal, null);
+      await a.ask({ action: "finishGoal" });
+    }
+    await reloaded.ask({ action: "reopenGoalBoard" });
+    record("PASS: clearing a new or resumed goal removes it from both windows and from the reopened board");
     if (managerOnly) {
       if (output) writeFileSync(join(output, "shared-runtime.txt"), results.join("\n") + "\n");
       break checks;
@@ -332,9 +344,20 @@ if (!process.versions.electron) {
   const runs = new Map(), leases = new Map(), pids = new Set(), providerRequests = new Map(); let failNext = false, providerSequence = 0;
   let gitWindow;
   const active = await import(new URL("../src/desktop/active-runs.ts", import.meta.url));
-  let managerCalls = 0, maintenanceCalls = 0, heldTurn;
+  let managerCalls = 0, maintenanceCalls = 0, heldTurn, goalDone, goalRequest;
   const maintenanceDone = Promise.withResolvers();
   globalThis.runtimeCheckReply = async (_profile, _project, text, _images, _action, _tools, _instructions, _signal, hooks) => {
+    if (hooks.goal || hooks.resumeGoal) {
+      goalDone = Promise.withResolvers();
+      hooks.onGoalControl(async ({ kind }) => {
+        assert.equal(kind, "clear");
+        hooks.onGoal(null);
+        return null;
+      });
+      hooks.onGoal({ objective: hooks.goal ?? "Paused fixture goal", status: "active" });
+      await goalDone.promise;
+      return { text: "", goalStatus: "cleared" };
+    }
     if (hooks.role === "reviewer") {
       assert.equal(hooks.id, undefined);
       assert.equal(hooks.resumeGoal, false);
@@ -477,6 +500,32 @@ if (!process.versions.electron) {
       })()`)));
       if (command.action === "managerCalls") data = managerCalls;
       if (command.action === "history") data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript("window.taskboard.boardHistory()");
+      if (command.action === "startGoal") {
+        goalRequest = BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(
+          `window.taskboard.boardRequest(${JSON.stringify(command.mode === "resume" ? "" : "New fixture goal")}, [], undefined, ${JSON.stringify(command.mode)})`);
+        data = true;
+      }
+      if (command.action === "clearGoal") data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(
+        'window.taskboard.boardGoal("clear")');
+      if (command.action === "finishGoal") {
+        goalDone.resolve();
+        data = await goalRequest;
+        assert.equal(data.ok, true, JSON.stringify(data));
+      }
+      if (command.action === "goalPanels") data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript(`(() => {
+        const panel = document.querySelector(".board-goal");
+        return { visible: !panel.hidden, status: panel.dataset.status };
+      })()`)));
+      if (command.action === "reopenGoalBoard") {
+        const { window, ready } = qa.createWindow([project]);
+        try {
+          await ready;
+          const history = await window.webContents.executeJavaScript("window.taskboard.boardHistory()");
+          assert.equal(history.data.goal, null);
+          assert.equal(await window.webContents.executeJavaScript('document.querySelector(".board-goal").hidden'), true);
+          data = true;
+        } finally { window.close(); }
+      }
       if (command.action === "openGitBoard") {
         const state = qa.createWindow([command.project]);
         gitWindow = state.window;

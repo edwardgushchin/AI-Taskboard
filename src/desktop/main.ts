@@ -2163,16 +2163,16 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           if (steering.has(id)) saveHistory();
           steering.get(id)?.resolve(true);
         },
-        onGoal: goal => {
+        onGoal: updatedGoal => {
           if (!goal) return;
-          saveBoardGoal(binding, goal);
-          activeGoal = goal?.status === "active" ? goal : undefined;
+          saveBoardGoal(binding, updatedGoal);
+          activeGoal = updatedGoal?.status === "active" ? updatedGoal : undefined;
           if (activeGoal && goalWork.signal.aborted) goalWork = new AbortController();
           if (!activeGoal) goalWork.abort();
-          const goalRunning = Boolean(activeGoal && !reviewIds);
+          const goalRunning = Boolean(activeGoal);
           running.goalRunning = goalRunning;
           publishRun(false);
-          publishGoal({ goal, goalRunning });
+          publishGoal({ goal: updatedGoal, goalRunning });
         },
         onGoalControl: control => { if (goal) running.goal = control; },
         onTurnEnded: () => { endReview(); saveHistory(); },
