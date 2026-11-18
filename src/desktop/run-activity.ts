@@ -72,15 +72,31 @@ function parseRunActivity(entries: Map<string, RunActivity>, method: string, par
   return { ...previous, text: bounded(previous.text + separator + delta) };
 }
 
-export function runLog(entries: Map<string, RunActivity>, maxBytes = 900_000): RunActivity[] {
+export function runLog(entries: Map<string, RunActivity>, maxBytes = 900_000, keepSummaries = false): RunActivity[] {
   const result: RunActivity[] = [];
+  const items = [...entries.values()].reverse().filter(item => item.text || item.title);
+  const summaries = new Set<RunActivity>();
   let remaining = maxBytes;
-  for (const item of Array.from(entries.values()).reverse()) {
-    if (!item.text && !item.title) continue;
-    remaining -= Buffer.byteLength(JSON.stringify(item)) + 1;
+  const size = (item: RunActivity) => Buffer.byteLength(JSON.stringify(item)) + 1;
+  if (keepSummaries) {
+    // Leave room for recent checks and the final report.
+    for (const item of items) {
+      if (item.type !== "reasoning" || !item.text.trim() || remaining - size(item) < maxBytes / 2) continue;
+      summaries.add(item);
+      remaining -= size(item);
+    }
+  }
+  for (const item of items) {
+    if (summaries.has(item)) {
+      result.push(item);
+      continue;
+    }
+    remaining -= size(item);
     if (remaining < 0) {
+      if (result.at(-1)?.type === "truncated") continue;
       result.push({ id: "truncated", type: "truncated", title: "", text: "", status: "" });
-      break;
+      if (!summaries.size) break;
+      continue;
     }
     result.push(item);
   }
