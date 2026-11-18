@@ -198,7 +198,8 @@ app.whenReady().then(async () => {
           ...Array.from({ length: 24 }, (_, index) => ({
             at: start + 101 + index, run: { lane: "notice", items: [
               answer("notice-" + index, "T-" + String(index + 1).padStart(4, "0") +
-                " «batch-cancel-" + index + "» — " + (transitionResults[index]?.[2] ?? "отменена") + ".", 101 + index),
+                " «batch-cancel-" + index + (index === 0 ? "\nВторая строка отмены" : index === 1 ? "\r\nВторая строка запуска" : "") +
+                "» — " + (transitionResults[index]?.[2] ?? "отменена") + ".", 101 + index),
             ] },
           })),
         ]);
@@ -301,6 +302,10 @@ app.whenReady().then(async () => {
       await check(onlyNoticeResults, "saved tool details have no duplicate status result after loading older notices");
       await check(`!dialogue.manager.querySelector('[data-status-result]:not([hidden])')`,
         "matching notices replace all five tool result rows");
+      await check(`
+        dialogue.manager.querySelector('[data-item="final:notice-0"]').textContent.includes('Вторая строка отмены') &&
+        dialogue.manager.querySelector('[data-item="final:notice-1"]').textContent.includes('Вторая строка запуска')
+      `, "matching notices preserve both lines of older card titles");
       await evaluate(`(async () => {
         for (let i = 0; i < ${Object.keys(workPages).length}; i++) {
           const older = dialogue.manager.querySelector('.board-work .board-chat-older');

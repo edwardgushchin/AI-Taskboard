@@ -83,7 +83,7 @@ const mergedPrefixes = Object.keys(localization.catalogs).map(locale => {
 
 // Only older records produced by status sync need their formatted fields recovered.
 function noticeTransition(text: string): BoardActivity["statusTransition"] {
-  const regular = /^(T-\d+) «[^\r\n]*?» — ([^\r\n]+?)(?:[.:]|$)/u.exec(text);
+  const regular = /^(T-\d+) «.*?» — ([^\r\n]+?)(?:[.:]|$)/su.exec(text);
   const status = regular && statusLabels.get(regular[2]!);
   if (regular && status) return { task: regular[1]!, status };
   for (const { prefix, suffix } of mergedPrefixes) {

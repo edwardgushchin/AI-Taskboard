@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
 import { writeJson } from "../src/cli/storage.ts";
+import { statusNotice } from "../src/cli/task-messages.ts";
+import type { Task } from "../src/cli/model.ts";
 import { managerChatItems, managerUnread, managerWorkItems, readManagerDialogue, readManagerHistory, readManagerMessages, saveManagerHistory } from "../src/desktop/manager-history.ts";
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
 import type { ReviewedSubmission } from "../src/desktop/board-actions.ts";
@@ -161,6 +163,27 @@ test("only delivered dialogue replies become unread and repeated saves preserve 
   assert.deepEqual(managerUnread(project), ["second"]);
   assert.deepEqual(readManagerHistory(project, null, "chat")!.turns.flatMap(turn => turn.items.map(item => item.id)), ["first", "second"]);
   assert.deepEqual(readManagerHistory(project, null, "work")!.turns.flatMap(turn => turn.items.map(item => item.id)), ["first", statusId]);
+});
+
+test("work history identifies older status notices with multiline card titles", t => {
+  const project = fixture(t);
+  const start = Date.now();
+  const notices = ["", "\n", "\r\n", "\r"].map((separator, index) => {
+    const title = "First" + separator + "Second";
+    const task = { id: "T-0042", title } as Task;
+    const at = new Date(start + index).toISOString();
+    const text = statusNotice(task, { action: "cancel", actor: "manager", from: "ready", to: "cancelled", at }, index % 2 ? "ru" : "en");
+    assert.ok(text?.includes(title));
+    const item = { id: randomUUID(), text: text!, at, title: "", type: "agentMessage", status: "completed", phase: "final_answer" as const };
+    saveManagerHistory(project, start + index, item.id, { lane: "notice", items: [item] });
+    return item;
+  });
+  const reply = { ...notices[1]!, id: randomUUID() };
+  saveManagerHistory(project, start + notices.length, randomUUID(), { lane: "chat", items: [reply] });
+  assert.deepEqual(readManagerHistory(project, null, "work")!.turns.flatMap(turn => turn.items),
+    notices.map(item => ({ ...item, statusTransition: { task: "T-0042", status: "cancelled" } })));
+  assert.deepEqual(readManagerHistory(project, null, "chat")!.turns.flatMap(turn => turn.items), [reply]);
+  assert.deepEqual(managerUnread(project), [reply.id]);
 });
 
 test("work pages interleaved notices and chat runs without losing or duplicating notices", t => {
