@@ -40,7 +40,7 @@ import { expertContext, expertSkill, listExperts, readExpert, saveExpert } from 
 import { approvalRequirements, createExpertPlan, expertStagesStatus, planNewTask, requireApprovalPlan, requireExpertPlan, requireExpertResults, reviewDecisionSequence, sendTeamMessage, taskExpertPhase, teamInbox, updateExpertStage } from "./expert-team.ts";
 import { syncTaskStatusNotices } from "../desktop/manager-history.ts";
 import { syncSettingsNotices } from "../desktop/settings-notices.ts";
-import { deferExecutor, forgetExecutor, linkQueuedExecutor, matchesQueuedExecutor, registerRuntime, runtimeEntries, runtimeTransaction } from "../desktop/board-runtime.ts";
+import { deferExecutor, forgetExecutor, linkQueuedExecutor, matchesQueuedExecutor, registerRuntime, runtimeEntries } from "../desktop/board-runtime.ts";
 
 const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "checklist", "pause", "block", "resume", "unblock", "update"]);
 const help = [
@@ -745,7 +745,9 @@ function run(
     if (draft !== task && hasPending(store, task, true)) {
       throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before returning the task to draft.");
     }
-    return draft === task ? task : isArchived(store, id) ? reactivateArchivedTask(store, draft) : store.save(draft);
+    const saved = draft === task ? task : isArchived(store, id) ? reactivateArchivedTask(store, draft) : store.save(draft);
+    forgetExecutor(store.location.root, id);
+    return saved;
   }
   if (hasPending(store, task)) {
     throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before modifying the task.");
@@ -1022,10 +1024,6 @@ async function main() {
           try {
             data = withTaskStartLock(location, id, () => onBoard(location,
               (store, lockWaitMs) => run(store, command, id, extra, input, values, lockWaitMs)));
-            runtimeTransaction(location.root, entries => {
-              const index = entries.findIndex(entry => entry.kind === "queue" && entry.task === id);
-              if (index >= 0) entries.splice(index, 1);
-            });
           } finally { release(); }
         } else if (command === "accept") {
           if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");

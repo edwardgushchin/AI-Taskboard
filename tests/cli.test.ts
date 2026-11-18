@@ -19,7 +19,7 @@ import { maxWorklogPartBytes } from "../src/cli/worklog-files.ts";
 import type { Task } from "../src/cli/model.ts";
 import { boardToolContent } from "../src/desktop/board-mcp.ts";
 import { setReviewModeFromChat, taskChatActions } from "../src/desktop/chat-actions.ts";
-import { registerRuntime, runtimeEntries, runtimeTransaction } from "../src/desktop/board-runtime.ts";
+import { matchesQueuedExecutor, registerRuntime, rememberExecutor, runtimeEntries, runtimeTransaction } from "../src/desktop/board-runtime.ts";
 
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
 const env = {
@@ -1001,6 +1001,24 @@ test("return to draft preserves the card and invalidates queued and late lifecyc
   assert.ok(!runtimeEntries(root).some(entry => entry.task === running.id));
   cli(root, ["start", running.id], { revision: running.revision }, "INVALID_TRANSITION");
   cli(root, ["submit", running.id], { token, noChanges: true, summary: "Late", checks: ["Late"] }, "INVALID_TRANSITION");
+  const interrupted = start(approve(create()));
+  const thread = "10000000-0000-0000-0000-000000000001";
+  const linked = cli(root, ["update", interrupted.id], { codexThreadId: thread });
+  const interrupt = registerRuntime(root, { kind: "slot", role: "executor", task: linked.id })!;
+  try {
+    interrupt.run(() => rememberExecutor(root, linked, root, undefined));
+    cli(root, ["return-to-draft", linked.id], { revision: linked.revision }, "CHAT_BUSY");
+    assert.equal(runtimeEntries(root).find(entry => entry.task === linked.id)?.restart?.threadId, thread);
+  } finally { interrupt(true); }
+  const pending = runtimeEntries(root).find(entry => matchesQueuedExecutor(entry, linked));
+  assert.ok(pending?.restart);
+  cli(root, ["return-to-draft", linked.id], { revision: linked.revision - 1 }, "REVISION_CONFLICT");
+  assert.deepEqual(runtimeEntries(root).find(entry => entry.task === linked.id), pending);
+  const restarted = start(approve(restore(linked)));
+  assert.equal(restarted.codexThreadId, thread);
+  assert.ok(matchesQueuedExecutor(pending, restarted));
+  assert.ok(!runtimeEntries(root).some(entry => entry.task === linked.id));
+  cli(root, ["start", linked.id], { revision: restarted.revision, queuedExecutor: true }, "INVALID_TRANSITION");
   const blocked = start(approve(create()));
   restore(cli(root, ["block", blocked.id], { reason: "Fixture", condition: "Retry" }));
   const review = submit(start(approve(create())));
