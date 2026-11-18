@@ -1,0 +1,124 @@
+name: Release packages
+
+on:
+  push:
+    branches: ['release-rehearsal/**']
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      signed:
+        description: Use distribution certificates (default branch only)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-packages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    if: github.repository == 'edwardgushchin/AI-Taskboard'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      signed: ${{ steps.version.outputs.signed }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24.14.0
+          package-manager-cache: false
+      - run: npm ci --ignore-scripts
+      - name: Validate release version and profile
+        id: version
+        env:
+          SIGNED_REHEARSAL: ${{ inputs.signed }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: node scripts/release.mjs version
+
+  package:
+    needs: version
+    uses: ./.github/workflows/ci.yml
+    with:
+      signed: ${{ needs.version.outputs.signed == 'true' }}
+    secrets:
+      WIN_CSC_LINK: ${{ needs.version.outputs.signed == 'true' && secrets.WIN_CSC_LINK || '' }}
+      WIN_CSC_KEY_PASSWORD: ${{ needs.version.outputs.signed == 'true' && secrets.WIN_CSC_KEY_PASSWORD || '' }}
+      MAC_CSC_LINK: ${{ needs.version.outputs.signed == 'true' && secrets.MAC_CSC_LINK || '' }}
+      MAC_CSC_KEY_PASSWORD: ${{ needs.version.outputs.signed == 'true' && secrets.MAC_CSC_KEY_PASSWORD || '' }}
+      CSC_INSTALLER_LINK: ${{ needs.version.outputs.signed == 'true' && secrets.CSC_INSTALLER_LINK || '' }}
+      CSC_INSTALLER_KEY_PASSWORD: ${{ needs.version.outputs.signed == 'true' && secrets.CSC_INSTALLER_KEY_PASSWORD || '' }}
+      APPLE_ID: ${{ needs.version.outputs.signed == 'true' && secrets.APPLE_ID || '' }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ needs.version.outputs.signed == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+      APPLE_TEAM_ID: ${{ needs.version.outputs.signed == 'true' && secrets.APPLE_TEAM_ID || '' }}
+
+  verify:
+    needs: [version, package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24.14.0
+          package-manager-cache: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ai-taskboard-${{ needs.version.outputs.version }}-*
+          path: matrix-packages
+      - name: Verify complete matrix and create SHA-256 manifest and release notes
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+          SIGNED_BUILD: ${{ needs.version.outputs.signed }}
+        run: node scripts/release.mjs stage matrix-packages release-candidate
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-candidate
+          path: release-candidate/
+          overwrite: true
+          if-no-files-found: error
+          compression-level: 0
+      - uses: actions/download-artifact@v4
+        if: github.event_name == 'workflow_dispatch' || github.ref_type == 'branch'
+        with:
+          name: release-candidate
+          path: downloaded-candidate
+      - name: Check downloaded rehearsal packages against SHA256SUMS
+        if: github.event_name == 'workflow_dispatch' || github.ref_type == 'branch'
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+          SIGNED_BUILD: ${{ needs.version.outputs.signed }}
+        run: node scripts/release.mjs check downloaded-candidate
+
+  publish:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [version, verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24.14.0
+          package-manager-cache: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-candidate
+          path: release-candidate
+      - name: Publish only after the draft assets match their checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        run: node scripts/release.mjs publish release-candidate

@@ -6,6 +6,29 @@ on:
   push:
     branches: [main, ai-taskboard/T-0100]
   workflow_call:
+    inputs:
+      signed:
+        type: boolean
+        default: false
+    secrets:
+      WIN_CSC_LINK:
+        required: false
+      WIN_CSC_KEY_PASSWORD:
+        required: false
+      MAC_CSC_LINK:
+        required: false
+      MAC_CSC_KEY_PASSWORD:
+        required: false
+      CSC_INSTALLER_LINK:
+        required: false
+      CSC_INSTALLER_KEY_PASSWORD:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_APP_SPECIFIC_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
 
 permissions:
   contents: read
@@ -33,7 +56,6 @@ jobs:
       TARGET_PLATFORM: ${{ matrix.platform }}
       TARGET_ARCH: ${{ matrix.arch }}
       RUNNER_IMAGE: ${{ matrix.image }}
-      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       AI_TASKBOARD_PROJECT_URL: https://github.com/${{ github.repository }}
       AI_TASKBOARD_MAINTAINER: AI Taskboard <41898282+github-actions[bot]@users.noreply.github.com>
 
@@ -81,21 +103,48 @@ jobs:
         run: |
           npm run check 2>&1 | tee ci-results/types.log
           npm run check:docs 2>&1 | tee ci-results/docs.log
-      - name: Run CLI and desktop board tests
+      - name: Run CLI, desktop and release tests
         run: |
-          node --test tests/board-creation.test.ts tests/board-location.test.ts tests/localization-settings.test.ts tests/documentation.test.ts 2>&1 | tee ci-results/tests.log
+          node --test tests/board-creation.test.ts tests/board-location.test.ts tests/localization-settings.test.ts tests/documentation.test.ts tests/release.test.mjs tests/updates.test.ts 2>&1 | tee ci-results/tests.log
       - name: Build standalone CLI and Electron package
+        if: '!inputs.signed'
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: npm run package -- --ci 2>&1 | tee ci-results/package.log
+      - name: Build and sign Windows installer
+        if: inputs.signed && matrix.os == 'windows'
+        env:
+          CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: npm run package -- --release 2>&1 | tee ci-results/package.log
+      - name: Build, sign and notarize macOS installer
+        if: inputs.signed && matrix.os == 'macos'
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          CSC_INSTALLER_LINK: ${{ secrets.CSC_INSTALLER_LINK }}
+          CSC_INSTALLER_KEY_PASSWORD: ${{ secrets.CSC_INSTALLER_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npm run package -- --release 2>&1 | tee ci-results/package.log
+      - name: Build Linux release packages
+        if: inputs.signed && matrix.os == 'linux'
+        run: npm run package -- --release 2>&1 | tee ci-results/package.log
       - name: Verify packaged CLI and launch the packaged desktop
+        env:
+          RELEASE_ARG: ${{ inputs.signed && '--release' || '' }}
         run: |
+          args=("$TARGET_ARCH" ci-results)
+          if [[ -n "$RELEASE_ARG" ]]; then args+=("$RELEASE_ARG"); fi
           if [[ "$TARGET_OS" == linux ]]; then
             # Ubuntu 24.04 restricts unprivileged user namespaces. Use Electron's setuid sandbox.
             sandbox=(release/linux*-unpacked/chrome-sandbox)
             sudo chown root:root "${sandbox[@]}"
             sudo chmod 4755 "${sandbox[@]}"
-            xvfb-run -a node scripts/check-ci-package.mjs "$TARGET_ARCH" ci-results 2>&1 | tee ci-results/smoke.log
+            xvfb-run -a node scripts/check-ci-package.mjs "${args[@]}" 2>&1 | tee ci-results/smoke.log
           else
-            node scripts/check-ci-package.mjs "$TARGET_ARCH" ci-results 2>&1 | tee ci-results/smoke.log
+            node scripts/check-ci-package.mjs "${args[@]}" 2>&1 | tee ci-results/smoke.log
           fi
 
       - name: Upload verified packages
@@ -104,16 +153,19 @@ jobs:
           name: ${{ env.PACKAGE_ID }}
           if-no-files-found: error
           compression-level: 0
+          overwrite: true
           path: |
             release/${{ env.PACKAGE_ID }}.exe
             release/${{ env.PACKAGE_ID }}.deb
             release/${{ env.PACKAGE_ID }}.rpm
             release/${{ env.PACKAGE_ID }}.zip
+            release/${{ env.PACKAGE_ID }}.pkg
       - name: Upload verification and diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: report-${{ matrix.os }}-${{ matrix.arch }}
+          overwrite: true
           path: |
             ci-results/
             release/builder-debug.yml

@@ -68,12 +68,12 @@ Use **Settings → Appearance** to follow the system or choose a theme for all w
 
 ### Install a packaged build
 
-When a Windows x64 installer is published, download it from [Releases](https://github.com/edwardgushchin/AI-Taskboard/releases), run `ai-taskboard-0.1.0-win-x64.exe` for version 0.1.0, then launch AI Taskboard from the Start menu. The package includes a standalone CLI and its Node.js runtime; source Node.js is not required for that package. Git and Codex remain external requirements for Git tasks and agents. Until then, build locally with the development guide.
+When a Windows installer is published, download the EXE for your architecture from [Releases](https://github.com/edwardgushchin/AI-Taskboard/releases), run it, then launch AI Taskboard from the Start menu. The package includes a standalone CLI and its Node.js runtime; source Node.js is not required for that package. Git and Codex remain external requirements for Git tasks and agents. Until then, build locally with the development guide.
 
 <a id="platforms"></a>
 ## Platform status
 
-Native CI builds and checks x64 and ARM64 packages for Windows, Linux, and macOS. See the [build and signing guide](docs/development.md) and the [CI results for each platform](https://github.com/edwardgushchin/AI-Taskboard/actions/workflows/ci.yml). Public packages appear separately under [Releases](https://github.com/edwardgushchin/AI-Taskboard/releases).
+Native CI builds and checks x64 and ARM64 packages for Windows, Linux, and macOS. See the [build and signing guide](docs/how-to/development.md#поставка), [CI results for each platform](https://github.com/edwardgushchin/AI-Taskboard/actions/workflows/ci.yml), and [formats for public downloads](docs/how-to/development.md#выпуск-на-github).
 
 ## Data and boundaries
 
