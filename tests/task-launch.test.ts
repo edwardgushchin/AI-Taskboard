@@ -260,7 +260,7 @@ test("the scheduler launches a due approved card once, waits for an executor slo
   assert.equal(f.task.status, "ready");
   assert.equal(f.task.summary, "Готово");
   assert.ok(Date.parse(f.task.schedule.nextAt) > Date.now());
-  assert.equal(f.slots.available("other", "executor"), 1);
+  assert.equal(f.slots.available("other", "executor"), 3);
   release();
 });
 
@@ -298,17 +298,20 @@ test("pausing while waiting for a slot prevents launch across windows; an active
 
 test("each board has separate pools with per-role inheritance and unlimited overrides", () => {
   const slots = createAgentSlots();
-  assert.deepEqual(slots.limits, { executor: 1, manager: 0, reviewer: 1 });
+  assert.deepEqual(slots.limits, { executor: 3, manager: 0, reviewer: 2 });
   assert.equal(parseAgentLimits({ executor: 1.5, manager: 1, reviewer: 1 }), undefined);
   assert.deepEqual(parseAgentLimits({ executor: 3, manager: -1, reviewer: 1 }), { executor: 3, manager: 0, reviewer: 1 });
   const manager = slots.acquire("one", "manager");
   const reviewer = slots.acquire("one", "reviewer");
   assert.ok(manager && reviewer);
   const secondManager = slots.acquire("one", "manager"); assert.ok(secondManager); secondManager();
+  const secondReviewer = slots.acquire("one", "reviewer");
+  assert.ok(secondReviewer);
   assert.equal(slots.acquire("one", "reviewer"), undefined);
+  secondReviewer();
   assert.equal(slots.available("two", "manager"), Infinity);
-  assert.equal(slots.available("two", "reviewer"), 1);
-  assert.equal(slots.available("one", "executor", { manager: 0 }), 1);
+  assert.equal(slots.available("two", "reviewer"), 2);
+  assert.equal(slots.available("one", "executor", { manager: 0 }), 3);
   const extra = slots.acquire("one", "manager", { manager: 0 });
   assert.ok(extra);
   slots.configure({ executor: 2, manager: 1, reviewer: 2 });
