@@ -20,19 +20,25 @@ export function createAgentSlots(shared = false) {
   const sharedProject = shared ? (identity: string) => projects.get(identity) ?? identity : undefined;
   let limits = { ...defaultAgentLimits };
   const active = new Map<string, AgentLimits>();
-  const inherited = (path: string) => runtimeEntries(path).find(entry => entry.kind === "defaults")?.limits ?? limits;
+  const taskId = (key: string | undefined) => key?.replace(/^review:/, "");
+  const savedDefaults = (entries: ReturnType<typeof runtimeEntries>) => entries.find(entry => entry.id === "task-defaults");
+  const inherited = (path: string) => savedDefaults(runtimeEntries(path))?.limits ?? limits;
   const persistDefaults = (path: string, replace = false) => runtimeTransaction(path, entries => {
-    const saved = entries.find(entry => entry.kind === "defaults");
+    const saved = savedDefaults(entries);
     if (saved) { if (replace) saved.limits = { ...limits }; }
-    else entries.push({ id: "defaults", owner: 0, kind: "defaults", limits: { ...limits } });
+    else {
+      const legacy = entries.findIndex(entry => entry.kind === "defaults");
+      if (legacy >= 0) entries.splice(legacy, 1);
+      entries.push({ id: "task-defaults", owner: 0, kind: "defaults", limits: { ...limits } });
+    }
   });
   const available = (project: string, role: AgentRole, overrides?: Partial<AgentLimits>) => {
     if (role === "manager") return Infinity;
     if (sharedProject) {
       const path = sharedProject(project);
       const entries = runtimeEntries(path);
-      const limit = readBoardSettings(runtimeLocation(path)).agentLimits?.[role] ??
-        entries.find(entry => entry.kind === "defaults")?.limits?.[role] ?? limits[role];
+      const limit = readBoardSettings(runtimeLocation(path)).taskLimits?.[role] ??
+        savedDefaults(entries)?.limits?.[role] ?? limits[role];
       return limit === 0 ? Infinity : Math.max(0, limit - entries.filter(entry => entry.kind === "slot" && entry.role === role).length);
     }
     const limit = overrides?.[role] ?? limits[role];
@@ -42,7 +48,7 @@ export function createAgentSlots(shared = false) {
     remember(project: string) {
       if (shared) {
         projects.set(projectIdentity(project), project);
-        if (!runtimeEntries(project).some(entry => entry.kind === "defaults")) persistDefaults(project);
+        if (!savedDefaults(runtimeEntries(project))) persistDefaults(project);
       }
     },
     claim(project: string, task: string) {
@@ -78,8 +84,9 @@ export function createAgentSlots(shared = false) {
       if (sharedProject) {
         const path = sharedProject(project);
         return registerRuntime(path, { kind: "slot", role, task }, entries => {
-          const limit = role === "manager" ? 0 : readBoardSettings(runtimeLocation(path)).agentLimits?.[role] ?? entries.find(entry => entry.kind === "defaults")?.limits?.[role] ?? limits[role];
-          return (!task || !entries.some(entry => entry.kind !== "queue" && entry.task === task)) &&
+          const limit = role === "manager" ? 0 : readBoardSettings(runtimeLocation(path)).taskLimits?.[role] ?? savedDefaults(entries)?.limits?.[role] ?? limits[role];
+          return (!task || !entries.some(entry => entry.kind !== "queue" && (entry.task === task ||
+            entry.kind === "slot" && entry.role === role && taskId(entry.task) === taskId(task)))) &&
             (limit === 0 || entries.filter(entry => entry.kind === "slot" && entry.role === role).length < limit);
         });
       }

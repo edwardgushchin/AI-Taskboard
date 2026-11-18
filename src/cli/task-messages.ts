@@ -39,9 +39,11 @@ export function taskMessages(task: Task, recipient: "manager" | "agent") {
   const lifecycle = task.history.findLastIndex(event => event.to !== undefined || executorOutcome(event));
   const approval = recipient === "manager" ? currentReviewApproval(task) : undefined;
   const latestSubmissionEvent = recipient === "manager" && !["done", "cancelled"].includes(task.status)
-    ? task.history.findLastIndex(event => event.action === "submit" || event.action === "request-changes") : -1;
+    ? task.history.findLastIndex(event => ["submit", "request-changes", "return-to-draft"].includes(event.action)) : -1;
   return task.history.flatMap((event, index) => {
-    const message = event.action === "coordination" && event.actor === (recipient === "manager" ? "agent" : "manager");
+    if (event.expertMessage && (recipient !== "manager" || event.expertMessage.from === "manager" ||
+        event.expertMessage.from !== "owner" && !["manager", "owner", "team"].includes(event.expertMessage.to))) return [];
+    const message = event.action === "coordination" && (event.expertMessage ? recipient === "manager" : event.actor === (recipient === "manager" ? "agent" : "manager"));
     const outcome = recipient === "manager" && index === lifecycle && executorOutcome(event);
     const accepted = recipient === "manager" && index === lifecycle && reviewerAcceptance(event);
     const returned = index === latestSubmissionEvent && reviewerReturn(event);
@@ -49,6 +51,7 @@ export function taskMessages(task: Task, recipient: "manager" | "agent") {
     if (outcome && event.action === "submit" && approval) return [];
     return [{
       id: task.id, title: task.title, sequence: index + 1, at: event.at, status: task.status,
+      ...(event.expertMessage ? { expertMessage: event.expertMessage } : {}),
       kind: message ? event.messageKind ?? "update" : event.action, replyTo: event.replyToMessage,
       text: accepted ? task.result?.summary : event.text, ...(outcome && event.action === "submit" ? { result: task.result } : {}),
       ...(accepted ? { actor: "reviewer" as const, target: task.git?.target, commit: task.git?.accepted } : {}),
@@ -60,7 +63,7 @@ export function taskMessages(task: Task, recipient: "manager" | "agent") {
 }
 
 export function needsManagerAttention(kind: string) {
-  return kind === "question" || kind === "block" || kind === "submit" || kind === "accept" ||
+  return kind === "question" || kind === "decision" || kind === "block" || kind === "submit" || kind === "accept" ||
     kind === "review-approve" || kind === "request-changes";
 }
 
@@ -87,7 +90,7 @@ export function acknowledgeTaskMessages(task: Task, input: Record<string, unknow
   const through = number(input.through, "through", 1);
   if (through <= (task.managerReadThrough ?? 0)) return task;
   const event = task.history[through - 1];
-  if (!(event?.action === "coordination" && event.actor === "agent") && !executorOutcome(event) && !reviewerAcceptance(event) &&
+  if (!(event?.action === "coordination" && (event.actor === "agent" || event.actor === "reviewer" || event.expertMessage?.from === "owner")) && !executorOutcome(event) && !reviewerAcceptance(event) &&
       !reviewerReturn(event) && !(event?.action === "review-approve" && event.actor === "reviewer")) {
     throw new TaskboardError("INVALID_INPUT", "Acknowledge an existing inbox message.");
   }

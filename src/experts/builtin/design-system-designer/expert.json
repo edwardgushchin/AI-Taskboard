@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "id": "design-system-designer",
+  "name": "Дизайнер системы компонентов",
+  "group": "Исследования пользователей и дизайн",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Дизайнер системы компонентов",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--design--skills--design-system",
+      "name": "design-system",
+      "library": "anthropics--knowledge-work-plugins--design--skills--design-system"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--design--skills--design-critique",
+      "name": "design-critique",
+      "library": "anthropics--knowledge-work-plugins--design--skills--design-critique"
+    }
+  ],
+  "requirements": [
+    "Редактор дизайна при работе с макетами"
+  ],
+  "limitations": ""
+}

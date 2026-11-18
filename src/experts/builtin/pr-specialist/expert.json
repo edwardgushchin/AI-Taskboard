@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "id": "pr-specialist",
+  "name": "PR специалист",
+  "group": "Маркетинг и коммуникации",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "PR специалист",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "coreyhaines31--marketingskills--skills--public-relations",
+      "name": "public-relations",
+      "library": "coreyhaines31--marketingskills--skills--public-relations"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--marketing--skills--brand-review",
+      "name": "brand-review",
+      "library": "anthropics--knowledge-work-plugins--marketing--skills--brand-review"
+    }
+  ],
+  "requirements": [],
+  "limitations": ""
+}

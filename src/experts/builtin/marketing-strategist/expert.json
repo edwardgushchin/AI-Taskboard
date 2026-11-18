@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "id": "marketing-strategist",
+  "name": "Маркетинговый стратег",
+  "group": "Маркетинг и коммуникации",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Маркетинговый стратег",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "coreyhaines31--marketingskills--skills--marketing-plan",
+      "name": "marketing-plan",
+      "library": "coreyhaines31--marketingskills--skills--marketing-plan"
+    },
+    {
+      "id": "coreyhaines31--marketingskills--skills--product-marketing",
+      "name": "product-marketing",
+      "library": "coreyhaines31--marketingskills--skills--product-marketing"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--marketing--skills--campaign-plan",
+      "name": "campaign-plan",
+      "library": "anthropics--knowledge-work-plugins--marketing--skills--campaign-plan"
+    }
+  ],
+  "requirements": [],
+  "limitations": ""
+}

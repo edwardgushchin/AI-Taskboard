@@ -1,0 +1,1415 @@
+{
+  "anthropics--knowledge-work-plugins--enterprise-search--skills--search-strategy": {
+    "id": "anthropics--knowledge-work-plugins--enterprise-search--skills--search-strategy",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "enterprise-search/skills/search-strategy/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "71d5ba2d219a72d696e079885cba2fb5455ba5da6b1404491f8b945bdd8694c6",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/enterprise-search/skills/search-strategy/SKILL.md",
+    "frontmatter_name": "search-strategy"
+  },
+  "anthropics--knowledge-work-plugins--enterprise-search--skills--source-management": {
+    "id": "anthropics--knowledge-work-plugins--enterprise-search--skills--source-management",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "enterprise-search/skills/source-management/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "221d8acdc5c686033bb073d2bba83841892f6b8be0888c0267247fd1dd34461d",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/enterprise-search/skills/source-management/SKILL.md",
+    "frontmatter_name": "source-management"
+  },
+  "anthropics--knowledge-work-plugins--enterprise-search--skills--knowledge-synthesis": {
+    "id": "anthropics--knowledge-work-plugins--enterprise-search--skills--knowledge-synthesis",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "enterprise-search/skills/knowledge-synthesis/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "8dc66c66ef0004010bbf2d569251163e90a6675b982e0cb99ef26b4dd1c5a0f6",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/enterprise-search/skills/knowledge-synthesis/SKILL.md",
+    "frontmatter_name": "knowledge-synthesis"
+  },
+  "anthropics--knowledge-work-plugins--product-management--skills--write-spec": {
+    "id": "anthropics--knowledge-work-plugins--product-management--skills--write-spec",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "product-management/skills/write-spec/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "ca6670913878b4ac4582727562bfced5271492a5a800d934f68c9e7bc1cd4dcc",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/product-management/skills/write-spec/SKILL.md",
+    "frontmatter_name": "write-spec"
+  },
+  "anthropics--knowledge-work-plugins--product-management--skills--roadmap-update": {
+    "id": "anthropics--knowledge-work-plugins--product-management--skills--roadmap-update",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "product-management/skills/roadmap-update/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "bdb121e290b590d60b94bca84d1700a8803c78db9f68f2a28fd04ccfe8aceb9e",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/product-management/skills/roadmap-update/SKILL.md",
+    "frontmatter_name": "roadmap-update"
+  },
+  "anthropics--knowledge-work-plugins--product-management--skills--metrics-review": {
+    "id": "anthropics--knowledge-work-plugins--product-management--skills--metrics-review",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "product-management/skills/metrics-review/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "e92f364b668074c72b36fd0f69a6adef2ead66640b2c17dc824c043fb613d278",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/product-management/skills/metrics-review/SKILL.md",
+    "frontmatter_name": "metrics-review"
+  },
+  "anthropics--knowledge-work-plugins--operations--skills--process-doc": {
+    "id": "anthropics--knowledge-work-plugins--operations--skills--process-doc",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "operations/skills/process-doc/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "fceeeddb363e813ba831f9f2de1adb4c7e45ad179366bbb9ea9e40377abe96a9",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/operations/skills/process-doc/SKILL.md",
+    "frontmatter_name": "process-doc"
+  },
+  "anthropics--knowledge-work-plugins--operations--skills--process-optimization": {
+    "id": "anthropics--knowledge-work-plugins--operations--skills--process-optimization",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "operations/skills/process-optimization/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "14099838fdbfca24057e934fc22ed17f94629c5e9c9cec470f32e3063d0575f9",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/operations/skills/process-optimization/SKILL.md",
+    "frontmatter_name": "process-optimization"
+  },
+  "anthropics--knowledge-work-plugins--engineering--skills--architecture": {
+    "id": "anthropics--knowledge-work-plugins--engineering--skills--architecture",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "engineering/skills/architecture/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "de7db3170a3ae1a894c70ef6cb555fe15618ed9b9674d20895eda3d2a0a5f9a2",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/engineering/skills/architecture/SKILL.md",
+    "frontmatter_name": "architecture"
+  },
+  "anthropics--knowledge-work-plugins--engineering--skills--system-design": {
+    "id": "anthropics--knowledge-work-plugins--engineering--skills--system-design",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "engineering/skills/system-design/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "8f28eca99f2208872fc2483fcc93326b628f4f73116e91309a95e05da86a0ab5",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/engineering/skills/system-design/SKILL.md",
+    "frontmatter_name": "system-design"
+  },
+  "anthropics--knowledge-work-plugins--operations--skills--capacity-plan": {
+    "id": "anthropics--knowledge-work-plugins--operations--skills--capacity-plan",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "operations/skills/capacity-plan/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "3b8f1379471eae19e5be26c750681ad0c6054f4c8cdbf79c94309fcf46957ea8",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/operations/skills/capacity-plan/SKILL.md",
+    "frontmatter_name": "capacity-plan"
+  },
+  "anthropics--knowledge-work-plugins--operations--skills--status-report": {
+    "id": "anthropics--knowledge-work-plugins--operations--skills--status-report",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "operations/skills/status-report/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "8c3a21075294a5c5b7a1a7930613e53f0afbdbc12cf9e05d4bd08e6950c0a0d9",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/operations/skills/status-report/SKILL.md",
+    "frontmatter_name": "status-report"
+  },
+  "anthropics--knowledge-work-plugins--operations--skills--change-request": {
+    "id": "anthropics--knowledge-work-plugins--operations--skills--change-request",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "operations/skills/change-request/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "b1ee71cc1fecb22c7d27e2e00171f5d62fb54c405095b51098dacfea0447d8d7",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/operations/skills/change-request/SKILL.md",
+    "frontmatter_name": "change-request"
+  },
+  "anthropics--knowledge-work-plugins--design--skills--user-research": {
+    "id": "anthropics--knowledge-work-plugins--design--skills--user-research",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "design/skills/user-research/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "fa18fc13d0f44aa869102962ef9466417ade726d659465195a40fbcf08cee156",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/design/skills/user-research/SKILL.md",
+    "frontmatter_name": "user-research"
+  },
+  "anthropics--knowledge-work-plugins--design--skills--research-synthesis": {
+    "id": "anthropics--knowledge-work-plugins--design--skills--research-synthesis",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "design/skills/research-synthesis/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "40048615dc81fc8b9b06104769498214d61a35ae4518a0995a12bbbd0ab945a1",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/design/skills/research-synthesis/SKILL.md",
+    "frontmatter_name": "research-synthesis"
+  },
+  "anthropics--knowledge-work-plugins--design--skills--design-handoff": {
+    "id": "anthropics--knowledge-work-plugins--design--skills--design-handoff",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "design/skills/design-handoff/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "38f1efc807928030654218443ad07f6a37ac82de6b4d627a03113a3568d787b7",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/design/skills/design-handoff/SKILL.md",
+    "frontmatter_name": "design-handoff"
+  },
+  "anthropics--skills--skills--frontend-design": {
+    "id": "anthropics--skills--skills--frontend-design",
+    "repo": "anthropics/skills",
+    "path": "skills/frontend-design/SKILL.md",
+    "commit": "e4bb5d960d87126ff3b3a8af1a104b7db67560ba",
+    "sha256": "d91970639e9f5c37682ac7ab60094d35f1c7c1f38d731bd56396563aee10c1d3",
+    "url": "https://github.com/anthropics/skills/blob/e4bb5d960d87126ff3b3a8af1a104b7db67560ba/skills/frontend-design/SKILL.md",
+    "frontmatter_name": "frontend-design"
+  },
+  "vercel-labs--agent-skills--skills--web-design-guidelines": {
+    "id": "vercel-labs--agent-skills--skills--web-design-guidelines",
+    "repo": "vercel-labs/agent-skills",
+    "path": "skills/web-design-guidelines/SKILL.md",
+    "commit": "1a2c79d4e6c4a2283dc2c614b6538cbe1ed5ca62",
+    "sha256": "f4647ca866a3accf763777f83e7682954f0187cd6bea7eea0399796652414e8f",
+    "url": "https://github.com/vercel-labs/agent-skills/blob/1a2c79d4e6c4a2283dc2c614b6538cbe1ed5ca62/skills/web-design-guidelines/SKILL.md",
+    "frontmatter_name": "web-design-guidelines"
+  },
+  "anthropics--knowledge-work-plugins--design--skills--accessibility-review": {
+    "id": "anthropics--knowledge-work-plugins--design--skills--accessibility-review",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "design/skills/accessibility-review/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "ef42982af0d51238dda2ab16d08626712891bdd41864876c32d1e7b13fb3124f",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/design/skills/accessibility-review/SKILL.md",
+    "frontmatter_name": "accessibility-review"
+  },
+  "anthropics--knowledge-work-plugins--design--skills--design-system": {
+    "id": "anthropics--knowledge-work-plugins--design--skills--design-system",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "design/skills/design-system/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "fb31bd0144c43955106f01927126ae9fd2d4148be44c8d5887b3391f40c31445",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/design/skills/design-system/SKILL.md",
+    "frontmatter_name": "design-system"
+  },
+  "anthropics--knowledge-work-plugins--design--skills--design-critique": {
+    "id": "anthropics--knowledge-work-plugins--design--skills--design-critique",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "design/skills/design-critique/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "3a4f260eb9f60b431782bf6d90f22afb480c0c67860267a032df58a3e1bd19cd",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/design/skills/design-critique/SKILL.md",
+    "frontmatter_name": "design-critique"
+  },
+  "anthropics--skills--skills--brand-guidelines": {
+    "id": "anthropics--skills--skills--brand-guidelines",
+    "repo": "anthropics/skills",
+    "path": "skills/brand-guidelines/SKILL.md",
+    "commit": "e4bb5d960d87126ff3b3a8af1a104b7db67560ba",
+    "sha256": "1120b3769e2985cefb3d25be981b1f914abeba57ae079b83c20c666c164fa9fe",
+    "url": "https://github.com/anthropics/skills/blob/e4bb5d960d87126ff3b3a8af1a104b7db67560ba/skills/brand-guidelines/SKILL.md",
+    "frontmatter_name": "brand-guidelines"
+  },
+  "anthropics--skills--skills--canvas-design": {
+    "id": "anthropics--skills--skills--canvas-design",
+    "repo": "anthropics/skills",
+    "path": "skills/canvas-design/SKILL.md",
+    "commit": "e4bb5d960d87126ff3b3a8af1a104b7db67560ba",
+    "sha256": "a1f288079624402f30682753c1d43920b6664785698d21d3e7aa197450a6448b",
+    "url": "https://github.com/anthropics/skills/blob/e4bb5d960d87126ff3b3a8af1a104b7db67560ba/skills/canvas-design/SKILL.md",
+    "frontmatter_name": "canvas-design"
+  },
+  "vercel-labs--agent-skills--skills--react-best-practices": {
+    "id": "vercel-labs--agent-skills--skills--react-best-practices",
+    "repo": "vercel-labs/agent-skills",
+    "path": "skills/react-best-practices/SKILL.md",
+    "commit": "1a2c79d4e6c4a2283dc2c614b6538cbe1ed5ca62",
+    "sha256": "71ed7794962fa6e803ee83030517b5b93a9f70fbfeb431ec4535c5480a8d8355",
+    "url": "https://github.com/vercel-labs/agent-skills/blob/1a2c79d4e6c4a2283dc2c614b6538cbe1ed5ca62/skills/react-best-practices/SKILL.md",
+    "frontmatter_name": "vercel-react-best-practices"
+  },
+  "vercel-labs--agent-skills--skills--composition-patterns": {
+    "id": "vercel-labs--agent-skills--skills--composition-patterns",
+    "repo": "vercel-labs/agent-skills",
+    "path": "skills/composition-patterns/SKILL.md",
+    "commit": "1a2c79d4e6c4a2283dc2c614b6538cbe1ed5ca62",
+    "sha256": "e38e0eaa609316b10423a9a138ed95e35099accd3f735585295c8a8f165c28a3",
+    "url": "https://github.com/vercel-labs/agent-skills/blob/1a2c79d4e6c4a2283dc2c614b6538cbe1ed5ca62/skills/composition-patterns/SKILL.md",
+    "frontmatter_name": "vercel-composition-patterns"
+  },
+  "anthropics--knowledge-work-plugins--engineering--skills--testing-strategy": {
+    "id": "anthropics--knowledge-work-plugins--engineering--skills--testing-strategy",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "engineering/skills/testing-strategy/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "5c5e95830754bbdd838213fa05fc8f07523f591fd558fd3c86031ffd479f7a9e",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/engineering/skills/testing-strategy/SKILL.md",
+    "frontmatter_name": "testing-strategy"
+  },
+  "avdlee--swiftui-agent-skill--skills--swiftui-expert-skill": {
+    "id": "avdlee--swiftui-agent-skill--skills--swiftui-expert-skill",
+    "repo": "AvdLee/SwiftUI-Agent-Skill",
+    "path": "skills/swiftui-expert-skill/SKILL.md",
+    "commit": "62bd760f005093d1e2e4de5db156e456a5f96400",
+    "sha256": "6fa1d5188176628a00e7f032298e640f5191185904e305983cc8a2fa6e2c31d5",
+    "url": "https://github.com/AvdLee/SwiftUI-Agent-Skill/blob/62bd760f005093d1e2e4de5db156e456a5f96400/skills/swiftui-expert-skill/SKILL.md",
+    "frontmatter_name": "swiftui-expert-skill"
+  },
+  "openai--plugins--plugins--build-ios-apps--skills--swiftui-performance-audit": {
+    "id": "openai--plugins--plugins--build-ios-apps--skills--swiftui-performance-audit",
+    "repo": "openai/plugins",
+    "path": "plugins/build-ios-apps/skills/swiftui-performance-audit/SKILL.md",
+    "commit": "d420d13051bffe4543ed39e30fa46b87148e47dd",
+    "sha256": "6fc6bd4d49b49ccb2089be706c449f195daa7db2c36d8097d883426488eb4b1a",
+    "url": "https://github.com/openai/plugins/blob/d420d13051bffe4543ed39e30fa46b87148e47dd/plugins/build-ios-apps/skills/swiftui-performance-audit/SKILL.md",
+    "frontmatter_name": "swiftui-performance-audit"
+  },
+  "android--skills--jetpack-compose--adaptive": {
+    "id": "android--skills--jetpack-compose--adaptive",
+    "repo": "android/skills",
+    "path": "jetpack-compose/adaptive/SKILL.md",
+    "commit": "c72942584fff970dac86ced78b367fce0c441e52",
+    "sha256": "c845f1c1b64ad23893b087974e36c4f0be6cb55cf71faa6fe27ef6281ee4b9d5",
+    "url": "https://github.com/android/skills/blob/c72942584fff970dac86ced78b367fce0c441e52/jetpack-compose/adaptive/SKILL.md",
+    "frontmatter_name": "adaptive"
+  },
+  "android--skills--jetpack-compose--jetpack-compose-performance": {
+    "id": "android--skills--jetpack-compose--jetpack-compose-performance",
+    "repo": "android/skills",
+    "path": "jetpack-compose/jetpack-compose-performance/SKILL.md",
+    "commit": "c72942584fff970dac86ced78b367fce0c441e52",
+    "sha256": "d4d9d1e9625a352eb3cd3800fbb75b1b87d1e8d857bbb7029389d5eba064627c",
+    "url": "https://github.com/android/skills/blob/c72942584fff970dac86ced78b367fce0c441e52/jetpack-compose/jetpack-compose-performance/SKILL.md",
+    "frontmatter_name": "jetpack-compose-performance"
+  },
+  "android--skills--testing--testing-setup": {
+    "id": "android--skills--testing--testing-setup",
+    "repo": "android/skills",
+    "path": "testing/testing-setup/SKILL.md",
+    "commit": "c72942584fff970dac86ced78b367fce0c441e52",
+    "sha256": "6f50f0f7addfae32afb77a8fded04d92d5054d19c3965b270ff8b49f160ac503",
+    "url": "https://github.com/android/skills/blob/c72942584fff970dac86ced78b367fce0c441e52/testing/testing-setup/SKILL.md",
+    "frontmatter_name": "testing-setup"
+  },
+  "openai--skills--skills---curated--winui-app": {
+    "id": "openai--skills--skills---curated--winui-app",
+    "repo": "openai/skills",
+    "path": "skills/.curated/winui-app/SKILL.md",
+    "commit": "49f948faa9258a0c61caceaf225e179651397431",
+    "sha256": "917341ec9eb688d73e21362910a7178a92b2ae49544b7d8f17ee9e19adfe2ea8",
+    "url": "https://github.com/openai/skills/blob/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/winui-app/SKILL.md",
+    "frontmatter_name": "winui-app"
+  },
+  "openai--plugins--plugins--build-macos-apps--skills--build-run-debug": {
+    "id": "openai--plugins--plugins--build-macos-apps--skills--build-run-debug",
+    "repo": "openai/plugins",
+    "path": "plugins/build-macos-apps/skills/build-run-debug/SKILL.md",
+    "commit": "d420d13051bffe4543ed39e30fa46b87148e47dd",
+    "sha256": "bd32f3fa611fd731d01113450929aaeab8b40bfdda669b6cad76d877a096b722",
+    "url": "https://github.com/openai/plugins/blob/d420d13051bffe4543ed39e30fa46b87148e47dd/plugins/build-macos-apps/skills/build-run-debug/SKILL.md",
+    "frontmatter_name": "build-run-debug"
+  },
+  "openai--plugins--plugins--build-macos-apps--skills--appkit-interop": {
+    "id": "openai--plugins--plugins--build-macos-apps--skills--appkit-interop",
+    "repo": "openai/plugins",
+    "path": "plugins/build-macos-apps/skills/appkit-interop/SKILL.md",
+    "commit": "d420d13051bffe4543ed39e30fa46b87148e47dd",
+    "sha256": "7c91be82e30340ed9c929270f102965da3d67bcf509eecf8bf207c8a679fd3b6",
+    "url": "https://github.com/openai/plugins/blob/d420d13051bffe4543ed39e30fa46b87148e47dd/plugins/build-macos-apps/skills/appkit-interop/SKILL.md",
+    "frontmatter_name": "appkit-interop"
+  },
+  "openai--plugins--plugins--build-macos-apps--skills--packaging-notarization": {
+    "id": "openai--plugins--plugins--build-macos-apps--skills--packaging-notarization",
+    "repo": "openai/plugins",
+    "path": "plugins/build-macos-apps/skills/packaging-notarization/SKILL.md",
+    "commit": "d420d13051bffe4543ed39e30fa46b87148e47dd",
+    "sha256": "adc0d5e0c48e74ac6c5078b5846d00cbb798a8fd08bd775590f23793c8e69b2b",
+    "url": "https://github.com/openai/plugins/blob/d420d13051bffe4543ed39e30fa46b87148e47dd/plugins/build-macos-apps/skills/packaging-notarization/SKILL.md",
+    "frontmatter_name": "packaging-notarization"
+  },
+  "vercel-labs--agent-skills--skills--react-native-skills": {
+    "id": "vercel-labs--agent-skills--skills--react-native-skills",
+    "repo": "vercel-labs/agent-skills",
+    "path": "skills/react-native-skills/SKILL.md",
+    "commit": "1a2c79d4e6c4a2283dc2c614b6538cbe1ed5ca62",
+    "sha256": "4012750a5ccbe064ca04af3835d5d1b011979d2d09d9b6df1c8128fac58e0a66",
+    "url": "https://github.com/vercel-labs/agent-skills/blob/1a2c79d4e6c4a2283dc2c614b6538cbe1ed5ca62/skills/react-native-skills/SKILL.md",
+    "frontmatter_name": "vercel-react-native-skills"
+  },
+  "expo--skills--plugins--expo--skills--expo-router": {
+    "id": "expo--skills--plugins--expo--skills--expo-router",
+    "repo": "expo/skills",
+    "path": "plugins/expo/skills/expo-router/SKILL.md",
+    "commit": "dfdebcc6c4c1bf7a9471cefd6b6f39c7ba6c884d",
+    "sha256": "605234749eeeb6896e324f55cdef7af15603c348fbc2f7a6fe13538ec222ce43",
+    "url": "https://github.com/expo/skills/blob/dfdebcc6c4c1bf7a9471cefd6b6f39c7ba6c884d/plugins/expo/skills/expo-router/SKILL.md",
+    "frontmatter_name": "expo-router"
+  },
+  "expo--skills--plugins--expo--skills--expo-dev-client": {
+    "id": "expo--skills--plugins--expo--skills--expo-dev-client",
+    "repo": "expo/skills",
+    "path": "plugins/expo/skills/expo-dev-client/SKILL.md",
+    "commit": "dfdebcc6c4c1bf7a9471cefd6b6f39c7ba6c884d",
+    "sha256": "f2fe5dab2e0476bb565b96f9d5ac67b0065713f88a1df56a4a48ed32b961352d",
+    "url": "https://github.com/expo/skills/blob/dfdebcc6c4c1bf7a9471cefd6b6f39c7ba6c884d/plugins/expo/skills/expo-dev-client/SKILL.md",
+    "frontmatter_name": "expo-dev-client"
+  },
+  "vercel-labs--agent-browser--skill-data--electron": {
+    "id": "vercel-labs--agent-browser--skill-data--electron",
+    "repo": "vercel-labs/agent-browser",
+    "path": "skill-data/electron/SKILL.md",
+    "commit": "b06e2533ba9b3823b8a96c859d455cb55f4d7893",
+    "sha256": "d97a2bc221b5044184ad0af51376b07bcb94f259622f2af254fb3701e6f01861",
+    "url": "https://github.com/vercel-labs/agent-browser/blob/b06e2533ba9b3823b8a96c859d455cb55f4d7893/skill-data/electron/SKILL.md",
+    "frontmatter_name": "electron"
+  },
+  "trailofbits--skills--plugins--modern-cpp--skills--modern-cpp": {
+    "id": "trailofbits--skills--plugins--modern-cpp--skills--modern-cpp",
+    "repo": "trailofbits/skills",
+    "path": "plugins/modern-cpp/skills/modern-cpp/SKILL.md",
+    "commit": "149d7b21f4067765b82e67029730b42d228ef4b4",
+    "sha256": "a3a886fc425c591202b18165aa587111fafdd9250c37a71bbc48f7285fcd3c3e",
+    "url": "https://github.com/trailofbits/skills/blob/149d7b21f4067765b82e67029730b42d228ef4b4/plugins/modern-cpp/skills/modern-cpp/SKILL.md",
+    "frontmatter_name": "modern-cpp"
+  },
+  "openai--plugins--plugins--game-studio--skills--three-webgl-game": {
+    "id": "openai--plugins--plugins--game-studio--skills--three-webgl-game",
+    "repo": "openai/plugins",
+    "path": "plugins/game-studio/skills/three-webgl-game/SKILL.md",
+    "commit": "d420d13051bffe4543ed39e30fa46b87148e47dd",
+    "sha256": "0e7dabddb98442387c29a8c1269c12b69430addca8d47df0fa9f1ee2e7a3dd7f",
+    "url": "https://github.com/openai/plugins/blob/d420d13051bffe4543ed39e30fa46b87148e47dd/plugins/game-studio/skills/three-webgl-game/SKILL.md",
+    "frontmatter_name": "three-webgl-game"
+  },
+  "openai--plugins--plugins--game-studio--skills--react-three-fiber-game": {
+    "id": "openai--plugins--plugins--game-studio--skills--react-three-fiber-game",
+    "repo": "openai/plugins",
+    "path": "plugins/game-studio/skills/react-three-fiber-game/SKILL.md",
+    "commit": "d420d13051bffe4543ed39e30fa46b87148e47dd",
+    "sha256": "45e5aa86ff3a6a71d1f3f2ab6f0267ce4ca4d35d9e1883a483c16bc9b201db4d",
+    "url": "https://github.com/openai/plugins/blob/d420d13051bffe4543ed39e30fa46b87148e47dd/plugins/game-studio/skills/react-three-fiber-game/SKILL.md",
+    "frontmatter_name": "react-three-fiber-game"
+  },
+  "anthropics--knowledge-work-plugins--operations--skills--runbook": {
+    "id": "anthropics--knowledge-work-plugins--operations--skills--runbook",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "operations/skills/runbook/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "c5c3eaa4c22fff96ec7239ce67eb3e100661b20a2818749e2f7ee21787233185",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/operations/skills/runbook/SKILL.md",
+    "frontmatter_name": "runbook"
+  },
+  "anthropics--knowledge-work-plugins--engineering--skills--deploy-checklist": {
+    "id": "anthropics--knowledge-work-plugins--engineering--skills--deploy-checklist",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "engineering/skills/deploy-checklist/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "85ca53dc471970e3e12c36ec814ebf5f6cb9419016c55adb05ff34789bae3be9",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/engineering/skills/deploy-checklist/SKILL.md",
+    "frontmatter_name": "deploy-checklist"
+  },
+  "anthropics--knowledge-work-plugins--engineering--skills--incident-response": {
+    "id": "anthropics--knowledge-work-plugins--engineering--skills--incident-response",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "engineering/skills/incident-response/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "9eaa7a974c90395ac7116e82710f74546f38e69f735d78f684ee13fd79646e9a",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/engineering/skills/incident-response/SKILL.md",
+    "frontmatter_name": "incident-response"
+  },
+  "supabase--agent-skills--skills--supabase-postgres-best-practices": {
+    "id": "supabase--agent-skills--skills--supabase-postgres-best-practices",
+    "repo": "supabase/agent-skills",
+    "path": "skills/supabase-postgres-best-practices/SKILL.md",
+    "commit": "c9be0e931b7930f7d02126d04774d904c381e7d7",
+    "sha256": "ad65e776f45e761bafc609d3f506c77c1032225aa65e0c4c02f241b8071e5855",
+    "url": "https://github.com/supabase/agent-skills/blob/c9be0e931b7930f7d02126d04774d904c381e7d7/skills/supabase-postgres-best-practices/SKILL.md",
+    "frontmatter_name": "supabase-postgres-best-practices"
+  },
+  "openai--skills--skills---curated--gh-fix-ci": {
+    "id": "openai--skills--skills---curated--gh-fix-ci",
+    "repo": "openai/skills",
+    "path": "skills/.curated/gh-fix-ci/SKILL.md",
+    "commit": "49f948faa9258a0c61caceaf225e179651397431",
+    "sha256": "7b326b4a2f0f5f85122144628ec02077e48841e0e0e82efce88b3415bcfb7c26",
+    "url": "https://github.com/openai/skills/blob/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/gh-fix-ci/SKILL.md",
+    "frontmatter_name": "gh-fix-ci"
+  },
+  "obra--superpowers--skills--systematic-debugging": {
+    "id": "obra--superpowers--skills--systematic-debugging",
+    "repo": "obra/superpowers",
+    "path": "skills/systematic-debugging/SKILL.md",
+    "commit": "22f0b463e7a5e579904dd6211a520321035526f7",
+    "sha256": "51c6435d98c83c42c96ba7c35725a0b2c376cd487fb1a4e6bd0ddbe7e33ef202",
+    "url": "https://github.com/obra/superpowers/blob/22f0b463e7a5e579904dd6211a520321035526f7/skills/systematic-debugging/SKILL.md",
+    "frontmatter_name": "systematic-debugging"
+  },
+  "anthropics--knowledge-work-plugins--engineering--skills--debug": {
+    "id": "anthropics--knowledge-work-plugins--engineering--skills--debug",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "engineering/skills/debug/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "e50bb92cbcb2715139f3a3cb9ff282a8f0f9ae794f8f35d81338654e2601d32a",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/engineering/skills/debug/SKILL.md",
+    "frontmatter_name": "debug"
+  },
+  "openai--plugins--plugins--codex-security--skills--threat-model": {
+    "id": "openai--plugins--plugins--codex-security--skills--threat-model",
+    "repo": "openai/plugins",
+    "path": "plugins/codex-security/skills/threat-model/SKILL.md",
+    "commit": "d420d13051bffe4543ed39e30fa46b87148e47dd",
+    "sha256": "42568e50c787c4c0bfb9495ad67e72ab6c1a951bb910ecba2c67cff8961c4d56",
+    "url": "https://github.com/openai/plugins/blob/d420d13051bffe4543ed39e30fa46b87148e47dd/plugins/codex-security/skills/threat-model/SKILL.md",
+    "frontmatter_name": "threat-model"
+  },
+  "trailofbits--skills--plugins--differential-review--skills--differential-review": {
+    "id": "trailofbits--skills--plugins--differential-review--skills--differential-review",
+    "repo": "trailofbits/skills",
+    "path": "plugins/differential-review/skills/differential-review/SKILL.md",
+    "commit": "149d7b21f4067765b82e67029730b42d228ef4b4",
+    "sha256": "f9af6a8193fc1a9f8ca3c54bb8d19095a5f20c9472ca6d014488bbde50b67da0",
+    "url": "https://github.com/trailofbits/skills/blob/149d7b21f4067765b82e67029730b42d228ef4b4/plugins/differential-review/skills/differential-review/SKILL.md",
+    "frontmatter_name": "differential-review"
+  },
+  "trailofbits--skills--plugins--sharp-edges--skills--sharp-edges": {
+    "id": "trailofbits--skills--plugins--sharp-edges--skills--sharp-edges",
+    "repo": "trailofbits/skills",
+    "path": "plugins/sharp-edges/skills/sharp-edges/SKILL.md",
+    "commit": "149d7b21f4067765b82e67029730b42d228ef4b4",
+    "sha256": "3b69a709c2f8f0cfcf57d40a3186e166f307865cc8ed924be4098e549a121e9c",
+    "url": "https://github.com/trailofbits/skills/blob/149d7b21f4067765b82e67029730b42d228ef4b4/plugins/sharp-edges/skills/sharp-edges/SKILL.md",
+    "frontmatter_name": "sharp-edges"
+  },
+  "trailofbits--skills--plugins--static-analysis--skills--semgrep": {
+    "id": "trailofbits--skills--plugins--static-analysis--skills--semgrep",
+    "repo": "trailofbits/skills",
+    "path": "plugins/static-analysis/skills/semgrep/SKILL.md",
+    "commit": "149d7b21f4067765b82e67029730b42d228ef4b4",
+    "sha256": "52162605593f871cf45f48f9cf00b7c2d7e0759ccb7507981088442b7cc5d76c",
+    "url": "https://github.com/trailofbits/skills/blob/149d7b21f4067765b82e67029730b42d228ef4b4/plugins/static-analysis/skills/semgrep/SKILL.md",
+    "frontmatter_name": "semgrep"
+  },
+  "trailofbits--skills--plugins--static-analysis--skills--codeql": {
+    "id": "trailofbits--skills--plugins--static-analysis--skills--codeql",
+    "repo": "trailofbits/skills",
+    "path": "plugins/static-analysis/skills/codeql/SKILL.md",
+    "commit": "149d7b21f4067765b82e67029730b42d228ef4b4",
+    "sha256": "1a6d919ff80f83b262daf650552af6eb6d2c32b19d0c529b70efe0c116b675cf",
+    "url": "https://github.com/trailofbits/skills/blob/149d7b21f4067765b82e67029730b42d228ef4b4/plugins/static-analysis/skills/codeql/SKILL.md",
+    "frontmatter_name": "codeql"
+  },
+  "trailofbits--skills--plugins--property-based-testing--skills--property-based-testing": {
+    "id": "trailofbits--skills--plugins--property-based-testing--skills--property-based-testing",
+    "repo": "trailofbits/skills",
+    "path": "plugins/property-based-testing/skills/property-based-testing/SKILL.md",
+    "commit": "149d7b21f4067765b82e67029730b42d228ef4b4",
+    "sha256": "9448cacb65c6237a7c22dc59602667177ecae405524079ae9ff92240590b995a",
+    "url": "https://github.com/trailofbits/skills/blob/149d7b21f4067765b82e67029730b42d228ef4b4/plugins/property-based-testing/skills/property-based-testing/SKILL.md",
+    "frontmatter_name": "property-based-testing"
+  },
+  "anthropics--knowledge-work-plugins--legal--skills--compliance-check": {
+    "id": "anthropics--knowledge-work-plugins--legal--skills--compliance-check",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "legal/skills/compliance-check/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "8dff8ebe7eda9ad5e38f3faf1016a7fc1eeba65bcdb7f5ae45ea507824bbc1c2",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/legal/skills/compliance-check/SKILL.md",
+    "frontmatter_name": "compliance-check"
+  },
+  "anthropics--knowledge-work-plugins--legal--skills--legal-risk-assessment": {
+    "id": "anthropics--knowledge-work-plugins--legal--skills--legal-risk-assessment",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "legal/skills/legal-risk-assessment/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "9f7985e3a98ac8419b52067cdaa1b72f754fa38c20489e7f0bf9de36347d4d89",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/legal/skills/legal-risk-assessment/SKILL.md",
+    "frontmatter_name": "legal-risk-assessment"
+  },
+  "trailofbits--skills--plugins--supply-chain-risk-auditor--skills--supply-chain-risk-auditor": {
+    "id": "trailofbits--skills--plugins--supply-chain-risk-auditor--skills--supply-chain-risk-auditor",
+    "repo": "trailofbits/skills",
+    "path": "plugins/supply-chain-risk-auditor/skills/supply-chain-risk-auditor/SKILL.md",
+    "commit": "149d7b21f4067765b82e67029730b42d228ef4b4",
+    "sha256": "a1254b7f8d3a1731a9a7e1f9cd6c67b59cf84ed6ef7c7fb455db9a14c528ceb4",
+    "url": "https://github.com/trailofbits/skills/blob/149d7b21f4067765b82e67029730b42d228ef4b4/plugins/supply-chain-risk-auditor/skills/supply-chain-risk-auditor/SKILL.md",
+    "frontmatter_name": "supply-chain-risk-auditor"
+  },
+  "trailofbits--skills--plugins--audit-context-building--skills--audit-context-building": {
+    "id": "trailofbits--skills--plugins--audit-context-building--skills--audit-context-building",
+    "repo": "trailofbits/skills",
+    "path": "plugins/audit-context-building/skills/audit-context-building/SKILL.md",
+    "commit": "149d7b21f4067765b82e67029730b42d228ef4b4",
+    "sha256": "33fa693dc6e166cfa4919e4373cb6578c009d296234c2ae7cb3cd4e79b443765",
+    "url": "https://github.com/trailofbits/skills/blob/149d7b21f4067765b82e67029730b42d228ef4b4/plugins/audit-context-building/skills/audit-context-building/SKILL.md",
+    "frontmatter_name": "audit-context-building"
+  },
+  "trailofbits--skills--plugins--agentic-actions-auditor--skills--agentic-actions-auditor": {
+    "id": "trailofbits--skills--plugins--agentic-actions-auditor--skills--agentic-actions-auditor",
+    "repo": "trailofbits/skills",
+    "path": "plugins/agentic-actions-auditor/skills/agentic-actions-auditor/SKILL.md",
+    "commit": "149d7b21f4067765b82e67029730b42d228ef4b4",
+    "sha256": "b2bdb88d559bc37e6c2c8314e28e7a2eb47e7cdd9da51e77da347d3517326dc0",
+    "url": "https://github.com/trailofbits/skills/blob/149d7b21f4067765b82e67029730b42d228ef4b4/plugins/agentic-actions-auditor/skills/agentic-actions-auditor/SKILL.md",
+    "frontmatter_name": "agentic-actions-auditor"
+  },
+  "anthropics--skills--skills--webapp-testing": {
+    "id": "anthropics--skills--skills--webapp-testing",
+    "repo": "anthropics/skills",
+    "path": "skills/webapp-testing/SKILL.md",
+    "commit": "e4bb5d960d87126ff3b3a8af1a104b7db67560ba",
+    "sha256": "51b7349e77ec63b7744a6f63647e7566a0b4d2e301121cc10e8c2113af6556a2",
+    "url": "https://github.com/anthropics/skills/blob/e4bb5d960d87126ff3b3a8af1a104b7db67560ba/skills/webapp-testing/SKILL.md",
+    "frontmatter_name": "webapp-testing"
+  },
+  "obra--superpowers--skills--verification-before-completion": {
+    "id": "obra--superpowers--skills--verification-before-completion",
+    "repo": "obra/superpowers",
+    "path": "skills/verification-before-completion/SKILL.md",
+    "commit": "22f0b463e7a5e579904dd6211a520321035526f7",
+    "sha256": "2befe7fc55bcadaa3d97dd9e8efeb633d2561c0ebe74c5a8b17c4d9e7e4520b3",
+    "url": "https://github.com/obra/superpowers/blob/22f0b463e7a5e579904dd6211a520321035526f7/skills/verification-before-completion/SKILL.md",
+    "frontmatter_name": "verification-before-completion"
+  },
+  "anthropics--knowledge-work-plugins--engineering--skills--code-review": {
+    "id": "anthropics--knowledge-work-plugins--engineering--skills--code-review",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "engineering/skills/code-review/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "6303932f1b301c614a6f5a0099cd87a19e1cd1b7cbfa1a1e11e996edbca6426b",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/engineering/skills/code-review/SKILL.md",
+    "frontmatter_name": "code-review"
+  },
+  "anthropics--knowledge-work-plugins--data--skills--sql-queries": {
+    "id": "anthropics--knowledge-work-plugins--data--skills--sql-queries",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "data/skills/sql-queries/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "dbd5a5e2d563d83ca6d4d033206f285f503296eabff4a35545cdb4cb5302bd9a",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/data/skills/sql-queries/SKILL.md",
+    "frontmatter_name": "sql-queries"
+  },
+  "anthropics--knowledge-work-plugins--data--skills--data-visualization": {
+    "id": "anthropics--knowledge-work-plugins--data--skills--data-visualization",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "data/skills/data-visualization/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "5811e8b3547cda6bc8af118aaf0d7589e8861cdc9facce6372dc78aea99ab87d",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/data/skills/data-visualization/SKILL.md",
+    "frontmatter_name": "data-visualization"
+  },
+  "anthropics--knowledge-work-plugins--data--skills--validate-data": {
+    "id": "anthropics--knowledge-work-plugins--data--skills--validate-data",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "data/skills/validate-data/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "1e424822043480375b80aef9416227b1c8083af749ca536568716265f79ca54b",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/data/skills/validate-data/SKILL.md",
+    "frontmatter_name": "validate-data"
+  },
+  "openai--plugins--plugins--data-analytics--skills--product-business-analysis": {
+    "id": "openai--plugins--plugins--data-analytics--skills--product-business-analysis",
+    "repo": "openai/plugins",
+    "path": "plugins/data-analytics/skills/product-business-analysis/SKILL.md",
+    "commit": "d420d13051bffe4543ed39e30fa46b87148e47dd",
+    "sha256": "3e6b684ace151bbf777afd88fe34758b337ac0d6ff2bf332958d7a495d624a4b",
+    "url": "https://github.com/openai/plugins/blob/d420d13051bffe4543ed39e30fa46b87148e47dd/plugins/data-analytics/skills/product-business-analysis/SKILL.md",
+    "frontmatter_name": "product-business-analysis"
+  },
+  "openai--plugins--plugins--data-analytics--skills--design-kpis": {
+    "id": "openai--plugins--plugins--data-analytics--skills--design-kpis",
+    "repo": "openai/plugins",
+    "path": "plugins/data-analytics/skills/design-kpis/SKILL.md",
+    "commit": "d420d13051bffe4543ed39e30fa46b87148e47dd",
+    "sha256": "fcefdecacd1d64f847fbb7c45e93a6bd49c679dff66b8966ebc74c4dc39b8f21",
+    "url": "https://github.com/openai/plugins/blob/d420d13051bffe4543ed39e30fa46b87148e47dd/plugins/data-analytics/skills/design-kpis/SKILL.md",
+    "frontmatter_name": "design-kpis"
+  },
+  "anthropics--knowledge-work-plugins--data--skills--statistical-analysis": {
+    "id": "anthropics--knowledge-work-plugins--data--skills--statistical-analysis",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "data/skills/statistical-analysis/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "91a15cfc144efffcd622b09827362a73993a3ff30e3a78114801832477c9f8a0",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/data/skills/statistical-analysis/SKILL.md",
+    "frontmatter_name": "statistical-analysis"
+  },
+  "anthropics--knowledge-work-plugins--data--skills--data-context-extractor": {
+    "id": "anthropics--knowledge-work-plugins--data--skills--data-context-extractor",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "data/skills/data-context-extractor/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "6d05dec52ac3667b551898b9eb943f5ee08141bc8d2fabb69a8e39bb9ce7c754",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/data/skills/data-context-extractor/SKILL.md",
+    "frontmatter_name": "data-context-extractor"
+  },
+  "k-dense-ai--claude-scientific-skills--skills--scikit-learn": {
+    "id": "k-dense-ai--claude-scientific-skills--skills--scikit-learn",
+    "repo": "K-Dense-AI/claude-scientific-skills",
+    "path": "skills/scikit-learn/SKILL.md",
+    "commit": "ec59a29a03d5c40f73ab40878df04860bc00e876",
+    "sha256": "a1765797d072ab40094522abe68fb04505d0881f66b7dfceeb8582422dbe488d",
+    "url": "https://github.com/K-Dense-AI/claude-scientific-skills/blob/ec59a29a03d5c40f73ab40878df04860bc00e876/skills/scikit-learn/SKILL.md",
+    "frontmatter_name": "scikit-learn"
+  },
+  "k-dense-ai--claude-scientific-skills--skills--pytorch-lightning": {
+    "id": "k-dense-ai--claude-scientific-skills--skills--pytorch-lightning",
+    "repo": "K-Dense-AI/claude-scientific-skills",
+    "path": "skills/pytorch-lightning/SKILL.md",
+    "commit": "ec59a29a03d5c40f73ab40878df04860bc00e876",
+    "sha256": "d8829e74e8a1d908f923cf0c0a850ecfdd9edcb004d2fa90ec32fb1ed0006ce8",
+    "url": "https://github.com/K-Dense-AI/claude-scientific-skills/blob/ec59a29a03d5c40f73ab40878df04860bc00e876/skills/pytorch-lightning/SKILL.md",
+    "frontmatter_name": "pytorch-lightning"
+  },
+  "k-dense-ai--claude-scientific-skills--skills--statistical-analysis": {
+    "id": "k-dense-ai--claude-scientific-skills--skills--statistical-analysis",
+    "repo": "K-Dense-AI/claude-scientific-skills",
+    "path": "skills/statistical-analysis/SKILL.md",
+    "commit": "ec59a29a03d5c40f73ab40878df04860bc00e876",
+    "sha256": "e112848726b3713267cac65e4e2c15491a0a26ee1ed628db01195f7e43f97997",
+    "url": "https://github.com/K-Dense-AI/claude-scientific-skills/blob/ec59a29a03d5c40f73ab40878df04860bc00e876/skills/statistical-analysis/SKILL.md",
+    "frontmatter_name": "statistical-analysis"
+  },
+  "openai--plugins--plugins--openai-developers--skills--agents-sdk": {
+    "id": "openai--plugins--plugins--openai-developers--skills--agents-sdk",
+    "repo": "openai/plugins",
+    "path": "plugins/openai-developers/skills/agents-sdk/SKILL.md",
+    "commit": "d420d13051bffe4543ed39e30fa46b87148e47dd",
+    "sha256": "61830dccd552307bc714b961acae80b1c9c9c30b5d2faaa9e6043b6fb0414760",
+    "url": "https://github.com/openai/plugins/blob/d420d13051bffe4543ed39e30fa46b87148e47dd/plugins/openai-developers/skills/agents-sdk/SKILL.md",
+    "frontmatter_name": "agents-sdk"
+  },
+  "openai--plugins--plugins--openai-developers--skills--openai-api-troubleshooting": {
+    "id": "openai--plugins--plugins--openai-developers--skills--openai-api-troubleshooting",
+    "repo": "openai/plugins",
+    "path": "plugins/openai-developers/skills/openai-api-troubleshooting/SKILL.md",
+    "commit": "d420d13051bffe4543ed39e30fa46b87148e47dd",
+    "sha256": "9fb4e152430c2f0475d1d14ce61b413267d322af9c032f2affb64698ca562662",
+    "url": "https://github.com/openai/plugins/blob/d420d13051bffe4543ed39e30fa46b87148e47dd/plugins/openai-developers/skills/openai-api-troubleshooting/SKILL.md",
+    "frontmatter_name": "openai-api-troubleshooting"
+  },
+  "anthropics--skills--skills--doc-coauthoring": {
+    "id": "anthropics--skills--skills--doc-coauthoring",
+    "repo": "anthropics/skills",
+    "path": "skills/doc-coauthoring/SKILL.md",
+    "commit": "e4bb5d960d87126ff3b3a8af1a104b7db67560ba",
+    "sha256": "2e47d78846faeea4a56e9809c52700087a15a2155a3f293a3efbaded81398ef4",
+    "url": "https://github.com/anthropics/skills/blob/e4bb5d960d87126ff3b3a8af1a104b7db67560ba/skills/doc-coauthoring/SKILL.md",
+    "frontmatter_name": "doc-coauthoring"
+  },
+  "coreyhaines31--marketingskills--skills--copy-editing": {
+    "id": "coreyhaines31--marketingskills--skills--copy-editing",
+    "repo": "coreyhaines31/marketingskills",
+    "path": "skills/copy-editing/SKILL.md",
+    "commit": "1f837447b20bb6f0e72d87b80ece1c221c362c7d",
+    "sha256": "ef6bf9e792edac9ff524576a7eea6980fd13e605e5561736b045136341cde63e",
+    "url": "https://github.com/coreyhaines31/marketingskills/blob/1f837447b20bb6f0e72d87b80ece1c221c362c7d/skills/copy-editing/SKILL.md",
+    "frontmatter_name": "copy-editing"
+  },
+  "anthropics--knowledge-work-plugins--engineering--skills--documentation": {
+    "id": "anthropics--knowledge-work-plugins--engineering--skills--documentation",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "engineering/skills/documentation/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "1d469418f786a05be83d2a05f04d68788aeed584d13863a650f5ad73c6c4cf50",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/engineering/skills/documentation/SKILL.md",
+    "frontmatter_name": "documentation"
+  },
+  "coreyhaines31--marketingskills--skills--copywriting": {
+    "id": "coreyhaines31--marketingskills--skills--copywriting",
+    "repo": "coreyhaines31/marketingskills",
+    "path": "skills/copywriting/SKILL.md",
+    "commit": "1f837447b20bb6f0e72d87b80ece1c221c362c7d",
+    "sha256": "1db2f6e51f0492f5efc646b74576721852720dec388e58d0facd2b790c01bb4e",
+    "url": "https://github.com/coreyhaines31/marketingskills/blob/1f837447b20bb6f0e72d87b80ece1c221c362c7d/skills/copywriting/SKILL.md",
+    "frontmatter_name": "copywriting"
+  },
+  "anthropics--knowledge-work-plugins--design--skills--ux-copy": {
+    "id": "anthropics--knowledge-work-plugins--design--skills--ux-copy",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "design/skills/ux-copy/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "d46a00a62ec637e9ca9d5f7823ea3e0a4ec26dffc53bb5035f59b48ebfcdcde7",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/design/skills/ux-copy/SKILL.md",
+    "frontmatter_name": "ux-copy"
+  },
+  "anthropics--skills--skills--algorithmic-art": {
+    "id": "anthropics--skills--skills--algorithmic-art",
+    "repo": "anthropics/skills",
+    "path": "skills/algorithmic-art/SKILL.md",
+    "commit": "e4bb5d960d87126ff3b3a8af1a104b7db67560ba",
+    "sha256": "3bc4092c09804853186524c826bc0621b940bb6122c05b84496dff95388e6eef",
+    "url": "https://github.com/anthropics/skills/blob/e4bb5d960d87126ff3b3a8af1a104b7db67560ba/skills/algorithmic-art/SKILL.md",
+    "frontmatter_name": "algorithmic-art"
+  },
+  "anthropics--skills--skills--pptx": {
+    "id": "anthropics--skills--skills--pptx",
+    "repo": "anthropics/skills",
+    "path": "skills/pptx/SKILL.md",
+    "commit": "e4bb5d960d87126ff3b3a8af1a104b7db67560ba",
+    "sha256": "598c981d93f2173b251f86a4bc94e9fb4e4f5ddaa314ba2dd4eca24b7a07808e",
+    "url": "https://github.com/anthropics/skills/blob/e4bb5d960d87126ff3b3a8af1a104b7db67560ba/skills/pptx/SKILL.md",
+    "frontmatter_name": "pptx"
+  },
+  "openai--plugins--plugins--adobe--skills--adobe-retouch-portraits": {
+    "id": "openai--plugins--plugins--adobe--skills--adobe-retouch-portraits",
+    "repo": "openai/plugins",
+    "path": "plugins/adobe/skills/adobe-retouch-portraits/SKILL.md",
+    "commit": "d420d13051bffe4543ed39e30fa46b87148e47dd",
+    "sha256": "30dd9e57ceae0438f3eadb4734403853dc4bb2ae23e23ca14365a4702ed2a182",
+    "url": "https://github.com/openai/plugins/blob/d420d13051bffe4543ed39e30fa46b87148e47dd/plugins/adobe/skills/adobe-retouch-portraits/SKILL.md",
+    "frontmatter_name": "adobe-retouch-portraits"
+  },
+  "openai--plugins--plugins--adobe--skills--adobe-batch-edit-photos": {
+    "id": "openai--plugins--plugins--adobe--skills--adobe-batch-edit-photos",
+    "repo": "openai/plugins",
+    "path": "plugins/adobe/skills/adobe-batch-edit-photos/SKILL.md",
+    "commit": "d420d13051bffe4543ed39e30fa46b87148e47dd",
+    "sha256": "062112a424340bef585f0c3aed9a484721ff4b200044883dd0bdb1dd7599642c",
+    "url": "https://github.com/openai/plugins/blob/d420d13051bffe4543ed39e30fa46b87148e47dd/plugins/adobe/skills/adobe-batch-edit-photos/SKILL.md",
+    "frontmatter_name": "adobe-batch-edit-photos"
+  },
+  "coreyhaines31--marketingskills--skills--marketing-plan": {
+    "id": "coreyhaines31--marketingskills--skills--marketing-plan",
+    "repo": "coreyhaines31/marketingskills",
+    "path": "skills/marketing-plan/SKILL.md",
+    "commit": "1f837447b20bb6f0e72d87b80ece1c221c362c7d",
+    "sha256": "76d879a32f2dd24e0c6236125f15e2b1e29808b6424242affcf790bdd294c44f",
+    "url": "https://github.com/coreyhaines31/marketingskills/blob/1f837447b20bb6f0e72d87b80ece1c221c362c7d/skills/marketing-plan/SKILL.md",
+    "frontmatter_name": "marketing-plan"
+  },
+  "coreyhaines31--marketingskills--skills--product-marketing": {
+    "id": "coreyhaines31--marketingskills--skills--product-marketing",
+    "repo": "coreyhaines31/marketingskills",
+    "path": "skills/product-marketing/SKILL.md",
+    "commit": "1f837447b20bb6f0e72d87b80ece1c221c362c7d",
+    "sha256": "8dbccc22998b3cac194c3509fa93d119163b82c9b0a1ce573e6737e5a5ccf555",
+    "url": "https://github.com/coreyhaines31/marketingskills/blob/1f837447b20bb6f0e72d87b80ece1c221c362c7d/skills/product-marketing/SKILL.md",
+    "frontmatter_name": "product-marketing"
+  },
+  "anthropics--knowledge-work-plugins--marketing--skills--campaign-plan": {
+    "id": "anthropics--knowledge-work-plugins--marketing--skills--campaign-plan",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "marketing/skills/campaign-plan/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "f0b146074b64ee0fd52f7864e30191eab83878c8c1e3e7cf24754e13c7dbfad3",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/marketing/skills/campaign-plan/SKILL.md",
+    "frontmatter_name": "campaign-plan"
+  },
+  "coreyhaines31--marketingskills--skills--seo-audit": {
+    "id": "coreyhaines31--marketingskills--skills--seo-audit",
+    "repo": "coreyhaines31/marketingskills",
+    "path": "skills/seo-audit/SKILL.md",
+    "commit": "1f837447b20bb6f0e72d87b80ece1c221c362c7d",
+    "sha256": "fb345045339bb0645029c1c0d682703d262f045a7184fe96cb0e13f509468e2a",
+    "url": "https://github.com/coreyhaines31/marketingskills/blob/1f837447b20bb6f0e72d87b80ece1c221c362c7d/skills/seo-audit/SKILL.md",
+    "frontmatter_name": "seo-audit"
+  },
+  "coreyhaines31--marketingskills--skills--site-architecture": {
+    "id": "coreyhaines31--marketingskills--skills--site-architecture",
+    "repo": "coreyhaines31/marketingskills",
+    "path": "skills/site-architecture/SKILL.md",
+    "commit": "1f837447b20bb6f0e72d87b80ece1c221c362c7d",
+    "sha256": "0c71871aea12689012b4d85aaaf24a4752d3f0e985603c4992d5c0bf0fce57ea",
+    "url": "https://github.com/coreyhaines31/marketingskills/blob/1f837447b20bb6f0e72d87b80ece1c221c362c7d/skills/site-architecture/SKILL.md",
+    "frontmatter_name": "site-architecture"
+  },
+  "coreyhaines31--marketingskills--skills--ai-seo": {
+    "id": "coreyhaines31--marketingskills--skills--ai-seo",
+    "repo": "coreyhaines31/marketingskills",
+    "path": "skills/ai-seo/SKILL.md",
+    "commit": "1f837447b20bb6f0e72d87b80ece1c221c362c7d",
+    "sha256": "67f0fe18d2278a2219ec77aa2246d1f07dfa6bae0c5ff5e7871ddd97a790ebd8",
+    "url": "https://github.com/coreyhaines31/marketingskills/blob/1f837447b20bb6f0e72d87b80ece1c221c362c7d/skills/ai-seo/SKILL.md",
+    "frontmatter_name": "ai-seo"
+  },
+  "coreyhaines31--marketingskills--skills--ads": {
+    "id": "coreyhaines31--marketingskills--skills--ads",
+    "repo": "coreyhaines31/marketingskills",
+    "path": "skills/ads/SKILL.md",
+    "commit": "1f837447b20bb6f0e72d87b80ece1c221c362c7d",
+    "sha256": "2d57d64ddbc60aa596ba855ba927d05eb0f19436f13f4befcf4e8aad453ad521",
+    "url": "https://github.com/coreyhaines31/marketingskills/blob/1f837447b20bb6f0e72d87b80ece1c221c362c7d/skills/ads/SKILL.md",
+    "frontmatter_name": "ads"
+  },
+  "coreyhaines31--marketingskills--skills--ad-creative": {
+    "id": "coreyhaines31--marketingskills--skills--ad-creative",
+    "repo": "coreyhaines31/marketingskills",
+    "path": "skills/ad-creative/SKILL.md",
+    "commit": "1f837447b20bb6f0e72d87b80ece1c221c362c7d",
+    "sha256": "152bba221b0f25ee0d5068dbe9818bf44fa114353e42ae756b41c97fc325c86f",
+    "url": "https://github.com/coreyhaines31/marketingskills/blob/1f837447b20bb6f0e72d87b80ece1c221c362c7d/skills/ad-creative/SKILL.md",
+    "frontmatter_name": "ad-creative"
+  },
+  "coreyhaines31--marketingskills--skills--social": {
+    "id": "coreyhaines31--marketingskills--skills--social",
+    "repo": "coreyhaines31/marketingskills",
+    "path": "skills/social/SKILL.md",
+    "commit": "1f837447b20bb6f0e72d87b80ece1c221c362c7d",
+    "sha256": "2e259195e4e72e475609feebaae810a386f4e2896a1889af62f7f158a8fecd79",
+    "url": "https://github.com/coreyhaines31/marketingskills/blob/1f837447b20bb6f0e72d87b80ece1c221c362c7d/skills/social/SKILL.md",
+    "frontmatter_name": "social"
+  },
+  "coreyhaines31--marketingskills--skills--community-marketing": {
+    "id": "coreyhaines31--marketingskills--skills--community-marketing",
+    "repo": "coreyhaines31/marketingskills",
+    "path": "skills/community-marketing/SKILL.md",
+    "commit": "1f837447b20bb6f0e72d87b80ece1c221c362c7d",
+    "sha256": "d5b84b418c3010bee36a19bb4ad45b8b39aebcc96d98c65ae8bd68e3b13333c5",
+    "url": "https://github.com/coreyhaines31/marketingskills/blob/1f837447b20bb6f0e72d87b80ece1c221c362c7d/skills/community-marketing/SKILL.md",
+    "frontmatter_name": "community-marketing"
+  },
+  "coreyhaines31--marketingskills--skills--emails": {
+    "id": "coreyhaines31--marketingskills--skills--emails",
+    "repo": "coreyhaines31/marketingskills",
+    "path": "skills/emails/SKILL.md",
+    "commit": "1f837447b20bb6f0e72d87b80ece1c221c362c7d",
+    "sha256": "47769dd5085b8f32c1ab276d7c19b95e2919fc4de699c3823ceaea48809edfcc",
+    "url": "https://github.com/coreyhaines31/marketingskills/blob/1f837447b20bb6f0e72d87b80ece1c221c362c7d/skills/emails/SKILL.md",
+    "frontmatter_name": "emails"
+  },
+  "anthropics--knowledge-work-plugins--marketing--skills--email-sequence": {
+    "id": "anthropics--knowledge-work-plugins--marketing--skills--email-sequence",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "marketing/skills/email-sequence/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "4303252cbe340b19945b3e58d46430fdf42ea47b3e26d985e3ef1d6da5e36021",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/marketing/skills/email-sequence/SKILL.md",
+    "frontmatter_name": "email-sequence"
+  },
+  "coreyhaines31--marketingskills--skills--cro": {
+    "id": "coreyhaines31--marketingskills--skills--cro",
+    "repo": "coreyhaines31/marketingskills",
+    "path": "skills/cro/SKILL.md",
+    "commit": "1f837447b20bb6f0e72d87b80ece1c221c362c7d",
+    "sha256": "0f8588aba125de102498ca3bbaa0151c8ebffa0a7ad85c14d992ef16db02fb2d",
+    "url": "https://github.com/coreyhaines31/marketingskills/blob/1f837447b20bb6f0e72d87b80ece1c221c362c7d/skills/cro/SKILL.md",
+    "frontmatter_name": "cro"
+  },
+  "coreyhaines31--marketingskills--skills--ab-testing": {
+    "id": "coreyhaines31--marketingskills--skills--ab-testing",
+    "repo": "coreyhaines31/marketingskills",
+    "path": "skills/ab-testing/SKILL.md",
+    "commit": "1f837447b20bb6f0e72d87b80ece1c221c362c7d",
+    "sha256": "938a9a9246c6b05657f509e7ab181f1c961dc14f9dcb5d452c574d3e44a39be2",
+    "url": "https://github.com/coreyhaines31/marketingskills/blob/1f837447b20bb6f0e72d87b80ece1c221c362c7d/skills/ab-testing/SKILL.md",
+    "frontmatter_name": "ab-testing"
+  },
+  "coreyhaines31--marketingskills--skills--public-relations": {
+    "id": "coreyhaines31--marketingskills--skills--public-relations",
+    "repo": "coreyhaines31/marketingskills",
+    "path": "skills/public-relations/SKILL.md",
+    "commit": "1f837447b20bb6f0e72d87b80ece1c221c362c7d",
+    "sha256": "e40e10c4d15441e16077d2506b2ed84619413001bf69dffbd91c6d46a6321b52",
+    "url": "https://github.com/coreyhaines31/marketingskills/blob/1f837447b20bb6f0e72d87b80ece1c221c362c7d/skills/public-relations/SKILL.md",
+    "frontmatter_name": "public-relations"
+  },
+  "anthropics--knowledge-work-plugins--marketing--skills--brand-review": {
+    "id": "anthropics--knowledge-work-plugins--marketing--skills--brand-review",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "marketing/skills/brand-review/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "759f29397a908c32521080247292a4e1c52ac01643bea70ccd6e807e86c1fa4b",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/marketing/skills/brand-review/SKILL.md",
+    "frontmatter_name": "brand-review"
+  },
+  "anthropics--knowledge-work-plugins--sales--skills--account-research": {
+    "id": "anthropics--knowledge-work-plugins--sales--skills--account-research",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "sales/skills/account-research/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "1f5e40ac7cea793dff344f331be95bf2bd6fd8e03c6734aedae2d514707ec59b",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/sales/skills/account-research/SKILL.md",
+    "frontmatter_name": "account-research"
+  },
+  "anthropics--knowledge-work-plugins--sales--skills--call-prep": {
+    "id": "anthropics--knowledge-work-plugins--sales--skills--call-prep",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "sales/skills/call-prep/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "4f772694f3f8fc1ef0d8bb8bb868f6c44661160f57c99dd8c9ebf97f7fe2a947",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/sales/skills/call-prep/SKILL.md",
+    "frontmatter_name": "call-prep"
+  },
+  "anthropics--knowledge-work-plugins--sales--skills--draft-outreach": {
+    "id": "anthropics--knowledge-work-plugins--sales--skills--draft-outreach",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "sales/skills/draft-outreach/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "1f28e9a07e9464e9eef71859d94d28cae955b1d2291a4d76665a71fa232f37f8",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/sales/skills/draft-outreach/SKILL.md",
+    "frontmatter_name": "draft-outreach"
+  },
+  "anthropics--knowledge-work-plugins--customer-support--skills--ticket-triage": {
+    "id": "anthropics--knowledge-work-plugins--customer-support--skills--ticket-triage",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "customer-support/skills/ticket-triage/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "d0e5e95443e358ad2a74811b196071d10807ca95aa20351ab5760feeecee1294",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/customer-support/skills/ticket-triage/SKILL.md",
+    "frontmatter_name": "ticket-triage"
+  },
+  "anthropics--knowledge-work-plugins--customer-support--skills--draft-response": {
+    "id": "anthropics--knowledge-work-plugins--customer-support--skills--draft-response",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "customer-support/skills/draft-response/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "1a201228b75a98fc3b5d45090cb7443d50df204b2ee748bfc8970790a64f0026",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/customer-support/skills/draft-response/SKILL.md",
+    "frontmatter_name": "draft-response"
+  },
+  "anthropics--knowledge-work-plugins--customer-support--skills--customer-escalation": {
+    "id": "anthropics--knowledge-work-plugins--customer-support--skills--customer-escalation",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "customer-support/skills/customer-escalation/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "90c33574a41371e8e116aaf40237141adcd6075ef8bcb9de993de2b543867b3e",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/customer-support/skills/customer-escalation/SKILL.md",
+    "frontmatter_name": "customer-escalation"
+  },
+  "anthropics--knowledge-work-plugins--operations--skills--risk-assessment": {
+    "id": "anthropics--knowledge-work-plugins--operations--skills--risk-assessment",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "operations/skills/risk-assessment/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "82e29810a762c396a56f92bbd5c5afd252f7a07c6be69a246c28f7b82c4086d9",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/operations/skills/risk-assessment/SKILL.md",
+    "frontmatter_name": "risk-assessment"
+  },
+  "anthropics--knowledge-work-plugins--operations--skills--vendor-review": {
+    "id": "anthropics--knowledge-work-plugins--operations--skills--vendor-review",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "operations/skills/vendor-review/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "c2a959a7ed068e34a83984cf223754062e6819deb0ba1ca33eb747b4cc808d5e",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/operations/skills/vendor-review/SKILL.md",
+    "frontmatter_name": "vendor-review"
+  },
+  "anthropics--knowledge-work-plugins--legal--skills--vendor-check": {
+    "id": "anthropics--knowledge-work-plugins--legal--skills--vendor-check",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "legal/skills/vendor-check/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "38be57a5e9e959874d2cb78e8493211664bc452e6225cb5bdbb8b12e6f444d2e",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/legal/skills/vendor-check/SKILL.md",
+    "frontmatter_name": "vendor-check"
+  },
+  "anthropics--knowledge-work-plugins--finance--skills--financial-statements": {
+    "id": "anthropics--knowledge-work-plugins--finance--skills--financial-statements",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "finance/skills/financial-statements/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "1a9ba1cc85495eef32fa250b8a4c05e4854430af574a290b855f919dbb557dfc",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/finance/skills/financial-statements/SKILL.md",
+    "frontmatter_name": "financial-statements"
+  },
+  "anthropics--knowledge-work-plugins--finance--skills--variance-analysis": {
+    "id": "anthropics--knowledge-work-plugins--finance--skills--variance-analysis",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "finance/skills/variance-analysis/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "467db7de3fb118550d013409254e2d4a9f87385a661e154655bf3431919b0ba1",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/finance/skills/variance-analysis/SKILL.md",
+    "frontmatter_name": "variance-analysis"
+  },
+  "anthropics--knowledge-work-plugins--finance--skills--reconciliation": {
+    "id": "anthropics--knowledge-work-plugins--finance--skills--reconciliation",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "finance/skills/reconciliation/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "aa17e90539f4d4d84130c910c7f527236bfaa71977c4c03493c8e8e515ddeea6",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/finance/skills/reconciliation/SKILL.md",
+    "frontmatter_name": "reconciliation"
+  },
+  "anthropics--knowledge-work-plugins--finance--skills--journal-entry-prep": {
+    "id": "anthropics--knowledge-work-plugins--finance--skills--journal-entry-prep",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "finance/skills/journal-entry-prep/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "122715fb18246c2f04d31a5f7c07584ecbfc5c0b46ee09b4c0f4557767d7351e",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/finance/skills/journal-entry-prep/SKILL.md",
+    "frontmatter_name": "journal-entry-prep"
+  },
+  "anthropics--knowledge-work-plugins--finance--skills--audit-support": {
+    "id": "anthropics--knowledge-work-plugins--finance--skills--audit-support",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "finance/skills/audit-support/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "6e53c9529c42bb92c11d00a58af5119f7383903d9cb3b911625089fec2ff4784",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/finance/skills/audit-support/SKILL.md",
+    "frontmatter_name": "audit-support"
+  },
+  "openai--plugins--plugins--public-equity-investing--skills--dcf-model-builder": {
+    "id": "openai--plugins--plugins--public-equity-investing--skills--dcf-model-builder",
+    "repo": "openai/plugins",
+    "path": "plugins/public-equity-investing/skills/dcf-model-builder/SKILL.md",
+    "commit": "d420d13051bffe4543ed39e30fa46b87148e47dd",
+    "sha256": "04a4e12498579301d1eb0eeef87413297f15bcbe305acf87100ad5dc1262d3bb",
+    "url": "https://github.com/openai/plugins/blob/d420d13051bffe4543ed39e30fa46b87148e47dd/plugins/public-equity-investing/skills/dcf-model-builder/SKILL.md",
+    "frontmatter_name": "dcf-model-builder"
+  },
+  "openai--plugins--plugins--public-equity-investing--skills--comps-valuation": {
+    "id": "openai--plugins--plugins--public-equity-investing--skills--comps-valuation",
+    "repo": "openai/plugins",
+    "path": "plugins/public-equity-investing/skills/comps-valuation/SKILL.md",
+    "commit": "d420d13051bffe4543ed39e30fa46b87148e47dd",
+    "sha256": "a75cb1105d70ba58778251cc1b22ae832e9072030e3d89382c1edb4f91599ebe",
+    "url": "https://github.com/openai/plugins/blob/d420d13051bffe4543ed39e30fa46b87148e47dd/plugins/public-equity-investing/skills/comps-valuation/SKILL.md",
+    "frontmatter_name": "comps-valuation"
+  },
+  "openai--plugins--plugins--public-equity-investing--skills--model-audit-tieout": {
+    "id": "openai--plugins--plugins--public-equity-investing--skills--model-audit-tieout",
+    "repo": "openai/plugins",
+    "path": "plugins/public-equity-investing/skills/model-audit-tieout/SKILL.md",
+    "commit": "d420d13051bffe4543ed39e30fa46b87148e47dd",
+    "sha256": "f66665e9ffa2804490a59e1044ac7b4796ecb2b463b208e6a7b50b7b13b54f9c",
+    "url": "https://github.com/openai/plugins/blob/d420d13051bffe4543ed39e30fa46b87148e47dd/plugins/public-equity-investing/skills/model-audit-tieout/SKILL.md",
+    "frontmatter_name": "model-audit-tieout"
+  },
+  "coreyhaines31--marketingskills--skills--pricing": {
+    "id": "coreyhaines31--marketingskills--skills--pricing",
+    "repo": "coreyhaines31/marketingskills",
+    "path": "skills/pricing/SKILL.md",
+    "commit": "1f837447b20bb6f0e72d87b80ece1c221c362c7d",
+    "sha256": "4f0a939631eca1b4bbee22bf6bc88b35ac06c33bfa8e4e837c8767a4bf6f5b54",
+    "url": "https://github.com/coreyhaines31/marketingskills/blob/1f837447b20bb6f0e72d87b80ece1c221c362c7d/skills/pricing/SKILL.md",
+    "frontmatter_name": "pricing"
+  },
+  "coreyhaines31--marketingskills--skills--offers": {
+    "id": "coreyhaines31--marketingskills--skills--offers",
+    "repo": "coreyhaines31/marketingskills",
+    "path": "skills/offers/SKILL.md",
+    "commit": "1f837447b20bb6f0e72d87b80ece1c221c362c7d",
+    "sha256": "d5de835c90e65c9fc117508760ca6df5d8d0ab546ffe6933beab089c944ba71c",
+    "url": "https://github.com/coreyhaines31/marketingskills/blob/1f837447b20bb6f0e72d87b80ece1c221c362c7d/skills/offers/SKILL.md",
+    "frontmatter_name": "offers"
+  },
+  "k-dense-ai--claude-scientific-skills--skills--statistical-power": {
+    "id": "k-dense-ai--claude-scientific-skills--skills--statistical-power",
+    "repo": "K-Dense-AI/claude-scientific-skills",
+    "path": "skills/statistical-power/SKILL.md",
+    "commit": "ec59a29a03d5c40f73ab40878df04860bc00e876",
+    "sha256": "a969660eafdc3504ac36e49bd7ded00e18b00fe5cef5699940d5d8281e24dd3d",
+    "url": "https://github.com/K-Dense-AI/claude-scientific-skills/blob/ec59a29a03d5c40f73ab40878df04860bc00e876/skills/statistical-power/SKILL.md",
+    "frontmatter_name": "statistical-power"
+  },
+  "anthropics--knowledge-work-plugins--legal--skills--review-contract": {
+    "id": "anthropics--knowledge-work-plugins--legal--skills--review-contract",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "legal/skills/review-contract/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "3a6413475f51adedbff130f4d5aabbeeacfb2abd323e0338bc91c21937fbfb76",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/legal/skills/review-contract/SKILL.md",
+    "frontmatter_name": "review-contract"
+  },
+  "anthropics--knowledge-work-plugins--human-resources--skills--org-planning": {
+    "id": "anthropics--knowledge-work-plugins--human-resources--skills--org-planning",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "human-resources/skills/org-planning/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "b3c6e33d251487225485c7fe455586f0cd490b282d7e41054273fa60820891ea",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/human-resources/skills/org-planning/SKILL.md",
+    "frontmatter_name": "org-planning"
+  },
+  "anthropics--knowledge-work-plugins--human-resources--skills--comp-analysis": {
+    "id": "anthropics--knowledge-work-plugins--human-resources--skills--comp-analysis",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "human-resources/skills/comp-analysis/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "1af196cd1c38cdb96565eadebcf13fa25e979469b3e06f4791e18baa7f2534a6",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/human-resources/skills/comp-analysis/SKILL.md",
+    "frontmatter_name": "comp-analysis"
+  },
+  "anthropics--knowledge-work-plugins--human-resources--skills--performance-review": {
+    "id": "anthropics--knowledge-work-plugins--human-resources--skills--performance-review",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "human-resources/skills/performance-review/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "a34e3f49e7c8619f07fd218cb2b6a6d57572dd7a0a78c72977dcd1739578e588",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/human-resources/skills/performance-review/SKILL.md",
+    "frontmatter_name": "performance-review"
+  },
+  "anthropics--knowledge-work-plugins--human-resources--skills--interview-prep": {
+    "id": "anthropics--knowledge-work-plugins--human-resources--skills--interview-prep",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "human-resources/skills/interview-prep/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "c687311babdeccf086aa5f6d86dcbfc3a9d1b8bb7124f072450ffa4315d98c4c",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/human-resources/skills/interview-prep/SKILL.md",
+    "frontmatter_name": "interview-prep"
+  },
+  "anthropics--knowledge-work-plugins--human-resources--skills--recruiting-pipeline": {
+    "id": "anthropics--knowledge-work-plugins--human-resources--skills--recruiting-pipeline",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "human-resources/skills/recruiting-pipeline/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "a00b442f701faa6eb65b8ecc8fcf375d5a33ec827b987ba8b04edaef0e90b92f",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/human-resources/skills/recruiting-pipeline/SKILL.md",
+    "frontmatter_name": "recruiting-pipeline"
+  },
+  "k-dense-ai--claude-scientific-skills--skills--literature-review": {
+    "id": "k-dense-ai--claude-scientific-skills--skills--literature-review",
+    "repo": "K-Dense-AI/claude-scientific-skills",
+    "path": "skills/literature-review/SKILL.md",
+    "commit": "ec59a29a03d5c40f73ab40878df04860bc00e876",
+    "sha256": "16a9e85bcdcb9bb859e1646bf836e51b22900445ba2e367d8d75be05b5a5cba8",
+    "url": "https://github.com/K-Dense-AI/claude-scientific-skills/blob/ec59a29a03d5c40f73ab40878df04860bc00e876/skills/literature-review/SKILL.md",
+    "frontmatter_name": "literature-review"
+  },
+  "k-dense-ai--claude-scientific-skills--skills--scientific-writing": {
+    "id": "k-dense-ai--claude-scientific-skills--skills--scientific-writing",
+    "repo": "K-Dense-AI/claude-scientific-skills",
+    "path": "skills/scientific-writing/SKILL.md",
+    "commit": "ec59a29a03d5c40f73ab40878df04860bc00e876",
+    "sha256": "511a2096bebecd8cf0f8212b9d262d37154ae1ba566eb385d93ac968682edbd1",
+    "url": "https://github.com/K-Dense-AI/claude-scientific-skills/blob/ec59a29a03d5c40f73ab40878df04860bc00e876/skills/scientific-writing/SKILL.md",
+    "frontmatter_name": "scientific-writing"
+  },
+  "k-dense-ai--claude-scientific-skills--skills--peer-review": {
+    "id": "k-dense-ai--claude-scientific-skills--skills--peer-review",
+    "repo": "K-Dense-AI/claude-scientific-skills",
+    "path": "skills/peer-review/SKILL.md",
+    "commit": "ec59a29a03d5c40f73ab40878df04860bc00e876",
+    "sha256": "a042ccdc76d3399431b9a6c4cd4f98968eab964b1c14baeea4d9e73de82c7d19",
+    "url": "https://github.com/K-Dense-AI/claude-scientific-skills/blob/ec59a29a03d5c40f73ab40878df04860bc00e876/skills/peer-review/SKILL.md",
+    "frontmatter_name": "peer-review"
+  },
+  "k-dense-ai--claude-scientific-skills--skills--sympy": {
+    "id": "k-dense-ai--claude-scientific-skills--skills--sympy",
+    "repo": "K-Dense-AI/claude-scientific-skills",
+    "path": "skills/sympy/SKILL.md",
+    "commit": "ec59a29a03d5c40f73ab40878df04860bc00e876",
+    "sha256": "bb97087bdddccc845401737ddc7f7a8da1c14ced5e8d40da01271c991ac46e23",
+    "url": "https://github.com/K-Dense-AI/claude-scientific-skills/blob/ec59a29a03d5c40f73ab40878df04860bc00e876/skills/sympy/SKILL.md",
+    "frontmatter_name": "sympy"
+  },
+  "trailofbits--skills--plugins--dimensional-analysis--skills--dimensional-analysis": {
+    "id": "trailofbits--skills--plugins--dimensional-analysis--skills--dimensional-analysis",
+    "repo": "trailofbits/skills",
+    "path": "plugins/dimensional-analysis/skills/dimensional-analysis/SKILL.md",
+    "commit": "149d7b21f4067765b82e67029730b42d228ef4b4",
+    "sha256": "e3a091ca6acd079a00044a74929153bd569731b08c24b4bbaba59203c734a67c",
+    "url": "https://github.com/trailofbits/skills/blob/149d7b21f4067765b82e67029730b42d228ef4b4/plugins/dimensional-analysis/skills/dimensional-analysis/SKILL.md",
+    "frontmatter_name": "dimensional-analysis"
+  },
+  "k-dense-ai--claude-scientific-skills--skills--rdkit": {
+    "id": "k-dense-ai--claude-scientific-skills--skills--rdkit",
+    "repo": "K-Dense-AI/claude-scientific-skills",
+    "path": "skills/rdkit/SKILL.md",
+    "commit": "ec59a29a03d5c40f73ab40878df04860bc00e876",
+    "sha256": "9f32d5d229bc1a5bac3e57de5fb87895cdb85dcc99132c57373905db0e1a941e",
+    "url": "https://github.com/K-Dense-AI/claude-scientific-skills/blob/ec59a29a03d5c40f73ab40878df04860bc00e876/skills/rdkit/SKILL.md",
+    "frontmatter_name": "rdkit"
+  },
+  "k-dense-ai--claude-scientific-skills--skills--deepchem": {
+    "id": "k-dense-ai--claude-scientific-skills--skills--deepchem",
+    "repo": "K-Dense-AI/claude-scientific-skills",
+    "path": "skills/deepchem/SKILL.md",
+    "commit": "ec59a29a03d5c40f73ab40878df04860bc00e876",
+    "sha256": "2965735ee473cf70d63c6170f1c8867bd533539809d4535c162acacc07d0b17d",
+    "url": "https://github.com/K-Dense-AI/claude-scientific-skills/blob/ec59a29a03d5c40f73ab40878df04860bc00e876/skills/deepchem/SKILL.md",
+    "frontmatter_name": "deepchem"
+  },
+  "k-dense-ai--claude-scientific-skills--skills--biopython": {
+    "id": "k-dense-ai--claude-scientific-skills--skills--biopython",
+    "repo": "K-Dense-AI/claude-scientific-skills",
+    "path": "skills/biopython/SKILL.md",
+    "commit": "ec59a29a03d5c40f73ab40878df04860bc00e876",
+    "sha256": "b617561b38a2e3ecc8f8cf3dd8bb0307ac1aaf4d67e6e0432b0c248bc4382245",
+    "url": "https://github.com/K-Dense-AI/claude-scientific-skills/blob/ec59a29a03d5c40f73ab40878df04860bc00e876/skills/biopython/SKILL.md",
+    "frontmatter_name": "biopython"
+  },
+  "anthropics--knowledge-work-plugins--bio-research--skills--single-cell-rna-qc": {
+    "id": "anthropics--knowledge-work-plugins--bio-research--skills--single-cell-rna-qc",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "bio-research/skills/single-cell-rna-qc/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "49cb573916deec6fcf6cc2cb1b573469cbc8c34b84326597ce2db22d0202393f",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/bio-research/skills/single-cell-rna-qc/SKILL.md",
+    "frontmatter_name": "single-cell-rna-qc"
+  },
+  "anthropics--knowledge-work-plugins--bio-research--skills--nextflow-development": {
+    "id": "anthropics--knowledge-work-plugins--bio-research--skills--nextflow-development",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "bio-research/skills/nextflow-development/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "f30017df5d499427a701ec6cedfc5c9948ca3bd04ee1a2b6a585a29cd93ad0d7",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/bio-research/skills/nextflow-development/SKILL.md",
+    "frontmatter_name": "nextflow-development"
+  },
+  "k-dense-ai--claude-scientific-skills--skills--geopandas": {
+    "id": "k-dense-ai--claude-scientific-skills--skills--geopandas",
+    "repo": "K-Dense-AI/claude-scientific-skills",
+    "path": "skills/geopandas/SKILL.md",
+    "commit": "ec59a29a03d5c40f73ab40878df04860bc00e876",
+    "sha256": "c03a46f911535326802af476208a1e04de13ea385f4d5309b022ad931826b222",
+    "url": "https://github.com/K-Dense-AI/claude-scientific-skills/blob/ec59a29a03d5c40f73ab40878df04860bc00e876/skills/geopandas/SKILL.md",
+    "frontmatter_name": "geopandas"
+  },
+  "openai--plugins--plugins--build-web-data-visualization--skills--geospatial-and-cartographic-visualization": {
+    "id": "openai--plugins--plugins--build-web-data-visualization--skills--geospatial-and-cartographic-visualization",
+    "repo": "openai/plugins",
+    "path": "plugins/build-web-data-visualization/skills/geospatial-and-cartographic-visualization/SKILL.md",
+    "commit": "d420d13051bffe4543ed39e30fa46b87148e47dd",
+    "sha256": "18f5cf852b8a2d635a8198ba0b7da69118860d66c9755ef3108d476bfa8be0ee",
+    "url": "https://github.com/openai/plugins/blob/d420d13051bffe4543ed39e30fa46b87148e47dd/plugins/build-web-data-visualization/skills/geospatial-and-cartographic-visualization/SKILL.md",
+    "frontmatter_name": "geospatial-and-cartographic-visualization"
+  },
+  "k-dense-ai--claude-scientific-skills--skills--clinical-reports": {
+    "id": "k-dense-ai--claude-scientific-skills--skills--clinical-reports",
+    "repo": "K-Dense-AI/claude-scientific-skills",
+    "path": "skills/clinical-reports/SKILL.md",
+    "commit": "ec59a29a03d5c40f73ab40878df04860bc00e876",
+    "sha256": "0d7c821b7857a4a761805e1a8263920a37f181658f77f1397755df0e14125022",
+    "url": "https://github.com/K-Dense-AI/claude-scientific-skills/blob/ec59a29a03d5c40f73ab40878df04860bc00e876/skills/clinical-reports/SKILL.md",
+    "frontmatter_name": "clinical-reports"
+  },
+  "anthropics--knowledge-work-plugins--productivity--skills--task-management": {
+    "id": "anthropics--knowledge-work-plugins--productivity--skills--task-management",
+    "repo": "anthropics/knowledge-work-plugins",
+    "path": "productivity/skills/task-management/SKILL.md",
+    "commit": "e91a134584eb798bac7fb0379358006a2b63b965",
+    "sha256": "db1320873d68caab09cdbc1788e78d81e3b9b7cc6b499e2c4b975f25e873049f",
+    "url": "https://github.com/anthropics/knowledge-work-plugins/blob/e91a134584eb798bac7fb0379358006a2b63b965/productivity/skills/task-management/SKILL.md",
+    "frontmatter_name": "task-management"
+  },
+  "k-dense-ai--claude-scientific-skills--skills--research-grants": {
+    "id": "k-dense-ai--claude-scientific-skills--skills--research-grants",
+    "repo": "K-Dense-AI/claude-scientific-skills",
+    "path": "skills/research-grants/SKILL.md",
+    "commit": "ec59a29a03d5c40f73ab40878df04860bc00e876",
+    "sha256": "3ca7ea8075bbe8008389660cc4a5769d66ac9ec638f3f61a955a5d7b20aeba85",
+    "url": "https://github.com/K-Dense-AI/claude-scientific-skills/blob/ec59a29a03d5c40f73ab40878df04860bc00e876/skills/research-grants/SKILL.md",
+    "frontmatter_name": "research-grants"
+  },
+  "anthropics--skills--skills--docx": {
+    "id": "anthropics--skills--skills--docx",
+    "repo": "anthropics/skills",
+    "path": "skills/docx/SKILL.md",
+    "commit": "e4bb5d960d87126ff3b3a8af1a104b7db67560ba",
+    "sha256": "895d5aa6c4cd98e4aed4c995d846f056f3549086e79bcd6617afea6014f82288",
+    "url": "https://github.com/anthropics/skills/blob/e4bb5d960d87126ff3b3a8af1a104b7db67560ba/skills/docx/SKILL.md",
+    "frontmatter_name": "docx"
+  },
+  "anthropics--skills--skills--pdf": {
+    "id": "anthropics--skills--skills--pdf",
+    "repo": "anthropics/skills",
+    "path": "skills/pdf/SKILL.md",
+    "commit": "e4bb5d960d87126ff3b3a8af1a104b7db67560ba",
+    "sha256": "d1c7caf5f35eb7d37877dd7fc33a095037be2b34fb5d2f7f4d43bde3165bb4ee",
+    "url": "https://github.com/anthropics/skills/blob/e4bb5d960d87126ff3b3a8af1a104b7db67560ba/skills/pdf/SKILL.md",
+    "frontmatter_name": "pdf"
+  },
+  "anthropics--skills--skills--xlsx": {
+    "id": "anthropics--skills--skills--xlsx",
+    "repo": "anthropics/skills",
+    "path": "skills/xlsx/SKILL.md",
+    "commit": "e4bb5d960d87126ff3b3a8af1a104b7db67560ba",
+    "sha256": "f32b1c2b5d5d31e02964df110d6489613d9345f86830c118cfe24159d8448ce6",
+    "url": "https://github.com/anthropics/skills/blob/e4bb5d960d87126ff3b3a8af1a104b7db67560ba/skills/xlsx/SKILL.md",
+    "frontmatter_name": "xlsx"
+  },
+  "anthropics--skills--skills--skill-creator": {
+    "id": "anthropics--skills--skills--skill-creator",
+    "repo": "anthropics/skills",
+    "path": "skills/skill-creator/SKILL.md",
+    "commit": "e4bb5d960d87126ff3b3a8af1a104b7db67560ba",
+    "sha256": "dcd4803e61e913e6fc27294184cd3a71f09f5e924ff20c8a9a20173e7b3c2bcf",
+    "url": "https://github.com/anthropics/skills/blob/e4bb5d960d87126ff3b3a8af1a104b7db67560ba/skills/skill-creator/SKILL.md",
+    "frontmatter_name": "skill-creator"
+  },
+  "anthropics--skills--skills--mcp-builder": {
+    "id": "anthropics--skills--skills--mcp-builder",
+    "repo": "anthropics/skills",
+    "path": "skills/mcp-builder/SKILL.md",
+    "commit": "e4bb5d960d87126ff3b3a8af1a104b7db67560ba",
+    "sha256": "b483b56d6673134497e45489c317f26ae0f1429c194db0297e43073e17e6748c",
+    "url": "https://github.com/anthropics/skills/blob/e4bb5d960d87126ff3b3a8af1a104b7db67560ba/skills/mcp-builder/SKILL.md",
+    "frontmatter_name": "mcp-builder"
+  },
+  "anthropics--skills--skills--claude-api": {
+    "id": "anthropics--skills--skills--claude-api",
+    "repo": "anthropics/skills",
+    "path": "skills/claude-api/SKILL.md",
+    "commit": "e4bb5d960d87126ff3b3a8af1a104b7db67560ba",
+    "sha256": "40537cca17c4aa86e4ce83ced39efcbfb1204905e3cf4c4ff98f2eab011e4b7f",
+    "url": "https://github.com/anthropics/skills/blob/e4bb5d960d87126ff3b3a8af1a104b7db67560ba/skills/claude-api/SKILL.md",
+    "frontmatter_name": "claude-api"
+  },
+  "vercel-labs--agent-browser--skills--agent-browser": {
+    "id": "vercel-labs--agent-browser--skills--agent-browser",
+    "repo": "vercel-labs/agent-browser",
+    "path": "skills/agent-browser/SKILL.md",
+    "commit": "b06e2533ba9b3823b8a96c859d455cb55f4d7893",
+    "sha256": "7d46deeb0101e84f8d70fd2e5cd18e3b6017edfb973607ff23e95e22c92ce73e",
+    "url": "https://github.com/vercel-labs/agent-browser/blob/b06e2533ba9b3823b8a96c859d455cb55f4d7893/skills/agent-browser/SKILL.md",
+    "frontmatter_name": "agent-browser"
+  },
+  "anthropics--skills--skills--internal-comms": {
+    "id": "anthropics--skills--skills--internal-comms",
+    "repo": "anthropics/skills",
+    "path": "skills/internal-comms/SKILL.md",
+    "commit": "e4bb5d960d87126ff3b3a8af1a104b7db67560ba",
+    "sha256": "067b7587a344a928fc6534ef66b1bcd591fc7c26d207ea7ca3334aeb678d6475",
+    "url": "https://github.com/anthropics/skills/blob/e4bb5d960d87126ff3b3a8af1a104b7db67560ba/skills/internal-comms/SKILL.md",
+    "frontmatter_name": "internal-comms"
+  },
+  "alirezarezvani--claude-skills--product-team--agile-product-owner--skills--agile-product-owner": {
+    "id": "alirezarezvani--claude-skills--product-team--agile-product-owner--skills--agile-product-owner",
+    "repo": "alirezarezvani/claude-skills",
+    "path": "product-team/agile-product-owner/skills/agile-product-owner/SKILL.md",
+    "commit": "f8593c4941210a621a6629ce1da9e07897976d5f",
+    "sha256": "30d0cd528a9cecf27c178660dc879e19c9c4661bac43bf013941b3f27579d202",
+    "url": "https://github.com/alirezarezvani/claude-skills/blob/f8593c4941210a621a6629ce1da9e07897976d5f/product-team/agile-product-owner/skills/agile-product-owner/SKILL.md",
+    "frontmatter_name": "agile-product-owner"
+  },
+  "jeffallan--claude-skills--skills--flutter-expert": {
+    "id": "jeffallan--claude-skills--skills--flutter-expert",
+    "repo": "Jeffallan/claude-skills",
+    "path": "skills/flutter-expert/SKILL.md",
+    "commit": "67c1961b180dc92cf08983344627109e983e8f51",
+    "sha256": "79b80928e5220637cf0a99e070f167dd2f3a6fa6a9bc6372875d3216a5199e9c",
+    "url": "https://github.com/Jeffallan/claude-skills/blob/67c1961b180dc92cf08983344627109e983e8f51/skills/flutter-expert/SKILL.md",
+    "frontmatter_name": "flutter-expert"
+  },
+  "jeffallan--claude-skills--skills--embedded-systems": {
+    "id": "jeffallan--claude-skills--skills--embedded-systems",
+    "repo": "Jeffallan/claude-skills",
+    "path": "skills/embedded-systems/SKILL.md",
+    "commit": "67c1961b180dc92cf08983344627109e983e8f51",
+    "sha256": "26695ca78cdbbfd3657dc143b28308a293e798399df430cee6116e758cc3f4a8",
+    "url": "https://github.com/Jeffallan/claude-skills/blob/67c1961b180dc92cf08983344627109e983e8f51/skills/embedded-systems/SKILL.md",
+    "frontmatter_name": "embedded-systems"
+  },
+  "alirezarezvani--claude-skills--engineering-team--skills--senior-qa": {
+    "id": "alirezarezvani--claude-skills--engineering-team--skills--senior-qa",
+    "repo": "alirezarezvani/claude-skills",
+    "path": "engineering-team/skills/senior-qa/SKILL.md",
+    "commit": "f8593c4941210a621a6629ce1da9e07897976d5f",
+    "sha256": "c213bca2af237e5cc9d45f103d98193c781676e5e8f2aca105da2d90fe40f013",
+    "url": "https://github.com/alirezarezvani/claude-skills/blob/f8593c4941210a621a6629ce1da9e07897976d5f/engineering-team/skills/senior-qa/SKILL.md",
+    "frontmatter_name": "senior-qa"
+  },
+  "alirezarezvani--claude-skills--engineering--skills--i18n-localization": {
+    "id": "alirezarezvani--claude-skills--engineering--skills--i18n-localization",
+    "repo": "alirezarezvani/claude-skills",
+    "path": "engineering/skills/i18n-localization/SKILL.md",
+    "commit": "f8593c4941210a621a6629ce1da9e07897976d5f",
+    "sha256": "e20911d5f84c4c7e6c86b9b6e91af9ea7ed26a7f0401a08e8c6e1eeb17e0fa59",
+    "url": "https://github.com/alirezarezvani/claude-skills/blob/f8593c4941210a621a6629ce1da9e07897976d5f/engineering/skills/i18n-localization/SKILL.md",
+    "frontmatter_name": "i18n-localization"
+  },
+  "alirezarezvani--claude-skills--business-growth--skills--customer-success-manager": {
+    "id": "alirezarezvani--claude-skills--business-growth--skills--customer-success-manager",
+    "repo": "alirezarezvani/claude-skills",
+    "path": "business-growth/skills/customer-success-manager/SKILL.md",
+    "commit": "f8593c4941210a621a6629ce1da9e07897976d5f",
+    "sha256": "54b13f595cfa511aa2aefb02605d6f828e3228ca359e8c2b17ffb0be23e8f167",
+    "url": "https://github.com/alirezarezvani/claude-skills/blob/f8593c4941210a621a6629ce1da9e07897976d5f/business-growth/skills/customer-success-manager/SKILL.md",
+    "frontmatter_name": "customer-success-manager"
+  },
+  "alirezarezvani--claude-skills--business-operations--skills--procurement-optimizer": {
+    "id": "alirezarezvani--claude-skills--business-operations--skills--procurement-optimizer",
+    "repo": "alirezarezvani/claude-skills",
+    "path": "business-operations/skills/procurement-optimizer/SKILL.md",
+    "commit": "f8593c4941210a621a6629ce1da9e07897976d5f",
+    "sha256": "fd528725f6c20ba2e5428358facd8caa3e64eb972997cdbc068e6aa5754ed401",
+    "url": "https://github.com/alirezarezvani/claude-skills/blob/f8593c4941210a621a6629ce1da9e07897976d5f/business-operations/skills/procurement-optimizer/SKILL.md",
+    "frontmatter_name": "procurement-optimizer"
+  },
+  "alirezarezvani--claude-skills--ra-qm-team--skills--regulatory-affairs-head": {
+    "id": "alirezarezvani--claude-skills--ra-qm-team--skills--regulatory-affairs-head",
+    "repo": "alirezarezvani/claude-skills",
+    "path": "ra-qm-team/skills/regulatory-affairs-head/SKILL.md",
+    "commit": "f8593c4941210a621a6629ce1da9e07897976d5f",
+    "sha256": "8fff95bc3d5d952a7ea220f42941e21337fa459dd07635e53d915b46db28c15b",
+    "url": "https://github.com/alirezarezvani/claude-skills/blob/f8593c4941210a621a6629ce1da9e07897976d5f/ra-qm-team/skills/regulatory-affairs-head/SKILL.md",
+    "frontmatter_name": "regulatory-affairs-head"
+  }
+}

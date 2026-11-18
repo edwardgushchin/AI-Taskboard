@@ -86,7 +86,15 @@ export function writeAtomic(path: string, contents: string | Uint8Array): void {
     } finally {
       closeSync(file);
     }
-    renameSync(temporary, path);
+    for (let attempt = 0; ; attempt++) {
+      try { renameSync(temporary, path); break; }
+      catch (error) {
+        if (process.platform !== "win32" || attempt >= 4 ||
+            !["EPERM", "EACCES", "EBUSY"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+        // Windows readers or scanners can briefly prevent atomic replacement.
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * (attempt + 1));
+      }
+    }
   } finally {
     removeFile(temporary);
   }
@@ -182,8 +190,8 @@ function withSqliteLock<T>(lockPath: string, timeoutMs: 0 | 15_000, callback: (l
   }
 }
 
-export function withLock<T>(directoryPath: string, callback: (lockWaitMs: number) => T): T {
-  return withSqliteLock(join(directoryPath, ".lock.sqlite"), 15_000, callback);
+export function withLock<T>(directoryPath: string, callback: (lockWaitMs: number) => T, timeoutMs: 0 | 15_000 = 15_000): T {
+  return withSqliteLock(join(directoryPath, ".lock.sqlite"), timeoutMs, callback);
 }
 
 export function withRuntimeLock<T>(directoryPath: string, callback: () => T): T {
@@ -273,7 +281,8 @@ function readIndex(path: string): BoardIndex {
       (index.settings.autoMode !== undefined && typeof index.settings.autoMode !== "boolean") ||
       (index.settings.autoReview !== undefined && typeof index.settings.autoReview !== "boolean") ||
       (index.settings.reviewMode !== undefined && !reviewModes.some(mode => mode === (index.settings as Record<string, unknown>).reviewMode)) ||
-      (index.settings.agentLimits !== undefined && !validAgentLimitOverrides(index.settings.agentLimits)) ||
+      (index.settings.taskLimits !== undefined && !validAgentLimitOverrides(index.settings.taskLimits)) ||
+      (index.settings.requireExpertPlans !== undefined && typeof index.settings.requireExpertPlans !== "boolean") ||
       !boardAgentRoles.every(role => validRoleSettings((index.settings as Record<string, unknown>)[role])) ||
       !(index.settings.archiveAfterDays === null ||
         (Number.isSafeInteger(index.settings.archiveAfterDays) && Number(index.settings.archiveAfterDays) >= 0))) {
@@ -320,7 +329,12 @@ function readIndex(path: string): BoardIndex {
       return { name: tag.name, color: color.toUpperCase() };
     });
   }
-  return { ...index, settings: { ...defaultBoardAgents, ...index.settings } } as unknown as BoardIndex;
+  const { agentLimits: _legacyLimits, ...settings } = index.settings;
+  const manager = settings.manager;
+  if (isRecord(manager) && manager.model === "gpt-6.1-sol" && manager.effort === "medium") {
+    settings.manager = defaultBoardAgents.manager;
+  }
+  return { ...index, settings: { ...defaultBoardAgents, ...settings } } as unknown as BoardIndex;
 }
 
 export function validateCard(value: unknown, id: string): Task {
@@ -383,7 +397,7 @@ export function validateCard(value: unknown, id: string): Task {
           .every(value => Number.isSafeInteger(value) && Number(value) >= 0))) {
       throw new TaskboardError("CORRUPT_STORAGE", "Invalid start timing for " + id + ".", { id });
     }
-    if (event?.run !== undefined && (event.action !== "run-log" || !Array.isArray(event.run) ||
+    if (event?.run !== undefined && ((event.action !== "run-log" && (event.action !== "chat" || event.actor !== "agent")) || !Array.isArray(event.run) ||
         event.run.some(item => !isRecord(item) ||
           !["id", "type", "title", "text", "status"].every(key => typeof item[key] === "string") ||
           (item.phase !== undefined && !["commentary", "final_answer"].includes(String(item.phase)))))) {
@@ -578,12 +592,12 @@ export function readBoardSettings(location: BoardLocation): BoardIndex["settings
   return new BoardStore(location).index.settings;
 }
 
-export function onBoard<T>(location: BoardLocation, callback: (store: BoardStore, lockWaitMs: number) => T): T {
+export function onBoard<T>(location: BoardLocation, callback: (store: BoardStore, lockWaitMs: number) => T, timeoutMs: 0 | 15_000 = 15_000): T {
   requireBoard(location);
   return withLock(location.directory, lockWaitMs => {
     finishTestRecovery(location);
     return callback(new BoardStore(location), lockWaitMs);
-  });
+  }, timeoutMs);
 }
 
 export function sha256(data: Uint8Array): string {

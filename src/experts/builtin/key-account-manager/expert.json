@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "id": "key-account-manager",
+  "name": "Менеджер ключевых клиентов",
+  "group": "Продажи и обслуживание клиентов",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Менеджер ключевых клиентов",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--sales--skills--account-research",
+      "name": "account-research",
+      "library": "anthropics--knowledge-work-plugins--sales--skills--account-research"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--sales--skills--call-prep",
+      "name": "call-prep",
+      "library": "anthropics--knowledge-work-plugins--sales--skills--call-prep"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--sales--skills--draft-outreach",
+      "name": "draft-outreach",
+      "library": "anthropics--knowledge-work-plugins--sales--skills--draft-outreach"
+    }
+  ],
+  "requirements": [],
+  "limitations": ""
+}

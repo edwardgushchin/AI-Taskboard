@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createTask, recordRunLog } from "../src/cli/tasks.ts";
-import { runActivity } from "../src/desktop/run-activity.ts";
+import { runActivity, runLog } from "../src/desktop/run-activity.ts";
 
 test("nonzero command exit codes remain visible as failures in collapsed activity groups", () => {
   const item = { id: "command", type: "commandExecution", command: "npm test", status: "completed", aggregatedOutput: "failed", exitCode: 1 };
@@ -37,6 +37,20 @@ test("streamed reasoning keeps new summary sections on separate lines", () => {
   assert.equal(next.text, "**Checking the board**\n\n**Preparing the answer**");
 });
 
+
+test("review logs retain provider summaries in order across the activity limit", () => {
+  const entries = new Map();
+  const add = (id: string, type: string, text: string) =>
+    entries.set(id, { id, type, title: "", text, status: "completed" });
+  add("start", "commandExecution", "before");
+  add("summary", "reasoning", "Provider summary");
+  for (let index = 0; index < 6; index++) add("tool" + index, "dynamicToolCall", "x".repeat(200));
+  add("final", "agentMessage", "Review outcome");
+  assert.deepEqual(runLog(entries, 700, true).map(item => item.id), ["truncated", "summary", "truncated", "tool5", "final"]);
+  assert.deepEqual(runLog(entries, 700).map(item => item.id), ["truncated", "tool4", "tool5", "final"]);
+  entries.delete("summary");
+  assert.deepEqual(runLog(entries, 700, true), runLog(entries, 700));
+});
 
 test("first event time survives deltas, completion and journal validation", () => {
   const entries = new Map();

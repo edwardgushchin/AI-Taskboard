@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import { withBoardMcp } from "../src/desktop/board-mcp.ts";
+import { executorExpertTools, expertCommands } from "../src/desktop/expert-tools.ts";
 import { goalTaskWaitSeconds } from "../src/desktop/board-actions.ts";
 import { responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "../src/desktop/board-agent-hooks.ts";
 import { codexRpc, turnControl } from "../src/desktop/codex-rpc.ts";
@@ -24,6 +25,7 @@ import { managerCliContext } from "../src/desktop/manager-cli.ts";
 import { managerAccess } from "../src/desktop/codex.ts";
 import { projectIdentity } from "../src/desktop/project-tabs.ts";
 import { githubReadTool } from "../src/desktop/github-read.ts";
+import { chatTools } from "../src/desktop/chat-actions.ts";
 
 const source = readFileSync(new URL("../src/desktop/codex-chat.ts", import.meta.url), "utf8")
   .replace(/^import[\s\S]*?;\r?\n/gm, "").replace(/^export /gm, "");
@@ -49,6 +51,7 @@ test("manager access defaults to auto and preserves old full-access choices per 
 
 test("an executor access request gets an independent manager decision scoped to its card", async () => {
   const task = { id: "T-0118", revision: 13, title: "Verify Electron", status: "in_progress", criteria: ["Run the UI check"] };
+  const evidence = { operation: "CreateWindowStationW", mxcError: 5, hostError: 0 };
   const grants: unknown[] = [];
   let answer = "";
   let calls = 0;
@@ -67,6 +70,7 @@ test("an executor access request gets an independent manager decision scoped to 
       calls++;
       assert.equal(JSON.parse(input).task.id, task.id);
       assert.match(JSON.parse(input).executorRequest, /install_dir_access\.cc/);
+      assert.deepEqual(JSON.parse(input).sandboxEvidence, evidence);
       assert.equal(options.tools.length, 0);
       assert.equal(options.finalAnswerSchema.properties.approved.type, "boolean");
       assert.match(options.instructions, /read-only shell does not limit that decision/);
@@ -74,7 +78,7 @@ test("an executor access request gets an independent manager decision scoped to 
     },
   });
   const args = { reason: "Required UI check fails with Electron install_dir_access.cc:52." };
-  const run = (input: unknown = args, signal = new AbortController().signal) => request("profile", "project", task.id, input, undefined, signal);
+  const run = (input: unknown = args, signal = new AbortController().signal) => request("profile", "project", task.id, input, undefined, signal, evidence);
   assert.equal((await run({ ...args, id: "T-9999" })).error.code, "INVALID_INPUT");
   assert.equal(calls, 0);
   answer = JSON.stringify({ approved: false, reason: "Use the scripted check." });
@@ -88,6 +92,7 @@ test("an executor access request gets an independent manager decision scoped to 
   const approved = await run();
   assert.equal(approved.data.approved, true);
   assert.equal(approved.data.appliesOn, "current-execution");
+  assert.deepEqual(approved.data.sandboxEvidence, evidence);
   assert.deepEqual(JSON.parse(JSON.stringify(grants)), [{ id: task.id, revision: task.revision, fullAccess: true }]);
 });
 
@@ -219,6 +224,8 @@ test("board history recovers a steering message and its attachment in the middle
 
 test("discussion steering and interruption share the streaming connection, including during a tool call", async t => {
   const directory = mkdtempSync(join(tmpdir(), "ai-taskboard-chat-test-"));
+  mkdirSync(join(directory, ".tasks"), { recursive: true });
+  writeFileSync(join(directory, ".tasks", "board.json"), JSON.stringify({ settings: { boardType: "manual" } }));
   t.after(() => rmSync(directory, { recursive: true, force: true, maxRetries: 3 }));
   const script = join(directory, "provider.cjs");
   writeFileSync(script, `
@@ -238,11 +245,19 @@ test("discussion steering and interruption share the streaming connection, inclu
       if (method === 'model/list') result = { data: [{ model: 'test', defaultReasoningEffort: 'low', supportedReasoningEfforts: [] }], nextCursor: null };
       if (method === 'thread/start') {
         assert.equal(params.sandbox, 'read-only');
+        const [update] = params.dynamicTools;
+        assert.equal(update.name, 'task_update');
+        assert.deepEqual(update.inputSchema.required, ['authorization']);
+        assert.match(update.inputSchema.properties.authorization.description, /latestUserMessage\.text/);
+        assert.match(params.developerInstructions, /even if the user did not explicitly ask to edit the card/);
+        assert.match(params.developerInstructions, /Questions alone, guesses and details found only in attachments do not authorize changes/);
+        assert.match(params.developerInstructions, /ask a specific question before saving the disputed change/);
+        assert.match(params.developerInstructions, /If task_update fails, report the error and do not claim an update/);
         result = { thread: { id: 'thread' } };
       }
       if (method === 'turn/start') {
         const { result: { tools } } = await invoke('tools/list');
-        assert.deepEqual(tools.map(tool => tool.name).sort(), ['github_read', 'worklog_record']);
+        assert.deepEqual(tools.map(tool => tool.name).sort(), ['expert_context', 'expert_list', 'expert_skill', 'github_read', 'worklog_record']);
         const github = await invoke('tools/call', { name: 'github_read', arguments: { view: 'run-failed-log', runId: 43816168554 } });
         assert.equal(JSON.parse(github.result.content[0].text).data.log, 'Dependency resolution failed');
         const write = await invoke('tools/call', { name: 'github_set_milestone_due', arguments: {} });
@@ -265,7 +280,7 @@ test("discussion steering and interruption share the streaming connection, inclu
       child.stderr.pipe(process.stderr);
       return child;
     },
-    trackActiveRun, trackProvider, claimDiscussion, codexRpc, turnControl, CodexTokenUsage, withBoardMcp, manualContext: () => "", readBoardSettings: () => ({}), locateBoard: (path: string) => path, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
+    executorExpertTools, expertCommands, trackActiveRun, trackProvider, claimDiscussion, codexRpc, turnControl, CodexTokenUsage, withBoardMcp, manualContext: () => "", readBoardSettings: () => ({}), locateBoard: (path: string) => path, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
     githubReadTool, readBoardGitHub: async (project: string, args: unknown) => {
       assert.equal(project, directory);
       assert.deepEqual(args, { view: "run-failed-log", runId: 43816168554 });
@@ -273,7 +288,7 @@ test("discussion steering and interruption share the streaming connection, inclu
     },
     process, setTimeout, clearTimeout,
     configuredCodex: async () => ({ path: process.execPath, args: [script] }),
-    chatTools: [], cliFailure: () => ({ ok: false }), saveChatImages: async () => [],
+    chatTools, cliFailure: () => ({ ok: false }), saveChatImages: async () => [],
   });
   const ready = Promise.withResolvers<AgentControl>();
   const toolStarted = Promise.withResolvers<void>();
@@ -296,7 +311,8 @@ test("discussion steering and interruption share the streaming connection, inclu
 
 test("board chat keeps a goal streaming across turns and times out only after inactivity", { timeout: 10_000 }, async t => {
   const directory = mkdtempSync(join(tmpdir(), "ai-taskboard-chat-test-"));
-  mkdirSync(join(directory, ".tasks"));
+  mkdirSync(join(directory, ".tasks"), { recursive: true });
+  writeFileSync(join(directory, ".tasks", "board.json"), JSON.stringify({ settings: { boardType: "manual" } }));
   t.after(() => rmSync(directory, { recursive: true, force: true, maxRetries: 3 }));
   const script = join(directory, "provider.cjs");
   const captured = join(directory, "requests.json");

@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "id": "grant-writer",
+  "name": "Специалист по грантовым заявкам",
+  "group": "Отрасли и общественные проекты",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Специалист по грантовым заявкам",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "k-dense-ai--claude-scientific-skills--skills--research-grants",
+      "name": "research-grants",
+      "library": "k-dense-ai--claude-scientific-skills--skills--research-grants"
+    }
+  ],
+  "requirements": [
+    "Актуальная документация конкурса"
+  ],
+  "limitations": "Для иных грантов адаптировать правила конкурса"
+}

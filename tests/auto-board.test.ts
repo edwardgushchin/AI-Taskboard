@@ -17,21 +17,22 @@ const code = parsed.statements.filter(node => ts.isFunctionDeclaration(node) && 
   .map(node => node.getText(parsed)).join("\n");
 
 function fixture(mode = "human") {
-  const board: any = { project: "project", settings: { autoMode: true, reviewMode: mode, agentLimits: { executor: 1, reviewer: 1 } },
+  const board: any = { project: "project", settings: { autoMode: true, reviewMode: mode, taskLimits: { executor: 1, reviewer: 1 } },
     tasks: [], managerInbox: [] };
   const watch: any = { board, tabs: new Set([{ window: { isDestroyed: () => false, webContents: {} } },
     { window: { isDestroyed: () => false, webContents: {} } }]), reviewerRuns: new Map() };
   const slots = createAgentSlots();
+  const managers = new Map<string, any>(), dialogues = new Map<string, any>();
   const busy = new Map<string, () => void>();
   const launches: string[] = [], accepted: string[] = [], reviews: string[] = [], notices: any[] = [], calls: string[][] = [], errors: string[] = [];
   let afterLaunch: (() => void) | undefined, beforeAccept: (() => void) | undefined, launchError: string | undefined;
   const fail = (code: string) => ({ ok: false, error: { code, message: code } });
   const runtime = runInNewContext(stripTypeScriptTypes(code) + "\n({scheduleAutoBoard, autoBoards})", {
-    subscriptions: new Map([["project", watch]]), closingProjects: new Set(), boardWorkRequests: new Map(),
+    subscriptions: new Map([["project", watch]]), closingProjects: new Set(), boardWorkRequests: managers, boardRequests: dialogues,
     isManual, nextReadyTask, boardReviewMode, agentSlots: slots, projectIdentity: (path: string) => path,
     executorBusy: (_: string, id: string) => busy.has(id), t: (key: string) => localization.text(key, {}, "en"),
     broadcastBoardChat: (_: string, __: string, value: any) => errors.push(value.error),
-    reserveAgent: (_: string, role: "reviewer") => slots.acquire("project", role, board.settings.agentLimits),
+    reserveAgent: (_: string, role: "reviewer") => slots.acquire("project", role, board.settings.taskLimits),
     publishReviewActivity: () => {},
     reviewSubmission: async (_: unknown, id: string) => {
       reviews.push(id);
@@ -62,10 +63,10 @@ function fixture(mode = "human") {
       return { ok: true, data: task };
     },
     launchTask: async (_: string, id: string, ...args: any[]) => {
-      assert.equal(args.at(-1), Boolean(board.settings.autoMode));
+      assert.equal(args[7], Boolean(board.settings.autoMode));
       if (launchError) { const error = launchError; launchError = undefined; return fail(error); }
       const task = board.tasks.find((task: any) => task.id === id);
-      const release = slots.acquire("project", task.mergeRepair ? "reviewer" : "executor", board.settings.agentLimits);
+      const release = slots.acquire("project", task.mergeRepair ? "reviewer" : "executor", board.settings.taskLimits);
       assert.ok(release, "dispatch exceeded its role limit");
       busy.set(id, release); launches.push(id);
       task.status = "in_progress";
@@ -87,7 +88,7 @@ function fixture(mode = "human") {
     const task = board.tasks.find((task: any) => task.id === id);
     task.status = "review"; task.revision++; task.reviewApproved = mode === "reviewer";
   };
-  return { board, watch, slots, launches, accepted, reviews, notices, calls, errors, tick, add, finish,
+  return { board, watch, slots, launches, accepted, reviews, notices, calls, errors, tick, add, finish, managers,
     afterLaunch: (callback: () => void) => { afterLaunch = callback; }, beforeAccept: (callback: () => void) => { beforeAccept = callback; },
     failLaunch: (code: string) => { launchError = code; } };
 }
@@ -109,12 +110,48 @@ test("automatic cycles share slots across windows and release dependencies only 
 
 test("off and lowered limits apply before the next decision without interrupting an active executor", async () => {
   for (const disable of [false, true]) {
-    const f = fixture(); f.board.settings.agentLimits.executor = 2;
+    const f = fixture(); f.board.settings.taskLimits.executor = 2;
     f.add("T-0001"); f.add("T-0002");
-    f.afterLaunch(() => { if (disable) f.board.settings.autoMode = false; else f.board.settings.agentLimits.executor = 1; });
+    f.afterLaunch(() => { if (disable) f.board.settings.autoMode = false; else f.board.settings.taskLimits.executor = 1; });
     await f.tick(); assert.deepEqual(f.launches, ["T-0001"]);
     assert.equal(f.board.tasks[0].status, "in_progress");
   }
+});
+
+test("automatic planning requests missing plans once and dispatches already planned work within the limit", async () => {
+  const f = fixture("reviewer");
+  f.board.settings.requireExpertPlans = true;
+  f.add("T-0001", { priority: "high" });
+  f.add("T-0002", { expertWorkPlanned: true, expertReviewPlanned: true });
+  f.add("T-0003", { status: "draft" });
+  await f.tick();
+  assert.deepEqual(f.launches, ["T-0002"]);
+  assert.equal(f.notices.length, 1);
+  assert.match(f.notices[0][2], /T-0001/);
+  assert.doesNotMatch(f.notices[0][2], /T-0003/);
+  await f.tick();
+  assert.equal(f.notices.length, 1);
+  Object.assign(f.board.tasks[0], { expertWorkPlanned: true, expertReviewPlanned: true, revision: 2 });
+  await f.tick();
+  assert.deepEqual(f.launches, ["T-0002"]);
+  f.finish("T-0002");
+  await f.tick();
+  assert.deepEqual(f.launches, ["T-0002", "T-0001"]);
+});
+
+test("an explicitly requested child gets a plan even with automatic dispatch off", async () => {
+  const f = fixture();
+  Object.assign(f.board.settings, { requireExpertPlans: true, autoMode: false });
+  f.add("T-0001", { launchRequested: true });
+  f.add("T-0002");
+  await f.tick();
+  assert.deepEqual(f.launches, []);
+  assert.equal(f.notices.length, 1);
+  assert.match(f.notices[0][2], /T-0001/);
+  assert.doesNotMatch(f.notices[0][2], /T-0002/);
+  Object.assign(f.board.tasks[0], { expertWorkPlanned: true, revision: 2 });
+  await f.tick();
+  assert.deepEqual(f.launches, ["T-0001"]);
 });
 
 test("automatic dispatch resumes a paused merge repair when only reviewer capacity is available", async () => {
@@ -123,7 +160,7 @@ test("automatic dispatch resumes a paused merge repair when only reviewer capaci
   await f.tick();
   f.add("T-0002");
   f.add("T-0003", { mergeRepair: true });
-  const reviewer = f.slots.acquire("project", "reviewer", f.board.settings.agentLimits)!;
+  const reviewer = f.slots.acquire("project", "reviewer", f.board.settings.taskLimits)!;
   await f.tick();
   assert.deepEqual(f.launches, ["T-0001"]);
   reviewer();
@@ -141,6 +178,71 @@ test("launch errors notify the manager once and independent work keeps moving", 
   assert.match(f.notices[0][2], /CODEX_UNAVAILABLE/);
 });
 
+test("an active goal shares automatic dispatch, integration and exception delivery", async () => {
+  const f = fixture("reviewer");
+  const events: any[] = [];
+  f.managers.set("project", { goalRunning: true, automationEvent: (event: any) => events.push(event) });
+  f.add("T-0001"); f.add("T-0002", { dependencies: ["T-0001"] });
+  await f.tick();
+  assert.deepEqual(f.launches, ["T-0001"]);
+  f.finish("T-0001");
+  await f.tick();
+  assert.deepEqual(f.accepted, ["T-0001"]);
+  assert.deepEqual(f.launches, ["T-0001", "T-0002"]);
+  f.finish("T-0002");
+  f.add("T-0003", { status: "ready", launchRequested: true });
+  f.failLaunch("CODEX_UNAVAILABLE");
+  await f.tick();
+  assert.equal(events.length, 1);
+  assert.match(events[0].error, /CODEX_UNAVAILABLE/);
+  assert.equal(f.notices.length, 0, "the goal handles exceptions in its existing context");
+});
+
+test("manager queue edits take effect between automatic launches and preserve role limits", async () => {
+  const f = fixture();
+  f.board.settings.taskLimits.executor = 2;
+  f.board.settings.autoQueue = { revision: 1, paused: false, order: ["T-0003", "T-0002"], held: ["T-0002"] };
+  f.add("T-0001"); f.add("T-0002"); f.add("T-0003");
+  f.afterLaunch(() => { f.board.settings.autoQueue = { revision: 2, paused: true, order: [], held: ["T-0002"] }; });
+  await f.tick();
+  assert.deepEqual(f.launches, ["T-0003"]);
+  assert.equal(f.board.tasks[2].status, "in_progress");
+  f.afterLaunch(() => {});
+  f.board.settings.autoQueue.paused = false;
+  await f.tick();
+  assert.deepEqual(f.launches, ["T-0003", "T-0001"]);
+  f.finish("T-0003");
+  f.board.settings.autoQueue.held = [];
+  await f.tick();
+  assert.deepEqual(f.launches, ["T-0003", "T-0001", "T-0002"]);
+});
+
+test("a stale dispatch revision retries the changed queue without blocking a task", async () => {
+  const f = fixture();
+  f.add("T-0001"); f.add("T-0002");
+  f.failLaunch("AUTO_QUEUE_CHANGED");
+  await f.tick();
+  assert.deepEqual(f.launches, []);
+  assert.equal(f.board.tasks[0].status, "ready");
+  assert.deepEqual(f.notices, []);
+  f.board.settings.autoQueue = { revision: 1, paused: false, order: ["T-0002"], held: [] };
+  await f.tick();
+  assert.deepEqual(f.launches, ["T-0002"]);
+});
+
+test("queue pause preserves reviewer-mode integration while preventing fresh dispatch", async () => {
+  const f = fixture("reviewer");
+  f.board.settings.autoQueue = { revision: 1, paused: true, order: [], held: [] };
+  f.add("T-0001", { status: "review", reviewApproved: true });
+  f.add("T-0002");
+  await f.tick();
+  assert.deepEqual(f.accepted, ["T-0001"]);
+  assert.deepEqual(f.launches, []);
+  f.board.settings.autoQueue.paused = false;
+  await f.tick();
+  assert.deepEqual(f.launches, ["T-0002"]);
+});
+
 test("a review-mode change during integration leaves the submission for the human", async () => {
   const f = fixture("reviewer"); f.add("T-0001", { status: "review", reviewApproved: true });
   f.beforeAccept(() => { f.board.settings.reviewMode = "human"; });
@@ -148,7 +250,7 @@ test("a review-mode change during integration leaves the submission for the huma
 });
 
 test("milestones are fetched once for the board and the queue is recalculated after each launch", async () => {
-  const f = fixture(); f.board.settings.agentLimits.executor = 2;
+  const f = fixture(); f.board.settings.taskLimits.executor = 2;
   const milestone = { repository: "owner/repo", number: 1, title: "Release" };
   f.add("T-0001", { milestone }); f.add("T-0002", { milestone }); f.add("T-0003", { milestone });
   f.afterLaunch(() => { f.board.tasks[2].dueDate = "2020-01-01"; });
@@ -179,7 +281,7 @@ test("manual boards never dispatch or review even with stale automatic settings"
 for (const mode of ["human", "reviewer"]) test("explicit child queue without auto mode: " + mode, async () => {
   const f = fixture(mode); f.board.settings.autoMode = false;
   f.add("T-0001"); // unrelated ready work must remain untouched
-  const parent = f.slots.acquire("project", "executor", f.board.settings.agentLimits)!;
+  const parent = f.slots.acquire("project", "executor", f.board.settings.taskLimits)!;
   f.add("T-0002", { launchRequested: true, origin: { parent: "T-0099", key: "local:disk:event1", basis: "Local check" } });
   await f.tick(); assert.deepEqual(f.launches, []);
   parent(); await f.tick(); assert.deepEqual(f.launches, ["T-0002"]);

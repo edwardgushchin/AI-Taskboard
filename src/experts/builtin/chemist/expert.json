@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "id": "chemist",
+  "name": "Химик исследователь",
+  "group": "Наука и исследования",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Химик исследователь",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "k-dense-ai--claude-scientific-skills--skills--rdkit",
+      "name": "rdkit",
+      "library": "k-dense-ai--claude-scientific-skills--skills--rdkit"
+    },
+    {
+      "id": "k-dense-ai--claude-scientific-skills--skills--deepchem",
+      "name": "deepchem",
+      "library": "k-dense-ai--claude-scientific-skills--skills--deepchem"
+    }
+  ],
+  "requirements": [
+    "Python и научные зависимости"
+  ],
+  "limitations": ""
+}

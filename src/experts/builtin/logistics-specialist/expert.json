@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "id": "logistics-specialist",
+  "name": "Специалист по логистике",
+  "group": "Бизнес процессы и операции",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Специалист по логистике",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--operations--skills--process-doc",
+      "name": "process-doc",
+      "library": "anthropics--knowledge-work-plugins--operations--skills--process-doc"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--operations--skills--risk-assessment",
+      "name": "risk-assessment",
+      "library": "anthropics--knowledge-work-plugins--operations--skills--risk-assessment"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--operations--skills--capacity-plan",
+      "name": "capacity-plan",
+      "library": "anthropics--knowledge-work-plugins--operations--skills--capacity-plan"
+    }
+  ],
+  "requirements": [],
+  "limitations": ""
+}

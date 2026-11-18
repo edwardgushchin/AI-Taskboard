@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "id": "digital-learning-producer",
+  "name": "Продюсер цифрового обучения",
+  "group": "Образование и обучение",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Продюсер цифрового обучения",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--skills--skills--pptx",
+      "name": "pptx",
+      "library": "anthropics--skills--skills--pptx"
+    }
+  ],
+  "requirements": [
+    "Python",
+    "Node.js по используемому workflow",
+    "Средство рендера"
+  ],
+  "limitations": ""
+}

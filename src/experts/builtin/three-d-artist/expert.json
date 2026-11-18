@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "id": "three-d-artist",
+  "name": "3D художник",
+  "group": "Визуальные и аудиовизуальные материалы",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "3D художник",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "openai--plugins--plugins--game-studio--skills--three-webgl-game",
+      "name": "three-webgl-game",
+      "library": "openai--plugins--plugins--game-studio--skills--three-webgl-game"
+    }
+  ],
+  "requirements": [
+    "Three.js runtime",
+    "Браузер"
+  ],
+  "limitations": "Не является заменой Blender моделированию или промышленному CAD"
+}

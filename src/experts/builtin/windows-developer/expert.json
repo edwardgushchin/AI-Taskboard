@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "id": "windows-developer",
+  "name": "Windows разработчик",
+  "group": "Платформенная разработка",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Windows разработчик",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "openai--skills--skills---curated--winui-app",
+      "name": "winui-app",
+      "library": "openai--skills--skills---curated--winui-app"
+    }
+  ],
+  "requirements": [
+    "Windows",
+    "Windows SDK",
+    ".NET при выбранном стеке"
+  ],
+  "limitations": "Источник устарел; проверить поддерживаемую замену. Скилл WinUI не покрывает WPF Qt и Electron"
+}

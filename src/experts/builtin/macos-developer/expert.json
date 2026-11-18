@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "id": "macos-developer",
+  "name": "macOS разработчик",
+  "group": "Платформенная разработка",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "macOS разработчик",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "openai--plugins--plugins--build-macos-apps--skills--build-run-debug",
+      "name": "build-run-debug",
+      "library": "openai--plugins--plugins--build-macos-apps--skills--build-run-debug"
+    },
+    {
+      "id": "openai--plugins--plugins--build-macos-apps--skills--appkit-interop",
+      "name": "appkit-interop",
+      "library": "openai--plugins--plugins--build-macos-apps--skills--appkit-interop"
+    },
+    {
+      "id": "openai--plugins--plugins--build-macos-apps--skills--packaging-notarization",
+      "name": "packaging-notarization",
+      "library": "openai--plugins--plugins--build-macos-apps--skills--packaging-notarization"
+    }
+  ],
+  "requirements": [
+    "macOS",
+    "Xcode",
+    "Учётная запись для подписания при выпуске"
+  ],
+  "limitations": ""
+}

@@ -65,7 +65,7 @@ app.whenReady().then(async () => {
       subscribe(callback) { window.pushBoard = next => { callback(next); }; }, onChatUpdate(callback) { window.pushChat = callback; }, onTheme() {},
       boardHistory: async (_project, _cursor, view) => ({ ok: true, data: view === 'live'
         ? { work: [], chat: [] } : { turns: [], model: "gpt-board-test" } }),
-      agentLimits: async () => ({ ok: true, data: { executor: 3, manager: 1, reviewer: 1 } }),
+      taskLimits: async () => ({ ok: true, data: { executor: 3, manager: 1, reviewer: 1 } }),
       boardQueue: async (project, action, id, draft, goal, files) => {
         const jobs = savedQueue.get(project) ?? new Map();
         savedQueue.set(project, jobs);

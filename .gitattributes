@@ -1,2 +1,5 @@
 *.sh text eol=lf
 tests/fixtures/T-0084/*.json -text
+
+# Preserve the bytes and checksums of pinned upstream assets on every platform.
+src/experts/library/** -text

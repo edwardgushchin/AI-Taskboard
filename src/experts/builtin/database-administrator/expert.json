@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "id": "database-administrator",
+  "name": "Администратор баз данных",
+  "group": "Инфраструктура и эксплуатация",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Администратор баз данных",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "supabase--agent-skills--skills--supabase-postgres-best-practices",
+      "name": "supabase-postgres-best-practices",
+      "library": "supabase--agent-skills--skills--supabase-postgres-best-practices"
+    }
+  ],
+  "requirements": [
+    "PostgreSQL для выполнения"
+  ],
+  "limitations": "Не переносить PostgreSQL рекомендации автоматически на другие СУБД"
+}

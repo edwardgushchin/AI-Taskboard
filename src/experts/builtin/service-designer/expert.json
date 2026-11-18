@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "id": "service-designer",
+  "name": "Сервис дизайнер",
+  "group": "Исследования пользователей и дизайн",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Сервис дизайнер",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--operations--skills--process-doc",
+      "name": "process-doc",
+      "library": "anthropics--knowledge-work-plugins--operations--skills--process-doc"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--operations--skills--process-optimization",
+      "name": "process-optimization",
+      "library": "anthropics--knowledge-work-plugins--operations--skills--process-optimization"
+    }
+  ],
+  "requirements": [],
+  "limitations": "Нужен локальный скилл трассировки требований и правил конкретного бизнеса"
+}

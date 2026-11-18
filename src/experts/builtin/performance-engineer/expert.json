@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "id": "performance-engineer",
+  "name": "Инженер производительности",
+  "group": "Инфраструктура и эксплуатация",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Инженер производительности",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "obra--superpowers--skills--systematic-debugging",
+      "name": "systematic-debugging",
+      "library": "obra--superpowers--skills--systematic-debugging"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--engineering--skills--debug",
+      "name": "debug",
+      "library": "anthropics--knowledge-work-plugins--engineering--skills--debug"
+    }
+  ],
+  "requirements": [
+    "Профилировщик выбранного стека"
+  ],
+  "limitations": "Методология общего назначения; нужна методика измерений конкретной платформы"
+}

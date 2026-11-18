@@ -1,4 +1,5 @@
-import { captureFileLink, isFileLink, verifyFileLink } from "./attachment-links.ts";
+import { beginBoardOperation } from "../desktop/board-worklog.ts";
+import { captureFileLink, isFileLink, snapshotFileLink, verifyFileLink } from "./attachment-links.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { readdirSync, realpathSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
@@ -9,7 +10,7 @@ import type { ArchiveLink, Attachment, BoardTag, Task } from "./model.ts";
 import { directory, exists, readBinary, removeFile, validateCard, writeAtomic } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
 import { managerInbox } from "./task-messages.ts";
-import { actorFor, withoutVerification } from "./tasks.ts";
+import { actorFor, parseRunEntries, withoutVerification } from "./tasks.ts";
 
 const maxCard = 16 * 1024 * 1024;
 const day = 24 * 60 * 60 * 1000;
@@ -112,6 +113,22 @@ export function readTask(store: BoardStore, id: string): Task {
     revision: task.revision + edit.history.length, updatedAt: edit.history.at(-1)!.at } : task;
 }
 
+export function reactivateArchivedTask(store: BoardStore, draft: Task): Task {
+  const link = store.index.archive[draft.id];
+  const archive = openArchive(store, draft.id, link);
+  const bytes = archivedBytes(archive, draft.attachments);
+  for (const file of draft.attachments.filter(file => !file.link)) {
+    const path = join(attachmentFolder(store, draft, true), file.file);
+    if (exists(path)) verifyBytes(file, readBinary(path));
+    else writeAtomic(path, bytes["attachments/" + file.file]);
+  }
+  store.save(draft);
+  delete store.index.archive[draft.id];
+  store.index.tasks[draft.id] = "tasks/" + draft.id + ".json";
+  store.saveIndex();
+  return draft;
+}
+
 export function setAttachmentCover(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
   requireRevision(task, input.revision);
   const file = text(input.file, "file", true);
@@ -205,12 +222,17 @@ function withNewAttachments(
 }
 
 export function addChatMessage(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
-  requireRevision(task, input.revision);
+  const draftDiscussion = input.draftDiscussion === true;
+  requireRevision(task, input.revision, draftDiscussion);
   const actor = actorFor(input, "user");
   const message = text(input.text, "text");
   const model = text(input.model, "model", true);
   const effort = text(input.effort, "effort", true);
-  if (actor === "agent") {
+  if (draftDiscussion) {
+    if (actor !== "agent" || task.status !== "draft" || task.draftDiscussion?.phase !== "running") {
+      throw new TaskboardError("CHAT_CHANGED", "The draft discussion is no longer awaiting a reply.");
+    }
+  } else if (actor === "agent") {
     const last = task.history.findLastIndex(event => event.chat);
     if (last !== number(input.replyTo, "replyTo", 0) || task.history[last]?.actor !== "user") {
       throw new TaskboardError("CHAT_CHANGED", "The last chat message changed before the reply was saved.");
@@ -219,6 +241,7 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
   const usage = actor === "agent" && input.usage !== undefined ? object(input.usage) : undefined;
   const commentary = actor === "agent" && input.commentary !== undefined ? strings(input.commentary, "commentary") : [];
   const durationMs = actor === "agent" && input.durationMs !== undefined ? number(input.durationMs, "durationMs", 0) : undefined;
+  const run = actor === "agent" && input.run !== undefined ? parseRunEntries(input.run) : undefined;
   const chat = {
     model, effort,
     ...(commentary.length ? { commentary } : {}),
@@ -229,12 +252,14 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
     if (!message && !attachments.length) throw new TaskboardError("INVALID_INPUT", "Write a message or attach a file.");
     const updated = record({
       ...task, attachments: [...task.attachments, ...attachments],
+      draftDiscussion: draftDiscussion || actor === "user" ? undefined : task.draftDiscussion,
     }, "chat", actor, task.status, message);
     updated.history.at(-1)!.chat = {
       ...chat,
       ...(actor === "user" || attachments.length ? { files: attachments.map(attachment => attachment.file) } : {}),
     };
     if (durationMs !== undefined) updated.history.at(-1)!.durationMs = durationMs;
+    if (run) updated.history.at(-1)!.run = run;
     return store.save(updated);
   });
 }
@@ -280,6 +305,11 @@ export function readAttachment(store: BoardStore, id: string, input: Record<stri
   const attachment = task.attachments.find(entry => entry.file === file);
   if (!attachment) throw new TaskboardError("ATTACHMENT_NOT_FOUND", "The task does not have that attachment.");
   if (attachment.link) {
+    if (input.snapshot === true) {
+      const path = resolve(text(input.destination, "destination", true));
+      snapshotFileLink(attachment.link, path);
+      return { ...attachment, path };
+    }
     const path = verifyFileLink(attachment.link);
     if (input.destination !== undefined) throw new TaskboardError("ATTACHMENT_LINK", "Open the linked source instead of copying it: " + path);
     return { ...attachment, path };
@@ -334,35 +364,39 @@ function archiveTask(store: BoardStore, task: Task, now: Date, closure: string):
   if (exists(store.pendingPath(task.id))) {
     throw new TaskboardError("PENDING_OPERATION", "Finish the pending task operation before archiving.");
   }
-  const card = readBinary(store.cardPath(task.id));
-  if (card.length > maxCard) throw new TaskboardError("ARCHIVE_LIMIT", "The task card exceeds 16 MiB.");
-  checkOriginals(store, task, card);
-  const link: ArchiveLink = {
-    path: "archive/" + task.id + (task.attachments.length ? ".zip" : ".json.gz"),
-    title: task.title, status: task.status, closedAt: closure, archivedAt: now.toISOString(),
-    updatedAt: task.updatedAt,
-    tags: task.tags,
-    milestone: task.milestone,
-  };
-  let compressed: Uint8Array;
-  if (task.attachments.length) {
-    const files: Record<string, Uint8Array> = { "task.json": card };
-    for (const attachment of task.attachments.filter(file => !file.link)) {
-      files["attachments/" + attachment.file] = activeBytes(store, task, attachment);
+  const finish = beginBoardOperation(store.location.root, "archive card", task.id);
+  try {
+    const card = readBinary(store.cardPath(task.id));
+    if (card.length > maxCard) throw new TaskboardError("ARCHIVE_LIMIT", "The task card exceeds 16 MiB.");
+    checkOriginals(store, task, card);
+    const link: ArchiveLink = {
+      path: "archive/" + task.id + (task.attachments.length ? ".zip" : ".json.gz"),
+      title: task.title, status: task.status, closedAt: closure, archivedAt: now.toISOString(),
+      updatedAt: task.updatedAt,
+      tags: task.tags,
+      milestone: task.milestone,
+    };
+    let compressed: Uint8Array;
+    if (task.attachments.length) {
+      const files: Record<string, Uint8Array> = { "task.json": card };
+      for (const attachment of task.attachments.filter(file => !file.link)) {
+        files["attachments/" + attachment.file] = activeBytes(store, task, attachment);
+      }
+      compressed = zipSync(files, { level: 6 });
+    } else {
+      compressed = gzipSync(card, { level: 6 });
     }
-    compressed = zipSync(files, { level: 6 });
-  } else {
-    compressed = gzipSync(card, { level: 6 });
-  }
-  writeAtomic(archivePath(store, link), compressed);
-  const archive = openArchive(store, task.id, link);
-  if (!archive.card.equals(card)) throw new TaskboardError("ARCHIVE_CORRUPT", "The archived JSON differs from the original.");
-  archivedBytes(archive, archive.task.attachments);
+    writeAtomic(archivePath(store, link), compressed);
+    const archive = openArchive(store, task.id, link);
+    if (!archive.card.equals(card)) throw new TaskboardError("ARCHIVE_CORRUPT", "The archived JSON differs from the original.");
+    archivedBytes(archive, archive.task.attachments);
 
-  delete store.index.tasks[task.id];
-  store.index.archive[task.id] = link;
-  store.saveIndex();
-  removeOriginals(store, archive);
+    delete store.index.tasks[task.id];
+    store.index.archive[task.id] = link;
+    store.saveIndex();
+    removeOriginals(store, archive);
+    finish("archived; original card removed after verification");
+  } catch (error) { finish("failed; inspect archive recovery state"); throw error; }
 }
 
 export function archiveDiagnostics(store: BoardStore, repair: boolean, inspectAll = true) {
@@ -395,7 +429,7 @@ export function sweepArchives(store: BoardStore, now = new Date()) {
     try {
       let task = store.card(id);
       if (task.status !== "done" && task.status !== "cancelled") continue;
-      const compact = withoutVerification(task);
+      const compact = task.status === "done" ? withoutVerification(task) : task;
       if (compact !== task && !exists(store.pendingPath(id))) task = store.save(compact);
       const closure = closedAt(task);
       if (!closure || !(now.getTime() - Date.parse(closure) >= afterDays * day)) continue;

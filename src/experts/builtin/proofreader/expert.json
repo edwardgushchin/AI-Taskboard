@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "id": "proofreader",
+  "name": "Корректор",
+  "group": "Тексты и знания",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Корректор",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "coreyhaines31--marketingskills--skills--copy-editing",
+      "name": "copy-editing",
+      "library": "coreyhaines31--marketingskills--skills--copy-editing"
+    }
+  ],
+  "requirements": [],
+  "limitations": "Для художественного научного и русского стилистического редактирования нужен соответствующий модуль"
+}

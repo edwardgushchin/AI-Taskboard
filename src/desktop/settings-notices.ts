@@ -1,11 +1,12 @@
 import { join } from "node:path";
 import type { AgentLimits } from "../cli/model.ts";
-import { locateBoard, onBoard, readJson, exists, writeJson } from "../cli/storage.ts";
+import { onBoard, readJson, exists, writeJson } from "../cli/storage.ts";
+import { runtimeLocation } from "./board-runtime.ts";
 import { recordSettings, settingsContext } from "../cli/settings-notices.ts";
 import type { SettingsJournal } from "../cli/settings-notices.ts";
 
 export function syncSettingsNotices(project: string, defaults: AgentLimits): SettingsJournal {
-  return onBoard(locateBoard(project), store => {
+  return onBoard(runtimeLocation(project), store => {
     const previous = store.index.managerSettings;
     const journal = recordSettings(store.index.settings, previous, defaults);
     if (JSON.stringify(previous) !== JSON.stringify(journal)) {
@@ -13,7 +14,7 @@ export function syncSettingsNotices(project: string, defaults: AgentLimits): Set
       store.saveIndex();
     }
     return journal;
-  });
+  }, 0);
 }
 
 // Each lane has its own durable receipt. Windows share the same running request.

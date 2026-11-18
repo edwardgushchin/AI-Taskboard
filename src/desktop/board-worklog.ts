@@ -1,11 +1,14 @@
-import { createHash } from "node:crypto";
-import { globSync, readdirSync, statSync } from "node:fs";
-import { isAbsolute, join, relative, resolve, win32 } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { readdirSync, statSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve, win32 } from "node:path";
 import { redactSecrets } from "../cli/redact.ts";
-import { directory, exists, readBinary, readJson, removeFile, withLock, writeAtomic, writeJson } from "../cli/storage.ts";
+import { directory, exists, readJson, removeFile, withLock, writeJson } from "../cli/storage.ts";
+import { appendWorklogBlocks, maxWorklogPartBytes, readWorklogPart, worklogParts } from "../cli/worklog-files.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
 import type { CliReply } from "./cli.ts";
 import type { RpcMessage } from "./codex-rpc.ts";
+import { backgroundWorklog } from "./worklog-background.ts";
+import { runtimeLocation } from "./board-runtime.ts";
 
 type Role = "manager" | "executor" | "reviewer";
 const labels = {
@@ -25,7 +28,6 @@ const stampPattern = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2} [+-]\d{2}:\d{2}$/;
 const linkPattern = /(?<!!)\[([^\]\n]*)\]\((<[^>\n]+>|[^)\n]+)\)/g;
 const privatePath = /(?:^|[\\/])(?:\.env(?:\.[^\\/]+)?|\.ssh|\.gnupg|private|credentials?)(?:[\\/]|$)/i;
 const maxDocumentBytes = 64 * 1024;
-const maxDayBytes = 32 * 1024 * 1024;
 const tool = "mcp__ai_taskboard__worklog_record";
 export const worklogReminder = "Worklog for this turn: before the final reply, call " + tool +
   " with {language, entries} for substantive work or {skip:\"no_material_work\"} for a trivial turn. " +
@@ -33,7 +35,7 @@ export const worklogReminder = "Worklog for this turn: before the final reply, c
   "Record concrete outcomes and evidence so someone can continue without opening the chat.";
 export const worklogInstructions = [
   worklogReminder,
-  "External journal hook instructions and shell submission commands in chat history belonged to those earlier turns. Use the built-in tool for this turn.",
+  "Use only the built-in worklog_record tool and canonical project .tasks/worklog. Do not run external journal hooks or create .dev-diary in the project or a worktree. The journal survives cancellation, deletion and cleanup; include failures and rollbacks even without a successful submission.",
   "Group investigation, unsuccessful attempts, final changes and checks for the same objective in one block. Use the language of the discussion.",
   "Context gives the problem, starting state and constraints. Timeline records significant phases, including failed attempts and their causes. Use observed HH:MM, ISO dates with timezone across midnight, or null if the time was not observed.",
   "Changes names the files, cards or components and the result. Separate the final state from reverted experiments and unresolved defects. Decisions records why a choice was made and what evidence supported it.",
@@ -191,12 +193,7 @@ function entryId({ threadId, turnId }: Binding, index = 0) {
 }
 
 const marker = (id: string) => "<!-- codex-worklog-entry:" + id + " -->";
-class InvalidWorklogSubmission extends Error {}
-
-function readDiary(path: string, maxBytes = maxDayBytes) {
-  if (statSync(path).size > maxBytes) throw new Error("Daily Worklog exceeds its size limit.");
-  return readBinary(path).toString("utf8");
-}
+export class InvalidWorklogSubmission extends Error {}
 
 function renderBlock(staged: Staged, entry: Entry, id: string) {
   const { stamp, threadId, turnId, role, taskId, submission } = staged;
@@ -229,53 +226,50 @@ function renderBlock(staged: Staged, entry: Entry, id: string) {
 
 function save(project: string, staged: Staged) {
   const day = staged.stamp.slice(0, 10);
-  const year = day.slice(0, 4);
-  const month = day.slice(5, 7);
   const board = join(project, ".tasks");
   const root = join(board, "worklog");
   directory(board);
   directory(root, true);
   const entry_ids = staged.submission.entries.map((_entry, index) => entryId(staged, index));
-  const path = join(root, year, month, day + ".md");
-  withLock(root, () => {
-    directory(join(root, year), true);
-    directory(join(root, year, month), true);
-    const header = "# Codex Worklog — " + day + "\n";
-    const prior = exists(path) ? readDiary(path) : header;
-    if (!prior.startsWith(header) || !prior.endsWith("\n")) throw new Error("Invalid daily Worklog file.");
-    const content = staged.submission.entries.map((entry, index) => renderBlock(staged, entry, entry_ids[index]!)).join("");
-    if (entry_ids.some(id => prior.includes(marker(id)))) {
-      if (!prior.includes(content)) throw new InvalidWorklogSubmission("This turn already has a different Worklog submission.");
-      return;
-    }
+  const path = withLock(root, () => {
+    const blocks = staged.submission.entries.map((entry, index) => renderBlock(staged, entry, entry_ids[index]!));
+    const fact = staged.turnId.includes("_fact_");
     const missing = new Set(staged.submission.entries.flatMap(entry => entry.supersedes));
+    const read = (file: string, limit?: number) => {
+      directory(dirname(dirname(file)));
+      directory(dirname(file));
+      return readWorklogPart(file, limit);
+    };
+    // Identity, not delivery date, owns the record. Compare the whole block other than its timestamp.
+    const parts = worklogParts(root);
+    for (const part of parts) {
+      const prior = read(part.path);
+      if (!entry_ids.some(id => prior.includes(marker(id)))) continue;
+      if (!blocks.every(block => prior.includes(block.slice(block.indexOf(" — "))))) throw new InvalidWorklogSubmission(
+        fact ? "Conflicting Worklog event identity." : "This turn already has a different Worklog submission.");
+      return part.path;
+    }
     if (missing.size) {
       if (entry_ids.some(id => missing.has(id))) throw new InvalidWorklogSubmission("Worklog entries cannot supersede their own submission.");
       let days = 0;
-      let remaining = 4 * maxDayBytes;
-      for (const file of globSync("[0-9][0-9][0-9][0-9]/[0-9][0-9]/????-??-??.md", { cwd: root })) {
+      let remaining = 4 * maxWorklogPartBytes;
+      for (const part of parts) {
         if (++days > 4096 || remaining <= 0) throw new InvalidWorklogSubmission("Worklog corrections exceed the history lookup limit.");
-        const parts = file.split(/[/\\]/);
-        directory(join(root, parts[0]!));
-        directory(join(root, parts[0]!, parts[1]!));
-        const previous = readDiary(join(root, file), Math.min(maxDayBytes, remaining));
+        const previous = read(part.path, Math.min(maxWorklogPartBytes, remaining));
         remaining -= Buffer.byteLength(previous);
         for (const id of missing) if (previous.includes(marker(id))) missing.delete(id);
         if (!missing.size) break;
       }
       if (missing.size) throw new InvalidWorklogSubmission("The entry to supersede is missing in this board's Worklog.");
     }
-    if (Buffer.byteLength(prior) + Buffer.byteLength(content) > maxDayBytes) throw new Error("Daily Worklog exceeds 32 MiB.");
-    writeAtomic(path, prior + content);
+    return appendWorklogBlocks(root, day, [blocks.join("")]).path;
   });
   return { recorded: true, staged: false, entry_ids, path };
 }
 
-export function boardWorklog(project: string, role: Role, taskId?: string) {
+export function worklogStorage(project: string) {
   const pendingRoot = join(project, ".tasks", "pending");
   const pendingPath = (binding: Binding) => join(pendingRoot, "worklog-" + entryId(binding) + ".json");
-  let turn: (Binding & { reminded?: boolean; skipped?: boolean; editedFiles?: boolean; submission?: Staged; saved?: boolean }) | undefined;
-  let finishedTurnId: string | undefined;
   const recover = (path: string): Staged => {
     const staged = object(readJson(path), ["threadId", "turnId", "stamp", "role", "taskId", "submission"]);
     const { threadId, turnId, stamp, role, taskId } = staged;
@@ -295,7 +289,7 @@ export function boardWorklog(project: string, role: Role, taskId?: string) {
       removeFile(path);
       return saved;
     } catch (error) {
-      if (error instanceof InvalidWorklogSubmission) removeFile(path);
+      // Keep conflicting deliveries for diagnosis; never discard historical evidence.
       throw error;
     }
   };
@@ -320,8 +314,12 @@ export function boardWorklog(project: string, role: Role, taskId?: string) {
     if (!exists(pendingRoot)) return;
     try {
       directory(pendingRoot);
-      for (const name of readdirSync(pendingRoot).filter(name => /^worklog-[0-9a-f]{24}\.json$/.test(name))) {
-        const path = join(pendingRoot, name);
+      const files = readdirSync(pendingRoot).filter(name => /^worklog-[0-9a-f]{24}\.json$/.test(name))
+        .map(name => {
+          const path = join(pendingRoot, name);
+          return { path, time: statSync(path, { throwIfNoEntry: false })?.mtimeMs ?? 0 };
+        }).sort((a, b) => a.time - b.time || a.path.localeCompare(b.path));
+      for (const { path } of files) {
         try {
           withLock(pendingRoot, () => {
             if (exists(path)) commit(path, recover(path));
@@ -334,16 +332,40 @@ export function boardWorklog(project: string, role: Role, taskId?: string) {
       console.warn("Could not read staged AI Taskboard Worklog:", (error as Error).message);
     }
   };
-  function finish() {
+  return { pendingPath, persist, retry };
+}
+
+export type WorklogWrite = { project: string; staged?: Staged };
+export type WorklogSaved = ReturnType<ReturnType<typeof worklogStorage>["persist"]>;
+
+export function boardWorklog(project: string, role: Role, taskId?: string,
+  background = process.type === "browser" && !process.env.ELECTRON_RUN_AS_NODE) {
+  project = runtimeLocation(project).root;
+  const storage = worklogStorage(project);
+  let turn: (Binding & { reminded?: boolean; skipped?: boolean; editedFiles?: boolean; submission?: Staged; saved?: boolean; facts?: boolean }) | undefined;
+  let finishedTurnId: string | undefined;
+  let lastWrite: Promise<unknown> | undefined;
+  const writeLater = (staged?: Staged) => {
+    const write = backgroundWorklog({ project, staged });
+    lastWrite = write.catch(error => console.warn("Could not write AI Taskboard Worklog:", (error as Error).message));
+    return write;
+  };
+  const queue = (staged?: Staged) => {
+    if (background) void writeLater(staged);
+    else if (staged) storage.persist(staged);
+    else storage.retry();
+  };
+  function finish(outcome = "interrupted or disconnected; final outcome unknown") {
+    if (turn?.facts) fact("turn-finished", "turn: " + outcome);
     const current = turn;
     if (current) finishedTurnId = current.turnId;
     turn = undefined;
-    if (current?.submission && !current.saved && !exists(pendingPath(current))) {
-      try { persist(current.submission); }
+    if (current?.submission && !current.saved && !exists(storage.pendingPath(current))) {
+      try { queue(current.submission); }
       catch (error) { console.warn("Could not stage AI Taskboard Worklog:", (error as Error).message); }
       return;
     }
-    retry();
+    queue();
   }
   const start = (threadId: string, turnId: string) => {
     if (!identityPattern.test(threadId) || !identityPattern.test(turnId) || turn?.turnId === turnId || finishedTurnId === turnId) return;
@@ -367,25 +389,46 @@ export function boardWorklog(project: string, role: Role, taskId?: string) {
     } catch (error) {
       return { ok: false, error: { code: "INVALID_WORKLOG", message: (error as Error).message } };
     }
-    turn.submission ??= { threadId: turn.threadId, turnId: turn.turnId, role, taskId, stamp: timestamp(), submission };
+    const current = turn;
+    current.submission ??= { threadId: current.threadId, turnId: current.turnId, role, taskId, stamp: timestamp(), submission };
     try {
-      const saved = persist(turn.submission);
-      turn.saved = true;
+      const saved = background ? await writeLater(current.submission) : storage.persist(current.submission);
+      if (!saved) throw new Error("Worklog writer returned no receipt.");
+      current.saved = true;
       return { ok: true, data: saved };
     } catch (error) {
       if (error instanceof InvalidWorklogSubmission) {
-        turn.submission = undefined;
+        current.submission = undefined;
         return { ok: false, error: { code: "INVALID_WORKLOG", message: error.message } };
       }
       return { ok: false, error: { code: "WORKLOG_WRITE_FAILED", message: (error as Error).message } };
     }
   }
+  function fact(id: string, detail: string) {
+    if (!turn) return;
+    turn.facts = true;
+    queue({ threadId: turn.threadId, turnId: turn.turnId + "_fact_" + createHash("sha256").update(id).digest("hex"),
+      stamp: timestamp(), role, taskId, submission: { language: "ru", entries: [{
+        title: "Событие выполнения операции", context: ["Наблюдаемый факт выполнения; итог работы требует авторского отчёта."],
+        timeline: [{ time: null, items: [detail] }], changes: ["Сохранён факт операции без команды, вывода и содержимого файлов."],
+        decisions: ["Событие записано сразу, независимо от сдачи и существования карточки."],
+        checks: ["Статус сообщён источником события; независимая проверка не выполнялась."],
+        next_steps: ["Сопоставить с авторским отчётом. Отсутствие отчёта не означает успех работы."], artifacts: [], supersedes: [],
+      }] } });
+  }
   function observe(message: RpcMessage, threadId: string) {
-    const params = message.params as { threadId?: string; turnId?: string; turn?: { id: string };
-      item?: { type?: string; status?: string } } | undefined;
+    const params = message.params as { threadId?: string; turnId?: string; turn?: { id: string; status?: string };
+      item?: { id?: string; type?: string; status?: string; exitCode?: number | null } } | undefined;
     if (params?.threadId !== threadId) return;
     if (message.method === "turn/started" && params.turn) start(threadId, params.turn.id);
-    if (message.method === "turn/completed" && params.turn?.id === turn?.turnId) finish();
+    if (message.method === "turn/completed" && params.turn?.id === turn?.turnId) finish(["completed", "failed", "interrupted"].includes(params.turn?.status ?? "") ? params.turn!.status : "completed; status unknown");
+    if ((message.method === "item/started" || message.method === "item/completed") && turn && turn.turnId === params.turnId &&
+        params.item?.id && ["commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall"].includes(params.item.type ?? "")) {
+      const item = params.item;
+      const status = ["inProgress", "completed", "failed", "declined", "interrupted"].includes(item.status ?? "") ? item.status : "unknown";
+      const exitCode = Number.isSafeInteger(item.exitCode) ? item.exitCode : "unknown";
+      fact(message.method + ":" + item.id, `${item.type}: ${message.method === "item/started" ? "started" : "completed"}; status=${status}; exitCode=${exitCode}`);
+    }
     if (message.method === "item/completed" && turn && turn.turnId === params.turnId) {
       if (params.item?.type === "contextCompaction") turn.reminded = false;
       if (params.item?.type === "fileChange" && params.item.status === "completed") {
@@ -402,5 +445,13 @@ export function boardWorklog(project: string, role: Role, taskId?: string) {
     turn.reminded = true;
     return { ...reply, worklog: worklogReminder };
   }
-  return { start, observe, finish, submit, remind };
+  return { start, observe, finish, submit, remind, fact, drain: () => lastWrite };
+}
+
+// Service operations use the same writer and recovery queue, without reading a card.
+export function beginBoardOperation(project: string, operation: string, taskId?: string) {
+  const log = boardWorklog(project, "manager", taskId);
+  log.start("board-service", randomUUID());
+  log.fact("started", operation + ": started; outcome unknown");
+  return (outcome: string) => { log.fact("result", operation + ": " + outcome); log.finish(outcome); };
 }

@@ -49,7 +49,7 @@ app.whenReady().then(async () => {
     window.settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     byId('workspace').hidden = false; byId('welcome').hidden = true;
     byId('lanes').append(card(fixture)); void 0;`);
-  await check(`(() => { const p = document.querySelector('.task-description'); return p.textContent.startsWith('Проблема') && !/[#*\x60]/.test(p.textContent) && p.textContent.includes('Первый пункт') && p.textContent.includes('inline code') && !p.querySelector('*') && getComputedStyle(p).webkitLineClamp === '2' && p.clientHeight <= 37; })()`, "board Markdown and height");
+  await check(`(() => { const p = document.querySelector('.task-description'); return p.textContent.startsWith('Длинная карточка') && !/[#*\x60]/.test(p.textContent) && p.textContent.includes('Первый пункт') && p.textContent.includes('inline code') && !p.querySelector('*') && getComputedStyle(p).webkitLineClamp === '2' && p.clientHeight <= 37; })()`, "board Markdown and height without old template headings");
   await check(`cardDescription('<img src=x onerror=alert(1)> [link](javascript:alert(1)) ![alt](https://example.com/x.png)').childElementCount === 0`, "inert unsafe preview");
   for (const theme of ['light', 'dark']) {
     nativeTheme.themeSource = theme;
@@ -60,7 +60,9 @@ app.whenReady().then(async () => {
     for (const width of [1280, 600]) {
       window.setSize(width, 900);
       await evaluate(`document.querySelector('.task-card').click(); settle()`);
-      await check(`body.querySelector('.task-sheet-description .chat-text h3').textContent === 'Проблема' && !body.querySelector('details').open`, "preview uses Markdown and collapsed details");
+      await check(`body.querySelector('.task-sheet-description .chat-text p').textContent.startsWith('Длинная карточка') &&
+        ![...body.querySelectorAll('.task-sheet-description .chat-text h3')].some(heading => heading.textContent === 'Проблема') &&
+        !body.querySelector('details').open`, "preview keeps the brief and collapses technical details");
       await check(`(() => { const p = body.querySelector('.chat-text p'); const s = getComputedStyle(p); return s.fontSize === '15px' && s.lineHeight === '24px' && parseFloat(s.marginBottom) > 0; })()`, "description typography");
       await check(`(() => { const d = body.querySelector('details'); return d.textContent.includes('Вложенный раздел') && !d.textContent.includes('Видимый конец') && d.nextElementSibling.textContent === 'Следующий раздел'; })()`, "section boundaries");
       await evaluate(`body.querySelector('summary').focus(); void 0;`);

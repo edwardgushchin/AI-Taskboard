@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "id": "vendor-manager",
+  "name": "Менеджер поставщиков",
+  "group": "Бизнес процессы и операции",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Менеджер поставщиков",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--operations--skills--vendor-review",
+      "name": "vendor-review",
+      "library": "anthropics--knowledge-work-plugins--operations--skills--vendor-review"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--legal--skills--vendor-check",
+      "name": "vendor-check",
+      "library": "anthropics--knowledge-work-plugins--legal--skills--vendor-check"
+    },
+    {
+      "id": "alirezarezvani--claude-skills--business-operations--skills--procurement-optimizer",
+      "name": "procurement-optimizer",
+      "library": "alirezarezvani--claude-skills--business-operations--skills--procurement-optimizer"
+    }
+  ],
+  "requirements": [],
+  "limitations": ""
+}

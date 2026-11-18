@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "id": "localization-tester",
+  "name": "Тестировщик локализации",
+  "group": "Обеспечение качества",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Тестировщик локализации",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "alirezarezvani--claude-skills--engineering--skills--i18n-localization",
+      "name": "i18n-localization",
+      "library": "alirezarezvani--claude-skills--engineering--skills--i18n-localization"
+    }
+  ],
+  "requirements": [
+    "Глоссарий и целевая локаль"
+  ],
+  "limitations": "Готовый скилл покрывает программную локализацию; предметный художественный и юридический перевод требует языкового модуля"
+}

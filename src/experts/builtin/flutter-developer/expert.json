@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "id": "flutter-developer",
+  "name": "Разработчик Flutter",
+  "group": "Платформенная разработка",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Разработчик Flutter",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "jeffallan--claude-skills--skills--flutter-expert",
+      "name": "flutter-expert",
+      "library": "jeffallan--claude-skills--skills--flutter-expert"
+    }
+  ],
+  "requirements": [
+    "Flutter SDK",
+    "Dart",
+    "Целевой SDK"
+  ],
+  "limitations": "Проверить совместимость версий Flutter Dart и плагинов проекта"
+}

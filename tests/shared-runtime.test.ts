@@ -24,9 +24,14 @@ test("shared defaults, overrides and canonical aliases use one pool without inte
   a.configure({ executor: 1, manager: 1, reviewer: 1 });
   assert.equal(b.inherited(alias).executor, 1); assert.equal(b.available(alias, "executor"), 0);
   assert.equal(runtimeEntries(alias).filter(entry => entry.kind === "slot").length, 2);
+  const review = b.acquire(alias, "reviewer", { reviewer: 2 }, "review:T-0002")!;
+  assert.ok(review, "a review can run while the work limit is full");
+  assert.equal(a.acquire(project, "reviewer", undefined, "T-0002"), undefined);
+  assert.equal(a.acquire(project, "reviewer", undefined, "review:T-0003"), undefined);
+  review();
   first(); first(); assert.equal(b.available(alias, "executor"), 0);
   second(); assert.equal(b.available(alias, "executor"), 1);
-  onBoard(locateBoard(project), store => { store.index.settings.agentLimits = { executor: 0, manager: 2 }; store.saveIndex(); });
+  onBoard(locateBoard(project), store => { store.index.settings.taskLimits = { executor: 0, manager: 2 }; store.saveIndex(); });
   assert.equal(b.available(alias, "executor"), Infinity); assert.equal(b.available(alias, "manager"), Infinity);
   const discussion = a.claim(project, "T-0003")!; assert.ok(discussion);
   assert.equal(b.acquire(alias, "executor", undefined, "T-0003"), undefined);
@@ -43,7 +48,7 @@ test("runtime snapshots and reservations stay responsive during a board transact
   const slots = createAgentSlots(true);
   slots.remember(project);
   withLock(location.directory, () => {
-    assert.equal(slots.available(project, "executor"), 3);
+    assert.equal(slots.available(project, "executor"), 1);
     const release = slots.acquire(project, "executor", undefined, "T-0001")!;
     assert.ok(release);
     assert.equal(runtimeEntries(project).some(entry => entry.task === "T-0001"), true);

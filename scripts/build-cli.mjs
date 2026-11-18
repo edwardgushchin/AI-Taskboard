@@ -1,6 +1,6 @@
 import { build } from "esbuild";
 import { execFileSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -18,6 +18,7 @@ function run(command, args) {
 }
 
 mkdirSync(directory, { recursive: true });
+cpSync(join(root, "src", "experts"), join(directory, "experts"), { recursive: true });
 // Ship the terms alongside the standalone executable, including its Node runtime.
 for (const name of ["LICENSE", "NOTICE", "README.md"]) copyFileSync(join(root, name), join(directory, name));
 const nodeLicenseUrl = `https://raw.githubusercontent.com/nodejs/node/v${process.versions.node}/LICENSE`;

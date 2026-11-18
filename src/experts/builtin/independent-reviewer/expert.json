@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "id": "independent-reviewer",
+  "name": "Специалист по независимой проверке",
+  "group": "Обеспечение качества",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Специалист по независимой проверке",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--engineering--skills--code-review",
+      "name": "code-review",
+      "library": "anthropics--knowledge-work-plugins--engineering--skills--code-review"
+    },
+    {
+      "id": "trailofbits--skills--plugins--differential-review--skills--differential-review",
+      "name": "differential-review",
+      "library": "trailofbits--skills--plugins--differential-review--skills--differential-review"
+    }
+  ],
+  "requirements": [],
+  "limitations": "Для некодовых результатов заменить кодовые проверки предметной рубрикой"
+}

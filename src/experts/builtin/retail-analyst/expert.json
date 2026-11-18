@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "id": "retail-analyst",
+  "name": "Аналитик розничной торговли",
+  "group": "Отрасли и общественные проекты",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Аналитик розничной торговли",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--data--skills--sql-queries",
+      "name": "sql-queries",
+      "library": "anthropics--knowledge-work-plugins--data--skills--sql-queries"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--data--skills--data-visualization",
+      "name": "data-visualization",
+      "library": "anthropics--knowledge-work-plugins--data--skills--data-visualization"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--data--skills--validate-data",
+      "name": "validate-data",
+      "library": "anthropics--knowledge-work-plugins--data--skills--validate-data"
+    }
+  ],
+  "requirements": [
+    "SQL либо Python",
+    "Доступ к данным"
+  ],
+  "limitations": ""
+}

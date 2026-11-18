@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "id": "customer-success-manager",
+  "name": "Менеджер успеха клиента",
+  "group": "Продажи и обслуживание клиентов",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Менеджер успеха клиента",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--customer-support--skills--ticket-triage",
+      "name": "ticket-triage",
+      "library": "anthropics--knowledge-work-plugins--customer-support--skills--ticket-triage"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--customer-support--skills--draft-response",
+      "name": "draft-response",
+      "library": "anthropics--knowledge-work-plugins--customer-support--skills--draft-response"
+    },
+    {
+      "id": "anthropics--knowledge-work-plugins--customer-support--skills--customer-escalation",
+      "name": "customer-escalation",
+      "library": "anthropics--knowledge-work-plugins--customer-support--skills--customer-escalation"
+    },
+    {
+      "id": "alirezarezvani--claude-skills--business-growth--skills--customer-success-manager",
+      "name": "customer-success-manager",
+      "library": "alirezarezvani--claude-skills--business-growth--skills--customer-success-manager"
+    }
+  ],
+  "requirements": [],
+  "limitations": ""
+}

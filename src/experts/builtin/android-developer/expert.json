@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "id": "android-developer",
+  "name": "Android разработчик",
+  "group": "Платформенная разработка",
+  "enabled": true,
+  "revision": 1,
+  "skills": [
+    {
+      "id": "workflow",
+      "name": "Android разработчик",
+      "file": "skills/workflow/SKILL.md"
+    },
+    {
+      "id": "android--skills--jetpack-compose--adaptive",
+      "name": "adaptive",
+      "library": "android--skills--jetpack-compose--adaptive"
+    },
+    {
+      "id": "android--skills--jetpack-compose--jetpack-compose-performance",
+      "name": "jetpack-compose-performance",
+      "library": "android--skills--jetpack-compose--jetpack-compose-performance"
+    },
+    {
+      "id": "android--skills--testing--testing-setup",
+      "name": "testing-setup",
+      "library": "android--skills--testing--testing-setup"
+    }
+  ],
+  "requirements": [
+    "JDK",
+    "Android SDK",
+    "Gradle",
+    "Эмулятор либо устройство"
+  ],
+  "limitations": ""
+}
