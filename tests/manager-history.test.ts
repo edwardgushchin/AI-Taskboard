@@ -114,6 +114,24 @@ for (const pausedGoal of [false, true]) test(`dialogue reload preserves saved re
   assert.equal(ids.length, 47 + Number(pausedGoal));
 });
 
+test("the newest question with a 4 MiB image stays on the first page after status notices", async t => {
+  const project = fixture(t);
+  const start = Date.now();
+  const image = { name: "image.png", url: "data:image/png;base64," + Buffer.alloc(4 * 1024 * 1024).toString("base64") };
+  const item = (id: string) => ({ id, type: "agentMessage", title: "", status: "completed", phase: "final_answer" as const, text: id });
+  for (const [offset, id] of ["prior", "latest"].entries()) {
+    saveManagerHistory(project, start + offset, randomUUID(), {
+      lane: "chat", message: { text: id, files: [image] }, items: [item(id + "-answer")],
+    });
+  }
+  saveManagerHistory(project, start + 2, randomUUID(), { lane: "notice", items: [item("notice")] });
+  const first = (await readManagerDialogue(project, null))!;
+  assert.deepEqual(first.turns.flatMap(turn => turn.items.map(item => item.id)), ["latest-answer", "notice"]);
+  assert.deepEqual(first.turns[0]?.messages[0]?.files, [image]);
+  assert.deepEqual((await readManagerDialogue(project, first.nextCursor))?.turns.map(turn => turn.messages[0]?.text), ["prior"]);
+  assert.deepEqual(await readManagerDialogue(project, null), first);
+});
+
 test("only delivered dialogue replies become unread and repeated saves preserve read status", t => {
   const project = fixture(t);
   const other = fixture(t);

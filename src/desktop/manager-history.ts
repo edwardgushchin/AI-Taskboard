@@ -241,10 +241,15 @@ export function readManagerHistory(project: string, cursor: string | null = null
     if (pages.length >= 20 && (view !== "chat" || conversations >= 2)) break;
     const path = join(folder, name);
     const size = statSync(path).size;
-    if (size > remaining && pages.length) break;
+    const exceedsBudget = size > remaining && pages.length > 0;
+    const needsConversation = view === "chat" && conversations === 0;
+    if (exceedsBudget && !needsConversation) break;
     const run = readJson(path) as Run;
     const turns = managerHistoryForView(displayTurns(run), view);
     if (view !== "chat" || turns.some(turn => turn.messages.length || turn.items.length)) {
+      // An inline image can exceed the page budget after Base64 encoding.
+      // Keep the first conversation together even if notices started the page.
+      if (exceedsBudget && run.lane === "notice") break;
       remaining -= size;
       pages.push(turns);
       model ??= run.model;

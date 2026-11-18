@@ -1,6 +1,7 @@
 // Real Chromium checks for the chat renderer, without opening a board or contacting Codex.
 // Optional: --references <task attachment directory> --artifacts <screenshot directory>
 // For a dialogue round trip, use --dialogue-history <empty temp directory>, then repeat with --reopen-dialogue.
+// Pass --large-dialogue-image to both invocations to include a 4 MiB attachment.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -92,6 +93,14 @@ app.whenReady().then(async () => {
   const dialogueFixture = option("--dialogue-history");
   if (dialogueFixture) {
     const reopening = process.argv.includes("--reopen-dialogue");
+    const largeImage = process.argv.includes("--large-dialogue-image");
+    const files = [];
+    if (largeImage) {
+      // Pad a decodable PNG to the exact input size under test.
+      const bytes = Buffer.alloc(4 * 1024 * 1024);
+      Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=", "base64").copy(bytes);
+      files.push({ name: "large-image.png", url: "data:image/png;base64," + bytes.toString("base64") });
+    }
     const start = Date.UTC(2026, 10, 18, 8);
     const answer = (id, text, offset) => ({
       id, text, at: new Date(start + offset).toISOString(), title: "", type: "agentMessage", status: "completed", phase: "final_answer",
@@ -110,7 +119,7 @@ app.whenReady().then(async () => {
           mkdirSync(join(project, ".tasks"), { recursive: true });
           for (const { at, id, run } of input) saveManagerHistory(project, at, id ?? randomUUID(), run);
         } else console.log(JSON.stringify(await readManagerDialogue(project, input)));
-      `, project, action], { input: JSON.stringify(input), encoding: "utf8", windowsHide: true });
+      `, project, action], { input: JSON.stringify(input), encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
       assert.equal(result.status, 0, result.stderr);
       return result.stdout ? JSON.parse(result.stdout) : undefined;
     };
@@ -118,7 +127,7 @@ app.whenReady().then(async () => {
       const project = join(dialogueFixture, paused ? "paused" : "no-goal");
       const goal = paused ? { objective: "Fixture objective", status: "paused" } : null;
       const chat = (text, offset, items, clientId) => ({
-        lane: "chat", message: { text, clientId, at: new Date(start + offset).toISOString(), files: [] }, items,
+        lane: "chat", message: { text, clientId, at: new Date(start + offset).toISOString(), files: clientId ? files : [] }, items,
       });
       const runId = "a0000000-0000-4000-8000-000000000001";
       if (!reopening) io(project, "write", Array.from({ length: 22 }, (_, index) => ({
@@ -177,8 +186,7 @@ app.whenReady().then(async () => {
       for (let open = 0; open < 2; open++) {
         const latest = history(null);
         const older = history(latest.data.nextCursor);
-        const expected = [...older.data.turns, ...latest.data.turns].flatMap(turn => turn.items.map(item => item.id));
-        await evaluate(`
+        await evaluate(`(async () => {
           api.boardHistory = async (_project, cursor) => cursor ? ${JSON.stringify(older)} : ${JSON.stringify(latest)};
           if (${open === 1}) {
             dialogue.manager.closeChat();
@@ -186,29 +194,43 @@ app.whenReady().then(async () => {
             dialogue.manager.dispose();
             dialogue.open();
           }
-          new Promise(resolve => requestAnimationFrame(resolve))
-        `);
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          const preview = dialogue.log.querySelector('.chat-attachments img');
+          if (preview) {
+            preview.loading = 'eager';
+            await preview.decode();
+          }
+          return true;
+        })()`);
         assert.deepEqual(await evaluate(`({
           answer: dialogue.log.textContent.includes('full-streamed-answer'),
           question: dialogue.log.textContent.includes('${question}'),
           previous: dialogue.log.textContent.includes('prior-reply-21'),
+          image: dialogue.log.querySelector('.chat-attachments img')?.naturalWidth ?? 0,
           notices: dialogue.log.querySelectorAll('[data-message-id^="notice-"]').length,
           paused: dialogue.manager.textContent.includes('Fixture objective'),
-        })`), { answer: true, question: true, previous: true, notices: 24, paused },
+        })`), { answer: true, question: true, previous: !largeImage, image: largeImage ? 1 : 0, notices: 24, paused },
         "finished or reopened dialogue keeps the question, full answer, previous reply and notices");
-        await evaluate(`
-          dialogue.log.querySelector('.board-chat-older').click();
-          new Promise(resolve => requestAnimationFrame(resolve))
-        `);
-        await check(`JSON.stringify([...dialogue.log.querySelectorAll('[data-message-id]')].map(node => node.dataset.messageId)) ===
-          ${JSON.stringify(JSON.stringify(expected))}`, "older and recent pages preserve saved order and have no missing or duplicate replies");
+        await evaluate(`dialogue.log.querySelector('.board-chat-older').click(); new Promise(resolve => requestAnimationFrame(resolve))`);
+        if (older.data.nextCursor) {
+          const oldest = history(older.data.nextCursor);
+          await evaluate(`
+            api.boardHistory = async () => (${JSON.stringify(oldest)});
+            dialogue.log.querySelector('.board-chat-older').click();
+            new Promise(resolve => requestAnimationFrame(resolve))
+          `);
+        }
+        assert.deepEqual(await evaluate(`[...dialogue.log.querySelectorAll('[data-message-id]')].map(node => node.dataset.messageId)`), [
+          ...Array.from({ length: 22 }, (_, index) => "prior-" + index), "full-answer",
+          ...Array.from({ length: 24 }, (_, index) => "notice-" + index),
+        ], "older and recent pages preserve saved order and have no missing or duplicate replies");
       }
       if (keepArtifacts && paused && reopening) {
         await evaluate(`document.fonts.ready.then(() => {
           dialogue.log.querySelector('[data-message-id="full-answer"]').scrollIntoView({ block: 'center' });
           return true;
         })`);
-        await capture("dialogue-history-paused-restart.png");
+        await capture(largeImage ? "dialogue-history-large-image-restart.png" : "dialogue-history-paused-restart.png");
       }
       await evaluate("dialogue.manager.dispose()");
       console.log(`Dialogue history passed: ${paused ? "paused goal" : "no goal"}, ${reopening ? "restarted Electron" : "stream and reopened composer"}`);
