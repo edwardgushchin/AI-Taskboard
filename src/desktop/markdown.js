@@ -15,10 +15,19 @@ function localDocumentLink(value) {
   } catch { return false; }
 }
 
+function localPngPath(value) {
+  try {
+    const path = decodeURIComponent(value);
+    if (!/[\0-\x1f\x7f]/.test(path) && /\.png$/i.test(path) &&
+        /^(?:[a-z]:[\\/]|[\\/]|\.tasks[\\/])/i.test(path)) return path;
+  } catch {}
+}
+
 if (chatMarkdown) {
   const web = url => /^https?:\/\//i.test(url);
   const inlineImage = url => /^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$/i.test(url);
-  chatMarkdown.validateLink = url => web(url) || /^mailto:/i.test(url) || inlineImage(url) || localDocumentLink(url);
+  chatMarkdown.validateLink = url => web(url) || /^mailto:/i.test(url) || inlineImage(url) ||
+    localDocumentLink(url) || Boolean(localPngPath(url));
   const parseDestination = chatMarkdown.helpers.parseLinkDestination;
   chatMarkdown.helpers = { ...chatMarkdown.helpers };
   chatMarkdown.helpers.parseLinkDestination = (text, start, max) => {
@@ -33,7 +42,7 @@ if (chatMarkdown) {
       if (!angle && char === ")" && depth-- === 0) break;
     }
     const path = text.slice(start + (angle ? 1 : 0), end).trimEnd();
-    if (depth <= 0 && (!angle || text[end] === ">") && localDocumentLink(path)) {
+    if (depth <= 0 && (!angle || text[end] === ">") && (localDocumentLink(path) || localPngPath(path))) {
       return { ok: true, str: path, pos: angle ? end + 1 : start + path.length };
     }
     return parseDestination(text, start, max);
@@ -375,6 +384,41 @@ function splitLongReportParagraphs(block) {
   }
 }
 
+function showArtifactThumbnail(link, path) {
+  const label = link.textContent || path.split(/[\\/]/).at(-1);
+  const tile = element("span", undefined, "chat-artifact");
+  const status = element("span", () => t("ui.loading_image_2f7fd2f5"), "muted");
+  status.setAttribute("role", "status");
+  tile.append(status);
+  link.replaceWith(tile);
+  void (async () => {
+    try {
+      const src = await api.artifactPreview(path);
+      if (!src) throw new Error();
+      const image = element("img");
+      image.alt = label;
+      image.src = src;
+      await image.decode();
+      const file = { name: label };
+      const preview = button("", () => openImagePreview(undefined, [file], 0, src, {
+        preview: () => src,
+        save: () => {
+          const download = element("a");
+          download.href = src;
+          download.download = path.split(/[\\/]/).at(-1);
+          download.click();
+          return { ok: true };
+        },
+      }), "quiet chat-attachment has-preview");
+      preview.title = label;
+      preview.append(image);
+      tile.replaceChildren(preview);
+    } catch {
+      bindLocalized(status, "textContent", () => t("ui.image_unavailable_024abc1d") + label);
+    }
+  })();
+}
+
 function chatText(text, context = { taskId: taskInSheet?.id }) {
   const block = element("div", undefined, "chat-text");
   if (!chatMarkdown) {
@@ -394,6 +438,10 @@ function chatText(text, context = { taskId: taskInSheet?.id }) {
     splitLongReportParagraphs(block);
   }
   formatReportReferences(block);
+  for (const link of block.querySelectorAll("a[href]")) {
+    const path = localPngPath(link.getAttribute("href"));
+    if (path) showArtifactThumbnail(link, path);
+  }
   for (const code of block.querySelectorAll("pre > code")) addCodeCopy(code.parentElement, code);
   block.addEventListener("click", event => {
     const link = event.target.closest("a");

@@ -850,6 +850,9 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .chat-attachments, .chat-composer .draft-attachments { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px; }
 .chat-attachments + .chat-text { margin-top: 5px; }
 .chat-text img { max-width: 100%; height: auto; }
+.chat-artifact { display: inline-block; max-width: 100%; vertical-align: middle; }
+.chat-artifact .chat-attachment { max-width: 100%; }
+.chat-artifact .chat-attachment img { max-width: min(100%, 250px); }
 .chat-text table { display: block; max-width: 100%; overflow: auto; border-collapse: collapse; }
 .chat-text th, .chat-text td { border: 1px solid var(--border); padding: 3px 6px; }
 .chat-text input[type="checkbox"] { margin: 0 4px 0 0; }
