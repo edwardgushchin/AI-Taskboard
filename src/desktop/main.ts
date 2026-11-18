@@ -746,6 +746,7 @@ interface ActiveAgent {
   control: AgentControl;
   directories: Set<string>;
   draftDiscussion?: true;
+  chatWindow?: number;
   updateMessage?: (task: Task, index: number) => () => void;
 }
 const activeAgents = new Map<string, ActiveAgent>();
@@ -840,18 +841,19 @@ async function saveTaskTokenUsage(project: string, id: string, role: TaskUsageRo
 }
 
 async function sendChat(project: string, id: string, request: ChatRequest, notify: (update: ChatUpdate) => void,
-  automatic?: NonNullable<Task["draftDiscussion"]>["phase"]) {
+  automatic?: NonNullable<Task["draftDiscussion"]>["phase"], chatWindow?: number) {
   const key = project + "\0" + id;
   const active = activeAgents.get(key);
   if (returningDrafts.has(key) || (!active && (chatRuns.has(key) || launchingTasks.has(key))) ||
-      (active && (automatic || active.draftDiscussion || request.retryAt !== undefined))) {
+      (active && (automatic || active.draftDiscussion || request.retryAt !== undefined ||
+        active.chatWindow !== undefined && active.chatWindow !== chatWindow))) {
     return { saved: false, result: cliFailure("CHAT_BUSY", t("ui.the_agent_is_already_replying_to_this_task_234378d8")) };
   }
   if (closingProjects.has(project)) return { saved: false, result: cliFailure("PROJECT_CLOSING",
     t("ui.the_project_is_closing_beb637fb")) };
   // A steering request can outlive the provider turn whose files it is preparing.
   const writer = active ? registerRuntime(project, { kind: "task", task: id }) : agentSlots.claim(project, id);
-  if (!writer) return { saved: false, result: cliFailure("CHAT_BUSY", "This task already has an active writer.") };
+  if (!writer) return { saved: false, result: cliFailure("CHAT_BUSY", t("task_chat.writer_busy")) };
   const operation = beginOperation(project, t("ui.task_discussion_97daf76e") + " · " + id);
   const signal = operation.controller.signal;
   const steering = active ? steeringOperations.get(key) ?? new Set<ProjectOperation>() : undefined;
@@ -921,7 +923,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       saved = reply.ok;
       if (saved) notify({ type: "saved" });
     } else {
-      reply = await callCli<Task>(project, ["show", id]);
+      reply = await callCli<Task>(project, ["chat", id], { retryAt });
     }
     if (!reply.ok) return { saved, result: reply };
     signal.throwIfAborted();
@@ -997,7 +999,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     let runAction = taskChatActions(project, task, message?.text ?? "", () => notify({ type: "changed" }));
     const ready = Promise.withResolvers<AgentControl>();
     void ready.promise.catch(() => {});
-    activeAgents.set(key, { directories, draftDiscussion: automatic ? true : undefined, control: {
+    activeAgents.set(key, { directories, chatWindow, draftDiscussion: automatic ? true : undefined, control: {
       steer: async (text, images) => (await ready.promise).steer(text, images),
       interrupt: async () => (await ready.promise).interrupt(),
     }, updateMessage: (latest, index) => {
@@ -1078,7 +1080,7 @@ ipcMain.handle("chat:send", async (event, id: unknown, request: unknown) => {
   return sendChat(project, id, input as ChatRequest, update => {
     if (update.type === "run") return publishRunActivity(project, id, update.items);
     if (!event.sender.isDestroyed()) event.sender.send("chat:update", { project, id, ...update });
-  });
+  }, undefined, event.sender.id);
 });
 
 function runDraftDiscussion(project: string, id: string, phase: NonNullable<Task["draftDiscussion"]>["phase"]) {
