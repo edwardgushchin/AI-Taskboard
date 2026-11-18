@@ -2,6 +2,7 @@ name: Release packages
 
 on:
   push:
+    branches: ['release-rehearsal/**']
     tags: ['v*']
   workflow_dispatch:
     inputs:
@@ -47,15 +48,15 @@ jobs:
     with:
       signed: ${{ needs.version.outputs.signed == 'true' }}
     secrets:
-      WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
-      WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
-      MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
-      MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
-      CSC_INSTALLER_LINK: ${{ secrets.CSC_INSTALLER_LINK }}
-      CSC_INSTALLER_KEY_PASSWORD: ${{ secrets.CSC_INSTALLER_KEY_PASSWORD }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      WIN_CSC_LINK: ${{ needs.version.outputs.signed == 'true' && secrets.WIN_CSC_LINK || '' }}
+      WIN_CSC_KEY_PASSWORD: ${{ needs.version.outputs.signed == 'true' && secrets.WIN_CSC_KEY_PASSWORD || '' }}
+      MAC_CSC_LINK: ${{ needs.version.outputs.signed == 'true' && secrets.MAC_CSC_LINK || '' }}
+      MAC_CSC_KEY_PASSWORD: ${{ needs.version.outputs.signed == 'true' && secrets.MAC_CSC_KEY_PASSWORD || '' }}
+      CSC_INSTALLER_LINK: ${{ needs.version.outputs.signed == 'true' && secrets.CSC_INSTALLER_LINK || '' }}
+      CSC_INSTALLER_KEY_PASSWORD: ${{ needs.version.outputs.signed == 'true' && secrets.CSC_INSTALLER_KEY_PASSWORD || '' }}
+      APPLE_ID: ${{ needs.version.outputs.signed == 'true' && secrets.APPLE_ID || '' }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ needs.version.outputs.signed == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+      APPLE_TEAM_ID: ${{ needs.version.outputs.signed == 'true' && secrets.APPLE_TEAM_ID || '' }}
 
   verify:
     needs: [version, package]
@@ -86,12 +87,12 @@ jobs:
           if-no-files-found: error
           compression-level: 0
       - uses: actions/download-artifact@v4
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' || github.ref_type == 'branch'
         with:
           name: release-candidate
           path: downloaded-candidate
       - name: Check downloaded rehearsal packages against SHA256SUMS
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' || github.ref_type == 'branch'
         env:
           RELEASE_VERSION: ${{ needs.version.outputs.version }}
           SIGNED_BUILD: ${{ needs.version.outputs.signed }}

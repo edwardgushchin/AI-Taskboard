@@ -195,16 +195,16 @@ async function main() {
   const { GITHUB_EVENT_NAME, GITHUB_REF_TYPE, GITHUB_REF_NAME, GITHUB_OUTPUT, GITHUB_SERVER_URL,
     GITHUB_REPOSITORY, GITHUB_RUN_ID, SIGNED_REHEARSAL, DEFAULT_BRANCH, RELEASE_VERSION, SIGNED_BUILD } = process.env;
   if (command === "version") {
-    const tagPush = GITHUB_EVENT_NAME === "push";
-    const signed = tagPush || SIGNED_REHEARSAL === "true";
-    if (tagPush) assert(GITHUB_REF_TYPE === "tag" && GITHUB_REF_NAME, "Expected a tag push");
-    if (!tagPush && signed) assert(GITHUB_REF_TYPE === "branch" && GITHUB_REF_NAME === DEFAULT_BRANCH, "Signed rehearsal requires the default branch");
+    const tagPush = GITHUB_EVENT_NAME === "push" && GITHUB_REF_TYPE === "tag";
+    const signedDispatch = GITHUB_EVENT_NAME === "workflow_dispatch" && SIGNED_REHEARSAL === "true";
+    if (tagPush) assert(GITHUB_REF_NAME, "Expected a tag name");
+    if (signedDispatch) assert(GITHUB_REF_TYPE === "branch" && GITHUB_REF_NAME === DEFAULT_BRANCH, "Signed rehearsal requires the default branch");
     const { version } = JSON.parse(await readFile("package.json", "utf8"));
     await releaseVersion(version, tagPush ? GITHUB_REF_NAME : undefined);
     const lock = JSON.parse(await readFile("package-lock.json", "utf8"));
     assert.equal(lock.version, version, "package-lock.json version must match package.json");
     assert.equal(lock.packages?.[""]?.version, version, "Root package version in package-lock.json must match package.json");
-    await appendFile(GITHUB_OUTPUT, `version=${version}\nsigned=${signed}\n`);
+    await appendFile(GITHUB_OUTPUT, `version=${version}\nsigned=${tagPush || signedDispatch}\n`);
   } else if (command === "stage") {
     const runUrl = `${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}`;
     await stageRelease(RELEASE_VERSION, SIGNED_BUILD === "true", directory, output, { sha: checkedOutCommit(), runUrl });

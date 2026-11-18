@@ -118,6 +118,44 @@ test("release version accepts exact stable and prerelease tags", async () => {
   await assert.rejects(releaseVersion("0.1.0+ci", "v0.1.0+ci"), /canonical SemVer/);
 });
 
+test("release CLI keeps branch pushes unsigned and reserves signed dispatch for the default branch", t => {
+  const scratch = mkdtempSync(join(tmpdir(), "ai-taskboard-release-profile-"));
+  t.after(() => rmSync(scratch, { recursive: true }));
+  const output = join(scratch, "github-output");
+  const { version } = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+
+  for (const [event, refType, refName, requestSigning, expectedSigning] of [
+    ["push", "branch", "release-rehearsal/T-0101", "true", false],
+    ["workflow_dispatch", "branch", "release-rehearsal/T-0101", "false", false],
+    ["workflow_dispatch", "branch", "main", "true", true],
+    ["workflow_dispatch", "branch", "release-rehearsal/T-0101", "true", null],
+    ["push", "tag", "v" + version, "false", true],
+  ]) {
+    writeFileSync(output, "");
+    const result = spawnSync(process.execPath, ["scripts/release.mjs", "version"], {
+      cwd: root, encoding: "utf8",
+      env: {
+        ...process.env,
+        GITHUB_EVENT_NAME: event,
+        GITHUB_REF_TYPE: refType,
+        GITHUB_REF_NAME: refName,
+        GITHUB_OUTPUT: output,
+        DEFAULT_BRANCH: "main",
+        SIGNED_REHEARSAL: requestSigning,
+      },
+    });
+    assert.ifError(result.error);
+    if (expectedSigning === null) {
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /Signed rehearsal requires the default branch/);
+      assert.equal(readFileSync(output, "utf8"), "");
+    } else {
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(readFileSync(output, "utf8"), "version=" + version + "\nsigned=" + expectedSigning + "\n");
+    }
+  }
+});
+
 for (const signed of [false, true]) {
   test((signed ? "distribution" : "CI") + " candidate hashes every package and rejects a corrupt download", async t => {
     const build = fixture(t, stable, signed);
