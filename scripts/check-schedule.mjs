@@ -50,7 +50,14 @@ void (async () => { try {
   }
   const sourceUrl = new URL("../src/desktop/main.ts", import.meta.url);
   const source = (readFileSync(sourceUrl, "utf8") + `
-    globalThis.scheduleCheck = { scheduleRecurringTasks, boardActions, stubLegacy(id, plan, start) {
+    globalThis.scheduleCheck = { scheduleRecurringTasks, boardActions, reserveAgent,
+      planning: project => autoBoards.get(subscriptions.get(project))?.running,
+      stubReview(id, plan, review) {
+        const request = runBoardRequest, submit = reviewSubmission;
+        runBoardRequest = (...args) => args[2].includes("use expert_plan") && args[2].includes(id) ? plan() : request(...args);
+        reviewSubmission = (watch, taskId, limit) => taskId === id ? review() : submit(watch, taskId, limit);
+      },
+      stubLegacy(id, plan, start) {
       const request = runBoardRequest, launch = launchTask;
       runBoardRequest = (...args) => args[2].includes("use expert_plan") && args[2].includes(id) ? plan() : request(...args);
       launchTask = (...args) => args[1] === id ? start(args[4], args[6]) : launch(...args);
@@ -139,11 +146,52 @@ void (async () => { try {
   globalThis.scheduleCheck.scheduleRecurringTasks();
   assert.equal(starts, 1);
   assert.equal(requests, 1);
+  for (const autoMode of [false, true]) {
+    cli(["settings"], { reviewMode: "reviewer-human", autoMode });
+    const { id } = cli(["create"], plannedDraft({ title: "Legacy review", criteria: ["Checked"], workingDirectory: project }));
+    cli(["approve", id]);
+    cli(["start", id]);
+    const { token } = cli(["preview", id]);
+    cli(["submit", id], { token, noChanges: true, summary: "Saved result", checks: ["Checked"] });
+    const cardPath = join(project, ".tasks/tasks", id + ".json");
+    const card = JSON.parse(readFileSync(cardPath, "utf8"));
+    const plan = { id, revision: card.revision, phase: "review", lead: "qa-engineer", reason: "Review the saved result.", stages: [] };
+    const release = globalThis.scheduleCheck.reserveAgent(project, "executor", id);
+    assert.ok(release);
+    let attempts = 0, reviews = 0, result;
+    globalThis.scheduleCheck.stubReview(id, async () => {
+      attempts++;
+      result = await act("expert_plan", plan);
+      return result;
+    }, async () => { reviews++; });
+    try {
+      delete card.expertTeam.review;
+      writeFileSync(cardPath, JSON.stringify(card));
+      const busy = await act("expert_plan", plan);
+      assert.equal(busy.error?.code, "EXPERT_PHASE_RUNNING");
+      await waitFor(async () => (await snapshot(first)).board.tasks.some(task => task.id === id && !task.expertReviewPlanned));
+      globalThis.scheduleCheck.scheduleRecurringTasks();
+      await waitFor(() => !globalThis.scheduleCheck.planning(project));
+      assert.equal(attempts, 0, "A busy submission must not consume its planning request");
+      assert.equal(reviews, 0);
+      assert.equal(cli(["show", id]).revision, card.revision);
+    } finally {
+      release();
+    }
+    await waitFor(() => result !== undefined && reviews === 1);
+    assert.equal(result?.ok, true, JSON.stringify(result));
+    assert.equal(attempts, 1);
+    const saved = cli(["show", id]);
+    assert.equal(saved.expertTeam.review.lead, plan.lead);
+    assert.equal(saved.revision, card.revision + 1);
+    assert.equal(saved.status, "review");
+  }
   if (keepArtifacts) {
     await evaluate(first, "document.querySelector('[data-task-id=\"T-0001\"]')?.click()");
     writeFileSync(join(artifacts, "schedule-two-windows.png"), (await first.webContents.capturePage()).toPNG());
   }
   console.log("Production schedule: persisted pauses, two windows, and a due legacy card with auto mode off requesting a plan then starting once: passed");
+  console.log("Production review queue: a legacy submission waits for its executor slot, then saves the review plan and dispatches a reviewer with auto mode on and off: passed");
 } catch (error) { console.error(error); process.exitCode = 1; }
 finally {
   for (const window of BrowserWindow.getAllWindows()) window.destroy();

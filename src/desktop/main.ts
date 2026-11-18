@@ -1247,8 +1247,14 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
       const notices = (board.managerInbox ?? []).filter(message => ["question", "decision", "block"].includes(message.kind) &&
         !queue.notices.has(message.id + ":" + message.sequence));
       const tab = [...watch.tabs].find(tab => !tab.window.isDestroyed());
-      const needsPlan = board.tasks.filter(task => missingPlan(task, board.settings) &&
-        !queue.notices.has("expert-plan:" + task.id + ":" + task.revision)).slice(0, 4);
+      const unplanned = board.tasks.filter(task => missingPlan(task, board.settings) &&
+        !queue.notices.has("expert-plan:" + task.id + ":" + task.revision));
+      const activeSlots = new Set(unplanned.length
+        ? agentSlots.entries(project).filter(entry => entry.kind === "slot").map(entry => entry.task)
+        : []);
+      // expert_plan refuses changes while either phase holds a slot. Leave the notice
+      // unclaimed so the queue can retry on release even if the card revision is unchanged.
+      const needsPlan = unplanned.filter(task => !activeSlots.has(task.id) && !activeSlots.has("review:" + task.id)).slice(0, 4);
       const addressed = board.settings.autoMode ? notices : [];
       if ((addressed.length || needsPlan.length) && tab && !boardWorkRequests.has(key) &&
           !backgroundManagerRequests.has(key) && agentSlots.available(key, "manager", board.settings.taskLimits)) {
