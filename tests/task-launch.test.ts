@@ -19,7 +19,7 @@ const names = new Set(["launchTask", "recordRunFailure", "publishRunActivity", "
   "beginOperation", "confirmProjectClose", "projectOperations", "closingProjects", "launchingTasks", "runningTasks", "runActivityByTask",
   "activeAgents", "chatRuns", "windowStates", "executorBusy", "reserveAgent", "scheduleAgentWork", "scheduleRecurringTasks",
   "deferredExecutors", "schedulingAgentWork", "taskRunLimit", "acceptanceWork", "continueAcceptance",
-  "returnTaskToDraft", "returningDrafts", "reviewOperations", "repairOperations", "taskOperations"]);
+  "returnTaskToDraft", "returningDrafts", "reviewOperations", "managerReviewOperations", "taskOperations", "steeringOperations"]);
 const lifecycle = parsed.statements.filter(node => {
   if (ts.isFunctionDeclaration(node)) return node.name && names.has(node.name.text);
   return ts.isVariableStatement(node) && node.declarationList.declarations.some(declaration =>

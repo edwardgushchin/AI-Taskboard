@@ -2,12 +2,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync, symlinkSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { electronCheck } from "./electron-check.mjs";
 import { saveManagerHistory } from "../src/desktop/manager-history.ts";
-import { registerRuntime } from "../src/desktop/board-runtime.ts";
+import { registerRuntime, runtimeEntries } from "../src/desktop/board-runtime.ts";
 
 const returnCheck = process.argv.includes("--return-to-draft-only");
 const restart = process.argv.includes("--verify-return-restart");
@@ -54,8 +55,13 @@ try {
       items: [{ id: "qa-unread", type: "agentMessage", title: "", text: "QA notice", phase: "final_answer", status: "completed" }] });
   }
   const sourceUrl = new URL("../src/desktop/main.ts", import.meta.url);
-  const source = ('import { trackActiveRun } from "./active-runs.ts";\n' + readFileSync(sourceUrl, "utf8")).replaceAll("import.meta.url", JSON.stringify(sourceUrl.href))
+  let source = ('import { trackActiveRun } from "./active-runs.ts";\n' + readFileSync(sourceUrl, "utf8")).replaceAll("import.meta.url", JSON.stringify(sourceUrl.href))
     .replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, sourceUrl).href));
+  if (returnCheck && !restart) {
+    source = source.replace("release.run(() => replyToBoard(", "release.run(() => globalThis.returnCheck.replyToBoard(")
+      .replace("writer.run(() => replyToTask(", "writer.run(() => globalThis.returnCheck.replyToTask(")
+      .replace("await writeFile(path, Buffer.from(file.bytes));", "await globalThis.returnCheck.copyAttachment(path, Buffer.from(file.bytes));");
+  }
   const entry = join(scratch, "main-under-test.mjs");
   writeFileSync(entry, transformSync(source + "\nglobalThis.agentCheck = { trackActiveRun, createWindow };", { loader: "ts", format: "esm" }).code);
   app.on("web-contents-created", (_event, contents) => contents.setBackgroundThrottling(false));
@@ -109,6 +115,87 @@ try {
     for (const win of [window, second]) await wait(() => win.webContents.executeJavaScript(
       `window.taskboard.bootstrap().then(f => f.board?.tasks.some(task => task.id === ${JSON.stringify(draft.id)} && task.status === 'draft'))`));
     console.log("Return to draft through real IPC passed in two windows with one shared card");
+
+    const startCard = title => {
+      const card = cli(project, ["create"], { title, criteria: ["Checked"], workingDirectory: project });
+      const approved = cli(project, ["approve", card.id], { revision: card.revision });
+      return cli(project, ["start", card.id], { revision: approved.revision }).task;
+    };
+    const returnCard = card => second.webContents.executeJavaScript(
+      `window.taskboard.command('return-to-draft', ${JSON.stringify(card.id)}, { revision: ${card.revision} })`);
+    const untilStopped = async (stopped, pending) => Promise.race([
+      stopped,
+      pending.then(result => assert.fail("Return completed before stopping the writer: " + JSON.stringify(result))),
+    ]);
+    const reviewStarted = Promise.withResolvers();
+    const reviewStopped = Promise.withResolvers();
+    const finishReview = Promise.withResolvers();
+    globalThis.returnCheck = {
+      async replyToBoard(_profile, _project, _prompt, _images, _tool, _tools, _instructions, signal) {
+        signal.addEventListener("abort", () => reviewStopped.resolve(), { once: true });
+        reviewStarted.resolve();
+        await finishReview.promise;
+        return { interrupted: true };
+      },
+    };
+    cli(project, ["settings"], { reviewMode: "manager", autoMode: false });
+    const submitted = startCard("Active manager review");
+    const preview = cli(project, ["preview", submitted.id]);
+    const review = cli(project, ["submit", submitted.id], { token: preview.token, noChanges: true,
+      summary: "Fixture", checks: ["Fixture"] });
+    await reviewStarted.promise;
+    const returningReview = returnCard(review);
+    await untilStopped(reviewStopped.promise, returningReview);
+    assert.equal(cli(project, ["show", review.id]).status, "review");
+    finishReview.resolve();
+    const returnedReview = await returningReview;
+    assert.equal(returnedReview.data?.status, "draft", JSON.stringify(returnedReview));
+    assert.equal(returnedReview.data.result.summary, review.result.summary);
+    console.log("A window interrupts the local manager review and waits for its reservation to release");
+
+    const discussion = startCard("Active discussion with delayed attachment");
+    const chatReady = Promise.withResolvers();
+    const chatFinished = Promise.withResolvers();
+    const copyStarted = Promise.withResolvers();
+    const finishCopy = Promise.withResolvers();
+    let copied = false;
+    Object.assign(globalThis.returnCheck, {
+      async replyToTask(...args) {
+        args[10]({
+          steer: async () => assert.fail("The delayed attachment was steered after interruption"),
+          interrupt: async () => chatFinished.resolve({ interrupted: true }),
+        });
+        chatReady.resolve();
+        return chatFinished.promise;
+      },
+      async copyAttachment(path, bytes) {
+        copyStarted.resolve();
+        await finishCopy.promise;
+        mkdirSync(dirname(path), { recursive: true });
+        await writeFile(path, bytes);
+        copied = true;
+      },
+    });
+    const chat = (text, files = "[]") => evaluate(
+      `window.taskboard.chatSend(${JSON.stringify(discussion.id)}, { model: 'fixture', effort: 'low', text: ${JSON.stringify(text)}, files: ${files} })`);
+    const original = chat("Keep this message");
+    await chatReady.promise;
+    const before = cli(project, ["show", discussion.id]);
+    const steering = chat("Late attachment", "[{ name: 'late.txt', type: 'text/plain', bytes: new Uint8Array([65]).buffer }]");
+    await copyStarted.promise;
+    const returningChat = returnCard(before);
+    await untilStopped(chatFinished.promise, returningChat);
+    assert.equal((await original).saved, true);
+    assert.equal(cli(project, ["show", discussion.id]).status, "in_progress");
+    assert.ok(runtimeEntries(project).some(entry => entry.kind === "task" && entry.task === discussion.id));
+    finishCopy.resolve();
+    assert.equal((await steering).saved, false);
+    assert.equal(copied, true);
+    const returnedChat = await returningChat;
+    assert.equal(returnedChat.data?.status, "draft", JSON.stringify(returnedChat));
+    assert.deepEqual(returnedChat.data.attachments, before.attachments);
+    assert.deepEqual(returnedChat.data.history.slice(0, -1), before.history);
+    console.log("Return waits for the delayed attachment and leaves the saved conversation intact");
     app.exit(0);
     return;
   }

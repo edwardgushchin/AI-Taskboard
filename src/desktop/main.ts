@@ -6,7 +6,7 @@ import type { FileLink } from "../cli/attachment-links.ts";
 import { providerLimitSource, readCodexLimits } from "./provider-limits.ts";
 import localization from "./localization.cjs";
 import { activeRunSummary, observeActiveRuns, enableSharedRuns } from "./active-runs.ts";
-import { runtimeLocation, runtimeTransaction } from "./board-runtime.ts";
+import { registerRuntime, runtimeLocation, runtimeTransaction } from "./board-runtime.ts";
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, Notification, protocol, session, shell } from "electron";
 import type { IpcMainInvokeEvent } from "electron";
 import { randomUUID } from "node:crypto";
@@ -747,8 +747,9 @@ interface ActiveAgent {
 const activeAgents = new Map<string, ActiveAgent>();
 const returningDrafts = new Set<string>();
 const reviewOperations = new Map<string, ProjectOperation>();
-const repairOperations = new Map<string, ProjectOperation>();
+const managerReviewOperations = new Map<string, ProjectOperation>();
 const taskOperations = new Map<string, ProjectOperation>();
+const steeringOperations = new Map<string, Set<ProjectOperation>>();
 
 async function returnTaskToDraft(project: string, id: string, revision: unknown, actor: "user" | "manager") {
   const key = project + "\0" + id;
@@ -764,12 +765,13 @@ async function returnTaskToDraft(project: string, id: string, revision: unknown,
     const timeout = AbortSignal.timeout(15_000);
     const stop = (async () => {
       reviewOperations.get(key)?.controller.abort();
-      repairOperations.get(key)?.controller.abort();
+      managerReviewOperations.get(key)?.controller.abort();
+      for (const operation of steeringOperations.get(key) ?? []) operation.controller.abort();
       const active = activeAgents.get(key);
       if (active) await active.control.interrupt();
       else taskOperations.get(key)?.controller.abort();
       while (launchingTasks.has(key) || runningTasks.has(key) || chatRuns.has(key) ||
-          reviewOperations.has(key) || repairOperations.has(key)) {
+          reviewOperations.has(key) || managerReviewOperations.has(key) || steeringOperations.has(key)) {
         await wait(50, undefined, { signal: timeout });
       }
     })();
@@ -841,11 +843,16 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
   }
   if (closingProjects.has(project)) return { saved: false, result: cliFailure("PROJECT_CLOSING",
     t("ui.the_project_is_closing_beb637fb")) };
-  const writer = active ? undefined : agentSlots.claim(project, id);
-  if (!active && !writer) return { saved: false, result: cliFailure("CHAT_BUSY", "This task already has an active writer.") };
+  // A steering request can outlive the provider turn whose files it is preparing.
+  const writer = active ? registerRuntime(project, { kind: "task", task: id }) : agentSlots.claim(project, id);
+  if (!writer) return { saved: false, result: cliFailure("CHAT_BUSY", "This task already has an active writer.") };
   const operation = beginOperation(project, t("ui.task_discussion_97daf76e") + " · " + id);
   const signal = operation.controller.signal;
-  if (!active) {
+  const steering = active ? steeringOperations.get(key) ?? new Set<ProjectOperation>() : undefined;
+  if (steering) {
+    steering.add(operation);
+    steeringOperations.set(key, steering);
+  } else {
     chatRuns.add(key);
     taskOperations.set(key, operation);
   }
@@ -870,6 +877,9 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
         sources.push({ path, name: suffix && !imageTypes.has(extname(name).toLowerCase()) ? name + suffix : name });
       }
       signal.throwIfAborted();
+      if (active && activeAgents.get(key) !== active) {
+        throw new Error(t("ui.the_agent_finished_before_receiving_this_message_88246090"));
+      }
       reply = await callCli<Task>(project, ["chat", id], { text, model, effort, attachmentSources: sources });
       saved = reply.ok;
       if (saved) notify({ type: "saved" });
@@ -877,6 +887,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       reply = await callCli<Task>(project, ["show", id]);
     }
     if (!reply.ok) return { saved, result: reply };
+    signal.throwIfAborted();
     const task = reply.data;
     const last = task.history.findLastIndex(entry => entry.chat);
     const message = task.history[last];
@@ -941,7 +952,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       runAction = taskChatActions(project, latest, latest.history[index].text ?? "", () => notify({ type: "changed" }));
       return () => { if (replyTo === index) { replyTo = previousIndex; runAction = previousAction; } };
     } });
-    const answer = await writer!.run(() => replyToTask(app.getPath("userData"), project, { model, effort }, prompt, images,
+    const answer = await writer.run(() => replyToTask(app.getPath("userData"), project, { model, effort }, prompt, images,
       text => notify({ type: "commentary", text }),
       (name, args) => runAction(name, args),
       scratch!, maxAttachmentBytes - task.attachments.reduce((sum, file) => sum + (file.link ? 0 : file.bytes), 0),
@@ -967,11 +978,17 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       for (const directory of directories) await rm(directory, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
       chatRuns.delete(key);
       taskOperations.delete(key);
-      writer?.();
+      writer();
       scheduleAgentWork();
       if (wasReplying) notifyRunChange(project);
-    } else if (scratch && activeAgents.get(key) !== active) {
-      await rm(scratch, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
+    } else {
+      if (scratch && (signal.aborted || activeAgents.get(key) !== active)) {
+        directories.delete(scratch);
+        await rm(scratch, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
+      }
+      writer();
+      steering?.delete(operation);
+      if (!steering?.size) steeringOperations.delete(key);
     }
     operation.finish();
   }
@@ -1682,9 +1699,12 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     writer();
     return cliFailure("BOARD_QUEUE_FAILED", t("ui.not_sent_28bb3764"));
   }
+  const managerReviewId = repairTask?.id ?? (expectedReviewMode === "manager" ? reviewIds?.[0] : undefined);
+  const managerReviewKey = managerReviewId ? board.project + "\0" + managerReviewId : undefined;
   const reviewTask = repairTask?.id ?? (cleanupJob?.task ? "review:" + cleanupJob.task : undefined) ??
-    (expectedReviewMode === "manager" && reviewIds?.[0] ? "review:" + reviewIds[0] : undefined);
-  const repairSlot = reviewTask ? reserveAgent(board.project, "reviewer", reviewTask) : undefined;
+    (managerReviewId ? "review:" + managerReviewId : undefined);
+  const repairSlot = reviewTask && !(managerReviewKey && returningDrafts.has(managerReviewKey))
+    ? reserveAgent(board.project, "reviewer", reviewTask) : undefined;
   if (reviewTask && !repairSlot) { writer(); return taskRunLimit("reviewer"); }
   if (cleanupJob) {
     const claim = await callCli<{ claimed: boolean }>(board.project, ["maintenance"], { action: "claim", id: cleanupJob.id, owner: process.pid });
@@ -1698,8 +1718,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     ? [t("ui.checking_worktree_cleanup_1f82f9a8"), cleanupJob.task].filter(Boolean).join(" · ")
     : [t("ui.project_manager_48697fa0"), repairTask?.id ?? reviewIds?.join(", ")].filter(Boolean).join(" · "));
   const signal = operation.controller.signal;
-  const repairKey = repairTask ? project + "\0" + repairTask.id : undefined;
-  if (repairKey) repairOperations.set(repairKey, operation);
+  if (managerReviewKey) managerReviewOperations.set(managerReviewKey, operation);
   const automaticDone = reviewIds || autoNotice || repairTask || cleanupJob ? Promise.withResolvers<void>() : undefined;
   const startedAt = Date.now();
   const managerRun: ManagerRun = { id: randomUUID(), phase: "starting", startedAt, lane: cleanupJob ? "maintenance" : lane };
@@ -1973,7 +1992,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           `If no prior sequence is known, run messages ${id}.`, []);
         return true;
       }, deliveredMessages, () => waitWork.signal, undefined, undefined,
-      (id, revision) => returnTaskToDraft(board.project, id, revision, "manager"));
+      (id, revision) => id === managerReviewId
+        ? Promise.resolve(cliFailure("CHAT_BUSY", "Return this task from its card or the manager chat after this automatic review ends."))
+        : returnTaskToDraft(board.project, id, revision, "manager"));
     const run = async (name: string, args: unknown): Promise<CliReply> => {
       try {
         if (name === "task_set_executor_access") return await setTaskExecutorAccess(app.getPath("userData"), board.project, args);
@@ -2317,7 +2338,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     }
     requests.delete(projectKey);
     release?.();
-    if (repairKey) repairOperations.delete(repairKey);
+    if (managerReviewKey) managerReviewOperations.delete(managerReviewKey);
     if (running.goalRunning) publishGoal({ goalRunning: false });
     running.managerRun = undefined;
     publishRun();
