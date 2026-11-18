@@ -756,10 +756,13 @@ function taskChat(task) {
   const dayFormat = new Intl.DateTimeFormat(locale, { dateStyle: "medium" });
   const reviewDecisions = [];
   let submittedAt = "";
+  let submissionRow;
+  const savedRunItems = new Set();
   let day;
   let lastMessage;
   for (const { event, index } of events) {
     if (event.action === "submit") submittedAt = event.at;
+    if (event.action === "start" || (event.to && event.to !== "review")) submissionRow = undefined;
     const returned = event.actor === "reviewer" && event.action === "request-changes";
     const conversation = ["chat", "comment", "questions"].includes(event.action) || returned;
     if (event.expertMessage) continue;
@@ -788,7 +791,17 @@ function taskChat(task) {
         appendWork(log);
         missingRuns.set(index, { log, durationMs: event.durationMs });
       }
-      if (event.action === "run-log") continue;
+      if (event.action === "run-log") {
+        // The turn that submitted the card can finish saving after review has started.
+        // Keep the history index for restoration and use the submission only for placement.
+        if (submissionRow && log.parentNode === work) {
+          for (const item of event.run ?? []) savedRunItems.add(item.id);
+          log.dataset.historyAt = submissionRow.dataset.historyAt;
+          work.insertBefore(log, submissionRow);
+          submissionRow = undefined;
+        }
+        continue;
+      }
     }
     if (!event.run?.length && event.chat?.commentary?.length) {
       const commentary = element("li", undefined, "chat-run");
@@ -816,6 +829,7 @@ function taskChat(task) {
       service.append(element("span", author, "chat-author"), element("span", label, "chat-action"));
       appendChatTime(service, event.at);
       appendWork(service);
+      if (event.action === "submit" && event.actor === "agent") submissionRow = service;
       if (!event.text && !attachments.length) continue;
       // A chat edit can quote the pending request as its audit note.
       if (event.action === "update" && event.actor === "user" &&
@@ -917,9 +931,11 @@ function taskChat(task) {
   if (workControls.childElementCount) work.prepend(workControls);
   const liveRun = element("li", undefined, "chat-run chat-run-live");
   const progress = element("li", undefined, "chat-run");
-  work.append(liveRun, progress);
+  if (submissionRow) work.insertBefore(liveRun, submissionRow);
+  else work.append(liveRun);
+  work.append(progress);
   const refreshReview = task.status === "review" || task.history.some(event => event.actor === "reviewer" || event.action === "submit")
-    ? reviewerChat(task, work, liveRun, reviewDecisions, items => { reviewTeam = items; renderTeam(); }) : undefined;
+    ? reviewerChat(task, work, submissionRow ? progress : liveRun, reviewDecisions, items => { reviewTeam = items; renderTeam(); }) : undefined;
   list.append(element("li", undefined, "chat-turn"));
   renderChatTurn(list, draft);
   area.append(list, work, team);
@@ -978,7 +994,8 @@ function taskChat(task) {
   let liveItems = [];
   function renderLiveWork() {
     const follow = work.scrollHeight - work.clientHeight - work.scrollTop <= 8;
-    renderRunActivity(liveRun, liveItems.filter(item => !collaborationItem(item) && item.phase !== "final_answer"),
+    renderRunActivity(liveRun, liveItems.filter(item => !collaborationItem(item) && !savedRunItems.has(item.id) &&
+      (submissionRow || item.phase !== "final_answer")),
       false, undefined, task.id);
     if (follow) work.scrollTop = work.scrollHeight;
   }
