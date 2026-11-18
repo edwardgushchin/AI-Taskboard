@@ -1,7 +1,7 @@
 import { manualContext } from "../cli/manual-board.ts";
 import { readBoardSettings, locateBoard } from "../cli/storage.ts";
 import { responseLanguageInstructions } from "./board-agent-hooks.ts";
-import { trackActiveRun, trackProvider, claimDiscussion } from "./active-runs.ts";
+import { trackActiveRun, trackProvider } from "./active-runs.ts";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { codexRpc, turnControl } from "./codex-rpc.ts";
@@ -269,15 +269,15 @@ export function replyToTask(
     ].join(" ") + manualContext(readBoardSettings(locateBoard(project))), { manual: readBoardSettings(locateBoard(project)).boardType === "manual" }),
     onCommentary, onTokenUsage, onControl, signal, imageDirectory, imageLimit, onActivity,
   };
-  const release = claimDiscussion(project, taskId);
   const specialistTools = mode === "initial" ? [] :
     executorExpertTools.filter(tool => tool.name !== "expert_stage" && (taskId || !tool.name.startsWith("team_")));
-  return release.run(() => withBoardMcp([worklogTool, githubReadTool, ...specialistTools], async (name, args) => {
+  // sendChat owns the board writer through preparation, this turn and saving the reply.
+  return withBoardMcp([worklogTool, githubReadTool, ...specialistTools], async (name, args) => {
     if (Object.hasOwn(expertCommands, name)) return worklog.remind(await callCli(project,
       [expertCommands[name], ...(name.startsWith("team_") && taskId ? [taskId] : [])], { ...args as object, actor: "agent" }));
     return name === githubReadTool.name ? worklog.remind(await readBoardGitHub(project, args)) : worklog.submit(args);
   }, (config, env) =>
-    reply(profile, project, prompt, images, runAction, { ...options, worklog, mcp: { config, env } }))).finally(release);
+    reply(profile, project, prompt, images, runAction, { ...options, worklog, mcp: { config, env } }));
 }
 
 export async function requestExecutorAccess(profile: string, project: string, id: string, args: unknown,
