@@ -90,6 +90,155 @@ app.whenReady().then(async () => {
     await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
     writeFileSync(join(artifacts, name), (await window.webContents.capturePage()).toPNG());
   };
+  if (process.argv.includes("--hex-colors-only")) {
+    const { clipboard } = await import("electron");
+    window.show();
+    window.focus();
+    const colors = ["#FFFFFF", "#0E0E11", "#131316", "#D0D273", "#9161D2", "#5dB08d"];
+    const tick = "\x60";
+    const sample = "Подойдёт " + colors[0] + "? Palette " + colors.slice(1).map(color => tick + color + tick).join(", ") +
+      ".\n\n[#abcdef](https://example.com/#123456) https://example.com/#abcdef. Commit abc1234, " +
+      "#123 #12345 #1234567 #12345678 #12345G #123456z.\n\n" + tick.repeat(3) + "text\n#123456\n" + tick.repeat(3);
+    const prompt = "Подойдёт #A0b1C2? Или " + tick + "#123ABC" + tick + "?\n" +
+      "https://example.com/?preview=#FFFFFF\n" + tick.repeat(3) + "css\n#FFFFFF\n" + tick.repeat(3) +
+      "\n\n> ~~~css\n> #223344\n> ~~~\n\nЦвет после блока #aBcDeF.";
+    await evaluate("const hexSample = " + JSON.stringify(sample) + "; const hexPrompt = " + JSON.stringify(prompt));
+    await evaluate(`
+      frame = { project: 'hex-fixture', russian: false };
+      document.querySelector('#welcome').hidden = true;
+      sheetKind = 'task';
+      byId('sheet-title').textContent = 'HEX colors';
+      const at = '2026-11-18T12:00:00Z';
+      const reply = { id: 'palette', type: 'agentMessage', phase: 'final_answer', status: 'completed', text: hexSample, at };
+      let managerSaved = false;
+      let manager;
+      api.boardQueue = async (_project, action) => ({ ok: true, data: action === 'list' ? [] : 'hex-queued' });
+      api.boardRequest = async () => {
+        manager.enableStop();
+        await new Promise(resolve => setTimeout(resolve, 100));
+        return { ok: true, data: { answer: hexSample, items: [reply] } };
+      };
+      api.boardHistory = async (_project, _cursor, view) => ({
+        ok: true, data: view === 'live' ? { work: [], chat: [] } :
+          { turns: managerSaved ? [{ messages: [{ text: hexPrompt, files: [], at }], items: [structuredClone(reply)] }] : [], nextCursor: null },
+      });
+      const openManager = () => {
+        manager?.dispose();
+        manager = draftComposer();
+        body.replaceChildren(manager);
+        if (!manager.hasAttribute('data-pinned')) manager.querySelector('.board-chat-pin').click();
+        manager.querySelector('.draft-input textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+      };
+      openManager();
+      sheet.showModal();
+      manager.querySelector('.draft-input textarea').value = hexPrompt;
+      manager.dispatchEvent(new Event('submit', { cancelable: true }));
+      void 0;
+    `);
+    const expectColors = async (selector, label) => {
+      const query = JSON.stringify(selector + " .chat-hex-color");
+      for (let attempt = 0; attempt < 50 && !await evaluate("!!document.querySelector(" + query + ")"); attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      const values = await evaluate("Array.from(document.querySelectorAll(" + query + "), node => node.textContent)");
+      assert.deepEqual(values, colors, values.length ? label : label + ": " + await evaluate("body.textContent"));
+    };
+    const manager = ".board-chat-log:not(.board-work)";
+    const plainMessage = ".board-chat-log [data-actor=user] .chat-text";
+    const checkPlainMessage = async () => {
+      const message = await evaluate("document.querySelector(" + JSON.stringify(plainMessage) + ").innerHTML");
+      assert.deepEqual(await evaluate("Array.from(document.querySelectorAll(" + JSON.stringify(plainMessage + " .chat-hex-color") +
+        "), node => node.textContent)"), ["#A0b1C2", "#123ABC", "#aBcDeF"], message);
+      await check("document.querySelector(" + JSON.stringify(plainMessage) + ").textContent === hexPrompt", "manager prompt keeps its literal text");
+      await check("!document.querySelector(" + JSON.stringify(plainMessage + " :is(a, pre, code)") + ")", "manager prompt retains plain formatting");
+    };
+    await expectColors(manager + " .chat-agent-text", "new manager reply");
+    await checkPlainMessage();
+    await evaluate("managerSaved = true; openManager(); void 0");
+    await expectColors(manager + " .chat-agent-text", "reopened manager history");
+    await checkPlainMessage();
+    await evaluate(`
+      manager.dispose();
+      const hexCard = { id: 'T-0184', createdAt: at, status: 'review', questions: [], attachments: [], history: [] };
+      let reviewSaved = false;
+      api.reviewerChat = async () => ({ ok: true, data: [{
+        id: 'hex-review', at, ...(reviewSaved ? { durationMs: 500 } : {}), items: [structuredClone(reply)],
+      }] });
+      const openCard = () => {
+        taskInSheet = structuredClone(hexCard);
+        body.replaceChildren(taskChat(taskInSheet));
+      };
+      const showWork = () => body.querySelector('[aria-controls="task-chat-work"]').click();
+      openCard();
+      hexCard.history.push({ action: 'chat', actor: 'agent', at, text: hexSample, chat: { model: 'test', effort: 'high' } });
+      openCard();
+      void 0;
+    `);
+    await expectColors(".task-dialogue", "new card reply");
+    await evaluate("sheet.close(); openCard(); sheet.showModal(); void 0");
+    await expectColors(".task-dialogue", "reopened card dialogue");
+    await evaluate("showWork(); void 0");
+    await expectColors(".task-review-attempt", "active reviewer attempt");
+    await evaluate("reviewSaved = true; sheet.close(); openCard(); sheet.showModal(); showWork(); void 0");
+    await expectColors(".task-review-attempt", "reopened reviewer attempt");
+
+    const report = [
+      "Reproduce: node scripts/check-chat.mjs --hex-colors-only --artifacts .tasks/qa",
+      JSON.stringify({ platform: process.platform, electron: process.versions.electron, chromium: process.versions.chrome }),
+      "Manager dialogue, card dialogue and reviewer Work view: exact six codes, new and reopened with IPC fixtures.",
+      "A question mark stays outside the HEX swatch. Outgoing manager messages preserve literal URLs and code fences in live and saved views.",
+    ];
+    for (const theme of ["dark", "light"]) for (const width of [400, 1000]) {
+      nativeTheme.themeSource = theme;
+      window.setSize(width, 740);
+      await evaluate("applyTheme(" + JSON.stringify(theme) + "); void 0");
+      const layout = await evaluate(`(() => {
+        const message = document.querySelector('.task-review-attempt .chat-text');
+        const labels = [...message.querySelectorAll('.chat-hex-color')];
+        const feed = document.querySelector('.task-work');
+        return {
+          lines: new Set(labels.map(label => label.getBoundingClientRect().top)).size,
+          fits: feed.scrollWidth <= feed.clientWidth + 1,
+          swatches: labels.map(label => {
+            const style = getComputedStyle(label, '::after');
+            return [style.backgroundColor, style.borderTopWidth, style.borderTopColor, style.width, style.height];
+          }),
+          links: [...message.querySelectorAll('a')].map(link => link.getAttribute('href')),
+          hash: message.querySelector('.chat-digest')?.title,
+          code: message.querySelector('pre code')?.textContent.trim(),
+          inline: labels.slice(1).every(label => label.parentElement.matches('code')),
+        };
+      })()`);
+      assert.ok(layout.fits && layout.inline);
+      if (width === 400) assert.ok(layout.lines > 1, JSON.stringify(layout));
+      assert.deepEqual(layout.links, ["https://example.com/#123456", "https://example.com/#abcdef"]);
+      assert.equal(layout.hash, "abc1234");
+      assert.equal(layout.code, "#123456");
+      for (const [index, [fill, border, borderColor, w, h]] of layout.swatches.entries()) {
+        const rgb = colors[index].slice(1).match(/../g).map(pair => parseInt(pair, 16));
+        assert.equal(fill, "rgb(" + rgb.join(", ") + ")");
+        assert.equal(border, "1px");
+        assert.notEqual(borderColor, fill);
+        assert.equal(w, h);
+      }
+      for (const index of [0, 5]) {
+        const selected = await evaluate("getSelection().selectAllChildren(document.querySelectorAll('.task-review-attempt .chat-hex-color')[" + index + "]); getSelection().toString()");
+        await clipboard.clear();
+        window.webContents.copy();
+        assert.equal(selected, colors[index]);
+        for (let attempt = 0; attempt < 20 && !await clipboard.readText(); attempt++) {
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        assert.equal(await clipboard.readText(), colors[index]);
+      }
+      await evaluate("getSelection().removeAllRanges()");
+      if (width === (theme === "dark" ? 1000 : 400)) await capture("hex-colors-" + theme + ".png");
+      report.push(theme + " " + width + "px: wrapping, six RGB fills and borders, intact links/code/hash, exact clipboard text.");
+    }
+    writeFileSync(join(artifacts, "hex-colors-check.txt"), report.join("\n") + "\n");
+    console.log("Chat HEX Chromium checks passed");
+    return;
+  }
   const dialogueFixture = option("--dialogue-history");
   if (dialogueFixture) {
     const reopening = process.argv.includes("--reopen-dialogue");

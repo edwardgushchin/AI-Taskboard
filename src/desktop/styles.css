@@ -829,6 +829,13 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .chat-text.chat-agent-text > :is(h1, h2, h3, h4, h5, h6) + * { margin-block-start: .35em; }
 .chat-text :is(pre, code) { background: var(--lane); border-radius: 4px; }
 .chat-text code { padding: 1px 4px; }
+.chat-hex-color { white-space: nowrap; }
+.chat-hex-color::after {
+  content: ""; display: inline-block; box-sizing: border-box;
+  width: .8em; height: .8em; margin-inline-start: .3em; vertical-align: -.04em;
+  border: 1px solid currentColor; border-radius: 2px;
+  background: var(--chat-hex) padding-box;
+}
 .chat-task-reference, .chat-version { white-space: nowrap; }
 .chat-task-reference > .icon, .chat-version > .icon {
   width: 1em; height: 1em; font-size: 1em; vertical-align: -.125em; margin-inline-end: .25em;

@@ -2754,7 +2754,11 @@ function draftComposer() {
       }
       entry.append(tiles);
     }
-    if (text) entry.append(actor === "agent" ? chatText(text, { agent: true }) : element("p", text, "chat-text"));
+    if (text) {
+      const message = actor === "agent" ? chatText(text, { agent: true }) : element("p", text, "chat-text");
+      if (actor !== "agent") showHexColors(message, true);
+      entry.append(message);
+    }
     appendChatTime(entry, at);
     if (insert) log.append(entry);
     return entry;
