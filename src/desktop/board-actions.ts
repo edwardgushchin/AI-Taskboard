@@ -156,7 +156,7 @@ const actions = {
     properties: { branch: reason, head: reason, remote: reason, remoteBranch: reason }, required: ["branch", "head"] },
   project_git_branch_create: { description: "Create a local branch at an existing full commit ID without checking it out. To publish it on request, use project_git_push with this branch and commit.",
     properties: { branch: reason, head: reason }, required: ["branch", "head"] },
-  project_git_branch_delete: { description: "Use only on a direct user request naming the branch and deletion scope. Pass its checked full tip and a configured remote. The board asks the user to approve this exact deletion and verifies that the branch is merged into the remote's current default branch.",
+  project_git_branch_delete: { description: "Use only on a direct user request naming the branch and deletion scope. Pass its checked full tip and a configured remote. The board asks the user to approve this exact deletion and verifies that the branch is merged into the remote's current default branch. Deletion requires a remote accessible as a repository on disk.",
     properties: { branch: reason, head: reason, remote: reason, scope: { ...string, enum: ["local", "remote"] } },
     required: ["branch", "head", "remote", "scope"] },
   project_git_push: { description: "Push a local branch tip to its configured upstream, or the same branch on origin when there is no upstream. For a branch without upstream, you can instead specify both the configured remote and remoteBranch. Use the local branch name and its full commit ID. Performs a normal Git push without an additional user confirmation. May be rejected by the remote.",

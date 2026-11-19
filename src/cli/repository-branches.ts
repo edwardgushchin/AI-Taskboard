@@ -1,6 +1,11 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
+import { isAbsolute, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { git, gitEnvironment, invokeGit, isAncestor, resolveCommit, worktrees } from "./git.ts";
+import { advanceWorktree } from "./fast-forward-worktree.ts";
+import { withGuardedBranchRefs } from "./ref-transaction.ts";
+import { discoverRepository, git, gitEnvironment, invokeGit, isAncestor, resolveCommit, worktrees } from "./git.ts";
 import { member, TaskboardError, text } from "./model.ts";
 import { redactSecrets } from "./redact.ts";
 import { onBoard, type BoardLocation, type BoardStore } from "./storage.ts";
@@ -172,21 +177,71 @@ export async function fastForwardRepository(location: BoardLocation, input: Reco
     throw new TaskboardError("GIT_BRANCH_REQUIRED", "The source branch is missing on the configured remote.", { remote, remoteRef });
   }
   await fetchObject(root, remote, target);
-  return onBoard(location, () => {
-    checkWorktree();
+  const checkSource = () => {
     if (JSON.stringify(source()) !== JSON.stringify(snapshot)) {
       throw new TaskboardError("STALE_REPOSITORY", "The upstream or remote configuration changed during fetch.");
     }
+  };
+  const check = () => {
+    checkWorktree();
+    checkSource();
+    checkProtectedPaths(root, git(root, ["diff", "--name-only", "--no-renames", "-z", head, target, "--"], historyEnv).split("\0").filter(Boolean));
+  };
+  const needsUpdate = onBoard(location, () => {
+    checkWorktree();
+    checkSource();
     if (head === target || isAncestor(root, target, head, historyEnv)) {
-      return { branch: input.branch, head, remote, remoteRef, remoteHead: target, updated: false };
+      return false;
     }
     if (!isAncestor(root, head, target, historyEnv)) {
       throw new TaskboardError("GIT_DIVERGED", "Local and remote histories diverged. Fast-forward was refused.", { head, remote, remoteRef, target });
     }
-    checkProtectedPaths(root, git(root, ["diff", "--name-only", "--no-renames", "-z", head, target, "--"], historyEnv).split("\0").filter(Boolean));
-    git(root, ["-c", "submodule.recurse=false", "merge", "--ff-only", "--no-autostash", "--no-overwrite-ignore", "--", target], historyEnv);
-    return { branch: input.branch, head: target, previousHead: head, remote, remoteRef, remoteHead: target, updated: true };
+    return true;
   });
+  if (!needsUpdate) return { branch: input.branch, head, remote, remoteRef, remoteHead: target, updated: false };
+  await advanceWorktree(root, ref, head, target, historyEnv, () => onBoard(location, check));
+  return { branch: input.branch, head: target, previousHead: head, remote, remoteRef, remoteHead: target, updated: true };
+}
+
+function transactionalRemote(root: string, url: string, remote: string) {
+  const unsupported = () => new TaskboardError("GIT_REMOTE_TRANSACTION_UNAVAILABLE",
+    "Safe branch deletion requires direct transactional access to the configured remote repository. The branch was preserved.", { remote });
+  if (url.includes("\n")) throw unsupported();
+  let path: string;
+  if (url.startsWith("file://")) {
+    try { path = fileURLToPath(url); } catch { throw unsupported(); }
+  } else if (isAbsolute(url) || !url.includes(":")) {
+    path = resolve(root, url);
+  } else {
+    throw unsupported();
+  }
+  const repo = existsSync(path) ? discoverRepository(path) : null;
+  if (!repo || repo.root !== realpathSync(path) || repo.root === realpathSync(root)) throw unsupported();
+  return repo;
+}
+
+function requireDirectRemoteDeletion(root: string, remoteRoot: string, remote: string) {
+  const hooks = (cwd: string, names: string[]) => names.some(name =>
+    existsSync(git(cwd, ["rev-parse", "--path-format=absolute", "--git-path", "hooks/" + name]).trimEnd()));
+  const deny = invokeGit(remoteRoot, ["config", "--type=bool", "--default=false", "--get", "receive.denyDeletes"]);
+  const customTransport = ["receivepack", "uploadpack"].some(key =>
+    invokeGit(root, ["config", "--get", "remote." + remote + "." + key]).code !== 1);
+  const filters = invokeGit(remoteRoot, ["config", "--get-regexp", "^(receive[.](hiderefs|procreceiverefs)|transfer[.]hiderefs)$"]);
+  if (deny.code !== 0 || deny.stdout.trim() !== "false" || filters.code !== 1 || customTransport ||
+      hooks(root, ["pre-push"]) ||
+      hooks(remoteRoot, ["pre-receive", "update", "proc-receive", "post-receive", "post-update"])) {
+    throw new TaskboardError("GIT_REMOTE_TRANSACTION_UNAVAILABLE",
+      "The remote or project has push rules that require normal receive-pack. Branch deletion was refused.", { remote });
+  }
+}
+
+function clearDeletedBranchConfig(root: string, branch: string) {
+  const result = invokeGit(root, ["config", "--local", "--remove-section", "branch." + branch]);
+  if (result.code !== 0 && !result.stderr.startsWith("fatal: no such section:")) {
+    throw new TaskboardError("GIT_BRANCH_CONFIG_FAILED",
+      "The local branch was deleted, but Git could not remove its configuration. Clean up the old branch settings before recreating it.",
+      { branch, deleted: true, output: result.stderr.trim() });
+  }
 }
 
 export async function deleteRepositoryBranch(location: BoardLocation, input: Record<string, unknown>) {
@@ -198,30 +253,34 @@ export async function deleteRepositoryBranch(location: BoardLocation, input: Rec
   if (input.confirmed !== true) {
     throw new TaskboardError("USER_DIRECTION_REQUIRED", "Deletion requires user approval for this branch, remote and commit.");
   }
-  const destination = () => {
-    const url = remoteUrls(root, remote);
-    if (scope === "remote" && (url.includes("\n") || remoteUrls(root, remote, true) !== url)) {
-      throw new TaskboardError("GIT_REMOTE_REQUIRED", "Remote deletion requires one identical fetch and push destination.");
+  const url = remoteUrls(root, remote);
+  const repo = transactionalRemote(root, url, remote);
+  const oid = (path: string, name: string) => invokeGit(path,
+    ["rev-parse", "--verify", "--quiet", "--end-of-options", name], historyEnv).stdout.trim();
+  const symbolic = (path: string, name: string) => invokeGit(path, ["symbolic-ref", "--no-recurse", "--quiet", name]).stdout.trim();
+  const primary = symbolic(repo.root, "HEAD");
+  const primaryHead = primary.startsWith(heads) && !symbolic(repo.root, primary) ? oid(repo.root, primary) : "";
+  if (!primaryHead || !commitId.test(primaryHead) ||
+      invokeGit(repo.root, ["cat-file", "-t", primaryHead], historyEnv).stdout.trim() !== "commit") {
+    throw new TaskboardError("GIT_REMOTE_DEFAULT_UNKNOWN", "Could not verify the remote's default branch and current commit.", { remote });
+  }
+
+  let projectPrimary = primary;
+  if (remote !== "origin" && remotes(root).includes("origin")) {
+    const origin = await advertisedRefs(root, "origin", ["HEAD"]);
+    projectPrimary = origin.get("symref:HEAD") ?? "";
+    if (!projectPrimary.startsWith(heads) || !commitId.test(origin.get("HEAD") ?? "")) {
+      throw new TaskboardError("GIT_PROJECT_DEFAULT_UNKNOWN", "Could not verify the project default branch on origin.", { remote: "origin" });
     }
-    return url;
-  };
-  const url = destination();
-  const readRemote = async () => {
-    const refs = await advertisedRefs(root, remote, ["HEAD", ref]);
-    const primary = refs.get("symref:HEAD");
-    const primaryHead = refs.get("HEAD");
-    if (!primary?.startsWith(heads) || invokeGit(root, ["check-ref-format", primary]).code !== 0 ||
-        !primaryHead || !commitId.test(primaryHead)) {
-      throw new TaskboardError("GIT_REMOTE_DEFAULT_UNKNOWN", "Could not verify the remote's default branch and current commit.", { remote });
-    }
-    return { primary, primaryHead, remoteHead: refs.get(ref) };
-  };
-  const checkBranch = (store: BoardStore, primary: string) => {
+  }
+
+  const branch = ref.slice(heads.length);
+  const checkBranch = (store: BoardStore) => {
     const compare = (candidate?: string) => candidate?.toLowerCase() === ref.toLowerCase();
     const trees = worktrees(root);
-    const originDefault = invokeGit(root, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]).stdout.trim();
+    const originDefault = symbolic(root, "refs/remotes/origin/HEAD");
     const originPrefix = "refs/remotes/origin/";
-    if ([primary, trees[0]?.branch, heads + "main", heads + "master",
+    if ([primary, projectPrimary, trees[0]?.branch, heads + "main", heads + "master",
       originDefault.startsWith(originPrefix) ? heads + originDefault.slice(originPrefix.length) : undefined].some(compare) ||
       ref.toLowerCase().startsWith(heads + "ai-taskboard/")) {
       throw new TaskboardError("GIT_PROTECTED_BRANCH", "This is a protected project, remote default or task branch.", { ref, remote });
@@ -229,42 +288,53 @@ export async function deleteRepositoryBranch(location: BoardLocation, input: Rec
     const task = store.storedCards().find(task => !["done", "cancelled"].includes(task.status) &&
       (compare(task.git?.target) || compare(task.git?.branch)));
     if (task) throw new TaskboardError("GIT_PROTECTED_BRANCH", "An open card uses this branch.", { ref, id: task.id });
-    if (trees.some(tree => compare(tree.branch))) {
+    if (trees.some(tree => compare(tree.branch)) || (scope === "remote" && worktrees(repo.root).some(tree => compare(tree.branch)))) {
       throw new TaskboardError("GIT_BRANCH_IN_USE", "A registered worktree has this branch checked out.", { ref });
     }
-    if (scope === "local" && (invokeGit(root, ["symbolic-ref", "--quiet", ref]).code === 0 || resolveCommit(root, ref) !== head)) {
-      throw new TaskboardError("STALE_REPOSITORY", "The local branch is missing, symbolic or changed since inspection.", { ref });
+    const targetRoot = scope === "local" ? root : repo.root;
+    if (symbolic(targetRoot, ref) || oid(targetRoot, ref) !== head) {
+      throw new TaskboardError("STALE_REPOSITORY", "The selected branch is missing, symbolic or changed since inspection.", { remote, ref });
     }
   };
-  const snapshot = await readRemote();
-  onBoard(location, store => checkBranch(store, snapshot.primary));
-  if (scope === "remote" && snapshot.remoteHead !== head) {
-    throw new TaskboardError("STALE_REPOSITORY", "The remote branch is missing or changed since inspection.", { remote, ref });
-  }
-  await fetchObject(root, remote, snapshot.primaryHead);
-  if (resolveCommit(root, head) !== head || !isAncestor(root, head, snapshot.primaryHead, historyEnv)) {
-    throw new TaskboardError("GIT_UNMERGED_BRANCH", "The branch contains commits outside the history of the remote's current default branch.",
-      { ref, head, remote, primary: snapshot.primary, primaryHead: snapshot.primaryHead });
-  }
-  const current = await readRemote();
-  if (current.primary !== snapshot.primary || current.primaryHead !== snapshot.primaryHead ||
-      (scope === "remote" && current.remoteHead !== head)) {
-    throw new TaskboardError("STALE_REPOSITORY", "The remote default or selected branch changed during verification.", { remote, ref });
-  }
+  const checkDestination = () => {
+    if (invokeGit(root, ["config", "--get", "remote." + remote + ".uploadpack"]).code !== 1) {
+      throw new TaskboardError("GIT_REMOTE_TRANSACTION_UNAVAILABLE",
+        "The configured remote uses a custom upload-pack command. Its default branch could not be guarded directly.", { remote });
+    }
+    if (remoteUrls(root, remote) !== url || transactionalRemote(root, url, remote).root !== repo.root) {
+      throw new TaskboardError("STALE_REPOSITORY", "The remote destination changed during verification.");
+    }
+    if (scope === "remote") {
+      if (!repo.bare || remoteUrls(root, remote, true) !== url) {
+        throw new TaskboardError("GIT_REMOTE_TRANSACTION_UNAVAILABLE",
+          "Remote deletion requires a bare repository with one identical fetch and push destination.", { remote });
+      }
+      requireDirectRemoteDeletion(root, repo.root, remote);
+    }
+  };
+
   onBoard(location, store => {
-    checkBranch(store, current.primary);
-    if (destination() !== url) throw new TaskboardError("STALE_REPOSITORY", "The remote destination changed during verification.");
-    if (scope === "local") {
-      git(root, ["update-ref", "--no-deref", "-d", ref, head]);
-      return;
-    }
-    // Keep the board's worktree and card checks current while the server applies the deletion.
-    try {
-      execFileSync("git", ["push", "--porcelain", "--no-mirror", "--no-follow-tags", "--recurse-submodules=no",
-        "--force-with-lease=" + ref + ":" + head, "--", remote, ":" + ref], { ...networkOptions(root), stdio: "pipe" });
-    } catch (error) {
-      throw networkFailure(error, remote, "Git refused remote deletion. Check the current branch tip and remote permissions.");
-    }
+    checkDestination();
+    checkBranch(store);
   });
-  return { scope, branch: input.branch, ref, head, remote, primary: current.primary, primaryHead: current.primaryHead, deleted: true };
+  if (invokeGit(repo.root, ["cat-file", "-t", head], historyEnv).stdout.trim() !== "commit" ||
+      !isAncestor(repo.root, head, primaryHead, historyEnv)) {
+    throw new TaskboardError("GIT_UNMERGED_BRANCH", "The branch contains commits outside the verified history of the remote's current default branch.",
+      { ref, head, remote, primary, primaryHead });
+  }
+
+  const commands = ["option no-deref", "verify " + primary + " " + primaryHead];
+  if (scope === "remote") commands.push("option no-deref", "delete " + ref + " " + head);
+  await onBoard(location, async store =>
+    withGuardedBranchRefs(repo.root, primary, primaryHead, commands, "taskboard: guard deletion of " + ref, async commit => {
+      checkDestination();
+      checkBranch(store);
+      if (scope === "remote") {
+        await commit();
+      } else {
+        git(root, ["update-ref", "--no-deref", "-d", ref, head]);
+        clearDeletedBranchConfig(root, branch);
+      }
+    }));
+  return { scope, branch, ref, head, remote, primary, primaryHead, deleted: true };
 }

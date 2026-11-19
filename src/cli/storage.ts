@@ -169,6 +169,7 @@ function withSqliteLock<T>(lockPath: string, timeoutMs: 0 | 15_000, callback: (l
   requireRegular(lockPath);
   const lock = new DatabaseSync(lockPath);
   let closed = false;
+  let releaseAfterCallback = false;
   const release = () => {
     if (!closed) { lock.close(); closed = true; }
   };
@@ -184,9 +185,14 @@ function withSqliteLock<T>(lockPath: string, timeoutMs: 0 | 15_000, callback: (l
       }
       throw error;
     }
-    return callback(Math.round(performance.now() - waiting), release);
+    const result = callback(Math.round(performance.now() - waiting), release);
+    if (result instanceof Promise) {
+      releaseAfterCallback = true;
+      return result.finally(release) as T;
+    }
+    return result;
   } finally {
-    release();
+    if (!releaseAfterCallback) release();
   }
 }
 
@@ -618,10 +624,16 @@ export function onBoard<T>(location: BoardLocation, callback: (store: BoardStore
     finishTestRecovery(location);
     const store = new BoardStore(location);
     lockedStores.add(store);
+    let releaseAfterCallback = false;
     try {
-      return callback(store, lockWaitMs);
+      const result = callback(store, lockWaitMs);
+      if (result instanceof Promise) {
+        releaseAfterCallback = true;
+        return result.finally(() => lockedStores.delete(store)) as T;
+      }
+      return result;
     } finally {
-      lockedStores.delete(store);
+      if (!releaseAfterCallback) lockedStores.delete(store);
     }
   }, timeoutMs);
 }

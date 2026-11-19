@@ -2652,7 +2652,7 @@ test("acceptance repair has an isolated context and waits for shared reviewer ca
   assert.equal(f.cliCalls.filter(args => args[0] === "start" && args[1] === card.id).length, 2);
 });
 
-test("manager Git branch workflow stays scoped and uses checked commits", { timeout: 180_000 }, async t => {
+test("manager Git branch workflow stays scoped and uses checked commits", { timeout: 240_000 }, async t => {
   const f = fixture(t);
   const project = f.project;
   const remote = join(f.folder, "remote.git");
@@ -2714,7 +2714,37 @@ test("manager Git branch workflow stays scoped and uses checked commits", { time
     assert.equal((await act("project_git_fast_forward", source)).error.code, "GIT_DIRTY_WORKTREE");
     assert.equal(readFileSync(join(project, "tracked"), "utf8"), "local edit");
     await writeFile(join(project, "tracked"), "before\n");
+    const monitor = join(project, ".git", "atb-fast-forward-monitor");
+    await writeFile(monitor, [
+      "#!/bin/sh", "if test -f .git/atb-monitor-seen; then",
+      "  git symbolic-ref HEAD refs/heads/other || exit 1",
+      "else", "  touch .git/atb-monitor-seen", "fi", "exit 1",
+    ].join("\n") + "\n", { mode: 0o755 });
+    git(project, "config", "core.fsmonitor", monitor.replaceAll("\\", "/"));
+    git(project, "config", "core.fsmonitorHookVersion", "2");
+    const checkoutChanged = await act("project_git_fast_forward", source);
+    git(project, "config", "--unset", "core.fsmonitor");
+    git(project, "config", "--unset", "core.fsmonitorHookVersion");
+    rmSync(monitor);
+    rmSync(join(project, ".git", "atb-monitor-seen"));
+    assert.equal(checkoutChanged.error.code, "GIT_REF_TRANSACTION_FAILED", JSON.stringify(checkoutChanged));
+    assert.equal(git(project, "branch", "--show-current"), "other");
+    assert.equal(git(project, "rev-parse", "refs/heads/main"), base);
+    assert.equal(git(project, "rev-parse", "refs/heads/other"), base);
+    assert.equal(readFileSync(join(project, "tracked"), "utf8"), "before\n");
+    git(project, "switch", "main");
+    const checkoutHook = join(project, ".git", "hooks", "reference-transaction");
+    const checked = join(project, ".git", "atb-checkout-race");
+    await writeFile(checkoutHook, [
+      "#!/bin/sh", "read old next ref", '[ "$1" = prepared ] && [ "$ref" = HEAD ] || exit 0',
+      'git switch other >.git/atb-checkout-race 2>&1 && exit 1',
+      'git symbolic-ref HEAD refs/heads/other >>.git/atb-checkout-race 2>&1 && exit 1', "exit 0",
+    ].join("\n") + "\n", { mode: 0o755 });
     const ff = await act("project_git_fast_forward", source);
+    rmSync(checkoutHook);
+    assert.match(readFileSync(checked, "utf8"), /index\.lock/);
+    assert.match(readFileSync(checked, "utf8"), /HEAD\.lock/);
+    rmSync(checked);
     assert.equal(ff.ok, true, JSON.stringify(ff.error));
     assert.equal(ff.data.head, incoming);
     assert.equal(git(project, "rev-parse", "HEAD"), incoming);
@@ -2806,14 +2836,68 @@ test("manager Git branch workflow stays scoped and uses checked commits", { time
   })).error.code, "STALE_REPOSITORY");
   assert.equal(git(project, "rev-parse", "merged"), current);
 
-  const hook = join(project, ".git", "hooks", "pre-push");
-  await writeFile(hook, "#!/bin/sh\nunset GIT_DIR GIT_WORK_TREE\n" +
-    "git --git-dir=\"$2\" update-ref refs/heads/published " + unique + " " + incoming + "\n", { mode: 0o755 });
-  const deniedRace = await remove("remote", "published", incoming);
-  assert.equal(deniedRace.error.code, "GIT_REMOTE_FAILED", JSON.stringify(deniedRace));
+  const detached = join(f.folder, "detached-refs");
+  mkdirSync(detached);
+  await writeFile(join(detached, "HEAD"), current + "\n");
+  await writeFile(join(detached, "commondir"), remote + "\n");
+  const hook = join(remote, "hooks", "reference-transaction");
+  const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+  const changeBeforeWrite = (ref: string, next: string, expected: string) => writeFile(hook, [
+    "#!/bin/sh", "read old next ref", '[ "$1" = prepared ] && [ "$ref" = HEAD ] || exit 0',
+    "git --git-dir=" + quote(detached) + " update-ref " + ref + " " + next + " " + expected,
+  ].join("\n") + "\n", { mode: 0o755 });
+  for (const [scope, branch, head] of [["local", "merged", current], ["remote", "published", incoming]]) {
+    // The remote's HEAD was read, and the default's old commit was accepted as
+    // ancestry evidence. Move the default just before its verification lock.
+    await changeBeforeWrite("refs/heads/trunk", base, current);
+    const blocked = await remove(scope!, branch!, head!);
+    assert.equal(blocked.error.code, "GIT_REF_TRANSACTION_FAILED", JSON.stringify(blocked));
+    assert.equal(git(remote, "rev-parse", "trunk"), base);
+    assert.equal(git(scope === "local" ? project : remote, "rev-parse", branch!), head);
+    rmSync(hook);
+    git(remote, "update-ref", "refs/heads/trunk", current, base);
+  }
+  await changeBeforeWrite("refs/heads/published", unique, incoming);
+  assert.equal((await remove("remote", "published", incoming)).error.code, "GIT_REF_TRANSACTION_FAILED");
   assert.equal(git(remote, "rev-parse", "published"), unique);
   rmSync(hook);
   git(remote, "update-ref", "refs/heads/published", incoming, unique);
+
+  const origin = join(f.folder, "origin.git");
+  git(f.folder, "init", "--bare", "-b", "stable", origin);
+  git(project, "remote", "add", "origin", origin);
+  git(project, "push", "origin", incoming + ":refs/heads/stable");
+  git(project, "branch", "stable", incoming);
+  assert.equal(git(project, "branch", "--show-current"), "main");
+  assert.equal(git(project, "branch", "-r", "--list", "origin/HEAD"), "");
+  assert.equal((await remove("local", "stable", incoming)).error.code, "GIT_PROTECTED_BRANCH");
+  assert.equal(git(project, "rev-parse", "stable"), incoming);
+
+  const changeHead = join(f.folder, "rotate-remote-head");
+  git(remote, "branch", "replacement", base);
+  await writeFile(changeHead, [
+    "#!/bin/sh", "git --git-dir=" + quote(remote) + " symbolic-ref HEAD refs/heads/replacement || exit 1",
+    'exec git upload-pack "$@"',
+  ].join("\n") + "\n", { mode: 0o755 });
+  git(project, "config", "remote.origin.uploadpack", "sh " + quote(changeHead));
+  for (const [scope, branch, head] of [["local", "merged", current], ["remote", "published", incoming]]) {
+    const blocked = await remove(scope!, branch!, head!);
+    assert.equal(blocked.error.code, "GIT_REF_TRANSACTION_FAILED", JSON.stringify(blocked));
+    assert.equal(git(remote, "symbolic-ref", "HEAD"), "refs/heads/replacement");
+    assert.equal(git(scope === "local" ? project : remote, "rev-parse", branch!), head);
+    git(remote, "symbolic-ref", "HEAD", "refs/heads/trunk");
+  }
+  git(project, "config", "--unset", "remote.origin.uploadpack");
+
+  git(remote, "config", "receive.denyDeletes", "true");
+  assert.equal((await remove("remote", "published", incoming)).error.code, "GIT_REMOTE_TRANSACTION_UNAVAILABLE");
+  assert.equal(git(remote, "rev-parse", "published"), incoming);
+  git(remote, "config", "--unset", "receive.denyDeletes");
+  git(project, "remote", "add", "network-only", "https://example.invalid/repo");
+  for (const scope of ["local", "remote"]) {
+    const unsupported = await f.cli(["git", "branch-delete"], { scope, branch: "merged", head: current, remote: "network-only", confirmed: true });
+    assert.equal(unsupported.error.code, "GIT_REMOTE_TRANSACTION_UNAVAILABLE");
+  }
 
   git(remote, "symbolic-ref", "HEAD", "refs/heads/missing");
   assert.equal((await remove("local", "merged", current)).error.code, "GIT_REMOTE_DEFAULT_UNKNOWN");
@@ -2823,6 +2907,16 @@ test("manager Git branch workflow stays scoped and uses checked commits", { time
   assert.equal((await remove("remote", "published", incoming)).data.deleted, true);
   assert.equal(git(project, "branch", "--list", "merged"), "");
   assert.equal(git(remote, "branch", "--list", "published"), "");
+  const recreated = await f.run("Create merged again and publish it to a new branch", async act => {
+    assert.equal((await act("project_git_branch_create", { branch: "merged", head: current })).ok, true);
+    assert.equal(git(project, "for-each-ref", "--format=%(upstream)", "refs/heads/merged"), "");
+    const pushed = await act("project_git_push", { branch: "merged", head: current, remote: "upstream", remoteBranch: "recreated" });
+    assert.equal(pushed.ok, true, JSON.stringify(pushed));
+    assert.equal(git(remote, "rev-parse", "recreated"), current);
+    assert.equal(git(project, "config", "branch.merged.merge"), "refs/heads/recreated");
+    return { text: "Recreated and published." };
+  });
+  assert.equal(recreated.ok, true, JSON.stringify(recreated.error));
   assert.equal(git(project, "rev-parse", "HEAD"), current);
   assert.equal(git(neighbor, "show-ref"), neighborRefs);
   assert.deepEqual(readFileSync(join(neighbor, ".tasks", "board.json")), neighborIndex);
