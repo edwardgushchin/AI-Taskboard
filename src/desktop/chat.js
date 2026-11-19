@@ -69,15 +69,26 @@ function showChatPreview(tile, src) {
   preview.src = src;
 }
 
-function renderChatTurn(list, draft) {
+function renderChatTurn(list, draft, items = [], replying = draft.pending === "replying") {
   const turn = list.querySelector(".chat-turn");
   const atBottom = draft.scroll === undefined;
-  turn.hidden = draft.pending !== "replying";
+  turn.hidden = !replying;
   turn.replaceChildren();
   if (!turn.hidden) {
-    const thinking = element("p", () => t("ui.thinking_14a886f3"), "chat-thinking");
-    thinking.setAttribute("role", "status");
-    turn.append(thinking);
+    const replies = items.filter(item => item.type === "agentMessage" && item.phase === "final_answer" && item.text);
+    for (const item of replies) {
+      const entry = element("div", undefined, "chat-entry");
+      entry.dataset.actor = "agent";
+      entry.append(element("span", () => t("ui.agent_262834de"), "chat-author"),
+        chatText(item.text, { taskId: taskInSheet?.id, agent: true }));
+      appendChatTime(entry, item.at);
+      turn.append(entry);
+    }
+    if (!replies.length) {
+      const thinking = element("p", () => t("ui.thinking_14a886f3"), "chat-thinking");
+      thinking.setAttribute("role", "status");
+      turn.append(thinking);
+    }
   }
   if (atBottom) list.scrollTop = list.scrollHeight;
 }
@@ -1086,7 +1097,10 @@ function taskChat(task) {
     renderTeam();
   };
   area.updateDiscussion = () => {
-    renderChatTurn(list, draft);
+    const savedReply = lastMessage?.actor === "agent" && liveItems.some(item =>
+      item.type === "agentMessage" && item.phase === "final_answer" && item.at === lastMessage.at);
+    renderChatTurn(list, draft, liveItems, !savedReply &&
+      (draft.pending === "replying" || frame.replyingTasks?.includes(task.id)));
     const commentary = frame.runActivity?.[task.id]?.some(item => item.phase === "commentary") ? [] : draft.commentary ?? [];
     progress.replaceChildren(...commentary.map(text => chatText(text, { taskId: task.id, agent: true })));
     progress.hidden = !commentary.length;

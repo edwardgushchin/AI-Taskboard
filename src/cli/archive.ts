@@ -225,6 +225,12 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
   const draftDiscussion = input.draftDiscussion === true;
   requireRevision(task, input.revision, draftDiscussion);
   const actor = actorFor(input, "user");
+  const at = input.at;
+  if (at !== undefined && (actor !== "agent" || typeof at !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(at) ||
+      !Number.isFinite(Date.parse(at)) || new Date(at).toISOString() !== at)) {
+    throw new TaskboardError("INVALID_INPUT", "Only an agent reply can supply an ISO timestamp from its first event.");
+  }
   const message = text(input.text, "text");
   const model = text(input.model, "model", true);
   const effort = text(input.effort, "effort", true);
@@ -262,6 +268,7 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
       ...chat,
       ...(actor === "user" || attachments.length ? { files: attachments.map(attachment => attachment.file) } : {}),
     };
+    if (typeof at === "string") updated.history.at(-1)!.at = at;
     if (durationMs !== undefined) updated.history.at(-1)!.durationMs = durationMs;
     if (run) updated.history.at(-1)!.run = run;
     return store.save(updated);

@@ -773,10 +773,12 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .chat-entry {
   display: flow-root; align-self: flex-start; min-width: 0; width: 100%; padding: 2px 0;
 }
-.chat-entry[data-actor="user"]:not(.chat-event) {
-  align-self: flex-end; width: fit-content; max-width: 88%; padding: 10px 14px; border-radius: 16px;
+.chat-entry[data-actor="user"]:not(.chat-event),
+.task-dialogue .chat-entry[data-actor="agent"]:not(.chat-coordination, .chat-event) {
+  width: fit-content; max-width: 88%; padding: 10px 14px; border-radius: 16px;
   background: color-mix(in srgb, var(--text) 6%, var(--panel));
 }
+.chat-entry[data-actor="user"]:not(.chat-event) { align-self: flex-end; }
 .chat-author {
   position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
 }
@@ -878,6 +880,7 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .chat-time { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .board-manager-message > .chat-time { text-align: end; }
 .chat-entry[data-actor="user"] .chat-time { text-align: end; }
+.task-dialogue .chat-entry > .chat-time { text-align: end; }
 .chat-day, .chat-entry.chat-event { align-self: center; color: var(--muted); text-align: center; font-size: 12px; }
 .chat-day span { display: inline-block; padding: 3px 10px; }
 .chat-entry.chat-event { width: auto; max-width: 94%; padding: 0; }
@@ -885,6 +888,7 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .chat-event .chat-time { display: inline; margin-inline-start: 9px; }
 .chat-commentary, .chat-turn { align-self: flex-start; min-width: 0; width: 100%; padding: 2px 0; }
 .chat-turn { display: grid; gap: 18px; }
+.task-dialogue .chat-turn { display: flex; flex-direction: column; }
 .chat-thinking { color: var(--muted); }
 .chat-thinking { font-size: 13px; animation: chat-thinking 1.6s ease-in-out infinite alternate; }
 @keyframes chat-thinking { from { opacity: .65; } to { opacity: 1; } }
