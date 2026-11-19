@@ -1,14 +1,25 @@
 <h1 align="center">AI Taskboard</h1>
 <p align="center"><strong>Локальная доска задач для coding-агентов и тех, кто проверяет их работу.</strong></p>
 <p align="center"><a href="README.md">English</a> · Русский</p>
+<hr>
 <p align="center">
   <a href="https://github.com/edwardgushchin/AI-Taskboard/blob/main/package.json"><img src="https://img.shields.io/badge/Node.js-%E2%89%A524.12.0-339933?logo=node.js&amp;logoColor=white" alt="Node.js для запуска из исходников: 24.12.0 или новее"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-blue" alt="Лицензия: PolyForm Noncommercial 1.0.0"></a>
   <a href="https://github.com/edwardgushchin/AI-Taskboard/releases"><img src="https://img.shields.io/github/v/release/edwardgushchin/AI-Taskboard?include_prereleases&amp;label=alpha" alt="Последний опубликованный alpha-выпуск"></a>
+</p>
+<p align="center">
   <a href="https://github.com/edwardgushchin/AI-Taskboard/commits/main/"><img src="https://img.shields.io/github/last-commit/edwardgushchin/AI-Taskboard/main?label=main%20commit" alt="Последний коммит main"></a>
   <a href="https://github.com/edwardgushchin/AI-Taskboard/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/edwardgushchin/AI-Taskboard/actions/workflows/ci.yml/badge.svg?branch=main" alt="Native CI (main)"></a>
 </p>
-<p align="center"><a href="https://github.com/edwardgushchin/AI-Taskboard/releases"><strong>Скачать alpha-сборку</strong></a> · <a href="#quick-start">Быстрый старт</a> · <a href="#documentation">Документация</a> · <a href="CONTRIBUTING.md#русский">Помочь проекту</a></p>
+<p align="center">
+  <a href="https://github.com/edwardgushchin/AI-Taskboard/releases"><strong>Скачать alpha-сборку</strong></a> ·
+  <a href="#quick-start">Быстрый старт</a> ·
+  <a href="#features">Возможности</a> ·
+  <a href="#workflow">Рабочий процесс</a> ·
+  <a href="#platforms">Платформы</a> ·
+  <a href="#documentation">Документация</a> ·
+  <a href="#contributing">Участие</a>
+</p>
 
 ![Демонстрационная доска AI Taskboard с карточкой в очереди и открытым чатом менеджера](docs/images/board.png)
 
@@ -125,12 +136,27 @@ README и `THIRD-PARTY-NOTICES.txt`; распространяйте их вме�
 загружается из официального репозитория Node.js и включается вместе с лицензией fflate.
 
 <a id="documentation"></a>
-## Документация и обратная связь
+## Документация
 
 - [Первая задача](docs/tutorials/first-task.md)
 - [Установка и настройка](docs/how-to/setup.md)
 - [Индекс документации](docs/README.md)
 - [Разработка и сборка](docs/how-to/development.md)
-- [Руководство участника](CONTRIBUTING.md#русский) и [правила поведения](CODE_OF_CONDUCT.md#русский)
-- [Сообщить об ошибке или предложить улучшение](https://github.com/edwardgushchin/AI-Taskboard/issues/new/choose)
-- [Сообщить об уязвимости приватно](SECURITY.md#русский)
+
+<a id="issues"></a>
+## Как сообщить о проблеме или предложить изменение
+
+Сначала [проверьте существующие заявки](https://github.com/edwardgushchin/AI-Taskboard/issues). Для воспроизводимой проблемы выберите [Сообщить об ошибке](https://github.com/edwardgushchin/AI-Taskboard/issues/new?template=bug.yml), для предложения — [Предложить улучшение](https://github.com/edwardgushchin/AI-Taskboard/issues/new?template=feature.yml). Укажите версию приложения и платформу. Опишите шаги воспроизведения или сценарий использования. Удалите личные данные из журналов и снимков.
+
+<a id="contributing"></a>
+## Участие в проекте
+
+Перед созданием pull request прочитайте [руководство участника](CONTRIBUTING.md#русский) и [правила поведения](CODE_OF_CONDUCT.md#русский). Опишите изменение и проверки по [шаблону pull request](.github/pull_request_template.md).
+
+## Безопасность
+
+Чтобы сообщить об уязвимости приватно, следуйте [политике безопасности](SECURITY.md#русский).
+
+## Доступность
+
+В [сведениях о доступности](ACCESSIBILITY.md#русский) описано, какие средства есть в приложении и как сообщить о проблеме.
