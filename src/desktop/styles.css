@@ -1064,6 +1064,12 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .sheet .notice { flex: none; margin-inline: var(--surface-inset); }
 .form { display: grid; gap: 12px; }
 .form label { display: grid; gap: 6px; font-weight: 600; }
+.backup-form {
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+  overflow-wrap: anywhere;
+}
+.backup-form select { min-width: 0; width: 100%; }
 .board-agent-settings {
   display: grid; min-width: 0; gap: 10px; margin: 0; padding: 12px; border: 1px solid var(--border); border-radius: 6px;
 }
