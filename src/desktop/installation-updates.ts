@@ -194,12 +194,15 @@ export async function prepareWindowsUpdate(candidate: Candidate, signal: AbortSi
     await writeFile(config, JSON.stringify({ parentId: process.pid, installer, digest,
       executable: options.executable, installDirectory: dirname(options.executable),
       args: [...options.args, `--user-data-dir=${options.profile}`] }), "utf8");
-    return { cancel, start: async () => {
-      signal.throwIfAborted();
-      const powershell = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-      options.relaunch(powershell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-        "-WindowStyle", "Hidden", "-File", script, "-Config", config]);
-    } };
+    return {
+      cancel,
+      start: async () => {
+        signal.throwIfAborted();
+        const powershell = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+        options.relaunch(powershell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+          "-WindowStyle", "Hidden", "-File", script, "-Config", config]);
+      },
+    };
   } catch (error) {
     await cancel();
     throw error;

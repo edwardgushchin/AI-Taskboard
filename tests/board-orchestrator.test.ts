@@ -415,7 +415,9 @@ test("manager update commands use the common release check and provide manual in
   let offline = false;
   t.mock.method(globalThis, "fetch", async (url: string) => {
     assert.match(url, /^https:\/\/api.github.com\/repos\/edwardgushchin\/AI-Taskboard\/releases\?/);
-    if (offline) throw new TypeError("Offline");
+    if (offline) {
+      throw new TypeError("Offline");
+    }
     return Response.json([{ tag_name: "v0.1.1-alpha", prerelease: true }]);
   });
   const result = await f.run("Check for AI Taskboard updates", async act => {
@@ -446,7 +448,7 @@ test("a prepared update rejects new dialogue before claiming its writer and canc
     assert.fail("An update must prevent a new provider turn");
   });
   assert.equal(blocked.error.code, "UPDATE_IN_PROGRESS");
-  assert.equal(runtimeEntries(project).some(entry => entry.task === "manager:context"), false);
+  assert.equal(runtimeEntries(project).some(entry => entry.task === "manager:dialogue"), false);
   await f.cancelUpdate();
   const resumed = await f.run("Retry after update cancellation", async act => {
     assert.equal((await act("board_list", {})).ok, true);

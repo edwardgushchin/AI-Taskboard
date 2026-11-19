@@ -519,7 +519,9 @@ let restoringSession = false;
 let quitting = false;
 
 function saveSession(): boolean {
-  if (restoringSession || quitting || !windowStates.size) return false;
+  if (restoringSession || quitting || !windowStates.size) {
+    return false;
+  }
   try {
     const directory = app.getPath("userData");
     mkdirSync(directory, { recursive: true });
@@ -1243,7 +1245,9 @@ const autoBoards = new WeakMap<BoardWatch, {
 let schedulingAgentWork = false;
 
 function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
-  if (applicationUpdates.installing) return;
+  if (applicationUpdates.installing) {
+    return;
+  }
   if (quotaWait) return;
   const { project } = watch.board;
   const planned = (task: Board["tasks"][number], settings: BoardSettings) => task.mergeRepair || task.expertStage ||
@@ -1418,7 +1422,9 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
 const queuedRecoveryDelay = new Set<string>();
 
 function scheduleAgentWork() {
-  if (applicationUpdates.installing) return;
+  if (applicationUpdates.installing) {
+    return;
+  }
   if (schedulingAgentWork) return;
   schedulingAgentWork = true;
   setImmediate(() => {
@@ -1473,7 +1479,9 @@ function scheduleAgentWork() {
 }
 
 function scheduleDraftDiscussions({ board }: BoardWatch) {
-  if (applicationUpdates.installing) return;
+  if (applicationUpdates.installing) {
+    return;
+  }
   const { project, tasks } = board;
   if (isManual(board.settings) || closingProjects.has(project)) return;
   const writers = new Set(agentSlots.entries(project).filter(entry => entry.kind !== "queue").map(entry => entry.task));
@@ -1486,7 +1494,9 @@ function scheduleDraftDiscussions({ board }: BoardWatch) {
 
 function reserveAgent(project: string, role: AgentRole, task?: string, queuedRevision?: number,
   review?: { id: string; mode: ReviewMode }, operation?: import("./board-runtime.ts").RuntimeEntry["operation"]) {
-  if (applicationUpdates.installing) return;
+  if (applicationUpdates.installing) {
+    return;
+  }
   if (quotaWait) return;
   agentSlots.remember(project);
   // A tool call can race the watch snapshot after CLI settings were saved.
@@ -1587,7 +1597,9 @@ async function continueAcceptance(project: string, task: Task) {
 
 const maintenanceWork = new Set<string>();
 async function scheduleMaintenance(project: string, watch: BoardWatch) {
-  if (applicationUpdates.installing) return;
+  if (applicationUpdates.installing) {
+    return;
+  }
   if (maintenanceWork.has(project)) return;
   maintenanceWork.add(project);
   try {
@@ -1604,7 +1616,9 @@ async function scheduleMaintenance(project: string, watch: BoardWatch) {
 }
 
 function scheduleRecurringTasks(now = Date.now()) {
-  if (applicationUpdates.installing) return;
+  if (applicationUpdates.installing) {
+    return;
+  }
   if (quotaWait) return;
   for (const [project, watch] of subscriptions) {
     if (!watch.tabs.size || closingProjects.has(project)) continue;
@@ -2493,7 +2507,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       (!repairTask || (!name.startsWith("project_git_") &&
         !["task_start", "task_start_batch", "task_accept", "task_request_changes", "task_return_to_draft"].includes(name))));
     if (!reviewIds && !cleanupJob) mcpTools.push(...(goal ? goalWorkTools : background ? [] : goalChatTools), githubReadTool);
-    if (!reviewIds && !cleanupJob && !repairTask && !goal && !background) mcpTools.push(...applicationUpdateTools);
+    if (!reviewIds && !cleanupJob && !repairTask && !goal && !background) {
+      mcpTools.push(...applicationUpdateTools);
+    }
     const allowReviewModeChange = !background && !goal && !isManual(settings.data);
     if (allowReviewModeChange) mcpTools.push(boardReviewModeTool);
     if (goal) mcpTools = goalActionTools(mcpTools);
@@ -2660,8 +2676,12 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
             if (!mcpTools.some(tool => tool.name === name)) {
               return cliFailure("INVALID_INPUT", "Use the owner's manager dialogue for application updates.");
             }
-            if (name === "app_check_updates") return applicationUpdates.check();
-            if (applicationUpdates.installing) return cliFailure("UPDATE_IN_PROGRESS", t("updates.preparing"));
+            if (name === "app_check_updates") {
+              return applicationUpdates.check();
+            }
+            if (applicationUpdates.installing) {
+              return cliFailure("UPDATE_IN_PROGRESS", t("updates.preparing"));
+            }
             updateOwner = operation;
             updateProject = project;
             const result = await applicationUpdates.install((args as { version?: unknown } | null)?.version,
@@ -2672,7 +2692,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
             }
             return result;
           }
-          if (applicationUpdates.installing) return cliFailure("UPDATE_IN_PROGRESS", t("updates.preparing"));
+          if (applicationUpdates.installing) {
+            return cliFailure("UPDATE_IN_PROGRESS", t("updates.preparing"));
+          }
           if (name === githubReadTool.name) return readBoardGitHub(board.project, args);
           if (name.startsWith("goal_")) {
             try { return goalAction(name, args) ?? cliFailure("INVALID_INPUT", t("errors.63a61aea5ed6f41a")); }
@@ -3005,7 +3027,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
 }
 
 function scheduleAutoReview(watch: BoardWatch) {
-  if (applicationUpdates.installing) return;
+  if (applicationUpdates.installing) {
+    return;
+  }
   if (quotaWait) return;
   if (isManual(watch.board.settings)) return;
   if (subscriptions.get(watch.board.project) !== watch) return;
@@ -3077,7 +3101,9 @@ function scheduleAutoReview(watch: BoardWatch) {
 }
 
 async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: number, expectedMode: ReviewMode) {
-  if (applicationUpdates.installing) return;
+  if (applicationUpdates.installing) {
+    return;
+  }
   const { board: { project }, reviewReports: reports } = watch;
   const key = project + "\0" + id;
   if (returningDrafts.has(key)) return;

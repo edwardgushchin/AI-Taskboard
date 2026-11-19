@@ -90,9 +90,16 @@ test("manager binds exact found version, cancels, retries and prevents concurren
     prepare: async () => {
       preparations++;
       if (release) {
-        await new Promise<void>(resolve => { release = resolve; });
+        await new Promise<void>(resolve => {
+          release = resolve;
+        });
       }
-      return { start: async () => {}, cancel: async () => { cancellations++; } };
+      return {
+        start: async () => {},
+        cancel: async () => {
+          cancellations++;
+        },
+      };
     },
   });
   const code = (result: Awaited<ReturnType<typeof service.install>>) => result.ok ? "ok" : result.error.code;
@@ -134,7 +141,12 @@ test("busy-after-download is cleaned; failed checks revoke the remembered versio
     version: () => "0.1.0-alpha", supported: () => true, busy: () => busy, confirm: async () => true,
     prepare: async () => {
       busy = true;
-      return { start: async () => {}, cancel: async () => { cancelled++; } };
+      return {
+        start: async () => {},
+        cancel: async () => {
+          cancelled++;
+        },
+      };
     },
   });
   await service.check();
@@ -169,7 +181,9 @@ test("cancellation after preparation removes the package and permits a fresh att
       }
       return {
         start: async () => {},
-        cancel: async () => { cancelled++; },
+        cancel: async () => {
+          cancelled++;
+        },
       };
     },
   });
