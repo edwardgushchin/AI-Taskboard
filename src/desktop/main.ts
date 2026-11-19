@@ -7,6 +7,7 @@ import { watchCodexQuotaExceeded } from "./codex-rpc.ts";
 import { archiveAcceptedCodexChats, rememberTaskCodexThread } from "./codex-task-archive.ts";
 import { confirmedQuota, providerLimitSource, readCodexLimits, type QuotaWait } from "./provider-limits.ts";
 import localization from "./localization.cjs";
+import { BackupService } from "./backup-service.ts";
 import { activeRunSummary, observeActiveRuns, enableSharedRuns } from "./active-runs.ts";
 import { forgetExecutor, matchesQueuedExecutor, prepareQueuedTurn, recordQueuedTurn, registerRuntime, rememberExecutor, runtimeLocation, runtimeTransaction } from "./board-runtime.ts";
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, Notification, protocol, session, shell } from "electron";
@@ -3337,6 +3338,65 @@ ipcMain.handle("board:recent", async (event, path: unknown) => {
   if (typeof path !== "string" || !recentBoards.includes(path)) throw new Error("Unknown recent board.");
   await openProject(state, path);
 });
+let backupService: BackupService | undefined;
+function backups(): BackupService {
+  return backupService ??= new BackupService(app.getPath("userData"));
+}
+
+let backupTick = false;
+async function tickBackups(): Promise<void> {
+  if (backupTick || quitting) return;
+  backupTick = true;
+  try {
+    await backups().tick();
+  } catch (error) {
+    console.error("Backup maintenance:", error);
+  } finally {
+    backupTick = false;
+  }
+}
+
+ipcMain.handle("backups:status", event => {
+  const state = stateOf(event);
+  return backups().status(state.board?.project);
+});
+ipcMain.handle("backups:automatic", (event, enabled: unknown) => {
+  const state = stateOf(event);
+  if (!state.board || typeof enabled !== "boolean") throw new Error("Open a board first.");
+  backups().automatic(state.board.project, enabled);
+});
+ipcMain.handle("backups:create", async event => {
+  const state = stateOf(event);
+  if (!state.board) throw new Error("Open a board first.");
+  await backups().create(state.board.project);
+});
+ipcMain.handle("backups:restore", async (event, id: unknown) => {
+  const state = stateOf(event);
+  if (typeof id !== "string") throw new Error("Select a backup.");
+  const backup = await backups().verify(id);
+  if (state.window.isDestroyed()) return;
+  const result = await dialog.showOpenDialog(state.window, {
+    title: t("backup.restore"),
+    properties: ["openDirectory"],
+  });
+  if (result.canceled || state.window.isDestroyed()) return;
+  const parent = result.filePaths[0];
+  const confirmation = await dialog.showMessageBox(state.window, {
+    type: "question",
+    buttons: [t("backup.restore"), t("ui.cancel_4c6dcc32")],
+    defaultId: 1,
+    cancelId: 1,
+    message: t("backup.confirm", {
+      project: backup.project,
+      date: new Date(backup.createdAt).toLocaleString(localization.locale),
+    }),
+    detail: join(parent, "AI-Taskboard-" + backup.id),
+  });
+  if (confirmation.response !== 0 || state.window.isDestroyed()) return;
+  const restored = await backups().restore(id, parent);
+  if (!state.window.isDestroyed()) await openProject(state, restored);
+  return true;
+});
 ipcMain.handle("app:checkUpdates", async event => {
   stateOf(event);
   return applicationUpdates.check();
@@ -4323,6 +4383,8 @@ else {
     } else if (app.isReady()) createWindow();
   });
   void app.whenReady().then(() => {
+    void tickBackups();
+    setInterval(() => void tickBackups(), 15_000).unref();
     if (process.platform === "win32") app.setAppUserModelId("org.aitaskboard.desktop");
     const trustedFrame = (id: number | undefined, url: string | undefined, mainFrame: boolean) =>
       id !== undefined && windowStates.has(id) && mainFrame && url === html.href;
