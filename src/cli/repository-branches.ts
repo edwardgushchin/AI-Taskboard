@@ -204,8 +204,8 @@ export async function fastForwardRepository(location: BoardLocation, input: Reco
     return true;
   });
   if (!needsUpdate) return { branch: input.branch, head, remote, remoteRef, remoteHead: target, updated: false };
-  await advanceWorktree(root, ref, head, target, historyEnv, () => onBoard(location, check));
-  return { branch: input.branch, head: target, previousHead: head, remote, remoteRef, remoteHead: target, updated: true };
+  const recoveryDirectory = await advanceWorktree(root, ref, head, target, historyEnv, () => onBoard(location, check));
+  return { branch: input.branch, head: target, previousHead: head, remote, remoteRef, remoteHead: target, updated: true, recoveryDirectory };
 }
 
 function transactionalRemote(root: string, url: string, remote: string) {

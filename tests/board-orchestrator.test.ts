@@ -2976,6 +2976,9 @@ test("manager Git branch workflow stays scoped and uses checked commits", { time
   await writeFile(join(project, "c-shape"), "original file\n");
   await writeFile(join(project, "z-filtered"), "original\n");
   await writeFile(join(project, ".gitattributes"), "z-filtered filter=taskboard-test\n");
+  mkdirSync(join(project, "tools"));
+  await writeFile(join(project, "tools", "smudge.sh"), "test \"$(cat tools/smudge-mode)\" = ready || exit 1\nsh \"$1\"\n");
+  await writeFile(join(project, "tools", "smudge-mode"), "ready\n");
   git(project, "add", ".");
   git(project, "commit", "-m", "Base");
   const base = git(project, "rev-parse", "HEAD");
@@ -3061,7 +3064,7 @@ test("manager Git branch workflow stays scoped and uses checked commits", { time
     const partialWrite = join(project, ".git", "atb-partial-checkout");
     const shellPath = (path: string) => "'" + path.replaceAll("\\", "/").replaceAll("'", "'\\''") + "'";
     git(project, "config", "filter.taskboard-test.clean", "cat");
-    git(project, "config", "filter.taskboard-test.smudge", "sh " + shellPath(failedFilter));
+    git(project, "config", "filter.taskboard-test.smudge", "sh tools/smudge.sh " + shellPath(failedFilter));
     git(project, "config", "filter.taskboard-test.required", "true");
     for (const outcome of ["failure", "edit and failure", "edit and success"]) {
       const script = ["#!/bin/sh"];
@@ -3091,7 +3094,7 @@ test("manager Git branch workflow stays scoped and uses checked commits", { time
       await writeFile(join(project, "tracked"), "before\n");
     }
     assert.equal(git(project, "status", "--porcelain"), "");
-    git(project, "config", "--remove-section", "filter.taskboard-test");
+    await writeFile(failedFilter, "#!/bin/sh\ncat\n", { mode: 0o755 });
     const checkoutHook = join(project, ".git", "hooks", "reference-transaction");
     const checked = join(project, ".git", "atb-checkout-race");
     await writeFile(checkoutHook, [
@@ -3105,6 +3108,8 @@ test("manager Git branch workflow stays scoped and uses checked commits", { time
     assert.match(readFileSync(checked, "utf8"), /HEAD\.lock/);
     rmSync(checked);
     assert.equal(ff.ok, true, JSON.stringify(ff.error));
+    assert.match(ff.data.recoveryDirectory, /taskboard-fast-forward-/);
+    git(project, "config", "--remove-section", "filter.taskboard-test");
     assert.equal(ff.data.head, incoming);
     assert.equal(git(project, "rev-parse", "HEAD"), incoming);
     assert.equal(readFileSync(join(project, "tracked"), "utf8"), "after\n");

@@ -1,5 +1,5 @@
 import {
-  chmodSync, closeSync, constants, copyFileSync, cpSync, lstatSync, mkdirSync, mkdtempSync, openSync,
+  chmodSync, closeSync, constants, copyFileSync, cpSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync,
   readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -52,7 +52,7 @@ function copyNewPath(source: string, destination: string) {
   }
 }
 
-function stageWorktreePaths(root: string, scratch: string, checkout: string, changed: string[]) {
+function stageWorktreePaths(root: string, scratch: string, checkout: string, changed: string[], fullCheckout: boolean) {
   const invalidPath = () => new TaskboardError("GIT_WORKTREE_PATH_INVALID", "Git returned a worktree path that could not be backed up safely.");
   const caseSetting = invokeGit(root, ["config", "--bool", "--get", "core.ignorecase"]).stdout.trim();
   const ignoreCase = caseSetting === "true" || (!caseSetting && process.platform === "win32");
@@ -71,7 +71,7 @@ function stageWorktreePaths(root: string, scratch: string, checkout: string, cha
     for (let index = 0; index < pieces.length; index++) {
       let name = pieces[index]!;
       const directory = join(root, parent);
-      if (!attributeDirectories.has(parent)) {
+      if (!fullCheckout && !attributeDirectories.has(parent)) {
         attributeDirectories.add(parent);
         const attributes = join(directory, ".gitattributes");
         if (inspectPath(attributes)?.isFile()) {
@@ -101,7 +101,9 @@ function stageWorktreePaths(root: string, scratch: string, checkout: string, cha
       const saved = join(scratch, "path-" + entries.size);
       if (stat) {
         cpSync(original, saved, copyOptions);
-        cpSync(saved, join(checkout, relative), copyOptions);
+        if (!fullCheckout) {
+          cpSync(saved, join(checkout, relative), copyOptions);
+        }
       }
       entries.add(relative);
       snapshots.push({ relative, original, saved });
@@ -111,14 +113,16 @@ function stageWorktreePaths(root: string, scratch: string, checkout: string, cha
   return snapshots;
 }
 
-function publishPaths(checkout: string, snapshots: Snapshot[], published: Publication[]) {
+function publishPaths(checkout: string, recoveryDirectory: string, snapshots: Snapshot[], published: Publication[]) {
   for (const snapshot of snapshots) {
     const staged = join(checkout, snapshot.relative);
     const after = inspectPath(staged);
     const destination = after && !after.isSymbolicLink()
       ? join(dirname(snapshot.original), basename(realpathSync.native(staged))) : snapshot.original;
     if (destination === snapshot.original && samePath(snapshot.saved, staged)) continue;
-    const backup = mkdtempSync(join(dirname(snapshot.original), ".taskboard-ff-"));
+    const backup = join(recoveryDirectory, String(published.length));
+    mkdirSync(backup);
+    writeFileSync(join(backup, "path.json"), JSON.stringify(snapshot.relative) + "\n");
     const previous = join(backup, "before");
     const item: Publication = { snapshot, staged, destination, backup, previous };
     published.push(item);
@@ -157,9 +161,13 @@ function undoPublishedPaths(published: Publication[]) {
         continue;
       }
       if (inspectPath(item.previous)) {
-        copyNewPath(item.previous, item.snapshot.original);
+        if (lstatSync(item.previous).isFile()) {
+          // Restore the same inode without overwriting a late save at the live path.
+          linkSync(item.previous, item.snapshot.original);
+        } else {
+          copyNewPath(item.previous, item.snapshot.original);
+        }
       }
-      rmSync(item.backup, { recursive: true, force: true, maxRetries: 3 });
     } catch {
       unresolved.push(item.backup);
     }
@@ -181,7 +189,7 @@ export async function advanceWorktree(root: string, ref: string, head: string, t
   }
   let removeLock = true;
   try {
-    await withGuardedBranchRefs(root, ref, head, ["option no-deref", "update " + ref + " " + target + " " + head],
+    return await withGuardedBranchRefs(root, ref, head, ["option no-deref", "update " + ref + " " + target + " " + head],
       "taskboard: fast-forward " + ref, async commit => {
         const changed = check();
         const scratch = mkdtempSync(join(tmpdir(), "taskboard-index-"));
@@ -190,16 +198,33 @@ export async function advanceWorktree(root: string, ref: string, head: string, t
           const temporaryIndex = join(scratch, "index");
           mkdirSync(checkout);
           copyFileSync(index, temporaryIndex);
-          const snapshots = stageWorktreePaths(root, scratch, checkout, changed);
+          const filters = invokeGit(root, ["config", "--name-only", "--get-regexp", "^filter\\..*\\.(clean|smudge|process)$"]);
+          if (filters.code !== 0 && filters.code !== 1) {
+            throw new TaskboardError("GIT_FAILED", "Git could not read the configured checkout filters.", { output: filters.stderr.trim() });
+          }
+          const fullCheckout = filters.code === 0;
+          if (fullCheckout) {
+            // A configured filter can read any relative dependency, including ignored files.
+            for (const name of readdirSync(root)) {
+              if ([".git", ".tasks"].includes(name.toLowerCase())) {
+                continue;
+              }
+              cpSync(join(root, name), join(checkout, name), copyOptions);
+            }
+          }
+          const snapshots = stageWorktreePaths(root, scratch, checkout, changed, fullCheckout);
           // Git and its checkout filters write only in the staging checkout.
           const stagedEnv = { ...env, GIT_DIR: gitDir, GIT_WORK_TREE: checkout, GIT_INDEX_FILE: temporaryIndex };
           const stagingOptions = ["-c", "core.fsmonitor=false", "-c", "submodule.recurse=false"];
           git(checkout, [...stagingOptions, "update-index", "--ignore-missing", "--refresh"], stagedEnv);
           git(checkout, [...stagingOptions, "read-tree", "-m", "-u", head, target], stagedEnv);
           check();
+          // Moved files may still have open writers after this operation returns.
+          // Keep their directory entries in Git storage until the user removes them.
+          const recoveryDirectory = mkdtempSync(join(gitDir, "taskboard-fast-forward-"));
           const published: Publication[] = [];
           try {
-            publishPaths(checkout, snapshots, published);
+            publishPaths(checkout, recoveryDirectory, snapshots, published);
             for (const item of published) {
               if (!samePath(item.snapshot.saved, item.previous) || !samePath(item.staged, item.destination)) {
                 throw new TaskboardError("GIT_DIRTY_WORKTREE", "A worktree path changed during fast-forward.",
@@ -214,9 +239,13 @@ export async function advanceWorktree(root: string, ref: string, head: string, t
             const backups = undoPublishedPaths(published);
             if (backups.length) {
               throw new TaskboardError("GIT_FAST_FORWARD_RECOVERY_FAILED",
-                "Fast-forward stopped and kept conflicting worktree versions for manual recovery.", { ref, head, target, backups });
+                "Fast-forward stopped and kept conflicting worktree versions for manual recovery.", { ref, head, target, recoveryDirectory, backups });
             }
-            throw error;
+            if (error instanceof TaskboardError) {
+              throw new TaskboardError(error.code, error.message, { ...error.details as Record<string, unknown>, recoveryDirectory });
+            }
+            throw new TaskboardError("GIT_WORKTREE_PUBLISH_FAILED", "Fast-forward could not publish the worktree paths.",
+              { reason: (error as NodeJS.ErrnoException).code, recoveryDirectory });
           }
           try {
             renameSync(lock, index);
@@ -226,18 +255,9 @@ export async function advanceWorktree(root: string, ref: string, head: string, t
             removeLock = false;
             throw new TaskboardError("GIT_INDEX_PUBLISH_FAILED",
               "The branch advanced, but Git could not publish the prepared index. The index lock contains the prepared index.",
-              { ref, head: target, lock, backups: published.map(item => item.backup) });
+              { ref, head: target, lock, recoveryDirectory });
           }
-          const editedBackups = published.filter(item => !samePath(item.snapshot.saved, item.previous));
-          for (const item of published) {
-            if (editedBackups.includes(item)) continue;
-            rmSync(item.backup, { recursive: true, force: true, maxRetries: 3 });
-          }
-          if (editedBackups.length) {
-            throw new TaskboardError("GIT_WORKTREE_EDIT_PRESERVED",
-              "The branch advanced and edits to replaced files were saved for manual recovery.",
-              { ref, head: target, backups: editedBackups.map(item => item.backup) });
-          }
+          return recoveryDirectory;
         } finally {
           rmSync(scratch, { recursive: true, force: true, maxRetries: 3 });
         }
