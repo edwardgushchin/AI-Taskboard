@@ -4,8 +4,10 @@ import { russianWriting } from "./russian-writing.ts";
 import { captureFileLink, isFileLink, verifyFileLink } from "../cli/attachment-links.ts";
 import type { FileLink } from "../cli/attachment-links.ts";
 import { watchCodexQuotaExceeded } from "./codex-rpc.ts";
+import { archiveAcceptedCodexChats, rememberTaskCodexThread } from "./codex-task-archive.ts";
 import { confirmedQuota, providerLimitSource, readCodexLimits, type QuotaWait } from "./provider-limits.ts";
 import localization from "./localization.cjs";
+import { BackupService } from "./backup-service.ts";
 import { activeRunSummary, observeActiveRuns, enableSharedRuns } from "./active-runs.ts";
 import { forgetExecutor, matchesQueuedExecutor, prepareQueuedTurn, recordQueuedTurn, registerRuntime, rememberExecutor, runtimeLocation, runtimeTransaction } from "./board-runtime.ts";
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, Notification, protocol, session, shell } from "electron";
@@ -21,7 +23,7 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { callCli, cliChild, cliFailure } from "./cli.ts";
 import { githubReadTool, readBoardGitHub } from "./github-read.ts";
-import { codexStatus, configuredCodex, executorFullAccess, isManagerAccess, managerAccess, setCodexExecutable, setCodexWindowsSandbox, setTaskExecutorAccess } from "./codex.ts";
+import { codexAuthMode, codexStatus, configuredCodex, executorFullAccess, isManagerAccess, managerAccess, setCodexAuth, setCodexExecutable, setCodexWindowsSandbox, setTaskExecutorAccess } from "./codex.ts";
 import { chatModels, readBoardHistory, readLastTaskTurn, readTaskRunHistory, replyToBoard, replyToTask, reviewWithCodex, updateBoardGoal } from "./codex-chat.ts";
 import type { BoardActivity, BoardGoal, BoardGoalAction } from "./codex-chat.ts";
 import { boardReviewModeTool, reviewModeReceipt, setReviewModeFromChat, taskChatActions } from "./chat-actions.ts";
@@ -1668,6 +1670,29 @@ function scheduleRecurringTasks(now = Date.now()) {
   }
 }
 
+const codexArchiveWork = new Set<string>();
+
+function scheduleCodexArchives() {
+  for (const [project, watch] of subscriptions) {
+    if (closingProjects.has(project) || codexArchiveWork.has(project)) continue;
+    const cards = [...watch.board.tasks, ...watch.board.archived].filter(task =>
+      task.status === "done" && task.codexArchivePending?.length);
+    if (!cards.length) continue;
+    codexArchiveWork.add(project);
+    void (async () => {
+      for (const task of cards) {
+        if (closingProjects.has(project) || executorBusy(project, task.id) || watch.reviewerRuns.has(task.id)) continue;
+        try {
+          await archiveAcceptedCodexChats(app.getPath("userData"), project, task.id);
+        } catch (error) {
+          console.warn("Codex archive deferred for %s: %s", task.id, (error as Error).message);
+        }
+      }
+    })().catch(error => console.warn("Codex archive deferred: %s", (error as Error).message))
+      .finally(() => codexArchiveWork.delete(project));
+  }
+}
+
 function managerQuestion(key: string, id?: unknown) {
   const questions = [boardWorkRequests.get(key)?.question, boardRequests.get(key)?.question, backgroundManagerRequests.get(key)?.question];
   return questions.find(question => question && (id === undefined || question.view.id === id));
@@ -2831,7 +2856,10 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         title: t("ui.project_manager_for_3f3547d6") + (basename(board.project) || board.project),
         save: id => {
           if (!background) writeJson(binding, { ...readBoardThread(binding), provider: "codex", id, history: "local" });
-          else if (reviewThreadPath) writeJson(reviewThreadPath, { binding: reviewBinding, id });
+          else if (reviewThreadPath && managerReviewId) {
+            rememberTaskCodexThread(project, managerReviewId, id);
+            writeJson(reviewThreadPath, { binding: reviewBinding, id });
+          }
           threadId = id;
         },
         onActivity: activity => {
@@ -3187,6 +3215,7 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
             trackUsage, id, activity, evidence.reviewTeam, evidence.targetHead, submissionSequence, {
               id: checkpoint.threadId,
               save: threadId => {
+                rememberTaskCodexThread(project, id, threadId);
                 checkpoint.threadId = threadId;
                 writeJson(path, checkpoint);
               },
@@ -3315,6 +3344,65 @@ ipcMain.handle("board:recent", async (event, path: unknown) => {
   const state = stateOf(event);
   if (typeof path !== "string" || !recentBoards.includes(path)) throw new Error("Unknown recent board.");
   await openProject(state, path);
+});
+let backupService: BackupService | undefined;
+function backups(): BackupService {
+  return backupService ??= new BackupService(app.getPath("userData"));
+}
+
+let backupTick = false;
+async function tickBackups(): Promise<void> {
+  if (backupTick || quitting) return;
+  backupTick = true;
+  try {
+    await backups().tick();
+  } catch (error) {
+    console.error("Backup maintenance:", error);
+  } finally {
+    backupTick = false;
+  }
+}
+
+ipcMain.handle("backups:status", event => {
+  const state = stateOf(event);
+  return backups().status(state.board?.project);
+});
+ipcMain.handle("backups:automatic", (event, enabled: unknown) => {
+  const state = stateOf(event);
+  if (!state.board || typeof enabled !== "boolean") throw new Error("Open a board first.");
+  backups().automatic(state.board.project, enabled);
+});
+ipcMain.handle("backups:create", async event => {
+  const state = stateOf(event);
+  if (!state.board) throw new Error("Open a board first.");
+  await backups().create(state.board.project);
+});
+ipcMain.handle("backups:restore", async (event, id: unknown) => {
+  const state = stateOf(event);
+  if (typeof id !== "string") throw new Error("Select a backup.");
+  const backup = await backups().verify(id);
+  if (state.window.isDestroyed()) return;
+  const result = await dialog.showOpenDialog(state.window, {
+    title: t("backup.restore"),
+    properties: ["openDirectory"],
+  });
+  if (result.canceled || state.window.isDestroyed()) return;
+  const parent = result.filePaths[0];
+  const confirmation = await dialog.showMessageBox(state.window, {
+    type: "question",
+    buttons: [t("backup.restore"), t("ui.cancel_4c6dcc32")],
+    defaultId: 1,
+    cancelId: 1,
+    message: t("backup.confirm", {
+      project: backup.project,
+      date: new Date(backup.createdAt).toLocaleString(localization.locale),
+    }),
+    detail: join(parent, "AI-Taskboard-" + backup.id),
+  });
+  if (confirmation.response !== 0 || state.window.isDestroyed()) return;
+  const restored = await backups().restore(id, parent);
+  if (!state.window.isDestroyed()) await openProject(state, restored);
+  return true;
 });
 ipcMain.handle("app:checkUpdates", async event => {
   stateOf(event);
@@ -3951,7 +4039,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     const run = await releaseSlot.run(() => startCodexRun(client, project, cwd, task, item => {
       activity.set(item.id, item);
       updateTimer ??= setTimeout(publish, 80);
-    }, report => saveTaskTokenUsage(project, id, role, report), signal, async codexThreadId => {
+    }, report => saveTaskTokenUsage(project, id, role, report), signal, async (codexThreadId, created) => {
       if (!queued && linked.codexThreadId === codexThreadId) {
         rememberExecutor(project, linked, cwd, continuation);
         return;
@@ -3972,6 +4060,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
           (queued && ["INVALID_TRANSITION", "REVISION_CONFLICT"].includes(saved.error.code)) ? saved.error.code : "CODEX_LINK_FAILED",
       });
       linked = saved.data;
+      if (created) rememberTaskCodexThread(project, id, codexThreadId);
       rememberExecutor(project, linked, cwd, continuation);
       if (!queued) return;
       const pending = prepareQueuedTurn(project, linked, codexThreadId);
@@ -4221,13 +4310,14 @@ function updateQuota(wait: QuotaWait | undefined) {
 }
 
 watchCodexQuotaExceeded(() => {
-  if (quotaWait) return;
+  if (quotaWait || codexAuthMode(app.getPath("userData")) === "api") return;
   readProviderLimits.invalidate();
   updateQuota({});
 });
 
 function refreshQuota() {
   quotaRefresh ??= readProviderLimits().then(limits => {
+    if (codexAuthMode(app.getPath("userData")) === "api") return limits;
     const confirmation = confirmedQuota(limits.find(limit => limit.provider === "Codex"));
     if (confirmation === "available") updateQuota(undefined);
     else if (confirmation) updateQuota(confirmation);
@@ -4250,6 +4340,27 @@ ipcMain.handle("providers:limits", event => { stateOf(event); return refreshQuot
 ipcMain.handle("codex:status", event => {
   stateOf(event);
   return codexStatus(app.getPath("userData"));
+});
+let changingCodexAuth = false;
+ipcMain.handle("codex:auth", async (event, mode: unknown, key: unknown) => {
+  stateOf(event);
+  if ((mode !== "api" && mode !== "profile") || typeof key !== "string") return { outcome: "invalidFormat" };
+  if (changingCodexAuth) return { outcome: "busy" };
+  changingCodexAuth = true;
+  const profile = app.getPath("userData");
+  try {
+    const previous = codexAuthMode(profile);
+    const outcome = await setCodexAuth(profile, mode, key);
+    if (outcome === "verified" || outcome === "applied" || outcome === "savedApplied") {
+      if (previous !== mode) updateQuota(undefined);
+      resetProviderLimits();
+    }
+    return { outcome, status: await codexStatus(profile) };
+  } catch {
+    return { outcome: "storageError" };
+  } finally {
+    changingCodexAuth = false;
+  }
 });
 ipcMain.handle("codex:managerAccess", (event, project: unknown, mode: unknown) => {
   const state = stateOf(event);
@@ -4298,6 +4409,8 @@ else {
     } else if (app.isReady()) createWindow();
   });
   void app.whenReady().then(() => {
+    void tickBackups();
+    setInterval(() => void tickBackups(), 15_000).unref();
     if (process.platform === "win32") app.setAppUserModelId("org.aitaskboard.desktop");
     const trustedFrame = (id: number | undefined, url: string | undefined, mainFrame: boolean) =>
       id !== undefined && windowStates.has(id) && mainFrame && url === html.href;
@@ -4320,6 +4433,7 @@ else {
     loadRecentBoards();
     Menu.setApplicationMenu(null);
     setInterval(scheduleRecurringTasks, 10_000).unref();
+    setInterval(scheduleCodexArchives, 10_000).unref();
     // Runtime changes do not change card revisions. Poll as a fallback across
     // profiles and after owner death, then wake the ordinary queues.
     setInterval(() => {

@@ -108,6 +108,8 @@ export function readTask(store: BoardStore, id: string): Task {
   if (!isArchived(store, id)) return store.card(id);
   const link = store.index.archive[id];
   const { task } = openArchive(store, id, link);
+  if (link.codexArchivePending) task.codexArchivePending = link.codexArchivePending;
+  else delete task.codexArchivePending;
   const edit = link.tagOverride;
   return edit ? { ...task, tags: edit.tags, history: [...task.history, ...edit.history],
     revision: task.revision + edit.history.length, updatedAt: edit.history.at(-1)!.at } : task;
@@ -383,6 +385,7 @@ function archiveTask(store: BoardStore, task: Task, now: Date, closure: string):
     const link: ArchiveLink = {
       path: "archive/" + task.id + (task.attachments.length ? ".zip" : ".json.gz"),
       title: task.title, status: task.status, closedAt: closure, archivedAt: now.toISOString(),
+      codexArchivePending: task.codexArchivePending,
       updatedAt: task.updatedAt,
       tags: task.tags,
       milestone: task.milestone,

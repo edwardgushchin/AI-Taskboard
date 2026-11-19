@@ -112,6 +112,10 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '  } else if (method === "thread/start" || method === "thread/resume") {',
     '    if (outcome === "busy") { send({ id, error: { message: "thread " + thread + " already has an active writer" } }); return; }',
     '    if (outcome === "missing" && method === "thread/resume") { send({ id, error: { message: "no rollout found for thread id " + params.threadId } }); return; }',
+    '    if (outcome === "archived" && method === "thread/resume" && !requests.some(request => request.method === "thread/unarchive")) {',
+    '      send({ id, error: { message: "session " + params.threadId + " is archived. Run codex unarchive first." } });',
+    '      return;',
+    '    }',
     '    result = { model: "resolved-model", thread: { id: params.threadId ?? thread },',
     '      approvalPolicy: params.approvalPolicy, approvalsReviewer: outcome === "manual-review" ? "user" : params.approvalsReviewer,',
     '      activePermissionProfile: { id: outcome === "readonly" ? ":read-only" : params.permissions } };',
@@ -433,6 +437,25 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(recoveredCalls[3].params.threadId, unavailable);
   assert.equal(recoveredCalls[4].params.cwd, worktree);
   assert.ok(!("projectId" in recoveredCalls[4].params));
+  const archived = await startCodexRun(client("archived"), folder, worktree, {
+    ...task, codexThreadId: thread, codexServiceThreads: [thread],
+  }, undefined, undefined, undefined, async (id, created) => {
+    assert.equal(id, thread);
+    assert.equal(created, false);
+  });
+  assert.equal(await archived.completion, undefined);
+  const archivedCalls = JSON.parse(readFileSync(capture, "utf8")).requests;
+  assert.deepEqual(archivedCalls.slice(3, 6).map((request: { method: string; params: { threadId: string } }) =>
+    [request.method, request.params.threadId]), [
+    ["thread/resume", thread],
+    ["thread/unarchive", thread],
+    ["thread/resume", thread],
+  ]);
+  await assert.rejects(
+    startCodexRun(client("archived"), folder, worktree, { ...task, codexThreadId: thread }),
+    /is archived/,
+  );
+  assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/resume");
   await assert.rejects(
     startCodexRun(client("missing"), folder, worktree, { ...task, codexThreadId: unavailable },
       undefined, undefined, undefined, async () => assert.fail("Restart must not open a new chat"), undefined, undefined, true),

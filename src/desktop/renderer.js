@@ -475,6 +475,11 @@ function openSettingsMenu(last = false) {
     return projectStatistics();
   });
   statistics.disabled = !frame.board;
+  const backups = button(() => t("backup.title"), () => {
+    menu.hidePopover();
+    trigger.focus();
+    return backupSettings();
+  });
   const update = button(() => t("updates.download"), () => {
     menu.hidePopover();
     trigger.focus();
@@ -485,9 +490,16 @@ function openSettingsMenu(last = false) {
     trigger.focus();
     return checkUpdates();
   });
-  for (const [index, item] of [app, board, statistics, update, check].entries()) {
+  for (const [id, item] of [
+    ["app", app],
+    ["board", board],
+    ["backups", backups],
+    ["statistics", statistics],
+    ["update", update],
+    ["updates", check],
+  ]) {
     item.className = "app-menu-item";
-    item.id = ["settings-menu-app", "settings-menu-board", "settings-menu-statistics", "settings-menu-update", "settings-menu-updates"][index];
+    item.id = "settings-menu-" + id;
     item.setAttribute("role", "menuitem");
     item.setAttribute("aria-disabled", String(item.disabled));
     item.tabIndex = -1;
@@ -495,7 +507,7 @@ function openSettingsMenu(last = false) {
   const separator = element("hr");
   separator.setAttribute("role", "separator");
   bindLocalized(menu, "aria-label", () => t("ui.settings_and_updates_f9f74584"), true);
-  menu.replaceChildren(app, board, statistics, separator, update, check);
+  menu.replaceChildren(app, board, backups, statistics, separator, update, check);
   syncSettingsUpdateItems();
   menu.showPopover({ source: trigger });
   positionSettingsMenu();
@@ -2534,7 +2546,7 @@ function draftComposer() {
   picker.type = "file";
   picker.multiple = true;
   picker.hidden = true;
-  const add = element("button", undefined, "button quiet draft-add");
+  const add = element("button", undefined, "button quiet draft-add chat-add");
   add.type = "button";
   add.append(icon("add"));
   const menu = element("div", undefined, "draft-add-menu");
@@ -2662,7 +2674,7 @@ function draftComposer() {
     closeMentions();
     insertDraftText(tasks[index].id, { start, end });
   }
-  const microphone = button("", startDictation, "quiet draft-mic");
+  const microphone = button("", startDictation, "quiet draft-mic chat-mic");
   microphone.append(icon("mic"));
   const voiceRow = element("div", undefined, "draft-voice-row");
   const waveform = element("canvas", undefined, "draft-voice-wave");
@@ -2830,7 +2842,7 @@ function draftComposer() {
   }, "quiet draft-goal-chip");
   const goalLabel = element("span");
   goalChip.append(icon("target"), goalLabel, icon("close"));
-  const send = element("button", undefined, "button primary draft-send");
+  const send = element("button", undefined, "button primary draft-send chat-send");
   send.type = "button";
   send.addEventListener("click", () => {
     if (hasDraft()) {
@@ -2879,13 +2891,7 @@ function draftComposer() {
   }
   const syncAction = () => {
     const stop = Boolean(active) && !hasDraft();
-    const mode = stop ? "stop" : "send";
-    if (send.dataset.action !== mode) {
-      send.dataset.action = mode;
-      send.replaceChildren(icon(stop ? "stop-circle" : "arrow-up"));
-      send.classList.toggle("quiet", stop);
-      send.classList.toggle("primary", !stop);
-    }
+    syncChatActionIcon(send, stop);
     send.disabled = stop ? !canStop || stopping : goalMode && !hasDraft();
     controlLabelForIcon(send, () => stop ? (waitingForChat ? t("ui.cancel_sending_480e1dd5") :
       t("ui.stop_reply_fc199c8c")) : t("ui.send_request_b9ccf5ac"));
@@ -4344,7 +4350,8 @@ async function showTask(id, dialogue = false) {
       () => act("update", { schedulePaused: !task.schedule.paused })));
   }
   if (task.status === "draft" && !task.approvalRequirements?.length) actions.append(button(() => t("ui.approve_535c27a7"), () => act("approve"), "primary"));
-  if (["ready", "in_progress", "blocked", "review", "cancelled"].includes(task.status)) {
+  if (["ready", "in_progress", "blocked", "review", "cancelled"].includes(task.status) ||
+      (task.status === "done" && !manualBoard())) {
     actions.append(button(() => t("ui.return_to_draft_ccd17679"), () => act("return-to-draft")));
   }
   if (task.workingDirectory) {
@@ -4692,13 +4699,56 @@ function codexSettings() {
   sandboxLabel.hidden = true;
   sandbox.addEventListener("change", () => update(() => api.setCodexWindowsSandbox(sandbox.value)));
   actions.append(choose, auto, refresh);
-  section.append(status, details, actions, sandboxLabel);
+  const accountStatus = element("p", undefined, "muted");
+  accountStatus.setAttribute("role", "status");
+  const modeLabel = element("label", () => t("codexAuth.mode"));
+  const mode = element("select");
+  mode.append(localizedOption(() => t("codexAuth.profile"), "profile"),
+    localizedOption(() => t("codexAuth.api"), "api"));
+  modeLabel.append(mode);
+  const keyLabel = element("label", () => t("codexAuth.key"));
+  const key = element("input");
+  key.type = "password";
+  key.autocomplete = "off";
+  key.spellcheck = false;
+  key.maxLength = 512;
+  keyLabel.append(key);
+  const authFeedback = element("p", undefined, "muted");
+  authFeedback.setAttribute("role", "status");
+  const apply = button(() => t("codexAuth.apply"), async () => {
+    const credential = mode.value === "api" ? key.value : "";
+    key.value = "";
+    refreshApplyLabel();
+    await update(async () => {
+      const result = await api.setCodexAuth(mode.value, credential);
+      bindLocalized(authFeedback, "textContent", () => t("codexAuth." + result.outcome));
+      return result.status ?? api.codexStatus();
+    }, false);
+  });
+  const billing = element("p", () => t("codexAuth.billing"), "muted");
+  function refreshApplyLabel() {
+    const label = mode.value === "api" && key.value !== "" ? "codexAuth.checkAndApply" : "codexAuth.apply";
+    bindLocalized(apply, "textContent", () => t(label));
+  }
+  function showKey() {
+    keyLabel.hidden = mode.value !== "api";
+    if (keyLabel.hidden) key.value = "";
+    refreshApplyLabel();
+  }
+  key.addEventListener("input", refreshApplyLabel);
+  mode.addEventListener("change", () => {
+    authFeedback.textContent = "";
+    showKey();
+  });
+  showKey();
+  section.append(status, details, actions, sandboxLabel, accountStatus, modeLabel, keyLabel, billing, apply, authFeedback);
   body.append(section);
 
   let savedSandbox;
-  async function update(load) {
+  async function update(load, syncMode = true) {
     for (const item of actions.children) item.disabled = true;
     sandbox.disabled = true;
+    for (const control of [mode, key, apply]) control.disabled = true;
     bindLocalized(status, "textContent", () => t("ui.checking_codex_cd8163c2"));
     try {
       const result = await load();
@@ -4713,6 +4763,11 @@ function codexSettings() {
       auto.hidden = !result.selectedPath;
       savedSandbox = result.windowsSandbox;
       sandboxLabel.hidden = !savedSandbox;
+      if (syncMode || result.authMode === mode.value) {
+        mode.value = result.authMode ?? "profile";
+        showKey();
+      }
+      bindLocalized(accountStatus, "textContent", () => t("codexAuth.account." + (result.account ?? "unknown")));
     } catch (error) {
       bindLocalized(status, "textContent", () => t("ui.could_not_check_codex_a3675ed8"));
       details.textContent = error.message;
@@ -4720,6 +4775,7 @@ function codexSettings() {
       for (const item of actions.children) item.disabled = false;
       if (savedSandbox) sandbox.value = savedSandbox;
       sandbox.disabled = false;
+      for (const control of [mode, key, apply]) control.disabled = false;
     }
   }
 
@@ -5057,6 +5113,89 @@ function expertTeamMail(task) {
   return log;
 }
 
+async function backupSettings() {
+  openSheet("backups", () => t("backup.title"));
+  const content = element("section", undefined, "form backup-form");
+  const project = frame.board?.project;
+  const path = element("p", "", "muted");
+  const lastSuccess = element("p");
+  const error = element("p");
+  error.setAttribute("role", "status");
+  const automatic = element("input");
+  automatic.type = "checkbox";
+  const automaticLabel = element("label", undefined, "form-checkbox");
+  automaticLabel.append(automatic, element("span", () => t("backup.automatic")));
+  const create = button(() => t("backup.create"), () => run(() => api.backupCreate()));
+  const list = element("select");
+  const label = element("label");
+  label.append(element("span", () => t("backup.select")), list);
+  const restore = button(() => t("backup.restore"), () => run(async () => {
+    if (await api.backupRestore(list.value)) {
+      if (content.isConnected) sheet.close();
+    }
+  }), "primary");
+  const date = value => new Date(value).toLocaleString(localization.locale);
+  let busy = false;
+
+  function controls(disabled) {
+    automatic.disabled = create.disabled = disabled || !project;
+    restore.disabled = list.disabled = disabled || !list.value;
+  }
+
+  async function refresh() {
+    const status = await api.backupStatus();
+    if (!content.isConnected) return;
+    path.textContent = t("backup.storage", { path: status.root });
+    automatic.checked = status.nextAutomatic !== undefined;
+    lastSuccess.textContent = status.lastSuccess
+      ? t("backup.success", { date: date(status.lastSuccess) })
+      : t("backup.noSuccess");
+    error.textContent = status.error || "";
+    const previous = list.value;
+    list.replaceChildren(...status.backups.map(backup => {
+      const option = element("option", date(backup.createdAt) + " · " + backup.project);
+      option.value = backup.id;
+      return option;
+    }));
+    if (!list.options.length) {
+      const empty = element("option", t("backup.empty"));
+      empty.value = "";
+      list.append(empty);
+    }
+    if (status.backups.some(backup => backup.id === previous)) list.value = previous;
+    controls(busy);
+  }
+
+  async function run(action) {
+    busy = true;
+    controls(true);
+    let failure;
+    try {
+      await action();
+    } catch (error) {
+      failure = error.message;
+    } finally {
+      busy = false;
+      if (content.isConnected) {
+        await refresh();
+        if (failure) error.textContent = failure;
+      }
+    }
+  }
+
+  automatic.addEventListener("change", protect(() => run(() => api.backupAutomatic(automatic.checked))));
+  content.append(path);
+  if (project) content.append(automaticLabel, create, lastSuccess);
+  content.append(label, restore, error, element("p", () => t("backup.retention"), "muted"));
+  body.append(content);
+  controls(true);
+  await refresh();
+  const timer = setInterval(() => {
+    if (!content.isConnected || !sheet.open) clearInterval(timer);
+    else if (!busy) void refresh().catch(error => notice(error.message));
+  }, 15_000);
+}
+
 function settings() {
   // The expert catalogue belongs to the selected board, including its overrides.
   const roles = [
@@ -5087,6 +5226,7 @@ function settings() {
     save.disabled = false;
   }).catch(error => { if (editor.isConnected) notice(error.message); });
   appearanceSettings();
+  body.append(button(() => t("backup.title"), backupSettings));
   codexSettings();
   if (frame.board) body.append(button(() => t("experts.title"), () => expertSettings()));
 }
@@ -5990,6 +6130,7 @@ byId("notifications").addEventListener("toggle", event => {
   else reviewNotificationRequest++;
 });
 byId("welcome-open").addEventListener("click", protect(() => api.open()));
+byId("welcome-restore").addEventListener("click", protect(backupSettings));
 byId("notice-close").addEventListener("click", () => {
   if (displayedBoardError) dismissedBoardErrors.set(frame.project, displayedBoardError);
   windowNotice();

@@ -211,8 +211,8 @@ export function withLock<T>(directoryPath: string, callback: (lockWaitMs: number
   return withSqliteLock(join(directoryPath, ".lock.sqlite"), timeoutMs, callback);
 }
 
-export function withRuntimeLock<T>(directoryPath: string, callback: () => T): T {
-  return withSqliteLock(join(directoryPath, ".runtime.sqlite"), 15_000, callback);
+export function withRuntimeLock<T>(directoryPath: string, callback: () => T, timeoutMs: 0 | 15_000 = 15_000): T {
+  return withSqliteLock(join(directoryPath, ".runtime.sqlite"), timeoutMs, callback);
 }
 
 function taskStartLockPath(location: BoardLocation, id: string): string {

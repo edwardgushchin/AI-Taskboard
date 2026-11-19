@@ -1,19 +1,18 @@
 <h1 align="center">AI Taskboard</h1>
 <p align="center"><strong>A local task board for coding agents and the people reviewing their work.</strong></p>
 <p align="center">English · <a href="README.ru.md">Русский</a></p>
+<p align="center">
+  <a href="https://github.com/edwardgushchin/AI-Taskboard/blob/main/package.json"><img src="https://img.shields.io/badge/Node.js-%E2%89%A524.12.0-339933?logo=node.js&amp;logoColor=white" alt="Node.js for source builds: 24.12.0 or newer"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-blue" alt="License: PolyForm Noncommercial 1.0.0"></a>
+  <a href="https://github.com/edwardgushchin/AI-Taskboard/releases"><img src="https://img.shields.io/github/v/release/edwardgushchin/AI-Taskboard?include_prereleases&amp;label=alpha" alt="Latest published alpha release"></a>
+  <a href="https://github.com/edwardgushchin/AI-Taskboard/commits/main/"><img src="https://img.shields.io/github/last-commit/edwardgushchin/AI-Taskboard/main?label=main%20commit" alt="Last commit on main"></a>
+  <a href="https://github.com/edwardgushchin/AI-Taskboard/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/edwardgushchin/AI-Taskboard/actions/workflows/ci.yml/badge.svg?branch=main" alt="Native CI (main)"></a>
+</p>
 <p align="center"><a href="#features">Features</a> · <a href="#workflow">Workflow</a> · <a href="#quick-start">Quick start</a> · <a href="#platforms">Platforms</a> · <a href="#documentation">Documentation</a> · <a href="#license">License</a></p>
 
-![AI Taskboard showing demo tasks from draft through review and completion](docs/images/board.png)
+![AI Taskboard demo board with a queued task and an open project manager chat](docs/images/board.png)
 
-*Real application renderer with public demo data. No model session or private conversation is shown.*
-
-![Git status in the demo repository: feature/board-polish, zero incoming and three unpushed commits](docs/images/git-status.png)
-
-*Git detail from the same window at 150% zoom: `feature/board-polish`, three local commits ahead of `origin`.*
-
-AI Taskboard brings a Kanban board, agent chats and Git review into one Electron app. Describe a change to the project manager, approve a task, and let an executor work in a separate Git worktree. Review the result before it enters your target branch.
-
-**Early development:** the first slice targets Windows x64. Public installers are not available yet; use the source quick start below. [Releases](https://github.com/edwardgushchin/AI-Taskboard/releases) will host installers when published.
+AI Taskboard brings a Kanban board, agent chats and Git review into one Electron app. Describe a change to the project manager, approve a task, and let an executor work in a separate Git worktree. Review the result before it enters your target branch. For personal tasks, create a manual board.
 
 <a id="features"></a>
 ## Features
@@ -23,6 +22,7 @@ AI Taskboard brings a Kanban board, agent chats and Git review into one Electron
 - **Isolated Git work.** Each Git task gets its own branch and worktree. Submission records a commit; acceptance integrates the reviewed result into the chosen target branch.
 - **A local board shared with agents.** The app and agents use the same CLI and project `.tasks` storage. Non-Git tasks use an assigned directory and can submit artifacts without a commit.
 - **Several projects in view.** Project tabs, separate windows, column filters, English and Russian UI, and built-in themes.
+- **Auto mode.** The board starts eligible approved tasks and schedules independent reviews according to the selected review mode and concurrency limits. You can reorder or pause the queue, or hold individual tasks. [Auto mode and queue controls](docs/reference/board.md#управление-автоматической-очередью) (Russian).
 
 <a id="workflow"></a>
 ## From request to merged change
@@ -30,7 +30,7 @@ AI Taskboard brings a Kanban board, agent chats and Git review into one Electron
 | Step | What happens |
 | --- | --- |
 | 1. Discuss | Tell the project manager what you want. A draft captures the problem and verifiable acceptance criteria. |
-| 2. Approve and start | Approve the draft, then start the executor. For a Git task, the board assigns a branch and worktree. |
+| 2. Approve and start | Approve the draft. Start the executor from the card, or let auto mode start eligible work. For a Git task, the board assigns a branch and worktree. |
 | 3. Execute | The agent changes files, runs checks and records progress. A blocker includes the condition needed to continue. |
 | 4. Review | A submission includes a diff, checks and limitations. Return it with feedback when changes are needed. |
 | 5. Accept | In human review mode, you accept the result. The board creates or verifies the acceptance commit in the target branch. Conflicts require resolution before acceptance. |
@@ -40,7 +40,6 @@ AI Taskboard brings a Kanban board, agent chats and Git review into one Electron
 
 ### Requirements
 
-- Windows x64 for the current development slice; see [platform status](#platform-status).
 - Node.js **24.12+**, npm and Git **2.38+** for source development.
 - A Codex executable and subscription sign-in for running agents. The app uses **Codex App Server**; no separate paid API key is required by the board. Subscription access and usage limits still apply.
 
@@ -68,12 +67,20 @@ Use **Settings → Appearance** to choose **Light**, **Dark**, or **System** for
 
 ### Install a packaged build
 
-When a Windows installer is published, download the EXE for your architecture from [Releases](https://github.com/edwardgushchin/AI-Taskboard/releases), run it, then launch AI Taskboard from the Start menu. The package includes a standalone CLI and its Node.js runtime; source Node.js is not required for that package. Git and Codex remain external requirements for Git tasks and agents. Until then, build locally with the development guide.
+Download a package for your operating system and architecture from [Releases](https://github.com/edwardgushchin/AI-Taskboard/releases). Compare the download's SHA-256 with `SHA256SUMS` from the same release. The desktop package includes the standalone CLI and its Node.js runtime. Install Git for Git tasks and Codex to run agents.
 
 <a id="platforms"></a>
 ## Platform status
 
-Native CI builds and checks x64 and ARM64 packages for Windows, Linux, and macOS. See the [build and signing guide](docs/how-to/development.md#поставка), [CI results for each platform](https://github.com/edwardgushchin/AI-Taskboard/actions/workflows/ci.yml), and [formats for public downloads](docs/how-to/development.md#выпуск-на-github).
+Native CI builds and checks packages on x64 and ARM64 for all three platforms. The public alpha includes these formats.
+
+| Platform | Public alpha packages |
+| --- | --- |
+| Windows | Run the NSIS installer (`.exe`). The alpha installer is unsigned. |
+| Linux | Install the `.deb` on Debian or Ubuntu, or the `.rpm` on an RPM-based distribution. |
+| macOS | Unpack the `.zip` and open the application. The alpha app uses an ad-hoc signature and has no notarization. |
+
+See the [packaging and signing guide](docs/how-to/development.md#поставка) (Russian) and [Native CI results](https://github.com/edwardgushchin/AI-Taskboard/actions/workflows/ci.yml?query=branch%3Amain).
 
 ## Data and boundaries
 
@@ -123,5 +130,5 @@ from the official Node.js repository and include it with the fflate license.
 - [Documentation index](docs/README.md): guides and project notes.
 - [Development and packaging](docs/development.md): checks, CLI, VS Code and installer builds.
 - [Project design](docs/explanation/architecture.md) (Russian): workflow, storage, Git integration and review rules.
-- [Releases](https://github.com/edwardgushchin/AI-Taskboard/releases): published packages when available.
+- [Releases](https://github.com/edwardgushchin/AI-Taskboard/releases): public alpha packages.
 - [GitHub Issues](https://github.com/edwardgushchin/AI-Taskboard/issues): bugs and feature requests. Include reproduction steps and remove private data from logs and screenshots.

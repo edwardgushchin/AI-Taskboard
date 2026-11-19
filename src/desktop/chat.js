@@ -1125,9 +1125,9 @@ function taskChat(task) {
   const retryReply = button(() => t("task_chat.retry_reply"), () => {
     if (!retryReply.disabled) void submit(lastMessageIndex);
   }, "quiet chat-retry-reply");
-  const send = element("button", undefined, "button primary chat-icon chat-send");
+  const send = element("button", undefined, "button primary chat-send");
   send.type = "submit";
-  const attach = button("", () => fileInput.click(), "quiet chat-icon chat-add");
+  const attach = button("", () => fileInput.click(), "quiet chat-add");
   attach.append(icon("add"));
   controlLabelForIcon(attach, () => t("ui.attach_files_792aed0d"));
   const microphone = button("", () => {
@@ -1136,7 +1136,7 @@ function taskChat(task) {
       ? t("ui.press_win_h_to_start_windows_voice_typing_39244c53")
       : t("ui.start_system_dictation_while_this_field_is_focus_f77f00e3"));
     feedback.hidden = false;
-  }, "quiet chat-icon chat-mic");
+  }, "quiet chat-mic");
   microphone.append(icon("mic"));
   controlLabelForIcon(microphone, () => t("ui.voice_input_a05b7480"));
   controls.append(attach, microphone, retryReply, send);
@@ -1216,7 +1216,7 @@ function taskChat(task) {
     input.readOnly = Boolean(draft.saving);
     attach.disabled = microphone.disabled = input.readOnly;
     const stop = stopping();
-    send.replaceChildren(icon(stop ? "stop" : "play"));
+    syncChatActionIcon(send, stop);
     controlLabelForIcon(send, () => stop ? t("ui.stop_agent_f50db092") : t("ui.send_message_173c4807"));
     send.disabled = Boolean(draft.saving || draft.stopping) || (!stop && !draft.text.trim() && !draft.files.length);
     retryReply.hidden = lastMessage?.actor !== "user" || working() ||
@@ -1349,6 +1349,15 @@ function taskChat(task) {
   renderPendingFiles();
   sync();
   return area;
+}
+
+function syncChatActionIcon(control, stop) {
+  const action = stop ? "stop" : "send";
+  if (control.dataset.action === action) return;
+  control.dataset.action = action;
+  control.replaceChildren(icon(stop ? "stop-circle" : "arrow-up"));
+  control.classList.toggle("quiet", stop);
+  control.classList.toggle("primary", !stop);
 }
 
 function controlLabelForIcon(control, label) {

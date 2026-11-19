@@ -10,6 +10,10 @@ contextBridge.exposeInMainWorld("taskboard", {
     return { name: file.name, type: file.type, bytes: await file.arrayBuffer() };
   },
   bootstrap: () => ipcRenderer.invoke("board:bootstrap"),
+  backupStatus: () => ipcRenderer.invoke("backups:status"),
+  backupAutomatic: enabled => ipcRenderer.invoke("backups:automatic", enabled),
+  backupCreate: () => ipcRenderer.invoke("backups:create"),
+  backupRestore: id => ipcRenderer.invoke("backups:restore", id),
   open: () => ipcRenderer.invoke("board:open"),
   boardRequest: (request, files, project, goal, immediate, id, goalRunId) => ipcRenderer.invoke("board:request", request, files, project, goal, immediate, id, goalRunId),
   boardHistory: (project, cursor, view) => ipcRenderer.invoke("board:history", project, cursor, view),
@@ -64,6 +68,7 @@ contextBridge.exposeInMainWorld("taskboard", {
   onProviderLimitsChanged: listener => { ipcRenderer.on("providers:changed", () => listener()); },
   providerLimits: () => ipcRenderer.invoke("providers:limits"),
   codexStatus: () => ipcRenderer.invoke("codex:status"),
+  setCodexAuth: (mode, key) => ipcRenderer.invoke("codex:auth", mode, key),
   executionModels: () => ipcRenderer.invoke("codex:executionModels"),
   setTaskAccess: (project, id, createdAt, fullAccess) => ipcRenderer.invoke("codex:taskAccess", project, id, createdAt, fullAccess),
   setManagerAccess: (project, mode) => ipcRenderer.invoke("codex:managerAccess", project, mode),

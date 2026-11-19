@@ -192,21 +192,26 @@ export function saveManagerHistory(project: string, startedAt: number, id: strin
   const board = join(project, ".tasks");
   directory(board);
   const folder = join(board, "manager-chat");
-  directory(folder, true);
-  const path = join(folder, String(startedAt).padStart(13, "0") + "-" + id + ".json");
-  const incoming = incomingMessages(run);
-  const previous = incoming.length && exists(path) ? new Set(incomingMessages(readJson(path) as Run)) : new Set<string>();
   const file = String(startedAt).padStart(13, "0") + "-" + id + ".json";
-  // Write unread first: replay after an interrupted chat write must not lose
-  // the unread marker. Existing messages retain their read state on replay.
-  const changed = incoming.length > 0 && withRuntimeLock(board, () => {
-    const { unread, through } = unreadState(project);
-    const added = incoming.filter(messageId => !previous.has(messageId) && (!through ||
-      comparePosition(messagePosition(file, run.items.find(item => item.id === messageId)!, run.items.findIndex(item => item.id === messageId)), through) > 0));
-    return added.length > 0 && updateManagerUnread(project, [...new Set([...unread, ...added])], through);
+  return withRuntimeLock(board, () => {
+    directory(folder, true);
+    const path = join(folder, file);
+    const incoming = incomingMessages(run);
+    let changed = false;
+    if (incoming.length) {
+      const previous = exists(path) ? new Set(incomingMessages(readJson(path) as Run)) : new Set<string>();
+      // Write unread first so replay can retain the marker after an interrupted write.
+      const { unread, through } = unreadState(project);
+      const added = incoming.filter(messageId => {
+        if (previous.has(messageId)) return false;
+        const index = run.items.findIndex(item => item.id === messageId);
+        return !through || comparePosition(messagePosition(file, run.items[index], index), through) > 0;
+      });
+      changed = added.length > 0 && updateManagerUnread(project, [...new Set([...unread, ...added])], through);
+    }
+    writeJson(path, run);
+    return changed;
   });
-  writeJson(path, run);
-  return changed;
 }
 
 function displayTurns({ message, items, durationMs, lane, goalId }: Run): Turn[] {
