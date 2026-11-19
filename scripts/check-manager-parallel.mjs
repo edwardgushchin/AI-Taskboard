@@ -95,6 +95,51 @@ async function capture(window, name) {
   writeFileSync(join(artifacts, name), png);
 }
 
+async function checkManagerBubble(window, phase) {
+  const original = await evaluate(window, "document.documentElement.dataset.theme");
+  const samples = [];
+  try {
+    for (const theme of ["dark", "light"]) {
+      assert.equal((await api(window, "setTheme", theme)).ok, true);
+      await until(() => evaluate(window, "document.documentElement.dataset.theme === " + JSON.stringify(theme)), "theme " + theme);
+      await until(() => evaluate(window, "[...document.querySelectorAll('.board-manager-message')].some(node => node.textContent.includes(" + JSON.stringify(dialogueAnswer) + "))"), "manager bubble");
+      const sample = await evaluate(window, `(() => {
+        const bubble = [...document.querySelectorAll('.board-manager-message')].find(node => node.textContent.includes(${JSON.stringify(dialogueAnswer)}));
+        bubble.scrollIntoView({ block: 'center', behavior: 'instant' });
+        const panel = bubble.closest('.board-chat');
+        const time = bubble.querySelector('.chat-time');
+        const bounds = bubble.getBoundingClientRect();
+        const clock = time.getBoundingClientRect();
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = 1;
+        const context = canvas.getContext('2d');
+        const rgb = color => {
+          context.fillStyle = color;
+          context.fillRect(0, 0, 1, 1);
+          return [...context.getImageData(0, 0, 1, 1).data].slice(0, 3);
+        };
+        const panelColor = getComputedStyle(panel).backgroundColor;
+        const bubbleColor = getComputedStyle(bubble).backgroundColor;
+        return { panelColor, bubbleColor, panelRGB: rgb(panelColor), bubbleRGB: rgb(bubbleColor),
+          time: time.textContent, timeInside: time.parentElement === bubble && clock.left >= bounds.left &&
+            clock.right <= bounds.right + 1 && clock.top >= bounds.top && clock.bottom <= bounds.bottom + 1 };
+      })()`);
+      samples.push({ phase, theme, ...sample });
+      await capture(window, "manager-bubble-" + phase + "-" + theme + ".png");
+    }
+  } finally {
+    assert.equal((await api(window, "setTheme", original)).ok, true);
+  }
+  console.log("BUBBLE " + JSON.stringify(samples));
+  for (const sample of samples) {
+    assert.ok(Math.max(...sample.panelRGB.map((channel, index) => Math.abs(channel - sample.bubbleRGB[index]))) >= 8,
+      "Manager bubble must differ visibly from its panel: " + JSON.stringify(sample));
+    assert.equal(sample.timeInside, true);
+    assert.match(sample.time, /^\d{2}:\d{2}$/);
+  }
+  reports.push("Manager bubble " + phase + ": " + JSON.stringify(samples));
+}
+
 function prepare() {
   if (!reopen) {
     mkdirSync(project);
@@ -219,6 +264,7 @@ async function run() {
     assert.equal((await history(other)).data.goalRunning, true);
     assert.equal(requests.filter(request => request.isGoal).length, 1);
     assert.notEqual(requests.find(request => request.isGoal).id, requests.find(request => !request.isGoal).id);
+    await checkManagerBubble(wide, "live");
     await capture(wide, "manager-parallel-dialog.png");
     pass("An ordinary question submitted through the form receives its answer while the original goal is still running, without pause/restart. Goal and dialogue have distinct provider thread IDs and one writer each.");
 
@@ -287,6 +333,7 @@ async function run() {
   assert.equal(restored.goal.status, "paused");
   assert.deepEqual(JSON.parse(JSON.stringify(restored.turns)), saved.chat);
   assert.deepEqual(JSON.parse(JSON.stringify((await history(other, "work")).data.turns)), saved.work);
+  await checkManagerBubble(wide, "restored");
   const resumedReply = await startCall(wide, "resumeReply", "boardGoal", "resume", objective);
   await until(() => goalRun, "resumed provider");
   assert.equal((await api(other, "boardGoal", "resume", objective)).ok, true);
