@@ -6,6 +6,7 @@
   "draft_discussion.running": "Revisando o rascunho…",
   "draft_discussion.failed": "Falha ao revisar o rascunho: {reason}",
   "draft_discussion.retry": "Tentar novamente",
+  "draft_discussion.ready": "A tarefa está pronta para aprovação.",
   "draft_discussion.interrupted": "A revisão anterior do rascunho foi interrompida.",
   "ui.resolving_acceptance_conflict": "Resolvendo conflito",
   "ui.dismiss_notification_9a17797e": "Ignorar notificação",

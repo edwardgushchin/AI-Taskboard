@@ -31,6 +31,7 @@
   "draft_discussion.running": "Агент разбирает черновик…",
   "draft_discussion.failed": "Разбор черновика прерван. {reason}",
   "draft_discussion.retry": "Повторить разбор",
+  "draft_discussion.ready": "Задача готова к утверждению.",
   "draft_discussion.interrupted": "Предыдущий разбор черновика был прерван.",
   "ui.resolving_acceptance_conflict": "Разрешение конфликта",
   "ui.dismiss_notification_9a17797e": "Скрыть уведомление",

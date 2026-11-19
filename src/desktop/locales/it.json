@@ -6,6 +6,7 @@
   "draft_discussion.running": "Revisione della bozza in corso…",
   "draft_discussion.failed": "Revisione della bozza non riuscita: {reason}",
   "draft_discussion.retry": "Riprova la revisione",
+  "draft_discussion.ready": "L’attività è pronta per l’approvazione.",
   "draft_discussion.interrupted": "La revisione precedente della bozza è stata interrotta.",
   "ui.resolving_acceptance_conflict": "Risoluzione del conflitto",
   "ui.dismiss_notification_9a17797e": "Ignora notifica",

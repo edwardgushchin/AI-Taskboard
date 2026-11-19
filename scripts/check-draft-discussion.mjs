@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { electronCheck } from "./electron-check.mjs";
+import localization from "../src/desktop/localization.cjs";
 
 const live = process.argv.includes("--live");
 const creationOnly = process.argv.includes("--creation-only");
@@ -40,6 +41,7 @@ const until = async (predicate, label) => {
   }
 };
 const settings = { model: "fixture-sol", effort: "high" };
+const readyText = localization.text("draft_discussion.ready", {}, "ru");
 const show = id => cli(["show", id]);
 const messages = card => card.history.filter(event => event.chat);
 const report = restart ? JSON.parse(readFileSync(evidence, "utf8")) :
@@ -51,6 +53,8 @@ if (!restart) mkdirSync(staging);
 process.env.TMPDIR = process.env.TEMP = process.env.TMP = staging;
 app.setPath("userData", profile);
 app.setPath("appData", join(scratch, "app-data"));
+mkdirSync(profile, { recursive: true });
+writeFileSync(join(profile, "appearance.json"), JSON.stringify({ language: "ru", theme: "dark" }));
 app.requestSingleInstanceLock = () => true;
 app.disableHardwareAcceleration();
 
@@ -86,6 +90,9 @@ globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images,
     failMessage = false;
     throw Error("Fixture provider unavailable");
   }
+  if (context.latestUserMessage?.text === "Fail clarification") {
+    throw Error("Fixture clarification unavailable");
+  }
   if (context.latestUserMessage?.text === "Wait for stop") {
     stopGate = true;
     return interrupted.promise;
@@ -93,9 +100,20 @@ globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images,
   if (mode === "initial" && context.task.title === "Provider inactive" && failProvider) throw Error("Fixture provider unavailable");
   if (context.task.title === "Stale draft") await new Promise(resolve => { staleGate = resolve; });
   await delay(450);
-  return { text: mode === "initial"
-    ? JSON.stringify({ questions: context.task.title === "CLI with attachments" ? "Which viewport is required?" : "" })
-    : JSON.stringify({ text: "User answer recorded: " + context.latestUserMessage.text, awaitingAnswer: false }) };
+  if (mode === "initial") {
+    let questions = "";
+    if (context.task.title === "CLI with attachments") {
+      questions = "Which viewport is required?";
+    } else if (context.task.title === "Partial answer") {
+      questions = "Which format and destination are required?";
+    }
+    return { text: JSON.stringify({ questions }) };
+  }
+  if (context.latestUserMessage.text === "CSV") {
+    return { text: JSON.stringify({ text: "Which destination is required?", awaitingAnswer: true }) };
+  }
+  const text = context.task.awaitingAnswer ? readyText : "User answer recorded: " + context.latestUserMessage.text;
+  return { text: JSON.stringify({ text, awaitingAnswer: false }) };
 };
 
 let writer;
@@ -155,24 +173,31 @@ try {
     }, "visible draft retry " + id);
   };
   const waitReply = (id, count = 1) => until(() => messages(show(id)).length === count, "chat reply " + id);
-  const waitSilent = async id => {
+  const waitReady = async id => {
     await until(() => {
       const card = show(id);
       assert.notEqual(card.draftDiscussion?.phase, "failed", card.draftDiscussion?.reason);
       return !card.draftDiscussion;
-    }, "silent completion " + id);
+    }, "ready completion " + id);
     const card = show(id);
     assert.equal(card.status, "draft");
     assert.equal(card.git, undefined);
-    assert.equal(messages(card).length, 0);
-    assert.ok(card.history.some(event => event.action === "draft-discussion-completed"));
+    assert.equal(card.awaitingAnswer, false);
+    assert.equal(messages(card).length, 1);
+    assert.equal(messages(card)[0].actor, "agent");
+    assert.equal(messages(card)[0].text, readyText);
+    assert.ok(Number.isFinite(Date.parse(messages(card)[0].at)));
   };
   const reopen = async id => {
     await evaluate("document.querySelector('#close-sheet').click()");
     await display(id);
   };
-  const emptyDialogue = async () => assert.equal(await evaluate(
-    "document.querySelector('.task-dialogue:not([hidden])')?.querySelectorAll('.chat-entry').length"), 0);
+  const readyDialogue = async () => {
+    await until(() => evaluate(`document.querySelector('.task-dialogue:not([hidden])')?.textContent.includes(${JSON.stringify(readyText)})`),
+      "visible readiness");
+    assert.equal(await evaluate("document.querySelector('.task-dialogue:not([hidden])')?.querySelectorAll('.chat-entry').length"), 1);
+    assert.ok(await evaluate("document.querySelector('.task-dialogue .chat-entry time')?.textContent"));
+  };
   const capture = async name => {
     window.focus();
     await evaluate("document.fonts.ready.then(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))))");
@@ -214,7 +239,7 @@ try {
     await display(unresolved.id);
     await reopen(unresolved.id);
     await capture("draft-with-question.png");
-    const answer = "Use audits+north@example.invalid as the recipient. Please confirm the delivery time and recipient.";
+    const answer = "Use audits+north@example.invalid as the recipient.";
     await until(() => evaluate(`window.taskboard.bootstrap().then(f => !f.replyingTasks?.includes(${JSON.stringify(unresolved.id)}))`),
       "released discussion writer before follow-up");
     const followup = await evaluate(`window.taskboard.chatSend(${JSON.stringify(unresolved.id)}, ${JSON.stringify({ ...execution, text: answer, files: [] })})`);
@@ -222,16 +247,17 @@ try {
     const confirmation = await waitAgent(unresolved.id, 2);
     assert.equal(show(unresolved.id).awaitingAnswer, false);
     assert.equal(messages(show(unresolved.id))[1].text, answer);
-    assert.match(confirmation, /Tuesday/i);
-    assert.match(confirmation, /09:40\s*UTC/i);
-    assert.match(confirmation, /audits\+north@example\.invalid/i);
+    assert.match(confirmation, /ready.*approval/i);
+    assert.doesNotMatch(confirmation, /Tuesday|09:40|audits\+north/i);
     assert.doesNotMatch(confirmation, /\?/);
+    await reopen(unresolved.id);
+    await capture("draft-question-chat.png");
     const complete = cli(["create"], plannedDraft({ ...brief, description: brief.description + " The recipient is audits+north@example.invalid." }));
-    await waitSilent(complete.id);
+    await waitReady(complete.id);
     await display(complete.id);
     await reopen(complete.id);
-    await emptyDialogue();
-    await capture("clear-draft.png");
+    await readyDialogue();
+    await capture("draft-ready-chat.png");
     assert.equal(existsSync(join(project, ".worktrees")), false);
     await until(() => !readdirSync(staging).some(name => name.startsWith("ai-taskboard-chat-")), "Codex staging cleanup");
     const git = args => execFileSync("git", args, {
@@ -249,25 +275,35 @@ try {
         draft: brief.description, completeDraft: complete.description },
       observed: { question, answer, confirmation, completeDraftMessages: messages(show(complete.id)).length },
     }, null, 2));
-    console.log("PASS Codex asked about the missing recipient, applied the answer and completed the clear draft silently");
+    console.log("PASS Codex asked about the missing recipient, applied the answer and confirmed the clear draft is ready for approval");
   } else if (restart) {
     await until(() => show(report.interrupted).draftDiscussion?.phase === "failed", "interrupted state after restart");
     assert.equal(calls.length, 0);
     await display(report.interrupted);
     await retry(report.interrupted);
-    await waitSilent(report.interrupted);
+    await waitReady(report.interrupted);
     assert.deepEqual(calls.map(call => call.context.task.id), [report.interrupted]);
-    await waitSilent(report.ui);
+    await waitReady(report.ui);
     await display(report.ui);
-    await emptyDialogue();
+    await readyDialogue();
+    assert.deepEqual(messages(show(report.ui)), report.readyMessages);
     await display(report.question);
     assert.match(await evaluate("document.querySelector('.task-dialogue').textContent"), /Which viewport is required\?/);
     assert.equal(messages(show(report.question)).length, 3);
+    assert.deepEqual(messages(show(report.question)), report.questionMessages);
+    assert.equal(show(report.question).status, "draft");
+    assert.equal(show(report.question).git, undefined);
     assert.deepEqual(calls.map(call => call.context.task.id), [report.interrupted]);
-    check("Restart retains silent completion and question with its answer, and only retries the interrupted draft on request");
-    writeFileSync(join(artifacts, "draft-discussion-check.txt"), [
-      "Windows Electron draft discussion (deterministic provider fixture)", "node scripts/check-draft-discussion.mjs --artifacts .tasks/qa",
+    check("Restart retains readiness and question with its answer and original timestamps, and only retries the interrupted draft on request");
+    writeFileSync(join(artifacts, "draft-ready-check.txt"), [
+      "Windows Electron draft discussion (deterministic provider fixture)",
+      "Command: node scripts/check-draft-discussion.mjs --artifacts .tasks/qa/T-0220",
+      "Tested HEAD: " + report.head,
       `Platform: ${report.platform}; Electron: ${report.electron}; Chromium: ${report.chromium}; viewport: 1280x800`,
+      "Source representation: UTF-8 working text with CRLF normalized to LF (SHA-256)",
+      ...Object.entries(report.sourceHashes).map(([path, hash]) => `${hash}  ${path}`),
+      "Windows: runtime passed; Linux/macOS: runtime not run. Shared code uses the existing CLI history and writer registry; packaging unchanged.",
+      "Provider boundary: deterministic fixture; --live separately exercises installed Codex.",
       ...report.checks.map(line => "PASS " + line), "",
     ].join("\n"));
   } else {
@@ -286,13 +322,14 @@ try {
     }))})`);
     assert.equal(response.ok, true, JSON.stringify(response));
     report.ui = response.data.id;
-    await waitSilent(report.ui);
+    await waitReady(report.ui);
     await display(report.ui);
     await reopen(report.ui);
-    await emptyDialogue();
-    await capture("clear-draft.png");
+    await readyDialogue();
+    await capture("draft-ready-chat.png");
+    report.readyMessages = messages(show(report.ui));
     assert.deepEqual(calls[0].configured, { model: "gpt-6.1-sol", effort: "medium" });
-    check("Desktop creation completes silently with the executor pool occupied and stays empty after reopening the dialogue");
+    check("Desktop creation saves one readiness message with time with the executor pool occupied and retains it after reopening");
     if (creationOnly) {
       await open(manual);
       const personal = await evaluate(`window.taskboard.command("create", undefined, {
@@ -414,11 +451,12 @@ try {
       () => false, never, never, undefined, never);
     const created = await manager("task_create", plannedDraft({ title: "Created by manager" }));
     assert.equal(created.ok, true, JSON.stringify(created));
-    await waitSilent(created.data.id);
+    await waitReady(created.data.id);
     await evaluateOther(`showTask(${JSON.stringify(created.data.id)})`);
-    assert.equal(await evaluateOther("document.querySelector('.task-dialogue')?.querySelectorAll('.chat-entry').length"), 0);
+    await until(() => evaluateOther("document.querySelector('.task-dialogue')?.querySelectorAll('.chat-entry').length === 1"),
+      "second window readiness");
     assert.equal(calls.filter(call => call.context.task.id === created.data.id).length, 1);
-    check("Manager creation reviews the draft once and the second window shows an empty dialogue");
+    check("Manager creation reviews the draft once and the second window shows one readiness message");
 
     const original = join(scratch, "file.txt"), linked = join(scratch, "linked.txt"), changed = join(scratch, "changed.txt");
     const image = join(scratch, "image.png");
@@ -454,23 +492,44 @@ try {
     })`);
     assert.equal(answer.result.ok, true, JSON.stringify(answer));
     assert.deepEqual(messages(show(draft.id)).map(event => event.text),
-      ["Which viewport is required?", "1280 pixels", "User answer recorded: 1280 pixels"]);
+      ["Which viewport is required?", "1280 pixels", readyText]);
+    assert.equal(show(draft.id).awaitingAnswer, false);
     assert.equal(calls.at(-1).context.history.some(event => event.text === "Which viewport is required?"), true);
     assert.deepEqual(calls.at(-1).context.attachments.filter(file => file.error).map(file => file.name),
       ["same.txt", "changed.txt", "image.png"]);
-    await until(() => evaluate("document.querySelector('.task-chat')?.textContent.includes('User answer recorded: 1280 pixels')"), "visible follow-up");
-    await capture("draft-discussion-reply.png");
+    await until(() => evaluate(`document.querySelector('.task-chat')?.textContent.includes(${JSON.stringify(readyText)})`), "visible follow-up");
+    await reopen(draft.id);
+    await capture("draft-question-chat.png");
+    report.questionMessages = messages(show(draft.id));
     check("CLI passes distinct same-name files and stable linked text/image snapshots despite edits at the provider boundary; the next turn reports changed sources");
+
+    const partial = cli(["create"], plannedDraft({ title: "Partial answer", execution: settings }));
+    await waitReply(partial.id);
+    await until(() => !runtimeEntries(project).some(entry => entry.task === partial.id), "partial draft writer released");
+    assert.equal(show(partial.id).awaitingAnswer, true);
+    await say(partial.id, "CSV");
+    assert.equal(show(partial.id).awaitingAnswer, true);
+    assert.equal(messages(show(partial.id)).at(-1).text, "Which destination is required?");
+    const failedClarification = await startMessage(partial.id, "Fail clarification");
+    assert.equal(failedClarification.result.error.code, "CHAT_FAILED");
+    assert.equal(show(partial.id).awaitingAnswer, true);
+    assert.equal(messages(show(partial.id)).some(event => event.text === readyText), false);
+    await say(partial.id, "Save it in exports.");
+    assert.equal(show(partial.id).awaitingAnswer, false);
+    assert.equal(messages(show(partial.id)).at(-1).text, readyText);
+    assert.equal(show(partial.id).status, "draft");
+    check("Partial answers and failed clarification keep the question open without readiness; sufficient clarification confirms readiness");
 
     const failure = cli(["create"], plannedDraft({ title: "Provider inactive", execution: settings }));
     await until(() => show(failure.id).draftDiscussion?.phase === "failed", "provider failure");
+    assert.equal(messages(show(failure.id)).length, 0);
     await display(failure.id);
     await until(() => evaluate("document.querySelector('.task-chat').textContent.includes('Fixture provider unavailable')"), "visible failure");
     await capture("draft-discussion-error.png");
     failProvider = false;
     await retry(failure.id);
-    await waitSilent(failure.id);
-    check("Provider failure stays visible until the retry completes silently");
+    await waitReady(failure.id);
+    check("Provider failure publishes no readiness until a successful retry");
 
     const stale = cli(["create"], plannedDraft({ title: "Stale draft", execution: settings }));
     await until(() => staleGate, "in-flight response");
@@ -481,8 +540,8 @@ try {
     assert.equal(messages(show(stale.id)).length, 0);
     await display(stale.id);
     await retry(stale.id);
-    await waitSilent(stale.id);
-    check("Editing during the turn rejects stale silent completion and the current revision can be retried");
+    await waitReady(stale.id);
+    check("Editing during the turn rejects stale readiness and the current revision can be retried");
 
     const busy = cli(["create"], plannedDraft({ title: "Writer occupied", execution: settings }));
     writer = registerRuntime(project, { kind: "task", task: busy.id });
@@ -490,7 +549,7 @@ try {
     await delay(2000);
     assert.equal(show(busy.id).draftDiscussion?.phase, "queued");
     writer(); writer = undefined;
-    await waitSilent(busy.id);
+    await waitReady(busy.id);
     check("The shared writer keeps a draft queued until released");
     const count = calls.length;
     cli(["create"], plannedDraft({ title: "Invalid creation", attachmentSources: [{ path: join(scratch, "missing") }] }), project, "IO_ERROR");
@@ -508,10 +567,22 @@ try {
     writer = registerRuntime(project, { kind: "task", task: interrupted.id });
     assert.ok(writer);
     cli(["draft-discussion", interrupted.id], { revision: interrupted.revision, phase: "running" });
+    assert.equal(messages(show(interrupted.id)).length, 0);
     report.interrupted = interrupted.id;
     check("Transient chat staging is cleaned");
   }
-  if (!live) writeFileSync(evidence, JSON.stringify(report, null, 2));
+  if (!live) {
+    const paths = ["src/desktop/main.ts", "src/desktop/codex-chat.ts", "src/cli/archive.ts", "src/cli/main.ts",
+      "src/desktop/chat.js", "src/desktop/locales/ru.json", "scripts/check-draft-discussion.mjs"];
+    report.sourceHashes = Object.fromEntries(paths.map(path => {
+      const source = readFileSync(new URL("../" + path, import.meta.url), "utf8").replaceAll("\r\n", "\n");
+      return [path, createHash("sha256").update(source).digest("hex")];
+    }));
+    report.head = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: fileURLToPath(new URL("../", import.meta.url)), encoding: "utf8", windowsHide: true,
+    }).trim();
+    writeFileSync(evidence, JSON.stringify(report, null, 2));
+  }
 } catch (error) {
   console.error(error);
   process.exitCode = 1;

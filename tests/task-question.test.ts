@@ -62,6 +62,10 @@ test("both discussion modes return explicit question state without parsing punct
 });
 
 test("invalid or interrupted provider results cannot silently close a question", async () => {
+  for (const questions of [undefined, null, 0, {}, []]) {
+    await assert.rejects(providerResult({ text: JSON.stringify({ questions }) }, true).pending,
+      /invalid draft discussion result/);
+  }
   for (const value of [undefined, "false", 0, null]) {
     await assert.rejects(providerResult({ text: JSON.stringify({ text: "Reply", awaitingAnswer: value }) }).pending,
       /invalid task discussion result/);
@@ -69,6 +73,9 @@ test("invalid or interrupted provider results cannot silently close a question",
   const result = await providerResult({ interrupted: true }).pending;
   assert.equal(result.interrupted, true);
   assert.equal(result.awaitingAnswer, undefined);
+  const initial = await providerResult({ interrupted: true }, true).pending;
+  assert.equal(initial.interrupted, true);
+  assert.equal(initial.text, undefined);
 });
 
 test("question state persists with replies, survives reads and partial answers, and is isolated per task", t => {
