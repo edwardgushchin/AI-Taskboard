@@ -9,7 +9,7 @@ import { discoverRepository, git, gitEnvironment, invokeGit, isAncestor, resolve
 import { member, TaskboardError } from "./model.ts";
 import { redactSecrets } from "./redact.ts";
 import { onBoard, type BoardLocation, type BoardStore } from "./storage.ts";
-import { checkProtectedPaths, gitStatus, requireNoGitOperation } from "./worktree.ts";
+import { checkProtectedPaths, gitStatus, requireNoGitOperation, worktreeOperationBranches } from "./worktree.ts";
 
 const execute = promisify(execFile);
 const heads = "refs/heads/";
@@ -188,7 +188,9 @@ export async function fastForwardRepository(location: BoardLocation, input: Reco
   const check = () => {
     checkWorktree();
     checkSource();
-    checkProtectedPaths(root, git(root, ["diff", "--name-only", "--no-renames", "-z", head, target, "--"], historyEnv).split("\0").filter(Boolean));
+    const changed = git(root, ["diff", "--name-only", "--no-renames", "-z", head, target, "--"], historyEnv).split("\0").filter(Boolean);
+    checkProtectedPaths(root, changed);
+    return changed;
   };
   const needsUpdate = onBoard(location, () => {
     checkWorktree();
@@ -290,8 +292,11 @@ export async function deleteRepositoryBranch(location: BoardLocation, input: Rec
     const task = store.storedCards().find(task => !["done", "cancelled"].includes(task.status) &&
       (compare(task.git?.target) || compare(task.git?.branch)));
     if (task) throw new TaskboardError("GIT_PROTECTED_BRANCH", "An open card uses this branch.", { ref, id: task.id });
-    if (trees.some(tree => compare(tree.branch)) || (scope === "remote" && worktrees(repo.root).some(tree => compare(tree.branch)))) {
-      throw new TaskboardError("GIT_BRANCH_IN_USE", "A registered worktree has this branch checked out.", { ref });
+    const relevantTrees = scope === "remote" ? [...trees, ...worktrees(repo.root)] : trees;
+    const occupied = relevantTrees.find(tree => compare(tree.branch) || worktreeOperationBranches(tree).some(compare));
+    if (occupied) {
+      throw new TaskboardError("GIT_BRANCH_IN_USE", "A registered worktree has this branch checked out or uses it in an unfinished Git operation.",
+        { ref, worktree: occupied.path });
     }
     const targetRoot = scope === "local" ? root : repo.root;
     if (symbolic(targetRoot, ref) || oid(targetRoot, ref) !== head) {

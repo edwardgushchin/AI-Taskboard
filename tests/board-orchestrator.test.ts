@@ -2972,7 +2972,11 @@ test("manager Git branch workflow stays scoped and uses checked commits", { time
   git(project, "init", "-b", "main");
   configure(project);
   await writeFile(join(project, "tracked"), "before\n");
-  git(project, "add", "tracked");
+  await writeFile(join(project, "a-removed"), "keep after failed checkout\n");
+  await writeFile(join(project, "c-shape"), "original file\n");
+  await writeFile(join(project, "z-filtered"), "original\n");
+  await writeFile(join(project, ".gitattributes"), "z-filtered filter=taskboard-test\n");
+  git(project, "add", ".");
   git(project, "commit", "-m", "Base");
   const base = git(project, "rev-parse", "HEAD");
   git(f.folder, "init", "--bare", "-b", "trunk", remote);
@@ -2981,7 +2985,14 @@ test("manager Git branch workflow stays scoped and uses checked commits", { time
   git(f.folder, "clone", remote, publisher);
   configure(publisher);
   await writeFile(join(publisher, "tracked"), "after\n");
-  git(publisher, "commit", "-am", "Incoming");
+  await writeFile(join(publisher, "z-filtered"), "changed\n");
+  git(publisher, "rm", "a-removed", "c-shape");
+  mkdirSync(join(publisher, "b-new", "nested"), { recursive: true });
+  await writeFile(join(publisher, "b-new", "nested", "added"), "incoming only\n");
+  mkdirSync(join(publisher, "c-shape"));
+  await writeFile(join(publisher, "c-shape", "child"), "replaced by a directory\n");
+  git(publisher, "add", ".");
+  git(publisher, "commit", "-m", "Incoming");
   const incoming = git(publisher, "rev-parse", "HEAD");
   git(publisher, "push", "origin", "trunk");
   git(f.folder, "clone", remote, neighbor);
@@ -3044,6 +3055,32 @@ test("manager Git branch workflow stays scoped and uses checked commits", { time
     assert.equal(git(project, "rev-parse", "refs/heads/other"), base);
     assert.equal(readFileSync(join(project, "tracked"), "utf8"), "before\n");
     git(project, "switch", "main");
+    const indexPath = join(project, ".git", "index");
+    // Refresh index stat data before comparing the index byte for byte.
+    git(project, "update-index", "--refresh");
+    const indexBefore = readFileSync(indexPath);
+    const failedFilter = join(project, ".git", "atb-failed-smudge");
+    const partialWrite = join(project, ".git", "atb-partial-checkout");
+    await writeFile(failedFilter, [
+      "#!/bin/sh",
+      "test -e a-removed || printf removed > .git/atb-partial-checkout",
+      "exit 1",
+    ].join("\n") + "\n", { mode: 0o755 });
+    git(project, "config", "filter.taskboard-test.clean", "cat");
+    git(project, "config", "filter.taskboard-test.smudge", "sh .git/atb-failed-smudge");
+    git(project, "config", "filter.taskboard-test.required", "true");
+    const filterRejected = await act("project_git_fast_forward", source);
+    assert.equal(filterRejected.error.code, "GIT_FAILED", JSON.stringify(filterRejected));
+    assert.equal(readFileSync(partialWrite, "utf8"), "removed");
+    assert.equal(git(project, "rev-parse", "HEAD"), base);
+    assert.deepEqual(readFileSync(indexPath), indexBefore);
+    assert.equal(readFileSync(join(project, "a-removed"), "utf8"), "keep after failed checkout\n");
+    assert.equal(readFileSync(join(project, "c-shape"), "utf8"), "original file\n");
+    assert.equal(existsSync(join(project, "b-new")), false);
+    assert.equal(readFileSync(join(project, "tracked"), "utf8"), "before\n");
+    assert.equal(readFileSync(join(project, "z-filtered"), "utf8"), "original\n");
+    assert.equal(git(project, "status", "--porcelain"), "");
+    git(project, "config", "--remove-section", "filter.taskboard-test");
     const checkoutHook = join(project, ".git", "hooks", "reference-transaction");
     const checked = join(project, ".git", "atb-checkout-race");
     await writeFile(checkoutHook, [
@@ -3060,6 +3097,9 @@ test("manager Git branch workflow stays scoped and uses checked commits", { time
     assert.equal(ff.data.head, incoming);
     assert.equal(git(project, "rev-parse", "HEAD"), incoming);
     assert.equal(readFileSync(join(project, "tracked"), "utf8"), "after\n");
+    assert.equal(readFileSync(join(project, "c-shape", "child"), "utf8"), "replaced by a directory\n");
+    assert.equal(readFileSync(join(project, "b-new", "nested", "added"), "utf8"), "incoming only\n");
+    assert.equal(existsSync(join(project, "a-removed")), false);
     assert.equal(git(project, "for-each-ref", "--format=%(upstream)", "refs/heads/main"), "");
     return { text: "Fetched and updated." };
   });
@@ -3126,6 +3166,27 @@ test("manager Git branch workflow stays scoped and uses checked commits", { time
   assert.equal(git(project, "rev-parse", "merged"), incoming);
   assert.equal((await remove("local", "main", current)).error.code, "GIT_PROTECTED_BRANCH");
   assert.equal((await remove("remote", "trunk", current)).error.code, "GIT_PROTECTED_BRANCH");
+
+  const rebaseTargets = [
+    ["local", project, "merged"],
+    ["remote", remote, "published"],
+  ] as const;
+  for (const [scope, repository, branch] of rebaseTargets) {
+    const rebasing = join(f.folder, "rebasing-" + scope);
+    git(repository, "worktree", "add", rebasing, branch);
+    configure(rebasing);
+    const stopped = spawnSync("git", ["-C", rebasing, "rebase", "--force-rebase", "--exec", "false", base], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    assert.notEqual(stopped.status, 0);
+    assert.match(stopped.stderr, /execution failed/);
+    assert.equal(git(rebasing, "branch", "--show-current"), "");
+    assert.equal((await remove(scope, branch, incoming)).error.code, "GIT_BRANCH_IN_USE");
+    assert.equal(git(repository, "rev-parse", "refs/heads/" + branch), incoming);
+    git(rebasing, "rebase", "--abort");
+    git(repository, "worktree", "remove", rebasing);
+  }
   const unique = git(project, "rev-parse", "other");
   const linked = join(f.folder, "linked");
   git(project, "worktree", "add", linked, "other");

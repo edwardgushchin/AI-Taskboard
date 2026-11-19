@@ -49,14 +49,41 @@ export function findTaskWorktree(repo: Repository, { branch, worktree: recorded 
   const detached = entries.find(item => !item.branch && item.head && !item.prunable && !relative(expected, item.path));
   if (!detached || !exists(detached.path)) return undefined;
   const gitDir = git(usableWorktree(detached), ["rev-parse", "--absolute-git-dir"]).trimEnd();
+  return rebaseOriginalBranch(gitDir) === branch ? detached : undefined;
+}
+
+function rebaseOriginalBranch(gitDir: string): string | undefined {
   for (const operation of ["rebase-merge", "rebase-apply"]) {
     const state = join(gitDir, operation);
     if (!exists(state)) continue;
     directory(state);
     const original = join(state, "head-name");
-    if (exists(original) && readBinary(original).toString("utf8").trimEnd() === branch) return detached;
+    if (exists(original)) return readBinary(original).toString("utf8").trimEnd();
   }
   return undefined;
+}
+
+export function worktreeOperationBranches(item: Worktree): string[] {
+  if (item.bare || item.prunable || !exists(item.path)) return [];
+  const gitDir = git(usableWorktree(item), ["rev-parse", "--absolute-git-dir"]).trimEnd();
+  const branches = [];
+  const rebase = rebaseOriginalBranch(gitDir);
+  if (rebase?.startsWith("refs/heads/")) branches.push(rebase);
+  const bisect = join(gitDir, "BISECT_START");
+  if (exists(bisect)) {
+    const branch = readBinary(bisect).toString("utf8").trimEnd();
+    if (branch) branches.push("refs/heads/" + branch);
+  }
+  const updateRefs = join(gitDir, "rebase-merge", "update-refs");
+  if (exists(updateRefs)) {
+    // Each pending ref is followed by its old and new object IDs.
+    const records = readBinary(updateRefs).toString("utf8").split(/\r?\n/);
+    for (let index = 0; index < records.length; index += 3) {
+      const ref = records[index]!;
+      if (ref.startsWith("refs/heads/")) branches.push(ref);
+    }
+  }
+  return branches;
 }
 
 export function taskWithCurrentWorktree(store: BoardStore, task: Task): Task & { cleanupAvailable?: boolean } {
