@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync, mkdirSync, mkdtempSync, openSync, closeSync, readSync,
+import { createReadStream, existsSync, globSync, mkdirSync, mkdtempSync, openSync, closeSync, readSync,
   readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
-const [arch, directory] = process.argv.slice(2);
+const [arch, directory, profileOption] = process.argv.slice(2);
+assert.ok(profileOption === undefined || profileOption === "--release");
+const signedRelease = profileOption === "--release";
 assert.match(arch ?? "", /^(x64|arm64)$/);
 assert.equal(process.arch, arch);
 const windows = process.platform === "win32";
@@ -25,6 +28,31 @@ const bundle = mac ? join(release, unpacked[0], "AI Taskboard.app", "Contents") 
 const resources = join(bundle, mac ? "Resources" : "resources");
 const desktop = join(bundle, mac ? "MacOS/AI Taskboard" : windows ? "AI Taskboard.exe" : "ai-taskboard-desktop");
 const cli = join(resources, "bin", windows ? "ai-taskboard.exe" : "ai-taskboard");
+const builderRequire = createRequire(createRequire(import.meta.url).resolve("app-builder-lib"));
+const { extractFile } = builderRequire("@electron/asar");
+
+function checkAppVersion(resourcesPath) {
+  const packaged = JSON.parse(extractFile(join(resourcesPath, "app.asar"), "package.json"));
+  assert.equal(packaged.version, version, "Packaged Electron version must match package.json");
+  return packaged.version;
+}
+
+function verifySignature(path) {
+  const run = (tool, args, env = process.env) => execFileSync(tool, args, {
+    env, encoding: "utf8", timeout: 60_000, windowsHide: true,
+  });
+  if (windows) {
+    const status = run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      "(Get-AuthenticodeSignature -LiteralPath $env:AI_TASKBOARD_SIGNATURE_PATH).Status"],
+    { ...process.env, AI_TASKBOARD_SIGNATURE_PATH: path }).trim();
+    assert.equal(status, "Valid", "Windows installer Authenticode validation");
+    return "Authenticode valid";
+  }
+  const status = run("pkgutil", ["--check-signature", path]);
+  assert.match(status, /Developer ID Installer:/);
+  run("xcrun", ["stapler", "validate", path]);
+  return "Developer ID Installer signature and notarization ticket valid";
+}
 
 function binaryArchitecture(path) {
   const fd = openSync(path, "r");
@@ -53,28 +81,34 @@ function binaryArchitecture(path) {
   }
 }
 
-function extractCli(packagePath, extension, destination) {
-  mkdirSync(destination);
+function extractResources(packagePath, extension, destination) {
+  if (extension !== "pkg") mkdirSync(destination);
   const extract = (tool, args) => execFileSync(tool, args, { stdio: "inherit", timeout: 180_000, windowsHide: true });
   if (extension === "exe") {
     // electron-builder's NSIS template stores one nested archive per architecture.
     const installed = join(process.env.ProgramFiles ?? "C:/Program Files", "7-Zip", "7z.exe");
     const sevenZip = existsSync(installed) ? installed : "7z";
     const archive = `$PLUGINSDIR/app-${arch === "x64" ? "64" : "arm64"}.7z`;
-    const entry = "resources/bin/ai-taskboard.exe";
     extract(sevenZip, ["x", "-y", `-o${destination}`, packagePath, archive]);
-    extract(sevenZip, ["x", "-y", `-o${destination}`, join(destination, archive), entry]);
-    return join(destination, entry);
+    extract(sevenZip, ["x", "-y", `-o${destination}`, join(destination, archive),
+      "resources/bin/ai-taskboard.exe", "resources/app.asar"]);
+    return join(destination, "resources");
   }
   if (extension === "zip") {
-    const entry = "AI Taskboard.app/Contents/Resources/bin/ai-taskboard";
-    extract("tar", ["-xf", packagePath, "-C", destination, entry]);
+    const entry = "AI Taskboard.app/Contents/Resources";
+    extract("tar", ["-xf", packagePath, "-C", destination, `${entry}/bin/ai-taskboard`, `${entry}/app.asar`]);
     return join(destination, entry);
   }
-  const entry = "opt/AI Taskboard/resources/bin/ai-taskboard";
+  if (extension === "pkg") {
+    extract("pkgutil", ["--expand-full", packagePath, destination]);
+    const apps = globSync("**/AI Taskboard.app/Contents/Resources/app.asar", { cwd: destination });
+    assert.equal(apps.length, 1, "Expected one packaged Electron application");
+    return resolve(destination, apps[0], "..");
+  }
   if (extension === "deb") extract("dpkg-deb", ["--extract", packagePath, destination]);
-  else extract("bsdtar", ["-xf", packagePath, "-C", destination, "--include=*/resources/bin/ai-taskboard"]);
-  return join(destination, entry);
+  else extract("bsdtar", ["-xf", packagePath, "-C", destination,
+    "--include=*/resources/bin/ai-taskboard", "--include=*/resources/app.asar"]);
+  return join(destination, "opt/AI Taskboard/resources");
 }
 
 function checkCliVersion(path, cwd) {
@@ -111,7 +145,7 @@ let launchError;
 let exited;
 let browserSocket;
 try {
-  assert.ok(existsSync(join(resources, "app.asar")));
+  report.checks.desktopVersion = checkAppVersion(resources);
   report.checks.desktopArch = binaryArchitecture(desktop);
   report.checks.cliArch = binaryArchitecture(cli);
   console.log(JSON.stringify(report.checks));
@@ -130,7 +164,7 @@ try {
   report.checks.cliBoard = true;
 
   report.packages = [];
-  for (const extension of windows ? ["exe"] : mac ? ["zip"] : ["deb", "rpm"]) {
+  for (const extension of windows ? ["exe"] : mac ? [signedRelease ? "pkg" : "zip"] : ["deb", "rpm"]) {
     const file = `${name}.${extension}`;
     report.checkingPackage = file;
     const path = join(release, file);
@@ -141,7 +175,14 @@ try {
     const evidence = { file, size, sha256: hash.digest("hex") };
     report.packages.push(evidence);
     const destination = join(profile, extension);
-    const extracted = extractCli(path, extension, destination);
+    if (signedRelease && (windows || mac)) evidence.signature = verifySignature(path);
+    const packagedResources = extractResources(path, extension, destination);
+    evidence.desktopVersion = checkAppVersion(packagedResources);
+    if (signedRelease && mac) {
+      execFileSync("codesign", ["--verify", "--deep", "--strict", resolve(packagedResources, "../..")],
+        { timeout: 60_000 });
+    }
+    const extracted = join(packagedResources, "bin", windows ? "ai-taskboard.exe" : "ai-taskboard");
     evidence.cliArch = binaryArchitecture(extracted);
     assert.equal(evidence.cliArch, arch, `${file} contains the wrong CLI architecture`);
     checkCliVersion(extracted, profile);

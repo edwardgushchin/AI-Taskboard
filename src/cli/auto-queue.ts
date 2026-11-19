@@ -42,6 +42,7 @@ export function updateAutoQueue(store: BoardStore, input: Record<string, unknown
 }
 
 export function requireAutoQueue(settings: BoardSettings, id: string, revision?: unknown) {
+  if (!settings.autoMode) throw new TaskboardError("AUTO_MODE_DISABLED", "Automatic starts are disabled.");
   const queue = autoQueueSettings(settings);
   if (queue.paused || queue.held.includes(id)) throw new TaskboardError("AUTO_QUEUE_PAUSED", "The automatic queue or task is paused by its manager.");
   if (revision !== undefined && revision !== queue.revision) throw new TaskboardError("AUTO_QUEUE_CHANGED", "The automatic queue changed before this launch.");

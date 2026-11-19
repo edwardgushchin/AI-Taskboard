@@ -9,6 +9,7 @@ import { electronCheck, localizationFixture } from "./electron-check.mjs";
 const script = fileURLToPath(import.meta.url);
 const root = resolve(dirname(script), "..");
 const require = createRequire(import.meta.url);
+const cardSpacingOnly = process.argv.includes("--card-spacing");
 const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "board",
   process.argv.includes("--settings-only") ? 300_000 : 180_000);
 const { app, BrowserWindow, nativeTheme } = await import("electron");
@@ -118,6 +119,133 @@ app.whenReady().then(async () => {
     window.pushBoard({ russian: true, restoring: true });
     void 0;
   `);
+  if (cardSpacingOnly) {
+    window.setContentSize(1280, 800);
+    await evaluate(`
+      const fullCard = {
+        status: 'in_progress', priority: 'high',
+        description: 'Review the spacing of the description, tags, preview and progress.',
+        tags: ['Interface', 'Cards', 'Electron', 'Keyboard access', 'LongUnbrokenTagForWrapping'],
+        milestone: { title: 'Release 0.1.0', repository: 'example/board', number: 1 },
+        attachments: [{ file: 'cover.png', name: 'cover.png' }],
+        subtasks: [{ title: 'Layout', done: true }, { title: 'Verify', done: false }],
+      };
+      fixture.board.tasks = [
+        task('T-0100', 'Check a long title and metadata in a narrow card', fullCard),
+        task('T-0101', 'Card with hidden preview', {
+          ...fullCard, status: 'review',
+          milestone: { ...fullCard.milestone, title: 'Very long milestone title requiring an ellipsis' },
+          attachments: [{ file: 'missing.png', name: 'missing.png' }],
+        }),
+        task('T-0102', 'Card without progress', { ...fullCard, status: 'ready', subtasks: [] }),
+        task('T-0103', 'Short card', { status: 'draft' }),
+      ];
+      fixture.runningTasks = ['T-0100', 'T-0101'];
+      fixture.waitingTasks = ['T-0102'];
+      window.taskboard.command = async () => new Promise(() => {});
+      push();
+      waitFor(() => findCard('T-0100')?.querySelector('.task-card-cover:not([hidden])')?.naturalWidth > 0 &&
+        findCard('T-0102')?.querySelector('.task-card-cover:not([hidden])')?.naturalWidth > 0 &&
+        window.previewCalls >= 3);
+    `);
+    const report = [
+      `${process.platform}/${process.arch}; Electron ${process.versions.electron}; Chromium ${process.versions.chrome}; Node ${process.versions.node}`,
+      "Command: node scripts/check-board.mjs --card-spacing --artifacts .tasks/qa",
+    ];
+    for (const theme of ["light", "dark"]) {
+      nativeTheme.themeSource = theme;
+      const panel = theme === "dark" ? "rgb(34, 37, 50)" : "rgb(255, 255, 255)";
+      await evaluate(`
+        applyTheme(${JSON.stringify(theme)});
+        waitFor(() => getComputedStyle(findCard('T-0100')).backgroundColor === ${JSON.stringify(panel)});
+      `);
+      for (const narrow of [false, true]) {
+        await evaluate(`
+          document.querySelectorAll('.task-card').forEach(node => {
+            node.style.width = ${JSON.stringify(narrow ? "120px" : "")};
+          });
+          settle();
+        `);
+        const measurement = await evaluate(`(() => {
+          const assertLayout = (condition, detail) => { if (!condition) throw new Error(detail); };
+          const near = (a, b) => Math.abs(a - b) < 0.05;
+          const rect = node => node.getBoundingClientRect();
+          assertLayout(innerWidth === 1280 && innerHeight === 800, '1280x800 viewport');
+          const expected = [6, 5, 6, 2];
+          return fixture.board.tasks.map(({ id }, index) => {
+            const card = findCard(id);
+            const details = card.querySelector('.task-card-details');
+            const bounds = rect(details);
+            const blocks = [...details.children].filter(node => !node.hidden);
+            const first = rect(blocks[0]);
+            const last = rect(blocks.at(-1));
+            const left = first.left - bounds.left;
+            const right = bounds.right - first.right;
+            const gaps = blocks.slice(1).map((node, i) => rect(node).top - rect(blocks[i]).bottom);
+            assertLayout(blocks.length === expected[index], id + ': visible blocks');
+            assertLayout(!${narrow} || rect(card).width === 120, id + ': narrow width');
+            assertLayout(near(left, right) && near(left, 8.96) &&
+              near(first.top - bounds.top, 11) && near(bounds.bottom - last.bottom, 11), id + ': equal padding');
+            assertLayout(gaps.every(gap => near(gap, 10)), id + ': block gaps ' + gaps);
+            assertLayout(blocks.every(node => near(rect(node).left, first.left) &&
+              near(rect(node).right, first.right)), id + ': common edges');
+            const meta = card.querySelector('.task-meta');
+            const tags = card.querySelector('.task-tags');
+            for (const group of [tags, meta, card.querySelector('.task-card-footer')].filter(Boolean)) {
+              const style = getComputedStyle(group);
+              assertLayout(style.rowGap === '4px' && style.columnGap === '6px', id + ': group gaps');
+              const boxes = [...group.children].map(rect);
+              boxes.forEach((a, i) => {
+                assertLayout(a.left >= first.left - 0.05 && a.right <= first.right + 0.05, id + ': group overflow');
+                assertLayout(boxes.slice(i + 1).every(b => a.right <= b.left || b.right <= a.left ||
+                  a.bottom <= b.top || b.bottom <= a.top), id + ': group overlap');
+              });
+            }
+            const tagRows = tags ? new Set([...tags.children].map(node => rect(node).top)).size : 0;
+            if (${narrow} && tags) assertLayout(tagRows > 1, id + ': tags wrap');
+            const spinner = card.querySelector('.agent-spinner');
+            if (index < 2) assertLayout(spinner?.getAttribute('role') === 'status' &&
+              spinner.getAttribute('aria-label') && meta.querySelector('.task-id').textContent === id &&
+              meta.querySelector('.task-milestone').title && meta.lastElementChild.textContent === '1',
+              id + ': metadata and accessible running indicator');
+            const milestone = meta.querySelector('.task-milestone-label');
+            const themeStyles = getComputedStyle(card);
+            assertLayout(themeStyles.backgroundColor === ${JSON.stringify(panel)}, id + ': theme panel color');
+            assertLayout(themeStyles.borderRadius ===
+              getComputedStyle(document.documentElement).getPropertyValue('--surface-radius').trim(), id + ': theme radius');
+            assertLayout(card.scrollWidth <= card.clientWidth && meta.scrollWidth <= meta.clientWidth, id + ': overflow');
+            return {
+              id, width: rect(card).width, padding: [11, left, 11, right], gaps, tagRows,
+              groupGap: getComputedStyle(meta).gap, panel: themeStyles.backgroundColor,
+              milestoneTruncated: milestone ? milestone.scrollWidth > milestone.clientWidth : null,
+              spinnerWrapped: spinner ? rect(spinner).top >= rect(meta).bottom : null,
+            };
+          });
+        })()`);
+        report.push(`${theme}, ${narrow ? "narrow" : "board"}: ${JSON.stringify(measurement)}`);
+        if (keepArtifacts && (!narrow || theme === "dark")) {
+          await capture(`card-spacing-${narrow ? "narrow" : theme}.png`);
+        }
+      }
+    }
+    window.show();
+    window.focus();
+    window.webContents.focus();
+    window.webContents.sendInputEvent({ type: "keyDown", keyCode: "Tab" });
+    window.webContents.sendInputEvent({ type: "keyUp", keyCode: "Tab" });
+    await evaluate(`findCard('T-0100').focus(); settle()`);
+    await check(`document.activeElement === findCard('T-0100') &&
+      getComputedStyle(findCard('T-0100')).outlineStyle === 'solid'`, "card has visible keyboard focus");
+    window.webContents.sendInputEvent({ type: "keyDown", keyCode: "Enter" });
+    window.webContents.sendInputEvent({ type: "char", keyCode: "\r" });
+    window.webContents.sendInputEvent({ type: "keyUp", keyCode: "Enter" });
+    await evaluate(`waitFor(() => sheet.open)`);
+    report.push("Keyboard focus visible; Enter opens the task sheet.");
+    report.push("Linux and macOS were not run. This change uses shared renderer HTML and CSS.");
+    if (keepArtifacts) writeFileSync(join(artifacts, "card-spacing-check.txt"), report.join("\n") + "\n");
+    console.log(report.join("\n"));
+    return;
+  }
   for (const russian of [true, false]) {
     for (const state of [{ restoring: true }, { loading: true }]) {
       await evaluate(`window.pushBoard(${JSON.stringify({ russian, ...state })}); void 0`);
@@ -446,7 +574,7 @@ app.whenReady().then(async () => {
         return footer.classList.contains('task-card-footer') && details.querySelectorAll('.task-run-status').length === 1 &&
           spinner?.getAttribute('role') === 'status' &&
           spinner.getAttribute('aria-label') === t('ui.agent_is_working_28ccd334') &&
-          s.left >= m.right && s.right === f.right && s.bottom === f.bottom &&
+          (s.left >= m.right || s.top >= m.bottom) && s.right === f.right && s.bottom === f.bottom &&
           progress?.children.length === 1 && progress.nextElementSibling === footer &&
           !bar.classList.contains('is-done') && b.left === f.left && b.right === f.right && b.height === 6 &&
           card.getAttribute('aria-description') === t('ui.subtasks_b409bda5') + ' 0/1' &&
@@ -1928,19 +2056,20 @@ app.whenReady().then(async () => {
       const meta = findCard(milestoneTask.id).querySelector('.task-meta');
       const idStyle = getComputedStyle(meta.querySelector('.task-id'));
       const milestone = meta.querySelector('.task-milestone');
-      const textParts = [...meta.querySelectorAll('.task-id, .task-milestone, .task-stat')];
-      const icons = [...meta.querySelectorAll('.task-stat .icon')];
+      const textParts = [...meta.querySelectorAll('.task-stat')];
+      const icons = ['symbol-number', 'milestone', 'link', 'attach']
+        .map(name => meta.querySelector('.task-stat .codicon-' + name));
       return getComputedStyle(milestone).color === idStyle.color && idStyle.color === getComputedStyle(meta).color &&
-        !!meta.querySelector('.task-id .codicon-symbol-number') && !!milestone.querySelector('.codicon-milestone') &&
-        textParts.length === 5 && textParts.every(part => {
+        textParts.length === icons.length && textParts.every(part => {
         const style = getComputedStyle(part);
         return style.fontFamily === getComputedStyle(document.documentElement).fontFamily &&
           style.fontSize === idStyle.fontSize && style.lineHeight === idStyle.lineHeight;
-      }) && icons.length === 5 && icons.every(icon => {
+      }) && icons.every(icon => {
+        if (!icon) return false;
         const glyph = getComputedStyle(icon, '::before');
         return glyph.fontFamily === 'codicon' && glyph.content !== 'none' && document.fonts.check(glyph.font);
       });
-    })()`, "task ID and milestone share the footer text color, and all five icons use the loaded Codicons font");
+    })()`, "task ID and milestone share the footer text color, and footer icons use the loaded Codicons font");
     await evaluate(`body.querySelector('.task-milestone-link').click(); waitFor(() => !!openedMilestone)`);
     await check(`openedMilestone === 'https://github.com/owner/example/milestone/5'`, "the assigned milestone opens on GitHub");
     await check(`(() => {
@@ -1953,9 +2082,14 @@ app.whenReady().then(async () => {
       const milestone = card.querySelector('.task-milestone');
       const bounds = milestone.getBoundingClientRect();
       const label = milestone.querySelector('.task-milestone-label');
-      return Math.abs(bounds.top - id.top) < 1 && bounds.right <= card.getBoundingClientRect().right &&
-        label.scrollWidth > label.clientWidth && getComputedStyle(label).textOverflow === 'ellipsis' && milestone.title.includes(title);
-    })()`, "a long milestone stays next to the task ID on a narrow card and exposes its full title on hover");
+      const meta = milestone.parentElement.getBoundingClientRect();
+      const cardBounds = card.getBoundingClientRect();
+      return cardBounds.width === 148 && bounds.top >= id.bottom &&
+        bounds.left >= meta.left && bounds.right <= meta.right && bounds.bottom <= cardBounds.bottom &&
+        meta.left >= cardBounds.left && meta.right <= cardBounds.right &&
+        label.clientWidth > 0 && label.scrollWidth > label.clientWidth &&
+        getComputedStyle(label).textOverflow === 'ellipsis' && milestone.title.includes(title);
+    })()`, "a long milestone wraps below the task ID at 148px, stays inside the card and exposes its full title on hover");
     console.log("GitHub milestone Chromium checks passed: " + checks);
     return;
   }

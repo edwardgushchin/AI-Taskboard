@@ -25,7 +25,7 @@ import { managerCliContext } from "../src/desktop/manager-cli.ts";
 import { managerAccess } from "../src/desktop/codex.ts";
 import { projectIdentity } from "../src/desktop/project-tabs.ts";
 import { githubReadTool } from "../src/desktop/github-read.ts";
-import { chatTools } from "../src/desktop/chat-actions.ts";
+import { chatTools, reviewModeInstruction } from "../src/desktop/chat-actions.ts";
 
 const source = readFileSync(new URL("../src/desktop/codex-chat.ts", import.meta.url), "utf8")
   .replace(/^import[\s\S]*?;\r?\n/gm, "").replace(/^export /gm, "");
@@ -253,6 +253,8 @@ test("discussion steering and interruption share the streaming connection, inclu
         assert.match(params.developerInstructions, /Questions alone, guesses and details found only in attachments do not authorize changes/);
         assert.match(params.developerInstructions, /ask a specific question before saving the disputed change/);
         assert.match(params.developerInstructions, /If task_update fails, report the error and do not claim an update/);
+        assert.match(params.developerInstructions, /write one observable result per item/);
+        assert.match(params.developerInstructions, /Preserve existing checklist items and their completion marks/);
         result = { thread: { id: 'thread' } };
       }
       if (method === 'turn/start') {
@@ -288,7 +290,7 @@ test("discussion steering and interruption share the streaming connection, inclu
     },
     process, setTimeout, clearTimeout,
     configuredCodex: async () => ({ path: process.execPath, args: [script] }),
-    chatTools, cliFailure: () => ({ ok: false }), saveChatImages: async () => [],
+    chatTools, reviewModeInstruction, cliFailure: () => ({ ok: false }), saveChatImages: async () => [],
   });
   const ready = Promise.withResolvers<AgentControl>();
   const toolStarted = Promise.withResolvers<void>();
@@ -450,6 +452,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
   let providerMode = "";
   const { replyToBoard: runtime, updateBoardGoal } = runInNewContext(stripTypeScriptTypes(source) + "\n({ replyToBoard, updateBoardGoal })", {
     spawn, turnControl, CodexTokenUsage, codexThreadPattern, Error, process, withBoardMcp, goalTaskWaitSeconds,
+    openComputerUse: async () => undefined,
     managerCliContext, probeManagerCli: async () => providerMode === "cli-ready"
       ? { gitOptions: ["--no-optional-locks", "-c", "core.fsmonitor=false"] } : {},
     manualContext: () => "", readBoardSettings: () => ({}), locateBoard: (path: string) => path, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
@@ -588,6 +591,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.equal(resumed.text, "First turn\n\nDone");
   const resumedRequests = JSON.parse(readFileSync(captured, "utf8"));
   const writingRules = readFileSync(new URL("../src/desktop/agent-instructions/task-writing.md", import.meta.url), "utf8").trim();
+  assert.match(writingRules, /write one observable result per item/);
   assert.ok(resumedRequests.find(({ method }: { method: string }) => method === "thread/resume").params.developerInstructions.includes(writingRules));
   assert.equal(resumed.model, "default-model");
   assert.equal(resumedRequests.find(({ method }: { method: string }) => method === "thread/resume").params.model, "default-model");

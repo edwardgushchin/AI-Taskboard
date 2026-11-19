@@ -7,12 +7,27 @@ import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const config = {};
 const ci = process.argv.includes("--ci");
+const release = process.argv.includes("--release");
+if (ci && release) throw new Error("Choose either --ci or --release.");
 const platform = Platform.current();
 const platformName = { win32: "windows", linux: "linux", darwin: "macos" }[process.platform];
-if (ci) {
+if (ci || release) {
   config.artifactName = `ai-taskboard-\${version}-${platformName}-${process.arch}.\${ext}`;
-  if (process.platform === "win32") config.win = { signExecutable: false };
-  if (process.platform === "darwin") config.mac = { identity: "-", hardenedRuntime: false, notarize: false };
+}
+if (ci && process.platform === "win32") config.win = { signExecutable: false };
+if (ci && process.platform === "darwin") {
+  config.mac = { identity: "-", hardenedRuntime: false, notarize: false };
+}
+if (release && process.platform !== "linux") {
+  const signingInputs = ["CSC_LINK", "CSC_KEY_PASSWORD"];
+  if (process.platform === "darwin") {
+    signingInputs.push("CSC_INSTALLER_LINK", "CSC_INSTALLER_KEY_PASSWORD",
+      "APPLE_ID", "APPLE_APP_SPECIFIC_PASSWORD", "APPLE_TEAM_ID");
+    config.mac = { notarize: true };
+  }
+  const missing = signingInputs.filter(name => !process.env[name]?.trim());
+  if (missing.length) throw new Error(`Missing release signing inputs: ${missing.join(", ")}`);
+  config.forceCodeSigning = true;
 }
 const stage = join(root, "dist", "installer");
 mkdirSync(stage, { recursive: true });
@@ -44,5 +59,7 @@ if (process.platform === "darwin" && !ci) {
   chmodSync(postinstall, 0o755);
   config.pkg = { scripts, allowAnywhere: false, allowCurrentUserHome: false };
 }
-const targets = ci ? platform.createTarget(process.platform === "darwin" ? "zip" : null, Arch[process.arch]) : undefined;
+const targets = ci || release
+  ? platform.createTarget(ci && process.platform === "darwin" ? "zip" : null, Arch[process.arch])
+  : undefined;
 await build({ projectDir: root, config, targets, publish: "never" });
