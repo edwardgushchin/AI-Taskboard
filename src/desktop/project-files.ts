@@ -1,8 +1,11 @@
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, opendir, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { TaskboardError } from "../cli/model.ts";
+import { gitEnvironment, invokeGit, requireRepository } from "../cli/git.ts";
+import { locateBoard } from "../cli/storage.ts";
 
 export function insideProject(root: string, file: string) {
   const path = relative(root, file);
@@ -113,4 +116,33 @@ export async function projectSha256(project: string, input: unknown, signal: Abo
     if (error instanceof TaskboardError) throw error;
     throw unreadable();
   }
+}
+
+export function commitFileHashes(project: string, commit: unknown, signal: AbortSignal) {
+  signal.throwIfAborted();
+  const invalidCommit = () => new TaskboardError("GIT_COMMIT_REQUIRED", "Use a full Git commit ID in this project.");
+  if (typeof commit !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(commit)) throw invalidCommit();
+  const { root } = requireRepository(locateBoard(project).repository);
+  const gitOptions = { GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "", GIT_NO_REPLACE_OBJECTS: "1" };
+  const kind = invokeGit(root, ["cat-file", "-t", commit], gitOptions);
+  if (kind.code !== 0 || kind.stdout.trim() !== "commit") throw invalidCommit();
+  const env = { ...gitEnvironment(), ...gitOptions };
+  return async (path: unknown) => {
+    signal.throwIfAborted();
+    if (typeof path !== "string" || /[\\:\x00-\x1f\x7f]/.test(path) ||
+        !path.split("/").every(part => part && part !== "." && part !== "..")) {
+      throw new TaskboardError("INVALID_INPUT", "Use a literal file path relative to the repository.");
+    }
+    const child = spawn("git", ["cat-file", "blob", commit + ":" + path], {
+      cwd: root, env, signal, windowsHide: true, stdio: ["ignore", "pipe", "ignore"],
+    });
+    child.on("error", () => { /* The close status and abort signal report failure. */ });
+    const closed = new Promise<number | null>(resolve => child.once("close", resolve));
+    const hash = createHash("sha256");
+    for await (const chunk of child.stdout) hash.update(chunk);
+    const status = await closed;
+    signal.throwIfAborted();
+    if (status !== 0) throw new TaskboardError("FILE_HASH_UNAVAILABLE", "No readable Git blob at that path in the selected commit.");
+    return { path, commit, sha256: hash.digest("hex") };
+  };
 }

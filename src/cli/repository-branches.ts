@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { advanceWorktree } from "./fast-forward-worktree.ts";
 import { withGuardedBranchRefs } from "./ref-transaction.ts";
 import { discoverRepository, git, gitEnvironment, invokeGit, isAncestor, resolveCommit, worktrees } from "./git.ts";
-import { member, TaskboardError, text } from "./model.ts";
+import { member, TaskboardError } from "./model.ts";
 import { redactSecrets } from "./redact.ts";
 import { onBoard, type BoardLocation, type BoardStore } from "./storage.ts";
 import { checkProtectedPaths, gitStatus, requireNoGitOperation } from "./worktree.ts";
@@ -19,18 +19,18 @@ const fetchOptions = ["fetch", "--no-tags", "--no-prune", "--no-prune-tags", "--
   "--no-write-fetch-head", "--no-auto-maintenance", "--refmap="];
 
 export function branchRef(root: string, value: unknown, label = "branch") {
-  const branch = text(value, label, true);
-  const ref = heads + branch;
-  if (branch.startsWith("-") || branch === "HEAD" || invokeGit(root, ["check-ref-format", ref]).code !== 0) {
+  if (typeof value !== "string" || !value || /[\x00-\x20\x7f]/.test(value) || value.startsWith("-") ||
+      value === "HEAD" || invokeGit(root, ["check-ref-format", heads + value]).code !== 0) {
     throw new TaskboardError("INVALID_INPUT", "Use a literal Git branch name for " + label + ".");
   }
-  return ref;
+  return heads + value;
 }
 
-function expectedCommit(value: unknown) {
-  const head = text(value, "head", true);
-  if (!commitId.test(head)) throw new TaskboardError("INVALID_INPUT", "Use a full Git commit ID.");
-  return head;
+export function expectedCommit(value: unknown) {
+  if (typeof value !== "string" || !commitId.test(value)) {
+    throw new TaskboardError("INVALID_INPUT", "Use a full Git commit ID.");
+  }
+  return value;
 }
 
 function remotes(root: string) {
@@ -38,7 +38,10 @@ function remotes(root: string) {
 }
 
 export function configuredRemote(root: string, value: unknown) {
-  const remote = text(value, "remote", true);
+  if (typeof value !== "string" || !value || /[\x00-\x20\x7f]/.test(value) || value.startsWith("-")) {
+    throw new TaskboardError("INVALID_INPUT", "Use a literal configured remote name.");
+  }
+  const remote = value;
   if (!remotes(root).includes(remote)) {
     throw new TaskboardError("GIT_REMOTE_REQUIRED", "Choose a configured Git remote.", { remote });
   }

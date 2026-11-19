@@ -30,8 +30,7 @@ import type { AgentControl } from "./codex-rpc.ts";
 import { CodexTokenUsage } from "./codex-token-usage.ts";
 import type { TokenUsageReport } from "../cli/token-usage.ts";
 import type { Expert } from "../cli/experts.ts";
-import { expertCommands, executorExpertTools, leadInstructions, leadSkillInstructions, phaseStageReporter, subagentInstructions } from "./expert-tools.ts";
-import type { teamInbox } from "../cli/expert-team.ts";
+import { expertCommands, executorExpertTools, leadInstructions, leadSkillInstructions, phaseStageReporter, subagentInstructions, watchTeamMail } from "./expert-tools.ts";
 import { insideProject } from "./project-files.ts";
 
 type Client = NonNullable<Awaited<ReturnType<typeof configuredCodex>>>;
@@ -74,7 +73,7 @@ const instructions = new URL("./agent-instructions/", import.meta.url);
 function executorInstructions() {
   const readInstructions = (name: string) => readFileSync(new URL(name + ".md", instructions), "utf8").trim();
   return boardAgentInstructions("executor", [
-    "AI Taskboard has already started this card and assigned its working directory. Read the current card, then work in that directory. Pass --project with the board root in every CLI invocation.",
+    "AI Taskboard has already started this card and assigned its working directory. Read the current card, then work in that directory. Pass --project with the board root in every CLI invocation. After a restart use the current TEMP for disposable files; the previous run's temporary directory has been retired.",
     "If a provider MCP tool is missing, use task_tool_request with server, tool and a reason. The manager discovers tools with provider_tools and saves an assignment with task_tool_grant. Assignments apply on the next task run. Keep working on independent steps. If the missing tool prevents further work on a required step, record that blocker and the condition for resuming.",
     checkWaitInstructions,
     readInstructions("executor").replace("__AI_TASKBOARD_CLI__", () => JSON.stringify(taskboardCliLaunch(bundled, entry))),
@@ -168,7 +167,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       if (assigned.size && ((name === "expert_context" && (!Array.isArray(input.ids) || input.ids.some(id => !assigned.has(id)))) ||
           (name === "expert_skill" && !assigned.has(input.expertId as string)))) return { ok: false, error: { code: "EXPERT_SCOPE", message: "Use the assigned specializations or ask the manager to change them." } };
       return worklog.remind(await callCli(project, [expertCommands[name], ...(name.startsWith("team_") || name === "expert_skill" ? [task.id] : [])],
-        { ...input, actor: "agent", ...(name === "expert_skill" ? { source: "tool" } : {}) }));
+        { ...input, actor: "agent", ...(name === "expert_skill" ? { source: "tool" } : {}),
+          ...(name === "expert_list" ? { catalogOnly: true } : {}) }));
     }
     if (name === recurringChildTool.name && task.schedule) return worklog.remind(await callCli(project, ["spawn-child", task.id, "--compact"], args));
     if (name === executorResultTool.name) return worklog.remind(await recordExecutorResult(project, task.id, args));
@@ -260,9 +260,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   const tokens = new CodexTokenUsage();
   let activeThreadId: string | undefined;
   let control: AgentControl | undefined;
-  let mailTimer: NodeJS.Timeout | undefined;
-  let deliveredMail = 0;
-  let readingMail = false;
+  let stopMail: (() => void) | undefined;
   let interruptTimeout: NodeJS.Timeout | undefined;
   const timeout = setTimeout(() => {
     rpc.fail(new Error("Codex did not start the task in time."));
@@ -270,7 +268,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     rpc.close();
   }, 60_000);
   const close = async () => {
-    clearInterval(mailTimer);
+    stopMail?.();
     clearTimeout(timeout);
     clearTimeout(interruptTimeout);
     signal?.removeEventListener("abort", interrupt);
@@ -429,6 +427,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       "После записи результата в карточку и перед итоговым ответом один раз вызови mcp__ai_taskboard__worklog_record с языком и массивом entries. " +
         "Инструмент подключён к текущему ходу. Команды Worklog из истории относятся к прошлым ходам. Объедини изменения и проверки в одну запись. Успешная запись завершает Worklog этого хода.",
       "Перед сдачей сопоставь каждый критерий с результатом в diff или проверке. Для изменённого поведения перечисли существенно разные условия, в которых действует один критерий, и проверь сочетания, где результат может различаться. Например, для изменений поставки это чистая и повторная сборка, сборка и публикация, настройки по умолчанию и переопределения. После возврата проверь другие затронутые сценарии того же критерия. Если проверка выполнена на более ранней ревизии, покажи, почему она ещё применима, либо повтори затронутую проверку.",
+      "Для сдачи через Git проверь пробельные ошибки командой git diff --check от базы карточки до сданных изменений. Для заменяемых данных проверь каждое место вывода, включая зависимые подписи, описания и состояния. Убедись, что старые значения исчезли и вернулись после восстановления исходных данных.",
+      "Перед сдачей проверь читаемость написанных вручную исходников и тестов. Разверни разметку, ветви и многооператорные строки в обычные блоки. Для ввода сначала проверяй допустимый формат и символы, затем нормализуй и преобразуй значения. В проверках используй допустимые варианты и строки, которые преобразователь ошибочно сделал бы допустимыми, например цифры с буквами или специальные записи числа в десятичном поле. Проверь исправление ошибочного ввода. После форматирования запусти проверку затронутого поведения.",
       "Если доступ отклонён, продолжай разрешённым способом и запроси у менеджера смену режима, если она нужна для обязательного шага. При исчерпании доступных способов заблокируй задачу. В причине укажи шаг, нужный ресурс и причину отказа, в условии разблокировки — конкретное действие для продолжения.",
       "Рабочая папка: " + cwd,
       JSON.stringify({ title: task.title, description: task.description, criteria: task.criteria, summary: task.summary, nextStep: task.nextStep }),
@@ -456,17 +456,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     worklog.start(threadId, turn.id);
     control = turnControl(request, threadId, turn.id);
     if (assigned.size || task.expertStage || task.expertStages?.length) {
-      mailTimer = setInterval(() => {
-        if (readingMail || !control) return;
-        readingMail = true;
-        void callCli<ReturnType<typeof teamInbox>>(project, ["expert-inbox", task.id], { afterSequence: deliveredMail }).then(async inbox => {
-          if (!inbox.ok || !inbox.data.messages.length) return;
-          const sequence = Math.max(...inbox.data.messages.map(message => message.sequence));
-          await control!.steer("AI Taskboard: new addressed team mail through sequence " + sequence + ". Read team_inbox and coordinate with the sender. Owner questions need a human answer.", []);
-          deliveredMail = sequence;
-        }).catch(() => { /* Persisted mail remains available; retry on the next pass. */ }).finally(() => { readingMail = false; });
-      }, 2000);
-      mailTimer.unref();
+      stopMail = watchTeamMail(project, task.id, control, "agent");
     }
     tokens.save(tokens.begin(threadId, turn.id), onTokenUsage);
     clearTimeout(timeout);

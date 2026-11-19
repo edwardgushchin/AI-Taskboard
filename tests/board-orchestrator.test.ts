@@ -23,9 +23,9 @@ import { managerInbox, needsManagerAttention } from "../src/cli/task-messages.ts
 import type { RunActivity, Task } from "../src/cli/model.ts";
 import type { ChatSettings } from "../src/cli/model.ts";
 import { directory as storageDirectory, locateBoard, onBoard, readBoardSettings, readJson, writeJson } from "../src/cli/storage.ts";
-import { registerRuntime, runtimeLocation, runtimeTransaction } from "../src/desktop/board-runtime.ts";
+import { registerRuntime, runtimeEntries, runtimeLocation, runtimeTransaction } from "../src/desktop/board-runtime.ts";
 import type { BoardGoal, BoardGoalAction, readBoardHistory } from "../src/desktop/codex-chat.ts";
-import { inspectProjectPath, projectSha256 } from "../src/desktop/project-files.ts";
+import { commitFileHashes, inspectProjectPath, projectSha256 } from "../src/desktop/project-files.ts";
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
 import { reviewerActivity, withReviewerChat } from "../src/desktop/reviewer-chat.ts";
 import { goalMessages, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory } from "../src/desktop/manager-history.ts";
@@ -84,7 +84,7 @@ function fixture(t: TestContext) {
   };
   const { autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools } = runInNewContext(
     boardSource + "\n({ autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools })",
-    { AbortSignal, expertActions, expertCommands, leadInstructions, autoQueueSettings, isManual, manualContext, locateBoard, readBoardSettings, boardReviewMode, usesIndependentReviewer, callCli, cliFailure, defaultBoardAgents, hexTagColor, inspectProjectPath, managerInbox, needsManagerAttention, projectSha256, reviewVerifier, russianWriting, TaskboardError, taskIdPattern,
+    { AbortSignal, expertActions, expertCommands, leadInstructions, autoQueueSettings, isManual, manualContext, locateBoard, readBoardSettings, boardReviewMode, usesIndependentReviewer, callCli, cliFailure, commitFileHashes, defaultBoardAgents, hexTagColor, inspectProjectPath, managerInbox, needsManagerAttention, projectSha256, reviewVerifier, russianWriting, TaskboardError, taskIdPattern,
       DOMException, deleteGitHubMilestone: (_location: unknown, input: Record<string, unknown>, signal: AbortSignal) => milestoneDeletion.run!(input, signal),
       taskFields: { title: {}, description: {}, criteria: {}, tags: {} },
     },
@@ -156,7 +156,7 @@ function fixture(t: TestContext) {
       tools: { name: string }[], call: RunAction, _signal: AbortSignal,
       onUsage: (report: import("../src/cli/token-usage.ts").TokenUsageReport) => Promise<void>) => {
       assert.equal(cwd, project);
-      assert.deepEqual(Array.from(tools, tool => tool.name), ["task_review_diff", "task_review_artifact", "project_path", "project_sha256"]);
+      assert.deepEqual(Array.from(tools, tool => tool.name), ["task_review_diff", "task_review_artifact", "project_git", "project_path", "project_sha256"]);
       const task = JSON.parse(context);
       const report = await reviewSubmission(task, call, settings);
       const confirmation = task.candidateReview || (report as { verifyRisk?: boolean })?.verifyRisk;
@@ -758,6 +758,33 @@ test("a board snapshot with auto-review on wakes the manager once per submitted 
   assert.deepEqual(readJson(f.binding), goalBinding);
 });
 
+test("approved reviewer integration stays disabled with auto mode off while a goal runs and after release", async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"])).ok, true);
+  const release = f.agentSlots.claim(f.project, "manager:context");
+  assert.ok(release);
+  f.agentSlots.entries = runtimeEntries;
+  runtimeTransaction(f.project, entries => {
+    entries.find(entry => entry.task === "manager:context")!.state = { id: "active-goal", phase: "running",
+      lane: "work", startedAt: Date.now(), goalRunning: true };
+  });
+  let backgroundCalls = 0;
+  const watch = f.schedule({
+    project: f.project, settings: { reviewMode: "reviewer" },
+    tasks: [{ id: "T-0001", status: "review", revision: 7, reviewApproved: true }],
+    managerInbox: [{ id: "T-0001", kind: "review-approve", sequence: 12 }],
+  }, async () => { backgroundCalls++; return { text: "Handled outstanding approval." }; });
+  try {
+    watch.tick();
+    await watch.done();
+    assert.equal(backgroundCalls, 0);
+  } finally { release(); }
+  watch.tick();
+  await watch.done();
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(backgroundCalls, 0);
+});
+
 test("manager has no configurable capacity limit and shares one board context", async t => {
   const f = fixture(t);
   await f.cli(["init"]);
@@ -923,6 +950,69 @@ test("reviewer-human uses the shared review queue with and without automatic mod
   }
 });
 
+test("an unfinished independent review keeps the submission and releases the manager to return it", { timeout: 60_000 }, async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"])).ok, true);
+  assert.equal((await f.cli(["settings"], { reviewMode: "reviewer", autoMode: true, reviewer: { model: "fixture", effort: "low" } })).ok, true);
+  const created = await f.cli(["create"], plannedDraft({ title: "Source comparison", criteria: ["Verify the referenced facts"] }));
+  assert.equal(created.ok, true, JSON.stringify(created));
+  const task = created.data;
+  const plan = await f.cli(["expert-plan", task.id], {
+    phase: "review", revision: task.revision, lead: "independent-reviewer", reason: "Independent source verification",
+    stages: [{ key: "verify", expertId: "independent-reviewer", title: "Verify facts",
+      criteria: ["Verify the referenced facts"], inputs: [], outputs: ["evidence"], dependsOn: [] }],
+  });
+  assert.equal(plan.ok, true, JSON.stringify(plan));
+  assert.equal((await f.cli(["approve", task.id])).ok, true);
+  assert.equal((await f.cli(["start", task.id])).ok, true);
+  const { data: preview } = await f.cli(["preview", task.id]);
+  const submitted = await f.cli(["submit", task.id], { token: preview.token, noChanges: true, summary: "Comparison", checks: ["Compared prices"] });
+  assert.equal(submitted.ok, true, JSON.stringify(submitted));
+  const { data: board } = await f.cli(["list", "--compact"]);
+  const reviewerStarted = Promise.withResolvers<void>();
+  const reviewerRelease = Promise.withResolvers<void>();
+  f.setReviewer(async () => {
+    reviewerStarted.resolve();
+    await reviewerRelease.promise;
+    return { summary: "The original publication is missing.", findings: [], needsHuman: false, evidence: ["Compared the available notes."] };
+  });
+  const watch = f.schedule(board, async () => assert.fail("An incomplete review must not trigger integration."));
+  watch.tick();
+  try {
+    await reviewerStarted.promise;
+    const attempt = await f.run("Read the submission.", async act => {
+      const review = await act("task_review", { id: task.id });
+      assert.equal(review.ok, true);
+      assert.equal(review.data.reviewerRunning, true);
+      const result = await act("task_request_changes", { id: task.id, revision: review.data.revision, reason: "Save the original publication." });
+      assert.equal(result.error.code, "REVIEW_IN_PROGRESS");
+      return { text: "The reviewer is working." };
+    });
+    assert.equal(attempt.ok, true, JSON.stringify(attempt));
+  } finally {
+    reviewerRelease.resolve();
+    await watch.done();
+  }
+  const { data: pending } = await f.cli(["show", task.id]);
+  assert.equal(pending.status, "review");
+  assert.ok(pending.history.some((event: { action: string; text?: string }) =>
+    event.action === "review-note" && event.text?.includes("The original publication is missing.")));
+  assert.ok(!pending.history.some((event: { action: string }) => event.action === "review-approve"));
+  const returned = await f.run("Ask the executor to save the source.", async act => {
+    const review = await act("task_review", { id: task.id });
+    assert.equal(review.ok, true);
+    const { revision, targetHead } = review.data;
+    assert.equal(review.data.reviewerRunning, false);
+    const result = await act("task_request_changes", { id: task.id, revision, reason: "Save the original publication." });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.data.status, "in_progress");
+    const stale = await act("task_review_diff", { id: task.id, revision, targetHead, paths: ["source.txt"] });
+    assert.equal(stale.error.code, "REVIEW_REQUIRED");
+    return { text: "The executor will save the source." };
+  });
+  assert.equal(returned.ok, true, JSON.stringify(returned));
+});
+
 test("reviewers agree to submissions or return defects, and the manager controls integration", { timeout: 240_000 }, async t => {
   const f = fixture(t);
   const project = join(f.folder, "project");
@@ -963,7 +1053,7 @@ test("reviewers agree to submissions or return defects, and the manager controls
   const reviewed = new Set<string>();
   let passReviews = 0;
   let failReviews = 0;
-  f.setReviewer(async ({ id, title, revision, targetHead, previousReview }, call, settings) => {
+  f.setReviewer(async ({ id, title, revision, submitted, targetHead, previousReview }, call, settings) => {
     assert.deepEqual(settings, model);
     reviewed.add(id);
     if (reviewed.size === 4) started.resolve();
@@ -988,6 +1078,12 @@ test("reviewers agree to submissions or return defects, and the manager controls
         assert.equal(wrongTargetPath.error.code, "INVALID_INPUT");
         const wrongTargetHead = await call("task_review_diff", { ...targetComparison, targetHead: previousReview.targetHead });
         assert.equal(wrongTargetHead.ok, false);
+        const pinnedInput = { view: "commit_diff", from: previousReview.targetHead, to: targetHead, paths: ["new-target.txt"] };
+        const pinnedDiff = await call("project_git", pinnedInput);
+        assert.equal(pinnedDiff.ok, true, JSON.stringify(pinnedDiff));
+        assert.match(pinnedDiff.data.output, /\n\+Unrelated change\n/);
+        assert.equal((await call("project_git", { ...pinnedInput, paths: ["../new-target.txt"] })).error.code, "INVALID_INPUT");
+        assert.equal((await call("project_git", { view: "diff" })).error.code, "INVALID_INPUT");
       }
     }
     if (title === "pass" || title === "fail") {
@@ -997,6 +1093,15 @@ test("reviewers agree to submissions or return defects, and the manager controls
     if (title === "pass" && passReviews === 1) {
       const unavailable = await call("task_review_diff", { id, revision, targetHead, paths: ["pass.txt"], comparison: "previous-target" });
       assert.equal(unavailable.error.code, "REVIEW_REQUIRED");
+      assert.equal(existsSync(join(project, "pass.txt")), false);
+      const hash = await call("project_sha256", { commit: submitted, paths: ["pass.txt", "missing.txt", "../pass.txt"] });
+      assert.equal(hash.ok, true, JSON.stringify(hash));
+      assert.equal(hash.data.files[0].data.commit, submitted);
+      assert.equal(hash.data.files[0].data.sha256, createHash("sha256").update("pass\n").digest("hex"));
+      assert.equal(hash.data.files[1].error.code, "FILE_HASH_UNAVAILABLE");
+      assert.equal(hash.data.files[2].error.code, "INVALID_INPUT");
+      assert.equal((await call("project_sha256", { commit: targetHead, path: "pass.txt" })).error.code, "FILE_HASH_UNAVAILABLE");
+      assert.equal((await call("project_sha256", { commit: git("rev-parse", submitted + "^{tree}"), path: "pass.txt" })).error.code, "REVIEW_REQUIRED");
     }
     if (title === "pass" && passReviews === 2) {
       const unavailable = await call("task_review_diff", { id, revision, targetHead, paths: ["pass.txt"], comparison: "previous-submission" });
@@ -1289,7 +1394,7 @@ test("work history continues from local pages to earlier provider operations", a
     lane: "chat", message: { text: "Cancel T-0001", files: [] }, items: [local],
   });
   for (let i = 1; i <= 20; i++) saveManagerHistory(f.project, start + i, randomUUID(), {
-    lane: "notice", items: [{ id: "notice-" + i, type: "agentMessage", title: "", status: "completed", text: "Cancelled" }],
+    lane: "work", items: [tool("work-" + i, "task_show", i)],
   });
   const first = await f.history(undefined, "work");
   assert.equal(first.data.turns.length, 20);
@@ -1427,6 +1532,9 @@ test("manager reads Git information without modifying the repository", async t =
     assert.equal(commit.ok, true);
     assert.match(commit.data.output, /\+Committed edit/);
     assert.doesNotMatch(commit.data.output, /Staged edit|Working edit/);
+    const wrongObject = await act("project_git", { view: "commit_diff", from, to: git("rev-parse", "HEAD^{tree}"), paths: ["tracked.txt"] });
+    assert.equal(wrongObject.error.code, "GIT_COMMIT_REQUIRED");
+    assert.equal(wrongObject.error.details.field, "to");
     assert.equal((await act("project_git", { view: "reset" })).error.code, "INVALID_INPUT");
     assert.equal((await act("project_git", { view: "status", path: ".." })).error.code, "INVALID_INPUT");
     return { text: "Проверил." };
@@ -1504,8 +1612,11 @@ test("manager adopts expert roles, loads a board skill and plans an addressed sp
   const reply = await f.run("Подготовь команду спринта", async act => {
     const experts = await act("expert_list", {});
     assert.equal(experts.ok, true); assert.equal(experts.data.length, 220);
+    assert.deepEqual(Object.keys(experts.data[0]).sort(), ["enabled", "group", "id", "name"]);
     const context = await act("expert_context", { ids: ["business-analyst", "product-owner"] });
     assert.equal(context.ok, true); assert.equal(context.data.length, 2);
+    const overLimit = await act("expert_context", { ids: experts.data.slice(0, 7).map(({ id }: { id: string }) => id) });
+    assert.equal(overLimit.error.code, "INVALID_INPUT");
     const skill = await act("expert_skill", { expertId: "product-owner", skillId: "workflow" });
     assert.equal(skill.ok, true); assert.match(skill.data.directory, /experts[\\/]product-owner[\\/]skills/);
     const stages = [
@@ -1515,15 +1626,23 @@ test("manager adopts expert roles, loads a board skill and plans an addressed sp
     const brief = { title: "Sprint", description: "Prepare requirements and a test plan.", criteria: ["Both plans are ready."] };
     const incomplete = await act("task_create", brief);
     assert.equal(incomplete.error.code, "EXPERT_PLAN_REQUIRED");
+    const invalidArtifact = await act("task_create", { ...brief,
+      expertTeam: { work: { lead: "product-owner", reason: "Plan work.", stages: [
+        { ...stages[1], dependsOn: [], artifactOutputs: { desktop: "png" } },
+      ] }, review: { lead: "qa-engineer", reason: "Verify the output.", stages: [] } } });
+    assert.equal(invalidArtifact.error.code, "INVALID_INPUT");
+    assert.match(invalidArtifact.error.message, /Stage test.*"desktop".*outputs/);
     assert.equal((await act("board_list", {})).data.tasks.length, 0);
     const planned = await act("task_create", { ...brief,
-      expertTeam: { work: { lead: "product-owner", reason: "Coordinate requirements and test planning.", stages },
+      expertTeam: { work: { lead: "product-owner", reason: "Coordinate requirements and test planning.",
+        stages: [stages[0], { ...stages[1], artifactOutputs: { "test-plan.md": "text" } }] },
         review: { lead: "qa-engineer", reason: "One QA specialist can verify both outputs.", stages: [] } } });
     assert.equal(planned.ok, true, JSON.stringify(planned.error));
     const parent = planned.data;
     assert.equal(parent.revision, 1);
     const saved = await act("task_show", { id: parent.id });
     assert.equal(saved.data.expertTeam.work.stages[1].dependsOn[0], stages[0].key);
+    assert.deepEqual(saved.data.expertTeam.work.stages[1].artifactOutputs, { "test-plan.md": "text" });
     const sent = await act("team_message", { id: parent.id, to: parent.id, kind: "decision", text: "Start with the EU market" });
     assert.equal(sent.ok, true, JSON.stringify(sent.error));
     const inbox = await act("team_inbox", { id: parent.id });
@@ -1891,7 +2010,7 @@ test("a goal delegates a bounded slice, waits for submission, and reviews before
     assert.equal(f.boardListeners.size, 1);
     const retry = await act("task_request_changes", { id: slice.id, revision: summary.revision, reason: "Return a validation error for empty names." });
     assert.equal(retry.data.status, "in_progress");
-    assert.deepEqual(f.cliCalls.slice(callsBeforeReturn).map(args => args[0]), ["list", "settings", "request-changes", "start"]);
+    assert.deepEqual(f.cliCalls.slice(callsBeforeReturn).map(args => args[0]), ["list", "request-changes", "start"]);
     await f.pushBoard();
     const returned = (await waitForReturn).data;
     assert.equal(returned.timedOut, false);
@@ -1988,14 +2107,14 @@ test("a goal delegates a bounded slice, waits for submission, and reviews before
     assert.equal(accepted.ok, true, JSON.stringify(accepted.error));
     assert.equal(accepted.data.status, "done");
     assert.equal(accepted.data.acceptedTreeMatchesSubmission, true);
-    assert.deepEqual(f.cliCalls.slice(callsBeforeAccept).map(args => args[0]), ["settings", "settings", "accept"]);
+    assert.deepEqual(f.cliCalls.slice(callsBeforeAccept).map(args => args[0]), ["accept"]);
     await f.pushBoard();
     assert.equal(f.reviewing()[sliceId], undefined);
     assert.deepEqual((await act("manager_inbox", {})).data.map((message: { sequence: number }) => message.sequence), [update.data.sequence]);
     return { text: "One slice integrated." };
   });
   assert.equal(ordinary.ok, true, JSON.stringify(ordinary.error ?? ordinary.data?.error));
-  assert.equal(ordinary.data.answer, "One slice integrated.");
+  assert.equal(ordinary.data.answer, "One slice integrated.", ordinary.data.error);
   assert.equal(readFileSync(join(project, "parser.txt"), "utf8").trim(), "Empty name: validation error");
   const saved = (await f.cli(["show", sliceId])).data;
   assert.equal(saved.history.findLast((event: { action: string }) => event.action === "accept").actor, "manager");
@@ -2877,6 +2996,15 @@ test("manager Git branch workflow stays scoped and uses checked commits", { time
     const refs = await act("project_git_branches", {});
     assert.equal(refs.data.head, base);
     assert.deepEqual(Array.from(refs.data.remotes), ["upstream"]);
+    for (const malformed of [" main", "main ", "bad\0name", "bad..name"]) {
+      const refused = await act("project_git_branch_create", { branch: malformed, head: base });
+      assert.equal(refused.error.code, "INVALID_INPUT");
+    }
+    for (const malformed of [" " + base, base + "\n", base.slice(0, -1) + "z", "0x" + base]) {
+      const refused = await act("project_git_fast_forward", { branch: "main", head: malformed });
+      assert.equal(refused.error.code, "INVALID_INPUT");
+    }
+    assert.equal((await act("project_git_fetch", { remote: "upstream " })).error.code, "INVALID_INPUT");
     const fetched = await act("project_git_fetch", { remote: "upstream" });
     assert.equal(fetched.ok, true, JSON.stringify(fetched.error));
     assert.equal(fetched.data.branches.find((entry: { ref: string }) => entry.ref === "refs/remotes/upstream/trunk").head, incoming);
@@ -3088,11 +3216,22 @@ test("manager Git branch workflow stays scoped and uses checked commits", { time
   assert.equal((await remove("remote", "published", incoming)).error.code, "GIT_REMOTE_TRANSACTION_UNAVAILABLE");
   assert.equal(git(remote, "rev-parse", "published"), incoming);
   git(remote, "config", "--unset", "receive.denyDeletes");
-  git(project, "remote", "add", "network-only", "https://example.invalid/repo");
-  for (const scope of ["local", "remote"]) {
-    const unsupported = await f.cli(["git", "branch-delete"], { scope, branch: "merged", head: current, remote: "network-only", confirmed: true });
-    assert.equal(unsupported.error.code, "GIT_REMOTE_TRANSACTION_UNAVAILABLE");
+  for (const url of ["ssh://git@example.invalid/repo", "https://example.invalid/repo"]) {
+    git(project, "remote", "set-url", "upstream", url);
+    for (const [scope, branch, head] of [["local", "merged", current], ["remote", "published", incoming]]) {
+      const prevented = await f.cli(["git", "branch-delete"], {
+        scope, branch, head, remote: "upstream", confirmed: true,
+      });
+      assert.equal(prevented.error.code, "GIT_REMOTE_TRANSACTION_UNAVAILABLE");
+      assert.match(prevented.error.message, /direct transactional access/);
+      assert.equal(prevented.error.details.remote, "upstream");
+      assert.equal(git(project, "rev-parse", "refs/heads/merged"), current);
+      assert.equal(git(remote, "rev-parse", "refs/heads/published"), incoming);
+    }
   }
+  git(project, "remote", "set-url", "upstream", remote);
+  assert.equal(git(project, "remote", "get-url", "upstream"), remote);
+  assert.equal(git(project, "config", "branch.merged.merge"), "refs/heads/published");
 
   git(remote, "symbolic-ref", "HEAD", "refs/heads/missing");
   assert.equal((await remove("local", "merged", current)).error.code, "GIT_REMOTE_DEFAULT_UNKNOWN");

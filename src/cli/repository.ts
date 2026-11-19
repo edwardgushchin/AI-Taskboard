@@ -7,7 +7,7 @@ import { onBoard, sha256, withMilestoneLinksLock } from "./storage.ts";
 import { requireNoGitOperation } from "./worktree.ts";
 import { githubApi, githubRequests } from "./github-cli.ts";
 import { redactSecrets } from "./redact.ts";
-import { branchRef, configuredRemote, createRepositoryBranch, deleteRepositoryBranch, fastForwardRepository, fetchRepositoryBranches, listRepositoryBranches } from "./repository-branches.ts";
+import { branchRef, configuredRemote, createRepositoryBranch, deleteRepositoryBranch, expectedCommit, fastForwardRepository, fetchRepositoryBranches, listRepositoryBranches } from "./repository-branches.ts";
 
 const execute = promisify(execFile);
 const commitId = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -303,9 +303,21 @@ function commitDiff(root: string, input: Record<string, unknown>) {
     throw new TaskboardError("INVALID_INPUT", "Use 1 to 64 distinct literal paths relative to the repository.");
   }
   const offset = input.offset === undefined ? 0 : number(input.offset, "offset", 0);
-  const output = git(root, ["--no-optional-locks", "--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv",
+  const env = { GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "" };
+  const comparison = invokeGit(root, ["--no-optional-locks", "--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv",
     "--no-color", "--no-renames", "--ignore-submodules=none", "--submodule=short", "--unified=0",
-    from + "^{commit}", to + "^{commit}", "--", ...paths], { GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "" });
+    from + "^{commit}", to + "^{commit}", "--", ...paths], env);
+  if (comparison.code !== 0) {
+    for (const [field, value] of [["from", from], ["to", to]]) {
+      if (invokeGit(root, ["rev-parse", "--verify", "--quiet", "--end-of-options", value + "^{commit}"], env).code !== 0) {
+        throw new TaskboardError("GIT_COMMIT_REQUIRED", "Use a full Git commit ID for " + field + ".", { field, value });
+      }
+    }
+    throw new TaskboardError("GIT_FAILED", "Git could not compare the selected commits.", {
+      output: comparison.stderr.trim(), exitCode: comparison.code,
+    });
+  }
+  const output = comparison.stdout;
   if (offset > output.length || /[\uDC00-\uDFFF]/.test(output.charAt(offset))) {
     throw new TaskboardError("INVALID_INPUT", "Use the nextOffset returned for these commits and paths.");
   }
@@ -502,12 +514,11 @@ async function pushPinnedBranch(location: BoardLocation, branch: string, head: s
 
 export async function pushRepositoryBranch(location: BoardLocation, input: Record<string, unknown>) {
   const root = repositoryPath(location);
-  const branch = text(input.branch, "branch", true);
-  const head = text(input.head, "head", true);
-  const source = "refs/heads/" + branch;
-  if (Object.keys(input).some(key => !["branch", "head", "remote", "remoteBranch"].includes(key)) || branch.startsWith("-") ||
-      !commitId.test(head) || invokeGit(root, ["check-ref-format", source]).code !== 0) {
-    throw new TaskboardError("INVALID_INPUT", "Pass a local branch name and its full Git commit ID.");
+  const source = branchRef(root, input.branch);
+  const branch = source.slice("refs/heads/".length);
+  const head = expectedCommit(input.head);
+  if (Object.keys(input).some(key => !["branch", "head", "remote", "remoteBranch"].includes(key))) {
+    throw new TaskboardError("INVALID_INPUT", "Use the parameters defined for branch publication.");
   }
   const { remote, remoteRef } = onBoard(location, () => {
     const tip = resolveCommit(root, source);
