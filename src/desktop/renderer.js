@@ -657,6 +657,9 @@ function openSheet(kind, title) {
     byId("app-content").inert = true;
     document.querySelector(".status-bar").inert = true;
   }
+  if (!sheet.contains(document.activeElement)) {
+    byId("close-sheet").focus();
+  }
 }
 
 function section(title, content, target = body) {
