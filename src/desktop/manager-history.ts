@@ -361,43 +361,91 @@ export function readDialogueReference(project: string) {
   return { referenceOnly: true, messages };
 }
 
+export function goalActivityItems(items: BoardActivity[], fallbackAt?: string): BoardActivity[] {
+  const events: BoardActivity[] = [];
+  for (const { messages, ...item } of items) {
+    const at = item.userMessage?.at ?? item.at ?? fallbackAt;
+    if (!item.messagesOnly) {
+      events.push(at === undefined ? item : { ...item, at });
+    }
+    for (const message of messages ?? []) {
+      events.push({
+        ...item, id: "coordination:" + message.id + "/" + message.sequence,
+        at: message.at ?? at, messages: [message], messagesOnly: true,
+      });
+    }
+  }
+  return events;
+}
+
 function readGoalHistory(project: string, cursor: string | null) {
   const prefix = "goal:";
-  const before = cursor?.slice(prefix.length);
-  if (cursor && (!cursor.startsWith(prefix) || !/^\d{13}:\d{13}-[0-9a-f-]{36}\.json:\d{8}$/i.test(before!))) {
-    throw new Error("Invalid goal history cursor.");
+  type Key = [time: number, id: string, file: string, index: number];
+  const compare = (left: Key, right: Key) => {
+    const [leftTime, leftId, leftFile, leftIndex] = left;
+    const [rightTime, rightId, rightFile, rightIndex] = right;
+    // Match goalTimeline in chat.js. File and index only distinguish copies of one event.
+    if (leftTime !== rightTime) {
+      return leftTime - rightTime;
+    }
+    if (leftId !== rightId) {
+      return leftId < rightId ? -1 : 1;
+    }
+    if (leftFile !== rightFile) {
+      return leftFile < rightFile ? -1 : 1;
+    }
+    return leftIndex - rightIndex;
+  };
+  let before: Key | undefined;
+  if (cursor) {
+    let value: unknown;
+    try {
+      value = cursor.startsWith(prefix) ? JSON.parse(cursor.slice(prefix.length)) : null;
+    } catch {
+      throw new Error("Invalid goal history cursor.");
+    }
+    if (!Array.isArray(value) || value.length !== 4) {
+      throw new Error("Invalid goal history cursor.");
+    }
+    const [time, id, file, index] = value;
+    if (!Number.isSafeInteger(time) || typeof id !== "string" ||
+        typeof file !== "string" || !filePattern.test(file) || !Number.isSafeInteger(index) || index < 0) {
+      throw new Error("Invalid goal history cursor.");
+    }
+    before = [time, id, file, index];
   }
   const folder = join(project, ".tasks", "manager-chat");
   if (!exists(folder)) {
     return undefined;
   }
   directory(folder);
-  const events: { key: string; file: string; turn: Turn; model?: string }[] = [];
+  const events: { key: Key; file: string; turn: Turn; model?: string }[] = [];
   for (const name of readdirSync(folder).filter(name => filePattern.test(name))) {
     const run = readJson(join(folder, name)) as Run;
     if (!run.goalId) {
       continue;
     }
     const scope = { lane: run.lane, goalId: run.goalId };
-    const append = (turn: Turn, index: number) => {
-      const at = turn.items[0]?.at ?? turn.messages[0]?.at;
-      const time = at && Number.isFinite(Date.parse(at)) ? Date.parse(at) : Number(name.slice(0, 13));
-      const key = String(time).padStart(13, "0") + ":" + name + ":" + String(index).padStart(8, "0");
-      if (!before || key < before) {
+    const append = (turn: Turn, id: string, at: string | undefined, index: number) => {
+      const key: Key = [Date.parse(at ?? "") || 0, id, name, index];
+      if (!before || compare(key, before) < 0) {
         events.push({ key, file: name, turn, model: run.model });
       }
     };
+    const startedAt = new Date(Number(name.slice(0, 13))).toISOString();
     if (run.message) {
-      append({ ...scope, messages: [run.message], items: [] }, 0);
+      const message = { ...run.message, at: run.message.at ?? startedAt, clientId: run.message.clientId ?? name };
+      append({ ...scope, messages: [message], items: [] }, message.clientId, message.at, 0);
     }
-    run.items.forEach((item, index) => {
+    const items = goalActivityItems(run.items, startedAt);
+    items.forEach((item, index) => {
       const turn: Turn = item.userMessage
         ? { ...scope, messages: [{ ...item.userMessage, clientId: item.id, at: item.at }], items: [] }
-        : { ...scope, messages: [], items: [item], ...(index === run.items.length - 1 ? { durationMs: run.durationMs } : {}) };
-      append(turn, index + 1);
+        : { ...scope, messages: [], items: [item], ...(index === items.length - 1 ? { durationMs: run.durationMs } : {}) };
+      append(turn, item.id, item.at, index + 1);
     });
   }
-  events.sort((left, right) => right.key.localeCompare(left.key));
+  events.sort((left, right) => compare(right.key, left.key));
   const selected: typeof events = [];
   let remaining = 4 * 1024 * 1024;
   for (const event of events) {
@@ -408,7 +456,7 @@ function readGoalHistory(project: string, cursor: string | null) {
     selected.push(event);
     remaining -= size;
   }
-  const nextCursor = selected.length < events.length ? prefix + selected.at(-1)!.key : null;
+  const nextCursor = selected.length < events.length ? prefix + JSON.stringify(selected.at(-1)!.key) : null;
   const turns: Turn[] = [];
   let previousFile: string | undefined;
   // Keep adjacent events from one run together so generated results retain
@@ -509,7 +557,8 @@ export async function readManagerView(project: string, cursor: string | null, vi
     const legacy = await readLegacy(next);
     if (!legacy) return;
     const turns = managerHistoryForView(legacy.turns, view).map(turn => ({
-      ...turn, messages: turn.messages.filter(beforeLocal), items: turn.items.filter(beforeLocal),
+      ...turn, messages: turn.messages.filter(beforeLocal),
+      items: (view === "work" ? goalActivityItems(turn.items) : turn.items).filter(beforeLocal),
     })).filter(turn => turn.messages.length || turn.items.length);
     next = legacy.nextCursor;
     if (turns.length || !next || visited.has(next)) {

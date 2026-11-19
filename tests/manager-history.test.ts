@@ -5,12 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
+import { runInNewContext } from "node:vm";
+import type { BoardActivity } from "../src/desktop/codex-chat.ts";
 import { initializeBoard, writeJson } from "../src/cli/storage.ts";
 import { sweepArchives } from "../src/cli/archive.ts";
 import { createTask } from "../src/cli/tasks.ts";
 import { statusNotice } from "../src/cli/task-messages.ts";
 import type { Task } from "../src/cli/model.ts";
-import { hasManagerImageView, managerChatItems, managerUnread, managerWorkItems, readManagerDialogue, readManagerHistory, readManagerMessages, saveManagerHistory } from "../src/desktop/manager-history.ts";
+import { goalActivityItems, hasManagerImageView, managerChatItems, managerUnread, managerWorkItems, readManagerDialogue, readManagerHistory, readManagerMessages, saveManagerHistory } from "../src/desktop/manager-history.ts";
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
 import type { ReviewedSubmission } from "../src/desktop/board-actions.ts";
 
@@ -86,6 +88,64 @@ test("goal history skips ordinary dialogue pages and finds saved goal events", t
   assert.deepEqual(first.turns.flatMap(turn => turn.items.map(item => item.id)), ["saved-work"]);
   assert.equal(first.nextCursor, null);
   assert.ok(!readManagerHistory(project, null, "chat")!.turns.some(turn => turn.items.some(item => item.id === "saved-work")));
+});
+
+test("goal timeline merges late messages by original time and keeps stable IDs through save and pagination", t => {
+  const project = fixture(t);
+  const at = (clock: string) => "2026-11-20T" + clock + "Z";
+  const later = at("01:25:00.017");
+  const earliest = at("01:17:00.012");
+  const goalId = randomUUID();
+  const activity = (id: string, time: string): BoardActivity => ({
+    id, at: time, type: "agentMessage", title: "", text: id, status: "completed",
+  });
+  const reply = activity("z-reply", later);
+  const tie = activity("a-reply", later);
+  const first = activity("before-tie", at("01:25:00.005"));
+  const packet: BoardActivity = {
+    ...activity("packet", at("01:28:00.000")),
+    type: "dynamicToolCall",
+    messagesOnly: true,
+    messages: [{ id: "T-0123", sequence: 1, actor: "agent", text: "Early update", at: earliest }],
+  };
+  const run = randomUUID();
+  const started = Date.parse(earliest);
+  const message = { text: "Goal request", files: [], clientId: "owner", at: at("01:16:00.000") };
+  const save = (items: BoardActivity[]) => saveManagerHistory(project, started, run, { lane: "work", goalId, message, items });
+  const renderer = readFileSync(new URL("../src/desktop/chat.js", import.meta.url), "utf8");
+  type Turns = NonNullable<ReturnType<typeof readManagerHistory>>["turns"];
+  const timeline: (turns: Turns, live: BoardActivity[], pending?: BoardActivity[]) => BoardActivity[] =
+    runInNewContext(renderer + "\n goalTimeline", { IntersectionObserver: class {} });
+  const visible = (turns: Turns, live: BoardActivity[], pending?: BoardActivity[]) =>
+    Array.from(timeline(turns, live, pending), ({ id, at }) => [id, at]);
+  save([reply, first]);
+  const initial = readManagerHistory(project, null, "work")!.turns;
+  assert.deepEqual(visible(initial, goalActivityItems([tie])), [
+    ["owner", message.at], [first.id, first.at], [tie.id, later], [reply.id, later],
+  ]);
+  const expected = [
+    ["owner", message.at], ["coordination:T-0123/1", earliest], [first.id, first.at], [tie.id, later], [reply.id, later],
+  ];
+  assert.deepEqual(visible(initial, goalActivityItems([tie, packet, reply, packet])), expected);
+  save([reply, tie, packet, first]);
+  const restored = readManagerHistory(project, null, "work")!.turns;
+  assert.deepEqual(visible(restored, goalActivityItems([packet, reply])), expected);
+  assert.deepEqual(visible(restored, []), expected);
+
+  const newer = Array.from({ length: 39 }, (_, index) =>
+    activity("new-" + index, new Date(Date.parse(later) + index + 1).toISOString()));
+  save([reply, tie, packet, first, ...newer]);
+  const head = readManagerHistory(project, null, "work")!;
+  const newerRows = newer.map(({ id, at }) => [id, at]);
+  assert.deepEqual(visible(head.turns, []), [expected[4], ...newerRows]);
+  assert.deepEqual(visible(head.turns, [], goalActivityItems([packet, first, tie, reply])),
+    [...expected.slice(1), ...newer.map(({ id, at }) => [id, at])]);
+  assert.ok(head.nextCursor);
+  const older = readManagerHistory(project, head.nextCursor, "work")!;
+  assert.deepEqual(visible(older.turns, []), expected.slice(0, 4));
+  assert.equal(older.nextCursor, null);
+  assert.deepEqual(visible([...older.turns, ...head.turns], goalActivityItems([packet])),
+    [...expected, ...newer.map(({ id, at }) => [id, at])]);
 });
 
 test("manager history preserves steering order and pages through locally saved runs", t => {

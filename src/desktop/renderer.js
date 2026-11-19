@@ -2286,32 +2286,27 @@ function draftComposer() {
   const workViewport = chatViewport(work);
   work.hidden = true;
   work.tabIndex = 0;
-  const workSaved = element("div", undefined, "board-work-timeline");
-  const workLive = element("div", undefined, "board-work-timeline");
-  const liveGoal = element("div", undefined, "chat-run");
-  const liveChat = element("div", undefined, "chat-run");
+  const workTimeline = element("div", undefined, "chat-run board-work-timeline");
   const workError = element("p", undefined, "muted");
   workError.hidden = true;
   const workOlder = button(() => t("ui.earlier_activity_e8606f75"), () => void loadWork(workCursor), "quiet board-chat-older");
   workOlder.hidden = true;
-  workLive.append(liveGoal, liveChat);
-  work.append(workOlder, workSaved, workLive, workError);
+  work.append(workOlder, workTimeline, workError);
   let workCursor;
   let workLoading = false;
   let workReload = false;
   let workLivePending = false;
   let workLiveDirty = false;
-  let liveWorkItems;
-  let savedWorkItems = new Set();
+  let liveWork = [];
+  const pendingWork = new Map();
+  let savedWorkIds = new Set();
+  let savedWork = [];
+  let olderWorkLoaded = false;
   let hasWorkHistory = false;
-  let loadedOlderWork = false;
-  function renderLiveWork() {
-    if (liveWorkItems) {
-      const seenMessages = new Set([...workSaved.querySelectorAll("[data-coordination-key]")].map(node => node.dataset.coordinationKey));
-      const pending = items => items.filter(item => !savedWorkItems.has(item.id));
-      renderActivity(liveGoal, pending(liveWorkItems.work), false, { seenMessages, managerWork: true });
-      renderActivity(liveChat, pending(liveWorkItems.chat), false, { seenMessages, managerWork: true });
-    }
+  function renderGoalTimeline() {
+    renderActivity(workTimeline, goalTimeline(savedWork, liveWork, pendingWork.values()), true, {
+      managerWork: true, liveIds: new Set(liveWork.map(item => item.id)),
+    });
   }
   async function loadWork(cursor = null) {
     if (disposed || work.hidden) return;
@@ -2322,66 +2317,45 @@ function draftComposer() {
     workLoading = true;
     workOlder.disabled = true;
     try {
-      let result;
       let next = cursor;
       const visited = new Set();
+      const turns = [];
+      // Keep the oldest loaded page when new events shift the page boundaries.
+      const oldest = !cursor && (olderWorkLoaded || !workViewport.atEnd()) ? savedWork[0] : undefined;
+      const oldestMessage = oldest?.messages[0]?.clientId;
+      const oldestItem = oldest?.items[0]?.id;
+      let reachedOldest = !oldest;
       do {
         visited.add(next);
-        result = await api.boardHistory(project, next, "work");
+        const result = await api.boardHistory(project, next, "work");
         if (disposed || work.hidden) return;
         if (!result.ok) throw new Error(boardError(result.error));
-        editor.updateGoal(result.data.goal, result.data.goalRunning, result.data.goalResuming, result.data);
-        if (work.hidden) return;
+        if (visited.size === 1) {
+          editor.updateGoal(result.data.goal, result.data.goalRunning, result.data.goalResuming, result.data);
+          if (work.hidden) return;
+        }
+        turns.unshift(...result.data.turns);
+        reachedOldest ||= result.data.turns.some(turn =>
+          (oldestMessage !== undefined && turn.messages.some(message => message.clientId === oldestMessage)) ||
+          turn.items.some(item => item.id === oldestItem));
         next = result.data.nextCursor;
         // A broken provider cursor must not keep the loading loop alive.
         if (visited.has(next)) next = null;
-      } while (!result.data.turns.length && next);
-      if (!cursor && loadedOlderWork && !workViewport.atEnd()) {
-        workReload = true;
-        return;
-      }
-      const seen = new Set(cursor ? [...workSaved.querySelectorAll("[data-coordination-key]")].map(node => node.dataset.coordinationKey) : []);
-      const page = document.createDocumentFragment();
-      const saved = new Set(cursor ? savedWorkItems : []);
-      const previousRuns = new Map([...workSaved.querySelectorAll("[data-work-turn]")].map(run => [
-        run.dataset.workTurn,
-        new Map([...run.querySelectorAll("details[data-item]")].map(detail => [detail.dataset.item, detail.open])),
-      ]));
-      const previous = !cursor && hasWorkHistory &&
-        new Set([...work.querySelectorAll("[data-item]")].map(row => activityRowKey(row.dataset.item)));
-      for (const turn of result.data.turns) {
-        for (const { text, files, clientId, at } of turn.messages) page.append(chatMessage("user", text, files, false, false, clientId, at));
-        const items = turn.items.filter(item => !saved.has(item.id));
-        if (!items.length) continue;
-        for (const item of items) saved.add(item.id);
-        const run = element("div", undefined, "chat-run");
-        run.dataset.workTurn = turn.items[0]?.id ?? "";
-        renderRunActivity(run, items, true, turn.durationMs, undefined, { seenMessages: seen, managerWork: true });
-        const details = previousRuns.get(run.dataset.workTurn);
-        if (details) {
-          for (const detail of run.querySelectorAll("details[data-item]")) {
-            if (details.has(detail.dataset.item)) {
-              detail.open = details.get(detail.dataset.item);
-            }
-          }
-        }
-        if (previous) {
-          for (const row of run.querySelectorAll("[data-item]")) {
-            if (!previous.has(activityRowKey(row.dataset.item))) row.setAttribute("data-enter", "");
-          }
-        }
-        for (const item of run.querySelectorAll("[data-coordination-key]")) seen.add(item.dataset.coordinationKey);
-        if (!run.hidden) page.append(run);
-      }
+      } while (next && (!reachedOldest || !turns.length));
       workViewport.update(() => {
-        if (cursor) workSaved.prepend(page);
-        else workSaved.replaceChildren(page);
-        loadedOlderWork = Boolean(cursor);
-        savedWorkItems = saved;
+        // Pages arrive newest first, while turns within each page are chronological.
+        if (cursor) savedWork.unshift(...turns);
+        else savedWork = turns;
+        savedWorkIds = new Set(savedWork.flatMap(turn => [
+          ...turn.messages.map(message => message.clientId),
+          ...turn.items.map(item => item.id),
+        ]));
+        for (const id of savedWorkIds) pendingWork.delete(id);
+        olderWorkLoaded ||= Boolean(cursor);
         workCursor = next;
         workOlder.hidden = !workCursor;
         workError.hidden = true;
-        renderLiveWork();
+        renderGoalTimeline();
       });
       if (!hasWorkHistory) workViewport.followEnd();
       hasWorkHistory = true;
@@ -2392,13 +2366,13 @@ function draftComposer() {
           workError.textContent = error.message;
           workError.hidden = false;
           workOlder.hidden = false;
-          renderLiveWork();
+          renderGoalTimeline();
         });
       }
     } finally {
       workLoading = false;
       workOlder.disabled = false;
-      if (workReload && (!loadedOlderWork || workViewport.atEnd())) {
+      if (workReload) {
         workReload = false;
         void loadWork();
       }
@@ -2435,15 +2409,8 @@ function draftComposer() {
       }).catch(() => {});
       return;
     }
-    if (loadedOlderWork && !workViewport.atEnd()) workReload = true;
-    else void loadWork();
+    void loadWork();
   };
-  work.addEventListener("scroll", () => {
-    if (workReload && !workLoading && workViewport.atEnd()) {
-      workReload = false;
-      void loadWork();
-    }
-  });
   editor.refreshWork = async () => {
     if (disposed || work.hidden || !editor.matches("[data-open], [data-pinned]")) return;
     if (workLivePending) {
@@ -2454,8 +2421,16 @@ function draftComposer() {
     try {
       const result = await api.boardHistory(project, null, "live");
       if (disposed || work.hidden || !result.ok) return;
-      liveWorkItems = result.data;
-      if (!workLoading) workViewport.update(renderLiveWork);
+      const previousLive = liveWork;
+      liveWork = [...(result.data.work ?? []), ...(result.data.chat ?? [])];
+      const liveIds = new Set(liveWork.map(item => item.id));
+      // A completed run can disappear from live before it reaches the loaded pages.
+      for (const item of previousLive) {
+        if (!liveIds.has(item.id) && !savedWorkIds.has(item.id)) pendingWork.set(item.id, item);
+      }
+      for (const id of liveIds) pendingWork.delete(id);
+      if (!workLoading) workViewport.update(renderGoalTimeline);
+      if (previousLive.length && !liveWork.length) void loadWork();
     } catch {
       // The next activity update will refresh the panel.
     } finally {
@@ -3075,7 +3050,7 @@ function draftComposer() {
     const previous = new Map([...container.querySelectorAll("[data-item]")].map(child =>
       [activityRowKey(child.dataset.item), child.getAnimations().find(animation => animation.animationName === "board-chat-enter")?.currentTime]));
     renderRunActivity(container, items, completed, undefined, undefined, {
-      ...context, userMessage: ({ text, files, at }) => chatMessage("user", text, files, false, false, undefined, at),
+      ...context, userMessage: ({ text, files, at }, id) => chatMessage("user", text, files, false, false, context.managerWork ? id : undefined, at),
     });
     if (completed && context.dialogue) rememberMessages(container);
     const now = performance.now();

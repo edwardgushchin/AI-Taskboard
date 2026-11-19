@@ -193,9 +193,47 @@ function reviewerFindings(text, taskId) {
   return body;
 }
 
+function goalTimeline(turns, live, pending = []) {
+  const entries = new Map();
+  for (const turn of turns) {
+    for (const message of turn.messages) {
+      const id = message.clientId ?? JSON.stringify([message.at, message.text, message.files]);
+      entries.set(id, { id, at: message.at, userMessage: message });
+    }
+    for (const item of turn.items) {
+      entries.set(item.id, item);
+    }
+  }
+  for (const item of pending) {
+    if (!entries.has(item.id)) {
+      entries.set(item.id, item);
+    }
+  }
+  for (const item of live) {
+    const saved = entries.get(item.id);
+    if (!saved || saved.status === "inProgress") {
+      entries.set(item.id, { ...item, at: saved?.at ?? item.userMessage?.at ?? item.at });
+    }
+  }
+  const time = item => Date.parse(item.at) || 0;
+  return [...entries.values()].sort((left, right) => {
+    const elapsed = time(left) - time(right);
+    if (elapsed || left.id === right.id) return elapsed;
+    return left.id < right.id ? -1 : 1;
+  });
+}
+
 function renderRunActivity(container, items, completed = false, durationMs, taskId, context) {
   const messageContext = { ...(context ?? { taskId: taskId ?? taskInSheet?.id }), agent: true };
   const previous = new Map([...container.querySelectorAll("details")].map(entry => [entry.dataset.item, entry.open]));
+  const previousFolds = new Map();
+  if (context?.managerWork) {
+    for (const fold of container.querySelectorAll(".chat-work")) {
+      for (const action of fold.querySelectorAll(".chat-run-item")) {
+        previousFolds.set(action.dataset.item, fold.open);
+      }
+    }
+  }
   const previousImages = new Map([...container.querySelectorAll(".chat-run-item")].map(entry =>
     [entry.dataset.item, entry.querySelector(".chat-run-images")?.querySelector("button")]));
   const focusedImage = container.querySelector("[data-manager-image]:focus") ??
@@ -225,9 +263,11 @@ function renderRunActivity(container, items, completed = false, durationMs, task
   const managerImageTiles = new Map([...container.querySelectorAll("[data-manager-image]")].map(tile =>
     [tile.dataset.managerImage + "\0" + tile.dataset.imagePlacement, tile]));
   const answers = new Map();
+  const lastByTurn = new Map();
   if (context?.dialogue || context?.managerWork) {
     for (const item of items) {
       const key = item.providerTurnId;
+      lastByTurn.set(key, item);
       if (item.type === "agentMessage" && item.phase === "final_answer" && item.text.trim()) {
         answers.set(key, item.id);
       }
@@ -414,11 +454,16 @@ function renderRunActivity(container, items, completed = false, durationMs, task
     nodes.push(tiles);
   }
   let previousTurnId = items[0]?.providerTurnId;
+  let previousItem;
   for (const item of items) {
     if (item.providerTurnId !== previousTurnId) {
-      appendUnansweredImages(previousTurnId);
+      if (!context?.managerWork || lastByTurn.get(previousTurnId) === previousItem) {
+        appendUnansweredImages(previousTurnId);
+      }
+      if (context?.managerWork) flush();
       previousTurnId = item.providerTurnId;
     }
+    previousItem = item;
     if (finalItems.has(item)) continue;
     if (context?.dialogue && item.type === "imageGeneration") {
       continue;
@@ -427,7 +472,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
     if (item.userMessage?.text?.startsWith("AI Taskboard queue: handle these addressed notices without a goal. [")) continue;
     if (item.userMessage && context?.userMessage) {
       flush();
-      const entry = context.userMessage(item.userMessage);
+      const entry = context.userMessage(item.userMessage, item.id);
       entry.dataset.item = "user:" + item.id;
       nodes.push(entry);
       continue;
@@ -486,14 +531,21 @@ function renderRunActivity(container, items, completed = false, durationMs, task
   flush();
   const boundaryKey = node => node.dataset.messageId || node.dataset.coordinationKey || node.dataset.generatedAnswer ||
     (node.dataset.item?.startsWith("images:") ? node.dataset.item : undefined) ||
+    (context?.managerWork && node.dataset.item?.startsWith("message:") ? node.dataset.item : undefined) ||
     (node.dataset.actor === "user" || taskEventRows.has(node) ? node.dataset.item : undefined);
   const hasBoundaries = nodes.some(boundaryKey);
   function foldWork(batch, key, label) {
     const work = element("details", undefined, "chat-work");
-    work.dataset.item = key;
     const first = batch.find(node => node.dataset.item)?.dataset.item;
+    if (context?.managerWork && first) key = "work:" + activityRowKey(first);
+    work.dataset.item = key;
     if (first) work.dataset.chatAnchor = "work:" + first;
     work.open = previous.get(key) ?? false;
+    if (context?.managerWork && !previous.has(key)) {
+      const actions = batch.flatMap(node => nodeActivities.get(node) ?? []);
+      const previousState = actions.map(item => previousFolds.get("item:" + item.id)).find(open => open !== undefined);
+      work.open = previousState ?? actions.some(item => context.liveIds.has(item.id));
+    }
     activitySummary(work, label, "", "reasoning", activityState(
       hasBoundaries ? batch.flatMap(node => nodeActivities.get(node) ?? []) : items));
     const chronology = element("div", undefined, "chat-run-body");
@@ -503,6 +555,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
   }
   if (completed && nodes.length) {
     let label = () => {
+      if (context?.managerWork) return t("ui.work_details_e9890a2e");
       if (!Number.isSafeInteger(durationMs) || durationMs < 0) return t("ui.completed_a863c619");
       const seconds = Math.floor(durationMs / 1000), minutes = Math.floor(seconds / 60);
       const unit = (value, name) => new Intl.NumberFormat(localization.locale, {style:"unit",unit:name,unitDisplay:"short"}).format(value);

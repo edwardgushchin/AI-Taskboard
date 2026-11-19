@@ -120,6 +120,11 @@ app.whenReady().then(async () => {
     window.pushBoard({ russian: true, restoring: true });
     void 0;
   `);
+  if (process.argv.includes("--goal-order-only")) {
+    const { checkGoalOrder } = await import("./check-goal-order.mjs");
+    await checkGoalOrder({ window, evaluate, capture, artifacts, root });
+    return;
+  }
   if (process.argv.includes("--show-more")) {
     await checkShowMore({ window, evaluate, check, click, capture, artifacts, root });
     console.log(`Show More Chromium checks passed: ${checks}`);
