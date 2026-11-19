@@ -122,7 +122,7 @@ async function run() {
 
   const requests = [];
   const first = Promise.withResolvers();
-  const hold = registerRuntime(project, { task: "manager:context", kind: "task" });
+  const hold = registerRuntime(project, { task: "manager:dialogue", kind: "task" });
   assert.ok(hold);
   globalThis.queueProvider = async (_profile, _project, prompt, images, _action, _tools, _instructions, _signal, session) => {
     requests.push({ prompt, images, id: session.messageId });

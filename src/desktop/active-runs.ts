@@ -50,8 +50,8 @@ function boardOperations(entries: RuntimeEntry[], overrides?: Partial<AgentLimit
       return [{ role: entry.role, kind, task }];
     }
     if (entry.kind === "task") {
-      if (entry.task === "manager:context") {
-        const kind = entry.state?.goalRunning || entry.state?.lane === "work" ? "goal" : "managerConversation";
+      if (entry.task === "manager:context" || entry.task === "manager:dialogue") {
+        const kind = entry.task === "manager:context" ? "goal" : "managerConversation";
         return [{ role: "manager" as const, kind, task }];
       }
       if (entry.task === "manager:background" && !backgroundUsesReviewSlot) {
@@ -74,7 +74,7 @@ function boardOperations(entries: RuntimeEntry[], overrides?: Partial<AgentLimit
   return {
     executor: occupancy("executor"),
     reviewer: occupancy("reviewer"),
-    managerBusy: entries.some(entry => entry.kind === "task" && entry.task === "manager:context"),
+    managerBusy: entries.some(entry => entry.kind === "task" && entry.task === "manager:dialogue"),
     operations,
   };
 }

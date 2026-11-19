@@ -28,7 +28,8 @@ import type { BoardGoal, BoardGoalAction, readBoardHistory } from "../src/deskto
 import { commitFileHashes, inspectProjectPath, projectSha256 } from "../src/desktop/project-files.ts";
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
 import { reviewerActivity, withReviewerChat } from "../src/desktop/reviewer-chat.ts";
-import { goalMessages, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory } from "../src/desktop/manager-history.ts";
+import { goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory, sendGoalMessage } from "../src/desktop/manager-history.ts";
+import { goalActionTools, runGoalAction } from "../src/desktop/goal-actions.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { autoQueueSettings } from "../src/cli/auto-queue.ts";
 import { automationDelivery } from "../src/desktop/automation-delivery.ts";
@@ -102,7 +103,7 @@ function fixture(t: TestContext) {
   const threadId = "00000000-0000-0000-0000-000000000001";
   const dialogueId = "00000000-0000-0000-0000-000000000002";
   const binding = join(project, ".tasks", "manager-dialog.json");
-  const chatBinding = join(project, ".tasks", "manager-dialog.json");
+  const chatBinding = join(project, ".tasks", "manager-conversation.json");
   const idleGoalActions: BoardGoalAction[] = [];
   let providerHistoryReads = 0;
   let legacyHistory: (cursor: string | null) => ReturnType<typeof readBoardHistory> = async () => {
@@ -134,7 +135,7 @@ function fixture(t: TestContext) {
     executorFullAccess, managerAccess, setTaskExecutorAccess, phaseStageReporter,
     autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, taskReviewMode, taskReviewModeVersion, boardReviewModeTool, reviewModeReceipt, setReviewModeFromChat, reviewsAcceptanceRepair, usesIndependentReviewer, defaultBoardAgents, reviewVerifier,
     existsSync, storageDirectory, readdirSync, rmSync, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
-    goalMessages, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory,
+    goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory, sendGoalMessage, goalActionTools, runGoalAction,
     send() {},
     readBoardHistory: (_profile: string, _project: string, _id: string, cursor: string | null) => {
       providerHistoryReads++;
@@ -240,7 +241,7 @@ function fixture(t: TestContext) {
         ...(!manualTurn && !cleanupTurn && !instructions.includes("This turn repairs") ? ["task_return_to_draft"] : []),
         ...(!manualTurn && !cleanupTurn && !reviewTurn && !instructions.includes("This turn repairs") && !prompt.startsWith("AI Taskboard queue:") ? ["board_set_auto_mode"] : []),
         ...(!manualTurn && !cleanupTurn && mode === "manager" ? ["expert_stage", "expert_verify_skills"] : []),
-        ...(!reviewTurn && !cleanupTurn && !instructions.includes("This turn repairs") ? (session.goal || session.resumeGoal ? ["goal_inbox", "goal_report"] : ["goal_read", "goal_send"]) : []),
+        ...(!reviewTurn && !cleanupTurn && !instructions.includes("This turn repairs") ? (session.goal || session.resumeGoal ? ["goal_dialogue", "goal_inbox", "goal_report"] : ["goal_read", "goal_send"]) : []),
         ...(!reviewTurn && !manualTurn && !cleanupTurn && !session.goal && !session.resumeGoal &&
           !instructions.includes("This turn repairs") && session.role === "manager" && !prompt.startsWith("AI Taskboard queue:") ?
           ["task_set_review_mode"] : []),
@@ -790,7 +791,7 @@ test("approved reviewer integration stays disabled with auto mode off while a go
   assert.equal(backgroundCalls, 0);
 });
 
-test("manager has no configurable capacity limit and shares one board context", async t => {
+test("manager has no configurable capacity limit and gives the goal a separate context", async t => {
   const f = fixture(t);
   await f.cli(["init"]);
   const configured = await f.cli(["settings"], { taskLimits: { manager: 1 } });
@@ -800,8 +801,8 @@ test("manager has no configurable capacity limit and shares one board context", 
   assert.equal(f.agentSlots.available(f.project, "manager", { manager: 1 }), Infinity);
   assert.equal((await f.run("Discuss", async () => ({ text: "Ready" }))).ok, true);
   const goal = await f.run("Coordinate release", async (_act, _prompt, _images, id) => {
-    assert.equal(id, f.dialogueId);
-    return { text: "Same context" };
+    assert.notEqual(id, f.dialogueId);
+    return { text: "Separate context" };
   }, [], true);
   assert.equal(goal.ok, true, JSON.stringify(goal));
   release();
@@ -1295,7 +1296,7 @@ test("reviewers agree to submissions or return defects, and the manager controls
 
 const file = (name: string, type: string, content: string) => ({ name, type, bytes: new TextEncoder().encode(content).buffer });
 
-test("dialogue results filter coordination on completion, interruption and partial failure while history retains work", async t => {
+test("dialogue results filter coordination and do not add it to the goal log", async t => {
   const f = fixture(t);
   assert.equal((await f.cli(["init"])).ok, true);
   for (const outcome of ["complete", "interrupt", "failure"]) {
@@ -1319,8 +1320,8 @@ test("dialogue results filter coordination on completion, interruption and parti
   const chat = (await f.history(undefined, "chat")).data.turns;
   assert.equal(chat.flatMap((turn: any) => turn.items).some((item: any) => item.messages?.length || item.text.includes("PRIVATE")), false);
   const work = (await f.history(undefined, "work")).data.turns.flatMap((turn: any) => turn.items);
-  assert.equal(work.length, 9);
-  assert.equal(work.flatMap((item: any) => item.messages).length, 9);
+  assert.equal(work.length, 0);
+  assert.equal(readManagerHistory(f.project)!.turns.flatMap(turn => turn.items).filter(item => item.messages?.length).length, 9);
 });
 
 test("an interrupted manager request preserves the durable queue until Codex records the message", async t => {
@@ -1369,11 +1370,11 @@ test("an interrupted manager request preserves the durable queue until Codex rec
   assert.deepEqual(withPausedGoal.data.goal, paused);
   assert.deepEqual(withPausedGoal.data.turns, archived.data.turns);
   assert.equal(f.providerHistoryReads(), 0);
-  assert.equal((await f.history(legacy.data.nextCursor)).error.code, "BOARD_HISTORY_FAILED");
-  assert.equal(f.providerHistoryReads(), 1);
+  assert.deepEqual((await f.history(legacy.data.nextCursor)).data.turns, archived.data.turns);
+  assert.equal(f.providerHistoryReads(), 0);
 });
 
-test("work history continues from local pages to earlier provider operations", async t => {
+test("goal history pages retain scoped local events and hide unclassified provider operations", async t => {
   const f = fixture(t);
   await f.cli(["init"]);
   const start = Date.now();
@@ -1392,33 +1393,31 @@ test("work history continues from local pages to earlier provider operations", a
       turns: [{ items, messages: [], durationMs: undefined }],
       nextCursor: cursor === null ? "older" : cursor === "older" ? "oldest" : null };
   });
-  writeJson(f.chatBinding, { provider: "codex", id: f.threadId });
-  assert.equal((await f.history(undefined, "work")).data.turns[0].items[0].id, "local");
+  writeJson(f.binding, { provider: "codex", id: f.threadId });
+  assert.deepEqual((await f.history(undefined, "work")).data.turns, []);
   cursors.length = 0;
   saveManagerHistory(f.project, start, randomUUID(), {
-    lane: "chat", message: { text: "Cancel T-0001", files: [] }, items: [local],
+    lane: "work", goalId: f.threadId, message: { text: "Cancel T-0001", files: [] }, items: [local],
   });
-  for (let i = 1; i <= 20; i++) saveManagerHistory(f.project, start + i, randomUUID(), {
-    lane: "work", items: [tool("work-" + i, "task_show", i)],
+  for (let i = 1; i <= 40; i++) saveManagerHistory(f.project, start + i, randomUUID(), {
+    lane: "work", goalId: f.threadId, items: [tool("work-" + i, "task_show", i)],
   });
   const first = await f.history(undefined, "work");
-  assert.equal(first.data.turns.length, 20);
-  assert.match(first.data.nextCursor, /^local:/);
+  assert.equal(first.data.turns.length, 40);
+  assert.match(first.data.nextCursor, /^goal:/);
   const lastLocal = await f.history(first.data.nextCursor, "work");
-  assert.equal(lastLocal.data.turns[0].items[0].id, "local");
+  assert.equal(lastLocal.data.turns.flatMap((turn: any) => turn.items)[0].id, "local");
   assert.deepEqual(cursors, []);
   const provider = await f.history(lastLocal.data.nextCursor, "work");
-  assert.deepEqual(cursors, [null, "older"]);
-  assert.deepEqual(provider.data.turns[0].items, [message]);
-  const last = await f.history(provider.data.nextCursor, "work");
-  assert.deepEqual(last.data.turns[0].items, [cancel]);
-  assert.equal(last.data.nextCursor, null);
+  assert.deepEqual(cursors, [null, "older", "oldest"]);
+  assert.deepEqual(provider.data.turns, []);
+  assert.equal(provider.data.nextCursor, null);
   const chat = await f.history();
-  assert.equal(chat.data.turns[0].messages[0].text, "Cancel T-0001");
+  assert.deepEqual(chat.data.turns, []);
   assert.deepEqual((await f.history(chat.data.nextCursor)).data.turns, []);
   const reopened = await f.history(undefined, "work");
   assert.deepEqual(reopened.data, first.data);
-  writeJson(f.chatBinding, { provider: "codex", id: f.threadId, history: "local" });
+  writeJson(f.binding, { provider: "codex", id: f.threadId, history: "local" });
   assert.equal((await f.history(first.data.nextCursor, "work")).data.nextCursor, null);
 });
 
@@ -2598,17 +2597,17 @@ test("goal actions use the running chat connection and resume requires an existi
   assert.equal(f.idleGoalActions[0]?.kind, "clear");
 });
 
-test("clearing a paused goal waits for dialogue and shares the result between requests", async t => {
+test("clearing a paused goal is independent of dialogue and shares duplicate requests", async t => {
   const f = fixture(t);
   assert.equal((await f.cli(["init"])).ok, true);
   const goal = { objective: "Saved objective", status: "paused" };
-  writeJson(f.chatBinding, { provider: "codex", id: f.threadId, history: "local", goal });
+  writeJson(f.binding, { provider: "codex", id: f.threadId, history: "local", goal });
   const connected = Promise.withResolvers<void>();
   const done = Promise.withResolvers<void>();
   const activeWriter = "failed to record goal instruction: thread already has an active writer";
   f.failGoalClear(activeWriter);
   const dialogue = f.run("Ordinary question", async (_act, _prompt, _images, id, _context, _waiting, signal) => {
-    assert.equal(id, f.threadId);
+    assert.notEqual(id, f.threadId);
     connected.resolve();
     await done.promise;
     assert.equal(signal?.aborted, false);
@@ -2618,19 +2617,17 @@ test("clearing a paused goal waits for dialogue and shares the result between re
   try {
     const first = f.goal("clear");
     const duplicate = f.goal("clear");
-    const early = await Promise.race([first, wait(50, "pending")]);
-    assert.equal(early, "pending", JSON.stringify(early));
-    assert.equal(f.idleGoalActions.length, 0);
+    const early = await first;
+    assert.equal(early.error.code, "BOARD_GOAL_FAILED");
+    assert.equal((await duplicate).error.code, "BOARD_GOAL_FAILED");
+    assert.equal(f.idleGoalActions.length, 1);
     assert.deepEqual((await f.history()).data.goal, goal);
     f.failGoalClear();
+    assert.equal((await f.goal("clear")).data, null);
     done.resolve();
     assert.equal((await dialogue).data.answer, "Ordinary answer");
-    for (const result of await Promise.all([first, duplicate])) {
-      assert.equal(result.ok, true);
-      assert.equal(result.data, null);
-    }
     assert.equal((await f.goal("clear")).data, null);
-    assert.equal(f.idleGoalActions.length, 1);
+    assert.equal(f.idleGoalActions.length, 2);
     const history = await f.history();
     assert.equal(history.data.goal, null);
     assert.match(JSON.stringify(history.data.turns), /Ordinary question.*Ordinary answer/);
@@ -2644,7 +2641,7 @@ test("a provider refusal leaves a paused goal in history and permits retry", asy
   const f = fixture(t);
   assert.equal((await f.cli(["init"])).ok, true);
   const goal = { objective: "Saved objective", status: "paused" };
-  writeJson(f.chatBinding, { provider: "codex", id: f.threadId, history: "local", goal });
+  writeJson(f.binding, { provider: "codex", id: f.threadId, history: "local", goal });
   f.failGoalClear("Provider refused");
   const rejected = await f.goal("clear");
   assert.equal(rejected.error.code, "BOARD_GOAL_FAILED");
@@ -2653,6 +2650,25 @@ test("a provider refusal leaves a paused goal in history and permits retry", asy
   f.failGoalClear();
   assert.equal((await f.goal("clear")).data, null);
   assert.equal(f.idleGoalActions.length, 2);
+});
+
+test("a paused legacy goal is retained locally without exposing its unclassified transcript", async t => {
+  const f = fixture(t);
+  await f.cli(["init"]);
+  const goal = { objective: "Legacy goal", status: "paused" as const };
+  writeJson(f.binding, { provider: "codex", id: f.threadId });
+  f.setLegacyHistory(async () => ({ goal, model: undefined, nextCursor: null,
+    turns: [{ messages: [{ text: "Unclassified legacy message", files: [] }], items: [], durationMs: undefined }] }));
+  const history = await f.history();
+  assert.deepEqual(history.data.goal, goal);
+  assert.deepEqual(history.data.turns, []);
+  assert.deepEqual((readJson(f.binding) as { goal: unknown }).goal, goal);
+  const result = await f.run("Send an instruction to the paused goal", async act => {
+    assert.equal((await act("goal_send", { text: "Continue after review" })).ok, true);
+    return { text: "Queued" };
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(goalMessages(f.project, f.threadId)[0]?.text, "Continue after review");
 });
 
 test("two windows sharing a board cannot start separate orchestrator chats", async t => {
@@ -2675,7 +2691,7 @@ test("two windows sharing a board cannot start separate orchestrator chats", asy
   }
 });
 
-test("a running goal accepts a question answer and steering during task_wait in the same context", { timeout: 15_000 }, async t => {
+test("a running goal accepts queued instructions while ordinary questions use another context", { timeout: 15_000 }, async t => {
   const f = fixture(t); await f.cli(["init"]);
   const { data: task } = await f.cli(["create"], plannedDraft({ title: "Running task" }));
   f.setRunning(task.id, true);
@@ -2698,20 +2714,20 @@ test("a running goal accepts a question answer and steering during task_wait in 
     await asked.promise;
     const question = f.pendingQuestion();
     assert.equal(question.text, "Which release?");
-    const turns = (await f.history()).data.turns as { items: RunActivity[] }[];
+    const turns = (await f.history(undefined, "work")).data.turns as { items: RunActivity[] }[];
     assert.ok(turns.some(turn => turn.items.some(item => item.text.includes(question.text))));
     assert.equal((await f.answerQuestion(question.id, "Alpha")).ok, true);
     await ready.promise;
     const goalRunId = managerRun().id;
-    const duplicate = await f.run("Parallel question", async () => assert.fail("Second context"));
-    assert.equal(duplicate.error.code, "BOARD_REQUEST_IN_PROGRESS");
+    const parallel = await f.run("Parallel question", async () => ({ text: "Ordinary answer" }));
+    assert.equal(parallel.data.answer, "Ordinary answer");
     const messageId = "00000000-0000-4000-8000-000000000003";
     assert.equal((await f.queue("add", messageId, "Hold publication", false, [])).ok, true);
     assert.equal((await f.sendNow("Hold publication", [], messageId, "stale-run")).error.code, "CHAT_NOT_RUNNING");
     assert.equal((await f.queue("list")).data.length, 1);
     assert.equal((await f.sendNow("Hold publication", [], messageId, goalRunId)).ok, true);
     assert.equal((await f.queue("list")).data.length, 0);
-    assert.equal(f.managerNotifications.at(-1), "Hold publication");
+    assert.equal(f.managerNotifications.at(-1), "AI Taskboard: new user directions are available. Read goal_inbox.");
   } finally {
     finish.resolve();
     if (f.pendingQuestion()) await f.answerQuestion(f.pendingQuestion().id, null);
@@ -2719,7 +2735,7 @@ test("a running goal accepts a question answer and steering during task_wait in 
   const result = await work;
   assert.equal(result.data.answer, "Finished");
   const next = await f.run("Continue", async (_act, _prompt, _images, id) => {
-    assert.equal(id, f.threadId); return { text: "Same context" };
+    assert.equal(id, f.dialogueId); return { text: "Dialogue context" };
   });
   assert.equal(next.ok, true, JSON.stringify(next));
 });
