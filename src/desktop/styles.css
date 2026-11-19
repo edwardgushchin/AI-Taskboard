@@ -902,7 +902,6 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .task-dialogue .chat-report-details { display: none; }
 .task-work-controls, .task-team-activity, .task-team-mail { display: grid; gap: 8px; }
 .chat-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; }
-.chat-header h3 { margin-inline-end: auto; font-size: 15px; }
 .chat-log { min-width: 0; list-style: none; margin: 0; }
 .chat-log:not(.task-dialogue) {
   display: flex; flex-direction: column; gap: 18px;
