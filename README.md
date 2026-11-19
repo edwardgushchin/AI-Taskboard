@@ -21,6 +21,8 @@
   <a href="#contributing">Contribute</a>
 </p>
 
+<p align="center">⭐ <a href="https://github.com/edwardgushchin/AI-Taskboard">Star us on GitHub</a> - it motivates us a lot!</p>
+
 ![AI Taskboard demo board with a queued task and an open project manager chat](docs/images/board.png)
 
 AI Taskboard brings a Kanban board, agent chats and Git review into one Electron app. Describe a change to the project manager, approve a task, and let an executor work in a separate Git worktree. Review the result before it enters your target branch. For personal tasks, create a manual board.
