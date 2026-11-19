@@ -1215,5 +1215,9 @@
   "limits.work": "Tareas en curso",
   "limits.review": "Tareas en revisión",
   "experts.review_lead": "Asignar responsable de revisión",
-  "experts.add_review_stage": "Añadir etapa de revisión"
+  "experts.add_review_stage": "Añadir etapa de revisión",
+  "updates.install_confirm": "¿Instalar AI Taskboard {version} y reiniciar?",
+  "updates.install_detail": "Se comprobará el instalador oficial de Windows con el manifiesto SHA-256 de la versión. Se conservarán el perfil y los tableros abiertos.",
+  "updates.install_button": "Instalar y reiniciar",
+  "updates.preparing": "Se está preparando una actualización. Vuelve a intentarlo tras reiniciar o cancelar."
 }

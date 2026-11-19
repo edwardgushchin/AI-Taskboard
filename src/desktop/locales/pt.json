@@ -1215,5 +1215,9 @@
   "limits.work": "Tarefas em andamento",
   "limits.review": "Tarefas em revisão",
   "experts.review_lead": "Atribuir responsável pela revisão",
-  "experts.add_review_stage": "Adicionar etapa de revisão"
+  "experts.add_review_stage": "Adicionar etapa de revisão",
+  "updates.install_confirm": "Instalar AI Taskboard {version} e reiniciar?",
+  "updates.install_detail": "O instalador oficial do Windows será verificado com o manifesto SHA-256 da versão. O perfil e os quadros abertos serão preservados.",
+  "updates.install_button": "Instalar e reiniciar",
+  "updates.preparing": "Uma atualização está sendo preparada. Tente novamente após reiniciar ou cancelar."
 }

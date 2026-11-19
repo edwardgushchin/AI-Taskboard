@@ -11,6 +11,22 @@
 !define TASKBOARD_ENV_KEY "Environment"
 !define TASKBOARD_OWNED_PATH_KEY "Software\AI Taskboard"
 
+# Updates must never use electron-builder's default process-killing path.
+!include "getProcessInfo.nsh"
+Var pid
+!macro customCheckAppRunning
+  !insertmacro IS_POWERSHELL_AVAILABLE
+  ${If} ${isUpdated}
+    !insertmacro FIND_PROCESS "${APP_EXECUTABLE_FILENAME}" $R0
+    ${If} $R0 == 0
+      SetErrorLevel 2
+      Quit
+    ${EndIf}
+  ${Else}
+    !insertmacro _CHECK_APP_RUNNING
+  ${EndIf}
+!macroend
+
 !macro ReadTaskboardUserPath
   StrCpy $3 1
   ClearErrors

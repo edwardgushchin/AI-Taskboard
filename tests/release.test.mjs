@@ -304,7 +304,7 @@ test("upload failure leaves a draft and retry publishes one complete stable rele
   assert.deepEqual(github.releases[0].assets.map(asset => asset.name).sort(), [...build.names, "SHA256SUMS"].sort());
   const update = await checkForUpdates("0.0.9", fetcher);
   assert.equal(update.status, "available");
-  assert.deepEqual(update.latest, { version: stable, url: releasesUrl + "/tag/v" + stable, prerelease: false });
+  assert.deepEqual(update.latest, { version: stable, tag: "v" + stable, url: releasesUrl + "/tag/v" + stable, prerelease: false });
 
   const rebuilt = fixture(t, stable, true);
   const reSignedGroup = basename(existing.name, extname(existing.name));
@@ -335,5 +335,5 @@ test("prerelease response from the publication model is visible only to preview 
   assert.equal((await checkForUpdates(stable, fetcher)).status, "empty");
   const update = await checkForUpdates("0.1.1-beta.1", fetcher);
   assert.equal(update.status, "available");
-  assert.deepEqual(update.latest, { version: preview, url, prerelease: true });
+  assert.deepEqual(update.latest, { version: preview, tag: "v" + preview, url, prerelease: true });
 });

@@ -1215,5 +1215,9 @@
   "limits.work": "Tâches en cours",
   "limits.review": "Tâches en revue",
   "experts.review_lead": "Désigner le responsable de la revue",
-  "experts.add_review_stage": "Ajouter une étape de revue"
+  "experts.add_review_stage": "Ajouter une étape de revue",
+  "updates.install_confirm": "Installer AI Taskboard {version} et redémarrer ?",
+  "updates.install_detail": "Le programme officiel Windows sera vérifié avec le manifeste SHA-256 de la version. Le profil et les tableaux ouverts seront conservés.",
+  "updates.install_button": "Installer et redémarrer",
+  "updates.preparing": "Une mise à jour est en préparation. Réessayez après le redémarrage ou l’annulation."
 }
