@@ -498,7 +498,9 @@ test("board chat keeps a goal streaming across turns and times out only after in
     goal: "Read this",
     mcpTools: ["task_start", "project_git", "task_review_queue", "project_path"].map(name => ({ name, description: name, inputSchema: { type: "object" } })),
     onGoalSet: () => accepted++,
-    onActivity(items: typeof generatedActivity) { generatedActivity = items; },
+    onActivity(items: typeof generatedActivity) {
+      generatedActivity = items;
+    },
     saveGeneratedImage: async (image: { id: string; result?: string }) => {
       assert.equal(image.result, "fixture-base64");
       generated.push(image.id);

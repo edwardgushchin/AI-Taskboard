@@ -68,7 +68,9 @@ try {
     for (const [index, color] of [[1, [62, 128, 224, 255]], [2, [86, 186, 88, 255]]]) {
       const pixels = Buffer.alloc(320 * 180 * 4);
       for (let offset = 0; offset < pixels.length; offset += 4) {
-        for (let channel = 0; channel < 4; channel++) pixels[offset + channel] = color[channel];
+        for (let channel = 0; channel < 4; channel++) {
+          pixels[offset + channel] = color[channel];
+        }
       }
       const png = nativeImage.createFromBitmap(pixels, { width: 320, height: 180 }).toPNG();
       const file = await session.saveGeneratedImage({
@@ -82,7 +84,9 @@ try {
     finishProvider = Promise.withResolvers();
     await finishProvider.promise;
     session.onTurnEnded();
-    if (session.goal) session.onGoal({ objective: session.goal, status: "complete" });
+    if (session.goal) {
+      session.onGoal({ objective: session.goal, status: "complete" });
+    }
     return { text: "Готовы два изображения.", model: "fixture", goalStatus: session.goal ? "complete" : undefined };
   };
   globalThis.managerImageCheckProvider = provider;
@@ -146,7 +150,6 @@ try {
   };
   const checkTiles = async selector => {
     const tiles = JSON.stringify(selector + " [data-manager-image]");
-    const images = JSON.stringify(selector + " [data-manager-image] img");
     const names = JSON.stringify(selector + " [data-manager-image] span");
     await waitFor(() => evaluate(`Boolean(document.querySelector(${tiles}))`));
     for (let index = 0; index < 2; index++) {
@@ -162,7 +165,9 @@ try {
   };
   await checkTiles(dialogSelector);
   await evaluate(`document.querySelector('${dialogSelector} .board-manager-message').scrollIntoView({block:'end'})`);
-  if (!restart) await capture("manager-dialog-generated-images.png");
+  if (!restart) {
+    await capture("manager-dialog-generated-images.png");
+  }
   const openMouse = async selector => {
     const point = await evaluate(`(() => {
       const tile = document.querySelector('${selector} [data-manager-image]');
@@ -199,12 +204,16 @@ try {
   await checkTiles(workResult);
   assert.equal(await evaluate("document.querySelector('.board-work .chat-work').open"), false);
   await evaluate("document.querySelector('.board-work').scrollTop = 0");
-  if (!restart) await capture("manager-generated-images.png");
+  if (!restart) {
+    await capture("manager-generated-images.png");
+  }
   assert.deepEqual(await evaluate("[...document.querySelectorAll('.board-work-timeline [data-item]')].map(x => x.dataset.item).filter(x => /^(message|item):/.test(x))"),
     ["message:goal-images-comment", "item:goal-images-command", "item:goal-images-image-1", "item:goal-images-image-2",
       "item:goal-images-tool", "message:goal-images-answer"]);
   await openMouse(workResult);
-  if (!restart) await capture("manager-generated-image-view.png");
+  if (!restart) {
+    await capture("manager-generated-image-view.png");
+  }
   await evaluate("document.querySelector('.image-preview').close()");
   await waitFor(() => evaluate("!document.querySelector('.image-preview')"));
   await evaluate(`document.querySelectorAll('.board-work details').forEach(x => {
@@ -212,7 +221,9 @@ try {
   })`);
   await checkTiles(".board-work .chat-run-group");
   await evaluate("document.querySelector('.board-work .chat-run-group').scrollIntoView({block:'start',behavior:'instant'})");
-  if (!restart) await capture("manager-generated-actions.png");
+  if (!restart) {
+    await capture("manager-generated-actions.png");
+  }
   results.push("PASS goal work preserves commentary, command, two generation actions, tool and answer order");
   for (let index = 0; index < 2; index++) {
     await evaluate("document.querySelector('.board-dialogue-toggle').click()");
@@ -264,12 +275,27 @@ try {
   console.log(results.join("\n"));
 } catch (error) {
   if (window && !window.isDestroyed()) {
-    console.error(await window.webContents.executeJavaScript("JSON.stringify({active:document.activeElement.tagName,dialogs:document.querySelectorAll('.image-preview').length,tiles:[...document.querySelectorAll('.board-work [data-manager-image]')].map(x=>({file:x.dataset.managerImage,width:x.querySelector('img')?.naturalWidth,rect:x.getBoundingClientRect().toJSON()})),details:[...document.querySelectorAll('.board-work details')].map(x=>[x.dataset.item,x.open])})").catch(() => "Renderer closed"));
+    const diagnostic = await window.webContents.executeJavaScript(`({
+      active: document.activeElement.tagName,
+      dialogs: document.querySelectorAll('.image-preview').length,
+      tiles: [...document.querySelectorAll('.board-work [data-manager-image]')].map(tile => ({
+        file: tile.dataset.managerImage,
+        width: tile.querySelector('img')?.naturalWidth,
+        bounds: tile.getBoundingClientRect().toJSON(),
+      })),
+      details: [...document.querySelectorAll('.board-work details')].map(detail => ({
+        item: detail.dataset.item,
+        open: detail.open,
+      })),
+    })`).catch(() => "Renderer closed");
+    console.error(diagnostic);
   }
   console.error(error);
   process.exitCode = 1;
 } finally {
-  for (const win of BrowserWindow.getAllWindows()) win.destroy();
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.destroy();
+  }
   app.exit(process.exitCode ?? 0);
 }
 })();

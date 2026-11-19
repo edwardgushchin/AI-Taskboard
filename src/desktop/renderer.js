@@ -2202,7 +2202,9 @@ function draftComposer() {
         const details = previousRuns.get(run.dataset.workTurn);
         if (details) {
           for (const detail of run.querySelectorAll("details[data-item]")) {
-            if (details.has(detail.dataset.item)) detail.open = details.get(detail.dataset.item);
+            if (details.has(detail.dataset.item)) {
+              detail.open = details.get(detail.dataset.item);
+            }
           }
         }
         if (previous) {

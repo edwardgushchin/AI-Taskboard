@@ -456,7 +456,9 @@ function renderRunActivity(container, items, completed = false, durationMs, task
   flush();
   if (context?.managerWork) {
     for (const [turnId, series] of managerImages) {
-      if (answers.has(turnId)) continue;
+      if (answers.has(turnId)) {
+        continue;
+      }
       const tiles = generatedTiles(series);
       tiles.dataset.item = "images:" + [...series.keys()].at(-1);
       nodes.push(tiles);
