@@ -28,6 +28,7 @@ function fixture(mode = "human") {
   let afterLaunch: (() => void) | undefined, beforeAccept: (() => void) | undefined, afterReviewRead: (() => void) | undefined, launchError: string | undefined;
   const fail = (code: string) => ({ ok: false, error: { code, message: code } });
   const runtime = runInNewContext(stripTypeScriptTypes(code) + "\n({scheduleAutoBoard, autoBoards})", {
+    quotaWait: undefined,
     subscriptions: new Map([["project", watch]]), closingProjects: new Set(), boardWorkRequests: managers, boardRequests: dialogues,
     backgroundManagerRequests: new Map(),
     isManual, nextReadyTask, taskReviewMode, taskReviewModeVersion, reviewsAcceptanceRepair, agentSlots: slots, projectIdentity: (path: string) => path,

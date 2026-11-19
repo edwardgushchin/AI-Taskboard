@@ -2,7 +2,7 @@ import localization from "../src/desktop/localization.cjs";
 (globalThis as any).taskboardLocalization = localization;
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { codexLimitWindows, codexLimitState, providerLimitSource } from '../src/desktop/provider-limits.ts';
+import { codexLimitWindows, codexLimitState, confirmedQuota, providerLimitSource, type ProviderLimits } from '../src/desktop/provider-limits.ts';
 import '../src/desktop/provider-limits.js';
 const summary = (globalThis as any).providerLimitSummary;
 test('available windows only; used becomes remaining, multi-bucket supersedes legacy', () => {
@@ -54,4 +54,25 @@ test('window labels use readable durations in Russian and English without plan a
  assert.match(label(2880,'ru-RU'),/2 дня/);
  assert.equal(label(undefined,'ru-RU'),'Лимит');
  assert.equal(codexLimitWindows({rateLimits:{primary:{usedPercent:53,windowDurationMins:10080}}})[0].durationMins,10080);
+});
+
+test('dispatch requires fresh confirmed quota and waits for all exhausted windows', () => {
+  const now = 10_000;
+  const base: ProviderLimits = {
+    provider: 'Codex',
+    state: 'ready',
+    observedAt: now,
+    windows: [
+      { name: 'Primary', remaining: 0, resetsAt: 20_000 },
+      { name: 'Secondary', remaining: 0, resetsAt: 30_000 },
+    ],
+  };
+  assert.deepEqual(confirmedQuota(base, now), { resetsAt: 30_000 });
+  assert.deepEqual(confirmedQuota({ ...base, windows: [{ name: 'Primary', remaining: 0 }] }, now), {});
+  assert.equal(confirmedQuota({ ...base, observedAt: now - 60_000, windows: [{ name: 'Old', remaining: 0 }] }, now), undefined);
+  assert.equal(confirmedQuota(base, 20_001), undefined);
+  for (const state of ['unknown', 'error', 'stale', 'auth', 'unsupported', 'no_windows'] as const) {
+    assert.equal(confirmedQuota({ ...base, state }, now), undefined);
+  }
+  assert.equal(confirmedQuota({ ...base, windows: [{ name: 'Primary', remaining: 0.5 }] }, now), 'available');
 });

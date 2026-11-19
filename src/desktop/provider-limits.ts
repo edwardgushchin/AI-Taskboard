@@ -11,6 +11,19 @@ export interface ProviderLimits {
   plan?: string;
 }
 
+export interface QuotaWait { resetsAt?: number }
+
+export function confirmedQuota(limits: ProviderLimits | undefined, now = Date.now()): QuotaWait | "available" | undefined {
+  if (limits?.state !== "ready" || !limits.windows.length || limits.observedAt === undefined ||
+      now - limits.observedAt >= 60_000 || limits.observedAt > now) return;
+  if (limits.windows.some(window => window.resetsAt !== undefined && window.resetsAt <= now)) return;
+  const exhausted = limits.windows.filter(window => window.remaining === 0);
+  if (!exhausted.length) return "available";
+  const resets = exhausted.map(window => window.resetsAt);
+  const known = resets.filter((time): time is number => time !== undefined);
+  return known.length === resets.length ? { resetsAt: Math.max(...known) } : {};
+}
+
 // Missing or invalid values never become a full or empty quota.
 export function codexLimitWindows(value: any): LimitWindow[] {
   const buckets = value?.rateLimitsByLimitId ? Object.values(value.rateLimitsByLimitId) : [value?.rateLimits];
@@ -22,7 +35,7 @@ export function codexLimitWindows(value: any): LimitWindow[] {
     return [{ name: bucket.limitName || bucket.limitId || "Codex",
       remaining: 100 - used,
       ...(typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0 ? { durationMins: minutes } : {}),
-      ...(typeof window.resetsAt === "number" && Number.isFinite(window.resetsAt) ? { resetsAt: window.resetsAt * 1000 } : {}) }];
+      ...(typeof window.resetsAt === "number" && window.resetsAt > 0 && window.resetsAt <= 8.64e12 ? { resetsAt: window.resetsAt * 1000 } : {}) }];
   }));
 }
 

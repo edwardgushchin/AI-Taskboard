@@ -860,7 +860,8 @@ function renderAgentRunStatus(target, task) {
       task.status === "in_progress" && task.codexThreadId ?
       t("ui.board_run_inactive_2a932a2f") : hybridReview ?
       t(task.reviewApproved ? "ui.awaiting_human_acceptance" : "ui.awaiting_reviewer_approval") : "";
-    if (target.firstElementChild || target.textContent !== text) target.textContent = text;
+    const status = frame.quotaTasks?.includes(task.id) ? quotaLabel() : text;
+    if (target.firstElementChild || target.textContent !== status) target.textContent = status;
   }
   target.hidden = !target.childNodes.length;
 }
@@ -914,6 +915,12 @@ function blockerBanner({ reason, condition }) {
   return banner;
 }
 
+function quotaLabel() {
+  return frame.quotaWait?.resetsAt
+    ? t("ui.waiting_for_provider_quota_until", { time: new Date(frame.quotaWait.resetsAt).toLocaleString(frame.localization?.locale) })
+    : t("ui.waiting_for_provider_quota");
+}
+
 function card(task) {
   const showCover = archiveView || frame.board.settings?.showCardPreviews !== false;
   const cover = showCover ? selectedCover(task, (task.attachments ?? []).filter(isImageAttachment)) : undefined;
@@ -921,7 +928,7 @@ function card(task) {
   const signature = JSON.stringify([frame.localization?.locale, task.title, task.description,
     task.tags?.map(name => boardTags.get(tagKey(name)) ?? { name }), cover?.file,
     frame.runningTasks?.includes(task.id) ?? false, frame.waitingTasks?.includes(task.id) ?? false,
-    frame.reviewingTasks?.[task.id], task.status, task.mergeRepair, task.acceptanceRepair, Boolean(task.codexThreadId),
+    frame.reviewingTasks?.[task.id], frame.quotaTasks?.includes(task.id) ? frame.quotaWait : null, task.status, task.mergeRepair, task.acceptanceRepair, Boolean(task.codexThreadId),
     task.reviewModeOverride?.mode ?? frame.board?.settings.reviewMode, task.reviewApproved,
     task.unfinishedDependencies, task.blocked, task.subtasks?.map(entry => entry.done),
     task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule,
@@ -1134,16 +1141,16 @@ function codexTaskAction(task) {
       const result = await api.launchTask(task.id, newThread ? { newThread: true }
         : resumeWithFullAccess ? { resumeWithFullAccess: true } : undefined);
       if (generation !== projectGeneration) return;
-      if (!result.ok) notice(boardError(result.error),
+      if (!result.ok && result.error.code !== "PROVIDER_QUOTA") notice(boardError(result.error),
         [t("ui.starting_task_1cd51aaa"), task.id, projectName()].join(" · "));
       else if (sheetKind === "task" && taskInSheet?.id === task.id) await showTask(task.id);
     } finally {
-      launch.disabled = Boolean(task.unfinishedDependencies?.length);
+      launch.disabled = Boolean(frame.quotaWait || task.unfinishedDependencies?.length);
     }
   });
   launch.id = "task-launch";
   launch.hidden = frame.runningTasks?.includes(task.id) ?? false;
-  launch.disabled = Boolean(task.unfinishedDependencies?.length);
+  launch.disabled = Boolean(frame.quotaWait || task.unfinishedDependencies?.length);
   return launch;
 }
 
@@ -1456,6 +1463,9 @@ function render(previousBoard) {
   const noBoard = !board;
   const autoMode = byId("status-auto-mode");
   autoMode.hidden = noBoard || manualBoard();
+  const quota = byId("status-provider-quota");
+  quota.hidden = !frame.quotaWait;
+  quota.textContent = frame.quotaWait ? quotaLabel() : "";
   const enabled = board?.settings.autoMode === true;
   autoMode.setAttribute("aria-pressed", String(enabled));
   autoMode.querySelector("i").className = `icon codicon codicon-${enabled ? "sync" : "play"}`;
@@ -5585,7 +5595,10 @@ function update(next) {
     const runStatus = byId("task-agent-run");
     if (runStatus) renderAgentRunStatus(runStatus, frame.board?.tasks.find(task => task.id === taskInSheet.id) ?? taskInSheet);
     const launch = byId("task-launch");
-    if (launch) launch.hidden = frame.runningTasks?.includes(taskInSheet.id) ?? false;
+    if (launch) {
+      launch.hidden = frame.runningTasks?.includes(taskInSheet.id) ?? false;
+      launch.disabled = Boolean(frame.quotaWait || taskInSheet.unfinishedDependencies?.length);
+    }
     if (tagsChanged) byId("task-sheet-tags")?.replaceChildren(...tagBadges(taskInSheet.tags));
     const task = frame.board?.tasks.find(entry => entry.id === taskInSheet.id);
     const archived = frame.board?.archived.find(entry => entry.id === taskInSheet.id);

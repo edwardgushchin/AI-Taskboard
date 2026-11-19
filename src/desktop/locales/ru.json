@@ -1278,5 +1278,7 @@
   "limits.work": "Задачи в работе",
   "limits.review": "Задачи на ревью",
   "experts.review_lead": "Назначить ответственного за ревью",
-  "experts.add_review_stage": "Добавить этап ревью"
+  "experts.add_review_stage": "Добавить этап ревью",
+  "ui.waiting_for_provider_quota": "Ожидание квоты провайдера",
+  "ui.waiting_for_provider_quota_until": "Ожидание квоты провайдера · сброс {time}"
 }
