@@ -4,6 +4,12 @@
 - Give a draft a title that says what changes. Keep the context needed to act. State open questions explicitly and phrase each acceptance criterion as something a reviewer can verify.
 - Write new task descriptions as a short, natural brief. Say what to do, add the context needed to understand why, and include essential conditions where they matter. Use ordinary paragraphs or a list when it helps. Do not use the stock headings Problem, Expected result, or Constraints (including their translated equivalents).
 - Keep acceptance criteria in the separate `criteria` field. If low-level reproduction details or references would interrupt the brief, place them under the optional Markdown heading `### Диагностика и связанные файлы`, which the card can collapse. Preserve facts, uncertainty, links, and existing requirements when updating a card.
+- When creating or refining a checklist (`subtasks`), write one observable result per item. Name the change, artifact, or condition that confirms completion. Split an item if it contains results that can be verified and marked complete independently. Let the task determine the number of items. Preserve existing checklist items and their completion marks unless the user authorizes a change.
+
+For example, split “Add CSV export and document it” into two checklist items:
+
+- “The Export action downloads a CSV containing the displayed rows.” Verify by exporting a populated table and comparing its rows with the file.
+- “The user guide lists the steps for exporting a CSV.” Verify by locating those steps in the guide.
 
 Example of a new brief (illustrative facts): the executor chat fails after an interrupted run with `no rollout found for thread id`; recovery must keep the assigned worktree. Whether the original chat can be restored is unknown.
 
