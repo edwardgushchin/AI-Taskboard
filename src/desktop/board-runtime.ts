@@ -14,6 +14,7 @@ export interface RuntimeEntry {
   kind: "slot" | "provider" | "turn" | "task" | "defaults" | "queue";
   role?: keyof AgentLimits;
   task?: string;
+  operation?: "maintenance" | "acceptanceRepair" | "managerReview" | "mergeRepair";
   pid?: number;
   parent?: string;
   limits?: AgentLimits;

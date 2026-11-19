@@ -140,10 +140,11 @@ export function createAgentSlots(shared = false) {
       if (shared) for (const path of projects.values()) persistDefaults(path, true);
     },
     available,
-    acquire(project: string, role: AgentRole, overrides?: Partial<AgentLimits>, task?: string, queuedRevision?: number) {
+    acquire(project: string, role: AgentRole, overrides?: Partial<AgentLimits>, task?: string, queuedRevision?: number,
+      operation?: RuntimeEntry["operation"]) {
       if (sharedProject) {
         const path = sharedProject(project);
-        return registerRuntime(path, { kind: "slot", role, task }, entries => {
+        return registerRuntime(path, { kind: "slot", role, task, operation }, entries => {
           const limit = role === "manager" ? 0 : readBoardSettings(runtimeLocation(path)).taskLimits?.[role] ?? cachedTaskLimits(entries)?.[role] ?? limits[role];
           const queued = entries.find(entry => entry.kind === "queue" && entry.task === task);
           return queued?.revision === queuedRevision && (!task || !entries.some(entry => entry.kind !== "queue" && (entry.task === task ||

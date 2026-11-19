@@ -1172,25 +1172,37 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 .statistics-counts dd { margin: 0; font-variant-numeric: tabular-nums; }
 #project-statistics { min-width: 0; overflow-wrap: anywhere; }
 
-#status-agents { position: relative; }
-#status-agents-tooltip { display: none; position: absolute; bottom: 100%; right: 0; z-index: 100; width: max-content; max-width: calc(100vw - 16px); white-space: pre-wrap; overflow-wrap: anywhere; padding: 8px; background: var(--bg); color: var(--text); border: 1px solid currentColor; border-radius: 4px; }
-#status-agents:hover #status-agents-tooltip, #status-agents:focus #status-agents-tooltip { display: block; }
-#status-agents:focus-visible { outline: 1px solid currentColor; }
+#status-agents { anchor-name: --agent-activity; }
+#agent-activity {
+  position-anchor: --agent-activity;
+  inset: auto max(8px, anchor(right)) calc(anchor(top) + 8px) auto;
+}
+#agent-activity h2 { margin: 0 0 12px; font-size: 14px; }
+#agent-activity h3 { margin: 0 0 8px; font-size: 13px; }
+#agent-activity section + section { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+#agent-activity dl { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; margin: 0; }
+#agent-activity dd { margin: 0; text-align: end; font-variant-numeric: tabular-nums; }
+#agent-activity ul { margin: 8px 0 0; padding-inline-start: 18px; }
+#agent-activity p { margin: 8px 0 0; color: var(--muted); }
 #status-limits { anchor-name: --provider-limits; flex: 0 1 auto; min-width: 36px; max-width: 150px; }
 #status-limits span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #status-limits.quota-low { font-weight: bold; text-decoration: underline dotted; }
 #provider-limits {
-  position: fixed; position-anchor: --provider-limits;
+  position-anchor: --provider-limits;
   inset: auto auto calc(anchor(top) + 8px) clamp(8px, anchor(left), calc(100vw - 398px));
+}
+:is(#provider-limits, #agent-activity) {
+  position: fixed;
   margin: 0; width: min(390px, calc(100vw - 16px)); max-height: min(65vh, 500px);
   overflow: auto; padding: 16px; border: 1px solid var(--border); border-radius: var(--surface-radius);
   color: var(--text); background: var(--panel); box-shadow: 0 6px 20px #0004;
+  overflow-wrap: anywhere;
   font-size: 13px; line-height: 1.5; opacity: 0; transform: translateY(4px);
   transition: opacity var(--hover-time) ease, transform var(--hover-time) ease,
     display var(--hover-time) allow-discrete, overlay var(--hover-time) allow-discrete;
 }
-#provider-limits:popover-open { opacity: 1; transform: translateY(0); }
-@starting-style { #provider-limits:popover-open { opacity: 0; transform: translateY(4px); } }
+:is(#provider-limits, #agent-activity):popover-open { opacity: 1; transform: translateY(0); }
+@starting-style { :is(#provider-limits, #agent-activity):popover-open { opacity: 0; transform: translateY(4px); } }
 #provider-limits section + section { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 #provider-limits .limits-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
 #provider-limits h3 { margin: 0; font-size: 14px; font-weight: 650; overflow-wrap: anywhere; }
@@ -1215,7 +1227,7 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
     border-radius: 999px; background: color-mix(in srgb, var(--accent) 70%, var(--text));
   }
 }
-#provider-limits:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
+:is(#provider-limits, #agent-activity):focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
 /* Board-owned expert packages and task-scoped collaboration. */
 .expert-search { width: 100%; margin: 8px 0; }
 .expert-list { display: grid; gap: 6px; }

@@ -1,5 +1,8 @@
 import { projectIdentity, projectLabels } from "./project-tabs.ts";
 import { registerRuntime, runtimeEntries, runtimeLocation } from "./board-runtime.ts";
+import type { RuntimeEntry } from "./board-runtime.ts";
+import type { AgentLimits } from "../cli/model.ts";
+import { cachedTaskLimits, defaultAgentLimits } from "./agent-limits.ts";
 import { exists } from "../cli/storage.ts";
 import { join } from "node:path";
 
@@ -37,9 +40,51 @@ export function trackActiveRun(project: string, role: Role = "executor") {
   };
 }
 
-export function activeRunSummary(projects: { path: string; name?: string }[] = []) {
+function boardOperations(entries: RuntimeEntry[], overrides?: Partial<AgentLimits>) {
+  const slots = entries.filter(entry => entry.kind === "slot");
+  const backgroundUsesReviewSlot = slots.some(entry => entry.operation && entry.operation !== "mergeRepair");
+  const operations = entries.flatMap<{ role: Role; kind: string; task?: string }>(entry => {
+    const task = entry.task?.match(/^(?:(?:review|draft):)?(T-\d+)$/)?.[1];
+    if (entry.kind === "slot" && entry.role) {
+      const kind = entry.operation ?? (entry.role === "reviewer" ? "review" : "execution");
+      return [{ role: entry.role, kind, task }];
+    }
+    if (entry.kind === "task") {
+      if (entry.task === "manager:context") {
+        const kind = entry.state?.goalRunning || entry.state?.lane === "work" ? "goal" : "managerConversation";
+        return [{ role: "manager" as const, kind, task }];
+      }
+      if (entry.task === "manager:background" && !backgroundUsesReviewSlot) {
+        const kind = entry.state?.lane === "maintenance" ? "maintenance" : "boardAutomation";
+        return [{ role: "manager" as const, kind, task }];
+      }
+      if (task) return [{ role: "executor" as const, kind: "discussion", task }];
+    }
+    if (entry.kind === "turn" && !entries.some(parent => parent.id === entry.parent &&
+        (parent.kind === "task" || parent.kind === "slot"))) {
+      return [{ role: entry.role ?? "executor", kind: "providerTurn", task }];
+    }
+    return [];
+  });
+  const inherited = cachedTaskLimits(entries) ?? defaultAgentLimits;
+  const occupancy = (role: "executor" | "reviewer") => ({
+    used: slots.filter(entry => entry.role === role).length,
+    limit: overrides?.[role] ?? inherited[role],
+  });
+  return {
+    executor: occupancy("executor"),
+    reviewer: occupancy("reviewer"),
+    managerBusy: entries.some(entry => entry.kind === "task" &&
+      (entry.task === "manager:context" || entry.task === "manager:background")) ||
+      operations.some(operation => operation.role === "manager"),
+    operations,
+  };
+}
+
+export function activeRunSummary(projects: { path: string; name?: string; taskLimits?: Partial<AgentLimits> }[] = []) {
   const boards = new Map<string, { path: string; name?: string; count: number; roles: Record<Role, number> }>();
-  const observed = shared ? projects.flatMap(project => runtimeEntries(project.path)
+  const snapshots = shared ? projects.map(project => ({ ...project, entries: runtimeEntries(project.path) })) : [];
+  const observed = shared ? snapshots.flatMap(project => project.entries
     .filter(entry => entry.kind === "turn").map(entry => ({ path: project.path, identity: projectIdentity(project.path), role: entry.role ?? "executor" }))) : [...runs.values()];
   for (const run of observed) {
     const board = boards.get(run.identity);
@@ -48,6 +93,13 @@ export function activeRunSummary(projects: { path: string; name?: string }[] = [
       name: projects.find(project => projectIdentity(project.path) === run.identity)?.name });
   }
   const entries = [...boards.values()];
-  return { total: observed.length, boards: projectLabels(entries).map((label, index) =>
-    ({ ...label, count: entries[index].count, roles: entries[index].roles })) };
+  return {
+    total: observed.length,
+    boards: projectLabels(entries).map((label, index) =>
+      ({ ...label, count: entries[index].count, roles: entries[index].roles })),
+    details: projectLabels(snapshots).map((label, index) => ({
+      ...label,
+      ...boardOperations(snapshots[index].entries, snapshots[index].taskLimits),
+    })),
+  };
 }

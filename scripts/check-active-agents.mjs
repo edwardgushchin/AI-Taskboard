@@ -1,7 +1,9 @@
 import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
 // Real main process, private profile and empty boards: never touches a user's queue.
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { once } from "node:events";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, symlinkSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -12,6 +14,7 @@ import { saveManagerHistory } from "../src/desktop/manager-history.ts";
 import { registerRuntime, runtimeEntries } from "../src/desktop/board-runtime.ts";
 
 const returnCheck = process.argv.includes("--return-to-draft-only");
+const slotsCheck = process.argv.includes("--board-slots-only");
 const restart = process.argv.includes("--verify-return-restart");
 const { scratch, artifacts } = electronCheck(import.meta.url, "active-agents", 120_000,
   returnCheck ? [[], ["--verify-return-restart"]] : [[]]);
@@ -89,9 +92,12 @@ try {
   const second = globalThis.agentCheck.createWindow([boards[returnCheck ? 1 : 0]]).window;
   const read = win => win.webContents.executeJavaScript(`(() => {
     const el = document.querySelector('#status-agents');
-    const tip = document.querySelector('#status-agents-tooltip');
-    return { count: Number(el.querySelector('span').textContent), text: tip.textContent,
-      visible: getComputedStyle(tip).display !== 'none', label: el.getAttribute('aria-label') };
+    const panel = document.querySelector('#agent-activity');
+    return {
+      count: Number(el.querySelector('span').textContent),
+      text: panel.innerText,
+      visible: panel.matches(':popover-open'),
+    };
   })()`);
   await wait(() => second.webContents.executeJavaScript("window.taskboard?.bootstrap().then(f => Boolean(f.board))"));
   if (returnCheck) {
@@ -241,6 +247,12 @@ try {
     await wait(async () => (await read(window)).count === count && (await read(second)).count === count);
   };
   await expect(0);
+  if (slotsCheck) {
+    await checkBoardSlots();
+    console.log("PASS: board slots in two windows, keyboard and mouse, owner exit, zero");
+    app.exit(0);
+    return;
+  }
   // Same production registry used by executor, manager, discussion and reviewer turns.
   const geometry = () => evaluate(`[...document.querySelectorAll('.project-tab')].map(el => {
     const r = el.getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; })`);
@@ -388,14 +400,9 @@ try {
   window.focus();
   window.webContents.focus();
   await evaluate("document.querySelector('#status-agents').focus()");
-  assert.equal((await read(window)).visible, true);
-  assert.equal((await read(window)).label, (await read(window)).text);
-  writeFileSync(join(artifacts, 'focus.png'), (await window.webContents.capturePage()).toPNG());
-  await evaluate("document.querySelector('#status-agents').blur()");
-  const point = await evaluate("(() => { const r = document.querySelector('#status-agents').getBoundingClientRect(); return { x: Math.round(r.x+r.width/2), y: Math.round(r.y+r.height/2) }; })()");
-  window.webContents.sendInputEvent({ type: 'mouseMove', ...point });
+  window.webContents.sendInputEvent({ type: "keyDown", keyCode: "Enter" });
+  window.webContents.sendInputEvent({ type: "keyUp", keyCode: "Enter" });
   await wait(async () => (await read(window)).visible);
-  writeFileSync(join(artifacts, 'hover.png'), (await window.webContents.capturePage()).toPNG());
   // Finish on first board while second is selected; both windows update without switching.
   finish[0](); await expect(3);
   assert.equal((await tabState())[0].active, true);
@@ -409,9 +416,148 @@ try {
   await wait(() => evaluate("window.taskboard.bootstrap().then(f => f.tabs.length === 1)"));
   writeFileSync(join(artifacts, 'active-agents.json'), JSON.stringify({ versions: process.versions,
     scenarios: ['two boards, four concurrent registry sessions', 'same board in two windows, no duplication',
-      'background completion updates both windows', 'hover and keyboard focus', 'zero and idempotent cleanup', 'roles and selected/unread combinations', 'light/dark with motion and reduced motion', 'stable bounds and focused DOM', 'keyboard select/reorder, drag during activity change, close'],
+      'background completion updates both windows', 'keyboard activation', 'zero and idempotent cleanup', 'roles and selected/unread combinations', 'light/dark with motion and reduced motion', 'stable bounds and focused DOM', 'keyboard select/reorder, drag during activity change, close'],
     snapshot: snapshot.activeAgents, matrix, result: 'passed', limitation: 'Registry sessions are controlled fixtures; no paid provider runs.' }, null, 2));
-  console.log('PASS: global registry, two boards, two windows, background finish, hover/focus, zero');
+  console.log('PASS: global registry, two boards, two windows, keyboard activation, zero');
   app.exit(0);
+
+  async function checkBoardSlots() {
+    cli(boards[0], ["settings"], { name: "Орбита", taskLimits: { executor: 0, reviewer: 2 } });
+    cli(boards[1], ["settings"], { name: "Маяк", taskLimits: { executor: 3, reviewer: 1 } });
+    window.setContentSize(1280, 800);
+    second.setContentSize(820, 680);
+    window.focus();
+    window.webContents.focus();
+    await evaluate("document.querySelector('#status-agents').focus()");
+    window.webContents.sendInputEvent({ type: "keyDown", keyCode: "Space" });
+    window.webContents.sendInputEvent({ type: "keyUp", keyCode: "Space" });
+    await wait(async () => (await read(window)).visible);
+    second.focus();
+    const point = await second.webContents.executeJavaScript(`(() => {
+      const rect = document.querySelector('#status-agents').getBoundingClientRect();
+      return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
+    })()`);
+    for (const type of ["mouseDown", "mouseUp"]) {
+      second.webContents.sendInputEvent({ type, button: "left", clickCount: 1, ...point });
+    }
+    await wait(async () => (await read(second)).visible);
+    const rows = win => win.webContents.executeJavaScript(`[...document.querySelectorAll('#agent-activity-boards > section')].map(group => ({
+      name: group.querySelector('h3').textContent,
+      slots: [...group.querySelectorAll('dd')].map(el => el.textContent),
+      operations: [...group.querySelectorAll('li')].map(el => el.textContent),
+      empty: group.querySelector('p')?.textContent,
+    }))`);
+    const empty = [
+      { name: "Орбита", slots: ["0 / без лимита", "0 / 2", "Свободен"], operations: [], empty: "Нет активных операций" },
+      { name: "Маяк", slots: ["0 / 3", "0 / 1", "Свободен"], operations: [], empty: "Нет активных операций" },
+    ];
+    const expectRows = async expected => {
+      for (const win of [window, second]) {
+        await wait(async () => JSON.stringify(await rows(win)) === JSON.stringify(expected));
+        assert.equal((await read(win)).visible, true);
+      }
+    };
+    await expectRows(empty);
+    const queue = registerRuntime(boards[1], { kind: "queue", task: "T-0099" });
+    const executor = registerRuntime(boards[1], { kind: "slot", role: "executor", task: "T-0007" });
+    const reserved = structuredClone(empty);
+    reserved[1] = {
+      name: "Маяк", slots: ["1 / 3", "0 / 1", "Свободен"],
+      operations: ["Исполнитель · Выполнение задачи · T-0007"],
+    };
+    try {
+      await expectRows(reserved);
+      await expect(0);
+      cli(boards[1], ["settings"], { taskLimits: { executor: 4, reviewer: 5 } });
+      const adjusted = structuredClone(reserved);
+      adjusted[1].slots = ["1 / 4", "0 / 5", "Свободен"];
+      await expectRows(adjusted);
+      cli(boards[1], ["settings"], { taskLimits: { executor: 3, reviewer: 1 } });
+      await expectRows(reserved);
+    } finally {
+      executor();
+    }
+    await expectRows(empty);
+    const goal = registerRuntime(boards[0], {
+      kind: "task", task: "manager:context",
+      state: { id: "qa-goal", phase: "running", startedAt: Date.now(), lane: "work", goalRunning: true },
+    });
+    const stopGoal = goal.run(() => globalThis.agentCheck.trackActiveRun(boards[0], "manager"));
+    await expect(1);
+    const goalOnly = structuredClone(empty);
+    goalOnly[0] = { name: "Орбита", slots: ["0 / без лимита", "0 / 2", "Занят"], operations: ["Менеджер · Цель"] };
+    await expectRows(goalOnly);
+    const registry = new URL("../src/desktop/board-runtime.ts", import.meta.url);
+    const fixture = `
+      import { registerRuntime } from ${JSON.stringify(registry.href)};
+      const project = process.argv[1];
+      registerRuntime(project, { kind: "task", task: "manager:background",
+        state: { id: "qa-maintenance", phase: "running", startedAt: Date.now(), lane: "maintenance" } });
+      const slot = registerRuntime(project, { kind: "slot", role: "reviewer", task: "review:T-0042", operation: "maintenance" });
+      slot.run(() => registerRuntime(project, { kind: "turn", role: "reviewer" }));
+      process.stdin.resume();
+    `;
+    const child = spawn(process.env.TASKBOARD_CHECK_NODE, ["--input-type=module", "-e", fixture, boards[1]], {
+      cwd: scratch, windowsHide: true, stdio: ["pipe", "ignore", "inherit"],
+    });
+    const exited = once(child, "exit");
+    try {
+      await expect(2);
+      const both = structuredClone(goalOnly);
+      both[1] = { name: "Маяк", slots: ["0 / 3", "1 / 1", "Занят"], operations: ["Ревьюер · Фоновое обслуживание · T-0042"] };
+      await expectRows(both);
+      for (const [win, name, width, height] of [
+        [window, "board-slots.png", 1280, 800],
+        [second, "board-slots-narrow.png", 820, 680],
+      ]) {
+        const bounds = await win.webContents.executeJavaScript(`(() => {
+          const panel = document.querySelector('#agent-activity');
+          const rect = panel.getBoundingClientRect();
+          return { width: innerWidth, height: innerHeight, fits: rect.left >= 0 && rect.right <= innerWidth &&
+            rect.top >= 0 && rect.bottom <= innerHeight && panel.scrollWidth <= panel.clientWidth };
+        })()`);
+        assert.deepEqual(bounds, { width, height, fits: true });
+        writeFileSync(join(artifacts, name), (await win.webContents.capturePage()).toPNG());
+      }
+      assert.ok(runtimeEntries(boards[1]).some(entry => entry.kind === "queue" && entry.task === "T-0099"));
+      assert.ok(runtimeEntries(boards[1]).some(entry => entry.owner === child.pid && entry.operation === "maintenance"));
+      stopGoal();
+      goal();
+      await expect(1);
+      await expectRows([empty[0], both[1]]);
+    } finally {
+      child.kill();
+      await exited;
+      queue();
+      goal();
+      stopGoal();
+    }
+    await expect(0);
+    await expectRows(empty);
+    await evaluate(`window.taskboard.closeTab(${JSON.stringify(boards[1])})`);
+    await expectRows([empty[0]]);
+    second.webContents.sendInputEvent({ type: "keyDown", keyCode: "Escape" });
+    await wait(async () => !(await read(second)).visible);
+    const git = args => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", windowsHide: true }).trim();
+    const paths = ["scripts/check-active-agents.mjs", "scripts/electron-check.mjs", "src/desktop/main.ts",
+      "src/desktop/board-runtime.ts", "src/desktop/agent-limits.ts", "src/desktop/active-runs.ts",
+      "src/desktop/index.html", "src/desktop/styles.css", "src/desktop/renderer.js",
+      "src/desktop/locales/ru.json", "src/desktop/locales/en.json"];
+    const hashes = paths.map(path => createHash("sha256").update(readFileSync(join(root, path), "utf8").replaceAll("\r\n", "\n"))
+      .digest("hex") + "  " + path);
+    writeFileSync(join(artifacts, "board-slots-check.txt"), [
+      `PASS Windows Electron ${process.versions.electron}, Chromium ${process.versions.chrome}, Node ${process.versions.node}`,
+      "Command: node scripts/check-active-agents.mjs --board-slots-only --artifacts .tasks/qa",
+      "Two boards, two windows: keyboard Space, mouse click, Escape, empty states, finite/unlimited limits.",
+      "Live IPC: owner process exit drops maintenance and its reviewer slot from both open panels. Local goal stops independently.",
+      "Queue T-0099 stays in the registry without consuming a slot. Executor T-0007 reserves a slot before the turn.",
+      "Limits change from 3/1 to 4/5 and back in both open panels. The counter tracks turns and drops 2 → 1 → 0.",
+      "Closing the final tab for the background board removes its row from both panels.",
+      "Provider operations are controlled registry fixtures. No external provider is called.",
+      "Tested worktree on Git HEAD " + git(["rev-parse", "HEAD"]) + ", SHA-256 of UTF-8 source bytes with LF newlines:",
+      ...hashes,
+      "",
+    ].join("\n"));
+  }
 } catch (error) { console.error(error); app.exit(1); }
 })();
