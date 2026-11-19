@@ -121,4 +121,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ needs.version.outputs.version }}
+          SIGNED_BUILD: ${{ needs.version.outputs.signed }}
         run: node scripts/release.mjs publish release-candidate
