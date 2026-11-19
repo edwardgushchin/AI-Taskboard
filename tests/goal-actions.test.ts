@@ -88,10 +88,12 @@ test("invalid IDs and keys are rejected before conversion, and corrected input i
 test("dialogue reference is bounded, board-local, stable and separate from the instruction inbox", t => {
   const { project, goal, message } = fixture(t);
   const started = Date.now();
-  for (let i = 0; i < 45; i++) saveManagerHistory(project, started + i, randomUUID(), {
-    lane: "chat", message: { text: "Question " + i, files: [] },
-    items: [{ id: "answer-" + i, type: "agentMessage", phase: "final_answer", status: "completed", title: "", text: "x".repeat(3000) }],
-  });
+  for (let i = 0; i < 45; i++) {
+    saveManagerHistory(project, started + i, randomUUID(), {
+      lane: "chat", message: { text: "Question " + i, files: [] },
+      items: [{ id: "answer-" + i, type: "agentMessage", phase: "final_answer", status: "completed", title: "", text: "x".repeat(3000) }],
+    });
+  }
   const reference = readDialogueReference(project);
   assert.ok(reference.messages.length <= 40);
   assert.ok(reference.messages.reduce((size, entry) => size + entry.text.length, 0) <= 16_000);

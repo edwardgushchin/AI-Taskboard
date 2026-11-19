@@ -44,7 +44,9 @@ async function until(probe, label) {
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
     const value = await probe();
-    if (value) return value;
+    if (value) {
+      return value;
+    }
     await delay(40);
   }
   throw new Error("Timed out: " + label);
@@ -134,7 +136,9 @@ globalThis.parallelProvider = async (_profile, cwd, prompt, _images, action, _to
   assert.equal(cwd, project);
   const isGoal = Boolean(session.goal || session.resumeGoal);
   const id = session.id ?? randomUUID();
-  if (!session.id) session.save(id);
+  if (!session.id) {
+    session.save(id);
+  }
   const context = isGoal ? "manager:context" : "manager:dialogue";
   assert.equal(runtimeEntries(project).filter(entry => entry.task === context).length, 1);
   requests.push({ prompt, id, isGoal, resume: Boolean(session.resumeGoal) });
@@ -148,7 +152,9 @@ globalThis.parallelProvider = async (_profile, cwd, prompt, _images, action, _to
       const goal = change.kind === "clear" ? null : { objective: change.objective ?? objective,
         status: change.kind === "pause" ? "paused" : "active" };
       session.onGoal(goal);
-      if (change.kind === "pause" || change.kind === "clear") done.resolve();
+      if (change.kind === "pause" || change.kind === "clear") {
+        done.resolve();
+      }
       return goal;
     });
     session.onActivity([{ id: randomUUID(), at: new Date().toISOString(), type: "agentMessage", title: "", phase: "commentary",
@@ -156,7 +162,9 @@ globalThis.parallelProvider = async (_profile, cwd, prompt, _images, action, _to
     await done.promise;
     return { text: "Ход цели сохранён.", model: "Fixture provider" };
   }
-  if (prompt === "Удержать ответ") await chatHold.promise;
+  if (prompt === "Удержать ответ") {
+    await chatHold.promise;
+  }
   if (prompt === "Передай цели второе указание") {
     assert.equal((await action("goal_send", { text: "Запиши второй результат" })).ok, true);
   }
@@ -230,12 +238,16 @@ async function run() {
     pass("Both form submission from Goal Activity and goal_send from the manager use goal_inbox. Repeated active-turn signals carry only: AI Taskboard: new user directions are available. Read goal_inbox. First instruction: one actual comment.");
     await evaluate(wide, "document.querySelector('.board-work-toggle').click()");
     await until(() => evaluate(wide, "document.querySelector('.board-work').textContent.includes('Цель выполняется.')"), "goal log");
-    await evaluate(wide, `(async () => { for (let index = 0; index < 10; index++) {
-      document.querySelector('.board-chat-resize').dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowUp',bubbles:true}));
-      await new Promise(resolve => requestAnimationFrame(resolve));
-    }
-    for (const summary of document.querySelectorAll('.board-work details.chat-work:not([open]) > summary')) summary.click();
-    document.querySelector('.board-work').scrollTop = 0;
+    await evaluate(wide, `(async () => {
+      for (let index = 0; index < 10; index++) {
+        document.querySelector('.board-chat-resize').dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+        await new Promise(resolve => requestAnimationFrame(resolve));
+      }
+      for (const summary of document.querySelectorAll('.board-work details.chat-work:not([open]) > summary')) {
+        summary.click();
+      }
+      document.querySelector('.board-work').scrollTop = 0;
     })()`);
     await capture(wide, "manager-goal-log.png");
     assert.equal((await api(wide, "boardGoal", "pause")).ok, true);
@@ -298,7 +310,9 @@ async function run() {
   assert.ok((await history(wide, "work")).data.turns.some(turn => turn.items.some(item => item.text === "Цель выполнена")));
   for (const name of readdirSync(join(project, ".tasks", "manager-chat"))) {
     const path = join(project, ".tasks", "manager-chat", name);
-    if (JSON.parse(readFileSync(path)).goalId) rmSync(path);
+    if (JSON.parse(readFileSync(path)).goalId) {
+      rmSync(path);
+    }
   }
   await until(() => evaluate(wide, "document.querySelector('.board-chat-views').hidden && document.querySelector('.board-work').hidden"), "return to dialogue when log removed");
   assert.equal(await evaluate(wide, "!document.querySelector('.board-chat-log:not(.board-work)').hidden"), true);

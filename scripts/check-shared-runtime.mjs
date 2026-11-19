@@ -681,7 +681,7 @@ if (!process.versions.electron) {
   const executorBindings = new Map();
   let gitWindow;
   const active = await import(new URL("../src/desktop/active-runs.ts", import.meta.url));
-  let managerCalls = 0, maintenanceCalls = 0, goalClearCalls = 0, heldTurn, goalDone, goalRequest;
+  let managerCalls = 0, maintenanceCalls = 0, goalClearCalls = 0, heldTurn, goalDone, goalRequest, goalMode;
   globalThis.runtimeCheckUpdateGoal = async (_profile, _project, _thread, action) => {
     assert.equal(action.kind, "clear");
     goalClearCalls++;
@@ -972,6 +972,7 @@ if (!process.versions.electron) {
       if (command.action === "managerCalls") data = managerCalls;
       if (command.action === "history") data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript("window.taskboard.boardHistory()");
       if (command.action === "startGoal") {
+        goalMode = command.mode;
         if (command.mode === "resume") {
           writeFileSync(join(project, ".tasks", "manager-dialog.json"), JSON.stringify({
             provider: "codex", id: "20000000-0000-0000-0000-000000000001", history: "local",
@@ -1004,7 +1005,13 @@ if (!process.versions.electron) {
       if (command.action === "finishGoal") {
         goalDone.resolve();
         data = await goalRequest;
-        assert.equal(data.ok, true, JSON.stringify(data));
+        if (goalMode === "resume") {
+          assert.equal(data.ok, false, JSON.stringify(data));
+          assert.equal(data.error.code, "BOARD_GOAL_FAILED");
+          assert.equal(data.error.message, "Цель снята.");
+        } else {
+          assert.equal(data.ok, true, JSON.stringify(data));
+        }
       }
       if (command.action === "goalPanels") data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript(`(() => {
         const panel = document.querySelector(".board-goal");
