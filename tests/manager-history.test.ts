@@ -10,7 +10,7 @@ import { sweepArchives } from "../src/cli/archive.ts";
 import { createTask } from "../src/cli/tasks.ts";
 import { statusNotice } from "../src/cli/task-messages.ts";
 import type { Task } from "../src/cli/model.ts";
-import { managerChatItems, managerUnread, managerWorkItems, readManagerDialogue, readManagerHistory, readManagerMessages, saveManagerHistory } from "../src/desktop/manager-history.ts";
+import { hasManagerImageView, managerChatItems, managerUnread, managerWorkItems, readManagerDialogue, readManagerHistory, readManagerMessages, saveManagerHistory } from "../src/desktop/manager-history.ts";
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
 import type { ReviewedSubmission } from "../src/desktop/board-actions.ts";
 
@@ -20,6 +20,33 @@ function fixture(t: import("node:test").TestContext) {
   mkdirSync(join(project, ".tasks"));
   return project;
 }
+
+test("saved manager views authorize exact completed paths only on their board", t => {
+  const project = fixture(t);
+  const otherProject = fixture(t);
+  const started = Date.now();
+  const viewed = (path: string, status = "completed", type = "imageView") => ({
+    id: randomUUID(), type, status, title: "", text: JSON.stringify({ path }),
+  });
+  saveManagerHistory(project, started, randomUUID(), { lane: "chat", items: [
+    viewed("dialogue.png"),
+    viewed("running.png", "inProgress"),
+    viewed("failed.png", "failed"),
+    viewed("mentioned.png", "completed", "agentMessage"),
+  ] });
+  saveManagerHistory(project, started + 1, randomUUID(), { lane: "work", goalId: randomUUID(),
+    items: [viewed("work.png")] });
+  saveManagerHistory(project, started + 2, randomUUID(), { items: [viewed("unscoped.png")] });
+  saveManagerHistory(otherProject, started, randomUUID(), { lane: "chat", items: [viewed("other.png")] });
+
+  assert.equal(hasManagerImageView(project, "dialogue.png"), true);
+  assert.equal(hasManagerImageView(project, "work.png"), true);
+  for (const path of ["./dialogue.png", "running.png", "failed.png", "mentioned.png", "unscoped.png", "other.png"]) {
+    assert.equal(hasManagerImageView(project, path), false, path);
+  }
+  assert.equal(hasManagerImageView(otherProject, "dialogue.png"), false);
+  assert.equal(hasManagerImageView(otherProject, "other.png"), true);
+});
 
 test("goal events and interleaved notices remain chronological across page boundaries", t => {
   const project = fixture(t);
