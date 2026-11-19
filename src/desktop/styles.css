@@ -49,7 +49,16 @@ main { display: flex; flex: 1; flex-direction: column; min-height: 0; }
 .icon {
   width: 16px; height: 16px; flex: none;
 }
-.task-state-label { display: inline-flex; align-items: center; gap: 4px; }
+.task-state-label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 6px;
+}
+.task-state-label > .codicon { line-height: 1.45; }
+.task-state-label > .chat-text { white-space: normal; }
+.task-state-label > .chat-text > :first-child { margin-block-start: 0; }
+.task-state-label > .chat-text > :last-child { margin-block-end: 0; }
 button, input, textarea, select { font: inherit; }
 button { color: inherit; }
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, summary:focus-visible {
@@ -819,6 +828,9 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .sheet-section h3 { font-size: 13px; margin-bottom: 5px; }
 .sheet-section p, .sheet-section ul { line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
 .sheet-section ul { padding-left: 22px; margin: 0; }
+.sheet-section > ul:has(> li > .task-state-label) { padding-inline: 0; }
+.sheet-section > ul > li:has(> .task-state-label)::marker { content: ""; }
+.sheet-section > ul > li + li:has(> .task-state-label) { margin-block-start: 6px; }
 .sheet-section .chat-text :is(p, ul, ol) { white-space: normal; }
 .task-sheet-description .chat-text { font-size: 15px; line-height: 1.6; }
 .task-sheet-description .chat-text :is(p, ul, ol) { line-height: inherit; }
@@ -1402,13 +1414,24 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 .expert-skill textarea { width: 100%; min-height: 130px; resize: vertical; }
 .expert-skill-preview { white-space: pre-wrap; overflow-wrap: anywhere; }
 .expert-team, .expert-team-phases { display: grid; gap: 10px; overflow-wrap: anywhere; }
-.expert-phase { border: 1px solid var(--border); border-radius: 8px; min-width: 0; }
+.expert-phase {
+  --phase-inset: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  min-width: 0;
+}
 .expert-phase-header {
-  display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;
-  gap: 6px 12px; padding: 9px 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 9px var(--phase-inset);
 }
 .expert-phase-header > h4, .expert-phase > p { margin: 0; }
-.expert-phase > p { padding: 0 12px 9px; }
+.expert-phase > p, .expert-phase-reason { padding: 0 var(--phase-inset) 9px; }
+.expert-phase-reason > :first-child { margin-block-start: 0; }
+.expert-phase-reason > :last-child { margin-block-end: 0; }
 .expert-lead { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 12px; }
 .expert-avatar {
   display: inline-grid; place-items: center; flex: none; width: 30px; height: 30px; box-sizing: border-box;
@@ -1418,8 +1441,13 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 .expert-lead .expert-avatar { width: 22px; height: 22px; font-size: 9px; }
 .expert-stage { border-block-start: 1px solid var(--border); min-width: 0; }
 .expert-stage-row {
-  display: grid; grid-template-columns: auto auto minmax(0, 1fr) minmax(0, max-content);
-  align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; list-style: none;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) fit-content(40%);
+  align-items: center;
+  gap: 8px;
+  padding: 8px var(--phase-inset);
+  cursor: pointer;
+  list-style: none;
 }
 .expert-stage-row::-webkit-details-marker, .expert-agent-event summary::-webkit-details-marker { display: none; }
 .expert-stage-row:hover, .expert-agent-event summary:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
@@ -1427,7 +1455,7 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 .expert-stage > :not(summary) { margin: 6px 12px 10px 62px; }
 .expert-stage-copy { display: grid; gap: 2px; }
 .expert-stage-copy > span, .expert-stage-status { color: var(--muted); font-size: 11px; }
-.expert-stage-status { max-width: 15ch; text-align: end; }
+.expert-stage-status { text-align: end; }
 .expert-stage-status[data-state="done"] { color: var(--green); }
 .expert-stage-status[data-state="running"] { color: var(--blue); }
 .expert-stage-status[data-state="blocked"] { color: var(--warn); }
