@@ -1,0 +1,30 @@
+name: Feature request / Предложить улучшение
+description: Suggest a change to AI Taskboard / Опишите улучшение AI Taskboard
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue is public. Use demo examples and remove secrets and private data.
+        [Report vulnerabilities privately](https://github.com/edwardgushchin/AI-Taskboard/security/policy#english).
+
+        Заявка публичная. Используйте демонстрационные примеры и уберите секреты и частные данные.
+        [Сообщайте об уязвимостях приватно](https://github.com/edwardgushchin/AI-Taskboard/security/policy#русский).
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do? / Что вы хотите сделать?
+      description: Describe the current steps and where you get stuck / Опишите текущие шаги и где возникает затруднение
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome / Желаемый результат
+      description: Describe what should become possible and how to tell it works / Опишите, что должно стать возможным и как это проверить
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Version and platform / Версия и платформа
+      description: If relevant, give the release tag or commit, OS version and architecture / Если это важно, укажите тег или коммит, версию ОС и архитектуру
