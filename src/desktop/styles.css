@@ -1372,6 +1372,20 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
     display var(--hover-time) allow-discrete, overlay var(--hover-time) allow-discrete;
 }
 :is(#provider-limits, #agent-activity):popover-open { opacity: 1; transform: translateY(0); }
+#agent-activity {
+  overflow: hidden;
+}
+#agent-activity:popover-open {
+  display: flex;
+  flex-direction: column;
+}
+.agent-activity-scroll {
+  min-height: 0;
+  overflow: auto;
+}
+.agent-activity-scroll:focus-visible {
+  outline: none;
+}
 @starting-style { :is(#provider-limits, #agent-activity):popover-open { opacity: 0; transform: translateY(4px); } }
 #provider-limits .limits-header {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
@@ -1398,7 +1412,11 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
     border-radius: 999px; background: color-mix(in srgb, var(--accent) 70%, var(--text));
   }
 }
-:is(#provider-limits, #agent-activity):focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
+#provider-limits:focus-visible,
+#agent-activity:has(.agent-activity-scroll:focus-visible) {
+  outline: 1px solid var(--focus);
+  outline-offset: -1px;
+}
 /* Board-owned expert packages and task-scoped collaboration. */
 .expert-search { width: 100%; margin: 8px 0; }
 .expert-list { display: grid; gap: 6px; }
