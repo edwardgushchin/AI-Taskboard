@@ -636,18 +636,11 @@ export function onBoard<T>(location: BoardLocation, callback: (store: BoardStore
   }, timeoutMs);
 }
 
-export async function onBoardAsync<T>(location: BoardLocation, callback: (store: BoardStore) => Promise<T>): Promise<T> {
+export async function withMilestoneLinksLock<T>(location: BoardLocation, callback: () => Promise<T>): Promise<T> {
   requireBoard(location);
-  const { release } = acquireSqliteLock(join(location.directory, ".lock.sqlite"), 15_000);
+  const { release } = acquireSqliteLock(join(location.directory, ".milestone-links.sqlite"), 0);
   try {
-    finishTestRecovery(location);
-    const store = new BoardStore(location);
-    lockedStores.add(store);
-    try {
-      return await callback(store);
-    } finally {
-      lockedStores.delete(store);
-    }
+    return await callback();
   } finally {
     release();
   }

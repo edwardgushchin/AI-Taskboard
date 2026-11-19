@@ -43,7 +43,7 @@ interface ModelEntry {
 
 type Notification = (message: RpcMessage) => void | Promise<void>;
 type ServerRequest = (message: RpcMessage) => Promise<object | undefined>;
-type RunAction = (name: string, args: unknown) => Promise<CliReply>;
+type RunAction = (name: string, args: unknown, toolSignal?: AbortSignal) => Promise<CliReply>;
 type BoardMcpConnection = { config: string; env: Record<string, string>; browserConfig?: string };
 type CodexClient = NonNullable<Awaited<ReturnType<typeof configuredCodex>>>;
 type RpcRequest = <R>(method: string, params: object) => Promise<R>;
@@ -362,9 +362,9 @@ export async function replyToBoard(
 ) {
   const worklog = boardWorklog(project, "manager");
   let providerAction: ReturnType<typeof providerActions> | undefined;
-  const dispatch: RunAction = (name, args) => name === "provider_tools" || name === "task_tool_grant" || name === "task_tool_revoke"
+  const dispatch: RunAction = (name, args, toolSignal) => name === "provider_tools" || name === "task_tool_grant" || name === "task_tool_revoke"
     ? providerAction?.(name, args) ?? Promise.resolve(cliFailure("PROVIDER_TOOLS_UNAVAILABLE", "Wait for the provider session to initialize."))
-    : runAction(name, args);
+    : runAction(name, args, toolSignal);
   const dialogue = !session.goal && !session.resumeGoal && !session.separateTurn;
   const fullAccess = !session.separateTurn && !session.readOnly && session.access === "full";
   const permissionProfile = fullAccess ? hostPermissionProfile : managerResearchProfile;
@@ -376,7 +376,7 @@ export async function replyToBoard(
   const mcpTools = [...session.mcpTools, worklogTool];
   const browser = await openComputerUse(!session.readOnly && session.role !== "reviewer", undefined, signal);
   return withBoardMcp(mcpTools,
-    async (name, args) => name === worklogTool.name ? worklog.submit(args) : worklog.remind(await dispatch(name, args)),
+    async (name, args, toolSignal) => name === worklogTool.name ? worklog.submit(args) : worklog.remind(await dispatch(name, args, toolSignal)),
     (config, env) => reply(profile, project, prompt, images, dispatch, {
       tools, instructions: boardAgentInstructions("manager", instructions + accessInstructions + (accessInstructions ?
         "Use existing credentials for authorized operations without exposing them. Keep SSH host key checking enabled and report server authentication failures separately from local permission failures." : ""), { dialogue, manual: readBoardSettings(locateBoard(project)).boardType === "manual" }),

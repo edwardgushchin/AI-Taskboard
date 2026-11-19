@@ -25,16 +25,19 @@ function githubExecutable(project: string) {
   throw new TaskboardError("GITHUB_CLI_MISSING", "Install GitHub CLI (gh) on the host and make it available on PATH.");
 }
 
-function githubCli(project: string) {
+function githubCli(project: string, signal?: AbortSignal) {
   const file = githubExecutable(project);
   const cwd = homedir();
   const env: NodeJS.ProcessEnv = { ...process.env, GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1", NO_COLOR: "1" };
   if (env.GH_CONFIG_DIR) env.GH_CONFIG_DIR = resolve(cwd, env.GH_CONFIG_DIR);
   delete env.GH_DEBUG;
   delete env.GH_FORCE_TTY;
-  const call = (args: string[]) => execute(file, args, {
-    cwd, env, windowsHide: true, timeout: 20_000, maxBuffer: 8 * 1024 * 1024,
-  });
+  const call = (args: string[]) => {
+    signal?.throwIfAborted();
+    return execute(file, args, {
+      cwd, env, signal, windowsHide: true, timeout: 20_000, maxBuffer: 8 * 1024 * 1024,
+    });
+  };
   return { call, env };
 }
 
@@ -42,8 +45,8 @@ export function githubApi(project: string) {
   return githubRequests(project).request;
 }
 
-export function githubRequests(project: string) {
-  const { call, env } = githubCli(project);
+export function githubRequests(project: string, signal?: AbortSignal) {
+  const { call, env } = githubCli(project, signal);
   const identityEndpoint = "user";
 
   function request(endpoint: string, flags: string[] = [], failureCode = "GITHUB_READ_FAILED"): Promise<unknown> {
@@ -55,6 +58,7 @@ export function githubRequests(project: string) {
       const { stdout } = await call(args);
       return parse(stdout);
     } catch (error) {
+      signal?.throwIfAborted();
       // Command output can contain account data and URLs. Return only known error categories.
       const failure = error as { code?: string; stdout?: string; stderr?: string; killed?: boolean };
       const message = (failure.stderr ?? "") + "\n" + (failure.stdout ?? "");
@@ -75,6 +79,7 @@ export function githubRequests(project: string) {
           '[.hosts["github.com"][]? | {configured: ((.login // "") != ""), tokenSource}]'])
           .then(({ stdout }) => JSON.parse(stdout)[0] as { configured?: boolean; tokenSource?: string } | undefined)
           .catch(() => undefined);
+        signal?.throwIfAborted();
         const hasCredentialSource = Boolean(saved?.tokenSource && saved.tokenSource !== "default");
         if (saved?.configured && !hasCredentialSource) {
           throw new TaskboardError("GITHUB_AUTH_STORAGE", "GitHub CLI has a configured account but no accessible saved credential in the host profile.");
@@ -105,11 +110,19 @@ export function githubRequests(project: string) {
 
   return {
     request,
-    deleteMilestone: (endpoint: string) => read(
-      ["api", "--hostname", host, "--method", "DELETE", "--include", endpoint],
-      stdout => {
-        if (!/^HTTP\/\S+ 204(?:\s|$)/.test(stdout)) throw new Error("Expected HTTP 204");
-      }, "GITHUB_MILESTONE_DELETE_FAILED"),
+    deleteMilestone: async (endpoint: string) => {
+      signal?.throwIfAborted();
+      try {
+        await read(["api", "--hostname", host, "--method", "DELETE", "--include", endpoint], stdout => {
+          if (!/^HTTP\/\S+ 204(?:\s|$)/.test(stdout)) throw new Error("Expected HTTP 204");
+        }, "GITHUB_MILESTONE_DELETE_FAILED");
+      } catch (error) {
+        if (signal?.aborted || (error instanceof TaskboardError && error.code === "GITHUB_MILESTONE_DELETE_FAILED")) {
+          throw new TaskboardError("GITHUB_MILESTONE_DELETE_FAILED", "GitHub did not confirm deletion. Read the milestone again before retrying.");
+        }
+        throw error;
+      }
+    },
     failedLog: (repository: string, runId: number) => read(
       ["run", "view", String(runId), "--repo", host + "/" + repository, "--log-failed"],
       stdout => stdout, "GITHUB_RUN_LOG_FAILED"),

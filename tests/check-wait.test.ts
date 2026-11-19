@@ -81,3 +81,25 @@ test("disconnecting the MCP caller aborts a pending check wait", { timeout: 5_00
   await rejected;
   assert.equal(await ended.promise, true);
 });
+
+test("an MCP cancellation notification aborts only its matching call", { timeout: 5_000 }, async t => {
+  const started = Promise.withResolvers<void>();
+  const mcp = await openBoardMcp([checkWaitTool], async (_name, _args, signal) => {
+    const completed = new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }));
+    started.resolve();
+    await completed;
+    return { ok: true, data: { cancelled: signal.aborted } };
+  });
+  t.after(() => mcp.close());
+  const post = (message: object) => fetch(/http[^"]+/.exec(mcp.config)![0], {
+    method: "POST", headers: { authorization: "Bearer " + mcp.env.AI_TASKBOARD_MCP_TOKEN },
+    body: JSON.stringify({ jsonrpc: "2.0", ...message }),
+  });
+  const response = post({ id: 7, method: "tools/call", params: { name: checkWaitTool.name, arguments: {} } });
+  await started.promise;
+  for (const requestId of ["7", 7]) {
+    assert.equal((await post({ method: "notifications/cancelled", params: { requestId } })).status, 202);
+  }
+  const result = await (await response).json();
+  assert.equal(JSON.parse(result.result.content[0].text).data.cancelled, true);
+});

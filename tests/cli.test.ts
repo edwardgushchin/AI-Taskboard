@@ -613,11 +613,12 @@ test("GitHub milestone creation is retryable and both deadlines can be read sepa
   assert.deepEqual(run("github-milestone-create", input, "race").data, { ...created.data, created: false });
 });
 
-test("GitHub milestone edits and confirmed deletion use current remote and board state", t => {
+test("GitHub milestone edits and confirmed deletion use current remote and board state", async t => {
   const root = fixture(t, true);
   const tools = fixture(t);
   const executable = join(tools, process.platform === "win32" ? "gh.exe" : "gh");
   const state = join(tools, "milestone.json");
+  const phase = join(tools, "deletion-phase.txt");
   writeFileSync(executable, "");
   writeFileSync(state, JSON.stringify({ number: 1, title: "First", description: null, state: "open", due_on: null }));
   cli(root, ["init"]);
@@ -632,13 +633,25 @@ test("GitHub milestone edits and confirmed deletion use current remote and board
     const endpoint = 'repos/owner/example/milestones/1';
     const mode = process.env.TASKBOARD_TEST_MILESTONE;
     const fail = stderr => { throw Object.assign(new Error('fixture'), { stderr }); };
-    cp.execFile = Object.assign(() => {}, { [promisify.custom]: async (cmd, args) => {
+    cp.execFile = Object.assign(() => {}, { [promisify.custom]: async (cmd, args, options) => {
       assert.equal(cmd, ${JSON.stringify(executable)});
       assert.deepEqual(args.slice(0, 3), ['api', '--hostname', 'github.com']);
       if (args[3] === 'user') return { stdout: '{"login":"fixture"}' };
       assert.equal(args.at(-1), endpoint);
       const row = JSON.parse(readFileSync(path, 'utf8'));
       if (!row) fail('gh: Not Found (HTTP 404)');
+      const deleting = args.includes('DELETE');
+      if (mode === 'cancel-read' || mode === 'cancel-delete') {
+        if (mode === 'cancel-read') assert.equal(deleting, false);
+        if (deleting === (mode === 'cancel-delete')) {
+          globalThis.cancelFixture();
+          options.signal.throwIfAborted();
+        }
+      }
+      if (mode === 'slow') {
+        writeFileSync(${JSON.stringify(phase)}, deleting ? 'delete' : 'read');
+        await new Promise(resolve => setTimeout(resolve, 17000));
+      }
       if (args.includes('PATCH')) {
         assert.notEqual(mode, 'no-write');
         if (mode === 'denied') fail('gh: Resource not accessible by personal access token (HTTP 403)');
@@ -710,7 +723,54 @@ test("GitHub milestone edits and confirmed deletion use current remote and board
   const approved = { ...keepLinks, token: run(remove, keepLinks).data.token };
   assert.equal(run(remove, approved, "denied").error.code, "GITHUB_AUTH_SCOPE");
   assert.equal(run(remove, approved, "unverified").error.code, "GITHUB_MILESTONE_DELETE_FAILED");
-  assert.deepEqual(run(remove, approved, "success").data,
+  const cancellation = `
+    import { deleteGitHubMilestone } from ${JSON.stringify(new URL("../src/cli/repository.ts", import.meta.url).href)};
+    import { locateBoard } from ${JSON.stringify(new URL("../src/cli/storage.ts", import.meta.url).href)};
+    const cancel = new AbortController();
+    globalThis.cancelFixture = () => cancel.abort();
+    try {
+      await deleteGitHubMilestone(locateBoard(${JSON.stringify(root)}), ${JSON.stringify(approved)}, cancel.signal);
+    } catch (error) {
+      process.stdout.write(error.name === 'AbortError' ? error.name : error.code);
+    }
+  `;
+  for (const [mode, expected] of [["cancel-read", "AbortError"], ["cancel-delete", "GITHUB_MILESTONE_DELETE_FAILED"]]) {
+    const result = spawnSync(process.execPath, ["--disable-warning=ExperimentalWarning", "--import",
+      "data:text/javascript," + encodeURIComponent(mock), "--input-type=module", "--eval", cancellation], {
+      env: { ...env, PATH: tools + delimiter + process.env.PATH, TASKBOARD_TEST_MILESTONE: mode },
+      encoding: "utf8", windowsHide: true,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, expected);
+    assert.equal(run(remove).data.deleted, false);
+  }
+  const child = spawn(process.execPath, ["--import", "data:text/javascript," + encodeURIComponent(mock),
+    ...commandArgs(root, [remove], approved)], {
+    env: { ...env, PATH: tools + delimiter + process.env.PATH, TASKBOARD_TEST_MILESTONE: "slow" }, windowsHide: true,
+  });
+  const closed = once(child, "close");
+  let output = "";
+  child.stdout.setEncoding("utf8").on("data", chunk => { output += chunk; });
+  child.stderr.resume();
+  child.stdin.end(JSON.stringify(approved));
+  try {
+    for (const expected of ["read", "delete"]) {
+      const deadline = Date.now() + 25_000;
+      while (!existsSync(phase) || readFileSync(phase, "utf8") !== expected) {
+        assert.ok(child.exitCode === null && Date.now() < deadline, output);
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      const other = cli(root, ["create"], { title: "Concurrent board write" });
+      cli(root, ["milestone", other.id], { revision: other.revision, milestone: null }, "BOARD_BUSY");
+      assert.equal(readFileSync(phase, "utf8"), expected);
+      assert.equal(child.exitCode, null);
+    }
+    assert.deepEqual(await closed, [0, null], output);
+  } finally {
+    if (child.exitCode === null) child.kill();
+    await closed;
+  }
+  assert.deepEqual(JSON.parse(output).data,
     { ...target, state: "deleted", deleted: true, linkedCards: linked.linkedCards });
   assert.equal(run(remove, approved).error.code, "GITHUB_RESOURCE_ACCESS");
   assert.equal(cli(root, ["show", active.id]).milestone.number, 1);

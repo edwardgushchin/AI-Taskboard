@@ -59,13 +59,11 @@ function fixture(t: TestContext) {
   const env = { ...process.env, GIT_CEILING_DIRECTORIES: folder };
   const cliCalls: string[][] = [];
   const busyDecisions = new Map<string, number>();
-  const cliOverrides = new Map<string, (input: Record<string, unknown>) => unknown>();
+  const milestoneDeletion = { run: undefined as ((input: Record<string, unknown>, signal: AbortSignal) => unknown) | undefined };
   const callCli = async (cwd: string, args: string[], input?: unknown, track = true) => {
     assert.equal(cwd, project);
     if (track) cliCalls.push(args);
     const key = args.slice(0, 2).join(" ");
-    const override = cliOverrides.get(key);
-    if (override) return override(input as Record<string, unknown>);
     const busy = busyDecisions.get(key) ?? 0;
     if (busy > 0) {
       busyDecisions.set(key, busy - 1);
@@ -81,10 +79,11 @@ function fixture(t: TestContext) {
   const { autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools } = runInNewContext(
     boardSource + "\n({ autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools })",
     { AbortSignal, expertActions, expertCommands, leadInstructions, autoQueueSettings, isManual, manualContext, locateBoard, readBoardSettings, boardReviewMode, usesIndependentReviewer, callCli, cliFailure, defaultBoardAgents, hexTagColor, inspectProjectPath, managerInbox, needsManagerAttention, projectSha256, reviewVerifier, russianWriting, TaskboardError, taskIdPattern,
+      DOMException, deleteGitHubMilestone: (_location: unknown, input: Record<string, unknown>, signal: AbortSignal) => milestoneDeletion.run!(input, signal),
       taskFields: { title: {}, description: {}, criteria: {}, tags: {} },
     },
   );
-  type RunAction = (name: string, args: unknown) => Promise<any>;
+  type RunAction = (name: string, args: unknown, toolSignal?: AbortSignal) => Promise<any>;
   type GoalControl = (action: BoardGoalAction) => Promise<BoardGoal | null>;
   type GoalRequest = { objective?: string; resume?: boolean; accepted: () => void; delivered: (id: string) => void; controls: (control: GoalControl) => void;
     update: (goal: BoardGoal | null) => void; activity: (items: RunActivity[]) => void; settings?: ChatSettings | null;
@@ -308,7 +307,7 @@ function fixture(t: TestContext) {
       runtime.boardRequests.get(project)?.automationChanged?.(board.data);
     },
     cli: (args: string[], input?: unknown) => callCli(project, args, input),
-    cliOverrides,
+    milestoneDeletion,
     run: (request: string, reply: Reply, files: unknown[] = [], goal: boolean | "resume" = false, id?: string) => {
       respond = reply;
       return handlers.get("board:request")!({ sender }, request, files, undefined, goal, false, id);
@@ -514,20 +513,23 @@ test("manager reveals milestone links before deletion and waits for native confi
   await f.cli(["init"]);
   const target = { repository: "owner/example", number: 7 };
   const milestone = { ...target, title: "Release", state: "closed" };
-  let linkedCards = [{ id: "T-0001", title: "Release card", archived: false }];
+  let linkedCards = Array.from({ length: 200 }, (_, index) => ({
+    id: "T-" + String(index + 1).padStart(4, "0"), title: "Release card ".repeat(16), archived: index % 2 === 0,
+  }));
+  assert.ok(JSON.stringify(linkedCards).length > 24_000);
   let deletes = 0;
-  f.cliOverrides.set("github-milestone-delete", input => {
+  f.milestoneDeletion.run = input => {
     assert.equal(input.repository, target.repository);
     assert.equal(input.number, target.number);
-    if (input.token === undefined) return { ok: true, data: { milestone, linkedCards, token: "preview", deleted: false } };
+    if (input.token === undefined) return { milestone, linkedCards, token: "preview", deleted: false };
     assert.equal(input.token, "preview");
     deletes++;
-    return { ok: true, data: { ...target, state: "deleted", deleted: true } };
-  });
+    return { ...target, state: "deleted", deleted: true };
+  };
   await f.run("Delete owner/example milestone #7", async act => {
     const result = await act("github_delete_milestone", target);
     assert.equal(result.data.deleted, false);
-    assert.equal(result.data.linkedCards[0].id, "T-0001");
+    assert.equal(JSON.stringify(result.data.linkedCards), JSON.stringify(linkedCards));
     assert.equal(f.pendingQuestion(), undefined);
     assert.equal(deletes, 0);
     return { text: "The milestone is linked." };
@@ -551,12 +553,35 @@ test("manager reveals milestone links before deletion and waits for native confi
     const question = f.pendingQuestion();
     assert.equal(question.approval, true);
     assert.match(question.text, /owner\/example #7 \(closed\)/);
-    if (keepLinks) assert.match(question.text, /T-0001 Release card/);
+    assert.ok(question.text.length < 500);
+    if (keepLinks) assert.match(question.text, /200 cards.*full list/);
     assert.equal(deletes, before);
     assert.equal((await f.answerQuestion(question.id, question.options[allow ? 0 : 1])).ok, true);
     assert.ok((await request).ok);
   }
   assert.equal(deletes, 2);
+});
+
+test("cancelling the milestone MCP call closes the approval and prevents deletion", { timeout: 15_000 }, async t => {
+  const f = fixture(t);
+  await f.cli(["init"]);
+  const target = { repository: "owner/example", number: 7 };
+  f.milestoneDeletion.run = input => {
+    assert.equal(input.token, undefined);
+    return { milestone: { ...target, title: "Release", state: "open" }, linkedCards: [], token: "preview" };
+  };
+  const lifetime = new AbortController();
+  const request = f.run("Delete milestone #7", async act => {
+    const result = await act("github_delete_milestone", target, lifetime.signal);
+    assert.equal(result.error.code, "GITHUB_MILESTONE_CONFIRMATION_REQUIRED");
+    return { text: "Cancelled." };
+  });
+  while (!f.pendingQuestion()) await new Promise(resolve => setImmediate(resolve));
+  const question = f.pendingQuestion();
+  lifetime.abort();
+  assert.ok((await request).ok);
+  assert.equal(f.pendingQuestion(), undefined);
+  assert.equal((await f.answerQuestion(question.id, "Allow once")).error.code, "QUESTION_CLOSED");
 });
 
 test("GitHub read is routed to the board host on new and continued manager requests", async t => {

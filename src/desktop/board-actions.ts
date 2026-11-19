@@ -1,5 +1,6 @@
 import { isManual } from "../cli/manual-board.ts";
 import { readBoardSettings, locateBoard } from "../cli/storage.ts";
+import { deleteGitHubMilestone } from "../cli/repository.ts";
 import { boardReviewMode, defaultBoardAgents, hexTagColor, reviewVerifier, TaskboardError, taskIdPattern, usesIndependentReviewer } from "../cli/model.ts";
 import type { ArchiveLink, BoardAgentSettings, BoardSettings, BoardTag, GitHubMilestone, ReviewMode, Task } from "../cli/model.ts";
 import { needsManagerAttention, type managerInbox } from "../cli/task-messages.ts";
@@ -375,7 +376,7 @@ export function boardActions(project: string, attachments: { path: string; name:
   deliveredMessages: Set<string> | undefined, waitInterrupt: () => AbortSignal,
   runReview?: ReviewRunner, reviewReports = new Map<string, ReviewedSubmission>(),
   returnToDraft?: (id: string, revision: number) => Promise<CliReply<Task>>,
-  confirmMilestoneDeletion?: (details: string) => Promise<boolean>) {
+  confirmMilestoneDeletion?: (details: string, signal: AbortSignal) => Promise<boolean>) {
   const reviewSnapshots = new Map<string, Pick<TaskReview, "revision" | "targetHead" | "artifacts"> & {
     mode: ReviewMode; reviewModeVersion?: number; criteriaCount: number; reviewerApproved: boolean;
   }>();
@@ -395,7 +396,7 @@ export function boardActions(project: string, attachments: { path: string; name:
       revision: snapshot.revision, source: args.source, sha256: args.sha256, offset: args.offset, format: args.format,
     });
   };
-  const run = async (name: string, args: unknown): Promise<CliReply> => {
+  const run = async (name: string, args: unknown, toolSignal?: AbortSignal): Promise<CliReply> => {
     signal.throwIfAborted();
     if (!Object.hasOwn(actions, name) || !args || typeof args !== "object" || Array.isArray(args)) {
       return cliFailure("INVALID_INPUT", "Unknown board action or invalid arguments.");
@@ -542,22 +543,37 @@ export function boardActions(project: string, attachments: { path: string; name:
     if (action === "github_set_milestone_due") return callCli(project, ["github-milestone-due"], input);
     if (action === "github_update_milestone") return callCli(project, ["github-milestone-update"], input);
     if (action === "github_delete_milestone") {
-      const result = await callCli<{ milestone: GitHubMilestone & { state: string }; token: string;
-        linkedCards: { id: string; title: string; archived: boolean }[] }>(project, ["github-milestone-delete"], input);
-      if (!result.ok) return result;
-      const { milestone, linkedCards, token } = result.data;
-      if (linkedCards.length && input.keepLinks !== true) return { ok: true, data: { milestone, linkedCards, deleted: false } };
-      const details = [
-        `Delete GitHub milestone ${milestone.repository} #${milestone.number} (${milestone.state})?`,
-        milestone.title,
-        ...(linkedCards.length ? ["Keep links to the deleted milestone on these cards:",
-          ...linkedCards.map(card => `${card.id} ${card.title}${card.archived ? " (archived)" : ""}`)] : []),
-      ];
-      if (!await confirmMilestoneDeletion?.(details.join("\n"))) {
-        return cliFailure("GITHUB_MILESTONE_CONFIRMATION_REQUIRED", "The user did not confirm deletion of this milestone.");
+      const lifetime = toolSignal ? AbortSignal.any([signal, toolSignal]) : signal;
+      const phase = (ms: number) => AbortSignal.any([lifetime, AbortSignal.timeout(ms)]);
+      try {
+        lifetime.throwIfAborted();
+        // Allow 25 s for preview, 60 s for the decision and 45 s for recheck + DELETE.
+        // The ordinary MCP call expires after 140 s.
+        const location = locateBoard(project);
+        const { milestone, linkedCards, token } = await deleteGitHubMilestone(location, input, phase(25_000));
+        if (!milestone || !token) return cliFailure("GITHUB_MILESTONE_VERIFY_FAILED", "Deletion preview is unavailable.");
+        if (linkedCards.length && input.keepLinks !== true) return { ok: true, data: { milestone, linkedCards, deleted: false } };
+        const details = [
+          `Delete GitHub milestone ${milestone.repository} #${milestone.number} (${milestone.state})?`,
+          milestone.title.slice(0, 200),
+          ...(linkedCards.length ? [
+            `Keep links on ${linkedCards.length} cards. The full list is available in the deletion preview.`,
+          ] : []),
+        ];
+        const decision = phase(60_000);
+        if (!await confirmMilestoneDeletion?.(details.join("\n"), decision) || decision.aborted) {
+          return cliFailure("GITHUB_MILESTONE_CONFIRMATION_REQUIRED", "The user did not confirm deletion of this milestone.");
+        }
+        lifetime.throwIfAborted();
+        return { ok: true, data: await deleteGitHubMilestone(location, { ...input, token }, phase(45_000)) };
+      } catch (error) {
+        if (error instanceof TaskboardError) return cliFailure(error.code, error.message);
+        if (lifetime.aborted) return cliFailure("GITHUB_MILESTONE_CANCELLED", "Milestone deletion was cancelled before sending DELETE.");
+        if (error instanceof DOMException && error.name === "TimeoutError") {
+          return cliFailure("GITHUB_MILESTONE_TIMEOUT", "The GitHub milestone read timed out before sending DELETE.");
+        }
+        throw error;
       }
-      signal.throwIfAborted();
-      return callCli(project, ["github-milestone-delete"], { ...input, token });
     }
     if (action === "tag_set_color") return callCli<BoardTag>(project, ["tag", "set"], { name: input.name, color: input.color });
     if (action === "task_set_milestone") {

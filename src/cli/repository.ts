@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 import { git, gitEnvironment, invokeGit, requireRepository, resolveCommit } from "./git.ts";
 import { githubRepositoryPattern, member, number, object, TaskboardError, text } from "./model.ts";
 import type { BoardLocation } from "./storage.ts";
-import { onBoard, onBoardAsync, sha256 } from "./storage.ts";
+import { onBoard, sha256, withMilestoneLinksLock } from "./storage.ts";
 import { requireNoGitOperation } from "./worktree.ts";
 import { githubApi, githubRequests } from "./github-cli.ts";
 import { redactSecrets } from "./redact.ts";
@@ -149,22 +149,25 @@ export async function updateGitHubMilestone(location: BoardLocation, input: Reco
   return { ...after, changed: true };
 }
 
-export async function deleteGitHubMilestone(location: BoardLocation, input: Record<string, unknown>) {
+export async function deleteGitHubMilestone(location: BoardLocation, input: Record<string, unknown>, signal?: AbortSignal) {
   if (Object.keys(input).some(key => !["repository", "number", "token", "keepLinks"].includes(key)) ||
       (input.keepLinks !== undefined && typeof input.keepLinks !== "boolean") ||
       (input.token !== undefined && (typeof input.token !== "string" || !/^[0-9a-f]{64}$/.test(input.token)))) {
     throw new TaskboardError("INVALID_INPUT", "Use repository, number, optional preview token and keepLinks.");
   }
   const milestoneNumber = number(input.number, "milestone number");
-  return onBoardAsync(location, async store => {
+  const inspectOrDelete = async () => {
     const repository = milestoneRepository(location, input.repository);
-    const { request, deleteMilestone } = githubRequests(location.root);
+    const { request, deleteMilestone } = githubRequests(location.root, signal);
     const milestone = await readGitHubMilestone(request, repository, milestoneNumber);
-    const links = (source: ReturnType<typeof store.snapshot>["tasks"] | ReturnType<typeof store.archivedCards>, archived: boolean) =>
-      source.filter(task => task.milestone?.repository.toLowerCase() === repository && task.milestone.number === milestoneNumber)
-        .map(({ id, title, status, updatedAt }) => ({ id, title, status, updatedAt, archived }));
-    const linkedCards = [...links(store.storedCards(), false), ...links(store.archivedCards(), true)]
-      .sort((a, b) => a.id.localeCompare(b.id));
+    signal?.throwIfAborted();
+    const linkedCards = onBoard(location, store => {
+      const links = (source: ReturnType<typeof store.storedCards> | ReturnType<typeof store.archivedCards>, archived: boolean) =>
+        source.filter(task => task.milestone?.repository.toLowerCase() === repository && task.milestone.number === milestoneNumber)
+          .map(({ id, title, status, updatedAt }) => ({ id, title, status, updatedAt, archived }));
+      return [...links(store.storedCards(), false), ...links(store.archivedCards(), true)]
+        .sort((a, b) => a.id.localeCompare(b.id));
+    }, 0);
     const token = sha256(Buffer.from(JSON.stringify([milestone, linkedCards, input.keepLinks === true])));
     if (input.token === undefined) return { milestone, linkedCards, token, deleted: false };
     if (input.token !== token) {
@@ -176,7 +179,8 @@ export async function deleteGitHubMilestone(location: BoardLocation, input: Reco
     milestoneRepository(location, repository);
     await deleteMilestone(milestoneEndpoint(repository, milestoneNumber));
     return { repository, number: milestoneNumber, state: "deleted", deleted: true, linkedCards };
-  });
+  };
+  return input.token === undefined ? inspectOrDelete() : withMilestoneLinksLock(location, inspectOrDelete);
 }
 
 export async function createGitHubMilestone(location: BoardLocation, input: Record<string, unknown>) {

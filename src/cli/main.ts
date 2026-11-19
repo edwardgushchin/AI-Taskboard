@@ -17,7 +17,7 @@ import {
 } from "./archive.ts";
 import { boardAgentRoles, boardReviewMode, taskReviewMode, taskReviewModeVersion, hexTagColor, member, number, object, reasoningEffortPattern, record, registerTags, requireRevision, requireState, reviewModes, strings, tagKey, taskIdPattern, TaskboardError, text, usesIndependentReviewer, validAgentLimitOverrides } from "./model.ts";
 import type { GitHubMilestone, Task } from "./model.ts";
-import { exists, initializeBoard, locateBoard, onBoard, onBoardAsync, readBoardSettings, withTaskStartLock } from "./storage.ts";
+import { exists, initializeBoard, locateBoard, onBoard, readBoardSettings, withMilestoneLinksLock, withTaskStartLock } from "./storage.ts";
 import { inheritedLimits, recordSettings } from "./settings-notices.ts";
 import { requireAutoQueue, updateAutoQueue } from "./auto-queue.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
@@ -973,7 +973,7 @@ async function main() {
             throw new TaskboardError("INVALID_INPUT", "Use distinct task IDs.");
           }
           const actor = input.actor === undefined ? "user" : member(input.actor, ["user", "manager"], "actor");
-          data = await onBoardAsync(location, async store => {
+          data = await withMilestoneLinksLock(location, async () => {
             let milestone: GitHubMilestone | undefined;
             if (input.milestone !== null) {
               const fields = object(input.milestone);
@@ -984,27 +984,29 @@ async function main() {
               if (entry?.number !== selected.number) throw new TaskboardError("GITHUB_MILESTONES_FAILED", "GitHub returned a different milestone.");
               milestone = { ...selected, title: entry.title };
             }
-            if (milestone && githubRepository(location) !== milestone.repository) {
-              throw new TaskboardError("GITHUB_REMOTE_REQUIRED", "The GitHub repository configured as origin changed.");
-            }
-            const update = ({ id, revision }: (typeof tasks)[number]) => {
-              const task = store.card(id);
-              requireRevision(task, revision, true);
-              if (hasPending(store, task)) throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before modifying the task.");
-              if (JSON.stringify(task.milestone) === JSON.stringify(milestone)) return task;
-              const updated = record({ ...task, milestone }, "milestone", actor, task.status, milestone?.title);
-              return store.save({ ...updated, closedAt: task.closedAt });
-            };
-            if (!batch) return update(tasks[0]);
-            return { milestone: milestone ?? null, tasks: tasks.map(reference => {
-              try {
-                const { id, title, status, revision } = update(reference);
-                return { ok: true, data: { id, title, status, revision, changed: revision !== reference.revision } };
-              } catch (error) {
-                if (!(error instanceof TaskboardError)) throw error;
-                return { id: reference.id, ok: false, error: { code: error.code, message: error.message } };
+            return onBoard(location, store => {
+              if (milestone && githubRepository(location) !== milestone.repository) {
+                throw new TaskboardError("GITHUB_REMOTE_REQUIRED", "The GitHub repository configured as origin changed.");
               }
-            }) };
+              const update = ({ id, revision }: (typeof tasks)[number]) => {
+                const task = store.card(id);
+                requireRevision(task, revision, true);
+                if (hasPending(store, task)) throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before modifying the task.");
+                if (JSON.stringify(task.milestone) === JSON.stringify(milestone)) return task;
+                const updated = record({ ...task, milestone }, "milestone", actor, task.status, milestone?.title);
+                return store.save({ ...updated, closedAt: task.closedAt });
+              };
+              if (!batch) return update(tasks[0]);
+              return { milestone: milestone ?? null, tasks: tasks.map(reference => {
+                try {
+                  const { id, title, status, revision } = update(reference);
+                  return { ok: true, data: { id, title, status, revision, changed: revision !== reference.revision } };
+                } catch (error) {
+                  if (!(error instanceof TaskboardError)) throw error;
+                  return { id: reference.id, ok: false, error: { code: error.code, message: error.message } };
+                }
+              }) };
+            });
           });
         } else if (command === "maintain") {
           data = input.attachmentsOnly === true ? onBoard(location, store => { removeLegacyAttachments(store); return { attachmentsRemoved: true }; }) : { cleaned: maintainBoard(location) };
