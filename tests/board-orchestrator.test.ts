@@ -3056,29 +3056,40 @@ test("manager Git branch workflow stays scoped and uses checked commits", { time
     assert.equal(readFileSync(join(project, "tracked"), "utf8"), "before\n");
     git(project, "switch", "main");
     const indexPath = join(project, ".git", "index");
-    // Refresh index stat data before comparing the index byte for byte.
-    git(project, "update-index", "--refresh");
-    const indexBefore = readFileSync(indexPath);
+
     const failedFilter = join(project, ".git", "atb-failed-smudge");
     const partialWrite = join(project, ".git", "atb-partial-checkout");
-    await writeFile(failedFilter, [
-      "#!/bin/sh",
-      "test -e a-removed || printf removed > .git/atb-partial-checkout",
-      "exit 1",
-    ].join("\n") + "\n", { mode: 0o755 });
+    const shellPath = (path: string) => "'" + path.replaceAll("\\", "/").replaceAll("'", "'\\''") + "'";
     git(project, "config", "filter.taskboard-test.clean", "cat");
-    git(project, "config", "filter.taskboard-test.smudge", "sh .git/atb-failed-smudge");
+    git(project, "config", "filter.taskboard-test.smudge", "sh " + shellPath(failedFilter));
     git(project, "config", "filter.taskboard-test.required", "true");
-    const filterRejected = await act("project_git_fast_forward", source);
-    assert.equal(filterRejected.error.code, "GIT_FAILED", JSON.stringify(filterRejected));
-    assert.equal(readFileSync(partialWrite, "utf8"), "removed");
-    assert.equal(git(project, "rev-parse", "HEAD"), base);
-    assert.deepEqual(readFileSync(indexPath), indexBefore);
-    assert.equal(readFileSync(join(project, "a-removed"), "utf8"), "keep after failed checkout\n");
-    assert.equal(readFileSync(join(project, "c-shape"), "utf8"), "original file\n");
-    assert.equal(existsSync(join(project, "b-new")), false);
-    assert.equal(readFileSync(join(project, "tracked"), "utf8"), "before\n");
-    assert.equal(readFileSync(join(project, "z-filtered"), "utf8"), "original\n");
+    for (const outcome of ["failure", "edit and failure", "edit and success"]) {
+      const script = ["#!/bin/sh"];
+      script.push("test -e a-removed || printf removed > " + shellPath(partialWrite));
+      if (outcome !== "failure") {
+        script.push("printf 'editor saved\\n' > " + shellPath(join(project, "tracked")));
+      }
+      if (outcome === "edit and success") {
+        script.push("cat", "exit 0");
+      } else {
+        script.push("exit 1");
+      }
+      await writeFile(failedFilter, script.join("\n") + "\n", { mode: 0o755 });
+      git(project, "update-index", "--refresh");
+      const indexBefore = readFileSync(indexPath);
+      const rejected = await act("project_git_fast_forward", source);
+      assert.equal(rejected.error.code, outcome === "edit and success" ? "GIT_DIRTY_WORKTREE" : "GIT_FAILED", JSON.stringify(rejected));
+      assert.equal(readFileSync(partialWrite, "utf8"), "removed");
+      rmSync(partialWrite);
+      assert.equal(git(project, "rev-parse", "HEAD"), base);
+      assert.equal(readFileSync(join(project, "a-removed"), "utf8"), "keep after failed checkout\n");
+      assert.equal(readFileSync(join(project, "c-shape"), "utf8"), "original file\n");
+      assert.equal(existsSync(join(project, "b-new")), false);
+      assert.equal(readFileSync(join(project, "tracked"), "utf8"), outcome === "failure" ? "before\n" : "editor saved\n");
+      assert.equal(readFileSync(join(project, "z-filtered"), "utf8"), "original\n");
+      assert.deepEqual(readFileSync(indexPath), indexBefore);
+      await writeFile(join(project, "tracked"), "before\n");
+    }
     assert.equal(git(project, "status", "--porcelain"), "");
     git(project, "config", "--remove-section", "filter.taskboard-test");
     const checkoutHook = join(project, ".git", "hooks", "reference-transaction");
