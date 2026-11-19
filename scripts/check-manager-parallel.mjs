@@ -25,6 +25,7 @@ const requests = [];
 const signals = [];
 let goalRun;
 let chatHold;
+let effectTask;
 
 function pass(text) {
   reports.push(text);
@@ -96,6 +97,15 @@ function prepare() {
     mkdirSync(project);
     cli(["init"]);
     cli(["settings"], { autoMode: false, reviewMode: "reviewer" });
+    const lead = { lead: "qa-engineer", reason: "Изолированная проверка", stages: [] };
+    effectTask = cli(["create"], {
+      title: "Счётчик эффектов",
+      description: "Изолированная проверка",
+      criteria: ["Два разных указания дают два комментария"],
+      expertTeam: { work: lead, review: lead },
+    }).id;
+    // Prepare the counter before the desktop watcher can start draft analysis.
+    cli(["approve", effectTask]);
     saveManagerHistory(project, Date.now() - 2000, randomUUID(), {
       message: { text: "UNCLASSIFIED-LEGACY", files: [] },
       items: [{ id: "legacy-answer", type: "agentMessage", title: "", text: "UNCLASSIFIED-LEGACY", status: "completed" }],
@@ -216,9 +226,7 @@ async function run() {
     assert.equal(requests.filter(request => request.isGoal).length, 1);
     pass("goal_dialogue reads the same board's question and answer with stable IDs, author and time. Two reads and the ordinary message leave the inbox empty and the goal turn count at one.");
 
-    const lead = { lead: "qa-engineer", reason: "Изолированная проверка", stages: [] };
-    const task = cli(["create"], { title: "Счётчик эффектов", description: "Изолированная проверка", criteria: ["Два разных указания дают два комментария"],
-      expertTeam: { work: lead, review: lead } }).id;
+    const task = effectTask;
     await sendForm(wide, "Запиши первый результат", true);
     const first = await until(async () => (await goalRun.action("goal_inbox", {})).data[0], "first inbox instruction");
     const actionInput = { id: task, revision: cli(["show", task]).revision, text: "Измеримый эффект", goalMessageId: first.id, goalActionKey: "record-result" };
