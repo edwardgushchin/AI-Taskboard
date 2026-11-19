@@ -584,11 +584,22 @@ select:hover:not(:disabled) {
   gap: min(4px, calc(22% / var(--subtask-count)));
 }
 .task-subtask-progress > span {
+  position: relative; overflow: hidden;
   flex: 1 1 0; min-width: 0; height: 6px; border-radius: 999px;
   background: color-mix(in srgb, var(--muted) 27%, var(--panel));
 }
-.task-subtask-progress > .is-done {
+.task-subtask-progress > span::before {
+  content: ""; position: absolute; inset: 0;
   background: var(--accent);
+  transform: scaleX(0); transform-origin: left; transition: none;
+}
+.task-subtask-progress > .is-done::before {
+  transform: scaleX(1);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .task-subtask-progress > span::before {
+    transition: transform 360ms cubic-bezier(.22,.8,.25,1);
+  }
 }
 .task-meta { min-width: 0; gap: var(--card-group-gap); color: var(--muted); font-size: 11px; line-height: 15px; font-variant-numeric: tabular-nums; }
 .task-meta > span { display: inline-flex; align-items: center; min-width: 0; max-width: 100%; }
