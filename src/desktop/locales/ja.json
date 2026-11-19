@@ -1219,5 +1219,9 @@
   "limits.work": "作業中のタスク",
   "limits.review": "レビュー中のタスク",
   "experts.review_lead": "レビュー責任者を割り当て",
-  "experts.add_review_stage": "レビュー工程を追加"
+  "experts.add_review_stage": "レビュー工程を追加",
+  "updates.install_confirm": "AI Taskboard {version} をインストールして再起動しますか？",
+  "updates.install_detail": "公式 Windows インストーラーをリリースの SHA-256 マニフェストと照合します。プロファイルと開いているボードは保持されます。",
+  "updates.install_button": "インストールして再起動",
+  "updates.preparing": "更新を準備しています。再起動またはキャンセル後に再試行してください。"
 }

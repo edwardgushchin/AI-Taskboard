@@ -36,6 +36,7 @@ import { automationDelivery } from "../src/desktop/automation-delivery.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import { settingsDelivery, syncSettingsNotices } from "../src/desktop/settings-notices.ts";
 import { githubReadTool } from "../src/desktop/github-read.ts";
+import { ApplicationUpdates, applicationUpdateTools } from "../src/desktop/installation-updates.ts";
 import { expertActions, expertCommands, leadInstructions, phaseStageReporter } from "../src/desktop/expert-tools.ts";
 import { executorFullAccess, managerAccess, setTaskExecutorAccess } from "../src/desktop/codex.ts";
 import type { ManagerAccess } from "../src/desktop/codex.ts";
@@ -126,8 +127,17 @@ function fixture(t: TestContext) {
   });
   const activeAgents = new Map<string, { control: { steer: (text: string) => Promise<void> } }>();
   const sender = { isDestroyed: () => true };
+  let supportsUpdates = false;
+  const applicationUpdates = new ApplicationUpdates({
+    version: () => "0.1.0-alpha",
+    supported: () => supportsUpdates,
+    busy: () => false,
+    confirm: async () => supportsUpdates,
+    prepare: async () => ({ start: async () => {}, cancel: async () => {} }),
+  });
   const runtime = runInNewContext(handlerSource + "\n({ frame, scheduleAutoReview, boardRequests, boardWorkRequests, backgroundManagerRequests, acceptanceWork, managerQuestion, runBoardRequest, scheduleRecurringTasks })", {
     quotaWait: undefined, quotaInterruption: new Error("Fixture quota pause"), refreshQuota: async () => [],
+    applicationUpdates, applicationUpdateTools, updateOwner: undefined, updateProject: undefined,
     scheduleAutoBoard: () => {}, scheduleDraftDiscussions: () => {},
     activeRunSummary, runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
     captureFileLink, isFileLink, verifyFileLink, AbortSignal, AbortController, ArrayBuffer, Buffer, Error, basename, dirname, extname, join, mkdtemp, rm, writeFile, maxAttachmentBytes, boardActions, boardInstructions, boardTools, callCli,
@@ -242,6 +252,8 @@ function fixture(t: TestContext) {
         ...(!manualTurn && !cleanupTurn && !reviewTurn && !instructions.includes("This turn repairs") && !prompt.startsWith("AI Taskboard queue:") ? ["board_set_auto_mode"] : []),
         ...(!manualTurn && !cleanupTurn && mode === "manager" ? ["expert_stage", "expert_verify_skills"] : []),
         ...(!reviewTurn && !cleanupTurn && !instructions.includes("This turn repairs") ? (session.goal || session.resumeGoal ? ["goal_dialogue", "goal_inbox", "goal_report"] : ["goal_read", "goal_send"]) : []),
+        ...(!reviewTurn && !cleanupTurn && !instructions.includes("This turn repairs") && !session.goal && !session.resumeGoal &&
+          !prompt.startsWith("AI Taskboard queue:") ? ["app_check_updates", "app_install_update"] : []),
         ...(!reviewTurn && !manualTurn && !cleanupTurn && !session.goal && !session.resumeGoal &&
           !instructions.includes("This turn repairs") && session.role === "manager" && !prompt.startsWith("AI Taskboard queue:") ?
           ["task_set_review_mode"] : []),
@@ -321,6 +333,12 @@ function fixture(t: TestContext) {
       runtime.boardRequests.get(project)?.automationChanged?.(board.data);
     },
     cli: (args: string[], input?: unknown) => callCli(project, args, input),
+    prepareUpdate: async () => {
+      supportsUpdates = true;
+      await applicationUpdates.check();
+      return applicationUpdates.install("0.1.1-alpha", new AbortController().signal);
+    },
+    cancelUpdate: () => applicationUpdates.cancel(),
     milestoneDeletion,
     run: (request: string, reply: Reply, files: unknown[] = [], goal = false, id?: string) => {
       respond = reply;
@@ -389,6 +407,54 @@ test("manual manager edits personal tasks but cannot launch or move them", async
     return { text: "Week planned." };
   });
   assert.equal(result.data?.answer, "Week planned.", JSON.stringify(result));
+});
+
+test("manager update commands use the common release check and provide manual instructions for unpacked clients", async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"])).ok, true);
+  let offline = false;
+  t.mock.method(globalThis, "fetch", async (url: string) => {
+    assert.match(url, /^https:\/\/api.github.com\/repos\/edwardgushchin\/AI-Taskboard\/releases\?/);
+    if (offline) {
+      throw new TypeError("Offline");
+    }
+    return Response.json([{ tag_name: "v0.1.1-alpha", prerelease: true }]);
+  });
+  const result = await f.run("Check for AI Taskboard updates", async act => {
+    const checked = await act("app_check_updates", {});
+    assert.equal(checked.ok, true);
+    assert.equal(checked.data.currentVersion, "0.1.0-alpha");
+    assert.equal(checked.data.latest.version, "0.1.1-alpha");
+    assert.equal(checked.data.installation, "manual");
+    const installed = await act("app_install_update", { version: "0.1.1-alpha" });
+    assert.equal(installed.error.code, "UPDATE_MANUAL_REQUIRED");
+    assert.match(installed.error.message, /github.com\/edwardgushchin\/AI-Taskboard\/releases/);
+    offline = true;
+    assert.equal((await act("app_check_updates", {})).error.code, "UPDATE_CHECK_FAILED");
+    offline = false;
+    assert.equal((await act("app_check_updates", {})).data.status, "available");
+    return { text: "Current: 0.1.0-alpha. Available: 0.1.1-alpha. Install manually from the official release." };
+  });
+  assert.equal(result.ok, true);
+  assert.match(result.data.answer, /Current: 0.1.0-alpha/);
+});
+
+test("a prepared update rejects new dialogue before claiming its writer and cancellation permits retry", async t => {
+  const f = fixture(t);
+  const { data: { project } } = await f.cli(["init"]);
+  t.mock.method(globalThis, "fetch", async () => Response.json([{ tag_name: "v0.1.1-alpha" }]));
+  assert.equal((await f.prepareUpdate()).ok, true);
+  const blocked = await f.run("New request during update", async () => {
+    assert.fail("An update must prevent a new provider turn");
+  });
+  assert.equal(blocked.error.code, "UPDATE_IN_PROGRESS");
+  assert.equal(runtimeEntries(project).some(entry => entry.task === "manager:dialogue"), false);
+  await f.cancelUpdate();
+  const resumed = await f.run("Retry after update cancellation", async act => {
+    assert.equal((await act("board_list", {})).ok, true);
+    return { text: "The original client can work again." };
+  });
+  assert.equal(resumed.ok, true);
 });
 
 test("manager can set and read the board tag palette in HEX", async t => {

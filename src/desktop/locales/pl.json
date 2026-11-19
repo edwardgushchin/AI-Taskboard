@@ -1235,5 +1235,9 @@
   "limits.work": "Zadania w toku",
   "limits.review": "Zadania w weryfikacji",
   "experts.review_lead": "Wyznacz osobę odpowiedzialną za weryfikację",
-  "experts.add_review_stage": "Dodaj etap weryfikacji"
+  "experts.add_review_stage": "Dodaj etap weryfikacji",
+  "updates.install_confirm": "Zainstalować AI Taskboard {version} i uruchomić ponownie?",
+  "updates.install_detail": "Oficjalny instalator Windows zostanie sprawdzony z manifestem SHA-256 wydania. Profil i otwarte tablice zostaną zachowane.",
+  "updates.install_button": "Zainstaluj i uruchom ponownie",
+  "updates.preparing": "Trwa przygotowanie aktualizacji. Spróbuj ponownie po restarcie lub anulowaniu."
 }
