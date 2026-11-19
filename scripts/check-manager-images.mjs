@@ -200,8 +200,9 @@ try {
   await evaluate("document.querySelector('.image-preview-next').click()");
   await waitFor(() => evaluate("document.querySelector('.image-preview header output').value === '2 / 2'"));
   await evaluate("document.querySelector('.image-preview-toolbar button:last-child').click()");
-  await waitFor(() => existsSync(join(scratch, "download.png")));
   const secondFile = await evaluate(`document.querySelectorAll('${dialogSelector} [data-manager-image]')[1].dataset.managerImage`);
+  await waitFor(() => existsSync(join(scratch, "download.png")) &&
+    readFileSync(join(scratch, "download.png")).equals(readFileSync(join(project, ".tasks/manager-images", secondFile))));
   assert.deepEqual(readFileSync(join(scratch, "download.png")), readFileSync(join(project, ".tasks/manager-images", secondFile)));
   await evaluate("document.querySelector('.image-preview').close()");
   await waitFor(() => evaluate("!document.querySelector('.image-preview')"));
