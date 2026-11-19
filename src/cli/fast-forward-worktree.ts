@@ -1,15 +1,30 @@
 import {
   chmodSync, closeSync, constants, copyFileSync, cpSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync,
-  readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync,
+  readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { git, invokeGit } from "./git.ts";
+import { excludeBoard, git, invokeGit } from "./git.ts";
 import { TaskboardError } from "./model.ts";
 import { withGuardedBranchRefs } from "./ref-transaction.ts";
 
 const copyOptions = { recursive: true, verbatimSymlinks: true, preserveTimestamps: true };
 const inspectPath = (path: string) => lstatSync(path, { throwIfNoEntry: false });
+
+function copyFilterContext(root: string, checkout: string) {
+  for (const name of readdirSync(root)) {
+    if ([".git", ".tasks"].includes(name.toLowerCase())) {
+      continue;
+    }
+    cpSync(join(root, name), join(checkout, name), {
+      ...copyOptions,
+      filter: path => {
+        const entry = inspectPath(path);
+        return !!entry && (entry.isFile() || entry.isDirectory() || entry.isSymbolicLink());
+      },
+    });
+  }
+}
 
 type Snapshot = { relative: string; original: string; saved: string };
 type Publication = {
@@ -113,6 +128,28 @@ function stageWorktreePaths(root: string, scratch: string, checkout: string, cha
   return snapshots;
 }
 
+function createRecoveryDirectory(root: string, gitDir: string, snapshots: Snapshot[]) {
+  const volume = (path: string) => statSync(path, { bigint: true }).dev;
+  const sourceVolumes = new Set(snapshots.map(snapshot => volume(dirname(snapshot.original))));
+  const onSourceVolume = (path: string) => !sourceVolumes.size ||
+    (sourceVolumes.size === 1 && sourceVolumes.has(volume(path)));
+  if (onSourceVolume(gitDir)) {
+    return mkdtempSync(join(gitDir, "taskboard-fast-forward-"));
+  }
+  const board = join(root, ".tasks");
+  if (!onSourceVolume(root) || (inspectPath(board) && !inspectPath(board)?.isDirectory())) {
+    throw new TaskboardError("GIT_WORKTREE_RECOVERY_VOLUME",
+      "Fast-forward could not keep recoverable files on the same volume as the worktree paths.", { root });
+  }
+  excludeBoard({ root, bare: false });
+  mkdirSync(board, { recursive: true, mode: 0o700 });
+  if (!onSourceVolume(board)) {
+    throw new TaskboardError("GIT_WORKTREE_RECOVERY_VOLUME",
+      "The board recovery directory is on a different volume from the worktree paths.", { root, board });
+  }
+  return mkdtempSync(join(board, "taskboard-fast-forward-"));
+}
+
 function publishPaths(checkout: string, recoveryDirectory: string, snapshots: Snapshot[], published: Publication[]) {
   for (const snapshot of snapshots) {
     const staged = join(checkout, snapshot.relative);
@@ -205,12 +242,7 @@ export async function advanceWorktree(root: string, ref: string, head: string, t
           const fullCheckout = filters.code === 0;
           if (fullCheckout) {
             // A configured filter can read any relative dependency, including ignored files.
-            for (const name of readdirSync(root)) {
-              if ([".git", ".tasks"].includes(name.toLowerCase())) {
-                continue;
-              }
-              cpSync(join(root, name), join(checkout, name), copyOptions);
-            }
+            copyFilterContext(root, checkout);
           }
           const snapshots = stageWorktreePaths(root, scratch, checkout, changed, fullCheckout);
           // Git and its checkout filters write only in the staging checkout.
@@ -220,8 +252,8 @@ export async function advanceWorktree(root: string, ref: string, head: string, t
           git(checkout, [...stagingOptions, "read-tree", "-m", "-u", head, target], stagedEnv);
           check();
           // Moved files may still have open writers after this operation returns.
-          // Keep their directory entries in Git storage until the user removes them.
-          const recoveryDirectory = mkdtempSync(join(gitDir, "taskboard-fast-forward-"));
+          // Keep their directory entries on the source volume until the user removes them.
+          const recoveryDirectory = createRecoveryDirectory(root, gitDir, snapshots);
           const published: Publication[] = [];
           try {
             publishPaths(checkout, recoveryDirectory, snapshots, published);
