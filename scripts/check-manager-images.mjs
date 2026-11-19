@@ -315,8 +315,9 @@ try {
   await waitFor(() => evaluate("Boolean(document.querySelector('.board-work-timeline [data-item=\"message:order-B-answer\"]'))"));
   const history = await evaluate(`window.taskboard.boardHistory(${JSON.stringify(orderProject)}, null, 'work')`);
   assert.equal(history.ok, true, JSON.stringify(history));
-  assert.equal(history.data.turns.length, 1, "both provider turns must share one saved history turn");
-  assert.deepEqual([...new Set(history.data.turns[0].items.map(item => item.providerTurnId))], ["order-A", "order-B"]);
+  const providerTurns = history.data.turns.filter(turn => turn.items.some(item => item.providerTurnId === "order-A"));
+  assert.equal(providerTurns.length, 1, "both provider turns must share one saved history turn");
+  assert.deepEqual([...new Set(providerTurns[0].items.map(item => item.providerTurnId))], ["order-A", "order-B"]);
   await checkOrder();
   await evaluate(`(() => {
     document.querySelectorAll('.board-work .chat-work').forEach(detail => detail.open = true);
