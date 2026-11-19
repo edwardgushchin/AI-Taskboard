@@ -132,8 +132,9 @@ try {
     finishProvider.resolve();
     const dialogue = await evaluate("window.imageCheckPending");
     assert.equal(dialogue.ok, true, JSON.stringify(dialogue));
-    await evaluate("document.querySelector('.board-work-toggle').click()");
     await evaluate(`window.imageCheckPending = window.taskboard.boardRequest('Создай два изображения для цели', [], ${JSON.stringify(project)}, true, false); void 0`);
+    await waitFor(() => evaluate("!document.querySelector('.board-chat-views').hidden"));
+    await evaluate("document.querySelector('.board-work-toggle').click()");
     await waitFor(() => evaluate("document.querySelectorAll('.board-work [data-generated-answer] [data-manager-image]').length === 2"));
     finishProvider.resolve();
     const goal = await evaluate("window.imageCheckPending");
@@ -276,7 +277,9 @@ try {
   await evaluate("window.taskboard.menuAction('open-project')");
   await waitFor(() => evaluate(`window.taskboard.bootstrap().then(frame => frame.board?.project === ${JSON.stringify(orderProject)} && !frame.loading)`));
   await evaluate("document.querySelector('#board-composer .board-draft-field').click()");
-  await evaluate("document.querySelector('.board-work-toggle').click()");
+  if (restart) {
+    await evaluate("document.querySelector('.board-work-toggle').click()");
+  }
   await evaluate(`(async () => {
     for (let index = 0; index < 12; index++) {
       document.querySelector('.board-chat-resize').dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowUp'}));
@@ -299,6 +302,8 @@ try {
   if (!restart) {
     await evaluate(`window.imageCheckPending = window.taskboard.boardRequest(${JSON.stringify(orderPrompt)}, [],
       ${JSON.stringify(orderProject)}, true, false); void 0`);
+    await waitFor(() => evaluate("!document.querySelector('.board-chat-views').hidden"));
+    await evaluate("document.querySelector('.board-work-toggle').click()");
     await waitFor(() => evaluate("Boolean(document.querySelector('.board-work [data-item=\"message:order-B-comment\"]'))"));
     await checkOrder();
     await capture("manager-image-turn-order-live.png");
