@@ -5099,11 +5099,41 @@ function boardSettings() {
   body.append(tags);
 }
 
+const systemPalette = matchMedia("(prefers-color-scheme: dark)");
+let paletteTransition;
+
 function applyTheme(theme) {
-  document.documentElement.dataset.theme = theme;
+  const root = document.documentElement;
+  root.dataset.theme = theme;
   const select = byId("theme-select");
-  if (select) select.value = theme;
+  if (select) {
+    select.value = theme;
+  }
+  const palette = theme === "system" ? (systemPalette.matches ? "dark" : "light") : theme;
+  if (root.dataset.palette === palette) {
+    return;
+  }
+  const initialized = Boolean(root.dataset.palette);
+  const updatePalette = () => {
+    const selected = root.dataset.theme;
+    root.dataset.palette = selected === "system" ? (systemPalette.matches ? "dark" : "light") : selected;
+  };
+  paletteTransition?.skipTransition();
+  if (!initialized || reducedMotion.matches || !document.startViewTransition) {
+    updatePalette();
+    return;
+  }
+  paletteTransition = document.startViewTransition(updatePalette);
+  // A rapid theme change can skip a transition before its snapshot is ready.
+  paletteTransition.ready.catch(() => {});
 }
+
+systemPalette.addEventListener("change", () => applyTheme(frame.theme ?? "system"));
+reducedMotion.addEventListener("change", () => {
+  if (reducedMotion.matches) {
+    paletteTransition?.skipTransition();
+  }
+});
 
 function appearanceSettings() {
   const panel = element("section", undefined, "appearance-panel");

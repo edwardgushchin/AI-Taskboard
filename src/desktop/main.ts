@@ -138,16 +138,6 @@ const themes = {
   system: ["System", "system"],
   light: ["Light", "light"],
   dark: ["Dark", "dark"],
-  "github-light": ["GitHub Light", "light"],
-  "github-dark": ["GitHub Dark", "dark"],
-  dracula: ["Dracula", "dark"],
-  nord: ["Nord", "dark"],
-  "one-dark": ["One Dark", "dark"],
-  "tokyo-night": ["Tokyo Night", "dark"],
-  "catppuccin-mocha": ["Catppuccin Mocha", "dark"],
-  "solarized-light": ["Solarized Light", "light"],
-  "solarized-dark": ["Solarized Dark", "dark"],
-  "gruvbox-dark": ["Gruvbox Dark", "dark"],
 } as const;
 type Theme = keyof typeof themes;
 let theme: Theme = "system";
@@ -179,7 +169,30 @@ function isTheme(value: unknown): value is Theme {
 function loadTheme(): void {
   try {
     const preference = readJson(join(app.getPath("userData"), "appearance.json")) as { theme?: unknown; language?: unknown };
-    if (isTheme(preference?.theme)) theme = preference.theme;
+    if (isTheme(preference?.theme)) {
+      theme = preference.theme;
+    } else {
+      const legacyThemes: Record<string, "light" | "dark"> = {
+        "github-light": "light",
+        "solarized-light": "light",
+        "github-dark": "dark",
+        dracula: "dark",
+        nord: "dark",
+        "one-dark": "dark",
+        "tokyo-night": "dark",
+        "catppuccin-mocha": "dark",
+        "solarized-dark": "dark",
+        "gruvbox-dark": "dark",
+      };
+      if (typeof preference?.theme === "string" && Object.hasOwn(legacyThemes, preference.theme)) {
+        theme = legacyThemes[preference.theme]!;
+        try {
+          writeJson(join(app.getPath("userData"), "appearance.json"), { ...preference, theme });
+        } catch {
+          // Use the migrated palette even when the profile cannot be updated.
+        }
+      }
+    }
     localization.select(typeof preference?.language === "string" && (preference.language === "system" || Object.hasOwn(localization.names, preference.language)) ? preference.language : "system", app.getPreferredSystemLanguages());
   } catch {
     // A missing or unreadable preference falls back to the system setting.

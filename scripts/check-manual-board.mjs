@@ -43,7 +43,11 @@ app.whenReady().then(async () => {
     ${read("chat.js")}
     ${localizationFixture()}
     ${read("renderer.js")}
-    applyTheme("github-dark"); window.boardTypes = []; api.createBoard = async type => { boardTypes.push(type); };
+    applyTheme("dark");
+    window.boardTypes = [];
+    api.createBoard = async type => {
+      boardTypes.push(type);
+    };
     void 0;`);
   await evaluate(`byId('welcome-create').click(); void 0;`);
   await check(`sheet.open && sheetKind === 'board-type' && body.querySelectorAll('[data-board-type]').length === 2 && boardTypes.length === 0`, 'welcome opens an in-app choice without a host dialog');
