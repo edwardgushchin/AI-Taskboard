@@ -230,12 +230,17 @@ export function restoreBackup(root: string, id: string, parent: string, now: num
       store.index.settings.autoMode = false;
       // A restored board must not resume queued actions against the original worktrees.
       if (store.index.settings.reviewMode === "reviewer-human") store.index.settings.reviewMode = "human";
+      // Archived cards take their outstanding Codex archive requests from the index.
+      for (const entry of Object.values(store.index.archive)) {
+        delete entry.codexArchivePending;
+      }
       writeJson(join(board, "board.json"), store.index);
       for (const taskId of Object.keys(store.index.tasks)) {
         const task = store.card(taskId);
         delete task.launchRequested;
         delete task.acceptanceRepair;
         delete task.discussionReturn;
+        delete task.codexArchivePending;
         if (task.draftDiscussion?.phase === "queued" || task.draftDiscussion?.phase === "running") {
           delete task.draftDiscussion;
         }

@@ -7,10 +7,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { createWithAttachments, readAttachment, readTask, sweepArchives } from "../src/cli/archive.ts";
+import { record } from "../src/cli/model.ts";
 import { BoardStore, initializeBoard, locateBoard, withLock } from "../src/cli/storage.ts";
 import { changeTask, createTask } from "../src/cli/tasks.ts";
 import { BackupService } from "../src/desktop/backup-service.ts";
 import { backupHour, backupLifetime, createBackup, restoreBackup, verifyBackup } from "../src/desktop/board-backups.ts";
+import { archiveAcceptedCodexChats } from "../src/desktop/codex-task-archive.ts";
 import { managerUnread, readManagerHistory, saveManagerHistory } from "../src/desktop/manager-history.ts";
 
 function fixture(t: TestContext) {
@@ -217,4 +219,54 @@ test("restoring retains cards and pauses automatic work in external directories"
   assert.equal(store.card("T-0004").discussionReturn, 1);
   assert.deepEqual(store.card("T-0005").schedule, schedule);
   assert.deepEqual(verifyBackup(root, saved.id, now), saved);
+});
+
+test("restoring clears pending Codex archival for completed cards and archive entries", async t => {
+  const { project, profile, parent, store } = fixture(t);
+  const now = Date.now();
+  const root = join(profile, "board-backups");
+  const archivedThread = randomUUID();
+  const completedThread = randomUUID();
+  const archived = record({
+    ...createTask("T-0001", { title: "Archived" }),
+    codexThreadId: randomUUID(),
+    codexArchivePending: [archivedThread],
+  }, "accept", "user", "done");
+  store.create(archived);
+  store.index.settings.archiveAfterDays = 0;
+  store.saveIndex();
+  assert.deepEqual(sweepArchives(store, new Date(now + backupHour)).archived, [archived.id]);
+  const completed = record({
+    ...createTask("T-0002", { title: "Completed" }),
+    codexThreadId: randomUUID(),
+    codexArchivePending: [completedThread],
+  }, "accept", "user", "done");
+  store.create(completed);
+
+  const saved = createBackup(root, project, now);
+  const destination = restoreBackup(root, saved.id, parent, now);
+  const restored = new BoardStore(locateBoard(destination));
+  assert.equal(restored.index.archive[archived.id].codexArchivePending, undefined);
+  assert.equal(restored.card(completed.id).codexArchivePending, undefined);
+  assert.deepEqual(readTask(restored, archived.id).history, archived.history);
+  assert.deepEqual(restored.card(completed.id).history, completed.history);
+
+  const calls: string[] = [];
+  const archive = async (_profile: string, _project: string, threadId: string) => {
+    calls.push(threadId);
+    return true;
+  };
+  for (const task of [archived, completed]) {
+    assert.equal(readTask(restored, task.id).codexThreadId, task.codexThreadId);
+    await archiveAcceptedCodexChats(profile, restored.location.root, task.id, archive);
+  }
+  assert.deepEqual(calls, []);
+  assert.deepEqual(verifyBackup(root, saved.id, now), saved);
+
+  const source = locateBoard(project);
+  for (const task of [archived, completed]) {
+    assert.deepEqual(readTask(new BoardStore(source), task.id).codexArchivePending, task.codexArchivePending);
+    await archiveAcceptedCodexChats(profile, source.root, task.id, archive);
+  }
+  assert.deepEqual(calls, [archivedThread, completedThread]);
 });
