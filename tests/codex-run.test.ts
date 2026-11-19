@@ -266,6 +266,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.deepEqual(launched.requests.map((req: { method: string }) => req.method),
     ["initialize", "command/exec", "config/read", "thread/start", "mcpServerStatus/list", "turn/start"]);
   const [, probe, , started, , turn] = launched.requests;
+  assert.match(started.params.developerInstructions, /Verify the specific observable result stated in each checklist item before marking it complete/);
   assert.equal(probe.params.cwd, worktree);
   assert.equal(probe.params.permissionProfile, started.params.permissions);
   assert.ok(probe.params.command.includes(join(folder, ".git", "objects")));

@@ -40,6 +40,7 @@ import { expertContext, expertSkill, listExperts, readExpert, saveExpert } from 
 import { approvalRequirements, createExpertPlan, expertStagesStatus, planNewTask, requireApprovalPlan, requireExpertPlan, requireExpertResults, reviewDecisionSequence, sendTeamMessage, taskExpertPhase, teamInbox, updateExpertStage } from "./expert-team.ts";
 import { syncTaskStatusNotices } from "../desktop/manager-history.ts";
 import { syncSettingsNotices } from "../desktop/settings-notices.ts";
+import { cachedTaskLimits, readProfileTaskLimits } from "../desktop/agent-limits.ts";
 import { deferExecutor, forgetExecutor, linkQueuedExecutor, matchesQueuedExecutor, registerRuntime, runtimeEntries } from "../desktop/board-runtime.ts";
 
 const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "checklist", "pause", "block", "resume", "unblock", "update"]);
@@ -779,6 +780,7 @@ function run(
     return filters.compact ? { ...taskReceipt(logged),
       ...(logged !== task ? { runLogSequence: logged.history.length } : {}) } : logged;
   }
+  if (command === "block" && input.autoMode === true) requireAutoQueue(store.index.settings, id, input.autoQueueRevision);
   if (command === "progress" && task.schedule && task.status === "in_progress") requireExpertResults(task, "work");
   if (command === "approve" && task.status === "draft") requireApprovalPlan(task, store.index.settings);
   let updated = changeTask(task, command, discussionReturn ? { ...input, actor: "agent" } : input);
@@ -852,9 +854,6 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
       if (input.queuedExecutor === true && !queued) {
         throw new TaskboardError("INVALID_TRANSITION", "The queued start is no longer pending.");
       }
-      if (input.autoMode === true && !store.index.settings.autoMode) {
-        throw new TaskboardError("AUTO_MODE_DISABLED", "Automatic starts are disabled.");
-      }
       if (input.autoMode === true) requireAutoQueue(store.index.settings, id, input.autoQueueRevision);
       if ((input.scheduled === true || input.autoMode === true) && task.schedule?.paused) {
         throw new TaskboardError("INVALID_TRANSITION", "The recurring schedule is paused.");
@@ -876,8 +875,10 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
     if (!prepared.checkout) return prepared.started;
     const plan = prepared.checkout;
     const worktree = checkoutTaskWorktree(plan);
-    return onBoard(location, (store, lockWaitMs) =>
-      reply(store, finishTaskStart(store, plan, worktree, lockWaitMs, input.isolatedWorktree === true, enqueue)));
+    return onBoard(location, (store, lockWaitMs) => {
+      if (input.autoMode === true) requireAutoQueue(store.index.settings, id, input.autoQueueRevision);
+      return reply(store, finishTaskStart(store, plan, worktree, lockWaitMs, input.isolatedWorktree === true, enqueue));
+    });
   });
 }
 
@@ -937,7 +938,8 @@ async function main() {
           data = readBoardSettings(location);
         } else if (command === "sync-notices") {
           if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "Notice synchronization takes no task ID.");
-          const limits = runtimeEntries(location.root).find(entry => entry.id === "task-defaults")?.limits ?? inheritedLimits;
+          const profile = input.profile === undefined ? undefined : text(input.profile, "profile", true);
+          const limits = cachedTaskLimits(runtimeEntries(location.root), readProfileTaskLimits(profile)) ?? inheritedLimits;
           syncSettingsNotices(location.root, limits);
           data = { changed: syncTaskStatusNotices(location.root, text(input.language, "language", true)) };
         } else if (command === "manager-usage") {

@@ -68,12 +68,12 @@ codex login
 
 ### Установка готовой сборки
 
-Когда установщик Windows x64 будет опубликован, скачайте его из [Releases](https://github.com/edwardgushchin/AI-Taskboard/releases), запустите `ai-taskboard-0.1.0-win-x64.exe` для версии 0.1.0 и откройте AI Taskboard из меню «Пуск». Пакет содержит автономный CLI с Node.js; отдельный Node.js для этого пакета не нужен. Для Git-задач и агентов по-прежнему нужны внешние Git и Codex. Пока пакет не опубликован, его можно собрать по руководству разработчика.
+Когда установщик Windows будет опубликован, скачайте из [Releases](https://github.com/edwardgushchin/AI-Taskboard/releases) EXE для своей архитектуры, запустите его и откройте AI Taskboard из меню «Пуск». Пакет содержит автономный CLI с Node.js. Для Git-задач и агентов по-прежнему нужны внешние Git и Codex. Пока пакет не опубликован, его можно собрать по руководству разработчика.
 
 <a id="platforms"></a>
 ## Состояние платформ
 
-Native CI собирает и проверяет пакеты для Windows, Linux и macOS на x64 и ARM64. Смотрите [матрицу и ограничения подписи](docs/how-to/development.md#поставка) и [результаты CI по платформам](https://github.com/edwardgushchin/AI-Taskboard/actions/workflows/ci.yml). Публичные пакеты размещаются отдельно в [Releases](https://github.com/edwardgushchin/AI-Taskboard/releases).
+Native CI собирает и проверяет пакеты для Windows, Linux и macOS на x64 и ARM64. Смотрите [матрицу и ограничения подписи](docs/how-to/development.md#поставка), [результаты CI по платформам](https://github.com/edwardgushchin/AI-Taskboard/actions/workflows/ci.yml) и [форматы публичных пакетов](docs/how-to/development.md#выпуск-на-github).
 
 ## Данные и ограничения
 

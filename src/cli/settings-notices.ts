@@ -1,7 +1,7 @@
 import type { AgentLimits, BoardSettings } from "./model.ts";
 import { boardReviewMode, defaultBoardAgents } from "./model.ts";
 
-export const inheritedLimits: AgentLimits = { executor: 1, manager: 0, reviewer: 1 };
+export const inheritedLimits: AgentLimits = { executor: 3, manager: 0, reviewer: 2 };
 type Values = Record<string, string | number | boolean | null>;
 export type SettingsJournal = {
   defaults: AgentLimits;

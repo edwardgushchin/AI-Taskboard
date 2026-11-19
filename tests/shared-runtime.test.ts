@@ -1,11 +1,11 @@
 import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { initializeBoard, locateBoard, onBoard, withLock } from "../src/cli/storage.ts";
-import { createAgentSlots } from "../src/desktop/agent-limits.ts";
+import { cachedTaskLimits, createAgentSlots, readProfileTaskLimits } from "../src/desktop/agent-limits.ts";
 import { projectIdentity } from "../src/desktop/project-tabs.ts";
 import { runtimeEntries } from "../src/desktop/board-runtime.ts";
 
@@ -40,6 +40,53 @@ test("shared defaults, overrides and canonical aliases use one pool without inte
   assert.equal(runtimeEntries(project).filter(entry => entry.kind === "slot" || entry.kind === "task").length, 0);
 });
 
+test("a profile save only replaces an older shared task limit", t => {
+  const project = mkdtempSync(join(tmpdir(), "taskboard-profile-limits-"));
+  t.after(() => rmSync(project, { recursive: true, maxRetries: 5 }));
+  initializeBoard(locateBoard(project, true), () => {});
+  const first = createAgentSlots(true), second = createAgentSlots(true);
+  first.configure({ executor: 4, manager: 0, reviewer: 3 }, 10);
+  first.remember(project);
+  const active = first.acquire(project, "executor", undefined, "T-0001");
+  assert.ok(active);
+  try {
+    second.configure({ executor: 1, manager: 0, reviewer: 1 }, 20);
+    second.remember(project);
+    first.remember(project);
+    // A save that reached the shared lock late must also keep the newer limits.
+    first.configure({ executor: 2, manager: 0, reviewer: 2 }, 15);
+    assert.equal(first.available(project, "executor"), 0);
+    assert.equal(first.acquire(project, "executor", undefined, "T-0002"), undefined);
+    assert.equal(first.available(project, "reviewer"), 1);
+    assert.deepEqual(second.inherited(project), { executor: 1, manager: 0, reviewer: 1 });
+  } finally {
+    active();
+  }
+  assert.equal(second.available(project, "executor"), 1);
+});
+
+test("legacy profile limits replace undated caches but respect a newer explicit save", t => {
+  const profile = mkdtempSync(join(tmpdir(), "taskboard-legacy-limits-"));
+  t.after(() => rmSync(profile, { recursive: true, maxRetries: 5 }));
+  const path = join(profile, "task-limits.json");
+  const legacyLimits = { executor: 1, manager: 0, reviewer: 1 };
+  const modernLimits = { executor: 4, manager: 0, reviewer: 2 };
+  writeFileSync(path, JSON.stringify(legacyLimits));
+  utimesSync(path, 100, 100);
+  const preference = readProfileTaskLimits(profile);
+  assert.ok(preference);
+  const legacyCache = { id: "task-defaults", owner: 0, kind: "defaults" as const,
+    limits: { executor: 5, manager: 0, reviewer: 1 } };
+  const builtInCache = { ...legacyCache, id: "task-defaults-v2", limits: { executor: 3, manager: 0, reviewer: 2 } };
+  assert.deepEqual(cachedTaskLimits([legacyCache], preference), legacyLimits);
+  assert.deepEqual(cachedTaskLimits([builtInCache], preference), legacyLimits);
+  assert.deepEqual(cachedTaskLimits([{ ...builtInCache, limits: modernLimits, limitsSavedAt: 100_001 }], preference), modernLimits);
+  writeFileSync(path, JSON.stringify({ ...legacyLimits, savedAt: 100_000 }));
+  utimesSync(path, 200, 200);
+  assert.deepEqual(cachedTaskLimits([{ ...builtInCache, limits: modernLimits, limitsSavedAt: 100_001 }],
+    readProfileTaskLimits(profile)), modernLimits);
+});
+
 test("runtime snapshots and reservations stay responsive during a board transaction", t => {
   const project = mkdtempSync(join(tmpdir(), "taskboard-runtime-lock-"));
   t.after(() => rmSync(project, { recursive: true, maxRetries: 5 }));
@@ -48,7 +95,7 @@ test("runtime snapshots and reservations stay responsive during a board transact
   const slots = createAgentSlots(true);
   slots.remember(project);
   withLock(location.directory, () => {
-    assert.equal(slots.available(project, "executor"), 1);
+    assert.equal(slots.available(project, "executor"), 3);
     const release = slots.acquire(project, "executor", undefined, "T-0001")!;
     assert.ok(release);
     assert.equal(runtimeEntries(project).some(entry => entry.task === "T-0001"), true);

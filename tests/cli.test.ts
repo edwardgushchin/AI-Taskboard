@@ -1642,6 +1642,7 @@ for (const restoring of [false, true]) test(
   }).id]);
   const task = restored?.ready ?? ready("Slow checkout");
   const other = ready("Independent checkout");
+  cli(root, ["settings"], { autoMode: true });
   const pending = join(root, ".tasks", "pending", task.id + ".json");
   const startLock = join(root, ".tasks", "pending", task.id + ".start.sqlite");
   const preload = `
@@ -1671,6 +1672,8 @@ for (const restoring of [false, true]) test(
         assert.equal(cancelled.error?.code, "PENDING_OPERATION");
         const sent = run(${JSON.stringify(commandArgs(root, ["manager-message", task.id], {}))}, { text: "Arrived during checkout" });
         assert.equal(sent.ok, true, JSON.stringify(sent));
+        const off = run(${JSON.stringify(commandArgs(root, ["settings"], {}))}, { autoMode: false });
+        assert.equal(off.data.autoMode, false);
       }
       return spawnSync(command, args, options);
     };
@@ -1678,11 +1681,14 @@ for (const restoring of [false, true]) test(
   `;
   const result = spawnSync(process.execPath, [
     "--import=data:text/javascript;base64," + Buffer.from(preload).toString("base64"),
-    ...commandArgs(root, ["start", task.id]),
-  ], { env, encoding: "utf8", windowsHide: true, timeout: 40_000 });
+    ...commandArgs(root, ["start", task.id], {}),
+  ], { env, input: JSON.stringify({ autoMode: true, revision: task.revision }), encoding: "utf8", windowsHide: true, timeout: 40_000 });
   assert.ifError(result.error);
-  assert.equal(result.status, 0, result.stdout + result.stderr);
-  const started = JSON.parse(result.stdout).data;
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.equal(JSON.parse(result.stdout).error.code, "AUTO_MODE_DISABLED");
+  assert.equal(cli(root, ["show", task.id]).status, "ready");
+  assert.ok(existsSync(pending));
+  const started = cli(root, ["start", task.id]);
   assert.equal(started.task.status, "in_progress");
   assert.ok(started.task.history.some((event: { action: string; text?: string }) =>
     event.action === "coordination" && event.text === "Arrived during checkout"));
