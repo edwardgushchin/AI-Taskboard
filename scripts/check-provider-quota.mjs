@@ -28,7 +28,7 @@ const repairCalls = [];
 const returnSaved = Promise.withResolvers();
 const releaseReturn = Promise.withResolvers();
 const newChatStarting = new Map();
-const { runtimeEntries } = require("../src/desktop/board-runtime.ts");
+const { registerRuntime, runtimeEntries } = require("../src/desktop/board-runtime.ts");
 
 process.on("unhandledRejection", error => console.error("Startup rejection", error));
 app.setPath("userData", profile);
@@ -396,8 +396,10 @@ async function run() {
     for (const id of [ids.returned, ids.newChatAuto, ids.newChatManual]) {
       assert.equal(runtimeEntries(project).some(entry => entry.kind === "queue" && entry.task === id), true);
     }
-    cli(["settings"], { autoMode: false });
+    cli(["settings"], { autoMode: false, taskLimits: { executor: 1, reviewer: 2 } });
     await until("auto-mode off", async () => !(await frame(first)).board.settings.autoMode);
+    const releaseExecutor = registerRuntime(project, { kind: "slot", role: "executor" });
+    assert.ok(releaseExecutor);
 
     await openRepair(second);
     assert.match(await repairLabel(second), /Ожидание квоты.*сброс/);
@@ -418,6 +420,15 @@ async function run() {
     await until("hybrid reviewer resumes with auto-mode off", () => providerCalls.some(call => call.role === "reviewer"));
     assert.equal(providerCalls.find(call => call.role === "reviewer").savedThread, reviewerThread);
     assert.equal(providerCalls.filter(call => call.role === "executor").length, 0);
+    for (const window of [first, second]) {
+      assert.ok((await frame(window)).waitingTasks.includes(ids.returned));
+    }
+    releaseExecutor();
+    await until("review return launches after the slot is released", () => providerCalls.some(call => call.id === ids.returned));
+    assert.deepEqual(providerCalls.filter(call => call.role === "executor").map(call => call.id), [ids.returned]);
+    assert.equal(show(ids.ready).status, "ready");
+    cli(["settings"], { taskLimits: { executor: 7, reviewer: 2 } });
+    pass("Quota interrupted a saved review return before slot reservation. With auto-mode off after restart, it waited for confirmed quota and an executor slot, then launched once. The ordinary ready card stayed ready.");
     assert.equal(show(ids.executor).codexThreadId, saved.executor.codexThreadId);
     assert.equal(show(ids.reviewer).result.summary, saved.reviewer.result.summary);
     assert.equal((await launch(second, ids.newChatManual)).ok, true);
@@ -469,7 +480,8 @@ async function run() {
     await capture(first, "quota-resumed.png");
 
     const files = [
-      "src/cli/acceptance.ts", "src/desktop/main.ts", "src/desktop/board-runtime.ts", "src/desktop/codex-chat.ts",
+      "src/cli/acceptance.ts", "src/cli/main.ts", "src/cli/model.ts",
+      "src/desktop/main.ts", "src/desktop/board-runtime.ts", "src/desktop/codex-chat.ts",
       "src/desktop/codex-rpc.ts", "src/desktop/reviewer-chat.ts", "src/desktop/provider-limits.ts", "src/desktop/renderer.js",
       "src/desktop/index.html", "src/desktop/provider-limits.js", "src/desktop/locales/en.json", "src/desktop/locales/ru.json",
       "scripts/check-provider-quota.mjs", "tests/provider-limits.test.ts",

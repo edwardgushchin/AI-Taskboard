@@ -262,7 +262,7 @@ function frame(state: ProjectTab) {
       const failedRevision = subscriptions.get(state.project ?? "")?.failedDiscussionStarts?.get(task.id);
       return task.status === "in_progress" && ((task.discussionReturn !== undefined && (failedRevision ?? -1) < task.revision) ||
         sharedRuns.some(entry => matchesQueuedExecutor(entry, task) &&
-          (!entry.quotaPaused || quotaWait || state.board?.settings.autoMode))) &&
+          (!entry.quotaPaused || entry.reviewReturn || quotaWait || state.board?.settings.autoMode))) &&
         !runningTasks.has(key) && !replyingTasks.has(key) && !sharedRuns.some(entry => entry.kind === "slot" && entry.task === task.id);
     }).map(task => task.id),
     reviewingTasks: Object.fromEntries(state.board?.tasks.flatMap(task => {
@@ -1451,7 +1451,7 @@ function scheduleAgentWork() {
         const { project, tasks, settings } = watch.board;
         if (closingProjects.has(project)) continue;
         for (const entry of agentSlots.entries(project)) {
-          const { kind, task: id, revision, continuation, quotaPaused } = entry;
+          const { kind, task: id, revision, continuation, quotaPaused, reviewReturn } = entry;
           if (kind !== "queue" || !id || revision === undefined) continue;
           const task = tasks.find(task => task.id === id);
           // The queue can be saved before the watch sees the new card revision.
@@ -1463,7 +1463,7 @@ function scheduleAgentWork() {
           }
           const role = task.mergeRepair ? "reviewer" : "executor";
           const key = project + "\0" + id;
-          if ((quotaPaused && !settings.autoMode) || queuedRecoveryDelay.has(key) ||
+          if ((quotaPaused && !settings.autoMode && !reviewReturn) || queuedRecoveryDelay.has(key) ||
               !agentSlots.available(projectIdentity(project), role, settings?.taskLimits) || executorBusy(project, id)) continue;
           const failed = (error: string) => broadcastBoardChat(project, "orchestrator-review-error", { error: id + " · " + error });
           void launchTask(project, id, undefined, false, task.revision, continuation,
@@ -3863,8 +3863,16 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         : await callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
     if (!current.ok) return current;
     if (revisionRequest) {
-      queuedRevision = current.data.reviewReturn;
+      const task = current.data;
+      queuedRevision = task.reviewReturn;
       queued = true;
+      if (signal.reason === quotaInterruption) {
+        // The CLI saved the return before this operation could reserve a slot.
+        runtimeTransaction(project, entries => {
+          const pending = entries.find(entry => entry.reviewReturn && matchesQueuedExecutor(entry, task));
+          if (pending) pending.quotaPaused = true;
+        });
+      }
     }
     if (manual && !newThread && queuedRevision === undefined) {
       const task = current.data;
