@@ -1891,6 +1891,9 @@ async function resumeBoardGoal(sender: Electron.WebContents, board: Board, objec
     try {
       broadcastBoardChat(project, "orchestrator-goal", { goalResuming: true });
       while (!pending.cancelled) {
+        if (agentSlots.entries(project).some(entry => entry.task === "manager:context" && entry.state?.goalRunning)) {
+          return { ok: true, data: null } as const;
+        }
         const result = await runBoardRequest(sender, board, "", [], "resume");
         if (result.ok) {
           return result.data?.error ? cliFailure("BOARD_GOAL_FAILED", result.data.error) : { ok: true, data: null } as const;

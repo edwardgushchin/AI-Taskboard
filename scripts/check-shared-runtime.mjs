@@ -464,6 +464,13 @@ if (!process.versions.electron) {
       await a.ask({ action: "startGoal", mode });
       await wait(async () => (await a.ask({ action: "goalPanels" })).every(
         panel => panel.visible && panel.status === "active"), "active goal visible in both windows");
+      if (mode === "resume") {
+        const starts = await a.ask({ action: "goalCalls" }) + await b.ask({ action: "goalCalls" });
+        assert.equal(starts, 1);
+        assert.equal((await b.ask({ action: "resumeGoal" })).ok, true);
+        assert.equal(await a.ask({ action: "goalCalls" }) + await b.ask({ action: "goalCalls" }), starts);
+        record("PASS: resume from a second process acknowledges the existing goal without another provider start");
+      }
       assert.deepEqual((await a.ask({ action: "clearGoal" })).data, null);
       await wait(async () => (await a.ask({ action: "goalPanels" })).every(
         panel => !panel.visible), "cleared goal removed from both open windows");
@@ -681,7 +688,7 @@ if (!process.versions.electron) {
   const executorBindings = new Map();
   let gitWindow;
   const active = await import(new URL("../src/desktop/active-runs.ts", import.meta.url));
-  let managerCalls = 0, maintenanceCalls = 0, goalClearCalls = 0, heldTurn, goalDone, goalRequest, goalMode;
+  let managerCalls = 0, maintenanceCalls = 0, goalClearCalls = 0, goalCalls = 0, heldTurn, goalDone, goalRequest, goalMode;
   globalThis.runtimeCheckUpdateGoal = async (_profile, _project, _thread, action) => {
     assert.equal(action.kind, "clear");
     goalClearCalls++;
@@ -690,6 +697,7 @@ if (!process.versions.electron) {
   const maintenanceDone = Promise.withResolvers();
   globalThis.runtimeCheckReply = async (_profile, _project, text, _images, _action, _tools, _instructions, _signal, hooks) => {
     if (hooks.goal || hooks.resumeGoal) {
+      goalCalls++;
       goalDone = Promise.withResolvers();
       if (!hooks.id) hooks.save("20000000-0000-0000-0000-000000000001");
       hooks.onGoalControl(async ({ kind }) => {
@@ -989,6 +997,11 @@ if (!process.versions.electron) {
       if (command.action === "clearGoal") data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(
         'window.taskboard.boardGoal("clear")');
       if (command.action === "goalClearCalls") data = goalClearCalls;
+      if (command.action === "goalCalls") data = goalCalls;
+      if (command.action === "resumeGoal") {
+        data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(
+          'window.taskboard.boardGoal("resume", "Paused fixture goal")');
+      }
       if (command.action === "clickClearGoal") {
         const contents = BrowserWindow.getAllWindows()[0].webContents;
         await wait(() => contents.executeJavaScript('Boolean(document.querySelector(".board-goal:not([hidden])[data-status=paused]"))'), "paused goal visible");
