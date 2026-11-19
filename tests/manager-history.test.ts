@@ -21,24 +21,43 @@ function fixture(t: import("node:test").TestContext) {
   return project;
 }
 
-test("paused work history can have several empty filtered pages before saved work", t => {
+test("goal events and interleaved notices remain chronological across page boundaries", t => {
   const project = fixture(t);
   const at = Date.now();
-  saveManagerHistory(project, at, randomUUID(), { lane: "work", items: [
+  const goalId = randomUUID();
+  const events = Array.from({ length: 65 }, (_, index) => ({
+    id: "event-" + index, at: new Date(at + index * 2).toISOString(),
+    type: "agentMessage", title: "", text: "Event " + index, status: "completed",
+  }));
+  saveManagerHistory(project, at, randomUUID(), { lane: "work", goalId, items: events });
+  for (let index = 0; index < 65; index++) {
+    saveManagerHistory(project, at + index * 2 + 1, randomUUID(), {
+      lane: "notice", goalId, items: [{ ...events[index]!, id: "notice-" + index, at: new Date(at + index * 2 + 1).toISOString() }],
+    });
+  }
+  const pages = [];
+  let cursor: string | null = null;
+  do {
+    const page: NonNullable<ReturnType<typeof readManagerHistory>> = readManagerHistory(project, cursor, "work")!;
+    pages.unshift(page);
+    cursor = page.nextCursor;
+  } while (cursor);
+  const ids = pages.flatMap(page => page.turns.flatMap(turn => turn.items.map(item => item.id)));
+  assert.deepEqual(ids, Array.from({ length: 65 }, (_, index) => ["event-" + index, "notice-" + index]).flat());
+});
+
+test("goal history skips ordinary dialogue pages and finds saved goal events", t => {
+  const project = fixture(t);
+  const at = Date.now();
+  saveManagerHistory(project, at, randomUUID(), { lane: "work", goalId: randomUUID(), items: [
     { id: "saved-work", type: "agentMessage", title: "", text: "Saved work", status: "completed" },
   ] });
   for (let i = 1; i <= 41; i++) saveManagerHistory(project, at + i, randomUUID(), {
     lane: "chat", message: { text: "Dialogue", files: [] }, items: [],
   });
   const first = readManagerHistory(project, null, "work")!;
-  assert.equal(first.turns.length, 0);
-  assert.ok(first.nextCursor);
-  const second = readManagerHistory(project, first.nextCursor, "work")!;
-  assert.equal(second.turns.length, 0);
-  assert.ok(second.nextCursor);
-  const last = readManagerHistory(project, second.nextCursor, "work")!;
-  assert.deepEqual(last.turns.flatMap(turn => turn.items.map(item => item.id)), ["saved-work"]);
-  assert.equal(last.nextCursor, null);
+  assert.deepEqual(first.turns.flatMap(turn => turn.items.map(item => item.id)), ["saved-work"]);
+  assert.equal(first.nextCursor, null);
   assert.ok(!readManagerHistory(project, null, "chat")!.turns.some(turn => turn.items.some(item => item.id === "saved-work")));
 });
 
@@ -112,10 +131,10 @@ for (const pausedGoal of [false, true]) test(`dialogue reload preserves saved re
   while (pages[0]?.nextCursor) pages.unshift((await readManagerDialogue(project, pages[0].nextCursor, readLegacy))!);
   const turns = pages.flatMap(page => page.turns);
   const questions = turns.flatMap(turn => turn.messages.map(message => message.text));
-  assert.deepEqual(questions, [...(pausedGoal ? ["Legacy question"] : []), ...Array.from({ length: 22 }, (_, i) => `prior-${i}`), "question"]);
+  assert.deepEqual(questions, [...Array.from({ length: 22 }, (_, i) => `prior-${i}`), "question"]);
   const ids = turns.flatMap(turn => turn.items.map(item => item.id));
   assert.equal(ids.length, new Set(ids).size);
-  assert.equal(ids.length, 23 + Number(pausedGoal));
+  assert.equal(ids.length, 23);
 });
 
 test("the newest question with a 4 MiB image stays on the first page after status notices", async t => {
@@ -158,13 +177,13 @@ test("only delivered dialogue replies become unread and repeated saves preserve 
   saveManagerHistory(project, at + 3, randomUUID(), {
     lane: "notice", goalId: randomUUID(), items: [{ ...reply, id: "second", text }],
   });
-  assert.deepEqual(managerUnread(project), ["first", "second"]);
+  assert.deepEqual(managerUnread(project), ["first"]);
   assert.deepEqual(managerUnread(other), []);
   assert.equal(readManagerMessages(project, ["unknown", "first"]), true);
   assert.equal(saveManagerHistory(project, at, id, { ...run, items: [reply] }), false);
-  assert.deepEqual(managerUnread(project), ["second"]);
-  assert.deepEqual(readManagerHistory(project, null, "chat")!.turns.flatMap(turn => turn.items.map(item => item.id)), ["first", "second"]);
-  assert.deepEqual(readManagerHistory(project, null, "work")!.turns.flatMap(turn => turn.items.map(item => item.id)), ["first"]);
+  assert.deepEqual(managerUnread(project), []);
+  assert.deepEqual(readManagerHistory(project, null, "chat")!.turns.flatMap(turn => turn.items.map(item => item.id)), ["first"]);
+  assert.deepEqual(readManagerHistory(project, null, "work")!.turns.flatMap(turn => turn.items.map(item => item.id)), ["second"]);
 });
 
 test("only service notices are hidden, even with identical user and agent text", t => {
@@ -184,7 +203,7 @@ test("only service notices are hidden, even with identical user and agent text",
   const reply = { ...notices[1]!, id: randomUUID() };
   const message = { text: reply.text, files: [] };
   saveManagerHistory(project, start + notices.length, randomUUID(), { lane: "chat", message, items: [reply] });
-  saveManagerHistory(project, start + notices.length + 1, randomUUID(), { lane: "work", items: [reply] });
+  saveManagerHistory(project, start + notices.length + 1, randomUUID(), { lane: "work", goalId: randomUUID(), items: [reply] });
   assert.deepEqual(readManagerHistory(project, null, "work")!.turns.flatMap(turn => turn.items), [reply]);
   assert.deepEqual(readManagerHistory(project, null, "chat")!.turns.flatMap(turn => turn.messages), [message]);
   assert.deepEqual(readManagerHistory(project)!.turns.filter(turn => turn.lane === "notice").flatMap(turn => turn.items), notices);
@@ -226,13 +245,16 @@ test("saved status notices stay hidden before and after the card is archived", t
 test("status notices do not consume work pages or hide older real activity", t => {
   const project = fixture(t);
   const at = Date.now();
-  for (let i = 0; i < 49; i++) saveManagerHistory(project, at + i, randomUUID(), {
-    lane: i % 2 ? "notice" : "work", items: [{ id: String(i), type: "agentMessage", title: "", text: String(i), status: "completed" }],
-  });
+  for (let i = 0; i < 89; i++) {
+    saveManagerHistory(project, at + i, randomUUID(), {
+      lane: i % 2 ? "notice" : "work", ...(i % 2 ? {} : { goalId: "test-goal" }),
+      items: [{ id: String(i), type: "agentMessage", title: "", text: String(i), status: "completed" }],
+    });
+  }
   const recent = readManagerHistory(project, null, "work")!;
   const older = readManagerHistory(project, recent.nextCursor!, "work")!;
   assert.equal(older.nextCursor, null);
-  assert.deepEqual([...older.turns, ...recent.turns].map(turn => turn.items[0]!.text), Array.from({ length: 25 }, (_, i) => String(i * 2)));
+  assert.deepEqual([...older.turns, ...recent.turns].map(turn => turn.items[0]!.text), Array.from({ length: 45 }, (_, i) => String(i * 2)));
 });
 
 test("live and saved service operations use their Board tool identity before any result arrives", t => {
@@ -252,7 +274,7 @@ test("live and saved service operations use their Board tool identity before any
   assert.deepEqual(managerWorkItems(items), work);
   saveManagerHistory(project, Date.now(), randomUUID(), { lane: "chat", items });
   assert.deepEqual(readManagerHistory(project, null, "chat")!.turns[0]!.items, chat);
-  assert.deepEqual(readManagerHistory(project, null, "work")!.turns[0]!.items, work);
+  assert.deepEqual(readManagerHistory(project, null, "work")!.turns, []);
 });
 
 test("review reports move into board storage and a cleared board cache supersedes old profile data", t => {
@@ -275,7 +297,7 @@ test("review reports move into board storage and a cleared board cache supersede
   assert.equal(readReviewReports(profile, project).size, 0);
 });
 
-test("saved automatic review turns stay in the work view without masquerading as user messages", t => {
+test("unclassified shared turns and background reviews are hidden in both views", t => {
   const project = fixture(t);
   const at = Date.now();
   const prompt = "AI Taskboard: ревьюер согласовал следующие сдачи. Открой их через task_review. Сдачи: T-0035 (133)";
@@ -287,9 +309,8 @@ test("saved automatic review turns stay in the work view without masquerading as
     message: { text: prompt, files: [], clientId: randomUUID() }, items: [],
   });
   const chat = readManagerHistory(project, null, "chat")!.turns;
-  assert.deepEqual(chat.map(turn => turn.messages[0]?.text), [question.text, prompt]);
-  assert.deepEqual(readManagerHistory(project, null, "work")!.turns.map(turn => ({ messages: turn.messages, items: turn.items })),
-    [{ messages: [], items: [review] }]);
+  assert.deepEqual(chat.map(turn => turn.messages[0]?.text), [question.text]);
+  assert.deepEqual(readManagerHistory(project, null, "work")!.turns, []);
 });
 
 
@@ -326,7 +347,7 @@ test("failed unread persistence retries without losing a concurrent arrival", t 
   assert.deepEqual(managerUnread(project), ["seen"]);
   rmSync(path, { recursive: true });
   renameSync(backup, path);
-  saveManagerHistory(project, 2, randomUUID(), { lane: "notice", goalId: randomUUID(), items: [reply("arrival")] });
+  saveManagerHistory(project, 2, randomUUID(), { lane: "chat", items: [reply("arrival")] });
   assert.equal(readManagerMessages(project, ["seen"]), true);
   assert.deepEqual(managerUnread(project), ["arrival"]);
   assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).unread, ["arrival"]);

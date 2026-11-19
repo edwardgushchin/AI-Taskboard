@@ -1065,7 +1065,21 @@ function card(task) {
     if (!runStatus.hidden) item.append(runStatus);
     item.append(meta);
   }
-  card.replaceChildren(item);
+  if (oldDetails) {
+    const children = [...item.childNodes];
+    const progress = oldDetails.querySelector(".task-subtask-progress");
+    const nextProgress = item.querySelector(".task-subtask-progress");
+    if (progress && nextProgress && progress.childElementCount === subtasks.length) {
+      // Keep the connected segments so CSS can continue or reverse an in-flight fill.
+      for (const [index, bar] of [...progress.children].entries()) {
+        bar.classList.toggle("is-done", subtasks[index].done);
+      }
+      children[children.indexOf(nextProgress)] = progress;
+    }
+    syncChildren(oldDetails, children);
+  } else {
+    card.replaceChildren(item);
+  }
   boardCards.set(task.id, { node: card, signature });
   return card;
 }
@@ -1307,7 +1321,8 @@ function laneTools(state, title, tasks, total, count, content) {
     manualLimit = visibleLimit + 4;
     visibleLimit = manualLimit;
     renderBatch();
-    if (!more.isConnected) content.children[firstNew]?.focus();
+    // Leave focus at the start of the new batch, rather than on the button moving below it.
+    content.children[firstNew]?.focus({ preventScroll: true });
   }, "quiet lane-more");
   function updateCards() {
     matching = tasks.filter(task => (!priority.value || task.priority === priority.value) &&
@@ -1830,6 +1845,7 @@ function draftComposer() {
   const files = [];
   const queued = [];
   let savingQueuedMessage = false;
+  let goalDeliveryDraft;
   let sendingQueuedMessage = false;
   let active;
   let managerRun;
@@ -1913,6 +1929,7 @@ function draftComposer() {
     persist();
   });
   const views = element("div", undefined, "board-chat-views");
+  views.hidden = true;
   const dialogueToggle = button("", () => showWork(false), "quiet board-dialogue-toggle");
   const workToggle = button("", () => showWork(true), "quiet board-work-toggle");
   dialogueToggle.setAttribute("aria-pressed", "true");
@@ -1920,11 +1937,13 @@ function draftComposer() {
   views.append(dialogueToggle, workToggle);
   bar.append(views, resize, pin);
   let currentGoal;
+  let goalScope;
+  let goalLogAvailable = false;
   let goalRunning = false;
   let goalResuming = false;
   let requestingResume = false;
   let clearingGoal = false;
-  const activeGoalRunId = () => goalRunning && managerWork?.phase === "running" ? managerWork.id : undefined;
+  const activeGoalRunId = () => currentGoal && currentGoal.status !== "complete" ? goalScope ?? (goalRunning && managerWork?.id) : undefined;
   let goalRevision = 0;
   let changingGoal = false;
   const goalPanel = element("details", undefined, "board-goal");
@@ -1995,12 +2014,17 @@ function draftComposer() {
     goalTitle.title = goalTitle.textContent;
     syncGoal();
   };
-  editor.updateGoal = (goal, running, resuming) => {
+  editor.updateGoal = (goal, running, resuming, metadata = {}) => {
     goalRevision++;
     if (running !== undefined) goalRunning = running;
     if (resuming !== undefined) goalResuming = resuming;
+    if (metadata.goalLogAvailable !== undefined) goalLogAvailable = metadata.goalLogAvailable;
+    if (metadata.goalId !== undefined) goalScope = metadata.goalId;
     if (goal !== undefined) showGoal(goal);
     else syncGoal();
+    syncViews();
+    renderWorkOverview();
+    syncPrompt();
   };
   goalText.addEventListener("input", syncGoal);
   async function changeGoal(kind, objective) {
@@ -2127,6 +2151,7 @@ function draftComposer() {
   function renderWorkOverview() {
     if (work.hidden || frame.project !== project) return;
     const rows = [];
+    if (currentGoal) rows.push(element("div", goalStatus.textContent, "board-work-row"));
     const workStatus = item => item ? runningLabel(item).status : t("ui.working_85aeded8");
     if (managerWork) {
       const time = managerWork.startedAt ? new Date(managerWork.startedAt).toLocaleTimeString(localization.locale, { hour: "2-digit", minute: "2-digit" }) : "";
@@ -2185,6 +2210,8 @@ function draftComposer() {
         result = await api.boardHistory(project, next, "work");
         if (disposed || work.hidden) return;
         if (!result.ok) throw new Error(boardError(result.error));
+        editor.updateGoal(result.data.goal, result.data.goalRunning, result.data.goalResuming, result.data);
+        if (work.hidden) return;
         next = result.data.nextCursor;
         // A broken provider cursor must not keep the loading loop alive.
         if (visited.has(next)) next = null;
@@ -2257,12 +2284,19 @@ function draftComposer() {
       }
     }
   }
+  function syncViews() {
+    views.hidden = !(goalRunning || startingWork || goalLogAvailable ||
+      (currentGoal && currentGoal.status !== "complete"));
+    if (views.hidden && !work.hidden) showWork(false);
+  }
   function showWork(show) {
+    if (show && views.hidden) return;
     if (show === !work.hidden) return;
     work.hidden = !show;
     log.hidden = show;
     dialogueToggle.setAttribute("aria-pressed", String(!show));
     workToggle.setAttribute("aria-pressed", String(show));
+    syncPrompt();
     if (!show) {
       dialogueViewport.restore();
       dialogueViewport.update(updateUnreadMessages);
@@ -2276,7 +2310,12 @@ function draftComposer() {
     editor.refreshWork();
   }
   editor.invalidateWork = () => {
-    if (work.hidden) return;
+    if (work.hidden) {
+      void api.boardHistory(project, null, "work").then(result => {
+        if (!disposed && result.ok) editor.updateGoal(result.data.goal, result.data.goalRunning, result.data.goalResuming, result.data);
+      }).catch(() => {});
+      return;
+    }
     if (loadedOlderWork && !workViewport.atEnd()) workReload = true;
     else void loadWork();
   };
@@ -2680,11 +2719,13 @@ function draftComposer() {
   progress.hidden = true;
   progress.setAttribute("role", "status");
   const syncPrompt = () => {
+    const toGoal = !work.hidden && Boolean(activeGoalRunId());
     const status = !editor.matches("[data-open], [data-pinned]") && (active?.thinking.textContent || (managerWork &&
       (managerWork.lane === "maintenance" ? t("ui.checking_worktree_cleanup_1f82f9a8") : runningLabel(managerWork.item).status)));
     const text = status || (goalMode ? t("ui.describe_the_goal_79e3a385") :
-      t("ui.write_to_the_project_manager_49756120"));
+      t(toGoal ? "ui.write_to_goal" : "ui.write_to_the_project_manager_49756120"));
     if (prompt.textContent !== text) prompt.textContent = text;
+    input.setAttribute("aria-label", t(toGoal ? "ui.message_the_goal" : "ui.message_the_project_manager_247ec40b"));
   };
   editor.syncPrompt = syncPrompt;
   const hasDraft = () => Boolean(input.value.trim() || (!goalMode && files.length));
@@ -2713,7 +2754,7 @@ function draftComposer() {
     updatePin();
     bindLocalized(dialogueToggle, "textContent", () => t("ui.dialogue_e154ab04"));
     bindLocalized(unreadDivider, "textContent", () => t("ui.new_messages_bb42ec76"));
-    bindLocalized(workToggle, "textContent", () => t("ui.work_activity_e01957b7"));
+    bindLocalized(workToggle, "textContent", () => t("ui.goal_activity"));
     work.setAttribute("aria-label", workToggle.textContent);
     bindLocalized(workOlder, "textContent", () => t("ui.earlier_activity_e8606f75"));
     bindLocalized(goalText, "aria-label", () => t("ui.goal_objective_c057a817"), true);
@@ -2722,7 +2763,7 @@ function draftComposer() {
     bindLocalized(resumeGoal, "textContent", () => t("ui.resume_b9681b5e"));
     bindLocalized(clearGoal, "textContent", () => t("ui.clear_goal_a38efd6d"));
     syncGoal();
-    bindLocalized(input, "aria-label", () => t("ui.message_the_project_manager_247ec40b"), true);
+    bindLocalized(input, "aria-label", () => t(!work.hidden && activeGoalRunId() ? "ui.message_the_goal" : "ui.message_the_project_manager_247ec40b"), true);
     bindLocalized(chat, "aria-label", () => t("ui.project_manager_chat_a425db31"), true);
     bindLocalized(resize, "aria-label", () => t("ui.chat_height_145da15f"), true);
     bindLocalized(greeting, "textContent", () => t("ui.ask_about_the_project_or_discuss_what_needs_to_c_b07dfce4"));
@@ -3051,7 +3092,7 @@ function draftComposer() {
       loadingHistory = api.boardHistory(project).then(async result => {
         if (!result.ok) throw new Error(boardError(result.error));
         if (disposed || reloadAfterHistory) return;
-        if (revision === goalRevision) editor.updateGoal(result.data.goal, result.data.goalRunning, result.data.goalResuming);
+        if (revision === goalRevision) editor.updateGoal(result.data.goal, result.data.goalRunning, result.data.goalResuming, result.data);
         const oldImages = [...log.querySelectorAll(".chat-attachments img")];
         let delivered;
         dialogueViewport.update(() => {
@@ -3472,10 +3513,10 @@ function draftComposer() {
     validate();
     edit.focus({ preventScroll: true });
   }
-  async function sendQueuedNow(job, goalRunId) {
+  async function sendQueuedNow(job) {
     if (disposed || sendingQueuedMessage || job.sending || job.editing || !queued.includes(job)) return;
     const turn = active;
-    if (!turn && !goalRunId) {
+    if (!turn) {
       await loadHistory()?.catch(() => {});
       if (disposed || !queued.includes(job) || job.sending || job.editing) return;
       if (active) return sendQueuedNow(job);
@@ -3491,10 +3532,11 @@ function draftComposer() {
     try {
       const pasted = await pasteFiles(job.submitted);
       if (disposed) return;
-      const result = await api.boardRequest(job.request, pasted, project, false, true, job.id, goalRunId);
+      const result = await api.boardRequest(job.request, pasted, project, false, true, job.id);
       if (disposed) return;
       if (!result.ok) throw new Error(boardError(result.error));
-      queued.splice(queued.indexOf(job), 1);
+      const index = queued.indexOf(job);
+      if (index >= 0) queued.splice(index, 1);
       job.row.remove();
       if (!turn || turn.items.some(item => item.userMessage && item.id === job.id) || active !== turn) {
         releaseMessagePreviews(job.messageFiles);
@@ -3583,6 +3625,7 @@ function draftComposer() {
     if (disposed || refreshingQueue || movingQueue || queueRetry || managerBusy || active || startingWork ||
         !next || next.failed || next.editing || next.sending || next.inFlight) return;
     startingWork = true;
+    syncViews();
     next.sending = true;
     bindLocalized(next.status, "textContent", () => t("ui.starting_39fd3c7e"));
     syncGoal();
@@ -3611,6 +3654,7 @@ function draftComposer() {
     }).finally(() => {
       next.sending = false;
       startingWork = false;
+      syncViews();
       syncGoal();
       if (!disposed) sendWorkNext();
     });
@@ -3638,7 +3682,7 @@ function draftComposer() {
     if (refreshingQueue || movingQueue) return;
     sendWorkNext();
     const next = queued.find(job => !job.goal && !job.failed);
-    if (disposed || queueRetry || managerBusy || startingWork || active || sendingQueuedMessage || !next || next.editing || next.sending || next.inFlight) return;
+    if (disposed || queueRetry || managerBusy || active || sendingQueuedMessage || !next || next.editing || next.sending || next.inFlight) return;
     queued.splice(queued.indexOf(next), 1);
     const { request, goal, submitted } = next;
     next.row?.remove();
@@ -3716,8 +3760,18 @@ function draftComposer() {
     let id;
     savingQueuedMessage = true;
     try {
-      await restoreQueue();
-      id = await queueStorage("add", undefined, draft, goal, await pasteFiles(submitted));
+      if (goalRunId) {
+        if (goalDeliveryDraft?.scope !== goalRunId || goalDeliveryDraft?.text !== draft) {
+          goalDeliveryDraft = { scope: goalRunId, text: draft, id: crypto.randomUUID() };
+        }
+        id = goalDeliveryDraft.id;
+        const result = await api.boardRequest(draft, await pasteFiles(submitted), project, false, true, id, goalRunId);
+        if (!result.ok) throw new Error(boardError(result.error));
+        goalDeliveryDraft = undefined;
+      } else {
+        await restoreQueue();
+        id = await queueStorage("add", undefined, draft, goal, await pasteFiles(submitted));
+      }
     } catch (error) {
       if (!disposed) message(error.message);
       return;
@@ -3736,12 +3790,10 @@ function draftComposer() {
     dismissedMention = undefined;
     attachments.hidden = !files.length;
     if (goalMode === goal) setGoalMode(false);
-    if (active?.id !== id && !queued.some(job => job.id === id)) enqueue(id, draft, goal, submitted);
+    if (!goalRunId && active?.id !== id && !queued.some(job => job.id === id)) enqueue(id, draft, goal, submitted);
     openChat();
     showWork(goal || Boolean(goalRunId));
-    const job = goalRunId && queued.find(job => job.id === id);
-    if (job) void sendQueuedNow(job, goalRunId);
-    else sendNext();
+    if (!goalRunId) sendNext();
     syncAction();
   });
   function updateQueuedPreview(job) {

@@ -121,9 +121,12 @@ function prepare() {
 
 globalThis.goalFixture = async (_profile, cwd, prompt, _images, _action, _tools, _instructions, _signal, session) => {
   assert.equal(cwd, project);
-  assert.equal(session.id, thread);
   const entries = runtimeEntries(project);
-  assert.equal(entries.filter(entry => entry.task === "manager:context").length, 1);
+  const goal = session.goal || session.resumeGoal;
+  if (goal) assert.equal(session.id, thread);
+  else if (!session.id) session.save(randomUUID());
+  const context = goal ? "manager:context" : "manager:dialogue";
+  assert.equal(entries.filter(entry => entry.task === context).length, 1);
   requests.push({ prompt, resume: session.resumeGoal, slots: entries.filter(entry => entry.role === "reviewer").length });
   if (session.resumeGoal) {
     if (failResume) throw new Error("Fixture provider refused continuation");
@@ -187,44 +190,31 @@ async function run() {
   assert.equal(await resumeEnabled(wide), true);
   assert.equal(await resumeEnabled(other), true);
   await evaluate(wide, "document.querySelector(" + JSON.stringify(button) + ").click()");
-  await until(async () => await pending(wide) && await pending(other), "pending resume in both windows");
-  await capture(wide, "goal-resume-pending.png");
-  assert.equal(await resumeEnabled(other), false);
-  assert.equal((await api(other, "boardGoal", "resume", objective)).ok, true);
-  assert.equal((await api(wide, "boardGoal", "resume", objective)).ok, true);
+  await until(async () => resumes() === 2 && !(await history(other)).data.goalResuming, "resume beside dialogue");
+  await capture(wide, "goal-resume-during-dialogue.png");
   assert.equal((await api(other, "boardRequest", "Competing request")).error.code, "BOARD_REQUEST_IN_PROGRESS");
-  assert.equal(resumes(), 1);
+  assert.equal(resumes(), 2);
+  assert.equal((await history(other)).data.turns.some(turn => turn.items.some(item => item.text.includes("Saved manager answer: Hold"))), false);
   chat.resolve();
   assert.equal((await first.reply()).ok, true);
-  const competitor = await api(other, "boardRequest", "Queued after the answer");
-  assert.ok(!competitor.ok || requests.findIndex(request => request.prompt === "Queued after the answer") >
-    requests.findLastIndex(request => request.resume));
-  await until(async () => resumes() === 2 && !(await history(other)).data.goalResuming, "one resumed run");
   assert.match(JSON.stringify((await history(other)).data.turns), /Saved manager answer: Hold the manager answer/);
-  pass("Both windows show one pending request while the chat writer runs. The next provider call resumes the goal and the ordinary answer is saved.");
+  pass("The goal resumes in its own saved context while the ordinary answer is held; a second dialogue writer is rejected and the ordinary answer is saved after release.");
 
   for (const kind of ["replace", "clear"]) {
     writeGoal(objective);
     const held = await holdChat(wide);
-    const request = await startCall(wide, "resumeReply", "boardGoal", "resume", objective);
-    await until(async () => (await history(other)).data.goalResuming, "pending request before " + kind);
-    let clear;
     if (kind === "replace") {
       writeGoal("Replacement goal");
+      assert.equal((await api(other, "boardGoal", "resume", objective)).ok, false);
     } else {
-      clear = await startCall(other, "clearReply", "boardGoal", "clear");
-      await until(async () => !(await history(wide)).data.goalResuming, "clear cancels pending resume");
+      assert.equal((await api(other, "boardGoal", "clear")).ok, true);
+      assert.equal(JSON.parse(readFileSync(binding)).goal, null);
     }
     chat.resolve();
     assert.equal((await held.reply()).ok, true);
-    assert.equal((await request()).ok, true);
-    if (clear) {
-      assert.equal((await clear()).ok, true);
-      assert.equal(JSON.parse(readFileSync(binding)).goal, null);
-    }
     assert.equal(resumes(), 2);
   }
-  pass("Replacing the saved goal and clearing it through IPC each discard the pending resume.");
+  pass("A replaced objective cannot be resumed by an obsolete request; clearing the goal proceeds while the dialogue is held.");
 
   writeGoal(objective);
   globalThis.publishFixtureGoal(project);

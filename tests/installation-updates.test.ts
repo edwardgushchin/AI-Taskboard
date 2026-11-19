@@ -194,7 +194,7 @@ test("the actual shutdown busy check excludes only the current manager's context
   assert.ok(start >= 0 && end > start);
   const operation = {};
   const entries: RuntimeEntry[] = [
-    { id: "context", owner: process.pid, kind: "task", task: "manager:context" },
+    { id: "context", owner: process.pid, kind: "task", task: "manager:dialogue" },
     { id: "provider", owner: process.pid, kind: "provider", parent: "context" },
     { id: "turn", owner: process.pid, kind: "turn", parent: "provider", role: "manager" },
     { id: "defaults", owner: 0, kind: "defaults" },
@@ -207,6 +207,9 @@ test("the actual shutdown busy check excludes only the current manager's context
   };
   const busy: () => boolean = runInNewContext(source.slice(start, end) + "\nupdateBusy", sandbox);
   assert.equal(busy(), false);
+  entries.push({ id: "goal", owner: process.pid, kind: "task", task: "manager:context" });
+  assert.equal(busy(), true);
+  entries.pop();
   operations.add({});
   assert.equal(busy(), true);
   operations.clear();

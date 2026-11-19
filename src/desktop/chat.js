@@ -553,7 +553,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
   }
 }
 
-function updateChat({ project, id, type, text, items, savedRun, goal, goalRunning, goalResuming, error, question, managerRun, managerWork, at }) {
+function updateChat({ project, id, type, text, items, savedRun, goal, goalId, goalRunning, goalResuming, error, question, managerRun, managerWork, at }) {
   if (type === "orchestrator-question") {
     if (frame.project === project) {
       frame.managerQuestion = question;
@@ -579,7 +579,7 @@ function updateChat({ project, id, type, text, items, savedRun, goal, goalRunnin
     else if (type === "orchestrator-work-activity") composer?.refreshWork?.();
     else if (type === "orchestrator-work-history") composer?.invalidateWork?.();
     else if (type === "orchestrator-work-accepted") composer?.acceptWork?.(id);
-    else if (type === "orchestrator-goal") composer?.updateGoal?.(goal, goalRunning, goalResuming);
+    else if (type === "orchestrator-goal") composer?.updateGoal?.(goal, goalRunning, goalResuming, { goalId });
     else if (type === "orchestrator-review-error") composer?.reviewError?.(error, id);
     else if (type === "orchestrator-ready") composer?.enableStop?.();
     else if (type === "orchestrator-message-time") composer?.setMessageTime?.(at);
