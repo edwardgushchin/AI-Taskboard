@@ -31,9 +31,14 @@ if (updateMarkdown) {
 }
 
 function renderAppUpdate() {
-  const trigger = byId("app-update");
+  const available = appUpdate?.available;
   const candidate = appUpdate?.candidate;
-  trigger.hidden = !candidate;
+  byId("app-update-badge").hidden = !available;
+  controlLabelForIcon(byId("app-settings"), () => {
+    const settings = t("ui.settings_and_updates_f9f74584");
+    return available ? settings + ". " + t("updates.available_version", { version: available.version }) : settings;
+  });
+  syncSettingsUpdateItems();
   if (!candidate) {
     if (updateDialog.open) {
       updateDialog.close();
@@ -41,9 +46,6 @@ function renderAppUpdate() {
     }
     return;
   }
-  const available = appUpdate.available ?? candidate;
-  trigger.title = t("updates.available_version", { version: available.version });
-  trigger.setAttribute("aria-label", trigger.title);
   if (!updateDialog.open) return;
 
   byId("update-title").textContent = t("updates.available_version", { version: candidate.version });
@@ -105,6 +107,13 @@ function renderAppUpdate() {
   action.hidden = !supported || downloading || phase === "installing";
   action.disabled = installing;
   action.textContent = t(ready ? "updates.restart" : error ? "updates.retry" : "updates.download");
+}
+
+function openUpdateDialog() {
+  if (!appUpdate?.candidate || updateDialog.open) return;
+  byId("update-title").textContent = t("updates.available_version", { version: appUpdate.candidate.version });
+  updateDialog.showModal();
+  renderAppUpdate();
 }
 
 const localizedBindings = new Set();
@@ -419,6 +428,29 @@ async function projectStatistics() {
   await run();
 }
 
+function positionSettingsMenu() {
+  const menu = byId("settings-menu");
+  const anchor = byId("app-settings").getBoundingClientRect();
+  menu.style.left = Math.max(4, Math.min(anchor.right, innerWidth - menu.offsetWidth - 4)) + "px";
+  menu.style.top = Math.max(4, Math.min(anchor.bottom - menu.offsetHeight, innerHeight - menu.offsetHeight - 4)) + "px";
+}
+
+function syncSettingsUpdateItems() {
+  const update = byId("settings-menu-update");
+  const check = byId("settings-menu-updates");
+  if (!update || !check) return;
+  const focused = document.activeElement;
+  const showUpdate = Boolean(appUpdate?.candidate);
+  const showCheck = !appUpdate?.available;
+  if (update.hidden === !showUpdate && check.hidden === !showCheck) return;
+  update.hidden = !showUpdate;
+  check.hidden = !showCheck;
+  if (!byId("settings-menu").matches(":popover-open")) return;
+  positionSettingsMenu();
+  if (focused === update && update.hidden) check.focus();
+  if (focused === check && check.hidden) update.focus();
+}
+
 function openSettingsMenu(last = false) {
   const trigger = byId("app-settings");
   const menu = byId("settings-menu");
@@ -443,14 +475,19 @@ function openSettingsMenu(last = false) {
     return projectStatistics();
   });
   statistics.disabled = !frame.board;
-  const updates = button(() => t("ui.check_for_updates_6a5aded8"), () => {
+  const update = button(() => t("updates.download"), () => {
+    menu.hidePopover();
+    trigger.focus();
+    openUpdateDialog();
+  });
+  const check = button(() => t("ui.check_for_updates_6a5aded8"), () => {
     menu.hidePopover();
     trigger.focus();
     return checkUpdates();
   });
-  for (const [index, item] of [app, board, statistics, updates].entries()) {
+  for (const [index, item] of [app, board, statistics, update, check].entries()) {
     item.className = "app-menu-item";
-    item.id = ["settings-menu-app", "settings-menu-board", "settings-menu-statistics", "settings-menu-updates"][index];
+    item.id = ["settings-menu-app", "settings-menu-board", "settings-menu-statistics", "settings-menu-update", "settings-menu-updates"][index];
     item.setAttribute("role", "menuitem");
     item.setAttribute("aria-disabled", String(item.disabled));
     item.tabIndex = -1;
@@ -458,12 +495,11 @@ function openSettingsMenu(last = false) {
   const separator = element("hr");
   separator.setAttribute("role", "separator");
   bindLocalized(menu, "aria-label", () => t("ui.settings_and_updates_f9f74584"), true);
-  menu.replaceChildren(app, board, statistics, separator, updates);
+  menu.replaceChildren(app, board, statistics, separator, update, check);
+  syncSettingsUpdateItems();
   menu.showPopover({ source: trigger });
-  const anchor = trigger.getBoundingClientRect();
-  menu.style.left = Math.max(4, Math.min(anchor.right, innerWidth - menu.offsetWidth - 4)) + "px";
-  menu.style.top = Math.max(4, Math.min(anchor.bottom - menu.offsetHeight, innerHeight - menu.offsetHeight - 4)) + "px";
-  (last ? updates : app).focus();
+  positionSettingsMenu();
+  (last ? (check.hidden ? update : check) : app).focus();
 }
 
 function mountAppMenu() {
@@ -1612,7 +1648,6 @@ function render(previousBoard) {
   byId("workspace").hidden = noBoard;
   byId("archive-menu-item").setAttribute("aria-disabled", String(noBoard));
   byId("board-settings-menu-item").setAttribute("aria-disabled", String(noBoard));
-  controlLabelForIcon(byId("app-settings"), () => t("ui.settings_and_updates_f9f74584"));
   byId("archive-menu-item").setAttribute("aria-checked", String(archiveView));
   if (!board) {
     resetBoardRendering();
@@ -5939,7 +5974,7 @@ byId("settings-menu").addEventListener("keydown", event => {
     return;
   }
   if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
-  const items = [...menu.querySelectorAll("button:not(:disabled)")];
+  const items = [...menu.querySelectorAll("button:not(:disabled):not([hidden])")];
   const index = items.indexOf(document.activeElement);
   const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
     : (index + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
@@ -6005,12 +6040,6 @@ reducedMotion.addEventListener("change", () => {
 api.onTheme(theme => {
   frame.theme = theme;
   applyTheme(theme);
-});
-byId("app-update").addEventListener("click", () => {
-  if (!appUpdate?.candidate || updateDialog.open) return;
-  byId("update-title").textContent = t("updates.available_version", { version: appUpdate.candidate.version });
-  updateDialog.showModal();
-  renderAppUpdate();
 });
 byId("update-release").addEventListener("click", event => {
   event.preventDefault();

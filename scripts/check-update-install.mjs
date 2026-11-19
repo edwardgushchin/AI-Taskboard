@@ -134,15 +134,22 @@ function updateDialogState() {
         const { x, y, width, height } = element.getBoundingClientRect();
         return { x, y, width, height };
     };
-    const button = get("app-update");
+    const button = get("app-settings");
+    const badge = get("app-update-badge");
+    const menu = get("settings-menu");
+    const updateItem = get("settings-menu-update");
+    const checkItem = get("settings-menu-updates");
     const dialog = get("update-dialog");
     const notes = get("update-notes");
     const progress = get("update-progress");
     const confirm = get("update-action");
     return {
-        advertised: !button.hidden,
-        button: box(button),
-        settings: box(get("app-settings")),
+        advertised: !badge.hidden,
+        menuOpen: menu.matches(":popover-open"),
+        menuExpanded: button.getAttribute("aria-expanded") === "true",
+        updateItem: updateItem && !updateItem.hidden ? updateItem.textContent : null,
+        checkItem: checkItem && !checkItem.hidden ? checkItem.textContent : null,
+        focused: document.activeElement.id,
         accessibleName: button.getAttribute("aria-label"),
         open: dialog.open,
         modal: dialog.matches(":modal"),
@@ -162,15 +169,18 @@ function updateDialogState() {
 }
 
 function updateTriggerStyle() {
-    const trigger = document.getElementById("app-update");
-    const icon = trigger.querySelector(".icon");
-    const gear = document.querySelector("#app-settings .icon");
+    const trigger = document.getElementById("app-settings");
+    const badge = trigger.querySelector("#app-update-badge");
+    const gear = trigger.querySelector(".icon");
     const style = getComputedStyle(trigger);
-    const circle = getComputedStyle(icon);
-    const glyph = getComputedStyle(icon, "::before");
+    const marker = getComputedStyle(badge);
+    const glyph = getComputedStyle(badge, "::before");
     const bounds = trigger.getBoundingClientRect();
-    const iconBounds = icon.getBoundingClientRect();
-    const hit = document.elementFromPoint(bounds.left + 2, bounds.top + bounds.height / 2);
+    const badgeBounds = badge.getBoundingClientRect();
+    const gearBounds = gear.getBoundingClientRect();
+    const badgeX = badgeBounds.x + badgeBounds.width / 2;
+    const badgeY = badgeBounds.y + badgeBounds.height / 2;
+    const hit = document.elementFromPoint(badgeX, badgeY);
     const context = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
     const rgba = color => {
         context.clearRect(0, 0, 1, 1);
@@ -180,15 +190,18 @@ function updateTriggerStyle() {
     };
     return {
         hitArea: [bounds.width, bounds.height],
-        hitOutsideCircle: trigger.contains(hit) && !icon.contains(hit),
-        diameter: [iconBounds.width, iconBounds.height],
-        centerInTarget: [
-            iconBounds.left + iconBounds.width / 2 - bounds.left - bounds.width / 2,
-            iconBounds.top + iconBounds.height / 2 - bounds.top - bounds.height / 2,
+        hitGearAtBadge: trigger.contains(hit) && !badge.contains(hit),
+        decorative: badge.getAttribute("aria-hidden") === "true" && badge.tabIndex === -1 && marker.pointerEvents === "none",
+        tabOrder: [trigger.tabIndex, ...Array.from(trigger.querySelectorAll("[tabindex]"), node => node.tabIndex)],
+        badgeSize: [badgeBounds.width, badgeBounds.height],
+        badgePlacement: [
+            badgeX - gearBounds.x - gearBounds.width / 2,
+            badgeY - gearBounds.y - gearBounds.height / 2,
         ],
-        radius: circle.borderRadius,
-        background: rgba(circle.backgroundColor),
+        badgeInsets: [Number.parseFloat(marker.right), Number.parseFloat(marker.bottom)],
+        background: rgba(marker.backgroundColor),
         foreground: rgba(glyph.color),
+        glyphContent: glyph.content.slice(1, -1),
         glyphFont: glyph.fontFamily,
         glyphSize: glyph.fontSize,
         gearSize: getComputedStyle(gear, "::before").fontSize,
@@ -255,31 +268,26 @@ function summarizeProgress({ reduced, frames }) {
     };
 }
 
-async function checkTriggerAppearance(run, capture) {
+async function checkTriggerAppearance(run, capture, setTheme, press, click, state) {
     const appearance = () => run(`(${updateTriggerStyle.toString()})()`);
     record.triggerAppearance = {};
     for (const theme of ["light", "dark"]) {
         await command({ action: "move-pointer-away" });
         await run("document.activeElement.blur()");
-        const measuredRest = await capture("trigger", theme);
-        const { ink, rail: restRail } = measuredRest;
+        await setTheme(theme);
+        const { rail: restRail } = await command({ action: "capture-poll", measureRail: true });
         const rest = await appearance();
-        const [width, height] = rest.diameter;
-        assert.deepEqual(rest.hitArea, [32, 32]);
-        assert.ok(rest.hitOutsideCircle);
-        assert.deepEqual([width, height], [17.5, 17.5]);
-        assert.ok(rest.centerInTarget.every(offset => Math.abs(offset) <= 1));
-        assert.ok(ink.downloadOffset.every(offset => Math.abs(offset) <= 1.5), JSON.stringify(ink));
-        assert.ok(Math.abs(ink.circleToGearAxis) <= 1, JSON.stringify(ink));
-        assert.ok(Math.abs(width - Math.max(...ink.gearSize)) <= 1, JSON.stringify(ink));
-        const radius = rest.radius.endsWith("%")
-            ? Number.parseFloat(rest.radius) * width / 100
-            : Number.parseFloat(rest.radius);
-        assert.ok(radius >= width / 2);
-        const gold = theme === "light" ? [223, 182, 109, 255] : [206, 159, 85, 255];
-        assert.deepEqual(rest.background, gold);
+        assert.deepEqual(rest.hitArea, [40, 40]);
+        assert.ok(rest.hitGearAtBadge && rest.decorative);
+        assert.deepEqual(rest.tabOrder, [0]);
+        assert.deepEqual(rest.badgeSize, [13, 13]);
+        assert.deepEqual(rest.badgeInsets, [6, 6]);
+        assert.ok(rest.badgePlacement.every(offset => offset > 0));
+        const accent = theme === "light" ? [61, 86, 168, 255] : [64, 89, 174, 255];
+        assert.deepEqual(rest.background, accent);
         assert.match(rest.glyphFont, /codicon/i);
-        assert.equal(rest.glyphSize, "14px");
+        assert.equal(rest.glyphContent, "\uea9a");
+        assert.equal(rest.glyphSize, "10px");
         assert.equal(rest.gearSize, "20px");
         const contrast = [luminance(rest.background), luminance(rest.foreground)].sort((a, b) => b - a);
         const contrastRatio = (contrast[0] + 0.05) / (contrast[1] + 0.05);
@@ -288,23 +296,37 @@ async function checkTriggerAppearance(run, capture) {
         await command({ action: "hover-trigger" });
         const hover = await appearance();
         assert.ok(hover.hovered && !hover.focusVisible);
-        assert.notDeepEqual(hover.background, rest.background);
-        const { rail: hoverRail } = await command({ action: "capture-poll", measureGlyph: true });
+        assert.deepEqual(hover.background, rest.background);
+        const { rail: hoverRail } = await command({ action: "capture-poll", measureRail: true });
         await command({ action: "move-pointer-away" });
-        await command({ action: "previous-tab", elementId: "app-settings" });
+        await press("Shift+Tab", "app-settings");
+        assert.equal((await appearance()).focused, false);
+        await press("Tab");
         const focus = await appearance();
         assert.ok(focus.focused && focus.focusVisible && !focus.hovered, JSON.stringify(focus));
         assert.deepEqual(focus.outline.slice(0, 2), ["solid", "2px"]);
-        const { rail: focusRail } = await command({ action: "capture-poll", measureGlyph: true });
+        const { rail: focusRail } = await command({ action: "capture-poll", measureRail: true });
         for (const rail of [restRail, hoverRail, focusRail]) {
             assert.ok(rail.continuousBorder, JSON.stringify(rail));
             assert.ok(rail.continuousBackground, JSON.stringify(rail));
         }
         assert.deepEqual(hoverRail, restRail);
         assert.deepEqual(focusRail, restRail);
-        record.triggerAppearance[theme] = { rest, hover, focus, ink, contrastRatio, rail: restRail, railStates: ["rest", "hover", "focus"] };
+        if (theme === "light") {
+            await press("Enter", "app-settings");
+        } else {
+            await click("app-update-badge");
+        }
+        const menu = await state();
+        assert.ok(menu.menuOpen && menu.menuExpanded && menu.advertised && !menu.open);
+        assert.equal(menu.updateItem, "Обновить");
+        assert.equal(menu.checkItem, null);
+        await capture("trigger", theme);
+        await press("Escape");
+        assert.equal((await state()).focused, "app-settings");
+        record.triggerAppearance[theme] = { rest, hover, focus, contrastRatio, rail: restRail, railStates: ["rest", "hover", "focus"] };
     }
-    note("Both themes show a 17.5px gold circle aligned to the settings glyph and matched to its visible diameter. The 14px Codicons download glyph is centered in the circle. The button has a 32px hit target and a visible 2px outline on Shift+Tab. The rail background and border stay continuous at rest, on hover and on focus.");
+    note("Both themes show the 13px update badge and ordinary settings menu together. The decorative Codicons down arrow uses the theme accent, and the 40px gear is the only tab stop in the control. Enter and a click over the badge open the same menu. The rail stays continuous at rest, on hover and on focus.");
 }
 
 async function checkPoll(mode, uninstaller, executable, child, before) {
@@ -312,10 +334,30 @@ async function checkPoll(mode, uninstaller, executable, child, before) {
     const state = (second = false) => run(`(${updateDialogState.toString()})()`, second);
     const network = () => command({ action: "network" });
     const click = (id, second = false) => command({ action: "click", elementId: id, second });
+    const press = (key, id, second = false) => command({ action: "key", key, elementId: id, second });
     const waitState = (label, predicate, second = false) => until(async () => {
         const answer = await state(second);
         return predicate(answer) && answer;
     }, label, 15000);
+    const openMenu = async (second = false, key) => {
+        if (key) {
+            await press(key, "app-settings", second);
+        } else {
+            await click("app-settings", second);
+        }
+        return waitState("settings menu opened", view => view.menuOpen && view.menuExpanded, second);
+    };
+    const openUpdate = async (second = false, keyboard = false) => {
+        const menu = await openMenu(second, keyboard ? "ArrowUp" : undefined);
+        assert.equal(menu.updateItem, "Обновить");
+        if (keyboard) {
+            assert.equal(menu.focused, "settings-menu-update");
+            await press("Enter", undefined, second);
+        } else {
+            await click("settings-menu-update", second);
+        }
+        return waitState("update dialog opened from settings", view => view.open && !view.menuOpen, second);
+    };
     const waitNetwork = (label, predicate) => until(async () => {
         const counters = await network();
         return predicate(counters) && counters;
@@ -340,9 +382,7 @@ async function checkPoll(mode, uninstaller, executable, child, before) {
         if (stateName !== "trigger") {
             await run("document.getElementById('update-notes').scrollTop = 0");
         }
-        return command({
-            action: "capture-poll", name: `update-${stateName}-${theme}.png`, measureGlyph: stateName === "trigger",
-        });
+        return command({ action: "capture-poll", name: `update-${stateName}-${theme}.png` });
     };
     const center = view => {
         assert.ok(view.modal);
@@ -352,25 +392,42 @@ async function checkPoll(mode, uninstaller, executable, child, before) {
 
     await waitNetwork("initial production poll", value => value.releases >= 1);
     assert.equal((await state()).advertised, false);
+    const initial = await openMenu(false, "ArrowUp");
+    assert.equal(initial.focused, "settings-menu-updates");
+    assert.match(initial.checkItem, /проверить наличие обновлений/i);
+    assert.equal(initial.updateItem, null);
+    await press("Enter");
+    await until(() => run("document.getElementById('updates-result')?.textContent.includes(" +
+        JSON.stringify(oldVersion) + ") && document.getElementById('sheet-body').textContent.includes('У вас последняя версия')"),
+        "manual check through settings shows the installed and current version");
+    await click("close-sheet");
+    await openMenu(false, "ArrowUp");
     const firstPoll = await network();
     mode("normal");
-    const offered = await waitState("next poll advertises the new version", view => view.advertised);
+    const offered = await waitState("next poll advertises the new version in the open menu",
+        view => view.advertised && view.updateItem === "Обновить");
     assert.equal(offered.open, false);
+    assert.ok(offered.menuOpen);
+    assert.equal(offered.focused, "settings-menu-update");
+    assert.equal(offered.checkItem, null);
     assert.match(offered.accessibleName, new RegExp(newVersion));
-    const gap = offered.settings.y - offered.button.y - offered.button.height;
-    assert.ok(gap >= -1 && gap <= 12, JSON.stringify(offered.button));
-    assert.ok(Math.abs(offered.button.x + offered.button.width / 2 - offered.settings.x - offered.settings.width / 2) <= 1);
     assert.ok((await network()).releases > firstPoll.releases);
-    await checkTriggerAppearance(run, capture);
     mode("offline");
     const offlineStart = await network();
     await waitNetwork("offline background poll", value => value.releases > offlineStart.releases && !value.activeReleases);
     const offline = await state();
-    assert.ok(offline.advertised);
-    assert.ok(!offline.open);
+    assert.ok(offline.advertised && offline.menuOpen && !offline.open);
+    assert.equal(offline.updateItem, "Обновить");
     mode("current");
-    await waitState("current release clears indicator after recovery", view => !view.advertised);
-    note("Initial current release hid the button. A later background tick showed the new version in the open window. An offline tick kept the indicator and opened no dialog. Recovery with the current version hid it again.");
+    const current = await waitState("current release clears the badge and restores manual check",
+        view => !view.advertised && view.checkItem && !view.updateItem);
+    assert.ok(current.menuOpen && !current.open);
+    assert.equal(current.focused, "settings-menu-updates");
+    await press("Escape");
+    mode("normal");
+    await waitState("available release for settings appearance", view => view.advertised);
+    await checkTriggerAppearance(run, capture, setTheme, press, click, state);
+    note("With the settings menu open, the first new release replaced manual check with Update and kept focus on the visible row. Offline kept the badge and action. The next current response restored the manual check and its focus.");
 
     await command({ action: "new-window" });
     assert.equal(await run("window.taskboard.bootstrap().then(frame => Boolean(frame.board))", true), false);
@@ -392,8 +449,7 @@ async function checkPoll(mode, uninstaller, executable, child, before) {
         await until(() => run("window.taskboard.updateState().then(state => !state.supported && state.candidate?.notes === '')", true), "manual-only installation state and empty release notes");
         // Wait for the next poll to broadcast the updated support marker to both renderers.
         await delay(1100);
-        await command({ action: "enter", elementId: "app-update", second: true });
-        const manual = await state(true);
+        const manual = await openUpdate(true, true);
         assert.ok(manual.open, JSON.stringify(manual));
         assert.equal(manual.action, null);
         assert.match(manual.notes, /списка изменений/i);
@@ -407,7 +463,7 @@ async function checkPoll(mode, uninstaller, executable, child, before) {
     note("Two windows and two manual checks shared the held background request. Enter opened the centered dialog in a board-free window. The manual-only client displayed the missing-notes message and release link.");
 
     mode("normal");
-    await click("app-update");
+    await openUpdate();
     const listed = await waitState("target release notes", view => view.listEntries === 34 && view.action?.text === "Обновить");
     assert.ok(listed.title.includes(newVersion));
     assert.match(listed.notes, /Фоновая проверка выпусков/);
@@ -437,9 +493,9 @@ async function checkPoll(mode, uninstaller, executable, child, before) {
     await command({ action: "resize", width: 1280, height: 800 });
     note("The centered dialog rendered the selected version's 34 list items safely. At 800 × 600 only the changes scrolled and both buttons stayed within the viewport. Opening and closing made zero package or manifest requests.");
 
-    await click("app-update", true);
+    await openUpdate(true);
     await waitState("installed update control in second window", view => view.action?.text === "Обновить", true);
-    await click("app-update");
+    await openUpdate();
     mode("stream");
     const beforeDownload = await network();
     await command({ action: "parallel-downloads" });
@@ -464,13 +520,34 @@ async function checkPoll(mode, uninstaller, executable, child, before) {
     mode("stream", "newer");
     for (const second of [false, true]) {
         const pinned = await waitState("newer offer during the original download",
-            view => view.accessibleName.includes(newerVersion), second);
+            view => view.advertised && view.accessibleName.includes(newerVersion), second);
         assertOriginal(pinned);
         assert.deepEqual(pinned.progress, progress.progress);
     }
     const duringNewerOffer = await network();
     assert.equal(duringNewerOffer.installers, beforeDownload.installers + 1);
     assert.equal(duringNewerOffer.manifests, beforeDownload.manifests + 1);
+    mode("stream", "current");
+    for (const second of [false, true]) {
+        const withdrawn = await waitState("withdrawal hides badge during the original download",
+            view => !view.advertised && view.progress?.value > 0, second);
+        assertOriginal(withdrawn);
+        assert.deepEqual(withdrawn.progress, progress.progress);
+    }
+    await click("update-later", true);
+    const duringWithdrawal = await openMenu(true, "ArrowUp");
+    assert.equal(duringWithdrawal.updateItem, "Обновить");
+    assert.match(duringWithdrawal.checkItem, /проверить наличие обновлений/i);
+    assert.equal(duringWithdrawal.focused, "settings-menu-updates");
+    await click("settings-menu-update", true);
+    const resumed = await waitState("settings menu resumes the original download",
+        view => view.open && view.progress?.value > 0, true);
+    assertOriginal(resumed);
+    assert.deepEqual(resumed.progress, progress.progress);
+    assert.equal((await network()).installers, duringNewerOffer.installers);
+    note("A withdrawn offer hid the badge but restored manual check beside the resume action. The second window reopened the in-flight package from settings without a new request.");
+    mode("stream", "newer");
+    await waitForOffer(newerVersion);
     await capture("progress", "light");
     await capture("progress", "dark");
     await command({ action: "motion", reduced: true, second: true });
@@ -507,7 +584,7 @@ async function checkPoll(mode, uninstaller, executable, child, before) {
     for (const second of [false, true]) {
         await waitForOffer(null, second);
         const pinned = await waitState("verified confirmation survives a withdrawn release",
-            view => view.accessibleName.includes(newVersion), second);
+            view => !view.advertised && view.action?.text === "Обновить и перезапустить", second);
         assertOriginal(pinned);
         assert.equal(pinned.action?.text, "Обновить и перезапустить");
         assert.equal(pinned.later.text, "Позже");
@@ -525,7 +602,7 @@ async function checkPoll(mode, uninstaller, executable, child, before) {
     const otherDialog = await waitState("Later switches the second dialog to the latest offer", next, true);
     assert.match(otherDialog.notes, /Следующее предложение/);
     assert.ok(otherDialog.release.endsWith("/tag/v" + newerVersion));
-    await click("app-update");
+    await openUpdate();
     await waitState("reopening after Later shows the latest offer", next);
     await click("update-later");
     const afterLater = await network();
@@ -541,7 +618,7 @@ async function checkPoll(mode, uninstaller, executable, child, before) {
 
     mode("corrupt-stream");
     await waitState("original package is offered for retry test", view => view.accessibleName.includes(newVersion));
-    await click("app-update");
+    await openUpdate();
     await click("update-action");
     await waitState("unknown content-length download", view => view.progress !== null);
     await waitState("unknown content-length download in second window", view => view.progress !== null, true);
@@ -584,11 +661,14 @@ try {
     for (const name of [
         "main.ts", "installation-updates.ts", "update-runner.ps1", "updates.ts", "localization.cjs",
         "index.html", "styles.css", "themes.css", "preload.cjs", "renderer.js", "locales/en.json", "locales/ru.json",
+        "vendor/codicons/codicon.css",
     ]) {
         const content = readFileSync(join(project, "src/desktop", name));
         record.sourceHashes["src/desktop/" + name] = sha(content);
         record.sourceHashesLF["src/desktop/" + name] = sha(content.toString("utf8").replaceAll("\r\n", "\n"));
     }
+    record.sourceHashes["src/desktop/vendor/codicons/codicon.ttf"] =
+        sha(readFileSync(join(project, "src/desktop/vendor/codicons/codicon.ttf")));
     record.sourceHashes["build/installer.nsh"] = sha(readFileSync(join(root, "build/installer.nsh")));
     record.sourceHashesLF["build/installer.nsh"] = sha(readFileSync(join(root, "build/installer.nsh"), "utf8").replaceAll("\r\n", "\n"));
     const checkSource = readFileSync(fileURLToPath(import.meta.url));
@@ -802,57 +882,25 @@ void (async () => {
     window.setContentSize(1280, 800);
     window.webContents.setBackgroundThrottling(false);
     const evaluate = code => window.webContents.executeJavaScript(code);
-    async function measureTriggerGlyphs(screenshot) {
-        const [circle, gear, trigger, settings] = await evaluate('["#app-update .icon", "#app-settings .icon", "#app-update", "#app-settings"].map(' +
-            'selector => document.querySelector(selector).getBoundingClientRect().toJSON())');
+    async function measureSettingsRail(screenshot) {
+        const bounds = await evaluate('document.getElementById("app-settings").getBoundingClientRect().toJSON()');
         const pixels = screenshot.toBitmap();
         const pitch = screenshot.getSize().width * 4;
         const colorAt = (x, y) => {
             const index = y * pitch + x * 4;
             return pixels.subarray(index, index + 3);
         };
-        const inkBounds = (area, isInk) => {
-            const xs = [];
-            const ys = [];
-            for (let y = Math.ceil(area.y); y < area.bottom; y++) {
-                for (let x = Math.ceil(area.x); x < area.right; x++) {
-                    if (isInk(colorAt(x, y), x + 0.5, y + 0.5)) {
-                        xs.push(x + 0.5);
-                        ys.push(y + 0.5);
-                    }
-                }
-            }
-            assert.ok(xs.length >= 10, "Glyph ink must be visible");
-            const edges = values => [Math.min(...values), Math.max(...values)];
-            const [left, right] = edges(xs);
-            const [top, bottom] = edges(ys);
-            return { x: (left + right) / 2, y: (top + bottom) / 2, width: right - left + 1, height: bottom - top + 1 };
-        };
-        const centerX = circle.x + circle.width / 2;
-        const centerY = circle.y + circle.height / 2;
-        const radius = circle.width / 2 - 1.5;
-        // Ignore the round edge, where the dark theme's toolbar can be mistaken for download ink.
-        const downloadInk = inkBounds(circle, (color, x, y) =>
-            Math.hypot(x - centerX, y - centerY) < radius && color.every(channel => channel <= 110));
-        const gearBackground = colorAt(Math.ceil(gear.x), Math.ceil(gear.y));
-        const gearInk = inkBounds(gear, color =>
-            color.some((channel, index) => Math.abs(channel - gearBackground[index]) >= 45));
-        const borderX = Math.floor(settings.right) - 1;
-        const fromY = Math.floor(trigger.top) - 8;
-        const toY = Math.floor(settings.bottom) - 4;
+        const borderX = Math.floor(bounds.right) - 1;
+        const fromY = Math.floor(bounds.top) - 8;
+        const toY = Math.floor(bounds.bottom) - 1;
         const border = colorAt(borderX, fromY);
         const background = colorAt(borderX - 8, fromY);
         let continuousBorder = !border.equals(background);
         for (let y = fromY; y <= toY && continuousBorder; y++) {
             continuousBorder = border.equals(colorAt(borderX, y));
         }
-        const sameBackground = [8, borderX - 8].every(x => background.equals(colorAt(x, Math.floor(centerY))));
+        const sameBackground = [8, borderX - 8].every(x => background.equals(colorAt(x, Math.floor(bounds.top) + 8)));
         return {
-            ink: {
-                downloadOffset: [downloadInk.x - centerX, downloadInk.y - centerY],
-                gearSize: [gearInk.width, gearInk.height],
-                circleToGearAxis: centerX - gearInk.x,
-            },
             rail: {
                 continuousBorder,
                 continuousBackground: sameBackground,
@@ -951,26 +999,32 @@ void (async () => {
                 result = true;
             }
             else if (command.action === 'hover-trigger') {
-                const trigger = await execute('document.getElementById("app-update").getBoundingClientRect().toJSON()');
+                const trigger = await execute('document.getElementById("app-settings").getBoundingClientRect().toJSON()');
                 const x = Math.round(trigger.x + trigger.width / 2);
                 const y = Math.round(trigger.y + trigger.height / 2);
                 await input(target, send => send('dispatchMouseEvent', { type: 'mouseMoved', x, y }));
                 result = true;
             }
-            else if (['click', 'enter', 'previous-tab'].includes(command.action)) {
+            else if (command.action === 'click' || command.action === 'key') {
                 target.show();
                 target.focus();
                 const element = 'document.getElementById(' + JSON.stringify(command.elementId) + ')';
-                if (command.action !== 'click') {
+                if (command.action === 'key') {
                     target.webContents.focus();
-                    assert.equal(await execute(element + '.focus(); document.activeElement.id'), command.elementId);
-                    const enter = command.action === 'enter';
-                    const key = enter
-                        ? { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 }
-                        : { key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, modifiers: 8 };
+                    if (command.elementId) {
+                        assert.equal(await execute(element + '.focus(); document.activeElement.id'), command.elementId);
+                    }
+                    const shift = command.key === 'Shift+Tab';
+                    const keyName = shift ? 'Tab' : command.key;
+                    const virtualCode = { Enter: 13, Tab: 9, ArrowUp: 38, Escape: 27 }[keyName];
+                    assert.ok(virtualCode, keyName);
+                    const key = {
+                        key: keyName, code: keyName, windowsVirtualKeyCode: virtualCode,
+                        nativeVirtualKeyCode: virtualCode, modifiers: shift ? 8 : 0,
+                    };
                     await input(target, async send => {
                         await send('dispatchKeyEvent', { ...key, type: 'rawKeyDown' });
-                        if (enter) {
+                        if (keyName === 'Enter') {
                             await send('dispatchKeyEvent', { ...key, type: 'char', text: '\\r' });
                         }
                         await send('dispatchKeyEvent', { ...key, type: 'keyUp' });
@@ -1001,7 +1055,7 @@ void (async () => {
                 assert.ok(!png.isEmpty());
                 if (command.name) writeFileSync(join(artifacts, command.name), png.toPNG());
                 result = true;
-                if (command.measureGlyph) result = await measureTriggerGlyphs(png);
+                if (command.measureRail) result = await measureSettingsRail(png);
             }
             else if (command.action === 'approve-restart') {
                 write('reply.json', { id: command.id, result: true });

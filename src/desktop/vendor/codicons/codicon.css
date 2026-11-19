@@ -20,6 +20,7 @@
 .codicon-add::before { content: "\ea60"; }
 .codicon-file::before { content: "\ea7b"; }
 .codicon-arrow-up::before { content: "\eaa1"; }
+.codicon-arrow-down::before { content: "\ea9a"; }
 .codicon-debug-stop::before { content: "\ead7"; }
 .codicon-debug-pause::before { content: "\ead1"; }
 .codicon-stop-circle::before { content: "\eba5"; }

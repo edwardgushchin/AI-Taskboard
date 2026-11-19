@@ -108,40 +108,33 @@ body:has(> .project-tabs:not([hidden]))::before {
 }
 .app-settings.button {
   grid-area: 2 / 1; align-self: end; z-index: 6; width: 40px; height: 40px; padding: 0;
+  position: relative;
   border: 0; border-radius: 0; color: var(--muted);
   transition: color var(--hover-time) ease;
 }
 .project-tabs, .project-tabs:not([hidden]) ~ .app-settings { border-inline-end: 1px solid transparent; }
-.project-tabs:has(+ #app-update:not([hidden])) { margin-block-end: 80px; }
 .app-settings.button.quiet, .app-settings.button.quiet:hover:not(:disabled) {
   background-color: transparent;
 }
 .app-settings.button:hover { color: var(--text); }
 .app-settings .icon { width: 20px; height: 20px; font-size: 20px; }
-#app-update {
-  justify-self: center;
-  width: 32px;
-  height: 32px;
-  margin-block-end: 44px;
-  border-radius: 50%;
-  color: #30210d;
-}
-#app-update .icon {
+#app-update-badge {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
   display: grid;
   place-items: center;
-  /* Match the visible gear outline at its 20px Codicons size. */
-  width: 17.5px;
-  height: 17.5px;
+  width: 13px;
+  height: 13px;
   border-radius: 50%;
-  background-color: light-dark(#dfb66d, #ce9f55);
-  font-size: 14px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 10px;
+  pointer-events: none;
 }
-/* Center the visible download glyph within its font box. */
-#app-update .icon::before { transform: translate(-0.45px, -1.3px); }
-#app-update:hover:not(:disabled) .icon { background-color: light-dark(#d3a555, #dbad68); }
-#app-update:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+#app-settings:focus-visible { outline-offset: -3px; }
 @media (forced-colors: active) {
-  #app-update .icon { border: 1px solid ButtonText; }
+  #app-update-badge { border: 1px solid ButtonText; }
 }
 #update-dialog {
   position: fixed;

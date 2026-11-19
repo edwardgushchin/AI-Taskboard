@@ -58,13 +58,19 @@ try {
   offline = false;
   assert.equal((await check()).data.status, "available");
   const manual = await window.webContents.executeJavaScript(`(async () => {
-    const trigger = document.querySelector("#app-update");
+    const trigger = document.querySelector("#app-settings");
+    const badge = document.querySelector("#app-update-badge");
     const dialog = document.querySelector("#update-dialog");
-    if (trigger.hidden || !trigger.getAttribute("aria-label")?.includes("0.3.0-beta.10")) {
-      throw new Error("The welcome screen did not expose the release in the update button.");
-    }
     trigger.click();
+    const update = document.querySelector("#settings-menu-update");
+    const check = document.querySelector("#settings-menu-updates");
+    const menu = document.querySelector("#settings-menu");
+    const entry = menu.matches(":popover-open") && !dialog.open && !update.hidden && check.hidden &&
+      !badge.hidden && badge.parentElement === trigger && trigger.getAttribute("aria-label").includes("0.3.0-beta.10");
+    update.click();
+    await Promise.resolve();
     const state = {
+      entry,
       open: dialog.open,
       noBoard: !(await window.taskboard.bootstrap()).board,
       downloadHidden: document.querySelector("#update-action").hidden,
@@ -74,13 +80,23 @@ try {
     document.querySelector("#update-later").click();
     return { ...state, closed: !dialog.open };
   })()`);
+  assert.equal(manual.entry, true);
   assert.equal(manual.open, true);
   assert.equal(manual.noBoard, true);
   assert.equal(manual.downloadHidden, true);
   assert.equal(manual.releaseUrl, live.data.sourceUrl + "/tag/v0.3.0-beta.10");
   assert.match(manual.notes, /release notes|списка изменений/);
   assert.equal(manual.closed, true);
-  console.log("Updates IPC and renderer checks passed: official source, version/channel, offline retry, missing notes and manual release link without a board");
+  response = [];
+  assert.equal((await check()).data.status, "empty");
+  const noUpdate = await window.webContents.executeJavaScript(`(() => {
+    document.querySelector("#app-settings").click();
+    return document.querySelector("#app-update-badge").hidden &&
+      document.querySelector("#settings-menu-update").hidden &&
+      !document.querySelector("#settings-menu-updates").hidden;
+  })()`);
+  assert.equal(noUpdate, true);
+  console.log("Updates IPC and renderer checks passed: official source, channel rules, offline retry, settings menu switching and manual release link without a board");
 } catch (error) {
   console.error(error);
   process.exitCode = 1;
