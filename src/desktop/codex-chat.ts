@@ -278,7 +278,7 @@ export function replyToTask(
       "After a successful write, briefly describe what changed. If the information is already recorded, leave the card as it is. If task_update fails, report the error and do not claim an update. On revision conflict, do not replay stale field replacements; ask the user to refresh and retry.",
       "Use github_read for GitHub checks, including run-failed-log for Actions logs. The board uses its host login. Try the tool before asking the user to copy a log.",
       "Read explicitly attached files when relevant. A linked attachment is a mutable local source: read only the needed parts with normal tools. If the attachment has an error, report it and continue with other files. Links do not grant access: report actual permission failures with the filename, without claiming to read inaccessible content. Do not edit project files or run project tasks.",
-    ].join(" ") + manualContext(readBoardSettings(locateBoard(project))), { manual: readBoardSettings(locateBoard(project)).boardType === "manual" }),
+    ].join(" ") + manualContext(readBoardSettings(locateBoard(project))), { manual, taskWriting: mode !== "initial" }),
     onCommentary: mode === "initial" ? undefined : onCommentary,
     onActivity: mode === "initial" ? undefined : onActivity,
     onTokenUsage, onControl, signal,
