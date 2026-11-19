@@ -51,6 +51,7 @@ import { readReviewReports, saveReviewReports } from "./review-history.ts";
 import { readReviewerChat, reviewerActivity, withReviewerChat } from "./reviewer-chat.ts";
 import { goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory, sendGoalMessage } from "./manager-history.ts";
 import { goalActionTools, runGoalAction } from "./goal-actions.ts";
+import { readManagerImage, saveManagerImage } from "./manager-images.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
 import { createAgentSlots, desktopAppName, parseAgentLimits, readProfileTaskLimits } from "./agent-limits.ts";
 import { nextReadyTask } from "./auto-queue.ts";
@@ -2630,6 +2631,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         confirmApproval: cleanupJob ? async () => false : reviewIds ? undefined : confirmApproval,
         settings: settings.data.manager,
         attachmentContext,
+        saveGeneratedImage: background ? undefined : image => saveManagerImage(project, image),
         mcpTools,
         observeProvider: stages?.observe,
         bindProvider: stages?.bind,
@@ -3401,6 +3403,28 @@ ipcMain.handle("board:attachmentPreview", async (event, id: unknown, file: unkno
   if (!result.ok) return null;
   const type = imageTypes.get(extname(result.data.name).toLowerCase());
   return type ? "data:" + type + ";base64," + result.data.base64 : null;
+});
+
+ipcMain.handle("board:managerImagePreview", (event, file: unknown) => {
+  const { project } = stateOf(event);
+  const image = project && readManagerImage(project, file);
+  return image ? "data:" + image.type + ";base64," + image.data.toString("base64") : null;
+});
+
+ipcMain.handle("board:saveManagerImage", async (event, file: unknown, name: unknown) => {
+  const { project, window } = stateOf(event);
+  const image = project && readManagerImage(project, file);
+  if (!image || typeof name !== "string" || !/^generated-\d+\.(png|jpg|gif|webp)$/.test(name)) {
+    return cliFailure("IMAGE_UNAVAILABLE", t("ui.image_unavailable_f6c21e43"));
+  }
+  const result = await dialog.showSaveDialog(window, { defaultPath: name });
+  if (result.canceled || !result.filePath) return { ok: true, data: null };
+  try {
+    await writeFile(result.filePath, image.data);
+    return { ok: true, data: null };
+  } catch {
+    return cliFailure("STORAGE_ERROR", t("ui.could_not_save_the_image_b9361004"));
+  }
 });
 
 async function taskRunImage(event: IpcMainInvokeEvent, id: unknown, path: unknown, reviewer: unknown) {

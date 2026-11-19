@@ -2208,6 +2208,10 @@ function draftComposer() {
       const seen = new Set(cursor ? [...workSaved.querySelectorAll("[data-coordination-key]")].map(node => node.dataset.coordinationKey) : []);
       const page = document.createDocumentFragment();
       const saved = new Set(cursor ? savedWorkItems : []);
+      const previousRuns = new Map([...workSaved.querySelectorAll("[data-work-turn]")].map(run => [
+        run.dataset.workTurn,
+        new Map([...run.querySelectorAll("details[data-item]")].map(detail => [detail.dataset.item, detail.open])),
+      ]));
       const previous = !cursor && hasWorkHistory &&
         new Set([...work.querySelectorAll("[data-item]")].map(row => activityRowKey(row.dataset.item)));
       for (const turn of result.data.turns) {
@@ -2216,7 +2220,16 @@ function draftComposer() {
         if (!items.length) continue;
         for (const item of items) saved.add(item.id);
         const run = element("div", undefined, "chat-run");
+        run.dataset.workTurn = turn.items[0]?.id ?? "";
         renderRunActivity(run, items, true, turn.durationMs, undefined, { seenMessages: seen, managerWork: true });
+        const details = previousRuns.get(run.dataset.workTurn);
+        if (details) {
+          for (const detail of run.querySelectorAll("details[data-item]")) {
+            if (details.has(detail.dataset.item)) {
+              detail.open = details.get(detail.dataset.item);
+            }
+          }
+        }
         if (previous) {
           for (const row of run.querySelectorAll("[data-item]")) {
             if (!previous.has(activityRowKey(row.dataset.item))) row.setAttribute("data-enter", "");
