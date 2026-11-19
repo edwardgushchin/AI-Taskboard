@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { electronCheck, localizationFixture } from "./electron-check.mjs";
+import { checkShowMore } from "./check-show-more.mjs";
 
 const script = fileURLToPath(import.meta.url);
 const root = resolve(dirname(script), "..");
@@ -119,6 +120,11 @@ app.whenReady().then(async () => {
     window.pushBoard({ russian: true, restoring: true });
     void 0;
   `);
+  if (process.argv.includes("--show-more")) {
+    await checkShowMore({ window, evaluate, check, click, capture, artifacts, root });
+    console.log(`Show More Chromium checks passed: ${checks}`);
+    return;
+  }
   if (process.argv.includes("--subtask-fill")) {
     const { checkSubtaskFill } = await import("./check-subtask-fill.mjs");
     await checkSubtaskFill({ window, evaluate, check, artifacts, root });

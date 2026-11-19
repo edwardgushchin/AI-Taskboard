@@ -1321,7 +1321,8 @@ function laneTools(state, title, tasks, total, count, content) {
     manualLimit = visibleLimit + 4;
     visibleLimit = manualLimit;
     renderBatch();
-    if (!more.isConnected) content.children[firstNew]?.focus();
+    // Leave focus at the start of the new batch, rather than on the button moving below it.
+    content.children[firstNew]?.focus({ preventScroll: true });
   }, "quiet lane-more");
   function updateCards() {
     matching = tasks.filter(task => (!priority.value || task.priority === priority.value) &&
