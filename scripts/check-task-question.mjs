@@ -229,7 +229,7 @@ void (async () => {
     } else {
       log("PASS a fresh Electron process restores the unresolved question and leaves both neighboring cards unmarked.");
       await evaluate("window.taskboard.setTheme('light')");
-      await until(() => evaluate("getComputedStyle(document.documentElement).getPropertyValue('--panel').trim() === '#fff'"), "light palette");
+      await until(() => evaluate("getComputedStyle(document.body).backgroundColor === 'rgb(238, 241, 247)'"), "light board background");
       const light = await evaluate(`(() => {
         const c = ${card};
         const q = c.querySelector('.task-question');
