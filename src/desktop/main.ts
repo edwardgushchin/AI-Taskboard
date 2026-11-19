@@ -212,7 +212,7 @@ function frame(state: ProjectTab) {
   const unreadTabs = new Set(openTabs.flatMap(tab =>
     tab.project && boardUnread(tab.board?.project).length ? [tab.project] : []));
   const activity = activeRunSummary([...subscriptions.values()].map(watch => ({
-    path: watch.board.project, name: watch.board.settings.name })));
+    path: watch.board.project, name: watch.board.settings.name, taskLimits: watch.board.settings.taskLimits })));
   return {
     restoring: windowStates.get(state.window.webContents.id)?.restoring ?? false,
     tabs: projectLabels(openTabs.flatMap(tab =>
@@ -302,6 +302,7 @@ function releaseWatch(project: string, watch: BoardWatch): void {
   if (!watch.tabs.size && !watch.listeners.size) {
     watch.stop();
     subscriptions.delete(project);
+    for (const { active } of windowStates.values()) send(active);
   }
 }
 
@@ -383,8 +384,11 @@ function subscribe(project: string, board: Board): BoardWatch {
       let result: CliReply<Board>;
       try { result = JSON.parse(line); }
       catch { result = cliFailure("CLI_UNAVAILABLE", t("errors.4bdf418ab969e5b1")); }
+      let activitySettingsChanged = false;
       if (result.ok) {
         queueNotices(result.data);
+        activitySettingsChanged = watch.board.settings.name !== result.data.settings.name ||
+          JSON.stringify(watch.board.settings.taskLimits) !== JSON.stringify(result.data.settings.taskLimits);
         watch.board = result.data;
         for (const requests of [boardRequests, boardWorkRequests]) requests.get(projectIdentity(project))?.automationChanged?.(result.data);
         for (const listener of watch.listeners) listener(result.data);
@@ -394,6 +398,11 @@ function subscribe(project: string, board: Board): BoardWatch {
         if (result.ok) state.board = result.data;
         state.error = result.ok ? undefined : { ...result.error, operation: "refresh" };
         send(state);
+      }
+      if (activitySettingsChanged) {
+        for (const state of windowStates.values()) {
+          if (!state.tabs.some(tab => tabs.has(tab))) send(state.active);
+        }
       }
       if (result.ok && !startedArchiveSweep) {
         startedArchiveSweep = true;
@@ -1404,12 +1413,14 @@ function scheduleDraftDiscussions({ board }: BoardWatch) {
   }
 }
 
-function reserveAgent(project: string, role: AgentRole, task?: string, queuedRevision?: number, review?: { id: string; mode: ReviewMode }) {
+function reserveAgent(project: string, role: AgentRole, task?: string, queuedRevision?: number,
+  review?: { id: string; mode: ReviewMode }, operation?: import("./board-runtime.ts").RuntimeEntry["operation"]) {
   if (quotaWait) return;
   agentSlots.remember(project);
   // A tool call can race the watch snapshot after CLI settings were saved.
   const location = runtimeLocation(project);
-  const acquire = (settings: BoardSettings) => agentSlots.acquire(projectIdentity(project), role, settings.taskLimits, task, queuedRevision);
+  const acquire = (settings: BoardSettings) =>
+    agentSlots.acquire(projectIdentity(project), role, settings.taskLimits, task, queuedRevision, operation);
   let release;
   try {
     release = review
@@ -2031,8 +2042,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   const managerReviewKey = managerReviewId ? board.project + "\0" + managerReviewId : undefined;
   const reviewTask = repairTask?.id ?? (cleanupJob ? (cleanupJob.task ? "review:" + cleanupJob.task : "maintenance:" + cleanupJob.id) : undefined) ??
     (managerReviewId ? "review:" + managerReviewId : undefined);
+  const operationKind = cleanupJob ? "maintenance" : repairTask ? "acceptanceRepair" : "managerReview";
   const repairSlot = reviewTask && !(managerReviewKey && returningDrafts.has(managerReviewKey))
-    ? reserveAgent(board.project, "reviewer", reviewTask) : undefined;
+    ? reserveAgent(board.project, "reviewer", reviewTask, undefined, undefined, operationKind) : undefined;
   if (reviewTask && !repairSlot) { writer(); return taskRunLimit("reviewer"); }
   if (cleanupJob) {
     const claim = await callCli<{ claimed: boolean }>(board.project, ["maintenance"], { action: "claim", id: cleanupJob.id, owner: process.pid });
@@ -3366,7 +3378,7 @@ function publishRunActivity(project: string, id: string, items: RunActivity[],
   }
 }
 
-function notifyRunChange(project: string) {
+function notifyRunChange(project: string, sharedActivityChanged = false) {
   const watch = subscriptions.get(project);
   if (watch) {
     for (const requests of [boardRequests, boardWorkRequests]) requests.get(projectIdentity(project))?.automationChanged?.(watch.board);
@@ -3374,7 +3386,7 @@ function notifyRunChange(project: string) {
     scheduleAutoReview(watch);
   }
   for (const state of windowStates.values()) {
-    if (state.tabs.some(tab => tab.project === project)) send(state.active);
+    if (sharedActivityChanged || state.tabs.some(tab => tab.project === project)) send(state.active);
   }
 }
 
@@ -3464,7 +3476,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     }
     const role = current.data.mergeRepair || (resolveConflicts && current.data.status === "review") ? "reviewer" : "executor";
     signal.throwIfAborted();
-    const releaseSlot = reserveAgent(project, role, id, queuedRevision);
+    const releaseSlot = reserveAgent(project, role, id, queuedRevision, undefined, role === "reviewer" ? "mergeRepair" : undefined);
     release = releaseSlot;
     if (!releaseSlot) {
       if (!revisionRequest) {
@@ -3981,7 +3993,7 @@ else {
             unread: stamp("manager-unread.json"),
           };
           if (previous?.runtime !== next.runtime) {
-            notifyRunChange(project);
+            notifyRunChange(project, true);
           } else if (previous?.unread !== next.unread) {
             publishManagerUnread(project);
           }

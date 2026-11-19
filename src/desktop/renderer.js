@@ -5332,14 +5332,57 @@ async function refreshReviewNotifications() {
 
 function renderActiveAgents() {
   const indicator = byId("status-agents");
+  const panel = byId("agent-activity");
   indicator.hidden = !frame.board;
-  if (indicator.hidden) return;
-  const { total = 0, boards = [] } = frame.activeAgents ?? {};
+  if (indicator.hidden) {
+    panel.hidePopover();
+    return;
+  }
+  const { total = 0, details = [] } = frame.activeAgents ?? {};
+  const label = t("ui.active_agents_f885023a");
   indicator.querySelector("span").textContent = total;
-  const text = t("ui.active_agents_f885023a") + " · " + total +
-    boards.map(board => "\n" + board.name + (board.detail ? " (" + board.detail + ")" : "") + ": " + board.count).join("");
-  byId("status-agents-tooltip").textContent = text;
-  indicator.setAttribute("aria-label", text);
+  indicator.setAttribute("aria-label", label + " · " + total);
+  byId("agent-activity-title").textContent = t("agentActivity.title");
+  const roles = {
+    manager: t("ui.manager_92a95b5c"),
+    executor: t("ui.executor_92197b27"),
+    reviewer: t("ui.reviewer_50c42665"),
+  };
+  const groups = details.map(board => {
+    const group = document.createElement("section");
+    const heading = document.createElement("h3");
+    heading.textContent = board.detail ? board.name + " (" + board.detail + ")" : board.name;
+    const slots = document.createElement("dl");
+    for (const role of ["executor", "reviewer", "manager"]) {
+      const term = document.createElement("dt");
+      term.textContent = roles[role];
+      const value = document.createElement("dd");
+      if (role === "manager") {
+        value.textContent = t(board.managerBusy ? "agentActivity.busy" : "agentActivity.idle");
+      } else {
+        const { used, limit } = board[role];
+        value.textContent = limit ? `${used} / ${limit}` : t("agentActivity.unlimited", { used });
+      }
+      slots.append(term, value);
+    }
+    group.append(heading, slots);
+    if (board.operations.length) {
+      const list = document.createElement("ul");
+      for (const operation of board.operations) {
+        const item = document.createElement("li");
+        item.textContent = [roles[operation.role], t("agentActivity." + operation.kind), operation.task]
+          .filter(Boolean).join(" · ");
+        list.append(item);
+      }
+      group.append(list);
+    } else {
+      const empty = document.createElement("p");
+      empty.textContent = t("agentActivity.empty");
+      group.append(empty);
+    }
+    return group;
+  });
+  byId("agent-activity-boards").replaceChildren(...groups);
 }
 
 function renderStatusBar(projectChanged) {
