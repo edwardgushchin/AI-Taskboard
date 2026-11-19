@@ -193,10 +193,17 @@ function acquireSqliteLock(lockPath: string, timeoutMs: 0 | 15_000) {
 
 function withSqliteLock<T>(lockPath: string, timeoutMs: 0 | 15_000, callback: (lockWaitMs: number, release: () => void) => T): T {
   const { waitMs, release } = acquireSqliteLock(lockPath, timeoutMs);
+  let releaseAfterCallback = false;
   try {
-    return callback(waitMs, release);
+    const result = callback(waitMs, release);
+    if (result instanceof Promise) {
+      releaseAfterCallback = true;
+      return result.finally(release) as T;
+    }
+    return result;
+
   } finally {
-    release();
+    if (!releaseAfterCallback) release();
   }
 }
 
@@ -628,10 +635,16 @@ export function onBoard<T>(location: BoardLocation, callback: (store: BoardStore
     finishTestRecovery(location);
     const store = new BoardStore(location);
     lockedStores.add(store);
+    let releaseAfterCallback = false;
     try {
-      return callback(store, lockWaitMs);
+      const result = callback(store, lockWaitMs);
+      if (result instanceof Promise) {
+        releaseAfterCallback = true;
+        return result.finally(() => lockedStores.delete(store)) as T;
+      }
+      return result;
     } finally {
-      lockedStores.delete(store);
+      if (!releaseAfterCallback) lockedStores.delete(store);
     }
   }, timeoutMs);
 }

@@ -229,12 +229,13 @@ function fixture(t: TestContext) {
         "board_auto_queue", "task_cancel", "provider_tools", "task_tool_grant", "task_tool_revoke", "task_set_executor_access", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_approve", "task_wait", "task_review_queue", "task_review", "task_review_diff",
         "task_review_artifact", "task_accept", "task_request_changes",
         "task_cleanup_status", "task_cleanup", "project_git", "project_git_push",
+        "project_git_branches", "project_git_fetch", "project_git_fast_forward", "project_git_branch_create", "project_git_branch_delete",
         "milestones_list", "github_create_milestone", "github_set_milestone_due", "github_update_milestone", "github_delete_milestone",
         "task_set_milestone", "tag_set_color", "github_read",
       ];
       const mode = boardReviewMode((await callCli(project, ["settings"], undefined, false)).data);
       assert.deepEqual(Array.from(session.mcpTools, tool => tool.name).sort(),
-        [...expectedTools.filter(name => (name !== "task_accept" || (mode !== "human" && mode !== "reviewer-human")) && (!instructions.includes("This turn repairs") || !["task_start", "task_start_batch", "task_accept", "task_request_changes"].includes(name))),
+        [...expectedTools.filter(name => (name !== "task_accept" || (mode !== "human" && mode !== "reviewer-human")) && (!instructions.includes("This turn repairs") || (!name.startsWith("project_git_") && !["task_start", "task_start_batch", "task_accept", "task_request_changes"].includes(name)))),
         ...(!manualTurn && !cleanupTurn && !instructions.includes("This turn repairs") ? ["task_return_to_draft"] : []),
         ...(!manualTurn && !cleanupTurn && !reviewTurn && !instructions.includes("This turn repairs") && !prompt.startsWith("AI Taskboard queue:") ? ["board_set_auto_mode"] : []),
         ...(!manualTurn && !cleanupTurn && mode === "manager" ? ["expert_stage", "expert_verify_skills"] : []),
@@ -2951,4 +2952,383 @@ test("acceptance repair has an isolated context and waits for shared reviewer ca
   assert.equal(f.agentSlots.available(f.project, "reviewer", { reviewer: 1 }), 1);
   assert.equal((await f.cli(["show", card.id])).data.acceptanceRepair.phase, "failed");
   assert.equal(f.cliCalls.filter(args => args[0] === "start" && args[1] === card.id).length, 2);
+});
+
+test("manager Git branch workflow stays scoped and uses checked commits", { timeout: 240_000 }, async t => {
+  const f = fixture(t);
+  const project = f.project;
+  const remote = join(f.folder, "remote.git");
+  const neighbor = join(f.folder, "neighbor");
+  const publisher = join(f.folder, "publisher");
+  const git = (cwd: string, ...args: string[]) => {
+    const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8", windowsHide: true });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  const configure = (cwd: string) => {
+    git(cwd, "config", "user.name", "Taskboard");
+    git(cwd, "config", "user.email", "test@example.invalid");
+  };
+  git(project, "init", "-b", "main");
+  configure(project);
+  await writeFile(join(project, "tracked"), "before\n");
+  await writeFile(join(project, "a-removed"), "keep after failed checkout\n");
+  await writeFile(join(project, "c-shape"), "original file\n");
+  await writeFile(join(project, "z-filtered"), "original\n");
+  await writeFile(join(project, ".gitattributes"), "z-filtered filter=taskboard-test\n");
+  mkdirSync(join(project, "tools"));
+  await writeFile(join(project, "tools", "smudge.sh"), "test \"$(cat tools/smudge-mode)\" = ready || exit 1\nsh \"$1\"\n");
+  await writeFile(join(project, "tools", "smudge-mode"), "ready\n");
+  git(project, "add", ".");
+  git(project, "commit", "-m", "Base");
+  const base = git(project, "rev-parse", "HEAD");
+  git(f.folder, "init", "--bare", "-b", "trunk", remote);
+  git(project, "remote", "add", "upstream", remote);
+  git(project, "push", "upstream", base + ":refs/heads/trunk");
+  git(f.folder, "clone", remote, publisher);
+  configure(publisher);
+  await writeFile(join(publisher, "tracked"), "after\n");
+  await writeFile(join(publisher, "z-filtered"), "changed\n");
+  git(publisher, "rm", "a-removed", "c-shape");
+  mkdirSync(join(publisher, "b-new", "nested"), { recursive: true });
+  await writeFile(join(publisher, "b-new", "nested", "added"), "incoming only\n");
+  mkdirSync(join(publisher, "c-shape"));
+  await writeFile(join(publisher, "c-shape", "child"), "replaced by a directory\n");
+  git(publisher, "add", ".");
+  git(publisher, "commit", "-m", "Incoming");
+  const incoming = git(publisher, "rev-parse", "HEAD");
+  git(publisher, "push", "origin", "trunk");
+  git(f.folder, "clone", remote, neighbor);
+  const neighborCli = spawnSync(process.execPath, [entry, "--project", neighbor, "--json", "init"], { encoding: "utf8" });
+  assert.equal(neighborCli.status, 0, neighborCli.stdout + neighborCli.stderr);
+  const neighborIndex = readFileSync(join(neighbor, ".tasks", "board.json"));
+  const neighborRefs = git(neighbor, "show-ref");
+  assert.equal((await f.cli(["init"])).ok, true);
+  let thread: string | undefined;
+  const first = await f.run("Fetch and fast-forward main", async (act, _prompt, _images, id) => {
+    assert.equal(id, undefined);
+    const refs = await act("project_git_branches", {});
+    assert.equal(refs.data.head, base);
+    assert.deepEqual(Array.from(refs.data.remotes), ["upstream"]);
+    for (const malformed of [" main", "main ", "bad\0name", "bad..name"]) {
+      const refused = await act("project_git_branch_create", { branch: malformed, head: base });
+      assert.equal(refused.error.code, "INVALID_INPUT");
+    }
+    for (const malformed of [" " + base, base + "\n", base.slice(0, -1) + "z", "0x" + base]) {
+      const refused = await act("project_git_fast_forward", { branch: "main", head: malformed });
+      assert.equal(refused.error.code, "INVALID_INPUT");
+    }
+    assert.equal((await act("project_git_fetch", { remote: "upstream " })).error.code, "INVALID_INPUT");
+    const fetched = await act("project_git_fetch", { remote: "upstream" });
+    assert.equal(fetched.ok, true, JSON.stringify(fetched.error));
+    assert.equal(fetched.data.branches.find((entry: { ref: string }) => entry.ref === "refs/remotes/upstream/trunk").head, incoming);
+    assert.equal(git(project, "rev-parse", "HEAD"), base);
+    assert.equal(readFileSync(join(project, "tracked"), "utf8"), "before\n");
+    assert.equal(git(project, "status", "--porcelain"), "");
+
+    const snapshot = { branch: "main", head: base };
+    const source = { ...snapshot, remote: "upstream", remoteBranch: "trunk" };
+    assert.equal((await act("project_git_fast_forward", snapshot)).error.code, "GIT_REMOTE_REQUIRED");
+    assert.equal((await act("project_git_fast_forward", { ...source, head: incoming })).error.code, "STALE_REPOSITORY");
+    git(project, "switch", "-c", "other");
+    assert.equal((await act("project_git_fast_forward", source)).error.code, "STALE_REPOSITORY");
+    git(project, "switch", "main");
+    await writeFile(join(project, "tracked"), "local edit");
+    assert.equal((await act("project_git_fetch", { remote: "upstream" })).ok, true);
+    assert.equal(git(project, "rev-parse", "HEAD"), base);
+    assert.equal((await act("project_git_fast_forward", source)).error.code, "GIT_DIRTY_WORKTREE");
+    assert.equal(readFileSync(join(project, "tracked"), "utf8"), "local edit");
+    await writeFile(join(project, "tracked"), "before\n");
+    const monitor = join(project, ".git", "atb-fast-forward-monitor");
+    await writeFile(monitor, [
+      "#!/bin/sh", "if test -f .git/atb-monitor-seen; then",
+      "  git symbolic-ref HEAD refs/heads/other || exit 1",
+      "else", "  touch .git/atb-monitor-seen", "fi", "exit 1",
+    ].join("\n") + "\n", { mode: 0o755 });
+    git(project, "config", "core.fsmonitor", monitor.replaceAll("\\", "/"));
+    git(project, "config", "core.fsmonitorHookVersion", "2");
+    const checkoutChanged = await act("project_git_fast_forward", source);
+    git(project, "config", "--unset", "core.fsmonitor");
+    git(project, "config", "--unset", "core.fsmonitorHookVersion");
+    rmSync(monitor);
+    rmSync(join(project, ".git", "atb-monitor-seen"));
+    assert.equal(checkoutChanged.error.code, "GIT_REF_TRANSACTION_FAILED", JSON.stringify(checkoutChanged));
+    assert.equal(git(project, "branch", "--show-current"), "other");
+    assert.equal(git(project, "rev-parse", "refs/heads/main"), base);
+    assert.equal(git(project, "rev-parse", "refs/heads/other"), base);
+    assert.equal(readFileSync(join(project, "tracked"), "utf8"), "before\n");
+    git(project, "switch", "main");
+    const indexPath = join(project, ".git", "index");
+
+    const failedFilter = join(project, ".git", "atb-failed-smudge");
+    const partialWrite = join(project, ".git", "atb-partial-checkout");
+    const shellPath = (path: string) => "'" + path.replaceAll("\\", "/").replaceAll("'", "'\\''") + "'";
+    git(project, "config", "filter.taskboard-test.clean", "cat");
+    git(project, "config", "filter.taskboard-test.smudge", "sh tools/smudge.sh " + shellPath(failedFilter));
+    git(project, "config", "filter.taskboard-test.required", "true");
+    for (const outcome of ["failure", "edit and failure", "edit and success"]) {
+      const script = ["#!/bin/sh"];
+      script.push("test -e a-removed || printf removed > " + shellPath(partialWrite));
+      if (outcome !== "failure") {
+        script.push("printf 'editor saved\\n' > " + shellPath(join(project, "tracked")));
+      }
+      if (outcome === "edit and success") {
+        script.push("cat", "exit 0");
+      } else {
+        script.push("exit 1");
+      }
+      await writeFile(failedFilter, script.join("\n") + "\n", { mode: 0o755 });
+      git(project, "update-index", "--refresh");
+      const indexBefore = readFileSync(indexPath);
+      const rejected = await act("project_git_fast_forward", source);
+      assert.equal(rejected.error.code, outcome === "edit and success" ? "GIT_DIRTY_WORKTREE" : "GIT_FAILED", JSON.stringify(rejected));
+      assert.equal(readFileSync(partialWrite, "utf8"), "removed");
+      rmSync(partialWrite);
+      assert.equal(git(project, "rev-parse", "HEAD"), base);
+      assert.equal(readFileSync(join(project, "a-removed"), "utf8"), "keep after failed checkout\n");
+      assert.equal(readFileSync(join(project, "c-shape"), "utf8"), "original file\n");
+      assert.equal(existsSync(join(project, "b-new")), false);
+      assert.equal(readFileSync(join(project, "tracked"), "utf8"), outcome === "failure" ? "before\n" : "editor saved\n");
+      assert.equal(readFileSync(join(project, "z-filtered"), "utf8"), "original\n");
+      assert.deepEqual(readFileSync(indexPath), indexBefore);
+      await writeFile(join(project, "tracked"), "before\n");
+    }
+    assert.equal(git(project, "status", "--porcelain"), "");
+    await writeFile(failedFilter, "#!/bin/sh\ncat\n", { mode: 0o755 });
+    const checkoutHook = join(project, ".git", "hooks", "reference-transaction");
+    const checked = join(project, ".git", "atb-checkout-race");
+    await writeFile(checkoutHook, [
+      "#!/bin/sh", "read old next ref", '[ "$1" = prepared ] && [ "$ref" = HEAD ] || exit 0',
+      'git switch other >.git/atb-checkout-race 2>&1 && exit 1',
+      'git symbolic-ref HEAD refs/heads/other >>.git/atb-checkout-race 2>&1 && exit 1', "exit 0",
+    ].join("\n") + "\n", { mode: 0o755 });
+    const ff = await act("project_git_fast_forward", source);
+    rmSync(checkoutHook);
+    assert.match(readFileSync(checked, "utf8"), /index\.lock/);
+    assert.match(readFileSync(checked, "utf8"), /HEAD\.lock/);
+    rmSync(checked);
+    assert.equal(ff.ok, true, JSON.stringify(ff.error));
+    assert.match(ff.data.recoveryDirectory, /taskboard-fast-forward-/);
+    git(project, "config", "--remove-section", "filter.taskboard-test");
+    assert.equal(ff.data.head, incoming);
+    assert.equal(git(project, "rev-parse", "HEAD"), incoming);
+    assert.equal(readFileSync(join(project, "tracked"), "utf8"), "after\n");
+    assert.equal(readFileSync(join(project, "c-shape", "child"), "utf8"), "replaced by a directory\n");
+    assert.equal(readFileSync(join(project, "b-new", "nested", "added"), "utf8"), "incoming only\n");
+    assert.equal(existsSync(join(project, "a-removed")), false);
+    assert.equal(git(project, "for-each-ref", "--format=%(upstream)", "refs/heads/main"), "");
+    return { text: "Fetched and updated." };
+  });
+  assert.equal(first.ok, true, JSON.stringify(first.error));
+  thread = first.data.id;
+  assert.equal(typeof thread, "string");
+
+  git(project, "branch", "--set-upstream-to=upstream/trunk", "main");
+  git(publisher, "commit", "--allow-empty", "-m", "Second incoming");
+  const current = git(publisher, "rev-parse", "HEAD");
+  git(publisher, "push", "origin", "trunk");
+  const second = await f.run("Continue with the branches", async (act, _prompt, _images, id) => {
+    assert.equal(id, thread);
+    const ff = await act("project_git_fast_forward", { branch: "main", head: incoming });
+    assert.equal(ff.ok, true, JSON.stringify(ff.error));
+    assert.equal(ff.data.head, current);
+    assert.equal(git(project, "config", "branch.main.merge"), "refs/heads/trunk");
+    assert.equal((await act("project_git_fast_forward", { branch: "main", head: current })).data.updated, false);
+    const create = await act("project_git_branch_create", { branch: "merged", head: incoming });
+    assert.equal(create.ok, true, JSON.stringify(create.error));
+    assert.equal(git(project, "branch", "--show-current"), "main");
+    const published = await act("project_git_push", { branch: "merged", head: incoming, remote: "upstream", remoteBranch: "published" });
+    assert.equal(published.ok, true, JSON.stringify(published.error));
+    assert.equal(published.data.remoteRef, "refs/heads/published");
+    assert.equal(git(project, "config", "branch.merged.merge"), "refs/heads/published");
+    git(project, "switch", "other");
+    git(project, "commit", "--allow-empty", "-m", "Only in other");
+    const unique = git(project, "rev-parse", "HEAD");
+    const diverged = await act("project_git_fast_forward", { branch: "other", head: unique, remote: "upstream", remoteBranch: "trunk" });
+    assert.equal(diverged.error.code, "GIT_DIVERGED");
+    assert.equal(git(project, "rev-parse", "HEAD"), unique);
+    git(project, "switch", "main");
+    git(project, "push", "upstream", unique + ":refs/heads/unmerged");
+    git(project, "remote", "add", "missing", join(f.folder, "missing.git"));
+    const failed = await act("project_git_fetch", { remote: "missing" });
+    assert.equal(failed.error.code, "GIT_REMOTE_FAILED");
+    assert.match(failed.error.message, /connection and permissions/);
+    return { text: "Checked the branches." };
+  });
+  assert.equal(second.ok, true, JSON.stringify(second.error));
+
+  const remove = async (scope: string, branch: string, head: string, allow = true, beforeConfirm?: () => void) => {
+    const shown = Promise.withResolvers<void>();
+    let outcome: any;
+    const turn = f.run("Delete the " + scope + " branch " + branch, async act => {
+      const pending = act("project_git_branch_delete", { scope, branch, head, remote: "upstream" });
+      shown.resolve();
+      outcome = await pending;
+      return { text: "Deletion checked." };
+    });
+    await Promise.race([shown.promise, turn.then(result => assert.fail("Deletion did not open a confirmation: " + JSON.stringify(result)))]);
+    for (let attempt = 0; !f.pendingQuestion() && attempt < 100; attempt++) await wait(10);
+    const question = f.pendingQuestion();
+    assert.ok(question);
+    assert.ok(question.approval);
+    assert.ok(question.text.includes(branch) && question.text.includes(head) && question.text.includes("upstream"));
+    beforeConfirm?.();
+    assert.equal((await f.answerQuestion(question.id, allow ? "Allow once" : "Deny")).ok, true);
+    assert.equal((await turn).ok, true);
+    return outcome;
+  };
+  assert.equal((await f.cli(["git", "branch-delete"], { scope: "local", branch: "merged", head: incoming, remote: "upstream" })).error.code, "USER_DIRECTION_REQUIRED");
+  assert.equal((await remove("local", "merged", incoming, false)).error.code, "USER_DIRECTION_REQUIRED");
+  assert.equal(git(project, "rev-parse", "merged"), incoming);
+  assert.equal((await remove("local", "main", current)).error.code, "GIT_PROTECTED_BRANCH");
+  assert.equal((await remove("remote", "trunk", current)).error.code, "GIT_PROTECTED_BRANCH");
+
+  const rebaseTargets = [
+    ["local", project, "merged"],
+    ["remote", remote, "published"],
+  ] as const;
+  for (const [scope, repository, branch] of rebaseTargets) {
+    const rebasing = join(f.folder, "rebasing-" + scope);
+    git(repository, "worktree", "add", rebasing, branch);
+    configure(rebasing);
+    const stopped = spawnSync("git", ["-C", rebasing, "rebase", "--force-rebase", "--exec", "false", base], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    assert.notEqual(stopped.status, 0);
+    assert.match(stopped.stderr, /execution failed/);
+    assert.equal(git(rebasing, "branch", "--show-current"), "");
+    assert.equal((await remove(scope, branch, incoming)).error.code, "GIT_BRANCH_IN_USE");
+    assert.equal(git(repository, "rev-parse", "refs/heads/" + branch), incoming);
+    git(rebasing, "rebase", "--abort");
+    git(repository, "worktree", "remove", rebasing);
+  }
+  const unique = git(project, "rev-parse", "other");
+  const linked = join(f.folder, "linked");
+  git(project, "worktree", "add", linked, "other");
+  assert.equal((await remove("local", "other", unique)).error.code, "GIT_BRANCH_IN_USE");
+  git(project, "worktree", "remove", linked);
+  assert.equal((await remove("local", "other", unique)).error.code, "GIT_UNMERGED_BRANCH");
+  assert.equal((await remove("remote", "unmerged", unique)).error.code, "GIT_UNMERGED_BRANCH");
+  assert.equal(git(remote, "rev-parse", "unmerged"), unique);
+
+  git(project, "branch", "card-target", incoming);
+  const { data: task } = await f.cli(["create"], plannedDraft({ title: "Use a target branch" }));
+  const approved = await f.cli(["approve", task.id], { revision: task.revision });
+  assert.equal(approved.ok, true, JSON.stringify(approved.error));
+  const started = await f.cli(["start", task.id], { revision: approved.data.revision, target: "card-target" });
+  assert.equal(started.ok, true, JSON.stringify(started.error));
+  assert.equal((await remove("local", "card-target", incoming)).error.code, "GIT_PROTECTED_BRANCH");
+  assert.equal((await remove("local", "merged", incoming, true, () => {
+    git(project, "update-ref", "refs/heads/merged", current, incoming);
+  })).error.code, "STALE_REPOSITORY");
+  assert.equal(git(project, "rev-parse", "merged"), current);
+
+  const detached = join(f.folder, "detached-refs");
+  mkdirSync(detached);
+  await writeFile(join(detached, "HEAD"), current + "\n");
+  await writeFile(join(detached, "commondir"), remote + "\n");
+  const hook = join(remote, "hooks", "reference-transaction");
+  const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+  const changeBeforeWrite = (ref: string, next: string, expected: string) => writeFile(hook, [
+    "#!/bin/sh", "read old next ref", '[ "$1" = prepared ] && [ "$ref" = HEAD ] || exit 0',
+    "git --git-dir=" + quote(detached) + " update-ref " + ref + " " + next + " " + expected,
+  ].join("\n") + "\n", { mode: 0o755 });
+  for (const [scope, branch, head] of [["local", "merged", current], ["remote", "published", incoming]]) {
+    // The remote's HEAD was read, and the default's old commit was accepted as
+    // ancestry evidence. Move the default just before its verification lock.
+    await changeBeforeWrite("refs/heads/trunk", base, current);
+    const blocked = await remove(scope!, branch!, head!);
+    assert.equal(blocked.error.code, "GIT_REF_TRANSACTION_FAILED", JSON.stringify(blocked));
+    assert.equal(git(remote, "rev-parse", "trunk"), base);
+    assert.equal(git(scope === "local" ? project : remote, "rev-parse", branch!), head);
+    rmSync(hook);
+    git(remote, "update-ref", "refs/heads/trunk", current, base);
+  }
+  await changeBeforeWrite("refs/heads/published", unique, incoming);
+  assert.equal((await remove("remote", "published", incoming)).error.code, "GIT_REF_TRANSACTION_FAILED");
+  assert.equal(git(remote, "rev-parse", "published"), unique);
+  rmSync(hook);
+  git(remote, "update-ref", "refs/heads/published", incoming, unique);
+
+  const origin = join(f.folder, "origin.git");
+  git(f.folder, "init", "--bare", "-b", "stable", origin);
+  git(project, "remote", "add", "origin", origin);
+  git(project, "push", "origin", incoming + ":refs/heads/stable");
+  git(project, "branch", "stable", incoming);
+  assert.equal(git(project, "branch", "--show-current"), "main");
+  assert.equal(git(project, "branch", "-r", "--list", "origin/HEAD"), "");
+  assert.equal((await remove("local", "stable", incoming)).error.code, "GIT_PROTECTED_BRANCH");
+  assert.equal(git(project, "rev-parse", "stable"), incoming);
+
+  for (const [scope, branch, head] of [["local", "merged", current], ["remote", "published", incoming]]) {
+    git(origin, "branch", branch!, base);
+    await writeFile(hook, [
+      "#!/bin/sh", "read old next ref", '[ "$1" = prepared ] && [ "$ref" = HEAD ] || exit 0',
+      "git --git-dir=" + quote(origin) + " symbolic-ref HEAD refs/heads/" + branch,
+    ].join("\n") + "\n", { mode: 0o755 });
+    const blocked = await remove(scope!, branch!, head!);
+    assert.equal(blocked.error.code, "GIT_REF_TRANSACTION_FAILED", JSON.stringify(blocked));
+    assert.equal(git(origin, "symbolic-ref", "HEAD"), "refs/heads/" + branch);
+    assert.equal(git(scope === "local" ? project : remote, "rev-parse", branch!), head);
+    rmSync(hook);
+    git(origin, "symbolic-ref", "HEAD", "refs/heads/stable");
+  }
+
+  git(remote, "branch", "replacement", base);
+  await writeFile(hook, [
+    "#!/bin/sh", "read old next ref", '[ "$1" = prepared ] && [ "$ref" = HEAD ] || exit 0',
+    "git symbolic-ref HEAD refs/heads/replacement",
+  ].join("\n") + "\n", { mode: 0o755 });
+  for (const [scope, branch, head] of [["local", "merged", current], ["remote", "published", incoming]]) {
+    const blocked = await remove(scope!, branch!, head!);
+    assert.equal(blocked.error.code, "GIT_REF_TRANSACTION_FAILED", JSON.stringify(blocked));
+    assert.match(blocked.error.details.output, /HEAD\.lock/);
+    assert.equal(git(remote, "symbolic-ref", "HEAD"), "refs/heads/trunk");
+    assert.equal(git(scope === "local" ? project : remote, "rev-parse", branch!), head);
+  }
+  rmSync(hook);
+
+  git(remote, "config", "receive.denyDeletes", "true");
+  assert.equal((await remove("remote", "published", incoming)).error.code, "GIT_REMOTE_TRANSACTION_UNAVAILABLE");
+  assert.equal(git(remote, "rev-parse", "published"), incoming);
+  git(remote, "config", "--unset", "receive.denyDeletes");
+  for (const url of ["ssh://git@example.invalid/repo", "https://example.invalid/repo"]) {
+    git(project, "remote", "set-url", "upstream", url);
+    for (const [scope, branch, head] of [["local", "merged", current], ["remote", "published", incoming]]) {
+      const prevented = await f.cli(["git", "branch-delete"], {
+        scope, branch, head, remote: "upstream", confirmed: true,
+      });
+      assert.equal(prevented.error.code, "GIT_REMOTE_TRANSACTION_UNAVAILABLE");
+      assert.match(prevented.error.message, /direct transactional access/);
+      assert.equal(prevented.error.details.remote, "upstream");
+      assert.equal(git(project, "rev-parse", "refs/heads/merged"), current);
+      assert.equal(git(remote, "rev-parse", "refs/heads/published"), incoming);
+    }
+  }
+  git(project, "remote", "set-url", "upstream", remote);
+  assert.equal(git(project, "remote", "get-url", "upstream"), remote);
+  assert.equal(git(project, "config", "branch.merged.merge"), "refs/heads/published");
+
+  git(remote, "symbolic-ref", "HEAD", "refs/heads/missing");
+  assert.equal((await remove("local", "merged", current)).error.code, "GIT_REMOTE_DEFAULT_UNKNOWN");
+  assert.equal((await remove("remote", "published", incoming)).error.code, "GIT_REMOTE_DEFAULT_UNKNOWN");
+  git(remote, "symbolic-ref", "HEAD", "refs/heads/trunk");
+  assert.equal((await remove("local", "merged", current)).data.deleted, true);
+  assert.equal((await remove("remote", "published", incoming)).data.deleted, true);
+  assert.equal(git(project, "branch", "--list", "merged"), "");
+  assert.equal(git(remote, "branch", "--list", "published"), "");
+  const recreated = await f.run("Create merged again and publish it to a new branch", async act => {
+    assert.equal((await act("project_git_branch_create", { branch: "merged", head: current })).ok, true);
+    assert.equal(git(project, "for-each-ref", "--format=%(upstream)", "refs/heads/merged"), "");
+    const pushed = await act("project_git_push", { branch: "merged", head: current, remote: "upstream", remoteBranch: "recreated" });
+    assert.equal(pushed.ok, true, JSON.stringify(pushed));
+    assert.equal(git(remote, "rev-parse", "recreated"), current);
+    assert.equal(git(project, "config", "branch.merged.merge"), "refs/heads/recreated");
+    return { text: "Recreated and published." };
+  });
+  assert.equal(recreated.ok, true, JSON.stringify(recreated.error));
+  assert.equal(git(project, "rev-parse", "HEAD"), current);
+  assert.equal(git(neighbor, "show-ref"), neighborRefs);
+  assert.deepEqual(readFileSync(join(neighbor, ".tasks", "board.json")), neighborIndex);
 });

@@ -480,6 +480,8 @@
   "ui.project_manager_ae7410e8": "Менеджер проекта · ",
   "ui.english_e7d843ef": "Russian",
   "ui.see_attachments_863aa6f1": "См. вложения.",
+  "ui.git_delete_local_branch": "Удалить локальную ветку «{branch}» на коммите {head} после проверки истории на remote «{remote}»?",
+  "ui.git_delete_remote_branch": "Удалить ветку «{branch}» на коммите {head} из remote «{remote}»?",
   "ui.allow_once_8539a30b": "Разрешить один раз",
   "ui.deny_ffcf9a77": "Отклонить",
   "ui.project_manager_for_3f3547d6": "Менеджер проекта ",

@@ -22,7 +22,7 @@ import { inheritedLimits, recordSettings } from "./settings-notices.ts";
 import { requireAutoQueue, updateAutoQueue } from "./auto-queue.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
 import { discoverRepository, invokeGit, resolveCommit, scheduleGitMaintenance } from "./git.ts";
-import { boardGitInfo, changeRepository, createGitHubMilestone, deleteGitHubMilestone, githubMilestones, githubRepository, inspectRepository, publishRepository, pushRepositoryBranch, readGitHub, repositoryRefs, setGitHubMilestoneDueDate, updateGitHubMilestone } from "./repository.ts";
+import { boardGitInfo, changeRepository, createGitHubMilestone, deleteGitHubMilestone, githubMilestones, githubRepository, inspectRepository, manageRepositoryBranches, publishRepository, pushRepositoryBranch, readGitHub, repositoryRefs, setGitHubMilestoneDueDate, updateGitHubMilestone } from "./repository.ts";
 import { previewSubmission, previewTask, submitTask } from "./submission.ts";
 import { changeTask, createTask, recordRunLog } from "./tasks.ts";
 import { recordTokenUsage, taskMetrics } from "./token-usage.ts";
@@ -933,7 +933,7 @@ async function main() {
       watchBoard(location, values.compact === true);
     } else {
       const audited = new Set(["start", "submit", "accept", "cancel", "return-to-draft", "cleanup", "archive", "restore-changes", "recover-test-data", "worklog-migrate", "git"]);
-      const finishOperation = audited.has(command) && command !== "git" || command === "git" && !["refs", "inspect"].includes(id ?? "")
+      const finishOperation = audited.has(command) && command !== "git" || command === "git" && !["refs", "inspect", "branches"].includes(id ?? "")
         ? beginBoardOperation(location.root, command + (extra ? "/" + extra : ""), id && /^T-\d+$/.test(id) ? id : undefined) : undefined;
       try {
         let data;
@@ -1109,11 +1109,13 @@ async function main() {
           });
           data = reviewWithSettings(store, task, review, input);
         } else if (command === "git") {
-          const action = member(id, ["refs", "inspect", "switch", "create", "detach", "publish", "push"], "action");
+          const action = member(id, ["refs", "inspect", "switch", "create", "detach", "publish", "push", "branches", "fetch", "fast-forward", "branch-create", "branch-delete"], "action");
           if (action === "inspect") data = inspectRepository(location, input);
           else if (action === "publish") data = await publishRepository(location, input);
           else if (action === "push") data = await pushRepositoryBranch(location, input);
-          else data = onBoard(location, () => action === "refs" ? repositoryRefs(location) : changeRepository(location, action, input));
+          else if (["branches", "fetch", "fast-forward", "branch-create", "branch-delete"].includes(action)) {
+            data = await manageRepositoryBranches(location, action, input);
+          } else data = onBoard(location, () => action === "refs" ? repositoryRefs(location) : changeRepository(location, action, input));
         } else {
           data = command === "init" ? initializeBoard(location, store => snapshotBoard(store, values.compact === true), input.boardType) :
             onBoard(location, (store, lockWaitMs) => run(store, command, id, extra, input, values, lockWaitMs));

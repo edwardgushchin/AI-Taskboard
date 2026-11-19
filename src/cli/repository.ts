@@ -7,6 +7,7 @@ import { onBoard, sha256, withMilestoneLinksLock } from "./storage.ts";
 import { requireNoGitOperation } from "./worktree.ts";
 import { githubApi, githubRequests } from "./github-cli.ts";
 import { redactSecrets } from "./redact.ts";
+import { branchRef, configuredRemote, createRepositoryBranch, deleteRepositoryBranch, expectedCommit, fastForwardRepository, fetchRepositoryBranches, listRepositoryBranches } from "./repository-branches.ts";
 
 const execute = promisify(execFile);
 const commitId = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -275,6 +276,22 @@ export function repositoryRefs(location: BoardLocation) {
   return { ...currentRevision(root), refs };
 }
 
+export function manageRepositoryBranches(location: BoardLocation, action: string, input: Record<string, unknown>) {
+  const root = repositoryPath(location);
+  const params: Record<string, string[]> = {
+    branches: [], fetch: ["remote"], "fast-forward": ["branch", "head", "remote", "remoteBranch"],
+    "branch-create": ["branch", "head"], "branch-delete": ["scope", "branch", "head", "remote", "confirmed"],
+  };
+  if (Object.keys(input).some(key => !params[action]?.includes(key))) {
+    throw new TaskboardError("INVALID_INPUT", "Use the parameters defined for this Git action.");
+  }
+  if (action === "branches") return { ...currentRevision(root), ...listRepositoryBranches(root) };
+  if (action === "fetch") return fetchRepositoryBranches(root, input);
+  if (action === "fast-forward") return fastForwardRepository(location, input);
+  if (action === "branch-delete") return deleteRepositoryBranch(location, input);
+  return onBoard(location, () => createRepositoryBranch(root, input));
+}
+
 function commitDiff(root: string, input: Record<string, unknown>) {
   const { from, to, paths } = input;
   if (typeof from !== "string" || !commitId.test(from) || typeof to !== "string" || !commitId.test(to)) {
@@ -497,18 +514,24 @@ async function pushPinnedBranch(location: BoardLocation, branch: string, head: s
 
 export async function pushRepositoryBranch(location: BoardLocation, input: Record<string, unknown>) {
   const root = repositoryPath(location);
-  const branch = text(input.branch, "branch", true);
-  const head = text(input.head, "head", true);
-  const source = "refs/heads/" + branch;
-  if (Object.keys(input).some(key => key !== "branch" && key !== "head") || branch.startsWith("-") ||
-      !commitId.test(head) || invokeGit(root, ["check-ref-format", source]).code !== 0) {
-    throw new TaskboardError("INVALID_INPUT", "Pass a local branch name and its full Git commit ID.");
+  const source = branchRef(root, input.branch);
+  const branch = source.slice("refs/heads/".length);
+  const head = expectedCommit(input.head);
+  if (Object.keys(input).some(key => !["branch", "head", "remote", "remoteBranch"].includes(key))) {
+    throw new TaskboardError("INVALID_INPUT", "Use the parameters defined for branch publication.");
   }
   const { remote, remoteRef } = onBoard(location, () => {
     const tip = resolveCommit(root, source);
     if (!tip) throw new TaskboardError("GIT_BRANCH_REQUIRED", "The local branch does not exist.");
     if (tip !== head) throw new TaskboardError("STALE_REPOSITORY", "The branch tip changed. Read its current commit before pushing.");
-    return repositoryPushTarget(root, branch);
+    if (input.remote === undefined && input.remoteBranch === undefined) return repositoryPushTarget(root, branch);
+    const remote = configuredRemote(root, input.remote);
+    const remoteRef = branchRef(root, input.remoteBranch, "remoteBranch");
+    const tracking = branchTracking(root, branch);
+    if (tracking.some(Boolean) && (tracking[0] !== remote || tracking[1] !== remoteRef)) {
+      throw new TaskboardError("GIT_REMOTE_REQUIRED", "Use the existing upstream as the push destination.");
+    }
+    return { remote, remoteRef };
   });
   await pushPinnedBranch(location, branch, head, { remote, remoteRef });
   return { branch, head, remote, remoteRef, gitInfo: boardGitInfo(location) };

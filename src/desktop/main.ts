@@ -2260,7 +2260,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       (reviewIds || cleanupJob || !["project_path", "project_sha256"].includes(name)) &&
       (!reviewIds || autoReviewReadTools.has(name) || reviewTaskTools.has(name)) &&
       (name !== "task_accept" || hasMode("reviewer") || hasMode("manager")) &&
-      (!repairTask || !["task_start", "task_start_batch", "task_accept", "task_request_changes", "task_return_to_draft"].includes(name)));
+      (!repairTask || (!name.startsWith("project_git_") &&
+        !["task_start", "task_start_batch", "task_accept", "task_request_changes", "task_return_to_draft"].includes(name))));
     if (!reviewIds && !cleanupJob) mcpTools.push(...(goal ? goalWorkTools : background ? [] : goalChatTools), githubReadTool);
     const allowReviewModeChange = !background && !goal && !isManual(settings.data);
     if (allowReviewModeChange) mcpTools.push(boardReviewModeTool);
@@ -2312,7 +2313,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         : returnTaskToDraft(board.project, id, revision, "manager"), allowAutoModeChange,
       reviewIds || cleanupJob || repairTask ? undefined : confirmApproval,
       id => subscriptions.get(board.project)?.reviewerRuns.has(id) ||
-        agentSlots.entries(board.project).some(entry => entry.kind === "slot" && entry.role === "reviewer" && entry.task === "review:" + id));
+        agentSlots.entries(board.project).some(entry => entry.kind === "slot" && entry.role === "reviewer" && entry.task === "review:" + id),
+      reviewIds || cleanupJob || repairTask ? undefined : ({ branch, head, remote, scope }, decision) =>
+        confirmApproval(t(scope === "local" ? "ui.git_delete_local_branch" : "ui.git_delete_remote_branch", { branch, head, remote }), decision));
     const run = async (name: string, args: unknown, toolSignal?: AbortSignal): Promise<CliReply> => {
       try {
         if (name === boardReviewModeTool.name) {
@@ -2323,6 +2326,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           const { id, status, title, revision } = result.data;
           changes.push({ id, status, title, revision, action: "set_review_mode" });
           return { ok: true, data: reviewModeReceipt(result.data) };
+        }
+        if (name.startsWith("project_git_") && !mcpTools.some(tool => tool.name === name)) {
+          return cliFailure("INVALID_INPUT", "This Git action is unavailable in this board session.");
         }
         if (name === "task_set_executor_access") return await setTaskExecutorAccess(app.getPath("userData"), board.project, args);
         const result = await runAction(name, args, toolSignal);
