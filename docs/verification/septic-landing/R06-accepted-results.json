@@ -1,0 +1,687 @@
+[
+  {
+    "scenario": 1,
+    "title": "1440×900: нет горизонтальной прокрутки",
+    "ok": true
+  },
+  {
+    "scenario": 1,
+    "title": "1440×900: обещание, демонстрация и оба действия доступны",
+    "ok": true
+  },
+  {
+    "scenario": 1,
+    "title": "1440×900: все блоки в принятом порядке",
+    "ok": true
+  },
+  {
+    "scenario": 1,
+    "title": "390×844: нет горизонтальной прокрутки",
+    "ok": true
+  },
+  {
+    "scenario": 1,
+    "title": "390×844: обещание, демонстрация и оба действия доступны",
+    "ok": true
+  },
+  {
+    "scenario": 1,
+    "title": "390×844: все блоки в принятом порядке",
+    "ok": true
+  },
+  {
+    "scenario": 1,
+    "title": "390×844: узнаваемая часть иллюстрации видна",
+    "ok": true
+  },
+  {
+    "scenario": 1,
+    "title": "Нижняя панель скрыта на первом экране",
+    "ok": true
+  },
+  {
+    "scenario": 1,
+    "title": "Панель появляется после первого экрана",
+    "ok": true
+  },
+  {
+    "scenario": 1,
+    "title": "Панель скрыта у формы",
+    "ok": true
+  },
+  {
+    "scenario": 2,
+    "title": "Мобильное меню раскрывается и объявляет состояние",
+    "ok": true
+  },
+  {
+    "scenario": 2,
+    "title": "Выбор раздела закрывает меню",
+    "ok": true
+  },
+  {
+    "scenario": 2,
+    "title": "Касание основного действия переводит фокус к форме",
+    "ok": true
+  },
+  {
+    "scenario": 1,
+    "title": "320×720: нет горизонтальной прокрутки",
+    "ok": true
+  },
+  {
+    "scenario": 1,
+    "title": "320×720: обещание, демонстрация и оба действия доступны",
+    "ok": true
+  },
+  {
+    "scenario": 1,
+    "title": "320×720: все блоки в принятом порядке",
+    "ok": true
+  },
+  {
+    "scenario": 2,
+    "title": "CTA 1: одна форма и её заголовок в фокусе",
+    "ok": true
+  },
+  {
+    "scenario": 2,
+    "title": "CTA 2: одна форма и её заголовок в фокусе",
+    "ok": true
+  },
+  {
+    "scenario": 2,
+    "title": "CTA 3: одна форма и её заголовок в фокусе",
+    "ok": true
+  },
+  {
+    "scenario": 2,
+    "title": "CTA 4: одна форма и её заголовок в фокусе",
+    "ok": true
+  },
+  {
+    "scenario": 2,
+    "title": "Enter активирует действие с видимым фокусом",
+    "ok": true
+  },
+  {
+    "scenario": 2,
+    "title": "FAQ раскрывается клавишей Enter",
+    "ok": true
+  },
+  {
+    "scenario": 2,
+    "title": "FAQ закрывается клавишей Enter",
+    "ok": true
+  },
+  {
+    "scenario": 2,
+    "title": "Все поля связаны с метками",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "1440: пустая форма отклонена со связанными ошибками",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "1440: пробелы, неверный номер и отсутствие флажка отклонены",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "1440: телефон 7abc0000000001 отклонён, исходный ввод сохранён",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "1440: телефон +7 (000) 000-00-01! отклонён, исходный ввод сохранён",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "1440: телефон 7/0000000001 отклонён, исходный ввод сохранён",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "1440: исправление телефона даёт локальный успех",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "1440: volume=0x10 отклонён, ввод сохранён",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "1440: depth=0x10 отклонён, ввод сохранён",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "1440: distance=0x10 отклонён, ввод сохранён",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "1440: исправленные замеры 3,5 дают локальный успех",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "1440: исправленные замеры 3.5 дают локальный успех",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "1440: ноль и отрицательные параметры отклонены",
+    "ok": true
+  },
+  {
+    "scenario": 5,
+    "title": "1440: отправка объявлена и кнопка заблокирована",
+    "ok": true
+  },
+  {
+    "scenario": 5,
+    "title": "1440: имитация ошибки сохраняет значения для повтора",
+    "ok": true
+  },
+  {
+    "scenario": 6,
+    "title": "1440: при имитации ошибки нет сетевой передачи",
+    "ok": true
+  },
+  {
+    "scenario": 4,
+    "title": "1440: полный набор, консультация и адрес за городом дают только локальный успех",
+    "ok": true
+  },
+  {
+    "scenario": 6,
+    "title": "1440: offline-повтор не отправляет сетевых запросов",
+    "ok": true
+  },
+  {
+    "scenario": 6,
+    "title": "1440: хранилища и cookies не содержат данных",
+    "ok": true
+  },
+  {
+    "scenario": 5,
+    "title": "1440: после успеха поля очищены",
+    "ok": true
+  },
+  {
+    "scenario": 5,
+    "title": "1440: новая невалидная попытка показывает актуальные ошибки",
+    "ok": true
+  },
+  {
+    "scenario": 4,
+    "title": "1440: «Не знаю» принимается без подмены нулём",
+    "ok": true
+  },
+  {
+    "scenario": 4,
+    "title": "1440: необязательные параметры можно пропустить",
+    "ok": true
+  },
+  {
+    "scenario": 5,
+    "title": "1440: перезагрузка очищает поля",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "390: пустая форма отклонена со связанными ошибками",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "390: пробелы, неверный номер и отсутствие флажка отклонены",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "390: телефон 7abc0000000001 отклонён, исходный ввод сохранён",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "390: телефон +7 (000) 000-00-01! отклонён, исходный ввод сохранён",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "390: телефон 7/0000000001 отклонён, исходный ввод сохранён",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "390: исправление телефона даёт локальный успех",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "390: volume=0x10 отклонён, ввод сохранён",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "390: depth=0x10 отклонён, ввод сохранён",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "390: distance=0x10 отклонён, ввод сохранён",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "390: исправленные замеры 3,5 дают локальный успех",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "390: исправленные замеры 3.5 дают локальный успех",
+    "ok": true
+  },
+  {
+    "scenario": 3,
+    "title": "390: ноль и отрицательные параметры отклонены",
+    "ok": true
+  },
+  {
+    "scenario": 5,
+    "title": "390: отправка объявлена и кнопка заблокирована",
+    "ok": true
+  },
+  {
+    "scenario": 5,
+    "title": "390: имитация ошибки сохраняет значения для повтора",
+    "ok": true
+  },
+  {
+    "scenario": 6,
+    "title": "390: при имитации ошибки нет сетевой передачи",
+    "ok": true
+  },
+  {
+    "scenario": 4,
+    "title": "390: полный набор, консультация и адрес за городом дают только локальный успех",
+    "ok": true
+  },
+  {
+    "scenario": 6,
+    "title": "390: offline-повтор не отправляет сетевых запросов",
+    "ok": true
+  },
+  {
+    "scenario": 6,
+    "title": "390: хранилища и cookies не содержат данных",
+    "ok": true
+  },
+  {
+    "scenario": 5,
+    "title": "390: после успеха поля очищены",
+    "ok": true
+  },
+  {
+    "scenario": 5,
+    "title": "390: новая невалидная попытка показывает актуальные ошибки",
+    "ok": true
+  },
+  {
+    "scenario": 4,
+    "title": "390: «Не знаю» принимается без подмены нулём",
+    "ok": true
+  },
+  {
+    "scenario": 4,
+    "title": "390: необязательные параметры можно пропустить",
+    "ok": true
+  },
+  {
+    "scenario": 5,
+    "title": "390: перезагрузка очищает поля",
+    "ok": true
+  },
+  {
+    "scenario": 7,
+    "title": "demo=true: нет tel, mailto и карт",
+    "ok": true
+  },
+  {
+    "scenario": 7,
+    "title": "Демонстрационный звонок .hero [data-call]: пояснение без звонка",
+    "ok": true
+  },
+  {
+    "scenario": 7,
+    "title": "Диалог .hero [data-call]: Escape возвращает фокус",
+    "ok": true
+  },
+  {
+    "scenario": 7,
+    "title": "Демонстрационный звонок #contacts [data-call]: пояснение без звонка",
+    "ok": true
+  },
+  {
+    "scenario": 7,
+    "title": "Диалог #contacts [data-call]: Escape возвращает фокус",
+    "ok": true
+  },
+  {
+    "scenario": 7,
+    "title": "Звонок из мобильной панели показывает пояснение",
+    "ok": true
+  },
+  {
+    "scenario": 7,
+    "title": "Звонок из шапки показывает пояснение",
+    "ok": true
+  },
+  {
+    "scenario": 7,
+    "title": "Email объясняет демонстрацию",
+    "ok": true
+  },
+  {
+    "scenario": 7,
+    "title": "Закрытие email возвращает фокус",
+    "ok": true
+  },
+  {
+    "scenario": "fallback",
+    "title": "Сбой инициализации JS (profile.js недоступен): содержимое и FAQ доступны",
+    "ok": true
+  },
+  {
+    "scenario": "fallback",
+    "title": "Сбой инициализации JS (profile.js недоступен): форма не отправляется, есть понятное состояние",
+    "ok": true
+  },
+  {
+    "scenario": "fallback",
+    "title": "Сбой инициализации JS (profile.js недоступен): звонок ведёт к контактам",
+    "ok": true
+  },
+  {
+    "scenario": "fallback",
+    "title": "JavaScript отключён: содержимое и FAQ доступны",
+    "ok": true
+  },
+  {
+    "scenario": "fallback",
+    "title": "JavaScript отключён: форма не отправляется, есть понятное состояние",
+    "ok": true
+  },
+  {
+    "scenario": "fallback",
+    "title": "JavaScript отключён: звонок ведёт к контактам",
+    "ok": true
+  },
+  {
+    "scenario": "server",
+    "title": "/scripts/server.mjs: внутренний файл не выдаётся",
+    "ok": true
+  },
+  {
+    "scenario": "server",
+    "title": "/.git/config: внутренний файл не выдаётся",
+    "ok": true
+  },
+  {
+    "scenario": "server",
+    "title": "/profile.json: внутренний файл не выдаётся",
+    "ok": true
+  },
+  {
+    "scenario": "server",
+    "title": "/../README.md: внутренний файл не выдаётся",
+    "ok": true
+  },
+  {
+    "scenario": "server",
+    "title": "/%2e%2e/README.md: внутренний файл не выдаётся",
+    "ok": true
+  },
+  {
+    "scenario": "server",
+    "title": "/docs/landing-brief.md: внутренний файл не выдаётся",
+    "ok": true
+  },
+  {
+    "scenario": "server",
+    "title": "POST: метод отклонён",
+    "ok": true
+  },
+  {
+    "scenario": "server",
+    "title": "PUT: метод отклонён",
+    "ok": true
+  },
+  {
+    "scenario": "server",
+    "title": "DELETE: метод отклонён",
+    "ok": true
+  },
+  {
+    "scenario": "server",
+    "title": "OPTIONS: метод отклонён",
+    "ok": true
+  },
+  {
+    "scenario": "server",
+    "title": "HEAD: заголовки без тела",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: name в title",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: name в .brand",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: name в footer strong",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: city в header",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: city в .hero h1",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: city в #location",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: zone в .hero .eyebrow",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: zone в #cost .factor:last-child",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: zone в #contacts h2",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: price в #cost h2",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: hours в header",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: hours в #contacts",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: hours в #dialog-hours",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: phoneDisplay в #contacts",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: phoneDisplay в #dialog-contact",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: email в [data-email]",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: address в #contacts",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: company в #contacts",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: inn в #contacts",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: ogrn в #contacts",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: старые уникальные значения исчезли из DOM",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: все действия имеют единый текст и якорь",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: диалог звонка использует текущие номер и часы",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Второй профиль: диалог почты использует текущий email",
+    "ok": true
+  },
+  {
+    "scenario": 9,
+    "title": "demo=false: все tel соответствуют текущему нормализованному номеру",
+    "ok": true
+  },
+  {
+    "scenario": 9,
+    "title": "demo=false: mailto соответствует текущему email",
+    "ok": true
+  },
+  {
+    "scenario": 9,
+    "title": "demo=false: исчезли зависимые пояснения демонстрационных контактов",
+    "ok": true
+  },
+  {
+    "scenario": 9,
+    "title": "demo=false: форма остаётся локальной демонстрацией",
+    "ok": true
+  },
+  {
+    "scenario": 9,
+    "title": "demo=true, отсутствует phone: действие и зависимые подписи скрыты",
+    "ok": true
+  },
+  {
+    "scenario": 9,
+    "title": "demo=true, отсутствует email: действие и зависимые подписи скрыты",
+    "ok": true
+  },
+  {
+    "scenario": 9,
+    "title": "demo=true, отсутствует address: действие и зависимые подписи скрыты",
+    "ok": true
+  },
+  {
+    "scenario": 9,
+    "title": "demo=false, отсутствует phone: действие и зависимые подписи скрыты",
+    "ok": true
+  },
+  {
+    "scenario": 9,
+    "title": "demo=false, отсутствует email: действие и зависимые подписи скрыты",
+    "ok": true
+  },
+  {
+    "scenario": 9,
+    "title": "demo=false, отсутствует address: действие и зависимые подписи скрыты",
+    "ok": true
+  },
+  {
+    "scenario": 9,
+    "title": "demo=true без контактов: нет действий и зависимых пояснений",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Весь профиль восстановлен: DOM, title, действия и подписи совпадают с исходными",
+    "ok": true
+  },
+  {
+    "scenario": 8,
+    "title": "Повторная сборка исходного профиля воспроизводима",
+    "ok": true
+  },
+  {
+    "scenario": 10,
+    "title": "Изображение имеет alt и видимую подпись происхождения",
+    "ok": true
+  },
+  {
+    "scenario": 10,
+    "title": "Нет декоративных номеров услуг и разделов; порядок шагов сохранён",
+    "ok": true
+  },
+  {
+    "scenario": 10,
+    "title": "Текст не обещает вымышленные награды и гарантии",
+    "ok": true
+  },
+  {
+    "scenario": "clean",
+    "title": "Проверка оставляет статус Git исходной копии без изменений",
+    "ok": true
+  }
+]
