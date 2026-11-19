@@ -1219,5 +1219,9 @@
   "limits.work": "Taken in uitvoering",
   "limits.review": "Taken in beoordeling",
   "experts.review_lead": "Reviewverantwoordelijke toewijzen",
-  "experts.add_review_stage": "Reviewstap toevoegen"
+  "experts.add_review_stage": "Reviewstap toevoegen",
+  "updates.install_confirm": "AI Taskboard {version} installeren en opnieuw starten?",
+  "updates.install_detail": "Het officiële Windows-installatiebestand wordt gecontroleerd met het SHA-256-manifest van de versie. Je profiel en geopende borden blijven bewaard.",
+  "updates.install_button": "Installeren en herstarten",
+  "updates.preparing": "Een update wordt voorbereid. Probeer het opnieuw na herstarten of annuleren."
 }

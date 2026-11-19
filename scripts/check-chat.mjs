@@ -4,6 +4,7 @@
 // Pass --large-dialogue-image to both invocations to include a 4 MiB attachment.
 // Use --artifact-links to check submission and dialogue screenshots across an Electron restart.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -94,6 +95,244 @@ app.whenReady().then(async () => {
     await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
     writeFileSync(join(artifacts, name), (await window.webContents.capturePage()).toPNG());
   };
+  if (process.argv.includes("--dialogue-parity")) {
+    window.webContents.debugger.attach();
+    await window.webContents.debugger.sendCommand("Emulation.setEmulatedMedia", {
+      features: [{ name: "prefers-reduced-motion", value: "reduce" }],
+    }).catch(() => {});
+    window.show();
+    window.focus();
+    window.setContentSize(1600, 900);
+    await evaluate(`
+      const sampleAt = '2026-11-19T17:20:00.000Z';
+      const prompt = 'Сравни оформление на одинаковой переписке.';
+      const answer = 'Проверил фон и **сообщения**. Цвет образца — #5879C2.';
+      const dialogueCard = {
+        id: 'T-0101', title: 'Сравнить оформление чатов', status: 'draft',
+        createdAt: sampleAt, updatedAt: sampleAt, priority: 'normal', tags: [],
+        description: 'Сверить оформление переписки в светлой и тёмной темах.',
+        criteria: ['Сообщения и кнопки одинаково оформлены в обоих чатах.'],
+        history: [
+          { action: 'chat', actor: 'user', at: sampleAt, text: prompt },
+          { action: 'chat', actor: 'agent', at: sampleAt, text: answer },
+        ],
+        questions: [], attachments: [], subtasks: [],
+        execution: { model: 'test', effort: 'high' },
+      };
+      api.isWindows = ${process.platform === "win32"};
+      frame = {
+        project: 'dialogue-fixture', board: { tasks: [dialogueCard], archived: [], settings: {} },
+        replyingTasks: [], runningTasks: [],
+      };
+      api.boardQueue = async () => ({ ok: true, data: [] });
+      api.boardHistory = async () => ({
+        ok: true, data: { nextCursor: null, turns: [{
+          messages: [{ text: prompt, files: [], at: sampleAt }],
+          items: [{
+            id: 'example-answer', type: 'agentMessage', phase: 'final_answer',
+            status: 'completed', text: answer, at: sampleAt,
+          }],
+        }] },
+      });
+      api.command = async (name, id) => ({
+        ok: name === 'show' && id === dialogueCard.id, data: structuredClone(dialogueCard),
+      });
+      mountAppMenu();
+      render();
+      const manager = byId('board-composer').firstChild;
+      manager.querySelector('.board-chat-pin').click();
+      const managerInput = manager.querySelector('.draft-input textarea');
+      managerInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+      const taskSide = byId('task-side');
+      const styles = (node, keys) => {
+        const style = getComputedStyle(node);
+        return keys.map(key => style[key]);
+      };
+      const messages = log => [...log.querySelectorAll('.chat-entry[data-actor], .board-manager-message')]
+        .filter(row => row.querySelector('time'))
+        .map(row => {
+          const text = row.querySelector('.chat-text');
+          const time = row.querySelector('time');
+          return {
+            role: row.dataset.actor ?? 'agent',
+            text: text.textContent.trimEnd(),
+            time: [time.textContent, time.dateTime, time.title],
+            bubble: styles(row, ['backgroundColor', 'borderRadius', 'padding', 'alignSelf', 'color']),
+            textStyle: styles(text, ['fontSize', 'lineHeight', 'fontFamily']),
+            timeStyle: styles(time, ['color', 'fontSize', 'textAlign', 'marginTop']),
+          };
+        });
+      const control = (container, name) => container.querySelector('.chat-' + name);
+      const controlStyles = node => ({
+        box: styles(node, ['width', 'height', 'borderRadius', 'backgroundColor', 'borderColor', 'color']),
+        glyph: node.querySelector('.codicon').className,
+        font: styles(node.querySelector('.codicon'), ['fontFamily', 'fontSize']),
+        label: node.getAttribute('aria-label'),
+        disabled: node.disabled,
+      });
+      const enterText = (target, text) => {
+        target.value = text;
+        target.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+      void 0;
+    `);
+    for (let attempt = 0; attempt < 50 && !await evaluate("manager.querySelectorAll('.board-chat time').length === 2"); attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 40));
+    }
+    const report = [];
+    for (const theme of ["light", "dark"]) {
+      nativeTheme.themeSource = theme;
+      await evaluate(`
+        if (sheet.open) sheet.close();
+        applyTheme(${JSON.stringify(theme)});
+        enterText(managerInput, 'Черновик для сравнения кнопок');
+        void 0;
+      `);
+      await evaluate("document.fonts.ready.then(() => true)");
+      await capture("manager-" + theme + ".png");
+      const managerStyle = await evaluate(`
+        ({
+          background: getComputedStyle(manager.querySelector('.board-chat')).backgroundColor,
+          messages: messages(manager.querySelector('.board-chat-log:not(.board-work)')),
+          buttons: ['add', 'mic', 'send'].map(name => controlStyles(control(manager, name))),
+        })
+      `);
+      await evaluate(`showTask(dialogueCard.id).then(() => {
+        enterText(byId('task-chat-input'), 'Черновик для сравнения кнопок');
+        return true;
+      })`);
+      await capture("card-" + theme + ".png");
+      const cardStyle = await evaluate(`
+        ({
+          background: getComputedStyle(taskSide.querySelector('.task-chat')).backgroundColor,
+          messages: messages(taskSide.querySelector('.task-dialogue')),
+          buttons: ['add', 'mic', 'send'].map(name => controlStyles(control(taskSide, name))),
+        })
+      `);
+      assert.equal(managerStyle.messages.length, 2);
+      assert.deepEqual(cardStyle.messages, managerStyle.messages, theme + " messages");
+      assert.equal(cardStyle.background, managerStyle.background, theme + " background");
+      const visual = ({ box, glyph, font, disabled }) => ({ box, glyph, font, disabled });
+      assert.deepEqual(cardStyle.buttons.map(visual), managerStyle.buttons.map(visual), theme + " action styles");
+      assert.ok([...cardStyle.buttons, ...managerStyle.buttons].every(button => button.label), theme + " accessible names");
+      await check(`byId('task-chat-input').rows === 3 && getComputedStyle(byId('task-chat-input')).resize === 'vertical' &&
+        managerInput.rows === 1 && managerInput.closest('.board-draft-field') &&
+        taskSide.querySelector('.chat-day')?.textContent.length > 0`, theme + " separate editors and card date separator");
+      report.push((theme === "light" ? "Светлая тема" : "Тёмная тема") +
+        ", 1600 × 900: совпали фон диалога, оформление двух сохранённых сообщений и времени, размеры, глифы и цвета трёх кнопок. Поля ввода сохранили свою компоновку.");
+    }
+    window.setContentSize(1000, 700);
+    const selector = name => "#task-side .chat-" + name;
+    const press = async (target, key) => {
+      await check(`(() => {
+        const button = document.querySelector(${JSON.stringify(target)});
+        button.focus();
+        const { left, right, top, bottom } = button.getBoundingClientRect();
+        return document.activeElement === button && left >= 0 && top >= 0 && right <= innerWidth && bottom <= innerHeight;
+      })()`, target + " is reachable in 1000 × 700");
+      window.webContents.sendInputEvent({ type: "keyDown", keyCode: key });
+      if (key === "Enter") {
+        window.webContents.sendInputEvent({ type: "char", keyCode: key });
+      }
+      window.webContents.sendInputEvent({ type: "keyUp", keyCode: key });
+      await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+    };
+    await evaluate(`
+      enterText(byId('task-chat-input'), '');
+      window.pickerClicks = 0;
+      window.sent = [];
+      window.stopCalls = 0;
+      const fileInput = taskSide.querySelector('input[type=file]');
+      fileInput.addEventListener('click', event => {
+        event.preventDefault();
+        window.pickerClicks++;
+        const files = new DataTransfer();
+        files.items.add(new File(['fixture'], 'sample.txt', { type: 'text/plain' }));
+        fileInput.files = files.files;
+        fileInput.dispatchEvent(new Event('change'));
+      });
+      api.filePayload = async file => ({ name: file.name, contents: await file.text() });
+      api.chatSend = async (_id, request) => {
+        window.sent.push(request);
+        frame.replyingTasks = [dialogueCard.id];
+        dialogueCard.history.push({
+          action: 'chat', actor: 'user', text: request.text, at: sampleAt,
+        });
+        return { saved: true, result: { ok: true } };
+      };
+      api.chatStop = async () => {
+        window.stopCalls++;
+        frame.replyingTasks = [];
+        return { ok: true };
+      };
+      void 0;
+    `);
+    await check(`control(taskSide, 'send').disabled`, "empty card draft keeps send disabled");
+    await press(selector("mic"), "Space");
+    await check(`document.activeElement === byId('task-chat-input') &&
+      !taskSide.querySelector('.chat-composer [role=status]').hidden &&
+      taskSide.querySelector('.chat-composer [role=status]').textContent === (api.isWindows
+        ? t('ui.press_win_h_to_start_windows_voice_typing_39244c53')
+        : t('ui.start_system_dictation_while_this_field_is_focus_f77f00e3'))`, "microphone focuses the input and shows the platform dictation hint");
+    await press(selector("add"), "Enter");
+    await check(`window.pickerClicks === 1 && taskSide.querySelector('.draft-attachments').textContent.includes('sample.txt') &&
+      !control(taskSide, 'send').disabled`, "attachment alone enables sending");
+    await evaluate("enterText(byId('task-chat-input'), 'Проверка отправки'); void 0");
+    await press(selector("send"), "Enter");
+    await check(`window.sent.length === 1 && window.sent[0].text === 'Проверка отправки' &&
+      window.sent[0].files[0].name === 'sample.txt' && window.sent[0].files[0].contents === 'fixture' &&
+      byId('task-chat-input').value === '' && !control(taskSide, 'send').disabled &&
+      !!control(taskSide, 'send').querySelector('.codicon-stop-circle')`, "Enter sends text and attachment, then enables stop");
+    await evaluate("api.boardHistory = async () => ({ ok: true, data: { dialogue: [] } }); void 0");
+    await evaluate("manager.updateManagerRun({ id: 'active-fixture', phase: 'running' }); enterText(managerInput, ''); void 0");
+    for (const theme of ["light", "dark"]) {
+      const stopStyles = await evaluate(`
+        applyTheme(${JSON.stringify(theme)});
+        [taskSide, manager].map(container => {
+          const { box, glyph, font, disabled } = controlStyles(control(container, 'send'));
+          return { box, glyph, font, disabled };
+        })
+      `);
+      assert.deepEqual(stopStyles[0], stopStyles[1], theme + " running stop style");
+    }
+    await evaluate("enterText(byId('task-chat-input'), 'Уточнение во время ответа'); void 0");
+    await check(`!control(taskSide, 'send').disabled &&
+      control(taskSide, 'send').dataset.action === 'send'`, "draft during a running reply switches to send");
+    await evaluate("enterText(byId('task-chat-input'), ''); void 0");
+    await check(`!control(taskSide, 'send').disabled &&
+      control(taskSide, 'send').dataset.action === 'stop'`, "clearing the draft restores stop");
+    await press(selector("send"), "Space");
+    await check(`window.stopCalls === 1 && control(taskSide, 'send').disabled &&
+      !!control(taskSide, 'send').querySelector('.codicon-arrow-up')`, "Space interrupts and restores disabled send");
+    await press('#task-side [aria-controls="task-chat-work"]', "Enter");
+    await check(`!byId('task-chat-work').hidden && byId('task-chat-dialogue').hidden &&
+      taskSide.querySelector('.chat-composer').hidden`, "Work tab shows its own view");
+    await press('#task-side [aria-controls="task-chat-team"]', "Enter");
+    await check(`!byId('task-chat-team').hidden && byId('task-chat-work').hidden`, "Team tab shows its own view");
+    await press('#task-side [aria-controls="task-chat-dialogue"]', "Enter");
+    await check(`!byId('task-chat-dialogue').hidden && byId('task-chat-dialogue').textContent.includes(prompt) &&
+      byId('task-chat-dialogue').textContent.includes('Проверка отправки') &&
+      getComputedStyle(byId('task-chat-input')).resize === 'vertical'`, "Dialogue restores saved messages and its input");
+    report.push("1000 × 700. Оформление активной кнопки остановки совпало в обеих темах. В тёмной теме Enter и пробел активировали кнопки. Проверены выбор вложения, отправка текста с файлом, переключение отправки и остановки при изменении черновика, фокус поля и подсказка диктовки, возврат к сохранённым сообщениям из вкладок «Ход работы» и «Команда экспертов».");
+    report.push("Использованы обычные компоненты рендерера Electron, тестовые данные и заглушки выбора файла и провайдера. Системное распознавание речи, macOS и Linux не проверялись.");
+    const git = args => spawnSync("git", args, { cwd: root, encoding: "utf8", windowsHide: true }).stdout.trim();
+    const sources = ["src/desktop/styles.css", "src/desktop/themes.css", "src/desktop/chat.js",
+      "src/desktop/renderer.js", "src/desktop/index.html", "scripts/check-chat.mjs"];
+    writeFileSync(join(artifacts, "dialogue-parity.txt"), [
+      "Команда:\nnode scripts/check-chat.mjs --dialogue-parity --artifacts .tasks/qa/T-0235",
+      JSON.stringify({ platform: process.platform, electron: process.versions.electron, chromium: process.versions.chrome,
+        node: spawnSync(process.env.TASKBOARD_CHECK_NODE, ["--version"], { encoding: "utf8", windowsHide: true }).stdout.trim() }),
+      "Git HEAD: " + git(["rev-parse", "HEAD"]),
+      "Дерево Git: " + git(["rev-parse", "HEAD^{tree}"]),
+      "SHA-256 файлов в представлении рабочей копии (включая окончания строк):",
+      ...sources.map(path => createHash("sha256").update(readFileSync(join(root, path))).digest("hex") + "  " + path),
+      "Идентификаторы Git blob с применёнными фильтрами Git:",
+      ...sources.map(path => git(["hash-object", "--path=" + path, path]) + "  " + path),
+      ...report,
+    ].join("\n") + "\n");
+    console.log("Dialogue parity Chromium checks passed");
+    return;
+  }
   if (process.argv.includes("--hex-colors-only")) {
     const { clipboard } = await import("electron");
     window.show();
@@ -1006,7 +1245,7 @@ app.whenReady().then(async () => {
       composerInput().dispatchEvent(new Event('input'));
       renderActiveAgents();
     `);
-    await check(`!!composerForm().querySelector('.chat-send .codicon-debug-stop') &&
+    await check(`!!composerForm().querySelector('.chat-send .codicon-stop-circle') &&
       byId('status-agents').querySelector('span').textContent === '1' &&
       byId('status-agents').title.includes('Обсуждения задач: 1') && frame.runningTasks.length === 0`,
       "discussion has stop and a separate role in the total count without an executor");
@@ -1014,11 +1253,11 @@ app.whenReady().then(async () => {
     window.setSize(850, 961);
     await capture('task-discussion.png');
     await evaluate(`frame.replyingTasks = []; taskInSheet.status = 'done'; showTask(); renderActiveAgents()`);
-    await check(`!!composerForm() && !!composerForm().querySelector('.codicon-play') &&
+    await check(`!!composerForm() && !!composerForm().querySelector('.chat-send .codicon-arrow-up') &&
       byId('status-agents').querySelector('span').textContent === '0'`,
       "finished discussion clears the count and a completed card keeps its composer");
     await evaluate(`taskInSheet.status = 'cancelled'; showTask()`);
-    await check(`!!composerForm() && !!composerForm().querySelector('.codicon-play')`,
+    await check(`!!composerForm() && !!composerForm().querySelector('.chat-send .codicon-arrow-up')`,
       "cancelled card keeps discussion available");
     console.log("Executor composer Chromium checks passed: 10");
     return;
@@ -1535,25 +1774,25 @@ app.whenReady().then(async () => {
     };
     void 0;
   `);
-  await check(`!!body.querySelector('.chat-send .codicon-play') && body.querySelector('.chat-send').disabled && !body.querySelector('.chat-send').textContent`, "idle composer uses an accessible play icon");
+  await check(`!!body.querySelector('.chat-send .codicon-arrow-up') && body.querySelector('.chat-send').disabled && !body.querySelector('.chat-send').textContent`, "idle composer uses an accessible send arrow");
   await evaluate(`window.typeMessage('Первое сообщение'); body.querySelector('.chat-composer').requestSubmit()`);
-  await check(`body.querySelector('.chat-log').textContent.includes('Первое сообщение') && !!body.querySelector('.chat-send .codicon-debug-stop') && !body.querySelector('.chat-send').disabled`, "saved message is visible and empty input switches to stop before the reply");
+  await check(`body.querySelector('.chat-log').textContent.includes('Первое сообщение') && !!body.querySelector('.chat-send .codicon-stop-circle') && !body.querySelector('.chat-send').disabled`, "saved message is visible and empty input switches to stop before the reply");
   await capture('chat-stop-thinking.png');
   await evaluate(`window.typeMessage('Новые данные во время размышления')`);
-  await check(`!!body.querySelector('.chat-send .codicon-play') && !body.querySelector('.chat-send').disabled`, "typing during a reply switches stop to enabled play");
+  await check(`!!body.querySelector('.chat-send .codicon-arrow-up') && !body.querySelector('.chat-send').disabled`, "typing during a reply switches stop to enabled send");
   await capture('chat-play-steering.png');
   await evaluate(`body.querySelector('#task-chat-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }))`);
-  await check(`window.sentMessages.length === 2 && window.pendingReplies.length === 1 && body.querySelector('.chat-log').textContent.includes('Новые данные во время размышления') && body.querySelector('#task-chat-input').value === '' && !!body.querySelector('.chat-send .codicon-debug-stop')`, "Ctrl+Enter sends new input immediately, shows it, and leaves the first reply running");
+  await check(`window.sentMessages.length === 2 && window.pendingReplies.length === 1 && body.querySelector('.chat-log').textContent.includes('Новые данные во время размышления') && body.querySelector('#task-chat-input').value === '' && !!body.querySelector('.chat-send .codicon-stop-circle')`, "Ctrl+Enter sends new input immediately, shows it, and leaves the first reply running");
   await capture('chat-steering-saved.png');
   await evaluate(`body.querySelector('.chat-send').click()`);
-  await check(`window.stopCalls === 1 && !!body.querySelector('.chat-send .codicon-play') && body.querySelector('.chat-send').disabled`, "stop interrupts the running reply and resets the composer");
+  await check(`window.stopCalls === 1 && !!body.querySelector('.chat-send .codicon-arrow-up') && body.querySelector('.chat-send').disabled`, "stop interrupts the running reply and resets the composer");
   await evaluate(`
     frame.runningTasks = ['T-0032'];
     body.querySelector('.task-chat').syncAgentState();
   `);
-  await check(`!!body.querySelector('.chat-send .codicon-debug-stop') && !body.querySelector('.chat-send').disabled`, "activity from another window enables stop without a local pending reply");
+  await check(`!!body.querySelector('.chat-send .codicon-stop-circle') && !body.querySelector('.chat-send').disabled`, "activity from another window enables stop without a local pending reply");
   await evaluate(`window.typeMessage('Сохранить черновик'); frame.runningTasks = []; body.querySelector('.task-chat').syncAgentState()`);
-  await check(`body.querySelector('#task-chat-input').value === 'Сохранить черновик' && !!body.querySelector('.chat-send .codicon-play')`, "completion retains a new draft");
+  await check(`body.querySelector('#task-chat-input').value === 'Сохранить черновик' && !!body.querySelector('.chat-send .codicon-arrow-up')`, "completion retains a new draft");
   await evaluate(`api.chatSend = async () => ({ saved: false, result: { ok: false, error: { message: 'Write failed' } } }); body.querySelector('.chat-composer').requestSubmit()`);
   await check(`body.querySelector('#task-chat-input').value === 'Сохранить черновик' && body.querySelector('.chat-status').textContent.includes('Write failed')`, "a save failure retains the draft and displays the error");
   await evaluate(`

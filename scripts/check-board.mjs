@@ -182,7 +182,7 @@ app.whenReady().then(async () => {
           const near = (a, b) => Math.abs(a - b) < 0.05;
           const rect = node => node.getBoundingClientRect();
           assertLayout(innerWidth === 1280 && innerHeight === 800, '1280x800 viewport');
-          const expected = [6, 5, 6, 2];
+          const expected = [6, 5, 5, 2];
           return fixture.board.tasks.map(({ id }, index) => {
             const card = findCard(id);
             const details = card.querySelector('.task-card-details');
@@ -219,6 +219,11 @@ app.whenReady().then(async () => {
               spinner.getAttribute('aria-label') && meta.querySelector('.task-id').textContent === id &&
               meta.querySelector('.task-milestone').title && meta.lastElementChild.textContent === '1',
               id + ': metadata and accessible running indicator');
+            if (id === 'T-0102') {
+              const queued = card.querySelector('.task-card-footer .task-queue-indicator');
+              assertLayout(queued?.getAttribute('aria-label') && rect(queued).left >= rect(meta).right,
+                id + ': accessible queue indicator beside metadata');
+            }
             const milestone = meta.querySelector('.task-milestone-label');
             const themeStyles = getComputedStyle(card);
             assertLayout(themeStyles.backgroundColor === ${JSON.stringify(panel)}, id + ': theme panel color');
@@ -538,35 +543,54 @@ app.whenReady().then(async () => {
       fixture.board.tasks = [queuedTask]; fixture.waitingTasks = [queuedTask.id];
       push(); void 0;
     `);
-    for (const theme of ['light', 'dark']) for (const width of [320, 200]) for (const locale of ['ru', 'en', 'long']) {
+    for (const theme of ['light', 'dark']) {
       nativeTheme.themeSource = theme;
       await evaluate(`waitFor(() => matchMedia('(prefers-color-scheme: dark)').matches === ${theme === 'dark'})`);
-      await evaluate(`
-        fixture.theme = ${JSON.stringify(theme)}; fixture.russian = ${locale !== 'en'};
-        push();
-        {
-        const testCard = findCard('T-0096');
-        renderAgentRunStatus(testCard.querySelector('.task-run-status'), queuedTask);
-        testCard.style.width = '${width}px'; testCard.style.maxWidth = 'none';
-        if (${locale === 'long'}) testCard.querySelector('.task-run-status').textContent =
-          'Waiting for an available executor with the requested runtime profile. '.repeat(3) + 'W'.repeat(100);
+      for (const width of [320, 200, 136]) {
+        for (const locale of ['ru', 'en']) {
+          await evaluate(`
+            fixture.theme = ${JSON.stringify(theme)};
+            fixture.russian = ${locale === 'ru'};
+            push();
+            findCard('T-0096').style.width = '${width}px';
+            void 0;
+          `);
+          const label = locale === 'ru' ? 'В очереди' : 'Waiting for an available executor';
+          await check(`(() => {
+            const card = findCard('T-0096');
+            const footer = card.querySelector('.task-card-footer');
+            const status = footer?.querySelector('.task-run-status');
+            const indicator = status?.querySelector('.task-queue-indicator');
+            const meta = footer?.querySelector('.task-meta');
+            if (!indicator || !meta) return false;
+            const statusRect = status.getBoundingClientRect();
+            const footerRect = footer.getBoundingClientRect();
+            const metaRect = meta.getBoundingClientRect();
+            return card.querySelectorAll('.task-run-status').length === 1 &&
+              indicator.getAttribute('role') === 'img' &&
+              indicator.getAttribute('aria-label') === ${JSON.stringify(label)} &&
+              indicator.title === ${JSON.stringify(label)} &&
+              !card.innerText.includes(indicator.title) &&
+              statusRect.left >= metaRect.right && statusRect.right === footerRect.right &&
+              statusRect.bottom === footerRect.bottom && statusRect.top < metaRect.bottom &&
+              card.scrollWidth <= card.clientWidth + 1 && meta.scrollWidth <= meta.clientWidth + 1 &&
+              meta.querySelector('.task-id')?.textContent === 'T-0096' &&
+              meta.querySelector('.task-milestone-label')?.textContent === queuedTask.milestone.title &&
+              meta.querySelector('.codicon-attach')?.parentElement.textContent === '1';
+          })()`, `queued indicator beside metadata: ${theme}, ${width}px, ${locale}`);
+          if (keepArtifacts && theme === 'light' && locale === 'ru') {
+            await capture(`waiting-${width}.png`);
+          }
         }
-        void 0;
-      `);
-      await check(`(() => {
-        const card = findCard('T-0096'), status = card.querySelector('.task-run-status');
-        const meta = card.querySelector('.task-meta'), details = status.parentElement;
-        const s = status.getBoundingClientRect(), m = meta.getBoundingClientRect();
-        return details.classList.contains('task-card-details') && status.nextElementSibling === meta &&
-          s.bottom <= m.top && s.width >= details.clientWidth - 25 &&
-          status.scrollWidth <= status.clientWidth + 1 && card.scrollWidth <= card.clientWidth + 1 &&
-          meta.scrollWidth <= meta.clientWidth + 1 && !meta.querySelector('.task-run-status') &&
-          (status.textContent.startsWith('Waiting') || status.textContent === 'В очереди');
-      })()`, `full-width waiting block: ${theme}, ${width}px, ${locale}, long milestone and attachments`);
-      if (keepArtifacts && theme === 'light' && width === 200 && locale === 'ru') await capture('waiting-200.png');
+      }
     }
-    await evaluate(`fixture.russian = true; fixture.waitingTasks = []; push(); void 0`);
-    await check(`findCard('T-0096').querySelector('.task-run-status').textContent === 'Запуск с доски не активен'`, 'dequeue replaces waiting with inactive status');
+    await evaluate(`fixture.russian = true; fixture.quotaTasks = ['T-0096']; push(); void 0`);
+    await check(`!findCard('T-0096').querySelector('.task-queue-indicator') &&
+      findCard('T-0096').querySelector('.task-run-status').textContent === quotaLabel()`, 'quota takes precedence over waiting');
+    await evaluate(`fixture.quotaTasks = []; fixture.waitingTasks = []; push(); void 0`);
+    await check(`!findCard('T-0096').querySelector('.task-queue-indicator') &&
+      findCard('T-0096').querySelector('.task-run-status').textContent === 'Запуск с доски не активен'`,
+    'dequeue replaces the indicator with inactive status');
     await evaluate(`fixture.waitingTasks = ['T-0096']; fixture.runningTasks = ['T-0096']; push(); void 0`);
     for (const width of [320, 136]) {
       await evaluate(`findCard('T-0096').style.width = '${width}px'; void 0`);
@@ -583,7 +607,7 @@ app.whenReady().then(async () => {
         const bar = progress?.firstElementChild;
         const b = bar?.getBoundingClientRect();
         return footer.classList.contains('task-card-footer') && details.querySelectorAll('.task-run-status').length === 1 &&
-          spinner?.getAttribute('role') === 'status' &&
+          !status.querySelector('.task-queue-indicator') && spinner?.getAttribute('role') === 'status' &&
           spinner.getAttribute('aria-label') === t('ui.agent_is_working_28ccd334') &&
           (s.left >= m.right || s.top >= m.bottom) && s.right === f.right && s.bottom === f.bottom &&
           progress?.children.length === 1 && progress.nextElementSibling === footer &&
@@ -616,7 +640,14 @@ app.whenReady().then(async () => {
     await evaluate(`fixture.reviewingTasks = {}; fixture.board.tasks[0].mergeRepair = {}; fixture.board.tasks[0].revision++; push(); void 0`);
     await check(`!byId('task-agent-run')?.querySelector('.agent-spinner')`, 'open task title clears the indicator when activity ends');
     await check(`findCard('T-0096').querySelector('.task-run-status').textContent === t('ui.waiting_for_a_reviewer_slot_8918dd95')`, 'repair queue retains reviewer waiting label');
-    await evaluate(`fixture.waitingTasks = []; fixture.board.tasks[0].status = 'ready'; fixture.board.tasks[0].revision++; push(); void 0`);
+    await evaluate(`
+      fixture.waitingTasks = [];
+      delete queuedTask.mergeRepair;
+      queuedTask.status = 'ready';
+      queuedTask.revision++;
+      push();
+      void 0;
+    `);
     await check(`findCard('T-0096').querySelector('.task-card-details').lastElementChild.classList.contains('task-meta') &&
       !findCard('T-0096').querySelector('.task-run-status, .task-card-footer')`, 'inactive card has no extra row when status has no run label');
     await evaluate(`sheet.close(); settle()`);
@@ -626,7 +657,8 @@ app.whenReady().then(async () => {
       push(); void 0`);
     await check(`!findCard('T-0096').querySelector('.task-run-status')`, 'occupied slots alone do not imply waiting');
     await evaluate(`fixture.waitingTasks = ['T-0096']; push(); void 0`);
-    await check(`findCard('T-0096').querySelector('.task-run-status').nextElementSibling.classList.contains('task-meta')`, 'ready task without optional metadata also has a separate waiting block');
+    await check(`!!findCard('T-0096').querySelector('.task-card-footer .task-queue-indicator')`,
+      'ready task without optional metadata has the same footer indicator');
     console.log('Run status Chromium checks passed: ' + checks);
     return;
   }
@@ -2870,10 +2902,10 @@ app.whenReady().then(async () => {
   await evaluate(`fixture.runningTasks = ['T-0001', 'T-0002']; push(); void 0`);
   await check(`byId('task-agent-run').textContent === 'Запуск с доски не активен'`, "occupied slots do not mark an interrupted task as queued");
   await evaluate(`fixture.waitingTasks = [interrupted.id]; push(); void 0`);
-  await check(`findCard(interrupted.id).querySelector('.task-run-status').textContent === 'В очереди' && byId('task-agent-run').textContent === 'В очереди' && !!byId('task-stop-waiting')`, "confirmed queue and its stop button are visible in Russian");
+  await check(`findCard(interrupted.id).querySelector('.task-queue-indicator').title === 'В очереди' && byId('task-agent-run').textContent === 'В очереди' && !!byId('task-stop-waiting')`, "confirmed queue and its stop button are visible in Russian");
   await capture("executor-waiting-ru.png");
   await evaluate(`fixture.russian = false; push(); void 0`);
-  await check(`findCard(interrupted.id).querySelector('.task-run-status').textContent === 'Waiting for an available executor' && byId('task-agent-run').textContent === 'Waiting for an available executor'`, "confirmed queue is visible in English in both views");
+  await check(`findCard(interrupted.id).querySelector('.task-queue-indicator').title === 'Waiting for an available executor' && byId('task-agent-run').textContent === 'Waiting for an available executor'`, "confirmed queue is visible in English in both views");
   await capture("executor-waiting-en.png");
   await evaluate(`fixture.waitingTasks = []; push(); void 0`);
   await check(`byId('task-agent-run').textContent === 'Board run inactive' && findCard(interrupted.id).querySelector('.task-run-status').textContent === 'Board run inactive'`, "removing the queued request clears both views");

@@ -58,7 +58,7 @@ import { createAgentSlots, desktopAppName, parseAgentLimits, readProfileTaskLimi
 import { nextReadyTask } from "./auto-queue.ts";
 import { automationDelivery } from "./automation-delivery.ts";
 import type { AgentRole } from "./agent-limits.ts";
-import { checkForUpdates } from "./updates.ts";
+import { ApplicationUpdates, applicationUpdateTools, prepareWindowsUpdate } from "./installation-updates.ts";
 import { settingsDelivery, syncSettingsNotices } from "./settings-notices.ts";
 
 interface Board {
@@ -532,14 +532,17 @@ async function loadProject(owner: WindowState, state: ProjectTab, project: strin
 let restoringSession = false;
 let quitting = false;
 
-function saveSession(): void {
-  if (restoringSession || quitting || !windowStates.size) return;
+function saveSession(): boolean {
+  if (restoringSession || quitting || !windowStates.size) {
+    return false;
+  }
   try {
     const directory = app.getPath("userData");
     mkdirSync(directory, { recursive: true });
     writeJson(join(directory, "project-tabs.json"), [...windowStates.values()].map(state => ({
       projects: state.tabs.flatMap(tab => tab.project ? [tab.project] : []), active: state.active.project,
     })));
+    return true;
   } catch (error) {
     const state = [...windowStates.values()].find(state => !state.window.isDestroyed());
     if (state) {
@@ -547,6 +550,7 @@ function saveSession(): void {
         message: t("ui.could_not_save_open_projects_ca8ee196") + " " + (error as Error).message };
       send(state.active);
     }
+    return false;
   }
 }
 
@@ -559,6 +563,58 @@ interface ProjectOperation {
 }
 const projectOperations = new Map<string, Set<ProjectOperation>>();
 const closingProjects = new Set<string>();
+let updateOwner: ProjectOperation | undefined;
+let updateProject: string | undefined;
+
+function updateBusy() {
+  if ([...projectOperations.values()].some(operations => [...operations].some(operation => operation !== updateOwner))) {
+    return true;
+  }
+  return [...subscriptions.keys()].some(project => {
+    const entries = agentSlots.entries(project);
+    const own = new Set(updateOwner && project === updateProject ? entries.filter(entry =>
+      entry.owner === process.pid && entry.task === "manager:dialogue").map(entry => entry.id) : []);
+    // Provider and turn leases belong to the manager's context through parent IDs.
+    // They are part of the reply that must finish before normal shutdown.
+    for (let previous = -1; previous !== own.size;) {
+      previous = own.size;
+      for (const entry of entries) {
+        if (entry.owner === process.pid && entry.parent && own.has(entry.parent)) {
+          own.add(entry.id);
+        }
+      }
+    }
+    return entries.some(entry => !["defaults", "queue"].includes(entry.kind) && !own.has(entry.id));
+  });
+}
+
+const applicationUpdates = new ApplicationUpdates({
+  version: () => app.getVersion(),
+  supported: () => process.platform === "win32" && app.isPackaged && ["x64", "arm64"].includes(process.arch) &&
+    !process.env.PORTABLE_EXECUTABLE_DIR && existsSync(join(dirname(process.execPath), "Uninstall " + basename(process.execPath))),
+  busy: updateBusy,
+  confirm: async (version, signal) => {
+    const result = await dialog.showMessageBox({ type: "question", title: "AI Taskboard",
+      message: t("updates.install_confirm", { version }), detail: t("updates.install_detail"),
+      buttons: [t("ui.cancel_4c6dcc32"), t("updates.install_button")], defaultId: 0, cancelId: 0, noLink: true, signal });
+    return result.response === 1;
+  },
+  prepare: (candidate, signal) => {
+    const args: string[] = [];
+    for (let index = 1; index < process.argv.length; index++) {
+      const argument = process.argv[index];
+      if (argument === "--project" || argument === "--user-data-dir") {
+        index++;
+        continue;
+      }
+      if (!argument.startsWith("--user-data-dir=")) {
+        args.push(argument);
+      }
+    }
+    return prepareWindowsUpdate(candidate, signal, { arch: process.arch, executable: process.execPath,
+      profile: app.getPath("userData"), args, relaunch: (execPath, args) => app.relaunch({ execPath, args }) });
+  },
+});
 
 function beginOperation(project: string, label?: string, agent = false) {
   if (closingProjects.has(project)) throw new Error(t("ui.the_project_is_closing_beb637fb"));
@@ -886,6 +942,9 @@ async function saveTaskTokenUsage(project: string, id: string, role: TaskUsageRo
 
 async function sendChat(project: string, id: string, request: ChatRequest, notify: (update: ChatUpdate) => void,
   automatic?: NonNullable<Task["draftDiscussion"]>["phase"], chatWindow?: number) {
+  if (applicationUpdates.installing) {
+    return { saved: false, result: cliFailure("UPDATE_IN_PROGRESS", t("updates.preparing")) };
+  }
   const key = project + "\0" + id;
   const active = activeAgents.get(key);
   if (quotaWait) return { saved: false, result: quotaFailure() };
@@ -1200,6 +1259,9 @@ const autoBoards = new WeakMap<BoardWatch, {
 let schedulingAgentWork = false;
 
 function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
+  if (applicationUpdates.installing) {
+    return;
+  }
   if (quotaWait) return;
   const { project } = watch.board;
   const planned = (task: Board["tasks"][number], settings: BoardSettings) => task.mergeRepair || task.expertStage ||
@@ -1374,6 +1436,9 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
 const queuedRecoveryDelay = new Set<string>();
 
 function scheduleAgentWork() {
+  if (applicationUpdates.installing) {
+    return;
+  }
   if (schedulingAgentWork) return;
   schedulingAgentWork = true;
   setImmediate(() => {
@@ -1428,6 +1493,9 @@ function scheduleAgentWork() {
 }
 
 function scheduleDraftDiscussions({ board }: BoardWatch) {
+  if (applicationUpdates.installing) {
+    return;
+  }
   const { project, tasks } = board;
   if (isManual(board.settings) || closingProjects.has(project)) return;
   const writers = new Set(agentSlots.entries(project).filter(entry => entry.kind !== "queue").map(entry => entry.task));
@@ -1440,6 +1508,9 @@ function scheduleDraftDiscussions({ board }: BoardWatch) {
 
 function reserveAgent(project: string, role: AgentRole, task?: string, queuedRevision?: number,
   review?: { id: string; mode: ReviewMode }, operation?: import("./board-runtime.ts").RuntimeEntry["operation"]) {
+  if (applicationUpdates.installing) {
+    return;
+  }
   if (quotaWait) return;
   agentSlots.remember(project);
   // A tool call can race the watch snapshot after CLI settings were saved.
@@ -1540,6 +1611,9 @@ async function continueAcceptance(project: string, task: Task) {
 
 const maintenanceWork = new Set<string>();
 async function scheduleMaintenance(project: string, watch: BoardWatch) {
+  if (applicationUpdates.installing) {
+    return;
+  }
   if (maintenanceWork.has(project)) return;
   maintenanceWork.add(project);
   try {
@@ -1556,6 +1630,9 @@ async function scheduleMaintenance(project: string, watch: BoardWatch) {
 }
 
 function scheduleRecurringTasks(now = Date.now()) {
+  if (applicationUpdates.installing) {
+    return;
+  }
   if (quotaWait) return;
   for (const [project, watch] of subscriptions) {
     if (!watch.tabs.size || closingProjects.has(project)) continue;
@@ -1949,6 +2026,9 @@ async function resumeBoardGoal(sender: Electron.WebContents, board: Board, objec
 }
 
 async function changeBoardGoal(project: string, key: string, action: BoardGoalAction) {
+  if (applicationUpdates.installing) {
+    return cliFailure("UPDATE_IN_PROGRESS", t("updates.preparing"));
+  }
   const running = boardWorkRequests.get(key);
   const busy = () => cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_agent_is_already_handling_a_request_72b4da49"));
   let writer: ReturnType<typeof agentSlots.claim>;
@@ -2032,6 +2112,9 @@ ipcMain.handle("board:request", async (event, request: unknown, files: unknown =
 
 async function runBoardRequest(sender: Electron.WebContents, board: Board | undefined, request: unknown, files: unknown = [],
   goal: unknown = false, immediate: unknown = false, messageId?: unknown, reviewIds?: string[], expectedReviewMode?: ReviewMode, autoNotice = false, repairTask?: Task, cleanupJob?: MaintenanceJob, goalRunId?: string) {
+  if (applicationUpdates.installing) {
+    return cliFailure("UPDATE_IN_PROGRESS", t("updates.preparing"));
+  }
   if (!board || typeof request !== "string" || typeof immediate !== "boolean" || (immediate && goal !== false) || !Array.isArray(files) ||
       (messageId !== undefined && (typeof messageId !== "string" || !codexThreadPattern.test(messageId))) ||
       !files.every(isPastedFile) || (goal === "resume" ? Boolean(request.trim() || files.length) :
@@ -2461,6 +2544,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       (!repairTask || (!name.startsWith("project_git_") &&
         !["task_start", "task_start_batch", "task_accept", "task_request_changes", "task_return_to_draft"].includes(name))));
     if (!reviewIds && !cleanupJob) mcpTools.push(...(goal ? goalWorkTools : background ? [] : goalChatTools), githubReadTool);
+    if (!reviewIds && !cleanupJob && !repairTask && !goal && !background) {
+      mcpTools.push(...applicationUpdateTools);
+    }
     const allowReviewModeChange = !background && !goal && !isManual(settings.data);
     if (allowReviewModeChange) mcpTools.push(boardReviewModeTool);
     if (goal) mcpTools = goalActionTools(mcpTools);
@@ -2623,6 +2709,29 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
             }
           }
           if (name === "ask_user") return askUser(args);
+          if (applicationUpdateTools.some(tool => tool.name === name)) {
+            if (!mcpTools.some(tool => tool.name === name)) {
+              return cliFailure("INVALID_INPUT", "Use the owner's manager dialogue for application updates.");
+            }
+            if (name === "app_check_updates") {
+              return applicationUpdates.check();
+            }
+            if (applicationUpdates.installing) {
+              return cliFailure("UPDATE_IN_PROGRESS", t("updates.preparing"));
+            }
+            updateOwner = operation;
+            updateProject = project;
+            const result = await applicationUpdates.install((args as { version?: unknown } | null)?.version,
+              toolSignal ? AbortSignal.any([signal, toolSignal]) : signal);
+            if (!applicationUpdates.prepared) {
+              updateOwner = undefined;
+              updateProject = undefined;
+            }
+            return result;
+          }
+          if (applicationUpdates.installing) {
+            return cliFailure("UPDATE_IN_PROGRESS", t("updates.preparing"));
+          }
           if (name === githubReadTool.name) return readBoardGitHub(board.project, args);
           if (name.startsWith("goal_")) {
             try { return goalAction(name, args) ?? cliFailure("INVALID_INPUT", t("errors.63a61aea5ed6f41a")); }
@@ -2930,6 +3039,24 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     running.managerRun = undefined;
     broadcastRun();
     operation.finish();
+    if (updateOwner === operation && applicationUpdates.prepared) {
+      updateOwner = undefined;
+      updateProject = undefined;
+      setImmediate(() => {
+        void (async () => {
+          if (signal.aborted || updateBusy() || !saveSession()) {
+            await applicationUpdates.cancel();
+            return;
+          }
+          try {
+            app.quit();
+          } catch (error) {
+            await applicationUpdates.cancel();
+            await dialog.showMessageBox({ type: "error", title: "AI Taskboard", message: String(error) });
+          }
+        })();
+      });
+    }
     if (threadId || historyAccepted || items.length) {
       broadcastMaintenanceSafe(project, "orchestrator-work-history");
       if (lane === "chat") broadcastMaintenanceSafe(project, "orchestrator-history");
@@ -2940,6 +3067,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
 }
 
 function scheduleAutoReview(watch: BoardWatch) {
+  if (applicationUpdates.installing) {
+    return;
+  }
   if (quotaWait) return;
   if (isManual(watch.board.settings)) return;
   if (subscriptions.get(watch.board.project) !== watch) return;
@@ -3011,6 +3141,9 @@ function scheduleAutoReview(watch: BoardWatch) {
 }
 
 async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: number, expectedMode: ReviewMode) {
+  if (applicationUpdates.installing) {
+    return;
+  }
   const { board: { project }, reviewReports: reports } = watch;
   const key = project + "\0" + id;
   if (returningDrafts.has(key)) return;
@@ -3206,11 +3339,7 @@ ipcMain.handle("board:recent", async (event, path: unknown) => {
 });
 ipcMain.handle("app:checkUpdates", async event => {
   stateOf(event);
-  try {
-    return { ok: true, data: await checkForUpdates(app.getVersion()) };
-  } catch (error) {
-    return cliFailure("UPDATE_CHECK_FAILED", error instanceof Error ? error.message : String(error));
-  }
+  return applicationUpdates.check();
 });
 ipcMain.handle("appearance:themes", event => {
   stateOf(event);
@@ -3608,6 +3737,9 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   newThread: false | "user" | "manager" = false, revision?: number,
   continuation: ExecutorContinuation = {}, scheduled = false, resolveConflicts = false, resumeWithFullAccess = false,
   autoMode = false, manual = false, autoQueueRevision?: number, queuedRevision?: number, discussionReturn?: number): Promise<CliReply<LaunchState>> {
+  if (applicationUpdates.installing) {
+    return cliFailure("UPDATE_IN_PROGRESS", t("updates.preparing"));
+  }
   if (quotaWait) return quotaFailure();
   if (manual && queuedRevision === undefined) {
     queuedRevision = agentSlots.entries(project).find(entry => entry.kind === "queue" && entry.task === id && entry.quotaPaused)?.revision;
@@ -4285,10 +4417,31 @@ else {
     if (quitPending) return;
     quitPending = true;
     void (async () => {
-      for (const state of windowStates.values()) {
-        if (state.closing || !await confirmProjectClose(state, state.tabs)) return;
+      if (applicationUpdates.prepared && updateBusy()) {
+        await applicationUpdates.cancel();
+        return;
       }
-      saveSession();
+      for (const state of windowStates.values()) {
+        if (state.closing || !await confirmProjectClose(state, state.tabs)) {
+          if (applicationUpdates.prepared) {
+            await applicationUpdates.cancel();
+          }
+          return;
+        }
+      }
+      if (!saveSession() && applicationUpdates.prepared) {
+        await applicationUpdates.cancel();
+        return;
+      }
+      if (applicationUpdates.prepared) {
+        try {
+          await applicationUpdates.prepared.start();
+        } catch (error) {
+          await applicationUpdates.cancel();
+          await dialog.showMessageBox({ type: "error", title: "AI Taskboard", message: String(error) });
+          return;
+        }
+      }
       quitting = true;
       app.quit();
     })().finally(() => { quitPending = false; });

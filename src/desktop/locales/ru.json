@@ -1303,5 +1303,9 @@
   "experts.review_lead": "Назначить ответственного за ревью",
   "experts.add_review_stage": "Добавить этап ревью",
   "ui.waiting_for_provider_quota": "Ожидание квоты провайдера",
-  "ui.waiting_for_provider_quota_until": "Ожидание квоты провайдера · сброс {time}"
+  "ui.waiting_for_provider_quota_until": "Ожидание квоты провайдера · сброс {time}",
+  "updates.install_confirm": "Установить AI Taskboard {version} и перезапустить приложение?",
+  "updates.install_detail": "Официальный установщик Windows будет проверен по SHA-256 из манифеста выпуска. Профиль и открытые доски сохранятся.",
+  "updates.install_button": "Установить и перезапустить",
+  "updates.preparing": "Готовится обновление приложения. Повторите после перезапуска или отмены."
 }

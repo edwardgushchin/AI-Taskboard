@@ -1219,5 +1219,9 @@
   "limits.work": "Aufgaben in Arbeit",
   "limits.review": "Aufgaben in Prüfung",
   "experts.review_lead": "Prüfleitung zuweisen",
-  "experts.add_review_stage": "Prüfschritt hinzufügen"
+  "experts.add_review_stage": "Prüfschritt hinzufügen",
+  "updates.install_confirm": "AI Taskboard {version} installieren und neu starten?",
+  "updates.install_detail": "Das offizielle Windows-Installationsprogramm wird anhand des SHA-256-Manifests geprüft. Profil und geöffnete Boards bleiben erhalten.",
+  "updates.install_button": "Installieren und neu starten",
+  "updates.preparing": "Eine Aktualisierung wird vorbereitet. Nach Neustart oder Abbruch erneut versuchen."
 }

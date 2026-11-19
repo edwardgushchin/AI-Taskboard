@@ -1219,5 +1219,9 @@
   "limits.work": "Attività in corso",
   "limits.review": "Attività in revisione",
   "experts.review_lead": "Assegna responsabile della revisione",
-  "experts.add_review_stage": "Aggiungi fase di revisione"
+  "experts.add_review_stage": "Aggiungi fase di revisione",
+  "updates.install_confirm": "Installare AI Taskboard {version} e riavviare?",
+  "updates.install_detail": "Il programma di installazione ufficiale di Windows sarà verificato con il manifesto SHA-256 della versione. Il profilo e le bacheche aperte saranno conservati.",
+  "updates.install_button": "Installa e riavvia",
+  "updates.preparing": "È in preparazione un aggiornamento. Riprova dopo il riavvio o l’annullamento."
 }

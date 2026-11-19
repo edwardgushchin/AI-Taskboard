@@ -1287,5 +1287,9 @@
   "experts.review_lead": "Assign review lead",
   "experts.add_review_stage": "Add review stage",
   "ui.waiting_for_provider_quota": "Waiting for provider quota",
-  "ui.waiting_for_provider_quota_until": "Waiting for provider quota · resets {time}"
+  "ui.waiting_for_provider_quota_until": "Waiting for provider quota · resets {time}",
+  "updates.install_confirm": "Install AI Taskboard {version} and restart?",
+  "updates.install_detail": "The official Windows installer will be checked against the release SHA-256 manifest. Your profile and open boards will be preserved.",
+  "updates.install_button": "Install and restart",
+  "updates.preparing": "An application update is being prepared. Try again after the restart or cancellation."
 }
