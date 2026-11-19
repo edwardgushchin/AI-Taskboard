@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -13,6 +13,7 @@ assert.equal(process.platform, "win32", "This check installs Windows NSIS packag
 const require = createRequire(import.meta.url);
 const root = fileURLToPath(new URL("../", import.meta.url));
 const outputOption = process.argv.indexOf("--artifacts");
+const pollScenario = process.argv.includes("--poll");
 assert.ok(outputOption >= 0, "Supply --artifacts with a review directory.");
 const artifacts = resolve(process.argv[outputOption + 1]);
 mkdirSync(artifacts, { recursive: true });
@@ -37,7 +38,7 @@ if (!process.env.TASKBOARD_UPDATE_QA_SCRATCH) {
             directory], { cwd: tmpdir(), windowsHide: true, stdio: "inherit" });
         assert.equal(cleanup.status, 0, "Temporary QA directory cleanup failed");
         assert.equal(existsSync(directory), false);
-        const path = join(artifacts, "update-install-report.json");
+        const path = join(artifacts, pollScenario ? "update-poll-report.json" : "update-install-report.json");
         if (existsSync(path)) {
             const report = JSON.parse(readFileSync(path, "utf8"));
             report.cleanupScratchRemoved = true;
@@ -63,6 +64,10 @@ record.seams = ["QA-only bootstrap substitutes release HTTP responses and the mo
     "Unique appId/executableName isolate installed product; NSIS PATH hooks and desktop/start-menu shortcuts are disabled in QA only. Process safety hook is retained.",
     "QA packages omit Huggingface and bundled standalone CLI; board CLI calls use the packaged Electron Node runtime. No code signing or live official release download is verified.",
     "Confirmation responses are deterministic through dialog.showMessageBox; the before/after PNGs show the real manager conversation."];
+if (pollScenario) {
+    record.seams[3] = "The initial poll uses its production 5-second delay. QA advances the recurring interval from 60 minutes to 1 second; update UI actions, installation and restart run unchanged.";
+    record.command = "node scripts/check-update-install.mjs --poll --artifacts .tasks/qa/T-0232";
+}
 record.testedCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8", windowsHide: true }).trim();
 record.gitStatusBefore = execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8", windowsHide: true }).trim();
 const sha = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -121,22 +126,289 @@ const note = text => {
     record.checks.push(text);
     console.log(text);
 };
+
+function updateDialogState() {
+    const get = id => document.getElementById(id);
+    const box = element => {
+        const { x, y, width, height } = element.getBoundingClientRect();
+        return { x, y, width, height };
+    };
+    const button = get("app-update");
+    const dialog = get("update-dialog");
+    const notes = get("update-notes");
+    const progress = get("update-progress");
+    const confirm = get("update-action");
+    return {
+        advertised: !button.hidden,
+        button: box(button),
+        settings: box(get("app-settings")),
+        accessibleName: button.getAttribute("aria-label"),
+        open: dialog.open,
+        modal: dialog.matches(":modal"),
+        viewport: { width: innerWidth, height: innerHeight },
+        dialog: box(dialog),
+        title: get("update-title").textContent,
+        notes: notes.textContent,
+        listEntries: notes.querySelectorAll("li").length,
+        unsafe: Boolean(notes.querySelector("script, img, iframe") || window.qaReleaseScriptExecuted),
+        scroll: { top: notes.scrollTop, height: notes.clientHeight, content: notes.scrollHeight },
+        status: get("update-status").textContent,
+        progress: progress.hidden ? null : { value: progress.value, max: progress.max },
+        action: confirm.hidden ? null : { text: confirm.textContent, box: box(confirm) },
+        later: { text: get("update-later").textContent, box: box(get("update-later")) },
+        release: get("update-release").href,
+    };
+}
+
+function updateTriggerStyle() {
+    const trigger = document.getElementById("app-update");
+    const style = getComputedStyle(trigger);
+    const glyph = getComputedStyle(trigger.querySelector(".icon"), "::before");
+    const context = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+    const rgba = color => {
+        context.clearRect(0, 0, 1, 1);
+        context.fillStyle = color;
+        context.fillRect(0, 0, 1, 1);
+        return [...context.getImageData(0, 0, 1, 1).data];
+    };
+    return {
+        diameter: [trigger.offsetWidth, trigger.offsetHeight],
+        radius: style.borderRadius,
+        background: rgba(style.backgroundColor),
+        foreground: rgba(glyph.color),
+        glyphFont: glyph.fontFamily,
+        focused: trigger === document.activeElement,
+        focusVisible: trigger.matches(":focus-visible"),
+        hovered: trigger.matches(":hover"),
+        outline: [style.outlineStyle, style.outlineWidth, style.outlineColor],
+        shadow: style.boxShadow,
+    };
+}
+
+function luminance([red, green, blue]) {
+    const linear = channel => {
+        const normalized = channel / 255;
+        return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+    };
+    return linear(red) * 0.2126 + linear(green) * 0.7152 + linear(blue) * 0.0722;
+}
+
+async function checkTriggerAppearance(run, capture) {
+    const appearance = () => run(`(${updateTriggerStyle.toString()})()`);
+    record.triggerAppearance = {};
+    for (const theme of ["light", "dark"]) {
+        await command({ action: "move-pointer-away" });
+        await run("document.activeElement.blur()");
+        await capture("trigger", theme);
+        const rest = await appearance();
+        const [width, height] = rest.diameter;
+        assert.ok(width > 20 && width === height);
+        const radius = rest.radius.endsWith("%")
+            ? Number.parseFloat(rest.radius) * width / 100
+            : Number.parseFloat(rest.radius);
+        assert.ok(radius >= width / 2);
+        const gold = theme === "light" ? [237, 190, 101, 255] : [232, 175, 87, 255];
+        assert.deepEqual(rest.background, gold);
+        assert.match(rest.glyphFont, /codicon/i);
+        const contrast = [luminance(rest.background), luminance(rest.foreground)].sort((a, b) => b - a);
+        const contrastRatio = (contrast[0] + 0.05) / (contrast[1] + 0.05);
+        assert.ok(contrastRatio >= 3, JSON.stringify(rest));
+        assert.ok(!rest.focused && !rest.hovered);
+        await command({ action: "previous-tab", elementId: "app-settings" });
+        const focus = await appearance();
+        assert.ok(focus.focused && focus.focusVisible, JSON.stringify(focus));
+        assert.ok(JSON.stringify(focus.outline) !== JSON.stringify(rest.outline) || focus.shadow !== rest.shadow);
+        record.triggerAppearance[theme] = { rest, focus, contrastRatio };
+    }
+    note("The closed-dialog captures show a circular gold button at rest, with a Codicons glyph. Both themes passed the 3:1 glyph contrast check and Shift+Tab showed keyboard focus.");
+}
+
+async function checkPoll(mode, uninstaller, executable, child, before) {
+    const run = (code, second = false) => command({ action: "execute", code, second });
+    const state = (second = false) => run(`(${updateDialogState.toString()})()`, second);
+    const network = () => command({ action: "network" });
+    const click = (id, second = false) => command({ action: "click", elementId: id, second });
+    const waitState = (label, predicate, second = false) => until(async () => {
+        const answer = await state(second);
+        return predicate(answer) && answer;
+    }, label, 15000);
+    const waitNetwork = (label, predicate) => until(async () => {
+        const counters = await network();
+        return predicate(counters) && counters;
+    }, label, 15000);
+    const setTheme = async theme => {
+        await run(`window.taskboard.setTheme(${JSON.stringify(theme)})`);
+        await until(() => run(`document.documentElement.dataset.palette === ${JSON.stringify(theme)}`), "selected palette");
+        await run("paletteTransition?.finished");
+    };
+    const capture = async (stateName, theme) => {
+        await setTheme(theme);
+        if (stateName !== "trigger") {
+            await run("document.getElementById('update-notes').scrollTop = 0");
+        }
+        return command({ action: "capture-poll", name: `update-${stateName}-${theme}.png` });
+    };
+    const center = view => {
+        assert.ok(view.modal);
+        assert.ok(Math.abs(view.dialog.x + view.dialog.width / 2 - view.viewport.width / 2) <= 2, JSON.stringify(view.dialog));
+        assert.ok(Math.abs(view.dialog.y + view.dialog.height / 2 - view.viewport.height / 2) <= 2, JSON.stringify(view.dialog));
+    };
+
+    await waitNetwork("initial production poll", value => value.releases >= 1);
+    assert.equal((await state()).advertised, false);
+    const firstPoll = await network();
+    mode("normal");
+    const offered = await waitState("next poll advertises the new version", view => view.advertised);
+    assert.equal(offered.open, false);
+    assert.match(offered.accessibleName, new RegExp(newVersion));
+    const gap = offered.settings.y - offered.button.y - offered.button.height;
+    assert.ok(gap >= -1 && gap <= 12, JSON.stringify(offered.button));
+    assert.ok(Math.abs(offered.button.x + offered.button.width / 2 - offered.settings.x - offered.settings.width / 2) <= 1);
+    assert.ok((await network()).releases > firstPoll.releases);
+    await checkTriggerAppearance(run, capture);
+    mode("offline");
+    const offlineStart = await network();
+    await waitNetwork("offline background poll", value => value.releases > offlineStart.releases && !value.activeReleases);
+    const offline = await state();
+    assert.ok(offline.advertised);
+    assert.ok(!offline.open);
+    mode("current");
+    await waitState("current release clears indicator after recovery", view => !view.advertised);
+    note("Initial current release hid the button. A later background tick showed the new version in the open window. An offline tick kept the indicator and opened no dialog. Recovery with the current version hid it again.");
+
+    await command({ action: "new-window" });
+    assert.equal(await run("window.taskboard.bootstrap().then(frame => Boolean(frame.board))", true), false);
+    mode("hold-release");
+    const held = await waitNetwork("hold one background request", value => value.activeReleases === 1);
+    await command({ action: "manual-checks" });
+    // Two scheduled ticks elapse while the in-flight request and both manual checks are held.
+    await delay(2100);
+    const concurrent = await network();
+    assert.equal(concurrent.releases, held.releases);
+    assert.equal(concurrent.peakReleases, 1);
+    mode("no-notes");
+    await waitState("notes-free release reaches second window", view => view.advertised, true);
+
+    // Temporarily remove the support marker from the unique isolated installation.
+    const hiddenUninstaller = uninstaller + ".qa-hidden";
+    renameSync(uninstaller, hiddenUninstaller);
+    try {
+        await until(() => run("window.taskboard.updateState().then(state => !state.supported && state.candidate?.notes === '')", true), "manual-only installation state and empty release notes");
+        // Wait for the next poll to broadcast the updated support marker to both renderers.
+        await delay(1100);
+        await command({ action: "enter", elementId: "app-update", second: true });
+        const manual = await state(true);
+        assert.ok(manual.open, JSON.stringify(manual));
+        assert.equal(manual.action, null);
+        assert.match(manual.notes, /списка изменений/i);
+        assert.match(manual.release, new RegExp("/tag/v" + newVersion + "$"));
+        center(manual);
+        await click("update-later", true);
+    } finally {
+        renameSync(hiddenUninstaller, uninstaller);
+    }
+    assert.deepEqual(await until(() => readJson(join(control, "manual-checks.json")), "joined manual checks"), [true, true]);
+    note("Two windows and two manual checks shared the held background request. Enter opened the centered dialog in a board-free window. The manual-only client displayed the missing-notes message and release link.");
+
+    mode("normal");
+    await click("app-update");
+    const listed = await waitState("target release notes", view => view.listEntries === 34 && view.action?.text === "Обновить");
+    assert.ok(listed.title.includes(newVersion));
+    assert.match(listed.notes, /Фоновая проверка выпусков/);
+    assert.doesNotMatch(listed.notes, /Older release only/);
+    assert.equal(listed.unsafe, false);
+    center(listed);
+    assert.equal((await network()).installers, 0);
+    assert.equal((await network()).manifests, 0);
+    await capture("notes", "light");
+    await capture("notes", "dark");
+    await command({ action: "resize", width: 800, height: 600 });
+    const small = await state();
+    center(small);
+    assert.deepEqual(small.viewport, { width: 800, height: 600 });
+    assert.ok(small.scroll.content > small.scroll.height);
+    await run("document.getElementById('update-notes').scrollTop = 10000");
+    const scrolled = await state();
+    assert.ok(scrolled.scroll.top > 0);
+    for (const button of [scrolled.action.box, scrolled.later.box]) {
+        assert.ok(button.height > 0 && button.y + button.height <= scrolled.viewport.height);
+    }
+    record.responsive = { ...scrolled.viewport, modal: scrolled.dialog, notesScroll: scrolled.scroll, buttons: [scrolled.action.box, scrolled.later.box] };
+    await click("update-later");
+    assert.equal((await state()).open, false);
+    assert.equal((await network()).installers, 0);
+    assert.equal((await network()).manifests, 0);
+    await command({ action: "resize", width: 1280, height: 800 });
+    note("The centered dialog rendered the selected version's 34 list items safely. At 800 × 600 only the changes scrolled and both buttons stayed within the viewport. Opening and closing made zero package or manifest requests.");
+
+    await click("app-update", true);
+    await waitState("installed update control in second window", view => view.action?.text === "Обновить", true);
+    await click("app-update");
+    mode("stream");
+    const beforeDownload = await network();
+    await command({ action: "parallel-downloads" });
+    const progress = await waitState("visible partial download", view => view.progress?.value > 0 && view.progress.value < view.progress.max);
+    assert.match(progress.status, /загрузк/i);
+    const secondProgress = await waitState("shared partial download", view => view.progress?.value > 0, true);
+    assert.deepEqual(secondProgress.progress, progress.progress);
+    assert.equal((await network()).installers, beforeDownload.installers + 1);
+    assert.equal((await network()).manifests, beforeDownload.manifests + 1);
+    await capture("progress", "light");
+    await capture("progress", "dark");
+    mode("normal");
+    const ready = await waitState("verified package and explicit confirmation", view => view.action?.text === "Обновить и перезапустить");
+    assert.equal(ready.later.text, "Позже");
+    assert.match(ready.status, /проверен/);
+    assert.equal(child.exitCode, null);
+    assert.equal(readJson(join(control, "ready.json")).pid, before.pid);
+    await capture("confirm", "light");
+    await capture("confirm", "dark");
+    await click("update-later");
+    assert.equal((await state()).open, false);
+    assert.equal(child.exitCode, null);
+    await command({ action: "close-secondary" });
+    await click("app-update");
+    mode("corrupt");
+    await click("update-action");
+    await waitState("hash mismatch and retry", view => /SHA-256/.test(view.status) && view.action?.text === "Повторить загрузку");
+    assert.equal(child.exitCode, null);
+    assert.deepEqual(updateCachesFor(executable), []);
+    mode("normal");
+    await click("update-action");
+    await waitState("retry verified", view => view.action?.text === "Обновить и перезапустить");
+    assert.equal((await network()).installers, beforeDownload.installers + 3);
+    assert.equal(child.exitCode, null);
+    note("Repeated clicks in two open dialogs made one package request and showed the same partial byte count. Later kept the old process alive. A checksum failure left no update cache; retry verified the clean package.");
+    record.progress = progress.progress;
+    record.network = await network();
+}
 try {
     mkdirSync(project);
     mkdirSync(profile);
     mkdirSync(control);
     cpSync(join(root, "src"), join(project, "src"), { recursive: true });
-    for (const name of ["main.ts", "installation-updates.ts", "update-runner.ps1", "updates.ts", "localization.cjs"]) {
+    for (const name of [
+        "main.ts", "installation-updates.ts", "update-runner.ps1", "updates.ts", "localization.cjs",
+        "index.html", "styles.css", "themes.css", "preload.cjs", "renderer.js", "locales/en.json", "locales/ru.json",
+    ]) {
         const content = readFileSync(join(project, "src/desktop", name));
         record.sourceHashes["src/desktop/" + name] = sha(content);
         record.sourceHashesLF["src/desktop/" + name] = sha(content.toString("utf8").replaceAll("\r\n", "\n"));
     }
     record.sourceHashes["build/installer.nsh"] = sha(readFileSync(join(root, "build/installer.nsh")));
     record.sourceHashesLF["build/installer.nsh"] = sha(readFileSync(join(root, "build/installer.nsh"), "utf8").replaceAll("\r\n", "\n"));
+    const checkSource = readFileSync(fileURLToPath(import.meta.url));
+    record.sourceHashes["scripts/check-update-install.mjs"] = sha(checkSource);
+    record.sourceHashesLF["scripts/check-update-install.mjs"] = sha(checkSource.toString("utf8").replaceAll("\r\n", "\n"));
     record.hashRepresentation = "SHA-256 of raw checked-out source bytes, before QA-only bootstrap instrumentation";
-    const source = readFileSync(join(project, "src/desktop/main.ts"), "utf8")
+    let source = readFileSync(join(project, "src/desktop/main.ts"), "utf8")
         .replace("readTaskRunHistory, replyToBoard, replyToTask", "readTaskRunHistory, replyToTask");
     assert.ok(!source.includes("readTaskRunHistory, replyToBoard, replyToTask"));
+    if (pollScenario) {
+        const interval = "setInterval(pollUpdates, 60 * 60_000)";
+        assert.ok(source.includes(interval), "Expected production hourly update timer");
+        source = source.replace(interval, "setInterval(pollUpdates, 1_000)");
+    }
     writeFileSync(join(project, "src/desktop/main.ts"), "const replyToBoard = (...args) => globalThis.qaManager(...args);\n" + source +
         "\nglobalThis.qaBeginOperation = project => beginOperation(project, 'QA held operation');\n");
     const installerInclude = readFileSync(join(root, "build/installer.nsh"), "utf8")
@@ -172,6 +444,7 @@ assert.equal(app.getPath('userData'), ${JSON.stringify(profile)}, 'Profile must 
 mkdirSync(${JSON.stringify(join(scratch, "appData"))}, { recursive: true });
 app.setPath('appData', ${JSON.stringify(join(scratch, "appData"))});
 app.disableHardwareAcceleration();
+app.commandLine.appendSwitch('force-device-scale-factor', '1');
 const write = (name, value) => writeFileSync(join(control, name), JSON.stringify(value));
 process.on('uncaughtException', error => {
     write('fatal.json', { error: error.stack });
@@ -184,27 +457,58 @@ process.on('unhandledRejection', error => {
 const fixture = () => JSON.parse(readFileSync(join(control, 'fixture.json'), 'utf8'));
 let finishPreparedReply;
 let decideClose;
+const network = { releases: 0, manifests: 0, installers: 0, activeReleases: 0, peakReleases: 0 };
+const notes = ${JSON.stringify("## Новое в " + newVersion + "\n\n- Фоновая проверка выпусков\n- Прогресс загрузки пакета\n\n" +
+    Array.from({ length: 32 }, (_, index) => "- Дополнение к выпуску " + (index + 1)).join("\n") +
+    "\n\n<script>window.qaReleaseScriptExecuted = true</script>\n\n![Внешнее изображение](https://invalid.example/pixel.png)")};
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 globalThis.fetch = async (url) => {
     const value = fixture();
     const address = String(url);
-    if (value.mode === 'offline') {
-        throw new TypeError('QA offline');
-    }
     if (address.startsWith('https://api.github.com/repos/edwardgushchin/AI-Taskboard/releases?')) {
-        return Response.json([{ tag_name: 'v${newVersion}', draft: false, prerelease: true }]);
+        network.releases++;
+        network.activeReleases++;
+        network.peakReleases = Math.max(network.activeReleases, network.peakReleases);
+        try {
+            while (fixture().mode === 'hold-release') await pause(50);
+            if (value.mode === 'offline') throw new TypeError('QA offline');
+            const latest = value.mode === 'current' ? '${oldVersion}' : '${newVersion}';
+            return Response.json([
+                { tag_name: 'v${oldVersion}', draft: false, prerelease: true, body: 'Older release only' },
+                { tag_name: 'v' + latest, draft: false, prerelease: true, body: value.mode === 'no-notes' ? '' : notes },
+            ]);
+        } finally {
+            network.activeReleases--;
+        }
     }
     const base = 'https://github.com/edwardgushchin/AI-Taskboard/releases/download/v${newVersion}/';
     assert.ok(address.startsWith(base), 'Unexpected update source: ' + address);
     if (address.endsWith('/SHA256SUMS')) {
+        network.manifests++;
         return new Response(value.digest + '  ai-taskboard-${newVersion}-windows-${process.arch}.exe\\n');
     }
     assert.equal(address, base + 'ai-taskboard-${newVersion}-windows-${process.arch}.exe');
+    network.installers++;
     if (value.mode === 'download-offline') {
         throw new TypeError('QA download offline');
     }
     let bytes = readFileSync(value.installer);
     if (value.mode === 'corrupt') {
         bytes = Buffer.concat([bytes, Buffer.from('corrupt')]);
+    }
+    if (value.mode === 'stream') {
+        let offset = 0;
+        const step = Math.ceil(bytes.length / 4);
+        return new Response(new ReadableStream({
+            async pull(controller) {
+                if (offset > 0) {
+                    while (fixture().mode === 'stream') await pause(50);
+                }
+                controller.enqueue(bytes.subarray(offset, offset + step));
+                offset += step;
+                if (offset >= bytes.length) controller.close();
+            },
+        }), { headers: { 'content-length': String(bytes.length) } });
     }
     return new Response(bytes);
 };
@@ -287,9 +591,19 @@ void (async () => {
         await wait(50);
     }
     const window = BrowserWindow.getAllWindows()[0];
+    let secondary;
     window.setContentSize(1280, 800);
     window.webContents.setBackgroundThrottling(false);
     const evaluate = code => window.webContents.executeJavaScript(code);
+    async function input(target, action) {
+        const session = target.webContents.debugger;
+        session.attach('1.3');
+        try {
+            await action((method, args) => session.sendCommand('Input.' + method, args));
+        } finally {
+            session.detach();
+        }
+    }
     while (!await evaluate('window.taskboard?.bootstrap().then(frame => Boolean(frame.board) && !frame.loading)').catch(() => false)) {
         await wait(50);
     }
@@ -310,8 +624,99 @@ void (async () => {
         last = command.id;
         void (async () => {
             let result;
+            const target = command.second ? secondary : window;
+            const execute = code => target.webContents.executeJavaScript(code);
             if (command.action === 'ask') {
                 result = await evaluate('window.taskboard.boardRequest(' + JSON.stringify(command.text) + ')');
+            }
+            else if (command.action === 'execute') {
+                result = await execute(command.code);
+            }
+            else if (command.action === 'network') {
+                result = network;
+            }
+            else if (command.action === 'new-window') {
+                const loaded = new Promise(resolve => app.once('browser-window-created', (_event, created) => {
+                    created.webContents.once('did-finish-load', () => resolve(created));
+                }));
+                await evaluate('window.taskboard.menuAction("new-window")');
+                secondary = await loaded;
+                secondary.setContentSize(800, 600);
+                secondary.webContents.setBackgroundThrottling(false);
+                result = true;
+            }
+            else if (command.action === 'close-secondary') {
+                secondary.destroy();
+                secondary = undefined;
+                result = true;
+            }
+            else if (command.action === 'manual-checks') {
+                const check = client => client.webContents.executeJavaScript('window.taskboard.checkUpdates()');
+                void Promise.all([check(window), check(secondary)]).then(replies => write('manual-checks.json', replies.map(reply => reply.ok)));
+                result = true;
+            }
+            else if (command.action === 'parallel-downloads') {
+                const click = client => client.webContents.executeJavaScript(\`(() => {
+                    const update = document.getElementById("update-action");
+                    update.click();
+                    update.click();
+                })()\`);
+                await Promise.all([click(window), click(secondary)]);
+                result = true;
+            }
+            else if (command.action === 'move-pointer-away') {
+                await input(target, send => send('dispatchMouseEvent', { type: 'mouseMoved', x: 400, y: 100 }));
+                result = true;
+            }
+            else if (['click', 'enter', 'previous-tab'].includes(command.action)) {
+                target.show();
+                target.focus();
+                const element = 'document.getElementById(' + JSON.stringify(command.elementId) + ')';
+                if (command.action !== 'click') {
+                    target.webContents.focus();
+                    assert.equal(await execute(element + '.focus(); document.activeElement.id'), command.elementId);
+                    const enter = command.action === 'enter';
+                    const key = enter
+                        ? { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 }
+                        : { key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, modifiers: 8 };
+                    await input(target, async send => {
+                        await send('dispatchKeyEvent', { ...key, type: 'rawKeyDown' });
+                        if (enter) {
+                            await send('dispatchKeyEvent', { ...key, type: 'char', text: '\\r' });
+                        }
+                        await send('dispatchKeyEvent', { ...key, type: 'keyUp' });
+                    });
+                } else {
+                    const area = await execute(element + '.getBoundingClientRect().toJSON()');
+                    assert.ok(area.width > 0 && area.height > 0, command.elementId + ' must be visible');
+                    const x = Math.round(area.x + area.width / 2);
+                    const y = Math.round(area.y + area.height / 2);
+                    await input(target, async send => {
+                        const pointer = { x, y, button: 'left', clickCount: 1 };
+                        await send('dispatchMouseEvent', { ...pointer, type: 'mousePressed' });
+                        await send('dispatchMouseEvent', { ...pointer, type: 'mouseReleased' });
+                    });
+                }
+                await wait(75);
+                result = true;
+            }
+            else if (command.action === 'resize') {
+                window.setContentSize(command.width, command.height);
+                await wait(100);
+                result = true;
+            }
+            else if (command.action === 'capture-poll') {
+                await evaluate('document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))');
+                const png = await window.webContents.capturePage();
+                assert.deepEqual(png.getSize(), { width: 1280, height: 800 });
+                assert.ok(!png.isEmpty());
+                writeFileSync(join(artifacts, command.name), png.toPNG());
+                result = true;
+            }
+            else if (command.action === 'approve-restart') {
+                write('reply.json', { id: command.id, result: true });
+                await evaluate('document.getElementById("update-action").click()');
+                return;
             }
             else if (command.action === 'begin-held-install') {
                 void evaluate('window.taskboard.boardRequest(' + JSON.stringify(command.text) + ')')
@@ -446,6 +851,7 @@ void (async () => {
             config: { appId: "org.aitaskboard.updateqa." + productExecutable.slice(-8), productName: "AI Taskboard",
                 executableName: productExecutable, directories: { output }, electronVersion: require("electron/package.json").version,
                 electronDist: dirname(require("electron")), files: ["src/**/*", "qa-main.mjs"], npmRebuild: false,
+                ...(pollScenario ? { compression: "store" } : {}),
                 win: { signExecutable: false }, nsis: { oneClick: false, perMachine: false, allowElevation: false,
                     createDesktopShortcut: false, createStartMenuShortcut: false, allowToChangeInstallationDirectory: true,
                     include: join(project, "installer.nsh") },
@@ -470,7 +876,7 @@ catch (error) {
     }
     const firstInstaller = join(scratch, "package-" + oldVersion, `ai-taskboard-${oldVersion}-windows-${process.arch}.exe`);
     const nextInstaller = join(scratch, "package-" + newVersion, `ai-taskboard-${newVersion}-windows-${process.arch}.exe`);
-    writeJson(join(control, "fixture.json"), { mode: "normal", installer: nextInstaller, digest: record.packages[1].sha256 });
+    writeJson(join(control, "fixture.json"), { mode: pollScenario ? "current" : "normal", installer: nextInstaller, digest: record.packages[1].sha256 });
     execFileSync(firstInstaller, ["/S", "/currentuser", "/D=" + installDirectory], { windowsHide: true, timeout: 90000 });
     installed = true;
     const uninstaller = join(installDirectory, "Uninstall " + productExecutable + ".exe");
@@ -505,78 +911,83 @@ catch (error) {
         assert.equal(result.ok, true, JSON.stringify(result));
         return readJson(join(control, "tool.json"));
     };
-    const checked = await ask("Проверь обновления AI Taskboard");
-    assert.equal(checked.result.data.currentVersion, oldVersion);
-    assert.equal(checked.result.data.latest.version, newVersion);
-    assert.equal(checked.result.data.installation, "windows-nsis");
-    for (const [value, expected] of [["offline", "UPDATE_CHECK_FAILED"], ["normal", null]]) {
-        mode(value);
-        const tool = await ask("Проверь обновления AI Taskboard");
-        assert.equal(tool.result.ok ? null : tool.result.error.code, expected);
-    }
-    note("Manager release check: current/found versions, network failure and successful retry.");
-    await command({ action: "hold" });
-    let tool = await ask("Установи AI Taskboard " + newVersion);
-    assert.equal(tool.result.error.code, "UPDATE_APP_BUSY");
-    await command({ action: "release" });
-    note("Busy operation rejected installation and remained available to finish normally.");
-    record.concurrentGoalBefore = await command({ action: "hold-goal" });
-    tool = await ask("Установи AI Taskboard " + newVersion);
-    assert.equal(tool.result.error.code, "UPDATE_APP_BUSY");
-    record.concurrentGoalAfter = await command({ action: "goal-state" });
-    assert.deepEqual(record.concurrentGoalAfter, record.concurrentGoalBefore);
-    await command({ action: "release-goal" });
-    note("Concurrent manager:context goal and its provider/turn leases blocked installation without being interrupted; the ordinary manager used manager:dialogue.");
-    for (const [value, expected] of [["cancel", "UPDATE_CANCELLED"], ["corrupt", "UPDATE_INSTALL_FAILED"], ["download-offline", "UPDATE_INSTALL_FAILED"]]) {
-        mode(value);
+    if (pollScenario) {
+        await checkPoll(mode, uninstaller, executable, child, before);
+        await command({ action: "approve-restart" });
+    } else {
+        const checked = await ask("Проверь обновления AI Taskboard");
+        assert.equal(checked.result.data.currentVersion, oldVersion);
+        assert.equal(checked.result.data.latest.version, newVersion);
+        assert.equal(checked.result.data.installation, "windows-nsis");
+        for (const [value, expected] of [["offline", "UPDATE_CHECK_FAILED"], ["normal", null]]) {
+            mode(value);
+            const tool = await ask("Проверь обновления AI Taskboard");
+            assert.equal(tool.result.ok ? null : tool.result.error.code, expected);
+        }
+        note("Manager release check: current/found versions, network failure and successful retry.");
+        await command({ action: "hold" });
+        let tool = await ask("Установи AI Taskboard " + newVersion);
+        assert.equal(tool.result.error.code, "UPDATE_APP_BUSY");
+        await command({ action: "release" });
+        note("Busy operation rejected installation and remained available to finish normally.");
+        record.concurrentGoalBefore = await command({ action: "hold-goal" });
         tool = await ask("Установи AI Taskboard " + newVersion);
-        assert.equal(tool.result.error.code, expected);
-        assert.equal(readJson(join(control, "ready.json")).version, oldVersion);
-        assert.equal(child.exitCode, null);
-        note(value + ": installer did not run; original client remains alive.");
+        assert.equal(tool.result.error.code, "UPDATE_APP_BUSY");
+        record.concurrentGoalAfter = await command({ action: "goal-state" });
+        assert.deepEqual(record.concurrentGoalAfter, record.concurrentGoalBefore);
+        await command({ action: "release-goal" });
+        note("Concurrent manager:context goal and its provider/turn leases blocked installation without being interrupted; the ordinary manager used manager:dialogue.");
+        for (const [value, expected] of [["cancel", "UPDATE_CANCELLED"], ["corrupt", "UPDATE_INSTALL_FAILED"], ["download-offline", "UPDATE_INSTALL_FAILED"]]) {
+            mode(value);
+            tool = await ask("Установи AI Taskboard " + newVersion);
+            assert.equal(tool.result.error.code, expected);
+            assert.equal(readJson(join(control, "ready.json")).version, oldVersion);
+            assert.equal(child.exitCode, null);
+            note(value + ": installer did not run; original client remains alive.");
+        }
+        mode("normal");
+        await ask("Проверь обновления AI Taskboard");
+        writeJson(join(control, "fixture.json"), {
+            mode: "normal", installer: nextInstaller, digest: record.packages[1].sha256,
+            holdReply: true, holdClose: true,
+        });
+        await command({ action: "begin-held-install", text: "Установи AI Taskboard " + newVersion });
+        const preparedReply = await until(() => readJson(join(control, "prepared-reply.json")), "prepared reply held");
+        assert.equal(preparedReply.result.ok, true);
+        assert.equal(preparedReply.result.data.version, newVersion);
+        const preparedCaches = updateCachesFor(executable);
+        assert.equal(preparedCaches.length, 1, "Exactly one verified update cache must exist before closing");
+        await command({ action: "close-window" });
+        const closeWarning = await until(() => readJson(join(control, "close-warning.json")), "close warning held");
+        assert.equal(closeWarning.buttons.length, 2);
+        await command({ action: "release-prepared-reply" });
+        const heldResult = await until(() => readJson(join(control, "held-reply-result.json")), "prepared manager reply completed");
+        assert.ok(!heldResult.error, JSON.stringify(heldResult));
+        assert.equal(heldResult.reply.ok, true, JSON.stringify(heldResult));
+        // The cache removal proves that before-quit vetoed the update while state.closing was still true.
+        await until(() => preparedCaches.every(path => !existsSync(path)), "prepared cache removed while close warning remains open");
+        await command({ action: "cancel-close" });
+        assert.equal(child.exitCode, null, "Cancelled close must leave the old process running");
+        assert.equal(readJson(join(control, "ready.json")).pid, before.pid);
+        mode("normal");
+        const afterCancelledClose = await ask("Проверь обновления AI Taskboard после отмены закрытия");
+        assert.equal(afterCancelledClose.result.ok, true);
+        assert.equal(afterCancelledClose.result.data.currentVersion, oldVersion);
+        record.cancelledClose = {
+            preparedVersion: preparedReply.result.data.version,
+            warning: closeWarning.message,
+            oldProcessId: before.pid,
+            cacheCountBefore: preparedCaches.length,
+            cacheRemoved: true,
+            cacheRemovedWhileWarningOpen: true,
+            newDialogueCurrentVersion: afterCancelledClose.result.data.currentVersion,
+        };
+        note("A close warning held the window while the prepared manager reply finished; before-quit removed its update cache before the warning was cancelled. The old process accepted a new dialogue and then retried installation successfully.");
+        record.captureBefore = await command({ action: "capture", name: "update-before.png" });
+        tool = await ask("Установи AI Taskboard " + newVersion);
+        assert.equal(tool.result.ok, true, JSON.stringify(tool));
+        assert.equal(tool.duplicate.error.code, "UPDATE_IN_PROGRESS");
     }
-    mode("normal");
-    await ask("Проверь обновления AI Taskboard");
-    writeJson(join(control, "fixture.json"), {
-        mode: "normal", installer: nextInstaller, digest: record.packages[1].sha256,
-        holdReply: true, holdClose: true,
-    });
-    await command({ action: "begin-held-install", text: "Установи AI Taskboard " + newVersion });
-    const preparedReply = await until(() => readJson(join(control, "prepared-reply.json")), "prepared reply held");
-    assert.equal(preparedReply.result.ok, true);
-    assert.equal(preparedReply.result.data.version, newVersion);
-    const preparedCaches = updateCachesFor(executable);
-    assert.equal(preparedCaches.length, 1, "Exactly one verified update cache must exist before closing");
-    await command({ action: "close-window" });
-    const closeWarning = await until(() => readJson(join(control, "close-warning.json")), "close warning held");
-    assert.equal(closeWarning.buttons.length, 2);
-    await command({ action: "release-prepared-reply" });
-    const heldResult = await until(() => readJson(join(control, "held-reply-result.json")), "prepared manager reply completed");
-    assert.ok(!heldResult.error, JSON.stringify(heldResult));
-    assert.equal(heldResult.reply.ok, true, JSON.stringify(heldResult));
-    // The cache removal proves that before-quit vetoed the update while state.closing was still true.
-    await until(() => preparedCaches.every(path => !existsSync(path)), "prepared cache removed while close warning remains open");
-    await command({ action: "cancel-close" });
-    assert.equal(child.exitCode, null, "Cancelled close must leave the old process running");
-    assert.equal(readJson(join(control, "ready.json")).pid, before.pid);
-    mode("normal");
-    const afterCancelledClose = await ask("Проверь обновления AI Taskboard после отмены закрытия");
-    assert.equal(afterCancelledClose.result.ok, true);
-    assert.equal(afterCancelledClose.result.data.currentVersion, oldVersion);
-    record.cancelledClose = {
-        preparedVersion: preparedReply.result.data.version,
-        warning: closeWarning.message,
-        oldProcessId: before.pid,
-        cacheCountBefore: preparedCaches.length,
-        cacheRemoved: true,
-        cacheRemovedWhileWarningOpen: true,
-        newDialogueCurrentVersion: afterCancelledClose.result.data.currentVersion,
-    };
-    note("A close warning held the window while the prepared manager reply finished; before-quit removed its update cache before the warning was cancelled. The old process accepted a new dialogue and then retried installation successfully.");
-    record.captureBefore = await command({ action: "capture", name: "update-before.png" });
-    tool = await ask("Установи AI Taskboard " + newVersion);
-    assert.equal(tool.result.ok, true, JSON.stringify(tool));
-    assert.equal(tool.duplicate.error.code, "UPDATE_IN_PROGRESS");
     const installingSince = Date.now() - 1000;
     const after = await until(() => {
         const errorFile = join(tmpdir(), "ai-taskboard-update-error.txt");
@@ -593,7 +1004,7 @@ catch (error) {
     assert.equal(sha(readFileSync(join(profile, "profile-marker.txt"))), markerHash);
     const tabs = JSON.parse(readFileSync(join(profile, "project-tabs.json"), "utf8"));
     assert.deepEqual(tabs[0].projects, boards);
-    await ask("Проверь обновления AI Taskboard после перезапуска");
+    if (!pollScenario) await ask("Проверь обновления AI Taskboard после перезапуска");
     const frame = await command({ action: "frame" });
     assert.equal(frame.project, boards[0]);
     for (const board of [boards[1], boards[0]]) {
@@ -601,8 +1012,10 @@ catch (error) {
         assert.equal(selected.project, board);
         assert.equal(selected.board, board);
     }
-    record.captureAfter = await command({ action: "capture", name: "update-after.png" });
-    note("Verified official fixture package SHA-256; repeated command returned UPDATE_IN_PROGRESS; one NSIS update restarted " + newVersion + ".");
+    if (!pollScenario) {
+        record.captureAfter = await command({ action: "capture", name: "update-after.png" });
+    }
+    note("The verified package installed and one NSIS update restarted " + newVersion + ".");
     assert.equal(JSON.parse(readFileSync(join(profile, "appearance.json"), "utf8")).language, "ru");
     assert.equal(JSON.parse(readFileSync(join(profile, "appearance.json"), "utf8")).theme, "dark");
     note("Profile marker bytes and both saved open boards survived; new process opened the original active board. Russian/dark rendering was checked; the bootstrap selects Russian on each launch.");
@@ -666,6 +1079,6 @@ finally {
         process.exitCode = 1;
     }
     record.gitStatusAfter = execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8", windowsHide: true }).trim();
-    writeJson(join(artifacts, "update-install-report.json"), record);
+    writeJson(join(artifacts, pollScenario ? "update-poll-report.json" : "update-install-report.json"), record);
 }
 process.exit(record.result === "passed" && !record.cleanupError ? 0 : 1);

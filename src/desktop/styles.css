@@ -13,7 +13,7 @@
 :where(
   .app-menu-popup, .draft-add-menu, .draft-task-mentions, .lane-filter-options,
   .git-branches, .notifications, #provider-limits, #agent-activity,
-  .board-chat, .board-draft-field, .sheet, .markdown-preview
+  .board-chat, .board-draft-field, .sheet, .markdown-preview, #update-dialog
 ),
 .image-preview :is(.image-preview-header > strong, .image-preview-toolbar),
 .image-preview .button:is(.image-preview-header > .button, .image-preview-previous, .image-preview-next) {
@@ -104,13 +104,54 @@ h1, h2, h3, p { margin: 0; }
   border: 0; border-radius: 0; color: var(--muted);
   transition: color var(--hover-time) ease;
 }
-.project-tabs, .project-tabs:not([hidden]) + .app-settings { border-inline-end: 1px solid var(--border); }
-.project-tabs:not([hidden]) + .app-settings { --settings-background: var(--toolbar); }
+.project-tabs, .project-tabs:not([hidden]) ~ .app-settings { border-inline-end: 1px solid var(--border); }
+.project-tabs:not([hidden]) ~ .app-settings { --settings-background: var(--toolbar); }
+.project-tabs:has(+ #app-update:not([hidden])) { margin-block-end: 80px; }
 .app-settings.button.quiet, .app-settings.button.quiet:hover:not(:disabled) {
   background-color: var(--settings-background, transparent);
 }
 .app-settings.button:hover { color: var(--text); }
 .app-settings .icon { width: 20px; height: 20px; font-size: 20px; }
+#app-update {
+  --settings-background: light-dark(#edbe65, #e8af57);
+  justify-self: center;
+  width: 32px;
+  height: 32px;
+  margin-block-end: 44px;
+  border-radius: 50%;
+  color: #30210d;
+}
+#app-update:hover:not(:disabled) { --settings-background: light-dark(#e2aa46, #f1c071); }
+#app-update:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+@media (forced-colors: active) {
+  #app-update { border: 1px solid ButtonText; }
+}
+#update-dialog {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(520px, calc(100vw - 32px));
+  max-height: min(75vh, 640px);
+  padding: var(--surface-inset);
+  font-size: 13px;
+  line-height: 1.5;
+}
+#update-dialog[open] { display: flex; flex-direction: column; gap: var(--surface-section-gap); }
+#update-dialog::backdrop { background: #0006; }
+#update-dialog h2 { margin: 0; font-size: 16px; }
+#update-dialog p { margin: 0; overflow-wrap: anywhere; }
+.update-notes { min-height: 0; overflow: auto; overflow-wrap: anywhere; }
+.update-notes pre { white-space: pre-wrap; }
+#update-dialog progress { width: 100%; }
+#update-dialog > :not(.update-notes) { flex: none; }
+#update-dialog footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+#update-release { color: var(--blue); margin-inline-end: auto; }
 .settings-menu.app-menu-popup {
   position: fixed; inset: 0 auto auto 0; margin: 0; color: var(--text);
   min-width: 0; max-width: calc(100vw - 8px); max-height: calc(100vh - 8px); overflow: auto;

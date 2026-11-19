@@ -21,6 +21,82 @@ const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
 const localization = window.taskboardLocalization;
 const t = (key, parameters) => localization.text(key, parameters);
+let appUpdate;
+let renderedUpdateNotes;
+const updateDialog = byId("update-dialog");
+const updateMarkdown = window.markdownit?.({ html: false }).disable("image");
+if (updateMarkdown) {
+  updateMarkdown.renderer.rules.link_open = () => "";
+  updateMarkdown.renderer.rules.link_close = () => "";
+}
+
+function renderAppUpdate() {
+  const trigger = byId("app-update");
+  const candidate = appUpdate?.candidate;
+  trigger.hidden = !candidate;
+  if (!candidate) {
+    if (updateDialog.open) {
+      updateDialog.close();
+      byId("app-settings").focus();
+    }
+    return;
+  }
+  const title = t("updates.available_version", { version: candidate.version });
+  trigger.title = title;
+  trigger.setAttribute("aria-label", title);
+  if (!updateDialog.open) return;
+
+  byId("update-title").textContent = title;
+  const notes = byId("update-notes");
+  const source = candidate.notes || t("updates.no_notes");
+  if (source !== renderedUpdateNotes) {
+    renderedUpdateNotes = source;
+    if (candidate.notes && updateMarkdown) {
+      notes.innerHTML = updateMarkdown.render(source);
+    } else {
+      notes.textContent = source;
+    }
+    notes.scrollTop = 0;
+  }
+
+  const { phase, supported, progress, error, installing } = appUpdate;
+  const downloading = phase === "downloading";
+  const ready = phase === "ready";
+  const status = byId("update-status");
+  let message = "";
+  if (downloading) {
+    message = t("updates.downloading");
+  } else if (phase === "installing") {
+    message = t("updates.preparing");
+  } else if (error) {
+    const reason = error === "UPDATE_APP_BUSY" ? t("updates.busy")
+      : error === "UPDATE_CANCELLED" ? t("updates.cancelled") : error;
+    message = t("updates.failed", { reason });
+  } else if (ready) {
+    message = t("updates.verified");
+  }
+  if (status.textContent !== message) status.textContent = message;
+  status.hidden = !message;
+  const meter = byId("update-progress");
+  meter.hidden = !downloading;
+  if (progress?.total) {
+    meter.max = progress.total;
+    meter.value = progress.received;
+  } else {
+    meter.removeAttribute("value");
+  }
+
+  const release = byId("update-release");
+  release.href = candidate.url;
+  release.textContent = t("ui.open_release_b1c993b5");
+  const later = byId("update-later");
+  later.textContent = t(ready ? "updates.later" : "updates.close");
+  const action = byId("update-action");
+  action.hidden = !supported || downloading || phase === "installing";
+  action.disabled = installing;
+  action.textContent = t(ready ? "updates.restart" : error ? "updates.retry" : "updates.download");
+}
+
 const localizedBindings = new Set();
 const nodeBindings = new WeakMap();
 function bindLocalized(node, property, render, attribute = false) {
@@ -1506,6 +1582,7 @@ function animateCardMoves(moves) {
 
 function render(previousBoard) {
   document.documentElement.lang = localization.locale;
+  renderAppUpdate();
   const board = frame.board;
   const noBoard = !board;
   const autoMode = byId("status-auto-mode");
@@ -5919,7 +5996,42 @@ api.onTheme(theme => {
   frame.theme = theme;
   applyTheme(theme);
 });
-api.bootstrap().then(update).catch(error => notice(error.message, t("ui.application_startup_a6ae49b2")));
+byId("app-update").addEventListener("click", () => {
+  if (!appUpdate?.candidate || updateDialog.open) return;
+  byId("update-title").textContent = byId("app-update").title;
+  updateDialog.showModal();
+  renderAppUpdate();
+});
+byId("update-release").addEventListener("click", event => {
+  event.preventDefault();
+  void api.openLink(event.currentTarget.href);
+});
+byId("update-later").addEventListener("click", () => {
+  if (appUpdate.phase === "ready") void api.discardUpdate(appUpdate.candidate.version);
+  updateDialog.close();
+});
+updateDialog.addEventListener("cancel", () => {
+  if (appUpdate.phase === "ready") void api.discardUpdate(appUpdate.candidate.version);
+});
+byId("update-action").addEventListener("click", () => {
+  const version = appUpdate.candidate.version;
+  if (appUpdate.phase === "ready") {
+    void api.confirmUpdate(version);
+  } else {
+    void api.downloadUpdate(version);
+  }
+});
+function receiveAppUpdate(state) {
+  appUpdate = state;
+  if (frame.localization) renderAppUpdate();
+}
+api.onUpdateChanged?.(receiveAppUpdate);
+api.bootstrap().then(initial => {
+  update(initial);
+  return api.updateState?.().then(state => {
+    if (!appUpdate) receiveAppUpdate(state);
+  });
+}).catch(error => notice(error.message, t("ui.application_startup_a6ae49b2")));
 
 function createBoard() {
   openSheet("board-type", "Создать доску");

@@ -28,10 +28,24 @@
     </div>
   </header>
   <nav id="project-tabs" class="project-tabs" role="tablist" aria-label="Projects" data-i18n-aria-label="ui.projects_f40f8e75" aria-orientation="vertical" hidden></nav>
+  <button id="app-update" class="button quiet app-settings" type="button" aria-haspopup="dialog" hidden>
+    <i class="icon codicon codicon-cloud-download" aria-hidden="true"></i>
+  </button>
   <button id="app-settings" class="button quiet app-settings" type="button" aria-label="Application settings" data-i18n-aria-label="ui.application_settings_b131bcd2" title="Application settings" data-i18n-title="ui.application_settings_b131bcd2">
     <i class="icon codicon codicon-settings-gear" aria-hidden="true"></i>
   </button>
   <div id="settings-menu" class="app-menu-popup settings-menu" role="menu" popover></div>
+  <dialog id="update-dialog" aria-labelledby="update-title">
+    <h2 id="update-title" tabindex="-1" autofocus></h2>
+    <div id="update-notes" class="update-notes"></div>
+    <p id="update-status" role="status" hidden></p>
+    <progress id="update-progress" aria-labelledby="update-status" hidden></progress>
+    <footer>
+      <a id="update-release" href="#"></a>
+      <button id="update-later" class="button" type="button"></button>
+      <button id="update-action" class="button primary" type="button"></button>
+    </footer>
+  </dialog>
   <main id="app-content">
     <div id="notice" class="notice" hidden>
       <div class="notice-content" role="status"><strong id="notice-context"></strong><span id="notice-message"></span></div>

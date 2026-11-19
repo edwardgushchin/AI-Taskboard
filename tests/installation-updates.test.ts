@@ -10,12 +10,66 @@ import { ApplicationUpdates, manifestChecksum, prepareWindowsUpdate } from "../s
 import { releasesUrl } from "../src/desktop/updates.ts";
 
 const version = "0.1.1-alpha";
-const candidate = { version, tag: `v${version}`, url: `${releasesUrl}/tag/v${version}`, prerelease: true };
+const candidate = { version, tag: `v${version}`, url: `${releasesUrl}/tag/v${version}`, prerelease: true, notes: "" };
 const name = `ai-taskboard-${version}-windows-x64.exe`;
 const bytes = Buffer.from("MZ test NSIS fixture");
 const digest = createHash("sha256").update(bytes).digest("hex");
 const signal = () => new AbortController().signal;
 const updateDirectories = async () => (await readdir(tmpdir())).filter(name => name.startsWith("ai-taskboard-update-")).sort();
+
+test("a successful check replaces the offer and discards its superseded download", async context => {
+  let next = version;
+  let offline = false;
+  let requests = 0;
+  context.mock.method(globalThis, "fetch", async () => {
+    requests++;
+    if (offline) throw new TypeError("Offline");
+    return Response.json([
+      { tag_name: "0.1.0-alpha", body: "Old notes" },
+      { tag_name: next, body: "Selected notes" },
+    ]);
+  });
+  let downloads = 0;
+  let discarded = 0;
+  let started = 0;
+  const service = new ApplicationUpdates({
+    version: () => "0.1.0-alpha",
+    supported: () => true,
+    busy: () => false,
+    confirm: async () => true,
+    prepare: async (_release, _signal, progress) => {
+      downloads++;
+      progress?.({ received: 1, total: 4 });
+      return {
+        start: async () => { started++; },
+        cancel: async () => { discarded++; },
+      };
+    },
+  });
+  assert.equal((await Promise.all([service.check(), service.check()])).every(reply => reply.ok), true);
+  assert.equal(requests, 1);
+  assert.equal(service.state.candidate?.notes, "Selected notes");
+  const download = service.download(version);
+  assert.equal(service.state.phase, "downloading");
+  assert.deepEqual(service.state.progress, { received: 1, total: 4 });
+  assert.equal(service.download(version), undefined);
+  await download;
+  assert.equal(downloads, 1);
+  assert.equal(service.state.phase, "ready");
+  assert.equal(service.prepared, undefined);
+
+  offline = true;
+  assert.equal((await service.check()).ok, false);
+  assert.equal(service.state.phase, "ready");
+  offline = false;
+  next = "0.1.2-alpha";
+  assert.equal((await service.check()).ok, true);
+  assert.equal(service.state.candidate?.version, next);
+  assert.equal(service.state.phase, "available");
+  assert.equal(discarded, 1);
+  assert.equal(started, 0);
+  assert.equal(service.confirmDownload(version), false);
+});
 
 test("manifest requires one exact version/architecture entry and validates the full line", () => {
   assert.equal(manifestChecksum(`${digest.toUpperCase()}  ${name}\r\n`, name), digest);
@@ -42,6 +96,30 @@ test("download accepts only constructed official assets and cleans successful pr
     context.mock.restoreAll();
   }
   assert.deepEqual(await updateDirectories(), before);
+});
+
+test("download reports a total only for a valid decimal Content-Length", async context => {
+  for (const [header, total] of [[String(bytes.length), bytes.length], ["1e3", undefined], ["12abc", undefined]] as const) {
+    context.mock.method(globalThis, "fetch", async (url: string) => {
+      if (url.endsWith("SHA256SUMS")) return new Response(`${digest}  ${name}\n`);
+      return new Response(bytes, { headers: { "Content-Length": header } });
+    });
+    const values: Array<{ received: number; total?: number }> = [];
+    const prepared = await prepareWindowsUpdate(candidate, signal(), {
+      arch: "x64",
+      executable: "C:\\App\\AI Taskboard.exe",
+      profile: "C:\\Profile",
+      args: [],
+      relaunch: () => {},
+      progress: value => values.push(value),
+    });
+    try {
+      assert.deepEqual(values[0], { received: 0, total });
+      assert.deepEqual(values.at(-1), { received: bytes.length, total });
+    } finally {
+      await prepared.cancel();
+    }
+  }
 });
 
 test("corrupt, wrong-architecture, network and cancellation failures never prepare an installer", async context => {
@@ -256,7 +334,7 @@ test("unsupported installations return the official manual path without download
 
 test("a vetoed quit discards the prepared update, including an overlapping window close", async context => {
   const source = readFileSync(new URL("../src/desktop/main.ts", import.meta.url), "utf8");
-  const start = source.indexOf("  let quitPending = false;");
+  const start = source.indexOf('  app.on("before-quit"');
   const end = source.indexOf('  app.on("window-all-closed"', start);
   assert.ok(start >= 0 && end > start);
 
@@ -299,6 +377,7 @@ test("a vetoed quit discards the prepared update, including an overlapping windo
       applicationUpdates,
       windowStates: new Map([[1, { closing: scenario === "window closing", tabs: [] }]]),
       quitting: false,
+      quitPending: false,
       updateBusy: () => scenario === "busy",
       confirmProjectClose: async () => {
         confirmCalls++;

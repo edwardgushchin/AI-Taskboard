@@ -15,6 +15,16 @@ export const applicationUpdateTools: BoardMcpTool[] = [
 ];
 
 type Candidate = NonNullable<Awaited<ReturnType<typeof checkForUpdates>>["latest"]>;
+type Progress = { received: number; total?: number };
+type Transfer = {
+  candidate: Candidate;
+  controller: AbortController;
+  phase: "downloading" | "ready" | "installing" | "error";
+  progress?: Progress;
+  package?: PreparedUpdate;
+  error?: string;
+  completion?: Promise<void>;
+};
 export interface PreparedUpdate {
   start: () => Promise<void>;
   cancel: () => Promise<void>;
@@ -22,6 +32,9 @@ export interface PreparedUpdate {
 
 export class ApplicationUpdates {
   private found?: Candidate;
+  private checkedTag?: string;
+  private checking?: Promise<CliReply>;
+  private transfer?: Transfer;
   private pending = false;
   prepared?: PreparedUpdate;
 
@@ -30,7 +43,8 @@ export class ApplicationUpdates {
     supported: () => boolean;
     busy: () => boolean;
     confirm: (version: string, signal: AbortSignal) => Promise<boolean>;
-    prepare: (candidate: Candidate, signal: AbortSignal) => Promise<PreparedUpdate>;
+    prepare: (candidate: Candidate, signal: AbortSignal, progress?: (value: Progress) => void) => Promise<PreparedUpdate>;
+    changed?: () => void;
   };
 
   constructor(options: ApplicationUpdates["options"]) {
@@ -41,13 +55,37 @@ export class ApplicationUpdates {
     return this.pending;
   }
 
-  async check(): Promise<CliReply> {
-    this.found = undefined;
+  get state() {
+    const transfer = this.transfer;
+    return {
+      candidate: transfer?.candidate ?? this.found ?? null,
+      supported: this.options.supported(),
+      phase: transfer?.phase ?? "available",
+      progress: transfer?.progress,
+      error: transfer?.error,
+      installing: this.pending,
+    };
+  }
+
+  check(background = false): Promise<CliReply> {
+    this.checking ??= this.checkRelease().finally(() => { this.checking = undefined; });
+    if (background) return this.checking;
+    this.checkedTag = undefined;
+    return this.checking.then(reply => {
+      if (reply.ok) this.checkedTag = this.found?.tag;
+      return reply;
+    });
+  }
+
+  private async checkRelease(): Promise<CliReply> {
     try {
       const result = await checkForUpdates(this.options.version());
-      if (result.status === "available" && result.latest) {
-        this.found = result.latest;
+      this.found = result.status === "available" ? result.latest ?? undefined : undefined;
+      if (this.checkedTag !== this.found?.tag) this.checkedTag = undefined;
+      if (this.transfer && this.transfer.candidate.tag !== this.found?.tag) {
+        await this.discardDownload();
       }
+      this.options.changed?.();
       return { ok: true, data: { ...result, installation: this.options.supported() ? "windows-nsis" : "manual",
         manualUrl: result.latest?.url ?? releasesUrl } };
     } catch (error) {
@@ -55,15 +93,76 @@ export class ApplicationUpdates {
     }
   }
 
+  download(version: unknown) {
+    if (!this.options.supported() || this.pending || (this.transfer && this.transfer.phase !== "error")
+        || !this.found || version !== this.found.version) {
+      return;
+    }
+    const transfer: Transfer = {
+      candidate: this.found, controller: new AbortController(), phase: "downloading",
+    };
+    this.transfer = transfer;
+    transfer.completion = this.prepareDownload(transfer);
+    return transfer.completion;
+  }
+
+  private async prepareDownload(transfer: Transfer) {
+    this.options.changed?.();
+    try {
+      const prepared = await this.options.prepare(transfer.candidate, transfer.controller.signal, progress => {
+        transfer.progress = progress;
+        if (this.transfer === transfer) this.options.changed?.();
+      });
+      if (this.transfer !== transfer) {
+        await prepared.cancel();
+        return;
+      }
+      transfer.package = prepared;
+      transfer.phase = "ready";
+    } catch (error) {
+      transfer.phase = "error";
+      transfer.error = (error as Error).message;
+    } finally {
+      this.options.changed?.();
+    }
+  }
+
+  async discardDownload() {
+    const transfer = this.transfer;
+    if (!transfer || transfer.phase === "installing") return;
+    this.transfer = undefined;
+    transfer.controller.abort();
+    this.options.changed?.();
+    await transfer.completion;
+    await transfer.package?.cancel();
+  }
+
+  confirmDownload(version: unknown) {
+    const transfer = this.transfer;
+    if (this.pending || transfer?.phase !== "ready" || transfer.candidate.version !== version || !transfer.package) {
+      return false;
+    }
+    if (this.options.busy()) {
+      transfer.error = "UPDATE_APP_BUSY";
+      this.options.changed?.();
+      return false;
+    }
+    this.pending = true;
+    transfer.phase = "installing";
+    this.prepared = transfer.package;
+    this.options.changed?.();
+    return true;
+  }
+
   async install(version: unknown, signal: AbortSignal): Promise<CliReply> {
-    if (this.pending) {
+    if (this.pending || this.transfer?.phase === "downloading" || this.transfer?.phase === "ready") {
       return cliFailure("UPDATE_IN_PROGRESS", "An update is already being prepared or installed.");
     }
     if (!this.options.supported()) {
       return cliFailure("UPDATE_MANUAL_REQUIRED",
         `Install the package for your OS and architecture from ${this.found?.url ?? releasesUrl}. Windows requires an installed NSIS client; source, unpacked, Linux and macOS installations update manually.`);
     }
-    if (typeof version !== "string" || !this.found || version !== this.found.version) {
+    if (typeof version !== "string" || !this.found || this.checkedTag !== this.found.tag || version !== this.found.version) {
       return cliFailure("UPDATE_CHECK_REQUIRED", "Check for updates, then pass the exact found version.");
     }
     const candidate = this.found;
@@ -71,6 +170,7 @@ export class ApplicationUpdates {
       return cliFailure("UPDATE_APP_BUSY", "Wait for running work to finish, then retry. No work was interrupted.");
     }
     this.pending = true;
+    this.options.changed?.();
     try {
       signal.throwIfAborted();
       if (!await this.options.confirm(version, signal)) {
@@ -95,6 +195,7 @@ export class ApplicationUpdates {
     } finally {
       if (!this.prepared) {
         this.pending = false;
+        this.options.changed?.();
       }
     }
   }
@@ -103,11 +204,15 @@ export class ApplicationUpdates {
     const prepared = this.prepared;
     this.prepared = undefined;
     this.pending = false;
+    if (this.transfer?.phase === "installing") {
+      this.transfer = { ...this.transfer, phase: "error", package: undefined, error: "UPDATE_CANCELLED" };
+    }
+    this.options.changed?.();
     await prepared?.cancel();
   }
 }
 
-async function download(url: string, limit: number, signal: AbortSignal, target?: string) {
+async function download(url: string, limit: number, signal: AbortSignal, target?: string, progress?: (value: Progress) => void) {
   const response = await fetch(url, { signal: AbortSignal.any([signal, AbortSignal.timeout(300_000)]) });
   if (!response.ok || !response.body) {
     throw new Error(`Download failed: HTTP ${response.status}`);
@@ -116,6 +221,12 @@ async function download(url: string, limit: number, signal: AbortSignal, target?
   const hash = createHash("sha256");
   const chunks: Buffer[] = [];
   let length = 0;
+  const contentLength = response.headers.get("content-length");
+  const size = contentLength && /^\d+$/.test(contentLength) ? Number(contentLength) : 0;
+  const total = Number.isSafeInteger(size) && size > 0 && size <= limit && !response.headers.has("content-encoding")
+    ? size : undefined;
+  let lastReport = -Infinity;
+  progress?.({ received: length, total });
   try {
     for await (const chunk of response.body) {
       length += chunk.length;
@@ -127,6 +238,10 @@ async function download(url: string, limit: number, signal: AbortSignal, target?
         await file.writeFile(chunk);
       } else {
         chunks.push(Buffer.from(chunk));
+      }
+      if (progress && performance.now() - lastReport >= 100) {
+        lastReport = performance.now();
+        progress({ received: length, total });
       }
     }
   } finally {
@@ -162,6 +277,7 @@ export async function prepareWindowsUpdate(candidate: Candidate, signal: AbortSi
   profile: string;
   args: string[];
   relaunch: (executable: string, args: string[]) => void;
+  progress?: (value: Progress) => void;
 }): Promise<PreparedUpdate> {
   if (!["x64", "arm64"].includes(options.arch)) {
     throw new Error("Unsupported Windows architecture.");
@@ -174,7 +290,7 @@ export async function prepareWindowsUpdate(candidate: Candidate, signal: AbortSi
     const manifest = await download(base + "SHA256SUMS", 1024 * 1024, signal);
     const digest = manifestChecksum(manifest.text, name);
     const installer = join(directory, name);
-    const downloaded = await download(base + name, 1024 * 1024 * 1024, signal, installer);
+    const downloaded = await download(base + name, 1024 * 1024 * 1024, signal, installer, options.progress);
     if (downloaded.digest !== digest) {
       throw new Error("Installer SHA-256 does not match the release manifest.");
     }

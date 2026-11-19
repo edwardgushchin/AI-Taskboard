@@ -1290,6 +1290,18 @@
   "ui.waiting_for_provider_quota_until": "Waiting for provider quota · resets {time}",
   "updates.install_confirm": "Install AI Taskboard {version} and restart?",
   "updates.install_detail": "The official Windows installer will be checked against the release SHA-256 manifest. Your profile and open boards will be preserved.",
+  "updates.available_version": "AI Taskboard {version} is available",
+  "updates.no_notes": "The publisher did not include release notes.",
+  "updates.close": "Close",
+  "updates.download": "Update",
+  "updates.downloading": "Downloading the update…",
+  "updates.verified": "The installer is verified and ready. Your profile and open boards will be preserved.",
+  "updates.restart": "Update and restart",
+  "updates.later": "Later",
+  "updates.retry": "Retry download",
+  "updates.busy": "Wait for running work to finish, then try again.",
+  "updates.cancelled": "The application could not close to install the update.",
+  "updates.failed": "Could not update. {reason}",
   "updates.install_button": "Install and restart",
   "updates.preparing": "An application update is being prepared. Try again after the restart or cancellation."
 }
