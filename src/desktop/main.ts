@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { callCli, cliChild, cliFailure } from "./cli.ts";
 import { githubReadTool, readBoardGitHub } from "./github-read.ts";
-import { codexStatus, configuredCodex, executorFullAccess, isManagerAccess, managerAccess, setCodexExecutable, setCodexWindowsSandbox, setTaskExecutorAccess } from "./codex.ts";
+import { codexAuthMode, codexStatus, configuredCodex, executorFullAccess, isManagerAccess, managerAccess, setCodexAuth, setCodexExecutable, setCodexWindowsSandbox, setTaskExecutorAccess } from "./codex.ts";
 import { chatModels, readBoardHistory, readLastTaskTurn, readTaskRunHistory, replyToBoard, replyToTask, reviewWithCodex, updateBoardGoal } from "./codex-chat.ts";
 import type { BoardActivity, BoardGoal, BoardGoalAction } from "./codex-chat.ts";
 import { boardReviewModeTool, reviewModeReceipt, setReviewModeFromChat, taskChatActions } from "./chat-actions.ts";
@@ -4224,13 +4224,14 @@ function updateQuota(wait: QuotaWait | undefined) {
 }
 
 watchCodexQuotaExceeded(() => {
-  if (quotaWait) return;
+  if (quotaWait || codexAuthMode(app.getPath("userData")) === "api") return;
   readProviderLimits.invalidate();
   updateQuota({});
 });
 
 function refreshQuota() {
   quotaRefresh ??= readProviderLimits().then(limits => {
+    if (codexAuthMode(app.getPath("userData")) === "api") return limits;
     const confirmation = confirmedQuota(limits.find(limit => limit.provider === "Codex"));
     if (confirmation === "available") updateQuota(undefined);
     else if (confirmation) updateQuota(confirmation);
@@ -4253,6 +4254,27 @@ ipcMain.handle("providers:limits", event => { stateOf(event); return refreshQuot
 ipcMain.handle("codex:status", event => {
   stateOf(event);
   return codexStatus(app.getPath("userData"));
+});
+let changingCodexAuth = false;
+ipcMain.handle("codex:auth", async (event, mode: unknown, key: unknown) => {
+  stateOf(event);
+  if ((mode !== "api" && mode !== "profile") || typeof key !== "string") return { outcome: "invalidFormat" };
+  if (changingCodexAuth) return { outcome: "busy" };
+  changingCodexAuth = true;
+  const profile = app.getPath("userData");
+  try {
+    const previous = codexAuthMode(profile);
+    const outcome = await setCodexAuth(profile, mode, key);
+    if (outcome === "verified") {
+      if (previous !== mode) updateQuota(undefined);
+      resetProviderLimits();
+    }
+    return { outcome, status: await codexStatus(profile) };
+  } catch {
+    return { outcome: "storageError" };
+  } finally {
+    changingCodexAuth = false;
+  }
 });
 ipcMain.handle("codex:managerAccess", (event, project: unknown, mode: unknown) => {
   const state = stateOf(event);
