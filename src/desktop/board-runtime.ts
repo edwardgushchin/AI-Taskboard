@@ -25,6 +25,7 @@ export interface RuntimeEntry {
   restart?: { threadId: string; cwd: string };
   continuation?: { afterDisconnect?: boolean; withoutProgress?: boolean };
   quotaPaused?: boolean;
+  reviewReturn?: true;
   newThread?: "user" | "manager";
   queuedMessageId?: string;
   steeringMessageId?: string;
@@ -142,15 +143,16 @@ export function runtimeEntries(project: string) {
   return liveEntries(readEntries(join(runtimeLocation(project).directory, "runtime.json")));
 }
 
-export type DeferredExecutor = Pick<RuntimeEntry, "continuation" | "quotaPaused" | "newThread"> & { revision: number };
+export type DeferredExecutor = Pick<RuntimeEntry, "continuation" | "quotaPaused" | "newThread" | "reviewReturn"> & { revision: number };
 
-type QueuedTask = Pick<Task, "id" | "revision" | "status" | "codexThreadId">;
+type QueuedTask = Pick<Task, "id" | "revision" | "status" | "codexThreadId" | "reviewReturn">;
 
 export function matchesQueuedExecutor(entry: RuntimeEntry, task: QueuedTask) {
-  return entry.kind === "queue" && entry.task === task.id && task.status === "in_progress" &&
-    (entry.restart ? entry.restart.threadId === task.codexThreadId && (entry.revision ?? Infinity) <= task.revision
-      : entry.revision === task.revision || (entry.linkedThread?.revision === task.revision &&
-        entry.linkedThread.codexThreadId === task.codexThreadId));
+  if (entry.kind !== "queue" || entry.task !== task.id || task.status !== "in_progress") return false;
+  if (entry.reviewReturn) return task.reviewReturn !== undefined && entry.revision === task.reviewReturn;
+  if (entry.restart) return entry.restart.threadId === task.codexThreadId && (entry.revision ?? Infinity) <= task.revision;
+  return entry.revision === task.revision || (entry.linkedThread?.revision === task.revision &&
+    entry.linkedThread.codexThreadId === task.codexThreadId);
 }
 
 export function linkQueuedExecutor(project: string, task: QueuedTask, updated: QueuedTask) {
@@ -158,7 +160,7 @@ export function linkQueuedExecutor(project: string, task: QueuedTask, updated: Q
     const entry = entries.find(entry => matchesQueuedExecutor(entry, task));
     if (!entry) return false;
     // Publish both revisions before saving the card, so either snapshot survives a crash.
-    if (updated.revision !== task.revision && updated.codexThreadId) {
+    if (!entry.reviewReturn && updated.revision !== task.revision && updated.codexThreadId) {
       entry.revision = task.revision;
       entry.linkedThread = { revision: updated.revision, codexThreadId: updated.codexThreadId };
     }

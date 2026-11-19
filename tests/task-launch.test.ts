@@ -66,6 +66,7 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "recovered
       deferExecutor(location(project), id, pending, expectedRevision),
   });
   const runtime = runInNewContext(stripTypeScriptTypes(lifecycle) + "\n({launchTask, returnTaskToDraft, scheduleAgentWork, scheduleRecurringTasks, beginOperation, confirmProjectClose, projectOperations, runningTasks, activeAgents})", {
+    applicationUpdates: { installing: false },
     quotaWait: undefined, quotaInterruption: new Error("Fixture quota pause"), refreshQuota: async () => [],
     AbortController, AbortSignal, wait, performance, setTimeout, clearTimeout, setImmediate, subscriptions, agentSlots: slots,
     isManual, runtimeLocation: (project: string) => project,
@@ -96,6 +97,8 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "recovered
         task.status = "in_progress";
         task.history.push({ actor: "user", action: "request-changes", at: new Date().toISOString(), text: input.reason });
         task.revision++;
+        task.reviewReturn = task.revision;
+        deferExecutor(location(project), task.id, { revision: task.reviewReturn, reviewReturn: true });
       }
       if (args[0] === "resume") {
         if (input.revision !== task.revision) return failure("REVISION_CONFLICT", "The task changed.");
@@ -113,7 +116,8 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "recovered
           task.mergeRepair = true;
         }
         const execution = task.execution ?? { provider: "codex", model: "executor-model", effort: "low" };
-        return { ok: true, data: { task: { ...structuredClone(task), execution }, worktree: task.git!.worktree } };
+        const feedback = task.history.findLast(event => event.action === "request-changes")?.text;
+        return { ok: true, data: { task: { ...structuredClone(task), execution, feedback }, worktree: task.git!.worktree } };
       }
       if (args[0] === "review") return { ok: true, data: { revision: task.revision, targetHead: task.acceptanceRepair?.targetHead } };
       if (args[0] === "accept") {
@@ -126,7 +130,9 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "recovered
       }
       if (args[0] === "block") {
         if (task.status !== "in_progress") return failure("INVALID_TRANSITION", "The task is no longer in progress.");
+        if (input.revision !== undefined && input.revision !== task.revision) return failure("REVISION_CONFLICT", "The task changed.");
         task.status = "blocked"; task.blocked = input; task.revision++;
+        forgetExecutor(location(project), task.id);
       }
       if (args[0] === "update") {
         if (outcome === "board-busy") return failure("BOARD_BUSY", "Another command is working on this board.");
@@ -341,11 +347,23 @@ test("a full board preserves review feedback and another board can still launch"
   assert.equal(f.slots.entries("full").find(entry => entry.task === f.task.id)?.revision, f.task.revision);
   assert.equal(f.task.history.at(-1)?.text, "Fix the result.");
   assert.equal(f.launched.length, 1);
+  Object.assign(f.task, changeTask(f.task, "update", {
+    actor: "manager",
+    note: "Clarified requirements.",
+    description: "Updated while waiting.",
+    criteria: ["Use the updated requirements."],
+  }));
+  f.runtime.scheduleAgentWork();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.slots.entries("full").filter(entry => entry.kind === "queue").length, 1);
   release();
   f.completion.resolve({ interrupted: true, reason: "Turn ended." });
   await new Promise(resolve => setImmediate(resolve));
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.launched.length, 2);
+  assert.equal(f.launched[1].description, "Updated while waiting.");
+  assert.deepEqual(f.launched[1].criteria, ["Use the updated requirements."]);
+  assert.equal(f.launched[1].feedback, "Fix the result.");
   assert.equal(f.slots.entries("full").length, 0);
   f.task.status = "review";
   f.retryCompletion.resolve(undefined);
@@ -377,8 +395,8 @@ test("deferred executors wait for two occupied slots, follow limit changes and d
     if (action === "decrease") { settings.taskLimits!.executor = 1; first(); }
     f.runtime.scheduleAgentWork();
     await new Promise(resolve => setImmediate(resolve));
-    const waits = ["decrease", "watch-lag"].includes(action);
-    const invalid = ["cancel", "delete", "revision"].includes(action);
+    const waits = ["decrease", "revision", "watch-lag"].includes(action);
+    const invalid = ["cancel", "delete"].includes(action);
     assert.equal(f.slots.entries("project").length, waits ? 1 : 0, action);
     assert.equal(f.launched.length, waits || invalid ? 0 : 1, action);
     if (waits) { board.tasks = [f.task]; first(); second(); f.runtime.scheduleAgentWork(); }

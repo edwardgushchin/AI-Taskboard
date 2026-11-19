@@ -28,7 +28,7 @@ const repairCalls = [];
 const returnSaved = Promise.withResolvers();
 const releaseReturn = Promise.withResolvers();
 const newChatStarting = new Map();
-const { runtimeEntries } = require("../src/desktop/board-runtime.ts");
+const { registerRuntime, runtimeEntries } = require("../src/desktop/board-runtime.ts");
 
 process.on("unhandledRejection", error => console.error("Startup rejection", error));
 app.setPath("userData", profile);
@@ -123,6 +123,7 @@ async function run() {
       ready: "Готовая карточка",
       prelink: "Пауза до первого чата",
       returned: "Возврат до слота",
+      returnedDuringPause: "Возврат при исчерпанной квоте",
       newChatAuto: "Новый чат · авторежим",
       newChatManual: "Новый чат · вручную",
       repair: "Ремонт приёмки",
@@ -153,18 +154,19 @@ async function run() {
       const targetHead = execFileSync("git", ["rev-parse", "main"], { cwd: project, encoding: "utf8" }).trim();
       store.save({ ...card, acceptanceRepair: { phase: "queued", targetHead, attempts: 0, message: "Fixture repair" } });
     });
-    const returned = cli(["start", ids.returned]);
-    cli(["update", ids.returned], { codexThreadId: threadFor(ids.returned) });
-    writeFileSync(join(returned.worktree, "saved-work.txt"), "Preserve the review worktree");
-    const returnedPreview = cli(["preview", ids.returned]);
-    cli(["submit", ids.returned], {
-      token: returnedPreview.token, message: "test: prepare returned work",
-      summary: "Review result before quota", checks: ["Fixture checked"],
-    });
-    onBoard(locateBoard(project), store => {
-      const card = store.card(ids.returned);
-      store.save({ ...card, reviewModeOverride: { mode: "human", version: 1 } });
-    });
+    for (const id of [ids.returned, ids.returnedDuringPause]) {
+      const { worktree } = cli(["start", id]);
+      cli(["update", id], { codexThreadId: threadFor(id) });
+      writeFileSync(join(worktree, "saved-work.txt"), "Preserve the review worktree");
+      const { token } = cli(["preview", id]);
+      cli(["submit", id], {
+        token, message: "test: prepare returned work", summary: "Review result before quota", checks: ["Fixture checked"],
+      });
+      onBoard(locateBoard(project), store => {
+        const card = store.card(id);
+        store.save({ ...card, reviewModeOverride: { mode: "human", version: 1 } });
+      });
+    }
     for (const id of [ids.newChatAuto, ids.newChatManual]) {
       cli(["start", id]);
       const oldThread = "30000000-0000-0000-0000-" + id.slice(2).padStart(12, "0");
@@ -284,7 +286,8 @@ async function run() {
     writeFileSync(join(work, "quota-fixture.txt"), "Preserved work");
     const saved = {
       ids, work, executor: show(ids.executor), manual: show(ids.manual), reviewer: show(ids.reviewer),
-      returned: show(ids.returned), newChatAuto: show(ids.newChatAuto), newChatManual: show(ids.newChatManual),
+      returned: show(ids.returned), returnedDuringPause: show(ids.returnedDuringPause),
+      newChatAuto: show(ids.newChatAuto), newChatManual: show(ids.newChatManual),
     };
     state = "error";
     await quotaApp.refresh();
@@ -356,12 +359,29 @@ async function run() {
     assert.equal(stopped.ok, true);
     await until("zero quota in the limits control", async () =>
       (await percentage(first)).endsWith(" 0%") && (await percentage(second)).endsWith(" 0%"));
+    const pausedReturn = await render(second, `taskboard.command("request-changes", ${JSON.stringify(ids.returnedDuringPause)}, {
+      revision: ${saved.returnedDuringPause.revision}, reason: "Keep the feedback sent during the active pause"
+    })`);
+    assert.equal(pausedReturn.ok, true, JSON.stringify(pausedReturn));
+    assert.equal(pausedReturn.data.status, "in_progress");
+    assert.equal(show(ids.returnedDuringPause).status, "in_progress");
+    const pausedQueue = runtimeEntries(project).find(entry => entry.kind === "queue" && entry.task === ids.returnedDuringPause);
+    assert.equal(pausedQueue?.quotaPaused, true);
+    assert.equal(pausedQueue?.revision, pausedReturn.data.revision);
+    await until("return made during quota wait is visible in both windows", async () =>
+      (await frame(first)).quotaTasks.includes(ids.returnedDuringPause) &&
+      (await frame(second)).quotaTasks.includes(ids.returnedDuringPause));
+    assert.equal(providerCalls.some(call => call.id === ids.returnedDuringPause), false);
+    await capture(second, "quota-return-during-pause.png");
     assert.equal((await launch(first, ids.ready)).error.code, "PROVIDER_QUOTA");
     assert.equal((await launch(second, ids.ready)).error.code, "PROVIDER_QUOTA");
     for (const window of [first, second]) {
       const view = await frame(window);
       assert.equal(view.board.settings.autoMode, false);
-      assert.deepEqual(new Set(view.quotaTasks), new Set([ids.executor, ids.reviewer, ids.ready, ids.manual, ids.prelink, ids.repair, ids.returned, ids.newChatAuto, ids.newChatManual]));
+      assert.deepEqual(new Set(view.quotaTasks), new Set([
+        ids.executor, ids.reviewer, ids.ready, ids.manual, ids.prelink, ids.repair,
+        ids.returned, ids.returnedDuringPause, ids.newChatAuto, ids.newChatManual,
+      ]));
       assert.equal((await quotaText(window)).includes("сброс"), true);
     }
     for (const id of [ids.newChatAuto, ids.newChatManual]) {
@@ -393,11 +413,13 @@ async function run() {
     await waitForPause();
     assert.equal((await frame(first)).board.settings.autoMode, true);
     assert.equal(providerCalls.length, 0);
-    for (const id of [ids.returned, ids.newChatAuto, ids.newChatManual]) {
+    for (const id of [ids.returned, ids.returnedDuringPause, ids.newChatAuto, ids.newChatManual]) {
       assert.equal(runtimeEntries(project).some(entry => entry.kind === "queue" && entry.task === id), true);
     }
-    cli(["settings"], { autoMode: false });
+    cli(["settings"], { autoMode: false, taskLimits: { executor: 1, reviewer: 2 } });
     await until("auto-mode off", async () => !(await frame(first)).board.settings.autoMode);
+    const releaseExecutor = registerRuntime(project, { kind: "slot", role: "executor" });
+    assert.ok(releaseExecutor);
 
     await openRepair(second);
     assert.match(await repairLabel(second), /Ожидание квоты.*сброс/);
@@ -418,6 +440,21 @@ async function run() {
     await until("hybrid reviewer resumes with auto-mode off", () => providerCalls.some(call => call.role === "reviewer"));
     assert.equal(providerCalls.find(call => call.role === "reviewer").savedThread, reviewerThread);
     assert.equal(providerCalls.filter(call => call.role === "executor").length, 0);
+    for (const window of [first, second]) {
+      const view = await frame(window);
+      assert.ok(view.waitingTasks.includes(ids.returned));
+      assert.ok(view.waitingTasks.includes(ids.returnedDuringPause));
+    }
+    const executorIds = () => providerCalls.filter(call => call.role === "executor").map(call => call.id);
+    releaseExecutor();
+    await until("one review return launches after a slot becomes free", () => executorIds().length === 1);
+    assert.ok([ids.returned, ids.returnedDuringPause].includes(executorIds()[0]));
+    cli(["settings"], { taskLimits: { executor: 2, reviewer: 2 } });
+    await until("the second review return launches with another free slot", () => executorIds().length === 2);
+    assert.deepEqual(executorIds().sort(), [ids.returned, ids.returnedDuringPause].sort());
+    assert.equal(show(ids.ready).status, "ready");
+    cli(["settings"], { taskLimits: { executor: 8, reviewer: 2 } });
+    pass("With auto-mode off after restart, both review returns waited for confirmed quota and a free executor slot, then each launched once. The ordinary ready card stayed ready.");
     assert.equal(show(ids.executor).codexThreadId, saved.executor.codexThreadId);
     assert.equal(show(ids.reviewer).result.summary, saved.reviewer.result.summary);
     assert.equal((await launch(second, ids.newChatManual)).ok, true);
@@ -430,21 +467,25 @@ async function run() {
     pass("Pause survives Electron restart and a provider failure. With auto-mode off, hybrid review resumes and an executor can be resumed manually in its saved thread.");
 
     cli(["settings"], { autoMode: true });
-    await until("executor and eligible queue launched", () => providerCalls.filter(call => call.role === "executor").length === 7);
+    await until("executor and eligible queue launched", () => executorIds().length === 8);
     const resumed = providerCalls.find(call => call.id === ids.executor);
     assert.equal(resumed.savedThread, saved.executor.codexThreadId);
     assert.equal(resumed.cwd, saved.work);
     assert.equal(readFileSync(join(saved.work, "quota-fixture.txt"), "utf8"), "Preserved work");
     assert.equal(show(ids.blocked).status, "blocked");
     await delay(1600);
-    assert.equal(providerCalls.length, 8);
-    const returnedRuns = providerCalls.filter(call => call.id === ids.returned);
-    assert.equal(returnedRuns.length, 1);
-    assert.equal(returnedRuns[0].savedThread, saved.returned.codexThreadId);
-    assert.equal(returnedRuns[0].cwd, saved.returned.git.worktree);
-    assert.equal(readFileSync(join(returnedRuns[0].cwd, "saved-work.txt"), "utf8"), "Preserve the review worktree");
-    assert.equal(cli(["show", ids.returned]).history.findLast(event => event.action === "request-changes").text,
-      "Keep this reviewer feedback after quota");
+    assert.equal(providerCalls.length, 9);
+    for (const [key, feedback] of [
+      ["returned", "Keep this reviewer feedback after quota"],
+      ["returnedDuringPause", "Keep the feedback sent during the active pause"],
+    ]) {
+      const runs = providerCalls.filter(call => call.id === ids[key]);
+      assert.equal(runs.length, 1);
+      assert.equal(runs[0].savedThread, saved[key].codexThreadId);
+      assert.equal(runs[0].cwd, saved[key].git.worktree);
+      assert.equal(readFileSync(join(runs[0].cwd, "saved-work.txt"), "utf8"), "Preserve the review worktree");
+      assert.equal(cli(["show", ids[key]]).history.findLast(event => event.action === "request-changes").text, feedback);
+    }
     const autoNewChat = providerCalls.filter(call => call.id === ids.newChatAuto);
     assert.equal(autoNewChat.length, 1);
     assert.equal(autoNewChat[0].savedThread, undefined);
@@ -469,7 +510,8 @@ async function run() {
     await capture(first, "quota-resumed.png");
 
     const files = [
-      "src/cli/acceptance.ts", "src/desktop/main.ts", "src/desktop/board-runtime.ts", "src/desktop/codex-chat.ts",
+      "src/cli/acceptance.ts", "src/cli/main.ts", "src/cli/model.ts",
+      "src/desktop/main.ts", "src/desktop/board-runtime.ts", "src/desktop/codex-chat.ts",
       "src/desktop/codex-rpc.ts", "src/desktop/reviewer-chat.ts", "src/desktop/provider-limits.ts", "src/desktop/renderer.js",
       "src/desktop/index.html", "src/desktop/provider-limits.js", "src/desktop/locales/en.json", "src/desktop/locales/ru.json",
       "scripts/check-provider-quota.mjs", "tests/provider-limits.test.ts",

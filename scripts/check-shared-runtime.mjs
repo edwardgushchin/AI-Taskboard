@@ -35,6 +35,8 @@ if (!process.versions.electron) {
   const hybridOnly = process.argv.includes("--reviewer-human-only");
   const recoveryOnly = process.argv.includes("--worktree-recovery-only");
   const restartOnly = process.argv.includes("--task-restart-only");
+  const returnOnly = process.argv.includes("--review-return-only");
+  const failedReviewLaunch = join(scratch, "failed-review-launch");
   const outputIndex = process.argv.indexOf("--artifacts");
   const output = outputIndex < 0 ? undefined : resolve(process.argv[outputIndex + 1]);
   const workers = [], providerPids = new Set();
@@ -73,6 +75,103 @@ if (!process.versions.electron) {
   };
   checks: try {
     symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), join(scratch, "node_modules"), process.platform === "win32" ? "junction" : "dir");
+    if (returnOnly) {
+      mkdirSync(project);
+      const git = (...args) => execFileSync("git", ["-C", project, ...args], { env, windowsHide: true });
+      git("init", "-b", "main");
+      git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "--no-gpg-sign", "-m", "Fixture");
+      cli(project, ["init"], { git: false });
+      cli(project, ["settings"], { autoMode: false, reviewMode: "human", taskLimits: { executor: 1 } });
+      const initialDescription = "Original description.";
+      const returnedCards = ["Free", "Occupied", "Cancelled", "Draft", "Failure"].map((title, index) => {
+        const directory = join(project, title);
+        const useWorktree = title === "Occupied";
+        if (!useWorktree) mkdirSync(directory);
+        const thread = "10000000-0000-0000-0000-00000000000" + (index + 1);
+        const { id } = cli(project, ["create"], plannedDraft({
+          title, description: initialDescription, criteria: ["Original criterion"],
+          ...(useWorktree ? {} : { workingDirectory: directory }),
+        }));
+        cli(project, ["approve", id]);
+        const { worktree } = cli(project, ["start", id]);
+        cli(project, ["update", id], { codexThreadId: thread });
+        const { token } = cli(project, ["preview", id]);
+        cli(project, ["submit", id], { token, noChanges: true, summary: "Initial result", checks: ["Fixture"] });
+        return { id, cwd: worktree ?? directory, thread };
+      });
+      const [free, occupied, cancelled, draft, failure] = returnedCards;
+      const show = id => cli(project, ["show", id, "--compact"]);
+      const feedback = "Apply review feedback.";
+      const before = cli(project, ["show", occupied.id, "--compact"], { historyLimit: 20 }).history;
+      const returnCard = async (worker, { id }) => {
+        const reply = await worker.ask({ action: "returnReview", id, revision: show(id).revision, reason: feedback });
+        assert.equal(reply.ok, true, JSON.stringify(reply));
+      };
+      const original = await start("review-return");
+      await returnCard(original, free);
+      assert.deepEqual(await original.ask({ action: "reviewBinding", id: free.id }), {
+        cwd: free.cwd, thread: free.thread, description: initialDescription, criteria: ["Original criterion"], feedback, count: 1,
+      });
+      await original.ask({ action: "stop", id: free.id });
+      await wait(() => show(free.id).status === "blocked", "stopped free launch");
+
+      const holder = await start("review-return-holder");
+      assert.equal(await holder.ask({ action: "reserve", role: "executor" }), true);
+      for (const card of [occupied, cancelled, draft, failure]) await returnCard(original, card);
+      cli(project, ["update", occupied.id], { revision: show(occupied.id).revision, actor: "manager",
+        note: "Clarify requirements.", description: "Updated description.", criteria: ["Updated criterion"] });
+      cli(project, ["cancel", cancelled.id], { reason: "Cancelled while waiting." });
+      cli(project, ["return-to-draft", draft.id], { revision: show(draft.id).revision });
+      writeFileSync(failedReviewLaunch, failure.id);
+      const exited = once(original.child, "exit");
+      await original.ask({ action: "exit" });
+      await exited;
+      const restarted = await start("review-return");
+      await restarted.ask({ action: "newWindow" });
+      await wait(async () => (await restarted.ask({ action: "frames" })).filter(frame =>
+        frame.waitingTasks?.includes(occupied.id) && frame.waitingTasks.includes(failure.id)).length >= 2, "waiting in two windows after restart");
+      await wait(async () => (await restarted.ask({ action: "dom" })).filter(frame => frame.waiting).length >= 2, "visible waiting indicators");
+      if (output) {
+        mkdirSync(output, { recursive: true });
+        await restarted.ask({ action: "screenshot", path: join(output, "review-return-waiting.png") });
+      }
+      await holder.ask({ action: "release", role: "executor" });
+      const workersWithBoard = [restarted, holder];
+      const bindings = id => Promise.all(workersWithBoard.map(worker => worker.ask({ action: "reviewBinding", id })));
+      let seen;
+      await wait(async () => {
+        seen = await bindings(occupied.id);
+        return seen.some(Boolean);
+      }, "follow-up executor after restart");
+      const owner = workersWithBoard[seen.findIndex(Boolean)];
+      await wait(() => owner.ask({ action: "canStop", id: occupied.id }), "follow-up provider started");
+      assert.deepEqual((await bindings(occupied.id)).filter(Boolean), [{
+        cwd: occupied.cwd, thread: occupied.thread, feedback, count: 1,
+        description: "Updated description.", criteria: ["Updated criterion"],
+      }]);
+      const history = cli(project, ["show", occupied.id, "--compact"], { historyLimit: 20 }).history;
+      assert.deepEqual(history.slice(0, before.length), before);
+      assert.equal(history.filter(event => event.action === "request-changes" && event.text === feedback).length, 1);
+      await owner.ask({ action: "stop", id: occupied.id });
+      await wait(() => show(failure.id).status === "blocked", "queued launch failure");
+      assert.match(show(failure.id).blocked.reason, /Isolated review launch failure/);
+      assert.ok(show(failure.id).blocked.condition);
+      assert.deepEqual((await bindings(failure.id)).filter(Boolean), []);
+      rmSync(failedReviewLaunch);
+      cli(project, ["resume", failure.id], { revision: show(failure.id).revision, reason: "Provider is available again." });
+      const resumed = await restarted.ask({ action: "launch", id: failure.id });
+      assert.equal(resumed.ok, true, JSON.stringify(resumed));
+      assert.deepEqual((await bindings(failure.id)).filter(Boolean), [{
+        cwd: failure.cwd, thread: failure.thread, feedback, count: 1,
+        description: initialDescription, criteria: ["Original criterion"],
+      }]);
+      for (const card of [cancelled, draft]) assert.deepEqual((await bindings(card.id)).filter(Boolean), []);
+      record("PASS free and occupied slots, restart, waiting in two windows, latest requirements, original chat, history and worktree, one launch, cancellation, draft, launch failure and manual recovery");
+      const { node, electron, chrome } = await restarted.ask({ action: "versions" });
+      record(JSON.stringify({ platform: process.platform, node, electron, chrome }));
+      if (output) writeFileSync(join(output, "review-return-check.txt"), results.join("\n") + "\n");
+      break checks;
+    }
     if (restartOnly) {
       mkdirSync(project);
       mkdirSync(other);
@@ -686,6 +785,7 @@ if (!process.versions.electron) {
   if (restartOnly) dialog.showMessageBox = async () => ({ response: 1 });
   const runs = new Map(), leases = new Map(), pids = new Set(), providerRequests = new Map(); let failNext = false, providerSequence = 0;
   const executorBindings = new Map();
+  const reviewBindings = new Map();
   let gitWindow;
   const active = await import(new URL("../src/desktop/active-runs.ts", import.meta.url));
   let managerCalls = 0, maintenanceCalls = 0, goalClearCalls = 0, goalCalls = 0, heldTurn, goalDone, goalRequest, goalMode;
@@ -736,6 +836,10 @@ if (!process.versions.electron) {
   };
   globalThis.runtimeCheckStart = async (_client, board, _cwd, task, _activity, _usage, signal, beforeTurn, _profile, _recoveringThread, strict) => {
     if (failNext) { failNext = false; throw Error("Isolated provider launch failure"); }
+    const failedReviewLaunch = join(scratch, "failed-review-launch");
+    if (existsSync(failedReviewLaunch) && task.id === readFileSync(failedReviewLaunch, "utf8")) {
+      throw Error("Isolated review launch failure");
+    }
     if (restartOnly && existsSync(join(scratch, "missing-chat")) &&
         task.codexThreadId === readFileSync(join(scratch, "missing-chat"), "utf8")) {
       assert.equal(strict, true);
@@ -749,6 +853,8 @@ if (!process.versions.electron) {
     const threadId = task.codexThreadId ?? ("10000000-0000-0000-0000-" + String(pid).padStart(12, "0"));
     const queued = await beforeTurn(threadId);
     queued?.accepted("turn-" + pid);
+    reviewBindings.set(task.id, { cwd: _cwd, thread: task.codexThreadId, description: task.description,
+      criteria: task.criteria, feedback: task.feedback, count: (reviewBindings.get(task.id)?.count ?? 0) + 1 });
     const interrupt = () => { try { process.kill(pid); } catch {} };
     signal?.addEventListener("abort", interrupt, { once: true });
     const completion = new Promise(resolve => {
@@ -824,6 +930,7 @@ if (!process.versions.electron) {
         `window.taskboard.command("accept", ${JSON.stringify(command.id)}, ${JSON.stringify(command.input)})`);
       if (command.action === "versions") data = process.versions;
       if (command.action === "executorBinding") data = executorBindings.get(command.id);
+      if (command.action === "reviewBinding") data = reviewBindings.get(command.id);
       if (command.action === "restoreBoards") { const state = qa.createWindow([project, other]); await state.ready; globalThis.restoredCheckWindow = state.window; data = true; }
       if (command.action === "closeRestored") { globalThis.restoredCheckWindow.close(); data = true; }
       if (command.action === "newWindow") { const state = qa.createWindow([project]); await state.ready; data = true; }
@@ -925,6 +1032,11 @@ if (!process.versions.electron) {
         data = true;
       }
       if (command.action === "launch") data = await qa.launchTask(project, command.id, undefined, false, undefined, undefined, false, false, false, false, true);
+      if (command.action === "returnReview") {
+        const { id, revision, reason } = command;
+        data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(
+          `window.taskboard.command("request-changes", ${JSON.stringify(id)}, ${JSON.stringify({ revision, reason })})`);
+      }
       if (command.action === "canStop") data = qa.activeAgents.has(project + "\0" + command.id);
       if (command.action === "stop") { await qa.activeAgents.get(project + "\0" + command.id)?.control.interrupt(); data = true; }
       if (command.action === "stopWatches") { for (const watch of qa.subscriptions.values()) watch.stop(); data = true; }
