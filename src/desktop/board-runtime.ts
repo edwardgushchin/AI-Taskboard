@@ -25,6 +25,7 @@ export interface RuntimeEntry {
   restart?: { threadId: string; cwd: string };
   continuation?: { afterDisconnect?: boolean; withoutProgress?: boolean };
   quotaPaused?: boolean;
+  newThread?: "user" | "manager";
   queuedMessageId?: string;
   steeringMessageId?: string;
   state?: {
@@ -81,20 +82,31 @@ function liveEntries(entries: RuntimeEntry[]) {
 }
 
 function queueRestart(entries: RuntimeEntry[], slot: RuntimeEntry, quotaPaused?: boolean) {
-  const { task, revision, restart, continuation } = slot;
+  const { task, revision, restart, continuation, newThread } = slot;
   if (slot.kind !== "slot" || !task || revision === undefined || (!restart && !quotaPaused) ||
       entries.some(entry => entry.kind === "queue" && entry.task === task)) return;
-  entries.push({ id: slot.id, kind: "queue", owner: 0, task, revision, restart, continuation, quotaPaused });
+  entries.push({ id: slot.id, kind: "queue", owner: 0, task, revision, restart, continuation, quotaPaused, newThread });
 }
 
-export function rememberExecutor(project: string, task: QueuedTask, cwd: string, continuation: RuntimeEntry["continuation"]) {
+export function rememberExecutor(project: string, task: QueuedTask, cwd: string,
+  continuation: RuntimeEntry["continuation"], newThread?: RuntimeEntry["newThread"]) {
   runtimeTransaction(project, entries => {
     const slot = entries.find(entry => entry.id === context.getStore() && entry.kind === "slot" && entry.task === task.id);
     if (slot && task.status === "in_progress") {
       slot.revision = task.revision;
-      if (task.codexThreadId) slot.restart = { threadId: task.codexThreadId, cwd };
-      else delete slot.restart;
+      slot.newThread = newThread;
+      if (task.codexThreadId && !newThread) {
+        slot.restart = { threadId: task.codexThreadId, cwd };
+      } else {
+        delete slot.restart;
+      }
       slot.continuation = continuation;
+      if (!newThread) {
+        const queued = entries.find(entry => entry.kind === "queue" && entry.task === task.id);
+        if (queued) {
+          delete queued.newThread;
+        }
+      }
     }
   });
 }
@@ -105,6 +117,7 @@ export function forgetExecutor(project: string, task: string) {
       if (entry.kind !== "slot" || entry.task !== task) continue;
       delete entry.restart;
       delete entry.revision;
+      delete entry.newThread;
     }
     const index = entries.findIndex(entry => entry.kind === "queue" && entry.task === task);
     if (index >= 0) entries.splice(index, 1);
@@ -129,7 +142,7 @@ export function runtimeEntries(project: string) {
   return liveEntries(readEntries(join(runtimeLocation(project).directory, "runtime.json")));
 }
 
-export type DeferredExecutor = Pick<RuntimeEntry, "continuation" | "quotaPaused"> & { revision: number };
+export type DeferredExecutor = Pick<RuntimeEntry, "continuation" | "quotaPaused" | "newThread"> & { revision: number };
 
 type QueuedTask = Pick<Task, "id" | "revision" | "status" | "codexThreadId">;
 

@@ -3409,7 +3409,8 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   if (manual && queuedRevision === undefined) {
     queuedRevision = agentSlots.entries(project).find(entry => entry.kind === "queue" && entry.task === id && entry.quotaPaused)?.revision;
   }
-  const queued = queuedRevision !== undefined;
+  let queued = queuedRevision !== undefined;
+  let threadChoice = newThread;
   if (isManual(readBoardSettings(runtimeLocation(project)))) return cliFailure("MANUAL_BOARD", "На обычной доске исполнители недоступны.");
   const key = project + "\0" + id;
   if (returningDrafts.has(key)) return cliFailure("CHAT_BUSY", "This task is being returned to draft.");
@@ -3465,6 +3466,15 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       : known ? { ok: true, data: known }
         : await callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
     if (!current.ok) return current;
+    if (revisionRequest) {
+      // The return is already saved even if quota interrupts before slot acquisition.
+      queuedRevision = current.data.revision;
+      agentSlots.defer(project, id, {
+        revision: queuedRevision,
+        quotaPaused: signal.reason === quotaInterruption || undefined,
+      });
+      queued = true;
+    }
     if (discussionReturn !== undefined && current.data.discussionReturn !== discussionReturn) {
       return cliFailure("INVALID_TRANSITION", "This discussion return is no longer waiting to launch.");
     }
@@ -3499,6 +3509,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       if (!pending) return cliFailure("INVALID_TRANSITION", "The queued start is no longer pending.");
       recoveringThreadId = pending.turnRequest?.threadId;
       restart = pending.restart;
+      threadChoice = pending.newThread ?? newThread;
     }
     const attemptedRevision = current.data.revision;
     // Record a permanent failure while this launch still owns the task slot.
@@ -3571,6 +3582,13 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       if (!current.ok) return current;
       revision = current.data.revision;
       prepared = true;
+      if (newThread) {
+        queuedRevision = revision;
+        agentSlots.defer(project, id, {
+          revision, newThread, quotaPaused: signal.reason === quotaInterruption || undefined,
+        });
+        queued = true;
+      }
     }
     signal.throwIfAborted();
     const started = await callCli<{ task: LaunchState & ExecutorTask } & ({ worktree: string } | { cwd: string })>(project, ["start", id, "--compact"],
@@ -3591,11 +3609,11 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     prepared = true;
     const desktopProfile = app.getPath("userData");
     const task = { ...started.data.task, fullAccess: executorFullAccess(desktopProfile, project, started.data.task),
-      ...(newThread ? { codexThreadId: undefined } : {}) };
+      ...(threadChoice ? { codexThreadId: undefined } : {}) };
     let linked: LaunchState = started.data.task;
     const cwd = "cwd" in started.data ? started.data.cwd : started.data.worktree;
     // Quota can interrupt this launch before Codex has opened or linked a thread.
-    releaseSlot.run(() => rememberExecutor(project, task, cwd, continuation));
+    releaseSlot.run(() => rememberExecutor(project, task, cwd, continuation, threadChoice || undefined));
     signal.throwIfAborted();
     const run = await releaseSlot.run(() => startCodexRun(client, project, cwd, task, item => {
       activity.set(item.id, item);
@@ -3612,7 +3630,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         codexThreadId, actor: replacing ? "user" : "agent", launchDetails: true,
         ...(queued ? { queuedExecutor: true, revision: linked.revision, preserveStatus: true } : {}),
         ...(replacing ? { previousCodexThreadId,
-          note: (newThread ? t("ui.continued_in_a_new_chat_previous_chat_6e40fb2d") :
+          note: (threadChoice ? t("ui.continued_in_a_new_chat_previous_chat_6e40fb2d") :
             t("ui.codex_could_not_find_the_previous_chat_continued_726501de")) +
             "`" + previousCodexThreadId + "`" } : {}),
       });
