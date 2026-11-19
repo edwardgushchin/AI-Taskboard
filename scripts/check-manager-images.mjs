@@ -222,9 +222,10 @@ try {
   if (!restart) {
     await capture("manager-generated-images.png");
   }
-  assert.deepEqual(await evaluate("[...document.querySelectorAll('.board-work-timeline [data-item]')].map(x => x.dataset.item).filter(x => /^(message|item):/.test(x))"),
+  assert.deepEqual(await evaluate("[...document.querySelectorAll('.board-work-timeline [data-item]')].map(x => x.dataset.item).filter(x => /^(message|item):goal-images-/.test(x))"),
     ["message:goal-images-comment", "item:goal-images-command", "item:goal-images-image-1", "item:goal-images-image-2",
       "item:goal-images-tool", "message:goal-images-answer"]);
+  assert.equal(await evaluate("document.querySelector('.board-work-timeline').textContent.includes('Цель выполнена')"), true);
   await openMouse(workResult);
   if (!restart) {
     await capture("manager-generated-image-view.png");
