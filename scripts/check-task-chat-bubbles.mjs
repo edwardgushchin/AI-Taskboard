@@ -149,7 +149,7 @@ void (async () => {
         await until(async () => (await snapshot()).length === 3, "stream bubble");
         const rows = await snapshot();
         assert.equal(rows[2].actor, "agent");
-        assert.equal(rows[2].radius, "16px");
+        assert.equal(rows[2].radius, "14px 14px 14px 5px");
         assert.equal(rows[2].at, provider.at);
         assert.ok(reply.startsWith(rows[2].text.trim()), JSON.stringify(rows[2]));
         assert.ok(rows[2].text.length > 0);
@@ -204,21 +204,27 @@ void (async () => {
             const stamp = time.getBoundingClientRect();
             const style = getComputedStyle(row);
             const date = new Intl.DateTimeFormat(localization.locale, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(time.dateTime));
-            return { radius: style.borderRadius, background: style.backgroundColor, color: style.color,
+            return { actor: row.dataset.actor, radius: style.borderRadius, background: style.backgroundColor, color: style.color,
               timeColor: getComputedStyle(time).color, correctTime: time.textContent === date && /^\\d{2}:\\d{2}$/.test(date),
               accessible: time.title === time.getAttribute('aria-label'),
               inside: stamp.top >= box.top && stamp.bottom <= box.bottom && stamp.left >= box.left && stamp.right <= box.right,
               visible: box.top >= log.getBoundingClientRect().top && box.bottom <= log.getBoundingClientRect().bottom,
               lines: row.querySelector('.chat-text').clientHeight / parseFloat(getComputedStyle(row.querySelector('.chat-text')).lineHeight) };
           }),
-          dividers: [...log.querySelectorAll('.chat-day')].map(row => ({ side: getComputedStyle(row).alignSelf, radius: getComputedStyle(row).borderRadius })),
+          dividers: [...log.querySelectorAll('.chat-day')].map(row => ({
+            side: getComputedStyle(row).alignSelf,
+            rule: getComputedStyle(row, '::before').borderBlockStartWidth,
+          })),
         };
       })()`);
       assert.equal(layout.fits, true);
       assert.equal(layout.entries.length, 3);
-      assert.ok(layout.entries.every(row => row.radius === "16px" && row.correctTime && row.accessible && row.inside && row.visible), JSON.stringify(layout));
+      for (const row of layout.entries) {
+        assert.equal(row.radius, row.actor === "user" ? "16px" : "14px 14px 14px 5px");
+        assert.ok(row.correctTime && row.accessible && row.inside && row.visible, JSON.stringify(layout));
+      }
       assert.ok(layout.entries[0].lines >= 2);
-      assert.ok(layout.dividers.length > 0 && layout.dividers.every(row => row.side === "center" && row.radius === "0px"));
+      assert.ok(layout.dividers.length > 0 && layout.dividers.every(row => row.side === "stretch" && row.rule === "1px"));
       if (restart && name) writeFileSync(join(artifacts, name), (await window.webContents.capturePage()).toPNG());
       const luminance = color => {
         const values = color.match(/[\d.]+/g).map(Number);
