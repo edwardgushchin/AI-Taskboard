@@ -17,6 +17,22 @@ export async function releaseVersion(version, tag) {
   return version;
 }
 
+function changesSection(version, changes, repository, serverUrl = "https://github.com") {
+  assert(typeof changes === "string", "Release changes are required");
+  const [base, ...lines] = changes.trim().split(/\r?\n/);
+  const items = lines.filter(line => line.trim());
+  assert(items.length > 0 && items.every(line => /^-\s+\S/.test(line)),
+    "Release changes must contain a non-empty bullet list");
+
+  let introduction = "This is the first public release.";
+  if (base !== "first") {
+    assert(/^v\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(base) && base !== `v${version}`,
+      "Specify a previous release tag or first on the first line of the release changes");
+    introduction = `Changes since \`${base}\`. [Compare ${base} and v${version}](${serverUrl}/${repository}/compare/${base}...v${version}).`;
+  }
+  return ["### What's changed", "", introduction, "", ...items].join("\n");
+}
+
 export function expectedPackageGroups(version, signed) {
   const groups = new Map();
   for (const [os, extensions] of Object.entries({ windows: ["exe"], linux: ["deb", "rpm"], macos: [signed ? "pkg" : "zip"] })) {
@@ -34,7 +50,8 @@ async function sha256(path) {
   return hash.digest("hex");
 }
 
-export async function stageRelease(version, signed, artifactRoot, output, { sha, runUrl }) {
+export async function stageRelease(version, signed, artifactRoot, output, { sha, runUrl, changes, repository, serverUrl }) {
+  const section = changes === undefined ? [] : [changesSection(version, changes, repository, serverUrl), ""];
   const groups = expectedPackageGroups(version, signed);
   assert.deepEqual((await readdir(artifactRoot)).sort(), [...groups.keys()].sort(), "Incomplete or unexpected matrix artifacts");
   await mkdir(output);
@@ -55,6 +72,7 @@ export async function stageRelease(version, signed, artifactRoot, output, { sha,
     `<!-- ai-taskboard-release:${sha} -->`,
     `## AI Taskboard ${version}`,
     "",
+    ...section,
     `Built from [${sha}](${runUrl}) on native x64 and ARM64 runners.`,
     "",
     "Choose the matching architecture (x64 for Intel/AMD, arm64 for ARM or Apple Silicon):",
@@ -121,14 +139,18 @@ function gh(...args) {
   return execFileSync("gh", args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
 }
 
-export async function publishRelease({ repository, version, signed, sha, directory }, github = gh, resolveTag = resolveRemoteTag) {
+export async function publishRelease({ repository, version, signed, sha, directory, changes, serverUrl },
+  github = gh, resolveTag = resolveRemoteTag) {
   const tag = `v${version}`;
   const prerelease = version.includes("-");
   const names = [...expectedPackageGroups(version, signed).values()].flat();
   const hashes = await verifyCandidate(directory, names);
   const notes = await readFile(join(directory, notesName), "utf8");
   const marker = `<!-- ai-taskboard-release:${sha} -->`;
+  const requiredSection = changesSection(version, changes, repository, serverUrl);
+  const hasChanges = (body) => body?.replaceAll("\r\n", "\n").includes(`\n${requiredSection}\n\n`);
   assert(notes.startsWith(marker + "\n"), "Release candidate source commit mismatch");
+  assert(hasChanges(notes), "Release candidate is missing the prepared changes");
   assert.equal(resolveTag(tag), sha, "Remote tag does not point to the build commit");
 
   const releases = `repos/${repository}/releases`;
@@ -147,6 +169,7 @@ export async function publishRelease({ repository, version, signed, sha, directo
 
   const [release] = matching;
   assert(release.body?.includes(marker), "This GitHub Release belongs to a different build or release process");
+  assert(hasChanges(release.body), "GitHub Release is missing the prepared changes");
   assert.equal(release.prerelease, prerelease, "GitHub Release has a different prerelease flag");
   const endpoint = `${releases}/${release.id}`;
   if (!release.draft) {
@@ -166,7 +189,8 @@ export async function publishRelease({ repository, version, signed, sha, directo
   }
   if (uploads.length) github("release", "upload", tag, "--repo", repository, "--clobber", ...uploads);
   const draft = JSON.parse(github("api", endpoint));
-  assert(draft.draft && draft.tag_name === tag && draft.prerelease === prerelease && draft.body?.includes(marker),
+  assert(draft.draft && draft.tag_name === tag && draft.prerelease === prerelease &&
+    draft.body?.includes(marker) && hasChanges(draft.body),
     "Release changed during draft verification");
   verifyRemoteAssets(draft.assets, hashes);
   assert.equal(resolveTag(tag), sha, "Remote tag changed while uploading assets");
@@ -194,8 +218,8 @@ async function main() {
   const [command, directory, output] = process.argv.slice(2);
   const { GITHUB_EVENT_NAME, GITHUB_REF_TYPE, GITHUB_REF_NAME, GITHUB_OUTPUT, GITHUB_SERVER_URL,
     GITHUB_REPOSITORY, GITHUB_RUN_ID, SIGNED_REHEARSAL, DEFAULT_BRANCH, RELEASE_VERSION, SIGNED_BUILD } = process.env;
+  const tagPush = GITHUB_EVENT_NAME === "push" && GITHUB_REF_TYPE === "tag";
   if (command === "version") {
-    const tagPush = GITHUB_EVENT_NAME === "push" && GITHUB_REF_TYPE === "tag";
     const signedDispatch = GITHUB_EVENT_NAME === "workflow_dispatch" && SIGNED_REHEARSAL === "true";
     if (tagPush) assert(GITHUB_REF_NAME, "Expected a tag name");
     if (signedDispatch) assert(GITHUB_REF_TYPE === "branch" && GITHUB_REF_NAME === DEFAULT_BRANCH, "Signed rehearsal requires the default branch");
@@ -213,20 +237,29 @@ async function main() {
   const signed = SIGNED_BUILD === "true";
   if (command === "stage") {
     const runUrl = `${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}`;
-    await stageRelease(RELEASE_VERSION, signed, directory, output, { sha: checkedOutCommit(), runUrl });
+    const changes = tagPush ? await readFile(`release-notes/${GITHUB_REF_NAME}.md`, "utf8") : undefined;
+    await stageRelease(RELEASE_VERSION, signed, directory, output, {
+      sha: checkedOutCommit(),
+      runUrl,
+      changes,
+      repository: GITHUB_REPOSITORY,
+      serverUrl: GITHUB_SERVER_URL,
+    });
   } else if (command === "check") {
     const names = [...expectedPackageGroups(RELEASE_VERSION, signed).values()].flat();
     await verifyCandidate(directory, names);
     console.log(`Verified ${names.length} downloaded packages against SHA256SUMS`);
   } else {
     assert.equal(command, "publish");
-    assert(GITHUB_EVENT_NAME === "push" && GITHUB_REF_TYPE === "tag" && GITHUB_REF_NAME === `v${RELEASE_VERSION}`);
+    assert(tagPush && GITHUB_REF_NAME === `v${RELEASE_VERSION}`);
     console.log(await publishRelease({
       repository: GITHUB_REPOSITORY,
       version: RELEASE_VERSION,
       signed,
       sha: checkedOutCommit(),
       directory,
+      changes: await readFile(`release-notes/${GITHUB_REF_NAME}.md`, "utf8"),
+      serverUrl: GITHUB_SERVER_URL,
     }));
   }
 }

@@ -15,11 +15,14 @@ const releaseScript = join(root, "scripts", "release.mjs");
 const sha = "1234567890abcdef1234567890abcdef12345678";
 const source = { sha, runUrl: "https://example.invalid/actions/runs/123" };
 const stable = "0.1.0";
-const alpha = "0.1.0-alpha";
+const alpha = "0.1.1-alpha";
 const preview = "0.1.1-beta.2"; // Only a controlled Releases API fixture.
+const firstChanges = "first\n\n- Publish the desktop app for Windows, macOS, and Linux.\n";
+const previewChanges = "v0.1.0\n\n- Improve the update experience.\n";
+const alphaChanges = readFileSync(join(root, "release-notes", `v${alpha}.md`), "utf8");
 const hash = content => createHash("sha256").update(content).digest("hex");
 
-function fixture(t, version, signed) {
+function fixture(t, version, signed, changes = firstChanges) {
   const scratch = mkdtempSync(join(tmpdir(), "ai-taskboard-release-test-"));
   t.after(() => rmSync(scratch, { recursive: true }));
   const artifacts = join(scratch, "matrix");
@@ -41,7 +44,10 @@ function fixture(t, version, signed) {
       writeFileSync(join(dir, file), "Fixture bytes for " + file + "\n");
     }
   }
-  return { artifacts, output, downloaded, names, stage: () => stageRelease(version, signed, artifacts, output, source) };
+  return {
+    artifacts, output, downloaded, names,
+    stage: () => stageRelease(version, signed, artifacts, output, { ...source, repository: releaseRepository, changes }),
+  };
 }
 
 function checkDownloaded(version, signed, path) {
@@ -194,7 +200,7 @@ test("tag profile uses the first SemVer prerelease identifier and requires an ex
     assert.equal(result.status, 0, result.stderr);
     assert.equal(outputs, `version=${version}\nsigned=${signed}\n`);
   }
-  const { result, outputs } = selectTagProfile(scratch, stable, `v${alpha}`);
+  const { result, outputs } = selectTagProfile(scratch, alpha, "v0.1.0-alpha");
   assert.equal(result.status, 1);
   assert.match(result.stderr, /release tag must match/);
   assert.equal(outputs, "");
@@ -238,14 +244,23 @@ test("alpha tag profile stages eight packages and publishes only after GitHub as
   t.after(() => rmSync(scratch, { recursive: true }));
   const { result, outputs } = selectTagProfile(scratch, alpha);
   assert.equal(result.status, 0, result.stderr);
-  const profile = new URLSearchParams(outputs.trim().replaceAll("\n", "&"));
-  const version = profile.get("version");
-  const signed = profile.get("signed") === "true";
+  assert.equal(outputs, `version=${alpha}\nsigned=false\n`);
+  const stageEnv = {
+    ...process.env,
+    GITHUB_EVENT_NAME: "push",
+    GITHUB_REF_TYPE: "tag",
+    GITHUB_REF_NAME: `v${alpha}`,
+    GITHUB_SERVER_URL: "https://github.com",
+    GITHUB_REPOSITORY: releaseRepository,
+    GITHUB_RUN_ID: "123",
+  };
+  const version = alpha;
+  const signed = false;
   const build = fixture(t, alpha, false);
   const stage = spawnSync(process.execPath, [releaseScript, "stage", build.artifacts, build.output], {
     cwd: root,
     encoding: "utf8",
-    env: { ...process.env, RELEASE_VERSION: version, SIGNED_BUILD: profile.get("signed") },
+    env: { ...stageEnv, RELEASE_VERSION: version, SIGNED_BUILD: String(signed) },
   });
   assert.ifError(stage.error);
   assert.equal(stage.status, 0, stage.stderr);
@@ -255,7 +270,7 @@ test("alpha tag profile stages eight packages and publishes only after GitHub as
   assert.match(check.stdout, /Verified 8 downloaded packages/);
 
   const commit = execFileSync("git", ["rev-parse", "HEAD^{commit}"], { cwd: root, encoding: "utf8" }).trim();
-  const args = { repository: releaseRepository, version, signed, sha: commit, directory: build.downloaded };
+  const args = { repository: releaseRepository, version, signed, sha: commit, directory: build.downloaded, changes: alphaChanges };
   const github = controlledGitHub();
   const macZip = `ai-taskboard-${alpha}-macos-arm64.zip`;
   const windowsExe = `ai-taskboard-${alpha}-windows-x64.exe`;
@@ -278,6 +293,14 @@ test("alpha tag profile stages eight packages and publishes only after GitHub as
   assert.equal(github.releases[0].draft, true);
   assert.equal(github.releases[0].prerelease, true);
   assert.equal(await publishRelease(args, github.api, () => commit), releasesUrl + "/tag/v" + alpha);
+  const { body } = github.releases[0];
+  assert.ok(body.includes("Changes since `v0.1.0-alpha`."));
+  assert.ok(body.includes("https://github.com/" + releaseRepository + "/compare/v0.1.0-alpha...v" + alpha));
+  for (const bullet of alphaChanges.split(/\r?\n/).filter(line => line.startsWith("- "))) {
+    assert.ok(body.includes(bullet));
+  }
+  assert.match(body, /run the NSIS installer/);
+  assert.match(body, /Get-FileHash -LiteralPath "package-file" -Algorithm SHA256/);
   assert.deepEqual(github.writes, ["create", "upload", "publish"]);
   assert.deepEqual(github.releases[0].assets.map(asset => asset.name).sort(), [...build.names, "SHA256SUMS"].sort());
   assert.equal(await publishRelease(args, github.api, () => commit), releasesUrl + "/tag/v" + alpha);
@@ -288,15 +311,24 @@ test("upload failure leaves a draft and retry publishes one complete stable rele
   const build = fixture(t, stable, true);
   await build.stage();
   const github = controlledGitHub({ interruptUpload: true });
-  const publish = () => publishRelease({ repository: releaseRepository, version: stable, signed: true, sha, directory: build.output },
-    github.api, () => sha);
+  const args = { repository: releaseRepository, version: stable, signed: true, sha, directory: build.output, changes: firstChanges };
+  const publish = () => publishRelease(args, github.api, () => sha);
   await assert.rejects(publish(), /Controlled upload interruption/);
   assert.equal(github.releases[0].draft, true);
   assert.equal(github.releases[0].assets.length, 1);
   const fetcher = async () => Response.json(github.releases);
   assert.equal((await checkForUpdates("0.0.9", fetcher)).status, "empty");
   const existing = github.releases[0].assets[0];
+  const { body } = github.releases[0];
+  github.releases[0].body = body.replace("This is the first public release.", "");
+  await assert.rejects(publish(), /GitHub Release is missing the prepared changes/);
+  assert.deepEqual(github.writes, ["create", "upload"]);
+  github.releases[0].body = body;
   assert.equal(await publish(), releasesUrl + "/tag/v" + stable);
+  assert.match(body, /This is the first public release\./);
+  assert.match(body, /Publish the desktop app for Windows, macOS, and Linux/);
+  assert.match(body, /open the signed and notarized installer/);
+  assert.match(body, /shasum -a 256 "package-file"/);
   assert.equal(github.releases.length, 1);
   assert.equal(github.releases[0].draft, false);
   assert.equal(github.releases[0].prerelease, false);
@@ -304,13 +336,19 @@ test("upload failure leaves a draft and retry publishes one complete stable rele
   assert.deepEqual(github.releases[0].assets.map(asset => asset.name).sort(), [...build.names, "SHA256SUMS"].sort());
   const update = await checkForUpdates("0.0.9", fetcher);
   assert.equal(update.status, "available");
-  assert.deepEqual(update.latest, { version: stable, tag: "v" + stable, url: releasesUrl + "/tag/v" + stable, prerelease: false });
+  assert.deepEqual(update.latest, {
+    version: stable,
+    tag: "v" + stable,
+    url: releasesUrl + "/tag/v" + stable,
+    prerelease: false,
+    notes: body.trim(),
+  });
 
   const rebuilt = fixture(t, stable, true);
   const reSignedGroup = basename(existing.name, extname(existing.name));
   writeFileSync(join(rebuilt.artifacts, reSignedGroup, existing.name), "Different signing timestamp");
   await rebuilt.stage();
-  const repeat = () => publishRelease({ repository: releaseRepository, version: stable, signed: true, sha, directory: rebuilt.output },
+  const repeat = () => publishRelease({ ...args, directory: rebuilt.output },
     github.api, () => sha);
   assert.equal(await repeat(), releasesUrl + "/tag/v" + stable);
   assert.equal(github.releases[0].assets.find(asset => asset.name === existing.name).digest, existing.digest);
@@ -320,10 +358,10 @@ test("upload failure leaves a draft and retry publishes one complete stable rele
 });
 
 test("prerelease response from the publication model is visible only to preview installations", async t => {
-  const build = fixture(t, preview, true);
+  const build = fixture(t, preview, true, previewChanges);
   await build.stage();
   const github = controlledGitHub();
-  const args = { repository: releaseRepository, version: preview, signed: true, sha, directory: build.output };
+  const args = { repository: releaseRepository, version: preview, signed: true, sha, directory: build.output, changes: previewChanges };
   await assert.rejects(publishRelease(args, github.api, () => "other"), /Remote tag does not point/);
   assert.deepEqual(github.writes, []);
   const url = await publishRelease(args, github.api, () => sha);
@@ -335,5 +373,28 @@ test("prerelease response from the publication model is visible only to preview 
   assert.equal((await checkForUpdates(stable, fetcher)).status, "empty");
   const update = await checkForUpdates("0.1.1-beta.1", fetcher);
   assert.equal(update.status, "available");
-  assert.deepEqual(update.latest, { version: preview, tag: "v" + preview, url, prerelease: true });
+  assert.deepEqual(update.latest, {
+    version: preview,
+    tag: "v" + preview,
+    url,
+    prerelease: true,
+    notes: github.releases[0].body.trim(),
+  });
+});
+
+test("missing or empty changes block stable and prerelease publication before contacting GitHub", async t => {
+  for (const [version, signed, changes] of [[stable, true, firstChanges], [preview, true, previewChanges]]) {
+    const build = fixture(t, version, signed, changes);
+    await build.stage();
+    const args = { repository: releaseRepository, version, signed, sha, directory: build.output };
+    const github = () => assert.fail("GitHub must not be contacted");
+    await assert.rejects(publishRelease(args, github, () => sha), /Release changes are required/);
+    await assert.rejects(publishRelease({ ...args, changes: "first\n\n-  \n" }, github, () => sha),
+      /non-empty bullet list/);
+    const notesPath = join(build.output, "release-notes.md");
+    const notes = readFileSync(notesPath, "utf8");
+    writeFileSync(notesPath, notes.replace("### What's changed", "### Removed changes"));
+    await assert.rejects(publishRelease({ ...args, changes }, github, () => sha),
+      /Release candidate is missing the prepared changes/);
+  }
 });

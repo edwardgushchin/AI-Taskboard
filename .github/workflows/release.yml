@@ -74,7 +74,7 @@ jobs:
         with:
           pattern: ai-taskboard-${{ needs.version.outputs.version }}-*
           path: matrix-packages
-      - name: Verify complete matrix and create SHA-256 manifest and release notes
+      - name: Verify packages and prepare the SHA-256 manifest and release notes
         env:
           RELEASE_VERSION: ${{ needs.version.outputs.version }}
           SIGNED_BUILD: ${{ needs.version.outputs.signed }}
@@ -117,7 +117,7 @@ jobs:
         with:
           name: release-candidate
           path: release-candidate
-      - name: Publish only after the draft assets match their checksums
+      - name: Publish after verifying the release notes and draft asset checksums
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ needs.version.outputs.version }}
