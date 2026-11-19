@@ -49,7 +49,6 @@
   "agentActivity.managerConversation": "Диалог с менеджером",
   "agentActivity.boardAutomation": "Автоматизация доски",
   "agentActivity.discussion": "Обсуждение задачи",
-  "agentActivity.providerTurn": "Ход провайдера",
   "ui.confirm_human_acceptance": "Принять проверенную сдачу?",
   "ui.recover_interrupted_acceptance": "Восстановить прерванную приёмку",
   "ui.recover_interrupted_acceptance_hint": "Режим ревью изменился во время приёмки. Восстановите прерванную операцию, чтобы продолжить.",

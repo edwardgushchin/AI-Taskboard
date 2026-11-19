@@ -49,7 +49,6 @@
   "agentActivity.managerConversation": "Manager conversation",
   "agentActivity.boardAutomation": "Board automation",
   "agentActivity.discussion": "Task discussion",
-  "agentActivity.providerTurn": "Provider turn",
   "ui.confirm_human_acceptance": "Accept this reviewed submission?",
   "ui.recover_interrupted_acceptance": "Recover interrupted acceptance",
   "ui.recover_interrupted_acceptance_hint": "The review mode changed during acceptance. Recover the interrupted operation to continue.",
