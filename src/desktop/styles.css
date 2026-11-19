@@ -461,12 +461,7 @@ body:has(> .project-tabs:not([hidden]))::before {
 }
 .board-chat-views .button[aria-pressed="true"] { background: var(--bg); color: var(--text); }
 .board-chat-views .board-work-toggle.working { color: var(--blue); }
-.board-work-overview, .board-work-timeline { display: grid; gap: 10px; }
-.board-work-overview { padding-block-end: 10px; border-bottom: 1px solid var(--border); }
-.board-work-row { min-width: 0; overflow-wrap: anywhere; color: var(--muted); font-size: 13px; }
-.board-work-row .button {
-  display: block; min-height: 0; max-width: 100%; padding: 0; border: 0; text-align: start; white-space: normal;
-}
+.board-work-timeline { display: grid; gap: 10px; }
 .board-chat-resize {
   display: grid; place-items: center; width: 56px; height: 28px; border-radius: 6px; cursor: ns-resize; touch-action: none;
 }
