@@ -361,6 +361,23 @@ export function readDialogueReference(project: string) {
   return { referenceOnly: true, messages };
 }
 
+export function goalActivityItems(items: BoardActivity[], fallbackAt?: string): BoardActivity[] {
+  const events: BoardActivity[] = [];
+  for (const { messages, ...item } of items) {
+    const at = item.userMessage?.at ?? item.at ?? fallbackAt;
+    if (!item.messagesOnly) {
+      events.push(at === undefined ? item : { ...item, at });
+    }
+    for (const message of messages ?? []) {
+      events.push({
+        ...item, id: "coordination:" + message.id + "/" + message.sequence,
+        at: message.at ?? at, messages: [message], messagesOnly: true,
+      });
+    }
+  }
+  return events;
+}
+
 function readGoalHistory(project: string, cursor: string | null) {
   const prefix = "goal:";
   const before = cursor?.slice(prefix.length);
@@ -387,13 +404,16 @@ function readGoalHistory(project: string, cursor: string | null) {
         events.push({ key, file: name, turn, model: run.model });
       }
     };
+    const startedAt = new Date(Number(name.slice(0, 13))).toISOString();
     if (run.message) {
-      append({ ...scope, messages: [run.message], items: [] }, 0);
+      const message = { ...run.message, at: run.message.at ?? startedAt, clientId: run.message.clientId ?? name };
+      append({ ...scope, messages: [message], items: [] }, 0);
     }
-    run.items.forEach((item, index) => {
+    const items = goalActivityItems(run.items, startedAt);
+    items.forEach((item, index) => {
       const turn: Turn = item.userMessage
         ? { ...scope, messages: [{ ...item.userMessage, clientId: item.id, at: item.at }], items: [] }
-        : { ...scope, messages: [], items: [item], ...(index === run.items.length - 1 ? { durationMs: run.durationMs } : {}) };
+        : { ...scope, messages: [], items: [item], ...(index === items.length - 1 ? { durationMs: run.durationMs } : {}) };
       append(turn, index + 1);
     });
   }
@@ -509,7 +529,8 @@ export async function readManagerView(project: string, cursor: string | null, vi
     const legacy = await readLegacy(next);
     if (!legacy) return;
     const turns = managerHistoryForView(legacy.turns, view).map(turn => ({
-      ...turn, messages: turn.messages.filter(beforeLocal), items: turn.items.filter(beforeLocal),
+      ...turn, messages: turn.messages.filter(beforeLocal),
+      items: (view === "work" ? goalActivityItems(turn.items) : turn.items).filter(beforeLocal),
     })).filter(turn => turn.messages.length || turn.items.length);
     next = legacy.nextCursor;
     if (turns.length || !next || visited.has(next)) {

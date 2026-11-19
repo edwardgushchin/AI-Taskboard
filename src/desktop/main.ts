@@ -51,7 +51,7 @@ import { startWindowsDictation } from "./windows-dictation.ts";
 import { needsManagerAttention } from "../cli/task-messages.ts";
 import { readReviewReports, saveReviewReports } from "./review-history.ts";
 import { readReviewerChat, reviewerActivity, withReviewerChat } from "./reviewer-chat.ts";
-import { goalMessages, hasGoalHistory, hasManagerImageView, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory, sendGoalMessage } from "./manager-history.ts";
+import { goalActivityItems, goalMessages, hasGoalHistory, hasManagerImageView, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory, sendGoalMessage } from "./manager-history.ts";
 import { goalActionTools, runGoalAction } from "./goal-actions.ts";
 import { readManagerImage, saveManagerImage } from "./manager-images.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
@@ -1886,7 +1886,7 @@ ipcMain.handle("board:history", async (event, project?: string, cursor: unknown 
     const live = shared?.live?.items ?? [];
     if (view === "live") return { ok: true, data: {
       dialogue: managerChatItems(boardRequests.get(key)?.items ?? (shared?.lane === "chat" ? live : [])).slice(-45),
-      work: (boardWorkRequests.get(key)?.items ?? sharedGoal?.live?.items ?? []).slice(-80),
+      work: goalActivityItems(boardWorkRequests.get(key)?.items ?? sharedGoal?.live?.items ?? []),
       chat: [],
       reviewers: Object.fromEntries([...(subscriptions.get(project)?.reviewerRuns.keys() ?? [])].map(id =>
         [id, reviewerActivity(board.project, id)])),
