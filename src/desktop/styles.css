@@ -96,24 +96,29 @@ h1, h2, h3, p { margin: 0; }
 .app-menu-submenu-trigger { position: relative; }
 .project-tabs {
   grid-area: 2 / 1; display: flex; flex-direction: column; overflow-y: auto;
-  position: relative; z-index: 6; background: var(--toolbar);
+  position: relative; z-index: 6;
   margin-block-end: 40px;
+}
+body:has(> .project-tabs:not([hidden]))::before {
+  content: "";
+  grid-area: 2 / 1;
+  background: var(--toolbar);
+  border-inline-end: 1px solid var(--border);
+  pointer-events: none;
 }
 .app-settings.button {
   grid-area: 2 / 1; align-self: end; z-index: 6; width: 40px; height: 40px; padding: 0;
   border: 0; border-radius: 0; color: var(--muted);
   transition: color var(--hover-time) ease;
 }
-.project-tabs, .project-tabs:not([hidden]) ~ .app-settings { border-inline-end: 1px solid var(--border); }
-.project-tabs:not([hidden]) ~ .app-settings { --settings-background: var(--toolbar); }
+.project-tabs, .project-tabs:not([hidden]) ~ .app-settings { border-inline-end: 1px solid transparent; }
 .project-tabs:has(+ #app-update:not([hidden])) { margin-block-end: 80px; }
 .app-settings.button.quiet, .app-settings.button.quiet:hover:not(:disabled) {
-  background-color: var(--settings-background, transparent);
+  background-color: transparent;
 }
 .app-settings.button:hover { color: var(--text); }
 .app-settings .icon { width: 20px; height: 20px; font-size: 20px; }
 #app-update {
-  --settings-background: light-dark(#edbe65, #e8af57);
   justify-self: center;
   width: 32px;
   height: 32px;
@@ -121,10 +126,22 @@ h1, h2, h3, p { margin: 0; }
   border-radius: 50%;
   color: #30210d;
 }
-#app-update:hover:not(:disabled) { --settings-background: light-dark(#e2aa46, #f1c071); }
-#app-update:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+#app-update .icon {
+  display: grid;
+  place-items: center;
+  /* Match the visible gear outline at its 20px Codicons size. */
+  width: 17.5px;
+  height: 17.5px;
+  border-radius: 50%;
+  background-color: light-dark(#dfb66d, #ce9f55);
+  font-size: 14px;
+}
+/* Center the visible download glyph within its font box. */
+#app-update .icon::before { transform: translate(-0.45px, -1.3px); }
+#app-update:hover:not(:disabled) .icon { background-color: light-dark(#d3a555, #dbad68); }
+#app-update:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 @media (forced-colors: active) {
-  #app-update { border: 1px solid ButtonText; }
+  #app-update .icon { border: 1px solid ButtonText; }
 }
 #update-dialog {
   position: fixed;
@@ -142,7 +159,46 @@ h1, h2, h3, p { margin: 0; }
 #update-dialog p { margin: 0; overflow-wrap: anywhere; }
 .update-notes { min-height: 0; overflow: auto; overflow-wrap: anywhere; }
 .update-notes pre { white-space: pre-wrap; }
-#update-dialog progress { width: 100%; }
+#update-progress {
+  /* The native value remains available to assistive technology. */
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  clip-path: inset(50%);
+}
+#update-progress-display { display: flex; align-items: center; gap: 8px; }
+#update-progress-percent { min-width: 4ch; text-align: end; font-variant-numeric: tabular-nums; }
+#update-progress-track {
+  flex: 1;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--toolbar);
+}
+#update-progress-fill {
+  height: 100%;
+  background: var(--blue);
+  transform-origin: left;
+  transform: scaleX(var(--update-progress, 0));
+  transition: transform 180ms linear;
+}
+#update-progress-track.indeterminate #update-progress-fill {
+  width: 30%;
+  transform: translateX(117%);
+  animation: update-progress-activity 1.4s linear infinite;
+}
+@keyframes update-progress-activity {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(334%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #update-progress-fill { transition: none; }
+  #update-progress-track.indeterminate #update-progress-fill { animation: none; }
+}
+@media (forced-colors: active) {
+  #update-progress-fill { forced-color-adjust: none; background: Highlight; }
+}
 #update-dialog > :not(.update-notes) { flex: none; }
 #update-dialog footer {
   display: flex;

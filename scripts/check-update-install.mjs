@@ -57,6 +57,7 @@ const control = join(scratch, "control");
 const productExecutable = "AI Taskboard QA " + randomUUID().slice(0, 8);
 const oldVersion = "0.1.0-alpha";
 const newVersion = "0.1.1-alpha";
+const newerVersion = "0.1.2-alpha";
 const record = { startedAt: new Date().toISOString(), platform: process.platform, arch: process.arch,
     node: process.version, oldVersion, newVersion, checks: [], packages: [], sourceHashes: {} };
 record.sourceHashesLF = {};
@@ -66,7 +67,7 @@ record.seams = ["QA-only bootstrap substitutes release HTTP responses and the mo
     "Confirmation responses are deterministic through dialog.showMessageBox; the before/after PNGs show the real manager conversation."];
 if (pollScenario) {
     record.seams[3] = "The initial poll uses its production 5-second delay. QA advances the recurring interval from 60 minutes to 1 second; update UI actions, installation and restart run unchanged.";
-    record.command = "node scripts/check-update-install.mjs --poll --artifacts .tasks/qa/T-0232";
+    record.command = "node scripts/check-update-install.mjs --poll --artifacts " + process.argv[outputOption + 1];
 }
 record.testedCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8", windowsHide: true }).trim();
 record.gitStatusBefore = execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8", windowsHide: true }).trim();
@@ -162,8 +163,14 @@ function updateDialogState() {
 
 function updateTriggerStyle() {
     const trigger = document.getElementById("app-update");
+    const icon = trigger.querySelector(".icon");
+    const gear = document.querySelector("#app-settings .icon");
     const style = getComputedStyle(trigger);
-    const glyph = getComputedStyle(trigger.querySelector(".icon"), "::before");
+    const circle = getComputedStyle(icon);
+    const glyph = getComputedStyle(icon, "::before");
+    const bounds = trigger.getBoundingClientRect();
+    const iconBounds = icon.getBoundingClientRect();
+    const hit = document.elementFromPoint(bounds.left + 2, bounds.top + bounds.height / 2);
     const context = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
     const rgba = color => {
         context.clearRect(0, 0, 1, 1);
@@ -172,16 +179,23 @@ function updateTriggerStyle() {
         return [...context.getImageData(0, 0, 1, 1).data];
     };
     return {
-        diameter: [trigger.offsetWidth, trigger.offsetHeight],
-        radius: style.borderRadius,
-        background: rgba(style.backgroundColor),
+        hitArea: [bounds.width, bounds.height],
+        hitOutsideCircle: trigger.contains(hit) && !icon.contains(hit),
+        diameter: [iconBounds.width, iconBounds.height],
+        centerInTarget: [
+            iconBounds.left + iconBounds.width / 2 - bounds.left - bounds.width / 2,
+            iconBounds.top + iconBounds.height / 2 - bounds.top - bounds.height / 2,
+        ],
+        radius: circle.borderRadius,
+        background: rgba(circle.backgroundColor),
         foreground: rgba(glyph.color),
         glyphFont: glyph.fontFamily,
+        glyphSize: glyph.fontSize,
+        gearSize: getComputedStyle(gear, "::before").fontSize,
         focused: trigger === document.activeElement,
         focusVisible: trigger.matches(":focus-visible"),
         hovered: trigger.matches(":hover"),
-        outline: [style.outlineStyle, style.outlineWidth, style.outlineColor],
-        shadow: style.boxShadow,
+        outline: [style.outlineStyle, style.outlineWidth, style.outlineColor, style.outlineOffset],
     };
 }
 
@@ -193,34 +207,104 @@ function luminance([red, green, blue]) {
     return linear(red) * 0.2126 + linear(green) * 0.7152 + linear(blue) * 0.0722;
 }
 
+function measureProgressFrames(duration) {
+    const meter = document.getElementById("update-progress");
+    const fill = document.getElementById("update-progress-fill");
+    const label = document.getElementById("update-progress-percent");
+    const percentFormat = new Intl.NumberFormat(document.documentElement.lang, { style: "percent" });
+    const started = performance.now();
+    const frames = [];
+    return new Promise(resolve => {
+        function sample(time) {
+            const elapsed = Math.max(0, time - started);
+            if (!meter.hidden) {
+                const style = getComputedStyle(fill);
+                const transform = new DOMMatrixReadOnly(style.transform);
+                frames.push({
+                    elapsed, native: meter.position, scale: transform.a, translation: transform.e,
+                    transition: style.transitionDuration, animation: style.animationName,
+                    percent: label.hidden || label.getClientRects().length === 0 ? null : label.textContent,
+                    expectedPercent: meter.position < 0 ? null : percentFormat.format(Math.floor(meter.value * 100 / meter.max) / 100),
+                });
+            }
+            if (elapsed >= duration) {
+                resolve({ reduced: matchMedia("(prefers-reduced-motion: reduce)").matches, frames });
+            } else {
+                requestAnimationFrame(sample);
+            }
+        }
+        requestAnimationFrame(sample);
+    });
+}
+
+function summarizeProgress({ reduced, frames }) {
+    const compare = property => {
+        const steps = frames.slice(1).map((frame, index) => Math.abs(frame[property] - frames[index][property]));
+        return { changes: steps.filter(step => step > 0.00001).length, largestStep: Math.max(0, ...steps) };
+    };
+    return {
+        reduced,
+        frames: frames.length,
+        visibleDuration: frames.at(-1).elapsed - frames[0].elapsed,
+        native: compare("native"),
+        scale: compare("scale"),
+        translation: compare("translation"),
+        transitions: [...new Set(frames.map(frame => frame.transition))],
+        animations: [...new Set(frames.map(frame => frame.animation))],
+        percentages: [...new Set(frames.map(frame => frame.percent))],
+    };
+}
+
 async function checkTriggerAppearance(run, capture) {
     const appearance = () => run(`(${updateTriggerStyle.toString()})()`);
     record.triggerAppearance = {};
     for (const theme of ["light", "dark"]) {
         await command({ action: "move-pointer-away" });
         await run("document.activeElement.blur()");
-        await capture("trigger", theme);
+        const measuredRest = await capture("trigger", theme);
+        const { ink, rail: restRail } = measuredRest;
         const rest = await appearance();
         const [width, height] = rest.diameter;
-        assert.ok(width > 20 && width === height);
+        assert.deepEqual(rest.hitArea, [32, 32]);
+        assert.ok(rest.hitOutsideCircle);
+        assert.deepEqual([width, height], [17.5, 17.5]);
+        assert.ok(rest.centerInTarget.every(offset => Math.abs(offset) <= 1));
+        assert.ok(ink.downloadOffset.every(offset => Math.abs(offset) <= 1.5), JSON.stringify(ink));
+        assert.ok(Math.abs(ink.circleToGearAxis) <= 1, JSON.stringify(ink));
+        assert.ok(Math.abs(width - Math.max(...ink.gearSize)) <= 1, JSON.stringify(ink));
         const radius = rest.radius.endsWith("%")
             ? Number.parseFloat(rest.radius) * width / 100
             : Number.parseFloat(rest.radius);
         assert.ok(radius >= width / 2);
-        const gold = theme === "light" ? [237, 190, 101, 255] : [232, 175, 87, 255];
+        const gold = theme === "light" ? [223, 182, 109, 255] : [206, 159, 85, 255];
         assert.deepEqual(rest.background, gold);
         assert.match(rest.glyphFont, /codicon/i);
+        assert.equal(rest.glyphSize, "14px");
+        assert.equal(rest.gearSize, "20px");
         const contrast = [luminance(rest.background), luminance(rest.foreground)].sort((a, b) => b - a);
         const contrastRatio = (contrast[0] + 0.05) / (contrast[1] + 0.05);
         assert.ok(contrastRatio >= 3, JSON.stringify(rest));
         assert.ok(!rest.focused && !rest.hovered);
+        await command({ action: "hover-trigger" });
+        const hover = await appearance();
+        assert.ok(hover.hovered && !hover.focusVisible);
+        assert.notDeepEqual(hover.background, rest.background);
+        const { rail: hoverRail } = await command({ action: "capture-poll", measureGlyph: true });
+        await command({ action: "move-pointer-away" });
         await command({ action: "previous-tab", elementId: "app-settings" });
         const focus = await appearance();
-        assert.ok(focus.focused && focus.focusVisible, JSON.stringify(focus));
-        assert.ok(JSON.stringify(focus.outline) !== JSON.stringify(rest.outline) || focus.shadow !== rest.shadow);
-        record.triggerAppearance[theme] = { rest, focus, contrastRatio };
+        assert.ok(focus.focused && focus.focusVisible && !focus.hovered, JSON.stringify(focus));
+        assert.deepEqual(focus.outline.slice(0, 2), ["solid", "2px"]);
+        const { rail: focusRail } = await command({ action: "capture-poll", measureGlyph: true });
+        for (const rail of [restRail, hoverRail, focusRail]) {
+            assert.ok(rail.continuousBorder, JSON.stringify(rail));
+            assert.ok(rail.continuousBackground, JSON.stringify(rail));
+        }
+        assert.deepEqual(hoverRail, restRail);
+        assert.deepEqual(focusRail, restRail);
+        record.triggerAppearance[theme] = { rest, hover, focus, ink, contrastRatio, rail: restRail, railStates: ["rest", "hover", "focus"] };
     }
-    note("The closed-dialog captures show a circular gold button at rest, with a Codicons glyph. Both themes passed the 3:1 glyph contrast check and Shift+Tab showed keyboard focus.");
+    note("Both themes show a 17.5px gold circle aligned to the settings glyph and matched to its visible diameter. The 14px Codicons download glyph is centered in the circle. The button has a 32px hit target and a visible 2px outline on Shift+Tab. The rail background and border stay continuous at rest, on hover and on focus.");
 }
 
 async function checkPoll(mode, uninstaller, executable, child, before) {
@@ -236,6 +320,16 @@ async function checkPoll(mode, uninstaller, executable, child, before) {
         const counters = await network();
         return predicate(counters) && counters;
     }, label, 15000);
+    const beginSampling = duration => command({
+        action: "sample-progress", code: measureProgressFrames.toString(), duration,
+    });
+    const readSamples = id => until(() => {
+        const sample = readJson(join(control, "progress-frames.json"));
+        if (sample?.id !== id) return false;
+        assert.ok(!sample.error, JSON.stringify(sample));
+        assert.ok(sample.windows.every(result => result.frames.length >= 15));
+        return sample.windows;
+    }, "progress animation samples in both windows", 15000);
     const setTheme = async theme => {
         await run(`window.taskboard.setTheme(${JSON.stringify(theme)})`);
         await until(() => run(`document.documentElement.dataset.palette === ${JSON.stringify(theme)}`), "selected palette");
@@ -246,7 +340,9 @@ async function checkPoll(mode, uninstaller, executable, child, before) {
         if (stateName !== "trigger") {
             await run("document.getElementById('update-notes').scrollTop = 0");
         }
-        return command({ action: "capture-poll", name: `update-${stateName}-${theme}.png` });
+        return command({
+            action: "capture-poll", name: `update-${stateName}-${theme}.png`, measureGlyph: stateName === "trigger",
+        });
     };
     const center = view => {
         assert.ok(view.modal);
@@ -353,24 +449,118 @@ async function checkPoll(mode, uninstaller, executable, child, before) {
     assert.deepEqual(secondProgress.progress, progress.progress);
     assert.equal((await network()).installers, beforeDownload.installers + 1);
     assert.equal((await network()).manifests, beforeDownload.manifests + 1);
+
+    const offeredVersion = second => run("window.taskboard.updateState().then(state => state.available?.version ?? null)", second);
+    const waitForOffer = (version, second = false) => until(async () => {
+        return (await offeredVersion(second)) === version;
+    }, "latest offer " + version, 15000);
+    const assertOriginal = view => {
+        assert.ok(view.open);
+        assert.equal(view.title, listed.title);
+        assert.equal(view.notes, listed.notes);
+        assert.equal(view.release, listed.release);
+    };
+
+    mode("stream", "newer");
+    for (const second of [false, true]) {
+        const pinned = await waitState("newer offer during the original download",
+            view => view.accessibleName.includes(newerVersion), second);
+        assertOriginal(pinned);
+        assert.deepEqual(pinned.progress, progress.progress);
+    }
+    const duringNewerOffer = await network();
+    assert.equal(duringNewerOffer.installers, beforeDownload.installers + 1);
+    assert.equal(duringNewerOffer.manifests, beforeDownload.manifests + 1);
     await capture("progress", "light");
     await capture("progress", "dark");
-    mode("normal");
+    await command({ action: "motion", reduced: true, second: true });
+    const pacedSample = await beginSampling(2500);
+    mode("paced", "newer");
+    const pacedWindows = await readSamples(pacedSample);
+    const [smooth, reduced] = pacedWindows.map(summarizeProgress);
+    assert.equal(smooth.reduced, false);
+    assert.equal(reduced.reduced, true);
+    assert.ok(smooth.native.changes >= 3, JSON.stringify(smooth));
+    assert.ok(smooth.scale.changes > smooth.native.changes, JSON.stringify(smooth));
+    assert.ok(smooth.scale.largestStep < smooth.native.largestStep, JSON.stringify(smooth));
+    assert.ok(pacedWindows[0].frames.every(frame => frame.scale <= frame.native + 0.00001));
+    assert.ok(pacedWindows[0].frames.some(frame => frame.native === 1 && Math.abs(frame.scale - 1) <= 0.00001));
+    assert.ok(reduced.native.changes >= 3, JSON.stringify(reduced));
+    assert.deepEqual(reduced.transitions, ["0s"]);
+    assert.ok(pacedWindows[1].frames.every(frame => Math.abs(frame.scale - frame.native) <= 0.00001));
+    assert.ok(pacedWindows.every(result => result.frames.every(frame => frame.percent === frame.expectedPercent)));
+    record.determinateMotion = {
+        chunkIntervalMs: 250,
+        discreteReference: "Before: discrete native progress.position on the same stream. After: computed scaleX of the visual bar.",
+        frameCounts: "Changes count frames whose value moved, not the window's overall FPS.",
+        smooth,
+        reduced,
+    };
+    note("The paced Windows download moved the visual scale over extra frames with smaller steps than the discrete byte ratio. The scale never exceeded received data. Reduced motion displayed the exact received ratio on every frame.");
+
     const ready = await waitState("verified package and explicit confirmation", view => view.action?.text === "Обновить и перезапустить");
-    assert.equal(ready.later.text, "Позже");
-    assert.match(ready.status, /проверен/);
+    assertOriginal(ready);
     assert.equal(child.exitCode, null);
     assert.equal(readJson(join(control, "ready.json")).pid, before.pid);
+
+    mode("normal", "current");
+    for (const second of [false, true]) {
+        await waitForOffer(null, second);
+        const pinned = await waitState("verified confirmation survives a withdrawn release",
+            view => view.accessibleName.includes(newVersion), second);
+        assertOriginal(pinned);
+        assert.equal(pinned.action?.text, "Обновить и перезапустить");
+        assert.equal(pinned.later.text, "Позже");
+        assert.match(pinned.status, /проверен/);
+    }
     await capture("confirm", "light");
     await capture("confirm", "dark");
+
+    mode("normal", "newer");
+    await waitForOffer(newerVersion);
     await click("update-later");
     assert.equal((await state()).open, false);
     assert.equal(child.exitCode, null);
-    await command({ action: "close-secondary" });
+    const next = view => view.open && view.title.includes(newerVersion) && view.action?.text === "Обновить";
+    const otherDialog = await waitState("Later switches the second dialog to the latest offer", next, true);
+    assert.match(otherDialog.notes, /Следующее предложение/);
+    assert.ok(otherDialog.release.endsWith("/tag/v" + newerVersion));
     await click("app-update");
-    mode("corrupt");
+    await waitState("reopening after Later shows the latest offer", next);
+    await click("update-later");
+    const afterLater = await network();
+    assert.equal(afterLater.installers, duringNewerOffer.installers);
+    assert.equal(afterLater.manifests, duringNewerOffer.manifests);
+    assert.deepEqual(updateCachesFor(executable), []);
+    note("Both windows kept the original release, notes and partial progress after a newer version became the offer. With the original release withdrawn after verification, both windows kept its confirmation. Later cleared the cached package and switched the remaining dialog and next opening to the latest offer without downloading it.");
+    record.offerChanges = {
+        downloading: { pinned: newVersion, offered: newerVersion, installers: duringNewerOffer.installers },
+        verified: { pinned: newVersion, offered: null },
+        afterLater: { offered: newerVersion, installers: afterLater.installers },
+    };
+
+    mode("corrupt-stream");
+    await waitState("original package is offered for retry test", view => view.accessibleName.includes(newVersion));
+    await click("app-update");
     await click("update-action");
+    await waitState("unknown content-length download", view => view.progress !== null);
+    await waitState("unknown content-length download in second window", view => view.progress !== null, true);
+    const unknownSample = await beginSampling(950);
+    const unknownWindows = await readSamples(unknownSample);
+    const [moving, still] = unknownWindows.map(summarizeProgress);
+    assert.ok(unknownWindows.every(result => result.frames.every(frame => frame.native === -1)));
+    assert.deepEqual(moving.percentages, [null]);
+    assert.deepEqual(still.percentages, [null]);
+    assert.deepEqual(moving.animations, ["update-progress-activity"]);
+    assert.ok(moving.translation.changes > 5, JSON.stringify(moving));
+    assert.deepEqual(still.animations, ["none"]);
+    assert.equal(still.translation.changes, 0);
+    record.indeterminateMotion = { moving, still };
+    note("With no Content-Length, both accessibility progress elements stayed indeterminate. The normal visual indicator moved, and reduced motion kept it stationary.");
+    mode("corrupt");
     await waitState("hash mismatch and retry", view => /SHA-256/.test(view.status) && view.action?.text === "Повторить загрузку");
+    await command({ action: "motion", reduced: false, second: true });
+    await command({ action: "close-secondary" });
     assert.equal(child.exitCode, null);
     assert.deepEqual(updateCachesFor(executable), []);
     mode("normal");
@@ -378,6 +568,10 @@ async function checkPoll(mode, uninstaller, executable, child, before) {
     await waitState("retry verified", view => view.action?.text === "Обновить и перезапустить");
     assert.equal((await network()).installers, beforeDownload.installers + 3);
     assert.equal(child.exitCode, null);
+    mode("normal", "current");
+    await waitForOffer(null);
+    assertOriginal(await state());
+    assert.equal((await state()).action?.text, "Обновить и перезапустить");
     note("Repeated clicks in two open dialogs made one package request and showed the same partial byte count. Later kept the old process alive. A checksum failure left no update cache; retry verified the clean package.");
     record.progress = progress.progress;
     record.network = await network();
@@ -472,11 +666,16 @@ globalThis.fetch = async (url) => {
         try {
             while (fixture().mode === 'hold-release') await pause(50);
             if (value.mode === 'offline') throw new TypeError('QA offline');
-            const latest = value.mode === 'current' ? '${oldVersion}' : '${newVersion}';
-            return Response.json([
+            const releaseMode = value.release ?? value.mode;
+            const releases = [
                 { tag_name: 'v${oldVersion}', draft: false, prerelease: true, body: 'Older release only' },
-                { tag_name: 'v' + latest, draft: false, prerelease: true, body: value.mode === 'no-notes' ? '' : notes },
-            ]);
+            ];
+            if (releaseMode !== 'current') {
+                const latest = releaseMode === 'newer' ? '${newerVersion}' : '${newVersion}';
+                const body = releaseMode === 'newer' ? '- Следующее предложение' : releaseMode === 'no-notes' ? '' : notes;
+                releases.push({ tag_name: 'v' + latest, draft: false, prerelease: true, body });
+            }
+            return Response.json(releases);
         } finally {
             network.activeReleases--;
         }
@@ -493,22 +692,30 @@ globalThis.fetch = async (url) => {
         throw new TypeError('QA download offline');
     }
     let bytes = readFileSync(value.installer);
-    if (value.mode === 'corrupt') {
+    if (value.mode === 'corrupt' || value.mode === 'corrupt-stream') {
         bytes = Buffer.concat([bytes, Buffer.from('corrupt')]);
     }
-    if (value.mode === 'stream') {
+    if (value.mode === 'stream' || value.mode === 'corrupt-stream') {
         let offset = 0;
-        const step = Math.ceil(bytes.length / 4);
+        const headers = value.mode === 'stream' ? { 'content-length': String(bytes.length) } : {};
         return new Response(new ReadableStream({
             async pull(controller) {
+                let size = Math.ceil(bytes.length / 4);
                 if (offset > 0) {
-                    while (fixture().mode === 'stream') await pause(50);
+                    while (fixture().mode === value.mode) await pause(50);
+                    if (fixture().mode === 'paced') {
+                        await pause(250);
+                        size = Math.ceil(bytes.length / 8);
+                    }
                 }
-                controller.enqueue(bytes.subarray(offset, offset + step));
-                offset += step;
-                if (offset >= bytes.length) controller.close();
+                controller.enqueue(bytes.subarray(offset, offset + size));
+                offset += size;
+                if (offset >= bytes.length) {
+                    if (fixture().mode === 'paced') await pause(300);
+                    controller.close();
+                }
             },
-        }), { headers: { 'content-length': String(bytes.length) } });
+        }), { headers });
     }
     return new Response(bytes);
 };
@@ -595,6 +802,65 @@ void (async () => {
     window.setContentSize(1280, 800);
     window.webContents.setBackgroundThrottling(false);
     const evaluate = code => window.webContents.executeJavaScript(code);
+    async function measureTriggerGlyphs(screenshot) {
+        const [circle, gear, trigger, settings] = await evaluate('["#app-update .icon", "#app-settings .icon", "#app-update", "#app-settings"].map(' +
+            'selector => document.querySelector(selector).getBoundingClientRect().toJSON())');
+        const pixels = screenshot.toBitmap();
+        const pitch = screenshot.getSize().width * 4;
+        const colorAt = (x, y) => {
+            const index = y * pitch + x * 4;
+            return pixels.subarray(index, index + 3);
+        };
+        const inkBounds = (area, isInk) => {
+            const xs = [];
+            const ys = [];
+            for (let y = Math.ceil(area.y); y < area.bottom; y++) {
+                for (let x = Math.ceil(area.x); x < area.right; x++) {
+                    if (isInk(colorAt(x, y), x + 0.5, y + 0.5)) {
+                        xs.push(x + 0.5);
+                        ys.push(y + 0.5);
+                    }
+                }
+            }
+            assert.ok(xs.length >= 10, "Glyph ink must be visible");
+            const edges = values => [Math.min(...values), Math.max(...values)];
+            const [left, right] = edges(xs);
+            const [top, bottom] = edges(ys);
+            return { x: (left + right) / 2, y: (top + bottom) / 2, width: right - left + 1, height: bottom - top + 1 };
+        };
+        const centerX = circle.x + circle.width / 2;
+        const centerY = circle.y + circle.height / 2;
+        const radius = circle.width / 2 - 1.5;
+        // Ignore the round edge, where the dark theme's toolbar can be mistaken for download ink.
+        const downloadInk = inkBounds(circle, (color, x, y) =>
+            Math.hypot(x - centerX, y - centerY) < radius && color.every(channel => channel <= 110));
+        const gearBackground = colorAt(Math.ceil(gear.x), Math.ceil(gear.y));
+        const gearInk = inkBounds(gear, color =>
+            color.some((channel, index) => Math.abs(channel - gearBackground[index]) >= 45));
+        const borderX = Math.floor(settings.right) - 1;
+        const fromY = Math.floor(trigger.top) - 8;
+        const toY = Math.floor(settings.bottom) - 4;
+        const border = colorAt(borderX, fromY);
+        const background = colorAt(borderX - 8, fromY);
+        let continuousBorder = !border.equals(background);
+        for (let y = fromY; y <= toY && continuousBorder; y++) {
+            continuousBorder = border.equals(colorAt(borderX, y));
+        }
+        const sameBackground = [8, borderX - 8].every(x => background.equals(colorAt(x, Math.floor(centerY))));
+        return {
+            ink: {
+                downloadOffset: [downloadInk.x - centerX, downloadInk.y - centerY],
+                gearSize: [gearInk.width, gearInk.height],
+                circleToGearAxis: centerX - gearInk.x,
+            },
+            rail: {
+                continuousBorder,
+                continuousBackground: sameBackground,
+                pixels: { border: [...border].reverse(), background: [...background].reverse() },
+                borderX, fromY, toY,
+            },
+        };
+    }
     async function input(target, action) {
         const session = target.webContents.debugger;
         session.attach('1.3');
@@ -650,6 +916,22 @@ void (async () => {
                 secondary = undefined;
                 result = true;
             }
+            else if (command.action === 'motion') {
+                const session = target.webContents.debugger;
+                if (command.reduced) session.attach('1.3');
+                const features = command.reduced ? [{ name: 'prefers-reduced-motion', value: 'reduce' }] : [];
+                await session.sendCommand('Emulation.setEmulatedMedia', { features });
+                if (!command.reduced) session.detach();
+                result = true;
+            }
+            else if (command.action === 'sample-progress') {
+                const code = '(' + command.code + ')(' + command.duration + ')';
+                void Promise.all([evaluate(code), secondary.webContents.executeJavaScript(code)]).then(
+                    windows => write('progress-frames.json', { id: command.id, windows }),
+                    error => write('progress-frames.json', { id: command.id, error: error.stack }),
+                );
+                result = command.id;
+            }
             else if (command.action === 'manual-checks') {
                 const check = client => client.webContents.executeJavaScript('window.taskboard.checkUpdates()');
                 void Promise.all([check(window), check(secondary)]).then(replies => write('manual-checks.json', replies.map(reply => reply.ok)));
@@ -666,6 +948,13 @@ void (async () => {
             }
             else if (command.action === 'move-pointer-away') {
                 await input(target, send => send('dispatchMouseEvent', { type: 'mouseMoved', x: 400, y: 100 }));
+                result = true;
+            }
+            else if (command.action === 'hover-trigger') {
+                const trigger = await execute('document.getElementById("app-update").getBoundingClientRect().toJSON()');
+                const x = Math.round(trigger.x + trigger.width / 2);
+                const y = Math.round(trigger.y + trigger.height / 2);
+                await input(target, send => send('dispatchMouseEvent', { type: 'mouseMoved', x, y }));
                 result = true;
             }
             else if (['click', 'enter', 'previous-tab'].includes(command.action)) {
@@ -710,8 +999,9 @@ void (async () => {
                 const png = await window.webContents.capturePage();
                 assert.deepEqual(png.getSize(), { width: 1280, height: 800 });
                 assert.ok(!png.isEmpty());
-                writeFileSync(join(artifacts, command.name), png.toPNG());
+                if (command.name) writeFileSync(join(artifacts, command.name), png.toPNG());
                 result = true;
+                if (command.measureGlyph) result = await measureTriggerGlyphs(png);
             }
             else if (command.action === 'approve-restart') {
                 write('reply.json', { id: command.id, result: true });
@@ -905,7 +1195,9 @@ catch (error) {
     record.electron = before.electron;
     record.chromium = before.chromium;
     note("Installed NSIS " + oldVersion + " started with an isolated profile and two boards; paths contain spaces.");
-    const mode = value => writeJson(join(control, "fixture.json"), { mode: value, installer: nextInstaller, digest: record.packages[1].sha256 });
+    const mode = (value, release) => writeJson(join(control, "fixture.json"), {
+        mode: value, release, installer: nextInstaller, digest: record.packages[1].sha256,
+    });
     const ask = async (text) => {
         const result = await command({ action: "ask", text });
         assert.equal(result.ok, true, JSON.stringify(result));

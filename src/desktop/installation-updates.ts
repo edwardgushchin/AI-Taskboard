@@ -58,6 +58,7 @@ export class ApplicationUpdates {
   get state() {
     const transfer = this.transfer;
     return {
+      available: this.found ?? null,
       candidate: transfer?.candidate ?? this.found ?? null,
       supported: this.options.supported(),
       phase: transfer?.phase ?? "available",
@@ -82,9 +83,6 @@ export class ApplicationUpdates {
       const result = await checkForUpdates(this.options.version());
       this.found = result.status === "available" ? result.latest ?? undefined : undefined;
       if (this.checkedTag !== this.found?.tag) this.checkedTag = undefined;
-      if (this.transfer && this.transfer.candidate.tag !== this.found?.tag) {
-        await this.discardDownload();
-      }
       this.options.changed?.();
       return { ok: true, data: { ...result, installation: this.options.supported() ? "windows-nsis" : "manual",
         manualUrl: result.latest?.url ?? releasesUrl } };
@@ -94,12 +92,13 @@ export class ApplicationUpdates {
   }
 
   download(version: unknown) {
+    const candidate = this.transfer?.candidate ?? this.found;
     if (!this.options.supported() || this.pending || (this.transfer && this.transfer.phase !== "error")
-        || !this.found || version !== this.found.version) {
+        || !candidate || version !== candidate.version) {
       return;
     }
     const transfer: Transfer = {
-      candidate: this.found, controller: new AbortController(), phase: "downloading",
+      candidate, controller: new AbortController(), phase: "downloading",
     };
     this.transfer = transfer;
     transfer.completion = this.prepareDownload(transfer);

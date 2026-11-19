@@ -41,12 +41,12 @@ function renderAppUpdate() {
     }
     return;
   }
-  const title = t("updates.available_version", { version: candidate.version });
-  trigger.title = title;
-  trigger.setAttribute("aria-label", title);
+  const available = appUpdate.available ?? candidate;
+  trigger.title = t("updates.available_version", { version: available.version });
+  trigger.setAttribute("aria-label", trigger.title);
   if (!updateDialog.open) return;
 
-  byId("update-title").textContent = title;
+  byId("update-title").textContent = t("updates.available_version", { version: candidate.version });
   const notes = byId("update-notes");
   const source = candidate.notes || t("updates.no_notes");
   if (source !== renderedUpdateNotes) {
@@ -79,11 +79,21 @@ function renderAppUpdate() {
   status.hidden = !message;
   const meter = byId("update-progress");
   meter.hidden = !downloading;
+  byId("update-progress-display").hidden = !downloading;
+  const track = byId("update-progress-track");
+  track.classList.toggle("indeterminate", downloading && !progress?.total);
   if (progress?.total) {
     meter.max = progress.total;
     meter.value = progress.received;
   } else {
     meter.removeAttribute("value");
+  }
+  track.style.setProperty("--update-progress", String(Math.max(0, meter.position)));
+  const percent = byId("update-progress-percent");
+  percent.hidden = !downloading || meter.position < 0;
+  if (!percent.hidden) {
+    percent.textContent = new Intl.NumberFormat(localization.locale, { style: "percent" })
+      .format(Math.floor(meter.value * 100 / meter.max) / 100);
   }
 
   const release = byId("update-release");
@@ -5998,7 +6008,7 @@ api.onTheme(theme => {
 });
 byId("app-update").addEventListener("click", () => {
   if (!appUpdate?.candidate || updateDialog.open) return;
-  byId("update-title").textContent = byId("app-update").title;
+  byId("update-title").textContent = t("updates.available_version", { version: appUpdate.candidate.version });
   updateDialog.showModal();
   renderAppUpdate();
 });
@@ -6006,13 +6016,16 @@ byId("update-release").addEventListener("click", event => {
   event.preventDefault();
   void api.openLink(event.currentTarget.href);
 });
+function discardUpdateOnClose() {
+  if (appUpdate.phase === "ready" || appUpdate.phase === "error") {
+    void api.discardUpdate(appUpdate.candidate.version);
+  }
+}
 byId("update-later").addEventListener("click", () => {
-  if (appUpdate.phase === "ready") void api.discardUpdate(appUpdate.candidate.version);
+  discardUpdateOnClose();
   updateDialog.close();
 });
-updateDialog.addEventListener("cancel", () => {
-  if (appUpdate.phase === "ready") void api.discardUpdate(appUpdate.candidate.version);
-});
+updateDialog.addEventListener("cancel", discardUpdateOnClose);
 byId("update-action").addEventListener("click", () => {
   const version = appUpdate.candidate.version;
   if (appUpdate.phase === "ready") {

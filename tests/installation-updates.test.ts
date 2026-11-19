@@ -17,7 +17,9 @@ const digest = createHash("sha256").update(bytes).digest("hex");
 const signal = () => new AbortController().signal;
 const updateDirectories = async () => (await readdir(tmpdir())).filter(name => name.startsWith("ai-taskboard-update-")).sort();
 
-test("a successful check replaces the offer and discards its superseded download", async context => {
+test("background checks refresh the offer and preserve the active package through confirmation", async context => {
+  const current = "0.1.0-alpha";
+  const newer = "0.1.2-alpha";
   let next = version;
   let offline = false;
   let requests = 0;
@@ -25,50 +27,113 @@ test("a successful check replaces the offer and discards its superseded download
     requests++;
     if (offline) throw new TypeError("Offline");
     return Response.json([
-      { tag_name: "0.1.0-alpha", body: "Old notes" },
-      { tag_name: next, body: "Selected notes" },
+      { tag_name: next, body: next === version ? "Selected notes" : "Other notes" },
     ]);
   });
   let downloads = 0;
   let discarded = 0;
   let started = 0;
+  let downloadSignal: AbortSignal | undefined;
+  const verified = Promise.withResolvers<void>();
   const service = new ApplicationUpdates({
-    version: () => "0.1.0-alpha",
+    version: () => current,
     supported: () => true,
     busy: () => false,
     confirm: async () => true,
-    prepare: async (_release, _signal, progress) => {
+    prepare: async (release, signal, progress) => {
+      assert.equal(release.version, version);
       downloads++;
+      downloadSignal = signal;
       progress?.({ received: 1, total: 4 });
+      signal.addEventListener("abort", () => verified.resolve(), { once: true });
+      await verified.promise;
       return {
         start: async () => { started++; },
         cancel: async () => { discarded++; },
       };
     },
   });
-  assert.equal((await Promise.all([service.check(), service.check()])).every(reply => reply.ok), true);
+  assert.equal((await Promise.all([service.check(true), service.check()])).every(reply => reply.ok), true);
   assert.equal(requests, 1);
   assert.equal(service.state.candidate?.notes, "Selected notes");
   const download = service.download(version);
   assert.equal(service.state.phase, "downloading");
   assert.deepEqual(service.state.progress, { received: 1, total: 4 });
   assert.equal(service.download(version), undefined);
+  for (const offer of [newer, current]) {
+    next = offer;
+    assert.equal((await service.check(true)).ok, true);
+    assert.equal(service.state.available?.version ?? null, offer === current ? null : offer);
+    assert.equal(service.state.candidate?.version, version);
+    assert.equal(service.state.phase, "downloading");
+    assert.deepEqual(service.state.progress, { received: 1, total: 4 });
+    assert.equal(downloadSignal?.aborted, false);
+    assert.equal(service.download(newer), undefined);
+  }
+  verified.resolve();
   await download;
   assert.equal(downloads, 1);
   assert.equal(service.state.phase, "ready");
-  assert.equal(service.prepared, undefined);
+  assert.equal(service.installing, false);
 
   offline = true;
-  assert.equal((await service.check()).ok, false);
+  assert.equal((await service.check(true)).ok, false);
   assert.equal(service.state.phase, "ready");
   offline = false;
-  next = "0.1.2-alpha";
-  assert.equal((await service.check()).ok, true);
-  assert.equal(service.state.candidate?.version, next);
-  assert.equal(service.state.phase, "available");
-  assert.equal(discarded, 1);
+  for (const offer of [newer, current]) {
+    next = offer;
+    assert.equal((await service.check(true)).ok, true);
+    assert.equal(service.state.available?.version ?? null, offer === current ? null : offer);
+    assert.equal(service.state.candidate?.version, version);
+    assert.equal(service.state.candidate?.notes, "Selected notes");
+    assert.equal(service.state.phase, "ready");
+    assert.equal(downloadSignal?.aborted, false);
+    assert.equal(service.confirmDownload(newer), false);
+  }
+  assert.equal(discarded, 0);
   assert.equal(started, 0);
-  assert.equal(service.confirmDownload(version), false);
+  assert.equal(service.confirmDownload(version), true);
+  assert.equal(service.state.phase, "installing");
+  assert.ok(service.prepared);
+  await service.prepared.start();
+  assert.equal(started, 1);
+});
+
+test("a failed transfer can be retried for the same version and discarded to reveal the latest offer", async context => {
+  const newer = "0.1.2-alpha";
+  let next = version;
+  let discarded = false;
+  const attempts: string[] = [];
+  context.mock.method(globalThis, "fetch", async () => Response.json([{ tag_name: next }]));
+  const service = new ApplicationUpdates({
+    version: () => "0.1.0-alpha",
+    supported: () => true,
+    busy: () => false,
+    confirm: async () => true,
+    prepare: async release => {
+      attempts.push(release.version);
+      if (attempts.length === 1) throw new Error("Network error");
+      return {
+        start: async () => { assert.fail("Discarding the package must not start the installer"); },
+        cancel: async () => { discarded = true; },
+      };
+    },
+  });
+  await service.check(true);
+  await service.download(version);
+  assert.equal(service.state.phase, "error");
+  next = newer;
+  await service.check(true);
+  assert.equal(service.state.available?.version, newer);
+  assert.equal(service.state.candidate?.version, version);
+  assert.equal(service.download(newer), undefined);
+  await service.download(version);
+  assert.deepEqual(attempts, [version, version]);
+  assert.equal(service.state.phase, "ready");
+  await service.discardDownload();
+  assert.equal(discarded, true);
+  assert.equal(service.state.phase, "available");
+  assert.equal(service.state.candidate?.version, newer);
 });
 
 test("manifest requires one exact version/architecture entry and validates the full line", () => {

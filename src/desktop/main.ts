@@ -3331,7 +3331,7 @@ ipcMain.handle("app:downloadUpdate", async (event, version: unknown) => {
 ipcMain.handle("app:discardUpdate", async (event, version: unknown) => {
   stateOf(event);
   const update = applicationUpdates.state;
-  if (update.phase === "ready" && update.candidate?.version === version) {
+  if ((update.phase === "ready" || update.phase === "error") && update.candidate?.version === version) {
     await applicationUpdates.discardDownload();
   }
 });
