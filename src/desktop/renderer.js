@@ -853,14 +853,17 @@ function renderAgentRunStatus(target, task) {
   } else {
     const repair = frame.board?.tasks.find(card => card.id === task.id)?.acceptanceRepair;
     const hybridReview = task.status === "review" && (task.reviewModeOverride?.mode ?? frame.board?.settings.reviewMode) === "reviewer-human";
-    const text = repair && !(hybridReview && repair.phase === "checking" && !task.reviewApproved) ? ({ queued: t("ui.waiting_for_a_reviewer_slot_8918dd95"), running: t("ui.resolving_acceptance_conflict"), checking: t("ui.accepting_task_39473c27"), failed: repair.reason }[repair.phase]) : frame.waitingTasks?.includes(task.id) ?
+    const text = repair && !(hybridReview && repair.phase === "checking" && !task.reviewApproved)
+      ? acceptanceRepairStatus(task.id, repair)
+      : frame.waitingTasks?.includes(task.id) ?
       (task.mergeRepair || frame.board?.tasks.find(card => card.id === task.id)?.mergeRepair
         ? t("ui.waiting_for_a_reviewer_slot_8918dd95")
         : t("ui.waiting_for_an_available_executor_cc0934a8")) :
       task.status === "in_progress" && task.codexThreadId ?
       t("ui.board_run_inactive_2a932a2f") : hybridReview ?
       t(task.reviewApproved ? "ui.awaiting_human_acceptance" : "ui.awaiting_reviewer_approval") : "";
-    if (target.firstElementChild || target.textContent !== text) target.textContent = text;
+    const status = frame.quotaTasks?.includes(task.id) ? quotaLabel() : text;
+    if (target.firstElementChild || target.textContent !== status) target.textContent = status;
   }
   target.hidden = !target.childNodes.length;
 }
@@ -914,6 +917,12 @@ function blockerBanner({ reason, condition }) {
   return banner;
 }
 
+function quotaLabel() {
+  return frame.quotaWait?.resetsAt
+    ? t("ui.waiting_for_provider_quota_until", { time: new Date(frame.quotaWait.resetsAt).toLocaleString(frame.localization?.locale) })
+    : t("ui.waiting_for_provider_quota");
+}
+
 function card(task) {
   const showCover = archiveView || frame.board.settings?.showCardPreviews !== false;
   const cover = showCover ? selectedCover(task, (task.attachments ?? []).filter(isImageAttachment)) : undefined;
@@ -921,7 +930,7 @@ function card(task) {
   const signature = JSON.stringify([frame.localization?.locale, task.title, task.description,
     task.tags?.map(name => boardTags.get(tagKey(name)) ?? { name }), cover?.file,
     frame.runningTasks?.includes(task.id) ?? false, frame.waitingTasks?.includes(task.id) ?? false,
-    frame.reviewingTasks?.[task.id], task.status, task.mergeRepair, task.acceptanceRepair, Boolean(task.codexThreadId),
+    frame.reviewingTasks?.[task.id], frame.quotaTasks?.includes(task.id) ? frame.quotaWait : null, task.status, task.mergeRepair, task.acceptanceRepair, Boolean(task.codexThreadId),
     task.reviewModeOverride?.mode ?? frame.board?.settings.reviewMode, task.reviewApproved,
     task.unfinishedDependencies, task.blocked, task.subtasks?.map(entry => entry.done),
     task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule,
@@ -1134,16 +1143,16 @@ function codexTaskAction(task) {
       const result = await api.launchTask(task.id, newThread ? { newThread: true }
         : resumeWithFullAccess ? { resumeWithFullAccess: true } : undefined);
       if (generation !== projectGeneration) return;
-      if (!result.ok) notice(boardError(result.error),
+      if (!result.ok && result.error.code !== "PROVIDER_QUOTA") notice(boardError(result.error),
         [t("ui.starting_task_1cd51aaa"), task.id, projectName()].join(" · "));
       else if (sheetKind === "task" && taskInSheet?.id === task.id) await showTask(task.id);
     } finally {
-      launch.disabled = Boolean(task.unfinishedDependencies?.length);
+      launch.disabled = Boolean(frame.quotaWait || task.unfinishedDependencies?.length);
     }
   });
   launch.id = "task-launch";
   launch.hidden = frame.runningTasks?.includes(task.id) ?? false;
-  launch.disabled = Boolean(task.unfinishedDependencies?.length);
+  launch.disabled = Boolean(frame.quotaWait || task.unfinishedDependencies?.length);
   return launch;
 }
 
@@ -1456,6 +1465,9 @@ function render(previousBoard) {
   const noBoard = !board;
   const autoMode = byId("status-auto-mode");
   autoMode.hidden = noBoard || manualBoard();
+  const quota = byId("status-provider-quota");
+  quota.hidden = !frame.quotaWait;
+  quota.textContent = frame.quotaWait ? quotaLabel() : "";
   const enabled = board?.settings.autoMode === true;
   autoMode.setAttribute("aria-pressed", String(enabled));
   autoMode.querySelector("i").className = `icon codicon codicon-${enabled ? "sync" : "play"}`;
@@ -1898,6 +1910,9 @@ function draftComposer() {
   bar.append(views, resize, pin);
   let currentGoal;
   let goalRunning = false;
+  let goalResuming = false;
+  let requestingResume = false;
+  let clearingGoal = false;
   const activeGoalRunId = () => goalRunning && managerWork?.phase === "running" ? managerWork.id : undefined;
   let goalRevision = 0;
   let changingGoal = false;
@@ -1922,16 +1937,20 @@ function draftComposer() {
   const goalActions = element("div", undefined, "board-goal-actions");
   const saveGoal = button("", () => changeGoal("edit", goalText.value.trim()), "quiet");
   const pauseGoal = button("", () => changeGoal("pause"), "quiet");
-  const resumeGoal = button("", () => {
+  const resumeGoal = button("", async () => {
     if (!currentGoal || resumeGoal.hidden || resumeGoal.disabled) return;
+    requestingResume = true;
     goalError.textContent = "";
-    void restoreQueue().then(() => {
-      if (disposed || !currentGoal || resumeGoal.hidden || resumeGoal.disabled) return;
-      const entry = element("div");
-      entry.hidden = true;
-      queued.unshift({ entry, status: element("span"), request: "", goal: "resume", submitted: [] });
-      sendNext();
-    }).catch(() => {});
+    syncGoal();
+    try {
+      const result = await api.boardGoal("resume", currentGoal.objective);
+      if (!result.ok) throw new Error(boardError(result.error));
+    } catch (error) {
+      goalError.textContent = error.message;
+    } finally {
+      requestingResume = false;
+      syncGoal();
+    }
   }, "quiet");
   const clearGoal = button("", () => changeGoal("clear"), "quiet danger");
   goalActions.append(saveGoal, pauseGoal, resumeGoal, clearGoal);
@@ -1950,7 +1969,8 @@ function draftComposer() {
     goalPanel.dataset.status = waitingToResume ? "idle" : currentGoal.status;
     pauseGoal.hidden = currentGoal.status !== "active" || waitingToResume;
     resumeGoal.hidden = currentGoal.status === "complete" || !pauseGoal.hidden;
-    resumeGoal.disabled = changingGoal || Boolean(managerWork) || startingWork;
+    resumeGoal.disabled = changingGoal || goalResuming || requestingResume || startingWork;
+    goalPending.hidden = !clearingGoal && (!goalResuming || goalRunning);
     saveGoal.disabled = changingGoal || !goalText.value.trim() || goalText.value.trim() === currentGoal.objective;
     pauseGoal.disabled = clearGoal.disabled = changingGoal;
   };
@@ -1964,9 +1984,10 @@ function draftComposer() {
     goalTitle.title = goalTitle.textContent;
     syncGoal();
   };
-  editor.updateGoal = (goal, running) => {
+  editor.updateGoal = (goal, running, resuming) => {
     goalRevision++;
     if (running !== undefined) goalRunning = running;
+    if (resuming !== undefined) goalResuming = resuming;
     if (goal !== undefined) showGoal(goal);
     else syncGoal();
   };
@@ -1975,7 +1996,7 @@ function draftComposer() {
     if (changingGoal) return;
     changingGoal = true;
     goalError.textContent = "";
-    goalPending.hidden = kind !== "clear";
+    clearingGoal = kind === "clear";
     const revision = goalRevision;
     syncGoal();
     try {
@@ -1987,7 +2008,7 @@ function draftComposer() {
       goalError.textContent = error.message;
     } finally {
       changingGoal = false;
-      goalPending.hidden = true;
+      clearingGoal = false;
       syncGoal();
     }
   }
@@ -3017,7 +3038,7 @@ function draftComposer() {
       loadingHistory = api.boardHistory(project).then(async result => {
         if (!result.ok) throw new Error(boardError(result.error));
         if (disposed || reloadAfterHistory) return;
-        if (revision === goalRevision) editor.updateGoal(result.data.goal, result.data.goalRunning);
+        if (revision === goalRevision) editor.updateGoal(result.data.goal, result.data.goalRunning, result.data.goalResuming);
         const oldImages = [...log.querySelectorAll(".chat-attachments img")];
         let delivered;
         dialogueViewport.update(() => {
@@ -3571,14 +3592,9 @@ function draftComposer() {
       if (result.data.error) goalError.textContent = result.data.error;
     })().catch(error => {
       goalError.textContent = error.message;
-      if (next.goal === "resume") {
-        const index = queued.indexOf(next);
-        if (index >= 0) queued.splice(index, 1);
-      } else {
-        next.failed = true;
-        renderQueuedActions(next);
-        message(error.message);
-      }
+      next.failed = true;
+      renderQueuedActions(next);
+      message(error.message);
     }).finally(() => {
       next.sending = false;
       startingWork = false;
@@ -4310,6 +4326,17 @@ async function showAcceptedTask(task) {
   if (messages.length) notice(messages.join("\n"));
 }
 
+function acceptanceRepairStatus(id, repair) {
+  if (frame.quotaTasks?.includes(id)) return quotaLabel();
+  if (repair.reason) return repair.reason;
+  const label = {
+    queued: "ui.waiting_for_a_reviewer_slot_8918dd95",
+    running: "ui.resolving_acceptance_conflict",
+    checking: "ui.accepting_task_39473c27",
+  }[repair.phase];
+  return label ? t(label) : "";
+}
+
 async function showReview(task, messageDraft, acceptanceError) {
   if (task.acceptanceRepair) {
     taskInSheet = task;
@@ -4317,7 +4344,9 @@ async function showReview(task, messageDraft, acceptanceError) {
       const cancelled = await command("accept", task.id, { revision: task.revision, cancelRepair: true });
       if (cancelled) sheet.close();
     });
-    editor.before(element("p", task.acceptanceRepair.reason ?? ({ queued: t("ui.waiting_for_a_reviewer_slot_8918dd95"), running: t("ui.resolving_acceptance_conflict"), checking: t("ui.accepting_task_39473c27") }[task.acceptanceRepair.phase]), "muted"));
+    const status = element("p", acceptanceRepairStatus(task.id, task.acceptanceRepair), "muted");
+    status.id = "acceptance-repair-status";
+    editor.before(status);
     body.append(button(() => t("ui.work_activity_e01957b7"), () => showTask(task.id)));
     return;
   }
@@ -5618,6 +5647,10 @@ function update(next) {
     if (current && (current.revision !== taskInSheet.revision || JSON.stringify(current.acceptanceRepair) !== JSON.stringify(taskInSheet.acceptanceRepair))) {
       if (current.acceptanceRepair) void showReview({ ...taskInSheet, ...current });
       else void showTask(current.id);
+    } else if (current?.acceptanceRepair) {
+      const status = byId("acceptance-repair-status");
+      const label = acceptanceRepairStatus(current.id, current.acceptanceRepair);
+      if (status && status.textContent !== label) status.textContent = label;
     }
   }
   if (sheetKind === "review" && sheet.open && taskInSheet && !taskInSheet.acceptanceRepair) {
@@ -5639,7 +5672,10 @@ function update(next) {
     const runStatus = byId("task-agent-run");
     if (runStatus) renderAgentRunStatus(runStatus, frame.board?.tasks.find(task => task.id === taskInSheet.id) ?? taskInSheet);
     const launch = byId("task-launch");
-    if (launch) launch.hidden = frame.runningTasks?.includes(taskInSheet.id) ?? false;
+    if (launch) {
+      launch.hidden = frame.runningTasks?.includes(taskInSheet.id) ?? false;
+      launch.disabled = Boolean(frame.quotaWait || taskInSheet.unfinishedDependencies?.length);
+    }
     if (tagsChanged) byId("task-sheet-tags")?.replaceChildren(...tagBadges(taskInSheet.tags));
     const task = frame.board?.tasks.find(entry => entry.id === taskInSheet.id);
     const archived = frame.board?.archived.find(entry => entry.id === taskInSheet.id);

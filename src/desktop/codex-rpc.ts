@@ -2,6 +2,12 @@ import type { ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { debuglog } from "node:util";
 
+let onQuotaExceeded: (() => void) | undefined;
+
+export function watchCodexQuotaExceeded(listener: () => void) {
+  onQuotaExceeded = listener;
+}
+
 const traceRpc = debuglog("taskboard-rpc");
 
 interface PendingReply {
@@ -55,6 +61,11 @@ export function codexRpc(child: ChildProcess,
     if (failure) return;
     try {
       const message = JSON.parse(line) as RpcMessage;
+      const notification = message.params as { error?: unknown; turn?: { error?: unknown } } | undefined;
+      const error = (message.error ?? (message.method === "error" ? notification?.error :
+        message.method === "turn/completed" ? notification?.turn?.error : undefined)) as
+        { codexErrorInfo?: unknown; data?: { codexErrorInfo?: unknown } } | undefined;
+      if ((error?.codexErrorInfo ?? error?.data?.codexErrorInfo) === "usageLimitExceeded") onQuotaExceeded?.();
       if (message.method && message.id !== undefined) {
         void Promise.resolve().then(() => onRequest?.(message)).then(result => {
           if (!failure) send(result ? { id: message.id, result } :

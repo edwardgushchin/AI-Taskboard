@@ -24,6 +24,8 @@ export interface RuntimeEntry {
   turnRequest?: { threadId: string; clientId: string; turnId?: string };
   restart?: { threadId: string; cwd: string };
   continuation?: { afterDisconnect?: boolean; withoutProgress?: boolean };
+  quotaPaused?: boolean;
+  newThread?: "user" | "manager";
   queuedMessageId?: string;
   steeringMessageId?: string;
   state?: {
@@ -79,27 +81,44 @@ function liveEntries(entries: RuntimeEntry[]) {
   return live;
 }
 
-function queueRestart(entries: RuntimeEntry[], slot: RuntimeEntry) {
-  const { task, revision, restart, continuation } = slot;
-  if (slot.kind !== "slot" || !task || revision === undefined || !restart ||
+function queueRestart(entries: RuntimeEntry[], slot: RuntimeEntry, quotaPaused?: boolean) {
+  const { task, revision, restart, continuation, newThread } = slot;
+  if (slot.kind !== "slot" || !task || revision === undefined || (!restart && !quotaPaused) ||
       entries.some(entry => entry.kind === "queue" && entry.task === task)) return;
-  entries.push({ id: slot.id, kind: "queue", owner: 0, task, revision, restart, continuation });
+  entries.push({ id: slot.id, kind: "queue", owner: 0, task, revision, restart, continuation, quotaPaused, newThread });
 }
 
-export function rememberExecutor(project: string, task: QueuedTask, cwd: string, continuation: RuntimeEntry["continuation"]) {
+export function rememberExecutor(project: string, task: QueuedTask, cwd: string,
+  continuation: RuntimeEntry["continuation"], newThread?: RuntimeEntry["newThread"]) {
   runtimeTransaction(project, entries => {
-    const slot = entries.find(entry => entry.id === context.getStore() && entry.kind === "slot" && entry.role === "executor");
-    if (slot && task.status === "in_progress" && task.codexThreadId) {
+    const slot = entries.find(entry => entry.id === context.getStore() && entry.kind === "slot" && entry.task === task.id);
+    if (slot && task.status === "in_progress") {
       slot.revision = task.revision;
-      slot.restart = { threadId: task.codexThreadId, cwd };
+      slot.newThread = newThread;
+      if (task.codexThreadId && !newThread) {
+        slot.restart = { threadId: task.codexThreadId, cwd };
+      } else {
+        delete slot.restart;
+      }
       slot.continuation = continuation;
+      if (!newThread) {
+        const queued = entries.find(entry => entry.kind === "queue" && entry.task === task.id);
+        if (queued) {
+          delete queued.newThread;
+        }
+      }
     }
   });
 }
 
 export function forgetExecutor(project: string, task: string) {
   runtimeTransaction(project, entries => {
-    for (const entry of entries) if (entry.kind === "slot" && entry.task === task) delete entry.restart;
+    for (const entry of entries) {
+      if (entry.kind !== "slot" || entry.task !== task) continue;
+      delete entry.restart;
+      delete entry.revision;
+      delete entry.newThread;
+    }
     const index = entries.findIndex(entry => entry.kind === "queue" && entry.task === task);
     if (index >= 0) entries.splice(index, 1);
   });
@@ -123,7 +142,7 @@ export function runtimeEntries(project: string) {
   return liveEntries(readEntries(join(runtimeLocation(project).directory, "runtime.json")));
 }
 
-export type DeferredExecutor = Pick<RuntimeEntry, "continuation"> & { revision: number };
+export type DeferredExecutor = Pick<RuntimeEntry, "continuation" | "quotaPaused" | "newThread"> & { revision: number };
 
 type QueuedTask = Pick<Task, "id" | "revision" | "status" | "codexThreadId">;
 
@@ -194,11 +213,18 @@ export function registerRuntime(project: string, value: Omit<RuntimeEntry, "id" 
     return true;
   });
   if (!accepted) return;
-  const release = (restart = false) => runtimeTransaction(project, entries => {
+  const release = (restart: boolean | "quota" = false) => runtimeTransaction(project, entries => {
     const index = entries.findIndex(entry => entry.id === id);
     if (index >= 0) {
       const [entry] = entries.splice(index, 1);
-      if (restart) queueRestart(entries, entry);
+      if (restart === "quota") {
+        const queued = entries.find(candidate => candidate.kind === "queue" && candidate.task === entry.task);
+        if (queued) {
+          queued.quotaPaused = true;
+          delete queued.turnRequest;
+        }
+      }
+      if (restart) queueRestart(entries, entry, restart === "quota" || undefined);
     }
   });
   return Object.assign(release, { run: <T>(callback: () => T) => context.run(id, callback) });

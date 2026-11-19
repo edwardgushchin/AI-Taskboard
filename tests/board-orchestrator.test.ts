@@ -47,7 +47,7 @@ const source = (file: string) => readFileSync(new URL("../src/desktop/" + file, 
 const boardSource = stripTypeScriptTypes(source("board-actions.ts").replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, ""));
 const main = ts.createSourceFile("main.ts", source("main.ts"), ts.ScriptTarget.Latest, true);
 const handlerSource = stripTypeScriptTypes(main.statements.map(node => node.getText(main)).filter(text =>
-  /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|changeBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|returnTaskToDraft|scheduleMaintenance|scheduleRecurringTasks|taskRunLimit|readQueuedMessage|queuedFiles|listQueuedMessages)\(|const (?:imageExtensions|imageTypes|boardRequests|boardGoalClears|boardWorkRequests|backgroundManagerRequests|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork|maintenanceWork|returningDrafts|reviewOperations|managerReviewOperations|taskOperations|steeringOperations) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
+  /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|changeBoardGoal|resumeBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|returnTaskToDraft|scheduleMaintenance|scheduleRecurringTasks|taskRunLimit|readQueuedMessage|queuedFiles|listQueuedMessages)\(|const (?:imageExtensions|imageTypes|boardRequests|boardGoalClears|boardGoalResumes|boardWorkRequests|backgroundManagerRequests|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork|maintenanceWork|returningDrafts|reviewOperations|managerReviewOperations|taskOperations|steeringOperations) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
 const cliFailure = (code: string, message: string) => ({ ok: false, error: { code, message } });
 
@@ -126,6 +126,7 @@ function fixture(t: TestContext) {
   const activeAgents = new Map<string, { control: { steer: (text: string) => Promise<void> } }>();
   const sender = { isDestroyed: () => true };
   const runtime = runInNewContext(handlerSource + "\n({ frame, scheduleAutoReview, boardRequests, boardWorkRequests, backgroundManagerRequests, acceptanceWork, managerQuestion, runBoardRequest, scheduleRecurringTasks })", {
+    quotaWait: undefined, quotaInterruption: new Error("Fixture quota pause"), refreshQuota: async () => [],
     scheduleAutoBoard: () => {}, scheduleDraftDiscussions: () => {},
     activeRunSummary, runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
     captureFileLink, isFileLink, verifyFileLink, AbortSignal, AbortController, ArrayBuffer, Buffer, Error, basename, dirname, extname, join, mkdtemp, rm, writeFile, maxAttachmentBytes, boardActions, boardInstructions, boardTools, callCli,
@@ -319,9 +320,13 @@ function fixture(t: TestContext) {
     },
     cli: (args: string[], input?: unknown) => callCli(project, args, input),
     milestoneDeletion,
-    run: (request: string, reply: Reply, files: unknown[] = [], goal: boolean | "resume" = false, id?: string) => {
+    run: (request: string, reply: Reply, files: unknown[] = [], goal = false, id?: string) => {
       respond = reply;
       return handlers.get("board:request")!({ sender }, request, files, undefined, goal, false, id);
+    },
+    resume: (objective: string, reply: Reply) => {
+      respond = reply;
+      return handlers.get("board:goal")!({ sender }, "resume", objective);
     },
     stop: () => handlers.get("board:stopOrchestrator")!({ sender }),
     history: (cursor?: string, view?: string) => handlers.get("board:history")!({ sender }, project, cursor, view),
@@ -1805,15 +1810,14 @@ test("the manager can approve drafts created while the goal was paused", async t
   assert.equal(paused.data.error, undefined);
   assert.ok(pending);
   const { id, revision } = pending;
-  const resumed = await f.run("", async (act, _text, _images, _id, _context, _waiting, _signal, goal) => {
+  const resumed = await f.resume(objective, async (act, _text, _images, _id, _context, _waiting, _signal, goal) => {
     goal!.update({ objective, status: "active" });
     const approval = await act("task_approve", { id, revision });
     assert.equal(approval.ok, true, JSON.stringify(approval.error));
     assert.equal(approval.data.status, "ready");
     return { text: "Release notes are ready to start." };
-  }, [], "resume");
+  });
   assert.equal(resumed.ok, true, JSON.stringify(resumed.error));
-  assert.equal(resumed.data.error, undefined);
   const saved = (await f.cli(["show", id])).data;
   assert.equal(saved.status, "ready");
   assert.equal(saved.history.at(-1).actor, "manager");
@@ -2540,15 +2544,20 @@ test("a damaged dialogue binding reports an error before opening another chat", 
 test("goal actions use the running chat connection and resume requires an existing binding", { timeout: 10_000 }, async t => {
   const f = fixture(t);
   assert.equal((await f.cli(["init"])).ok, true);
-  assert.equal((await f.run("", async () => assert.fail("Must not start another chat"), [], "resume")).ok, false);
+  const objective = "Saved objective";
+  assert.equal((await f.resume(objective, async () => assert.fail("Must not start another chat"))).ok, false);
   assert.equal((await f.goal("edit", "  ")).ok, false);
   writeJson(f.binding, { provider: "codex", id: f.threadId });
+  f.setLegacyHistory(async () => ({
+    goal: { objective, status: "paused" }, model: undefined, turns: [], nextCursor: null,
+  }));
+  assert.equal((await f.resume("Replaced objective", async () => assert.fail("Must not resume a different goal"))).ok, false);
   const settings = { model: "test-manager", effort: "high" };
   assert.equal((await f.cli(["settings"], { manager: settings })).ok, true);
   const { goalActivity, managerRuns, managerRun } = f.backgroundWindow();
   const connected = Promise.withResolvers<void>();
   const done = Promise.withResolvers<void>();
-  const resume = f.run("", async (_act, prompt, _images, id, _context, waiting, _signal, goal) => {
+  const resume = f.resume(objective, async (_act, prompt, _images, id, _context, waiting, _signal, goal) => {
     assert.equal(id, f.threadId);
     assert.equal(prompt, "");
     assert.ok(goal?.resume);
@@ -2565,7 +2574,7 @@ test("goal actions use the running chat connection and resume requires an existi
     connected.resolve();
     await done.promise;
     return { text: "Paused." };
-  }, [], "resume");
+  });
   await Promise.race([connected.promise, resume.then(result => assert.fail(JSON.stringify(result)))]);
   try {
     assert.deepEqual(goalActivity, [true]);

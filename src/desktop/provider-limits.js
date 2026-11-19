@@ -1,8 +1,14 @@
 // Also loaded by node tests; the browser uses the same minimum and freshness rules.
 globalThis.providerLimitSummary = (providers, now = Date.now()) => {
-  const fresh = providers.map(provider => ({ ...provider,
-    state: provider.state === "ready" && (!provider.observedAt || now - provider.observedAt > 180_000 ||
-      provider.windows.some(window => window.resetsAt && window.resetsAt <= now)) ? "stale" : provider.state }));
+  const fresh = providers.map(provider => {
+    if (provider.state !== "ready") return provider;
+    if (!provider.observedAt || now - provider.observedAt > 180_000) return { ...provider, state: "stale" };
+    const windows = provider.windows.filter(window => !window.resetsAt || window.resetsAt > now);
+    if (windows.some(window => window.remaining === 0)) return { ...provider, windows };
+    if (windows.length !== provider.windows.length) return { ...provider, state: "stale" };
+    if (provider.incomplete) return { ...provider, state: "unknown" };
+    return provider;
+  });
   const known = fresh.filter(provider => provider.state === "ready").flatMap(provider =>
     provider.windows.map(window => ({ ...window, provider: provider.provider })));
   return { providers: fresh, lowest: known.sort((a, b) => a.remaining - b.remaining)[0],

@@ -2,7 +2,7 @@ import localization from "../src/desktop/localization.cjs";
 (globalThis as any).taskboardLocalization = localization;
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { codexLimitWindows, codexLimitState, providerLimitSource } from '../src/desktop/provider-limits.ts';
+import { codexLimitWindows, codexLimitState, codexLimitSnapshot, confirmedQuota, providerLimitSource, type ProviderLimits } from '../src/desktop/provider-limits.ts';
 import '../src/desktop/provider-limits.js';
 const summary = (globalThis as any).providerLimitSummary;
 test('available windows only; used becomes remaining, multi-bucket supersedes legacy', () => {
@@ -54,4 +54,51 @@ test('window labels use readable durations in Russian and English without plan a
  assert.match(label(2880,'ru-RU'),/2 дня/);
  assert.equal(label(undefined,'ru-RU'),'Лимит');
  assert.equal(codexLimitWindows({rateLimits:{primary:{usedPercent:53,windowDurationMins:10080}}})[0].durationMins,10080);
+});
+
+test('dispatch requires fresh confirmed quota and waits for all exhausted windows', () => {
+  const now = 10_000;
+  const base: ProviderLimits = {
+    provider: 'Codex',
+    state: 'ready',
+    observedAt: now,
+    windows: [
+      { name: 'Primary', remaining: 0, resetsAt: 20_000 },
+      { name: 'Secondary', remaining: 0, resetsAt: 30_000 },
+    ],
+  };
+  assert.deepEqual(confirmedQuota(base, now), { resetsAt: 30_000 });
+  assert.deepEqual(confirmedQuota({ ...base, windows: [{ name: 'Primary', remaining: 0 }] }, now), {});
+  assert.equal(confirmedQuota({ ...base, observedAt: now - 60_000, windows: [{ name: 'Old', remaining: 0 }] }, now), undefined);
+  assert.deepEqual(confirmedQuota(base, 20_001), { resetsAt: 30_000 });
+  assert.equal(confirmedQuota(base, 30_000), undefined);
+  for (const state of ['unknown', 'error', 'stale', 'auth', 'unsupported', 'no_windows'] as const) {
+    assert.equal(confirmedQuota({ ...base, state }, now), undefined);
+  }
+  assert.equal(confirmedQuota({ ...base, windows: [{ name: 'Primary', remaining: 0.5 }] }, now), 'available');
+});
+
+test('only a complete fresh positive snapshot confirms recovery', () => {
+  const now = 10_000;
+  const primary = { usedPercent: 40, resetsAt: 20 };
+  for (const usedPercent of ['25', '5e1', '0x32', '25x', null, undefined, NaN, -1, 101]) {
+    const secondary = { usedPercent, resetsAt: 30 };
+    const snapshot = codexLimitSnapshot({ rateLimits: { primary, secondary } }, now);
+    assert.equal(snapshot.incomplete, true);
+    assert.equal(confirmedQuota(snapshot, now), undefined);
+    assert.equal(summary([snapshot], now).providers[0].state, 'unknown');
+  }
+
+  const expired = { usedPercent: 100, resetsAt: 9 };
+  const mixed = codexLimitSnapshot({ rateLimits: { primary: { usedPercent: 100, resetsAt: 20 }, secondary: expired } }, now);
+  assert.deepEqual(confirmedQuota(mixed, now), { resetsAt: 20_000 });
+  assert.equal(summary([mixed], now).lowest.remaining, 0);
+  const partialZero = codexLimitSnapshot({ rateLimits: { primary: { usedPercent: 100 }, secondary: { usedPercent: '50' } } }, now);
+  assert.deepEqual(confirmedQuota(partialZero, now), {});
+  assert.equal(confirmedQuota(codexLimitSnapshot({ rateLimits: { primary, secondary: expired } }, now), now), undefined);
+
+  const corrected = codexLimitSnapshot({ rateLimits: { primary, secondary: { usedPercent: 50, resetsAt: 30 } } }, now);
+  assert.equal(confirmedQuota(corrected, now), 'available');
+  assert.equal(summary([corrected], now).lowest.remaining, 50);
+  assert.equal(confirmedQuota(codexLimitSnapshot({ rateLimits: { primary, secondary: null } }, now), now), 'available');
 });

@@ -44,7 +44,7 @@ export function readReviewerChat(project: string, id: string) {
 }
 
 export async function withReviewerChat<T>(project: string, id: string, notify: () => void,
-  run: (onActivity: (items: RunActivity[]) => void) => Promise<T>): Promise<T> {
+  run: (onActivity: (items: RunActivity[]) => void) => Promise<T>, interrupted?: () => boolean): Promise<T> {
   const path = historyPath(project, id);
   const started = performance.now();
   const attempt: ReviewerAttempt = { id: randomUUID(), at: new Date().toISOString(), items: [] };
@@ -61,7 +61,9 @@ export async function withReviewerChat<T>(project: string, id: string, notify: (
       }, 100);
     });
   } catch (error) {
-    attempt.error = (error instanceof Error ? error.message : String(error)).slice(0, 2000);
+    if (!interrupted?.()) {
+      attempt.error = (error instanceof Error ? error.message : String(error)).slice(0, 2000);
+    }
     throw error;
   } finally {
     clearTimeout(notifyTimer);
