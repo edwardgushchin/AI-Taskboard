@@ -4216,7 +4216,8 @@ async function showTask(id, dialogue = false) {
       () => act("update", { schedulePaused: !task.schedule.paused })));
   }
   if (task.status === "draft" && !task.approvalRequirements?.length) actions.append(button(() => t("ui.approve_535c27a7"), () => act("approve"), "primary"));
-  if (["ready", "in_progress", "blocked", "review", "cancelled"].includes(task.status)) {
+  if (["ready", "in_progress", "blocked", "review", "cancelled"].includes(task.status) ||
+      (task.status === "done" && !manualBoard())) {
     actions.append(button(() => t("ui.return_to_draft_ccd17679"), () => act("return-to-draft")));
   }
   if (task.workingDirectory) {

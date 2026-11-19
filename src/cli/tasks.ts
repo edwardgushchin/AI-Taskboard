@@ -181,7 +181,7 @@ export function withoutVerification(task: Task): Task {
 export function changeTask(task: Task, action: string, input: Record<string, unknown>): Task {
   requireRevision(task, input.revision);
   if (action === "return-to-draft") {
-    requireState(task, [...activeStates, "cancelled"]);
+    requireState(task, [...activeStates, "done", "cancelled"]);
     if (task.status === "draft") return task;
     requireRevision(task, input.revision, true);
     const draft = record(task, action, boardActor(input, "user"), "draft");
@@ -189,6 +189,10 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
     delete draft.blocked;
     delete draft.acceptanceRepair;
     delete draft.launchRequested;
+    if (task.status === "done") {
+      delete draft.git;
+      delete draft.codexArchivePending;
+    }
     return draft;
   }
   if (action === "comment" && task.status === "done") {

@@ -110,7 +110,7 @@ function compactTask(task: Task) {
     createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep, dependencies, milestone, workingDirectory, schedule, origin, launchRequested } = task;
   return { reviewModeOverride: task.reviewModeOverride, expertId: task.expertId, expertTeam: task.expertTeam, expertStage: task.expertStage, expertStages: task.expertStages,
     reviewDecision: status === "review" ? reviewDecisionSequence(task) : undefined, acceptanceRepair: task.acceptanceRepair, id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
-    coverAttachment, codexThreadId, createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep,
+    coverAttachment, codexThreadId, codexArchivePending: task.codexArchivePending, createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep,
     dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, origin, launchRequested, discussionReturn: task.discussionReturn,
     awaitingAnswer: task.awaitingAnswer,
     draftDiscussion: status === "draft" ? task.draftDiscussion : undefined, historyLength: task.history.length,
@@ -131,7 +131,7 @@ function taskReceipt({ id, status, revision, git, result }: Task) {
 
 function taskLaunchState(task: Task) {
   const { id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep } = task;
-  return { expertId: task.expertId, expertTeam: task.expertTeam, expertStage: task.expertStage, expertStages: task.expertStages, acceptanceRepair: task.acceptanceRepair, discussionReturn: task.discussionReturn, id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep,
+  return { expertId: task.expertId, expertTeam: task.expertTeam, expertStage: task.expertStage, expertStages: task.expertStages, acceptanceRepair: task.acceptanceRepair, discussionReturn: task.discussionReturn, id, title, status, revision, createdAt, codexThreadId, codexServiceThreads: task.codexServiceThreads, blocked, summary, nextStep,
     ...(isMergeRepair(task) ? { mergeRepair: true as const } : {}) };
 }
 
@@ -751,6 +751,9 @@ function run(
     const draft = changeTask(task, command, input);
     if (draft !== task && hasPending(store, task, true)) {
       throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before returning the task to draft.");
+    }
+    if (task.status === "done" && taskWithCurrentWorktree(store, task).cleanupAvailable) {
+      throw new TaskboardError("PENDING_OPERATION", "Finish cleanup of the accepted worktree and branch before returning the task to draft.");
     }
     const saved = draft === task ? task : isArchived(store, id) ? reactivateArchivedTask(store, draft) : store.save(draft);
     forgetExecutor(store.location.root, id);
