@@ -250,6 +250,46 @@ test("one native specialist can finish multiple stages but cannot impersonate a 
   });
 });
 
+test("a resumed native specialist must complete in the current lead run", async t => {
+  const f = fixture(t);
+  const draft = await callCli<Task>(f.root, ["create"], {
+    title: "Retest the updated page", workingDirectory: f.root, criteria: ["Run QA"],
+    expertTeam: {
+      work: { lead: "product-owner", reason: "QA is delegated.", stages: [brief("verify", "qa-engineer")] },
+      review: { lead: "desktop-qa", reason: "Check the result independently.", stages: [] },
+    },
+  });
+  assert.ok(draft.ok, JSON.stringify(draft));
+  const id = draft.data.id;
+  const ready = await callCli<Task>(f.root, ["approve", id], { revision: draft.data.revision });
+  assert.ok(ready.ok, JSON.stringify(ready));
+  const started = await callCli<{ task: Task }>(f.root, ["start", id], { revision: ready.data.revision });
+  assert.ok(started.ok, JSON.stringify(started));
+  const { revision } = started.data.task;
+
+  const reporter = phaseStageReporter(f.root, "work", id);
+  const stage = { revision, key: "verify" };
+  assert.ok((await reporter.report({ ...stage, state: "running" })).ok);
+  const result = { ...stage, state: "done", agentId: "previous-qa", result: "Retested", outputs: { "verify.md": "New checks passed." } };
+  const observe = (threadId: string, item: object) =>
+    reporter.observe({ method: "item/completed", params: { threadId, item } }, "lead");
+  const followup = { type: "collabAgentToolCall", tool: "followupTask", status: "completed", receiverThreadIds: ["previous-qa"] };
+  const expectError = async (code: string) => {
+    const reply = await reporter.report(result);
+    assert.equal(reply.ok, false);
+    assert.equal(reply.error?.code, code);
+  };
+  observe("other-lead", followup);
+  await expectError("EXPERT_AGENT_UNCONFIRMED");
+  observe("lead", followup);
+  await expectError("EXPERT_AGENT_RUNNING");
+  observe("lead", { type: "collabAgentToolCall", tool: "wait", agentsStates: { "previous-qa": { status: "completed" } } });
+  observe("lead", { ...followup, tool: "resumeAgent" });
+  await expectError("EXPERT_AGENT_RUNNING");
+  observe("lead", { type: "subAgentActivity", kind: "completed", agentThreadId: "previous-qa", agentPath: "/root/qa" });
+  assert.ok((await reporter.report({ ...result, agentId: "/root/qa" })).ok);
+  f.run(store => assert.equal(store.card(id).history.at(-1)?.expertStageRun?.agentId, "previous-qa"));
+});
 test("assigned skills require successful actions by the correct agent and preserve native outputs", { timeout: 120_000 }, async t => {
   const f = fixture(t);
   const action = (tool: string, args: object, id: string, isError = false) => ({

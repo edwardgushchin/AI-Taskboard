@@ -86,9 +86,9 @@ export const expertInstructions = "Board experts are internal instruction packag
 export const leadInstructions = "You are responsible for this card's current phase and its final result. Apply the assigned lead specialization and read your team inbox before delegating or reporting a decision. " +
   "Read the current revision and recorded stage states before opening work with expert_stage. On REVISION_CONFLICT, reread the card and reconcile changed requirements before retrying. A completed stage already has a result; reuse it. After collecting the result, use expert_stage with state done, a summary, and an outputs object keyed by each exact declared output. For delegated work pass the actual child agent ID after waiting for its result. " +
   "Apply the preloaded lead skills. If your lead has explicit skillChecks in this phase, perform them and call expert_verify_skills before submitting or approving when the tool is available. The implicit workflow alone requires no verification call. Load the delegated specialist's assigned skills via expert_skill and pass the actual instructions and assigned actions to the specialist. For a stage with assigned skills, the specialist must perform the actions personally and return JSON with an outputs object keyed by the exact declared output names. Pass those outputs unchanged to expert_stage. Handle your own stages yourself and reuse the same native subagent for later stages of its specialization. " +
-  "Run only independent, non-conflicting stages in parallel. Wait for prerequisites and pass their results to dependent specialists. Use the provider's messaging and wait mechanisms to coordinate. " +
-  "For declared artifact outputs, save individual evidence files in the task's ignored .tasks/qa/ directory. Finish the stage with a path for each declared artifact output. Capture from the same sources you will submit. Open saved screenshots and verify the required state is visible. If a capture is empty or clipped, repair the delivered capture or document the tested replacement in the reproducible QA procedure. If you record source hashes, state whether they cover checked-out bytes or Git blobs and verify them against the submission. Recheck any affected source changed after QA. The board saves the declared outputs with the submission. " +
-  "For evidence from external research, verify the comparison against the saved material with no live lookups before the first preview. Each material price, unit and calculating condition must be readable in a short dated source extract or screenshot referenced from that claim. If a claim cannot be checked from the saved evidence, save the missing context or qualify the claim before submission. " +
+  "Run only independent, non-conflicting stages in parallel. Wait for prerequisites and pass their results to dependent specialists. Use the provider's messaging and wait mechanisms to coordinate. Wait for the current run to report completion after following up with a previous specialist. " +
+  "Keep browser profiles and disposable checks in a system temporary directory. Save only the files needed for review in the task's ignored .tasks/qa/ directory and register all retained files before submission. If a QA command is delivered to the user, run it in an ordinary clean clone and check git status --porcelain after it finishes. Finish the stage with a path for each declared artifact output. Capture from the same sources you will submit. Open saved screenshots and verify the required state is visible. For review, use PNGs up to 4 MiB and 16 megapixels. Capture the relevant viewport or region for oversized pages. If a capture is empty or clipped, repair the delivered capture or document the tested replacement in the reproducible QA procedure. Every executable verification report must identify the tested commit or list the tested source hashes and their representation. Run on committed sources when possible. For a worktree snapshot, verify its source hashes against the final preview before submitting. Keep commit IDs separate from tree and blob IDs. Recheck any affected source changed after QA. The board saves the declared outputs with the submission. " +
+  "For external research, read the completed comparison against the saved primary evidence without live lookups before first preview. Record each material price, unit, condition and other assertion with its own evidence reference. Label details the source does not state as unknown. Omit unsupported details from findings. If a PNG carries unique evidence, include it in the submission's artifacts so the reviewer can open it with task_review_artifact. " +
   "Use team_message for meaningful handoffs and questions between assigned roles. Include the decision or artifact the receiving stage needs and route it to its stage address. Deliver incoming mail from team_inbox to its native agent. If a decision blocks a stage, mark it blocked and leave a persistent question. " +
   "Search team_findings when a failure or diagnostic is likely to recur. Record confirmed reusable causes with the environment and verification. Treat findings from other cards as evidence and recheck applicability when conditions differ. " +
   "If delegation is unavailable or fails, apply the package yourself and give the factual fallback reason when recording its result. Check every result before submitting or giving the review decision. The same task permission and review scope apply to all delegates.";
@@ -109,8 +109,11 @@ export function phaseStageReporter(project: string, phase: "work" | "review", id
       const item = event?.item;
       if (!lead || event?.threadId !== lead || !item) return;
       if (message.method === "item/completed" && item.type === "collabAgentToolCall" &&
-          item.tool === "spawnAgent" && item.status === "completed") {
-        for (const child of item.receiverThreadIds ?? []) children.set(child, child);
+          item.status === "completed" && ["spawnAgent", "resumeAgent", "followupTask"].includes(item.tool ?? "")) {
+        for (const child of item.receiverThreadIds ?? []) {
+          children.set(child, child);
+          if (item.tool !== "spawnAgent") completed.delete(child);
+        }
       }
       if (message.method === "item/completed" && item.type === "collabAgentToolCall" && item.tool === "wait") {
         for (const [child, state] of Object.entries(item.agentsStates ?? {})) {
@@ -118,11 +121,11 @@ export function phaseStageReporter(project: string, phase: "work" | "review", id
         }
       }
       if ((message.method === "item/started" || message.method === "item/completed") && item.type === "subAgentActivity" &&
-          (item.kind === "started" || item.kind === "completed") && item.agentThreadId) {
+          item.agentThreadId) {
         children.set(item.agentThreadId, item.agentThreadId);
         if (item.agentPath) children.set(item.agentPath, item.agentThreadId);
         if (item.kind === "completed") completed.add(item.agentThreadId);
-        else completed.delete(item.agentThreadId);
+        else if (item.kind === "started" || item.kind === "interrupted") completed.delete(item.agentThreadId);
       }
     },
     async report(args: unknown) {
@@ -131,7 +134,7 @@ export function phaseStageReporter(project: string, phase: "work" | "review", id
       if (typeof taskId !== "string") return Promise.resolve(cliFailure("INVALID_INPUT", "Supply the task ID."));
       const agentId = typeof input.agentId === "string" ? children.get(input.agentId) : undefined;
       if (input.agentId !== undefined && !agentId)
-        return Promise.resolve(cliFailure("EXPERT_AGENT_UNCONFIRMED", "Use a specialist ID from this responsible agent's observed native spawn."));
+        return Promise.resolve(cliFailure("EXPERT_AGENT_UNCONFIRMED", "Use a specialist ID observed by the provider in this responsible agent's native collaboration."));
       if (input.state === "done" && agentId && !completed.has(agentId))
         return Promise.resolve(cliFailure("EXPERT_AGENT_RUNNING", "Wait for the specialist's completion before submitting its result."));
       if (input.state === "done" && typeof input.key === "string") {

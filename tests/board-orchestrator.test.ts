@@ -783,6 +783,7 @@ test("an unfinished independent review keeps the submission and releases the man
     const attempt = await f.run("Read the submission.", async act => {
       const review = await act("task_review", { id: task.id });
       assert.equal(review.ok, true);
+      assert.equal(review.data.reviewerRunning, true);
       const result = await act("task_request_changes", { id: task.id, revision: review.data.revision, reason: "Save the original publication." });
       assert.equal(result.error.code, "REVIEW_IN_PROGRESS");
       return { text: "The reviewer is working." };
@@ -801,6 +802,7 @@ test("an unfinished independent review keeps the submission and releases the man
     const review = await act("task_review", { id: task.id });
     assert.equal(review.ok, true);
     const { revision, targetHead } = review.data;
+    assert.equal(review.data.reviewerRunning, false);
     const result = await act("task_request_changes", { id: task.id, revision, reason: "Save the original publication." });
     assert.equal(result.ok, true, JSON.stringify(result));
     assert.equal(result.data.status, "in_progress");
@@ -1332,6 +1334,9 @@ test("manager reads Git information without modifying the repository", async t =
     assert.equal(commit.ok, true);
     assert.match(commit.data.output, /\+Committed edit/);
     assert.doesNotMatch(commit.data.output, /Staged edit|Working edit/);
+    const wrongObject = await act("project_git", { view: "commit_diff", from, to: git("rev-parse", "HEAD^{tree}"), paths: ["tracked.txt"] });
+    assert.equal(wrongObject.error.code, "GIT_COMMIT_REQUIRED");
+    assert.equal(wrongObject.error.details.field, "to");
     assert.equal((await act("project_git", { view: "reset" })).error.code, "INVALID_INPUT");
     assert.equal((await act("project_git", { view: "status", path: ".." })).error.code, "INVALID_INPUT");
     return { text: "Проверил." };

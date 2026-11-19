@@ -452,6 +452,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
     spawn, turnControl, CodexTokenUsage, codexThreadPattern, Error, process, withBoardMcp, goalTaskWaitSeconds,
     managerCliContext, probeManagerCli: async () => providerMode === "cli-ready"
       ? { gitOptions: ["--no-optional-locks", "-c", "core.fsmonitor=false"] } : {},
+    openComputerUse: async () => undefined,
     manualContext: () => "", readBoardSettings: () => ({}), locateBoard: (path: string) => path, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
     trackActiveRun, trackProvider, claimDiscussion, codexRpc: (child: Parameters<typeof codexRpc>[0], notify: Parameters<typeof codexRpc>[1], onRequest: Parameters<typeof codexRpc>[2]) =>
       codexRpc(child, (message: RpcMessage) => {

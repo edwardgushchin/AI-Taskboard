@@ -690,7 +690,7 @@ function collaborationData(item) {
 
 function teamActivity(task, item, details, agents) {
   const operation = item.type === "subAgentActivity" ? { started: "spawn", interacted: "interaction", completed: "completed" }[details.kind] :
-    { spawnAgent: "spawn", sendInput: "send", wait: "wait", closeAgent: "close", resumeAgent: "resume" }[details.tool ?? item.title];
+    { spawnAgent: "spawn", sendInput: "send", wait: "wait", closeAgent: "close", resumeAgent: "resume", followupTask: "resume" }[details.tool ?? item.title];
   if (!operation) return;
   const ids = [...new Set([...(details.receiverThreadIds ?? []), ...Object.keys(details.agentsStates ?? {}),
     ...(details.agentThreadId ? [details.agentThreadId] : [])])];
