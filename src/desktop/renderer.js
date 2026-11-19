@@ -4995,7 +4995,11 @@ function expertTeamSection(task) {
     else assignment.append(element("span", () => t("experts.no_lead"), "muted"));
     header.append(assignment);
     phaseArea.append(header);
-    if (plan?.reason) phaseArea.append(chatText(plan.reason, { taskId: task.id }));
+    if (plan?.reason) {
+      const reason = chatText(plan.reason, { taskId: task.id });
+      reason.classList.add("expert-phase-reason");
+      phaseArea.append(reason);
+    }
     for (const stage of plan?.stages ?? []) {
       const state = task.expertStageStatus?.[phase]?.find(item => item.key === stage.key);
       const details = element("details", undefined, "expert-stage");
