@@ -3800,7 +3800,8 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   if (applicationUpdates.installing) {
     return cliFailure("UPDATE_IN_PROGRESS", t("updates.preparing"));
   }
-  if (quotaWait) return quotaFailure();
+  const waitingForQuota = Boolean(quotaWait);
+  if (waitingForQuota && !revisionRequest) return quotaFailure();
   if (manual && queuedRevision === undefined) {
     queuedRevision = agentSlots.entries(project).find(entry => entry.kind === "queue" && entry.task === id && entry.quotaPaused)?.revision;
   }
@@ -3866,13 +3867,14 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       const task = current.data;
       queuedRevision = task.reviewReturn;
       queued = true;
-      if (signal.reason === quotaInterruption) {
+      if (waitingForQuota || signal.reason === quotaInterruption) {
         // The CLI saved the return before this operation could reserve a slot.
         runtimeTransaction(project, entries => {
           const pending = entries.find(entry => entry.reviewReturn && matchesQueuedExecutor(entry, task));
           if (pending) pending.quotaPaused = true;
         });
       }
+      if (quotaWait && !signal.aborted) return current;
     }
     if (manual && !newThread && queuedRevision === undefined) {
       const task = current.data;
