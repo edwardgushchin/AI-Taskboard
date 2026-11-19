@@ -1,7 +1,33 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+
+function readBoundaryPages(root) {
+  const project = join(process.env.TASKBOARD_CHECK_DIR, "goal-boundary");
+  mkdirSync(join(project, ".tasks"), { recursive: true });
+  const script = `
+    import { readManagerHistory, saveManagerHistory } from "./src/desktop/manager-history.ts";
+
+    const project = process.argv[1];
+    const at = "2026-11-20T01:25:01.002Z";
+    const item = (id, time) => ({ id, at: time, text: id, type: "agentMessage", title: "", status: "completed" });
+    // The physical journal records the equal-time IDs in the opposite order.
+    const items = [item("late-b", at), item("late-a", at)];
+    for (let index = 1; index <= 39; index++) {
+      const time = new Date(Date.parse("2026-11-20T01:26:00.000Z") + index).toISOString();
+      items.push(item("after-" + index, time));
+    }
+    const goalId = "625280c9-c9d1-4c28-89fc-82b65c8efaa2";
+    saveManagerHistory(project, Date.parse(at), goalId, { lane: "work", goalId, items });
+    const head = readManagerHistory(project, null, "work");
+    const earlier = readManagerHistory(project, head.nextCursor, "work");
+    console.log(JSON.stringify({ head, earlier }));
+  `;
+  return JSON.parse(execFileSync(process.env.TASKBOARD_CHECK_NODE, ["--input-type=module", "-e", script, project], {
+    cwd: root, encoding: "utf8", windowsHide: true,
+  }));
+}
 
 export async function checkGoalOrder({ window, evaluate, capture, artifacts, root }) {
   window.setContentSize(741, 900);
@@ -44,15 +70,16 @@ export async function checkGoalOrder({ window, evaluate, capture, artifacts, roo
     const orderGoal = { objective: 'Проверить порядок сообщений', status: 'active' };
     let orderSaved = [orderTurn(orderFirst), orderTurn(orderSecond)];
     let orderEarlierPage = orderOlder;
+    let orderCursor = 'earlier';
     let orderLive = [];
     let orderOlderReads = 0;
     window.taskboard.boardHistory = async (_project, cursor, view) => {
       if (view === 'live') return { ok: true, data: { work: orderLive, chat: [] } };
       if (view !== 'work') return { ok: true, data: { turns: [orderTurn(orderDialogue)] } };
-      if (cursor === 'earlier') orderOlderReads++;
+      if (cursor === orderCursor) orderOlderReads++;
       return { ok: true, data: {
-        turns: cursor === 'earlier' ? orderEarlierPage : orderSaved,
-        nextCursor: cursor === 'earlier' ? null : 'earlier',
+        turns: cursor === orderCursor ? orderEarlierPage : orderSaved,
+        nextCursor: cursor === orderCursor ? null : orderCursor,
         goal: orderGoal, goalRunning: true, goalLogAvailable: true,
       } };
     };
@@ -206,6 +233,36 @@ export async function checkGoalOrder({ window, evaluate, capture, artifacts, roo
   await verify("Повторно открытая сохранённая история", [early, first, tie, second]);
   await captureSettled("goal-restored-order.png");
 
+  const boundary = readBoundaryPages(root);
+  const later = Array.from({ length: 39 }, (_, index) =>
+    ["after-" + (index + 1), "2026-11-20T01:26:00." + String(index + 1).padStart(3, "0") + "Z", "01:26"]);
+  assert.ok(boundary.head.nextCursor, "Получен курсор ранней страницы журнала");
+  assert.equal(boundary.earlier.nextCursor, null);
+  assert.equal(boundary.head.turns[0].items[0].id, second[0], "Более поздний ID совпадающего времени попал на первую страницу");
+  assert.equal(boundary.earlier.turns[0].items[0].id, tie[0], "Более ранний ID совпадающего времени попал на раннюю страницу");
+  await evaluate(`
+    (async () => {
+      const original = orderLog();
+      const boundary = ${JSON.stringify(boundary)};
+      orderSaved = boundary.head.turns;
+      orderEarlierPage = boundary.earlier.turns;
+      orderCursor = boundary.head.nextCursor;
+      fixture.project = 'goal-boundary';
+      push();
+      await waitFor(() => orderLog() !== original);
+      await orderOpen();
+    })()
+  `);
+  await verify("Первая сохранённая страница с одним из совпадающих ID", [second, ...later]);
+  await evaluate(`
+    (async () => {
+      orderLog().querySelector('.board-chat-older').click();
+      await waitFor(() => orderRow('message:late-a'));
+      await settle();
+    })()
+  `);
+  await verify("Догрузка второго совпадающего ID из сохранённой истории", [tie, second, ...later]);
+
   const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
   const paths = ["scripts/check-board.mjs", "scripts/check-goal-order.mjs", "scripts/electron-check.mjs",
     "src/desktop/chat.js", "src/desktop/renderer.js", "src/desktop/manager-history.ts", "src/desktop/main.ts"];
@@ -224,7 +281,7 @@ export async function checkGoalOrder({ window, evaluate, capture, artifacts, roo
     "node scripts/check-board.mjs --goal-order-only --artifacts .tasks/qa",
     "```",
     "",
-    "Результат — код 0. Штатный renderer в изолированном BrowserWindow, sandbox и contextIsolation включены. Контролируемые IPC-ответы заменяют провайдера и файловую историю. Повторное открытие создало новый экземпляр панели с теми же сохранёнными данными.",
+    "Результат — код 0. Штатный renderer в изолированном BrowserWindow, sandbox и contextIsolation включены. Контролируемые IPC-ответы заменяют провайдера. Две страницы с совпадающими отметками времени прочитал штатный менеджер истории из временного журнала. Остальные страницы заданы в проверке. Повторное открытие создало новый экземпляр панели с теми же сохранёнными данными.",
     "",
     `Смещение опорной записи при нажатии «Более ранние события» составило ${offset.after - offset.before} CSS px, запросов ранней страницы — ${offset.earlierRequests}. Действие осталось раскрыто. Миниатюра доступна у своего ответа. Обычный «Диалог» показал свой ответ отдельно. Сводка активных агентов отсутствует.`,
     "",

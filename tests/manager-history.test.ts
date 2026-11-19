@@ -132,15 +132,18 @@ test("goal timeline merges late messages by original time and keeps stable IDs t
   assert.deepEqual(visible(restored, goalActivityItems([packet, reply])), expected);
   assert.deepEqual(visible(restored, []), expected);
 
-  const newer = Array.from({ length: 38 }, (_, index) =>
+  const newer = Array.from({ length: 39 }, (_, index) =>
     activity("new-" + index, new Date(Date.parse(later) + index + 1).toISOString()));
   save([reply, tie, packet, first, ...newer]);
   const head = readManagerHistory(project, null, "work")!;
-  assert.deepEqual(visible(head.turns, []).slice(0, 2), expected.slice(3));
+  const newerRows = newer.map(({ id, at }) => [id, at]);
+  assert.deepEqual(visible(head.turns, []), [expected[4], ...newerRows]);
   assert.deepEqual(visible(head.turns, [], goalActivityItems([packet, first, tie, reply])),
     [...expected.slice(1), ...newer.map(({ id, at }) => [id, at])]);
   assert.ok(head.nextCursor);
   const older = readManagerHistory(project, head.nextCursor, "work")!;
+  assert.deepEqual(visible(older.turns, []), expected.slice(0, 4));
+  assert.equal(older.nextCursor, null);
   assert.deepEqual(visible([...older.turns, ...head.turns], goalActivityItems([packet])),
     [...expected, ...newer.map(({ id, at }) => [id, at])]);
 });
