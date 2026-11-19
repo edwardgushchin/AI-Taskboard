@@ -1,0 +1,41 @@
+name: Bug report / Сообщить об ошибке
+description: Report a reproducible problem with AI Taskboard / Опишите воспроизводимую ошибку
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue is public. Keep vulnerability details out of public reports.
+        Заявка публичная. Не публикуйте в ней сведения об уязвимостях.
+  - type: input
+    id: version
+    attributes:
+      label: AI Taskboard version / Версия AI Taskboard
+      description: Give the release tag or source commit / Укажите тег выпуска или коммит исходников
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform and installation / Платформа и установка
+      description: Give the OS version, CPU architecture and package format or source setup / Укажите версию ОС, архитектуру и формат пакета или запуск из исходников
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce / Шаги воспроизведения
+      description: List the steps from a known starting state / Перечислите действия от известного исходного состояния
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior / Ожидаемый и фактический результат
+      description: Describe what you expected and what happened / Опишите, чего вы ожидали и что произошло
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Safe diagnostic details / Безопасные диагностические данные
+      description: Attach short, redacted excerpts or demo screenshots. Remove tokens, keys, private paths, chats and project data. / Приложите короткие выдержки или демоснимки. Удалите токены, ключи, частные пути, переписку и данные проекта.

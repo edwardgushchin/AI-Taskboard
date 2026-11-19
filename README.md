@@ -8,7 +8,7 @@
   <a href="https://github.com/edwardgushchin/AI-Taskboard/commits/main/"><img src="https://img.shields.io/github/last-commit/edwardgushchin/AI-Taskboard/main?label=main%20commit" alt="Last commit on main"></a>
   <a href="https://github.com/edwardgushchin/AI-Taskboard/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/edwardgushchin/AI-Taskboard/actions/workflows/ci.yml/badge.svg?branch=main" alt="Native CI (main)"></a>
 </p>
-<p align="center"><a href="#features">Features</a> · <a href="#workflow">Workflow</a> · <a href="#quick-start">Quick start</a> · <a href="#platforms">Platforms</a> · <a href="#documentation">Documentation</a> · <a href="#license">License</a></p>
+<p align="center"><a href="https://github.com/edwardgushchin/AI-Taskboard/releases"><strong>Download alpha</strong></a> · <a href="#quick-start">Quick start</a> · <a href="#documentation">Documentation</a> · <a href="CONTRIBUTING.md#english">Contribute</a></p>
 
 ![AI Taskboard demo board with a queued task and an open project manager chat](docs/images/board.png)
 
@@ -38,12 +38,13 @@ AI Taskboard brings a Kanban board, agent chats and Git review into one Electron
 <a id="quick-start"></a>
 ## Quick start
 
-### Requirements
+### Install a packaged build
 
-- Node.js **24.12+**, npm and Git **2.38+** for source development.
-- A Codex executable and subscription sign-in for running agents. The app uses **Codex App Server**; no separate paid API key is required by the board. Subscription access and usage limits still apply.
+Open [Releases](https://github.com/edwardgushchin/AI-Taskboard/releases), expand **Assets** on the release you want, and select the [package for your OS and architecture](#platform-status). Compare its SHA-256 with `SHA256SUMS` from the same release using the commands in the release notes. The desktop package includes the CLI and its Node.js runtime.
 
 ### Run from source
+
+Install Node.js **24.12.0 or newer** and npm. Install Git **2.38 or newer** to clone the repository and work on Git tasks.
 
 ```sh
 git clone https://github.com/edwardgushchin/AI-Taskboard.git
@@ -52,22 +53,19 @@ npm ci
 npm start
 ```
 
-Sign in with your subscription before running agents:
+### Run your first task
 
-```sh
-codex login
-```
+1. For Git tasks, install Git 2.38 or newer. To run agents, install Codex and sign in. For ChatGPT sign-in, run:
 
-1. Open a project folder and choose **Create board** if it has no board yet. Select **Board for agents** for the workflow described here.
-2. AI Taskboard detects Codex automatically. To select it manually, open **Settings → Codex model provider → Choose executable…**.
-3. Describe a change to the manager, approve its draft, then start the executor from the card.
+   ```sh
+   codex login
+   ```
+
+2. Open a project folder and choose **Create board** if needed. Select **Board for agents**. AI Taskboard detects Codex automatically. To select it manually, use **Settings → Codex model provider → Choose executable…**.
+3. Describe a change to the manager, approve its draft and start the executor from the card.
 4. Inspect the submitted diff and checks. In human review mode, choose **Accept** when the result is ready.
 
-Use **Settings → Appearance** to choose **Light**, **Dark**, or **System** for all windows. System follows OS appearance changes while the app is open, including scheduled changes. Palette changes fade briefly; reduced motion makes them immediate. Older presets become the standard light or dark theme. Source checks, CLI examples, VS Code debugging and packaging instructions are in the [development guide](docs/development.md).
-
-### Install a packaged build
-
-Download a package for your operating system and architecture from [Releases](https://github.com/edwardgushchin/AI-Taskboard/releases). Compare the download's SHA-256 with `SHA256SUMS` from the same release. The desktop package includes the standalone CLI and its Node.js runtime. Install Git for Git tasks and Codex to run agents.
+See the [first-task tutorial](docs/tutorials/first-task.md) and [setup guide](docs/how-to/setup.md) (Russian). The setup guide also covers the API-key option in the current source tree.
 
 <a id="platforms"></a>
 ## Platform status
@@ -86,7 +84,7 @@ See the [packaging and signing guide](docs/how-to/development.md#поставк�
 
 Cards and board state live in the project's local **`.tasks`** directory, outside Git history. Back it up separately from source commits. Git worktrees isolate task changes, but acceptance still depends on the target branch and Git checks. Agent execution uses the configured provider's permissions and limits.
 
-Codex is the current model provider. Claude Code, Cursor and other client integrations are planned.
+AI Taskboard uses Codex as its model provider.
 
 <a id="license"></a>
 ## License and commercial permission
@@ -127,8 +125,9 @@ from the official Node.js repository and include it with the fflate license.
 <a id="documentation"></a>
 ## Documentation and feedback
 
-- [Documentation index](docs/README.md): guides and project notes.
-- [Development and packaging](docs/development.md): checks, CLI, VS Code and installer builds.
-- [Project design](docs/explanation/architecture.md) (Russian): workflow, storage, Git integration and review rules.
-- [Releases](https://github.com/edwardgushchin/AI-Taskboard/releases): public alpha packages.
-- [GitHub Issues](https://github.com/edwardgushchin/AI-Taskboard/issues): bugs and feature requests. Include reproduction steps and remove private data from logs and screenshots.
+- [First-task tutorial](docs/tutorials/first-task.md) (Russian)
+- [Installation and settings](docs/how-to/setup.md) (Russian)
+- [Documentation index](docs/README.md) (Russian)
+- [Development and packaging](docs/development.md)
+- [Contributing guide](CONTRIBUTING.md#english) and [code of conduct](CODE_OF_CONDUCT.md#english)
+- [Report a bug or suggest a feature](https://github.com/edwardgushchin/AI-Taskboard/issues/new/choose)
