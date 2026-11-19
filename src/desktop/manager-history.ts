@@ -91,14 +91,27 @@ function unreadState(project: string): UnreadState {
   const folder = join(project, ".tasks", "manager-chat");
   // Older versions used the same UUID for the notice item and its run file.
   // Preserve pending dialogue delivery and the saved read position.
-  const candidates = new Set(state.unread.filter(id => codexThreadPattern.test(id)));
+  const candidates = new Set(state.unread);
   const statusIds = new Set<string>();
+  const dialogueIds = new Set<string>();
   if (candidates.size && exists(folder)) for (const file of readdirSync(folder)) {
     if (!filePattern.test(file)) continue;
     const id = file.slice(14, -5);
-    if (candidates.has(id) && isStatusNotice(readJson(join(folder, file)) as Run)) statusIds.add(id);
+    const run = readJson(join(folder, file)) as Run;
+    if (run.lane !== "chat" || run.goalId) {
+      if (candidates.has(id)) statusIds.add(id);
+      for (const item of run.items) {
+        if (candidates.has(item.id)) {
+          statusIds.add(item.id);
+        }
+      }
+    } else {
+      for (const item of run.items) {
+        dialogueIds.add(item.id);
+      }
+    }
   }
-  state.unread = state.unread.filter(id => !statusIds.has(id));
+  state.unread = state.unread.filter(id => !statusIds.has(id) || dialogueIds.has(id));
   lastUnread.set(project, [...state.unread]);
   return state;
 }
@@ -155,7 +168,7 @@ export function readManagerMessages(project: string, ids: string[]) {
 }
 
 function incomingMessages(run: Run) {
-  if (run.lane !== "chat" && (run.lane !== "notice" || isStatusNotice(run))) return [];
+  if (run.lane !== "chat" || run.goalId) return [];
   return run.items.filter(item => item.type === "agentMessage" && item.phase === "final_answer" &&
     item.status === "completed" && item.text.trim()).map(item => item.id);
 }
@@ -206,7 +219,8 @@ function displayTurns({ message, items, durationMs, lane, goalId }: Run): Turn[]
       continue;
     }
     if (current.messages.length || current.items.length) turns.push(current);
-    current = { messages: [{ ...item.userMessage, clientId: item.id }], items: [], ...scope };
+    current = { messages: [{ ...item.userMessage, clientId: item.id,
+      ...(item.at ? { at: item.userMessage.at ?? item.at } : {}) }], items: [], ...scope };
   }
   if (current.messages.length || current.items.length) turns.push({ ...current, durationMs });
   return turns;
@@ -246,30 +260,156 @@ export function managerWorkItems(items: BoardActivity[], lane?: Turn["lane"]) {
   return items.filter(isWorkActivity);
 }
 
-const automaticReviewPrefixes = [
-  "AI Taskboard: the reviewer approved these submissions. Use task_review",
-  "AI Taskboard: ревьюер согласовал следующие сдачи. Открой их через task_review",
-  "AI Taskboard automatic review. Follow the board's review mode",
-  "Автоматическая проверка AI Taskboard. Проверь сдачи в режиме, выбранном на доске",
-];
-
 export function managerHistoryForView(turns: Turn[], view?: "chat" | "work") {
   return turns.flatMap(turn => {
     if (!view) return [turn];
-    if (isStatusNotice(turn)) return [];
-    const first = turn.messages[0];
-    const automatic = !turn.lane && turn.messages.length === 1 && first && !first.clientId && !first.files.length &&
-      automaticReviewPrefixes.some(prefix => first.text.startsWith(prefix));
-    if (view === "chat") {
-      return turn.lane === "work" || automatic ? [] : [{ ...turn, items: managerChatItems(turn.items) }];
+    // A shared legacy session has no trustworthy conversation/goal attribution.
+    if (!turn.lane && !turn.goalId) {
+      return [];
     }
-    const items = managerWorkItems(turn.items, automatic ? "work" : turn.lane);
-    const messages = turn.lane === "work" ? turn.messages : [];
+    if (isStatusNotice(turn)) return [];
+    if (view === "chat") {
+      return turn.lane !== "chat" || turn.goalId ? [] : [{ ...turn, items: managerChatItems(turn.items) }];
+    }
+    if (!turn.goalId) {
+      return [];
+    }
+    const items = turn.items;
+    const messages = turn.messages;
     return items.length || messages.length ? [{ ...turn, items, messages }] : [];
   });
 }
 
+export function hasGoalHistory(project: string) {
+  const folder = join(project, ".tasks", "manager-chat");
+  if (!exists(folder)) {
+    return false;
+  }
+  directory(folder);
+  return readdirSync(folder).some(name => {
+    if (!filePattern.test(name)) {
+      return false;
+    }
+    const run = readJson(join(folder, name)) as Run;
+    return Boolean(run.goalId && (run.message || run.items.length));
+  });
+}
+
+export function readDialogueReference(project: string) {
+  directory(join(project, ".tasks"));
+  const folder = join(project, ".tasks", "manager-chat");
+  const messages: { id: string; author: "user" | "manager"; at: string; text: string }[] = [];
+  let remaining = 16_000;
+  if (!exists(folder)) {
+    return { referenceOnly: true, messages };
+  }
+  directory(folder);
+  for (const name of readdirSync(folder).filter(name => filePattern.test(name)).sort().reverse()) {
+    const run = readJson(join(folder, name)) as Run;
+    if (run.lane !== "chat" || run.goalId) {
+      continue;
+    }
+    const at = new Date(Number(name.slice(0, 13))).toISOString();
+    const turns = displayTurns(run);
+    const entries = turns.flatMap((turn, index) => [
+      ...turn.messages.map((message, part) => ({ id: message.clientId ?? name + ":user:" + index + ":" + part,
+        author: "user" as const, at: message.at ?? at, text: message.text })),
+      ...managerChatItems(turn.items).filter(item => item.type === "agentMessage" && item.status === "completed")
+        .map(item => ({ id: item.id, author: "manager" as const, at: item.at ?? at, text: item.text })),
+    ]);
+    for (const entry of entries.reverse()) {
+      if (!entry.text.trim()) {
+        continue;
+      }
+      const text = entry.text.slice(0, Math.min(2000, remaining));
+      if (!text) {
+        break;
+      }
+      messages.unshift({ ...entry, text });
+      remaining -= text.length;
+      if (messages.length === 40 || remaining === 0) {
+        break;
+      }
+    }
+    if (messages.length === 40 || remaining === 0) {
+      break;
+    }
+  }
+  return { referenceOnly: true, messages };
+}
+
+function readGoalHistory(project: string, cursor: string | null) {
+  const prefix = "goal:";
+  const before = cursor?.slice(prefix.length);
+  if (cursor && (!cursor.startsWith(prefix) || !/^\d{13}:\d{13}-[0-9a-f-]{36}\.json:\d{8}$/i.test(before!))) {
+    throw new Error("Invalid goal history cursor.");
+  }
+  const folder = join(project, ".tasks", "manager-chat");
+  if (!exists(folder)) {
+    return undefined;
+  }
+  directory(folder);
+  const events: { key: string; file: string; turn: Turn; model?: string }[] = [];
+  for (const name of readdirSync(folder).filter(name => filePattern.test(name))) {
+    const run = readJson(join(folder, name)) as Run;
+    if (!run.goalId) {
+      continue;
+    }
+    const scope = { lane: run.lane, goalId: run.goalId };
+    const append = (turn: Turn, index: number) => {
+      const at = turn.items[0]?.at ?? turn.messages[0]?.at;
+      const time = at && Number.isFinite(Date.parse(at)) ? Date.parse(at) : Number(name.slice(0, 13));
+      const key = String(time).padStart(13, "0") + ":" + name + ":" + String(index).padStart(8, "0");
+      if (!before || key < before) {
+        events.push({ key, file: name, turn, model: run.model });
+      }
+    };
+    if (run.message) {
+      append({ ...scope, messages: [run.message], items: [] }, 0);
+    }
+    run.items.forEach((item, index) => {
+      const turn: Turn = item.userMessage
+        ? { ...scope, messages: [{ ...item.userMessage, clientId: item.id, at: item.at }], items: [] }
+        : { ...scope, messages: [], items: [item], ...(index === run.items.length - 1 ? { durationMs: run.durationMs } : {}) };
+      append(turn, index + 1);
+    });
+  }
+  events.sort((left, right) => right.key.localeCompare(left.key));
+  const selected: typeof events = [];
+  let remaining = 4 * 1024 * 1024;
+  for (const event of events) {
+    const size = JSON.stringify(event.turn).length;
+    if (selected.length && (selected.length >= 40 || size > remaining)) {
+      break;
+    }
+    selected.push(event);
+    remaining -= size;
+  }
+  const nextCursor = selected.length < events.length ? prefix + selected.at(-1)!.key : null;
+  const turns: Turn[] = [];
+  let previousFile: string | undefined;
+  // Keep adjacent events from one run together so generated results retain
+  // their answer and provider-turn context. Interleaved notices stay in order.
+  for (const event of selected.toReversed()) {
+    const previous = turns.at(-1);
+    if (previous && previousFile === event.file && !event.turn.messages.length) {
+      previous.items.push(...event.turn.items);
+      if (event.turn.durationMs !== undefined) {
+        previous.durationMs = event.turn.durationMs;
+      }
+    } else {
+      turns.push(event.turn);
+    }
+    previousFile = event.file;
+  }
+  return { model: selected.find(event => event.model)?.model, turns, nextCursor };
+}
+
 export function readManagerHistory(project: string, cursor: string | null = null, view?: "chat" | "work") {
+  if (view === "work") {
+    directory(join(project, ".tasks"));
+    return readGoalHistory(project, cursor);
+  }
   const before = cursor === null ? undefined : cursor.slice(cursorPrefix.length);
   if (before !== undefined && (!isLocalManagerCursor(cursor) || !filePattern.test(before))) {
     throw new Error("Invalid manager history cursor.");
@@ -292,7 +432,7 @@ export function readManagerHistory(project: string, cursor: string | null = null
     const exceedsBudget = size > remaining && pages.length > 0;
     const needsConversation = view === "chat" && conversations === 0;
     const run = readJson(path) as Run;
-    if (view && isStatusNotice(run)) {
+    if (view && (isStatusNotice(run) || (!run.lane && !run.goalId))) {
       consumed++;
       continue;
     }
@@ -355,8 +495,9 @@ export async function readManagerView(project: string, cursor: string | null, vi
   } while (next);
 }
 
-type GoalMessage = {
+export type GoalMessage = {
   id: string;
+  at?: string;
   text: string;
   status: "pending" | "applied" | "declined";
   reply?: string;
@@ -364,25 +505,56 @@ type GoalMessage = {
 
 type GoalMessageResult = { id: string; status: "applied" | "declined"; reply: string };
 export function goalMessages(project: string, goalId: string): GoalMessage[];
-export function goalMessages(project: string, goalId: string, change: { text: string }): GoalMessage;
+export function goalMessages(project: string, goalId: string, change: { text: string; id?: string }): GoalMessage;
 export function goalMessages(project: string, goalId: string, change: GoalMessageResult): GoalMessage | undefined;
-export function goalMessages(project: string, goalId: string, change?: { text: string } | GoalMessageResult) {
+export function goalMessages(project: string, goalId: string, change?: { text: string; id?: string } | GoalMessageResult) {
   if (!codexThreadPattern.test(goalId)) throw new Error("Invalid goal ID.");
   const board = join(project, ".tasks");
   directory(board);
-  const path = join(board, "goal-messages.json");
-  const previous = exists(path) ? readJson(path) as { goalId: string; messages: GoalMessage[] } : undefined;
-  const messages = previous?.goalId === goalId ? previous.messages : [];
-  if (!change) return messages;
-  if ("text" in change) {
-    const message = { id: randomUUID(), text: change.text, status: "pending" as const };
-    writeJson(path, { goalId, messages: [...messages, message] });
+  const lock = join(board, "goal-inbox");
+  directory(lock, true);
+  return withRuntimeLock(lock, () => {
+    const path = join(board, "goal-messages.json");
+    const previous = exists(path) ? readJson(path) as { goalId: string; messages: GoalMessage[] } : undefined;
+    const messages = previous?.goalId === goalId ? previous.messages : [];
+    if (!change) {
+      return messages;
+    }
+    if ("text" in change) {
+      if (change.id && !codexThreadPattern.test(change.id)) {
+        throw new Error("Invalid goal message ID.");
+      }
+      const existing = change.id && messages.find(message => message.id === change.id);
+      if (existing) {
+        if (existing.text !== change.text) {
+          throw new Error("Goal message ID already has different text.");
+        }
+        return existing;
+      }
+      const message = { id: change.id ?? randomUUID(), at: new Date().toISOString(), text: change.text, status: "pending" as const };
+      writeJson(path, { goalId, messages: [...messages, message] });
+      return message;
+    }
+    const message = messages.find(entry => entry.id === change.id);
+    if (!message) {
+      return undefined;
+    }
+    if (message.status !== "pending") {
+      return message.status === change.status && message.reply === change.reply ? message : undefined;
+    }
+    Object.assign(message, { status: change.status, reply: change.reply });
+    // Closed IDs survive compaction and retries for the lifetime of this goal.
+    writeJson(path, { goalId, messages });
     return message;
+  });
+}
+
+export function sendGoalMessage(project: string, goalId: string, text: string, id?: string) {
+  const message = goalMessages(project, goalId, { text, ...(id ? { id } : {}) });
+  if (message.at) {
+    saveManagerHistory(project, Date.parse(message.at), message.id, {
+      lane: "notice", goalId, message: { text: message.text, clientId: message.id, at: message.at, files: [] }, items: [],
+    });
   }
-  const message = messages.find(entry => entry.id === change.id);
-  if (!message || message.status !== "pending") return undefined;
-  Object.assign(message, { status: change.status, reply: change.reply });
-  const completed = new Set(messages.filter(entry => entry.status !== "pending").slice(-20));
-  writeJson(path, { goalId, messages: messages.filter(entry => entry.status === "pending" || completed.has(entry)) });
   return message;
 }

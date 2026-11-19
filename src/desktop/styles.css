@@ -444,8 +444,15 @@ h1, h2, h3, p { margin: 0; }
 .board-chat .chat-entry[data-actor="user"] .chat-text { max-inline-size: 68ch; }
 .board-chat .chat-run > .chat-entry[data-actor="user"] { justify-self: end; }
 .board-chat-log:not(.board-work) .board-manager-message {
-  justify-self: start; align-self: flex-start; width: fit-content; max-width: 88%; min-width: 0;
-  padding: 9px 13px; border-radius: 14px 14px 14px 5px; background: var(--panel);
+  justify-self: start;
+  align-self: flex-start;
+  width: fit-content;
+  max-width: 88%;
+  min-width: 0;
+  padding: 9px 13px;
+  border: 1px solid var(--border);
+  border-radius: 14px 14px 14px 5px;
+  background: color-mix(in srgb, var(--text) 8%, var(--panel));
 }
 .board-chat-unread {
   display: flex; align-items: center; gap: 10px; color: var(--blue);

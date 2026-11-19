@@ -443,23 +443,34 @@ if (!process.versions.electron) {
     record("PASS: focus, click and board IPC stay responsive while the board transaction lock is held");
     await a.ask({ action: "addMessage", text: "Hold manager: clear paused goal" });
     await wait(async () => (await frames()).every(frame => frame.managerRun?.phase === "running"), "ordinary reply before goal removal");
-    const dialogueOwner = (await a.ask({ action: "hasHeldTurn" })) ? a : b;
+    let dialogueOwner;
+    for (const worker of [a, b, reloaded]) {
+      if (await worker.ask({ action: "hasHeldTurn" })) dialogueOwner = worker;
+    }
+    assert.ok(dialogueOwner, "The held dialogue has a live owner");
     const otherWindow = dialogueOwner === a ? b : a;
     await otherWindow.ask({ action: "clickClearGoal" });
     await dialogueOwner.ask({ action: "clickClearGoal" });
-    assert.deepEqual(JSON.parse(readFileSync(binding, "utf8")).goal, goal);
-    assert.equal(await a.ask({ action: "goalClearCalls" }) + await b.ask({ action: "goalClearCalls" }), 0);
-    if (output) await otherWindow.ask({ action: "screenshot", path: join(output, "goal-clear-waiting.png") });
+    await wait(async () => JSON.parse(readFileSync(binding, "utf8")).goal === null, "goal cleared independently of dialogue");
+    assert.equal(await a.ask({ action: "goalClearCalls" }) + await b.ask({ action: "goalClearCalls" }), 1);
+    if (output) await otherWindow.ask({ action: "screenshot", path: join(output, "goal-cleared-during-dialogue.png") });
     await dialogueOwner.ask({ action: "finishManager" });
     await wait(async () => (await a.ask({ action: "goalPanels" }))[0]?.visible === false &&
       (await b.ask({ action: "goalPanels" }))[0]?.visible === false, "paused goal removed after the ordinary reply");
     assert.equal(await a.ask({ action: "goalClearCalls" }) + await b.ask({ action: "goalClearCalls" }), 1);
     await start("profile-reopen-cleared").then(worker => worker.ask({ action: "reopenGoalBoard", expectedReply: "Finished held turn" }));
-    record("PASS: one provider clear after the ordinary reply, across two processes; reopened board displays the preserved reply without the goal");
+    record("PASS: one provider clear during the ordinary reply, across two processes; reopened board displays the preserved reply without the goal");
     for (const mode of ["resume", true]) {
       await a.ask({ action: "startGoal", mode });
       await wait(async () => (await a.ask({ action: "goalPanels" })).every(
         panel => panel.visible && panel.status === "active"), "active goal visible in both windows");
+      if (mode === "resume") {
+        const starts = await a.ask({ action: "goalCalls" }) + await b.ask({ action: "goalCalls" });
+        assert.equal(starts, 1);
+        assert.equal((await b.ask({ action: "resumeGoal" })).ok, true);
+        assert.equal(await a.ask({ action: "goalCalls" }) + await b.ask({ action: "goalCalls" }), starts);
+        record("PASS: resume from a second process acknowledges the existing goal without another provider start");
+      }
       assert.deepEqual((await a.ask({ action: "clearGoal" })).data, null);
       await wait(async () => (await a.ask({ action: "goalPanels" })).every(
         panel => !panel.visible), "cleared goal removed from both open windows");
@@ -677,7 +688,7 @@ if (!process.versions.electron) {
   const executorBindings = new Map();
   let gitWindow;
   const active = await import(new URL("../src/desktop/active-runs.ts", import.meta.url));
-  let managerCalls = 0, maintenanceCalls = 0, goalClearCalls = 0, heldTurn, goalDone, goalRequest;
+  let managerCalls = 0, maintenanceCalls = 0, goalClearCalls = 0, goalCalls = 0, heldTurn, goalDone, goalRequest, goalMode;
   globalThis.runtimeCheckUpdateGoal = async (_profile, _project, _thread, action) => {
     assert.equal(action.kind, "clear");
     goalClearCalls++;
@@ -686,13 +697,16 @@ if (!process.versions.electron) {
   const maintenanceDone = Promise.withResolvers();
   globalThis.runtimeCheckReply = async (_profile, _project, text, _images, _action, _tools, _instructions, _signal, hooks) => {
     if (hooks.goal || hooks.resumeGoal) {
+      goalCalls++;
       goalDone = Promise.withResolvers();
+      if (!hooks.id) hooks.save("20000000-0000-0000-0000-000000000001");
       hooks.onGoalControl(async ({ kind }) => {
         assert.equal(kind, "clear");
         hooks.onGoal(null);
         return null;
       });
       hooks.onGoal({ objective: hooks.goal ?? "Paused fixture goal", status: "active" });
+      hooks.onGoalSet();
       await goalDone.promise;
       return { text: "", goalStatus: "cleared" };
     }
@@ -912,11 +926,11 @@ if (!process.versions.electron) {
       if (command.action === "stopAll") { for (const agent of qa.activeAgents.values()) await agent.control.interrupt(); data = true; }
       if (command.action === "queue") { qa.agentSlots.defer(project, command.id, { revision: command.revision }); qa.scheduleAgentWork(); data = true; }
       if (command.action === "reserve") {
-        const lease = command.role === "manager" ? qa.agentSlots.claim(board, "manager:context") : qa.reserveAgent(board, command.role, command.task);
+        const lease = command.role === "manager" ? qa.agentSlots.claim(board, "manager:dialogue") : qa.reserveAgent(board, command.role, command.task);
         if (lease) leases.set(key, lease);
         data = Boolean(lease);
       }
-      if (command.action === "managerPhase") { qa.agentSlots.update(project, "manager:context", { id: "fixture-manager", phase: command.phase, startedAt: Date.now(), lane: command.lane }); data = true; }
+      if (command.action === "managerPhase") { qa.agentSlots.update(project, "manager:dialogue", { id: "fixture-manager", phase: command.phase, startedAt: Date.now(), lane: command.lane }); data = true; }
       if (command.action === "startMaintenance") { void qa.scheduleMaintenance(project, qa.subscriptions.get(project)); data = true; }
       if (command.action === "finishMaintenance") { maintenanceDone.resolve(); data = true; }
       if (command.action === "maintenanceCalls") data = maintenanceCalls;
@@ -966,13 +980,28 @@ if (!process.versions.electron) {
       if (command.action === "managerCalls") data = managerCalls;
       if (command.action === "history") data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript("window.taskboard.boardHistory()");
       if (command.action === "startGoal") {
-        goalRequest = BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(
-          `window.taskboard.boardRequest(${JSON.stringify(command.mode === "resume" ? "" : "New fixture goal")}, [], undefined, ${JSON.stringify(command.mode)})`);
+        goalMode = command.mode;
+        if (command.mode === "resume") {
+          writeFileSync(join(project, ".tasks", "manager-dialog.json"), JSON.stringify({
+            provider: "codex", id: "20000000-0000-0000-0000-000000000001", history: "local",
+            goal: { objective: "Paused fixture goal", status: "paused" },
+          }));
+          goalRequest = BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(
+            'window.taskboard.boardGoal("resume", "Paused fixture goal")');
+        } else {
+          goalRequest = BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(
+            'window.taskboard.boardRequest("New fixture goal", [], undefined, true)');
+        }
         data = true;
       }
       if (command.action === "clearGoal") data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(
         'window.taskboard.boardGoal("clear")');
       if (command.action === "goalClearCalls") data = goalClearCalls;
+      if (command.action === "goalCalls") data = goalCalls;
+      if (command.action === "resumeGoal") {
+        data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(
+          'window.taskboard.boardGoal("resume", "Paused fixture goal")');
+      }
       if (command.action === "clickClearGoal") {
         const contents = BrowserWindow.getAllWindows()[0].webContents;
         await wait(() => contents.executeJavaScript('Boolean(document.querySelector(".board-goal:not([hidden])[data-status=paused]"))'), "paused goal visible");
@@ -989,7 +1018,13 @@ if (!process.versions.electron) {
       if (command.action === "finishGoal") {
         goalDone.resolve();
         data = await goalRequest;
-        assert.equal(data.ok, true, JSON.stringify(data));
+        if (goalMode === "resume") {
+          assert.equal(data.ok, false, JSON.stringify(data));
+          assert.equal(data.error.code, "BOARD_GOAL_FAILED");
+          assert.equal(data.error.message, "Цель снята.");
+        } else {
+          assert.equal(data.ok, true, JSON.stringify(data));
+        }
       }
       if (command.action === "goalPanels") data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript(`(() => {
         const panel = document.querySelector(".board-goal");
