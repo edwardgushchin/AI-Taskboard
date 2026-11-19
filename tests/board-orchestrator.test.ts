@@ -1413,6 +1413,8 @@ test("manager adopts expert roles, loads a board skill and plans an addressed sp
     assert.deepEqual(Object.keys(experts.data[0]).sort(), ["enabled", "group", "id", "name"]);
     const context = await act("expert_context", { ids: ["business-analyst", "product-owner"] });
     assert.equal(context.ok, true); assert.equal(context.data.length, 2);
+    const overLimit = await act("expert_context", { ids: experts.data.slice(0, 7).map(({ id }: { id: string }) => id) });
+    assert.equal(overLimit.error.code, "INVALID_INPUT");
     const skill = await act("expert_skill", { expertId: "product-owner", skillId: "workflow" });
     assert.equal(skill.ok, true); assert.match(skill.data.directory, /experts[\\/]product-owner[\\/]skills/);
     const stages = [
