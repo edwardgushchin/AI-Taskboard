@@ -112,7 +112,7 @@ const actions = {
   task_cancel: { description: "Cancel an unfinished task. Record the reason in history. For consolidation, transfer requirements first, then supply mergedInto and transferred for a contextual notification.",
     properties: { ...taskReference, reason, mergedInto: taskReference.id,
       transferred: { ...reason, description: "What requirements were transferred to mergedInto; required with mergedInto." } }, required: ["id", "revision", "reason"] },
-  task_return_to_draft: { description: "Return the same card to draft, only on an explicit user instruction. Read task_show for the current revision. Ready, in-progress, blocked, review and cancelled cards can return. Completed cards cannot. Confirm only from the tool result. The user must approve the draft on the board before work can start again.",
+  task_return_to_draft: { description: "Return the same card to draft, only on an explicit user instruction. Read task_show for the current revision. Ready, in-progress, blocked, review, completed and cancelled cards can return. For a completed Git task, cleanup of the accepted worktree and branch must finish first. Confirm only from the tool result. The user must approve the draft on the board before work can start again.",
     properties: taskReference, required: ["id", "revision"] },
   task_block: { description: "Block a draft, ready, or in-progress task. Record the obstacle and how it can be resolved.",
     properties: { ...taskReference, reason, condition: reason }, required: ["id", "revision", "reason", "condition"] },

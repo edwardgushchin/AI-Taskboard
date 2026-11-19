@@ -752,6 +752,9 @@ function run(
     if (draft !== task && hasPending(store, task, true)) {
       throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before returning the task to draft.");
     }
+    if (task.status === "done" && taskWithCurrentWorktree(store, task).cleanupAvailable) {
+      throw new TaskboardError("PENDING_OPERATION", "Finish cleanup of the accepted worktree and branch before returning the task to draft.");
+    }
     const saved = draft === task ? task : isArchived(store, id) ? reactivateArchivedTask(store, draft) : store.save(draft);
     forgetExecutor(store.location.root, id);
     return saved;

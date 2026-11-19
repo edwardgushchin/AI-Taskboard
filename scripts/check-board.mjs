@@ -455,8 +455,15 @@ app.whenReady().then(async () => {
     `);
     for (const status of ["ready", "in_progress", "blocked", "review", "cancelled", "done", "draft"]) {
       await evaluate(`showReturn(${JSON.stringify(status)})`);
-      await check(`Boolean(findReturn()) === ${!["done", "draft"].includes(status)}`, status + " return action");
+      await check(`Boolean(findReturn()) === ${status !== "draft"}`, status + " return action");
     }
+    window.setContentSize(1280, 800);
+    await evaluate(`showReturn('done')`);
+    await capture('return-completed-card.png');
+    await evaluate(`findReturn().click(); waitFor(() => taskInSheet?.status === 'draft')`);
+    await check(`lastReturn.id === returned.id && lastReturn.revision === returned.revision - 1`, 'completed card returns with its current revision');
+    await check(`taskInSheet.id === returned.id && !findReturn()`, 'the same card is shown as a draft');
+    await capture('returned-completed-draft.png');
     await evaluate(`rejectReturn = true; showReturn('in_progress')`);
     await capture('return-active-card.png');
     await evaluate(`findReturn().click(); waitFor(() => document.body.textContent.includes('Fixture writer is active'))`);
