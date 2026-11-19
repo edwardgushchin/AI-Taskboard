@@ -271,6 +271,7 @@ function fixture(t: TestContext) {
   return {
     folder, project, threadId, dialogueId, binding, chatBinding, idleGoalActions, cliCalls, boardListeners, executorNotifications, managerNotifications,
     reviewing, agentSlots, failGoalClear: (message?: string) => { clearGoalError = message; },
+    automationError: (error: string) => runtime.boardWorkRequests.get(project)?.automationEvent?.({ error }),
     automaticNotice: (board: unknown) =>
       runtime.runBoardRequest(sender, board, "AI Taskboard queue: test notice", [], false, false, undefined, undefined, undefined, true),
     repair: (task: Task, reply: Reply) => {
@@ -418,7 +419,6 @@ test("a goal controls the persistent automatic queue and receives live board cha
   await f.pushBoard();
   let queueRevision = 0;
   const notifications: string[] = [];
-  const received = Promise.withResolvers<void>();
   const result = await f.run("Prepare a release with automatic dispatch", async (act, _prompt, _images, _id, _context, _waiting, _signal, goal) => {
     goal!.accepted();
     goal!.update({ objective: "Prepare a release", status: "active" });
@@ -432,10 +432,9 @@ test("a goal controls the persistent automatic queue and receives live board cha
     assert.equal(controlled.ok, true, JSON.stringify(controlled));
     queueRevision = controlled.data.queue.revision;
     assert.equal((await act("board_auto_queue", { revision: 0, paused: true })).error.code, "REVISION_CONFLICT");
-    goal!.enableNotifications(async text => {
-      notifications.push(text);
-      if (text.includes('"status":"in_progress"')) received.resolve();
-    });
+    goal!.enableNotifications(async text => { notifications.push(text); });
+    await wait(400);
+    const beforeUpdate = notifications.length;
     const waiting = act("task_wait", {});
     for (let attempt = 0; !f.boardListeners.size && attempt < 50; attempt++) await wait(10);
     assert.equal(f.boardListeners.size, 1, "an automatic goal can wait before any executor is known");
@@ -444,9 +443,11 @@ test("a goal controls the persistent automatic queue and receives live board cha
     assert.equal(started.ok, true, JSON.stringify(started));
     f.setRunning(second.id, true);
     await f.pushBoard();
-    await Promise.race([received.promise, wait(5000).then(() => assert.fail("No live automation update"))]);
-    assert.equal((await waiting).error.code, "USER_MESSAGE_RECEIVED");
-    assert.ok(notifications.some(text => text.includes(second.id) && text.includes('"running":true')));
+    const updated = await waiting;
+    assert.equal(updated.ok, true, JSON.stringify(updated));
+    assert.equal(updated.data.automationUpdated, true);
+    assert.equal(notifications.length, beforeUpdate, "queue state never enters the conversation transport");
+    assert.equal((await f.cli(["show", second.id])).data.status, "in_progress");
     const paused = await act("board_auto_queue", { revision: queueRevision, paused: true });
     assert.equal(paused.ok, true);
     assert.equal((await f.cli(["show", second.id])).data.status, "in_progress");
@@ -454,6 +455,7 @@ test("a goal controls the persistent automatic queue and receives live board cha
     return { text: "Queue planned and automatic work observed." };
   }, [], true);
   assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.data.error, undefined, JSON.stringify(result));
   assert.equal((await f.cli(["settings"])).data.autoMode, true);
   const saved = (await f.cli(["auto-queue"])).data;
   assert.equal(saved.paused, true);
@@ -461,6 +463,55 @@ test("a goal controls the persistent automatic queue and receives live board cha
   const before = notifications.length;
   await f.pushBoard(); await wait(400);
   assert.equal(notifications.length, before, "the completed turn removes its live subscription");
+});
+
+test("internal queue wakes preserve sequential questions through the manager inbox", async t => {
+  const f = fixture(t);
+  await f.cli(["init"], { git: false });
+  await f.cli(["settings"], { autoMode: true, reviewMode: "reviewer-human" });
+  const draft = (await f.cli(["create"], plannedDraft({ title: "Inbox source" }))).data;
+  await f.cli(["approve", draft.id]);
+  await f.cli(["start", draft.id]);
+  f.setRunning(draft.id, true);
+  await f.pushBoard();
+  const result = await f.run("Coordinate the queue", async (act, _prompt, _images, _id, _context, _waiting, _signal, goal) => {
+    goal!.accepted();
+    goal!.update({ objective: "Coordinate the queue", status: "active" });
+    goal!.enableNotifications();
+    await wait(400);
+    const before = f.managerNotifications.length;
+    const routineWait = act("task_wait", {});
+    await f.cli(["message", draft.id], { kind: "update", text: "Routine progress" });
+    await f.pushBoard();
+    const routine = await routineWait;
+    assert.equal(routine.ok, true, JSON.stringify(routine));
+    assert.equal(routine.data.automationUpdated, true);
+    assert.deepEqual(Array.from(routine.data.inbox), []);
+    const errorWait = act("task_wait", {});
+    f.automationError("accept T-0001: Integration needs attention");
+    const failed = await errorWait;
+    assert.equal(failed.ok, true, JSON.stringify(failed));
+    assert.equal(failed.automationErrors[0].error, "accept T-0001: Integration needs attention");
+    const questionWait = act("task_wait", {});
+    const first = (await f.cli(["message", draft.id], { kind: "question", text: "Choose release A or B" })).data;
+    await f.pushBoard();
+    const second = (await f.cli(["message", draft.id], { kind: "question", text: "Confirm the deployment window" })).data;
+    await f.pushBoard();
+    const received = await questionWait;
+    assert.equal(received.ok, true, JSON.stringify(received));
+    const remaining = await act("manager_inbox", {});
+    const questions = [...received.data.inbox, ...remaining.data].filter(message => message.kind === "question");
+    assert.deepEqual(questions.map(message => message.sequence), [first.sequence, second.sequence]);
+    assert.deepEqual(Array.from((await act("manager_inbox", {})).data), []);
+    assert.equal((await act("manager_ack", { id: draft.id, through: second.sequence })).ok, true);
+    assert.equal((await act("board_auto_queue", {})).data.reviewMode, "reviewer-human");
+    assert.equal(f.managerNotifications.length, before, "questions use tool results rather than steer");
+    goal!.update({ objective: "Coordinate the queue", status: "complete" });
+    return { text: "Questions handled" };
+  }, [], true);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.data.error, undefined, JSON.stringify(result));
+  assert.equal((await f.cli(["manager-inbox"])).data.length, 0);
 });
 
 test("manager grants and revokes executor access for a task", async t => {
