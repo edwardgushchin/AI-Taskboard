@@ -266,6 +266,8 @@ function fixture(t: TestContext) {
   return {
     folder, project, threadId, dialogueId, binding, chatBinding, idleGoalActions, cliCalls, boardListeners, executorNotifications, managerNotifications,
     reviewing, agentSlots, failGoalClear: (message?: string) => { clearGoalError = message; },
+    automaticNotice: (board: unknown) =>
+      runtime.runBoardRequest(sender, board, "AI Taskboard queue: test notice", [], false, false, undefined, undefined, undefined, true),
     repair: (task: Task, reply: Reply) => {
       respond = reply;
       return runtime.runBoardRequest(sender, { project, tasks: [task] }, "Repair this acceptance", [], false, false, undefined, undefined, undefined, false, task);
@@ -583,6 +585,15 @@ test("manager manual approval asks the user and accepts only one of the displaye
   assert.equal(f.pendingQuestion(), undefined);
 });
 
+function attemptWhileBoardLocked<T>(project: string, attempt: () => T): T {
+  return onBoard(locateBoard(project), () => {
+    const startedAt = performance.now();
+    const result = attempt();
+    assert.ok(performance.now() - startedAt < 2_000, "Dispatch must return promptly while the SQLite board lock is held");
+    return result;
+  }, 0);
+}
+
 test("a board snapshot with auto-review on wakes the manager once per submitted revision", async t => {
   const f = fixture(t);
   await f.cli(["init"]);
@@ -621,13 +632,16 @@ test("a board snapshot with auto-review on wakes the manager once per submitted 
   assert.equal(calls, 0);
   await watch.done();
   f.setRunning("T-0001", false);
-  const releaseManager = f.agentSlots.acquire(f.project, "manager");
-  assert.ok(releaseManager);
-  watch.tick();
-  assert.deepEqual(Object.keys(watch.reviewing()), []);
-  assert.equal(calls, 0);
-  releaseManager();
+  const notice = await attemptWhileBoardLocked(f.project, () => f.automaticNotice(board));
+  assert.equal(notice.error.code, "BOARD_BUSY");
+  attemptWhileBoardLocked(f.project, () => {
+    watch.tick();
+    assert.deepEqual(Object.keys(watch.reviewing()), []);
+    assert.equal(calls, 0);
+  });
   await f.cli(["settings"], { autoMode: false });
+  await watch.done();
+  assert.equal((await f.automaticNotice(board)).error.code, "AUTO_MODE_DISABLED");
   watch.tick();
   assert.equal(calls, 0);
   await f.cli(["settings"], { autoMode: true });
@@ -702,6 +716,10 @@ test("a stale reviewer-human snapshot cannot reserve a reviewer after switching 
     calls++;
     return { summary: "Reviewed", needsHuman: true, findings: [], evidence: ["Checked"] };
   });
+  attemptWhileBoardLocked(f.project, queue.tick);
+  assert.deepEqual(Object.keys(queue.reviewing()), []);
+  await queue.done();
+  assert.equal(calls, 0);
   assert.equal((await f.cli(["settings"], { reviewMode: "reviewer", autoMode: false })).ok, true);
   queue.tick();
   assert.deepEqual(Object.keys(queue.reviewing()), []);

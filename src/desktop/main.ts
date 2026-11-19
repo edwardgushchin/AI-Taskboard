@@ -1394,18 +1394,25 @@ function reserveAgent(project: string, role: AgentRole, task?: string, queuedRev
   // A tool call can race the watch snapshot after CLI settings were saved.
   const location = runtimeLocation(project);
   const acquire = (settings: BoardSettings) => agentSlots.acquire(projectIdentity(project), role, settings.taskLimits, task, queuedRevision);
-  const release = review
-    ? onBoard(location, store => {
-      if (!Object.hasOwn(store.index.tasks, review.id)) return;
-      const card = store.card(review.id);
-      const { settings } = store.index;
-      const mode = taskReviewMode(card, settings);
-      if (card.status !== "review" || mode !== review.mode || !usesIndependentReviewer(mode) ||
-          (!settings.autoMode && mode !== "reviewer-human") ||
-          (card.acceptanceRepair && !reviewsAcceptanceRepair(card, settings))) return;
-      return acquire(settings);
-    })
-    : acquire(readBoardSettings(location));
+  let release;
+  try {
+    release = review
+      ? onBoard(location, store => {
+        if (!Object.hasOwn(store.index.tasks, review.id)) return;
+        const card = store.card(review.id);
+        const { settings } = store.index;
+        const mode = taskReviewMode(card, settings);
+        if (card.status !== "review" || mode !== review.mode || !usesIndependentReviewer(mode) ||
+            (!settings.autoMode && mode !== "reviewer-human") ||
+            (card.acceptanceRepair && !reviewsAcceptanceRepair(card, settings))) return;
+        return acquire(settings);
+      }, 0)
+      : acquire(readBoardSettings(location));
+  } catch (error) {
+    // A later scheduler tick retries from the saved board.
+    if (review && error instanceof TaskboardError && error.code === "BOARD_BUSY") return;
+    throw error;
+  }
   if (!release) return;
   return Object.assign((restart = false) => {
     release(restart);
@@ -1949,7 +1956,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       ? onBoard(runtimeLocation(board.project), store => {
         if (!store.index.settings.autoMode) throw new TaskboardError("AUTO_MODE_DISABLED", "Automatic dispatch is disabled.");
         return claimWriter();
-      })
+      }, 0)
       : claimWriter();
   } catch (error) {
     if (error instanceof TaskboardError) return cliFailure(error.code, error.message);
