@@ -1,4 +1,6 @@
 {
+  "task_question.needs_answer": "回答が必要",
+  "task_question.open_dialogue": "回答が必要です。タスクの対話を開く",
   "ui.reorder_queued_message": "待機中のメッセージ「{message}」を移動します。上矢印キーまたは下矢印キーを使います。",
   "draft_discussion.queued": "下書きの確認を待機しています。",
   "draft_discussion.running": "下書きを確認しています…",

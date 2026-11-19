@@ -1,4 +1,6 @@
 {
+  "task_question.needs_answer": "Risposta richiesta",
+  "task_question.open_dialogue": "Risposta richiesta. Apri il dialogo della scheda",
   "ui.reorder_queued_message": "Sposta il messaggio in attesa «{message}». Usa le frecce su e giù.",
   "draft_discussion.queued": "La revisione della bozza è in coda.",
   "draft_discussion.running": "Revisione della bozza in corso…",

@@ -201,6 +201,7 @@ export interface ExpertPhase {
 export type ArtifactKind = "png" | "text";
 
 export interface Task {
+  awaitingAnswer?: boolean;
   reviewModeOverride?: { mode: ReviewMode; version: number };
   draftDiscussion?: { phase: "queued" | "running" } | { phase: "failed"; reason: string };
   expertId?: string;

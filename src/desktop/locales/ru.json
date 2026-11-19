@@ -1,4 +1,6 @@
 {
+  "task_question.needs_answer": "Нужен ответ",
+  "task_question.open_dialogue": "Нужен ответ. Открыть диалог задачи",
   "agentActivity.title": "Активность по доскам",
   "agentActivity.busy": "Занят",
   "agentActivity.idle": "Свободен",

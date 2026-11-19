@@ -1,6 +1,7 @@
 import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
 // Real Electron, CLI and renderer. Pass --live to exercise the installed Codex provider.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -94,7 +95,7 @@ globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images,
   await delay(450);
   return { text: mode === "initial"
     ? JSON.stringify({ questions: context.task.title === "CLI with attachments" ? "Which viewport is required?" : "" })
-    : "User answer recorded: " + context.latestUserMessage.text };
+    : JSON.stringify({ text: "User answer recorded: " + context.latestUserMessage.text, awaitingAnswer: false }) };
 };
 
 let writer;
@@ -206,6 +207,7 @@ try {
       return messages(card).at(-1).text;
     };
     const question = await waitAgent(unresolved.id, 1);
+    assert.equal(show(unresolved.id).awaitingAnswer, true);
     assert.match(question, /(?:recipient|alias|email)/i);
     assert.equal((question.match(/\?/g) ?? []).length, 1, question);
     assert.doesNotMatch(question, /(?:what|which)\s+(?:day|time|schedule)\b/i);
@@ -218,6 +220,7 @@ try {
     const followup = await evaluate(`window.taskboard.chatSend(${JSON.stringify(unresolved.id)}, ${JSON.stringify({ ...execution, text: answer, files: [] })})`);
     assert.equal(followup.result.ok, true, JSON.stringify(followup));
     const confirmation = await waitAgent(unresolved.id, 2);
+    assert.equal(show(unresolved.id).awaitingAnswer, false);
     assert.equal(messages(show(unresolved.id))[1].text, answer);
     assert.match(confirmation, /Tuesday/i);
     assert.match(confirmation, /09:40\s*UTC/i);
@@ -236,6 +239,10 @@ try {
     }).trim();
     writeFileSync(join(artifacts, "draft-discussion-live.json"), JSON.stringify({
       head: git(["rev-parse", "HEAD"]), workingTreeChanged: Boolean(git(["status", "--porcelain"])),
+      sourceRepresentation: "raw working-file bytes (SHA-256)",
+      sourceHashes: Object.fromEntries(["src/desktop/codex-chat.ts", "src/desktop/main.ts", "src/cli/archive.ts",
+        "src/cli/model.ts", "src/cli/storage.ts", "src/cli/main.ts", "scripts/check-draft-discussion.mjs"].map(path =>
+        [path, createHash("sha256").update(readFileSync(new URL("../" + path, import.meta.url))).digest("hex")])),
       platform: process.platform, electron: process.versions.electron,
       chromium: process.versions.chrome, provider: "Codex App Server", execution,
       fixture: { projectInstructions: readFileSync(instructions, "utf8"), attachedSchedule: readFileSync(schedule, "utf8"),

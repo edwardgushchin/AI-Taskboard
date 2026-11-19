@@ -1,4 +1,6 @@
 {
+  "task_question.needs_answer": "Réponse requise",
+  "task_question.open_dialogue": "Réponse requise. Ouvrir le dialogue de la tâche",
   "ui.reorder_queued_message": "Déplacer le message en attente « {message} ». Utilisez les flèches haut et bas.",
   "draft_discussion.queued": "L’examen du brouillon est en attente.",
   "draft_discussion.running": "Examen du brouillon en cours…",

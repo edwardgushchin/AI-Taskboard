@@ -1,4 +1,6 @@
 {
+  "task_question.needs_answer": "Requer resposta",
+  "task_question.open_dialogue": "Requer resposta. Abrir diálogo da tarefa",
   "ui.reorder_queued_message": "Mova a mensagem em espera «{message}». Use as setas para cima e para baixo.",
   "draft_discussion.queued": "A revisão do rascunho está na fila.",
   "draft_discussion.running": "Revisando o rascunho…",
