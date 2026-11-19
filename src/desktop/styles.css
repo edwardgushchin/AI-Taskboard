@@ -620,6 +620,13 @@ select:hover:not(:disabled) {
 }
 .task-card-footer > .task-meta { max-width: 100%; }
 .task-card-footer > .task-run-status { display: inline-flex; align-items: center; min-height: 15px; margin-inline-start: auto; color: var(--muted); }
+.task-card-footer:has(.task-queue-indicator) { flex-wrap: nowrap; }
+.task-queue-indicator {
+  font-family: "Segoe UI Symbol", "Apple Symbols", "DejaVu Sans", sans-serif;
+  font-variant-emoji: text;
+  font-size: 13px;
+  line-height: 15px;
+}
 .task-id { flex: none; }
 .task-stat { display: inline-flex; align-items: center; gap: 2px; }
 .task-stat .codicon { width: 14px; height: 12px; font-size: 12px; }

@@ -840,7 +840,7 @@ function tagBadges(names) {
   return Array.from(tags.values(), tag => tagBadge(tag.name, tag.color));
 }
 
-function renderAgentRunStatus(target, task) {
+function renderAgentRunStatus(target, task, { compactQueue = false } = {}) {
   const review = frame.reviewingTasks?.[task.id];
   const label = review === "reviewer" ? t("ui.reviewer_is_reviewing_d6afb5da") :
     review === "manager" ? t("ui.project_manager_is_reviewing_730137f9") :
@@ -854,19 +854,38 @@ function renderAgentRunStatus(target, task) {
     spinner.title = label;
     if (!spinner.parentNode) target.replaceChildren(spinner);
   } else {
-    const repair = frame.board?.tasks.find(card => card.id === task.id)?.acceptanceRepair;
+    const boardTask = frame.board?.tasks.find(card => card.id === task.id);
+    const repair = boardTask?.acceptanceRepair;
     const hybridReview = task.status === "review" && (task.reviewModeOverride?.mode ?? frame.board?.settings.reviewMode) === "reviewer-human";
-    const text = repair && !(hybridReview && repair.phase === "checking" && !task.reviewApproved)
-      ? acceptanceRepairStatus(task.id, repair)
-      : frame.waitingTasks?.includes(task.id) ?
-      (task.mergeRepair || frame.board?.tasks.find(card => card.id === task.id)?.mergeRepair
-        ? t("ui.waiting_for_a_reviewer_slot_8918dd95")
-        : t("ui.waiting_for_an_available_executor_cc0934a8")) :
-      task.status === "in_progress" && task.codexThreadId ?
-      t("ui.board_run_inactive_2a932a2f") : hybridReview ?
-      t(task.reviewApproved ? "ui.awaiting_human_acceptance" : "ui.awaiting_reviewer_approval") : "";
-    const status = frame.quotaTasks?.includes(task.id) ? quotaLabel() : text;
-    if (target.firstElementChild || target.textContent !== status) target.textContent = status;
+    let status = "";
+    if (frame.quotaTasks?.includes(task.id)) {
+      status = quotaLabel();
+    } else if (repair && !(hybridReview && repair.phase === "checking" && !task.reviewApproved)) {
+      status = acceptanceRepairStatus(task.id, repair);
+    } else if (frame.waitingTasks?.includes(task.id)) {
+      if (task.mergeRepair || boardTask?.mergeRepair) {
+        status = t("ui.waiting_for_a_reviewer_slot_8918dd95");
+      } else if (compactQueue) {
+        // Request text presentation of U+231B.
+        const hourglass = element("span", "\u231B\uFE0E", "task-queue-indicator");
+        hourglass.setAttribute("role", "img");
+        const queueLabel = () => t("ui.waiting_for_an_available_executor_cc0934a8");
+        bindLocalized(hourglass, "title", queueLabel);
+        bindLocalized(hourglass, "aria-label", queueLabel, true);
+        target.replaceChildren(hourglass);
+        target.hidden = false;
+        return;
+      } else {
+        status = t("ui.waiting_for_an_available_executor_cc0934a8");
+      }
+    } else if (task.status === "in_progress" && task.codexThreadId) {
+      status = t("ui.board_run_inactive_2a932a2f");
+    } else if (hybridReview) {
+      status = t(task.reviewApproved ? "ui.awaiting_human_acceptance" : "ui.awaiting_reviewer_approval");
+    }
+    if (target.firstElementChild || target.textContent !== status) {
+      target.textContent = status;
+    }
   }
   target.hidden = !target.childNodes.length;
 }
@@ -1032,7 +1051,7 @@ function card(task) {
     meta.append(badge);
   }
   const runStatus = element("span", undefined, "task-run-status");
-  renderAgentRunStatus(runStatus, task);
+  renderAgentRunStatus(runStatus, task, { compactQueue: true });
   if (task.unfinishedDependencies?.length && task.status === "draft") {
     meta.append(taskIndicator("link", task.unfinishedDependencies.length,
       t("ui.unfinished_dependencies_5cfaaab6"), "dependency-warning"));
