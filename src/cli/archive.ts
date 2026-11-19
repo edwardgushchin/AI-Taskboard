@@ -228,6 +228,9 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
   const message = text(input.text, "text");
   const model = text(input.model, "model", true);
   const effort = text(input.effort, "effort", true);
+  if (input.awaitingAnswer !== undefined && (actor !== "agent" || typeof input.awaitingAnswer !== "boolean")) {
+    throw new TaskboardError("INVALID_INPUT", "Only an agent reply can set a boolean awaitingAnswer state.");
+  }
   if (draftDiscussion) {
     if (actor !== "agent" || task.status !== "draft" || task.draftDiscussion?.phase !== "running") {
       throw new TaskboardError("CHAT_CHANGED", "The draft discussion is no longer awaiting a reply.");
@@ -252,6 +255,7 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
     if (!message && !attachments.length) throw new TaskboardError("INVALID_INPUT", "Write a message or attach a file.");
     const updated = record({
       ...task, attachments: [...task.attachments, ...attachments],
+      ...(actor === "agent" && input.awaitingAnswer !== undefined ? { awaitingAnswer: input.awaitingAnswer as boolean } : {}),
       draftDiscussion: draftDiscussion || actor === "user" ? undefined : task.draftDiscussion,
     }, "chat", actor, task.status, message);
     updated.history.at(-1)!.chat = {

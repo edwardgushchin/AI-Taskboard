@@ -1,4 +1,6 @@
 {
+  "task_question.needs_answer": "Needs answer",
+  "task_question.open_dialogue": "Needs answer. Open task dialogue",
   "agentActivity.title": "Board activity",
   "agentActivity.busy": "Busy",
   "agentActivity.idle": "Available",

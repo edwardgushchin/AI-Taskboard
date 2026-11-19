@@ -1,4 +1,6 @@
 {
+  "task_question.needs_answer": "Antwoord nodig",
+  "task_question.open_dialogue": "Antwoord nodig. Taakdialoog openen",
   "ui.reorder_queued_message": "Verplaats wachtbericht ‘{message}’. Gebruik de pijl omhoog of omlaag.",
   "draft_discussion.queued": "De conceptbeoordeling staat in de wachtrij.",
   "draft_discussion.running": "Concept wordt beoordeeld…",

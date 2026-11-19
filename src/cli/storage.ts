@@ -378,6 +378,7 @@ export function validateCard(value: unknown, id: string): Task {
         typeof value.execution.model !== "string" || !value.execution.model.trim() ||
         (value.execution.effort !== undefined &&
           (typeof value.execution.effort !== "string" || !reasoningEffortPattern.test(value.execution.effort))))) ||
+      (value.awaitingAnswer !== undefined && typeof value.awaitingAnswer !== "boolean") ||
       !["criteria", "questions", "subtasks"].every(key => Array.isArray(value[key])) || !isTagList(value.tags) ||
       !Array.isArray(value.attachments) || value.attachments.some(entry => !isRecord(entry) ||
         typeof entry.name !== "string" || typeof entry.file !== "string" ||

@@ -1,4 +1,6 @@
 {
+  "task_question.needs_answer": "Antwort nötig",
+  "task_question.open_dialogue": "Antwort nötig. Aufgabendialog öffnen",
   "ui.reorder_queued_message": "Wartende Nachricht „{message}“ verschieben. Pfeil nach oben oder unten verwenden.",
   "draft_discussion.queued": "Die Entwurfsprüfung wartet.",
   "draft_discussion.running": "Der Entwurf wird geprüft…",

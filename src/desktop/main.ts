@@ -987,7 +987,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     })) : undefined;
     const prompt = JSON.stringify({
       task: { id, title: task.title, status: task.status, description: task.description,
-        criteria: task.criteria, openQuestions: task.questions, tags: task.tags, priority: task.priority,
+        criteria: task.criteria, openQuestions: task.questions, awaitingAnswer: task.awaitingAnswer, tags: task.tags, priority: task.priority,
         subtasks: task.subtasks, dependencies: task.dependencies, milestone: task.milestone, dueDate: task.dueDate,
         schedule: task.schedule, workingDirectory: task.workingDirectory, execution: task.execution, expertTeam: task.expertTeam,
         summary: task.summary, nextStep: task.nextStep },

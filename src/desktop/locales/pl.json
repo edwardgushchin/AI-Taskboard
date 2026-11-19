@@ -1,4 +1,6 @@
 {
+  "task_question.needs_answer": "Wymaga odpowiedzi",
+  "task_question.open_dialogue": "Wymaga odpowiedzi. Otwórz dialog zadania",
   "ui.reorder_queued_message": "Przenieś oczekującą wiadomość „{message}”. Użyj strzałek w górę i w dół.",
   "draft_discussion.queued": "Przegląd szkicu oczekuje w kolejce.",
   "draft_discussion.running": "Trwa przegląd szkicu…",

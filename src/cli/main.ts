@@ -112,6 +112,7 @@ function compactTask(task: Task) {
     reviewDecision: status === "review" ? reviewDecisionSequence(task) : undefined, acceptanceRepair: task.acceptanceRepair, id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
     coverAttachment, codexThreadId, createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep,
     dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, origin, launchRequested, discussionReturn: task.discussionReturn,
+    awaitingAnswer: task.awaitingAnswer,
     draftDiscussion: status === "draft" ? task.draftDiscussion : undefined, historyLength: task.history.length,
     expertWorkPlanned: Boolean(task.expertTeam?.work?.lead || task.expertStage),
     expertReviewPlanned: Boolean(task.expertTeam?.review?.lead),

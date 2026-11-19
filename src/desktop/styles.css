@@ -593,6 +593,10 @@ select:hover:not(:disabled) {
 .task-stat { display: inline-flex; align-items: center; gap: 2px; }
 .task-stat .codicon { width: 14px; height: 12px; font-size: 12px; }
 .task-stat .codicon-link { rotate: -45deg; }
+.task-question {
+  color: var(--text); background: color-mix(in srgb, var(--accent) 14%, var(--panel));
+  border-radius: 4px; padding: 1px 4px; white-space: nowrap;
+}
 .dependency-warning { color: var(--yellow); }
 .task-dependency-message {
   display: inline-flex; align-items: center; justify-self: start; min-width: 0; max-width: 100%;
