@@ -2183,7 +2183,6 @@ function draftComposer() {
     if (goal !== undefined) showGoal(goal);
     else syncGoal();
     syncViews();
-    renderWorkOverview();
     syncPrompt();
   };
   goalText.addEventListener("input", syncGoal);
@@ -2287,7 +2286,6 @@ function draftComposer() {
   const workViewport = chatViewport(work);
   work.hidden = true;
   work.tabIndex = 0;
-  const workOverview = element("div", undefined, "board-work-overview");
   const workSaved = element("div", undefined, "board-work-timeline");
   const workLive = element("div", undefined, "board-work-timeline");
   const liveGoal = element("div", undefined, "chat-run");
@@ -2297,7 +2295,7 @@ function draftComposer() {
   const workOlder = button(() => t("ui.earlier_activity_e8606f75"), () => void loadWork(workCursor), "quiet board-chat-older");
   workOlder.hidden = true;
   workLive.append(liveGoal, liveChat);
-  work.append(workOverview, workOlder, workSaved, workLive, workError);
+  work.append(workOlder, workSaved, workLive, workError);
   let workCursor;
   let workLoading = false;
   let workReload = false;
@@ -2307,44 +2305,6 @@ function draftComposer() {
   let savedWorkItems = new Set();
   let hasWorkHistory = false;
   let loadedOlderWork = false;
-  let activeReviewers = {};
-  function renderWorkOverview() {
-    if (work.hidden || frame.project !== project) return;
-    const rows = [];
-    if (currentGoal) rows.push(element("div", goalStatus.textContent, "board-work-row"));
-    const workStatus = item => item ? runningLabel(item).status : t("ui.working_85aeded8");
-    if (managerWork) {
-      const time = managerWork.startedAt ? new Date(managerWork.startedAt).toLocaleTimeString(localization.locale, { hour: "2-digit", minute: "2-digit" }) : "";
-      const detail = managerWork.lane === "maintenance" ? t("ui.checking_worktree_cleanup_1f82f9a8") :
-        managerWork.phase === "running" ? workStatus(managerWork.item) :
-        managerWork.phase === "waiting" ? t("ui.waiting_for_a_session_67475e7f") :
-          t("ui.starting_39fd3c7e");
-      const row = element("div", () => [t("ui.manager_92a95b5c"), detail, time].filter(Boolean).join(" · "), "board-work-row");
-      row.dataset.chatAnchor = "overview:manager";
-      rows.push(row);
-    }
-    const reviewing = frame.reviewingTasks ?? {};
-    const ids = new Set([...(frame.runningTasks ?? []), ...(frame.replyingTasks ?? []), ...Object.keys(reviewing)]);
-    for (const id of ids) {
-      const title = frame.board?.tasks.find(task => task.id === id)?.title;
-      const link = button(id + (title ? " · " + title : ""), protect(async () => {
-        await showTask(id);
-        if (reviewing[id] === "reviewer" && taskInSheet?.id === id) byId("task-side").firstElementChild?.openReviewer();
-      }), "quiet board-chat-task");
-      const status = reviewing[id] === "reviewer" ? t("ui.reviewer_50c42665") + " · " + workStatus(activeReviewers[id]?.item) :
-        reviewing[id] === "manager" ? t("ui.manager_is_reviewing_b8f46e42") :
-        frame.replyingTasks?.includes(id) ? t("ui.task_discussion_97daf76e") :
-          t("ui.executor_92197b27") + " · " + workStatus(frame.runActivity?.[id]?.findLast(item => item.status === "inProgress"));
-      const row = element("div", undefined, "board-work-row");
-      row.dataset.chatAnchor = "overview:" + id;
-      row.append(link, element("span", status));
-      rows.push(row);
-    }
-    if (!rows.length) rows.push(element("div", () => t("ui.no_active_agents_599b3f8c"), "muted"));
-    if (workOverview.textContent !== rows.map(row => row.textContent).join("")) {
-      workViewport.update(() => workOverview.replaceChildren(...rows));
-    }
-  }
   function renderLiveWork() {
     if (liveWorkItems) {
       const seenMessages = new Set([...workSaved.querySelectorAll("[data-coordination-key]")].map(node => node.dataset.coordinationKey));
@@ -2465,7 +2425,6 @@ function draftComposer() {
     }
     dialogueViewport.update(() => unreadDivider.remove());
     workViewport.restore();
-    renderWorkOverview();
     editor.invalidateWork();
     editor.refreshWork();
   }
@@ -2495,8 +2454,6 @@ function draftComposer() {
     try {
       const result = await api.boardHistory(project, null, "live");
       if (disposed || work.hidden || !result.ok) return;
-      activeReviewers = result.data.reviewers ?? {};
-      renderWorkOverview();
       liveWorkItems = result.data;
       if (!workLoading) workViewport.update(renderLiveWork);
     } catch {
@@ -3318,10 +3275,7 @@ function draftComposer() {
     editor.setAttribute("data-open", "");
     syncPrompt();
     revealHistory();
-    if (!work.hidden) {
-      renderWorkOverview();
-      editor.invalidateWork();
-    }
+    if (!work.hidden) editor.invalidateWork();
   };
   editor.closeChat = () => {
     if (pinned || !editor.hasAttribute("data-open")) return;
@@ -3771,7 +3725,6 @@ function draftComposer() {
     workToggle.classList.toggle("working", Boolean(managerWork));
     syncPrompt();
     syncGoal();
-    renderWorkOverview();
     if (!managerWork) sendNext();
   };
   function sendWorkNext() {
