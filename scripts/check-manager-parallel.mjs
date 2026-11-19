@@ -20,6 +20,9 @@ const reopen = process.argv.includes("--reopen");
 const binding = join(project, ".tasks", "manager-dialog.json");
 const statePath = join(scratch, "continuation.json");
 const objective = "Проверить параллельную работу цели и диалога";
+const dialogueQuestion = "Как идёт работа?";
+const dialogueAnswer = "Цель продолжает работу, сейчас выполняется следующий шаг";
+const queuedAnswer = "Указание поставлено в очередь цели. Жду подтверждения выполнения.";
 const reports = reopen ? JSON.parse(readFileSync(statePath)).reports : [];
 const requests = [];
 const signals = [];
@@ -177,8 +180,9 @@ globalThis.parallelProvider = async (_profile, cwd, prompt, _images, action, _to
   }
   if (prompt === "Передай цели второе указание") {
     assert.equal((await action("goal_send", { text: "Запиши второй результат" })).ok, true);
+    return { text: queuedAnswer, model: "Fixture provider" };
   }
-  return { text: "Ответ менеджера: " + prompt + ". Цель продолжает работу.", model: "Fixture provider" };
+  return { text: dialogueAnswer, model: "Fixture provider" };
 };
 
 globalThis.parallelGoalControl = async (_profile, _cwd, _id, change) => {
@@ -207,8 +211,11 @@ async function run() {
     await until(() => goalRun, "goal provider");
     await until(() => evaluate(other, "!document.querySelector('.board-chat-views').hidden"), "tabs in second window");
     assert.equal((await api(other, "boardRequest", "Duplicate goal", [], project, true)).error.code, "BOARD_REQUEST_IN_PROGRESS");
-    await sendForm(wide, "Как идёт работа?");
-    await until(() => evaluate(wide, "document.querySelector('#board-chat').textContent.includes('Ответ менеджера: Как идёт работа?')"), "ordinary answer");
+    await sendForm(wide, dialogueQuestion);
+    await until(() => evaluate(wide, "document.querySelector('#board-chat').textContent.includes(" + JSON.stringify(dialogueAnswer) + ")"), "ordinary answer");
+    const dialogueText = await evaluate(wide, "document.querySelector('#board-chat').textContent");
+    assert.equal(dialogueText.includes("Ответ менеджера:"), false);
+    assert.equal(dialogueText.split(dialogueQuestion).length - 1, 1);
     assert.equal((await history(other)).data.goalRunning, true);
     assert.equal(requests.filter(request => request.isGoal).length, 1);
     assert.notEqual(requests.find(request => request.isGoal).id, requests.find(request => !request.isGoal).id);
@@ -218,8 +225,9 @@ async function run() {
     const reference = await goalRun.action("goal_dialogue", {});
     assert.equal(reference.ok, true);
     assert.equal(reference.data.referenceOnly, true);
-    const recent = reference.data.messages.filter(message => message.text.includes("Как идёт работа?"));
+    const recent = reference.data.messages.filter(message => [dialogueQuestion, dialogueAnswer].includes(message.text));
     assert.deepEqual(recent.map(message => message.author), ["user", "manager"]);
+    assert.deepEqual(recent.map(message => message.text), [dialogueQuestion, dialogueAnswer]);
     assert.ok(recent.every(message => message.id && Number.isFinite(Date.parse(message.at))));
     assert.deepEqual((await goalRun.action("goal_dialogue", {})).data, reference.data);
     assert.deepEqual((await goalRun.action("goal_inbox", {})).data, []);
@@ -235,6 +243,7 @@ async function run() {
     assert.equal((await goalRun.action("goal_inbox", { id: first.id, status: "applied", reply: "Первый результат записан." })).ok, true);
     await sendForm(other, "Передай цели второе указание");
     const second = await until(async () => (await goalRun.action("goal_inbox", {})).data[0], "manager-transferred instruction");
+    await until(() => evaluate(other, "document.querySelector('#board-chat').textContent.includes(" + JSON.stringify(queuedAnswer) + ")"), "queued confirmation");
     assert.notEqual(second.id, first.id);
     assert.equal(second.text, "Запиши второй результат");
     globalThis.repeatInboxSignal();
@@ -284,7 +293,7 @@ async function run() {
   assert.equal(requests.filter(request => request.isGoal).length, 1);
   assert.deepEqual((await goalRun.action("goal_inbox", {})).data.map(message => message.id), [saved.second]);
   const reference = (await goalRun.action("goal_dialogue", {})).data.messages;
-  assert.deepEqual(reference.filter(message => message.text.includes("Как идёт работа?")), saved.reference);
+  assert.deepEqual(reference.filter(message => [dialogueQuestion, dialogueAnswer].includes(message.text)), saved.reference);
   globalThis.repeatInboxSignal();
   assert.deepEqual(await goalRun.action("task_comment", saved.actionInput), saved.result);
   assert.equal(commentCount(saved.task, "Измеримый эффект"), 1);
