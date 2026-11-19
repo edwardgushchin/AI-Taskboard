@@ -14,14 +14,16 @@ const require = createRequire(import.meta.url);
 const { app, BrowserWindow, dialog, nativeImage } = require("electron");
 const root = fileURLToPath(new URL("../", import.meta.url));
 const project = join(scratch, "board");
+const orderProject = join(scratch, "order-board");
+const orderPrompt = "Проверь порядок A без финала и B";
 app.setPath("userData", join(scratch, restart ? "restart-profile" : "profile"));
 app.setPath("appData", join(scratch, "app-data"));
 app.requestSingleInstanceLock = () => true;
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch("lang", "ru");
-const cli = (args, input) => {
+const cli = (args, input, board = project) => {
   const result = JSON.parse(execFileSync(process.env.TASKBOARD_CHECK_NODE, [
-    "--disable-warning=ExperimentalWarning", join(root, "src/cli/main.ts"), "--project", project,
+    "--disable-warning=ExperimentalWarning", join(root, "src/cli/main.ts"), "--project", board,
     "--json", ...args, ...(input ? ["--stdin"] : []),
   ], { encoding: "utf8", windowsHide: true, input: input && JSON.stringify(input),
     env: { ...process.env, GIT_CEILING_DIRECTORIES: scratch } }));
@@ -43,14 +45,18 @@ try {
   if (!restart) {
     symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), join(scratch, "node_modules"),
       process.platform === "win32" ? "junction" : "dir");
-    mkdirSync(project);
-    cli(["init"], { git: false });
-    cli(["settings"], { autoMode: false });
+    for (const board of [project, orderProject]) {
+      mkdirSync(board);
+      cli(["init"], { git: false }, board);
+      cli(["settings"], { autoMode: false }, board);
+    }
   }
-  dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [project] });
+  let chosenProject = project;
+  dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [chosenProject] });
   dialog.showSaveDialog = async () => ({ canceled: false, filePath: join(scratch, "download.png") });
   const provider = async (_profile, _project, _prompt, _images, _action, _tools, _instructions, _signal, session) => {
-    const turnId = session.goal ? "goal-images" : "dialog-images";
+    const orderCase = session.goal === orderPrompt;
+    const turnId = orderCase ? "order-A" : session.goal ? "goal-images" : "dialog-images";
     const items = [];
     const add = item => {
       items.push({ title: "", text: "", status: "completed", at: new Date().toISOString(),
@@ -80,7 +86,15 @@ try {
       add({ id: turnId + "-image-" + index, type: "imageGeneration", generatedImage: { file } });
     }
     add({ id: turnId + "-tool", type: "dynamicToolCall", title: "Проверка результата", text: "Порядок сохранён." });
-    add({ id: turnId + "-answer", type: "agentMessage", phase: "final_answer", text: "Готовы два изображения." });
+    if (orderCase) {
+      add({ id: "order-A-tail", type: "agentMessage", phase: "commentary", text: "Ход A сохранил изображения." });
+      add({ id: "order-B-comment", providerTurnId: "order-B", type: "agentMessage", phase: "commentary",
+        text: "Ход B продолжает работу." });
+      add({ id: "order-B-answer", providerTurnId: "order-B", type: "agentMessage", phase: "final_answer",
+        text: "Ход B завершён." });
+    } else {
+      add({ id: turnId + "-answer", type: "agentMessage", phase: "final_answer", text: "Готовы два изображения." });
+    }
     finishProvider = Promise.withResolvers();
     await finishProvider.promise;
     session.onTurnEnded();
@@ -258,6 +272,65 @@ try {
     results.push("PASS missing saved result shows unavailable state, second image and journal survive");
   }
   results.push(restart ? "PASS fresh Electron process reopens both feeds and saved images" : "PASS initial process");
+  chosenProject = orderProject;
+  await evaluate("window.taskboard.menuAction('open-project')");
+  await waitFor(() => evaluate(`window.taskboard.bootstrap().then(frame => frame.board?.project === ${JSON.stringify(orderProject)} && !frame.loading)`));
+  await evaluate("document.querySelector('#board-composer .board-draft-field').click()");
+  await evaluate("document.querySelector('.board-work-toggle').click()");
+  await evaluate(`(async () => {
+    for (let index = 0; index < 12; index++) {
+      document.querySelector('.board-chat-resize').dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowUp'}));
+      await new Promise(resolve => setTimeout(resolve, 220));
+    }
+  })()`);
+  const orderSeries = '.board-work [data-item="images:order-A-image-2"]';
+  const checkOrder = async () => {
+    await checkTiles(orderSeries);
+    assert.equal(await evaluate(`(() => {
+      const series = document.querySelector(${JSON.stringify(orderSeries)});
+      const next = document.querySelector('.board-work [data-item="message:order-B-comment"]');
+      const tail = document.querySelector('.board-work [data-item="message:order-A-tail"]');
+      return Boolean(next && tail &&
+        (tail.compareDocumentPosition(series) & Node.DOCUMENT_POSITION_FOLLOWING) &&
+        (series.compareDocumentPosition(next) & Node.DOCUMENT_POSITION_FOLLOWING));
+    })()`), true, "A results must follow A's last record and precede B");
+    assert.equal(await evaluate(`document.querySelectorAll(${JSON.stringify(orderSeries)}).length`), 1);
+  };
+  if (!restart) {
+    await evaluate(`window.imageCheckPending = window.taskboard.boardRequest(${JSON.stringify(orderPrompt)}, [],
+      ${JSON.stringify(orderProject)}, true, false); void 0`);
+    await waitFor(() => evaluate("Boolean(document.querySelector('.board-work [data-item=\"message:order-B-comment\"]'))"));
+    await checkOrder();
+    await capture("manager-image-turn-order-live.png");
+    finishProvider.resolve();
+    const response = await evaluate("window.imageCheckPending");
+    assert.equal(response.ok, true, JSON.stringify(response));
+  }
+  await waitFor(() => evaluate("Boolean(document.querySelector('.board-work-timeline [data-item=\"message:order-B-answer\"]'))"));
+  const history = await evaluate(`window.taskboard.boardHistory(${JSON.stringify(orderProject)}, null, 'work')`);
+  assert.equal(history.ok, true, JSON.stringify(history));
+  assert.equal(history.data.turns.length, 1, "both provider turns must share one saved history turn");
+  assert.deepEqual([...new Set(history.data.turns[0].items.map(item => item.providerTurnId))], ["order-A", "order-B"]);
+  await checkOrder();
+  await evaluate(`(() => {
+    document.querySelectorAll('.board-work .chat-work').forEach(detail => detail.open = true);
+    document.querySelectorAll('.board-work .chat-run-group').forEach(detail => detail.open = false);
+    document.querySelector(${JSON.stringify(orderSeries)}).scrollIntoView({block:'start', behavior:'instant'});
+  })()`);
+  await waitFor(() => evaluate(`(() => {
+    document.querySelector(${JSON.stringify(orderSeries)}).scrollIntoView({block:'start', behavior:'instant'});
+    const log = document.querySelector('.board-work').getBoundingClientRect();
+    const series = document.querySelector(${JSON.stringify(orderSeries)}).getBoundingClientRect();
+    const next = document.querySelector('.board-work [data-item="message:order-B-comment"]').getBoundingClientRect();
+    return series.top >= log.top - 1 && next.bottom <= log.bottom + 1;
+  })()`));
+  await capture(restart ? "manager-image-turn-order-reopened.png" : "manager-image-turn-order-saved.png");
+  await evaluate("document.querySelector('.board-dialogue-toggle').click()");
+  await evaluate("document.querySelector('.board-work-toggle').click()");
+  await checkOrder();
+  results.push(restart
+    ? "PASS restarted Electron keeps A images once before B, with both provider turns in one saved history turn"
+    : "PASS live and saved A without final answer keeps two images once before B, including a later A commentary");
   const paths = ["src/desktop/chat-images.ts", "src/desktop/manager-images.ts", "src/desktop/codex-chat.ts",
     "src/desktop/main.ts", "src/desktop/preload.cjs", "src/desktop/chat.js", "src/desktop/renderer.js", "src/desktop/manager-history.ts",
     "src/desktop/image-preview.js", "scripts/check-manager-images.mjs"];

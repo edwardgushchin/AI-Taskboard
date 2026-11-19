@@ -270,12 +270,14 @@ function renderRunActivity(container, items, completed = false, durationMs, task
   if (completed && !context?.managerWork) {
     const boundary = items.findLastIndex(item => item.userMessage);
     const finalSegment = boundary === -1 ? items : items.slice(boundary + 1);
-    for (const item of finalSegment) {
+    const finalTurnId = finalSegment.at(-1)?.providerTurnId;
+    const finalTurn = finalSegment.filter(item => item.providerTurnId === finalTurnId);
+    for (const item of finalTurn) {
       if (item.type === "agentMessage" && item.phase === "final_answer" && item.text.trim()) finalItems.add(item);
     }
     // Older logs have no phase. Their last completed message is the final reply.
-    if (!finalItems.size && !finalSegment.some(item => item.type === "agentMessage" && item.phase)) {
-      const last = finalSegment.findLast(item => item.type === "agentMessage" && item.status === "completed" && item.text.trim());
+    if (!finalItems.size && !finalTurn.some(item => item.type === "agentMessage" && item.phase)) {
+      const last = finalTurn.findLast(item => item.type === "agentMessage" && item.status === "completed" && item.text.trim());
       if (last) finalItems.add(last);
     }
   }
@@ -382,16 +384,24 @@ function renderRunActivity(container, items, completed = false, durationMs, task
     }
     operations = [];
   }
+  function appendUnansweredImages(turnId) {
+    const series = managerImages.get(turnId);
+    if (!series || answers.has(turnId)) {
+      return;
+    }
+    flush();
+    const tiles = generatedTiles(series);
+    tiles.dataset.item = "images:" + [...series.keys()].at(-1);
+    nodes.push(tiles);
+  }
+  let previousTurnId = items[0]?.providerTurnId;
   for (const item of items) {
+    if (item.providerTurnId !== previousTurnId) {
+      appendUnansweredImages(previousTurnId);
+      previousTurnId = item.providerTurnId;
+    }
     if (finalItems.has(item)) continue;
     if (context?.dialogue && item.type === "imageGeneration") {
-      const series = managerImages.get(item.providerTurnId);
-      if (!answers.has(item.providerTurnId) && series && [...series.keys()].at(-1) === item.id) {
-        flush();
-        const tiles = generatedTiles(series);
-        tiles.dataset.item = "images:" + item.id;
-        nodes.push(tiles);
-      }
       continue;
     }
     if (item.type === "reasoning" && !item.text.trim()) continue;
@@ -453,17 +463,8 @@ function renderRunActivity(container, items, completed = false, durationMs, task
       taskEventRows.add(row);
     } else operations.push(item);
   }
+  appendUnansweredImages(previousTurnId);
   flush();
-  if (context?.managerWork) {
-    for (const [turnId, series] of managerImages) {
-      if (answers.has(turnId)) {
-        continue;
-      }
-      const tiles = generatedTiles(series);
-      tiles.dataset.item = "images:" + [...series.keys()].at(-1);
-      nodes.push(tiles);
-    }
-  }
   const boundaryKey = node => node.dataset.messageId || node.dataset.coordinationKey || node.dataset.generatedAnswer ||
     (node.dataset.item?.startsWith("images:") ? node.dataset.item : undefined) ||
     (node.dataset.actor === "user" || taskEventRows.has(node) ? node.dataset.item : undefined);
