@@ -1557,7 +1557,7 @@ app.whenReady().then(async () => {
     await evaluate(`delete fixture.board.gitInfo.branch; push(); void 0`);
     await check(`byId('status-branch').textContent === '01234567' && byId('status-publish').hidden && byId('status-tracking').hidden`,
       "detached HEAD shows the commit hash and keeps the Git menu available");
-    for (const theme of ["dark", "github-light"]) {
+    for (const theme of ["dark", "light"]) {
       for (const width of [1380, 760]) {
         window.setContentSize(width, 760);
         await evaluate(`fixture.theme = '${theme}'; void 0`);
@@ -3118,8 +3118,8 @@ app.whenReady().then(async () => {
   await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); void 0`);
   await check(`!lane('ready').querySelector('details').open && document.activeElement === lane('ready').querySelector('summary')`, "Escape closes the column menu and restores focus");
   await window.webContents.insertCSS(":root { --hover-time: 0ms; }");
-  for (const theme of ["github-light", "nord"]) {
-    nativeTheme.themeSource = theme.endsWith("light") ? "light" : "dark";
+  for (const theme of ["light", "dark"]) {
+    nativeTheme.themeSource = theme;
     await evaluate(`fixture.theme = '${theme}'; push(); new Promise(resolve => setTimeout(resolve, 220))`);
     await check(`getComputedStyle(findCard('T-0055')).borderTopColor === themeColor('--border') && getComputedStyle(findCard('T-0055')).backgroundColor === themeColor('--panel') && getComputedStyle(findCard('T-0055')).color === themeColor('--text') && getComputedStyle(findCard('T-0055'), '::before').backgroundColor === themeColor('--yellow') && getComputedStyle(findCard('T-0051'), '::before').content === 'none' && getComputedStyle(draftForm().querySelector('.board-draft-field')).backgroundColor === themeColor('--panel') && getComputedStyle(draftForm().querySelector('.board-chat')).backgroundColor === themeColor('--bg')`, theme + " uses active theme colors for cards, priorities, the composer and the chat panel");
     await capture("board-reference-" + theme + ".png");

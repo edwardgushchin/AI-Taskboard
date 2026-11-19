@@ -8,7 +8,7 @@ import { electronCheck, localizationFixture } from "./electron-check.mjs";
 const root = new URL("../", import.meta.url);
 const read = file => readFileSync(new URL(file, root), "utf8");
 const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "icons", 120_000);
-const { app, BrowserWindow, nativeTheme } = await import("electron");
+const { app, BrowserWindow } = await import("electron");
 app.setPath("userData", join(scratch, "profile"));
 app.disableHardwareAcceleration();
 let window;
@@ -72,8 +72,9 @@ try {
   const names = [...css.matchAll(/\.codicon-([\w-]+)::before/g)].map(m => m[1]);
   const aliases = ["images", "thought", "tool", "board", "plus", "chevron", "dependency", "attachment", "stop", "microphone", "git-user", "notifications", "git-tag", "chat"];
   for (const theme of ["dark", "light"]) {
+    const backdrop = theme === "dark" ? "rgb(27, 29, 40)" : "rgb(238, 241, 247)";
     const result = await evaluate(`(async () => {
-      document.documentElement.dataset.theme = ${JSON.stringify("github-" + theme)};
+      document.documentElement.dataset.palette = '${theme}';
       const gallery = element('section');
       gallery.id = 'icon-gallery';
       for (const name of ${JSON.stringify([...names, ...aliases])}) {
@@ -93,6 +94,7 @@ try {
       return valid && checked;
     })()`);
     assert.equal(result, true, theme + " static, shared and CSS icons");
+    assert.equal(await evaluate("getComputedStyle(byId('icon-gallery')).backgroundColor"), backdrop, `${theme} gallery background`);
     await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
     if (keepArtifacts) writeFileSync(join(artifacts, "icons-" + theme + ".png"), (await window.webContents.capturePage()).toPNG());
     await evaluate(`document.getElementById('icon-gallery').remove()`);
@@ -110,14 +112,13 @@ try {
   // Exercise the shared status entry point for both callers and every active role.
   const spinnerResults = [];
   for (const theme of ["dark", "light"]) {
-    nativeTheme.themeSource = theme;
+    await evaluate(`document.documentElement.dataset.palette = '${theme}'`);
     console.log("Checking returned conditions: " + theme);
     for (const motion of ["no-preference", "reduce"]) {
       await window.webContents.debugger.sendCommand("Emulation.setEmulatedMedia", {
         features: [{ name: "prefers-reduced-motion", value: motion }],
       });
       assert.equal(await evaluate(`(() => {
-        document.documentElement.dataset.theme = 'github-' + ${JSON.stringify(theme)};
         for (const russian of [false, true]) {
           localization.select(russian ? 'ru' : 'en');
           const language = (en, ru) => russian ? ru : en;
@@ -193,7 +194,7 @@ try {
             })()`);
             const scenario = `${theme}/${width}/${motion}/${role}/${multiline ? "wrapped" : "single"}`;
             spinnerResults.push({ scenario, ...metrics });
-            assert.deepEqual([metrics.titleSize, metrics.fontSize, metrics.width, metrics.height], Array(4).fill("20px"), scenario);
+            assert.deepEqual([metrics.fontSize, metrics.width, metrics.height], Array(3).fill(metrics.titleSize), scenario);
             assert.equal(metrics.lines > 1, multiline, scenario);
             assert.ok(metrics.gap >= 3 && metrics.gap <= 9 && metrics.offset <= 4 && metrics.inside, scenario);
             assert.equal(metrics.role, "status", scenario);

@@ -14,7 +14,7 @@ const script = fileURLToPath(import.meta.url);
 const root = resolve(dirname(script), "..");
 const require = createRequire(import.meta.url);
 const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "chat-attachments", 90_000);
-const { app, BrowserWindow, nativeTheme } = await import("electron");
+const { app, BrowserWindow } = await import("electron");
 const option = name => { const at = process.argv.indexOf(name); return at < 0 ? undefined : process.argv[at + 1]; };
 const project = resolve(option("--project") ?? root);
 const id = option("--task");
@@ -86,34 +86,46 @@ app.whenReady().then(async () => {
     ${read("chat.js")}
     ${localizationFixture()}
     ${read("renderer.js")}
-    frame = { project: ${JSON.stringify(project)}, russian: true, board: { tasks: [window.fixtureTask], archived: [] } };
+    frame = {
+      project: ${JSON.stringify(project)},
+      russian: true,
+      board: { settings: {}, tasks: [window.fixtureTask], archived: [] },
+    };
+    window.openAttachmentCard = async () => {
+      await showTask(window.fixtureTask.id);
+      byId('task-side').querySelector('[aria-controls="task-chat-work"]').click();
+    };
     document.querySelector('#welcome').hidden = true;
     void 0;
   `);
-  await evaluate("showTask(window.fixtureTask.id)");
+  window.showInactive();
+  await evaluate("openAttachmentCard()");
+  const chatTile = file => `byId('task-chat-work').querySelector('.chat-attachment[data-file="${file.file}"]')`;
   for (const theme of ["dark", "light"]) {
-    nativeTheme.themeSource = theme;
+    await evaluate(`document.documentElement.dataset.palette = '${theme}'`);
     for (const width of [1384, 500]) {
       window.setSize(width, 1000);
-      await waitFor(`matchMedia('(prefers-color-scheme: dark)').matches === ${theme === "dark"}`);
-      await check(`getComputedStyle(document.documentElement).getPropertyValue('--panel').trim() === '${theme === "dark" ? "#222532" : "#fff"}'`,
-        `native ${theme} theme is applied at ${width}`);
+      const panelColor = theme === "dark" ? "rgb(34, 37, 50)" : "rgb(255, 255, 255)";
+      await check(`getComputedStyle(sheet).backgroundColor === '${panelColor}'`, `${theme} dialog background at ${width}`);
       for (const file of files) {
-        const tile = `body.querySelector('.chat-attachment[data-file="${file.file}"]')`;
+        const tile = chatTile(file);
         await check(`!!${tile}`, file.name + " has an image tile");
         await evaluate(`${tile}.scrollIntoView({ block: 'center' })`);
         await waitFor(`${tile}.querySelector('img')?.naturalWidth > 0`);
         await check(`${tile}.classList.contains('has-preview') && ${tile}.getBoundingClientRect().width > 0`,
           file.name + ` thumbnail decodes at ${theme}/${width}`);
       }
-      await check(`body.scrollWidth <= body.clientWidth + 1 && body.querySelector('.chat-log').scrollWidth <= body.querySelector('.chat-log').clientWidth + 1`,
+      await check(`(() => {
+        const log = byId('task-chat-work');
+        return body.scrollWidth <= body.clientWidth + 1 && log.scrollWidth <= log.clientWidth + 1;
+      })()`,
         `no horizontal overflow at ${theme}/${width}`);
-      await evaluate(`body.querySelector('.chat-attachment[data-file="${files[0].file}"]').scrollIntoView({ block: 'start' })`);
+      await evaluate(`${chatTile(files[0])}.scrollIntoView({ block: 'start' })`);
       await capture(`attachments-${theme}-${width}.png`);
     }
   }
   for (const file of files) {
-    const tile = `body.querySelector('.chat-attachment[data-file="${file.file}"]')`;
+    const tile = chatTile(file);
     await evaluate(`${tile}.click()`);
     await waitFor(`document.querySelector('.image-preview-stage img:not([hidden])')?.naturalWidth > 0`);
     await check(`document.querySelector('.image-preview-header strong').textContent === ${JSON.stringify(file.name)} &&
@@ -131,15 +143,23 @@ app.whenReady().then(async () => {
     assert.equal(createHash("sha256").update(readFileSync(destination)).digest("hex"), file.sha256);
     checks.push(file.name + " CLI download matches SHA-256 " + file.sha256 + ": " + destination);
   }
-  await evaluate(`sheet.close(); showTask(window.fixtureTask.id)`);
+  await evaluate(`
+    sheet.close();
+    openAttachmentCard();
+  `);
   for (const file of files) {
-    await evaluate(`body.querySelector('.chat-attachment[data-file="${file.file}"]').scrollIntoView({ block: 'center' })`);
-    await waitFor(`body.querySelector('.chat-attachment[data-file="${file.file}"] img')?.naturalWidth > 0`);
+    const tile = chatTile(file);
+    await evaluate(`${tile}.scrollIntoView({ block: 'center' })`);
+    await waitFor(`${tile}.querySelector('img')?.naturalWidth > 0`);
   }
   checks.push("all image previews reload after reopening the real card");
   const missing = files[0];
-  await evaluate(`window.failedFile = '${missing.file}'; sheet.close(); showTask(window.fixtureTask.id)`);
-  await evaluate(`body.querySelector('.chat-attachment[data-file="${missing.file}"]').click()`);
+  await evaluate(`
+    window.failedFile = '${missing.file}';
+    sheet.close();
+    openAttachmentCard();
+  `);
+  await evaluate(`${chatTile(missing)}.click()`);
   await waitFor(`document.querySelector('.image-preview-status').textContent.includes(${JSON.stringify(missing.name)})`);
   await check(`document.querySelector('.image-preview').open && !document.querySelector('.image-preview-stage img:not([hidden])')`,
     "unavailable images keep a usable viewer with the filename and error");

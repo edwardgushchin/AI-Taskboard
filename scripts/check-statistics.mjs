@@ -28,7 +28,14 @@ try {
     void 0;
   `);
   for (const russian of [true, false]) for (const theme of ['dark', 'light']) {
-    await evaluate(`frame.russian = ${russian}; document.documentElement.dataset.theme = 'github-${theme}'; byId('app-content').hidden = false; byId('app-settings').focus(); openSettingsMenu(); void 0`);
+    await evaluate(`
+      localization.select('${russian ? "ru" : "en"}');
+      document.documentElement.dataset.palette = '${theme}';
+      byId('app-content').hidden = false;
+      byId('app-settings').focus();
+      openSettingsMenu();
+      void 0;
+    `);
     assert.equal(await evaluate(`byId('settings-menu-statistics').disabled`), false);
     await evaluate(`byId('settings-menu-app').focus(); byId('settings-menu').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })); byId('settings-menu').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })); void 0`);
     assert.equal(await evaluate(`document.activeElement.id`), 'settings-menu-statistics');
@@ -40,6 +47,8 @@ try {
     window.setSize(440, 720);
     await evaluate(`new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))`);
     assert.equal(await evaluate(`sheet.getBoundingClientRect().right <= innerWidth && body.scrollWidth <= body.clientWidth`), true);
+    const panelColor = theme === "dark" ? "rgb(34, 37, 50)" : "rgb(255, 255, 255)";
+    assert.equal(await evaluate("getComputedStyle(sheet).backgroundColor"), panelColor, `${theme} statistics dialog background`);
     writeFileSync(join(artifacts, `statistics-${russian ? 'ru' : 'en'}-${theme}.png`), (await window.webContents.capturePage()).toPNG());
     await evaluate(`sheet.close(); new Promise(r => setTimeout(r, 20))`);
     assert.equal(await evaluate(`document.activeElement.id`), 'app-settings');

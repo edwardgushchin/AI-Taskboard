@@ -168,17 +168,16 @@ app.whenReady().then(async () => {
       await key("Escape", "Escape", 27);
     }
 
-    const namedThemes = [...read("themes.css").matchAll(/\[data-theme="([^"]+)"\]/g)].map(match => match[1]);
     await set([{ ...codex, windows: [{ ...weekly, remaining: 1 }] }]);
-    for (const theme of namedThemes) {
-      await evaluate(`document.documentElement.dataset.theme = ${JSON.stringify(theme)}`);
+    for (const theme of ["light", "dark"]) {
+      await evaluate(`document.documentElement.dataset.palette = ${JSON.stringify(theme)}`);
       for (const hovered of [false, true]) {
         await mouse("mouseMoved", hovered ? position : { x: 200, y: 100 });
         await settle();
         await checkContrast(theme, hovered);
       }
     }
-    await evaluate("delete document.documentElement.dataset.theme");
+    await evaluate("delete document.documentElement.dataset.palette");
     await mouse("mouseMoved", { x: 200, y: 100 });
     await set([codex]);
 

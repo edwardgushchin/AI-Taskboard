@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { electronCheck, localizationFixture } from "./electron-check.mjs";
 
 const { scratch, artifacts } = electronCheck(import.meta.url, "task-description", 90_000);
-const { app, BrowserWindow, clipboard, nativeTheme } = await import("electron");
+const { app, BrowserWindow, clipboard } = await import("electron");
 app.setPath("userData", join(scratch, "profile"));
 app.disableHardwareAcceleration();
 const read = name => readFileSync(new URL("../src/desktop/" + name, import.meta.url), "utf8");
@@ -52,9 +52,13 @@ app.whenReady().then(async () => {
   await check(`(() => { const p = document.querySelector('.task-description'); return p.textContent.startsWith('Длинная карточка') && !/[#*\x60]/.test(p.textContent) && p.textContent.includes('Первый пункт') && p.textContent.includes('inline code') && !p.querySelector('*') && getComputedStyle(p).webkitLineClamp === '2' && p.clientHeight <= 37; })()`, "board Markdown and height without old template headings");
   await check(`cardDescription('<img src=x onerror=alert(1)> [link](javascript:alert(1)) ![alt](https://example.com/x.png)').childElementCount === 0`, "inert unsafe preview");
   for (const theme of ['light', 'dark']) {
-    nativeTheme.themeSource = theme;
-    await evaluate(`applyTheme('github-${theme}'); settle()`);
-    await check(`getComputedStyle(document.documentElement).getPropertyValue('--panel').trim() === '${theme === 'light' ? '#fff' : '#161b22'}'`, "actual theme palette");
+    await evaluate(`
+      document.documentElement.dataset.palette = '${theme}';
+      settle();
+    `);
+    const backdrop = theme === "dark" ? "rgb(27, 29, 40)" : "rgb(238, 241, 247)";
+    assert.equal(await evaluate("getComputedStyle(document.body).backgroundColor"), backdrop, `${theme} board background`);
+    checks++;
     await window.webContents.capturePage();
     writeFileSync(join(artifacts, 'board-' + theme + '.png'), (await window.webContents.capturePage()).toPNG());
     for (const width of [1280, 600]) {

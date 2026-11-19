@@ -40,7 +40,10 @@ try {
   for (const theme of ['dark', 'light']) for (const width of [800, 320]) for (const zoom of [1, 1.25, 1.5]) {
     win.setSize(width, 800);
     win.webContents.setZoomFactor(zoom);
-    await ev(`document.documentElement.dataset.theme='github-${theme}'; document.fonts.ready`);
+    await ev(`
+      document.documentElement.dataset.palette = '${theme}';
+      document.fonts.ready;
+    `);
     await ev('new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))');
     const { root } = await win.webContents.debugger.sendCommand('DOM.getDocument');
     const { nodeId } = await win.webContents.debugger.sendCommand('DOM.querySelector', { nodeId:root.nodeId, selector:'.chat-task-reference' });
@@ -63,6 +66,8 @@ try {
     })()`);
     assert.ok(metrics.intact && metrics.font && metrics.noOverflow);
     assert.equal(metrics.global, '16px');
+    const backdrop = theme === "dark" ? "rgb(27, 29, 40)" : "rgb(238, 241, 247)";
+    assert.equal(await ev("getComputedStyle(document.body).backgroundColor"), backdrop, `${theme} reference backdrop`);
     if (!before) { assert.equal(metrics.icon.width, metrics.icon.font); assert.equal(metrics.icon.height, metrics.icon.font); assert.equal(metrics.line, metrics.plainLine); }
     results.push({theme,width,zoom,...metrics});
     writeFileSync(join(artifacts, `${theme}-${width}-${zoom}.png`), (await win.webContents.capturePage()).toPNG());
@@ -84,7 +89,10 @@ try {
   await ev('new Promise(r=>setTimeout(r,200))');
   if (!before) assert.equal(await ev(`getComputedStyle(document.activeElement).borderBottomColor === getComputedStyle(document.activeElement).color`), true);
   for (const theme of ['dark', 'light']) {
-    await ev(`document.documentElement.dataset.theme='github-${theme}'; new Promise(r=>setTimeout(r,200))`);
+    await ev(`
+      document.documentElement.dataset.palette = '${theme}';
+      new Promise(resolve => setTimeout(resolve, 200));
+    `);
     writeFileSync(join(artifacts, `focus-${theme}.png`), (await win.webContents.capturePage()).toPNG());
   }
   // Click the glyph itself: event.target must route through its enclosing anchor.

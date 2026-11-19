@@ -64,7 +64,7 @@ codex login
 3. Describe a change to the manager, approve its draft, then start the executor from the card.
 4. Inspect the submitted diff and checks. In human review mode, choose **Accept** when the result is ready.
 
-Use **Settings → Appearance** to follow the system or choose a theme for all windows. Source checks, CLI examples, VS Code debugging and packaging instructions are in the [development guide](docs/development.md).
+Use **Settings → Appearance** to choose **Light**, **Dark**, or **System** for all windows. System follows OS appearance changes while the app is open, including scheduled changes. Palette changes fade briefly; reduced motion makes them immediate. Older presets become the standard light or dark theme. Source checks, CLI examples, VS Code debugging and packaging instructions are in the [development guide](docs/development.md).
 
 ### Install a packaged build
 
