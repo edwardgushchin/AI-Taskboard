@@ -30,9 +30,11 @@ test("goal events and interleaved notices remain chronological across page bound
     type: "agentMessage", title: "", text: "Event " + index, status: "completed",
   }));
   saveManagerHistory(project, at, randomUUID(), { lane: "work", goalId, items: events });
-  for (let index = 0; index < 65; index++) saveManagerHistory(project, at + index * 2 + 1, randomUUID(), {
-    lane: "notice", goalId, items: [{ ...events[index]!, id: "notice-" + index, at: new Date(at + index * 2 + 1).toISOString() }],
-  });
+  for (let index = 0; index < 65; index++) {
+    saveManagerHistory(project, at + index * 2 + 1, randomUUID(), {
+      lane: "notice", goalId, items: [{ ...events[index]!, id: "notice-" + index, at: new Date(at + index * 2 + 1).toISOString() }],
+    });
+  }
   const pages = [];
   let cursor: string | null = null;
   do {
@@ -243,10 +245,12 @@ test("saved status notices stay hidden before and after the card is archived", t
 test("status notices do not consume work pages or hide older real activity", t => {
   const project = fixture(t);
   const at = Date.now();
-  for (let i = 0; i < 89; i++) saveManagerHistory(project, at + i, randomUUID(), {
-    lane: i % 2 ? "notice" : "work", ...(i % 2 ? {} : { goalId: "test-goal" }),
-    items: [{ id: String(i), type: "agentMessage", title: "", text: String(i), status: "completed" }],
-  });
+  for (let i = 0; i < 89; i++) {
+    saveManagerHistory(project, at + i, randomUUID(), {
+      lane: i % 2 ? "notice" : "work", ...(i % 2 ? {} : { goalId: "test-goal" }),
+      items: [{ id: String(i), type: "agentMessage", title: "", text: String(i), status: "completed" }],
+    });
+  }
   const recent = readManagerHistory(project, null, "work")!;
   const older = readManagerHistory(project, recent.nextCursor!, "work")!;
   assert.equal(older.nextCursor, null);

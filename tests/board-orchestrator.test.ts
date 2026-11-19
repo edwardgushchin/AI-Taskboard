@@ -1450,9 +1450,11 @@ test("goal history pages retain scoped local events and hide unclassified provid
   saveManagerHistory(f.project, start, randomUUID(), {
     lane: "work", goalId: f.threadId, message: { text: "Cancel T-0001", files: [] }, items: [local],
   });
-  for (let i = 1; i <= 40; i++) saveManagerHistory(f.project, start + i, randomUUID(), {
-    lane: "work", goalId: f.threadId, items: [tool("work-" + i, "task_show", i)],
-  });
+  for (let i = 1; i <= 40; i++) {
+    saveManagerHistory(f.project, start + i, randomUUID(), {
+      lane: "work", goalId: f.threadId, items: [tool("work-" + i, "task_show", i)],
+    });
+  }
   const first = await f.history(undefined, "work");
   assert.equal(first.data.turns.length, 40);
   assert.match(first.data.nextCursor, /^goal:/);
@@ -2786,7 +2788,8 @@ test("a running goal accepts queued instructions while ordinary questions use an
   const result = await work;
   assert.equal(result.data.answer, "Finished");
   const next = await f.run("Continue", async (_act, _prompt, _images, id) => {
-    assert.equal(id, f.dialogueId); return { text: "Dialogue context" };
+    assert.equal(id, f.dialogueId);
+    return { text: "Dialogue context" };
   });
   assert.equal(next.ok, true, JSON.stringify(next));
 });
