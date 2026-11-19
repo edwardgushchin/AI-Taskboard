@@ -100,9 +100,15 @@ function unreadState(project: string): UnreadState {
     const run = readJson(join(folder, file)) as Run;
     if (run.lane !== "chat" || run.goalId) {
       if (candidates.has(id)) statusIds.add(id);
-      for (const item of run.items) if (candidates.has(item.id)) statusIds.add(item.id);
+      for (const item of run.items) {
+        if (candidates.has(item.id)) {
+          statusIds.add(item.id);
+        }
+      }
     } else {
-      for (const item of run.items) dialogueIds.add(item.id);
+      for (const item of run.items) {
+        dialogueIds.add(item.id);
+      }
     }
   }
   state.unread = state.unread.filter(id => !statusIds.has(id) || dialogueIds.has(id));
@@ -258,12 +264,16 @@ export function managerHistoryForView(turns: Turn[], view?: "chat" | "work") {
   return turns.flatMap(turn => {
     if (!view) return [turn];
     // A shared legacy session has no trustworthy conversation/goal attribution.
-    if (!turn.lane && !turn.goalId) return [];
+    if (!turn.lane && !turn.goalId) {
+      return [];
+    }
     if (isStatusNotice(turn)) return [];
     if (view === "chat") {
       return turn.lane !== "chat" || turn.goalId ? [] : [{ ...turn, items: managerChatItems(turn.items) }];
     }
-    if (!turn.goalId) return [];
+    if (!turn.goalId) {
+      return [];
+    }
     const items = turn.items;
     const messages = turn.messages;
     return items.length || messages.length ? [{ ...turn, items, messages }] : [];
@@ -272,10 +282,14 @@ export function managerHistoryForView(turns: Turn[], view?: "chat" | "work") {
 
 export function hasGoalHistory(project: string) {
   const folder = join(project, ".tasks", "manager-chat");
-  if (!exists(folder)) return false;
+  if (!exists(folder)) {
+    return false;
+  }
   directory(folder);
   return readdirSync(folder).some(name => {
-    if (!filePattern.test(name)) return false;
+    if (!filePattern.test(name)) {
+      return false;
+    }
     const run = readJson(join(folder, name)) as Run;
     return Boolean(run.goalId && (run.message || run.items.length));
   });
@@ -286,11 +300,15 @@ export function readDialogueReference(project: string) {
   const folder = join(project, ".tasks", "manager-chat");
   const messages: { id: string; author: "user" | "manager"; at: string; text: string }[] = [];
   let remaining = 16_000;
-  if (!exists(folder)) return { referenceOnly: true, messages };
+  if (!exists(folder)) {
+    return { referenceOnly: true, messages };
+  }
   directory(folder);
   for (const name of readdirSync(folder).filter(name => filePattern.test(name)).sort().reverse()) {
     const run = readJson(join(folder, name)) as Run;
-    if (run.lane !== "chat" || run.goalId) continue;
+    if (run.lane !== "chat" || run.goalId) {
+      continue;
+    }
     const at = new Date(Number(name.slice(0, 13))).toISOString();
     const turns = displayTurns(run);
     const entries = turns.flatMap((turn, index) => [
@@ -300,14 +318,22 @@ export function readDialogueReference(project: string) {
         .map(item => ({ id: item.id, author: "manager" as const, at: item.at ?? at, text: item.text })),
     ]);
     for (const entry of entries.reverse()) {
-      if (!entry.text.trim()) continue;
+      if (!entry.text.trim()) {
+        continue;
+      }
       const text = entry.text.slice(0, Math.min(2000, remaining));
-      if (!text) break;
+      if (!text) {
+        break;
+      }
       messages.unshift({ ...entry, text });
       remaining -= text.length;
-      if (messages.length === 40 || remaining === 0) break;
+      if (messages.length === 40 || remaining === 0) {
+        break;
+      }
     }
-    if (messages.length === 40 || remaining === 0) break;
+    if (messages.length === 40 || remaining === 0) {
+      break;
+    }
   }
   return { referenceOnly: true, messages };
 }
@@ -319,20 +345,28 @@ function readGoalHistory(project: string, cursor: string | null) {
     throw new Error("Invalid goal history cursor.");
   }
   const folder = join(project, ".tasks", "manager-chat");
-  if (!exists(folder)) return undefined;
+  if (!exists(folder)) {
+    return undefined;
+  }
   directory(folder);
   const events: { key: string; turn: Turn; model?: string }[] = [];
   for (const name of readdirSync(folder).filter(name => filePattern.test(name))) {
     const run = readJson(join(folder, name)) as Run;
-    if (!run.goalId) continue;
+    if (!run.goalId) {
+      continue;
+    }
     const scope = { lane: run.lane, goalId: run.goalId };
     const append = (turn: Turn, index: number) => {
       const at = turn.items[0]?.at ?? turn.messages[0]?.at;
       const time = at && Number.isFinite(Date.parse(at)) ? Date.parse(at) : Number(name.slice(0, 13));
       const key = String(time).padStart(13, "0") + ":" + name + ":" + String(index).padStart(8, "0");
-      if (!before || key < before) events.push({ key, turn, model: run.model });
+      if (!before || key < before) {
+        events.push({ key, turn, model: run.model });
+      }
     };
-    if (run.message) append({ ...scope, messages: [run.message], items: [] }, 0);
+    if (run.message) {
+      append({ ...scope, messages: [run.message], items: [] }, 0);
+    }
     run.items.forEach((item, index) => {
       const turn: Turn = item.userMessage
         ? { ...scope, messages: [{ ...item.userMessage, clientId: item.id, at: item.at }], items: [] }
@@ -345,7 +379,9 @@ function readGoalHistory(project: string, cursor: string | null) {
   let remaining = 4 * 1024 * 1024;
   for (const event of events) {
     const size = JSON.stringify(event.turn).length;
-    if (selected.length && (selected.length >= 40 || size > remaining)) break;
+    if (selected.length && (selected.length >= 40 || size > remaining)) {
+      break;
+    }
     selected.push(event);
     remaining -= size;
   }
@@ -465,12 +501,18 @@ export function goalMessages(project: string, goalId: string, change?: { text: s
     const path = join(board, "goal-messages.json");
     const previous = exists(path) ? readJson(path) as { goalId: string; messages: GoalMessage[] } : undefined;
     const messages = previous?.goalId === goalId ? previous.messages : [];
-    if (!change) return messages;
+    if (!change) {
+      return messages;
+    }
     if ("text" in change) {
-      if (change.id && !codexThreadPattern.test(change.id)) throw new Error("Invalid goal message ID.");
+      if (change.id && !codexThreadPattern.test(change.id)) {
+        throw new Error("Invalid goal message ID.");
+      }
       const existing = change.id && messages.find(message => message.id === change.id);
       if (existing) {
-        if (existing.text !== change.text) throw new Error("Goal message ID already has different text.");
+        if (existing.text !== change.text) {
+          throw new Error("Goal message ID already has different text.");
+        }
         return existing;
       }
       const message = { id: change.id ?? randomUUID(), at: new Date().toISOString(), text: change.text, status: "pending" as const };
@@ -478,8 +520,12 @@ export function goalMessages(project: string, goalId: string, change?: { text: s
       return message;
     }
     const message = messages.find(entry => entry.id === change.id);
-    if (!message) return undefined;
-    if (message.status !== "pending") return message.status === change.status && message.reply === change.reply ? message : undefined;
+    if (!message) {
+      return undefined;
+    }
+    if (message.status !== "pending") {
+      return message.status === change.status && message.reply === change.reply ? message : undefined;
+    }
     Object.assign(message, { status: change.status, reply: change.reply });
     // Closed IDs survive compaction and retries for the lifetime of this goal.
     writeJson(path, { goalId, messages });
@@ -489,8 +535,10 @@ export function goalMessages(project: string, goalId: string, change?: { text: s
 
 export function sendGoalMessage(project: string, goalId: string, text: string, id?: string) {
   const message = goalMessages(project, goalId, { text, ...(id ? { id } : {}) });
-  if (message.at) saveManagerHistory(project, Date.parse(message.at), message.id, {
-    lane: "notice", goalId, message: { text: message.text, clientId: message.id, at: message.at, files: [] }, items: [],
-  });
+  if (message.at) {
+    saveManagerHistory(project, Date.parse(message.at), message.id, {
+      lane: "notice", goalId, message: { text: message.text, clientId: message.id, at: message.at, files: [] }, items: [],
+    });
+  }
   return message;
 }
