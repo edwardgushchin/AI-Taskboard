@@ -67,7 +67,7 @@ const help = [
   "          github-milestone-create --stdin (repository, title, optional dueDate as YYYY-MM-DD)",
   "          github-milestone-due --stdin (repository, number, dueDate as YYYY-MM-DD)",
   "          github-milestone-update --stdin (repository, number, title, description or state: open/closed)",
-  "          github-milestone-delete --stdin (repository, number, optional token and keepLinks)",
+  "          github-milestone-delete --stdin (repository, number; preview only)",
   "          milestone-batch --stdin (tasks: [{id, revision}], milestone: {repository, number} or null)",
   "          git refs, git inspect, git switch, git create, git detach, git publish --stdin, git push --stdin (branch and head)",
   "For init, pass git: true with --stdin to initialize Git in the chosen folder.",
@@ -948,12 +948,20 @@ async function main() {
           if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "GitHub read takes no task ID.");
           readBoardSettings(location);
           data = await readGitHub(location, input);
+        } else if (command === "github-milestone-delete") {
+          if (id !== undefined || Object.keys(input).some(key => key !== "repository" && key !== "number")) {
+            throw new TaskboardError("INVALID_INPUT", "This command only previews deletion. Use repository and number.");
+          }
+          const { milestone, linkedCards } = await deleteGitHubMilestone(location, {
+            repository: input.repository, number: input.number,
+          });
+          data = { milestone, linkedCards, deleted: false };
         } else if (command === "github-milestone-create" || command === "github-milestone-due" ||
-            command === "github-milestone-update" || command === "github-milestone-delete") {
+            command === "github-milestone-update") {
           if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "GitHub milestone changes take no task ID.");
           readBoardSettings(location);
           const change = { "github-milestone-create": createGitHubMilestone, "github-milestone-due": setGitHubMilestoneDueDate,
-            "github-milestone-update": updateGitHubMilestone, "github-milestone-delete": deleteGitHubMilestone }[command];
+            "github-milestone-update": updateGitHubMilestone }[command];
           data = await change(location, input);
         } else if (command === "milestones") {
           if (id !== undefined || Object.keys(input).length) throw new TaskboardError("INVALID_INPUT", "Milestones takes no arguments.");

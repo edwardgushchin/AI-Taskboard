@@ -518,22 +518,37 @@ test("manager reveals milestone links before deletion and waits for native confi
   }));
   assert.ok(JSON.stringify(linkedCards).length > 24_000);
   let deletes = 0;
+  let snapshot = "a".repeat(64);
   f.milestoneDeletion.run = input => {
     assert.equal(input.repository, target.repository);
     assert.equal(input.number, target.number);
-    if (input.token === undefined) return { milestone, linkedCards, token: "preview", deleted: false };
-    assert.equal(input.token, "preview");
+    if (input.token === undefined) return { milestone, linkedCards, snapshot, token: "internal", deleted: false };
+    assert.equal(input.token, "internal");
     deletes++;
     return { ...target, state: "deleted", deleted: true };
   };
-  await f.run("Delete owner/example milestone #7", async act => {
-    const result = await act("github_delete_milestone", target);
+  let previewSnapshot: string | undefined;
+  const preview = async (act: (name: string, args: unknown) => Promise<any>, args: Record<string, unknown>) => {
+    const result = await act("github_delete_milestone", { ...target, ...args });
     assert.equal(result.data.deleted, false);
     assert.equal(JSON.stringify(result.data.linkedCards), JSON.stringify(linkedCards));
+    assert.equal(result.data.token, undefined);
+    assert.equal(result.data.previewSnapshot, snapshot);
     assert.equal(f.pendingQuestion(), undefined);
     assert.equal(deletes, 0);
+    previewSnapshot = result.data.previewSnapshot;
+  };
+  assert.ok((await f.run("Delete owner/example milestone #7 and keep its links", async act => {
+    await preview(act, { keepLinks: true });
+    await preview(act, {});
     return { text: "The milestone is linked." };
-  });
+  })).ok);
+  snapshot = "b".repeat(64);
+  linkedCards[0] = { ...linkedCards[0], archived: false };
+  assert.ok((await f.run("Keep its links", async act => {
+    await preview(act, { keepLinks: true, previewSnapshot });
+    return { text: "The milestone is linked." };
+  })).ok);
   for (const { allow, keepLinks } of [
     { allow: false, keepLinks: true }, { allow: true, keepLinks: true }, { allow: true, keepLinks: false },
   ]) {
@@ -541,7 +556,7 @@ test("manager reveals milestone links before deletion and waits for native confi
     const before = deletes;
     const started = Promise.withResolvers<void>();
     const request = f.run("Delete owner/example milestone #7", async act => {
-      const pending = act("github_delete_milestone", { ...target, keepLinks });
+      const pending = act("github_delete_milestone", { ...target, keepLinks, ...(keepLinks ? { previewSnapshot } : {}) });
       started.resolve();
       const result = await pending;
       if (allow) assert.equal(result.data.deleted, true);
@@ -568,7 +583,7 @@ test("cancelling the milestone MCP call closes the approval and prevents deletio
   const target = { repository: "owner/example", number: 7 };
   f.milestoneDeletion.run = input => {
     assert.equal(input.token, undefined);
-    return { milestone: { ...target, title: "Release", state: "open" }, linkedCards: [], token: "preview" };
+    return { milestone: { ...target, title: "Release", state: "open" }, linkedCards: [], snapshot: "a".repeat(64), token: "internal" };
   };
   const lifetime = new AbortController();
   const request = f.run("Delete milestone #7", async act => {

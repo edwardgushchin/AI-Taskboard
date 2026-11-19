@@ -168,8 +168,9 @@ export async function deleteGitHubMilestone(location: BoardLocation, input: Reco
       return [...links(store.storedCards(), false), ...links(store.archivedCards(), true)]
         .sort((a, b) => a.id.localeCompare(b.id));
     }, 0);
-    const token = sha256(Buffer.from(JSON.stringify([milestone, linkedCards, input.keepLinks === true])));
-    if (input.token === undefined) return { milestone, linkedCards, token, deleted: false };
+    const snapshot = sha256(Buffer.from(JSON.stringify([milestone, linkedCards])));
+    const token = sha256(Buffer.from(JSON.stringify([snapshot, input.keepLinks === true])));
+    if (input.token === undefined) return { milestone, linkedCards, snapshot, token, deleted: false };
     if (input.token !== token) {
       throw new TaskboardError("GITHUB_MILESTONE_STALE", "The milestone or its card links changed. Inspect them and obtain a new confirmation.");
     }

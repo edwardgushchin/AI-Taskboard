@@ -686,23 +686,45 @@ test("GitHub milestone edits and confirmed deletion use current remote and board
   };
   const update = "github-milestone-update";
   const remove = "github-milestone-delete";
+  const deletionArgs = (input: object) => ["--disable-warning=ExperimentalWarning",
+    "--import", "data:text/javascript," + encodeURIComponent(mock), "--input-type=module", "--eval", `
+      import { deleteGitHubMilestone } from ${JSON.stringify(new URL("../src/cli/repository.ts", import.meta.url).href)};
+      import { locateBoard } from ${JSON.stringify(new URL("../src/cli/storage.ts", import.meta.url).href)};
+      const cancel = new AbortController();
+      globalThis.cancelFixture = () => cancel.abort();
+      try {
+        const data = await deleteGitHubMilestone(locateBoard(${JSON.stringify(root)}), ${JSON.stringify(input)}, cancel.signal);
+        process.stdout.write(JSON.stringify({ data }));
+      } catch (error) {
+        process.stdout.write(JSON.stringify({ error: { code: error.name === 'AbortError' ? error.name : error.code } }));
+      }
+    `];
+  const runDeletion = (input: object = target, mode = "no-write") => {
+    const result = spawnSync(process.execPath, deletionArgs(input), {
+      env: { ...env, PATH: tools + delimiter + process.env.PATH, TASKBOARD_TEST_MILESTONE: mode },
+      encoding: "utf8", windowsHide: true,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, "");
+    return JSON.parse(result.stdout);
+  };
   const changed = { ...target, title: "Renamed", description: "  Release notes\nLine 2", state: "closed" };
   assert.equal(run(update, changed, "unverified").error.code, "GITHUB_MILESTONE_VERIFY_FAILED");
   assert.equal(run(update, changed, "denied").error.code, "GITHUB_AUTH_SCOPE");
   assert.equal(run(update, { ...target, repository: "other/repo" }).error.code, "GITHUB_REMOTE_REQUIRED");
   assert.equal(run(update, target).error.code, "INVALID_INPUT");
-  const beforeEdit = run(remove).data.token;
+  const beforeEdit = runDeletion().data.token;
   const result = run(update, changed, "success").data;
   assert.deepEqual({ ...result, dueDate: undefined, url: undefined }, { ...changed, changed: true, dueDate: undefined, url: undefined });
   assert.equal(run(update, changed).data.changed, false);
-  assert.equal(run(remove, { ...target, token: beforeEdit }).error.code, "GITHUB_MILESTONE_STALE");
+  assert.equal(runDeletion({ ...target, token: beforeEdit }).error.code, "GITHUB_MILESTONE_STALE");
   const reopened = run(update, { ...target, state: "open", description: "" }, "success").data;
   assert.equal(reopened.title, "Renamed");
   assert.equal(reopened.state, "open");
   assert.equal(reopened.description, "");
   assert.equal(run("github-read", { view: "milestone", number: 1 }).data.state, "open");
 
-  const unlinked = run(remove).data;
+  const unlinked = runDeletion().data;
   assert.equal(unlinked.deleted, false);
   const active = cli(root, ["create"], { title: "Linked card" });
   const archived = cli(root, ["create"], { title: "Archived card" });
@@ -712,47 +734,34 @@ test("GitHub milestone edits and confirmed deletion use current remote and board
   cli(root, ["cancel", archived.id], { reason: "Archive fixture" });
   cli(root, ["settings"], { archiveAfterDays: 0 });
   cli(root, ["archive", "sweep"]);
-  assert.equal(run(remove, { ...target, token: unlinked.token }).error.code, "GITHUB_MILESTONE_STALE");
+  assert.equal(runDeletion({ ...target, token: unlinked.token }).error.code, "GITHUB_MILESTONE_STALE");
   assert.equal(run(remove, { ...target, repository: "other/repo" }).error.code, "GITHUB_REMOTE_REQUIRED");
-  const linked = run(remove).data;
+  const linked = runDeletion().data;
   assert.deepEqual(linked.linkedCards.map((card: { id: string; archived: boolean }) => [card.id, card.archived]),
     [[active.id, false], [archived.id, true]]);
-  assert.equal(run(remove, { ...target, token: linked.token }).error.code, "GITHUB_MILESTONE_LINKED");
-  assert.equal(run(remove, { ...target, token: linked.token, keepLinks: true }).error.code, "GITHUB_MILESTONE_STALE");
+  assert.deepEqual(run(remove).data, { milestone: linked.milestone, linkedCards: linked.linkedCards, deleted: false });
+  assert.equal(runDeletion({ ...target, token: linked.token }).error.code, "GITHUB_MILESTONE_LINKED");
+  assert.equal(runDeletion({ ...target, token: linked.token, keepLinks: true }).error.code, "GITHUB_MILESTONE_STALE");
   const keepLinks = { ...target, keepLinks: true };
-  const approved = { ...keepLinks, token: run(remove, keepLinks).data.token };
-  assert.equal(run(remove, approved, "denied").error.code, "GITHUB_AUTH_SCOPE");
-  assert.equal(run(remove, approved, "unverified").error.code, "GITHUB_MILESTONE_DELETE_FAILED");
-  const cancellation = `
-    import { deleteGitHubMilestone } from ${JSON.stringify(new URL("../src/cli/repository.ts", import.meta.url).href)};
-    import { locateBoard } from ${JSON.stringify(new URL("../src/cli/storage.ts", import.meta.url).href)};
-    const cancel = new AbortController();
-    globalThis.cancelFixture = () => cancel.abort();
-    try {
-      await deleteGitHubMilestone(locateBoard(${JSON.stringify(root)}), ${JSON.stringify(approved)}, cancel.signal);
-    } catch (error) {
-      process.stdout.write(error.name === 'AbortError' ? error.name : error.code);
-    }
-  `;
+  const approved = { ...keepLinks, token: runDeletion(keepLinks).data.token };
+  // Even the valid internal token cannot turn the public command into a write.
+  assert.equal(run(remove, { ...target, token: approved.token }).error.code, "INVALID_INPUT");
+  assert.equal(run(remove, keepLinks).error.code, "INVALID_INPUT");
+  assert.equal(run(remove, approved).error.code, "INVALID_INPUT");
+  assert.equal(runDeletion(approved, "denied").error.code, "GITHUB_AUTH_SCOPE");
+  assert.equal(runDeletion(approved, "unverified").error.code, "GITHUB_MILESTONE_DELETE_FAILED");
   for (const [mode, expected] of [["cancel-read", "AbortError"], ["cancel-delete", "GITHUB_MILESTONE_DELETE_FAILED"]]) {
-    const result = spawnSync(process.execPath, ["--disable-warning=ExperimentalWarning", "--import",
-      "data:text/javascript," + encodeURIComponent(mock), "--input-type=module", "--eval", cancellation], {
-      env: { ...env, PATH: tools + delimiter + process.env.PATH, TASKBOARD_TEST_MILESTONE: mode },
-      encoding: "utf8", windowsHide: true,
-    });
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, expected);
+    assert.equal(runDeletion(approved, mode).error.code, expected);
     assert.equal(run(remove).data.deleted, false);
   }
-  const child = spawn(process.execPath, ["--import", "data:text/javascript," + encodeURIComponent(mock),
-    ...commandArgs(root, [remove], approved)], {
+  const child = spawn(process.execPath, deletionArgs(approved), {
     env: { ...env, PATH: tools + delimiter + process.env.PATH, TASKBOARD_TEST_MILESTONE: "slow" }, windowsHide: true,
   });
   const closed = once(child, "close");
   let output = "";
   child.stdout.setEncoding("utf8").on("data", chunk => { output += chunk; });
   child.stderr.resume();
-  child.stdin.end(JSON.stringify(approved));
+  child.stdin.end();
   try {
     for (const expected of ["read", "delete"]) {
       const deadline = Date.now() + 25_000;
@@ -772,7 +781,7 @@ test("GitHub milestone edits and confirmed deletion use current remote and board
   }
   assert.deepEqual(JSON.parse(output).data,
     { ...target, state: "deleted", deleted: true, linkedCards: linked.linkedCards });
-  assert.equal(run(remove, approved).error.code, "GITHUB_RESOURCE_ACCESS");
+  assert.equal(runDeletion(approved).error.code, "GITHUB_RESOURCE_ACCESS");
   assert.equal(cli(root, ["show", active.id]).milestone.number, 1);
   assert.equal(cli(root, ["list"]).archived[0].milestone.number, 1);
 });
