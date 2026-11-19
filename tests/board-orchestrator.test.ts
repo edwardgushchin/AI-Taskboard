@@ -1456,7 +1456,7 @@ test("goal history pages retain scoped local events and hide unclassified provid
     });
   }
   const first = await f.history(undefined, "work");
-  assert.equal(first.data.turns.length, 40);
+  assert.equal(first.data.turns.reduce((count: number, turn: any) => count + turn.items.length + turn.messages.length, 0), 40);
   assert.match(first.data.nextCursor, /^goal:/);
   const lastLocal = await f.history(first.data.nextCursor, "work");
   assert.equal(lastLocal.data.turns.flatMap((turn: any) => turn.items)[0].id, "local");

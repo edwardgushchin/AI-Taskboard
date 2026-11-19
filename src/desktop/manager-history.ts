@@ -349,7 +349,7 @@ function readGoalHistory(project: string, cursor: string | null) {
     return undefined;
   }
   directory(folder);
-  const events: { key: string; turn: Turn; model?: string }[] = [];
+  const events: { key: string; file: string; turn: Turn; model?: string }[] = [];
   for (const name of readdirSync(folder).filter(name => filePattern.test(name))) {
     const run = readJson(join(folder, name)) as Run;
     if (!run.goalId) {
@@ -361,7 +361,7 @@ function readGoalHistory(project: string, cursor: string | null) {
       const time = at && Number.isFinite(Date.parse(at)) ? Date.parse(at) : Number(name.slice(0, 13));
       const key = String(time).padStart(13, "0") + ":" + name + ":" + String(index).padStart(8, "0");
       if (!before || key < before) {
-        events.push({ key, turn, model: run.model });
+        events.push({ key, file: name, turn, model: run.model });
       }
     };
     if (run.message) {
@@ -386,7 +386,23 @@ function readGoalHistory(project: string, cursor: string | null) {
     remaining -= size;
   }
   const nextCursor = selected.length < events.length ? prefix + selected.at(-1)!.key : null;
-  return { model: selected.find(event => event.model)?.model, turns: selected.reverse().map(event => event.turn), nextCursor };
+  const turns: Turn[] = [];
+  let previousFile: string | undefined;
+  // Keep adjacent events from one run together so generated results retain
+  // their answer and provider-turn context. Interleaved notices stay in order.
+  for (const event of selected.reverse()) {
+    const previous = turns.at(-1);
+    if (previous && previousFile === event.file && !event.turn.messages.length) {
+      previous.items.push(...event.turn.items);
+      if (event.turn.durationMs !== undefined) {
+        previous.durationMs = event.turn.durationMs;
+      }
+    } else {
+      turns.push(event.turn);
+    }
+    previousFile = event.file;
+  }
+  return { model: selected.find(event => event.model)?.model, turns, nextCursor };
 }
 
 export function readManagerHistory(project: string, cursor: string | null = null, view?: "chat" | "work") {
