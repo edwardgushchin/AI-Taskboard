@@ -2412,7 +2412,7 @@ function draftComposer() {
   picker.type = "file";
   picker.multiple = true;
   picker.hidden = true;
-  const add = element("button", undefined, "button quiet draft-add");
+  const add = element("button", undefined, "button quiet draft-add chat-add");
   add.type = "button";
   add.append(icon("add"));
   const menu = element("div", undefined, "draft-add-menu");
@@ -2540,7 +2540,7 @@ function draftComposer() {
     closeMentions();
     insertDraftText(tasks[index].id, { start, end });
   }
-  const microphone = button("", startDictation, "quiet draft-mic");
+  const microphone = button("", startDictation, "quiet draft-mic chat-mic");
   microphone.append(icon("mic"));
   const voiceRow = element("div", undefined, "draft-voice-row");
   const waveform = element("canvas", undefined, "draft-voice-wave");
@@ -2708,7 +2708,7 @@ function draftComposer() {
   }, "quiet draft-goal-chip");
   const goalLabel = element("span");
   goalChip.append(icon("target"), goalLabel, icon("close"));
-  const send = element("button", undefined, "button primary draft-send");
+  const send = element("button", undefined, "button primary draft-send chat-send");
   send.type = "button";
   send.addEventListener("click", () => {
     if (hasDraft()) {
@@ -2757,13 +2757,7 @@ function draftComposer() {
   }
   const syncAction = () => {
     const stop = Boolean(active) && !hasDraft();
-    const mode = stop ? "stop" : "send";
-    if (send.dataset.action !== mode) {
-      send.dataset.action = mode;
-      send.replaceChildren(icon(stop ? "stop-circle" : "arrow-up"));
-      send.classList.toggle("quiet", stop);
-      send.classList.toggle("primary", !stop);
-    }
+    syncChatActionIcon(send, stop);
     send.disabled = stop ? !canStop || stopping : goalMode && !hasDraft();
     controlLabelForIcon(send, () => stop ? (waitingForChat ? t("ui.cancel_sending_480e1dd5") :
       t("ui.stop_reply_fc199c8c")) : t("ui.send_request_b9ccf5ac"));
