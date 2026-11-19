@@ -17,12 +17,12 @@ import {
 } from "./archive.ts";
 import { boardAgentRoles, boardReviewMode, taskReviewMode, taskReviewModeVersion, hexTagColor, member, number, object, reasoningEffortPattern, record, registerTags, requireRevision, requireState, reviewModes, strings, tagKey, taskIdPattern, TaskboardError, text, usesIndependentReviewer, validAgentLimitOverrides } from "./model.ts";
 import type { GitHubMilestone, Task } from "./model.ts";
-import { exists, initializeBoard, locateBoard, onBoard, readBoardSettings, withTaskStartLock } from "./storage.ts";
+import { exists, initializeBoard, locateBoard, onBoard, readBoardSettings, withMilestoneLinksLock, withTaskStartLock } from "./storage.ts";
 import { inheritedLimits, recordSettings } from "./settings-notices.ts";
 import { requireAutoQueue, updateAutoQueue } from "./auto-queue.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
 import { discoverRepository, invokeGit, resolveCommit, scheduleGitMaintenance } from "./git.ts";
-import { boardGitInfo, changeRepository, createGitHubMilestone, githubMilestones, githubRepository, inspectRepository, manageRepositoryBranches, publishRepository, pushRepositoryBranch, readGitHub, repositoryRefs, setGitHubMilestoneDueDate } from "./repository.ts";
+import { boardGitInfo, changeRepository, createGitHubMilestone, deleteGitHubMilestone, githubMilestones, githubRepository, inspectRepository, manageRepositoryBranches, publishRepository, pushRepositoryBranch, readGitHub, repositoryRefs, setGitHubMilestoneDueDate, updateGitHubMilestone } from "./repository.ts";
 import { previewSubmission, previewTask, submitTask } from "./submission.ts";
 import { changeTask, createTask, recordRunLog } from "./tasks.ts";
 import { recordTokenUsage, taskMetrics } from "./token-usage.ts";
@@ -67,6 +67,8 @@ const help = [
   "          github-read --stdin (view: account, repository or milestone with number), milestones, milestone TASK-ID --stdin (revision, milestone: {repository, number} or null)",
   "          github-milestone-create --stdin (repository, title, optional dueDate as YYYY-MM-DD)",
   "          github-milestone-due --stdin (repository, number, dueDate as YYYY-MM-DD)",
+  "          github-milestone-update --stdin (repository, number, title, description or state: open/closed)",
+  "          github-milestone-delete --stdin (repository, number; preview only)",
   "          milestone-batch --stdin (tasks: [{id, revision}], milestone: {repository, number} or null)",
   "          git refs, git inspect, git switch, git create, git detach, git publish --stdin, git push --stdin (branch and head)",
   "For init, pass git: true with --stdin to initialize Git in the chosen folder.",
@@ -948,10 +950,21 @@ async function main() {
           if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "GitHub read takes no task ID.");
           readBoardSettings(location);
           data = await readGitHub(location, input);
-        } else if (command === "github-milestone-create" || command === "github-milestone-due") {
+        } else if (command === "github-milestone-delete") {
+          if (id !== undefined || Object.keys(input).some(key => key !== "repository" && key !== "number")) {
+            throw new TaskboardError("INVALID_INPUT", "This command only previews deletion. Use repository and number.");
+          }
+          const { milestone, linkedCards } = await deleteGitHubMilestone(location, {
+            repository: input.repository, number: input.number,
+          });
+          data = { milestone, linkedCards, deleted: false };
+        } else if (command === "github-milestone-create" || command === "github-milestone-due" ||
+            command === "github-milestone-update") {
           if (id !== undefined) throw new TaskboardError("INVALID_INPUT", "GitHub milestone changes take no task ID.");
           readBoardSettings(location);
-          data = await (command === "github-milestone-create" ? createGitHubMilestone : setGitHubMilestoneDueDate)(location, input);
+          const change = { "github-milestone-create": createGitHubMilestone, "github-milestone-due": setGitHubMilestoneDueDate,
+            "github-milestone-update": updateGitHubMilestone }[command];
+          data = await change(location, input);
         } else if (command === "milestones") {
           if (id !== undefined || Object.keys(input).length) throw new TaskboardError("INVALID_INPUT", "Milestones takes no arguments.");
           data = await githubMilestones(location);
@@ -970,38 +983,40 @@ async function main() {
             throw new TaskboardError("INVALID_INPUT", "Use distinct task IDs.");
           }
           const actor = input.actor === undefined ? "user" : member(input.actor, ["user", "manager"], "actor");
-          let milestone: GitHubMilestone | undefined;
-          if (input.milestone !== null) {
-            const fields = object(input.milestone);
-            const selected = { repository: text(fields.repository, "repository", true).toLowerCase(),
-              number: number(fields.number, "milestone number") };
-            const result = await githubMilestones(location, selected);
-            const entry = result.milestones[0];
-            if (entry?.number !== selected.number) throw new TaskboardError("GITHUB_MILESTONES_FAILED", "GitHub returned a different milestone.");
-            milestone = { ...selected, title: entry.title };
-          }
-          data = onBoard(location, store => {
-            if (milestone && githubRepository(location) !== milestone.repository) {
-              throw new TaskboardError("GITHUB_REMOTE_REQUIRED", "The GitHub repository configured as origin changed.");
+          data = await withMilestoneLinksLock(location, async () => {
+            let milestone: GitHubMilestone | undefined;
+            if (input.milestone !== null) {
+              const fields = object(input.milestone);
+              const selected = { repository: text(fields.repository, "repository", true).toLowerCase(),
+                number: number(fields.number, "milestone number") };
+              const result = await githubMilestones(location, selected);
+              const entry = result.milestones[0];
+              if (entry?.number !== selected.number) throw new TaskboardError("GITHUB_MILESTONES_FAILED", "GitHub returned a different milestone.");
+              milestone = { ...selected, title: entry.title };
             }
-            const update = ({ id, revision }: (typeof tasks)[number]) => {
-              const task = store.card(id);
-              requireRevision(task, revision, true);
-              if (hasPending(store, task)) throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before modifying the task.");
-              if (JSON.stringify(task.milestone) === JSON.stringify(milestone)) return task;
-              const updated = record({ ...task, milestone }, "milestone", actor, task.status, milestone?.title);
-              return store.save({ ...updated, closedAt: task.closedAt });
-            };
-            if (!batch) return update(tasks[0]);
-            return { milestone: milestone ?? null, tasks: tasks.map(reference => {
-              try {
-                const { id, title, status, revision } = update(reference);
-                return { ok: true, data: { id, title, status, revision, changed: revision !== reference.revision } };
-              } catch (error) {
-                if (!(error instanceof TaskboardError)) throw error;
-                return { id: reference.id, ok: false, error: { code: error.code, message: error.message } };
+            return onBoard(location, store => {
+              if (milestone && githubRepository(location) !== milestone.repository) {
+                throw new TaskboardError("GITHUB_REMOTE_REQUIRED", "The GitHub repository configured as origin changed.");
               }
-            }) };
+              const update = ({ id, revision }: (typeof tasks)[number]) => {
+                const task = store.card(id);
+                requireRevision(task, revision, true);
+                if (hasPending(store, task)) throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before modifying the task.");
+                if (JSON.stringify(task.milestone) === JSON.stringify(milestone)) return task;
+                const updated = record({ ...task, milestone }, "milestone", actor, task.status, milestone?.title);
+                return store.save({ ...updated, closedAt: task.closedAt });
+              };
+              if (!batch) return update(tasks[0]);
+              return { milestone: milestone ?? null, tasks: tasks.map(reference => {
+                try {
+                  const { id, title, status, revision } = update(reference);
+                  return { ok: true, data: { id, title, status, revision, changed: revision !== reference.revision } };
+                } catch (error) {
+                  if (!(error instanceof TaskboardError)) throw error;
+                  return { id: reference.id, ok: false, error: { code: error.code, message: error.message } };
+                }
+              }) };
+            });
           });
         } else if (command === "maintain") {
           data = input.attachmentsOnly === true ? onBoard(location, store => { removeLegacyAttachments(store); return { attachmentsRemoved: true }; }) : { cleaned: maintainBoard(location) };

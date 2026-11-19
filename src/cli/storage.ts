@@ -165,11 +165,10 @@ export function locateBoard(path: string, initializing = false, initializeGit = 
   return { root, directory: join(root, ".tasks"), repository };
 }
 
-function withSqliteLock<T>(lockPath: string, timeoutMs: 0 | 15_000, callback: (lockWaitMs: number, release: () => void) => T): T {
+function acquireSqliteLock(lockPath: string, timeoutMs: 0 | 15_000) {
   requireRegular(lockPath);
   const lock = new DatabaseSync(lockPath);
   let closed = false;
-  let releaseAfterCallback = false;
   const release = () => {
     if (!closed) { lock.close(); closed = true; }
   };
@@ -185,12 +184,24 @@ function withSqliteLock<T>(lockPath: string, timeoutMs: 0 | 15_000, callback: (l
       }
       throw error;
     }
-    const result = callback(Math.round(performance.now() - waiting), release);
+    return { waitMs: Math.round(performance.now() - waiting), release };
+  } catch (error) {
+    release();
+    throw error;
+  }
+}
+
+function withSqliteLock<T>(lockPath: string, timeoutMs: 0 | 15_000, callback: (lockWaitMs: number, release: () => void) => T): T {
+  const { waitMs, release } = acquireSqliteLock(lockPath, timeoutMs);
+  let releaseAfterCallback = false;
+  try {
+    const result = callback(waitMs, release);
     if (result instanceof Promise) {
       releaseAfterCallback = true;
       return result.finally(release) as T;
     }
     return result;
+
   } finally {
     if (!releaseAfterCallback) release();
   }
@@ -636,6 +647,16 @@ export function onBoard<T>(location: BoardLocation, callback: (store: BoardStore
       if (!releaseAfterCallback) lockedStores.delete(store);
     }
   }, timeoutMs);
+}
+
+export async function withMilestoneLinksLock<T>(location: BoardLocation, callback: () => Promise<T>): Promise<T> {
+  requireBoard(location);
+  const { release } = acquireSqliteLock(join(location.directory, ".milestone-links.sqlite"), 0);
+  try {
+    return await callback();
+  } finally {
+    release();
+  }
 }
 
 export function sha256(data: Uint8Array): string {
