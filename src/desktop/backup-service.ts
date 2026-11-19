@@ -16,6 +16,7 @@ export class BackupService {
   readonly preferences: string;
   private queue: Promise<unknown> = Promise.resolve();
   private states: Record<string, BackupStatus>;
+  private readonly persistenceErrors = new Map<string, string>();
 
   constructor(profile: string, now: () => number = Date.now) {
     this.root = join(profile, "board-backups");
@@ -28,14 +29,24 @@ export class BackupService {
 
   private update(project: string, state: BackupStatus): void {
     const next = { ...this.states, [project]: state };
-    writeJson(this.preferences, next);
+    try {
+      writeJson(this.preferences, next);
+    } catch (error) {
+      const reason = (error as Error).message;
+      this.persistenceErrors.set(project, state.error ? state.error + "\n" + reason : reason);
+      throw error;
+    }
     this.states = next;
+    this.persistenceErrors.delete(project);
   }
 
   status(project?: string) {
-    const state = project ? this.states[project] : undefined;
+    const state = project ? { ...this.states[project], error: this.persistenceErrors.get(project) ?? this.states[project]?.error } : undefined;
     try {
-      return { ...state, root: this.root, backups: listBackups(this.root, this.now()) };
+      const backups = listBackups(this.root, this.now());
+      const latest = backups.find(backup => backup.project === project)?.createdAt;
+      const lastSuccess = Math.max(state?.lastSuccess ?? 0, latest ?? 0) || undefined;
+      return { ...state, root: this.root, backups, lastSuccess };
     } catch (error) {
       return { ...state, root: this.root, backups: [], error: state?.error ?? (error as Error).message };
     }
@@ -86,7 +97,12 @@ export class BackupService {
       for (const project of Object.keys(this.states)) {
         const state = this.states[project];
         if (state.nextAutomatic === undefined || this.now() < state.nextAutomatic) continue;
-        this.update(project, { ...state, nextAutomatic: this.now() + backupHour });
+        try {
+          this.update(project, { ...state, nextAutomatic: this.now() + backupHour });
+        } catch {
+          // Keep this generation due so the next tick can retry the settings write.
+          continue;
+        }
         await this.create(project).catch(() => {});
       }
     }

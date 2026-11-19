@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -8,6 +11,7 @@ import { BoardStore, initializeBoard, locateBoard, withLock } from "../src/cli/s
 import { changeTask, createTask } from "../src/cli/tasks.ts";
 import { BackupService } from "../src/desktop/backup-service.ts";
 import { backupHour, backupLifetime, createBackup, restoreBackup, verifyBackup } from "../src/desktop/board-backups.ts";
+import { managerUnread, readManagerHistory, saveManagerHistory } from "../src/desktop/manager-history.ts";
 
 function fixture(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), "taskboard-backups-"));
@@ -114,4 +118,103 @@ test("copy defers under writer locks and restores only verified board data", t =
   }
   assert.deepEqual(verifyBackup(root, saved.id, now + 1), saved);
   assert.equal(existsSync(data + "-original"), true);
+});
+
+test("a failed settings write leaves a due hourly backup retryable and shows the last success", async t => {
+  const { project, profile } = fixture(t);
+  const previous = Date.now();
+  let now = previous;
+  const service = new BackupService(profile, () => now);
+  await service.create(project);
+  service.automatic(project, true);
+  now += backupHour;
+  renameSync(service.preferences, service.preferences + "-saved");
+  mkdirSync(service.preferences);
+
+  await service.tick();
+  assert.match(service.status(project).error ?? "", /Expected a regular file.*board-backup-settings\.json/);
+  assert.equal(service.status(project).lastSuccess, previous);
+  assert.equal(service.status(project).nextAutomatic, now);
+  assert.equal(service.status(project).backups.length, 1);
+
+  // A manual snapshot is still usable when only the preference file is blocked.
+  await assert.rejects(service.create(project), /board-backup-settings\.json/);
+  assert.equal(service.status(project).lastSuccess, now);
+  assert.equal(service.status(project).backups.length, 2);
+  fs.rmdirSync(service.preferences);
+  renameSync(service.preferences + "-saved", service.preferences);
+  now++;
+  await service.tick();
+  assert.equal(service.status(project).error, undefined);
+  assert.equal(service.status(project).lastSuccess, now);
+  assert.equal(service.status(project).nextAutomatic, now + backupHour);
+  assert.equal(service.status(project).backups.length, 3);
+});
+
+test("a snapshot defers between the unread marker and the manager reply write", t => {
+  const { project, profile, parent, store } = fixture(t);
+  const root = join(profile, "board-backups");
+  const now = Date.now();
+  const runId = randomUUID();
+  const unread = join(store.location.directory, "manager-unread.json");
+  const runPath = join(store.location.directory, "manager-chat", now + "-" + runId + ".json");
+  const rename = fs.renameSync;
+  const attempts = t.mock.method(fs, "renameSync", (from: fs.PathLike, to: fs.PathLike) => {
+    rename(from, to);
+    if (to === unread) {
+      assert.equal(existsSync(runPath), false);
+      assert.throws(() => createBackup(root, project, now), { code: "BOARD_BUSY" });
+    }
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.equal(saveManagerHistory(project, now, runId, {
+      lane: "chat",
+      items: [{ id: "reply", type: "agentMessage", phase: "final_answer", status: "completed", title: "", text: "Hello" }],
+    }), true);
+    assert.equal(attempts.mock.calls.filter(call => call.arguments[1] === unread).length, 1);
+  } finally {
+    attempts.mock.restore();
+    syncBuiltinESMExports();
+  }
+  const saved = createBackup(root, project, now);
+  const restored = restoreBackup(root, saved.id, parent, now);
+  assert.deepEqual(managerUnread(restored), ["reply"]);
+  assert.equal(readManagerHistory(restored, null, "chat")?.turns[0]?.items[0]?.text, "Hello");
+});
+
+test("restoring retains cards and pauses automatic work in external directories", t => {
+  const { project, profile, parent, store } = fixture(t);
+  const now = Date.now();
+  const root = join(profile, "board-backups");
+  const schedule = { everyMinutes: 10, nextAt: new Date(now - 1).toISOString() };
+  for (const [index, phase] of (["queued", "running", "failed"] as const).entries()) {
+    const draftDiscussion = phase === "failed" ? { phase, reason: "Previous failure" } : { phase };
+    store.create({ ...createTask("T-000" + (index + 1), { title: phase }), draftDiscussion });
+  }
+  store.create({
+    ...createTask("T-0004", { title: "Returned from discussion" }),
+    status: "in_progress",
+    discussionReturn: 1,
+    workingDirectory: profile,
+  });
+  store.create({
+    ...createTask("T-0005", { title: "Due schedule" }),
+    status: "ready",
+    schedule,
+    workingDirectory: profile,
+  });
+  const saved = createBackup(root, project, now);
+  const restored = new BoardStore(locateBoard(restoreBackup(root, saved.id, parent, now)));
+  assert.equal(restored.card("T-0001").draftDiscussion, undefined);
+  assert.equal(restored.card("T-0002").draftDiscussion, undefined);
+  assert.deepEqual(restored.card("T-0003").draftDiscussion, store.card("T-0003").draftDiscussion);
+  assert.equal(restored.card("T-0004").status, "in_progress");
+  assert.equal(restored.card("T-0004").discussionReturn, undefined);
+  assert.equal(restored.card("T-0005").status, "ready");
+  assert.deepEqual(restored.card("T-0005").schedule, { ...schedule, paused: true });
+  assert.deepEqual(restored.card("T-0005").workingDirectory, store.card("T-0005").workingDirectory);
+  assert.equal(store.card("T-0004").discussionReturn, 1);
+  assert.deepEqual(store.card("T-0005").schedule, schedule);
+  assert.deepEqual(verifyBackup(root, saved.id, now), saved);
 });

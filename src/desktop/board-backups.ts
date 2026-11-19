@@ -4,7 +4,7 @@ import {
   readdirSync, readSync, realpathSync, renameSync, rmdirSync, rmSync,
 } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
-import { BoardStore, directory, exists, locateBoard, readJson, withLock, writeJson } from "../cli/storage.ts";
+import { BoardStore, directory, exists, locateBoard, readJson, withLock, withRuntimeLock, writeJson } from "../cli/storage.ts";
 
 export const backupHour = 60 * 60 * 1000;
 export const backupLifetime = 24 * backupHour;
@@ -154,7 +154,8 @@ export function createBackup(root: string, project: string, now: number): Backup
   return withLock(root, () => {
     const staging = mkdtempSync(join(root, ".creating-"));
     try {
-      const save = (): Manifest => {
+      const data = join(staging, ".tasks");
+      const save = (): void => {
         const board = location.directory;
         const store = new BoardStore(location);
         if (exists(join(board, "test-recovery.json"))) {
@@ -167,21 +168,22 @@ export function createBackup(root: string, project: string, now: number): Backup
           return [stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(":");
         };
         const before = inventory(board, signature, true);
-        const data = join(staging, ".tasks");
         copyInventory(board, data, before);
         if (JSON.stringify(before) !== JSON.stringify(inventory(board, signature, true))) {
           throw new Error("Board files changed during backup. Retry shortly.");
         }
         validateBoard(store);
-        return { version: 1, id, project: location.root, createdAt: now, inventory: inventory(data, digest) };
       };
-      const manifest = withLock(location.directory, () => {
-        const journal = join(location.directory, "worklog");
-        // Create the shared lock even on a board that has not recorded its first block.
-        mkdirSync(journal, { recursive: true });
-        directory(journal);
-        return withLock(journal, save, 0);
+      withLock(location.directory, () => {
+        withRuntimeLock(location.directory, () => {
+          const journal = join(location.directory, "worklog");
+          // Create the shared lock even on a board that has not recorded its first block.
+          mkdirSync(journal, { recursive: true });
+          directory(journal);
+          withLock(journal, save, 0);
+        }, 0);
       }, 0);
+      const manifest: Manifest = { version: 1, id, project: location.root, createdAt: now, inventory: inventory(data, digest) };
       writeJson(join(staging, "manifest.json"), manifest);
       renameSync(staging, join(root, id));
       return descriptor(manifest);
@@ -233,6 +235,13 @@ export function restoreBackup(root: string, id: string, parent: string, now: num
         const task = store.card(taskId);
         delete task.launchRequested;
         delete task.acceptanceRepair;
+        delete task.discussionReturn;
+        if (task.draftDiscussion?.phase === "queued" || task.draftDiscussion?.phase === "running") {
+          delete task.draftDiscussion;
+        }
+        if (task.schedule && !task.schedule.paused) {
+          task.schedule.paused = true;
+        }
         if (task.reviewModeOverride?.mode === "reviewer-human") {
           task.reviewModeOverride.mode = "human";
         }
