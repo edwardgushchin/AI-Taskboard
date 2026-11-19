@@ -2136,6 +2136,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   let liveTimer: NodeJS.Timeout | undefined;
   let activityTimer: NodeJS.Timeout | undefined;
   let stopAutomation = () => {};
+  let takeAutomationErrors = (): { error: string }[] => [];
   const broadcastRun = () => {
     if (!background) broadcastBoardChat(project, "orchestrator-run", goal
       ? { managerWork: running.managerRun ?? null } : { managerRun: running.managerRun ?? null });
@@ -2550,7 +2551,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           name === "expert_stage" && stages ? stages.report(args) :
             name === "expert_verify_skills" && stages ? stages.verify(args) : run(name, args));
         if (!independent && !outOfQueue) pendingAction = pending;
-        return pending.then(result => {
+        return pending.then(reply => {
+          const automationErrors = takeAutomationErrors();
+          const result = { ...reply, ...(automationErrors.length ? { automationErrors } : {}) };
           if (reviewIds || cleanupJob) return result;
           if (name === "task_review" && result.ok) {
             const { id, reviewMode, stale } = result.data as { id: string; reviewMode: ReviewMode; stale: boolean };
@@ -2675,11 +2678,12 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           }
           if (!cleanupJob && !repairTask) {
             stopAutomation();
-            const automation = automationDelivery(text => control.steer(text, []), () => {
-              waitWork.abort();
+            const automation = automationDelivery(() => {
+              waitWork.abort("automation");
               waitWork = new AbortController();
             }, signal);
             running.automationEvent = event => automation.event(event);
+            takeAutomationErrors = () => automation.takeErrors();
             const observeAutomation = (snapshot: Board) => {
               const entries = agentSlots.entries(project);
               automation.observe(snapshot, id => ({
