@@ -1,5 +1,6 @@
 // Run with Node.js. Use --artifacts <directory> to retain screenshots and a report.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -72,6 +73,70 @@ app.whenReady().then(async () => {
     };
     await set([codex]);
     page.debugger.attach();
+    win.setContentSize(1280, 800);
+    const position = await evaluate(`(() => {
+      const rect = button.getBoundingClientRect();
+      return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
+    })()`);
+    const mouse = (type, point, extra = {}) =>
+      page.debugger.sendCommand("Input.dispatchMouseEvent", { type, ...point, ...extra });
+
+    for (const theme of ["light", "dark"]) {
+      nativeTheme.themeSource = theme;
+      await mouse("mouseMoved", { x: 200, y: 100 });
+      for (const remaining of [1, 10, 11, 19]) {
+        await set([{ ...codex, windows: [{ ...weekly, remaining }] }]);
+        const low = remaining <= 10;
+        for (const hovered of [false, true]) {
+          await mouse("mouseMoved", hovered ? position : { x: 200, y: 100 });
+          await settle();
+          await check(`(() => {
+            const expected = document.createElement("span");
+            expected.style.color = ${low} ? "var(--accent)" : "inherit";
+            button.parentElement.append(expected);
+            const color = getComputedStyle(expected).color;
+            expected.remove();
+            const warning = taskboardLocalization.text("limits.low");
+            const label = button.getAttribute("aria-label");
+            return matchMedia("(prefers-color-scheme: ${theme})").matches &&
+              innerWidth === 1280 && innerHeight === 800 &&
+              button.matches(":hover") === ${hovered} &&
+              button.textContent === "Лимиты ${remaining}%" &&
+              button.classList.contains("quota-low") === ${low} &&
+              label === button.title && label.includes("${remaining}%") && label.includes(warning) === ${low} &&
+              [button, ...button.children].every(element => {
+                const style = getComputedStyle(element);
+                return style.color === color && style.textDecorationLine === "none";
+              });
+          })()`, `${theme}: ${remaining}%, ${hovered ? "hover" : "rest"}, color, no underline and accessible label`);
+        }
+      }
+
+      await mouse("mouseMoved", { x: 200, y: 100 });
+      await set([{ ...codex, windows: [{ ...weekly, remaining: 1 }] }]);
+      await evaluate("button.blur()");
+      await key("Tab", "Tab", 9);
+      await check(`document.activeElement === button && button.matches(":focus-visible") &&
+        getComputedStyle(button).outlineStyle === "solid" && getComputedStyle(button).outlineWidth === "2px"`,
+      `${theme}: Tab shows the focus outline at 1%`);
+      await evaluate("document.fonts.ready.then(() => true)");
+      const screenshot = await page.capturePage({ x: 0, y: 750, width: 320, height: 50 });
+      writeFileSync(join(artifacts, `limits-accent-${theme}.png`), screenshot.toPNG());
+      await key("Enter", "Enter", 13, "\r");
+      await check('popup.matches(":popover-open") && button.getAttribute("aria-expanded") === "true" && document.activeElement === popup',
+        `${theme}: Enter opens the panel and moves focus inside`);
+      await key("Escape", "Escape", 27);
+      await check('!popup.matches(":popover-open") && document.activeElement === button',
+        `${theme}: Escape closes the panel and returns focus`);
+      await set([codex]);
+      await mouse("mousePressed", position, { button: "left", clickCount: 1 });
+      await mouse("mouseReleased", position, { button: "left", clickCount: 1 });
+      await settle();
+      await check('popup.matches(":popover-open") && button.getAttribute("aria-expanded") === "true"',
+        `${theme}: click opens the panel at 19%`);
+      await key("Escape", "Escape", 27);
+    }
+
     await evaluate("button.focus()");
     await key("Enter", "Enter", 13, "\r");
     await check('popup.matches(":popover-open") && button.getAttribute("aria-expanded") === "true" && document.activeElement === popup',
@@ -146,6 +211,17 @@ app.whenReady().then(async () => {
       `Electron ${process.versions.electron}, Chromium ${process.versions.chrome}, ${process.platform} ${process.arch}`,
       "Command: node scripts/check-provider-limits.mjs --artifacts .tasks/qa",
       "Production markup, styles and renderer with fixture responses at the providerLimits boundary.",
+      "Accent screenshots show the lower-left crop of the 1280×800 Electron viewport with keyboard focus.",
+      "SHA-256 of the tested files as read from the checkout (raw bytes):",
+      ...["index.html", "themes.css", "styles.css", "provider-limits.js", "localization.cjs",
+        "vendor/codicons/codicon.css", "vendor/codicons/codicon.ttf"].map(name => {
+        const bytes = readFileSync(new URL("../src/desktop/" + name, import.meta.url));
+        return `${createHash("sha256").update(bytes).digest("hex")}  src/desktop/${name}`;
+      }),
+      ...["check-provider-limits.mjs", "electron-check.mjs"].map(name => {
+        const bytes = readFileSync(new URL(name, import.meta.url));
+        return `${createHash("sha256").update(bytes).digest("hex")}  scripts/${name}`;
+      }),
       ...results.map(result => "PASS " + result),
     ].join("\n");
     writeFileSync(join(artifacts, "provider-limits-check.txt"), report + "\n");

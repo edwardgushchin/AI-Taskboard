@@ -1178,7 +1178,8 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 #status-agents:focus-visible { outline: 1px solid currentColor; }
 #status-limits { anchor-name: --provider-limits; flex: 0 1 auto; min-width: 36px; max-width: 150px; }
 #status-limits span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#status-limits.quota-low { font-weight: bold; text-decoration: underline dotted; }
+#status-limits.quota-low { font-weight: bold; }
+#status-limits.quota-low, #status-limits.quota-low:hover:not(:disabled) { color: var(--accent); }
 #provider-limits {
   position: fixed; position-anchor: --provider-limits;
   inset: auto auto calc(anchor(top) + 8px) clamp(8px, anchor(left), calc(100vw - 398px));
