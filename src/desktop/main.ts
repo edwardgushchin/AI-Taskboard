@@ -1151,6 +1151,13 @@ type ManagerRequest = {
 };
 const boardRequests = new Map<string, ManagerRequest>();
 const boardGoalClears = new Map<string, ReturnType<typeof changeBoardGoal>>();
+const boardGoalResumes = new Map<string, {
+  binding: string;
+  saved: NonNullable<ReturnType<typeof readBoardThread>>;
+  objective: string;
+  started: boolean;
+  cancelled: boolean;
+}>();
 const boardWorkRequests = new Map<string, ManagerRequest>();
 const backgroundManagerRequests = new Map<string, ManagerRequest>();
 enableSharedRuns();
@@ -1573,7 +1580,7 @@ async function prepareBoardAttachments(files: PastedFile[], scratch: Set<string>
   return attachments;
 }
 
-function broadcastBoardChat(project: string, type: string, details: { id?: string; goal?: BoardGoal | null; goalRunning?: boolean; error?: string;
+function broadcastBoardChat(project: string, type: string, details: { id?: string; goal?: BoardGoal | null; goalRunning?: boolean; goalResuming?: boolean; error?: string;
   question?: ManagerQuestion | null; managerRun?: ManagerRun | null;
   managerWork?: ManagerRun | null; items?: RunActivity[] } = {}, except?: Electron.WebContents) {
   for (const { window, tabs } of windowStates.values()) {
@@ -1729,7 +1736,7 @@ ipcMain.handle("board:history", async (event, project?: string, cursor: unknown 
     const goalRunning = Boolean(boardWorkRequests.get(key)?.goalRunning ?? shared?.goalRunning);
     return { ok: true, data: { turns: [], nextCursor: null, ...data,
       goal: saved?.goal !== undefined ? saved.goal : (data && "goal" in data ? data.goal : undefined),
-      model: data?.model ?? board.settings.manager?.model, goalRunning } };
+      model: data?.model ?? board.settings.manager?.model, goalRunning, goalResuming: boardGoalResumes.has(key) } };
   } catch (error) {
     return cliFailure("BOARD_HISTORY_FAILED", (error as Error).message);
   }
@@ -1806,12 +1813,18 @@ ipcMain.handle("board:answerQuestion", (event, id: unknown, answer: unknown) => 
 });
 
 ipcMain.handle("board:goal", async (event, kind: unknown, objective: unknown) => {
-  const project = stateOf(event).board?.project;
+  const board = stateOf(event).board;
+  const project = board?.project;
+  if (board && kind === "resume" && typeof objective === "string") {
+    return resumeBoardGoal(event.sender, board, objective);
+  }
   if (!project || (kind !== "pause" && kind !== "clear" && (kind !== "edit" || typeof objective !== "string" || !objective.trim()))) {
     return cliFailure("INVALID_INPUT", t("ui.choose_an_action_for_the_project_goal_43bfd434"));
   }
   const action: BoardGoalAction = kind === "edit" ? { kind, objective: (objective as string).trim() } : { kind };
   const key = projectIdentity(project);
+  const resume = boardGoalResumes.get(key);
+  if (resume && !resume.started && kind === "clear") resume.cancelled = true;
   if (kind !== "clear") return changeBoardGoal(project, key, action);
   const pending = boardGoalClears.get(key);
   if (pending) return pending;
@@ -1820,6 +1833,41 @@ ipcMain.handle("board:goal", async (event, kind: unknown, objective: unknown) =>
   try { return await clear; }
   finally { boardGoalClears.delete(key); }
 });
+
+async function resumeBoardGoal(sender: Electron.WebContents, board: Board, objective: string) {
+  const { project } = board;
+  const key = projectIdentity(project);
+  if (boardGoalResumes.has(key) || boardGoalClears.has(key) || boardWorkRequests.get(key)?.goalRunning) {
+    return { ok: true, data: null } as const;
+  }
+  try {
+    const binding = boardThreadPath(project);
+    const saved = readBoardThread(binding);
+    const legacyGoal = saved?.goal === undefined && saved?.history !== "local";
+    if (!saved || (!legacyGoal && (saved.goal?.objective !== objective || saved.goal.status === "complete"))) {
+      return cliFailure("INVALID_INPUT", t("ui.there_is_no_saved_goal_67c98597"));
+    }
+    const pending = { binding, saved, objective, started: false, cancelled: false };
+    boardGoalResumes.set(key, pending);
+    try {
+      broadcastBoardChat(project, "orchestrator-goal", { goalResuming: true });
+      while (!pending.cancelled) {
+        const result = await runBoardRequest(sender, board, "", [], "resume");
+        if (result.ok) {
+          return result.data?.error ? cliFailure("BOARD_GOAL_FAILED", result.data.error) : { ok: true, data: null } as const;
+        }
+        if (pending.started || !["BOARD_REQUEST_IN_PROGRESS", "BOARD_BUSY"].includes(result.error.code)) return result;
+        await wait(100);
+      }
+      return { ok: true, data: null } as const;
+    } finally {
+      boardGoalResumes.delete(key);
+      broadcastBoardChat(project, "orchestrator-goal", { goalResuming: false });
+    }
+  } catch (error) {
+    return cliFailure("BOARD_GOAL_FAILED", (error as Error).message);
+  }
+}
 
 async function changeBoardGoal(project: string, key: string, action: BoardGoalAction) {
   const running = boardWorkRequests.get(key);
@@ -1877,6 +1925,7 @@ ipcMain.handle("board:request", async (event, request: unknown, files: unknown =
   const state = stateOf(event);
   const board = project === undefined || state.board?.project === project ? state.board :
     windowStates.get(state.window.webContents.id)?.tabs.find(tab => tab.board?.project === project)?.board;
+  if (goal === "resume") return cliFailure("INVALID_INPUT", t("ui.choose_an_action_for_the_project_goal_43bfd434"));
   if (goalRunId !== undefined) {
     const work = board && boardWorkRequests.get(projectIdentity(board.project));
     if (immediate !== true || typeof goalRunId !== "string" || !work?.goalRunning || work.managerRun?.id !== goalRunId) {
@@ -1958,7 +2007,10 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   }
   const busy = background ? backgroundManagerRequests.has(projectKey) :
     boardRequests.has(projectKey) || boardWorkRequests.has(projectKey);
-  if (busy) return cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_agent_is_already_handling_a_request_72b4da49"));
+  const resume = boardGoalResumes.get(projectKey);
+  if (busy || (!background && goal !== "resume" && resume && !resume.cancelled)) {
+    return cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_agent_is_already_handling_a_request_72b4da49"));
+  }
   if (closingProjects.has(board.project)) return cliFailure("PROJECT_CLOSING", t("ui.the_project_is_closing_beb637fb"));
   const claimWriter = () => agentSlots.claim(board.project, context);
   let writer;
@@ -1977,6 +2029,17 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   // Another window may have delivered, edited or removed the message before this claim.
   let queued: QueuedBoardMessage | undefined;
   try {
+    if (goal === "resume") {
+      const binding = boardThreadPath(board.project);
+      const current = readBoardThread(binding);
+      if (!resume || resume.cancelled || binding !== resume.binding || !current || current.id !== resume.saved.id ||
+          current.goalId !== resume.saved.goalId || current.goal?.objective !== resume.saved.goal?.objective ||
+          current.goal?.status !== resume.saved.goal?.status) {
+        writer();
+        return { ok: true, data: { answer: "", changes: [] } } as const;
+      }
+      resume.started = true;
+    }
     if (queuedPath) {
       const selection = runtimeTransaction(board.project, entries => {
         const pending = readQueuedMessage(queuedPath);
@@ -2218,6 +2281,13 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     threadId = stored?.id;
     goalId = goal === true ? randomUUID() : stored?.goalId ?? stored?.id;
     if (goal === "resume" && !threadId) return cliFailure("INVALID_INPUT", t("ui.there_is_no_saved_goal_67c98597"));
+    if (goal === "resume" && resume && stored?.goal === undefined && threadId) {
+      // Older bindings get their goal from the provider. Check it under the same writer claim.
+      const { goal: legacyGoal } = await readBoardHistory(app.getPath("userData"), project, threadId);
+      if (legacyGoal?.objective !== resume.objective || legacyGoal.status === "complete") {
+        return cliFailure("INVALID_INPUT", t("ui.there_is_no_saved_goal_67c98597"));
+      }
+    }
     const settings = await callCli<BoardSettings>(board.project, ["settings"]);
     if (!settings.ok) return settings;
     const settingsNotices = settingsDelivery(project, background ? "background" : lane, () => syncSettingsNotices(project, agentSlots.inherited(project)));
