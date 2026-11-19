@@ -145,7 +145,7 @@ if (!process.versions.electron) {
         const nextResumed = resumed.find(id => id !== firstResumed);
         if (output && !autoMode) {
           mkdirSync(output, { recursive: true });
-          await wait(async () => (await restarted.ask({ action: "dom" }))[0].waiting, "queue caption");
+          await wait(async () => (await restarted.ask({ action: "dom" }))[0].waiting, "queue indicator");
           await restarted.ask({ action: "screenshot", path: join(output, "task-restart-queue.png") });
         }
         for (const id of [firstResumed, nextResumed]) {
@@ -828,7 +828,12 @@ if (!process.versions.electron) {
       if (command.action === "closeRestored") { globalThis.restoredCheckWindow.close(); data = true; }
       if (command.action === "newWindow") { const state = qa.createWindow([project]); await state.ready; data = true; }
       if (command.action === "compactWindows") for (const win of BrowserWindow.getAllWindows()) win.setSize(700, 550);
-      if (command.action === "dom") data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript(`({ count: Number(document.querySelector('#status-agents span')?.textContent), waiting: document.body.innerText.includes('В очереди') || document.body.innerText.includes('Waiting for an available executor') })`)));
+      if (command.action === "dom") {
+        data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript(`({
+          count: Number(document.querySelector('#status-agents span')?.textContent),
+          waiting: Boolean(document.querySelector('.task-card .task-queue-indicator'))
+        })`)));
+      }
       if (command.action === "order") data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript(`(() => {
         const titles = state => [...document.querySelectorAll('#lane-cards-' + state + ' .task-card-heading strong')].map(node => node.textContent);
         return { execution: titles('in_progress'), review: titles('review'), more: Boolean(document.querySelector('#lane-cards-in_progress .lane-more')) };
