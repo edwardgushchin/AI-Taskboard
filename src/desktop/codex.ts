@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
@@ -8,6 +8,7 @@ import type { Task } from "../cli/model.ts";
 import { taskIdPattern } from "../cli/model.ts";
 import { directory, readJson, writeJson } from "../cli/storage.ts";
 import { callCli, cliFailure } from "./cli.ts";
+import { codexRpc } from "./codex-rpc.ts";
 import { projectIdentity } from "./project-tabs.ts";
 
 const run = promisify(execFile);
@@ -24,6 +25,10 @@ interface Client extends Launch {
 }
 
 type WindowsSandbox = "mxc" | "elevated";
+export type CodexAuthMode = "profile" | "api";
+type CodexAccount = "chatgpt" | "apiKey" | "signedOut" | "unknown";
+type CodexAuthResult = "verified" | "applied" | "savedApplied" | "invalidFormat" | "invalidKey" | "network" | "apiError" |
+  "storageError" | "noKey" | "unavailable";
 
 export interface CodexStatus {
   state: "unavailable" | "ready" | "error";
@@ -31,6 +36,8 @@ export interface CodexStatus {
   clientPath?: string;
   clientVersion?: string;
   windowsSandbox?: WindowsSandbox;
+  authMode?: CodexAuthMode;
+  account?: CodexAccount;
   error?: string;
 }
 
@@ -46,10 +53,13 @@ function isFile(path: string): boolean {
 
 function preferences(directory: string) {
   const path = join(directory, "codex.json");
-  const value = existsSync(path) ? readJson(path) as { executable?: unknown; windowsSandbox?: unknown } : undefined;
+  const value = existsSync(path)
+    ? readJson(path) as { executable?: unknown; windowsSandbox?: unknown; authMode?: unknown }
+    : undefined;
   const executable = typeof value?.executable === "string" && isAbsolute(value.executable) ? value.executable : undefined;
   const windowsSandbox: WindowsSandbox = value?.windowsSandbox === "elevated" ? "elevated" : "mxc";
-  return { executable, windowsSandbox: process.platform === "win32" ? windowsSandbox : undefined };
+  return { executable, windowsSandbox: process.platform === "win32" ? windowsSandbox : undefined,
+    authMode: value?.authMode === "api" ? "api" as const : "profile" as const };
 }
 
 export function executorFullAccess(dataDirectory: string, project: string, task: Pick<Task, "id" | "createdAt">, enabled?: boolean): boolean {
@@ -233,7 +243,7 @@ async function findClient(dataDirectory: string, selectedPath?: string, windowsS
 
 const configuredClients = new Map<string, { selected?: string; windowsSandbox?: WindowsSandbox; expires: number; client: Promise<Client | undefined> }>();
 
-export function configuredCodex(dataDirectory: string) {
+function detectedCodex(dataDirectory: string) {
   const { executable: selected, windowsSandbox } = preferences(dataDirectory);
   const cached = configuredClients.get(dataDirectory);
   if (cached && cached.selected === selected && cached.windowsSandbox === windowsSandbox && cached.expires > Date.now()) return cached.client;
@@ -245,15 +255,110 @@ export function configuredCodex(dataDirectory: string) {
   return client;
 }
 
+function withAuthMode(client: Client, dataDirectory: string, mode: CodexAuthMode): Client {
+  if (mode === "profile") return client;
+  const home = join(dataDirectory, "codex-api");
+  directory(home, true);
+  const env = { ...(client.env ?? process.env) };
+  for (const name of Object.keys(env)) {
+    if (/^(CODEX_HOME|OPENAI_API_KEY|CODEX_API_KEY|CODEX_ACCESS_TOKEN)$/i.test(name)) delete env[name];
+  }
+  env.CODEX_HOME = home;
+  return { ...client, env, args: [...client.args, "-c", 'cli_auth_credentials_store="keyring"', "-c", 'forced_login_method="api"'] };
+}
+
+export function codexAuthMode(dataDirectory: string): CodexAuthMode {
+  return preferences(dataDirectory).authMode;
+}
+
+export async function configuredCodex(dataDirectory: string) {
+  const mode = codexAuthMode(dataDirectory);
+  const client = await detectedCodex(dataDirectory);
+  return client && withAuthMode(client, dataDirectory, mode);
+}
+
+async function withAccountServer<T>(client: Client, action: (rpc: ReturnType<typeof codexRpc>) => Promise<T>): Promise<T> {
+  const child = spawn(client.path, [...client.args, "app-server"], {
+    env: client.env, windowsHide: true, stdio: ["pipe", "pipe", "ignore"],
+  });
+  const closed = new Promise<void>(resolve => child.once("close", resolve));
+  const rpc = codexRpc(child, () => {});
+  const timeout = setTimeout(() => rpc.fail(new Error("Codex account request timed out.")), 10_000);
+  try {
+    await rpc.request("initialize", { clientInfo: { name: "ai_taskboard", version: "0.1.0" } });
+    rpc.send({ method: "initialized" });
+    return await action(rpc);
+  } finally {
+    clearTimeout(timeout);
+    rpc.close();
+    child.stdin.end();
+    child.kill();
+    await closed;
+  }
+}
+
+async function readAccount(rpc: ReturnType<typeof codexRpc>): Promise<CodexAccount> {
+  const { account, requiresOpenaiAuth } = await rpc.request<{
+    account: { type: string } | null;
+    requiresOpenaiAuth: boolean;
+  }>("account/read", {});
+  if (account?.type === "apiKey" || account?.type === "chatgpt") return account.type;
+  return account === null && requiresOpenaiAuth ? "signedOut" : "unknown";
+}
+
+export async function setCodexAuth(dataDirectory: string, mode: CodexAuthMode, key: string): Promise<CodexAuthResult> {
+  if (mode === "api" && key !== "") {
+    if (key.length < 4 || key.length > 512 || !key.startsWith("sk-") || /[^A-Za-z0-9_-]/.test(key)) {
+      return "invalidFormat";
+    }
+    try {
+      const response = await fetch("https://api.openai.com/v1/models", {
+        headers: { Authorization: "Bearer " + key },
+        redirect: "error",
+        signal: AbortSignal.timeout(10_000),
+      });
+      await response.body?.cancel();
+      if (response.status === 401) return "invalidKey";
+      if (!response.ok) return "apiError";
+    } catch {
+      return "network";
+    }
+  }
+  const client = await detectedCodex(dataDirectory);
+  if (!client) return "unavailable";
+  try {
+    if (mode === "api") {
+      const apiClient = withAuthMode(client, dataDirectory, mode);
+      if (key) {
+        await withAccountServer(apiClient, async rpc => {
+          const result = await rpc.request<{ type: string }>("account/login/start", { type: "apiKey", apiKey: key });
+          if (result.type !== "apiKey") throw new Error("Codex did not accept API-key login.");
+        });
+      }
+      // Read a fresh process to confirm the credential survived shutdown.
+      if (await withAccountServer(apiClient, readAccount) !== "apiKey") return key ? "storageError" : "noKey";
+    }
+    directory(dataDirectory, true);
+    writeJson(join(dataDirectory, "codex.json"), { ...preferences(dataDirectory), authMode: mode });
+    if (mode === "profile") return "applied";
+    return key ? "verified" : "savedApplied";
+  } catch {
+    // Credential operations can contain provider diagnostics. Do not forward them to IPC or logs.
+    return "storageError";
+  }
+}
+
 export async function codexStatus(dataDirectory: string): Promise<CodexStatus> {
   let selectedPath: string | undefined;
   let windowsSandbox: WindowsSandbox | undefined;
   try {
-    ({ executable: selectedPath, windowsSandbox } = preferences(dataDirectory));
-    const client = await findClient(dataDirectory, selectedPath, windowsSandbox);
-    return client
-      ? { state: "ready", selectedPath, clientPath: client.path, clientVersion: client.version, windowsSandbox }
-      : { state: "unavailable", selectedPath, windowsSandbox };
+    const settings = preferences(dataDirectory);
+    ({ executable: selectedPath, windowsSandbox } = settings);
+    const { authMode } = settings;
+    const client = await configuredCodex(dataDirectory);
+    if (!client) return { state: "unavailable", selectedPath, windowsSandbox, authMode };
+    const account = await withAccountServer(client, readAccount).catch(() => "unknown" as const);
+    return { state: "ready", selectedPath, clientPath: client.path, clientVersion: client.version, windowsSandbox, authMode, account };
   } catch (error) {
     return { state: "error", selectedPath, windowsSandbox, error: (error as Error).message };
   }

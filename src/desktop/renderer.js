@@ -4570,13 +4570,56 @@ function codexSettings() {
   sandboxLabel.hidden = true;
   sandbox.addEventListener("change", () => update(() => api.setCodexWindowsSandbox(sandbox.value)));
   actions.append(choose, auto, refresh);
-  section.append(status, details, actions, sandboxLabel);
+  const accountStatus = element("p", undefined, "muted");
+  accountStatus.setAttribute("role", "status");
+  const modeLabel = element("label", () => t("codexAuth.mode"));
+  const mode = element("select");
+  mode.append(localizedOption(() => t("codexAuth.profile"), "profile"),
+    localizedOption(() => t("codexAuth.api"), "api"));
+  modeLabel.append(mode);
+  const keyLabel = element("label", () => t("codexAuth.key"));
+  const key = element("input");
+  key.type = "password";
+  key.autocomplete = "off";
+  key.spellcheck = false;
+  key.maxLength = 512;
+  keyLabel.append(key);
+  const authFeedback = element("p", undefined, "muted");
+  authFeedback.setAttribute("role", "status");
+  const apply = button(() => t("codexAuth.apply"), async () => {
+    const credential = mode.value === "api" ? key.value : "";
+    key.value = "";
+    refreshApplyLabel();
+    await update(async () => {
+      const result = await api.setCodexAuth(mode.value, credential);
+      bindLocalized(authFeedback, "textContent", () => t("codexAuth." + result.outcome));
+      return result.status ?? api.codexStatus();
+    }, false);
+  });
+  const billing = element("p", () => t("codexAuth.billing"), "muted");
+  function refreshApplyLabel() {
+    const label = mode.value === "api" && key.value !== "" ? "codexAuth.checkAndApply" : "codexAuth.apply";
+    bindLocalized(apply, "textContent", () => t(label));
+  }
+  function showKey() {
+    keyLabel.hidden = mode.value !== "api";
+    if (keyLabel.hidden) key.value = "";
+    refreshApplyLabel();
+  }
+  key.addEventListener("input", refreshApplyLabel);
+  mode.addEventListener("change", () => {
+    authFeedback.textContent = "";
+    showKey();
+  });
+  showKey();
+  section.append(status, details, actions, sandboxLabel, accountStatus, modeLabel, keyLabel, billing, apply, authFeedback);
   body.append(section);
 
   let savedSandbox;
-  async function update(load) {
+  async function update(load, syncMode = true) {
     for (const item of actions.children) item.disabled = true;
     sandbox.disabled = true;
+    for (const control of [mode, key, apply]) control.disabled = true;
     bindLocalized(status, "textContent", () => t("ui.checking_codex_cd8163c2"));
     try {
       const result = await load();
@@ -4591,6 +4634,11 @@ function codexSettings() {
       auto.hidden = !result.selectedPath;
       savedSandbox = result.windowsSandbox;
       sandboxLabel.hidden = !savedSandbox;
+      if (syncMode || result.authMode === mode.value) {
+        mode.value = result.authMode ?? "profile";
+        showKey();
+      }
+      bindLocalized(accountStatus, "textContent", () => t("codexAuth.account." + (result.account ?? "unknown")));
     } catch (error) {
       bindLocalized(status, "textContent", () => t("ui.could_not_check_codex_a3675ed8"));
       details.textContent = error.message;
@@ -4598,6 +4646,7 @@ function codexSettings() {
       for (const item of actions.children) item.disabled = false;
       if (savedSandbox) sandbox.value = savedSandbox;
       sandbox.disabled = false;
+      for (const control of [mode, key, apply]) control.disabled = false;
     }
   }
 

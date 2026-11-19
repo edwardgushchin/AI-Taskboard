@@ -63,6 +63,7 @@ contextBridge.exposeInMainWorld("taskboard", {
   onProviderLimitsChanged: listener => { ipcRenderer.on("providers:changed", () => listener()); },
   providerLimits: () => ipcRenderer.invoke("providers:limits"),
   codexStatus: () => ipcRenderer.invoke("codex:status"),
+  setCodexAuth: (mode, key) => ipcRenderer.invoke("codex:auth", mode, key),
   executionModels: () => ipcRenderer.invoke("codex:executionModels"),
   setTaskAccess: (project, id, createdAt, fullAccess) => ipcRenderer.invoke("codex:taskAccess", project, id, createdAt, fullAccess),
   setManagerAccess: (project, mode) => ipcRenderer.invoke("codex:managerAccess", project, mode),
