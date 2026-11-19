@@ -4589,6 +4589,7 @@ function codexSettings() {
   const apply = button(() => t("codexAuth.apply"), async () => {
     const credential = mode.value === "api" ? key.value : "";
     key.value = "";
+    refreshApplyLabel();
     await update(async () => {
       const result = await api.setCodexAuth(mode.value, credential);
       bindLocalized(authFeedback, "textContent", () => t("codexAuth." + result.outcome));
@@ -4596,10 +4597,16 @@ function codexSettings() {
     }, false);
   });
   const billing = element("p", () => t("codexAuth.billing"), "muted");
+  function refreshApplyLabel() {
+    const label = mode.value === "api" && key.value !== "" ? "codexAuth.checkAndApply" : "codexAuth.apply";
+    bindLocalized(apply, "textContent", () => t(label));
+  }
   function showKey() {
     keyLabel.hidden = mode.value !== "api";
     if (keyLabel.hidden) key.value = "";
+    refreshApplyLabel();
   }
+  key.addEventListener("input", refreshApplyLabel);
   mode.addEventListener("change", () => {
     authFeedback.textContent = "";
     showKey();

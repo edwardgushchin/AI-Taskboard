@@ -27,7 +27,7 @@ interface Client extends Launch {
 type WindowsSandbox = "mxc" | "elevated";
 export type CodexAuthMode = "profile" | "api";
 type CodexAccount = "chatgpt" | "apiKey" | "signedOut" | "unknown";
-type CodexAuthResult = "verified" | "invalidFormat" | "invalidKey" | "network" | "apiError" |
+type CodexAuthResult = "verified" | "applied" | "savedApplied" | "invalidFormat" | "invalidKey" | "network" | "apiError" |
   "storageError" | "noKey" | "unavailable";
 
 export interface CodexStatus {
@@ -340,7 +340,8 @@ export async function setCodexAuth(dataDirectory: string, mode: CodexAuthMode, k
     }
     directory(dataDirectory, true);
     writeJson(join(dataDirectory, "codex.json"), { ...preferences(dataDirectory), authMode: mode });
-    return "verified";
+    if (mode === "profile") return "applied";
+    return key ? "verified" : "savedApplied";
   } catch {
     // Credential operations can contain provider diagnostics. Do not forward them to IPC or logs.
     return "storageError";

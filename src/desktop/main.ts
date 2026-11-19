@@ -4325,7 +4325,7 @@ ipcMain.handle("codex:auth", async (event, mode: unknown, key: unknown) => {
   try {
     const previous = codexAuthMode(profile);
     const outcome = await setCodexAuth(profile, mode, key);
-    if (outcome === "verified") {
+    if (outcome === "verified" || outcome === "applied" || outcome === "savedApplied") {
       if (previous !== mode) updateQuota(undefined);
       resetProviderLimits();
     }
