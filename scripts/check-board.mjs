@@ -125,6 +125,11 @@ app.whenReady().then(async () => {
     console.log(`Show More Chromium checks passed: ${checks}`);
     return;
   }
+  if (process.argv.includes("--subtask-fill")) {
+    const { checkSubtaskFill } = await import("./check-subtask-fill.mjs");
+    await checkSubtaskFill({ window, evaluate, check, artifacts, root });
+    return;
+  }
   if (cardSpacingOnly) {
     window.setContentSize(1280, 800);
     await evaluate(`
@@ -800,9 +805,12 @@ app.whenReady().then(async () => {
       for (const states of [[false, false, false], [true, false, true], [false, true, true], [true, true, true]]) {
         const count = states.filter(Boolean).length;
         await evaluate(`
-          progressTask.subtasks.forEach((entry, index) => { entry.done = ${JSON.stringify(states)}[index]; });
+          progressTask.subtasks.forEach((entry, index) => {
+            entry.done = ${JSON.stringify(states)}[index];
+          });
           progressTask.revision++;
-          push(); settle();
+          push();
+          settle().then(() => waitFor(() => progress().getAnimations({ subtree: true }).length === 0));
         `);
         await check(`(() => {
           const states = ${JSON.stringify(states)};
@@ -812,8 +820,11 @@ app.whenReady().then(async () => {
           return findCard(progressTask.id) === progressCard && fitsInOneRow(states) &&
             bars().every((bar, i) => {
               const color = getComputedStyle(bar).backgroundColor;
-              return states[i] ? color === accent : color !== accent &&
-                segmentColor(bar).every((channel, j) => Math.abs(channel - neutral[j]) <= 1);
+              if (states[i]) {
+                const fill = getComputedStyle(bar, '::before');
+                return fill.backgroundColor === accent && fill.transform === 'matrix(1, 0, 0, 1, 0, 0)';
+              }
+              return color !== accent && segmentColor(bar).every((channel, j) => Math.abs(channel - neutral[j]) <= 1);
             }) &&
             cover && !cover.hidden && cover.nextElementSibling === progress() && progress().nextElementSibling === meta() &&
             meta().scrollWidth <= meta().clientWidth && meta().querySelector('.task-id').textContent === progressTask.id &&
@@ -828,7 +839,7 @@ app.whenReady().then(async () => {
         assert.match(accessible.description.value, new RegExp(`${count}/3$`));
         if (!narrow && states[0] && !states[1]) {
           const { accent, segments } = await evaluate(`({ accent: activeAccent(),
-            segments: bars().map(bar => getComputedStyle(bar).backgroundColor) })`);
+            segments: bars().map(bar => getComputedStyle(bar, bar.classList.contains('is-done') ? '::before' : null).backgroundColor) })`);
           console.log(`Progress colors (${theme}): --accent = ${accent}, segments = ${segments.join(" / ")}`);
           await capture(`progress-accent-${theme}.png`);
         }

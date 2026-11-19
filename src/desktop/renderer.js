@@ -1065,7 +1065,21 @@ function card(task) {
     if (!runStatus.hidden) item.append(runStatus);
     item.append(meta);
   }
-  card.replaceChildren(item);
+  if (oldDetails) {
+    const children = [...item.childNodes];
+    const progress = oldDetails.querySelector(".task-subtask-progress");
+    const nextProgress = item.querySelector(".task-subtask-progress");
+    if (progress && nextProgress && progress.childElementCount === subtasks.length) {
+      // Keep the connected segments so CSS can continue or reverse an in-flight fill.
+      for (const [index, bar] of [...progress.children].entries()) {
+        bar.classList.toggle("is-done", subtasks[index].done);
+      }
+      children[children.indexOf(nextProgress)] = progress;
+    }
+    syncChildren(oldDetails, children);
+  } else {
+    card.replaceChildren(item);
+  }
   boardCards.set(task.id, { node: card, signature });
   return card;
 }
