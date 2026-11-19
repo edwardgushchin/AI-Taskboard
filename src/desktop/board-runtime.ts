@@ -81,7 +81,7 @@ function liveEntries(entries: RuntimeEntry[]) {
 
 function queueRestart(entries: RuntimeEntry[], slot: RuntimeEntry, quotaPaused?: boolean) {
   const { task, revision, restart, continuation } = slot;
-  if (slot.kind !== "slot" || !task || revision === undefined || !restart ||
+  if (slot.kind !== "slot" || !task || revision === undefined || (!restart && !quotaPaused) ||
       entries.some(entry => entry.kind === "queue" && entry.task === task)) return;
   entries.push({ id: slot.id, kind: "queue", owner: 0, task, revision, restart, continuation, quotaPaused });
 }
@@ -89,9 +89,10 @@ function queueRestart(entries: RuntimeEntry[], slot: RuntimeEntry, quotaPaused?:
 export function rememberExecutor(project: string, task: QueuedTask, cwd: string, continuation: RuntimeEntry["continuation"]) {
   runtimeTransaction(project, entries => {
     const slot = entries.find(entry => entry.id === context.getStore() && entry.kind === "slot" && entry.task === task.id);
-    if (slot && task.status === "in_progress" && task.codexThreadId) {
+    if (slot && task.status === "in_progress") {
       slot.revision = task.revision;
-      slot.restart = { threadId: task.codexThreadId, cwd };
+      if (task.codexThreadId) slot.restart = { threadId: task.codexThreadId, cwd };
+      else delete slot.restart;
       slot.continuation = continuation;
     }
   });
@@ -99,7 +100,11 @@ export function rememberExecutor(project: string, task: QueuedTask, cwd: string,
 
 export function forgetExecutor(project: string, task: string) {
   runtimeTransaction(project, entries => {
-    for (const entry of entries) if (entry.kind === "slot" && entry.task === task) delete entry.restart;
+    for (const entry of entries) {
+      if (entry.kind !== "slot" || entry.task !== task) continue;
+      delete entry.restart;
+      delete entry.revision;
+    }
     const index = entries.findIndex(entry => entry.kind === "queue" && entry.task === task);
     if (index >= 0) entries.splice(index, 1);
   });

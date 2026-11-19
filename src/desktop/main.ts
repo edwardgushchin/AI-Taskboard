@@ -230,8 +230,10 @@ function frame(state: ProjectTab) {
     quotaWait: quotaWait && state.board && !isManual(state.board.settings) ? quotaWait : undefined,
     quotaTasks: quotaWait ? state.board?.tasks.filter(task => task.status === "ready" ||
       (task.status === "in_progress" && sharedRuns.some(entry => matchesQueuedExecutor(entry, task))) ||
-      (task.status === "review" && !task.reviewApproved && !task.reviewPending && !task.acceptanceRepair &&
-        taskReviewMode(task, state.board!.settings) !== "human")).map(task => task.id) : undefined,
+      (task.status === "review" && (task.acceptanceRepair
+        ? task.acceptanceRepair.phase !== "failed"
+        : !task.reviewApproved && !task.reviewPending && taskReviewMode(task, state.board!.settings) !== "human")))
+      .map(task => task.id) : undefined,
     runningTasks: state.board?.tasks.filter(task => {
       const key = state.project + "\0" + task.id;
       return runningTasks.has(key) || sharedRuns.some(entry => entry.kind === "slot" && entry.task === task.id);
@@ -3575,12 +3577,14 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       return started;
     }
     prepared = true;
-    signal.throwIfAborted();
     const desktopProfile = app.getPath("userData");
     const task = { ...started.data.task, fullAccess: executorFullAccess(desktopProfile, project, started.data.task),
       ...(newThread ? { codexThreadId: undefined } : {}) };
     let linked: LaunchState = started.data.task;
     const cwd = "cwd" in started.data ? started.data.cwd : started.data.worktree;
+    // Quota can interrupt this launch before Codex has opened or linked a thread.
+    releaseSlot.run(() => rememberExecutor(project, task, cwd, continuation));
+    signal.throwIfAborted();
     const run = await releaseSlot.run(() => startCodexRun(client, project, cwd, task, item => {
       activity.set(item.id, item);
       updateTimer ??= setTimeout(publish, 80);

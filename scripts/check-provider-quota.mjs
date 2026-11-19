@@ -23,6 +23,8 @@ const snapshot = join(scratch, "snapshot.json");
 const pausing = process.argv.includes("--pause");
 const providerCalls = [];
 const results = [];
+const beforeLink = Promise.withResolvers();
+const repairCalls = [];
 
 process.on("unhandledRejection", error => console.error("Startup rejection", error));
 app.setPath("userData", profile);
@@ -67,12 +69,16 @@ const threadFor = id => "10000000-0000-0000-0000-" + id.slice(2).padStart(12, "0
 const reviewerThread = "20000000-0000-0000-0000-000000000001";
 let state = pausing ? "available" : "error";
 const resetsAt = Date.now() + 3600_000;
-const limits = async () => ({
-  provider: "Codex",
-  state: state === "error" ? "error" : "ready",
-  windows: state === "error" ? [] : [{ name: "Codex", remaining: state === "exhausted" ? 0 : 60, resetsAt }],
-  observedAt: Date.now(),
-});
+const { codexLimitSnapshot } = require("../src/desktop/provider-limits.ts");
+const limits = async () => {
+  if (state === "error") return { provider: "Codex", state: "error", windows: [] };
+  const resetSeconds = resetsAt / 1000;
+  const primary = { usedPercent: state === "exhausted" ? 100 : 40, resetsAt: resetSeconds };
+  let secondary = null;
+  if (state === "exhausted") secondary = { usedPercent: 100, resetsAt: Date.now() / 1000 - 1 };
+  if (state === "partial") secondary = { usedPercent: "40", resetsAt: resetSeconds };
+  return codexLimitSnapshot({ rateLimits: { primary, secondary } });
+};
 
 async function capture(window, name) {
   const debuggerClient = window.webContents.debugger;
@@ -100,14 +106,18 @@ async function run() {
     writeFileSync(join(profile, "appearance.json"), JSON.stringify({ language: "ru" }));
     const git = (...args) => execFileSync("git", args, { cwd: project, windowsHide: true, stdio: "ignore" });
     git("init", "-b", "main");
-    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
-      "commit", "--allow-empty", "-m", "Fixture");
+    git("config", "user.name", "Fixture");
+    git("config", "user.email", "fixture@example.invalid");
+    git("config", "commit.gpgsign", "false");
+    git("commit", "--allow-empty", "-m", "Fixture");
     cli(["init"]);
-    cli(["settings"], { autoMode: false, reviewMode: "reviewer-human", taskLimits: { executor: 4, reviewer: 1 } });
+    cli(["settings"], { autoMode: false, reviewMode: "reviewer-human", taskLimits: { executor: 4, reviewer: 2 } });
     return Object.fromEntries(Object.entries({
       executor: "Исполнитель · сохранённая работа",
       reviewer: "Ревьюер · сохранённая сдача",
       ready: "Готовая карточка",
+      prelink: "Пауза до первого чата",
+      repair: "Ремонт приёмки",
       blocked: "Заблокирована по другой причине",
       manual: "Ручное продолжение",
       stopped: "Явно остановленная задача",
@@ -122,11 +132,33 @@ async function run() {
     cli(["start", ids.reviewer]);
     const { token } = cli(["preview", ids.reviewer]);
     cli(["submit", ids.reviewer], { token, noChanges: true, summary: "Fixture result", checks: ["Fixture checked"] });
+    const prepared = cli(["start", ids.repair]);
+    writeFileSync(join(prepared.worktree, "repair-fixture.txt"), "Acceptance repair fixture");
+    const repairPreview = cli(["preview", ids.repair]);
+    cli(["submit", ids.repair], {
+      token: repairPreview.token, message: "test: prepare repair scenario",
+      summary: "Fixture repair result", checks: ["Fixture checked"],
+    });
+    const { locateBoard, onBoard } = require("../src/cli/storage.ts");
+    onBoard(locateBoard(project), store => {
+      const card = store.card(ids.repair);
+      const targetHead = execFileSync("git", ["rev-parse", "main"], { cwd: project, encoding: "utf8" }).trim();
+      store.save({ ...card, acceptanceRepair: { phase: "queued", targetHead, attempts: 0, message: "Fixture repair" } });
+    });
     cli(["block", ids.blocked], { allowUnstarted: true, reason: "Fixture block", condition: "Human decision" });
   }
   globalThis.quotaFixture = {
     limits,
+    async manager(_profile, _project, prompt, _images, _action, _tools, _instructions, signal) {
+      if (!prompt.startsWith("Resolve the pending acceptance conflict")) return { text: "Fixture manager response" };
+      repairCalls.push(prompt);
+      await new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+    },
     async execute(_client, _board, cwd, task, _activity, _usage, signal, beforeTurn) {
+      if (pausing && task.id === ids.prelink) {
+        beforeLink.resolve(cwd);
+        await new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+      }
       const thread = task.codexThreadId ?? threadFor(task.id);
       const queued = await beforeTurn(thread);
       queued?.accepted("fixture-turn");
@@ -158,10 +190,10 @@ async function run() {
   const substitutions = `
     const { execute: startCodexRun, review: reviewWithCodex } = globalThis.quotaFixture;
     const configuredCodex = async () => ({});
-    const replyToBoard = async () => ({ text: "Fixture manager response" });
+    const replyToBoard = globalThis.quotaFixture.manager;
   `;
   const exposed = `
-    globalThis.quotaApp = { createWindow,
+    globalThis.quotaApp = { createWindow, scheduleRecurringTasks,
       refresh: () => { readProviderLimits.invalidate(); return refreshQuota(); } };
   `;
   writeFileSync(entry, transformSync(substitutions + source + exposed, { loader: "ts", format: "esm" }).code);
@@ -190,6 +222,8 @@ async function run() {
   const launch = (window, id) => render(window, `taskboard.launchTask(${JSON.stringify(id)})`);
   const quotaText = window => render(window, "document.querySelector('#status-provider-quota').innerText");
   const percentage = window => render(window, "document.querySelector('#status-limits span').innerText");
+  const openRepair = window => render(window, `showReview(frame.board.tasks.find(task => task.id === ${JSON.stringify(ids.repair)}))`);
+  const repairLabel = window => render(window, "document.querySelector('#acceptance-repair-status')?.textContent");
   const waitForPause = () => until("quota status in both windows", async () =>
     (await quotaText(first)).includes("Ожидание квоты") && (await quotaText(second)).includes("Ожидание квоты"));
 
@@ -208,6 +242,18 @@ async function run() {
     assert.equal((await frame(first)).runningTasks.includes(ids.executor), true);
     pass("A provider read failure leaves the running executor and review slot unchanged.");
 
+    quotaApp.scheduleRecurringTasks();
+    await until("acceptance repair starts", () => repairCalls.length === 1);
+    const firstLaunch = launch(second, ids.prelink);
+    const firstWorktree = await Promise.race([
+      beforeLink.promise,
+      firstLaunch.then(result => { throw new Error("The provider returned before the pre-link pause: " + JSON.stringify(result)); }),
+    ]);
+    const prelink = show(ids.prelink);
+    assert.equal(prelink.status, "in_progress");
+    assert.equal(prelink.codexThreadId, undefined);
+    assert.equal(prelink.git.worktree, firstWorktree);
+
     const { codexRpc } = require("../src/desktop/codex-rpc.ts");
     const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough() });
     const rpc = codexRpc(child, () => {});
@@ -223,6 +269,7 @@ async function run() {
       await notifyError("usageLimitExceeded");
       await waitForPause();
       assert.deepEqual((await frame(first)).quotaWait, {});
+      assert.equal((await firstLaunch).error.code, "PROVIDER_QUOTA");
     } finally {
       rpc.close();
       child.stdin.destroy();
@@ -232,7 +279,9 @@ async function run() {
     await waitForPause();
     await until("executor and reviewer stopped", async () => {
       const view = await frame(first);
-      return !view.runningTasks.length && !Object.keys(view.reviewingTasks).length && view.waitingTasks.includes(ids.executor);
+      return !view.runningTasks.length && !Object.keys(view.reviewingTasks).length &&
+        view.waitingTasks.includes(ids.executor) && view.waitingTasks.includes(ids.prelink) &&
+        view.board.tasks.find(task => task.id === ids.repair)?.acceptanceRepair?.phase === "queued";
     });
     const stopped = await render(second, `taskboard.chatStop(${JSON.stringify(ids.stopped)})`);
     assert.equal(stopped.ok, true);
@@ -243,9 +292,11 @@ async function run() {
     for (const window of [first, second]) {
       const view = await frame(window);
       assert.equal(view.board.settings.autoMode, false);
-      assert.deepEqual(new Set(view.quotaTasks), new Set([ids.executor, ids.reviewer, ids.ready, ids.manual]));
+      assert.deepEqual(new Set(view.quotaTasks), new Set([ids.executor, ids.reviewer, ids.ready, ids.manual, ids.prelink, ids.repair]));
       assert.equal((await quotaText(window)).includes("сброс"), true);
     }
+    await openRepair(second);
+    assert.match(await repairLabel(second), /Ожидание квоты.*сброс/);
     cli(["settings"], { autoMode: true });
     await until("saved auto-mode shown", async () => (await frame(first)).board.settings.autoMode);
     await delay(1600);
@@ -256,7 +307,8 @@ async function run() {
     assert.equal(show(ids.blocked).status, "blocked");
     pass("Only the structured quota error paused dispatch before the next snapshot. Both windows show 0%, the reset time and the waiting cards. Both manual starts were denied and the scheduler did not retry.");
     await capture(first, "quota-paused.png");
-    writeFileSync(snapshot, JSON.stringify({ ...saved, results }));
+    pass("Quota interrupted the first launch before its chat was linked, and the acceptance repair returned to its queue with the quota reset label.");
+    writeFileSync(snapshot, JSON.stringify({ ...saved, firstWorktree, results }));
   } else {
     const saved = JSON.parse(readFileSync(snapshot, "utf8"));
     await quotaApp.refresh();
@@ -266,9 +318,20 @@ async function run() {
     cli(["settings"], { autoMode: false });
     await until("auto-mode off", async () => !(await frame(first)).board.settings.autoMode);
 
+    await openRepair(second);
+    assert.match(await repairLabel(second), /Ожидание квоты.*сброс/);
+    state = "partial";
+    await quotaApp.refresh();
+    assert.ok((await frame(first)).quotaWait);
+    assert.equal(providerCalls.length, 0);
+    assert.match(await repairLabel(second), /Ожидание квоты/);
     state = "available";
     await quotaApp.refresh();
     await until("quota notice cleared", async () => !(await frame(first)).quotaWait && !(await frame(second)).quotaWait);
+    await until("repair sheet returns to its normal label", async () => {
+      const label = await repairLabel(second);
+      return label && !label.includes("Ожидание квоты");
+    });
     await until("confirmed quota in both limits controls", async () =>
       (await percentage(first)).endsWith(" 60%") && (await percentage(second)).endsWith(" 60%"));
     await until("hybrid reviewer resumes with auto-mode off", () => providerCalls.some(call => call.role === "reviewer"));
@@ -281,23 +344,29 @@ async function run() {
     pass("Pause survives Electron restart and a provider failure. With auto-mode off, hybrid review resumes and an executor can be resumed manually in its saved thread.");
 
     cli(["settings"], { autoMode: true });
-    await until("executor and eligible queue launched", () => providerCalls.filter(call => call.role === "executor").length === 3);
+    await until("executor and eligible queue launched", () => providerCalls.filter(call => call.role === "executor").length === 4);
     const resumed = providerCalls.find(call => call.id === ids.executor);
     assert.equal(resumed.savedThread, saved.executor.codexThreadId);
     assert.equal(resumed.cwd, saved.work);
     assert.equal(readFileSync(join(saved.work, "quota-fixture.txt"), "utf8"), "Preserved work");
     assert.equal(show(ids.blocked).status, "blocked");
     await delay(1600);
-    assert.equal(providerCalls.length, 4);
+    assert.equal(providerCalls.length, 5);
+    const firstStarts = providerCalls.filter(call => call.id === ids.prelink);
+    assert.equal(firstStarts.length, 1);
+    assert.equal(firstStarts[0].savedThread, undefined);
+    assert.equal(firstStarts[0].cwd, saved.firstWorktree);
+    assert.equal(show(ids.prelink).codexThreadId, threadFor(ids.prelink));
     assert.equal(providerCalls.some(call => call.id === ids.stopped), false);
     assert.equal(show(ids.stopped).status, "in_progress");
     pass("Auto-mode resumes the original executor in the saved worktree and thread, starts the eligible card once, and leaves explicit stops and unrelated blocks alone.");
+    pass("The malformed mixed snapshot kept the pause. The corrected snapshot restored the repair label and started the previously unbound executor once in its saved worktree.");
     await capture(first, "quota-resumed.png");
 
     const files = [
       "src/cli/acceptance.ts", "src/desktop/main.ts", "src/desktop/board-runtime.ts", "src/desktop/codex-chat.ts",
       "src/desktop/codex-rpc.ts", "src/desktop/reviewer-chat.ts", "src/desktop/provider-limits.ts", "src/desktop/renderer.js",
-      "src/desktop/index.html", "src/desktop/locales/en.json", "src/desktop/locales/ru.json",
+      "src/desktop/index.html", "src/desktop/provider-limits.js", "src/desktop/locales/en.json", "src/desktop/locales/ru.json",
       "scripts/check-provider-quota.mjs", "tests/provider-limits.test.ts",
     ];
     const hashes = files.map(file => {

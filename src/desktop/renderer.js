@@ -853,7 +853,9 @@ function renderAgentRunStatus(target, task) {
   } else {
     const repair = frame.board?.tasks.find(card => card.id === task.id)?.acceptanceRepair;
     const hybridReview = task.status === "review" && (task.reviewModeOverride?.mode ?? frame.board?.settings.reviewMode) === "reviewer-human";
-    const text = repair && !(hybridReview && repair.phase === "checking" && !task.reviewApproved) ? ({ queued: t("ui.waiting_for_a_reviewer_slot_8918dd95"), running: t("ui.resolving_acceptance_conflict"), checking: t("ui.accepting_task_39473c27"), failed: repair.reason }[repair.phase]) : frame.waitingTasks?.includes(task.id) ?
+    const text = repair && !(hybridReview && repair.phase === "checking" && !task.reviewApproved)
+      ? acceptanceRepairStatus(task.id, repair)
+      : frame.waitingTasks?.includes(task.id) ?
       (task.mergeRepair || frame.board?.tasks.find(card => card.id === task.id)?.mergeRepair
         ? t("ui.waiting_for_a_reviewer_slot_8918dd95")
         : t("ui.waiting_for_an_available_executor_cc0934a8")) :
@@ -4309,6 +4311,17 @@ async function showAcceptedTask(task) {
   if (messages.length) notice(messages.join("\n"));
 }
 
+function acceptanceRepairStatus(id, repair) {
+  if (frame.quotaTasks?.includes(id)) return quotaLabel();
+  if (repair.reason) return repair.reason;
+  const label = {
+    queued: "ui.waiting_for_a_reviewer_slot_8918dd95",
+    running: "ui.resolving_acceptance_conflict",
+    checking: "ui.accepting_task_39473c27",
+  }[repair.phase];
+  return label ? t(label) : "";
+}
+
 async function showReview(task, messageDraft, acceptanceError) {
   if (task.acceptanceRepair) {
     taskInSheet = task;
@@ -4316,7 +4329,9 @@ async function showReview(task, messageDraft, acceptanceError) {
       const cancelled = await command("accept", task.id, { revision: task.revision, cancelRepair: true });
       if (cancelled) sheet.close();
     });
-    editor.before(element("p", task.acceptanceRepair.reason ?? ({ queued: t("ui.waiting_for_a_reviewer_slot_8918dd95"), running: t("ui.resolving_acceptance_conflict"), checking: t("ui.accepting_task_39473c27") }[task.acceptanceRepair.phase]), "muted"));
+    const status = element("p", acceptanceRepairStatus(task.id, task.acceptanceRepair), "muted");
+    status.id = "acceptance-repair-status";
+    editor.before(status);
     body.append(button(() => t("ui.work_activity_e01957b7"), () => showTask(task.id)));
     return;
   }
@@ -5574,6 +5589,10 @@ function update(next) {
     if (current && (current.revision !== taskInSheet.revision || JSON.stringify(current.acceptanceRepair) !== JSON.stringify(taskInSheet.acceptanceRepair))) {
       if (current.acceptanceRepair) void showReview({ ...taskInSheet, ...current });
       else void showTask(current.id);
+    } else if (current?.acceptanceRepair) {
+      const status = byId("acceptance-repair-status");
+      const label = acceptanceRepairStatus(current.id, current.acceptanceRepair);
+      if (status && status.textContent !== label) status.textContent = label;
     }
   }
   if (sheetKind === "review" && sheet.open && taskInSheet && !taskInSheet.acceptanceRepair) {
