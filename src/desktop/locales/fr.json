@@ -6,6 +6,7 @@
   "draft_discussion.running": "Examen du brouillon en cours…",
   "draft_discussion.failed": "Échec de l’examen du brouillon : {reason}",
   "draft_discussion.retry": "Relancer l’examen",
+  "draft_discussion.ready": "La tâche est prête à être approuvée.",
   "draft_discussion.interrupted": "L’examen précédent du brouillon a été interrompu.",
   "ui.resolving_acceptance_conflict": "Résolution du conflit",
   "ui.dismiss_notification_9a17797e": "Rejeter la notification",
