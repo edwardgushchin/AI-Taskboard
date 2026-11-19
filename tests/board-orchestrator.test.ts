@@ -3056,21 +3056,33 @@ test("manager Git branch workflow stays scoped and uses checked commits", { time
   assert.equal((await remove("local", "stable", incoming)).error.code, "GIT_PROTECTED_BRANCH");
   assert.equal(git(project, "rev-parse", "stable"), incoming);
 
-  const changeHead = join(f.folder, "rotate-remote-head");
+  for (const [scope, branch, head] of [["local", "merged", current], ["remote", "published", incoming]]) {
+    git(origin, "branch", branch!, base);
+    await writeFile(hook, [
+      "#!/bin/sh", "read old next ref", '[ "$1" = prepared ] && [ "$ref" = HEAD ] || exit 0',
+      "git --git-dir=" + quote(origin) + " symbolic-ref HEAD refs/heads/" + branch,
+    ].join("\n") + "\n", { mode: 0o755 });
+    const blocked = await remove(scope!, branch!, head!);
+    assert.equal(blocked.error.code, "GIT_REF_TRANSACTION_FAILED", JSON.stringify(blocked));
+    assert.equal(git(origin, "symbolic-ref", "HEAD"), "refs/heads/" + branch);
+    assert.equal(git(scope === "local" ? project : remote, "rev-parse", branch!), head);
+    rmSync(hook);
+    git(origin, "symbolic-ref", "HEAD", "refs/heads/stable");
+  }
+
   git(remote, "branch", "replacement", base);
-  await writeFile(changeHead, [
-    "#!/bin/sh", "git --git-dir=" + quote(remote) + " symbolic-ref HEAD refs/heads/replacement || exit 1",
-    'exec git upload-pack "$@"',
+  await writeFile(hook, [
+    "#!/bin/sh", "read old next ref", '[ "$1" = prepared ] && [ "$ref" = HEAD ] || exit 0',
+    "git symbolic-ref HEAD refs/heads/replacement",
   ].join("\n") + "\n", { mode: 0o755 });
-  git(project, "config", "remote.origin.uploadpack", "sh " + quote(changeHead));
   for (const [scope, branch, head] of [["local", "merged", current], ["remote", "published", incoming]]) {
     const blocked = await remove(scope!, branch!, head!);
     assert.equal(blocked.error.code, "GIT_REF_TRANSACTION_FAILED", JSON.stringify(blocked));
-    assert.equal(git(remote, "symbolic-ref", "HEAD"), "refs/heads/replacement");
+    assert.match(blocked.error.details.output, /HEAD\.lock/);
+    assert.equal(git(remote, "symbolic-ref", "HEAD"), "refs/heads/trunk");
     assert.equal(git(scope === "local" ? project : remote, "rev-parse", branch!), head);
-    git(remote, "symbolic-ref", "HEAD", "refs/heads/trunk");
   }
-  git(project, "config", "--unset", "remote.origin.uploadpack");
+  rmSync(hook);
 
   git(remote, "config", "receive.denyDeletes", "true");
   assert.equal((await remove("remote", "published", incoming)).error.code, "GIT_REMOTE_TRANSACTION_UNAVAILABLE");

@@ -258,21 +258,20 @@ export async function deleteRepositoryBranch(location: BoardLocation, input: Rec
   const oid = (path: string, name: string) => invokeGit(path,
     ["rev-parse", "--verify", "--quiet", "--end-of-options", name], historyEnv).stdout.trim();
   const symbolic = (path: string, name: string) => invokeGit(path, ["symbolic-ref", "--no-recurse", "--quiet", name]).stdout.trim();
-  const primary = symbolic(repo.root, "HEAD");
-  const primaryHead = primary.startsWith(heads) && !symbolic(repo.root, primary) ? oid(repo.root, primary) : "";
-  if (!primaryHead || !commitId.test(primaryHead) ||
-      invokeGit(repo.root, ["cat-file", "-t", primaryHead], historyEnv).stdout.trim() !== "commit") {
-    throw new TaskboardError("GIT_REMOTE_DEFAULT_UNKNOWN", "Could not verify the remote's default branch and current commit.", { remote });
-  }
-
-  let projectPrimary = primary;
-  if (remote !== "origin" && remotes(root).includes("origin")) {
-    const origin = await advertisedRefs(root, "origin", ["HEAD"]);
-    projectPrimary = origin.get("symref:HEAD") ?? "";
-    if (!projectPrimary.startsWith(heads) || !commitId.test(origin.get("HEAD") ?? "")) {
-      throw new TaskboardError("GIT_PROJECT_DEFAULT_UNKNOWN", "Could not verify the project default branch on origin.", { remote: "origin" });
+  const defaultBranch = (path: string, name: string) => {
+    const ref = symbolic(path, "HEAD");
+    const head = ref.startsWith(heads) && !symbolic(path, ref) ? oid(path, ref) : "";
+    if (!commitId.test(head) || invokeGit(path, ["cat-file", "-t", head], historyEnv).stdout.trim() !== "commit") {
+      throw new TaskboardError("GIT_REMOTE_DEFAULT_UNKNOWN", "Could not verify the remote's default branch and current commit.", { remote: name });
     }
-  }
+    return { ref, head };
+  };
+  const selected = defaultBranch(repo.root, remote);
+  const { ref: primary, head: primaryHead } = selected;
+  const originUrl = () => remote !== "origin" && remotes(root).includes("origin") ? remoteUrls(root, "origin") : undefined;
+  const configuredOrigin = originUrl();
+  const originRepo = configuredOrigin === undefined ? undefined : transactionalRemote(root, configuredOrigin, "origin");
+  const projectDefault = originRepo && originRepo.root !== repo.root ? defaultBranch(originRepo.root, "origin") : selected;
 
   const branch = ref.slice(heads.length);
   const checkBranch = (store: BoardStore) => {
@@ -280,7 +279,7 @@ export async function deleteRepositoryBranch(location: BoardLocation, input: Rec
     const trees = worktrees(root);
     const originDefault = symbolic(root, "refs/remotes/origin/HEAD");
     const originPrefix = "refs/remotes/origin/";
-    if ([primary, projectPrimary, trees[0]?.branch, heads + "main", heads + "master",
+    if ([primary, projectDefault.ref, trees[0]?.branch, heads + "main", heads + "master",
       originDefault.startsWith(originPrefix) ? heads + originDefault.slice(originPrefix.length) : undefined].some(compare) ||
       ref.toLowerCase().startsWith(heads + "ai-taskboard/")) {
       throw new TaskboardError("GIT_PROTECTED_BRANCH", "This is a protected project, remote default or task branch.", { ref, remote });
@@ -303,6 +302,13 @@ export async function deleteRepositoryBranch(location: BoardLocation, input: Rec
     }
     if (remoteUrls(root, remote) !== url || transactionalRemote(root, url, remote).root !== repo.root) {
       throw new TaskboardError("STALE_REPOSITORY", "The remote destination changed during verification.");
+    }
+    if (originUrl() !== configuredOrigin || (originRepo && transactionalRemote(root, configuredOrigin!, "origin").root !== originRepo.root)) {
+      throw new TaskboardError("STALE_REPOSITORY", "The project origin changed during verification.");
+    }
+    if (originRepo && invokeGit(root, ["config", "--get", "remote.origin.uploadpack"]).code !== 1) {
+      throw new TaskboardError("GIT_REMOTE_TRANSACTION_UNAVAILABLE",
+        "The project origin uses a custom upload-pack command. Its default branch could not be guarded directly.", { remote: "origin" });
     }
     if (scope === "remote") {
       if (!repo.bare || remoteUrls(root, remote, true) !== url) {
@@ -327,13 +333,22 @@ export async function deleteRepositoryBranch(location: BoardLocation, input: Rec
   if (scope === "remote") commands.push("option no-deref", "delete " + ref + " " + head);
   await onBoard(location, async store =>
     withGuardedBranchRefs(repo.root, primary, primaryHead, commands, "taskboard: guard deletion of " + ref, async commit => {
-      checkDestination();
-      checkBranch(store);
-      if (scope === "remote") {
-        await commit();
+      const remove = async () => {
+        checkDestination();
+        checkBranch(store);
+        if (scope === "remote") {
+          await commit();
+        } else {
+          git(root, ["update-ref", "--no-deref", "-d", ref, head]);
+          clearDeletedBranchConfig(root, branch);
+        }
+      };
+      if (originRepo && originRepo.root !== repo.root) {
+        await withGuardedBranchRefs(originRepo.root, projectDefault.ref, projectDefault.head,
+          ["option no-deref", "verify " + projectDefault.ref + " " + projectDefault.head],
+          "taskboard: guard project default branch", remove);
       } else {
-        git(root, ["update-ref", "--no-deref", "-d", ref, head]);
-        clearDeletedBranchConfig(root, branch);
+        await remove();
       }
     }));
   return { scope, branch, ref, head, remote, primary, primaryHead, deleted: true };
