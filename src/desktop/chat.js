@@ -453,7 +453,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
     tiles.dataset.item = "images:" + [...series.keys()].at(-1);
     nodes.push(tiles);
   }
-  let previousTurnId;
+  let previousTurnId = items[0]?.providerTurnId;
   let previousItem;
   for (const item of items) {
     if (item.providerTurnId !== previousTurnId) {
