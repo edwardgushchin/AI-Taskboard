@@ -60,10 +60,6 @@ function boardOperations(entries: RuntimeEntry[], overrides?: Partial<AgentLimit
       }
       if (task) return [{ role: "executor" as const, kind: "discussion", task }];
     }
-    if (entry.kind === "turn" && !entries.some(parent => parent.id === entry.parent &&
-        (parent.kind === "task" || parent.kind === "slot"))) {
-      return [{ role: entry.role ?? "executor", kind: "providerTurn", task }];
-    }
     return [];
   });
   const inherited = cachedTaskLimits(entries) ?? defaultAgentLimits;
