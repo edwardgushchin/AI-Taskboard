@@ -390,7 +390,7 @@ function readGoalHistory(project: string, cursor: string | null) {
   let previousFile: string | undefined;
   // Keep adjacent events from one run together so generated results retain
   // their answer and provider-turn context. Interleaved notices stay in order.
-  for (const event of selected.reverse()) {
+  for (const event of selected.toReversed()) {
     const previous = turns.at(-1);
     if (previous && previousFile === event.file && !event.turn.messages.length) {
       previous.items.push(...event.turn.items);
