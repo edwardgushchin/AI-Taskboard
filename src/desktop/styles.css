@@ -340,6 +340,9 @@ h1, h2, h3, p { margin: 0; }
   transition: height var(--board-chat-motion) cubic-bezier(.2,.75,.25,1), opacity 140ms ease,
     visibility var(--board-chat-motion) allow-discrete;
 }
+.board-chat:has(> .board-chat-log:not(.board-work, [hidden])) {
+  background: var(--bg);
+}
 .board-draft:is([data-open], [data-pinned], [data-resizing]) .board-chat {
   height: min(var(--board-chat-height, clamp(220px, 44vh, 390px)), max(0px, calc(100vh - 160px)));
   opacity: 1; visibility: visible;
@@ -450,9 +453,8 @@ h1, h2, h3, p { margin: 0; }
   max-width: 88%;
   min-width: 0;
   padding: 9px 13px;
-  border: 1px solid var(--border);
   border-radius: 14px 14px 14px 5px;
-  background: color-mix(in srgb, var(--text) 8%, var(--panel));
+  background: var(--panel);
 }
 .board-chat-unread {
   display: flex; align-items: center; gap: 10px; color: var(--blue);
