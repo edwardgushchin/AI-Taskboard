@@ -357,14 +357,19 @@ function openSettingsMenu(last = false) {
     return projectStatistics();
   });
   statistics.disabled = !frame.board;
+  const backups = button(() => t("backup.title"), () => {
+    menu.hidePopover();
+    trigger.focus();
+    return backupSettings();
+  });
   const updates = button(() => t("ui.check_for_updates_6a5aded8"), () => {
     menu.hidePopover();
     trigger.focus();
     return checkUpdates();
   });
-  for (const [index, item] of [app, board, statistics, updates].entries()) {
+  for (const [index, item] of [app, board, statistics, updates, backups].entries()) {
     item.className = "app-menu-item";
-    item.id = ["settings-menu-app", "settings-menu-board", "settings-menu-statistics", "settings-menu-updates"][index];
+    item.id = ["settings-menu-app", "settings-menu-board", "settings-menu-statistics", "settings-menu-updates", "settings-menu-backups"][index];
     item.setAttribute("role", "menuitem");
     item.setAttribute("aria-disabled", String(item.disabled));
     item.tabIndex = -1;
@@ -372,7 +377,7 @@ function openSettingsMenu(last = false) {
   const separator = element("hr");
   separator.setAttribute("role", "separator");
   bindLocalized(menu, "aria-label", () => t("ui.settings_and_updates_f9f74584"), true);
-  menu.replaceChildren(app, board, statistics, separator, updates);
+  menu.replaceChildren(app, board, backups, statistics, separator, updates);
   menu.showPopover({ source: trigger });
   const anchor = trigger.getBoundingClientRect();
   menu.style.left = Math.max(4, Math.min(anchor.right, innerWidth - menu.offsetWidth - 4)) + "px";
@@ -4929,6 +4934,89 @@ function expertTeamMail(task) {
   return log;
 }
 
+async function backupSettings() {
+  openSheet("backups", () => t("backup.title"));
+  const content = element("section", undefined, "form backup-form");
+  const project = frame.board?.project;
+  const path = element("p", "", "muted");
+  const lastSuccess = element("p");
+  const error = element("p");
+  error.setAttribute("role", "status");
+  const automatic = element("input");
+  automatic.type = "checkbox";
+  const automaticLabel = element("label", undefined, "form-checkbox");
+  automaticLabel.append(automatic, element("span", () => t("backup.automatic")));
+  const create = button(() => t("backup.create"), () => run(() => api.backupCreate()));
+  const list = element("select");
+  const label = element("label");
+  label.append(element("span", () => t("backup.select")), list);
+  const restore = button(() => t("backup.restore"), () => run(async () => {
+    if (await api.backupRestore(list.value)) {
+      if (content.isConnected) sheet.close();
+    }
+  }), "primary");
+  const date = value => new Date(value).toLocaleString(localization.locale);
+  let busy = false;
+
+  function controls(disabled) {
+    automatic.disabled = create.disabled = disabled || !project;
+    restore.disabled = list.disabled = disabled || !list.value;
+  }
+
+  async function refresh() {
+    const status = await api.backupStatus();
+    if (!content.isConnected) return;
+    path.textContent = t("backup.storage", { path: status.root });
+    automatic.checked = status.nextAutomatic !== undefined;
+    lastSuccess.textContent = status.lastSuccess
+      ? t("backup.success", { date: date(status.lastSuccess) })
+      : t("backup.noSuccess");
+    error.textContent = status.error || "";
+    const previous = list.value;
+    list.replaceChildren(...status.backups.map(backup => {
+      const option = element("option", date(backup.createdAt) + " · " + backup.project);
+      option.value = backup.id;
+      return option;
+    }));
+    if (!list.options.length) {
+      const empty = element("option", t("backup.empty"));
+      empty.value = "";
+      list.append(empty);
+    }
+    if (status.backups.some(backup => backup.id === previous)) list.value = previous;
+    controls(busy);
+  }
+
+  async function run(action) {
+    busy = true;
+    controls(true);
+    let failure;
+    try {
+      await action();
+    } catch (error) {
+      failure = error.message;
+    } finally {
+      busy = false;
+      if (content.isConnected) {
+        await refresh();
+        if (failure) error.textContent = failure;
+      }
+    }
+  }
+
+  automatic.addEventListener("change", protect(() => run(() => api.backupAutomatic(automatic.checked))));
+  content.append(path);
+  if (project) content.append(automaticLabel, create, lastSuccess);
+  content.append(label, restore, error, element("p", () => t("backup.retention"), "muted"));
+  body.append(content);
+  controls(true);
+  await refresh();
+  const timer = setInterval(() => {
+    if (!content.isConnected || !sheet.open) clearInterval(timer);
+    else if (!busy) void refresh().catch(error => notice(error.message));
+  }, 15_000);
+}
+
 function settings() {
   // The expert catalogue belongs to the selected board, including its overrides.
   const roles = [
@@ -4959,6 +5047,7 @@ function settings() {
     save.disabled = false;
   }).catch(error => { if (editor.isConnected) notice(error.message); });
   appearanceSettings();
+  body.append(button(() => t("backup.title"), backupSettings));
   codexSettings();
   if (frame.board) body.append(button(() => t("experts.title"), () => expertSettings()));
 }
@@ -5862,6 +5951,7 @@ byId("notifications").addEventListener("toggle", event => {
   else reviewNotificationRequest++;
 });
 byId("welcome-open").addEventListener("click", protect(() => api.open()));
+byId("welcome-restore").addEventListener("click", protect(backupSettings));
 byId("notice-close").addEventListener("click", () => {
   if (displayedBoardError) dismissedBoardErrors.set(frame.project, displayedBoardError);
   windowNotice();
