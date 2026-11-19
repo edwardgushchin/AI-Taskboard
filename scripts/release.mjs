@@ -60,7 +60,7 @@ export async function stageRelease(version, signed, artifactRoot, output, { sha,
     "Choose the matching architecture (x64 for Intel/AMD, arm64 for ARM or Apple Silicon):",
     "",
     "- Windows: run the NSIS installer (.exe).",
-    signed ? "- macOS: open the signed and notarized installer (.pkg)." : "- macOS: unpack the CI rehearsal archive (.zip).",
+    signed ? "- macOS: open the signed and notarized installer (.pkg)." : "- macOS: unpack the application archive (.zip).",
     "- Linux: install the .deb on Debian/Ubuntu or the .rpm on an RPM-based distribution.",
     "",
     "Replace `package-file` with the downloaded filename and compare the result with its entry in SHA256SUMS.",
@@ -83,7 +83,7 @@ export async function stageRelease(version, signed, artifactRoot, output, { sha,
     'Get-FileHash -LiteralPath "package-file" -Algorithm SHA256',
     "```",
     "",
-    signed ? "" : "These rehearsal packages use the CI signing profile and are for workflow verification.",
+    signed ? "" : "The Windows installer is unsigned. The macOS application is ad-hoc signed and has no notarization.",
     "",
   ].join("\n"));
 }
@@ -121,10 +121,10 @@ function gh(...args) {
   return execFileSync("gh", args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
 }
 
-export async function publishRelease({ repository, version, sha, directory }, github = gh, resolveTag = resolveRemoteTag) {
+export async function publishRelease({ repository, version, signed, sha, directory }, github = gh, resolveTag = resolveRemoteTag) {
   const tag = `v${version}`;
   const prerelease = version.includes("-");
-  const names = [...expectedPackageGroups(version, true).values()].flat();
+  const names = [...expectedPackageGroups(version, signed).values()].flat();
   const hashes = await verifyCandidate(directory, names);
   const notes = await readFile(join(directory, notesName), "utf8");
   const marker = `<!-- ai-taskboard-release:${sha} -->`;
@@ -204,18 +204,30 @@ async function main() {
     const lock = JSON.parse(await readFile("package-lock.json", "utf8"));
     assert.equal(lock.version, version, "package-lock.json version must match package.json");
     assert.equal(lock.packages?.[""]?.version, version, "Root package version in package-lock.json must match package.json");
-    await appendFile(GITHUB_OUTPUT, `version=${version}\nsigned=${tagPush || signedDispatch}\n`);
-  } else if (command === "stage") {
+    const alpha = /^\d+\.\d+\.\d+-alpha(?:\.|$)/.test(version);
+    const signed = signedDispatch || (tagPush && !alpha);
+    await appendFile(GITHUB_OUTPUT, `version=${version}\nsigned=${signed}\n`);
+    return;
+  }
+  assert(SIGNED_BUILD === "true" || SIGNED_BUILD === "false", "Expected an explicit SIGNED_BUILD profile");
+  const signed = SIGNED_BUILD === "true";
+  if (command === "stage") {
     const runUrl = `${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}`;
-    await stageRelease(RELEASE_VERSION, SIGNED_BUILD === "true", directory, output, { sha: checkedOutCommit(), runUrl });
+    await stageRelease(RELEASE_VERSION, signed, directory, output, { sha: checkedOutCommit(), runUrl });
   } else if (command === "check") {
-    const names = [...expectedPackageGroups(RELEASE_VERSION, SIGNED_BUILD === "true").values()].flat();
+    const names = [...expectedPackageGroups(RELEASE_VERSION, signed).values()].flat();
     await verifyCandidate(directory, names);
     console.log(`Verified ${names.length} downloaded packages against SHA256SUMS`);
   } else {
     assert.equal(command, "publish");
     assert(GITHUB_EVENT_NAME === "push" && GITHUB_REF_TYPE === "tag" && GITHUB_REF_NAME === `v${RELEASE_VERSION}`);
-    console.log(await publishRelease({ repository: GITHUB_REPOSITORY, version: RELEASE_VERSION, sha: checkedOutCommit(), directory }));
+    console.log(await publishRelease({
+      repository: GITHUB_REPOSITORY,
+      version: RELEASE_VERSION,
+      signed,
+      sha: checkedOutCommit(),
+      directory,
+    }));
   }
 }
 

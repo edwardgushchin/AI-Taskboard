@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,9 +11,11 @@ import { publishRelease, releaseVersion, stageRelease } from "../scripts/release
 import { checkForUpdates, releaseRepository, releasesUrl } from "../src/desktop/updates.ts";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
+const releaseScript = join(root, "scripts", "release.mjs");
 const sha = "1234567890abcdef1234567890abcdef12345678";
 const source = { sha, runUrl: "https://example.invalid/actions/runs/123" };
 const stable = "0.1.0";
+const alpha = "0.1.0-alpha";
 const preview = "0.1.1-beta.2"; // Only a controlled Releases API fixture.
 const hash = content => createHash("sha256").update(content).digest("hex");
 
@@ -51,6 +53,26 @@ function checkDownloaded(version, signed, path) {
   return result;
 }
 
+function selectTagProfile(directory, version, tag = `v${version}`) {
+  const output = join(directory, "github-output");
+  writeFileSync(join(directory, "package.json"), JSON.stringify({ version }));
+  writeFileSync(join(directory, "package-lock.json"), JSON.stringify({ version, packages: { "": { version } } }));
+  writeFileSync(output, "");
+  const result = spawnSync(process.execPath, [releaseScript, "version"], {
+    cwd: directory,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      GITHUB_EVENT_NAME: "push",
+      GITHUB_REF_TYPE: "tag",
+      GITHUB_REF_NAME: tag,
+      GITHUB_OUTPUT: output,
+    },
+  });
+  assert.ifError(result.error);
+  return { result, outputs: readFileSync(output, "utf8") };
+}
+
 function controlledGitHub({ interruptUpload = false } = {}) {
   const releases = [];
   const attached = new Map();
@@ -64,6 +86,9 @@ function controlledGitHub({ interruptUpload = false } = {}) {
       if (operation === "create") {
         assert.ok(args.includes("--draft"));
         assert.ok(args.includes("--verify-tag"));
+        if (args.includes("--prerelease")) {
+          assert.ok(args.includes("--latest=false"));
+        }
         assert.equal(releases.length, 0);
         releases.push({
           id: 1, tag_name: tag, draft: true, prerelease: args.includes("--prerelease"),
@@ -129,7 +154,6 @@ test("release CLI keeps branch pushes unsigned and reserves signed dispatch for 
     ["workflow_dispatch", "branch", "release-rehearsal/T-0101", "false", false],
     ["workflow_dispatch", "branch", "main", "true", true],
     ["workflow_dispatch", "branch", "release-rehearsal/T-0101", "true", null],
-    ["push", "tag", "v" + version, "false", true],
   ]) {
     writeFileSync(output, "");
     const result = spawnSync(process.execPath, ["scripts/release.mjs", "version"], {
@@ -156,6 +180,26 @@ test("release CLI keeps branch pushes unsigned and reserves signed dispatch for 
   }
 });
 
+test("tag profile uses the first SemVer prerelease identifier and requires an exact version match", t => {
+  const scratch = mkdtempSync(join(tmpdir(), "ai-taskboard-release-profile-"));
+  t.after(() => rmSync(scratch, { recursive: true }));
+  for (const [version, signed] of [
+    [stable, true],
+    [alpha, false],
+    ["0.1.0-alpha.2", false],
+    ["0.1.0-alpha-other", true],
+    ["0.1.0-beta.alpha", true],
+  ]) {
+    const { result, outputs } = selectTagProfile(scratch, version);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(outputs, `version=${version}\nsigned=${signed}\n`);
+  }
+  const { result, outputs } = selectTagProfile(scratch, stable, `v${alpha}`);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /release tag must match/);
+  assert.equal(outputs, "");
+});
+
 for (const signed of [false, true]) {
   test((signed ? "distribution" : "CI") + " candidate hashes every package and rejects a corrupt download", async t => {
     const build = fixture(t, stable, signed);
@@ -165,7 +209,7 @@ for (const signed of [false, true]) {
     assert.equal(manifest, build.names.map(name =>
       hash("Fixture bytes for " + name + "\n") + "  " + name + "\n").join(""));
     assert.match(readFileSync(join(build.downloaded, "release-notes.md"), "utf8"),
-      signed ? /signed and notarized installer/ : /CI rehearsal archive/);
+      signed ? /signed and notarized installer/ : /ad-hoc signed and has no notarization/);
     const valid = checkDownloaded(stable, signed, build.downloaded);
     assert.equal(valid.status, 0, valid.stderr);
     assert.match(valid.stdout, /Verified 8 downloaded packages/);
@@ -178,20 +222,73 @@ for (const signed of [false, true]) {
 }
 
 test("missing architecture or package blocks the release candidate", async t => {
-  const build = fixture(t, stable, true);
-  rmSync(join(build.artifacts, "ai-taskboard-" + stable + "-linux-arm64"), { recursive: true });
-  await assert.rejects(build.stage(), /Incomplete or unexpected matrix artifacts/);
-  const incomplete = fixture(t, stable, true);
-  rmSync(join(incomplete.artifacts, "ai-taskboard-" + stable + "-linux-x64",
-    "ai-taskboard-" + stable + "-linux-x64.rpm"));
-  await assert.rejects(incomplete.stage(), /Unexpected files in/);
+  for (const [version, signed] of [[alpha, false], [stable, true]]) {
+    const build = fixture(t, version, signed);
+    rmSync(join(build.artifacts, `ai-taskboard-${version}-linux-arm64`), { recursive: true });
+    await assert.rejects(build.stage(), /Incomplete or unexpected matrix artifacts/);
+    const incomplete = fixture(t, version, signed);
+    const group = `ai-taskboard-${version}-linux-x64`;
+    rmSync(join(incomplete.artifacts, group, group + ".rpm"));
+    await assert.rejects(incomplete.stage(), /Unexpected files in/);
+  }
+});
+
+test("alpha tag profile stages eight packages and publishes only after GitHub asset verification", async t => {
+  const scratch = mkdtempSync(join(tmpdir(), "ai-taskboard-release-alpha-"));
+  t.after(() => rmSync(scratch, { recursive: true }));
+  const { result, outputs } = selectTagProfile(scratch, alpha);
+  assert.equal(result.status, 0, result.stderr);
+  const profile = new URLSearchParams(outputs.trim().replaceAll("\n", "&"));
+  const version = profile.get("version");
+  const signed = profile.get("signed") === "true";
+  const build = fixture(t, alpha, false);
+  const stage = spawnSync(process.execPath, [releaseScript, "stage", build.artifacts, build.output], {
+    cwd: root,
+    encoding: "utf8",
+    env: { ...process.env, RELEASE_VERSION: version, SIGNED_BUILD: profile.get("signed") },
+  });
+  assert.ifError(stage.error);
+  assert.equal(stage.status, 0, stage.stderr);
+  cpSync(build.output, build.downloaded, { recursive: true });
+  const check = checkDownloaded(version, signed, build.downloaded);
+  assert.equal(check.status, 0, check.stderr);
+  assert.match(check.stdout, /Verified 8 downloaded packages/);
+
+  const commit = execFileSync("git", ["rev-parse", "HEAD^{commit}"], { cwd: root, encoding: "utf8" }).trim();
+  const args = { repository: releaseRepository, version, signed, sha: commit, directory: build.downloaded };
+  const github = controlledGitHub();
+  const macZip = `ai-taskboard-${alpha}-macos-arm64.zip`;
+  const windowsExe = `ai-taskboard-${alpha}-windows-x64.exe`;
+  writeFileSync(join(build.downloaded, windowsExe), "Corrupted download");
+  await assert.rejects(publishRelease(args, github.api, () => commit), /Checksum mismatch: .*windows-x64\.exe/);
+  assert.deepEqual(github.writes, []);
+  cpSync(join(build.output, windowsExe), join(build.downloaded, windowsExe));
+
+  const readCorruptDraft = (...request) => {
+    const response = github.api(...request);
+    if (request[0] !== "api" || request[1] !== `repos/${releaseRepository}/releases/1`) {
+      return response;
+    }
+    const draft = JSON.parse(response);
+    draft.assets.find(asset => asset.name === macZip).digest = "sha256:" + hash("Corrupted remote ZIP");
+    return JSON.stringify(draft);
+  };
+  await assert.rejects(publishRelease(args, readCorruptDraft, () => commit), /GitHub checksum mismatch: .*macos-arm64\.zip/);
+  assert.deepEqual(github.writes, ["create", "upload"]);
+  assert.equal(github.releases[0].draft, true);
+  assert.equal(github.releases[0].prerelease, true);
+  assert.equal(await publishRelease(args, github.api, () => commit), releasesUrl + "/tag/v" + alpha);
+  assert.deepEqual(github.writes, ["create", "upload", "publish"]);
+  assert.deepEqual(github.releases[0].assets.map(asset => asset.name).sort(), [...build.names, "SHA256SUMS"].sort());
+  assert.equal(await publishRelease(args, github.api, () => commit), releasesUrl + "/tag/v" + alpha);
+  assert.deepEqual(github.writes, ["create", "upload", "publish"]);
 });
 
 test("upload failure leaves a draft and retry publishes one complete stable release", async t => {
   const build = fixture(t, stable, true);
   await build.stage();
   const github = controlledGitHub({ interruptUpload: true });
-  const publish = () => publishRelease({ repository: releaseRepository, version: stable, sha, directory: build.output },
+  const publish = () => publishRelease({ repository: releaseRepository, version: stable, signed: true, sha, directory: build.output },
     github.api, () => sha);
   await assert.rejects(publish(), /Controlled upload interruption/);
   assert.equal(github.releases[0].draft, true);
@@ -213,7 +310,7 @@ test("upload failure leaves a draft and retry publishes one complete stable rele
   const reSignedGroup = basename(existing.name, extname(existing.name));
   writeFileSync(join(rebuilt.artifacts, reSignedGroup, existing.name), "Different signing timestamp");
   await rebuilt.stage();
-  const repeat = () => publishRelease({ repository: releaseRepository, version: stable, sha, directory: rebuilt.output },
+  const repeat = () => publishRelease({ repository: releaseRepository, version: stable, signed: true, sha, directory: rebuilt.output },
     github.api, () => sha);
   assert.equal(await repeat(), releasesUrl + "/tag/v" + stable);
   assert.equal(github.releases[0].assets.find(asset => asset.name === existing.name).digest, existing.digest);
@@ -226,7 +323,7 @@ test("prerelease response from the publication model is visible only to preview 
   const build = fixture(t, preview, true);
   await build.stage();
   const github = controlledGitHub();
-  const args = { repository: releaseRepository, version: preview, sha, directory: build.output };
+  const args = { repository: releaseRepository, version: preview, signed: true, sha, directory: build.output };
   await assert.rejects(publishRelease(args, github.api, () => "other"), /Remote tag does not point/);
   assert.deepEqual(github.writes, []);
   const url = await publishRelease(args, github.api, () => sha);
