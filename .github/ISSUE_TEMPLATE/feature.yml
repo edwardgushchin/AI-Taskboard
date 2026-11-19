@@ -4,8 +4,11 @@ body:
   - type: markdown
     attributes:
       value: |
-        This issue is public. Use demo examples and keep secrets, private data and vulnerability details out of it.
-        Заявка публичная. Используйте демонстрационные примеры. Не публикуйте секреты, частные данные и сведения об уязвимостях.
+        This issue is public. Use demo examples and remove secrets and private data.
+        [Report vulnerabilities privately](https://github.com/edwardgushchin/AI-Taskboard/security/policy#english).
+
+        Заявка публичная. Используйте демонстрационные примеры и уберите секреты и частные данные.
+        [Сообщайте об уязвимостях приватно](https://github.com/edwardgushchin/AI-Taskboard/security/policy#русский).
   - type: textarea
     id: problem
     attributes:

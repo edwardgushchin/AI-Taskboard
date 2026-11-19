@@ -1,3 +1,6 @@
+<!-- Report vulnerabilities privately: https://github.com/edwardgushchin/AI-Taskboard/security/policy#english -->
+<!-- Сообщайте об уязвимостях приватно: https://github.com/edwardgushchin/AI-Taskboard/security/policy#русский -->
+
 ## What changed / Что изменилось
 
 <!-- Describe the user-visible result and link the related issue, if any. -->

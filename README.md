@@ -131,3 +131,4 @@ from the official Node.js repository and include it with the fflate license.
 - [Development and packaging](docs/development.md)
 - [Contributing guide](CONTRIBUTING.md#english) and [code of conduct](CODE_OF_CONDUCT.md#english)
 - [Report a bug or suggest a feature](https://github.com/edwardgushchin/AI-Taskboard/issues/new/choose)
+- [Report a vulnerability privately](SECURITY.md#english)

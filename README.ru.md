@@ -133,3 +133,4 @@ README и `THIRD-PARTY-NOTICES.txt`; распространяйте их вме�
 - [Разработка и сборка](docs/how-to/development.md)
 - [Руководство участника](CONTRIBUTING.md#русский) и [правила поведения](CODE_OF_CONDUCT.md#русский)
 - [Сообщить об ошибке или предложить улучшение](https://github.com/edwardgushchin/AI-Taskboard/issues/new/choose)
+- [Сообщить об уязвимости приватно](SECURITY.md#русский)
