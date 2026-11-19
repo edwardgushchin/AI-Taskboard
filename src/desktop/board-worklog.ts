@@ -31,6 +31,7 @@ const maxDocumentBytes = 64 * 1024;
 const tool = "mcp__ai_taskboard__worklog_record";
 export const worklogReminder = "Worklog for this turn: before the final reply, call " + tool +
   " with {language, entries} for substantive work or {skip:\"no_material_work\"} for a trivial turn. " +
+  "Submit one document per provider turn. During a running goal use goal_report for progress and keep Worklog for the end of the turn. After a storage failure retry the same document. " +
   "Each entry needs a result title, context, timeline, changes, decisions, checks and next_steps. " +
   "Record concrete outcomes and evidence so someone can continue without opening the chat.";
 export const worklogInstructions = [

@@ -1,0 +1,697 @@
+{
+  "date": "2026-11-18T22:55:28.809Z",
+  "node": "v24.14.0",
+  "playwright": "1.56.1",
+  "chromium": "141.0.7390.37",
+  "chromiumSandbox": true,
+  "results": [
+    {
+      "name": "320: load, geography and images",
+      "result": "PASS"
+    },
+    {
+      "name": "320: normal layout",
+      "result": "PASS"
+    },
+    {
+      "name": "320: 200% text layout",
+      "result": "PASS"
+    },
+    {
+      "name": "320: navigation, FAQ, keyboard and contacts",
+      "result": "PASS"
+    },
+    {
+      "name": "320: invalid inputs and consent",
+      "result": "PASS"
+    },
+    {
+      "name": "320: Enter, sending, duplicate guard, success and reset",
+      "result": "PASS"
+    },
+    {
+      "name": "320: first failure and successful retry with retained input",
+      "result": "PASS"
+    },
+    {
+      "name": "320: no storage",
+      "result": "PASS"
+    },
+    {
+      "name": "320: serviceAreas-only substitution updates area and unchanged FAQ",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone rejects \"7+0000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone rejects \"++70000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone rejects \"+80000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone rejects \"70000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone rejects \"+70+00000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone rejects \"+70000000000+\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone accepts \"+70000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone accepts \"+7 (000) 000-00-00\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone accepts \"80000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone accepts \"8 (000) 000-00-00\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone accepts \"  +7 (000) 000-00-00  \" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone accepts \"  8 (000) 000-00-00  \" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone rejects \"7+0000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone rejects \"++70000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone rejects \"+80000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone rejects \"70000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone rejects \"+70+00000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone rejects \"+70000000000+\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone accepts \"+70000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone accepts \"+7 (000) 000-00-00\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone accepts \"80000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone accepts \"8 (000) 000-00-00\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone accepts \"  +7 (000) 000-00-00  \" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "320: phone accepts \"  8 (000) 000-00-00  \" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "360: load, geography and images",
+      "result": "PASS"
+    },
+    {
+      "name": "360: normal layout",
+      "result": "PASS"
+    },
+    {
+      "name": "360: 200% text layout",
+      "result": "PASS"
+    },
+    {
+      "name": "360: navigation, FAQ, keyboard and contacts",
+      "result": "PASS"
+    },
+    {
+      "name": "360: invalid inputs and consent",
+      "result": "PASS"
+    },
+    {
+      "name": "360: Enter, sending, duplicate guard, success and reset",
+      "result": "PASS"
+    },
+    {
+      "name": "360: first failure and successful retry with retained input",
+      "result": "PASS"
+    },
+    {
+      "name": "360: no storage",
+      "result": "PASS"
+    },
+    {
+      "name": "360: serviceAreas-only substitution updates area and unchanged FAQ",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone rejects \"7+0000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone rejects \"++70000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone rejects \"+80000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone rejects \"70000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone rejects \"+70+00000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone rejects \"+70000000000+\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone accepts \"+70000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone accepts \"+7 (000) 000-00-00\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone accepts \"80000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone accepts \"8 (000) 000-00-00\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone accepts \"  +7 (000) 000-00-00  \" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone accepts \"  8 (000) 000-00-00  \" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone rejects \"7+0000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone rejects \"++70000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone rejects \"+80000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone rejects \"70000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone rejects \"+70+00000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone rejects \"+70000000000+\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone accepts \"+70000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone accepts \"+7 (000) 000-00-00\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone accepts \"80000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone accepts \"8 (000) 000-00-00\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone accepts \"  +7 (000) 000-00-00  \" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "360: phone accepts \"  8 (000) 000-00-00  \" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "390: load, geography and images",
+      "result": "PASS"
+    },
+    {
+      "name": "390: normal layout",
+      "result": "PASS"
+    },
+    {
+      "name": "390: 200% text layout",
+      "result": "PASS"
+    },
+    {
+      "name": "390: navigation, FAQ, keyboard and contacts",
+      "result": "PASS"
+    },
+    {
+      "name": "390: invalid inputs and consent",
+      "result": "PASS"
+    },
+    {
+      "name": "390: Enter, sending, duplicate guard, success and reset",
+      "result": "PASS"
+    },
+    {
+      "name": "390: first failure and successful retry with retained input",
+      "result": "PASS"
+    },
+    {
+      "name": "390: no storage",
+      "result": "PASS"
+    },
+    {
+      "name": "390: serviceAreas-only substitution updates area and unchanged FAQ",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone rejects \"7+0000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone rejects \"++70000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone rejects \"+80000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone rejects \"70000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone rejects \"+70+00000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone rejects \"+70000000000+\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone accepts \"+70000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone accepts \"+7 (000) 000-00-00\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone accepts \"80000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone accepts \"8 (000) 000-00-00\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone accepts \"  +7 (000) 000-00-00  \" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone accepts \"  8 (000) 000-00-00  \" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone rejects \"7+0000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone rejects \"++70000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone rejects \"+80000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone rejects \"70000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone rejects \"+70+00000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone rejects \"+70000000000+\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone accepts \"+70000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone accepts \"+7 (000) 000-00-00\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone accepts \"80000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone accepts \"8 (000) 000-00-00\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone accepts \"  +7 (000) 000-00-00  \" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "390: phone accepts \"  8 (000) 000-00-00  \" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "768: load, geography and images",
+      "result": "PASS"
+    },
+    {
+      "name": "768: normal layout",
+      "result": "PASS"
+    },
+    {
+      "name": "768: 200% text layout",
+      "result": "PASS"
+    },
+    {
+      "name": "768: navigation, FAQ, keyboard and contacts",
+      "result": "PASS"
+    },
+    {
+      "name": "768: invalid inputs and consent",
+      "result": "PASS"
+    },
+    {
+      "name": "768: Enter, sending, duplicate guard, success and reset",
+      "result": "PASS"
+    },
+    {
+      "name": "768: first failure and successful retry with retained input",
+      "result": "PASS"
+    },
+    {
+      "name": "768: no storage",
+      "result": "PASS"
+    },
+    {
+      "name": "768: serviceAreas-only substitution updates area and unchanged FAQ",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone rejects \"7+0000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone rejects \"++70000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone rejects \"+80000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone rejects \"70000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone rejects \"+70+00000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone rejects \"+70000000000+\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone accepts \"+70000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone accepts \"+7 (000) 000-00-00\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone accepts \"80000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone accepts \"8 (000) 000-00-00\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone accepts \"  +7 (000) 000-00-00  \" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone accepts \"  8 (000) 000-00-00  \" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone rejects \"7+0000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone rejects \"++70000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone rejects \"+80000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone rejects \"70000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone rejects \"+70+00000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone rejects \"+70000000000+\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone accepts \"+70000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone accepts \"+7 (000) 000-00-00\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone accepts \"80000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone accepts \"8 (000) 000-00-00\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone accepts \"  +7 (000) 000-00-00  \" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "768: phone accepts \"  8 (000) 000-00-00  \" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: load, geography and images",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: normal layout",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: 200% text layout",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: navigation, FAQ, keyboard and contacts",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: invalid inputs and consent",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: Enter, sending, duplicate guard, success and reset",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: first failure and successful retry with retained input",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: no storage",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: serviceAreas-only substitution updates area and unchanged FAQ",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone rejects \"7+0000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone rejects \"++70000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone rejects \"+80000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone rejects \"70000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone rejects \"+70+00000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone rejects \"+70000000000+\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone accepts \"+70000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone accepts \"+7 (000) 000-00-00\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone accepts \"80000000000\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone accepts \"8 (000) 000-00-00\" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone accepts \"  +7 (000) 000-00-00  \" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone accepts \"  8 (000) 000-00-00  \" by click",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone rejects \"7+0000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone rejects \"++70000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone rejects \"+80000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone rejects \"70000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone rejects \"+70+00000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone rejects \"+70000000000+\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone accepts \"+70000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone accepts \"+7 (000) 000-00-00\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone accepts \"80000000000\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone accepts \"8 (000) 000-00-00\" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone accepts \"  +7 (000) 000-00-00  \" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "1440: phone accepts \"  8 (000) 000-00-00  \" by Enter",
+      "result": "PASS"
+    },
+    {
+      "name": "configuration: every consumed field, verified tel/mailto",
+      "result": "PASS"
+    },
+    {
+      "name": "configuration: unverified and invalid contacts remain local buttons",
+      "result": "PASS"
+    },
+    {
+      "name": "JavaScript disabled: Enter/click cannot submit or expose data in URL",
+      "result": "PASS"
+    },
+    {
+      "name": "file URL launch",
+      "result": "PASS"
+    },
+    {
+      "name": "external traffic",
+      "result": "PASS"
+    }
+  ],
+  "errors": [],
+  "hashes": {
+    "index.html": "60599509f6e3b199275225286089c743c4ab8a334648c4c5db2970de80696af9",
+    "app.js": "22ba70a9cfc5d3d629648cb308e877e6720941ff3a3ef21e647656eb01a2a57b",
+    "data.js": "dd9c177133d14057c027316b48ae5f995b54c6ac8bb775446895eb99e984a190",
+    "styles.css": "69d37b1ac816bfb195ffc7afaafc128faaa8bd2befc80e9e7190ff0fb18dd04f",
+    "docs/implementation.md": "e606194b136de0c1dad3879ddcc0546d0e067dc1275e2b945d77fb3b687db9d6"
+  }
+}

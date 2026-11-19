@@ -286,9 +286,21 @@ function commitDiff(root: string, input: Record<string, unknown>) {
     throw new TaskboardError("INVALID_INPUT", "Use 1 to 64 distinct literal paths relative to the repository.");
   }
   const offset = input.offset === undefined ? 0 : number(input.offset, "offset", 0);
-  const output = git(root, ["--no-optional-locks", "--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv",
+  const env = { GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "" };
+  const comparison = invokeGit(root, ["--no-optional-locks", "--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv",
     "--no-color", "--no-renames", "--ignore-submodules=none", "--submodule=short", "--unified=0",
-    from + "^{commit}", to + "^{commit}", "--", ...paths], { GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "" });
+    from + "^{commit}", to + "^{commit}", "--", ...paths], env);
+  if (comparison.code !== 0) {
+    for (const [field, value] of [["from", from], ["to", to]]) {
+      if (invokeGit(root, ["rev-parse", "--verify", "--quiet", "--end-of-options", value + "^{commit}"], env).code !== 0) {
+        throw new TaskboardError("GIT_COMMIT_REQUIRED", "Use a full Git commit ID for " + field + ".", { field, value });
+      }
+    }
+    throw new TaskboardError("GIT_FAILED", "Git could not compare the selected commits.", {
+      output: comparison.stderr.trim(), exitCode: comparison.code,
+    });
+  }
+  const output = comparison.stdout;
   if (offset > output.length || /[\uDC00-\uDFFF]/.test(output.charAt(offset))) {
     throw new TaskboardError("INVALID_INPUT", "Use the nextOffset returned for these commits and paths.");
   }

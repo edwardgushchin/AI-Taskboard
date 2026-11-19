@@ -1,0 +1,751 @@
+{
+  "node": "v24.14.0",
+  "version": {
+    "protocolVersion": "1.3",
+    "product": "Chrome/141.0.7390.37",
+    "revision": "@9f043f63b0e5b728c8d09f3e3ddfc1681a4bd58e",
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/141.0.0.0 Safari/537.36",
+    "jsVersion": "14.1.146.11"
+  },
+  "checks": [
+    {
+      "name": "width 320",
+      "pass": true,
+      "detail": "{\"width\":320,\"scroll\":305,\"images\":true,\"sections\":9}"
+    },
+    {
+      "name": "width 360",
+      "pass": true,
+      "detail": "{\"width\":360,\"scroll\":345,\"images\":true,\"sections\":9}"
+    },
+    {
+      "name": "width 390",
+      "pass": true,
+      "detail": "{\"width\":390,\"scroll\":375,\"images\":true,\"sections\":9}"
+    },
+    {
+      "name": "width 768",
+      "pass": true,
+      "detail": "{\"width\":768,\"scroll\":753,\"images\":true,\"sections\":9}"
+    },
+    {
+      "name": "768 header navigation avoids brand",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "width 1280",
+      "pass": true,
+      "detail": "{\"width\":1280,\"scroll\":1265,\"images\":true,\"sections\":9}"
+    },
+    {
+      "name": "width 1440",
+      "pass": true,
+      "detail": "{\"width\":1440,\"scroll\":1425,\"images\":true,\"sections\":9}"
+    },
+    {
+      "name": "200% equivalent reflow 1440 physical / 720 CSS",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "bar hidden beside visible hero actions",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "bar fixed after hero actions leave viewport",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "bar enters flow near form",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "skip first Tab",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "focus outline",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "menu open expanded",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "menu focus contained",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "menu escape focus return",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "menu anchor closes and focuses",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "demo call local",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "call focus contained",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "call focus returns",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "call to form",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "terms local",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "terms focus return",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "FAQ Enter opens",
+      "pass": true,
+      "detail": "<summary>Не знаю объём. Можно обратиться?</summary>"
+    },
+    {
+      "name": "FAQ Space closes",
+      "pass": true,
+      "detail": "<summary>Не знаю объём. Можно обратиться?</summary>"
+    },
+    {
+      "name": "anchor services",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "anchor price",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "anchor process",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "anchor faq",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "anchor form",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "service selection 0",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "service selection 1",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "service selection 2",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "empty validation",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "bar hidden on input focus",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "phone format ",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "phone format 123",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "phone format +7 (000) 000-00-00",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "phone format 8 000 000-00-00",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "phone format 70000000000",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "phone format 7abc0000000000",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "volume 0",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "volume -1",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "volume 100.1",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "volume 0.01",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "volume 100",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "volume ",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "place boundary 1",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "place boundary 2",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "place boundary 5",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "place boundary 80",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "place boundary 81",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "optional max values",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "name over max",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "comment over max",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "pending disabled",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "forced failure preserves",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "repeat error flag stays failure",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "repeat revalidates",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "offline retry success",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "no scenario requests",
+      "pass": true,
+      "detail": "before 64; after 64"
+    },
+    {
+      "name": "no storage",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "no query fields",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "success invalid resubmit clears stale success without edit",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "success recovers after invalid resubmit",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "edit preserves",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "new example reset",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "contact mode [\"8 (999) 123-45-67\",true,true]",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "contact text matches href [\"8 (999) 123-45-67\",true,true]",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "contact mode [\"7 999 123 45 67\",true,true]",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "contact text matches href [\"7 999 123 45 67\",true,true]",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "contact mode [\"+7 (999) 123-45-67\",true,true]",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "contact text matches href [\"+7 (999) 123-45-67\",true,true]",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "contact mode [\"\",true,true]",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "contact text matches href [\"\",true,true]",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "contact mode [\"123\",true,true]",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "contact text matches href [\"123\",true,true]",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "contact mode [\"8 (861) 000-00-00\",true,true]",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "contact text matches href [\"8 (861) 000-00-00\",true,true]",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "contact mode [\"89991234567\",false,true]",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "contact text matches href [\"89991234567\",false,true]",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "contact mode [\"89991234567\",true,false]",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "contact text matches href [\"89991234567\",true,false]",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "single contact config",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "replacement address email labels accurate",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "restore demo address email labels",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "reload reset demo",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "no runtime exceptions",
+      "pass": true,
+      "detail": "[]"
+    }
+  ],
+  "hashes": {
+    "index.html": "a87b911b5adc5c86c89b25ea9965725e8080bafe9a4e78983c317dc6a9d8d695",
+    "app.js": "f955290ca96481823bc875c2ecfb35bb3b6fc861b3546256f044ebb2ec97feea",
+    "styles.css": "d445eecb3aadaf87de61598c030680bddf64fba3f348da7968dc9fd568147c22",
+    "config.js": "a3cb296baef9b7aeaa9ffbdb71980a810085788747149d90a46c22aa6ee96a62",
+    "faq.js": "9230bd9a01684ebf540fe806c846e1d2b4ebeffe61fca8fe4d2c8a23d60080cb",
+    "server.cjs": "2ace20800bda5e076247c5f538e93415e28977b28bc60a35fd83d06553ea4705",
+    "assets/hero-pumping.jpg": "5e27cc3bec940db19019c98b980e7c4553e226273971c1ad57ed68d6f766fd64",
+    "docs/landing-brief.md": "269f603a036d31b40a1f0f1ea8b4be906bc762ec2d00a157f62b1c49fe6b2be8",
+    "docs/design/spec.md": "2a6db3493c2538dac4a930e8fd63fa939d7e5331190f827ba0e6a7c15c637132",
+    "docs/verification/browser-check.cjs": "2d3d3447d5fbdcda2005be21f48c0ce38df8f792c2a01f42da84445738c35885"
+  },
+  "requests": [
+    {
+      "url": "http://127.0.0.1:4173/",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/styles.css",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/assets/hero-pumping.jpg",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/assets/otkachka.svg",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/config.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/faq.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/app.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/favicon.ico",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/styles.css",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/assets/hero-pumping.jpg",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/assets/otkachka.svg",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/config.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/faq.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/app.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/styles.css",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/assets/hero-pumping.jpg",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/assets/otkachka.svg",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/config.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/faq.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/app.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/styles.css",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/assets/hero-pumping.jpg",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/assets/otkachka.svg",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/config.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/faq.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/app.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/styles.css",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/assets/hero-pumping.jpg",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/assets/otkachka.svg",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/config.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/faq.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/app.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/styles.css",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/assets/hero-pumping.jpg",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/assets/otkachka.svg",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/config.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/faq.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/app.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/styles.css",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/assets/hero-pumping.jpg",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/assets/otkachka.svg",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/config.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/faq.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/app.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/styles.css",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/assets/hero-pumping.jpg",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/assets/otkachka.svg",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/config.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/faq.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/app.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/styles.css",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/assets/hero-pumping.jpg",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/assets/otkachka.svg",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/config.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/faq.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/app.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/styles.css",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/assets/hero-pumping.jpg",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/assets/otkachka.svg",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/config.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/faq.js",
+      "method": "GET"
+    },
+    {
+      "url": "http://127.0.0.1:4173/app.js",
+      "method": "GET"
+    }
+  ],
+  "exceptions": []
+}

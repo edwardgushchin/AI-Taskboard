@@ -7,7 +7,7 @@ import { needsManagerAttention, type managerInbox } from "../cli/task-messages.t
 import { taskFields } from "./chat-actions.ts";
 import { callCli, cliFailure } from "./cli.ts";
 import type { CliReply } from "./cli.ts";
-import { inspectProjectPath, projectSha256 } from "./project-files.ts";
+import { commitFileHashes, inspectProjectPath, projectSha256 } from "./project-files.ts";
 import { russianWriting } from "./russian-writing.ts";
 import { autoQueueSettings } from "../cli/auto-queue.ts";
 import { expertActions, expertCommands, leadInstructions } from "./expert-tools.ts";
@@ -123,22 +123,22 @@ const actions = {
   task_start_batch: { description: "Start several approved, independent tasks concurrently in separate executor chats. Check dependencies and overlapping work before selecting the batch. Returns each launch outcome.",
     properties: { tasks: { type: "array", minItems: 1, items: { type: "object", properties: taskReference,
       required: ["id", "revision"], additionalProperties: false } } }, required: ["tasks"] },
-  task_approve: { description: "Approve a complete draft after checking its description, criteria and assigned expert plans. If task_show returns nonempty approvalRequirements, complete the draft before asking for approval or approving it.",
+  task_approve: { description: "Approve a complete draft after its automatic discussion finishes. For a running draft in board_list, include its ID in task_wait, then read the fresh revision. Resolve nonempty approvalRequirements before approving.",
     properties: taskReference, required: ["id", "revision"] },
-  task_wait: { description: `Wait for the listed executors to finish, for the listed submissions to leave review, or for a new question, blocker, submission or reviewer approval anywhere on the board. Pass active executor IDs in ids and submissions waiting for a decision in reviewIds. Returns task states and relevant messages not yet delivered in this request, or timedOut after ${goalTaskWaitSeconds} seconds in a background goal and ${taskWaitSeconds} seconds in a conversation.`,
+  task_wait: { description: `Wait for the listed executors to finish, for the listed submissions to leave review, or for a new question, blocker, submission or reviewer approval anywhere on the board. Put each card in one list. Once status is review, pass it only in reviewIds, even while the executor is finishing. Use ids for the remaining active executors and drafts. Returns task states and relevant messages not yet delivered in this request, or timedOut after ${goalTaskWaitSeconds} seconds in a background goal and ${taskWaitSeconds} seconds in a conversation.`,
     properties: { ids: { type: "array", minItems: 1, uniqueItems: true, items: taskReference.id }, id: taskReference.id,
       reviewIds: { type: "array", minItems: 1, uniqueItems: true, items: taskReference.id } }, required: [] },
   task_review_queue: { description: "Read all pending submissions in one call. Shows when they were submitted, executor activity and Git compatibility against a single snapshot per target branch. Use task_review on cards selected for detailed review.",
     properties: {}, required: [] },
-  task_review: { description: "Read the submission, its revision, target HEAD, Git merge status and whether the executor is still running. To refresh a submission already read in this session, pass its knownRevision. When evidenceUnchanged is true, reuse the earlier description, criteria, result and artifacts.",
+  task_review: { description: "Read the submission, its revision, target HEAD, Git merge status, executorRunning and reviewerRunning. To refresh a submission already read in this session, pass its knownRevision. When evidenceUnchanged is true, reuse the earlier description, criteria, result and artifacts.",
     properties: { id: taskReference.id, knownRevision: taskReference.revision }, required: ["id"] },
-  task_review_diff: { description: "Read the submitted diff for selected exact paths. Set contextLines to 0 for only changed lines. With one file, pass line to read the matching hunk in the newer commit. Add lineRadius to keep just the nearby lines, for example 8 on each side. No matching hunk returns an empty diff. Keep paths, line, lineRadius and contextLines when paging. Pass the revision and targetHead from task_review.",
+  task_review_diff: { description: "Read the submitted diff for exact paths from the selected comparison in task_review. Use project_git commit_diff for inputs from a separate committed change. Set contextLines to 0 for only changed lines. With one file, pass line to read the matching hunk in the newer commit. Add lineRadius to keep just the nearby lines, for example 8 on each side. No matching hunk returns an empty diff. Keep paths, line, lineRadius and contextLines when paging. Pass the revision and targetHead from task_review.",
     properties: { ...taskReference, targetHead: reason, paths: { type: "array", minItems: 1, uniqueItems: true, items: reason },
       line: { type: "integer", minimum: 1 }, lineRadius: { type: "integer", minimum: 0, maximum: 100 },
       contextLines: { type: "integer", minimum: 0, maximum: 100 },
       offset: { type: "integer", minimum: 0 } },
     required: ["id", "revision", "targetHead", "paths"] },
-  task_review_artifact: { description: "Open a saved PNG or read a UTF-8 review file. Use the exact source and sha256 from the submission's result.artifactEvidence when available. For screenshots pass format png. For text, page with nextOffset.",
+  task_review_artifact: { description: "Open a saved PNG or read a UTF-8 review file. Use the exact revision, source, sha256 and file kind from the current submission's result.artifactEvidence or artifacts. Set format png for PNGs of at most 4 MiB and 16 megapixels, or text for reports. For text, page with nextOffset.",
     properties: { ...taskReference, source: reason, sha256: { ...string, pattern: "^[0-9a-f]{64}$" },
       format: { type: "string", enum: ["text", "png"] }, offset: { type: "integer", minimum: 0 } },
     required: ["id", "revision", "source", "sha256"] },
@@ -147,14 +147,14 @@ const actions = {
       integrationMode: { ...string, enum: ["merge", "squash"], description: "Optional for Git submissions. Defaults to the board's integration mode." },
       evidence: { type: "array", items: reason, minItems: 1 }, findingAssessment: reason },
     required: ["id", "revision", "targetHead"] },
-  task_request_changes: { description: "Return the same review card with actionable feedback and start its executor. Available in every review mode. In human mode use only on the user's explicit request; in agent review modes use for a confirmed material defect. Read task_review first and confirm the transition only from the tool result.",
+  task_request_changes: { description: "Return the same review card with actionable feedback and start its executor. Available in every review mode. In human mode use only on the user's explicit request; in agent review modes use for a confirmed material defect. When task_review reports reviewerRunning, wait and read the fresh decision. Use team_message for an additional finding while the reviewer is working. Gather evidence from task_review and task_review_diff before returning the card. The transition ends this review snapshot.",
     properties: { ...taskReference, reason: { ...reason, description: "Explain what needs to change in complete sentences with spaces between words." } },
     required: ["id", "revision", "reason"] },
   task_cleanup_status: { description: "Inspect what remains in the worktree of a closed task. Returns the path and Git status entries (including ignored files).",
     properties: { id: taskReference.id }, required: ["id"] },
   task_cleanup: { description: "Retry internal lifecycle cleanup on the original closed card. Optionally select individual ignored evidence or user files to preserve by worktree-relative path. Already absent paths are skipped. Verified copies remain in board storage after cleanup. Up to 64 MiB and 64 entries across submissions and cleanup. Never archive dependency/build/cache directories. Tracked, changed and unselected local files are preserved.",
     properties: { id: taskReference.id, artifacts: { type: "array", items: reason } }, required: ["id"] },
-  project_git: { description: "Read Git status (including the current branch and full HEAD), recent log or working-tree and staged diffs. Use commit_diff to compare two full commit IDs for selected literal paths. Pass nextOffset as offset with the same commits and paths to continue.",
+  project_git: { description: "Read Git status (including the current branch and full HEAD), recent log or working-tree and staged diffs. Use commit_diff to compare two full commit IDs for selected literal paths. Copy submitted or targetHead from review, or head from status. QA tree and blob IDs describe content and cannot be used as commit arguments. Pass nextOffset as offset with the same commits and paths to continue.",
     properties: { view: { ...string, enum: ["status", "log", "diff", "staged_diff", "commit_diff"] },
       from: reason, to: reason, paths: { type: "array", minItems: 1, maxItems: 64, uniqueItems: true, items: reason },
       offset: { type: "integer", minimum: 0 } }, required: ["view"] },
@@ -162,8 +162,8 @@ const actions = {
     properties: { branch: reason, head: reason }, required: ["branch", "head"] },
   project_path: { description: "Check whether a literal project-relative path exists and get its type. Set list to true to list up to 200 immediate directory entries, including hidden entries. Use '.' for the project root.",
     properties: { path: reason, list: { type: "boolean" } }, required: ["path"] },
-  project_sha256: { description: "Compute SHA-256 checksums for project files. Use path for one file or paths for up to 64 distinct files in one call. Pass literal project-relative paths. A batch returns a checksum or an error for each file.",
-    properties: { path: reason, paths: { type: "array", minItems: 1, maxItems: 64, uniqueItems: true, items: reason } }, required: [] },
+  project_sha256: { description: "Compute SHA-256 checksums for project files. Use path for one file or paths for up to 64 distinct files. Set commit to a full Git commit ID to hash raw Git blob bytes at literal repository-relative paths without reading the working tree. For a review use submitted or targetHead, never a tree or blob ID. A batch returns a checksum or an error per file.",
+    properties: { path: reason, paths: { type: "array", minItems: 1, maxItems: 64, uniqueItems: true, items: reason }, commit: reason }, required: [] },
 };
 
 const tools = Object.entries(actions).map(([name, { description, properties, required }]) => ({
@@ -180,12 +180,17 @@ export const boardMcpTools = tools.filter(tool => mcpNames.has(tool.name));
 export const milestonesListTool = boardMcpTools.find(tool => tool.name === "milestones_list")!;
 export const githubCreateMilestoneTool = boardMcpTools.find(tool => tool.name === "github_create_milestone")!;
 export const githubSetMilestoneDueTool = boardMcpTools.find(tool => tool.name === "github_set_milestone_due")!;
-export const reviewerTools = tools.filter(tool => ["task_review_diff", "task_review_artifact", "project_path", "project_sha256"].includes(tool.name))
+export const reviewerTools = tools.filter(tool => ["task_review_diff", "task_review_artifact", "project_git", "project_path", "project_sha256"].includes(tool.name))
   .map(tool => tool.name === "task_review_diff" ? {
     ...tool,
     description: tool.description + " For previousReview.submissionChanges use comparison previous-submission. For previousReview.changes use comparison previous-target to read changes between the two reviewed target HEADs. Keep comparison when paging.",
     inputSchema: { ...tool.inputSchema, properties: { ...tool.inputSchema.properties,
       comparison: { type: "string", enum: ["previous-submission", "previous-target"] } } },
+  } : tool.name === "project_git" ? {
+    ...tool,
+    description: "Read changes to specific review inputs between two full commit IDs in this project's repository. Use commit_diff with literal paths and repeat the same commits and paths when paging. Use commit, not tree or blob IDs.",
+    inputSchema: { ...tool.inputSchema, properties: { ...tool.inputSchema.properties, view: { type: "string", enum: ["commit_diff"] } },
+      required: ["view", "from", "to", "paths"] },
   } : tool);
 
 export const autoReviewTaskTools = new Set(["task_review", "task_review_diff", "task_review_artifact", "task_accept", "task_request_changes", "task_return_to_draft", "expert_stage", "expert_verify_skills", "team_inbox", "team_message", "team_findings"]);
@@ -217,9 +222,13 @@ export const boardInstructions = [
   "Decide whether a board change is useful from the user's feedback, decisions, and the conversation. Act on clear implications without waiting for a direct command or confirmation. Answer informational questions and discuss tentative options without changing the board unless the conversation establishes a reason to act.",
   "Use task_approve when a draft has clear scope and acceptance criteria and the conversation or active plan establishes that work should proceed. While a goal is paused, continue handling the user's messages and the relevant cards, including approving and starting tasks when appropriate. Resume the goal only when the user asks.",
   "For each new agent-board draft, choose a work lead and stage specialists with expert_list and expert_context. Choose a review lead for a task without a schedule in manager, reviewer, and reviewer-human modes. Supply skillChecks with the specific action for every explicitly assigned skill in skills. The general workflow is delivered implicitly. Pass expertTeam in task_create with a concrete reason for each composition. For an existing draft, fill missing phases with expert_plan and reread task_show. Complete scope, criteria and assignments before approval.",
-  "When the task creates a new public-facing offer, landing page, or positioning, plan a proportionate comparison of competitors or comparable alternatives before UX and copy. Assign the comparison to a relevant specialist, request cited public sources and actionable findings, and make design and copy depend on those findings. If the market is unspecified, label comparable examples as such and state the assumption. Skip this step for routine fixes unless the task calls for it.",
-  "After task_create succeeds on an agent board, the app starts a read-only discussion in the saved draft's chat. Tell the user where to find the discussion. Approval and execution continue through their own board actions.",
-  "Before every task_create, independently check the current board with board_list and identify semantic candidates by the requested outcome, not just titles, shared words or files. Include open tasks and relevant recently completed tasks (omit activeOnly to find closed candidates). Read each plausible candidate's full description and acceptance criteria with task_show before deciding. Reuse current details already read while their revisions remain unchanged; refresh after changes or session continuation. Do this in ordinary dialogue, new and resumed sessions, and every goal turn that creates work, without a user reminder. Do not reread the entire project history on every message.",
+  "When the user explicitly asks to divide work among specialists, include that delegation instruction and its scope in each affected card before starting it. State which accepted files or artifacts a dependent specialist should reuse. If a later task needs the same verification environment, pass on confirmed tool limits and the successful setup. Reuse a checked implementation or prototype where it meets the later scope.",
+  "When the task creates a new public-facing offer, landing page, or positioning, plan a proportionate comparison before UX and copy. Assign it to a relevant specialist and make offline verification a first-submission criterion. Require a short dated excerpt or an inspectable board artifact for each material claim, including the exact price, unit, qualification and meaningful contradiction. Specify the evidence register in the work plan. Use short text extracts when sufficient. When claims rely on screenshots, register the relevant cropped PNGs under submission artifacts. Unstated details remain unknown. Leave unsupported details out of the comparison. Check that the reviewer can read all of it from the submitted files. Distinguish visible content from extracted text and published claims from independently verified facts. Replace persistently inaccessible sources when the scope allows it. If the market is unspecified, label comparable examples and state the assumption.",
+  "Keep work with a material dependency gated until the input is accepted or a stable, readable revision and its evidence are available to both the executor and reviewer. Give reviewers literal repository paths or artifact references and the relevant Git revisions. Ask the responsible executor to supply missing evidence on its existing card when possible. Reserve ask_user for a decision or information only the user has.",
+  "Agree on the main action, visible promise, visual requirements and asset provenance before approving design. In a demo, make the brief specify a full, believable fictional profile including concrete labelled mock contact values. If a form is local-only, exercise JavaScript disabled and startup failure. If a local server is needed, check that it exposes only the public app assets and permitted methods. For configurable or mock data, require an executable replacement check of values, dependent labels, actions and restored defaults. For a multi-step form, require recovery from validation and submission errors, including a new invalid attempt after success. Assign executable checks to QA and give the read-only reviewer results tied to the submitted sources. Specify native browser zoom if zoom is required. Check it using the browser's actual zoom control and record the effective factor. Verify screenshots from the stated viewports and zoom show the named states.",
+  "Before integration, verify test evidence against the submitted Git sources. Specify whether a hash describes a Git blob or checked-out bytes and record any transformations. Require reusable verification to leave an ordinary clean clone clean, including untracked files. Use temporary output outside the checkout or a committed ignore rule. Check the complete proposed diff, allowing intentional formatting such as Markdown hard breaks.",
+  "After task_create succeeds on an agent board, the app starts a read-only discussion in the draft chat. Tell the user where to find the discussion. If an occupied draft needs approval, include it in task_wait and use the fresh revision when its writer finishes.",
+  "When inspecting a new repository, check the Git tree and project instructions first. An empty initial tree is a valid starting state. Before every task_create, independently check the current board with board_list and identify semantic candidates by the requested outcome, not just titles, shared words or files. Include open tasks and relevant recently completed tasks (omit activeOnly to find closed candidates). Read each plausible candidate's full description and acceptance criteria with task_show before deciding. Reuse current details already read while their revisions remain unchanged; refresh after changes or session continuation. Do this in ordinary dialogue, new and resumed sessions, and every goal turn that creates work, without a user reminder. Do not reread the entire project history on every message.",
   "If feedback refines an existing draft or approved task's result, use task_update on that card and preserve its existing requirements, criteria and sources. For work already in progress, also send the relevant clarification directly to its executor with task_message. Shared files or vocabulary alone do not make tasks duplicates: keep separate cards for independently verifiable outcomes. Create a new draft only when no suitable existing card covers the independent result.",
   "When consolidating tasks, read both cards and their dependencies first. Transfer all distinct requirements, acceptance criteria, source links and reproduction examples to the main card before cancelling the source. Check incoming and outgoing dependencies, redirect those still needed with the existing dependency tools, and avoid self-dependencies, cycles or dropping prerequisites. Verify successful updates before cancellation; if a transfer fails, keep the source and report what remains. Cancel with task_cancel using mergedInto, transferred and a reason explicitly linking to the main card. Preserve submitted and accepted requirements: use the normal review/return lifecycle for a submission and a separate follow-up for a new result after completion; never rewrite a submitted or accepted brief to hide a scope change or consolidation.",
   "After consolidation, give a self-contained result for each source card: source ID → main ID, short topic, what was transferred and which card was cancelled, with the main card's state. For multiple consolidations, list every explicit pair. Report only confirmed tool outcomes. Do not rely on adjacent tool calls, say only 'merged' without naming the cards, or repeat service cancellation reasons as separate replies.",
@@ -381,7 +390,8 @@ export function boardActions(project: string, attachments: { path: string; name:
   runReview?: ReviewRunner, reviewReports = new Map<string, ReviewedSubmission>(),
   returnToDraft?: (id: string, revision: number) => Promise<CliReply<Task>>,
   allowAutoModeChange = false,
-  confirmMilestoneDeletion?: (details: string, signal: AbortSignal) => Promise<boolean>) {
+  confirmMilestoneDeletion?: (details: string, signal: AbortSignal) => Promise<boolean>,
+  isReviewRunning?: (id: string) => boolean) {
   const reviewSnapshots = new Map<string, Pick<TaskReview, "revision" | "targetHead" | "artifacts"> & {
     mode: ReviewMode; reviewModeVersion?: number; criteriaCount: number; reviewerApproved: boolean;
   }>();
@@ -429,7 +439,8 @@ export function boardActions(project: string, attachments: { path: string; name:
     if (Object.hasOwn(expertCommands, action)) {
       const { id, ...fields } = input;
       return callCli(project, [expertCommands[action], ...(typeof id === "string" ? [id] : [])],
-        { ...fields, ...(action === "expert_stage" ? { phase: "review" } : {}), actor: "manager" });
+        { ...fields, ...(action === "expert_stage" ? { phase: "review" } : {}),
+          ...(action === "expert_list" ? { catalogOnly: true } : {}), actor: "manager" });
     }
     if (input.execution != null) {
       const { model, effort } = input.execution as Partial<BoardAgentSettings>;
@@ -526,29 +537,34 @@ export function boardActions(project: string, attachments: { path: string; name:
       } };
     }
     if (action === "project_git_push") return callCli(project, ["git", "push"], input);
-    if (action === "project_sha256" && input.paths !== undefined) {
-      const { paths } = input;
-      if (input.path !== undefined || !Array.isArray(paths) || !paths.length || paths.length > 64 ||
-          !paths.every(path => typeof path === "string" && path.trim()) || new Set(paths).size !== paths.length) {
+    if (action === "project_path") {
+      try {
+        return { ok: true, data: await inspectProjectPath(project, input.path, input.list, signal) };
+      } catch (error) {
+        if (error instanceof TaskboardError) return cliFailure(error.code, error.message);
+        throw error;
+      }
+    }
+    if (action === "project_sha256") {
+      const { path, paths, commit } = input;
+      if (paths !== undefined && (path !== undefined || !Array.isArray(paths) || !paths.length || paths.length > 64 ||
+          !paths.every(path => typeof path === "string" && path.trim()) || new Set(paths).size !== paths.length)) {
         return cliFailure("INVALID_INPUT", "Pass either path or a list of 1 to 64 distinct paths.");
       }
-      const files = [];
-      for (const path of paths) {
-        signal.throwIfAborted();
-        try {
-          files.push({ path, ok: true, data: await projectSha256(project, path, signal) });
-        } catch (error) {
-          if (!(error instanceof TaskboardError)) throw error;
-          files.push({ path, ok: false, error: { code: error.code, message: error.message } });
-        }
-      }
-      return { ok: true, data: { files } };
-    }
-    if (action === "project_path" || action === "project_sha256") {
       try {
-        const data = action === "project_path" ? await inspectProjectPath(project, input.path, input.list, signal) :
-          await projectSha256(project, input.path, signal);
-        return { ok: true, data };
+        const digest = commit === undefined ? (path: unknown) => projectSha256(project, path, signal) : commitFileHashes(project, commit, signal);
+        if (paths === undefined) return { ok: true, data: await digest(path) };
+        const files = [];
+        for (const path of paths) {
+          signal.throwIfAborted();
+          try {
+            files.push({ path, ok: true, data: await digest(path) });
+          } catch (error) {
+            if (!(error instanceof TaskboardError)) throw error;
+            files.push({ path, ...cliFailure(error.code, error.message) });
+          }
+        }
+        return { ok: true, data: { files } };
       } catch (error) {
         if (error instanceof TaskboardError) return cliFailure(error.code, error.message);
         throw error;
@@ -683,9 +699,10 @@ export function boardActions(project: string, attachments: { path: string; name:
           revision, targetHead, artifacts: data.artifacts, mode: data.reviewMode, reviewModeVersion: data.reviewModeVersion, criteriaCount: criteria.length,
           reviewerApproved: Boolean(data.reviewerApproval),
         });
-        if (!runReview || !usesIndependentReviewer(data.reviewMode) || data.stale || data.reviewerApproval?.targetHead === targetHead) {
+        const reviewerRunning = usesIndependentReviewer(data.reviewMode) && (isReviewRunning?.(id) ?? false);
+        if (reviewerRunning || !runReview || !usesIndependentReviewer(data.reviewMode) || data.stale || data.reviewerApproval?.targetHead === targetHead) {
           const current = { ...data, targetChangesSinceApproval: data.reviewerApproval ? targetChangesSinceReview : undefined,
-            executorRunning: isTaskRunning(id) };
+            executorRunning: isTaskRunning(id), reviewerRunning };
           if (!data.stale && fields.knownRevision === revision && previousRead?.revision === revision &&
               JSON.stringify(previousRead.artifacts) === JSON.stringify(artifacts)) {
             const { description: _description, criteria: _criteria, result: _result, artifacts: _artifacts, ...state } = current;
@@ -698,7 +715,7 @@ export function boardActions(project: string, attachments: { path: string; name:
           const verification = settings.reviewer?.model === defaultBoardAgents.reviewer.model ? [reviewVerifier] : [];
           const snapshot = submitted && data.submissionSequence > 0 ? JSON.stringify([evidence, settings.reviewer, ...verification]) : undefined;
           if (snapshot && prior?.snapshot === snapshot) {
-            return { ok: true, data: { ...data, reviewer: prior.report, executorRunning: isTaskRunning(id) } };
+            return { ok: true, data: { ...data, reviewer: prior.report, executorRunning: isTaskRunning(id), reviewerRunning } };
           }
           const previous = prior && submitted && prior.submitted && prior.description === description &&
               JSON.stringify(prior.criteria) === JSON.stringify(criteria) &&
@@ -736,13 +753,18 @@ export function boardActions(project: string, attachments: { path: string; name:
             if (name === "task_review_artifact" && args?.id === id) {
               return guardRead(readArtifact(id, data, args));
             }
-            if (name === "project_path" || name === "project_sha256") return run(name, args);
+            if (name === "project_sha256" && args?.commit !== undefined &&
+                (args.commit !== submitted && args.commit !== targetHead || typeof args.commit !== "string")) {
+              return Promise.resolve(cliFailure("REVIEW_REQUIRED", "Use the submitted or targetHead commit from this review."));
+            }
+            if (name === "project_path" || name === "project_sha256" ||
+                (name === "project_git" && args?.view === "commit_diff")) return run(name, args);
             return Promise.resolve(cliFailure("INVALID_INPUT", "Use only read-only tools for the assigned submission."));
           }, signal, data.submissionSequence);
           if (!validReviewReport(reviewer, criteria.length)) throw new Error("The reviewer returned an invalid report.");
           if (outdated) return cliFailure("REVISION_CONFLICT", "The submission changed while the reviewer was reading it.");
           reviewReports.set(id, { targetHead, submitted, mergeBase, description, criteria, artifacts, snapshot, report: reviewer });
-          return { ok: true, data: { ...data, reviewer, executorRunning: isTaskRunning(id) } };
+          return { ok: true, data: { ...data, reviewer, executorRunning: isTaskRunning(id), reviewerRunning } };
         } catch (error) {
           if (error instanceof TaskboardError && error.code === "REVIEW_MODE_CHANGED") return cliFailure(error.code, error.message);
           return cliFailure("REVIEW_FAILED", (error as Error).message);
@@ -751,7 +773,7 @@ export function boardActions(project: string, attachments: { path: string; name:
       if (action === "task_review_diff") {
         const prior = reviewSnapshots.get(id);
         if (!prior || prior.revision !== fields.revision || prior.targetHead !== fields.targetHead) {
-          return cliFailure("REVIEW_REQUIRED", "Use the revision and target HEAD returned by task_review.");
+          return cliFailure("REVIEW_REQUIRED", "Use the current revision and target HEAD from task_review. After review ends, use project_git commit_diff to read historical changes.");
         }
         return callCli(project, ["review", id], fields);
       }
@@ -775,6 +797,9 @@ export function boardActions(project: string, attachments: { path: string; name:
           }
           waitSignal.throwIfAborted();
           const { mode } = snapshot;
+          if (action === "task_request_changes" && usesIndependentReviewer(mode) && isReviewRunning?.(id)) {
+            return cliFailure("REVIEW_IN_PROGRESS", "The independent reviewer is still working. Include this card in task_wait reviewIds and reread the submission before deciding.");
+          }
           if ((mode === "human" || mode === "reviewer-human") && action === "task_accept") return cliFailure("AUTO_REVIEW_DISABLED", "Leave the decision to the user.");
           fields.reviewMode = mode;
           fields.reviewModeVersion = snapshot.reviewModeVersion;
@@ -810,6 +835,7 @@ export function boardActions(project: string, attachments: { path: string; name:
     }
     if (!result.ok) return result;
     const { id: taskId, title, status, revision } = result.data;
+    if (status !== "review" || reviewSnapshots.get(taskId)?.revision !== revision) reviewSnapshots.delete(taskId);
     const data = { id: taskId, title, status, revision };
     changes.push({ ...data, action: action.slice("task_".length) });
     return { ok: true, data: action === "task_accept" ? {

@@ -1,0 +1,49 @@
+{
+  "job": "T-0003:cleanup",
+  "savedArtifactSha256": "706253758f5647959b3343cdd0a7c5538dd863286e01505887d42ec0167c0ae9",
+  "steps": [
+    {
+      "at": "2026-11-19T04:03:21.988Z",
+      "tool": "task_cleanup_status",
+      "args": {
+        "id": "T-0003"
+      },
+      "ok": true,
+      "result": {
+        "pending": true,
+        "path": "G:\\Projects\\2026\\septic-landing-r04\\.worktrees\\T-0003",
+        "reason": "DIRTY_WORKTREE",
+        "entries": [
+          "!! .tasks/"
+        ]
+      }
+    },
+    {
+      "at": "2026-11-19T04:04:34.369Z",
+      "tool": "task_cleanup",
+      "args": {
+        "id": "T-0003",
+        "artifacts": [
+          ".tasks/qa/mobile-first.png"
+        ]
+      },
+      "ok": true,
+      "result": {
+        "removed": true,
+        "branchRemoved": true
+      }
+    },
+    {
+      "at": "2026-11-19T04:04:50.248Z",
+      "tool": "task_cleanup_status",
+      "args": {
+        "id": "T-0003"
+      },
+      "ok": true,
+      "result": {
+        "pending": false,
+        "entries": []
+      }
+    }
+  ]
+}

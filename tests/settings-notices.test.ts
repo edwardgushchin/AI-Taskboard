@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { settingsDelivery, syncSettingsNotices } from "../src/desktop/settings-notices.ts";
 import { inheritedLimits, recordSettings, settingsContext } from "../src/cli/settings-notices.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
+import { TaskboardError } from "../src/cli/model.ts";
 
 process.env.GIT_CEILING_DIRECTORIES = tmpdir();
 process.env.GIT_CONFIG_NOSYSTEM = "1";
@@ -82,6 +83,21 @@ test("settings writes survive coalesced watches, inactive manager and restart; l
   await Promise.all([one, two]);
   assert.match(received.at(-2)!, /без ограничений → 2/);
   assert.match(received.at(-1)!, /2 → 3/);
+
+  let reads = 0;
+  const busy = settingsDelivery(a, "background", () => {
+    if (reads++ === 0) throw new TaskboardError("BOARD_BUSY", "Board is temporarily busy.");
+    return current();
+  });
+  const beforeRetry = received.length;
+  await busy.flush(send);
+  assert.equal(reads, 2);
+  assert.equal(received.length, beforeRetry + 1);
+  await busy.flush(send);
+  assert.equal(received.length, beforeRetry + 1);
+  const stopped = AbortSignal.abort();
+  await assert.rejects(busy.flush(send, stopped), { name: "AbortError" });
+  assert.equal(reads, 3);
 });
 
 test("effective projection omits unknown fields, normalizes aliases and tracks all supported fields", () => {

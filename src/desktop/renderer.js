@@ -2775,11 +2775,18 @@ function draftComposer() {
     if (insert) log.append(entry);
     return entry;
   };
+  let reviewErrorTask;
   const message = text => {
+    reviewErrorTask = undefined;
     progress.textContent = text;
     progress.hidden = !text;
   };
-  editor.reviewError = error => message(t("ui.automatic_review_was_interrupted_2fded29c") + "\n" + error);
+  editor.reviewError = (error, id) => {
+    if (error) {
+      message(t("ui.automatic_review_was_interrupted_2fded29c") + "\n" + error);
+      reviewErrorTask = id;
+    } else if (id && id === reviewErrorTask) message("");
+  };
   const busy = value => {
     syncPrompt();
     editor.setAttribute("aria-busy", String(value));

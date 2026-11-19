@@ -120,8 +120,10 @@ function parseExpertPlan(store: BoardStore, task: Pick<Task, "schedule">, phase:
     if (new Set(outputs).size !== outputs.length || outputs.some(output => !output.trim()))
       throw new TaskboardError("INVALID_INPUT", "Stage outputs must be distinct and non-empty.");
     const artifacts = Object.entries(object(stage.artifactOutputs ?? {})).map(([name, kind]) => {
-      if (phase !== "work" || task.schedule || !outputs.includes(name))
-        throw new TaskboardError("INVALID_INPUT", "Artifact outputs must name declared outputs on a work stage of a task submitted for review.");
+      if (phase !== "work" || task.schedule)
+        throw new TaskboardError("INVALID_INPUT", "Artifact outputs are available on work stages of tasks submitted for review.");
+      if (!outputs.includes(name))
+        throw new TaskboardError("INVALID_INPUT", "Stage " + key + ": artifactOutputs key " + JSON.stringify(name) + " must match an entry in outputs exactly.");
       return [name, member(kind, ["png", "text"], "artifact kind")] as const;
     });
     return { key, expertId, title: text(stage.title, "stage title", true), description: text(stage.description ?? "", "stage description"),
