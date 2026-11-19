@@ -4379,7 +4379,12 @@ else {
         return;
       }
       for (const state of windowStates.values()) {
-        if (state.closing || !await confirmProjectClose(state, state.tabs)) return;
+        if (state.closing || !await confirmProjectClose(state, state.tabs)) {
+          if (applicationUpdates.prepared) {
+            await applicationUpdates.cancel();
+          }
+          return;
+        }
       }
       if (!saveSession() && applicationUpdates.prepared) {
         await applicationUpdates.cancel();

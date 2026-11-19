@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -90,6 +90,15 @@ function readJson(path) {
         return undefined;
     }
 }
+function updateCachesFor(executable) {
+    return readdirSync(tmpdir(), { withFileTypes: true }).flatMap(entry => {
+        if (!entry.isDirectory() || !/^ai-taskboard-update-[a-zA-Z0-9]+$/.test(entry.name)) {
+            return [];
+        }
+        const path = join(tmpdir(), entry.name);
+        return readJson(join(path, "update.json"))?.executable === executable ? [path] : [];
+    });
+}
 async function command(input) {
     const id = ++seq;
     writeJson(join(control, "command.json"), { id, ...input });
@@ -173,6 +182,8 @@ process.on('unhandledRejection', error => {
     app.exit(1);
 });
 const fixture = () => JSON.parse(readFileSync(join(control, 'fixture.json'), 'utf8'));
+let finishPreparedReply;
+let decideClose;
 globalThis.fetch = async (url) => {
     const value = fixture();
     const address = String(url);
@@ -200,6 +211,15 @@ globalThis.fetch = async (url) => {
 dialog.showMessageBox = async (...args) => {
     const options = args.at(-1);
     write('dialog.json', { version: app.getVersion(), message: options.message, buttons: options.buttons });
+    if (options.type === 'warning' && fixture().holdClose) {
+        write('close-warning.json', { message: options.message, buttons: options.buttons });
+        return new Promise(resolve => {
+            decideClose = response => {
+                decideClose = undefined;
+                resolve({ response, checkboxChecked: false });
+            };
+        });
+    }
     return { response: fixture().mode === 'cancel' ? 0 : 1, checkboxChecked: false };
 };
 dialog.showErrorBox = (title, content) => write('fatal.json', { title, content });
@@ -226,6 +246,13 @@ globalThis.qaManager = async (_profile, project, prompt, _images, action, _tools
             duplicate = await action(tool, { version: '${newVersion}' });
         }
         write('tool.json', { tool, result, duplicate, version: app.getVersion() });
+        if (result.ok && tool === 'app_install_update' && fixture().holdReply) {
+            write('prepared-reply.json', { result, version: app.getVersion() });
+            await new Promise(resolve => {
+                finishPreparedReply = resolve;
+            });
+            finishPreparedReply = undefined;
+        }
         let text;
         if (!result.ok) {
             text = result.error.code + ': ' + result.error.message;
@@ -285,6 +312,26 @@ void (async () => {
             let result;
             if (command.action === 'ask') {
                 result = await evaluate('window.taskboard.boardRequest(' + JSON.stringify(command.text) + ')');
+            }
+            else if (command.action === 'begin-held-install') {
+                void evaluate('window.taskboard.boardRequest(' + JSON.stringify(command.text) + ')')
+                    .then(reply => write('held-reply-result.json', { reply }))
+                    .catch(error => write('held-reply-result.json', { error: error.stack }));
+                result = true;
+            }
+            else if (command.action === 'release-prepared-reply') {
+                assert.ok(finishPreparedReply, 'The prepared manager reply must still be held');
+                finishPreparedReply();
+                result = true;
+            }
+            else if (command.action === 'close-window') {
+                window.close();
+                result = true;
+            }
+            else if (command.action === 'cancel-close') {
+                assert.ok(decideClose, 'The close warning must still be held');
+                decideClose(0);
+                result = true;
             }
             else if (command.action === 'hold') {
                 operation = globalThis.qaBeginOperation(${JSON.stringify(boards[1])});
@@ -490,6 +537,42 @@ catch (error) {
     }
     mode("normal");
     await ask("Проверь обновления AI Taskboard");
+    writeJson(join(control, "fixture.json"), {
+        mode: "normal", installer: nextInstaller, digest: record.packages[1].sha256,
+        holdReply: true, holdClose: true,
+    });
+    await command({ action: "begin-held-install", text: "Установи AI Taskboard " + newVersion });
+    const preparedReply = await until(() => readJson(join(control, "prepared-reply.json")), "prepared reply held");
+    assert.equal(preparedReply.result.ok, true);
+    assert.equal(preparedReply.result.data.version, newVersion);
+    const preparedCaches = updateCachesFor(executable);
+    assert.equal(preparedCaches.length, 1, "Exactly one verified update cache must exist before closing");
+    await command({ action: "close-window" });
+    const closeWarning = await until(() => readJson(join(control, "close-warning.json")), "close warning held");
+    assert.equal(closeWarning.buttons.length, 2);
+    await command({ action: "release-prepared-reply" });
+    const heldResult = await until(() => readJson(join(control, "held-reply-result.json")), "prepared manager reply completed");
+    assert.ok(!heldResult.error, JSON.stringify(heldResult));
+    assert.equal(heldResult.reply.ok, true, JSON.stringify(heldResult));
+    // The cache removal proves that before-quit vetoed the update while state.closing was still true.
+    await until(() => preparedCaches.every(path => !existsSync(path)), "prepared cache removed while close warning remains open");
+    await command({ action: "cancel-close" });
+    assert.equal(child.exitCode, null, "Cancelled close must leave the old process running");
+    assert.equal(readJson(join(control, "ready.json")).pid, before.pid);
+    mode("normal");
+    const afterCancelledClose = await ask("Проверь обновления AI Taskboard после отмены закрытия");
+    assert.equal(afterCancelledClose.result.ok, true);
+    assert.equal(afterCancelledClose.result.data.currentVersion, oldVersion);
+    record.cancelledClose = {
+        preparedVersion: preparedReply.result.data.version,
+        warning: closeWarning.message,
+        oldProcessId: before.pid,
+        cacheCountBefore: preparedCaches.length,
+        cacheRemoved: true,
+        cacheRemovedWhileWarningOpen: true,
+        newDialogueCurrentVersion: afterCancelledClose.result.data.currentVersion,
+    };
+    note("A close warning held the window while the prepared manager reply finished; before-quit removed its update cache before the warning was cancelled. The old process accepted a new dialogue and then retried installation successfully.");
     record.captureBefore = await command({ action: "capture", name: "update-before.png" });
     tool = await ask("Установи AI Taskboard " + newVersion);
     assert.equal(tool.result.ok, true, JSON.stringify(tool));
@@ -566,6 +649,20 @@ finally {
     }
     catch (error) {
         record.cleanupError = String(error);
+        process.exitCode = 1;
+    }
+    try {
+        const executable = join(installDirectory, productExecutable + ".exe");
+        const remainingCaches = updateCachesFor(executable);
+        for (const directory of remainingCaches) {
+            assert.equal(dirname(directory), resolve(tmpdir()));
+            rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+        }
+        assert.deepEqual(updateCachesFor(executable), []);
+        record.updateCachesCleanedOnExit = remainingCaches.length;
+    }
+    catch (error) {
+        record.cleanupError = [record.cleanupError, String(error)].filter(Boolean).join("\n");
         process.exitCode = 1;
     }
     record.gitStatusAfter = execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8", windowsHide: true }).trim();

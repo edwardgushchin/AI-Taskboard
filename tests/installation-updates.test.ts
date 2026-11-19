@@ -253,3 +253,79 @@ test("unsupported installations return the official manual path without download
     assert.ok(result.error.message.includes(releasesUrl));
   }
 });
+
+test("a vetoed quit discards the prepared update, including an overlapping window close", async context => {
+  const source = readFileSync(new URL("../src/desktop/main.ts", import.meta.url), "utf8");
+  const start = source.indexOf("  let quitPending = false;");
+  const end = source.indexOf('  app.on("window-all-closed"', start);
+  assert.ok(start >= 0 && end > start);
+
+  context.mock.method(globalThis, "fetch", async () => Response.json([{ tag_name: candidate.tag }]));
+  for (const scenario of ["window closing", "confirmation declined", "busy", "session failed", "launch failed", "success"]) {
+    let cleaned = 0;
+    let launched = 0;
+    let quits = 0;
+    let confirmCalls = 0;
+    const applicationUpdates = new ApplicationUpdates({
+      version: () => "0.1.0-alpha",
+      supported: () => true,
+      busy: () => false,
+      confirm: async () => true,
+      prepare: async () => ({
+        start: async () => {
+          if (scenario === "launch failed") {
+            throw new Error("Relaunch unavailable");
+          }
+          launched++;
+        },
+        cancel: async () => {
+          cleaned++;
+        },
+      }),
+    });
+    await applicationUpdates.check();
+    assert.equal((await applicationUpdates.install(version, signal())).ok, true);
+    let beforeQuit: (() => void) | undefined;
+    runInNewContext(source.slice(start, end), {
+      app: {
+        on(name: string, handler: (event: { preventDefault(): void }) => void) {
+          assert.equal(name, "before-quit");
+          beforeQuit = () => handler({ preventDefault() {} });
+        },
+        quit() {
+          quits++;
+        },
+      },
+      applicationUpdates,
+      windowStates: new Map([[1, { closing: scenario === "window closing", tabs: [] }]]),
+      quitting: false,
+      updateBusy: () => scenario === "busy",
+      confirmProjectClose: async () => {
+        confirmCalls++;
+        return scenario !== "confirmation declined";
+      },
+      saveSession: () => scenario !== "session failed",
+      dialog: { showMessageBox: async () => {} },
+    });
+    assert.ok(beforeQuit);
+    beforeQuit();
+    await new Promise(resolve => setImmediate(resolve));
+
+    if (scenario === "success") {
+      assert.equal(quits, 1);
+      assert.equal(launched, 1);
+      assert.equal(cleaned, 0);
+      continue;
+    }
+    assert.equal(quits, 0, scenario);
+    assert.equal(launched, 0, scenario);
+    assert.equal(cleaned, 1, scenario);
+    assert.equal(applicationUpdates.prepared, undefined, scenario);
+    assert.equal(applicationUpdates.installing, false, scenario);
+    if (scenario === "window closing") {
+      assert.equal(confirmCalls, 0);
+    }
+    assert.equal((await applicationUpdates.install(version, signal())).ok, true, scenario);
+    await applicationUpdates.cancel();
+  }
+});
