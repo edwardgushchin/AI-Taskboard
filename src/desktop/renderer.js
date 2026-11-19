@@ -1898,6 +1898,9 @@ function draftComposer() {
   bar.append(views, resize, pin);
   let currentGoal;
   let goalRunning = false;
+  let goalResuming = false;
+  let requestingResume = false;
+  let clearingGoal = false;
   const activeGoalRunId = () => goalRunning && managerWork?.phase === "running" ? managerWork.id : undefined;
   let goalRevision = 0;
   let changingGoal = false;
@@ -1922,16 +1925,20 @@ function draftComposer() {
   const goalActions = element("div", undefined, "board-goal-actions");
   const saveGoal = button("", () => changeGoal("edit", goalText.value.trim()), "quiet");
   const pauseGoal = button("", () => changeGoal("pause"), "quiet");
-  const resumeGoal = button("", () => {
+  const resumeGoal = button("", async () => {
     if (!currentGoal || resumeGoal.hidden || resumeGoal.disabled) return;
+    requestingResume = true;
     goalError.textContent = "";
-    void restoreQueue().then(() => {
-      if (disposed || !currentGoal || resumeGoal.hidden || resumeGoal.disabled) return;
-      const entry = element("div");
-      entry.hidden = true;
-      queued.unshift({ entry, status: element("span"), request: "", goal: "resume", submitted: [] });
-      sendNext();
-    }).catch(() => {});
+    syncGoal();
+    try {
+      const result = await api.boardGoal("resume", currentGoal.objective);
+      if (!result.ok) throw new Error(boardError(result.error));
+    } catch (error) {
+      goalError.textContent = error.message;
+    } finally {
+      requestingResume = false;
+      syncGoal();
+    }
   }, "quiet");
   const clearGoal = button("", () => changeGoal("clear"), "quiet danger");
   goalActions.append(saveGoal, pauseGoal, resumeGoal, clearGoal);
@@ -1950,7 +1957,8 @@ function draftComposer() {
     goalPanel.dataset.status = waitingToResume ? "idle" : currentGoal.status;
     pauseGoal.hidden = currentGoal.status !== "active" || waitingToResume;
     resumeGoal.hidden = currentGoal.status === "complete" || !pauseGoal.hidden;
-    resumeGoal.disabled = changingGoal || Boolean(managerWork) || startingWork;
+    resumeGoal.disabled = changingGoal || goalResuming || requestingResume || startingWork;
+    goalPending.hidden = !clearingGoal && (!goalResuming || goalRunning);
     saveGoal.disabled = changingGoal || !goalText.value.trim() || goalText.value.trim() === currentGoal.objective;
     pauseGoal.disabled = clearGoal.disabled = changingGoal;
   };
@@ -1964,9 +1972,10 @@ function draftComposer() {
     goalTitle.title = goalTitle.textContent;
     syncGoal();
   };
-  editor.updateGoal = (goal, running) => {
+  editor.updateGoal = (goal, running, resuming) => {
     goalRevision++;
     if (running !== undefined) goalRunning = running;
+    if (resuming !== undefined) goalResuming = resuming;
     if (goal !== undefined) showGoal(goal);
     else syncGoal();
   };
@@ -1975,7 +1984,7 @@ function draftComposer() {
     if (changingGoal) return;
     changingGoal = true;
     goalError.textContent = "";
-    goalPending.hidden = kind !== "clear";
+    clearingGoal = kind === "clear";
     const revision = goalRevision;
     syncGoal();
     try {
@@ -1987,7 +1996,7 @@ function draftComposer() {
       goalError.textContent = error.message;
     } finally {
       changingGoal = false;
-      goalPending.hidden = true;
+      clearingGoal = false;
       syncGoal();
     }
   }
@@ -3006,7 +3015,7 @@ function draftComposer() {
       loadingHistory = api.boardHistory(project).then(async result => {
         if (!result.ok) throw new Error(boardError(result.error));
         if (disposed || reloadAfterHistory) return;
-        if (revision === goalRevision) editor.updateGoal(result.data.goal, result.data.goalRunning);
+        if (revision === goalRevision) editor.updateGoal(result.data.goal, result.data.goalRunning, result.data.goalResuming);
         const oldImages = [...log.querySelectorAll(".chat-attachments img")];
         let delivered;
         dialogueViewport.update(() => {
@@ -3560,14 +3569,9 @@ function draftComposer() {
       if (result.data.error) goalError.textContent = result.data.error;
     })().catch(error => {
       goalError.textContent = error.message;
-      if (next.goal === "resume") {
-        const index = queued.indexOf(next);
-        if (index >= 0) queued.splice(index, 1);
-      } else {
-        next.failed = true;
-        renderQueuedActions(next);
-        message(error.message);
-      }
+      next.failed = true;
+      renderQueuedActions(next);
+      message(error.message);
     }).finally(() => {
       next.sending = false;
       startingWork = false;
