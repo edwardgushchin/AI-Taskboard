@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import type { RunActivity } from "../src/cli/model.ts";
+import type { BoardActivity } from "../src/desktop/codex-chat.ts";
 
 const source = ["source-files.cjs", "markdown.js", "chat.js"].map(name =>
   readFileSync(new URL("../src/desktop/" + name, import.meta.url), "utf8")).join("\n");
@@ -56,12 +57,59 @@ function fixture(russian = true) {
     api: { runImagePreview: (_id: string, path: string) => reads.push(path), saveRunImage: (_id: string, path: string) => saves.push(path) },
     IntersectionObserver: class { observe() {} },
   }) as {
-    renderRunActivity: (container: Node, items: RunActivity[], completed?: boolean, durationMs?: number, taskId?: string) => void;
+    renderRunActivity: (container: Node, items: RunActivity[], completed?: boolean, durationMs?: number, taskId?: string,
+      context?: { dialogue?: boolean; managerWork?: boolean }) => void;
     boardWaitStatus: (item?: RunActivity) => string | undefined;
   };
   const container = new Node("li");
   const row = (id: string) => container.querySelectorAll("details").find(node => node.dataset.item === "item:" + id)!;
-  return { render: (items: RunActivity[], completed = false, durationMs?: number) => renderRunActivity(container, items, completed, durationMs, "T-0042"), boardWaitStatus, container, document, row, frame, previews, reads, saves, openedTasks };
+  return {
+    render: (items: RunActivity[], completed = false, durationMs?: number,
+      context?: { dialogue?: boolean; managerWork?: boolean }) =>
+      renderRunActivity(container, items, completed, durationMs, "T-0042", context),
+    boardWaitStatus, container, document, row, frame, previews, reads, saves, openedTasks,
+  };
+}
+
+for (const lane of ["managerWork", "dialogue"] as const) {
+  for (const firstAnswer of [false, true]) {
+    for (const secondAnswer of [false, true]) {
+      test(`${lane} keeps consecutive image turns ordered with final answers ${firstAnswer}/${secondAnswer}`, () => {
+        const turn = (id: string, final: boolean): BoardActivity[] => [
+          { ...action(id + "-comment", "agentMessage", "completed", "", id + " begins"),
+            phase: "commentary", providerTurnId: id },
+          ...[1, 2].map(index => ({
+            ...action(id + "-image-" + index, "imageGeneration", "completed", "", ""),
+            providerTurnId: id, generatedImage: { file: id + "-" + index + ".png" },
+          })),
+          { ...action(id + "-tail", "agentMessage", "completed", "", id + " finishes work"),
+            phase: "commentary", providerTurnId: id },
+          ...(final ? [{ ...action(id + "-answer", "agentMessage", "completed", "", id + " answer"),
+            phase: "final_answer" as const, providerTurnId: id }] : []),
+        ];
+        const items = [...turn("A", firstAnswer), ...turn("B", secondAnswer)];
+        for (const completed of [false, true]) {
+          const view = fixture();
+          // Render again to cover retained tiles as well as a freshly restored log.
+          for (let pass = 0; pass < 2; pass++) {
+            view.render(items, completed, undefined, { [lane]: true });
+            const rows = view.container.children;
+            const resultIndex = (id: string) => rows.findIndex(row =>
+              row.dataset.generatedAnswer === id + "-answer" || row.dataset.item === "images:" + id + "-image-2");
+            const first = resultIndex("A");
+            const second = resultIndex("B");
+            assert.ok(first >= 0 && second > first);
+            assert.ok(rows.findIndex(row => row.textContent.includes("A finishes work")) < first);
+            assert.ok(first < rows.findIndex(row => row.textContent.includes("B begins")));
+            for (const [id, index] of [["A", first], ["B", second]] as const) {
+              assert.deepEqual(rows[index]!.querySelectorAll("button").map(tile => tile.dataset.managerImage),
+                [id + "-1.png", id + "-2.png"]);
+            }
+          }
+        }
+      });
+    }
+  }
 }
 
 test("only the running Taskboard wait has a board status", () => {

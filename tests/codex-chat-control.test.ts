@@ -403,6 +403,12 @@ test("board chat keeps a goal streaming across turns and times out only after in
           if (permission?.scope !== "turn" || Object.keys(permission.permissions).length) throw Error("Denied permissions were granted");
         }
         const usage = { totalTokens: 120, inputTokens: 100, cachedInputTokens: 80, cacheWriteInputTokens: 0, outputTokens: 20, reasoningOutputTokens: 10 };
+        if (params.input[0].text === "Read this") {
+          for (const imageId of ["image-first", "image-first", "image-second"]) {
+            send({ method: "item/completed", params: { threadId, turnId: "reply",
+              item: { id: imageId, type: "imageGeneration", status: "completed", result: "fixture-base64" } } });
+          }
+        }
         send({ method: "thread/tokenUsage/updated", params: { threadId, turnId: "reply", tokenUsage: { total: usage, last: usage } } });
         send({ method: "item/completed", params: { threadId, elapsed: 120_000, item: { id: "first", type: "agentMessage", phase: "final_answer", text: "First turn" } } });
         if (params.input[0].text === "Silent") {
@@ -484,12 +490,23 @@ test("board chat keeps a goal streaming across turns and times out only after in
   const stop = Promise.withResolvers<() => Promise<void>>();
   const receipt = Promise.withResolvers<string>();
   const reports: import("../src/cli/token-usage.ts").TokenUsageReport[] = [];
+  const generated: string[] = [];
+  let generatedActivity: import("../src/desktop/codex-chat.ts").BoardActivity[] = [];
   const session = {
     id: threadId, title: "Project manager", save: () => assert.fail("Thread ID must be preserved"),
     settings: { model: "manager-model", effort: "high" },
     goal: "Read this",
     mcpTools: ["task_start", "project_git", "task_review_queue", "project_path"].map(name => ({ name, description: name, inputSchema: { type: "object" } })),
-    onGoalSet: () => accepted++, onActivity() {}, onControl: (value: AgentControl) => { control = value; },
+    onGoalSet: () => accepted++,
+    onActivity(items: typeof generatedActivity) {
+      generatedActivity = items;
+    },
+    saveGeneratedImage: async (image: { id: string; result?: string }) => {
+      assert.equal(image.result, "fixture-base64");
+      generated.push(image.id);
+      return image.id + ".png";
+    },
+    onControl: (value: AgentControl) => { control = value; },
     onWaiting: (value: boolean) => waiting.push(value),
     onTokenUsage: async (report: import("../src/cli/token-usage.ts").TokenUsageReport) => { reports.push(report); },
   };
@@ -499,6 +516,10 @@ test("board chat keeps a goal streaming across turns and times out only after in
     return { ok: true, data: { id: "T-0001" } };
   }, [], "", controller.signal, session);
   assert.equal(result.text, "First turn\n\nDone");
+  assert.deepEqual(generated, ["image-first", "image-second"]);
+  const savedImages = generatedActivity.filter(item => item.type === "imageGeneration");
+  assert.deepEqual(Array.from(savedImages, item => item.generatedImage?.file), ["image-first.png", "image-second.png"]);
+  assert.ok(savedImages.every(item => item.providerTurnId === "reply" && !item.text.includes("fixture-base64")));
   assert.deepEqual(Array.from(reports.at(-1)!.records, ({ turnId, totalTokens }) => [turnId, totalTokens]),
     [["reply", 120], ["continuation", 120]]);
   assert.equal(result.goalStatus, "complete");

@@ -8,11 +8,11 @@ export interface ChatImage {
   savedPath?: string;
 }
 
-export async function saveChatImages(images: ChatImage[], directory: string, limit: number) {
+export async function saveChatImages(images: ChatImage[], directory: string, limit: number, stem = "generated") {
   const sources: { path: string; name: string }[] = [];
   for (const image of images) {
     let data: Buffer;
-    if (image.result) {
+    if (typeof image.result === "string" && image.result) {
       const encoded = image.result.replace(/^data:image\/(?:png|jpeg|webp|gif);base64,/i, "");
       if (encoded.length > 4 * Math.ceil(limit / 3)) throw new Error("Attachments are limited to 64 MiB per task.");
       if (!/^[a-z0-9+/]+={0,2}$/i.test(encoded)) throw new Error("Codex returned an invalid image.");
@@ -20,7 +20,7 @@ export async function saveChatImages(images: ChatImage[], directory: string, lim
       if (data.toString("base64").replace(/=+$/, "") !== encoded.replace(/=+$/, "")) {
         throw new Error("Codex returned an invalid image.");
       }
-    } else if (image.savedPath) {
+    } else if (typeof image.savedPath === "string" && image.savedPath) {
       const file = await stat(image.savedPath);
       if (!file.isFile()) throw new Error("Codex returned an invalid image path.");
       if (file.size > limit) throw new Error("Attachments are limited to 64 MiB per task.");
@@ -35,7 +35,7 @@ export async function saveChatImages(images: ChatImage[], directory: string, lim
       : /^GIF8[79]a$/.test(data.toString("ascii", 0, 6)) ? ".gif"
       : data.toString("ascii", 0, 4) === "RIFF" && data.toString("ascii", 8, 12) === "WEBP" ? ".webp" : undefined;
     if (!extension) throw new Error("Codex returned an unsupported or invalid image.");
-    const name = "generated-" + (sources.length + 1) + extension;
+    const name = stem + "-" + (sources.length + 1) + extension;
     const path = join(directory, name);
     await writeFile(path, data, { flag: "wx" });
     sources.push({ path, name });

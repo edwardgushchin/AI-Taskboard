@@ -20,12 +20,13 @@ const chatPreviews = new IntersectionObserver(entries => {
     if (!isIntersecting) continue;
     chatPreviews.unobserve(target);
     if (!target.isConnected) continue;
-    const { task, file, path, reviewer } = target.dataset;
-    const preview = path ? api.runImagePreview(task, path, reviewer === "true") : api.attachmentPreview(task, file);
+    const { task, file, path, reviewer, managerImage } = target.dataset;
+    const preview = managerImage ? api.managerImagePreview(managerImage) :
+      path ? api.runImagePreview(task, path, reviewer === "true") : api.attachmentPreview(task, file);
     void preview.then(src => {
       if (src && target.isConnected) showChatPreview(target, src);
-      else if (path && target.isConnected) unavailableRunImage(target);
-    }).catch(() => { if (path && target.isConnected) unavailableRunImage(target); });
+      else if ((path || managerImage) && target.isConnected) unavailableRunImage(target);
+    }).catch(() => { if ((path || managerImage) && target.isConnected) unavailableRunImage(target); });
   }
 });
 
@@ -61,7 +62,10 @@ function showChatPreview(tile, src) {
     }
     if (atBottom) list.scrollTop = list.scrollHeight;
   };
-  preview.onerror = () => { release(); if (tile.dataset.path) unavailableRunImage(tile); };
+  preview.onerror = () => {
+    release();
+    if (tile.dataset.path || tile.dataset.managerImage) unavailableRunImage(tile);
+  };
   preview.src = src;
 }
 
@@ -183,7 +187,8 @@ function renderRunActivity(container, items, completed = false, durationMs, task
   const previous = new Map([...container.querySelectorAll("details")].map(entry => [entry.dataset.item, entry.open]));
   const previousImages = new Map([...container.querySelectorAll(".chat-run-item")].map(entry =>
     [entry.dataset.item, entry.querySelector(".chat-run-images")?.querySelector("button")]));
-  const focusedImage = [...previousImages.values()].find(tile => tile?.contains(document.activeElement));
+  const focusedImage = container.querySelector("[data-manager-image]:focus") ??
+    [...previousImages.values()].find(tile => tile?.contains(document.activeElement));
   const focused = container.contains(document.activeElement) ? document.activeElement.closest("details")?.dataset.item : undefined;
   const focusedTask = focused && document.activeElement.matches(".board-chat-task") ? document.activeElement.dataset.task : undefined;
   const focusedMessage = container.contains(document.activeElement) ?
@@ -198,16 +203,81 @@ function renderRunActivity(container, items, completed = false, durationMs, task
   const nodeActivities = new Map();
   const taskEventRows = new Set();
   const images = taskId ? items.map(runImageFile).filter(Boolean) : [];
+  const managerImages = new Map();
+  const managerImageTiles = new Map([...container.querySelectorAll("[data-manager-image]")].map(tile =>
+    [tile.dataset.managerImage + "\0" + tile.dataset.imagePlacement, tile]));
+  const answers = new Map();
+  if (context?.dialogue || context?.managerWork) {
+    for (const item of items) {
+      const key = item.providerTurnId;
+      if (item.type === "agentMessage" && item.phase === "final_answer" && item.text.trim()) {
+        answers.set(key, item.id);
+      }
+      if (item.type !== "imageGeneration" || item.status !== "completed") {
+        continue;
+      }
+      const series = managerImages.get(key) ?? new Map();
+      const file = item.generatedImage?.file;
+      const extension = file?.split(".").pop() ?? "png";
+      series.set(item.id, { file, name: "generated-" + (series.size + 1) + "." + extension });
+      managerImages.set(key, series);
+    }
+  }
+  function generatedTiles(series, onlyId) {
+    const tiles = element("div", undefined, "chat-attachments chat-run-images");
+    const files = [...series.values()];
+    for (const [id, image] of series) {
+      if (onlyId !== undefined && id !== onlyId) {
+        continue;
+      }
+      const placement = onlyId ?? "answer";
+      let tile = managerImageTiles.get(image.file + "\0" + placement);
+      if (!tile) {
+        tile = button("", () => {
+          const group = tile.imageFiles;
+          openImagePreview(undefined, group, group.findIndex(file => file.file === image.file && file.name === image.name),
+            tile.querySelector("img")?.src, {
+              preview: file => file.file ? api.managerImagePreview(file.file) : null,
+              save: file => api.saveManagerImage(file.file, file.name),
+            });
+        }, "quiet chat-attachment");
+        tile.append(icon("images"), element("span", image.name));
+        controlLabelForIcon(tile, () => t("ui.view_7aa05de3") + image.name);
+        if (image.file) {
+          tile.dataset.managerImage = image.file;
+          tile.dataset.imagePlacement = placement;
+          chatPreviews.observe(tile);
+        } else {
+          unavailableRunImage(tile);
+        }
+      }
+      tile.imageFiles = files;
+      tiles.append(tile);
+    }
+    return tiles;
+  }
+  function appendAnswerImages(entry, item) {
+    if ((!context?.dialogue && !context?.managerWork) || answers.get(item.providerTurnId) !== item.id) {
+      return;
+    }
+    const series = managerImages.get(item.providerTurnId);
+    if (series) {
+      entry.append(generatedTiles(series));
+      entry.dataset.generatedAnswer = item.id;
+    }
+  }
   const finalItems = new Set();
-  if (completed) {
+  if (completed && !context?.managerWork) {
     const boundary = items.findLastIndex(item => item.userMessage);
     const finalSegment = boundary === -1 ? items : items.slice(boundary + 1);
-    for (const item of finalSegment) {
+    const finalTurnId = finalSegment.at(-1)?.providerTurnId;
+    const finalTurn = finalSegment.filter(item => item.providerTurnId === finalTurnId);
+    for (const item of finalTurn) {
       if (item.type === "agentMessage" && item.phase === "final_answer" && item.text.trim()) finalItems.add(item);
     }
     // Older logs have no phase. Their last completed message is the final reply.
-    if (!finalItems.size && !finalSegment.some(item => item.type === "agentMessage" && item.phase)) {
-      const last = finalSegment.findLast(item => item.type === "agentMessage" && item.status === "completed" && item.text.trim());
+    if (!finalItems.size && !finalTurn.some(item => item.type === "agentMessage" && item.phase)) {
+      const last = finalTurn.findLast(item => item.type === "agentMessage" && item.status === "completed" && item.text.trim());
       if (last) finalItems.add(last);
     }
   }
@@ -245,6 +315,12 @@ function renderRunActivity(container, items, completed = false, durationMs, task
       changeLabel ? t(...changeLabel) : approvalLabel ? t(...approvalLabel) : label;
     const taskPreview = noticeChanges ? "" : taskChanges.map(({ id }) => id).join(", ");
     activitySummary(detail, summaryLabel, taskPreview || preview, kind, state);
+    const generated = managerImages.get(item.providerTurnId);
+    if (generated?.has(item.id)) {
+      detail.open = previous.get(detail.dataset.item) ?? true;
+      detail.append(generatedTiles(generated, item.id));
+      return detail;
+    }
     const image = taskId && runImageFile(item);
     if (image) {
       detail.open = previous.get(detail.dataset.item) ?? true;
@@ -308,8 +384,26 @@ function renderRunActivity(container, items, completed = false, durationMs, task
     }
     operations = [];
   }
+  function appendUnansweredImages(turnId) {
+    const series = managerImages.get(turnId);
+    if (!series || answers.has(turnId)) {
+      return;
+    }
+    flush();
+    const tiles = generatedTiles(series);
+    tiles.dataset.item = "images:" + [...series.keys()].at(-1);
+    nodes.push(tiles);
+  }
+  let previousTurnId = items[0]?.providerTurnId;
   for (const item of items) {
+    if (item.providerTurnId !== previousTurnId) {
+      appendUnansweredImages(previousTurnId);
+      previousTurnId = item.providerTurnId;
+    }
     if (finalItems.has(item)) continue;
+    if (context?.dialogue && item.type === "imageGeneration") {
+      continue;
+    }
     if (item.type === "reasoning" && !item.text.trim()) continue;
     if (item.userMessage?.text?.startsWith("AI Taskboard queue: handle these addressed notices without a goal. [")) continue;
     if (item.userMessage && context?.userMessage) {
@@ -353,6 +447,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
         const entry = context?.dialogue && item.type === "agentMessage" && item.text.trim()
           ? element("div", undefined, "board-manager-message") : message;
         if (entry !== message) entry.append(message);
+        appendAnswerImages(entry, item);
         if (item.type === "agentMessage") appendChatTime(entry, item.at);
         entry.dataset.item = "message:" + item.id;
         if (context?.dialogue && item.type === "agentMessage" && item.phase === "final_answer" &&
@@ -368,8 +463,10 @@ function renderRunActivity(container, items, completed = false, durationMs, task
       taskEventRows.add(row);
     } else operations.push(item);
   }
+  appendUnansweredImages(previousTurnId);
   flush();
-  const boundaryKey = node => node.dataset.messageId || node.dataset.coordinationKey ||
+  const boundaryKey = node => node.dataset.messageId || node.dataset.coordinationKey || node.dataset.generatedAnswer ||
+    (node.dataset.item?.startsWith("images:") ? node.dataset.item : undefined) ||
     (node.dataset.actor === "user" || taskEventRows.has(node) ? node.dataset.item : undefined);
   const hasBoundaries = nodes.some(boundaryKey);
   function foldWork(batch, key, label) {
@@ -414,6 +511,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
       final.dataset.messageId = item.id;
     }
     final.append(chatText(item.text, messageContext));
+    appendAnswerImages(final, item);
     appendChatTime(final, item.at);
     nodes.push(final);
   }
