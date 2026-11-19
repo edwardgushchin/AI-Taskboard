@@ -1,14 +1,25 @@
 <h1 align="center">AI Taskboard</h1>
 <p align="center"><strong>A local task board for coding agents and the people reviewing their work.</strong></p>
 <p align="center">English · <a href="README.ru.md">Русский</a></p>
+<hr>
 <p align="center">
   <a href="https://github.com/edwardgushchin/AI-Taskboard/blob/main/package.json"><img src="https://img.shields.io/badge/Node.js-%E2%89%A524.12.0-339933?logo=node.js&amp;logoColor=white" alt="Node.js for source builds: 24.12.0 or newer"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-blue" alt="License: PolyForm Noncommercial 1.0.0"></a>
   <a href="https://github.com/edwardgushchin/AI-Taskboard/releases"><img src="https://img.shields.io/github/v/release/edwardgushchin/AI-Taskboard?include_prereleases&amp;label=alpha" alt="Latest published alpha release"></a>
+</p>
+<p align="center">
   <a href="https://github.com/edwardgushchin/AI-Taskboard/commits/main/"><img src="https://img.shields.io/github/last-commit/edwardgushchin/AI-Taskboard/main?label=main%20commit" alt="Last commit on main"></a>
   <a href="https://github.com/edwardgushchin/AI-Taskboard/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/edwardgushchin/AI-Taskboard/actions/workflows/ci.yml/badge.svg?branch=main" alt="Native CI (main)"></a>
 </p>
-<p align="center"><a href="https://github.com/edwardgushchin/AI-Taskboard/releases"><strong>Download alpha</strong></a> · <a href="#quick-start">Quick start</a> · <a href="#documentation">Documentation</a> · <a href="CONTRIBUTING.md#english">Contribute</a></p>
+<p align="center">
+  <a href="https://github.com/edwardgushchin/AI-Taskboard/releases"><strong>Download alpha</strong></a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#workflow">Workflow</a> ·
+  <a href="#platforms">Platforms</a> ·
+  <a href="#documentation">Documentation</a> ·
+  <a href="#contributing">Contribute</a>
+</p>
 
 ![AI Taskboard demo board with a queued task and an open project manager chat](docs/images/board.png)
 
@@ -40,7 +51,7 @@ AI Taskboard brings a Kanban board, agent chats and Git review into one Electron
 
 ### Install a packaged build
 
-Open [Releases](https://github.com/edwardgushchin/AI-Taskboard/releases), expand **Assets** on the release you want, and select the [package for your OS and architecture](#platform-status). Compare its SHA-256 with `SHA256SUMS` from the same release using the commands in the release notes. The desktop package includes the CLI and its Node.js runtime.
+Open [Releases](https://github.com/edwardgushchin/AI-Taskboard/releases), expand **Assets** on the release you want, and select the [package for your OS and architecture](#platforms). Compare its SHA-256 with `SHA256SUMS` from the same release using the commands in the release notes. The desktop package includes the CLI and its Node.js runtime.
 
 ### Run from source
 
@@ -123,12 +134,27 @@ CLI builds download the license for the exact build-time Node.js version
 from the official Node.js repository and include it with the fflate license.
 
 <a id="documentation"></a>
-## Documentation and feedback
+## Documentation
 
 - [First-task tutorial](docs/tutorials/first-task.md) (Russian)
 - [Installation and settings](docs/how-to/setup.md) (Russian)
 - [Documentation index](docs/README.md) (Russian)
 - [Development and packaging](docs/development.md)
-- [Contributing guide](CONTRIBUTING.md#english) and [code of conduct](CODE_OF_CONDUCT.md#english)
-- [Report a bug or suggest a feature](https://github.com/edwardgushchin/AI-Taskboard/issues/new/choose)
-- [Report a vulnerability privately](SECURITY.md#english)
+
+<a id="issues"></a>
+## Report a problem or suggest a change
+
+[Search existing issues](https://github.com/edwardgushchin/AI-Taskboard/issues) before opening one. Choose [Bug report](https://github.com/edwardgushchin/AI-Taskboard/issues/new?template=bug.yml) for a reproducible problem or [Feature request](https://github.com/edwardgushchin/AI-Taskboard/issues/new?template=feature.yml) for a proposed change. Include the app version, platform and steps or use case. Remove private data from logs and screenshots.
+
+<a id="contributing"></a>
+## Contributing
+
+Read the [contributing guide](CONTRIBUTING.md#english) and [code of conduct](CODE_OF_CONDUCT.md#english) before opening a pull request. Use the [pull request template](.github/pull_request_template.md) to describe the change and checks.
+
+## Security
+
+Follow the [security policy](SECURITY.md#english) to report a vulnerability privately.
+
+## Accessibility
+
+See the [accessibility statement](ACCESSIBILITY.md#english) for available controls and how to report barriers.
