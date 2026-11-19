@@ -2056,19 +2056,20 @@ app.whenReady().then(async () => {
       const meta = findCard(milestoneTask.id).querySelector('.task-meta');
       const idStyle = getComputedStyle(meta.querySelector('.task-id'));
       const milestone = meta.querySelector('.task-milestone');
-      const textParts = [...meta.querySelectorAll('.task-id, .task-milestone, .task-stat')];
-      const icons = [...meta.querySelectorAll('.task-stat .icon')];
+      const textParts = [...meta.querySelectorAll('.task-stat')];
+      const icons = ['symbol-number', 'milestone', 'link', 'attach']
+        .map(name => meta.querySelector('.task-stat .codicon-' + name));
       return getComputedStyle(milestone).color === idStyle.color && idStyle.color === getComputedStyle(meta).color &&
-        !!meta.querySelector('.task-id .codicon-symbol-number') && !!milestone.querySelector('.codicon-milestone') &&
-        textParts.length === 5 && textParts.every(part => {
+        textParts.length === icons.length && textParts.every(part => {
         const style = getComputedStyle(part);
         return style.fontFamily === getComputedStyle(document.documentElement).fontFamily &&
           style.fontSize === idStyle.fontSize && style.lineHeight === idStyle.lineHeight;
-      }) && icons.length === 5 && icons.every(icon => {
+      }) && icons.every(icon => {
+        if (!icon) return false;
         const glyph = getComputedStyle(icon, '::before');
         return glyph.fontFamily === 'codicon' && glyph.content !== 'none' && document.fonts.check(glyph.font);
       });
-    })()`, "task ID and milestone share the footer text color, and all five icons use the loaded Codicons font");
+    })()`, "task ID and milestone share the footer text color, and footer icons use the loaded Codicons font");
     await evaluate(`body.querySelector('.task-milestone-link').click(); waitFor(() => !!openedMilestone)`);
     await check(`openedMilestone === 'https://github.com/owner/example/milestone/5'`, "the assigned milestone opens on GitHub");
     await check(`(() => {
@@ -2081,9 +2082,14 @@ app.whenReady().then(async () => {
       const milestone = card.querySelector('.task-milestone');
       const bounds = milestone.getBoundingClientRect();
       const label = milestone.querySelector('.task-milestone-label');
-      return Math.abs(bounds.top - id.top) < 1 && bounds.right <= card.getBoundingClientRect().right &&
-        label.scrollWidth > label.clientWidth && getComputedStyle(label).textOverflow === 'ellipsis' && milestone.title.includes(title);
-    })()`, "a long milestone stays next to the task ID on a narrow card and exposes its full title on hover");
+      const meta = milestone.parentElement.getBoundingClientRect();
+      const cardBounds = card.getBoundingClientRect();
+      return cardBounds.width === 148 && bounds.top >= id.bottom &&
+        bounds.left >= meta.left && bounds.right <= meta.right && bounds.bottom <= cardBounds.bottom &&
+        meta.left >= cardBounds.left && meta.right <= cardBounds.right &&
+        label.clientWidth > 0 && label.scrollWidth > label.clientWidth &&
+        getComputedStyle(label).textOverflow === 'ellipsis' && milestone.title.includes(title);
+    })()`, "a long milestone wraps below the task ID at 148px, stays inside the card and exposes its full title on hover");
     console.log("GitHub milestone Chromium checks passed: " + checks);
     return;
   }
