@@ -723,7 +723,11 @@ function createWindow(initial: string[] = [], selected?: string): WindowState {
   window.on("close", event => {
     if (quitting) return;
     event.preventDefault();
-    if (state.closing) return;
+    if (state.closing || quitPending) return;
+    if (process.platform !== "darwin" && windowStates.size === 1 && applicationUpdates.hasDownloadToDiscard) {
+      app.quit();
+      return;
+    }
     state.closing = true;
     void confirmProjectClose(state, state.tabs).then(confirmed => {
       if (!confirmed) return;
@@ -3419,8 +3423,16 @@ ipcMain.handle("app:downloadUpdate", async (event, version: unknown) => {
 ipcMain.handle("app:discardUpdate", async (event, version: unknown) => {
   stateOf(event);
   const update = applicationUpdates.state;
-  if ((update.phase === "ready" || update.phase === "error") && update.candidate?.version === version) {
+  if (quitPending || update.candidate?.version !== version ||
+      !["ready", "error", "discarding", "cleanup-error"].includes(update.phase)) {
+    return false;
+  }
+  try {
     await applicationUpdates.discardDownload();
+    return true;
+  } catch {
+    // The update state carries the cleanup error to each open dialog.
+    return false;
   }
 });
 ipcMain.handle("app:confirmUpdate", (event, version: unknown) => {
@@ -4547,7 +4559,13 @@ else {
         await applicationUpdates.cancel();
         return;
       }
-      await applicationUpdates.discardDownload();
+      try {
+        await applicationUpdates.discardDownload();
+      } catch (error) {
+        await dialog.showMessageBox({ type: "error", title: "AI Taskboard",
+          message: t("updates.cleanup_failed", { reason: String(error) }) });
+        return;
+      }
       if (applicationUpdates.prepared) {
         try {
           await applicationUpdates.prepared.start();

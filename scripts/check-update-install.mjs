@@ -58,6 +58,7 @@ const productExecutable = "AI Taskboard QA " + randomUUID().slice(0, 8);
 const oldVersion = "0.1.0-alpha";
 const newVersion = "0.1.1-alpha";
 const newerVersion = "0.1.2-alpha";
+const nativeProgressRevision = "8a16179f152576e2d50c12c19da42d936c0f0211";
 const record = { startedAt: new Date().toISOString(), platform: process.platform, arch: process.arch,
     node: process.version, oldVersion, newVersion, checks: [], packages: [], sourceHashes: {} };
 record.sourceHashesLF = {};
@@ -74,6 +75,7 @@ record.gitStatusBefore = execFileSync("git", ["status", "--porcelain"], { cwd: r
 const sha = bytes => createHash("sha256").update(bytes).digest("hex");
 let child;
 let childLogs = "";
+const heldCaches = new Set();
 let installed = false;
 let seq = 0;
 const writeJson = (path, value) => writeFileSync(path, JSON.stringify(value, null, 2));
@@ -104,6 +106,50 @@ function updateCachesFor(executable) {
         const path = join(tmpdir(), entry.name);
         return readJson(join(path, "update.json"))?.executable === executable ? [path] : [];
     });
+}
+
+async function withLockedInstaller(executable, action) {
+    const caches = updateCachesFor(executable);
+    assert.equal(caches.length, 1, "Expected one prepared update to lock");
+    const [cache] = caches;
+    const { installer } = readJson(join(cache, "update.json"));
+    assert.equal(dirname(installer), cache);
+    assert.ok(existsSync(installer));
+    heldCaches.add(cache);
+    const nonce = randomUUID();
+    const ready = join(control, "lock-ready-" + nonce);
+    const release = join(control, "lock-release-" + nonce);
+    const quote = value => "'" + value.replaceAll("'", "''") + "'";
+    const source = [
+        "$ErrorActionPreference = 'Stop'",
+        "$file = [IO.File]::Open(" + quote(installer) + ", [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)",
+        "try {",
+        "  [IO.File]::WriteAllText(" + quote(ready) + ", 'locked')",
+        "  while (![IO.File]::Exists(" + quote(release) + ")) { Start-Sleep -Milliseconds 50 }",
+        "} finally { $file.Dispose() }",
+    ].join("\r\n");
+    const powershell = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const holder = spawn(powershell, ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(source, "utf16le").toString("base64")], {
+        stdio: "ignore", windowsHide: true,
+    });
+    let failed;
+    holder.on("error", error => { failed = error; });
+    try {
+        await until(() => {
+            if (failed) throw failed;
+            assert.equal(holder.exitCode, null, "File share lock must stay open");
+            return existsSync(ready);
+        }, "Windows FileShare.Read lock", 10000);
+        await action(cache);
+    } finally {
+        writeFileSync(release, "release");
+        try {
+            await until(() => failed || holder.exitCode !== null, "file share holder exit", 5000);
+        } finally {
+            if (!failed && holder.exitCode === null) holder.kill();
+        }
+    }
+    return cache;
 }
 async function command(input) {
     const id = ++seq;
@@ -265,6 +311,17 @@ function summarizeProgress({ reduced, frames }) {
         transitions: [...new Set(frames.map(frame => frame.transition))],
         animations: [...new Set(frames.map(frame => frame.animation))],
         percentages: [...new Set(frames.map(frame => frame.percent))],
+    };
+}
+
+function summarizePixelProgress(samples, property) {
+    const widths = samples.map(sample => sample[property]);
+    const movements = widths.slice(1).map((width, index) => Math.abs(width - widths[index]));
+    return {
+        movingFrames: movements.filter(step => step > 0.003).length,
+        largestStep: Math.max(0, ...movements),
+        start: widths[0],
+        end: widths.at(-1),
     };
 }
 
@@ -551,6 +608,7 @@ async function checkPoll(mode, uninstaller, executable, child, before) {
     await capture("progress", "light");
     await capture("progress", "dark");
     await command({ action: "motion", reduced: true, second: true });
+    const pixelSample = await command({ action: "sample-progress-pixels" });
     const pacedSample = await beginSampling(2500);
     mode("paced", "newer");
     const pacedWindows = await readSamples(pacedSample);
@@ -566,12 +624,33 @@ async function checkPoll(mode, uninstaller, executable, child, before) {
     assert.deepEqual(reduced.transitions, ["0s"]);
     assert.ok(pacedWindows[1].frames.every(frame => Math.abs(frame.scale - frame.native) <= 0.00001));
     assert.ok(pacedWindows.every(result => result.frames.every(frame => frame.percent === frame.expectedPercent)));
+    const pixels = await until(() => {
+        const sample = readJson(join(control, "progress-pixels.json"));
+        if (sample?.id !== pixelSample) return false;
+        assert.ok(!sample.error, JSON.stringify(sample));
+        return sample;
+    }, "visible pixel samples before and after", 15000);
+    const pixelLegacy = summarizePixelProgress(pixels.samples, "legacy");
+    const pixelCurrent = summarizePixelProgress(pixels.samples, "current");
+    assert.ok(pixels.samples.length >= 15);
+    assert.ok(pixelLegacy.movingFrames >= 3);
+    assert.ok(pixelCurrent.movingFrames > pixelLegacy.movingFrames, JSON.stringify({ pixelLegacy, pixelCurrent }));
+    assert.ok(pixelCurrent.largestStep < pixelLegacy.largestStep, JSON.stringify({ pixelLegacy, pixelCurrent }));
+    for (const series of [pixelLegacy, pixelCurrent]) {
+        assert.ok(Math.abs(series.start - 0.25) <= 0.02 && series.end >= 0.98, JSON.stringify(series));
+    }
     record.determinateMotion = {
         chunkIntervalMs: 250,
         discreteReference: "Before: discrete native progress.position on the same stream. After: computed scaleX of the visual bar.",
         frameCounts: "Changes count frames whose value moved, not the window's overall FPS.",
         smooth,
         reduced,
+        pixels: {
+            sameStream: "One installed window, same IPC byte updates, theme and capture timestamps.",
+            legacy: pixelLegacy, current: pixelCurrent, roi: pixels.roi,
+            samples: pixels.samples,
+            image: "update-progress-before-after.png (legacy above, current below)",
+        },
     };
     note("The paced Windows download moved the visual scale over extra frames with smaller steps than the discrete byte ratio. The scale never exceeded received data. Reduced motion displayed the exact received ratio on every frame.");
 
@@ -595,8 +674,18 @@ async function checkPoll(mode, uninstaller, executable, child, before) {
 
     mode("normal", "newer");
     await waitForOffer(newerVersion);
+    const lockedLaterCache = await withLockedInstaller(executable, async cache => {
+        await click("update-later");
+        const refusal = await waitState("Later exposes deletion failure",
+            view => view.open && view.later.text === "Позже" && view.action === null && /EPERM|EBUSY|ENOTEMPTY/i.test(view.status));
+        assertOriginal(refusal);
+        assert.equal(child.exitCode, null);
+        assert.ok(existsSync(cache));
+        record.cleanupLater = refusal.status;
+    });
     await click("update-later");
-    assert.equal((await state()).open, false);
+    await waitState("Later closes after the lock is released", view => !view.open);
+    assert.equal(existsSync(lockedLaterCache), false);
     assert.equal(child.exitCode, null);
     const next = view => view.open && view.title.includes(newerVersion) && view.action?.text === "Обновить";
     const otherDialog = await waitState("Later switches the second dialog to the latest offer", next, true);
@@ -610,6 +699,7 @@ async function checkPoll(mode, uninstaller, executable, child, before) {
     assert.equal(afterLater.manifests, duringNewerOffer.manifests);
     assert.deepEqual(updateCachesFor(executable), []);
     note("Both windows kept the original release, notes and partial progress after a newer version became the offer. With the original release withdrawn after verification, both windows kept its confirmation. Later cleared the cached package and switched the remaining dialog and next opening to the latest offer without downloading it.");
+    note("Later reported the real Windows sharing violation and kept the dialog open with the retry action only. A second Later removed the cache after releasing the file lock.");
     record.offerChanges = {
         downloading: { pinned: newVersion, offered: newerVersion, installers: duringNewerOffer.installers },
         verified: { pinned: newVersion, offered: null },
@@ -653,6 +743,62 @@ async function checkPoll(mode, uninstaller, executable, child, before) {
     record.progress = progress.progress;
     record.network = await network();
 }
+
+async function launchInstalledClient(executable) {
+    const environment = { ...process.env };
+    delete environment.ELECTRON_RUN_AS_NODE;
+    child = spawn(executable, ["--user-data-dir=" + profile], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: environment });
+    child.stdout.on("data", data => { childLogs += data; });
+    child.stderr.on("data", data => { childLogs += data; });
+    return until(() => {
+        const fatal = readJson(join(control, "fatal.json"));
+        if (fatal) throw new Error("Installed startup: " + JSON.stringify(fatal));
+        if (child.exitCode !== null) throw new Error("Installed client exited " + child.exitCode + ": " + childLogs);
+        const ready = readJson(join(control, "ready.json"));
+        return ready?.pid === child.pid && ready;
+    }, "installed client ready");
+}
+
+async function checkLockedQuit(executable, pid, mode) {
+    const state = code => command({ action: "execute", code });
+    const messages = [];
+    const cache = await withLockedInstaller(executable, async directory => {
+        for (const action of ["quit", "close-window"]) {
+            const path = join(control, "dialog.json");
+            rmSync(path, { force: true });
+            await command({ action });
+            const problem = await until(() => readJson(path), "system error for " + action);
+            assert.equal(problem.type, "error");
+            assert.match(problem.message + " " + (problem.detail ?? ""), /EPERM|EBUSY|ENOTEMPTY/i);
+            assert.match(problem.message, /Не удалось удалить скачанный установщик/);
+            assert.equal(child.exitCode, null);
+            assert.equal(readJson(join(control, "ready.json")).pid, pid);
+            assert.ok(existsSync(directory));
+            assert.equal(await state("window.taskboard.updateState().then(state => state.phase)"), "cleanup-error");
+            messages.push({ action, ...problem });
+        }
+    });
+    await command({ action: "close-window" });
+    await until(() => child.exitCode !== null, "normal exit after lock release");
+    assert.equal(child.exitCode, 0);
+    assert.equal(existsSync(cache), false);
+    mode("normal");
+    const session = await launchInstalledClient(executable);
+    assert.notEqual(session.pid, pid);
+    assert.equal(session.version, oldVersion);
+    assert.equal(session.profile, profile);
+    record.cleanupQuit = { messages, originalPid: pid, manuallyRelaunchedPid: session.pid, exitCode: 0, cacheRemoved: true };
+    note("Quit and closing the last window both reported the sharing violation and left the old PID running. After releasing the lock the last window closed, removed the cache and did not install. A separate manual launch still started the old version.");
+
+    await until(() => state("!document.getElementById('app-update-badge').hidden"), "reopened client advertises the update");
+    await command({ action: "key", key: "ArrowUp", elementId: "app-settings" });
+    await command({ action: "key", key: "Enter" });
+    await command({ action: "click", elementId: "update-action" });
+    await until(async () => {
+        const update = await state("window.taskboard.updateState()");
+        return update?.candidate?.version === newVersion && update.phase === "ready";
+    }, "new package verified before confirmed install");
+}
 try {
     mkdirSync(project);
     mkdirSync(profile);
@@ -674,6 +820,18 @@ try {
     const checkSource = readFileSync(fileURLToPath(import.meta.url));
     record.sourceHashes["scripts/check-update-install.mjs"] = sha(checkSource);
     record.sourceHashesLF["scripts/check-update-install.mjs"] = sha(checkSource.toString("utf8").replaceAll("\r\n", "\n"));
+    let legacyProgressCss = "";
+    if (pollScenario) {
+        const readLegacy = path => execFileSync("git", ["show", nativeProgressRevision + ":" + path], { cwd: root });
+        const css = readLegacy("src/desktop/styles.css");
+        const renderer = readLegacy("src/desktop/renderer.js");
+        const oldRule = css.toString("utf8").match(/^#update-dialog progress\s*\{[^}]+\}/m)?.[0];
+        assert.ok(oldRule, "Legacy renderer requires its visible native progress styling");
+        legacyProgressCss = oldRule;
+        record.legacyProgress = {
+            revision: nativeProgressRevision, cssBlobBytesSha256: sha(css), rendererBlobBytesSha256: sha(renderer), oldRule,
+        };
+    }
     record.hashRepresentation = "SHA-256 of raw checked-out source bytes, before QA-only bootstrap instrumentation";
     let source = readFileSync(join(project, "src/desktop/main.ts"), "utf8")
         .replace("readTaskRunHistory, replyToBoard, replyToTask", "readTaskRunHistory, replyToTask");
@@ -801,7 +959,7 @@ globalThis.fetch = async (url) => {
 };
 dialog.showMessageBox = async (...args) => {
     const options = args.at(-1);
-    write('dialog.json', { version: app.getVersion(), message: options.message, buttons: options.buttons });
+    write('dialog.json', { version: app.getVersion(), type: options.type, message: options.message, detail: options.detail, buttons: options.buttons });
     if (options.type === 'warning' && fixture().holdClose) {
         write('close-warning.json', { message: options.message, buttons: options.buttons });
         return new Promise(resolve => {
@@ -882,6 +1040,84 @@ void (async () => {
     window.setContentSize(1280, 800);
     window.webContents.setBackgroundThrottling(false);
     const evaluate = code => window.webContents.executeJavaScript(code);
+    async function startPixelProgressSample(id) {
+        const cssKey = await window.webContents.insertCSS(${JSON.stringify(legacyProgressCss)});
+        const clear = async () => {
+            await evaluate('window.qaRemoveLegacyProgress?.()');
+            await window.webContents.removeInsertedCSS(cssKey);
+        };
+        try {
+            await evaluate('(() => {' +
+                'const meter = document.getElementById("update-progress");' +
+                'const legacy = document.createElement("progress");' +
+                'legacy.id = "qa-legacy-progress"; meter.before(legacy);' +
+                'const sync = () => { legacy.max = meter.max; legacy.value = meter.value; legacy.hidden = meter.hidden; };' +
+                'const observer = new MutationObserver(sync); sync();' +
+                'observer.observe(meter, { attributeFilter: ["max", "value", "hidden"] });' +
+                'window.qaRemoveLegacyProgress = () => { observer.disconnect(); legacy.remove(); };' +
+                '})()');
+            const [legacy, current] = await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => ' +
+                'resolve(["qa-legacy-progress", "update-progress-track"].map(id => document.getElementById(id).getBoundingClientRect().toJSON())))))');
+            assert.ok(legacy.width >= 400 && legacy.height >= 8 && current.width >= 400 && current.height >= 6,
+                JSON.stringify({ legacy, current }));
+            const x = Math.floor(Math.min(legacy.left, current.left));
+            const y = Math.floor(legacy.top) - 2;
+            const width = Math.ceil(Math.max(legacy.right, current.right)) - x;
+            const height = Math.ceil(current.bottom) - y + 2;
+            const roi = { x, y, width, height };
+            const calibrate = await window.webContents.capturePage(roi);
+            assert.deepEqual(calibrate.getSize(), { width, height });
+            writeFileSync(join(artifacts, "update-progress-before-after.png"), calibrate.toPNG());
+
+            function colorAt(bitmap, column, row) {
+                const index = (row * width + column) * 4;
+                return bitmap.subarray(index, index + 3);
+            }
+            const distance = (first, second) => first.reduce((sum, channel, index) => sum + Math.abs(channel - second[index]), 0);
+            const initial = calibrate.toBitmap();
+            function rowProbe(rect) {
+                const left = Math.ceil(rect.left) - x;
+                const right = Math.floor(rect.right) - x;
+                const row = Math.floor(rect.top + rect.height / 2) - y;
+                const on = colorAt(initial, Math.floor(left + (right - left) * 0.12), row);
+                const off = colorAt(initial, Math.floor(left + (right - left) * 0.78), row);
+                assert.ok(distance(on, off) >= 40, "Visible filled and empty colors must be distinguishable");
+                return bitmap => {
+                    let filled = 0;
+                    for (let column = left + 2; column < right - 2; column++) {
+                        const pixel = colorAt(bitmap, column, row);
+                        if (distance(pixel, on) < distance(pixel, off)) filled++;
+                    }
+                    return filled / (right - left - 4);
+                };
+            }
+            const legacyRatio = rowProbe(legacy);
+            const currentRatio = rowProbe(current);
+            const samples = [];
+            const start = performance.now();
+            const append = image => {
+                const bitmap = image.toBitmap();
+                samples.push({ elapsed: performance.now() - start, legacy: legacyRatio(bitmap), current: currentRatio(bitmap) });
+            };
+            append(calibrate);
+            void (async () => {
+                while (performance.now() - start < 3200) {
+                    await wait(5);
+                    const frame = await window.webContents.capturePage(roi);
+                    if (await evaluate('document.getElementById("update-progress").hidden')) break;
+                    append(frame);
+                }
+                await clear();
+                write('progress-pixels.json', { id, roi, samples });
+            })().catch(async error => {
+                await clear();
+                write('progress-pixels.json', { id, error: error.stack });
+            });
+        } catch (error) {
+            await clear();
+            throw error;
+        }
+    }
     async function measureSettingsRail(screenshot) {
         const bounds = await evaluate('document.getElementById("app-settings").getBoundingClientRect().toJSON()');
         const pixels = screenshot.toBitmap();
@@ -978,6 +1214,10 @@ void (async () => {
                     windows => write('progress-frames.json', { id: command.id, windows }),
                     error => write('progress-frames.json', { id: command.id, error: error.stack }),
                 );
+                result = command.id;
+            }
+            else if (command.action === 'sample-progress-pixels') {
+                await startPixelProgressSample(command.id);
                 result = command.id;
             }
             else if (command.action === 'manual-checks') {
@@ -1226,25 +1466,7 @@ catch (error) {
     const uninstaller = join(installDirectory, "Uninstall " + productExecutable + ".exe");
     assert.ok(existsSync(uninstaller));
     const executable = join(installDirectory, productExecutable + ".exe");
-    const environment = { ...process.env };
-    delete environment.ELECTRON_RUN_AS_NODE;
-    child = spawn(executable, ["--user-data-dir=" + profile], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: environment });
-    child.stdout.on("data", data => {
-        childLogs += data;
-    });
-    child.stderr.on("data", data => {
-        childLogs += data;
-    });
-    const before = await until(() => {
-        const fatal = readJson(join(control, "fatal.json"));
-        if (fatal) {
-            throw new Error("Installed startup: " + JSON.stringify(fatal));
-        }
-        if (child.exitCode !== null) {
-            throw new Error("Installed client exited " + child.exitCode + ": " + childLogs);
-        }
-        return readJson(join(control, "ready.json"));
-    }, "installed old version ready");
+    const before = await launchInstalledClient(executable);
     assert.equal(before.version, oldVersion);
     record.electron = before.electron;
     record.chromium = before.chromium;
@@ -1259,6 +1481,7 @@ catch (error) {
     };
     if (pollScenario) {
         await checkPoll(mode, uninstaller, executable, child, before);
+        await checkLockedQuit(executable, before.pid, mode);
         await command({ action: "approve-restart" });
     } else {
         const checked = await ask("Проверь обновления AI Taskboard");
@@ -1412,7 +1635,7 @@ finally {
     }
     try {
         const executable = join(installDirectory, productExecutable + ".exe");
-        const remainingCaches = updateCachesFor(executable);
+        const remainingCaches = [...new Set([...updateCachesFor(executable), ...heldCaches])].filter(existsSync);
         for (const directory of remainingCaches) {
             assert.equal(dirname(directory), resolve(tmpdir()));
             rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });

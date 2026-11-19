@@ -19,7 +19,7 @@ type Progress = { received: number; total?: number };
 type Transfer = {
   candidate: Candidate;
   controller: AbortController;
-  phase: "downloading" | "ready" | "installing" | "error";
+  phase: "downloading" | "ready" | "installing" | "error" | "discarding" | "cleanup-error";
   progress?: Progress;
   package?: PreparedUpdate;
   error?: string;
@@ -35,6 +35,7 @@ export class ApplicationUpdates {
   private checkedTag?: string;
   private checking?: Promise<CliReply>;
   private transfer?: Transfer;
+  private discarding?: Promise<void>;
   private pending = false;
   prepared?: PreparedUpdate;
 
@@ -53,6 +54,10 @@ export class ApplicationUpdates {
 
   get installing() {
     return this.pending;
+  }
+
+  get hasDownloadToDiscard() {
+    return Boolean(this.transfer && this.transfer.phase !== "installing");
   }
 
   get state() {
@@ -112,28 +117,42 @@ export class ApplicationUpdates {
         transfer.progress = progress;
         if (this.transfer === transfer) this.options.changed?.();
       });
-      if (this.transfer !== transfer) {
-        await prepared.cancel();
-        return;
-      }
       transfer.package = prepared;
-      transfer.phase = "ready";
+      if (transfer.phase !== "discarding") transfer.phase = "ready";
     } catch (error) {
-      transfer.phase = "error";
-      transfer.error = (error as Error).message;
+      if (transfer.phase !== "discarding") {
+        transfer.phase = "error";
+        transfer.error = (error as Error).message;
+      }
     } finally {
       this.options.changed?.();
     }
   }
 
-  async discardDownload() {
+  discardDownload(): Promise<void> {
+    if (this.discarding) return this.discarding;
     const transfer = this.transfer;
-    if (!transfer || transfer.phase === "installing") return;
-    this.transfer = undefined;
-    transfer.controller.abort();
+    if (!transfer || transfer.phase === "installing") return Promise.resolve();
+    this.discarding = this.discardTransfer(transfer).finally(() => { this.discarding = undefined; });
+    return this.discarding;
+  }
+
+  private async discardTransfer(transfer: Transfer) {
+    const downloading = transfer.phase === "downloading";
+    transfer.phase = "discarding";
     this.options.changed?.();
-    await transfer.completion;
-    await transfer.package?.cancel();
+    if (downloading) transfer.controller.abort();
+    try {
+      await transfer.completion;
+      await transfer.package?.cancel();
+      this.transfer = undefined;
+    } catch (error) {
+      transfer.phase = "cleanup-error";
+      transfer.error = (error as Error).message;
+      throw error;
+    } finally {
+      this.options.changed?.();
+    }
   }
 
   confirmDownload(version: unknown) {
@@ -154,7 +173,7 @@ export class ApplicationUpdates {
   }
 
   async install(version: unknown, signal: AbortSignal): Promise<CliReply> {
-    if (this.pending || this.transfer?.phase === "downloading" || this.transfer?.phase === "ready") {
+    if (this.pending || (this.transfer && this.transfer.phase !== "error")) {
       return cliFailure("UPDATE_IN_PROGRESS", "An update is already being prepared or installed.");
     }
     if (!this.options.supported()) {

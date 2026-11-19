@@ -136,6 +136,44 @@ test("a failed transfer can be retried for the same version and discarded to rev
   assert.equal(service.state.candidate?.version, newer);
 });
 
+test("a busy installer keeps its cleanup handle without allowing installation or another download", async context => {
+  context.mock.method(globalThis, "fetch", async () => Response.json([{ tag_name: candidate.tag }]));
+  const firstRemoval = Promise.withResolvers<void>();
+  let removals = 0;
+  const service = new ApplicationUpdates({
+    version: () => "0.1.0-alpha",
+    supported: () => true,
+    busy: () => false,
+    confirm: async () => true,
+    prepare: async () => ({
+      start: async () => { assert.fail("The installer must not run after cleanup starts"); },
+      cancel: async () => {
+        removals++;
+        if (removals === 1) await firstRemoval.promise;
+      },
+    }),
+  });
+  await service.check();
+  await service.download(version);
+  const removal = service.discardDownload();
+  const sameRemoval = service.discardDownload();
+  assert.equal(removal, sameRemoval);
+  assert.equal(service.state.phase, "discarding");
+  assert.equal(service.confirmDownload(version), false);
+  firstRemoval.reject(new Error("EBUSY: installer is locked"));
+  await assert.rejects(removal, /EBUSY/);
+  assert.equal(removals, 1);
+  assert.equal(service.state.phase, "cleanup-error");
+  assert.equal(service.state.candidate?.version, version);
+  assert.match(service.state.error ?? "", /EBUSY/);
+  assert.equal(service.confirmDownload(version), false);
+  assert.equal(service.download(version), undefined);
+  assert.equal((await service.install(version, signal())).ok, false);
+  await service.discardDownload();
+  assert.equal(removals, 2);
+  assert.equal(service.state.phase, "available");
+});
+
 test("manifest requires one exact version/architecture entry and validates the full line", () => {
   assert.equal(manifestChecksum(`${digest.toUpperCase()}  ${name}\r\n`, name), digest);
   for (const manifest of ["", `${digest}  other.exe`, `${digest}  ../${name}`, `${digest}  ${name}\n${digest}  ${name}`,
@@ -397,18 +435,19 @@ test("unsupported installations return the official manual path without download
   }
 });
 
-test("a vetoed quit discards the prepared update, including an overlapping window close", async context => {
+test("quit can retry a locked package and handles vetoes of a confirmed installation", async context => {
   const source = readFileSync(new URL("../src/desktop/main.ts", import.meta.url), "utf8");
   const start = source.indexOf('  app.on("before-quit"');
   const end = source.indexOf('  app.on("window-all-closed"', start);
   assert.ok(start >= 0 && end > start);
 
   context.mock.method(globalThis, "fetch", async () => Response.json([{ tag_name: candidate.tag }]));
-  for (const scenario of ["window closing", "confirmation declined", "busy", "session failed", "launch failed", "success"]) {
+  for (const scenario of ["locked installer", "window closing", "confirmation declined", "busy", "session failed", "launch failed", "success"]) {
     let cleaned = 0;
     let launched = 0;
     let quits = 0;
     let confirmCalls = 0;
+    const messages: string[] = [];
     const applicationUpdates = new ApplicationUpdates({
       version: () => "0.1.0-alpha",
       supported: () => true,
@@ -423,11 +462,16 @@ test("a vetoed quit discards the prepared update, including an overlapping windo
         },
         cancel: async () => {
           cleaned++;
+          if (scenario === "locked installer" && cleaned === 1) throw new Error("EBUSY");
         },
       }),
     });
     await applicationUpdates.check();
-    assert.equal((await applicationUpdates.install(version, signal())).ok, true);
+    if (scenario === "locked installer") {
+      await applicationUpdates.download(version);
+    } else {
+      assert.equal((await applicationUpdates.install(version, signal())).ok, true);
+    }
     let beforeQuit: (() => void) | undefined;
     runInNewContext(source.slice(start, end), {
       app: {
@@ -449,12 +493,28 @@ test("a vetoed quit discards the prepared update, including an overlapping windo
         return scenario !== "confirmation declined";
       },
       saveSession: () => scenario !== "session failed",
-      dialog: { showMessageBox: async () => {} },
+      t: (key: string, { reason }: { reason: string }) => key + ": " + reason,
+      dialog: {
+        showMessageBox: async ({ message }: { message: string }) => { messages.push(message); },
+      },
     });
     assert.ok(beforeQuit);
     beforeQuit();
     await new Promise(resolve => setImmediate(resolve));
 
+    if (scenario === "locked installer") {
+      assert.equal(quits, 0);
+      assert.equal(cleaned, 1);
+      assert.equal(applicationUpdates.state.phase, "cleanup-error");
+      assert.deepEqual(messages, ["updates.cleanup_failed: Error: EBUSY"]);
+      beforeQuit();
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(quits, 1);
+      assert.equal(cleaned, 2);
+      assert.equal(launched, 0);
+      assert.equal(applicationUpdates.state.phase, "available");
+      continue;
+    }
     if (scenario === "success") {
       assert.equal(quits, 1);
       assert.equal(launched, 1);

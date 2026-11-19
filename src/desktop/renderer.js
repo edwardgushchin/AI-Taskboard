@@ -64,10 +64,16 @@ function renderAppUpdate() {
   const { phase, supported, progress, error, installing } = appUpdate;
   const downloading = phase === "downloading";
   const ready = phase === "ready";
+  const discarding = phase === "discarding";
+  const cleanupFailed = phase === "cleanup-error";
   const status = byId("update-status");
   let message = "";
   if (downloading) {
     message = t("updates.downloading");
+  } else if (discarding) {
+    message = t("updates.cleaning");
+  } else if (cleanupFailed) {
+    message = t("updates.cleanup_failed", { reason: error });
   } else if (phase === "installing") {
     message = t("updates.preparing");
   } else if (error) {
@@ -102,9 +108,10 @@ function renderAppUpdate() {
   release.href = candidate.url;
   release.textContent = t("ui.open_release_b1c993b5");
   const later = byId("update-later");
-  later.textContent = t(ready ? "updates.later" : "updates.close");
+  later.disabled = discarding;
+  later.textContent = t(ready || discarding || cleanupFailed ? "updates.later" : "updates.close");
   const action = byId("update-action");
-  action.hidden = !supported || downloading || phase === "installing";
+  action.hidden = !supported || downloading || discarding || cleanupFailed || phase === "installing";
   action.disabled = installing;
   action.textContent = t(ready ? "updates.restart" : error ? "updates.retry" : "updates.download");
 }
@@ -6186,16 +6193,24 @@ byId("update-release").addEventListener("click", event => {
   event.preventDefault();
   void api.openLink(event.currentTarget.href);
 });
-function discardUpdateOnClose() {
-  if (appUpdate.phase === "ready" || appUpdate.phase === "error") {
-    void api.discardUpdate(appUpdate.candidate.version);
+async function closeUpdateDialog(event) {
+  event.preventDefault();
+  const { phase, candidate } = appUpdate;
+  if (phase === "discarding") return;
+  if (phase === "ready" || phase === "error" || phase === "cleanup-error") {
+    if (!await api.discardUpdate(candidate.version)) {
+      if (updateDialog.open) byId("update-later").focus();
+      return;
+    }
   }
-}
-byId("update-later").addEventListener("click", () => {
-  discardUpdateOnClose();
   updateDialog.close();
+}
+byId("update-later").addEventListener("click", event => {
+  void closeUpdateDialog(event).catch(error => notice(error.message));
 });
-updateDialog.addEventListener("cancel", discardUpdateOnClose);
+updateDialog.addEventListener("cancel", event => {
+  void closeUpdateDialog(event).catch(error => notice(error.message));
+});
 byId("update-action").addEventListener("click", () => {
   const version = appUpdate.candidate.version;
   if (appUpdate.phase === "ready") {

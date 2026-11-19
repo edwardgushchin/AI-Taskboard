@@ -1335,6 +1335,8 @@
   "updates.busy": "Wait for running work to finish, then try again.",
   "updates.cancelled": "The application could not close to install the update.",
   "updates.failed": "Could not update. {reason}",
+  "updates.cleaning": "Removing the downloaded installer…",
+  "updates.cleanup_failed": "Could not remove the downloaded installer. Close any program using the file and try again. {reason}",
   "updates.install_button": "Install and restart",
   "updates.preparing": "An application update is being prepared. Try again after the restart or cancellation."
 }
