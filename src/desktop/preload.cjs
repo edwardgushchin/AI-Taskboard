@@ -43,6 +43,8 @@ contextBridge.exposeInMainWorld("taskboard", {
   attachmentPreview: (id, file) => ipcRenderer.invoke("board:attachmentPreview", id, file),
   artifactPreview: path => ipcRenderer.invoke("board:artifactPreview", path),
   runImagePreview: (id, path, reviewer) => ipcRenderer.invoke("board:runImagePreview", id, path, reviewer),
+  managerImagePreview: file => ipcRenderer.invoke("board:managerImagePreview", file),
+  saveManagerImage: (file, name) => ipcRenderer.invoke("board:saveManagerImage", file, name),
   saveRunImage: (id, path, reviewer) => ipcRenderer.invoke("board:saveRunImage", id, path, reviewer),
   openLink: url => ipcRenderer.invoke("chat:openLink", url),
   readMarkdown: (id, link, source) => ipcRenderer.invoke("board:readMarkdown", id, link, source),

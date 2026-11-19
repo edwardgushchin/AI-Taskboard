@@ -420,6 +420,7 @@ interface BoardSession {
   onControl: (control: AgentControl, model?: string) => void;
   onWaiting: (waiting: boolean) => void;
   attachmentContext?: string;
+  saveGeneratedImage?: (image: ChatImage) => Promise<string | undefined>;
   goal?: string;
   resumeGoal?: boolean;
   separateTurn?: boolean;
@@ -438,6 +439,8 @@ type BoardMessage = { at?: string; id: string; sequence: number; actor: "manager
   kind?: "request-changes" };
 export type BoardActivity = RunActivity & { taskChanges?: BoardChange[]; messages?: BoardMessage[]; messagesOnly?: boolean;
   completedAt?: string; statusTransition?: { task: string; status: string };
+  generatedImage?: { file?: string };
+  providerTurnId?: string;
   userMessage?: ReturnType<typeof boardMessage> & { at?: string } };
 
 export function updateBoardGoal(profile: string, project: string, threadId: string, action: BoardGoalAction) {
@@ -534,6 +537,10 @@ export function readBoardHistory(profile: string, project: string, threadId: str
 }
 
 function boardActivity(entries: Map<string, BoardActivity>, method: string, params: Record<string, unknown>, at?: string): BoardActivity | undefined {
+  const image = params.item as Record<string, unknown> | undefined;
+  if (image?.type === "imageGeneration") {
+    params = { ...params, item: { id: image.id, type: image.type, status: image.status, prompt: image.prompt } };
+  }
   const activity: BoardActivity | undefined = runActivity(entries, method, params, at);
   if (!activity || method !== "item/completed") return activity;
   const item = params.item as Record<string, unknown>;
@@ -777,7 +784,19 @@ function reply(profile: string, project: string, prompt: string, images: string[
       if (message.method === "thread/goal/updated" && data.goal) updateGoal(data.goal);
       if (message.method === "thread/goal/cleared") updateGoal(null);
       if (activityItem) {
+        if (session) {
+          activityItem.providerTurnId = data.turnId ?? activity.get(activityItem.id)?.providerTurnId;
+        }
         if (session && activityItem.type === "agentMessage" && typeof data.item?.text === "string") activityItem.text = data.item.text;
+        if (session?.saveGeneratedImage && activityItem.type === "imageGeneration") {
+          activityItem.generatedImage = activity.get(activityItem.id)?.generatedImage;
+          const image = data.item;
+          if (!activityItem.generatedImage && itemMethod === "item/completed" && image?.status === "completed") {
+            activityItem.generatedImage = {
+              file: await session.saveGeneratedImage({ ...image, id: activityItem.id }),
+            };
+          }
+        }
         activity.set(activityItem.id, activityItem);
         activityTimer ??= setTimeout(publish, 80);
       }
@@ -908,7 +927,8 @@ function reply(profile: string, project: string, prompt: string, images: string[
       if (turn.status !== "completed" && !goalStopped) throw new Error(turn.error?.message ?? "Codex did not complete the reply.");
       completed = !goalStopped;
       const text = answers.join("\n\n").trim();
-      if (!text && !generated.size && goalStatus === undefined) throw new Error("Codex returned no message.");
+      const hasManagerImages = [...activity.values()].some(item => item.generatedImage);
+      if (!text && !generated.size && !hasManagerImages && goalStatus === undefined) throw new Error("Codex returned no message.");
       signal?.throwIfAborted();
       const attachmentSources = imageDirectory === undefined ? [] :
         await saveChatImages([...generated.values()], imageDirectory, imageLimit);
