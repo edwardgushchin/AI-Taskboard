@@ -41,7 +41,7 @@ import { applyDesktopAcceptance } from "../cli/acceptance.ts";
 import { missingCodexThread, startCodexRun } from "./codex-run.ts";
 import type { ExecutorTask } from "./codex-run.ts";
 import { runLog } from "./run-activity.ts";
-import { readReviewerImage, readRunImage } from "./run-images.ts";
+import { imageViewPath, readReviewerImage, readRunImage, readViewedImage } from "./run-images.ts";
 import { projectIdentity, projectLabels, projectPath, savedWindows } from "./project-tabs.ts";
 import { readMarkdownFile } from "./markdown-files.ts";
 import { readSavedPng } from "../cli/artifacts.ts";
@@ -51,7 +51,7 @@ import { startWindowsDictation } from "./windows-dictation.ts";
 import { needsManagerAttention } from "../cli/task-messages.ts";
 import { readReviewReports, saveReviewReports } from "./review-history.ts";
 import { readReviewerChat, reviewerActivity, withReviewerChat } from "./reviewer-chat.ts";
-import { goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory, sendGoalMessage } from "./manager-history.ts";
+import { goalMessages, hasGoalHistory, hasManagerImageView, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory, sendGoalMessage } from "./manager-history.ts";
 import { goalActionTools, runGoalAction } from "./goal-actions.ts";
 import { readManagerImage, saveManagerImage } from "./manager-images.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
@@ -3698,9 +3698,24 @@ ipcMain.handle("board:saveManagerImage", async (event, file: unknown, name: unkn
   }
 });
 
-async function taskRunImage(event: IpcMainInvokeEvent, id: unknown, path: unknown, reviewer: unknown) {
+async function runImage(event: IpcMainInvokeEvent, id: unknown, path: unknown, reviewer: unknown) {
   const { project } = stateOf(event);
-  if (!project || typeof id !== "string" || !taskIdPattern.test(id) || typeof path !== "string") return null;
+  if (!project || typeof path !== "string") return null;
+  if (id === undefined && reviewer === undefined) {
+    const key = projectIdentity(project);
+    const matches = (item: RunActivity) => imageViewPath(item) === path;
+    try {
+      const live = [boardRequests.get(key)?.items, boardWorkRequests.get(key)?.items];
+      const confirmed = live.some(items => items?.some(matches)) ||
+        agentSlots.entries(project).some(({ task, state }) =>
+          (task === "manager:dialogue" || task === "manager:context") && state?.live?.items.some(matches)) ||
+        hasManagerImageView(project, path);
+      return confirmed ? readViewedImage(project, path) : null;
+    } catch {
+      return null;
+    }
+  }
+  if (typeof id !== "string" || !taskIdPattern.test(id)) return null;
   const task = await callCli<Task>(project, ["show", id]);
   if (!task.ok) return null;
   if (reviewer === true) return readReviewerImage(project, task.data.id, path);
@@ -3708,12 +3723,12 @@ async function taskRunImage(event: IpcMainInvokeEvent, id: unknown, path: unknow
 }
 
 ipcMain.handle("board:runImagePreview", async (event, id: unknown, path: unknown, reviewer: unknown) => {
-  const image = await taskRunImage(event, id, path, reviewer);
+  const image = await runImage(event, id, path, reviewer);
   return image ? "data:" + image.type + ";base64," + image.data.toString("base64") : null;
 });
 
 ipcMain.handle("board:saveRunImage", async (event, id: unknown, path: unknown, reviewer: unknown) => {
-  const image = await taskRunImage(event, id, path, reviewer);
+  const image = await runImage(event, id, path, reviewer);
   if (!image) return cliFailure("IMAGE_UNAVAILABLE", t("ui.image_unavailable_f6c21e43"));
   const result = await dialog.showSaveDialog(stateOf(event).window, { defaultPath: image.name });
   if (result.canceled || !result.filePath) return { ok: true, data: null };

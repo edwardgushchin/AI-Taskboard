@@ -8,6 +8,7 @@ import { onBoard, withRuntimeLock } from "../cli/storage.ts";
 import { runtimeLocation } from "./board-runtime.ts";
 import { readTask } from "../cli/archive.ts";
 import { statusNotice } from "../cli/task-messages.ts";
+import { imageViewPath } from "./run-images.ts";
 
 // Run under the board lock, shared by all windows and CLI writers. Persist the
 // delivery batch before writing chat files so an interrupted replay is idempotent.
@@ -77,6 +78,23 @@ const filePattern = /^\d{13}-[0-9a-f-]{36}\.json$/i;
 type ReadPosition = { at: number; file: string; index: number };
 type UnreadState = { unread: string[]; through?: ReadPosition };
 const lastUnread = new Map<string, string[]>();
+
+export function hasManagerImageView(project: string, path: string): boolean {
+  const board = join(project, ".tasks");
+  const folder = join(board, "manager-chat");
+  directory(board);
+  if (!exists(folder)) return false;
+  directory(folder);
+  return readdirSync(folder).filter(name => filePattern.test(name)).sort().reverse().some(name => {
+    try {
+      const run = readJson(join(folder, name)) as Run;
+      return (run.lane === "chat" || Boolean(run.goalId)) &&
+        run.items.some(item => imageViewPath(item) === path);
+    } catch {
+      return false;
+    }
+  });
+}
 
 export const isLocalManagerCursor = (cursor: string | null) => cursor?.startsWith(cursorPrefix) ?? false;
 

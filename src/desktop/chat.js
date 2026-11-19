@@ -22,7 +22,7 @@ const chatPreviews = new IntersectionObserver(entries => {
     if (!target.isConnected) continue;
     const { task, file, path, reviewer, managerImage } = target.dataset;
     const preview = managerImage ? api.managerImagePreview(managerImage) :
-      path ? api.runImagePreview(task, path, reviewer === "true") : api.attachmentPreview(task, file);
+      path ? api.runImagePreview(task, path, task ? reviewer === "true" : undefined) : api.attachmentPreview(task, file);
     void preview.then(src => {
       if (src && target.isConnected) showChatPreview(target, src);
       else if ((path || managerImage) && target.isConnected) unavailableRunImage(target);
@@ -213,7 +213,14 @@ function renderRunActivity(container, items, completed = false, durationMs, task
   const seen = new Set(context?.seenMessages);
   const nodeActivities = new Map();
   const taskEventRows = new Set();
-  const images = taskId ? items.map(runImageFile).filter(Boolean) : [];
+  const viewedImages = new Map();
+  if (taskId || context?.dialogue || context?.managerWork) {
+    for (const item of items) {
+      const image = runImageFile(item);
+      if (image) viewedImages.set(item, image);
+    }
+  }
+  const images = [...viewedImages.values()];
   const managerImages = new Map();
   const managerImageTiles = new Map([...container.querySelectorAll("[data-manager-image]")].map(tile =>
     [tile.dataset.managerImage + "\0" + tile.dataset.imagePlacement, tile]));
@@ -332,25 +339,26 @@ function renderRunActivity(container, items, completed = false, durationMs, task
       detail.append(generatedTiles(generated, item.id));
       return detail;
     }
-    const image = taskId && runImageFile(item);
+    const image = viewedImages.get(item);
     if (image) {
       detail.open = previous.get(detail.dataset.item) ?? true;
       const tiles = element("div", undefined, "chat-attachments chat-run-images");
       let tile = previousImages.get(detail.dataset.item);
       if (!tile || tile.dataset.path !== image.file || tile.dataset.task !== taskId) {
-        tile = button("", () => openImagePreview(taskId, tile.imageFiles, tile.imageFiles.findIndex(file => file.file === image.file),
+        tile = button("", () => openImagePreview(taskId, tile.imageFiles, tile.imageIndex,
           tile.querySelector("img")?.src, {
             preview: file => api.runImagePreview(taskId, file.file, context?.reviewer),
             save: file => api.saveRunImage(taskId, file.file, context?.reviewer),
           }), "quiet chat-attachment");
         controlLabelForIcon(tile, () => t("ui.view_7aa05de3") + image.name);
         tile.append(icon("images"), element("span", image.name));
-        tile.dataset.task = taskId;
+        if (taskId) tile.dataset.task = taskId;
         tile.dataset.path = image.file;
         if (context?.reviewer) tile.dataset.reviewer = "true";
         chatPreviews.observe(tile);
       }
       tile.imageFiles = images;
+      tile.imageIndex = images.indexOf(image);
       tiles.append(tile);
       detail.append(tiles);
       return detail;

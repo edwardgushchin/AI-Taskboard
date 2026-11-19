@@ -28,7 +28,7 @@ export async function readReviewerImage(project: string, id: string, path: strin
   return readViewedImage(project, path);
 }
 
-async function readViewedImage(cwd: string, path: string) {
+export async function readViewedImage(cwd: string, path: string) {
   const type = new Map([[".png", "image/png"], [".jpg", "image/jpeg"], [".jpeg", "image/jpeg"],
     [".gif", "image/gif"], [".webp", "image/webp"]]).get(extname(path).toLowerCase());
   if (!type) return null;
