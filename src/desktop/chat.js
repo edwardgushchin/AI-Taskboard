@@ -817,12 +817,10 @@ function taskChat(task) {
   }
   if (draft.savedRun?.sequence <= task.history.length) delete draft.savedRun;
   const area = element("section", undefined, "task-chat");
-  const heading = element("h3", () => t("ui.agent_chat_065b4b62"));
-  heading.id = "task-chat-heading";
-  area.setAttribute("aria-labelledby", heading.id);
+  bindLocalized(area, "aria-label", () => t("ui.agent_chat_065b4b62"), true);
   const header = element("div", undefined, "chat-header");
   const tabs = element("div", undefined, "board-chat-views");
-  header.append(heading, tabs);
+  header.append(tabs);
   area.append(header);
   const list = element("ol", undefined, "chat-log task-dialogue");
   bindLocalized(list, "aria-label", () => t("ui.messages_e8e13717"), true);
@@ -1118,7 +1116,7 @@ function taskChat(task) {
   const composer = element("form", undefined, "chat-composer");
   const input = element("textarea");
   input.id = "task-chat-input";
-  input.rows = 3;
+  input.rows = 2;
   input.value = draft.text;
   bindLocalized(input, "placeholder", () => t("ui.message_the_agent_a84e2133"));
   input.setAttribute("aria-label", input.placeholder);
@@ -1149,7 +1147,7 @@ function taskChat(task) {
   controlLabelForIcon(microphone, () => t("ui.voice_input_a05b7480"));
   controls.append(attach, microphone, retryReply, send);
   composer.append(pendingFiles, input, fileInput, controls, feedback);
-  if (task.status === "draft" && task.draftDiscussion) {
+  if (task.status === "draft" && task.draftDiscussion && task.draftDiscussion.phase !== "running") {
     const { phase, reason } = task.draftDiscussion;
     const discussion = element("div", undefined, "chat-status");
     discussion.setAttribute("role", "status");

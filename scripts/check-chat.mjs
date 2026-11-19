@@ -215,7 +215,7 @@ app.whenReady().then(async () => {
       const visual = ({ box, glyph, font, disabled }) => ({ box, glyph, font, disabled });
       assert.deepEqual(cardStyle.buttons.map(visual), managerStyle.buttons.map(visual), theme + " action styles");
       assert.ok([...cardStyle.buttons, ...managerStyle.buttons].every(button => button.label), theme + " accessible names");
-      await check(`byId('task-chat-input').rows === 3 && getComputedStyle(byId('task-chat-input')).resize === 'vertical' &&
+      await check(`byId('task-chat-input').rows === 2 && getComputedStyle(byId('task-chat-input')).resize === 'vertical' &&
         managerInput.rows === 1 && managerInput.closest('.board-draft-field') &&
         taskSide.querySelector('.chat-day')?.textContent.length > 0`, theme + " separate editors and card date separator");
       report.push((theme === "light" ? "Светлая тема" : "Тёмная тема") +
