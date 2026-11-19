@@ -20,7 +20,7 @@ export function boardToolContent(name: string, reply: CliReply) {
 
 export async function withBoardMcp<T>(
   tools: BoardMcpTool[],
-  call: (name: string, args: unknown) => Promise<CliReply>,
+  call: (name: string, args: unknown, signal: AbortSignal) => Promise<CliReply>,
   run: (config: string, env: Record<string, string>) => Promise<T>,
   toolTimeoutSeconds?: number,
 ): Promise<T> {
@@ -39,6 +39,7 @@ export async function openBoardMcp(
 ) {
   const token = randomBytes(32).toString("hex");
   const tokenVariable = name.toUpperCase() + "_MCP_TOKEN";
+  const activeCalls = new Map<string | number, AbortController>();
   const server = createServer((request, response) => {
     const end = (status: number) => { response.writeHead(status).end(); };
     if (request.headers.origin !== undefined || request.headers.authorization !== "Bearer " + token) return end(403);
@@ -57,7 +58,10 @@ export async function openBoardMcp(
       }
       const message = JSON.parse(body);
       if (message?.jsonrpc !== "2.0" || typeof message.method !== "string") return end(400);
-      if (message.id === undefined) return end(202);
+      if (message.id === undefined) {
+        if (message.method === "notifications/cancelled") activeCalls.get(message.params?.requestId)?.abort();
+        return end(202);
+      }
       let result: object | undefined;
       if (message.method === "initialize") {
         const version = message.params?.protocolVersion;
@@ -67,7 +71,9 @@ export async function openBoardMcp(
         result = { tools };
       } else if (message.method === "tools/call" && tools.some(tool => tool.name === message.params?.name)) {
         if (response.destroyed) return;
+        if ((typeof message.id !== "string" && typeof message.id !== "number") || activeCalls.has(message.id)) return end(400);
         const lifetime = new AbortController();
+        activeCalls.set(message.id, lifetime);
         const closed = () => lifetime.abort();
         response.once("close", closed);
         try {
@@ -77,6 +83,7 @@ export async function openBoardMcp(
           result = { content: [{ type: "text", text: content.text },
             ...(content.pngBase64 ? [{ type: "image", mimeType: "image/png", data: content.pngBase64 }] : [])], isError: !reply.ok };
         } finally {
+          activeCalls.delete(message.id);
           response.removeListener("close", closed);
         }
       } else if (message.method === "ping") {

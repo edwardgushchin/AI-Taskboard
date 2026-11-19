@@ -2136,8 +2136,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     if (changed) publishManagerUnread(project);
     broadcastMaintenanceSafe(project, "orchestrator-history");
   }
-  async function askUser(args: unknown, approval = false): Promise<CliReply> {
-    signal.throwIfAborted();
+  async function askUser(args: unknown, approval = false, questionSignal = signal): Promise<CliReply> {
+    questionSignal.throwIfAborted();
     if (running.changingGoal) return cliFailure("QUESTION_CLOSED", t("errors.e39a8618c13d7aae"));
     const { question, options = [] } = (args ?? {}) as { question?: unknown; options?: unknown };
     if (typeof question !== "string" || !question.trim() || question.length > (approval ? 24_000 : 2000) ||
@@ -2161,7 +2161,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     // Leave time to deliver the response before the MCP call's 140-second deadline.
     const timeout = setTimeout(() => settle(null), 120_000);
     const aborted = () => settle(null);
-    signal.addEventListener("abort", aborted, { once: true });
+    questionSignal.addEventListener("abort", aborted, { once: true });
     try {
       if (goal && !approval) publishGoalNotice(t("ui.question_from_the_goal_8b2d2caf") + "\n\n" + view.text);
       broadcastMaintenanceSafe(project, "orchestrator-question", { question: managerQuestion(projectKey)?.view ?? null });
@@ -2190,7 +2190,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     } finally {
       settle(null);
       clearTimeout(timeout);
-      signal.removeEventListener("abort", aborted);
+      questionSignal.removeEventListener("abort", aborted);
     }
   }
   try {
@@ -2287,6 +2287,12 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       unreadBoardMessages: unread.length || undefined,
       previousConversation: priorChat?.length ? priorChat : undefined,
     }) : undefined;
+    const confirmApproval = async (details: string, approvalSignal = signal) => {
+      if (approvalSignal.aborted || requests.get(projectKey) !== running) return false;
+      const allow = t("ui.allow_once_8539a30b");
+      const result = await askUser({ question: details, options: [allow, t("ui.deny_ffcf9a77")] }, true, approvalSignal);
+      return !approvalSignal.aborted && result.ok && (result.data as { answer: string | null }).answer === allow;
+    };
     const runAction = boardActions(board.project, attachments, changes, signal,
       (id, revision, { reason, targetHead, reviewMode, reviewModeVersion, newThread, resolveConflicts } = {}) => reason ?
         launchTask(board.project, id, { input: { revision, reason, targetHead, reviewMode, reviewModeVersion, actor: "manager" } }) :
@@ -2302,8 +2308,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       }, deliveredMessages, () => waitWork.signal, undefined, undefined,
       (id, revision) => id === managerReviewId
         ? Promise.resolve(cliFailure("CHAT_BUSY", "Return this task from its card or the manager chat after this automatic review ends."))
-        : returnTaskToDraft(board.project, id, revision, "manager"), allowAutoModeChange);
-    const run = async (name: string, args: unknown): Promise<CliReply> => {
+        : returnTaskToDraft(board.project, id, revision, "manager"), allowAutoModeChange,
+      reviewIds || cleanupJob || repairTask ? undefined : confirmApproval);
+    const run = async (name: string, args: unknown, toolSignal?: AbortSignal): Promise<CliReply> => {
       try {
         if (name === boardReviewModeTool.name) {
           if (!allowReviewModeChange) return cliFailure("USER_DIRECTION_REQUIRED", "Use the owner's manager chat to change review mode.");
@@ -2315,7 +2322,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           return { ok: true, data: reviewModeReceipt(result.data) };
         }
         if (name === "task_set_executor_access") return await setTaskExecutorAccess(app.getPath("userData"), board.project, args);
-        const result = await runAction(name, args);
+        const result = await runAction(name, args, toolSignal);
         if (name === "task_show" && result.ok && !reviewIds) {
           const task = result.data as Task;
           return { ok: true, data: { ...task, executorFullAccess: executorFullAccess(app.getPath("userData"), board.project, task) } };
@@ -2383,7 +2390,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     const response = await release.run(() => replyToBoard(app.getPath("userData"), board.project,
       goal === "resume" ? "" : requestText || t("ui.see_attachments_863aa6f1"),
       attachments.flatMap(file => file.image ? [file.image] : []),
-      async (name, args) => {
+      async (name, args, toolSignal) => {
         if (reviewIds && !autoReviewReadTools.has(name)) {
           const input = args as { id?: string; messages?: { id?: string }[] } | null;
           const ids = name === "manager_ack" && Array.isArray(input?.messages)
@@ -2403,10 +2410,11 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         }
         // Starts can overlap, but they must see any board edits queued before them.
         const independent = name === "task_wait" || name === "task_start" || name === "task_start_batch" || name === "task_review";
-        const pending = name === "task_wait" ? run(name, args) : pendingAction.then(() =>
+        const outOfQueue = name === "task_wait" || name === "github_delete_milestone";
+        const pending = outOfQueue ? run(name, args, toolSignal) : pendingAction.then(() =>
           name === "expert_stage" && stages ? stages.report(args) :
             name === "expert_verify_skills" && stages ? stages.verify(args) : run(name, args));
-        if (!independent) pendingAction = pending;
+        if (!independent && !outOfQueue) pendingAction = pending;
         return pending.then(result => {
           if (reviewIds || cleanupJob) return result;
           if (name === "task_review" && result.ok) {
@@ -2432,12 +2440,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         separateTurn: reviewIds ? true : undefined,
         role: cleanupJob || repairTask ? "reviewer" : "manager",
         access: reviewIds ? undefined : managerAccess(app.getPath("userData"), project),
-        confirmApproval: cleanupJob ? async () => false : reviewIds ? undefined : async details => {
-          if (signal.aborted || requests.get(projectKey) !== running) return false;
-          const allow = t("ui.allow_once_8539a30b");
-          const result = await askUser({ question: details, options: [allow, t("ui.deny_ffcf9a77")] }, true);
-          return !signal.aborted && result.ok && (result.data as { answer: string | null }).answer === allow;
-        },
+        confirmApproval: cleanupJob ? async () => false : reviewIds ? undefined : confirmApproval,
         settings: settings.data.manager,
         attachmentContext,
         mcpTools,

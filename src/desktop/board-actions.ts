@@ -1,5 +1,6 @@
 import { isManual } from "../cli/manual-board.ts";
 import { readBoardSettings, locateBoard } from "../cli/storage.ts";
+import { deleteGitHubMilestone } from "../cli/repository.ts";
 import { boardReviewMode, defaultBoardAgents, hexTagColor, reviewVerifier, TaskboardError, taskIdPattern, usesIndependentReviewer } from "../cli/model.ts";
 import type { ArchiveLink, BoardAgentSettings, BoardSettings, BoardTag, GitHubMilestone, ReviewMode, Task } from "../cli/model.ts";
 import { needsManagerAttention, type managerInbox } from "../cli/task-messages.ts";
@@ -77,6 +78,13 @@ const actions = {
   github_set_milestone_due: { description: "Set the due date of an existing GitHub milestone for the board's origin using the board host's GitHub login. Use for an authorized deadline change. Pass the repository and number from the milestone list. Returns the date verified by reading GitHub again.",
     properties: { repository: string, number: { type: "integer", minimum: 1 }, dueDate: { ...string, pattern: "^\\d{4}-\\d{2}-\\d{2}$" } },
     required: ["repository", "number", "dueDate"] },
+  github_update_milestone: { description: "Update an authorized GitHub milestone by number for the board's origin. Set any of title, description (empty to clear) and state (closed or open). Returns the milestone verified by reading GitHub again.",
+    properties: { repository: string, number: { type: "integer", minimum: 1 }, title: { ...string, minLength: 1 },
+      description: string, state: { type: "string", enum: ["open", "closed"] } }, required: ["repository", "number"] },
+  github_delete_milestone: { description: "Use only on the user's explicit instruction to delete a specific GitHub milestone. Pass its repository and number. For linked cards, show the returned list, including archived cards, before asking how to handle it. To retain those links after the user's explicit choice, pass keepLinks: true and previewSnapshot from that list. If a fresh list is returned, show it and ask again. The board asks the user to confirm the exact deletion.",
+    properties: { repository: string, number: { type: "integer", minimum: 1 }, keepLinks: { type: "boolean" },
+      previewSnapshot: { ...string, pattern: "^[0-9a-f]{64}$" } },
+    required: ["repository", "number"] },
   task_set_milestone: { description: "Assign one GitHub milestone from the board's origin to one or more local cards, including completed and cancelled cards. Pass the repository and milestone number, or null to clear it. Use task IDs and revisions from board_list. Returns a result per card.",
     properties: { tasks: { type: "array", minItems: 1, items: { type: "object", properties: taskReference,
       required: ["id", "revision"], additionalProperties: false } }, milestone: { type: ["object", "null"],
@@ -162,7 +170,7 @@ const tools = Object.entries(actions).map(([name, { description, properties, req
   name, description, inputSchema: { type: "object", properties, required, additionalProperties: false },
 }));
 const reviewActions = new Set(["task_approve", "task_accept", "task_request_changes"]);
-const mcpNames = new Set(["task_cancel", "task_tool_revoke", "provider_tools", "task_tool_grant", "task_set_executor_access", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_wait", ...reviewActions, "task_review_queue", "task_review", "task_review_diff", "task_review_artifact", "task_cleanup_status", "task_cleanup", "project_git", "project_git_push", "project_path", "project_sha256", "milestones_list", "github_create_milestone", "github_set_milestone_due", "task_set_milestone", "tag_set_color"]);
+const mcpNames = new Set(["task_cancel", "task_tool_revoke", "provider_tools", "task_tool_grant", "task_set_executor_access", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_wait", ...reviewActions, "task_review_queue", "task_review", "task_review_diff", "task_review_artifact", "task_cleanup_status", "task_cleanup", "project_git", "project_git_push", "project_path", "project_sha256", "milestones_list", "github_create_milestone", "github_set_milestone_due", "github_update_milestone", "github_delete_milestone", "task_set_milestone", "tag_set_color"]);
 mcpNames.add("board_auto_queue");
 mcpNames.add("board_set_auto_mode");
 mcpNames.add("task_return_to_draft");
@@ -203,6 +211,7 @@ export const boardInstructions = [
   "Use provider read and shell tools for project files, directory listings, checksums and volume space. Use literal paths; distinguish absence from access errors. Use Get-FileHash on Windows or sha256sum where available for SHA-256.",
   "When publication is appropriate under the user's directions or the active plan, use project_git_push with the checked-out branch and full HEAD. Report the target and Git result.",
   "Use github_create_milestone for a user-authorized creation and github_set_milestone_due for a user-authorized deadline change. Read a milestone independently with github_read, view milestone and its number.",
+  "Use github_update_milestone for authorized edits, closure and reopening. Use github_delete_milestone only after a direct user instruction identifying the milestone. Show each returned list before asking whether to cancel, clear or reassign local links where possible, or explicitly keep them. Pass previewSnapshot from the shown list when keeping links. Report deletion only when deleted is true.",
   "When the user's release goal names a milestone, read its current state and reconcile the cards that are confirmed release scope with task_set_milestone. Repeat for newly created release work, including blockers. A deadline does not assign existing or future cards. Preserve explicit exclusions, other milestones, and work scheduled after the release.",
   "Use board_list with activeOnly: true when you only need the open queue. Use the revision already returned by a board tool for the next action on that card. Use task_show when you need card details or after a revision conflict. task_review provides the revision for acceptance and requesting changes.",
   "Decide whether a board change is useful from the user's feedback, decisions, and the conversation. Act on clear implications without waiting for a direct command or confirmation. Answer informational questions and discuss tentative options without changing the board unless the conversation establishes a reason to act.",
@@ -371,7 +380,8 @@ export function boardActions(project: string, attachments: { path: string; name:
   deliveredMessages: Set<string> | undefined, waitInterrupt: () => AbortSignal,
   runReview?: ReviewRunner, reviewReports = new Map<string, ReviewedSubmission>(),
   returnToDraft?: (id: string, revision: number) => Promise<CliReply<Task>>,
-  allowAutoModeChange = false) {
+  allowAutoModeChange = false,
+  confirmMilestoneDeletion?: (details: string, signal: AbortSignal) => Promise<boolean>) {
   const reviewSnapshots = new Map<string, Pick<TaskReview, "revision" | "targetHead" | "artifacts"> & {
     mode: ReviewMode; reviewModeVersion?: number; criteriaCount: number; reviewerApproved: boolean;
   }>();
@@ -391,7 +401,7 @@ export function boardActions(project: string, attachments: { path: string; name:
       revision: snapshot.revision, source: args.source, sha256: args.sha256, offset: args.offset, format: args.format,
     });
   };
-  const run = async (name: string, args: unknown): Promise<CliReply> => {
+  const run = async (name: string, args: unknown, toolSignal?: AbortSignal): Promise<CliReply> => {
     signal.throwIfAborted();
     if (!Object.hasOwn(actions, name) || !args || typeof args !== "object" || Array.isArray(args)) {
       return cliFailure("INVALID_INPUT", "Unknown board action or invalid arguments.");
@@ -547,6 +557,45 @@ export function boardActions(project: string, attachments: { path: string; name:
     if (action === "milestones_list") return callCli(project, ["milestones"]);
     if (action === "github_create_milestone") return callCli(project, ["github-milestone-create"], input);
     if (action === "github_set_milestone_due") return callCli(project, ["github-milestone-due"], input);
+    if (action === "github_update_milestone") return callCli(project, ["github-milestone-update"], input);
+    if (action === "github_delete_milestone") {
+      const { previewSnapshot, ...target } = input;
+      const lifetime = toolSignal ? AbortSignal.any([signal, toolSignal]) : signal;
+      const phase = (ms: number) => AbortSignal.any([lifetime, AbortSignal.timeout(ms)]);
+      try {
+        lifetime.throwIfAborted();
+        // Allow 25 s for preview, 60 s for the decision and 45 s for recheck + DELETE.
+        // The ordinary MCP call expires after 140 s.
+        const location = locateBoard(project);
+        const { milestone, linkedCards, snapshot, token } = await deleteGitHubMilestone(location, target, phase(25_000));
+        if (!milestone || !snapshot || !token) return cliFailure("GITHUB_MILESTONE_VERIFY_FAILED", "Deletion preview is unavailable.");
+        const latestPreview = previewSnapshot === snapshot;
+        if ((linkedCards.length && (target.keepLinks !== true || !latestPreview)) ||
+            (previewSnapshot !== undefined && !latestPreview)) {
+          return { ok: true, data: { milestone, linkedCards, previewSnapshot: snapshot, deleted: false } };
+        }
+        const details = [
+          `Delete GitHub milestone ${milestone.repository} #${milestone.number} (${milestone.state})?`,
+          milestone.title.slice(0, 200),
+          ...(linkedCards.length ? [
+            `Keep links on ${linkedCards.length} cards. The full list is available in the deletion preview.`,
+          ] : []),
+        ];
+        const decision = phase(60_000);
+        if (!await confirmMilestoneDeletion?.(details.join("\n"), decision) || decision.aborted) {
+          return cliFailure("GITHUB_MILESTONE_CONFIRMATION_REQUIRED", "The user did not confirm deletion of this milestone.");
+        }
+        lifetime.throwIfAborted();
+        return { ok: true, data: await deleteGitHubMilestone(location, { ...target, token }, phase(45_000)) };
+      } catch (error) {
+        if (error instanceof TaskboardError) return cliFailure(error.code, error.message);
+        if (lifetime.aborted) return cliFailure("GITHUB_MILESTONE_CANCELLED", "Milestone deletion was cancelled before sending DELETE.");
+        if (error instanceof DOMException && error.name === "TimeoutError") {
+          return cliFailure("GITHUB_MILESTONE_TIMEOUT", "The GitHub milestone read timed out before sending DELETE.");
+        }
+        throw error;
+      }
+    }
     if (action === "tag_set_color") return callCli<BoardTag>(project, ["tag", "set"], { name: input.name, color: input.color });
     if (action === "task_set_milestone") {
       const result = await callCli<{ milestone: GitHubMilestone | null; tasks: CliReply<TaskLink & { changed: boolean }>[] }>(
