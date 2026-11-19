@@ -50,6 +50,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   const launches: number[] = [];
   const runtime = runInNewContext(stripTypeScriptTypes(activitySource.replace("function scheduleAgentWork() {", "function scheduleAgentWork() { if (!subscriptions.size) { noteSchedule(); return; }")) +
     "\n({ sendChat, stopChat, returnTaskToDraft, activeAgents, frame, windowStates, runningTasks, launchingTasks, notifyRunChange, chatRuns, replyingTasks, scheduleAgentWork })", {
+    quotaWait: undefined, quotaInterruption: new Error("Fixture quota pause"), refreshQuota: async () => [],
     agentSlots: { ...slots, entries: (project: string) => sharedRuns.get(project) ?? [] },
     registerRuntime: () => () => {}, matchesQueuedExecutor, activeRunSummary, basename, extname, join, performance, projectLabels, AbortController, AbortSignal, wait, subscriptions,
     isManual: () => options.manual, runtimeLocation: (project: string) => project, readBoardSettings: () => ({}),

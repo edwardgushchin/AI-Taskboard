@@ -148,7 +148,8 @@ export function chatModels(profile: string, project: string) {
 export async function reviewWithCodex(profile: string, project: string, settings: ChatSettings | null | undefined,
   context: string, tools: object[], runAction: RunAction, signal: AbortSignal,
   onTokenUsage: (report: TokenUsageReport) => Promise<void>, taskId?: string,
-  onActivity?: (items: RunActivity[]) => void, plan?: ExpertPhase, targetHead?: string | null, submissionSequence = 0) {
+  onActivity?: (items: RunActivity[]) => void, plan?: ExpertPhase, targetHead?: string | null, submissionSequence = 0,
+  reviewThread?: { id?: string; save: (id: string) => void }) {
   let usage: TokenUsageReport | undefined;
   let stopMail: (() => void) | undefined;
   const worklog = boardWorklog(project, "reviewer", taskId);
@@ -159,7 +160,7 @@ export async function reviewWithCodex(profile: string, project: string, settings
   const options = {
     role: "reviewer" as const, settings, tools, signal, onActivity, specialistDelegation: Boolean(plan?.stages.length),
     onControl: taskId ? (control: AgentControl) => { stopMail = watchTeamMail(project, taskId, control, "reviewer", submissionSequence); } : undefined,
-    observeProvider: stages?.observe, onProviderReady: stages?.bind,
+    observeProvider: stages?.observe, onProviderReady: stages?.bind, reviewThread,
     onTokenUsage: async (report: TokenUsageReport) => { usage = report; }, finalAnswerSchema: {
       type: "object", additionalProperties: false, required: ["summary", "findings", "evidence", "needsHuman", "verifyRisk"],
       properties: {
@@ -408,6 +409,7 @@ export async function replyToBoard(
 
 interface BoardSession {
   id?: string;
+  keepThread?: boolean;
   access?: ManagerAccess;
   role?: "manager" | "reviewer";
   confirmApproval?: (details: string) => Promise<boolean>;
@@ -632,6 +634,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
   onActivity?: (items: RunActivity[]) => void;
   onControl?: (control: AgentControl) => void; signal?: AbortSignal; imageDirectory?: string; imageLimit?: number;
   session?: BoardSession;
+  reviewThread?: { id?: string; save: (id: string) => void };
   finalAnswerSchema?: object;
   webSearch?: boolean;
   mcp?: BoardMcpConnection;
@@ -673,13 +676,13 @@ function reply(profile: string, project: string, prompt: string, images: string[
     if (images.length && model?.inputModalities && !model.inputModalities.includes("image")) {
       throw new Error("Choose a model that supports images.");
     }
-    const existing = session?.separateTurn ? undefined : session?.id;
+    const existing = session?.separateTurn && !session.keepThread ? undefined : session?.id ?? options.reviewThread?.id;
     const method = existing ? "thread/resume" : "thread/start";
     const researchInstructions = research ? await options.prepareResearch?.(request, client) : undefined;
     const params = {
       ...(existing ? { threadId: existing, excludeTurns: true } : {
         // Native subagents fork from the provider's saved parent rollout.
-        ephemeral: !options.specialistDelegation && (!session || session.separateTurn === true), dynamicTools: options.tools,
+        ephemeral: !options.reviewThread && !session?.keepThread && !options.specialistDelegation && (!session || session.separateTurn === true), dynamicTools: options.tools,
         ...(session && !session.separateTurn ? { historyMode: "paginated" } : {}),
       }),
       cwd: project, model: modelId, approvalPolicy,
@@ -714,6 +717,12 @@ function reply(profile: string, project: string, prompt: string, images: string[
     if (research && (started.activePermissionProfile?.id !== permissionProfile || started.approvalPolicy !== approvalPolicy ||
         (!fullAccess && started.approvalsReviewer !== approvalsReviewer))) {
       throw new Error("Codex did not apply the selected manager access mode.");
+    }
+    if (options.reviewThread) {
+      if (!codexThreadPattern.test(thread.id) || (existing && existing !== thread.id)) {
+        throw new Error("Codex returned an unexpected reviewer thread ID.");
+      }
+      if (!existing) options.reviewThread.save(thread.id);
     }
     options.onProviderReady?.(request, thread.id);
     if (session) {

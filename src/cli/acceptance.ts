@@ -825,6 +825,19 @@ function executeAcceptance(store: BoardStore, task: Task, input: Record<string, 
     requireRevision(task, input.revision, true);
     return store.save(record({ ...task, acceptanceRepair: undefined }, "acceptance-cancelled", "user"));
   }
+  if (input.pauseRepairForQuota === true) {
+    requireRevision(task, input.revision, true);
+    if (task.status !== "review" || task.acceptanceRepair?.phase !== "running") {
+      throw new TaskboardError("INVALID_TRANSITION", "There is no running acceptance repair to pause.");
+    }
+    if (exists(store.pendingPath(task.id))) {
+      throw new TaskboardError("PENDING_OPERATION", "Recover the interrupted acceptance first.");
+    }
+    const repair = task.acceptanceRepair;
+    return store.save(record({ ...task, acceptanceRepair: {
+      ...repair, phase: "queued", attempts: Math.max(0, repair.attempts - 1),
+    } }, "acceptance-quota-wait", "agent"));
+  }
   if (input.repairFailure !== undefined && task.acceptanceRepair) {
     requireRevision(task, input.revision, true);
     if (exists(store.pendingPath(task.id))) throw new TaskboardError("PENDING_OPERATION", "Recover the interrupted acceptance first.");

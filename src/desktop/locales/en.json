@@ -1278,5 +1278,7 @@
   "limits.work": "Tasks in progress",
   "limits.review": "Tasks under review",
   "experts.review_lead": "Assign review lead",
-  "experts.add_review_stage": "Add review stage"
+  "experts.add_review_stage": "Add review stage",
+  "ui.waiting_for_provider_quota": "Waiting for provider quota",
+  "ui.waiting_for_provider_quota_until": "Waiting for provider quota · resets {time}"
 }
