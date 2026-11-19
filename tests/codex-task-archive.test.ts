@@ -48,7 +48,7 @@ test("acceptance archives dedicated Codex threads after their writers release th
   move("pause", "blocked");
   await run();
   await run(oldId);
-  assert.deepEqual(calls, []);
+  assert.equal(calls.length, 0);
 
   const done = onBoard(location, store => {
     const review = record({
@@ -66,13 +66,13 @@ test("acceptance archives dedicated Codex threads after their writers release th
     calls.push(threadId);
     return true;
   });
-  assert.deepEqual(calls, []);
+  assert.equal(calls.length, 0);
 
   const release = registerRuntime(project, { kind: "slot", role: "reviewer", task: "review:" + id });
   assert.ok(release);
   try {
     await run();
-    assert.deepEqual(calls, []);
+    assert.equal(calls.length, 0);
   } finally {
     release();
   }
