@@ -2237,7 +2237,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       }, deliveredMessages, () => waitWork.signal, undefined, undefined,
       (id, revision) => id === managerReviewId
         ? Promise.resolve(cliFailure("CHAT_BUSY", "Return this task from its card or the manager chat after this automatic review ends."))
-        : returnTaskToDraft(board.project, id, revision, "manager"));
+        : returnTaskToDraft(board.project, id, revision, "manager"),
+      id => subscriptions.get(board.project)?.reviewerRuns.has(id) ||
+        agentSlots.entries(board.project).some(entry => entry.kind === "slot" && entry.role === "reviewer" && entry.task === "review:" + id));
     const run = async (name: string, args: unknown): Promise<CliReply> => {
       try {
         if (name === "task_set_executor_access") return await setTaskExecutorAccess(app.getPath("userData"), board.project, args);
@@ -2754,7 +2756,7 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
       });
     }, reports);
   const notify = (error: string) => {
-    if (!signal.aborted) broadcastBoardChat(project, "orchestrator-review-error", { error: id + " · " + error });
+    if (!signal.aborted) broadcastBoardChat(project, "orchestrator-review-error", { id, error: id + " · " + error });
   };
   try {
     // The manager can advance the target while this reviewer is reading.
@@ -2786,14 +2788,19 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
       signal.throwIfAborted();
       const input = { revision, targetHead, reviewMode, reviewModeVersion, actor: "reviewer", reviewerUsage: usage };
       const needsMoreEvidence = !reviewer.findings.length && (!reviewer.evidence.length || reviewer.evidence.includes(null));
-      const recordDecision = () => {
+      const recordDecision = async () => {
+        const note = (summary: string) => callCli(project, ["review-note", id, "--compact"], { ...input, summary });
         if (reviewer.needsHuman || needsMoreEvidence) {
-          return callCli(project, ["review-note", id, "--compact"], { ...input, summary: reviewer.summary });
+          return note(reviewer.summary);
         }
-        if (reviewer.findings.length) {
-          return launchTask(project, id, { input: { ...input, reason: reviewer.findings.join("\n\n") } });
+        const findings = reviewer.findings.join("\n\n");
+        const decision = findings
+          ? await launchTask(project, id, { input: { ...input, reason: findings } })
+          : await callCli(project, ["review-approve", id, "--compact"], { ...input, summary: reviewer.summary, evidence: reviewer.evidence });
+        if (!decision.ok && decision.error.code === "EXPERT_STAGES_INCOMPLETE") {
+          return note([decision.error.message, reviewer.summary, findings].filter(Boolean).join("\n\n"));
         }
-        return callCli(project, ["review-approve", id, "--compact"], { ...input, summary: reviewer.summary, evidence: reviewer.evidence });
+        return decision;
       };
       let decided = await recordDecision();
       // BOARD_BUSY means the command never started. Keep the report and retry the write.
@@ -2804,6 +2811,7 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
       }
       if (decided.ok) {
         usage = undefined;
+        broadcastBoardChat(project, "orchestrator-review-error", { id });
         return;
       }
       if (decided.error.code === "TARGET_CHANGED") {

@@ -505,7 +505,7 @@ function updateChat({ project, id, type, text, items, savedRun, goal, goalRunnin
     else if (type === "orchestrator-work-history") composer?.invalidateWork?.();
     else if (type === "orchestrator-work-accepted") composer?.acceptWork?.(id);
     else if (type === "orchestrator-goal") composer?.updateGoal?.(goal, goalRunning);
-    else if (type === "orchestrator-review-error") composer?.reviewError?.(error);
+    else if (type === "orchestrator-review-error") composer?.reviewError?.(error, id);
     else if (type === "orchestrator-ready") composer?.enableStop?.();
     else if (type === "orchestrator-message-time") composer?.setMessageTime?.(at);
     else if (type === "orchestrator-waiting" || type === "orchestrator-sending") composer?.setWaiting?.(type === "orchestrator-waiting");

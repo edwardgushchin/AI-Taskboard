@@ -146,7 +146,7 @@ function fixture(t: TestContext) {
       tools: { name: string }[], call: RunAction, _signal: AbortSignal,
       onUsage: (report: import("../src/cli/token-usage.ts").TokenUsageReport) => Promise<void>) => {
       assert.equal(cwd, project);
-      assert.deepEqual(Array.from(tools, tool => tool.name), ["task_review_diff", "task_review_artifact", "project_path", "project_sha256"]);
+      assert.deepEqual(Array.from(tools, tool => tool.name), ["task_review_diff", "task_review_artifact", "project_git", "project_path", "project_sha256"]);
       const task = JSON.parse(context);
       const report = await reviewSubmission(task, call, settings);
       const confirmation = task.candidateReview || (report as { verifyRisk?: boolean })?.verifyRisk;
@@ -752,6 +752,65 @@ test("reviewer-human uses the shared review queue with and without automatic mod
   }
 });
 
+test("an unfinished independent review keeps the submission and releases the manager to return it", { timeout: 60_000 }, async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"])).ok, true);
+  assert.equal((await f.cli(["settings"], { reviewMode: "reviewer", reviewer: { model: "fixture", effort: "low" } })).ok, true);
+  const { data: task } = await f.cli(["create"], { title: "Source comparison", criteria: ["Verify the referenced facts"] });
+  const plan = await f.cli(["expert-plan", task.id], {
+    phase: "review", revision: task.revision, lead: "independent-reviewer", reason: "Independent source verification",
+    stages: [{ key: "verify", expertId: "independent-reviewer", title: "Verify facts",
+      criteria: ["Verify the referenced facts"], inputs: [], outputs: ["evidence"], dependsOn: [] }],
+  });
+  assert.equal(plan.ok, true, JSON.stringify(plan));
+  assert.equal((await f.cli(["approve", task.id])).ok, true);
+  assert.equal((await f.cli(["start", task.id])).ok, true);
+  const { data: preview } = await f.cli(["preview", task.id]);
+  const submitted = await f.cli(["submit", task.id], { token: preview.token, noChanges: true, summary: "Comparison", checks: ["Compared prices"] });
+  assert.equal(submitted.ok, true, JSON.stringify(submitted));
+  const { data: board } = await f.cli(["list", "--compact"]);
+  const reviewerStarted = Promise.withResolvers<void>();
+  const reviewerRelease = Promise.withResolvers<void>();
+  f.setReviewer(async () => {
+    reviewerStarted.resolve();
+    await reviewerRelease.promise;
+    return { summary: "The original publication is missing.", findings: [], needsHuman: false, evidence: ["Compared the available notes."] };
+  });
+  const watch = f.schedule(board, async () => assert.fail("An incomplete review must not trigger integration."));
+  watch.tick();
+  try {
+    await reviewerStarted.promise;
+    const attempt = await f.run("Read the submission.", async act => {
+      const review = await act("task_review", { id: task.id });
+      assert.equal(review.ok, true);
+      const result = await act("task_request_changes", { id: task.id, revision: review.data.revision, reason: "Save the original publication." });
+      assert.equal(result.error.code, "REVIEW_IN_PROGRESS");
+      return { text: "The reviewer is working." };
+    });
+    assert.equal(attempt.ok, true, JSON.stringify(attempt));
+  } finally {
+    reviewerRelease.resolve();
+    await watch.done();
+  }
+  const { data: pending } = await f.cli(["show", task.id]);
+  assert.equal(pending.status, "review");
+  assert.ok(pending.history.some((event: { action: string; text?: string }) =>
+    event.action === "review-note" && event.text?.includes("The original publication is missing.")));
+  assert.ok(!pending.history.some((event: { action: string }) => event.action === "review-approve"));
+  const returned = await f.run("Ask the executor to save the source.", async act => {
+    const review = await act("task_review", { id: task.id });
+    assert.equal(review.ok, true);
+    const { revision, targetHead } = review.data;
+    const result = await act("task_request_changes", { id: task.id, revision, reason: "Save the original publication." });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.data.status, "in_progress");
+    const stale = await act("task_review_diff", { id: task.id, revision, targetHead, paths: ["source.txt"] });
+    assert.equal(stale.error.code, "REVIEW_REQUIRED");
+    return { text: "The executor will save the source." };
+  });
+  assert.equal(returned.ok, true, JSON.stringify(returned));
+});
+
 test("reviewers agree to submissions or return defects, and the manager controls integration", { timeout: 240_000 }, async t => {
   const f = fixture(t);
   const project = join(f.folder, "project");
@@ -817,6 +876,12 @@ test("reviewers agree to submissions or return defects, and the manager controls
         assert.equal(wrongTargetPath.error.code, "INVALID_INPUT");
         const wrongTargetHead = await call("task_review_diff", { ...targetComparison, targetHead: previousReview.targetHead });
         assert.equal(wrongTargetHead.ok, false);
+        const pinnedInput = { view: "commit_diff", from: previousReview.targetHead, to: targetHead, paths: ["new-target.txt"] };
+        const pinnedDiff = await call("project_git", pinnedInput);
+        assert.equal(pinnedDiff.ok, true, JSON.stringify(pinnedDiff));
+        assert.match(pinnedDiff.data.output, /\n\+Unrelated change\n/);
+        assert.equal((await call("project_git", { ...pinnedInput, paths: ["../new-target.txt"] })).error.code, "INVALID_INPUT");
+        assert.equal((await call("project_git", { view: "diff" })).error.code, "INVALID_INPUT");
       }
     }
     if (title === "pass" || title === "fail") {

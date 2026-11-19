@@ -132,7 +132,7 @@ const actions = {
       integrationMode: { ...string, enum: ["merge", "squash"], description: "Optional for Git submissions. Defaults to the board's integration mode." },
       evidence: { type: "array", items: reason, minItems: 1 }, findingAssessment: reason },
     required: ["id", "revision", "targetHead"] },
-  task_request_changes: { description: "Return the same review card with actionable feedback and start its executor. Available in every review mode. In human mode use only on the user's explicit request; in agent review modes use for a confirmed material defect. Read task_review first and confirm the transition only from the tool result.",
+  task_request_changes: { description: "Return the same review card with actionable feedback and start its executor. Available in every review mode. In human mode use only on the user's explicit request; in agent review modes use for a confirmed material defect. Wait for a running independent review to finish. Gather evidence from task_review and task_review_diff before returning the card. The transition ends this review snapshot.",
     properties: { ...taskReference, reason: { ...reason, description: "Explain what needs to change in complete sentences with spaces between words." } },
     required: ["id", "revision", "reason"] },
   task_cleanup_status: { description: "Inspect what remains in the worktree of a closed task. Returns the path and Git status entries (including ignored files).",
@@ -164,12 +164,17 @@ export const boardMcpTools = tools.filter(tool => mcpNames.has(tool.name));
 export const milestonesListTool = boardMcpTools.find(tool => tool.name === "milestones_list")!;
 export const githubCreateMilestoneTool = boardMcpTools.find(tool => tool.name === "github_create_milestone")!;
 export const githubSetMilestoneDueTool = boardMcpTools.find(tool => tool.name === "github_set_milestone_due")!;
-export const reviewerTools = tools.filter(tool => ["task_review_diff", "task_review_artifact", "project_path", "project_sha256"].includes(tool.name))
+export const reviewerTools = tools.filter(tool => ["task_review_diff", "task_review_artifact", "project_git", "project_path", "project_sha256"].includes(tool.name))
   .map(tool => tool.name === "task_review_diff" ? {
     ...tool,
     description: tool.description + " For previousReview.submissionChanges use comparison previous-submission. For previousReview.changes use comparison previous-target to read changes between the two reviewed target HEADs. Keep comparison when paging.",
     inputSchema: { ...tool.inputSchema, properties: { ...tool.inputSchema.properties,
       comparison: { type: "string", enum: ["previous-submission", "previous-target"] } } },
+  } : tool.name === "project_git" ? {
+    ...tool,
+    description: "Read changes to specific review inputs between two full commit IDs in this project's repository. Use commit_diff with literal paths and repeat the same commits and paths when paging.",
+    inputSchema: { ...tool.inputSchema, properties: { ...tool.inputSchema.properties, view: { type: "string", enum: ["commit_diff"] } },
+      required: ["view", "from", "to", "paths"] },
   } : tool);
 
 export const autoReviewTaskTools = new Set(["task_review", "task_review_diff", "task_review_artifact", "task_accept", "task_request_changes", "task_return_to_draft", "expert_stage", "expert_verify_skills", "team_inbox", "team_message", "team_findings"]);
@@ -201,7 +206,10 @@ export const boardInstructions = [
   "Use task_approve when a draft has clear scope and acceptance criteria and the conversation or active plan establishes that work should proceed. While a goal is paused, continue handling the user's messages and the relevant cards, including approving and starting tasks when appropriate. Resume the goal only when the user asks.",
   "For each new agent-board draft, choose work and review leads and stage specialists with expert_list and expert_context. Supply skillChecks with the specific action for every explicitly assigned skill in skills. The general workflow is delivered implicitly. Pass expertTeam in task_create with a concrete reason for each composition. For an existing draft, fill missing phases with expert_plan and reread task_show. Complete scope, criteria and assignments before approval.",
   "When the user explicitly asks to divide work among specialists, include that delegation instruction and its scope in each affected card before starting it. State which accepted files or artifacts a dependent specialist should reuse. If a later task needs the same verification environment, pass on confirmed tool limits and the successful setup. Reuse a checked implementation or prototype where it meets the later scope.",
-  "When the task creates a new public-facing offer, landing page, or positioning, plan a proportionate comparison of competitors or comparable alternatives before UX and copy. Assign the comparison to a relevant specialist, request cited public sources and actionable findings, and make design and copy depend on those findings. If the market is unspecified, label comparable examples as such and state the assumption. Skip this step for routine fixes unless the task calls for it.",
+  "When the task creates a new public-facing offer, landing page, or positioning, plan a proportionate comparison before UX and copy. Assign it to a relevant specialist and plan evidence for an offline reviewer from the first research draft: save short source extracts or relevant screenshots with direct URLs, access dates, units and claim-to-evidence links. Distinguish visible content from extracted text and published claims from independently verified facts. Replace persistently inaccessible sources when the scope allows it. If the market is unspecified, label comparable examples and state the assumption.",
+  "Keep work with a material dependency gated until the input is accepted or a stable, readable revision and its evidence are available to both the executor and reviewer. Give reviewers literal repository paths or artifact references and the relevant Git revisions. Ask the responsible executor to supply missing evidence on its existing card when possible. Reserve ask_user for a decision or information only the user has.",
+  "Agree on the main action, visible promise, visual requirements and asset provenance before approving design. For configurable or mock data, require an executable replacement check of values, dependent labels, actions and restored defaults. For a multi-step form, require recovery from validation and submission errors, including a new invalid attempt after success. Assign executable checks to QA and give the read-only reviewer results tied to the submitted sources.",
+  "Before integration, verify test evidence against the submitted Git sources. Specify whether a hash describes a Git blob or checked-out bytes and record any transformations. Require reusable verification to leave tracked files unchanged and check the complete proposed diff, allowing only intentional formatting such as actual Markdown hard breaks.",
   "After task_create the board starts a read-only discussion in the draft's chat. Include occupied drafts in the next group task_wait and approve from a fresh task_show after the writer finishes. Tell the user where to find the discussion in ordinary chat.",
   "Before every task_create, independently check the current board with board_list and identify semantic candidates by the requested outcome, not just titles, shared words or files. Include open tasks and relevant recently completed tasks (omit activeOnly to find closed candidates). Read each plausible candidate's full description and acceptance criteria with task_show before deciding. Reuse current details already read while their revisions remain unchanged; refresh after changes or session continuation. Do this in ordinary dialogue, new and resumed sessions, and every goal turn that creates work, without a user reminder. Do not reread the entire project history on every message.",
   "If feedback refines an existing draft or approved task's result, use task_update on that card and preserve its existing requirements, criteria and sources. For work already in progress, also send the relevant clarification directly to its executor with task_message. Shared files or vocabulary alone do not make tasks duplicates: keep separate cards for independently verifiable outcomes. Create a new draft only when no suitable existing card covers the independent result.",
@@ -363,7 +371,7 @@ export function boardActions(project: string, attachments: { path: string; name:
   isTaskRunning: (id: string) => boolean, observe: ObserveTasks, notifyExecutor: (id: string, sequence: number) => Promise<boolean>,
   deliveredMessages: Set<string> | undefined, waitInterrupt: () => AbortSignal,
   runReview?: ReviewRunner, reviewReports = new Map<string, ReviewedSubmission>(),
-  returnToDraft?: (id: string, revision: number) => Promise<CliReply<Task>>) {
+  returnToDraft?: (id: string, revision: number) => Promise<CliReply<Task>>, isReviewRunning?: (id: string) => boolean) {
   const reviewSnapshots = new Map<string, Pick<TaskReview, "revision" | "targetHead" | "artifacts"> & {
     mode: ReviewMode; criteriaCount: number; reviewerApproved: boolean;
   }>();
@@ -669,7 +677,8 @@ export function boardActions(project: string, attachments: { path: string; name:
             if (name === "task_review_artifact" && args?.id === id) {
               return guardRead(readArtifact(id, data, args));
             }
-            if (name === "project_path" || name === "project_sha256") return run(name, args);
+            if (name === "project_path" || name === "project_sha256" ||
+                (name === "project_git" && args?.view === "commit_diff")) return run(name, args);
             return Promise.resolve(cliFailure("INVALID_INPUT", "Use only read-only tools for the assigned submission."));
           }, signal, data.submissionSequence);
           if (!validReviewReport(reviewer, criteria.length)) throw new Error("The reviewer returned an invalid report.");
@@ -683,7 +692,7 @@ export function boardActions(project: string, attachments: { path: string; name:
       if (action === "task_review_diff") {
         const prior = reviewSnapshots.get(id);
         if (!prior || prior.revision !== fields.revision || prior.targetHead !== fields.targetHead) {
-          return cliFailure("REVIEW_REQUIRED", "Use the revision and target HEAD returned by task_review.");
+          return cliFailure("REVIEW_REQUIRED", "Use the current revision and target HEAD from task_review. After review ends, use project_git commit_diff to read historical changes.");
         }
         return callCli(project, ["review", id], fields);
       }
@@ -704,6 +713,9 @@ export function boardActions(project: string, attachments: { path: string; name:
           if (!settings.ok) return settings;
           const mode = boardReviewMode(settings.data);
           if ((mode === "human" || mode === "reviewer-human") && action === "task_accept") return cliFailure("AUTO_REVIEW_DISABLED", "Leave the decision to the user.");
+          if (action === "task_request_changes" && usesIndependentReviewer(mode) && isReviewRunning?.(id)) {
+            return cliFailure("REVIEW_IN_PROGRESS", "The independent reviewer is still working. Include this card in task_wait reviewIds and reread the submission before deciding.");
+          }
           const snapshot = reviewSnapshots.get(id);
           if (!snapshot || snapshot.mode !== mode || snapshot.revision !== fields.revision ||
               (action === "task_accept" && snapshot.targetHead !== fields.targetHead)) {
@@ -743,6 +755,7 @@ export function boardActions(project: string, attachments: { path: string; name:
     }
     if (!result.ok) return result;
     const { id: taskId, title, status, revision } = result.data;
+    if (status !== "review" || reviewSnapshots.get(taskId)?.revision !== revision) reviewSnapshots.delete(taskId);
     const data = { id: taskId, title, status, revision };
     changes.push({ ...data, action: action.slice("task_".length) });
     return { ok: true, data: action === "task_accept" ? {
