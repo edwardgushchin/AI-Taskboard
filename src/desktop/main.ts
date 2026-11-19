@@ -2740,7 +2740,7 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
         let firstPass: RunActivity[] = [];
         const evidence = JSON.parse(context);
         const initial = await reviewWithCodex(app.getPath("userData"), project, settings, context, reviewerTools, call, reviewSignal,
-          trackUsage, id, items => { firstPass = items; onActivity(items); }, evidence.reviewTeam, evidence.targetHead);
+          trackUsage, id, items => { firstPass = items; onActivity(items); }, evidence.reviewTeam, evidence.targetHead, submissionSequence);
         const candidate = initial as Partial<ReviewReport> | null;
         if (settings?.model !== defaultBoardAgents.reviewer.model || candidate?.needsHuman !== false ||
             (!candidate.verifyRisk && !candidate.findings?.length)) return initial;
@@ -2752,7 +2752,7 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
         onActivity(previous);
         return reviewWithCodex(app.getPath("userData"), project, reviewVerifier,
           JSON.stringify({ ...evidence, candidateReview: candidate }), reviewerTools, call, reviewSignal,
-          trackUsage, id, items => onActivity([...previous, ...items]), evidence.reviewTeam, evidence.targetHead);
+          trackUsage, id, items => onActivity([...previous, ...items]), evidence.reviewTeam, evidence.targetHead, submissionSequence);
       });
     }, reports);
   const notify = (error: string) => {

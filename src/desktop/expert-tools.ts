@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { callCli, cliFailure } from "./cli.ts";
 import { skillEvidence } from "./skill-evidence.ts";
-import type { RpcMessage } from "./codex-rpc.ts";
+import type { AgentControl, RpcMessage } from "./codex-rpc.ts";
+import type { teamInbox } from "../cli/expert-team.ts";
 import type { Expert } from "../cli/experts.ts";
 import type { ExpertPhase } from "../cli/model.ts";
 
@@ -53,6 +54,30 @@ export const executorExpertTools = Object.entries(expertActions).filter(([name])
     required: action.required.filter(name => name !== "id"), additionalProperties: false } };
 });
 
+export function watchTeamMail(project: string, taskId: string, control: AgentControl, actor: "agent" | "reviewer", afterSequence = 0) {
+  let reading = false;
+  let stopped = false;
+  const timer = setInterval(() => {
+    if (reading) return;
+    reading = true;
+    void callCli<ReturnType<typeof teamInbox>>(project, ["expert-inbox", taskId], { actor, afterSequence }).then(async inbox => {
+      if (stopped || !inbox.ok || !inbox.data.messages.length) return;
+      const sequence = Math.max(...inbox.data.messages.map(message => message.sequence));
+      if (actor === "agent" || inbox.data.messages.some(message =>
+        message.from !== "reviewer" && !message.from.startsWith("review:"))) {
+        await control.steer("AI Taskboard: new addressed team mail through sequence " + sequence +
+          ". Read team_inbox and coordinate with the sender. Owner questions need a human answer.", []);
+      }
+      afterSequence = sequence;
+    }).catch(() => { /* Persisted mail remains available; retry on the next pass. */ }).finally(() => { reading = false; });
+  }, 2000);
+  timer.unref();
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
+}
+
 export async function leadSkillInstructions(project: string, taskId: string, expert: Expert, plan: ExpertPhase | undefined,
   actor: "agent" | "reviewer", context: string) {
   const workflow = expert.skills.filter(skill => skill.id === "workflow").map(skill => skill.id);
@@ -88,7 +113,7 @@ export const leadInstructions = "You are responsible for this card's current pha
   "Apply the preloaded lead skills. If your lead has explicit skillChecks in this phase, perform them and call expert_verify_skills before submitting or approving when the tool is available. The implicit workflow alone requires no verification call. Load the delegated specialist's assigned skills via expert_skill and pass the actual instructions and assigned actions to the specialist. For a stage with assigned skills, the specialist must perform the actions personally and return JSON with an outputs object keyed by the exact declared output names. Pass those outputs unchanged to expert_stage. Handle your own stages yourself and reuse the same native subagent for later stages of its specialization. " +
   "Run only independent, non-conflicting stages in parallel. Wait for prerequisites and pass their results to dependent specialists. Use the provider's messaging and wait mechanisms to coordinate. Wait for the current run to report completion after following up with a previous specialist. " +
   "Keep browser profiles and disposable checks in a system temporary directory. Save only the files needed for review in the task's ignored .tasks/qa/ directory and register all retained files before submission. If a QA command is delivered to the user, run it in an ordinary clean clone and check git status --porcelain after it finishes. Finish the stage with a path for each declared artifact output. Capture from the same sources you will submit. Open saved screenshots and verify the required state is visible. For review, use PNGs up to 4 MiB and 16 megapixels. Capture the relevant viewport or region for oversized pages. If a capture is empty or clipped, repair the delivered capture or document the tested replacement in the reproducible QA procedure. Every executable verification report must identify the tested commit or list the tested source hashes and their representation. Run on committed sources when possible. For a worktree snapshot, verify its source hashes against the final preview before submitting. Keep commit IDs separate from tree and blob IDs. Recheck any affected source changed after QA. The board saves the declared outputs with the submission. " +
-  "For external research, read the completed comparison against the saved primary evidence without live lookups before first preview. Record each material price, unit, condition and other assertion with its own evidence reference. Label details the source does not state as unknown. Omit unsupported details from findings. If a PNG carries unique evidence, include it in the submission's artifacts so the reviewer can open it with task_review_artifact. " +
+  "For external research, read the completed comparison against the saved primary evidence without live lookups before first preview. Record each material price, unit, condition and other assertion with its own evidence reference. Label details the source does not state as unknown. Omit unsupported details from findings. Check that cited paths in a handoff open from a clean checkout. If a PNG carries unique evidence, include it in the submission's artifacts so the reviewer can open it with task_review_artifact. " +
   "Use team_message for meaningful handoffs and questions between assigned roles. Include the decision or artifact the receiving stage needs and route it to its stage address. Deliver incoming mail from team_inbox to its native agent. If a decision blocks a stage, mark it blocked and leave a persistent question. " +
   "Search team_findings when a failure or diagnostic is likely to recur. Record confirmed reusable causes with the environment and verification. Treat findings from other cards as evidence and recheck applicability when conditions differ. " +
   "If delegation is unavailable or fails, apply the package yourself and give the factual fallback reason when recording its result. Check every result before submitting or giving the review decision. The same task permission and review scope apply to all delegates.";

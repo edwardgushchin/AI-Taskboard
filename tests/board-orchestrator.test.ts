@@ -23,7 +23,7 @@ import type { ChatSettings } from "../src/cli/model.ts";
 import { directory as storageDirectory, locateBoard, readBoardSettings, readJson, writeJson } from "../src/cli/storage.ts";
 import { registerRuntime, runtimeEntries, runtimeLocation, runtimeTransaction } from "../src/desktop/board-runtime.ts";
 import type { BoardGoal, BoardGoalAction, readBoardHistory } from "../src/desktop/codex-chat.ts";
-import { inspectProjectPath, projectSha256 } from "../src/desktop/project-files.ts";
+import { commitFileHashes, inspectProjectPath, projectSha256 } from "../src/desktop/project-files.ts";
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
 import { reviewerActivity, withReviewerChat } from "../src/desktop/reviewer-chat.ts";
 import { goalMessages, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory } from "../src/desktop/manager-history.ts";
@@ -75,7 +75,7 @@ function fixture(t: TestContext) {
   };
   const { autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools } = runInNewContext(
     boardSource + "\n({ autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools })",
-    { AbortSignal, expertActions, expertCommands, leadInstructions, autoQueueSettings, isManual, manualContext, locateBoard, readBoardSettings, boardReviewMode, usesIndependentReviewer, callCli, cliFailure, defaultBoardAgents, hexTagColor, inspectProjectPath, managerInbox, needsManagerAttention, projectSha256, reviewVerifier, russianWriting, TaskboardError, taskIdPattern,
+    { AbortSignal, expertActions, expertCommands, leadInstructions, autoQueueSettings, isManual, manualContext, locateBoard, readBoardSettings, boardReviewMode, usesIndependentReviewer, callCli, cliFailure, commitFileHashes, defaultBoardAgents, hexTagColor, inspectProjectPath, managerInbox, needsManagerAttention, projectSha256, reviewVerifier, russianWriting, TaskboardError, taskIdPattern,
       taskFields: { title: {}, description: {}, criteria: {}, tags: {} },
     },
   );
@@ -853,7 +853,7 @@ test("reviewers agree to submissions or return defects, and the manager controls
   const reviewed = new Set<string>();
   let passReviews = 0;
   let failReviews = 0;
-  f.setReviewer(async ({ id, title, revision, targetHead, previousReview }, call, settings) => {
+  f.setReviewer(async ({ id, title, revision, submitted, targetHead, previousReview }, call, settings) => {
     assert.deepEqual(settings, model);
     reviewed.add(id);
     if (reviewed.size === 4) started.resolve();
@@ -893,6 +893,15 @@ test("reviewers agree to submissions or return defects, and the manager controls
     if (title === "pass" && passReviews === 1) {
       const unavailable = await call("task_review_diff", { id, revision, targetHead, paths: ["pass.txt"], comparison: "previous-target" });
       assert.equal(unavailable.error.code, "REVIEW_REQUIRED");
+      assert.equal(existsSync(join(project, "pass.txt")), false);
+      const hash = await call("project_sha256", { commit: submitted, paths: ["pass.txt", "missing.txt", "../pass.txt"] });
+      assert.equal(hash.ok, true, JSON.stringify(hash));
+      assert.equal(hash.data.files[0].data.commit, submitted);
+      assert.equal(hash.data.files[0].data.sha256, createHash("sha256").update("pass\n").digest("hex"));
+      assert.equal(hash.data.files[1].error.code, "FILE_HASH_UNAVAILABLE");
+      assert.equal(hash.data.files[2].error.code, "INVALID_INPUT");
+      assert.equal((await call("project_sha256", { commit: targetHead, path: "pass.txt" })).error.code, "FILE_HASH_UNAVAILABLE");
+      assert.equal((await call("project_sha256", { commit: git("rev-parse", submitted + "^{tree}"), path: "pass.txt" })).error.code, "REVIEW_REQUIRED");
     }
     if (title === "pass" && passReviews === 2) {
       const unavailable = await call("task_review_diff", { id, revision, targetHead, paths: ["pass.txt"], comparison: "previous-submission" });

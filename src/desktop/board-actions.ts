@@ -6,7 +6,7 @@ import { needsManagerAttention, type managerInbox } from "../cli/task-messages.t
 import { taskFields } from "./chat-actions.ts";
 import { callCli, cliFailure } from "./cli.ts";
 import type { CliReply } from "./cli.ts";
-import { inspectProjectPath, projectSha256 } from "./project-files.ts";
+import { commitFileHashes, inspectProjectPath, projectSha256 } from "./project-files.ts";
 import { russianWriting } from "./russian-writing.ts";
 import { autoQueueSettings } from "../cli/auto-queue.ts";
 import { expertActions, expertCommands, leadInstructions } from "./expert-tools.ts";
@@ -147,8 +147,8 @@ const actions = {
     properties: { branch: reason, head: reason }, required: ["branch", "head"] },
   project_path: { description: "Check whether a literal project-relative path exists and get its type. Set list to true to list up to 200 immediate directory entries, including hidden entries. Use '.' for the project root.",
     properties: { path: reason, list: { type: "boolean" } }, required: ["path"] },
-  project_sha256: { description: "Compute SHA-256 checksums for project files. Use path for one file or paths for up to 64 distinct files in one call. Pass literal project-relative paths. A batch returns a checksum or an error for each file.",
-    properties: { path: reason, paths: { type: "array", minItems: 1, maxItems: 64, uniqueItems: true, items: reason } }, required: [] },
+  project_sha256: { description: "Compute SHA-256 checksums for project files. Use path for one file or paths for up to 64 distinct files. Set commit to a full Git commit ID to hash raw Git blob bytes at literal repository-relative paths without reading the working tree. For a review use submitted or targetHead, never a tree or blob ID. A batch returns a checksum or an error per file.",
+    properties: { path: reason, paths: { type: "array", minItems: 1, maxItems: 64, uniqueItems: true, items: reason }, commit: reason }, required: [] },
 };
 
 const tools = Object.entries(actions).map(([name, { description, properties, required }]) => ({
@@ -506,29 +506,34 @@ export function boardActions(project: string, attachments: { path: string; name:
       } };
     }
     if (action === "project_git_push") return callCli(project, ["git", "push"], input);
-    if (action === "project_sha256" && input.paths !== undefined) {
-      const { paths } = input;
-      if (input.path !== undefined || !Array.isArray(paths) || !paths.length || paths.length > 64 ||
-          !paths.every(path => typeof path === "string" && path.trim()) || new Set(paths).size !== paths.length) {
+    if (action === "project_path") {
+      try {
+        return { ok: true, data: await inspectProjectPath(project, input.path, input.list, signal) };
+      } catch (error) {
+        if (error instanceof TaskboardError) return cliFailure(error.code, error.message);
+        throw error;
+      }
+    }
+    if (action === "project_sha256") {
+      const { path, paths, commit } = input;
+      if (paths !== undefined && (path !== undefined || !Array.isArray(paths) || !paths.length || paths.length > 64 ||
+          !paths.every(path => typeof path === "string" && path.trim()) || new Set(paths).size !== paths.length)) {
         return cliFailure("INVALID_INPUT", "Pass either path or a list of 1 to 64 distinct paths.");
       }
-      const files = [];
-      for (const path of paths) {
-        signal.throwIfAborted();
-        try {
-          files.push({ path, ok: true, data: await projectSha256(project, path, signal) });
-        } catch (error) {
-          if (!(error instanceof TaskboardError)) throw error;
-          files.push({ path, ok: false, error: { code: error.code, message: error.message } });
-        }
-      }
-      return { ok: true, data: { files } };
-    }
-    if (action === "project_path" || action === "project_sha256") {
       try {
-        const data = action === "project_path" ? await inspectProjectPath(project, input.path, input.list, signal) :
-          await projectSha256(project, input.path, signal);
-        return { ok: true, data };
+        const digest = commit === undefined ? (path: unknown) => projectSha256(project, path, signal) : commitFileHashes(project, commit, signal);
+        if (paths === undefined) return { ok: true, data: await digest(path) };
+        const files = [];
+        for (const path of paths) {
+          signal.throwIfAborted();
+          try {
+            files.push({ path, ok: true, data: await digest(path) });
+          } catch (error) {
+            if (!(error instanceof TaskboardError)) throw error;
+            files.push({ path, ...cliFailure(error.code, error.message) });
+          }
+        }
+        return { ok: true, data: { files } };
       } catch (error) {
         if (error instanceof TaskboardError) return cliFailure(error.code, error.message);
         throw error;
@@ -677,6 +682,10 @@ export function boardActions(project: string, attachments: { path: string; name:
             }
             if (name === "task_review_artifact" && args?.id === id) {
               return guardRead(readArtifact(id, data, args));
+            }
+            if (name === "project_sha256" && args?.commit !== undefined &&
+                (args.commit !== submitted && args.commit !== targetHead || typeof args.commit !== "string")) {
+              return Promise.resolve(cliFailure("REVIEW_REQUIRED", "Use the submitted or targetHead commit from this review."));
             }
             if (name === "project_path" || name === "project_sha256" ||
                 (name === "project_git" && args?.view === "commit_diff")) return run(name, args);

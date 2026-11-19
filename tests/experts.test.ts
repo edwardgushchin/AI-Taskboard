@@ -12,7 +12,7 @@ import { createTask } from "../src/cli/tasks.ts";
 import { createExpertPlan, expertStagesStatus, reviewDecisionSequence, sendTeamMessage, teamInbox, updateExpertStage } from "../src/cli/expert-team.ts";
 import { managerInbox } from "../src/cli/task-messages.ts";
 import { callCli } from "../src/desktop/cli.ts";
-import { phaseStageReporter } from "../src/desktop/expert-tools.ts";
+import { phaseStageReporter, watchTeamMail } from "../src/desktop/expert-tools.ts";
 import type { Task } from "../src/cli/model.ts";
 
 function fixture(t: TestContext) {
@@ -24,6 +24,37 @@ function fixture(t: TestContext) {
 }
 const brief = (key: string, expertId = "business-analyst", dependsOn: string[] = []) => ({ key, expertId, title: key,
   description: "A concrete stage", inputs: ["Project brief"], outputs: [key + ".md"], criteria: ["Verified result"], dependsOn });
+
+test("the active reviewer gets a signal for newly addressed mail and can read it", { timeout: 15_000 }, async t => {
+  const f = fixture(t);
+  const task = f.run(store => {
+    const task = store.create(createTask(store.allocateId(), { title: "Review the brief" }));
+    return createExpertPlan(store, task.id, {
+      revision: task.revision, phase: "review", lead: "business-analyst", reason: "Confirm the acceptance criteria independently.",
+      stages: [brief("verify")],
+    }).parent;
+  });
+  const boundary = f.run(store => sendTeamMessage(store, task.id, "manager", {
+    to: "review:verify", text: "Previous submission",
+  }).sequence);
+  const notice = Promise.withResolvers<string>();
+  const deadline = setTimeout(() => notice.reject(new Error("No review mail signal")), 10_000);
+  const stop = watchTeamMail(f.root, task.id, {
+    interrupt: async () => {},
+    steer: async text => { notice.resolve(text); },
+  }, "reviewer", boundary);
+  t.after(() => { clearTimeout(deadline); stop(); });
+  const sent = f.run(store => {
+    sendTeamMessage(store, task.id, "reviewer", { to: "manager", text: "Reviewer asks for evidence" });
+    sendTeamMessage(store, task.id, "manager", { to: task.id, text: "Executor-only handoff" });
+    return sendTeamMessage(store, task.id, "manager", { to: "review:verify", text: "Verify the missing loading state." });
+  });
+  const notification = await notice.promise;
+  assert.match(notification, new RegExp("sequence " + sent.sequence + "\\b"));
+  assert.doesNotMatch(notification, /loading state/);
+  const inbox = f.run(store => teamInbox(store, task.id, "reviewer", boundary));
+  assert.deepEqual(inbox.messages.map(m => m.text), ["Reviewer asks for evidence", "Verify the missing loading state."]);
+});
 
 test("220 board-local expert packages can be edited, disabled and extended without changing provider profiles", t => {
   const f = fixture(t);
