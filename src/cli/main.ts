@@ -778,6 +778,7 @@ function run(
     return filters.compact ? { ...taskReceipt(logged),
       ...(logged !== task ? { runLogSequence: logged.history.length } : {}) } : logged;
   }
+  if (command === "block" && input.autoMode === true) requireAutoQueue(store.index.settings, id, input.autoQueueRevision);
   if (command === "progress" && task.schedule && task.status === "in_progress") requireExpertResults(task, "work");
   if (command === "approve" && task.status === "draft") requireApprovalPlan(task, store.index.settings);
   let updated = changeTask(task, command, discussionReturn ? { ...input, actor: "agent" } : input);
@@ -851,9 +852,6 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
       if (input.queuedExecutor === true && !queued) {
         throw new TaskboardError("INVALID_TRANSITION", "The queued start is no longer pending.");
       }
-      if (input.autoMode === true && !store.index.settings.autoMode) {
-        throw new TaskboardError("AUTO_MODE_DISABLED", "Automatic starts are disabled.");
-      }
       if (input.autoMode === true) requireAutoQueue(store.index.settings, id, input.autoQueueRevision);
       if ((input.scheduled === true || input.autoMode === true) && task.schedule?.paused) {
         throw new TaskboardError("INVALID_TRANSITION", "The recurring schedule is paused.");
@@ -875,8 +873,10 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
     if (!prepared.checkout) return prepared.started;
     const plan = prepared.checkout;
     const worktree = checkoutTaskWorktree(plan);
-    return onBoard(location, (store, lockWaitMs) =>
-      reply(store, finishTaskStart(store, plan, worktree, lockWaitMs, input.isolatedWorktree === true, enqueue)));
+    return onBoard(location, (store, lockWaitMs) => {
+      if (input.autoMode === true) requireAutoQueue(store.index.settings, id, input.autoQueueRevision);
+      return reply(store, finishTaskStart(store, plan, worktree, lockWaitMs, input.isolatedWorktree === true, enqueue));
+    });
   });
 }
 
