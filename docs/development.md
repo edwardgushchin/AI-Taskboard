@@ -43,7 +43,7 @@ npm run package
 
 The NSIS installer and unpacked application are written to `release/`. The command builds the standalone CLI with its Node.js runtime before packaging the app. It does not publish a GitHub release.
 
-The Linux build uses `AI_TASKBOARD_PROJECT_URL` and `AI_TASKBOARD_MAINTAINER` for package metadata. The macOS distribution requires Developer ID identities and notarization credentials.
+The Linux build uses `AI_TASKBOARD_PROJECT_URL` and `AI_TASKBOARD_MAINTAINER` for package metadata. The signed macOS PKG profile requires Developer ID identities and notarization credentials.
 
 Native CI uses Node.js 24.14.0 and builds NSIS on Windows, DEB and RPM on Linux, and an ad-hoc signed ZIP on macOS. Each platform runs on both native x64 and ARM64. The CI profile is available through `npm run package -- --ci`. See the [CI matrix and local verification commands (Russian)](how-to/development.md#поставка) and [per-commit CI results](https://github.com/edwardgushchin/AI-Taskboard/actions/workflows/ci.yml).
 

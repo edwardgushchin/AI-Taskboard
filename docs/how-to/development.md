@@ -47,7 +47,7 @@ npm run package
 Тексты лицензий собственного кода и сторонних компонентов поставляются вместе с приложением и CLI; условия описаны в [README](../../README.md#license-and-commercial-permission).
 Встроенные правила документации распаковываются рядом с app.asar, чтобы агент мог читать их обычным файловым API.
 Для Linux метаданные пакета задаются через AI_TASKBOARD_PROJECT_URL и AI_TASKBOARD_MAINTAINER.
-Для распространения macOS нужны сертификаты Developer ID и нотарификация.
+Профиль упаковки подписанного macOS PKG требует сертификатов Developer ID и реквизитов для нотарификации.
 
 [Native CI](../../.github/workflows/ci.yml) выполняется для PR в `main` и push в `main`. Другой workflow может вызвать его через `workflow_call`. Он устанавливает нативный Node.js 24.14.0 из [дистрибутивов Node.js](https://nodejs.org/download/release/v24.14.0/) и проверяет совпадение ОС и архитектуры с матрицей.
 
@@ -101,7 +101,7 @@ Windows CI собирает неподписанный NSIS. macOS CI собир
 | macOS | `MAC_CSC_LINK`, `MAC_CSC_KEY_PASSWORD` для Developer ID Application, `CSC_INSTALLER_LINK`, `CSC_INSTALLER_KEY_PASSWORD` для Developer ID Installer |
 | Нотарификация macOS | `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID` |
 
-Сборка с подписью требует действующих сертификатов и проходит нативные проверки Authenticode, Developer ID и билета нотарификации. Отсутствие реквизитов останавливает выпуск. У пакетов и проверки состава есть только `contents: read`. `contents: write` получает финальная операция публикации при запуске по тегу.
+Профиль с сертификатами требует действующих сертификатов и проходит нативные проверки Authenticode, Developer ID и билета нотарификации. Отсутствие реквизитов останавливает выпуск в этом профиле. У пакетов и проверки состава есть только `contents: read`. `contents: write` получает финальная операция публикации при запуске по тегу.
 
 ## Проверки интерфейса
 
