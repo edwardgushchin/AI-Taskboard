@@ -223,6 +223,8 @@ export interface Task {
   coverAttachment?: string;
   status: TaskState;
   codexThreadId?: string;
+  codexServiceThreads?: string[];
+  codexArchivePending?: string[];
   goalThreadId?: string;
   managerReadThrough?: number;
   revision: number;
@@ -297,6 +299,7 @@ export function boardReviewMode(settings: Pick<BoardSettings, "reviewMode" | "au
 }
 
 export interface ArchiveLink {
+  codexArchivePending?: string[];
   path: string;
   title: string;
   status: "done" | "cancelled";

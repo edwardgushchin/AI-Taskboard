@@ -103,7 +103,7 @@ const verifyWrite = [
   "}",
 ].join("\n");
 
-export type ExecutorTask = Pick<Task, "expertId" | "expertTeam" | "expertStage" | "expertStages" | "acceptanceRepair" | "id" | "title" | "description" | "criteria" | "dueDate" | "summary" | "nextStep" | "execution" | "git" | "codexThreadId" | "workingDirectory" | "schedule" | "toolGrants"> &
+export type ExecutorTask = Pick<Task, "expertId" | "expertTeam" | "expertStage" | "expertStages" | "acceptanceRepair" | "id" | "title" | "description" | "criteria" | "dueDate" | "summary" | "nextStep" | "execution" | "git" | "codexThreadId" | "codexServiceThreads" | "workingDirectory" | "schedule" | "toolGrants"> &
   { feedback?: string; fullAccess?: boolean };
 
 export function missingCodexThread(message: string | undefined, threadId: string | undefined) {
@@ -112,7 +112,7 @@ export function missingCodexThread(message: string | undefined, threadId: string
 
 export async function startCodexRun(client: Client, project: string, cwd: string, task: ExecutorTask,
   onActivity?: (item: RunActivity) => void, onTokenUsage?: (report: TokenUsageReport) => Promise<void>, signal?: AbortSignal,
-  beforeTurn?: (threadId: string) => Promise<void | QueuedTurn>, desktopProfile?: string,
+  beforeTurn?: (threadId: string, created: boolean) => Promise<void | QueuedTurn>, desktopProfile?: string,
   recoveringThreadId?: string, requireSavedThread = false): Promise<Run> {
   signal?.throwIfAborted();
   const fullAccess = task.fullAccess === true;
@@ -375,14 +375,21 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     };
     let started: ThreadReply | undefined;
     if (existing) {
+      const params = { ...threadOptions, threadId: existing };
       try {
-        started = await request<ThreadReply>("thread/resume", { ...threadOptions, threadId: existing });
+        started = await request<ThreadReply>("thread/resume", params);
       } catch (error) {
-        if (!missingCodexThread((error as Error).message, existing)) throw error;
-        if (requireSavedThread) throw error;
-        if (recoveringThreadId) throw Object.assign(error as Error, { code: "CODEX_START_UNCONFIRMED" });
-        signal?.throwIfAborted();
-        existing = undefined;
+        const message = (error as Error).message;
+        if (task.codexServiceThreads?.includes(existing) && message.startsWith("session " + existing + " is archived.")) {
+          signal?.throwIfAborted();
+          await request("thread/unarchive", { threadId: existing });
+          started = await request<ThreadReply>("thread/resume", params);
+        } else {
+          if (!missingCodexThread(message, existing) || requireSavedThread) throw error;
+          if (recoveringThreadId) throw Object.assign(error as Error, { code: "CODEX_START_UNCONFIRMED" });
+          signal?.throwIfAborted();
+          existing = undefined;
+        }
       }
     }
     started ??= await request<ThreadReply>("thread/start", threadOptions);
@@ -399,7 +406,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     const githubTools = localTools.filter(name => name.startsWith("github_") || name === milestonesListTool.name);
     if (!codexThreadPattern.test(threadId) || (existing && threadId !== existing)) throw new Error("Codex returned an unexpected thread ID.");
     signal?.throwIfAborted();
-    const queued = await beforeTurn?.(threadId);
+    const queued = await beforeTurn?.(threadId, !existing);
     signal?.throwIfAborted();
     timeout.refresh();
     const prompt = [
