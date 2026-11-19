@@ -15,7 +15,7 @@ const start = source.indexOf("export function replyToTask(");
 const end = source.indexOf("\nexport async function requestExecutorAccess", start);
 assert.ok(start >= 0 && end > start);
 
-function providerResult(result: object, initial = false) {
+function providerResult(result: object, initial = false, onActivity?: (items: any[]) => void) {
   let options: any;
   const replyToTask = runInNewContext(stripTypeScriptTypes(source.slice(start, end).replace("export ", "")) + "\nreplyToTask", {
     boardWorklog: () => ({}),
@@ -35,7 +35,7 @@ function providerResult(result: object, initial = false) {
     },
   });
   const pending = replyToTask("profile", "project", {}, "{}", [], () => {}, () => {}, "scratch", 1024,
-    undefined, undefined, undefined, "T-0001", undefined, initial ? "initial" : undefined);
+    undefined, undefined, undefined, "T-0001", onActivity, initial ? "initial" : undefined);
   return { pending, options: () => options };
 }
 
@@ -59,6 +59,50 @@ test("both discussion modes return explicit question state without parsing punct
     assert.equal(result.attachmentSources[0].name, "result.png");
     assert.ok(f.options().finalAnswerSchema.required.includes("awaitingAnswer"));
   }
+});
+
+test("discussion streaming decodes JSON strings and saves the first reply timestamp", async () => {
+  const at = "2026-11-19T12:34:56.789Z";
+  let visible: any[] = [];
+  const text = 'Принято: "узкое окно".\nПуть C:\\temp\\new, цвет #FFFFFF.';
+  const encoded = JSON.stringify({ text, awaitingAnswer: false });
+  const f = providerResult({ text: encoded }, false, items => { visible = items; });
+  const publish = (value: string) => f.options().onActivity([
+    { id: "reply", type: "agentMessage", phase: "final_answer", text: value, at, status: "inProgress" },
+  ]);
+  for (let length = 1; length <= encoded.length; length++) {
+    publish(encoded.slice(0, length));
+    assert.ok(text.startsWith(visible[0].text), JSON.stringify(visible[0].text));
+    assert.equal(visible[0].at, at);
+  }
+  assert.equal(visible[0].text, text);
+  publish(String.raw`{"text":"Уже видно\u04`);
+  assert.equal(visible[0].text, "Уже видно");
+  publish(String.raw`{"awaitingAnswer":false,"text":"Уже видно\u0434"}`);
+  assert.equal(visible[0].text, "Уже виднод");
+  const result = await f.pending;
+  assert.equal(result.at, at);
+  assert.equal(result.text, text);
+});
+
+test("agent reply timestamps reject malformed input before saving and accept a corrected value", t => {
+  const root = mkdtempSync(join(tmpdir(), "task-chat-time-"));
+  t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const location = { root, directory: join(root, ".tasks"), repository: null };
+  const store = initializeBoard(location, store => store);
+  const settings = { model: "fixture", effort: "low" };
+  let task = store.create(createTask("T-0001", { title: "Timestamp" }));
+  task = addChatMessage(store, task, { ...settings, text: "Answer" });
+  const pending = { ...settings, actor: "agent", text: "Received.", replyTo: task.history.length - 1 };
+  const at = "2026-11-19T12:34:56.789Z";
+  for (const value of [null, 123, "", "2026-02-30T12:34:56.789Z", at + "junk", " " + at, "2026-11-19"]) {
+    assert.throws(() => addChatMessage(store, task, { ...pending, at: value }), (error: unknown) =>
+      error instanceof TaskboardError && error.code === "INVALID_INPUT");
+    assert.equal(readTask(store, task.id).history.length, task.history.length);
+  }
+  assert.throws(() => addChatMessage(store, task, { ...settings, text: "User", at }), /Only an agent/);
+  task = addChatMessage(store, task, { ...pending, at });
+  assert.equal(readTask(new BoardStore(location), task.id).history.at(-1)!.at, at);
 });
 
 test("invalid or interrupted provider results cannot silently close a question", async () => {

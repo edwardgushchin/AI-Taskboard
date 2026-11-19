@@ -269,6 +269,17 @@ export function replyToTask(
 ) {
   const worklog = boardWorklog(project, "executor", taskId);
   const manual = readBoardSettings(locateBoard(project)).boardType === "manual";
+  let replyAt: string | undefined;
+  const discussionActivity = (items: RunActivity[]) => {
+    onActivity?.(items.map(item => {
+      if (item.type !== "agentMessage" || item.phase !== "final_answer") return item;
+      replyAt ??= item.at;
+      // Decode only complete JSON string tokens; an unfinished escape waits for the next delta.
+      const match = /^\s*\{\s*(?:"awaitingAnswer"\s*:\s*(?:true|false)\s*,\s*)?"text"\s*:\s*"((?:[^"\\\u0000-\u001f]|\\(?:["\\/bfnrt]|u[\da-fA-F]{4}))*)/.exec(item.text);
+      const text = match ? JSON.parse('"' + match[1] + '"') as string : "";
+      return { ...item, text: text.trim() };
+    }));
+  };
   const options = {
     settings, tools: mode === "initial" ? [] : chatTools.filter(tool => (tool.name !== "task_request_changes" || (reviewCard && !manual)) &&
       (tool.name !== "task_set_review_mode" || (!manual && !closedCard))), webSearch: true,
@@ -292,7 +303,7 @@ export function replyToTask(
       "Read explicitly attached files when relevant. A linked attachment is a mutable local source: read only the needed parts with normal tools. If the attachment has an error, report it and continue with other files. Links do not grant access: report actual permission failures with the filename, without claiming to read inaccessible content. Do not edit project files or run project tasks.",
     ].join(" ") + manualContext(readBoardSettings(locateBoard(project))), { manual, taskWriting: mode !== "initial" }),
     onCommentary: mode === "initial" ? undefined : onCommentary,
-    onActivity: mode === "initial" ? undefined : onActivity,
+    onActivity: mode === "initial" || !onActivity ? undefined : discussionActivity,
     onTokenUsage, onControl, signal,
     imageDirectory: mode === "initial" ? undefined : imageDirectory, imageLimit,
     finalAnswerSchema: mode === "initial" ? {
@@ -326,7 +337,7 @@ export function replyToTask(
     if (typeof output?.text !== "string" || typeof output.awaitingAnswer !== "boolean") {
       throw new Error("Codex returned an invalid task discussion result.");
     }
-    return { ...result, text: output.text.trim(), awaitingAnswer: output.awaitingAnswer };
+    return { ...result, text: output.text.trim(), awaitingAnswer: output.awaitingAnswer, ...(replyAt ? { at: replyAt } : {}) };
   });
 }
 
