@@ -419,36 +419,45 @@ test("a resumed native specialist must complete in the current lead run", async 
   f.run(store => assert.equal(store.card(id).history.at(-1)?.expertStageRun?.agentId, "previous-qa"));
 });
 
-test("assigned skills require successful actions by the correct agent and preserve native outputs", { timeout: 120_000 }, async t => {
-  const f = fixture(t);
-  const action = (tool: string, args: object, id: string, isError = false) => ({
-    id, type: "mcpToolCall", tool, server: "fixture", status: "completed", arguments: args, result: { isError },
-  });
-  const ready = async <T>(name: string, input?: object, id?: string) => {
-    const reply = await callCli<T>(f.root, [name, ...(id ? [id] : [])], input);
-    if (!reply.ok) assert.fail(JSON.stringify(reply.error));
-    return reply.data;
-  };
-  const errorCode = async (promise: Promise<{ ok: boolean; error?: { code: string } }>, code: string) => {
-    const response = await promise;
-    assert.equal(response.ok, false);
-    assert.equal(response.error?.code, code);
-  };
-  const observe = (reporter: ReturnType<typeof phaseStageReporter>, threadId: string, item: object, lead = "lead") =>
-    reporter.observe({ method: "item/completed", params: { threadId, item } }, lead);
-  for (const mode of ["reviewer", "manager"] as const) {
+for (const mode of ["reviewer", "manager"] as const) {
+  test(`assigned library skills are loaded and verified in ${mode} review mode`, { timeout: 120_000 }, async t => {
+    const f = fixture(t);
+    const action = (tool: string, args: object, id: string, isError = false) => ({
+      id, type: "mcpToolCall", tool, server: "fixture", status: "completed", arguments: args, result: { isError },
+    });
+    const ready = async <T>(name: string, input?: object, id?: string) => {
+      const reply = await callCli<T>(f.root, [name, ...(id ? [id] : [])], input);
+      if (!reply.ok) assert.fail(JSON.stringify(reply.error));
+      return reply.data;
+    };
+    const errorCode = async (promise: Promise<{ ok: boolean; error?: { code: string } }>, code: string) => {
+      const response = await promise;
+      assert.equal(response.ok, false);
+      assert.equal(response.error?.code, code);
+    };
+    const observe = (reporter: ReturnType<typeof phaseStageReporter>, threadId: string, item: object, lead = "lead") =>
+      reporter.observe({ method: "item/completed", params: { threadId, item } }, lead);
+    const workSkill = "anthropics--knowledge-work-plugins--product-management--skills--write-spec";
+    const stageSkill = "anthropics--skills--skills--webapp-testing";
+    const reviewSkill = "anthropics--knowledge-work-plugins--design--skills--accessibility-review";
     await ready("settings", { reviewMode: mode });
-    const lead = { skills: ["workflow"], skillChecks: { workflow: { tool: "trace", server: "fixture", arguments: { case: "lead" } } } };
-    const specialist = { ...brief("verify", "qa-engineer"), skills: ["workflow"],
-      skillChecks: { workflow: { command: "node check.mjs" } } };
     const base = { title: "Verify assigned skills", description: "Use observable actions.", criteria: ["Checked"], workingDirectory: f.root };
-    const work = { lead: "product-owner", reason: "Coordinate and verify the test.", ...lead, stages: [specialist] };
-    const review = { lead: "desktop-qa", reason: "Inspect the submitted evidence.", ...lead, stages: [] };
+    const work = { lead: "product-owner", reason: "Coordinate and verify the test.", skills: [workSkill],
+      skillChecks: { [workSkill]: { tool: "trace", server: "fixture", arguments: { case: "lead" } } },
+      stages: [{ ...brief("verify", "qa-engineer"), skills: [stageSkill],
+        skillChecks: { [stageSkill]: { command: "node check.mjs" } } }] };
+    const review = { lead: "accessibility-tester", reason: "Inspect the submitted evidence.", skills: [reviewSkill],
+      skillChecks: { [reviewSkill]: { tool: "trace", server: "fixture", arguments: { case: "review" } } }, stages: [] };
     await errorCode(callCli(f.root, ["create"], { ...base, expertTeam: { work: { ...work, skillChecks: undefined } } }), "SKILL_CHECK_REQUIRED");
     const draft = await ready<Task>("create", { ...base, expertTeam: { work, review } });
     const approved = await ready<Task>("approve", { revision: draft.revision }, draft.id);
     const { task } = await ready<{ task: Task }>("start", { revision: approved.revision }, draft.id);
     const revision = task.revision;
+    const workExpert = f.run(store => readExpert(store, work.lead));
+    const workInstructions = await leadSkillInstructions(f.root, task.id, workExpert, task.expertTeam?.work, "agent", "");
+    assert.equal(workInstructions.length, 2);
+    assert.match(workInstructions[1], /# Write Spec\b/);
+
     const report = phaseStageReporter(f.root, "work", task.id);
     const command = { id: "command", type: "commandExecution", status: "completed", exitCode: 0,
       command: '"C:\\Program Files\\PowerShell\\pwsh.exe" -Command \'node check.mjs\'' };
@@ -459,8 +468,11 @@ test("assigned skills require successful actions by the correct agent and preser
       return { data: history.map(item => ({ item, completedAtMs: Date.now() })), nextCursor: null } as T;
     }, "lead");
     const start = await report.report({ revision, key: "verify", state: "running" });
-    assert.ok(start.ok);
-    assert.equal("assignedSkills" in start.data && start.data.assignedSkills.length, 1);
+    assert.ok(start.ok && "assignedSkills" in start.data);
+    const assigned = start.data.assignedSkills as ReturnType<typeof expertSkill>[];
+    assert.deepEqual(assigned.map(skill => skill.skillId), [stageSkill, "workflow"]);
+    assert.match(assigned[0].content, /Reconnaissance-Then-Action Pattern/);
+    assert.ok(assigned[0].sourceUrl);
     const complete = { revision, key: "verify", state: "done", agentId: "child", result: "Checked", outputs };
     observe(report, "lead", { type: "collabAgentToolCall", tool: "spawnAgent", status: "completed", receiverThreadIds: ["child"] });
     observe(report, "lead", { type: "collabAgentToolCall", tool: "wait", agentsStates: { child: { status: "completed" } } });
@@ -480,19 +492,50 @@ test("assigned skills require successful actions by the correct agent and preser
     observe(report, "lead", action("trace", { case: "lead" }, "correct"));
     assert.ok((await report.verify({ revision })).ok);
     const submitted = await ready<Task>("submit", submission, task.id);
+    if (mode === "reviewer") {
+      const reviewExpert = f.run(store => readExpert(store, review.lead));
+      const reviewInstructions = await leadSkillInstructions(f.root, task.id, reviewExpert, submitted.expertTeam?.review, "reviewer", "");
+      assert.equal(reviewInstructions.length, 2);
+      assert.match(reviewInstructions[1], /## Testing Approach\b/);
+    } else {
+      const loaded = await ready<ReturnType<typeof expertSkill>>("expert-skill", {
+        actor: "manager", expertId: review.lead, skillId: reviewSkill,
+      });
+      assert.match(loaded.content, /## Testing Approach\b/);
+    }
     const decision = { revision: submitted.revision, targetHead: null, summary: "Verified", evidence: ["Observed"] };
     const finish = mode === "reviewer" ? "review-approve" : "accept";
     const actor = mode === "manager" ? { actor: mode } : {};
     await errorCode(callCli(f.root, [finish, task.id], { ...decision, ...actor }), "SKILL_USE_REQUIRED");
     await errorCode(callCli(f.root, ["accept", task.id], { revision: submitted.revision }), "SKILL_USE_REQUIRED");
     const reviewing = phaseStageReporter(f.root, "review", mode === "reviewer" ? task.id : undefined, null);
+    const reviewerId = mode + "-thread";
     if (mode === "manager") {
-      observe(reviewing, "lead", { ...action("task_review", { id: "other" }, "read-other"), server: "ai_taskboard" });
+      observe(reviewing, reviewerId, { ...action("task_review", { id: "other" }, "read-other"), server: "ai_taskboard" }, reviewerId);
       await errorCode(reviewing.verify({ ...decision, id: task.id }), "REVIEW_REQUIRED");
-      observe(reviewing, "lead", { ...action("task_review", { id: task.id }, "read-card"), server: "ai_taskboard" });
+      observe(reviewing, reviewerId, { ...action("task_review", { id: task.id }, "read-card"), server: "ai_taskboard" }, reviewerId);
     }
-    observe(reviewing, "lead", action("trace", { case: "lead" }, "reviewed"));
+    observe(reviewing, "lead", action("trace", { case: "review" }, "other-thread"), reviewerId);
+    await errorCode(reviewing.verify({ ...decision, id: task.id }), "SKILL_USE_REQUIRED");
+    observe(reviewing, reviewerId, action("trace", { case: "review" }, "reviewed"), reviewerId);
     assert.ok((await reviewing.verify({ ...decision, id: task.id })).ok);
     await ready(finish, { ...decision, ...actor }, task.id);
-  }
-});
+    const historyAfterReview = f.run(store => store.card(task.id).history);
+    assert.deepEqual(historyAfterReview.flatMap(event => {
+      const skill = event.expertSkill;
+      return skill && skill.skillId !== "workflow" ? [[event.actor, skill.expertId, skill.skillId, skill.source]] : [];
+    }), [
+      ["agent", work.lead, workSkill, "plan"],
+      ["agent", "qa-engineer", stageSkill, "plan"],
+      ...(mode === "reviewer" ? [["reviewer", review.lead, reviewSkill, "plan"]] : []),
+    ]);
+    assert.deepEqual(historyAfterReview.flatMap(event => {
+      const proof = event.expertSkillProof;
+      return proof ? [[proof.phase, proof.key, proof.expertId, proof.agentId, proof.items]] : [];
+    }), [
+      ["work", "verify", "qa-engineer", "child", { [stageSkill]: "command" }],
+      ["work", undefined, work.lead, "lead", { [workSkill]: "correct" }],
+      ["review", undefined, review.lead, reviewerId, { [reviewSkill]: "reviewed" }],
+    ]);
+  });
+}
