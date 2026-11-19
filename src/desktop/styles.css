@@ -580,8 +580,9 @@ body:has(> .project-tabs:not([hidden]))::before {
 :is(.board-chat, .task-dialogue) .chat-text :is(strong, b) { font-weight: 600; }
 :is(.board-chat, .task-dialogue) .chat-attachments { gap: 8px; }
 :is(.board-chat, .task-dialogue) .chat-attachments + .chat-text { margin-block-start: 10px; }
-:is(.board-chat, .task-dialogue) .chat-attachment img {
-  max-width: min(220px, 55vw, 100%); max-height: 150px; border-radius: 7px;
+:is(.board-chat, .task-dialogue) .chat-attachment {
+  --chat-preview-width: min(220px, 55vw);
+  --chat-preview-height: 150px;
 }
 .board-chat details > summary > .icon:last-child { transition: transform 180ms ease; }
 .board-chat .chat-thinking { min-height: 18px; }
@@ -1043,8 +1044,7 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .chat-attachments + .chat-text { margin-top: 5px; }
 .chat-text img { max-width: 100%; height: auto; }
 .chat-artifact { display: inline-block; max-width: 100%; vertical-align: middle; }
-.chat-artifact .chat-attachment { max-width: 100%; }
-.chat-artifact .chat-attachment img { max-width: min(100%, 250px); }
+.chat-artifact .chat-attachment { --chat-preview-width: 250px; }
 .chat-text table { display: block; max-width: 100%; overflow: auto; border-collapse: collapse; }
 .chat-text th, .chat-text td { border: 1px solid var(--border); padding: 3px 6px; }
 .chat-text input[type="checkbox"] { margin: 0 4px 0 0; }
@@ -1076,7 +1076,10 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 [data-state="running"] > summary .chat-run-state { color: var(--blue); }
 .chat-run-children { display: grid; gap: 2px; margin: 4px 0 0 8px; padding-inline-start: 12px; border-inline-start: 1px solid var(--border); }
 .chat-run-images { margin: 4px 0 8px 24px; }
-.chat-run-images .chat-attachment img { max-width: min(160px, 100%); max-height: 100px; }
+.chat-run-images .chat-attachment {
+  --chat-preview-width: 160px;
+  --chat-preview-height: 100px;
+}
 .chat-run-item pre {
   margin: 6px 0 8px 20px; padding: 10px 12px; border-radius: 6px; background: var(--lane); color: var(--text);
   overflow: auto; max-height: 240px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; user-select: text;
@@ -1094,9 +1097,23 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
   padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; text-align: start;
 }
 .chat-attachment > span { overflow-wrap: anywhere; white-space: normal; }
-.chat-attachment.has-preview, .chat-composer .draft-attachments .has-preview { overflow: hidden; padding: 0; }
+.chat-composer .draft-attachments .has-preview { overflow: hidden; padding: 0; }
+.chat-attachment:has(> img) {
+  display: block;
+  width: max-content;
+  max-width: min(100%, calc(var(--chat-preview-width, 250px) + 2px));
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+}
 .chat-attachment.has-preview > :is(.icon, span, small) { display: none; }
-.chat-attachment img { display: block; min-width: 0; width: auto; height: auto; max-width: 250px; max-height: 160px; object-fit: contain; }
+.chat-attachment > img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: var(--chat-preview-height, 160px);
+}
 .chat-composer {
   display: grid; gap: 10px; min-width: 0; padding: 12px;
   border: 1px solid var(--border); border-radius: 18px; background: color-mix(in srgb, var(--text) 2%, var(--panel));
