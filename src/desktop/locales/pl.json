@@ -1,4 +1,6 @@
 {
+  "task_question.needs_answer": "Wymaga odpowiedzi",
+  "task_question.open_dialogue": "Wymaga odpowiedzi. Otwórz dialog zadania",
   "ui.reorder_queued_message": "Przenieś oczekującą wiadomość „{message}”. Użyj strzałek w górę i w dół.",
   "draft_discussion.queued": "Przegląd szkicu oczekuje w kolejce.",
   "draft_discussion.running": "Trwa przegląd szkicu…",
@@ -186,6 +188,10 @@
   "ui.send_request_b9ccf5ac": "Wyślij prośbę",
   "ui.dialogue_e154ab04": "Dialog",
   "ui.new_messages_bb42ec76": "Nowe wiadomości",
+  "ui.goal_activity": "Przebieg celu",
+  "ui.write_to_goal": "Napisz do celu…",
+  "ui.message_the_goal": "Wiadomość do celu",
+  "ui.goal_instruction_text": "Instrukcje dla celu mogą zawierać wyłącznie tekst, maksymalnie 4000 znaków.",
   "ui.work_activity_e01957b7": "Aktywność zawodowa",
   "ui.goal_objective_c057a817": "Cel celu",
   "ui.save_changes_c6c74561": "Zapisz zmiany",

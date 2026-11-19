@@ -1,4 +1,6 @@
 {
+  "task_question.needs_answer": "Réponse requise",
+  "task_question.open_dialogue": "Réponse requise. Ouvrir le dialogue de la tâche",
   "ui.reorder_queued_message": "Déplacer le message en attente « {message} ». Utilisez les flèches haut et bas.",
   "draft_discussion.queued": "L’examen du brouillon est en attente.",
   "draft_discussion.running": "Examen du brouillon en cours…",
@@ -186,6 +188,10 @@
   "ui.send_request_b9ccf5ac": "Envoyer la demande",
   "ui.dialogue_e154ab04": "Dialogues",
   "ui.new_messages_bb42ec76": "Nouveaux messages",
+  "ui.goal_activity": "Progression de l’objectif",
+  "ui.write_to_goal": "Écrivez à l’objectif…",
+  "ui.message_the_goal": "Message à l’objectif",
+  "ui.goal_instruction_text": "Les instructions de l’objectif doivent contenir uniquement du texte, limité à 4000 caractères.",
   "ui.work_activity_e01957b7": "Activité professionnelle",
   "ui.goal_objective_c057a817": "Objectif du but",
   "ui.save_changes_c6c74561": "Enregistrer les modifications",

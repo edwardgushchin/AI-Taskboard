@@ -1,4 +1,6 @@
 {
+  "task_question.needs_answer": "Antwort nötig",
+  "task_question.open_dialogue": "Antwort nötig. Aufgabendialog öffnen",
   "ui.reorder_queued_message": "Wartende Nachricht „{message}“ verschieben. Pfeil nach oben oder unten verwenden.",
   "draft_discussion.queued": "Die Entwurfsprüfung wartet.",
   "draft_discussion.running": "Der Entwurf wird geprüft…",
@@ -186,6 +188,10 @@
   "ui.send_request_b9ccf5ac": "Anfrage senden",
   "ui.dialogue_e154ab04": "Dialog",
   "ui.new_messages_bb42ec76": "Neue Nachrichten",
+  "ui.goal_activity": "Zielverlauf",
+  "ui.write_to_goal": "Nachricht an das Ziel…",
+  "ui.message_the_goal": "Nachricht an das Ziel",
+  "ui.goal_instruction_text": "Anweisungen an das Ziel dürfen nur Text mit höchstens 4000 Zeichen enthalten.",
   "ui.work_activity_e01957b7": "Arbeitstätigkeit",
   "ui.goal_objective_c057a817": "Zielziel",
   "ui.save_changes_c6c74561": "Änderungen speichern",

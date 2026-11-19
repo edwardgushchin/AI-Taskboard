@@ -1,4 +1,6 @@
 {
+  "task_question.needs_answer": "Requer resposta",
+  "task_question.open_dialogue": "Requer resposta. Abrir diálogo da tarefa",
   "ui.reorder_queued_message": "Mova a mensagem em espera «{message}». Use as setas para cima e para baixo.",
   "draft_discussion.queued": "A revisão do rascunho está na fila.",
   "draft_discussion.running": "Revisando o rascunho…",
@@ -186,6 +188,10 @@
   "ui.send_request_b9ccf5ac": "Enviar solicitação",
   "ui.dialogue_e154ab04": "Diálogo",
   "ui.new_messages_bb42ec76": "Novas mensagens",
+  "ui.goal_activity": "Andamento da meta",
+  "ui.write_to_goal": "Escreva para a meta…",
+  "ui.message_the_goal": "Mensagem para a meta",
+  "ui.goal_instruction_text": "As instruções da meta devem conter apenas texto, com no máximo 4000 caracteres.",
   "ui.work_activity_e01957b7": "Atividade de trabalho",
   "ui.goal_objective_c057a817": "Objetivo da meta",
   "ui.save_changes_c6c74561": "Salvar alterações",

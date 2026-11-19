@@ -1000,7 +1000,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     })) : undefined;
     const prompt = JSON.stringify({
       task: { id, title: task.title, status: task.status, description: task.description,
-        criteria: task.criteria, openQuestions: task.questions, tags: task.tags, priority: task.priority,
+        criteria: task.criteria, openQuestions: task.questions, awaitingAnswer: task.awaitingAnswer, tags: task.tags, priority: task.priority,
         subtasks: task.subtasks, dependencies: task.dependencies, milestone: task.milestone, dueDate: task.dueDate,
         schedule: task.schedule, workingDirectory: task.workingDirectory, execution: task.execution, expertTeam: task.expertTeam,
         summary: task.summary, nextStep: task.nextStep },
@@ -2159,6 +2159,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   let liveTimer: NodeJS.Timeout | undefined;
   let activityTimer: NodeJS.Timeout | undefined;
   let stopAutomation = () => {};
+  let takeAutomationErrors = (): { error: string }[] => [];
   const broadcastRun = () => {
     if (!background) broadcastBoardChat(project, "orchestrator-run", goal
       ? { managerWork: running.managerRun ?? null } : { managerRun: running.managerRun ?? null });
@@ -2596,7 +2597,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
             name === "expert_stage" && stages ? stages.report(args) :
               name === "expert_verify_skills" && stages ? stages.verify(args) : run(name, args));
           if (!independent && !outOfQueue) pendingAction = pending;
-          return pending.then(result => {
+          return pending.then(reply => {
+            const automationErrors = takeAutomationErrors();
+            const result = { ...reply, ...(automationErrors.length ? { automationErrors } : {}) };
             if (reviewIds || cleanupJob) return result;
             if (name === "task_review" && result.ok) {
               const { id, reviewMode, stale } = result.data as { id: string; reviewMode: ReviewMode; stale: boolean };
@@ -2736,11 +2739,12 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           }
           if (!cleanupJob && !repairTask) {
             stopAutomation();
-            const automation = automationDelivery(text => control.steer(text, []), () => {
-              waitWork.abort();
+            const automation = automationDelivery(() => {
+              waitWork.abort("automation");
               waitWork = new AbortController();
             }, signal);
             running.automationEvent = event => automation.event(event);
+            takeAutomationErrors = () => automation.takeErrors();
             const observeAutomation = (snapshot: Board) => {
               const entries = agentSlots.entries(project);
               automation.observe(snapshot, id => ({

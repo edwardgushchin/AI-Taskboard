@@ -1,4 +1,6 @@
 {
+  "task_question.needs_answer": "Antwoord nodig",
+  "task_question.open_dialogue": "Antwoord nodig. Taakdialoog openen",
   "ui.reorder_queued_message": "Verplaats wachtbericht ‘{message}’. Gebruik de pijl omhoog of omlaag.",
   "draft_discussion.queued": "De conceptbeoordeling staat in de wachtrij.",
   "draft_discussion.running": "Concept wordt beoordeeld…",
@@ -186,6 +188,10 @@
   "ui.send_request_b9ccf5ac": "Verzoek verzenden",
   "ui.dialogue_e154ab04": "Dialoog",
   "ui.new_messages_bb42ec76": "Nieuwe berichten",
+  "ui.goal_activity": "Doelactiviteit",
+  "ui.write_to_goal": "Schrijf aan het doel…",
+  "ui.message_the_goal": "Bericht aan het doel",
+  "ui.goal_instruction_text": "Instructies voor het doel mogen alleen tekst bevatten, maximaal 4000 tekens.",
   "ui.work_activity_e01957b7": "Werk activiteit",
   "ui.goal_objective_c057a817": "Doel doelstelling",
   "ui.save_changes_c6c74561": "Wijzigingen opslaan",

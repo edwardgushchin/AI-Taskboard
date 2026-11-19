@@ -1095,6 +1095,7 @@ function taskChat(task) {
   }
   area.refreshReview = () => { if (draft.view !== "dialogue") refreshReview?.(); };
   area.openReviewer = () => selectView("work");
+  area.openDialogue = () => selectView("dialogue");
   selectView(views.some(view => view.name === draft.view) ? draft.view : "dialogue");
 
   function working() { return Boolean(draft.pending || frame.runningTasks?.includes(task.id) || frame.replyingTasks?.includes(task.id)); }

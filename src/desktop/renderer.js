@@ -657,6 +657,9 @@ function openSheet(kind, title) {
     byId("app-content").inert = true;
     document.querySelector(".status-bar").inert = true;
   }
+  if (!sheet.contains(document.activeElement)) {
+    byId("close-sheet").focus();
+  }
 }
 
 function section(title, content, target = body) {
@@ -933,11 +936,12 @@ function card(task) {
     frame.reviewingTasks?.[task.id], frame.quotaTasks?.includes(task.id) ? frame.quotaWait : null, task.status, task.mergeRepair, task.acceptanceRepair, Boolean(task.codexThreadId),
     task.reviewModeOverride?.mode ?? frame.board?.settings.reviewMode, task.reviewApproved,
     task.unfinishedDependencies, task.blocked, task.subtasks?.map(entry => entry.done),
-    task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule,
+    task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule, task.awaitingAnswer,
     manualColumns().find(c => c.id === task.status)]);
   const previous = boardCards.get(task.id);
   if (previous?.signature === signature) return previous.node;
-  const card = previous?.node ?? button("", () => showTask(task.id));
+  const card = previous?.node ?? button("", () => showTask(task.id, card.dataset.awaitingAnswer === "true"));
+  card.dataset.awaitingAnswer = String(task.awaitingAnswer === true);
   const oldDetails = card.querySelector(".task-card-details");
   const oldImage = card.querySelector(".task-card-cover");
   if (oldDetails) cardCovers.unobserve(oldDetails);
@@ -952,10 +956,11 @@ function card(task) {
   }
   const subtasks = task.subtasks ?? [];
   const completed = subtasks.filter(entry => entry.done).length;
-  if (hasPriority || subtasks.length) {
+  if (hasPriority || subtasks.length || task.awaitingAnswer) {
     bindLocalized(card, "aria-description", () => [
       hasPriority ? t("ui.priority_b114c9b5") + " · " + priorityName(task.priority) : "",
       subtasks.length ? t("ui.subtasks_b409bda5") + " " + completed + "/" + subtasks.length : "",
+      task.awaitingAnswer ? t("task_question.open_dialogue") : "",
     ].filter(Boolean).join(". "), true);
   } else {
     card.removeAttribute("aria-description");
@@ -1001,6 +1006,12 @@ function card(task) {
   const id = element("span", undefined, "task-id task-stat");
   id.append(icon("symbol-number"), task.id);
   meta.append(id);
+  if (task.awaitingAnswer) {
+    const question = element("span", undefined, "task-question task-stat");
+    question.append(icon("question"), element("span", () => t("task_question.needs_answer")));
+    bindLocalized(question, "title", () => t("task_question.open_dialogue"));
+    meta.append(question);
+  }
   if (task.milestone) {
     const { title, repository, number } = task.milestone;
     const badge = element("span", undefined, "task-milestone task-stat");
@@ -4020,7 +4031,7 @@ function openTaskSheet(task) {
   if (metadata.length) body.append(element("p", metadata.join(" · "), "muted"));
 }
 
-async function showTask(id) {
+async function showTask(id, dialogue = false) {
   const request = ++taskSheetRequest;
   const project = frame.project;
   const refresh = sheet.open && sheetKind === "task" && taskInSheet?.id === id;
@@ -4213,6 +4224,10 @@ async function showTask(id) {
   const side = byId("task-side");
   side.replaceChildren(taskChat(task));
   side.hidden = false;
+  if (dialogue) {
+    side.firstChild.openDialogue();
+    side.querySelector(".task-dialogue").focus({ preventScroll: true });
+  }
   body.scrollTop = scroll;
   if (focusedChat && byId("task-chat-input")) {
     byId("task-chat-input").focus({ preventScroll: true });

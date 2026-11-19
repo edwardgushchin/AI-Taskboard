@@ -4,7 +4,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { Task, BoardSettings } from "../src/cli/model.ts";
 import { automationDelivery } from "../src/desktop/automation-delivery.ts";
 
-test("automation delivers state changes, retains events during a failed steer and stops with its manager", async t => {
+test("automation coalesces internal wakes without a conversation transport", async t => {
   const controller = new AbortController();
   t.after(() => controller.abort());
   const board = {
@@ -12,22 +12,12 @@ test("automation delivers state changes, retains events during a failed steer an
     tasks: [{ id: "T-0001", title: "First", status: "ready", priority: "normal", revision: 1 } as Task],
     managerInbox: [] as { id: string; sequence: number; kind: string }[],
   };
-  let running = false, reviewing = false, wakes = 0;
-  const delivered: string[] = [];
-  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
-  let failed = false;
-  const delivery = automationDelivery(async text => {
-    if (!failed) {
-      failed = true;
-      entered.resolve();
-      await release.promise;
-      throw Error("Temporary steer failure");
-    }
-    delivered.push(text);
-  }, () => { wakes++; }, controller.signal);
+  let running = false;
+  let reviewing = false;
+  let wakes = 0;
+  const delivery = automationDelivery(() => { wakes++; }, controller.signal);
   const observe = () => delivery.observe(board, () => ({ running, reviewing }));
   observe();
-  await entered.promise;
   running = true;
   board.tasks[0].status = "in_progress";
   observe();
@@ -37,25 +27,41 @@ test("automation delivers state changes, retains events during a failed steer an
   observe();
   delivery.event({ error: "Review needs a decision" });
   delivery.event({ error: "Review needs a decision" });
-  release.resolve();
-  for (let attempt = 0; !delivered.length && attempt < 30; attempt++) await delay(100);
+  await delay(400);
   assert.equal(wakes, 1);
-  assert.equal(delivered.length, 1);
-  assert.match(delivered[0], /"status":"ready"/);
-  assert.match(delivered[0], /"running":true/);
-  assert.match(delivered[0], /"reviewing":true/);
-  assert.match(delivered[0], /Review needs a decision/);
-  assert.equal(delivered[0].split("Review needs a decision").length - 1, 1);
+  assert.deepEqual(delivery.takeErrors(), [{ error: "Review needs a decision" }]);
+  assert.deepEqual(delivery.takeErrors(), []);
+  observe();
+  delivery.event({ error: "Review needs a decision" });
+  await delay(400);
+  assert.equal(wakes, 1, "unchanged observations and errors do not wake again");
+  board.managerInbox.push({ id: "T-0001", sequence: 2, kind: "question" });
   observe();
   await delay(400);
-  assert.equal(delivered.length, 1, "unchanged observations do not resend");
+  assert.equal(wakes, 2, "a later question triggers another wake");
   board.settings.autoMode = false;
   observe();
   await delay(400);
-  assert.match(delivered[1], /"enabled":false/);
+  assert.equal(wakes, 3, "turning automation off wakes the current wait");
   controller.abort();
   board.settings.autoMode = true;
   observe();
   await delay(400);
-  assert.equal(delivered.length, 2);
+  assert.equal(wakes, 3);
+});
+
+test("disposing cancels a pending wake and disabled automation stays silent", async () => {
+  const board = { settings: { autoMode: false } as BoardSettings, tasks: [] };
+  let wakes = 0;
+  const delivery = automationDelivery(() => { wakes++; }, new AbortController().signal);
+  const observe = () => delivery.observe(board, () => ({ running: false, reviewing: false }));
+  observe();
+  delivery.event({ error: "Ignored while disabled" });
+  await delay(400);
+  assert.equal(wakes, 0);
+  board.settings.autoMode = true;
+  observe();
+  delivery.dispose();
+  await delay(400);
+  assert.equal(wakes, 0);
 });

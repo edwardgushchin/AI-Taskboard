@@ -337,7 +337,7 @@ function summarizeInbox(inbox: Inbox) {
 
 async function waitForTasks(project: string, ids: string[], reviewIds: string[], signal: AbortSignal,
   isRunning: (id: string) => boolean, observe: ObserveTasks, deliveredMessages: ReadonlySet<string> | undefined,
-  timeoutSeconds: number) {
+  timeoutSeconds: number, interrupt: AbortSignal) {
   const read = () => callCli<TaskSnapshot>(project, ["list", "--compact"]);
   const watched = [...ids, ...reviewIds];
   const awaitingReview = new Set(reviewIds);
@@ -356,8 +356,12 @@ async function waitForTasks(project: string, ids: string[], reviewIds: string[],
     // Review can start as soon as the submission is recorded.
     (!["block", "progress", "pause"].includes(kind) || !isRunning(id)));
   const timeout = AbortSignal.timeout(timeoutSeconds * 1000);
-  const waiting = AbortSignal.any([signal, timeout]);
-  signal.throwIfAborted();
+  const waiting = AbortSignal.any([signal, timeout, interrupt]);
+  const checkCancellation = () => {
+    signal.throwIfAborted();
+    if (interrupt.reason !== "automation") interrupt.throwIfAborted();
+  };
+  checkCancellation();
   let unsubscribe = () => {};
   let cancel = () => {};
   let readInitial = false;
@@ -371,16 +375,17 @@ async function waitForTasks(project: string, ids: string[], reviewIds: string[],
       });
       cancel = () => resolve(null);
       waiting.addEventListener("abort", cancel, { once: true });
+      if (waiting.aborted) cancel();
     });
     const initial = await read();
-    signal.throwIfAborted();
+    checkCancellation();
     if (!initial.ok) return initial;
     const current = taskStates(initial.data.tasks);
     const unread = inbox(initial.data);
     if (hasOutcome(current) || unread.length) return { ok: true as const, data: { tasks: current, inbox: unread, timedOut: false } };
     readInitial = true;
     const outcome = await changed;
-    signal.throwIfAborted();
+    checkCancellation();
     if (outcome?.snapshot) {
       const messages = inbox(outcome.snapshot);
       if (messages.length) {
@@ -388,11 +393,13 @@ async function waitForTasks(project: string, ids: string[], reviewIds: string[],
       }
     }
     const latest = await read();
-    signal.throwIfAborted();
+    checkCancellation();
     if (!latest.ok) return latest;
     const tasks = taskStates(latest.data.tasks);
     const messages = inbox(latest.data);
-    return { ok: true as const, data: { tasks, inbox: messages, timedOut: !outcome && !hasOutcome(tasks) && !messages.length } };
+    return { ok: true as const, data: { tasks, inbox: messages,
+      timedOut: !interrupt.aborted && !outcome && !hasOutcome(tasks) && !messages.length,
+      ...(interrupt.aborted ? { automationUpdated: true } : {}) } };
   } finally {
     waiting.removeEventListener("abort", cancel);
     unsubscribe();
@@ -482,16 +489,17 @@ export function boardActions(project: string, attachments: { path: string; name:
         return cliFailure("INVALID_INPUT", "Use distinct task IDs across the executor and review lists.");
       }
       const interrupt = waitInterrupt();
-      const waitSignal = AbortSignal.any(goal ? [signal, goal.signal, interrupt] : [signal, interrupt]);
+      const waitSignal = goal ? AbortSignal.any([signal, goal.signal]) : signal;
       const result = await waitForTasks(project, ids, reviewIds, waitSignal, isTaskRunning, observe, deliveredMessages,
-        goal ? goalTaskWaitSeconds : taskWaitSeconds).catch(error => {
+        goal ? goalTaskWaitSeconds : taskWaitSeconds, interrupt).catch(error => {
         if (!interrupt.aborted || signal.aborted || goal?.signal.aborted) throw error;
         return cliFailure("USER_MESSAGE_RECEIVED", "The active turn received a user or board update.");
       });
       if (!result.ok) return result;
-      const { tasks, inbox, timedOut } = result.data;
+      const { tasks, inbox, timedOut, automationUpdated } = result.data;
       const state = input.id === undefined || reviewIds.length ? { tasks } : tasks[0];
-      return { ok: true, data: { ...state, inbox: deliverInbox(inbox), timedOut } };
+      return { ok: true, data: { ...state, inbox: deliverInbox(inbox), timedOut,
+        ...(automationUpdated ? { automationUpdated: true } : {}) } };
     }
     if (action === "manager_inbox") {
       if (input.replay !== undefined && typeof input.replay !== "boolean") {

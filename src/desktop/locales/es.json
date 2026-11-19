@@ -1,4 +1,6 @@
 {
+  "task_question.needs_answer": "Requiere respuesta",
+  "task_question.open_dialogue": "Requiere respuesta. Abrir diálogo de la tarea",
   "ui.reorder_queued_message": "Mover el mensaje en espera «{message}». Usa las flechas arriba y abajo.",
   "draft_discussion.queued": "La revisión del borrador está en cola.",
   "draft_discussion.running": "Revisando el borrador…",
@@ -186,6 +188,10 @@
   "ui.send_request_b9ccf5ac": "Enviar solicitud",
   "ui.dialogue_e154ab04": "Diálogo",
   "ui.new_messages_bb42ec76": "Nuevos mensajes",
+  "ui.goal_activity": "Actividad del objetivo",
+  "ui.write_to_goal": "Escribe al objetivo…",
+  "ui.message_the_goal": "Mensaje al objetivo",
+  "ui.goal_instruction_text": "Las instrucciones del objetivo deben contener solo texto, con un máximo de 4000 caracteres.",
   "ui.work_activity_e01957b7": "Actividad laboral",
   "ui.goal_objective_c057a817": "Objetivo de meta",
   "ui.save_changes_c6c74561": "Guardar cambios",
