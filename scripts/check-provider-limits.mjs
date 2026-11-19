@@ -1,5 +1,6 @@
 // Run with Node.js. Use --artifacts <directory> to retain screenshots and a report.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -54,6 +55,26 @@ app.whenReady().then(async () => {
       window.popup = document.querySelector("#provider-limits");
       window.button = document.querySelector("#status-limits");
       window.query = selector => popup.querySelector(selector);
+      window.limitsContrast = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = 1;
+        canvas.height = 1;
+        const context = canvas.getContext("2d");
+        const paint = color => {
+          context.fillStyle = color;
+          context.fillRect(0, 0, 1, 1);
+          const rgba = context.getImageData(0, 0, 1, 1).data;
+          const [red, green, blue] = Array.from(rgba.slice(0, 3), value => {
+            const channel = value / 255;
+            return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+          });
+          return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+        };
+        paint(getComputedStyle(button.parentElement).backgroundColor);
+        const background = paint(getComputedStyle(button).backgroundColor);
+        const foreground = paint(getComputedStyle(button.querySelector("span")).color);
+        return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05);
+      };
       void 0;
     `);
 
@@ -72,6 +93,95 @@ app.whenReady().then(async () => {
     };
     await set([codex]);
     page.debugger.attach();
+    win.setContentSize(1280, 800);
+    const position = await evaluate(`(() => {
+      const rect = button.getBoundingClientRect();
+      return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
+    })()`);
+    const mouse = (type, point, extra = {}) =>
+      page.debugger.sendCommand("Input.dispatchMouseEvent", { type, ...point, ...extra });
+    const checkContrast = async (theme, hovered) => {
+      assert.equal(await evaluate('button.matches(":hover")'), hovered);
+      const ratio = await evaluate("limitsContrast()");
+      const description = `${theme}: ${hovered ? "hover" : "rest"} contrast ${ratio.toFixed(2)}:1`;
+      assert.ok(ratio >= 4.5, description + ", expected at least 4.5:1");
+      results.push(description);
+      console.log("PASS " + description);
+    };
+
+    for (const theme of ["light", "dark"]) {
+      nativeTheme.themeSource = theme;
+      await mouse("mouseMoved", { x: 200, y: 100 });
+      for (const remaining of [1, 10, 11, 19]) {
+        await set([{ ...codex, windows: [{ ...weekly, remaining }] }]);
+        const low = remaining <= 10;
+        for (const hovered of [false, true]) {
+          await mouse("mouseMoved", hovered ? position : { x: 200, y: 100 });
+          await settle();
+          if (remaining === 1) {
+            await checkContrast(theme, hovered);
+          }
+          await check(`(() => {
+            const expected = document.createElement("span");
+            expected.style.color = ${low} ? "color-mix(in srgb, var(--accent) 40%, var(--text))" : "inherit";
+            button.parentElement.append(expected);
+            const color = getComputedStyle(expected).color;
+            expected.remove();
+            const warning = taskboardLocalization.text("limits.low");
+            const label = button.getAttribute("aria-label");
+            return matchMedia("(prefers-color-scheme: ${theme})").matches &&
+              innerWidth === 1280 && innerHeight === 800 &&
+              button.matches(":hover") === ${hovered} &&
+              button.textContent === "Лимиты ${remaining}%" &&
+              button.classList.contains("quota-low") === ${low} &&
+              label === button.title && label.includes("${remaining}%") && label.includes(warning) === ${low} &&
+              [button, ...button.children].every(element => {
+                const style = getComputedStyle(element);
+                return style.color === color && style.textDecorationLine === "none";
+              });
+          })()`, `${theme}: ${remaining}%, ${hovered ? "hover" : "rest"}, color, no underline and accessible label`);
+        }
+      }
+
+      await mouse("mouseMoved", { x: 200, y: 100 });
+      await set([{ ...codex, windows: [{ ...weekly, remaining: 1 }] }]);
+      await evaluate("button.blur()");
+      await key("Tab", "Tab", 9);
+      await check(`document.activeElement === button && button.matches(":focus-visible") &&
+        getComputedStyle(button).outlineStyle === "solid" && getComputedStyle(button).outlineWidth === "2px"`,
+      `${theme}: Tab shows the focus outline at 1%`);
+      await evaluate("document.fonts.ready.then(() => true)");
+      const screenshot = await page.capturePage({ x: 0, y: 750, width: 320, height: 50 });
+      writeFileSync(join(artifacts, `limits-accent-${theme}.png`), screenshot.toPNG());
+      await key("Enter", "Enter", 13, "\r");
+      await check('popup.matches(":popover-open") && button.getAttribute("aria-expanded") === "true" && document.activeElement === popup',
+        `${theme}: Enter opens the panel and moves focus inside`);
+      await key("Escape", "Escape", 27);
+      await check('!popup.matches(":popover-open") && document.activeElement === button',
+        `${theme}: Escape closes the panel and returns focus`);
+      await set([codex]);
+      await mouse("mousePressed", position, { button: "left", clickCount: 1 });
+      await mouse("mouseReleased", position, { button: "left", clickCount: 1 });
+      await settle();
+      await check('popup.matches(":popover-open") && button.getAttribute("aria-expanded") === "true"',
+        `${theme}: click opens the panel at 19%`);
+      await key("Escape", "Escape", 27);
+    }
+
+    const namedThemes = [...read("themes.css").matchAll(/\[data-theme="([^"]+)"\]/g)].map(match => match[1]);
+    await set([{ ...codex, windows: [{ ...weekly, remaining: 1 }] }]);
+    for (const theme of namedThemes) {
+      await evaluate(`document.documentElement.dataset.theme = ${JSON.stringify(theme)}`);
+      for (const hovered of [false, true]) {
+        await mouse("mouseMoved", hovered ? position : { x: 200, y: 100 });
+        await settle();
+        await checkContrast(theme, hovered);
+      }
+    }
+    await evaluate("delete document.documentElement.dataset.theme");
+    await mouse("mouseMoved", { x: 200, y: 100 });
+    await set([codex]);
+
     await evaluate("button.focus()");
     await key("Enter", "Enter", 13, "\r");
     await check('popup.matches(":popover-open") && button.getAttribute("aria-expanded") === "true" && document.activeElement === popup',
@@ -146,6 +256,17 @@ app.whenReady().then(async () => {
       `Electron ${process.versions.electron}, Chromium ${process.versions.chrome}, ${process.platform} ${process.arch}`,
       "Command: node scripts/check-provider-limits.mjs --artifacts .tasks/qa",
       "Production markup, styles and renderer with fixture responses at the providerLimits boundary.",
+      "Accent screenshots show the lower-left crop of the 1280×800 Electron viewport with keyboard focus.",
+      "SHA-256 of the tested files as read from the checkout (raw bytes):",
+      ...["index.html", "themes.css", "styles.css", "provider-limits.js", "localization.cjs",
+        "vendor/codicons/codicon.css", "vendor/codicons/codicon.ttf"].map(name => {
+        const bytes = readFileSync(new URL("../src/desktop/" + name, import.meta.url));
+        return `${createHash("sha256").update(bytes).digest("hex")}  src/desktop/${name}`;
+      }),
+      ...["check-provider-limits.mjs", "electron-check.mjs"].map(name => {
+        const bytes = readFileSync(new URL(name, import.meta.url));
+        return `${createHash("sha256").update(bytes).digest("hex")}  scripts/${name}`;
+      }),
       ...results.map(result => "PASS " + result),
     ].join("\n");
     writeFileSync(join(artifacts, "provider-limits-check.txt"), report + "\n");
