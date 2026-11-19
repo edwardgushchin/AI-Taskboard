@@ -74,9 +74,7 @@ function boardOperations(entries: RuntimeEntry[], overrides?: Partial<AgentLimit
   return {
     executor: occupancy("executor"),
     reviewer: occupancy("reviewer"),
-    managerBusy: entries.some(entry => entry.kind === "task" &&
-      (entry.task === "manager:context" || entry.task === "manager:background")) ||
-      operations.some(operation => operation.role === "manager"),
+    managerBusy: entries.some(entry => entry.kind === "task" && entry.task === "manager:context"),
     operations,
   };
 }

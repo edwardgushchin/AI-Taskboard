@@ -504,7 +504,11 @@ try {
     try {
       await expect(2);
       const both = structuredClone(goalOnly);
-      both[1] = { name: "Маяк", slots: ["0 / 3", "1 / 1", "Занят"], operations: ["Ревьюер · Фоновое обслуживание · T-0042"] };
+      both[1] = {
+        name: "Маяк",
+        slots: ["0 / 3", "1 / 1", "Свободен"],
+        operations: ["Ревьюер · Фоновое обслуживание · T-0042"],
+      };
       await expectRows(both);
       for (const [win, name, width, height] of [
         [window, "board-slots.png", 1280, 800],
@@ -524,6 +528,17 @@ try {
       stopGoal();
       goal();
       await expect(1);
+      await expectRows([empty[0], both[1]]);
+      const conversation = registerRuntime(boards[1], { kind: "task", task: "manager:context" });
+      try {
+        const withConversation = structuredClone(both[1]);
+        withConversation.slots[2] = "Занят";
+        withConversation.operations.push("Менеджер · Диалог с менеджером");
+        await expectRows([empty[0], withConversation]);
+        await expect(1);
+      } finally {
+        conversation();
+      }
       await expectRows([empty[0], both[1]]);
     } finally {
       child.kill();
@@ -550,6 +565,7 @@ try {
       "Command: node scripts/check-active-agents.mjs --board-slots-only --artifacts .tasks/qa",
       "Two boards, two windows: keyboard Space, mouse click, Escape, empty states, finite/unlimited limits.",
       "Live IPC: owner process exit drops maintenance and its reviewer slot from both open panels. Local goal stops independently.",
+      "Maintenance alone leaves the manager available. A main-context conversation sets busy until its reservation is released.",
       "Queue T-0099 stays in the registry without consuming a slot. Executor T-0007 reserves a slot before the turn.",
       "Limits change from 3/1 to 4/5 and back in both open panels. The counter tracks turns and drops 2 → 1 → 0.",
       "Closing the final tab for the background board removes its row from both panels.",
