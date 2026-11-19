@@ -13,7 +13,7 @@
 :where(
   .app-menu-popup, .draft-add-menu, .draft-task-mentions, .lane-filter-options,
   .git-branches, .notifications, #provider-limits, #agent-activity,
-  .board-chat, .board-draft-field, .sheet, .markdown-preview
+  .board-chat, .board-draft-field, .sheet, .markdown-preview, #update-dialog
 ),
 .image-preview :is(.image-preview-header > strong, .image-preview-toolbar),
 .image-preview .button:is(.image-preview-header > .button, .image-preview-previous, .image-preview-next) {
@@ -96,21 +96,111 @@ h1, h2, h3, p { margin: 0; }
 .app-menu-submenu-trigger { position: relative; }
 .project-tabs {
   grid-area: 2 / 1; display: flex; flex-direction: column; overflow-y: auto;
-  position: relative; z-index: 6; background: var(--toolbar);
+  position: relative; z-index: 6;
   margin-block-end: 40px;
+}
+body:has(> .project-tabs:not([hidden]))::before {
+  content: "";
+  grid-area: 2 / 1;
+  background: var(--toolbar);
+  border-inline-end: 1px solid var(--border);
+  pointer-events: none;
 }
 .app-settings.button {
   grid-area: 2 / 1; align-self: end; z-index: 6; width: 40px; height: 40px; padding: 0;
+  position: relative;
   border: 0; border-radius: 0; color: var(--muted);
   transition: color var(--hover-time) ease;
 }
-.project-tabs, .project-tabs:not([hidden]) + .app-settings { border-inline-end: 1px solid var(--border); }
-.project-tabs:not([hidden]) + .app-settings { --settings-background: var(--toolbar); }
+.project-tabs, .project-tabs:not([hidden]) ~ .app-settings { border-inline-end: 1px solid transparent; }
 .app-settings.button.quiet, .app-settings.button.quiet:hover:not(:disabled) {
-  background-color: var(--settings-background, transparent);
+  background-color: transparent;
 }
 .app-settings.button:hover { color: var(--text); }
 .app-settings .icon { width: 20px; height: 20px; font-size: 20px; }
+#app-update-badge {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  display: grid;
+  place-items: center;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 10px;
+  pointer-events: none;
+}
+#app-settings:focus-visible { outline-offset: -3px; }
+@media (forced-colors: active) {
+  #app-update-badge { border: 1px solid ButtonText; }
+}
+#update-dialog {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(520px, calc(100vw - 32px));
+  max-height: min(75vh, 640px);
+  padding: var(--surface-inset);
+  font-size: 13px;
+  line-height: 1.5;
+}
+#update-dialog[open] { display: flex; flex-direction: column; gap: var(--surface-section-gap); }
+#update-dialog::backdrop { background: #0006; }
+#update-dialog h2 { margin: 0; font-size: 16px; }
+#update-dialog p { margin: 0; overflow-wrap: anywhere; }
+.update-notes { min-height: 0; overflow: auto; overflow-wrap: anywhere; }
+.update-notes pre { white-space: pre-wrap; }
+#update-progress {
+  /* The native value remains available to assistive technology. */
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  clip-path: inset(50%);
+}
+#update-progress-display { display: flex; align-items: center; gap: 8px; }
+#update-progress-percent { min-width: 4ch; text-align: end; font-variant-numeric: tabular-nums; }
+#update-progress-track {
+  flex: 1;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--toolbar);
+}
+#update-progress-fill {
+  height: 100%;
+  background: var(--blue);
+  transform-origin: left;
+  transform: scaleX(var(--update-progress, 0));
+  transition: transform 180ms linear;
+}
+#update-progress-track.indeterminate #update-progress-fill {
+  width: 30%;
+  transform: translateX(117%);
+  animation: update-progress-activity 1.4s linear infinite;
+}
+@keyframes update-progress-activity {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(334%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #update-progress-fill { transition: none; }
+  #update-progress-track.indeterminate #update-progress-fill { animation: none; }
+}
+@media (forced-colors: active) {
+  #update-progress-fill { forced-color-adjust: none; background: Highlight; }
+}
+#update-dialog > :not(.update-notes) { flex: none; }
+#update-dialog footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+#update-release { color: var(--blue); margin-inline-end: auto; }
 .settings-menu.app-menu-popup {
   position: fixed; inset: 0 auto auto 0; margin: 0; color: var(--text);
   min-width: 0; max-width: calc(100vw - 8px); max-height: calc(100vh - 8px); overflow: auto;

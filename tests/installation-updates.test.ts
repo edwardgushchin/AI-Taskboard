@@ -10,12 +10,169 @@ import { ApplicationUpdates, manifestChecksum, prepareWindowsUpdate } from "../s
 import { releasesUrl } from "../src/desktop/updates.ts";
 
 const version = "0.1.1-alpha";
-const candidate = { version, tag: `v${version}`, url: `${releasesUrl}/tag/v${version}`, prerelease: true };
+const candidate = { version, tag: `v${version}`, url: `${releasesUrl}/tag/v${version}`, prerelease: true, notes: "" };
 const name = `ai-taskboard-${version}-windows-x64.exe`;
 const bytes = Buffer.from("MZ test NSIS fixture");
 const digest = createHash("sha256").update(bytes).digest("hex");
 const signal = () => new AbortController().signal;
 const updateDirectories = async () => (await readdir(tmpdir())).filter(name => name.startsWith("ai-taskboard-update-")).sort();
+
+test("background checks refresh the offer and preserve the active package through confirmation", async context => {
+  const current = "0.1.0-alpha";
+  const newer = "0.1.2-alpha";
+  let next = version;
+  let offline = false;
+  let requests = 0;
+  context.mock.method(globalThis, "fetch", async () => {
+    requests++;
+    if (offline) throw new TypeError("Offline");
+    return Response.json([
+      { tag_name: next, body: next === version ? "Selected notes" : "Other notes" },
+    ]);
+  });
+  let downloads = 0;
+  let discarded = 0;
+  let started = 0;
+  let downloadSignal: AbortSignal | undefined;
+  const verified = Promise.withResolvers<void>();
+  const service = new ApplicationUpdates({
+    version: () => current,
+    supported: () => true,
+    busy: () => false,
+    confirm: async () => true,
+    prepare: async (release, signal, progress) => {
+      assert.equal(release.version, version);
+      downloads++;
+      downloadSignal = signal;
+      progress?.({ received: 1, total: 4 });
+      signal.addEventListener("abort", () => verified.resolve(), { once: true });
+      await verified.promise;
+      return {
+        start: async () => { started++; },
+        cancel: async () => { discarded++; },
+      };
+    },
+  });
+  assert.equal((await Promise.all([service.check(true), service.check()])).every(reply => reply.ok), true);
+  assert.equal(requests, 1);
+  assert.equal(service.state.candidate?.notes, "Selected notes");
+  const download = service.download(version);
+  assert.equal(service.state.phase, "downloading");
+  assert.deepEqual(service.state.progress, { received: 1, total: 4 });
+  assert.equal(service.download(version), undefined);
+  for (const offer of [newer, current]) {
+    next = offer;
+    assert.equal((await service.check(true)).ok, true);
+    assert.equal(service.state.available?.version ?? null, offer === current ? null : offer);
+    assert.equal(service.state.candidate?.version, version);
+    assert.equal(service.state.phase, "downloading");
+    assert.deepEqual(service.state.progress, { received: 1, total: 4 });
+    assert.equal(downloadSignal?.aborted, false);
+    assert.equal(service.download(newer), undefined);
+  }
+  verified.resolve();
+  await download;
+  assert.equal(downloads, 1);
+  assert.equal(service.state.phase, "ready");
+  assert.equal(service.installing, false);
+
+  offline = true;
+  assert.equal((await service.check(true)).ok, false);
+  assert.equal(service.state.phase, "ready");
+  offline = false;
+  for (const offer of [newer, current]) {
+    next = offer;
+    assert.equal((await service.check(true)).ok, true);
+    assert.equal(service.state.available?.version ?? null, offer === current ? null : offer);
+    assert.equal(service.state.candidate?.version, version);
+    assert.equal(service.state.candidate?.notes, "Selected notes");
+    assert.equal(service.state.phase, "ready");
+    assert.equal(downloadSignal?.aborted, false);
+    assert.equal(service.confirmDownload(newer), false);
+  }
+  assert.equal(discarded, 0);
+  assert.equal(started, 0);
+  assert.equal(service.confirmDownload(version), true);
+  assert.equal(service.state.phase, "installing");
+  assert.ok(service.prepared);
+  await service.prepared.start();
+  assert.equal(started, 1);
+});
+
+test("a failed transfer can be retried for the same version and discarded to reveal the latest offer", async context => {
+  const newer = "0.1.2-alpha";
+  let next = version;
+  let discarded = false;
+  const attempts: string[] = [];
+  context.mock.method(globalThis, "fetch", async () => Response.json([{ tag_name: next }]));
+  const service = new ApplicationUpdates({
+    version: () => "0.1.0-alpha",
+    supported: () => true,
+    busy: () => false,
+    confirm: async () => true,
+    prepare: async release => {
+      attempts.push(release.version);
+      if (attempts.length === 1) throw new Error("Network error");
+      return {
+        start: async () => { assert.fail("Discarding the package must not start the installer"); },
+        cancel: async () => { discarded = true; },
+      };
+    },
+  });
+  await service.check(true);
+  await service.download(version);
+  assert.equal(service.state.phase, "error");
+  next = newer;
+  await service.check(true);
+  assert.equal(service.state.available?.version, newer);
+  assert.equal(service.state.candidate?.version, version);
+  assert.equal(service.download(newer), undefined);
+  await service.download(version);
+  assert.deepEqual(attempts, [version, version]);
+  assert.equal(service.state.phase, "ready");
+  await service.discardDownload();
+  assert.equal(discarded, true);
+  assert.equal(service.state.phase, "available");
+  assert.equal(service.state.candidate?.version, newer);
+});
+
+test("a busy installer keeps its cleanup handle without allowing installation or another download", async context => {
+  context.mock.method(globalThis, "fetch", async () => Response.json([{ tag_name: candidate.tag }]));
+  const firstRemoval = Promise.withResolvers<void>();
+  let removals = 0;
+  const service = new ApplicationUpdates({
+    version: () => "0.1.0-alpha",
+    supported: () => true,
+    busy: () => false,
+    confirm: async () => true,
+    prepare: async () => ({
+      start: async () => { assert.fail("The installer must not run after cleanup starts"); },
+      cancel: async () => {
+        removals++;
+        if (removals === 1) await firstRemoval.promise;
+      },
+    }),
+  });
+  await service.check();
+  await service.download(version);
+  const removal = service.discardDownload();
+  const sameRemoval = service.discardDownload();
+  assert.equal(removal, sameRemoval);
+  assert.equal(service.state.phase, "discarding");
+  assert.equal(service.confirmDownload(version), false);
+  firstRemoval.reject(new Error("EBUSY: installer is locked"));
+  await assert.rejects(removal, /EBUSY/);
+  assert.equal(removals, 1);
+  assert.equal(service.state.phase, "cleanup-error");
+  assert.equal(service.state.candidate?.version, version);
+  assert.match(service.state.error ?? "", /EBUSY/);
+  assert.equal(service.confirmDownload(version), false);
+  assert.equal(service.download(version), undefined);
+  assert.equal((await service.install(version, signal())).ok, false);
+  await service.discardDownload();
+  assert.equal(removals, 2);
+  assert.equal(service.state.phase, "available");
+});
 
 test("manifest requires one exact version/architecture entry and validates the full line", () => {
   assert.equal(manifestChecksum(`${digest.toUpperCase()}  ${name}\r\n`, name), digest);
@@ -42,6 +199,30 @@ test("download accepts only constructed official assets and cleans successful pr
     context.mock.restoreAll();
   }
   assert.deepEqual(await updateDirectories(), before);
+});
+
+test("download reports a total only for a valid decimal Content-Length", async context => {
+  for (const [header, total] of [[String(bytes.length), bytes.length], ["1e3", undefined], ["12abc", undefined]] as const) {
+    context.mock.method(globalThis, "fetch", async (url: string) => {
+      if (url.endsWith("SHA256SUMS")) return new Response(`${digest}  ${name}\n`);
+      return new Response(bytes, { headers: { "Content-Length": header } });
+    });
+    const values: Array<{ received: number; total?: number }> = [];
+    const prepared = await prepareWindowsUpdate(candidate, signal(), {
+      arch: "x64",
+      executable: "C:\\App\\AI Taskboard.exe",
+      profile: "C:\\Profile",
+      args: [],
+      relaunch: () => {},
+      progress: value => values.push(value),
+    });
+    try {
+      assert.deepEqual(values[0], { received: 0, total });
+      assert.deepEqual(values.at(-1), { received: bytes.length, total });
+    } finally {
+      await prepared.cancel();
+    }
+  }
 });
 
 test("corrupt, wrong-architecture, network and cancellation failures never prepare an installer", async context => {
@@ -254,18 +435,19 @@ test("unsupported installations return the official manual path without download
   }
 });
 
-test("a vetoed quit discards the prepared update, including an overlapping window close", async context => {
+test("quit can retry a locked package and handles vetoes of a confirmed installation", async context => {
   const source = readFileSync(new URL("../src/desktop/main.ts", import.meta.url), "utf8");
-  const start = source.indexOf("  let quitPending = false;");
+  const start = source.indexOf('  app.on("before-quit"');
   const end = source.indexOf('  app.on("window-all-closed"', start);
   assert.ok(start >= 0 && end > start);
 
   context.mock.method(globalThis, "fetch", async () => Response.json([{ tag_name: candidate.tag }]));
-  for (const scenario of ["window closing", "confirmation declined", "busy", "session failed", "launch failed", "success"]) {
+  for (const scenario of ["locked installer", "window closing", "confirmation declined", "busy", "session failed", "launch failed", "success"]) {
     let cleaned = 0;
     let launched = 0;
     let quits = 0;
     let confirmCalls = 0;
+    const messages: string[] = [];
     const applicationUpdates = new ApplicationUpdates({
       version: () => "0.1.0-alpha",
       supported: () => true,
@@ -280,11 +462,16 @@ test("a vetoed quit discards the prepared update, including an overlapping windo
         },
         cancel: async () => {
           cleaned++;
+          if (scenario === "locked installer" && cleaned === 1) throw new Error("EBUSY");
         },
       }),
     });
     await applicationUpdates.check();
-    assert.equal((await applicationUpdates.install(version, signal())).ok, true);
+    if (scenario === "locked installer") {
+      await applicationUpdates.download(version);
+    } else {
+      assert.equal((await applicationUpdates.install(version, signal())).ok, true);
+    }
     let beforeQuit: (() => void) | undefined;
     runInNewContext(source.slice(start, end), {
       app: {
@@ -299,18 +486,35 @@ test("a vetoed quit discards the prepared update, including an overlapping windo
       applicationUpdates,
       windowStates: new Map([[1, { closing: scenario === "window closing", tabs: [] }]]),
       quitting: false,
+      quitPending: false,
       updateBusy: () => scenario === "busy",
       confirmProjectClose: async () => {
         confirmCalls++;
         return scenario !== "confirmation declined";
       },
       saveSession: () => scenario !== "session failed",
-      dialog: { showMessageBox: async () => {} },
+      t: (key: string, { reason }: { reason: string }) => key + ": " + reason,
+      dialog: {
+        showMessageBox: async ({ message }: { message: string }) => { messages.push(message); },
+      },
     });
     assert.ok(beforeQuit);
     beforeQuit();
     await new Promise(resolve => setImmediate(resolve));
 
+    if (scenario === "locked installer") {
+      assert.equal(quits, 0);
+      assert.equal(cleaned, 1);
+      assert.equal(applicationUpdates.state.phase, "cleanup-error");
+      assert.deepEqual(messages, ["updates.cleanup_failed: Error: EBUSY"]);
+      beforeQuit();
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(quits, 1);
+      assert.equal(cleaned, 2);
+      assert.equal(launched, 0);
+      assert.equal(applicationUpdates.state.phase, "available");
+      continue;
+    }
     if (scenario === "success") {
       assert.equal(quits, 1);
       assert.equal(launched, 1);

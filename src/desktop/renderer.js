@@ -21,6 +21,108 @@ const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
 const localization = window.taskboardLocalization;
 const t = (key, parameters) => localization.text(key, parameters);
+let appUpdate;
+let renderedUpdateNotes;
+const updateDialog = byId("update-dialog");
+const updateMarkdown = window.markdownit?.({ html: false }).disable("image");
+if (updateMarkdown) {
+  updateMarkdown.renderer.rules.link_open = () => "";
+  updateMarkdown.renderer.rules.link_close = () => "";
+}
+
+function renderAppUpdate() {
+  const available = appUpdate?.available;
+  const candidate = appUpdate?.candidate;
+  byId("app-update-badge").hidden = !available;
+  controlLabelForIcon(byId("app-settings"), () => {
+    const settings = t("ui.settings_and_updates_f9f74584");
+    return available ? settings + ". " + t("updates.available_version", { version: available.version }) : settings;
+  });
+  syncSettingsUpdateItems();
+  if (!candidate) {
+    if (updateDialog.open) {
+      updateDialog.close();
+      byId("app-settings").focus();
+    }
+    return;
+  }
+  if (!updateDialog.open) return;
+
+  byId("update-title").textContent = t("updates.available_version", { version: candidate.version });
+  const notes = byId("update-notes");
+  const source = candidate.notes || t("updates.no_notes");
+  if (source !== renderedUpdateNotes) {
+    renderedUpdateNotes = source;
+    if (candidate.notes && updateMarkdown) {
+      notes.innerHTML = updateMarkdown.render(source);
+    } else {
+      notes.textContent = source;
+    }
+    notes.scrollTop = 0;
+  }
+
+  const { phase, supported, progress, error, installing } = appUpdate;
+  const downloading = phase === "downloading";
+  const ready = phase === "ready";
+  const discarding = phase === "discarding";
+  const cleanupFailed = phase === "cleanup-error";
+  const status = byId("update-status");
+  let message = "";
+  if (downloading) {
+    message = t("updates.downloading");
+  } else if (discarding) {
+    message = t("updates.cleaning");
+  } else if (cleanupFailed) {
+    message = t("updates.cleanup_failed", { reason: error });
+  } else if (phase === "installing") {
+    message = t("updates.preparing");
+  } else if (error) {
+    const reason = error === "UPDATE_APP_BUSY" ? t("updates.busy")
+      : error === "UPDATE_CANCELLED" ? t("updates.cancelled") : error;
+    message = t("updates.failed", { reason });
+  } else if (ready) {
+    message = t("updates.verified");
+  }
+  if (status.textContent !== message) status.textContent = message;
+  status.hidden = !message;
+  const meter = byId("update-progress");
+  meter.hidden = !downloading;
+  byId("update-progress-display").hidden = !downloading;
+  const track = byId("update-progress-track");
+  track.classList.toggle("indeterminate", downloading && !progress?.total);
+  if (progress?.total) {
+    meter.max = progress.total;
+    meter.value = progress.received;
+  } else {
+    meter.removeAttribute("value");
+  }
+  track.style.setProperty("--update-progress", String(Math.max(0, meter.position)));
+  const percent = byId("update-progress-percent");
+  percent.hidden = !downloading || meter.position < 0;
+  if (!percent.hidden) {
+    percent.textContent = new Intl.NumberFormat(localization.locale, { style: "percent" })
+      .format(Math.floor(meter.value * 100 / meter.max) / 100);
+  }
+
+  const release = byId("update-release");
+  release.href = candidate.url;
+  release.textContent = t("ui.open_release_b1c993b5");
+  const later = byId("update-later");
+  later.disabled = discarding;
+  later.textContent = t(ready || discarding || cleanupFailed ? "updates.later" : "updates.close");
+  const action = byId("update-action");
+  action.hidden = !supported || downloading || discarding || cleanupFailed || phase === "installing";
+  action.disabled = installing;
+  action.textContent = t(ready ? "updates.restart" : error ? "updates.retry" : "updates.download");
+}
+
+function openUpdateDialog() {
+  if (!appUpdate?.candidate || updateDialog.open) return;
+  byId("update-title").textContent = t("updates.available_version", { version: appUpdate.candidate.version });
+  updateDialog.showModal();
+  renderAppUpdate();
+}
+
 const localizedBindings = new Set();
 const nodeBindings = new WeakMap();
 function bindLocalized(node, property, render, attribute = false) {
@@ -333,6 +435,29 @@ async function projectStatistics() {
   await run();
 }
 
+function positionSettingsMenu() {
+  const menu = byId("settings-menu");
+  const anchor = byId("app-settings").getBoundingClientRect();
+  menu.style.left = Math.max(4, Math.min(anchor.right, innerWidth - menu.offsetWidth - 4)) + "px";
+  menu.style.top = Math.max(4, Math.min(anchor.bottom - menu.offsetHeight, innerHeight - menu.offsetHeight - 4)) + "px";
+}
+
+function syncSettingsUpdateItems() {
+  const update = byId("settings-menu-update");
+  const check = byId("settings-menu-updates");
+  if (!update || !check) return;
+  const focused = document.activeElement;
+  const showUpdate = Boolean(appUpdate?.candidate);
+  const showCheck = !appUpdate?.available;
+  if (update.hidden === !showUpdate && check.hidden === !showCheck) return;
+  update.hidden = !showUpdate;
+  check.hidden = !showCheck;
+  if (!byId("settings-menu").matches(":popover-open")) return;
+  positionSettingsMenu();
+  if (focused === update && update.hidden) check.focus();
+  if (focused === check && check.hidden) update.focus();
+}
+
 function openSettingsMenu(last = false) {
   const trigger = byId("app-settings");
   const menu = byId("settings-menu");
@@ -362,14 +487,26 @@ function openSettingsMenu(last = false) {
     trigger.focus();
     return backupSettings();
   });
-  const updates = button(() => t("ui.check_for_updates_6a5aded8"), () => {
+  const update = button(() => t("updates.download"), () => {
+    menu.hidePopover();
+    trigger.focus();
+    openUpdateDialog();
+  });
+  const check = button(() => t("ui.check_for_updates_6a5aded8"), () => {
     menu.hidePopover();
     trigger.focus();
     return checkUpdates();
   });
-  for (const [index, item] of [app, board, statistics, updates, backups].entries()) {
+  for (const [id, item] of [
+    ["app", app],
+    ["board", board],
+    ["backups", backups],
+    ["statistics", statistics],
+    ["update", update],
+    ["updates", check],
+  ]) {
     item.className = "app-menu-item";
-    item.id = ["settings-menu-app", "settings-menu-board", "settings-menu-statistics", "settings-menu-updates", "settings-menu-backups"][index];
+    item.id = "settings-menu-" + id;
     item.setAttribute("role", "menuitem");
     item.setAttribute("aria-disabled", String(item.disabled));
     item.tabIndex = -1;
@@ -377,12 +514,11 @@ function openSettingsMenu(last = false) {
   const separator = element("hr");
   separator.setAttribute("role", "separator");
   bindLocalized(menu, "aria-label", () => t("ui.settings_and_updates_f9f74584"), true);
-  menu.replaceChildren(app, board, backups, statistics, separator, updates);
+  menu.replaceChildren(app, board, backups, statistics, separator, update, check);
+  syncSettingsUpdateItems();
   menu.showPopover({ source: trigger });
-  const anchor = trigger.getBoundingClientRect();
-  menu.style.left = Math.max(4, Math.min(anchor.right, innerWidth - menu.offsetWidth - 4)) + "px";
-  menu.style.top = Math.max(4, Math.min(anchor.bottom - menu.offsetHeight, innerHeight - menu.offsetHeight - 4)) + "px";
-  (last ? updates : app).focus();
+  positionSettingsMenu();
+  (last ? (check.hidden ? update : check) : app).focus();
 }
 
 function mountAppMenu() {
@@ -1511,6 +1647,7 @@ function animateCardMoves(moves) {
 
 function render(previousBoard) {
   document.documentElement.lang = localization.locale;
+  renderAppUpdate();
   const board = frame.board;
   const noBoard = !board;
   const autoMode = byId("status-auto-mode");
@@ -1530,7 +1667,6 @@ function render(previousBoard) {
   byId("workspace").hidden = noBoard;
   byId("archive-menu-item").setAttribute("aria-disabled", String(noBoard));
   byId("board-settings-menu-item").setAttribute("aria-disabled", String(noBoard));
-  controlLabelForIcon(byId("app-settings"), () => t("ui.settings_and_updates_f9f74584"));
   byId("archive-menu-item").setAttribute("aria-checked", String(archiveView));
   if (!board) {
     resetBoardRendering();
@@ -5985,7 +6121,7 @@ byId("settings-menu").addEventListener("keydown", event => {
     return;
   }
   if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
-  const items = [...menu.querySelectorAll("button:not(:disabled)")];
+  const items = [...menu.querySelectorAll("button:not(:disabled):not([hidden])")];
   const index = items.indexOf(document.activeElement);
   const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
     : (index + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
@@ -6053,7 +6189,47 @@ api.onTheme(theme => {
   frame.theme = theme;
   applyTheme(theme);
 });
-api.bootstrap().then(update).catch(error => notice(error.message, t("ui.application_startup_a6ae49b2")));
+byId("update-release").addEventListener("click", event => {
+  event.preventDefault();
+  void api.openLink(event.currentTarget.href);
+});
+async function closeUpdateDialog(event) {
+  event.preventDefault();
+  const { phase, candidate } = appUpdate;
+  if (phase === "discarding") return;
+  if (phase === "ready" || phase === "error" || phase === "cleanup-error") {
+    if (!await api.discardUpdate(candidate.version)) {
+      if (updateDialog.open) byId("update-later").focus();
+      return;
+    }
+  }
+  updateDialog.close();
+}
+byId("update-later").addEventListener("click", event => {
+  void closeUpdateDialog(event).catch(error => notice(error.message));
+});
+updateDialog.addEventListener("cancel", event => {
+  void closeUpdateDialog(event).catch(error => notice(error.message));
+});
+byId("update-action").addEventListener("click", () => {
+  const version = appUpdate.candidate.version;
+  if (appUpdate.phase === "ready") {
+    void api.confirmUpdate(version);
+  } else {
+    void api.downloadUpdate(version);
+  }
+});
+function receiveAppUpdate(state) {
+  appUpdate = state;
+  if (frame.localization) renderAppUpdate();
+}
+api.onUpdateChanged?.(receiveAppUpdate);
+api.bootstrap().then(initial => {
+  update(initial);
+  return api.updateState?.().then(state => {
+    if (!appUpdate) receiveAppUpdate(state);
+  });
+}).catch(error => notice(error.message, t("ui.application_startup_a6ae49b2")));
 
 function createBoard() {
   openSheet("board-type", "Создать доску");

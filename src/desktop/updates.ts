@@ -9,7 +9,7 @@ export async function checkForUpdates(currentVersion: string, fetcher: typeof fe
   const current: string | null = semver.valid(currentVersion);
   if (!current) throw new Error("Invalid application version.");
   const includePrerelease = semver.prerelease(current) !== null;
-  let latest: { version: string; tag: string; url: string; prerelease: boolean } | null = null;
+  let latest: { version: string; tag: string; url: string; prerelease: boolean; notes: string } | null = null;
   const signal = AbortSignal.timeout(15_000);
   for (let page = 1; ; page++) {
     const response = await fetcher(`https://api.github.com/repos/${releaseRepository}/releases?per_page=100&page=${page}`, {
@@ -25,7 +25,11 @@ export async function checkForUpdates(currentVersion: string, fetcher: typeof fe
       const prerelease = Boolean(release.prerelease) || semver.prerelease(version) !== null;
       if (prerelease && !includePrerelease) continue;
       if (!latest || semver.gt(version, latest.version)) {
-        latest = { version, tag: release.tag_name, prerelease, url: `${releasesUrl}/tag/${encodeURIComponent(release.tag_name)}` };
+        latest = {
+          version, tag: release.tag_name, prerelease,
+          url: `${releasesUrl}/tag/${encodeURIComponent(release.tag_name)}`,
+          notes: typeof release.body === "string" ? release.body.trim() : "",
+        };
       }
     }
     if (releases.length < 100) break;

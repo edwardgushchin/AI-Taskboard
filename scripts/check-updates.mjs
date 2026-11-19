@@ -35,7 +35,7 @@ try {
   const live = await check();
   assert.equal(live.ok, true);
   assert.equal(live.data.currentVersion, app.getVersion());
-  assert.equal(live.data.status, "empty");
+  assert.ok(["empty", "current", "available"].includes(live.data.status));
   assert.equal(live.data.sourceUrl, "https://github.com/edwardgushchin/AI-Taskboard/releases");
   writeFileSync(join(artifacts, "updates-ipc-live.json"), JSON.stringify({ checkedAt: new Date().toISOString(), versions: process.versions, live }, null, 2));
   app.getVersion = () => "0.1.0";
@@ -57,7 +57,46 @@ try {
   assert.equal((await check()).error.code, "UPDATE_CHECK_FAILED");
   offline = false;
   assert.equal((await check()).data.status, "available");
-  console.log("Updates preload/main checks passed: live empty repository, application version, available/current/prerelease, network failure and retry");
+  const manual = await window.webContents.executeJavaScript(`(async () => {
+    const trigger = document.querySelector("#app-settings");
+    const badge = document.querySelector("#app-update-badge");
+    const dialog = document.querySelector("#update-dialog");
+    trigger.click();
+    const update = document.querySelector("#settings-menu-update");
+    const check = document.querySelector("#settings-menu-updates");
+    const menu = document.querySelector("#settings-menu");
+    const entry = menu.matches(":popover-open") && !dialog.open && !update.hidden && check.hidden &&
+      !badge.hidden && badge.parentElement === trigger && trigger.getAttribute("aria-label").includes("0.3.0-beta.10");
+    update.click();
+    await Promise.resolve();
+    const state = {
+      entry,
+      open: dialog.open,
+      noBoard: !(await window.taskboard.bootstrap()).board,
+      downloadHidden: document.querySelector("#update-action").hidden,
+      releaseUrl: document.querySelector("#update-release").href,
+      notes: document.querySelector("#update-notes").textContent,
+    };
+    document.querySelector("#update-later").click();
+    return { ...state, closed: !dialog.open };
+  })()`);
+  assert.equal(manual.entry, true);
+  assert.equal(manual.open, true);
+  assert.equal(manual.noBoard, true);
+  assert.equal(manual.downloadHidden, true);
+  assert.equal(manual.releaseUrl, live.data.sourceUrl + "/tag/v0.3.0-beta.10");
+  assert.match(manual.notes, /release notes|списка изменений/);
+  assert.equal(manual.closed, true);
+  response = [];
+  assert.equal((await check()).data.status, "empty");
+  const noUpdate = await window.webContents.executeJavaScript(`(() => {
+    document.querySelector("#app-settings").click();
+    return document.querySelector("#app-update-badge").hidden &&
+      document.querySelector("#settings-menu-update").hidden &&
+      !document.querySelector("#settings-menu-updates").hidden;
+  })()`);
+  assert.equal(noUpdate, true);
+  console.log("Updates IPC and renderer checks passed: official source, channel rules, offline retry, settings menu switching and manual release link without a board");
 } catch (error) {
   console.error(error);
   process.exitCode = 1;

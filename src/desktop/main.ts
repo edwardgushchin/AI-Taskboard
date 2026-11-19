@@ -532,6 +532,7 @@ async function loadProject(owner: WindowState, state: ProjectTab, project: strin
 
 let restoringSession = false;
 let quitting = false;
+let quitPending = false;
 
 function saveSession(): boolean {
   if (restoringSession || quitting || !windowStates.size) {
@@ -594,13 +595,19 @@ const applicationUpdates = new ApplicationUpdates({
   supported: () => process.platform === "win32" && app.isPackaged && ["x64", "arm64"].includes(process.arch) &&
     !process.env.PORTABLE_EXECUTABLE_DIR && existsSync(join(dirname(process.execPath), "Uninstall " + basename(process.execPath))),
   busy: updateBusy,
+  changed: () => {
+    const update = applicationUpdates.state;
+    for (const { window } of windowStates.values()) {
+      if (!window.isDestroyed()) window.webContents.send("app:updateChanged", update);
+    }
+  },
   confirm: async (version, signal) => {
     const result = await dialog.showMessageBox({ type: "question", title: "AI Taskboard",
       message: t("updates.install_confirm", { version }), detail: t("updates.install_detail"),
       buttons: [t("ui.cancel_4c6dcc32"), t("updates.install_button")], defaultId: 0, cancelId: 0, noLink: true, signal });
     return result.response === 1;
   },
-  prepare: (candidate, signal) => {
+  prepare: (candidate, signal, progress) => {
     const args: string[] = [];
     for (let index = 1; index < process.argv.length; index++) {
       const argument = process.argv[index];
@@ -613,7 +620,7 @@ const applicationUpdates = new ApplicationUpdates({
       }
     }
     return prepareWindowsUpdate(candidate, signal, { arch: process.arch, executable: process.execPath,
-      profile: app.getPath("userData"), args, relaunch: (execPath, args) => app.relaunch({ execPath, args }) });
+      profile: app.getPath("userData"), args, progress, relaunch: (execPath, args) => app.relaunch({ execPath, args }) });
   },
 });
 
@@ -716,7 +723,11 @@ function createWindow(initial: string[] = [], selected?: string): WindowState {
   window.on("close", event => {
     if (quitting) return;
     event.preventDefault();
-    if (state.closing) return;
+    if (state.closing || quitPending) return;
+    if (process.platform !== "darwin" && windowStates.size === 1 && applicationUpdates.hasDownloadToDiscard) {
+      app.quit();
+      return;
+    }
     state.closing = true;
     void confirmProjectClose(state, state.tabs).then(confirmed => {
       if (!confirmed) return;
@@ -3401,6 +3412,33 @@ ipcMain.handle("app:checkUpdates", async event => {
   stateOf(event);
   return applicationUpdates.check();
 });
+ipcMain.handle("app:updateState", event => {
+  stateOf(event);
+  return applicationUpdates.state;
+});
+ipcMain.handle("app:downloadUpdate", async (event, version: unknown) => {
+  stateOf(event);
+  if (!quitPending) await applicationUpdates.download(version);
+});
+ipcMain.handle("app:discardUpdate", async (event, version: unknown) => {
+  stateOf(event);
+  const update = applicationUpdates.state;
+  if (quitPending || update.candidate?.version !== version ||
+      !["ready", "error", "discarding", "cleanup-error"].includes(update.phase)) {
+    return false;
+  }
+  try {
+    await applicationUpdates.discardDownload();
+    return true;
+  } catch {
+    // The update state carries the cleanup error to each open dialog.
+    return false;
+  }
+});
+ipcMain.handle("app:confirmUpdate", (event, version: unknown) => {
+  stateOf(event);
+  if (!quitPending && applicationUpdates.confirmDownload(version)) app.quit();
+});
 ipcMain.handle("appearance:themes", event => {
   stateOf(event);
   return Object.entries(themes).map(([id, [label]]) => [id, label]);
@@ -4493,8 +4531,12 @@ else {
       });
     }
     app.on("activate", () => { if (!windowStates.size) createWindow(); });
+    const pollUpdates = () => { void applicationUpdates.check(true); };
+    setTimeout(() => {
+      pollUpdates();
+      setInterval(pollUpdates, 60 * 60_000).unref();
+    }, 5_000).unref();
   });
-  let quitPending = false;
   app.on("before-quit", event => {
     if (quitting) return;
     event.preventDefault();
@@ -4515,6 +4557,13 @@ else {
       }
       if (!saveSession() && applicationUpdates.prepared) {
         await applicationUpdates.cancel();
+        return;
+      }
+      try {
+        await applicationUpdates.discardDownload();
+      } catch (error) {
+        await dialog.showMessageBox({ type: "error", title: "AI Taskboard",
+          message: t("updates.cleanup_failed", { reason: String(error) }) });
         return;
       }
       if (applicationUpdates.prepared) {
