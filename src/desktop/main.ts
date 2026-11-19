@@ -3791,7 +3791,7 @@ async function recordRunFailure(project: string, id: string, reason: string, con
   if (!result.ok && result.error.code !== "INVALID_TRANSITION" && result.error.code !== "REVISION_CONFLICT") return result.error.message;
 }
 
-type LaunchState = Pick<Task, "acceptanceRepair" | "discussionReturn" | "id" | "title" | "status" | "revision" | "createdAt" | "codexThreadId" | "blocked" | "summary" | "nextStep"> & { mergeRepair?: true };
+type LaunchState = Pick<Task, "acceptanceRepair" | "discussionReturn" | "reviewReturn" | "id" | "title" | "status" | "revision" | "createdAt" | "codexThreadId" | "blocked" | "summary" | "nextStep"> & { mergeRepair?: true };
 
 async function launchTask(project: string, id: string, revisionRequest?: { input: Record<string, unknown> },
   newThread: false | "user" | "manager" = false, revision?: number,
@@ -3822,6 +3822,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   const activity = new Map<string, RunActivity>();
   const runStarted = performance.now();
   let prepared = false;
+  let returnedRevision: number | undefined;
   let monitoring = false;
   let recoveringThreadId: string | undefined;
   let restart: import("./board-runtime.ts").RuntimeEntry["restart"];
@@ -3862,13 +3863,14 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         : await callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
     if (!current.ok) return current;
     if (revisionRequest) {
-      // The return is already saved even if quota interrupts before slot acquisition.
-      queuedRevision = current.data.revision;
-      agentSlots.defer(project, id, {
-        revision: queuedRevision,
-        quotaPaused: signal.reason === quotaInterruption || undefined,
-      });
+      queuedRevision = current.data.reviewReturn;
       queued = true;
+    }
+    if (manual && !newThread && queuedRevision === undefined) {
+      const task = current.data;
+      const pending = agentSlots.entries(project).find(entry => entry.reviewReturn && matchesQueuedExecutor(entry, task));
+      queuedRevision = pending?.revision;
+      queued = queuedRevision !== undefined;
     }
     if (discussionReturn !== undefined && current.data.discussionReturn !== discussionReturn) {
       return cliFailure("INVALID_TRANSITION", "This discussion return is no longer waiting to launch.");
@@ -3884,7 +3886,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     const releaseSlot = reserveAgent(project, role, id, queuedRevision, undefined, role === "reviewer" ? "mergeRepair" : undefined);
     release = releaseSlot;
     if (!releaseSlot) {
-      if (!revisionRequest) {
+      if (!revisionRequest && !queued) {
         if (!ordinaryManualStart || role !== "executor") return taskRunLimit(role);
         signal.throwIfAborted();
         const pending = await callCli<{ task: LaunchState }>(project, ["start", id, "--compact"], {
@@ -3894,14 +3896,14 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         scheduleAgentWork();
         return { ok: true, data: pending.data.task };
       }
-      agentSlots.defer(project, id, { revision: current.data.revision });
       scheduleAgentWork();
-      return current;
+      return revisionRequest || ordinaryManualStart ? current : taskRunLimit(role);
     }
     if (queued) {
       const task = current.data;
       const pending = agentSlots.entries(project).find(entry => matchesQueuedExecutor(entry, task));
       if (!pending) return cliFailure("INVALID_TRANSITION", "The queued start is no longer pending.");
+      if (pending.reviewReturn) returnedRevision = task.revision;
       recoveringThreadId = pending.turnRequest?.threadId;
       restart = pending.restart;
       threadChoice = pending.newThread ?? newThread;
@@ -3924,7 +3926,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     const client = await configuredCodex(app.getPath("userData"));
     if (!client) {
       const reason = t("ui.choose_the_codex_executable_in_settings_06a08a7e");
-      if (prepared || recoveringThreadId || restart) throw new Error(reason);
+      if (prepared || recoveringThreadId || restart || returnedRevision !== undefined) throw new Error(reason);
       await failDiscussionStart("CODEX_UNAVAILABLE", reason);
       return cliFailure("CODEX_UNAVAILABLE", reason);
     }
@@ -3994,7 +3996,8 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         ...(resolveConflicts ? { resolveConflicts } : {}),
         ...(process.platform === "win32" && client.windowsSandbox === "elevated" ? { isolatedWorktree: true } : {}) });
     if (!started.ok) {
-      if (restart && !["BOARD_BUSY", "REVISION_CONFLICT", "INVALID_TRANSITION"].includes(started.error.code)) {
+      if (queued && ["BOARD_BUSY", "REVISION_CONFLICT", "INVALID_TRANSITION"].includes(started.error.code)) return started;
+      if (restart || returnedRevision !== undefined) {
         throw new Error(started.error.code + ": " + started.error.message);
       }
       if (prepared && started.error.code !== "BOARD_BUSY") throw new Error(started.error.message);
@@ -4006,6 +4009,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     const task = { ...started.data.task, fullAccess: executorFullAccess(desktopProfile, project, started.data.task),
       ...(threadChoice ? { codexThreadId: undefined } : {}) };
     let linked: LaunchState = started.data.task;
+    if (returnedRevision !== undefined) returnedRevision = linked.revision;
     const cwd = "cwd" in started.data ? started.data.cwd : started.data.worktree;
     // Quota can interrupt this launch before Codex has opened or linked a thread.
     releaseSlot.run(() => rememberExecutor(project, task, cwd, continuation, threadChoice || undefined));
@@ -4034,6 +4038,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
           (queued && ["INVALID_TRANSITION", "REVISION_CONFLICT"].includes(saved.error.code)) ? saved.error.code : "CODEX_LINK_FAILED",
       });
       linked = saved.data;
+      if (returnedRevision !== undefined) returnedRevision = linked.revision;
       if (created) rememberTaskCodexThread(project, id, codexThreadId);
       rememberExecutor(project, linked, cwd, continuation);
       if (!queued) return;
@@ -4196,6 +4201,15 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     const reason = busy ? t("ui.this_codex_chat_is_already_open_in_another_proce_9d6a0201") + "\n\n" + (error as Error).message : (error as Error).message;
     await saveActivity();
     const condition = busy ? t("ui.continue_in_the_existing_chat_or_stop_work_there_635dd251") : undefined;
+    if (returnedRevision !== undefined && !signal.aborted) {
+      const blocked = await callCli<LaunchState>(project, ["block", id, "--compact"], {
+        revision: returnedRevision, reason,
+        condition: condition ?? t("ui.resolve_the_reported_issue_and_resume_the_task_2b49bf6d"),
+      });
+      if (blocked.ok) return blocked;
+      return blocked.error.code === "REVISION_CONFLICT" || blocked.error.code === "BOARD_BUSY" ? blocked :
+        cliFailure("CODEX_LAUNCH_FAILED", reason + "\n" + blocked.error.message);
+    }
     const failure = (prepared || restart) && !signal.aborted
       ? await recordRunFailure(project, id, reason, condition, restart ? revision : undefined) : undefined;
     // The feedback was saved even when starting its follow-up run failed.

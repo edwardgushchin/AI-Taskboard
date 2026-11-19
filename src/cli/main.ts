@@ -112,7 +112,7 @@ function compactTask(task: Task) {
     reviewDecision: status === "review" ? reviewDecisionSequence(task) : undefined, acceptanceRepair: task.acceptanceRepair, id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
     coverAttachment, codexThreadId, codexArchivePending: task.codexArchivePending, createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep,
     dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, origin, launchRequested, discussionReturn: task.discussionReturn,
-    awaitingAnswer: task.awaitingAnswer,
+    awaitingAnswer: task.awaitingAnswer, reviewReturn: task.reviewReturn,
     draftDiscussion: status === "draft" ? task.draftDiscussion : undefined, historyLength: task.history.length,
     expertWorkPlanned: Boolean(task.expertTeam?.work?.lead || task.expertStage),
     expertReviewPlanned: Boolean(task.expertTeam?.review?.lead),
@@ -132,7 +132,7 @@ function taskReceipt({ id, status, revision, git, result }: Task) {
 function taskLaunchState(task: Task) {
   const { id, title, status, revision, createdAt, codexThreadId, blocked, summary, nextStep } = task;
   return { expertId: task.expertId, expertTeam: task.expertTeam, expertStage: task.expertStage, expertStages: task.expertStages, acceptanceRepair: task.acceptanceRepair, discussionReturn: task.discussionReturn, id, title, status, revision, createdAt, codexThreadId, codexServiceThreads: task.codexServiceThreads, blocked, summary, nextStep,
-    ...(isMergeRepair(task) ? { mergeRepair: true as const } : {}) };
+    reviewReturn: task.reviewReturn, ...(isMergeRepair(task) ? { mergeRepair: true as const } : {}) };
 }
 
 function reviewWithSettings(store: BoardStore, task: Task, review: ReturnType<typeof inspectReview>, input: Record<string, unknown>) {
@@ -820,6 +820,11 @@ function run(
     return cancelled;
   }
   if ((command === "update" || command === "unblock") && input.dependencies !== undefined) validateDependencies(store, updated);
+  if (command === "request-changes" && !discussionReturn) {
+    // Publish the request first. It becomes eligible only when the matching return is saved.
+    updated.reviewReturn = updated.revision;
+    deferExecutor(store.location.root, id, { revision: updated.reviewReturn, reviewReturn: true });
+  }
   const saved = store.save(command === "request-changes" && input.actor === "reviewer" ? withReviewerUsage(updated) :
     command === "update" && input.tags !== undefined ? assignTags(store, updated) : updated);
   if (task.status === "in_progress" && saved.status !== "in_progress") forgetExecutor(store.location.root, id);
