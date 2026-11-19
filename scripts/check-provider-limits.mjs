@@ -55,6 +55,26 @@ app.whenReady().then(async () => {
       window.popup = document.querySelector("#provider-limits");
       window.button = document.querySelector("#status-limits");
       window.query = selector => popup.querySelector(selector);
+      window.limitsContrast = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = 1;
+        canvas.height = 1;
+        const context = canvas.getContext("2d");
+        const paint = color => {
+          context.fillStyle = color;
+          context.fillRect(0, 0, 1, 1);
+          const rgba = context.getImageData(0, 0, 1, 1).data;
+          const [red, green, blue] = Array.from(rgba.slice(0, 3), value => {
+            const channel = value / 255;
+            return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+          });
+          return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+        };
+        paint(getComputedStyle(button.parentElement).backgroundColor);
+        const background = paint(getComputedStyle(button).backgroundColor);
+        const foreground = paint(getComputedStyle(button.querySelector("span")).color);
+        return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05);
+      };
       void 0;
     `);
 
@@ -80,6 +100,14 @@ app.whenReady().then(async () => {
     })()`);
     const mouse = (type, point, extra = {}) =>
       page.debugger.sendCommand("Input.dispatchMouseEvent", { type, ...point, ...extra });
+    const checkContrast = async (theme, hovered) => {
+      assert.equal(await evaluate('button.matches(":hover")'), hovered);
+      const ratio = await evaluate("limitsContrast()");
+      const description = `${theme}: ${hovered ? "hover" : "rest"} contrast ${ratio.toFixed(2)}:1`;
+      assert.ok(ratio >= 4.5, description + ", expected at least 4.5:1");
+      results.push(description);
+      console.log("PASS " + description);
+    };
 
     for (const theme of ["light", "dark"]) {
       nativeTheme.themeSource = theme;
@@ -90,9 +118,12 @@ app.whenReady().then(async () => {
         for (const hovered of [false, true]) {
           await mouse("mouseMoved", hovered ? position : { x: 200, y: 100 });
           await settle();
+          if (remaining === 1) {
+            await checkContrast(theme, hovered);
+          }
           await check(`(() => {
             const expected = document.createElement("span");
-            expected.style.color = ${low} ? "var(--accent)" : "inherit";
+            expected.style.color = ${low} ? "color-mix(in srgb, var(--accent) 40%, var(--text))" : "inherit";
             button.parentElement.append(expected);
             const color = getComputedStyle(expected).color;
             expected.remove();
@@ -136,6 +167,20 @@ app.whenReady().then(async () => {
         `${theme}: click opens the panel at 19%`);
       await key("Escape", "Escape", 27);
     }
+
+    const namedThemes = [...read("themes.css").matchAll(/\[data-theme="([^"]+)"\]/g)].map(match => match[1]);
+    await set([{ ...codex, windows: [{ ...weekly, remaining: 1 }] }]);
+    for (const theme of namedThemes) {
+      await evaluate(`document.documentElement.dataset.theme = ${JSON.stringify(theme)}`);
+      for (const hovered of [false, true]) {
+        await mouse("mouseMoved", hovered ? position : { x: 200, y: 100 });
+        await settle();
+        await checkContrast(theme, hovered);
+      }
+    }
+    await evaluate("delete document.documentElement.dataset.theme");
+    await mouse("mouseMoved", { x: 200, y: 100 });
+    await set([codex]);
 
     await evaluate("button.focus()");
     await key("Enter", "Enter", 13, "\r");
