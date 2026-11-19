@@ -481,6 +481,21 @@ export function updateBoardGoal(profile: string, project: string, threadId: stri
   }, async () => undefined);
 }
 
+export function archiveCodexThread(profile: string, project: string, threadId: string) {
+  return withServer(profile, project, async ({ request, refreshTimeout }) => {
+    refreshTimeout(15_000);
+    const { thread } = await request<{ thread: { id: string; path?: string | null; status?: { type: string } } }>("thread/read", {
+      threadId, includeTurns: false,
+    });
+    if (thread.id !== threadId) throw new Error("Codex returned an unexpected thread ID.");
+    if (thread.status?.type !== "idle" && thread.status?.type !== "notLoaded") return false;
+    // The server can complete the move before the board saves its acknowledgment.
+    if (thread.path?.split(/[\\/]/).at(-2) === "archived_sessions") return true;
+    await request("thread/archive", { threadId });
+    return true;
+  }, undefined, AbortSignal.timeout(30_000), { providerTools: false });
+}
+
 export function readLastTaskTurn(profile: string, project: string, threadId: string, signal: AbortSignal) {
   return withServer(profile, project, async ({ request, refreshTimeout }) => {
     refreshTimeout(15_000);

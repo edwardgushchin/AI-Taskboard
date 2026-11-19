@@ -1203,14 +1203,19 @@ test("return to draft preserves the card and invalidates queued and late lifecyc
   restore(cancelled);
   const doneReview = submit(start(approve(create())));
   const done = cli(root, ["accept", doneReview.id], { actor: "user", revision: doneReview.revision });
-  cli(root, ["return-to-draft", done.id], { revision: done.revision }, "INVALID_TRANSITION");
+  cli(root, ["return-to-draft", done.id], { revision: done.revision - 1 }, "REVISION_CONFLICT");
   assert.deepEqual(cli(root, ["show", done.id]).history, done.history);
   const file = join(root, "archive-evidence.txt");
   writeFileSync(file, "Keep archived bytes\n");
   const attached = cli(root, ["attachment", "add", create().id], { path: file });
   const archived = cli(root, ["cancel", approve(attached).id], { reason: "Archive fixture" });
   cli(root, ["settings"], { archiveAfterDays: 0 });
-  assert.ok(cli(root, ["archive", "sweep"]).archived.includes(archived.id));
+  const archivedIds = cli(root, ["archive", "sweep"]).archived;
+  assert.ok(archivedIds.includes(archived.id));
+  assert.ok(archivedIds.includes(done.id));
+  const reopened = start(approve(restore(done)));
+  assert.equal(reopened.id, done.id);
+  assert.equal(reopened.status, "in_progress");
   restore(archived);
   assert.ok(cli(root, ["list"]).tasks.some((task: Task) => task.id === archived.id));
   const destination = join(root, "restored-evidence.txt");
@@ -3019,18 +3024,31 @@ test("accept creates a merge commit and protects the source and ignored files", 
   assert.equal(cli(root, ["show", task.id]).status, "review");
   rmSync(join(root, "protected.txt"));
 
+  git(root, "worktree", "lock", worktree);
   const done = cli(root, ["accept", task.id], { revision: task.revision, targetHead: review.targetHead });
   assert.equal(done.status, "done");
   assert.equal(done.git.accepted, git(root, "rev-parse", "HEAD"));
   assert.equal(done.acceptedTreeMatchesSubmission, true);
   assert.equal(git(root, "show", "-s", "--format=%P"), initial + " " + task.git.submission.sha);
   assert.equal(git(root, "show", "-s", "--format=%B"), "feat: deliver result\n\nTask: " + task.id);
-  assert.equal(existsSync(worktree), false);
-  assert.equal(git(root, "branch", "--list", "ai-taskboard/" + task.id), "");
+  assert.equal(existsSync(worktree), true);
+  cli(root, ["return-to-draft", task.id], { revision: done.revision }, "PENDING_OPERATION");
+  assert.equal(cli(root, ["show", task.id]).status, "done");
   assert.equal(git(root, "rev-parse", "HEAD^2"), task.git.submission.sha);
+  git(root, "worktree", "unlock", worktree);
   const retried = cli(root, ["accept", task.id], { revision: task.revision });
   assert.equal(retried.git.accepted, done.git.accepted);
   assert.equal(retried.acceptedTreeMatchesSubmission, true);
+  assert.equal(existsSync(worktree), false);
+  assert.equal(git(root, "branch", "--list", "ai-taskboard/" + task.id), "");
+
+  const reopened = cli(root, ["return-to-draft", task.id], { revision: done.revision });
+  assert.equal(reopened.status, "draft");
+  assert.equal(reopened.git, undefined);
+  const ready = cli(root, ["approve", task.id], { revision: reopened.revision });
+  const started = cli(root, ["start", task.id], { revision: ready.revision });
+  assert.equal(started.task.status, "in_progress");
+  assert.equal(git(started.worktree, "rev-parse", "HEAD"), done.git.accepted);
 });
 
 test("review pages can omit unchanged context without losing edits", t => {

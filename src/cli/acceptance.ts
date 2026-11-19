@@ -447,6 +447,11 @@ function parseIntent(value: unknown, task: Task, target: string, submitted: stri
   return pending as unknown as AcceptIntent;
 }
 
+function recordAcceptance(task: Task, actor: "user" | "manager" | "reviewer", sha?: string) {
+  const codexArchivePending = task.codexServiceThreads?.length ? [...task.codexServiceThreads] : undefined;
+  return withoutVerification(record({ ...task, codexArchivePending }, "accept", actor, "done", sha));
+}
+
 function finish(store: BoardStore, task: Task, sha: string, restoreLocalChanges = false, actor: "user" | "manager" | "reviewer" = "user") {
   let localChangesWarning;
   if (restoreLocalChanges) {
@@ -460,7 +465,7 @@ function finish(store: BoardStore, task: Task, sha: string, restoreLocalChanges 
     }
   }
   const context = reviewed(task);
-  const completed = store.save(withoutVerification(record({ ...task, git: { ...context, accepted: sha } }, "accept", actor, "done", sha)));
+  const completed = store.save(recordAcceptance({ ...task, git: { ...context, accepted: sha } }, actor, sha));
   removeFile(store.pendingPath(task.id));
   return { ...completed, localChangesWarning };
 }
@@ -642,7 +647,7 @@ function integrateTask(store: BoardStore, task: Task, input: Record<string, unkn
     if (noChangesReviewIsStale(store, task, task.result.noChanges.head)) {
       throw new TaskboardError("STALE_SUBMISSION", "The task worktree changed. Submit the task again.");
     }
-    return store.save(withoutVerification(record(task, "accept", actor ?? "user", "done")));
+    return store.save(recordAcceptance(task, actor ?? "user"));
   }
   const context = reviewed(task);
   const repo = requireRepository(store.location.repository);

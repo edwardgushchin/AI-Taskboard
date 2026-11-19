@@ -4,6 +4,7 @@ import { russianWriting } from "./russian-writing.ts";
 import { captureFileLink, isFileLink, verifyFileLink } from "../cli/attachment-links.ts";
 import type { FileLink } from "../cli/attachment-links.ts";
 import { watchCodexQuotaExceeded } from "./codex-rpc.ts";
+import { archiveAcceptedCodexChats, rememberTaskCodexThread } from "./codex-task-archive.ts";
 import { confirmedQuota, providerLimitSource, readCodexLimits, type QuotaWait } from "./provider-limits.ts";
 import localization from "./localization.cjs";
 import { BackupService } from "./backup-service.ts";
@@ -1662,6 +1663,29 @@ function scheduleRecurringTasks(now = Date.now()) {
   }
 }
 
+const codexArchiveWork = new Set<string>();
+
+function scheduleCodexArchives() {
+  for (const [project, watch] of subscriptions) {
+    if (closingProjects.has(project) || codexArchiveWork.has(project)) continue;
+    const cards = [...watch.board.tasks, ...watch.board.archived].filter(task =>
+      task.status === "done" && task.codexArchivePending?.length);
+    if (!cards.length) continue;
+    codexArchiveWork.add(project);
+    void (async () => {
+      for (const task of cards) {
+        if (closingProjects.has(project) || executorBusy(project, task.id) || watch.reviewerRuns.has(task.id)) continue;
+        try {
+          await archiveAcceptedCodexChats(app.getPath("userData"), project, task.id);
+        } catch (error) {
+          console.warn("Codex archive deferred for %s: %s", task.id, (error as Error).message);
+        }
+      }
+    })().catch(error => console.warn("Codex archive deferred: %s", (error as Error).message))
+      .finally(() => codexArchiveWork.delete(project));
+  }
+}
+
 function managerQuestion(key: string, id?: unknown) {
   const questions = [boardWorkRequests.get(key)?.question, boardRequests.get(key)?.question, backgroundManagerRequests.get(key)?.question];
   return questions.find(question => question && (id === undefined || question.view.id === id));
@@ -2825,7 +2849,10 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         title: t("ui.project_manager_for_3f3547d6") + (basename(board.project) || board.project),
         save: id => {
           if (!background) writeJson(binding, { ...readBoardThread(binding), provider: "codex", id, history: "local" });
-          else if (reviewThreadPath) writeJson(reviewThreadPath, { binding: reviewBinding, id });
+          else if (reviewThreadPath && managerReviewId) {
+            rememberTaskCodexThread(project, managerReviewId, id);
+            writeJson(reviewThreadPath, { binding: reviewBinding, id });
+          }
           threadId = id;
         },
         onActivity: activity => {
@@ -3181,6 +3208,7 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
             trackUsage, id, activity, evidence.reviewTeam, evidence.targetHead, submissionSequence, {
               id: checkpoint.threadId,
               save: threadId => {
+                rememberTaskCodexThread(project, id, threadId);
                 checkpoint.threadId = threadId;
                 writeJson(path, checkpoint);
               },
@@ -3985,7 +4013,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     const run = await releaseSlot.run(() => startCodexRun(client, project, cwd, task, item => {
       activity.set(item.id, item);
       updateTimer ??= setTimeout(publish, 80);
-    }, report => saveTaskTokenUsage(project, id, role, report), signal, async codexThreadId => {
+    }, report => saveTaskTokenUsage(project, id, role, report), signal, async (codexThreadId, created) => {
       if (!queued && linked.codexThreadId === codexThreadId) {
         rememberExecutor(project, linked, cwd, continuation);
         return;
@@ -4006,6 +4034,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
           (queued && ["INVALID_TRANSITION", "REVISION_CONFLICT"].includes(saved.error.code)) ? saved.error.code : "CODEX_LINK_FAILED",
       });
       linked = saved.data;
+      if (created) rememberTaskCodexThread(project, id, codexThreadId);
       rememberExecutor(project, linked, cwd, continuation);
       if (!queued) return;
       const pending = prepareQueuedTurn(project, linked, codexThreadId);
@@ -4356,6 +4385,7 @@ else {
     loadRecentBoards();
     Menu.setApplicationMenu(null);
     setInterval(scheduleRecurringTasks, 10_000).unref();
+    setInterval(scheduleCodexArchives, 10_000).unref();
     // Runtime changes do not change card revisions. Poll as a fallback across
     // profiles and after owner death, then wake the ordinary queues.
     setInterval(() => {
