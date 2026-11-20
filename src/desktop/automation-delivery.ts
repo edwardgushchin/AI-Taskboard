@@ -1,20 +1,21 @@
 import type { BoardSettings, Task } from "../cli/model.ts";
 import { autoQueueSettings } from "../cli/auto-queue.ts";
-import { boardReviewMode, taskReviewMode } from "../cli/model.ts";
+import { boardReviewMode, taskReviewMode, taskReviewModeVersion } from "../cli/model.ts";
 
 type BoardState = {
   settings: BoardSettings;
-  tasks: (Task & { reviewApproved?: boolean; reviewPending?: boolean })[];
+  tasks: (Task & { reviewApproved?: boolean; reviewPending?: boolean; reviewApprovalTargetHead?: string | null })[];
   managerInbox?: { id: string; sequence: number; kind: string }[];
 };
 
 export function pendingReviewApprovals(board: BoardState) {
   if (board.settings.autoMode) return [];
-  const approvals = (board.managerInbox ?? []).filter(message => message.kind === "review-approve");
-  if (!approvals.length) return approvals;
-  const eligible = new Set(board.tasks.filter(task => task.status === "review" && task.reviewApproved &&
-    !task.reviewPending && !task.acceptanceRepair && taskReviewMode(task, board.settings) === "reviewer").map(task => task.id));
-  return approvals.filter(message => eligible.has(message.id));
+  return board.tasks.filter(task => task.status === "review" && task.reviewApproved &&
+    !task.reviewPending && !task.acceptanceRepair && taskReviewMode(task, board.settings) === "reviewer")
+    .map(task => ({
+      id: task.id,
+      key: JSON.stringify([task.id, task.revision, taskReviewModeVersion(task, board.settings), task.reviewApprovalTargetHead]),
+    }));
 }
 
 // Queue changes wake board tools internally; they are never conversation messages.
@@ -47,7 +48,9 @@ export function automationDelivery(wake: () => void, signal: AbortSignal) {
       const wasEnabled = enabled;
       enabled = board.settings.autoMode === true;
       if (!enabled && !wasEnabled) {
-        const approvals = pendingReviewApprovals(board);
+        const unread = (board.managerInbox ?? []).filter(message => message.kind === "review-approve");
+        const pending = new Set(unread.length ? pendingReviewApprovals(board).map(({ id }) => id) : []);
+        const approvals = unread.filter(({ id }) => pending.has(id));
         const serialized = JSON.stringify(approvals.map(({ id, sequence }) => ({ id, sequence })));
         if (approvals.length && serialized !== previousInbox) schedule();
         previousInbox = serialized;

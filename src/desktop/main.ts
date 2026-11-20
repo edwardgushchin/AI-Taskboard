@@ -1278,7 +1278,7 @@ type ExecutorContinuation = { afterDisconnect?: boolean; withoutProgress?: boole
 const autoBoards = new WeakMap<BoardWatch, {
   running: boolean; milestonesAt: number; dates: Map<number, string | null>; milestonesError?: string;
   launches: Set<string>; integrations: Set<string>; notices: Set<string>;
-  approvalRetryAt: number;
+  approvalRetries: Map<string, number>;
 }>();
 let schedulingAgentWork = false;
 
@@ -1306,7 +1306,7 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
         !pendingReviewApprovals(watch.board).length)) return;
   let state = autoBoards.get(watch);
   if (!state) {
-    state = { running: false, milestonesAt: 0, dates: new Map(), launches: new Set(), integrations: new Set(), notices: new Set(), approvalRetryAt: 0 };
+    state = { running: false, milestonesAt: 0, dates: new Map(), launches: new Set(), integrations: new Set(), notices: new Set(), approvalRetries: new Map() };
     autoBoards.set(watch, state);
   }
   if (state.running) return;
@@ -1390,13 +1390,22 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
         !queue.notices.has(message.id + ":" + message.sequence));
       const tab = [...watch.tabs].find(tab => !tab.window.isDestroyed());
       const pendingApprovals = pendingReviewApprovals(board);
+      const approvalKeys = new Set(pendingApprovals.map(approval => approval.key));
+      for (const attempt of queue.approvalRetries.keys()) {
+        if (!approvalKeys.has(attempt)) queue.approvalRetries.delete(attempt);
+      }
       if (pendingApprovals.length && tab && !boardWorkRequests.has(key) && !boardRequests.has(key) && !backgroundManagerRequests.has(key) &&
           !agentSlots.entries(project).some(entry => entry.task === "manager:context" || entry.task === "manager:dialogue") &&
-          agentSlots.available(key, "manager", board.settings.taskLimits) && now >= queue.approvalRetryAt) {
-        const approvals = pendingApprovals.filter(({ id }) =>
-          !executorBusy(project, id) && !watch.reviewerRuns.has(id)).slice(0, 4);
+          agentSlots.available(key, "manager", board.settings.taskLimits)) {
+        // Give untried approvals a turn even when previous attempts have cooled down.
+        const retryAt = (approval: (typeof pendingApprovals)[number]) => queue.approvalRetries.get(approval.key) ?? -1;
+        const approvals = pendingApprovals.filter(approval =>
+          retryAt(approval) <= now && !executorBusy(project, approval.id) && !watch.reviewerRuns.has(approval.id))
+          .sort((left, right) => retryAt(left) - retryAt(right)).slice(0, 4);
         if (approvals.length) {
-          queue.approvalRetryAt = now + 30_000;
+          for (const approval of approvals) {
+            queue.approvalRetries.set(approval.key, now + 30_000);
+          }
           void runBoardRequest(tab.window.webContents, board,
             "Process the recorded reviewer approvals for the assigned cards and finish the turn.",
             [], false, false, undefined, undefined, undefined, approvals)
@@ -2666,9 +2675,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       // Recheck persisted approvals after acquiring it, before starting the provider.
       const current = await callCli<Board>(project, ["list", "--compact"]);
       if (!current.ok) return current;
-      const pending = pendingReviewApprovals(current.data);
-      for (const { id, sequence } of approvalNotices) {
-        if (!pending.some(message => message.id === id && message.sequence === sequence) || executorBusy(project, id)) continue;
+      const pending = new Set(pendingReviewApprovals(current.data).map(approval => approval.key));
+      for (const { id, key } of approvalNotices) {
+        if (!pending.has(key) || executorBusy(project, id)) continue;
         const review = await callCli<ApprovalSnapshot & { stale: boolean; reviewMode: ReviewMode;
           reviewerApproval?: { targetHead: string | null } }>(project, ["review", id, "--compact"]);
         if (!review.ok && review.error.code === "BOARD_BUSY") return review;
@@ -2698,7 +2707,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     }
     const instructions = approvalNotices ?
       "Use task_review for each assigned card and task_accept with the returned revision and targetHead if the reviewer approval is current. " +
-      "Finish after one pass. Leave cards with failed acceptance or stale approval pending." :
+      "If an acceptance fails or an approval is stale, leave that card pending and continue with the remaining assigned cards. Finish after one pass." :
       cleanupJob ? boardInstructions.replace("Do not edit files, run project code, or change Git state yourself.", "Diagnose and repair only the assigned internal maintenance fault yourself.") +
       " This is a private maintenance run with manager authority charged to the shared reviewer pool. No goal, user messages, notifications or product cards. " +
       "Do not launch agents or change task status. Read the private maintenance diagnostic and inspect ownership, active runtime users, exact absolute paths and Git registration before mutation. " +

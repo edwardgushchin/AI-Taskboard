@@ -118,16 +118,16 @@ function fixture(mode = "human") {
     failLaunch: (code: string) => { launchError = code; } };
 }
 
-test("recorded approval wakes one manager after dialogue release and retries a refused start", async () => {
+test("acknowledged approval wakes one manager after dialogue release and retries a refused start", async () => {
   const f = fixture("reviewer");
   f.board.settings.autoMode = false;
   f.add("T-0001", { status: "review", reviewApproved: true });
   f.add("T-0002");
-  const approval = { id: "T-0001", sequence: 7, kind: "review-approve" };
-  f.board.managerInbox.push(approval);
+  f.board.managerInbox.push({ id: "T-0001", sequence: 7, kind: "review-approve" });
   f.dialogues.set("project", {});
   await f.tick(100);
   assert.equal(f.notices.length, 0);
+  f.board.managerInbox = [];
   f.dialogues.clear();
   f.failNotice("BOARD_BUSY");
   await f.tick(200);
@@ -136,13 +136,34 @@ test("recorded approval wakes one manager after dialogue release and retries a r
   await f.tick(30_200);
   assert.equal(f.notices.length, 2);
   assert.equal(f.notices[1][4], false);
-  assert.deepEqual(f.notices[1].at(-1), [approval]);
+  assert.deepEqual(f.notices[1].at(-1).map(({ id }: { id: string }) => id), ["T-0001"]);
   assert.deepEqual(f.launches, []);
   assert.deepEqual(f.errors, []);
 
   f.board.tasks[0].status = "done";
   await f.tick(60_200);
   assert.equal(f.notices.length, 2);
+});
+
+test("untried approvals get a turn even when four failed approvals become retryable", async () => {
+  const f = fixture("reviewer");
+  f.board.settings.autoMode = false;
+  const first = ["T-0001", "T-0002", "T-0003", "T-0004"];
+  for (const [index, id] of [...first, "T-0005"].entries()) {
+    f.add(id, { status: "review", reviewApproved: true });
+    f.board.managerInbox.push({ id, sequence: index + 1, kind: "review-approve" });
+  }
+  const batch = (index: number) => f.notices[index].at(-1).map(({ id }: { id: string }) => id);
+
+  await f.tick(100);
+  assert.deepEqual(batch(0), first);
+  // The first batch remains in review, and its manager turn outlasts the retry delay.
+  await f.tick(30_101);
+  assert.deepEqual(batch(1), ["T-0005", ...first.slice(0, 3)]);
+  f.board.tasks[4].status = "done";
+  await f.tick(30_102);
+  assert.deepEqual(batch(2), ["T-0004"]);
+  assert.deepEqual(f.launches, []);
 });
 
 test("approved cards in human acceptance modes stay out of the background turn", async () => {
