@@ -1403,15 +1403,21 @@ const laneSizes = new ResizeObserver(scheduleLaneFit);
 
 function fitLanes(columns) {
   const board = byId("lanes");
-  if (board.hidden || !board.clientHeight) return;
-  const bottom = board.getBoundingClientRect().top + board.clientHeight;
+  const height = board.clientHeight;
+  if (board.hidden || !height) return;
+  const bottom = board.getBoundingClientRect().top + height;
+  const scrollTop = board.scrollTop;
   const composer = byId("board-composer").getBoundingClientRect();
-  for (const lane of columns) {
+  // Measure every lane before fitting any of them changes the DOM.
+  const measurements = Array.from(columns, lane => {
     const bounds = lane.content.getBoundingClientRect();
     const overlapsComposer = bounds.left < composer.right && bounds.right > composer.left;
     const usableBottom = overlapsComposer ? Math.min(bottom, composer.top) : bottom;
-    const visibleHeight = usableBottom - 8 - board.scrollTop - bounds.top;
-    lane.tools.fit(visibleHeight * 1.5);
+    const visibleHeight = usableBottom - 8 - scrollTop - bounds.top;
+    return { lane, availableHeight: visibleHeight * 1.5, bounds };
+  });
+  for (const { lane, availableHeight, bounds } of measurements) {
+    lane.tools.fit(availableHeight, bounds);
   }
 }
 
@@ -1494,6 +1500,7 @@ function laneTools(state, title, tasks, total, count, content) {
   let activeCount = 0;
   let visibleLimit = 4;
   let manualLimit = 0;
+  let fitted;
   const more = button("", () => {
     const firstNew = visibleLimit;
     manualLimit = visibleLimit + 4;
@@ -1533,6 +1540,7 @@ function laneTools(state, title, tasks, total, count, content) {
   const create = manualBoard() ? button("Создать задачу", () => createManualTask(state), "quiet lane-create") : undefined;
   if (create) create.prepend(icon("plus"));
   function renderBatch() {
+    fitted = undefined;
     const children = matching.slice(0, visibleLimit).map(card);
     if (matching.length > visibleLimit) {
       const remaining = matching.length - visibleLimit;
@@ -1557,33 +1565,40 @@ function laneTools(state, title, tasks, total, count, content) {
     if (focused?.parentElement !== content || !focused.classList.contains("task-card")) return 0;
     return matching.findIndex(task => boardCards.get(task.id)?.node === focused) + 1;
   }
-  function fit(availableHeight) {
+  function fit(availableHeight, bounds) {
     if (collapsed || !matching.length) return;
     const focused = document.activeElement;
     const firstNew = visibleLimit;
     const minimum = Math.min(matching.length, Math.max(1, manualLimit, activeCount, focusedCardPosition()));
-    const fits = () => content.getBoundingClientRect().height <= availableHeight;
+    if (fitted?.availableHeight === availableHeight && fitted.width === bounds.width &&
+        fitted.height === bounds.height && fitted.minimum === minimum) return;
+    let height = bounds.height;
+    const renderAndMeasure = () => {
+      renderBatch();
+      height = content.getBoundingClientRect().height;
+    };
     const limit = Math.min(matching.length, Math.max(visibleLimit, minimum));
     if (visibleLimit !== limit) {
       visibleLimit = limit;
-      renderBatch();
+      renderAndMeasure();
     }
-    while (visibleLimit > minimum && !fits()) {
+    while (visibleLimit > minimum && height > availableHeight) {
       visibleLimit--;
-      renderBatch();
+      renderAndMeasure();
     }
-    while (visibleLimit < matching.length && fits()) {
+    while (visibleLimit < matching.length && height <= availableHeight) {
       visibleLimit++;
-      renderBatch();
-      if (fits()) continue;
+      renderAndMeasure();
+      if (height <= availableHeight) continue;
       visibleLimit--;
-      renderBatch();
+      renderAndMeasure();
       break;
     }
     if (focused === more && document.activeElement !== more) {
       const next = more.isConnected ? more : content.children[firstNew];
       next?.focus({ preventScroll: true });
     }
+    fitted = { availableHeight, width: bounds.width, height, minimum };
   }
   updateCards();
   updateCollapse();
@@ -1940,25 +1955,49 @@ const activityRowKey = id => id.replace(/^final:/, "message:").replace(/^group:/
 function chatViewport(list) {
   const rows = "[data-item], [data-chat-anchor]";
   const key = row => row.dataset.chatAnchor ?? activityRowKey(row.dataset.item);
+  const report = ".chat-report-details";
+  const reportBlocks = report + "[open] > .chat-report-body > *";
+  const foldsSelector = "details[data-item], " + report;
+  function foldKey(fold) {
+    if (!fold.matches(report)) return fold.dataset.item;
+    const message = fold.parentElement.closest(rows);
+    if (!message) return fold.dataset.item;
+    const sections = [...fold.parentElement.querySelectorAll(":scope > " + report)];
+    return JSON.stringify(["report", key(message), sections.indexOf(fold)]);
+  }
+  function anchorKey(row) {
+    const body = row.parentElement;
+    if (!body.matches(".chat-report-body")) return key(row);
+    const section = foldKey(body.parentElement);
+    if (section) return JSON.stringify(["report-block", section, [...body.children].indexOf(row)]);
+  }
   const rowBounds = row => (row.matches("details") ? row.firstElementChild ?? row : row).getBoundingClientRect();
   const visible = row => row.checkVisibility({ visibilityProperty: true });
-  const hasViewport = () => list.clientHeight && visible(list);
-  const atEnd = () => list.scrollHeight - list.scrollTop - list.clientHeight <= 1;
+  let suspended = false;
+  let restoring = false;
+  const hasViewport = () => !suspended && list.clientHeight && visible(list);
   let position = { end: true, top: 0, anchors: [] };
+  const atEnd = () => suspended ? position.end : list.scrollHeight - list.scrollTop - list.clientHeight <= 1;
   let restoredTop;
+  let folds;
   function remember() {
-    if (!hasViewport()) return;
+    if (restoring || !hasViewport()) return;
     const top = list.getBoundingClientRect().top;
     const end = atEnd();
     const anchors = [];
     if (!end) {
-      for (const row of list.querySelectorAll(rows)) {
-        if (!visible(row)) continue;
-        const bounds = rowBounds(row);
-        if (bounds.height && bounds.bottom > top && bounds.top < top + list.clientHeight) {
-          anchors.push({ node: row, key: key(row), offset: bounds.top - top });
+      const bottom = top + list.clientHeight;
+      // Text wraps differently after a resize, so prefer anchors inside open reports.
+      for (const selector of [reportBlocks, rows]) {
+        for (const row of list.querySelectorAll(selector)) {
+          if (!visible(row)) continue;
+          const bounds = rowBounds(row);
+          if (!bounds.height || bounds.bottom <= top || bounds.top >= bottom) continue;
+          const id = anchorKey(row);
+          if (id) anchors.push({ node: row, key: id, offset: bounds.top - top });
           if (anchors.length === 4) break;
         }
+        if (anchors.length === 4) break;
       }
     }
     position = { end, top: list.scrollTop, anchors };
@@ -1968,11 +2007,11 @@ function chatViewport(list) {
     if (!hasViewport()) return;
     if (position.end) list.scrollTop = list.scrollHeight;
     else {
-      const candidates = [...list.querySelectorAll(rows)];
+      const candidates = [...list.querySelectorAll(rows + ", " + reportBlocks)];
       let top = position.top;
       for (const anchor of position.anchors) {
-        const connected = list.contains(anchor.node);
-        const row = connected ? anchor.node : candidates.find(candidate => key(candidate) === anchor.key);
+        const connected = anchor.node && list.contains(anchor.node);
+        const row = connected ? anchor.node : candidates.find(candidate => anchorKey(candidate) === anchor.key);
         if (!row) continue;
         if (!connected && !visible(row)) {
           for (let fold = row.parentElement.closest(".chat-work"); fold; fold = fold.parentElement.closest(".chat-work")) fold.open = true;
@@ -1983,6 +2022,7 @@ function chatViewport(list) {
       }
       list.scrollTop = top;
     }
+    restoring = false;
     remember();
   }
   const resize = new ResizeObserver(restore);
@@ -2002,6 +2042,33 @@ function chatViewport(list) {
     atEnd,
     restore,
     remember,
+    suspend(change) {
+      remember();
+      folds = new Map();
+      for (const fold of list.querySelectorAll(foldsSelector)) {
+        const id = foldKey(fold);
+        if (id) folds.set(id, fold.open);
+      }
+      suspended = true;
+      resize.disconnect();
+      observed.clear();
+      for (const anchor of position.anchors) delete anchor.node;
+      change();
+    },
+    resume(change) {
+      change();
+      if (!suspended) return;
+      for (const fold of list.querySelectorAll(foldsSelector)) {
+        const id = foldKey(fold);
+        if (folds.has(id)) fold.open = folds.get(id);
+      }
+      folds = undefined;
+      restoring = true;
+      suspended = false;
+      resize.observe(list);
+      observeRows();
+      restore();
+    },
     followEnd() {
       position.end = true;
       restore();
@@ -2009,7 +2076,7 @@ function chatViewport(list) {
     update(change) {
       remember();
       change();
-      observeRows();
+      if (!suspended) observeRows();
       restore();
     },
     dispose: () => resize.disconnect(),
@@ -2265,7 +2332,7 @@ function draftComposer() {
   function readVisibleMessages() {
     clearTimeout(readRetry);
     clearTimeout(queueRetry);
-    if (!api.readManagerMessages || !unread.size || readFrame || readingMessages) return;
+    if (!canBrowseHistory() || !api.readManagerMessages || !unread.size || readFrame || readingMessages) return;
     readFrame = requestAnimationFrame(async () => {
       readFrame = undefined;
       if (disposed || loadingHistory || !editor.isConnected || frame.project !== project || document.hidden ||
@@ -2292,7 +2359,7 @@ function draftComposer() {
         readingMessages = false;
         // Updates and scrolls during the IPC call may have exposed another reply.
         // Retry failures as well, without requiring another user gesture.
-        if (!disposed && unread.size) readRetry = setTimeout(readVisibleMessages, 500);
+        if (!disposed && canBrowseHistory() && unread.size) readRetry = setTimeout(readVisibleMessages, 500);
       }
     });
   }
@@ -2305,6 +2372,7 @@ function draftComposer() {
   };
   let positionNewDialogue = false;
   function showDialoguePosition() {
+    if (!canBrowseHistory()) return;
     if (positionNewDialogue && log.clientHeight && log.checkVisibility({ visibilityProperty: true })) {
       positionNewDialogue = false;
       if (updateUnreadMessages()) {
@@ -2316,7 +2384,6 @@ function draftComposer() {
     readVisibleMessages();
   }
   const readObserver = new ResizeObserver(showDialoguePosition);
-  readObserver.observe(log);
   const work = element("section", undefined, "board-chat-log board-work");
   const workViewport = chatViewport(work);
   work.hidden = true;
@@ -2348,7 +2415,7 @@ function draftComposer() {
     });
   }
   async function loadWork(cursor = null) {
-    if (disposed || work.hidden) return;
+    if (disposed || work.hidden || !canBrowseHistory()) return;
     if (workLoading) {
       if (!cursor) workReload = true;
       return;
@@ -2369,7 +2436,7 @@ function draftComposer() {
       do {
         visited.add(next);
         const result = await api.boardHistory(project, next, "work");
-        if (disposed || work.hidden) return;
+        if (disposed || work.hidden || !canBrowseHistory()) return;
         if (!result.ok) throw new Error(boardError(result.error));
         if (visited.size === 1 && revision === goalRevision) {
           editor.updateGoal(result.data.goal, result.data.goalRunning, result.data.goalResuming, result.data);
@@ -2402,7 +2469,7 @@ function draftComposer() {
       hasWorkHistory = true;
       editor.refreshWork();
     } catch (error) {
-      if (!disposed) {
+      if (!disposed && canBrowseHistory()) {
         workViewport.update(() => {
           workError.textContent = error.message;
           workError.hidden = false;
@@ -2465,7 +2532,7 @@ function draftComposer() {
     workLivePending = true;
     try {
       const result = await api.boardHistory(project, null, "live");
-      if (disposed || work.hidden || !result.ok) return;
+      if (disposed || work.hidden || !canBrowseHistory() || !result.ok) return;
       const previousLive = liveWork;
       liveWork = [...(result.data.work ?? []), ...(result.data.chat ?? [])];
       const liveIds = new Set(liveWork.map(item => item.id));
@@ -3125,6 +3192,11 @@ function draftComposer() {
   let olderCursor;
   let lastScrollTop = 0;
   const olderNodes = [];
+  const olderPages = [];
+  const historyMarkup = new WeakMap();
+  let recentTurns;
+  let recentNodes = [];
+  let historyUnmounted = false;
   const previewUrls = [];
   const pendingPreviews = new Map();
   const previewSource = file => !file.link && file.size <= 64 * 1024 * 1024 && (/^(?:image\/(?:png|jpeg|webp|gif))$/.test(file.type) || isImageAttachment(file));
@@ -3163,6 +3235,12 @@ function draftComposer() {
     const page = document.createDocumentFragment();
     const delivered = new Set();
     const liveIds = new Set(active?.items?.map(item => item.id));
+    let markdownCache = historyMarkup.get(turns);
+    if (!markdownCache) {
+      // Save the formatted markup for remounts without holding on to rendered nodes.
+      markdownCache = new Map();
+      historyMarkup.set(turns, markdownCache);
+    }
     for (const turn of turns) {
       for (const { text, files, clientId, at } of turn.messages) {
         if (clientId && (active?.id === clientId || liveIds.has(clientId))) continue;
@@ -3170,7 +3248,8 @@ function draftComposer() {
         if (clientId) delivered.add(clientId);
       }
       const container = element("div", undefined, "chat-run");
-      renderRunActivity(container, turn.items.filter(item => !liveIds.has(item.id)), true, turn.durationMs, undefined, { dialogue: true, seenMessages });
+      renderRunActivity(container, turn.items.filter(item => !liveIds.has(item.id)), true, turn.durationMs, undefined,
+        { dialogue: true, seenMessages, markdownCache });
       rememberMessages(container);
       if (!container.hidden) page.append(container);
     }
@@ -3185,6 +3264,7 @@ function draftComposer() {
   function forgetOlderHistory() {
     historyGeneration++;
     for (const node of olderNodes.splice(0)) node.remove();
+    olderPages.length = 0;
     olderCursor = recentCursor;
     seenMessages.clear();
     rememberMessages(log);
@@ -3202,6 +3282,7 @@ function draftComposer() {
       if (!result.ok) throw new Error(boardError(result.error));
       dialogueViewport.update(() => {
         const { page } = renderHistoryPage(result.data.turns);
+        olderPages.push(result.data.turns);
         olderNodes.push(...page.children);
         greeting.after(page);
         updateUnreadMessages();
@@ -3222,7 +3303,7 @@ function draftComposer() {
       const revision = goalRevision;
       loadingHistory = api.boardHistory(project).then(async result => {
         if (!result.ok) throw new Error(boardError(result.error));
-        if (disposed || reloadAfterHistory) return;
+        if (disposed || reloadAfterHistory || !canBrowseHistory()) return;
         if (revision === goalRevision) editor.updateGoal(result.data.goal, result.data.goalRunning, result.data.goalResuming, result.data);
         const oldImages = [...log.querySelectorAll(".chat-attachments img")];
         let delivered;
@@ -3231,9 +3312,13 @@ function draftComposer() {
             node.dataset.messageId ?? node.dataset.item.slice("message:".length)));
           historyGeneration++;
           olderNodes.length = 0;
+          olderPages.length = 0;
+          recentTurns = result.data.turns;
           recentCursor = olderCursor = result.data.nextCursor;
           seenMessages.clear();
-          const next = renderHistoryPage(result.data.turns);
+          const next = renderHistoryPage(recentTurns);
+          recentNodes = [...next.page.children];
+          historyUnmounted = false;
           delivered = next.delivered;
           if (hasDialogueHistory) for (const reply of next.page.querySelectorAll("[data-message-id]")) {
             if (!previousReplies.has(reply.dataset.messageId)) reply.setAttribute("data-enter", "");
@@ -3282,6 +3367,27 @@ function draftComposer() {
     return loadingHistory;
   };
   const revealHistory = () => {
+    if (historyUnmounted && historyInvalidated && atEndOfHistory()) {
+      historyInvalidated = false;
+      historyLoaded = false;
+    }
+    readObserver.observe(log);
+    dialogueViewport.resume(() => {
+      if (!historyUnmounted) return;
+      historyUnmounted = false;
+      // Keep the reading anchor until the saved pages are back in the viewport.
+      const { page } = renderHistoryPage(recentTurns);
+      recentNodes = [...page.children];
+      greeting.after(page);
+      for (const turns of olderPages) {
+        const { page } = renderHistoryPage(turns);
+        olderNodes.push(...page.children);
+        greeting.after(page);
+      }
+      greeting.hidden = log.childElementCount > 2;
+      updateUnreadMessages();
+    });
+    lastScrollTop = log.scrollTop;
     if (historyLoaded) {
       dialogueViewport.restore();
       dialogueViewport.update(updateUnreadMessages);
@@ -3295,12 +3401,40 @@ function draftComposer() {
     editor.setAttribute("data-open", "");
     syncPrompt();
     revealHistory();
+    workViewport.resume(() => {
+      if (savedWork.length || liveWork.length || pendingWork.size) renderGoalTimeline();
+    });
     if (!work.hidden) editor.invalidateWork();
   };
   editor.closeChat = () => {
     if (pinned || !editor.hasAttribute("data-open")) return;
+    clearTimeout(readRetry);
+    cancelAnimationFrame(readFrame);
+    readFrame = undefined;
+    readObserver.disconnect();
+    historyGeneration++;
+    const removeHistory = node => {
+      for (const tile of node.querySelectorAll(".chat-attachment")) chatPreviews.unobserve(tile);
+      node.remove();
+    };
+    const removed = [...recentNodes, ...olderNodes, ...workTimeline.children];
+    dialogueViewport.suspend(() => {
+      unreadDivider.remove();
+      for (const node of recentNodes) removeHistory(node);
+      for (const node of olderNodes) removeHistory(node);
+      recentNodes = [];
+      olderNodes.length = 0;
+      historyUnmounted = Boolean(recentTurns);
+      seenMessages.clear();
+      rememberMessages(log);
+    });
+    workViewport.suspend(() => {
+      for (const node of [...workTimeline.children]) removeHistory(node);
+    });
+    for (const binding of localizedBindings) {
+      if (!binding.node.isConnected && removed.some(node => node.contains(binding.node))) localizedBindings.delete(binding);
+    }
     editor.removeAttribute("data-open");
-    dialogueViewport.update(() => unreadDivider.remove());
     syncPrompt();
   };
   editor.revealPinned = () => { if (pinned && !loadingHistory && !historyLoaded) revealHistory(); };
@@ -3309,7 +3443,7 @@ function draftComposer() {
       reloadAfterHistory = true;
       return;
     }
-    if (historyLoaded && !atEndOfHistory() && (olderNodes.length || loadingOlder)) {
+    if (historyLoaded && !atEndOfHistory() && (olderPages.length || loadingOlder)) {
       historyInvalidated = true;
       return;
     }

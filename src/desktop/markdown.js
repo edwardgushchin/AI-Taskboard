@@ -472,14 +472,22 @@ function chatText(text, context = { taskId: taskInSheet?.id }) {
   const agent = context.agent || context.coordination;
   const report = agent && !context.source;
   block.classList.toggle("chat-agent-text", Boolean(report));
-  block.innerHTML = chatMarkdown.render(text, { agent, report: report || context.coordination, coordination: context.coordination });
-  if (context.coordination) {
-    showCoordinationCommands(block);
-    showCoordinationEvidence(block);
-  }
-  if (report) {
-    foldTechnicalDetails(block);
-    splitLongReportParagraphs(block);
+  const cache = report && !context.coordination ? context.markdownCache : undefined;
+  const markup = cache?.get(text);
+  if (markup === undefined) {
+    block.innerHTML = chatMarkdown.render(text, { agent, report: report || context.coordination, coordination: context.coordination });
+    if (context.coordination) {
+      showCoordinationCommands(block);
+      showCoordinationEvidence(block);
+    }
+    if (report) {
+      foldTechnicalDetails(block);
+      splitLongReportParagraphs(block);
+    }
+    // Interactive controls below still receive fresh listeners and labels.
+    if (cache) cache.set(text, block.innerHTML);
+  } else {
+    block.innerHTML = markup;
   }
   formatReportReferences(block);
   for (const link of block.querySelectorAll("a[href]")) {
