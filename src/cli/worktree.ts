@@ -335,6 +335,9 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
       return { id: task.id, repo, branch, managedPath, intent, preparing, lockWaitMs };
     }
     const worktree = isolateTaskWorktree(store, repo, task.id, usableWorktree(existing));
+    if (task.status === "ready" && !relative(join(isolatedRoot(repo), task.id), worktree)) {
+      restoreChangesOnStart(store, task, worktree);
+    }
     const updated = { ...task, git: { ...task.git, worktree } };
     if (pending) removeFile(pendingPath);
     if (task.status === "in_progress" && task.discussionReturn === undefined) return { task: worktree === task.git.worktree ? task : store.save(updated), worktree };
@@ -440,7 +443,7 @@ export function finishTaskStart(store: BoardStore, plan: TaskCheckout, checkout:
         "The interrupted checkout could not be verified: tracked files or the index differ from the saved commit. Inspect and preserve local changes before completing the checkout and retrying.",
         { path: worktree, head: base });
     }
-    restoreChangesOnStart(store, task, worktree, base);
+    restoreChangesOnStart(store, task, worktree);
   }
   const updatedTask = { ...task, git: { ...(restore ? task.git! : { target, base, branch }), worktree } };
   const preserveRevision = task.status === "in_progress" && task.discussionReturn === undefined;

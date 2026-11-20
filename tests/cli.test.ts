@@ -2331,6 +2331,62 @@ test("watch cleans an active cancelled task after its session releases the workt
   assert.equal(git(resumed.worktree, "show", ":source.txt"), "staged change");
 });
 
+test("start restores cancelled edits in a retained worktree with ignored files", t => {
+  const root = fixture(t, true);
+  cli(root, ["init"]);
+  const card = cli(root, ["create"], { title: "Resume with local cache" });
+  cli(root, ["approve", card.id]);
+  const { task, worktree } = cli(root, ["start", card.id]);
+  const head = git(worktree, "rev-parse", "HEAD");
+  const registrations = git(root, "worktree", "list", "--porcelain");
+  const cached = join(worktree, "local.cache");
+  const tracked = join(worktree, "source.txt");
+  const untracked = join(worktree, "user.txt");
+  const exclude = join(root, ".git", "info", "exclude");
+  writeFileSync(exclude, "local.cache\n");
+  writeFileSync(cached, "cache data\n");
+  writeFileSync(tracked, "staged change\n");
+  git(worktree, "add", "source.txt");
+  writeFileSync(tracked, "working change\n");
+  writeFileSync(untracked, "untracked data\n");
+
+  cli(root, ["cancel", task.id], { reason: "Resume the same card later" });
+  const closed = cli(root, ["show", task.id]);
+  assert.equal(closed.status, "cancelled");
+  assert.match(closed.savedChanges.sha, /^[0-9a-f]{40}$/);
+  assert.equal(closed.savedChanges.restored, undefined);
+  assert.equal(git(root, "worktree", "list", "--porcelain"), registrations);
+  assert.equal(readFileSync(cached, "utf8"), "cache data\n");
+  assert.equal(readFileSync(tracked, "utf8"), "baseline\n");
+  assert.equal(existsSync(untracked), false);
+
+  const draft = cli(root, ["return-to-draft", task.id], { revision: closed.revision });
+  assert.deepEqual(draft.history.slice(0, closed.history.length), closed.history);
+  const ready = cli(root, ["approve", draft.id], { revision: draft.revision });
+  writeFileSync(exclude, "local.cache\nuser.txt\n");
+  writeFileSync(untracked, "new ignored data\n");
+  cli(root, ["start", ready.id], { revision: ready.revision }, "PROTECTED_PATH_COLLISION");
+  assert.equal(readFileSync(untracked, "utf8"), "new ignored data\n");
+  assert.equal(git(worktree, "show", ":source.txt"), "baseline");
+  const afterConflict = cli(root, ["show", task.id]);
+  assert.equal(afterConflict.revision, ready.revision);
+  assert.deepEqual(afterConflict.savedChanges, closed.savedChanges);
+  rmSync(untracked);
+  writeFileSync(exclude, "local.cache\n");
+
+  const resumed = cli(root, ["start", ready.id], { revision: ready.revision });
+  assert.equal(resumed.worktree, worktree);
+  assert.equal(git(root, "worktree", "list", "--porcelain"), registrations);
+  assert.equal(git(root, "rev-parse", task.git.branch), head);
+  assert.equal(git(worktree, "show", ":source.txt"), "staged change");
+  assert.equal(readFileSync(tracked, "utf8"), "working change\n");
+  assert.equal(readFileSync(untracked, "utf8"), "untracked data\n");
+  assert.equal(readFileSync(cached, "utf8"), "cache data\n");
+  assert.deepEqual(cli(root, ["show", task.id]).savedChanges.restored, { destination: "worktree", path: worktree });
+  assert.equal(cli(root, ["start", task.id]).worktree, worktree);
+  assert.equal(git(worktree, "show", ":source.txt"), "staged change");
+});
+
 test("cancelled task maintenance preserves staged and untracked edits in the existing saved-changes mechanism", t => {
   const root = fixture(t, true);
   cli(root, ["init"]);
