@@ -1953,13 +1953,14 @@ function chatViewport(list) {
   const rowBounds = row => (row.matches("details") ? row.firstElementChild ?? row : row).getBoundingClientRect();
   const visible = row => row.checkVisibility({ visibilityProperty: true });
   let suspended = false;
+  let restoring = false;
   const hasViewport = () => !suspended && list.clientHeight && visible(list);
-  const atEnd = () => list.scrollHeight - list.scrollTop - list.clientHeight <= 1;
   let position = { end: true, top: 0, anchors: [] };
+  const atEnd = () => suspended ? position.end : list.scrollHeight - list.scrollTop - list.clientHeight <= 1;
   let restoredTop;
   let folds;
   function remember() {
-    if (!hasViewport()) return;
+    if (restoring || !hasViewport()) return;
     const top = list.getBoundingClientRect().top;
     const end = atEnd();
     const anchors = [];
@@ -1995,6 +1996,7 @@ function chatViewport(list) {
       }
       list.scrollTop = top;
     }
+    restoring = false;
     remember();
   }
   const resize = new ResizeObserver(restore);
@@ -2030,6 +2032,7 @@ function chatViewport(list) {
         if (folds?.has(row.dataset.item)) row.open = folds.get(row.dataset.item);
       }
       folds = undefined;
+      restoring = true;
       suspended = false;
       resize.observe(list);
       observeRows();
@@ -3333,6 +3336,10 @@ function draftComposer() {
     return loadingHistory;
   };
   const revealHistory = () => {
+    if (historyUnmounted && historyInvalidated && atEndOfHistory()) {
+      historyInvalidated = false;
+      historyLoaded = false;
+    }
     readObserver.observe(log);
     dialogueViewport.resume(() => {
       if (!historyUnmounted) return;
@@ -3405,7 +3412,7 @@ function draftComposer() {
       reloadAfterHistory = true;
       return;
     }
-    if (historyLoaded && (historyUnmounted || !atEndOfHistory()) && (olderPages.length || loadingOlder)) {
+    if (historyLoaded && !atEndOfHistory() && (olderPages.length || loadingOlder)) {
       historyInvalidated = true;
       return;
     }
