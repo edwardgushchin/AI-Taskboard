@@ -275,6 +275,10 @@ function frame(state: ProjectTab) {
       const log = runActivityByTask.get(state.project + "\0" + task.id);
       return log ? [[task.id, log]] : [];
     }) ?? []),
+    discussionActivity: Object.fromEntries(state.board?.tasks.flatMap(task => {
+      const log = discussionActivityByTask.get(state.project + "\0" + task.id);
+      return log ? [[task.id, log]] : [];
+    }) ?? []),
     recentBoards: recentBoards.map(path => ({ name: basename(path) || path, path })),
   };
 }
@@ -857,6 +861,7 @@ interface ActiveAgent {
   draftDiscussion?: true;
   chatWindow?: number;
   updateMessage?: (task: Task, index: number) => () => void;
+  steerMessage?: (text: string, images: string[], index: number) => Promise<void>;
 }
 const activeAgents = new Map<string, ActiveAgent>();
 const returningDrafts = new Set<string>();
@@ -945,7 +950,7 @@ interface ChatRequest {
   retryAt?: number;
 }
 
-type ChatUpdate = { type: "saved" | "changed" } | { type: "commentary"; text: string } | { type: "run"; items: RunActivity[] };
+type ChatUpdate = { type: "saved" | "changed" } | { type: "commentary"; text: string };
 
 async function saveTaskTokenUsage(project: string, id: string, role: TaskUsageRole, report: TokenUsageReport): Promise<void> {
   const saved = await callCli(project, ["token-usage", id, "--compact"], { ...report, role });
@@ -983,7 +988,6 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
   const directories = new Set<string>();
   let scratch: string | undefined;
   let saved = request.retryAt !== undefined;
-  let streamed = false;
   let discussionStarted = false;
   let discussionFailure = t("draft_discussion.interrupted");
   try {
@@ -1012,6 +1016,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       if (!reply.ok) return { saved, result: reply };
       discussionStarted = true;
       replyingTasks.add(key);
+      publishDiscussionActivity(project, id, []);
       notifyRunChange(project);
       const configured = task.execution ?? readBoardSettings(runtimeLocation(project)).executor;
       if (configured?.effort) ({ model, effort } = { model: configured.model, effort: configured.effort });
@@ -1049,7 +1054,10 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     if (!automatic && (message?.actor !== "user" || retryAt !== undefined && last !== retryAt)) {
       return { saved, result: cliFailure("CHAT_CHANGED", t("ui.this_message_is_no_longer_awaiting_a_reply_6ec519ec")) };
     }
-    if (!active) replyingTasks.add(key);
+    if (!active && !automatic) {
+      replyingTasks.add(key);
+      publishDiscussionActivity(project, id, []);
+    }
     notifyRunChange(project);
     const activeFiles = new Set(message?.chat?.files);
     const inspectDraft = task.status === "draft";
@@ -1106,7 +1114,10 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       active.directories.add(scratch!);
       directories.delete(scratch!);
       const undo = active.updateMessage?.(task, last);
-      try { await active.control.steer(prompt, images); }
+      try {
+        if (active.steerMessage) await active.steerMessage(prompt, images, last);
+        else await active.control.steer(prompt, images);
+      }
       catch (error) { undo?.(); throw error; }
       return { saved, result: { ok: true as const, data: task } };
     }
@@ -1141,10 +1152,8 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       (name, args) => runAction(name, args),
       scratch!, maxAttachmentBytes - task.attachments.reduce((sum, file) => sum + (file.link ? 0 : file.bytes), 0),
       report => saveTaskTokenUsage(project, id, "discussion", report),
-      control => ready.resolve(control), signal, id, items => {
-        streamed = true;
-        notify({ type: "run", items });
-      }, automatic === undefined ? undefined : "initial", task.status === "review", Boolean(task.closedAt))).finally(() => ready.reject(new Error("The agent session ended.")));
+      control => ready.resolve(control), signal, id, items => publishDiscussionActivity(project, id, items),
+      automatic === undefined ? undefined : "initial", task.status === "review", Boolean(task.closedAt))).finally(() => ready.reject(new Error("The agent session ended.")));
     if ("interrupted" in answer) return { saved, result: { ok: true as const, data: task } };
     signal.throwIfAborted();
     const result = await callCli<Task>(project, ["chat", id], {
@@ -1172,10 +1181,10 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
         }
       } catch (error) { console.warn("Could not save the draft discussion failure.", error); }
     }
-    if (streamed) notify({ type: "run", items: [] });
     if (!active) {
       activeAgents.delete(key);
       const wasReplying = replyingTasks.delete(key);
+      if (wasReplying) publishDiscussionActivity(project, id);
       for (const directory of directories) await rm(directory, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
       chatRuns.delete(key);
       taskOperations.delete(key);
@@ -1208,15 +1217,12 @@ ipcMain.handle("chat:send", async (event, id: unknown, request: unknown) => {
     return { saved: false, result: cliFailure("ATTACHMENT_LIMIT", t("ui.attachments_are_limited_to_64_mib_per_task_ae680c16")) };
   }
   return sendChat(project, id, input as ChatRequest, update => {
-    if (update.type === "run") return publishRunActivity(project, id, update.items);
     if (!event.sender.isDestroyed()) event.sender.send("chat:update", { project, id, ...update });
   }, undefined, event.sender.id);
 });
 
 function runDraftDiscussion(project: string, id: string, phase: NonNullable<Task["draftDiscussion"]>["phase"]) {
-  return sendChat(project, id, { model: "", effort: "", text: "", files: [] }, update => {
-    if (update.type === "run") publishRunActivity(project, id, update.items);
-  }, phase);
+  return sendChat(project, id, { model: "", effort: "", text: "", files: [] }, () => {}, phase);
 }
 
 ipcMain.handle("chat:retry-draft-discussion", async (event, id: unknown) => {
@@ -3746,7 +3752,9 @@ async function runImage(event: IpcMainInvokeEvent, id: unknown, path: unknown, r
   const task = await callCli<Task>(project, ["show", id]);
   if (!task.ok) return null;
   if (reviewer === true) return readReviewerImage(project, task.data.id, path);
-  return readRunImage(project, task.data, runActivityByTask.get(project + "\0" + id) ?? [], path);
+  const key = project + "\0" + id;
+  const items = [...(runActivityByTask.get(key) ?? []), ...(discussionActivityByTask.get(key) ?? [])];
+  return readRunImage(project, task.data, items, path);
 }
 
 ipcMain.handle("board:runImagePreview", async (event, id: unknown, path: unknown, reviewer: unknown) => {
@@ -3832,6 +3840,18 @@ ipcMain.handle("board:revealArtifact", async (event, id: unknown, source: unknow
 const launchingTasks = new Set<string>();
 const runningTasks = new Set<string>();
 const runActivityByTask = new Map<string, RunActivity[]>();
+const discussionActivityByTask = new Map<string, RunActivity[]>();
+
+function publishDiscussionActivity(project: string, id: string, items?: RunActivity[]) {
+  const key = project + "\0" + id;
+  if (items) discussionActivityByTask.set(key, items);
+  else discussionActivityByTask.delete(key);
+  for (const state of windowStates.values()) {
+    if (state.active.project === project && !state.window.isDestroyed()) {
+      state.window.webContents.send("chat:update", { project, id, type: "discussion", items });
+    }
+  }
+}
 
 function executorBusy(project: string, id: string) {
   const key = project + "\0" + id;
@@ -3909,9 +3929,24 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   let restart: import("./board-runtime.ts").RuntimeEntry["restart"];
   let release: ((restart?: boolean | "quota") => void) | undefined;
   let updateTimer: NodeJS.Timeout | undefined;
+  type SteeredReply = { index: number; activity: Map<string, RunActivity> };
+  let steeredReply: SteeredReply | undefined;
+  const pendingReplies = new Map<string, SteeredReply>();
+  const latestReply = () => {
+    let latest = steeredReply;
+    for (const reply of pendingReplies.values()) {
+      if (!latest || reply.index > latest.index) latest = reply;
+    }
+    return latest;
+  };
+  const publishReply = () => {
+    const latest = latestReply();
+    publishDiscussionActivity(project, id, latest && runLog(latest.activity, 96_000));
+  };
   const publish = () => {
     updateTimer = undefined;
     publishRunActivity(project, id, runLog(activity));
+    if (steeredReply && latestReply() === steeredReply) publishReply();
   };
   const saveActivity = async () => {
     clearTimeout(updateTimer);
@@ -4104,7 +4139,11 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     // Quota can interrupt this launch before Codex has opened or linked a thread.
     releaseSlot.run(() => rememberExecutor(project, task, cwd, continuation, threadChoice || undefined));
     signal.throwIfAborted();
-    const run = await releaseSlot.run(() => startCodexRun(client, project, cwd, task, item => {
+    const run = await releaseSlot.run(() => startCodexRun(client, project, cwd, task, (item, currentTurn = true) => {
+      // An action already present at the steering boundary belongs to the earlier work.
+      if (currentTurn && steeredReply && (!activity.has(item.id) || steeredReply.activity.has(item.id))) {
+        steeredReply.activity.set(item.id, item);
+      }
       activity.set(item.id, item);
       updateTimer ??= setTimeout(publish, 80);
     }, report => saveTaskTokenUsage(project, id, role, report), signal, async (codexThreadId, created) => {
@@ -4138,7 +4177,13 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         throw Object.assign(new Error("The queued start belongs to another Codex thread."), { code: "CODEX_START_UNCONFIRMED" });
       }
       return { ...pending, accepted: (turnId: string) => recordQueuedTurn(project, id, pending.clientId, turnId) };
-    }, desktopProfile, recoveringThreadId, Boolean(restart)));
+    }, desktopProfile, recoveringThreadId, Boolean(restart), clientId => {
+      const reply = pendingReplies.get(clientId);
+      if (!reply) return;
+      pendingReplies.delete(clientId);
+      if (!steeredReply || reply.index > steeredReply.index) steeredReply = reply;
+      publishReply();
+    }));
     const { threadId: codexThreadId, completion } = run;
     const directories = new Set<string>();
     let stopRequested = false;
@@ -4146,13 +4191,41 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       forgetExecutor(project, id);
       stopRequested = true;
       return run.interrupt();
-    } }, directories });
+    } }, directories, async steerMessage(text, images, index) {
+      const clientId = randomUUID();
+      pendingReplies.set(clientId, { index, activity: new Map() });
+      publishReply();
+      try {
+        await run.steer(text, images, clientId);
+      } catch (error) {
+        pendingReplies.delete(clientId);
+        publishReply();
+        throw error;
+      }
+    } });
     monitoring = true;
     runningTasks.add(key);
     notifyRunChange(project);
     let retry: { revision: number; reason: string; continuation: ExecutorContinuation } | undefined;
     let requeueRecoveredTurn = false;
     void completion.then(async outcome => {
+      const reply = steeredReply;
+      steeredReply = undefined;
+      pendingReplies.clear();
+      if (reply && !outcome && !stopRequested && !signal.aborted) {
+        const final = [...reply.activity.values()].findLast(item =>
+          item.type === "agentMessage" && item.phase === "final_answer" && item.status === "completed" && item.text.trim());
+        if (final) {
+          const saved = await callCli(project, ["chat", id], {
+            actor: "agent", text: final.text.trim(), at: final.at, replyTo: reply.index,
+            model: task.execution?.model ?? "", effort: task.execution?.effort ?? "",
+          });
+          if (!saved.ok && saved.error.code !== "CHAT_CHANGED") {
+            console.warn("Could not save the executor's reply:", saved.error.message);
+          }
+        }
+      }
+      if (discussionActivityByTask.has(key)) publishDiscussionActivity(project, id);
       if (signal.reason === quotaInterruption && !stopRequested) {
         await saveActivity();
         return;
@@ -4236,6 +4309,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         { id: "block-error", type: "error", title: "", text: failure, status: "failed" },
       ]);
     }).finally(async () => {
+      if (discussionActivityByTask.has(key)) publishDiscussionActivity(project, id);
       activeAgents.delete(key);
       for (const directory of directories) await rm(directory, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
       runningTasks.delete(key);

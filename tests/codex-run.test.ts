@@ -153,6 +153,11 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '  if (method === "turn/steer") {',
     '    send({ method: "item/agentMessage/delta", params: { threadId: thread, itemId: "live", delta: params.input[0].text } });',
     '    if (params.input[0].text === "reject") { send({ id, error: { message: "No active turn" } }); return; }',
+    '    if (params.clientUserMessageId) {',
+    '      const item = { id: "steered", type: "userMessage", clientId: params.clientUserMessageId, content: params.input };',
+    '      send({ method: "item/completed", params: { threadId: thread, turnId: "other-turn", item: { ...item, clientId: "other" } } });',
+    '      send({ method: "item/completed", params: { threadId: thread, turnId: params.expectedTurnId, item } });',
+    '    }',
     '    setTimeout(() => send({ id, result: { turnId: params.expectedTurnId } }), params.input[0].text === "first" ? 20 : 0); return;',
     '  }',
     '  send({ id, result });',
@@ -406,15 +411,24 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.deepEqual(await (await launch("failed")).completion, { reason: "Provider disconnected" });
   const closed = await (await launch("closed")).completion;
   assert.deepEqual(closed, { reason: "The Codex process closed.", disconnected: true });
-  const controlled = await launch("control");
-  await Promise.all([controlled.steer("first", ["extra.png"]), controlled.steer("second", [])]);
-  await assert.rejects(controlled.steer("reject", []), /No active turn/);
+  const receivedMessages: string[] = [];
+  const controlled = await startCodexRun(client("control"), folder, worktree, task, item => activity.push(item),
+    undefined, undefined, undefined, undefined, undefined, false,
+    clientId => receivedMessages.push(clientId));
+  try {
+    await Promise.all([controlled.steer("first", ["extra.png"], "owner-reply"), controlled.steer("second", [])]);
+    await assert.rejects(controlled.steer("reject", []), /No active turn/);
+  } finally {
+    await controlled.interrupt();
+    await controlled.completion;
+  }
+  assert.deepEqual(receivedMessages, ["owner-reply"]);
   assert.ok(activity.some(item => item.id === "live" && item.text.includes("first")));
-  await controlled.interrupt();
   assert.match((await controlled.completion)?.reason ?? "", /interrupted/);
   const controls = JSON.parse(readFileSync(capture, "utf8")).requests.filter((entry: { method: string }) => entry.method.startsWith("turn/"));
   assert.deepEqual(controls.map((entry: { method: string }) => entry.method), ["turn/start", "turn/steer", "turn/steer", "turn/steer", "turn/interrupt"]);
   assert.equal(controls[1].params.expectedTurnId, "turn-1");
+  assert.equal(controls[1].params.clientUserMessageId, "owner-reply");
   assert.deepEqual(controls[1].params.input[1], { type: "localImage", path: "extra.png" });
   assert.deepEqual(controls.at(-1).params, { threadId: thread, turnId: "turn-1" });
   assert.equal((await callCli(folder, ["settings"], { reviewMode: "human" })).ok, true);
