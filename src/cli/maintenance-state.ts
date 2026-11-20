@@ -29,6 +29,7 @@ function fingerprint(error: MaintenanceJob["error"]): string {
 }
 
 function repairAvailable(job: MaintenanceJob): boolean {
+  if (job.operation === "cleanup" && job.error.code === "WORKTREE_IN_USE") return false;
   const limit = job.error.code === "DIRTY_WORKTREE" ? 1 : 3;
   return (job.repairAttempts ?? 0) < limit;
 }
@@ -103,8 +104,13 @@ export function maintenanceFailure(store: BoardStore, operation: MaintenanceJob[
 }
 
 export function cleanupRetryDeferred(store: BoardStore, task: string) {
-  return transaction(store, jobs => jobs.some(job => job.task === task && job.operation === "cleanup" &&
-    (alive(job.owner) || (job.cleanupRetryAt ?? 0) > Date.now())));
+  return transaction(store, jobs => {
+    const job = jobs.find(job => job.task === task && job.operation === "cleanup");
+    if (!job) return false;
+    if (alive(job.owner)) return true;
+    // Older versions persisted expected live-session deferrals as cleanup failures.
+    return job.error.code !== "WORKTREE_IN_USE" && (job.cleanupRetryAt ?? 0) > Date.now();
+  });
 }
 
 export function maintenanceSuccess(store: BoardStore, operation: MaintenanceJob["operation"], task?: string) {

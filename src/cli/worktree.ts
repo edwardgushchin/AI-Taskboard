@@ -1,8 +1,9 @@
 import { beginBoardOperation } from "../desktop/board-worklog.ts";
 import { migrateWorklog, removeMigratedWorklog } from "./worklog-migration.ts";
 import { maintenanceFailure, maintenanceSuccess } from "./maintenance-state.ts";
-import { inspectLocalChanges, saveLocalChanges } from "./saved-changes.ts";
-import { lstatSync, readdirSync, realpathSync, rmSync, rmdirSync, unlinkSync } from "node:fs";
+import { inspectLocalChanges, isRestoreAttemptId, restoredForStart, restoreChangesOnStart, saveLocalChanges } from "./saved-changes.ts";
+import { randomUUID } from "node:crypto";
+import { lstatSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, unlinkSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { artifactFiles, removeSavedSource, saveArtifacts } from "./artifacts.ts";
 import { dependencyStatus, unfinishedDependencies } from "./dependencies.ts";
@@ -224,7 +225,16 @@ export function hasPending(store: BoardStore, task: Task, holdsStartLock = false
 }
 
 type StartedTask = { task: Task } & ({ worktree: string } | { cwd: string });
-type StartIntent = { action: "start"; revision: number; target: string; base: string; actor?: "user" | "agent" | "manager"; isolatedWorktree?: true; restore?: true };
+type StartIntent = {
+  action: "start";
+  revision: number;
+  target: string;
+  base: string;
+  actor?: "user" | "agent" | "manager";
+  isolatedWorktree?: true;
+  restore?: true;
+  restoreAttempt?: string;
+};
 type TaskCheckout = {
   id: string; repo: Repository; branch: string; managedPath: string; intent: StartIntent;
   preparing: number; lockWaitMs: number;
@@ -305,14 +315,17 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
     }
     if (pending?.restore === true) {
       if (existing) {
-        const { revision, target, base } = pending;
+        const { revision, target, base, restoreAttempt } = pending;
         const managedPath = join(isolatedRoot(repo), task.id);
         if (typeof revision !== "number" || target !== task.git.target ||
-            typeof base !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(base)) {
+            typeof base !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(base) ||
+            (restoreAttempt !== undefined && !isRestoreAttemptId(restoreAttempt))) {
           throw new TaskboardError("PENDING_OPERATION", "The interrupted worktree recovery does not match this task revision or target.");
         }
         if (revision === task.revision) {
-          const intent: StartIntent = { action: "start", revision, target, base, actor: boardActor(pending), restore: true };
+          const intent: StartIntent = {
+            action: "start", revision, target, base, actor: boardActor(pending), restore: true, restoreAttempt,
+          };
           return { id: task.id, repo, branch, managedPath, intent, preparing, lockWaitMs };
         }
         // The restored worktree and its start event may already be saved if removal of the intent was interrupted.
@@ -330,11 +343,14 @@ export function prepareTaskStart(store: BoardStore, task: Task, input: Record<st
       if (pending) throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted start before restoring a missing worktree.");
       const { managedPath, base } = prepareMissingWorktree(store, repo, task.id, task.git, entries);
       const intent: StartIntent = { action: "start", revision: task.revision, target: task.git.target,
-        base, actor: boardActor(input), restore: true };
+        base, actor: boardActor(input), restore: true, restoreAttempt: randomUUID() };
       writeJson(pendingPath, intent);
       return { id: task.id, repo, branch, managedPath, intent, preparing, lockWaitMs };
     }
     const worktree = isolateTaskWorktree(store, repo, task.id, usableWorktree(existing));
+    if (task.status === "ready" && !relative(join(isolatedRoot(repo), task.id), worktree)) {
+      restoreChangesOnStart(store, task, worktree);
+    }
     const updated = { ...task, git: { ...task.git, worktree } };
     if (pending) removeFile(pendingPath);
     if (task.status === "in_progress" && task.discussionReturn === undefined) return { task: worktree === task.git.worktree ? task : store.save(updated), worktree };
@@ -406,14 +422,8 @@ export function checkoutTaskWorktree({ id, repo, branch, managedPath, intent: { 
   }
   if (restore && existing) {
     requireNoGitOperation(worktree);
-    // An interrupted Git command can leave a valid registration before populating the index and files.
-    if (gitStatus(worktree, "tracked")) {
-      throw new TaskboardError("WORKTREE_CHECKOUT_INCOMPLETE",
-        "The interrupted checkout could not be verified: tracked files or the index differ from the saved commit. Inspect and preserve local changes before completing the checkout and retrying.",
-        { path: worktree, head: base });
-    }
   }
-  return { worktree, gitWorktreeAddMs };
+  return { worktree, gitWorktreeAddMs, reusedCheckout: Boolean(existing) };
 }
 
 export function finishTaskStart(store: BoardStore, plan: TaskCheckout, checkout: ReturnType<typeof checkoutTaskWorktree>,
@@ -426,10 +436,10 @@ export function finishTaskStart(store: BoardStore, plan: TaskCheckout, checkout:
   if (dependencies.length) throw new TaskboardError("DEPENDENCIES_INCOMPLETE", "Complete the task dependencies before starting.", { dependencies });
   const pendingPath = store.pendingPath(id);
   const pending = exists(pendingPath) && object(readJson(pendingPath));
-  const { target, base, restore } = intent;
+  const { target, base, restore, restoreAttempt } = intent;
   if (!pending || pending.action !== intent.action || pending.revision !== intent.revision ||
       pending.target !== target || pending.base !== base || pending.restore !== restore ||
-      pending.isolatedWorktree !== intent.isolatedWorktree) {
+      pending.isolatedWorktree !== intent.isolatedWorktree || pending.restoreAttempt !== restoreAttempt) {
     throw new TaskboardError("PENDING_OPERATION", "The pending task checkout changed.");
   }
   const { gitWorktreeAddMs } = checkout;
@@ -437,6 +447,21 @@ export function finishTaskStart(store: BoardStore, plan: TaskCheckout, checkout:
   const prepareMs = Math.max(0, Math.round(performance.now() - preparing) - finalLockWaitMs);
   if (restore && (!task.git || task.git.branch !== branch || task.git.target !== target)) {
     throw new TaskboardError("PENDING_OPERATION", "The saved task branch or target changed during checkout.");
+  }
+  if (restore) {
+    // An interrupted Git command can register a worktree before populating its files.
+    if (checkout.reusedCheckout && gitStatus(worktree, "tracked") &&
+        !restoredForStart(store, task, worktree, restoreAttempt)) {
+      throw new TaskboardError("WORKTREE_CHECKOUT_INCOMPLETE",
+        "The interrupted checkout could not be verified: tracked files or the index differ from the saved commit. Inspect and preserve local changes before completing the checkout and retrying.",
+        { path: worktree, head: base });
+    }
+    // Older pending checkouts acquire an attempt ID before applying the backup.
+    const attempt = restoreAttempt ?? randomUUID();
+    if (!restoreAttempt) {
+      writeJson(pendingPath, { ...pending, restoreAttempt: attempt });
+    }
+    restoreChangesOnStart(store, task, worktree, attempt);
   }
   const updatedTask = { ...task, git: { ...(restore ? task.git! : { target, base, branch }), worktree } };
   const preserveRevision = task.status === "in_progress" && task.discussionReturn === undefined;
@@ -522,6 +547,9 @@ export function cleanTaskWorktree(store: BoardStore, task: Task, artifacts?: unk
   requireState(task, ["done", "cancelled"]);
   let finish: ReturnType<typeof beginBoardOperation> | undefined;
   try {
+    if (taskResourcesInUse(store, task.id)) {
+      throw new TaskboardError("WORKTREE_IN_USE", "A live agent still uses the task resources.");
+    }
     const result = cleanTaskWorktreeNow(store, task, artifacts, () => {
       finish = beginBoardOperation(store.location.root, "worktree cleanup", task.id);
     });
@@ -529,6 +557,8 @@ export function cleanTaskWorktree(store: BoardStore, task: Task, artifacts?: unk
     finish?.(result.removed ? "worktree removed" : result.branchRemoved ? "retired branch removed" : "resources already absent");
     return result;
   } catch (error) {
+    // A live session is an expected deferral. Retry as soon as it releases the worktree.
+    if (error instanceof TaskboardError && error.code === "WORKTREE_IN_USE") throw error;
     maintenanceFailure(store, "cleanup", error, task.id);
     finish?.("failed; resources retained for retry");
     throw error;
@@ -536,8 +566,6 @@ export function cleanTaskWorktree(store: BoardStore, task: Task, artifacts?: unk
 }
 
 function cleanTaskWorktreeNow(store: BoardStore, task: Task, artifacts: unknown, audit: () => void) {
-  requireState(task, ["done", "cancelled"]);
-  if (taskResourcesInUse(store, task.id)) throw new TaskboardError("WORKTREE_IN_USE", "A live agent still uses the task resources.");
   if (!task.git || task.git.branch !== worktreeBranch(task)) {
     return { removed: false };
   }
@@ -668,6 +696,19 @@ function removeTaskWorktree(store: BoardStore, task: Task, repo: Repository, ite
   }
   directory(managedRoot);
   requireNoGitOperation(path);
+  if (task.status === "cancelled" && process.platform === "win32") {
+    // Git for Windows can drop the registration even when an open handle blocks
+    // removal. A same-path rename checks for existing locks without moving files.
+    try {
+      renameSync(path, path);
+    } catch (error) {
+      const { code, message } = error as NodeJS.ErrnoException;
+      if (code === "EACCES" || code === "EPERM" || code === "EBUSY") {
+        throw worktreeAccessDenied(path, message);
+      }
+      throw error;
+    }
+  }
   if (exists(join(path, ".dev-diary"))) {
     if (git(path, ["ls-files", "-z", "--", ".dev-diary"])) migrateWorklog(store.location.root, [join(path, ".dev-diary")]);
     else removeMigratedWorklog(store.location.root, join(path, ".dev-diary"));
