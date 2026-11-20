@@ -724,7 +724,7 @@ function collaborationItem(item) {
 }
 
 function taskWorkItem(item) {
-  if (collaborationItem(item)) return false;
+  if (item.stageChild || collaborationItem(item)) return false;
   if (item.type === "error" && ["project-closed", "save-error", "discussion-launch-error", "schedule-error", "block-error"].includes(item.id)) {
     return false;
   }
@@ -795,7 +795,7 @@ function reviewerHistory(task, journal, decisions, onActivity) {
         node.error.hidden = !attempt.error;
         node.report = undefined;
         const items = attempt.items.flatMap(item => {
-          if (collaborationItem(item)) return [];
+          if (item.stageChild || collaborationItem(item)) return [];
           if (item.type !== "agentMessage" || item.phase === "commentary") return [item];
           if (item.status !== "completed") return [];
           node.report = undefined;
@@ -866,17 +866,26 @@ function stageWork(task, panels) {
 
     const address = run.phase + ":" + run.key;
     let attempt = active.get(address);
+    if (run.state === "running" && run.agentId && attempt?.run.sessionId &&
+        run.sessionId === attempt.run.sessionId && run.threadId === attempt.run.threadId &&
+        run.targetHead === attempt.run.targetHead) {
+      attempt.agentId = run.agentId;
+      continue;
+    }
     if (attempt) {
       attempt.until = event.at;
       active.delete(address);
     }
     if (run.state === "running" || !attempt ||
         (run.threadId && run.threadId !== attempt.run.threadId) || run.targetHead !== attempt.run.targetHead) {
-      attempt = { address, run, at: event.at, activity: element("div", undefined, "chat-run") };
+      attempt = { address, run, agentId: run.agentId, at: event.at, activity: element("div", undefined, "chat-run") };
       attempts.push(attempt);
     }
     if (run.state === "running") active.set(address, attempt);
-    else attempt.finish = { run, at: event.at };
+    else {
+      attempt.finish = { run, at: event.at };
+      attempt.agentId ??= run.agentId;
+    }
   }
 
   function statusRow(run, at) {
@@ -908,29 +917,31 @@ function stageWork(task, panels) {
     for (const item of items) {
       if (item.threadId && item.at) unique.set(item.threadId + "\0" + item.id, item);
     }
-    for (const item of unique.values()) {
+    const ordered = [...unique.values()].sort((first, second) => first.at.localeCompare(second.at));
+    for (const item of ordered) {
       if (item.phase === "final_answer" || item.type === "truncated" ||
           item.title === "ai_taskboard / expert_stage") continue;
-      let matches = attempts.filter(({ run, at, until, previousPlan }) => !previousPlan &&
-        run.state === "running" && run.phase === phase && run.threadId === item.threadId &&
+      let matches = attempts.filter(({ run, agentId, at, until, previousPlan }) => !previousPlan &&
+        run.state === "running" && run.phase === phase &&
+        (item.stageChild ? agentId === item.threadId && Boolean(item.stageSessionId) : run.threadId === item.threadId) &&
         (item.stageSessionId ? item.stageSessionId === run.sessionId : Boolean(until)) &&
         item.at > at && (!until || item.at < until));
       const collaboration = collaborationItem(item);
-      if (collaboration) {
+      if (collaboration && !item.stageChild) {
         const data = collaborationData(item);
         const receivers = Array.isArray(data.receiverThreadIds) ? data.receiverThreadIds : [];
         const ids = new Set([...receivers, ...Object.keys(data.agentsStates ?? {}),
           ...(data.agentThreadId ? [data.agentThreadId] : [])]);
         if (ids.size !== 1) continue;
         const [id] = ids;
-        matches = matches.filter(attempt => attempt.finish?.run.agentId === id);
+        matches = matches.filter(attempt => attempt.agentId === id);
       }
       if (matches.length !== 1) continue;
       const [attempt] = matches;
       const plan = task.expertTeam[phase];
       const isLead = plan.stages.find(stage => stage.key === attempt.run.key)?.expertId === plan.lead;
       const local = isLead || Boolean(attempt.finish?.run.fallback);
-      if (!collaboration && (!local || attempt.finish?.run.agentId)) continue;
+      if (!item.stageChild && !collaboration && (!local || attempt.agentId)) continue;
       const log = byAttempt.get(attempt) ?? [];
       log.push(item);
       byAttempt.set(attempt, log);

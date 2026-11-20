@@ -163,7 +163,7 @@ export async function reviewWithCodex(profile: string, project: string, settings
       : onActivity,
     specialistDelegation: Boolean(plan?.stages.length),
     onControl: taskId ? (control: AgentControl) => { stopMail = watchTeamMail(project, taskId, control, "reviewer", submissionSequence); } : undefined,
-    observeProvider: stages?.observe, onProviderReady: stages?.bind, reviewThread,
+    observeProvider: stages?.observe, onProviderReady: stages?.bind, stageReporter: stages, reviewThread,
     onTokenUsage: async (report: TokenUsageReport) => { usage = report; }, finalAnswerSchema: {
       type: "object", additionalProperties: false, required: ["summary", "findings", "evidence", "needsHuman", "verifyRisk"],
       properties: {
@@ -699,6 +699,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
   onProviderReady?: (request: import("./provider-tools.ts").ProviderRequest, threadId: string) => void;
   worklog?: ReturnType<typeof boardWorklog>;
   specialistDelegation?: boolean;
+  stageReporter?: ReturnType<typeof phaseStageReporter>;
   observeProvider?: (message: RpcMessage, threadId: string) => void;
 }) {
   const { onCommentary, onTokenUsage, onControl, onActivity, signal, imageDirectory, imageLimit = 0, session } = options;
@@ -808,6 +809,12 @@ function reply(profile: string, project: string, prompt: string, images: string[
       session?.onActivity([...activity.values()]);
       if (onActivity) onActivity(runLog(activity, 96_000, options.role === "reviewer"));
     };
+    if (onActivity) {
+      options.stageReporter?.listen(item => {
+        activity.set(item.id, item);
+        activityTimer ??= setTimeout(publish, 80);
+      });
+    }
     let currentGoal: BoardGoal | null | undefined;
     let followingGoal = false;
     let goalChange: Promise<BoardGoal | null> | undefined;
@@ -1010,6 +1017,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
       return { text, usage, commentary, attachmentSources, model: started.model ?? thread.model, goalStatus,
         ...(run.length ? { run } : {}) } as const;
     } finally {
+      options.stageReporter?.close();
       clearTimeout(activityTimer);
       if (activityTimer) publish();
       await goalChange?.catch(() => {});

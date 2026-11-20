@@ -13,7 +13,7 @@ import { createExpertPlan, expertStagesStatus, reviewDecisionSequence, sendTeamM
 import { managerInbox } from "../src/cli/task-messages.ts";
 import { callCli } from "../src/desktop/cli.ts";
 import { leadSkillInstructions, phaseStageReporter, watchTeamMail } from "../src/desktop/expert-tools.ts";
-import type { Task } from "../src/cli/model.ts";
+import type { RunActivity, Task } from "../src/cli/model.ts";
 
 function fixture(t: TestContext) {
   const parent = realpathSync(tmpdir()); const root = mkdtempSync(join(parent, "taskboard-experts-"));
@@ -396,12 +396,27 @@ test("a resumed native specialist must complete in the current lead run", async 
   const { revision } = started.data.task;
 
   const reporter = phaseStageReporter(f.root, "work", id);
+  t.after(() => reporter.close());
+  const lead = "f677da73-5436-4a47-a452-3ec00c2d3a40";
+  const child = "95c19e7a-b829-4195-814b-922d28903c82";
+  const command = { id: "test-command", type: "commandExecution", command: "git status", status: "completed" };
+  const items = new Map<string, RunActivity>();
+  let commandAt = 0;
+  reporter.bind(async <T>(method: string, params: object) => {
+    assert.equal(method, "thread/items/list");
+    assert.equal("threadId" in params && params.threadId, child);
+    return {
+      data: [{ item: command, startedAtMs: commandAt }],
+      nextCursor: null,
+    } as T;
+  }, lead);
+  reporter.listen(item => items.set(item.id, item));
   const stage = { revision, key: "verify" };
   assert.ok((await reporter.report({ ...stage, state: "running" })).ok);
-  const result = { ...stage, state: "done", agentId: "previous-qa", result: "Retested", outputs: { "verify.md": "New checks passed." } };
+  const result = { ...stage, state: "done", agentId: child, result: "Retested", outputs: { "verify.md": "New checks passed." } };
   const observe = (threadId: string, item: object) =>
-    reporter.observe({ method: "item/completed", params: { threadId, item } }, "lead");
-  const followup = { type: "collabAgentToolCall", tool: "followupTask", status: "completed", receiverThreadIds: ["previous-qa"] };
+    reporter.observe({ method: "item/completed", params: { threadId, item } }, lead);
+  const followup = { type: "collabAgentToolCall", tool: "followupTask", status: "completed", receiverThreadIds: [child] };
   const expectError = async (code: string) => {
     const reply = await reporter.report(result);
     assert.equal(reply.ok, false);
@@ -409,14 +424,41 @@ test("a resumed native specialist must complete in the current lead run", async 
   };
   observe("other-lead", followup);
   await expectError("EXPERT_AGENT_UNCONFIRMED");
-  observe("lead", followup);
+  observe(lead, followup);
   await expectError("EXPERT_AGENT_RUNNING");
-  observe("lead", { type: "collabAgentToolCall", tool: "wait", agentsStates: { "previous-qa": { status: "completed" } } });
-  observe("lead", { ...followup, tool: "resumeAgent" });
+  commandAt = Date.now();
+  const running = await reporter.report({ ...stage, state: "running", agentId: child });
+  assert.ok(running.ok, JSON.stringify(running));
+  f.run(store => {
+    const [current] = expertStagesStatus(store.card(id), "work");
+    assert.equal(current.state, "running");
+    assert.equal(current.run?.agentId, child);
+    assert.equal(current.run?.sessionId, reporter.sessionId);
+  });
+  const commentary = { id: "test-commentary", type: "agentMessage", phase: "commentary", text: "Checked the working tree." };
+  const beforeCommentary = items.size;
+  observe("foreign", commentary);
+  assert.equal(items.size, beforeCommentary);
+  observe(child, commentary);
+  assert.equal(items.size, beforeCommentary + 1);
+  assert.equal(items.get(child + ":" + commentary.id)?.text, commentary.text);
+  for (let wait = 0; !items.has(child + ":" + command.id) && wait < 40; wait++) {
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.equal(items.get(child + ":" + command.id)?.title, command.command);
+  observe(lead, { type: "collabAgentToolCall", tool: "wait", agentsStates: { [child]: { status: "completed" } } });
+  observe(lead, { ...followup, tool: "resumeAgent" });
   await expectError("EXPERT_AGENT_RUNNING");
-  observe("lead", { type: "subAgentActivity", kind: "completed", agentThreadId: "previous-qa", agentPath: "/root/qa" });
+  observe(lead, { type: "subAgentActivity", kind: "completed", agentThreadId: child, agentPath: "/root/qa" });
   assert.ok((await reporter.report({ ...result, agentId: "/root/qa" })).ok);
-  f.run(store => assert.equal(store.card(id).history.at(-1)?.expertStageRun?.agentId, "previous-qa"));
+  const saved = await callCli<Task>(f.root, ["run-log", id], { entries: [...items.values()], runThreadId: lead });
+  assert.ok(saved.ok, JSON.stringify(saved));
+  const reopened = await callCli<Task>(f.root, ["show", id]);
+  assert.ok(reopened.ok, JSON.stringify(reopened));
+  assert.equal(reopened.data.history.findLast(event => event.expertStageRun)?.expertStageRun?.agentId, child);
+  assert.equal(reopened.data.history.at(-1)?.run?.length, 2);
+  assert.ok(reopened.data.history.at(-1)?.run?.every(item =>
+    item.threadId === child && item.stageSessionId === reporter.sessionId && item.stageChild));
 });
 
 for (const mode of ["reviewer", "manager"] as const) {

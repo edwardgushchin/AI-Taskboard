@@ -15,7 +15,7 @@ const active = new Map<string, { attempt: ReviewerAttempt; history?: ReviewerAtt
 
 export function reviewerActivity(project: string, id: string) {
   const attempt = active.get(historyPath(project, id))?.attempt;
-  const item = attempt?.items.findLast(entry => entry.status === "inProgress");
+  const item = attempt?.items.findLast(entry => !entry.stageChild && entry.status === "inProgress");
   return attempt && { at: attempt.at, item: item && {
     type: item.type, status: item.status, title: item.title, text: item.type === "reasoning" ? item.text.slice(-1000) : "",
   } };

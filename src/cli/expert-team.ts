@@ -269,6 +269,10 @@ export function updateExpertStage(store: BoardStore, id: string, phase: Phase, i
       run.sessionId = text(input.sessionId, "provider session ID", true);
     }
   }
+  const active = stage.run?.state === "running" && stage.run.sessionId === input.sessionId ? stage.run : undefined;
+  if (active?.agentId && (state === "done" || input.agentId !== undefined) && active.agentId !== input.agentId) {
+    throw new TaskboardError("EXPERT_AGENT_SCOPE", "Finish or block the current assignment before changing the specialist.");
+  }
   if (state !== "running") {
     run.result = text(input.result, "stage result", true);
     if (run.result.length > 8000) throw new TaskboardError("INVALID_INPUT", "Stage summaries are limited to 8000 characters.");
@@ -302,8 +306,11 @@ export function updateExpertStage(store: BoardStore, id: string, phase: Phase, i
       run.fallback = text(input.fallback, "reason for local execution", true);
       if (run.fallback.length > 1000) throw new TaskboardError("INVALID_INPUT", "Fallback reasons are limited to 1000 characters.");
     }
-    if (input.agentId != null) {
-      run.agentId = text(input.agentId, "confirmed provider agent ID", true);
+  }
+  if (state !== "blocked" && (input.agentId != null || (state === "running" && active?.agentId))) {
+    const specialist = input.agentId ?? active?.agentId;
+    if (specialist != null) {
+      run.agentId = text(specialist, "confirmed provider agent ID", true);
       if (!/^[a-z0-9-]{1,100}$/i.test(run.agentId) || stages.some(item => item.key !== stage.key && item.run?.agentId === run.agentId && item.expertId !== stage.expertId))
         throw new TaskboardError("EXPERT_AGENT_SCOPE", "A provider agent represents one specialization.");
       if (input.sessionId !== undefined) {
@@ -311,6 +318,10 @@ export function updateExpertStage(store: BoardStore, id: string, phase: Phase, i
         if (stages.some(item => item.key !== stage.key && item.expertId === stage.expertId &&
             item.run?.sessionId === run.sessionId && item.run?.agentId && item.run.agentId !== run.agentId))
           throw new TaskboardError("EXPERT_AGENT_DUPLICATE", "Reuse the provider agent already assigned to this specialization in this session.");
+      }
+      if (state === "running" && stages.some(item => item.key !== stage.key && item.run?.state === "running" &&
+          item.run.sessionId === run.sessionId && item.run.agentId === run.agentId)) {
+        throw new TaskboardError("EXPERT_AGENT_SCOPE", "Finish the specialist's current stage before assigning the next one.");
       }
     }
   }

@@ -97,6 +97,7 @@ export interface RunActivity {
   at?: string;
   threadId?: string;
   stageSessionId?: string;
+  stageChild?: true;
   id: string;
   type: string;
   title: string;

@@ -77,13 +77,20 @@ async function runCheck() {
       var reviewers = [];
       var at = second => new Date(Date.UTC(2026, 10, 20, 9, 0, second)).toISOString();
       var event = (second, action, fields = {}) => ({ at: at(second), action, actor: "agent", ...fields });
-      var stageEvent = (second, phase, key, state, threadId, sessionId, result) => event(second, "expert-stage", {
+      var stageEvent = (second, phase, key, state, threadId, sessionId, result, agentId) => event(second, "expert-stage", {
         actor: phase === "work" ? "agent" : "reviewer",
-        expertStageRun: { phase, key, state, threadId, sessionId, result },
+        expertStageRun: { phase, key, state, threadId, sessionId, result, agentId },
       });
       var activity = (second, id, text, threadId = "executor", stageSessionId = "run-1") => ({
         at: at(second), id, text, threadId, stageSessionId,
         type: "agentMessage", status: "completed", title: "", phase: "commentary",
+      });
+      var childActivity = (second, id, text, child = "worker", session = "run-1") => ({
+        ...activity(second, id, text, child, session), stageChild: true,
+      });
+      var coordination = (second, id, title, leader, session, child) => ({
+        ...activity(second, id, JSON.stringify({ tool: "sendInput", receiverThreadIds: [child] }), leader, session),
+        phase: undefined, type: "collabAgentToolCall", title,
       });
       var stageConfig = (key, title, dependsOn = []) => ({
         key, title, dependsOn, expertId: "frontend-developer",
@@ -175,44 +182,58 @@ async function runCheck() {
 
     await evaluate(`
       var outside = activity(1, "outside", "ПОДГОТОВКА СЕАНСА");
-      var early = activity(3, "early", "Открыт журнал исполнения.");
-      var command = { ...activity(4, "command", "Проверка дерева завершена."),
+      var early = childActivity(3, "early", "Открыт журнал исполнения.");
+      var command = { ...childActivity(4, "command", "Проверка дерева завершена."),
         phase: undefined, type: "commandExecution", title: "git status --short" };
       var foreign = activity(4, "foreign", "ЧУЖОЙ ПОТОК", "foreign");
-      var later = activity(5, "later", "События сопоставлены с первой попыткой.");
+      var foreignChild = childActivity(5, "foreign-child", "ЧУЖОЙ СПЕЦИАЛИСТ", "unassigned-worker");
+      var later = childActivity(5, "later", "События сопоставлены с первой попыткой.");
+      var workHandoff = coordination(6, "work-handoff", "Передача исполнителю", "executor", "run-1", "worker");
+      var wrongHandoff = coordination(6, "wrong-handoff", "ЧУЖАЯ ПЕРЕДАЧА", "executor", "run-1", "unassigned-worker");
       var unscoped = activity(5, "unscoped", "СОБЫТИЕ БЕЗ СВЯЗИ", null, null);
-      var overlap = activity(7, "overlap", "НЕОДНОЗНАЧНОЕ СОБЫТИЕ");
-      var sameRole = activity(13, "same-role", "Запись другого этапа той же роли.");
-      var retry = activity(23, "retry", "Данные подтверждены после повторного запуска.", "executor", "run-2");
-      var wrongSession = activity(23, "wrong-session", "СОБЫТИЕ СТАРОЙ ПОПЫТКИ");
+      var overlap = childActivity(7, "overlap", "НЕОДНОЗНАЧНОЕ СОБЫТИЕ");
+      var sameRole = childActivity(13, "same-role", "Запись другого этапа той же роли.");
+      var retry = childActivity(23, "retry", "Данные подтверждены после повторного запуска.", "worker", "run-2");
+      var wrongSession = childActivity(23, "wrong-session", "СОБЫТИЕ СТАРОЙ ПОПЫТКИ");
       fixture.history.push(stageEvent(2, "work", "analysis", "running", "executor", "run-1"));
       fixture.expertStageStatus.work[0].state = "running";
       openFixture();
     `);
     await evaluate("update('run', [outside, early, command, foreign]); void 0");
+    await verify(`stageAt(0).open && !stageText(0).includes("Открыт журнал исполнения.")`,
+      "До подтверждения дочернего потока его действия не видны в журнале этапа.");
+    await evaluate(`
+      fixture.history.push(stageEvent(4, "work", "analysis", "running", "executor", "run-1", undefined, "worker"));
+      openFixture();
+    `);
     await verify(`stageAt(0).open && stageText(0).includes("Открыт журнал исполнения.") &&
-      !stageText(0).includes("События сопоставлены")`, "Первое событие исполнения появляется в раскрытом этапе.");
+      !stageText(0).includes("События сопоставлены") &&
+      stageAt(0).querySelectorAll(".expert-stage-log > .chat-event").length === 1`,
+      "Подтверждение дочернего потока не создаёт новую попытку. Его первое действие появляется до завершения этапа.");
     await click(".expert-stage[open] .chat-run-item > summary");
-    await evaluate("update('run', [outside, early, command, foreign, later, unscoped]); void 0");
+    await evaluate("update('run', [outside, early, command, foreign, later, foreignChild, unscoped, workHandoff, wrongHandoff]); void 0");
     await verify(`ordered(stageText(0), ["Открыт журнал исполнения.", "git status --short",
-      "Проверка дерева завершена.", "События сопоставлены с первой попыткой."]) &&
-      !/ЧУЖОЙ ПОТОК|ПОДГОТОВКА СЕАНСА|СОБЫТИЕ БЕЗ СВЯЗИ/.test(stageText(0)) &&
+      "Проверка дерева завершена.", "События сопоставлены с первой попыткой.", "Передача исполнителю"]) &&
+      !/ЧУЖОЙ|ЧУЖАЯ|ПОДГОТОВКА СЕАНСА|СОБЫТИЕ БЕЗ СВЯЗИ/.test(stageText(0)) &&
       stageAt(0).querySelector(".chat-run-item").open`,
-      "Позднее событие обновляет открытый этап. Порядок, раскрытая команда и её вывод сохраняются.");
+      "Позднее пояснение специалиста и координация ведущего видны до завершения этапа. Порядок и раскрытие команды сохраняются.");
     await capture("stage-live.png", 680);
 
     await evaluate(`
       fixture.history.push(
-        stageEvent(6, "work", "overlap", "running", "executor", "run-1"),
+        stageEvent(6, "work", "overlap", "running", "executor", "run-1", undefined, "worker"),
         stageEvent(8, "work", "overlap", "done", "executor", "run-1", "Итог параллельного этапа."),
         stageEvent(9, "work", "analysis", "blocked", "executor", "run-1", "Первая попытка отложена."),
-        stageEvent(12, "work", "implementation", "running", "executor", "run-1"),
+        stageEvent(12, "work", "implementation", "running", "executor", "run-1", undefined, "worker"),
         stageEvent(14, "work", "implementation", "done", "executor", "run-1", "Итог другого этапа."),
         stageEvent(15, "work", "fallback", "running", "executor", "run-1"),
         stageEvent(16, "work", "fallback", "done", "executor", "run-1", "Доступен только записанный результат."),
-        event(17, "run-log", { runThreadId: "executor", run: [outside, early, command, later, unscoped, overlap, sameRole] }),
+        event(17, "run-log", {
+          runThreadId: "executor", run: [outside, early, command, later, unscoped, workHandoff, overlap, sameRole],
+        }),
         event(18, "run-log", { runThreadId: "foreign", run: [foreign] }),
-        stageEvent(22, "work", "analysis", "running", "executor", "run-2")
+        stageEvent(21, "work", "analysis", "running", "executor", "run-2"),
+        stageEvent(22, "work", "analysis", "running", "executor", "run-2", undefined, "worker")
       );
       fixture.expertStageStatus.work.forEach((state, index) => state.state = index ? "done" : "running");
       openFixture();
@@ -236,7 +257,8 @@ async function runCheck() {
         stageEvent(24, "work", "analysis", "done", "executor", "run-2", "Этап исполнения завершён."),
         event(25, "run-log", { runThreadId: "executor", run: [wrongSession, retry] }),
         event(29, "submit", { to: "review" }),
-        stageEvent(32, "review", "analysis", "running", "reviewer", "review-1")
+        stageEvent(31, "review", "analysis", "running", "reviewer", "review-1"),
+        stageEvent(32, "review", "analysis", "running", "reviewer", "review-1", undefined, "review-worker")
       );
       fixture.expertStageStatus.work[0].state = "done";
       fixture.expertStageStatus.review[0].state = "running";
@@ -248,26 +270,42 @@ async function runCheck() {
     await evaluate(`
       stageAt(4).open = true;
       document.querySelector('[aria-controls="task-chat-dialogue"]').click();
-      reviewers[0].items.push(activity(33, "reviewed", "Проверен журнал этапа исполнения.", "reviewer", "review-1"));
+      var reviewLead = activity(30, "review-lead", "Ведущий открыл материалы ревью.", "reviewer", "review-1");
+      var reviewHandoff = coordination(33, "review-handoff", "Передача ревьюеру", "reviewer", "review-1", "review-worker");
+      var reviewCommand = {
+        ...childActivity(34, "review-command", "Дифф проверен.", "review-worker", "review-1"),
+        phase: undefined, type: "commandExecution", title: "git diff --check",
+      };
+      var reviewed = childActivity(35, "reviewed", "Проверен журнал этапа исполнения.", "review-worker", "review-1");
+      var foreignReview = childActivity(35, "foreign-review", "ЧУЖОЙ РЕВЬЮЕР", "unassigned-worker", "review-1");
+      reviewers[0].items.push(reviewLead, reviewHandoff, reviewCommand, reviewed, foreignReview);
       update("reviewer-chat");
       void 0;
     `);
-    await verify(`stageText(4).includes("Проверен журнал этапа исполнения.") &&
+    await verify(`ordered(stageAt(4).textContent, ["Передача ревьюеру", "git diff --check", "Проверен журнал этапа исполнения."]) &&
+      stageText(4).includes("Проверен журнал этапа исполнения.") &&
       !stageText(0).includes("Проверен журнал этапа исполнения.") &&
-      !stageText(4).includes("Открыт журнал исполнения.") && visible(byId("task-chat-dialogue"))`,
-      "Живое ревью обновляет этап при открытом диалоге справа. Совпадающий ключ фазы исполнения не получает запись.");
+      !/ЧУЖОЙ РЕВЬЮЕР|Открыт журнал исполнения/.test(stageText(4)) && visible(byId("task-chat-dialogue")) &&
+      stageAt(4).querySelectorAll(".expert-stage-log > .chat-event").length === 1`,
+      "В открытом этапе ревью видны координация, команда и пояснение дочернего потока до завершения. Диалог остаётся открытым.");
     await evaluate(`
-      fixture.history.push(stageEvent(35, "review", "analysis", "done", "reviewer", "review-1", "Ревью этапа завершено."));
+      fixture.history.push(stageEvent(36, "review", "analysis", "done", "reviewer", "review-1", "Ревью этапа завершено."));
       fixture.expertStageStatus.review[0].state = "done";
       reviewers[0].durationMs = 5500;
       reopenFixture();
     `);
-    await verify(`stageAt(4).open && ordered(stageText(4), ["Проверен журнал этапа исполнения.", "Ревью этапа завершено."])`,
-      "После повторного открытия карточки сохранённый журнал ревью восстановлен вместе с итогом.");
+    await verify(`stageAt(4).open && ordered(stageAt(4).textContent, ["Передача ревьюеру", "git diff --check",
+      "Проверен журнал этапа исполнения.", "Ревью этапа завершено."])`,
+      "После повторного открытия карточки восстановлены координация, действия специалиста и итог ревью.");
+    await evaluate('byId("task-review-history").open = true; void 0');
+    await verify(`visible(byId("task-review-history").querySelector(".task-review-attempt")) &&
+      byId("task-review-history").textContent.includes("Ведущий открыл материалы ревью.") &&
+      !/ЧУЖОЙ РЕВЬЮЕР|Проверен журнал этапа исполнения|git diff --check/.test(byId("task-review-history").textContent)`,
+      "Полный журнал ревью показывает ведущего. Команда и пояснение дочернего потока остаются в журнале этапа.");
     await evaluate(`document.querySelector('[aria-controls="task-chat-work"]').click(); void 0`);
     await verify(`visible(byId("task-chat-work")) && byId("task-chat-work").textContent.includes("ПОДГОТОВКА СЕАНСА") &&
-      !/ЧУЖОЙ ПОТОК|Проверен журнал этапа исполнения/.test(byId("task-chat-work").textContent)`,
-      "Правая вкладка показывает подготовку открытого сеанса исполнителя. Записи ревью и другого сеанса исключены.");
+      !/ЧУЖОЙ ПОТОК|Проверен журнал этапа исполнения|Открыт журнал исполнения|git status --short|Данные подтверждены/.test(byId("task-chat-work").textContent)`,
+      "Правая вкладка показывает открытый сеанс ведущего. Записи ревью, дочернего потока и другого сеанса исключены.");
     await evaluate(`
       var rightSnapshot = byId("task-chat-work").textContent;
       stageAt(0).querySelector("summary").click();
@@ -275,7 +313,7 @@ async function runCheck() {
       void 0;
     `);
     await verify(`byId("task-chat-work").textContent === rightSnapshot`, "Раскрытие этапа не меняет правый журнал.");
-    window.setContentSize(388, 1550);
+    window.setContentSize(388, 1670);
     await evaluate(`
       for (let index = 1; index < 5; index++) stageAt(index).open = false;
       stageAt(0).querySelector("summary").focus();
@@ -298,7 +336,7 @@ async function runCheck() {
       "src/cli/expert-team.ts", "src/cli/model.ts", "src/cli/tasks.ts", "src/desktop/chat.js",
       "src/desktop/codex-chat.ts", "src/desktop/codex-run.ts", "src/desktop/expert-tools.ts",
       "src/desktop/locales/en.json", "src/desktop/locales/ru.json", "src/desktop/renderer.js",
-      "src/desktop/run-activity.ts", "src/desktop/styles.css",
+      "src/desktop/reviewer-chat.ts", "src/desktop/run-activity.ts", "src/desktop/styles.css",
     ];
     const hashes = sources.map(path => {
       const current = git("hash-object", "--path=" + path, path).toString().trim();
@@ -314,8 +352,8 @@ async function runCheck() {
       "Результат — " + checks.length + " проверок пройдены. Ошибок в консоли renderer нет.", "",
       "Windows " + process.getSystemVersion() + ", Electron " + process.versions.electron +
         ", Chromium " + process.versions.chrome + ", Node " + process.versions.node + " (Electron).", "",
-      fence + "powershell", "node scripts/check-stage-work.mjs --artifacts .tasks/qa", fence, "",
-      "Production renderer запущен с тестовыми данными IPC в изолированном окне. Повторное открытие " +
+      fence + "powershell", "node scripts/check-stage-work.mjs --artifacts .tasks/qa/delegated", fence, "",
+      "Проверен рабочий интерфейс Electron с тестовыми данными IPC в изолированном окне. Повторное открытие " +
         "проверено через showTask. Реальный провайдер и запись его журнала здесь не вызываются.", "",
       "## Результаты", "", ...checks.map(check => "- " + check), "",
       "## Снимки", "", ...captures.map(capture => "- " + capture), "",
