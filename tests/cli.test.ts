@@ -3313,6 +3313,9 @@ test("accept creates a merge commit and protects the source and ignored files", 
   const approved = cli(root, ["review-approve", task.id], decision);
   assert.equal(approved.revision, task.revision);
   assert.equal(approved.history.at(-1).reviewApproval.targetHead, initial);
+  cli(root, ["accept", task.id], {
+    actor: "manager", reviewMode: "reviewer", revision: task.revision, targetHead: task.git.submission.sha,
+  }, "REVIEW_REQUIRED");
 
   const exclude = join(root, ".git", "info", "exclude");
   writeFileSync(exclude, readFileSync(exclude, "utf8") + "\n/protected.txt\n");

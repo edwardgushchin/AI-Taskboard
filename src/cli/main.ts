@@ -691,7 +691,8 @@ function run(
     }
     if (command === "accept" && mode === "reviewer" && task.status === "review") {
       requireRevision(task, input.revision, true);
-      if (!currentReviewApproval(task, store.index.settings) || input.targetHead === undefined) {
+      const approval = currentReviewApproval(task, store.index.settings)?.reviewApproval;
+      if (!approval || approval.targetHead !== input.targetHead) {
         throw new TaskboardError("REVIEW_REQUIRED", "Use the current target HEAD and the reviewer's approval for this submission.");
       }
     }

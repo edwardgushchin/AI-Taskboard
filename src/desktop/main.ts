@@ -57,7 +57,7 @@ import { readManagerImage, saveManagerImage } from "./manager-images.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
 import { createAgentSlots, desktopAppName, parseAgentLimits, readProfileTaskLimits } from "./agent-limits.ts";
 import { nextReadyTask } from "./auto-queue.ts";
-import { automationDelivery } from "./automation-delivery.ts";
+import { automationDelivery, pendingReviewApprovals } from "./automation-delivery.ts";
 import type { AgentRole } from "./agent-limits.ts";
 import { ApplicationUpdates, applicationUpdateTools, prepareWindowsUpdate } from "./installation-updates.ts";
 import { settingsDelivery, syncSettingsNotices } from "./settings-notices.ts";
@@ -1274,6 +1274,7 @@ type ExecutorContinuation = { afterDisconnect?: boolean; withoutProgress?: boole
 const autoBoards = new WeakMap<BoardWatch, {
   running: boolean; milestonesAt: number; dates: Map<number, string | null>; milestonesError?: string;
   launches: Set<string>; integrations: Set<string>; notices: Set<string>;
+  approvalRetryAt: number;
 }>();
 let schedulingAgentWork = false;
 
@@ -1297,10 +1298,11 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
   };
   if (isManual(watch.board.settings) || subscriptions.get(project) !== watch || closingProjects.has(project) ||
       (!watch.board.settings.autoMode && !watch.board.tasks.some(task =>
-        (task.status === "ready" && task.launchRequested) || missingPlan(task, watch.board.settings)))) return;
+        (task.status === "ready" && task.launchRequested) || missingPlan(task, watch.board.settings)) &&
+        !pendingReviewApprovals(watch.board).length)) return;
   let state = autoBoards.get(watch);
   if (!state) {
-    state = { running: false, milestonesAt: 0, dates: new Map(), launches: new Set(), integrations: new Set(), notices: new Set() };
+    state = { running: false, milestonesAt: 0, dates: new Map(), launches: new Set(), integrations: new Set(), notices: new Set(), approvalRetryAt: 0 };
     autoBoards.set(watch, state);
   }
   if (state.running) return;
@@ -1383,6 +1385,25 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
       const notices = (board.managerInbox ?? []).filter(message => ["question", "decision", "block"].includes(message.kind) &&
         !queue.notices.has(message.id + ":" + message.sequence));
       const tab = [...watch.tabs].find(tab => !tab.window.isDestroyed());
+      const pendingApprovals = pendingReviewApprovals(board);
+      if (pendingApprovals.length && tab && !boardWorkRequests.has(key) && !boardRequests.has(key) && !backgroundManagerRequests.has(key) &&
+          !agentSlots.entries(project).some(entry => entry.task === "manager:context" || entry.task === "manager:dialogue") &&
+          agentSlots.available(key, "manager", board.settings.taskLimits) && now >= queue.approvalRetryAt) {
+        const approvals = pendingApprovals.filter(({ id }) =>
+          !executorBusy(project, id) && !watch.reviewerRuns.has(id)).slice(0, 4);
+        if (approvals.length) {
+          queue.approvalRetryAt = now + 30_000;
+          void runBoardRequest(tab.window.webContents, board,
+            "Process the recorded reviewer approvals for the assigned cards and finish the turn.",
+            [], false, false, undefined, undefined, undefined, false, undefined, undefined, undefined, approvals)
+            .then(result => {
+              if (!result.ok && !["BOARD_REQUEST_IN_PROGRESS", "MANAGER_LIMIT", "BOARD_BUSY", "PROVIDER_QUOTA"].includes(result.error.code)) {
+                failed(result.error.message);
+              } else if (result.ok && result.data?.error) failed(result.data.error);
+            })
+            .catch(error => failed((error as Error).message));
+        }
+      }
       const unplanned = board.tasks.filter(task => missingPlan(task, board.settings) &&
         !queue.notices.has("expert-plan:" + task.id + ":" + task.revision));
       const activeSlots = new Set(unplanned.length
@@ -2152,7 +2173,8 @@ ipcMain.handle("board:request", async (event, request: unknown, files: unknown =
 });
 
 async function runBoardRequest(sender: Electron.WebContents, board: Board | undefined, request: unknown, files: unknown = [],
-  goal: unknown = false, immediate: unknown = false, messageId?: unknown, reviewIds?: string[], expectedReviewMode?: ReviewMode, autoNotice = false, repairTask?: Task, cleanupJob?: MaintenanceJob, goalRunId?: string) {
+  goal: unknown = false, immediate: unknown = false, messageId?: unknown, reviewIds?: string[], expectedReviewMode?: ReviewMode, autoNotice = false, repairTask?: Task, cleanupJob?: MaintenanceJob, goalRunId?: string,
+  approvalNotices?: ReturnType<typeof pendingReviewApprovals>) {
   if (applicationUpdates.installing) {
     return cliFailure("UPDATE_IN_PROGRESS", t("updates.preparing"));
   }
@@ -2175,7 +2197,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   };
   const broadcastMaintenanceSafe: typeof broadcastBoardChat = (...args) => { if (!cleanupJob) broadcastBoardChat(...args); };
   const projectKey = projectIdentity(board.project);
-  const background = Boolean(reviewIds || autoNotice || repairTask || cleanupJob);
+  const background = Boolean(reviewIds || autoNotice || repairTask || cleanupJob || approvalNotices);
   const lane = goal || background ? "work" : "chat";
   const requests = background ? backgroundManagerRequests : goal ? boardWorkRequests : boardRequests;
   const context = background ? "manager:background" : goal ? "manager:context" : "manager:dialogue";
@@ -2532,6 +2554,28 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     }
     const settings = await callCli<BoardSettings>(board.project, ["settings"]);
     if (!settings.ok) return settings;
+    type ApprovalSnapshot = { revision: number; targetHead: string | null; reviewModeVersion?: number };
+    const checkedApprovals = new Map<string, ApprovalSnapshot>();
+    if (approvalNotices) {
+      // The writer claim serializes background turns across windows and processes.
+      // Recheck persisted approvals after acquiring it, before starting the provider.
+      const current = await callCli<Board>(project, ["list", "--compact"]);
+      if (!current.ok) return current;
+      const pending = pendingReviewApprovals(current.data);
+      for (const { id, sequence } of approvalNotices) {
+        if (!pending.some(message => message.id === id && message.sequence === sequence) || executorBusy(project, id)) continue;
+        const review = await callCli<ApprovalSnapshot & { stale: boolean; reviewMode: ReviewMode;
+          reviewerApproval?: { targetHead: string | null } }>(project, ["review", id, "--compact"]);
+        if (!review.ok && review.error.code === "BOARD_BUSY") return review;
+        if (review.ok && !review.data.stale && review.data.reviewMode === "reviewer" &&
+            review.data.reviewerApproval && review.data.reviewerApproval.targetHead === review.data.targetHead) {
+          const { revision, targetHead, reviewModeVersion } = review.data;
+          checkedApprovals.set(id, { revision, targetHead, reviewModeVersion });
+        }
+      }
+      if (!checkedApprovals.size) return { ok: true as const, data: { answer: "", changes: [] } };
+      requestText += "\nCards: " + JSON.stringify([...checkedApprovals.keys()]);
+    }
     const settingsNotices = settingsDelivery(project, background ? "background" : lane, () => syncSettingsNotices(project, agentSlots.inherited(project)));
     let initialSettings;
     while (!initialSettings) {
@@ -2547,7 +2591,10 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     if (expectedReviewMode && !board.tasks.some(task => reviewIds?.includes(task.id) && taskReviewMode(task, settings.data) === expectedReviewMode)) {
       return cliFailure("REVIEW_MODE_CHANGED", t("errors.5842130646fd0b88"));
     }
-    const instructions = cleanupJob ? boardInstructions.replace("Do not edit files, run project code, or change Git state yourself.", "Diagnose and repair only the assigned internal maintenance fault yourself.") +
+    const instructions = approvalNotices ?
+      "Use task_review for each assigned card and task_accept with the returned revision and targetHead if the reviewer approval is current. " +
+      "Finish after one pass. Leave cards with failed acceptance or stale approval pending." :
+      cleanupJob ? boardInstructions.replace("Do not edit files, run project code, or change Git state yourself.", "Diagnose and repair only the assigned internal maintenance fault yourself.") +
       " This is a private maintenance run with manager authority charged to the shared reviewer pool. No goal, user messages, notifications or product cards. " +
       "Do not launch agents or change task status. Read the private maintenance diagnostic and inspect ownership, active runtime users, exact absolute paths and Git registration before mutation. " +
       "Retry transient locks/access errors without force or weakening ACLs. Preserve unknown user data with the established saved-changes mechanism and required evidence as individual board attachments/artifacts. " +
@@ -2595,8 +2642,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     const allowReviewModeChange = !background && !goal && !isManual(settings.data);
     if (allowReviewModeChange) mcpTools.push(boardReviewModeTool);
     if (goal) mcpTools = goalActionTools(mcpTools);
+    if (approvalNotices) mcpTools = mcpTools.filter(({ name }) => name === "task_review" || name === "task_accept");
     const attachments = await prepareBoardAttachments(queued ? queuedFiles(queued) : files, scratch);
-    if (!reviewIds && !autoNotice && goal !== "resume") {
+    if (!reviewIds && !autoNotice && !approvalNotices && goal !== "resume") {
       historyMessage = {
         at: new Date().toISOString(),
         text: requestText,
@@ -2605,7 +2653,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       };
     }
     let imageIndex = 0;
-    const unread = cleanupJob || reviewIds || (!goal && boardWorkRequests.get(projectKey)?.goalRunning) ? [] :
+    const unread = cleanupJob || reviewIds || approvalNotices || (!goal && boardWorkRequests.get(projectKey)?.goalRunning) ? [] :
       (subscriptions.get(project)?.board ?? board).managerInbox ?? [];
     const priorChat = lane === "chat" && !threadId ? readManagerHistory(project, null, "chat")?.turns.slice(-8)
       .flatMap(turn => turn.lane === "notice" ? [] : [{
@@ -2733,7 +2781,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     let requestTools: BoardMcpTool[];
     if (cleanupJob) {
       requestTools = boardTools.filter(tool => ["board_list", "task_show"].includes(tool.name));
-    } else if (reviewIds) {
+    } else if (reviewIds || approvalNotices) {
       requestTools = [];
     } else if (isManual(settings.data)) {
       requestTools = boardTools.filter(tool => ["board_list", "task_show", "task_create", "task_update", "tag_set_color", "ask_user"].includes(tool.name));
@@ -2745,6 +2793,28 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       attachments.flatMap(file => file.image ? [file.image] : []),
       async (name, args, toolSignal) => {
         const dispatch = async (args: unknown): Promise<CliReply> => {
+          if (approvalNotices) {
+            const fields = args as ({ id?: string } & Partial<ApprovalSnapshot>) | null;
+            const id = fields?.id ?? "";
+            const expected = checkedApprovals.get(id);
+            if (!expected || (name !== "task_review" && name !== "task_accept")) {
+              return cliFailure("INVALID_INPUT", "This request handles only the assigned reviewer approvals.");
+            }
+            if (name === "task_review") {
+              const reply = await run(name, args, toolSignal);
+              if (!reply.ok) return reply;
+              const current = reply.data as ApprovalSnapshot & { stale: boolean; reviewMode: ReviewMode };
+              if (current.stale || current.reviewMode !== "reviewer" || current.revision !== expected.revision ||
+                  current.reviewModeVersion !== expected.reviewModeVersion || current.targetHead !== expected.targetHead) {
+                checkedApprovals.delete(id);
+                return cliFailure("REVIEW_REQUIRED", "The assigned review changed. Leave it pending for the next board check.");
+              }
+              return reply;
+            }
+            if (fields?.revision !== expected.revision || fields.targetHead !== expected.targetHead) {
+              return cliFailure("REVIEW_REQUIRED", "Use the revision and target HEAD of the assigned approval.");
+            }
+          }
           if (reviewIds && !autoReviewReadTools.has(name)) {
             const input = args as { id?: string; messages?: { id?: string }[] } | null;
             const ids = name === "manager_ack" && Array.isArray(input?.messages)
@@ -2795,7 +2865,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           return pending.then(reply => {
             const automationErrors = takeAutomationErrors();
             const result = { ...reply, ...(automationErrors.length ? { automationErrors } : {}) };
-            if (reviewIds || cleanupJob) return result;
+            if (reviewIds || cleanupJob || approvalNotices) return result;
             if (name === "task_review" && result.ok) {
               const { id, reviewMode, stale } = result.data as { id: string; reviewMode: ReviewMode; stale: boolean };
               if (!stale && !usesIndependentReviewer(reviewMode) && !signal.aborted && requests.get(projectKey) === running) startReview([id]);
@@ -3107,7 +3177,10 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       if (lane === "chat") broadcastMaintenanceSafe(project, "orchestrator-history");
     }
     const watch = subscriptions.get(board.project);
-    if (watch) setImmediate(() => scheduleAutoReview(watch));
+    if (watch) setImmediate(() => {
+      scheduleAutoReview(watch);
+      if (!watch.board.settings.autoMode) scheduleAutoBoard(watch);
+    });
   }
 }
 
