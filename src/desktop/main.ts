@@ -1291,7 +1291,7 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
     (task.expertWorkPlanned && (task.schedule || taskReviewMode(task, settings) === "human" || task.expertReviewPlanned));
   const missingPlan = (task: Board["tasks"][number], settings: BoardSettings) => {
     const mode = taskReviewMode(task, settings);
-    if (task.status === "review") return (settings.autoMode || mode === "reviewer-human") && mode !== "human" && !task.expertReviewPlanned &&
+    if (task.status === "review") return (settings.autoMode || usesIndependentReviewer(mode)) && mode !== "human" && !task.expertReviewPlanned &&
       !task.reviewPending && !task.reviewApproved && (!task.acceptanceRepair || reviewsAcceptanceRepair(task, settings));
     const controls = settings.autoMode ? settings.autoQueue : undefined;
     return task.status === "ready" && !controls?.paused && !controls?.held.includes(task.id) &&
@@ -1615,7 +1615,6 @@ function reserveAgent(project: string, role: AgentRole, task?: string, queuedRev
         const { settings } = store.index;
         const mode = taskReviewMode(card, settings);
         if (card.status !== "review" || mode !== review.mode || !usesIndependentReviewer(mode) ||
-            (!settings.autoMode && mode !== "reviewer-human") ||
             (card.acceptanceRepair && !reviewsAcceptanceRepair(card, settings))) return;
         return acquire(settings);
       }, 0)
@@ -3297,7 +3296,7 @@ function scheduleAutoReview(watch: BoardWatch) {
 
   const reviewAttempt = (task: Task & { reviewDecision?: number; reviewTargetHead?: string | null }) =>
     JSON.stringify([modeOf(task), taskReviewModeVersion(task, settings), task.revision, task.reviewDecision, task.reviewTargetHead]);
-  const ready = submissions.filter(task => (settings.autoMode || modeOf(task) === "reviewer-human") &&
+  const ready = submissions.filter(task => (settings.autoMode || usesIndependentReviewer(modeOf(task))) &&
     modeOf(task) !== "human" && !task.reviewPending &&
     (!task.acceptanceRepair || reviewsAcceptanceRepair(task, settings)) && !watch.reviewerRuns.has(task.id) &&
     task.expertReviewPlanned && (!usesIndependentReviewer(modeOf(task)) || !task.reviewApproved) &&

@@ -171,7 +171,8 @@ function snapshotBoard(store: BoardStore, compact = false, cache = new Map<strin
       let reviewTargetHead: string | null | undefined;
       const mode = taskReviewMode(task, header.settings);
       const reviewPending = task.status === "review" && exists(store.pendingPath(task.id)) ? true as const : undefined;
-      const checkReviewTarget = mode === "reviewer-human" || (mode === "reviewer" && !task.expertReviewPlanned && approval);
+      const checkReviewTarget = mode === "reviewer-human" ||
+        (mode === "reviewer" && approval && (!header.settings.autoMode || !task.expertReviewPlanned));
       if (task.status === "review" && checkReviewTarget) {
         if (target && !targetHeads.has(target)) {
           targetHeads.set(target, store.location.repository && resolveCommit(store.location.repository.root, target) || undefined);

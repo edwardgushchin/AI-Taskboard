@@ -136,12 +136,14 @@ function fixture(t: TestContext) {
     confirm: async () => supportsUpdates,
     prepare: async () => ({ start: async () => {}, cancel: async () => {} }),
   });
+  let quotaPaused = false;
   const runtime = runInNewContext(handlerSource + "\n({ frame, scheduleAutoReview, boardRequests, boardWorkRequests, backgroundManagerRequests, acceptanceWork, managerQuestion, runBoardRequest, scheduleRecurringTasks })", {
-    quotaWait: undefined, quotaInterruption: new Error("Fixture quota pause"), refreshQuota: async () => [],
+    get quotaWait() { return quotaPaused ? {} : undefined; },
+    quotaInterruption: new Error("Fixture quota pause"), refreshQuota: async () => [],
     currentActiveGoal: activeManagerGoal, managerGoalBinding,
     applicationUpdates, applicationUpdateTools, updateOwner: undefined, updateProject: undefined,
     scheduleAutoBoard: () => {}, scheduleDraftDiscussions: () => {},
-    activeRunSummary, runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
+    activeRunSummary, discussionActivityByTask: new Map(), runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
     captureFileLink, isFileLink, verifyFileLink, AbortSignal, AbortController, ArrayBuffer, Buffer, Error, basename, dirname, extname, join, mkdtemp, rm, writeFile, maxAttachmentBytes, boardActions, boardInstructions, boardTools, callCli,
     githubReadTool, readBoardGitHub: (cwd: string, args: unknown) => callCli(cwd, ["github-read"], args),
     executorFullAccess, managerAccess, setTaskExecutorAccess, phaseStageReporter,
@@ -299,6 +301,7 @@ function fixture(t: TestContext) {
     },
     busyDecisions,
     beforeReviewRead: (change: () => void) => { beforeReviewRead = change; },
+    setQuotaPaused: (paused: boolean) => { quotaPaused = paused; },
     setReviewer: (runner: typeof reviewSubmission) => { reviewSubmission = runner; },
     schedule: (board: any, reply: Reply) => {
       respond = reply;
@@ -309,6 +312,9 @@ function fixture(t: TestContext) {
       subscriptions.set(project, watch);
       return {
         tick: () => runtime.scheduleAutoReview(watch),
+        addWindow: () => watch.tabs.add({
+          window: { isDestroyed: () => false, webContents: { isDestroyed: () => false, send() {} } },
+        }),
         acceptanceTick: () => runtime.scheduleRecurringTasks(),
         runChanged: () => { for (const listener of boardListeners) listener(watch.board); },
         reloadReviewReports: () => { watch.reviewReports = readReviewReports(folder, project); return watch.reviewReports; },
@@ -950,7 +956,7 @@ test("manager can route a draft to Luna or Sol without changing board defaults",
   assert.deepEqual((await f.cli(["settings"])).data.executor, defaultBoardAgents.executor);
 });
 
-test("a stale reviewer-human snapshot cannot reserve a reviewer after switching to reviewer with automatic mode off", { timeout: 90_000 }, async t => {
+test("a stale reviewer-human snapshot cannot reserve a reviewer after switching to human with automatic mode off", { timeout: 90_000 }, async t => {
   const f = fixture(t);
   await f.cli(["init"], { git: false });
   await f.cli(["settings"], { reviewMode: "reviewer-human", autoMode: true });
@@ -971,7 +977,7 @@ test("a stale reviewer-human snapshot cannot reserve a reviewer after switching 
   assert.deepEqual(Object.keys(queue.reviewing()), []);
   await queue.done();
   assert.equal(calls, 0);
-  assert.equal((await f.cli(["settings"], { reviewMode: "reviewer", autoMode: false })).ok, true);
+  assert.equal((await f.cli(["settings"], { reviewMode: "human", autoMode: false })).ok, true);
   queue.tick();
   assert.deepEqual(Object.keys(queue.reviewing()), []);
   await queue.done();
@@ -1003,77 +1009,112 @@ test("a stale reviewer-human snapshot cannot reserve a reviewer after switching 
   await queue.done();
   assert.equal(calls, 0);
 
-  await f.cli(["settings"], { autoMode: true });
   await queue.refresh();
   queue.tick();
   await queue.done();
   assert.equal(calls, 1);
 });
 
-test("reviewer-human uses the shared review queue with and without automatic mode", { timeout: 120_000 }, async t => {
-  const f = fixture(t);
-  await f.cli(["init"]);
-  f.agentSlots.configure({ executor: 1, manager: 1, reviewer: 1 });
-  for (const autoMode of [false, true]) {
-    assert.equal((await f.cli(["settings"], { reviewMode: "reviewer-human", autoMode, reviewer: { model: "fixture", effort: "low" } })).ok, true);
-    const ids: string[] = [];
-    const submit = async (id: string) => {
-      const { data: preview } = await f.cli(["preview", id]);
-      assert.equal((await f.cli(["submit", id], { token: preview.token, noChanges: true,
-        summary: "External result", checks: ["Read the result"] })).ok, true);
+for (const reviewMode of ["reviewer", "reviewer-human"]) {
+  test(reviewMode + " uses the shared review queue with and without automatic mode", { timeout: 120_000 }, async t => {
+    const f = fixture(t);
+    const git = (...args: string[]) => {
+      const result = spawnSync("git", ["-C", f.project, ...args], { encoding: "utf8", windowsHide: true });
+      assert.equal(result.status, 0, result.stderr);
     };
-    for (const title of ["First", "Second"]) {
-      const { data: task } = await f.cli(["create"], plannedDraft({ title, criteria: ["Check the result"] }));
-      await f.cli(["approve", task.id]);
-      assert.equal((await f.cli(["start", task.id])).ok, true);
-      await submit(task.id);
-      ids.push(task.id);
-    }
-    const release = Promise.withResolvers<void>();
-    const calls: string[] = [];
-    f.setReviewer(async ({ id }) => {
-      calls.push(id);
-      if (calls.length === 1) await release.promise;
-      const findings = id === ids[1] && calls.filter(call => call === id).length === 1 ? ["Fix the result"] : [];
-      return { summary: "Reviewed", findings, needsHuman: false, evidence: ["Checked"] };
-    });
-    const schedule = async () => f.schedule((await f.cli(["list", "--compact"])).data,
-      async () => assert.fail("Hybrid approval must not dispatch manager integration"));
-    const queue = await schedule();
-    queue.tick();
-    for (let i = 0; !calls.length && i < 250; i++) await wait(20);
-    try {
-      assert.equal(calls.length, 1);
-      assert.equal(Object.keys(queue.reviewing()).length, 1);
+    git("init", "-b", "main");
+    git("config", "user.name", "Taskboard");
+    git("config", "user.email", "taskboard@example.invalid");
+    git("commit", "--allow-empty", "-m", "Initial commit");
+    await f.cli(["init"]);
+    f.agentSlots.configure({ executor: 1, manager: 1, reviewer: 1 });
+    for (const autoMode of [false, true]) {
+      assert.equal((await f.cli(["settings"], { reviewMode, autoMode, reviewer: { model: "fixture", effort: "low" } })).ok, true);
+      const ids: string[] = [];
+      const submit = async (id: string, commit = false) => {
+        const { data: preview } = await f.cli(["preview", id]);
+        assert.equal((await f.cli(["submit", id], { token: preview.token, ...(commit ? { message: "test: add review evidence" } : { noChanges: true }),
+          summary: "External result", checks: ["Read the result"] })).ok, true);
+      };
+      for (const title of ["First", "Second"]) {
+        const { data: task } = await f.cli(["create"], plannedDraft({ title, criteria: ["Check the result"] }));
+        await f.cli(["approve", task.id]);
+        const started = await f.cli(["start", task.id]);
+        assert.equal(started.ok, true, JSON.stringify(started));
+        if (title === "First") {
+          await writeFile(join(started.data.worktree, "evidence.txt"), "Review evidence\n");
+          await submit(task.id, true);
+        }
+        ids.push(task.id);
+      }
+      const release = Promise.withResolvers<void>();
+      const calls: Array<{ id: string; revision: number }> = [];
+      f.setReviewer(async ({ id, revision }) => {
+        calls.push({ id, revision });
+        if (calls.length === 1) await release.promise;
+        const findings = id === ids[1] && calls.filter(call => call.id === id).length === 1 ? ["Fix the result"] : [];
+        return { summary: "Reviewed", findings, needsHuman: false, evidence: ["Checked"] };
+      });
+      const schedule = async () => f.schedule((await f.cli(["list", "--compact"])).data,
+        async () => assert.fail("The review scheduler must not dispatch manager integration directly"));
+      const queue = await schedule();
+      f.setQuotaPaused(true);
       queue.tick();
-      assert.equal(calls.length, 1);
-    } finally {
-      release.resolve();
+      await queue.done();
+      assert.equal(calls.length, 0);
+      f.setQuotaPaused(false);
+      queue.tick();
+      for (let i = 0; !calls.length && i < 250; i++) await wait(20);
+      try {
+        assert.equal(calls.length, 1);
+        assert.equal(Object.keys(queue.reviewing()).length, 1);
+        await submit(ids[1]);
+        await queue.refresh();
+        queue.addWindow();
+        queue.tick();
+        assert.equal(calls.length, 1);
+      } finally {
+        release.resolve();
+      }
+      await queue.done();
+      await queue.refresh();
+      queue.tick();
+      await queue.done();
+      assert.equal(calls.length, 2);
+      const first = calls[0].id;
+      assert.equal((await f.cli(["show", first])).data.status, "review");
+      const returned = await f.cli(["show", ids[1]]);
+      assert.equal(returned.data.status, "in_progress");
+      await submit(ids[1]);
+      await queue.refresh();
+      queue.tick();
+      await queue.done();
+      assert.equal(calls.length, 3);
+      const restarted = await schedule();
+      restarted.tick();
+      await restarted.done();
+      assert.deepEqual(calls.map(call => call.id), [ids[0], ids[1], ids[1]]);
+      assert.ok(calls[2].revision > calls[1].revision);
+      t.diagnostic(JSON.stringify({ reviewMode, autoMode, calls }));
+      for (const id of ids) {
+        const { data } = await f.cli(["review", id, "--compact"]);
+        assert.ok(data.reviewerApproval);
+        assert.equal(Boolean(data.awaitingHumanAcceptance), reviewMode === "reviewer-human");
+      }
+      assert.equal((await f.cli(["settings"])).data.autoMode, autoMode);
+      if (reviewMode === "reviewer" && !autoMode) {
+        git("commit", "--allow-empty", "-m", "Advance the review target");
+        await restarted.refresh();
+        restarted.tick();
+        await restarted.done();
+        assert.deepEqual(calls.map(call => call.id), [ids[0], ids[1], ids[1], ids[0]]);
+        const { data } = await f.cli(["review", ids[0], "--compact"]);
+        assert.equal(data.reviewerApproval?.targetHead, data.targetHead);
+        t.diagnostic(JSON.stringify({ advancedTarget: calls[3] }));
+      }
     }
-    await queue.done();
-    await queue.refresh();
-    queue.tick();
-    await queue.done();
-    assert.equal(calls.length, 2);
-    const first = calls[0];
-    assert.equal((await f.cli(["show", first])).data.status, "review");
-    const returned = await f.cli(["show", ids[1]]);
-    assert.equal(returned.data.status, "in_progress");
-    await submit(ids[1]);
-    await queue.refresh();
-    queue.tick();
-    await queue.done();
-    assert.equal(calls.length, 3);
-    const restarted = await schedule();
-    restarted.tick();
-    await restarted.done();
-    assert.equal(calls.length, 3);
-    for (const id of ids) {
-      const { data } = await f.cli(["review", id, "--compact"]);
-      assert.equal(data.awaitingHumanAcceptance, true);
-    }
-  }
-});
+  });
+}
 
 test("an unfinished independent review keeps the submission and releases the manager to return it", { timeout: 60_000 }, async t => {
   const f = fixture(t);
