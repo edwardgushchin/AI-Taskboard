@@ -91,19 +91,16 @@ async function run() {
   const evaluate = code => window.webContents.executeJavaScript(code);
   await evaluate(`showTask(${JSON.stringify(id)})`);
   await evaluate(`document.querySelector('[aria-controls="task-chat-work"]').click()`);
+  const work = await evaluate(`document.querySelector('#task-chat-work').innerText`);
+  assert.match(work, /Executor response saved during review/);
+  assert.doesNotMatch(work, /Provider summary|task_review_diff|Submission before review|Review approved|Fix the finding/);
+  await evaluate(`document.querySelector('#task-review-history > summary').click()`);
   const rows = await waitFor(() => evaluate(`(() => {
-    const feed = document.querySelector('#task-chat-work');
+    const feed = document.querySelector('#task-review-history');
     const attempts = [...feed.querySelectorAll('.task-review-attempt')];
     if (attempts.length !== 3) return null;
     return {
       text: feed.innerText,
-      handoff: [...feed.children].flatMap(row => {
-        if (row.textContent.includes('Executor response saved during review.')) return ['executor'];
-        if (row.textContent.includes('Submission before review')) return ['submission'];
-        return row === attempts[0] ? ['reviewer'] : [];
-      }),
-      decisionCount: [...feed.querySelectorAll('.chat-event > .chat-author')]
-        .filter(label => label.textContent === 'Ревьюер').length,
       attempts: attempts.map(row => ({
         label: row.firstElementChild.innerText,
         events: [...row.querySelector('.chat-run').children].map(node => node.dataset.item),
@@ -114,8 +111,6 @@ async function run() {
   assert.match(rows.attempts[0].label, /Ревьюер #1/);
   assert.match(rows.attempts[1].label, /Ревьюер #2/);
   assert.match(rows.attempts[2].label, /Ревьюер #3/);
-  assert.deepEqual(rows.handoff, ["executor", "submission", "reviewer"]);
-  assert.equal(rows.decisionCount, 3);
   assert.deepEqual(rows.attempts.map(row => row.events), [
     ["item:summary-1", "item:tool-1", "message:result-1"], ["item:tool-2", "message:result-2"], ["message:result-3"],
   ]);
@@ -131,14 +126,14 @@ async function run() {
     writeFileSync(join(artifacts, "review-after-restart.png"), (await window.webContents.capturePage()).toPNG());
   }
   await evaluate(`sheet.close(); showTask("T-0002")`);
-  await evaluate(`document.querySelector('[aria-controls="task-chat-work"]').click()`);
+  await evaluate(`document.querySelector("#task-review-history > summary").click()`);
   assert.deepEqual(await evaluate(`api.reviewerChat("T-0002")`), { ok: true, data: [] });
-  assert.match(await evaluate(`document.querySelector('#task-chat-work').innerText`), /Decision from the card history/);
+  assert.match(await evaluate(`document.querySelector('#task-review-history').innerText`), /Decision from the card history/);
   await evaluate(`sheet.close(); showTask("T-0003")`);
   assert.deepEqual(await evaluate(`api.reviewerChat("T-0003")`), { ok: true, data: [] });
   assert.match(await evaluate(`document.querySelector('#task-chat-dialogue').innerText`), /Repair the missing evaluation/);
-  await evaluate(`document.querySelector('[aria-controls="task-chat-work"]').click()`);
-  const fallbackReason = await evaluate(`document.querySelector('#task-chat-work').innerText`);
+  await evaluate(`document.querySelector("#task-review-history > summary").click()`);
+  const fallbackReason = await evaluate(`document.querySelector('#task-review-history').innerText`);
   assert.match(fallbackReason, /Ревьюер/);
   assert.equal(fallbackReason.split("Repair the missing evaluation.").length - 1, 1);
   if (!writing && keepArtifacts) {

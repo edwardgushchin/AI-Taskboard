@@ -129,6 +129,8 @@ export interface TaskEvent {
   from?: TaskState;
   to?: TaskState;
   chat?: ChatSettings & { files?: string[]; usage?: ChatUsage; commentary?: string[] };
+  previousCodexThreadId?: string;
+  runThreadId?: string;
   run?: RunActivity[];
 }
 

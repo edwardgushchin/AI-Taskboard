@@ -876,6 +876,8 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .task-details-content { margin: 0; padding: 12px 14px 14px; border-top: 1px solid var(--border); }
 .task-details-content h3 { margin: 0 0 4px; color: var(--muted); font-size: 12px; font-weight: 600; }
 .task-details-content h3:not(:first-child) { margin-top: 12px; }
+.task-review-history { display: grid; gap: 8px; list-style: none; margin: 0; }
+.task-review-history .chat-entry { width: 100%; max-width: none; }
 .task-review-files { list-style: none; margin: 0; padding: 0; }
 .task-review-file.button {
   display: flex; justify-content: space-between; align-items: center; gap: 8px 12px; flex-wrap: wrap;
@@ -908,7 +910,7 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .task-chat .chat-composer textarea { max-height: 22vh; }
 .task-chat .chat-composer { flex: none; }
 .task-dialogue .chat-report-details { display: none; }
-.task-work-controls, .task-team-activity, .task-team-mail { display: grid; gap: 8px; }
+.task-work-controls, .task-team-mail { display: grid; gap: 8px; }
 .chat-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; }
 .chat-log { min-width: 0; list-style: none; margin: 0; }
 .chat-log:not(.task-dialogue) {
@@ -1573,9 +1575,6 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 .expert-recipient { display: flex; align-items: baseline; gap: 4px; color: var(--muted); margin-bottom: 5px; }
 .expert-bubble .chat-text > :last-child { margin-bottom: 0; }
 .expert-message-reference { margin-bottom: 5px; }
-.expert-agent-history { border-bottom: 1px solid var(--border); padding-bottom: 8px; }
-.expert-agent-history > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
-.task-team-activity { gap: 0; }
 .expert-agent-event { border-block-end: 1px solid var(--border); min-width: 0; overflow-wrap: anywhere; }
 .expert-agent-event-line { display: flex; align-items: flex-start; gap: 8px; padding: 7px 3px; list-style: none; }
 .expert-agent-event summary { cursor: pointer; }

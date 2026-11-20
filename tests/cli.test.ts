@@ -1419,12 +1419,18 @@ test("task chat stores messages and attachments together and archives the conver
   cli(root, ["run-log", task.id], { entries: [{ ...entries[0], phase: "unknown" }] }, "INVALID_INPUT");
   cli(root, ["run-log", task.id], { entries: [{ ...entries[0], threadId: " " + entries[0].threadId }] }, "INVALID_INPUT");
   cli(root, ["run-log", task.id], { entries: [{ ...entries[0], stageSessionId: 12 }] }, "INVALID_INPUT");
-  const loggedReceipt = cli(root, ["run-log", task.id, "--compact"], { entries, durationMs: 433_000 });
+  const runThreadId = "10000000-0000-0000-0000-000000000001";
+  for (const invalid of [123, " " + runThreadId, runThreadId + "x", runThreadId.replace("10000000", "1000000z")]) {
+    cli(root, ["run-log", task.id], { entries, runThreadId: invalid }, "INVALID_INPUT");
+  }
+  const loggedReceipt = cli(root, ["run-log", task.id, "--compact"], { entries, durationMs: 433_000, runThreadId });
   assert.equal(loggedReceipt.id, task.id);
   assert.equal(loggedReceipt.history, undefined);
   const logged = cli(root, ["show", task.id]);
   assert.equal(loggedReceipt.runLogSequence, logged.history.length);
+  assert.equal(logged.history.length, answered.history.length + 1);
   assert.deepEqual(logged.history.at(-1).run, entries);
+  assert.equal(logged.history.at(-1).runThreadId, runThreadId);
   const compact = cli(root, ["list", "--compact"]).tasks.find((entry: { id: string }) => entry.id === task.id);
   assert.equal(compact.revision, logged.revision);
   assert.equal(compact.historyLength, logged.history.length);
