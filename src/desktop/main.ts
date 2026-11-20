@@ -227,7 +227,8 @@ function frame(state: ProjectTab) {
   const request = key ? boardRequests.get(key) : undefined;
   const work = key ? boardWorkRequests.get(key) : undefined;
   const goal = state.board ? currentManagerGoal(state.board.project) : undefined;
-  const reviewerRuns = state.project ? subscriptions.get(state.project)?.reviewerRuns : undefined;
+  const watch = state.project ? subscriptions.get(state.project) : undefined;
+  const reviewerRuns = watch?.reviewerRuns;
   const sharedRuns = state.board ? agentSlots.entries(state.board.project) : [];
   const managerContext = sharedRuns.find(entry => entry.task === "manager:dialogue");
   const sharedManager = managerContext?.state && { ...managerContext.state, live: undefined };
@@ -238,6 +239,15 @@ function frame(state: ProjectTab) {
     tab.project && boardUnread(tab.board?.project).length ? [tab.project] : []));
   const activity = activeRunSummary([...subscriptions.values()].map(watch => ({
     path: watch.board.project, name: watch.board.settings.name, taskLimits: watch.board.settings.taskLimits })));
+  const reviewingTasks = Object.fromEntries(state.board?.tasks.flatMap(task => {
+    if (task.status !== "review") return [];
+    if (reviewerRuns?.has(task.id) || sharedRuns.some(entry => entry.kind === "slot" && entry.role === "reviewer" && entry.task === "review:" + task.id)) return [[task.id, "reviewer"]];
+    if (request?.reviewing?.has(task.id) || work?.reviewing?.has(task.id) || sharedRuns.some(entry => entry.state?.reviewing?.includes(task.id))) return [[task.id, "manager"]];
+    return [];
+  }) ?? []);
+  const waitingReviewTasks = watch && canScheduleAutoReview(watch) && autoReviewTab(watch) && availableReviewSlots(watch) === 0
+    ? readyReviews(watch).filter(task => !Object.hasOwn(reviewingTasks, task.id)).map(task => task.id)
+    : [];
   return {
     restoring: windowStates.get(state.window.webContents.id)?.restoring ?? false,
     tabs: projectLabels(openTabs.flatMap(tab =>
@@ -277,12 +287,8 @@ function frame(state: ProjectTab) {
           (!entry.quotaPaused || entry.reviewReturn || quotaWait || state.board?.settings.autoMode))) &&
         !runningTasks.has(key) && !replyingTasks.has(key) && !sharedRuns.some(entry => entry.kind === "slot" && entry.task === task.id);
     }).map(task => task.id),
-    reviewingTasks: Object.fromEntries(state.board?.tasks.flatMap(task => {
-      if (task.status !== "review") return [];
-      if (reviewerRuns?.has(task.id) || sharedRuns.some(entry => entry.kind === "slot" && entry.role === "reviewer" && entry.task === "review:" + task.id)) return [[task.id, "reviewer"]];
-      if (request?.reviewing?.has(task.id) || work?.reviewing?.has(task.id) || sharedRuns.some(entry => entry.state?.reviewing?.includes(task.id))) return [[task.id, "manager"]];
-      return [];
-    }) ?? []),
+    reviewingTasks,
+    waitingReviewTasks,
     runActivity: Object.fromEntries(state.board?.tasks.flatMap(task => {
       const log = runActivityByTask.get(state.project + "\0" + task.id);
       return log ? [[task.id, log.items]] : [];
@@ -3420,13 +3426,42 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   }
 }
 
+function canScheduleAutoReview(watch: BoardWatch) {
+  const { project, settings } = watch.board;
+  return !applicationUpdates.installing && !quotaWait && !isManual(settings) && subscriptions.get(project) === watch;
+}
+
+function autoReviewTab(watch: BoardWatch) {
+  if (closingProjects.has(watch.board.project)) return;
+  return [...watch.tabs].find(tab => !tab.window.isDestroyed());
+}
+
+function availableReviewSlots(watch: BoardWatch) {
+  const { project, settings } = watch.board;
+  return agentSlots.available(projectIdentity(project), "reviewer", settings.taskLimits);
+}
+
+function reviewAttempt(task: Task & { reviewDecision?: number; reviewTargetHead?: string | null }, settings: Board["settings"]) {
+  return JSON.stringify([taskReviewMode(task, settings), taskReviewModeVersion(task, settings),
+    task.revision, task.reviewDecision, task.reviewTargetHead]);
+}
+
+function readyReviews(watch: BoardWatch) {
+  const { project, tasks, settings } = watch.board;
+  return tasks.filter(task => {
+    if (task.status !== "review") return false;
+    const mode = taskReviewMode(task, settings);
+    const independent = usesIndependentReviewer(mode);
+    return (settings.autoMode || independent) && mode !== "human" && !task.reviewPending &&
+      (!task.acceptanceRepair || reviewsAcceptanceRepair(task, settings)) && !watch.reviewerRuns.has(task.id) &&
+      task.expertReviewPlanned && (!independent || (!task.reviewApproved && !task.reviewNoted)) &&
+      watch.reviewAttempts.get(task.id) !== reviewAttempt(task, settings) &&
+      ((independent && task.reviewHasCommit) || !executorBusy(project, task.id));
+  });
+}
+
 function scheduleAutoReview(watch: BoardWatch) {
-  if (applicationUpdates.installing) {
-    return;
-  }
-  if (quotaWait) return;
-  if (isManual(watch.board.settings)) return;
-  if (subscriptions.get(watch.board.project) !== watch) return;
+  if (!canScheduleAutoReview(watch)) return;
   const { project, tasks, settings } = watch.board;
   const modeOf = (task: Task) => taskReviewMode(task, settings);
   if (tasks.every(task => modeOf(task) === "human")) {
@@ -3449,28 +3484,18 @@ function scheduleAutoReview(watch: BoardWatch) {
     if (!submittedIds.has(id)) watch.reviewAttempts.delete(id);
   }
   const projectKey = projectIdentity(project);
-  const overrides = settings.taskLimits;
-  const managerAvailable = agentSlots.available(projectKey, "manager", overrides) > 0 && !backgroundManagerRequests.has(projectKey);
-  if (closingProjects.has(project)) return;
-  const tab = [...watch.tabs].find(tab => !tab.window.isDestroyed());
+  const managerAvailable = agentSlots.available(projectKey, "manager", settings.taskLimits) > 0 && !backgroundManagerRequests.has(projectKey);
+  const tab = autoReviewTab(watch);
   if (!tab) return;
-  const capacity = agentSlots.available(projectKey, "reviewer", overrides);
-
-  const reviewAttempt = (task: Task & { reviewDecision?: number; reviewTargetHead?: string | null }) =>
-    JSON.stringify([modeOf(task), taskReviewModeVersion(task, settings), task.revision, task.reviewDecision, task.reviewTargetHead]);
-  const ready = submissions.filter(task => (settings.autoMode || usesIndependentReviewer(modeOf(task))) &&
-    modeOf(task) !== "human" && !task.reviewPending &&
-    (!task.acceptanceRepair || reviewsAcceptanceRepair(task, settings)) && !watch.reviewerRuns.has(task.id) &&
-    task.expertReviewPlanned && (!usesIndependentReviewer(modeOf(task)) || (!task.reviewApproved && !task.reviewNoted)) &&
-    watch.reviewAttempts.get(task.id) !== reviewAttempt(task) &&
-    ((usesIndependentReviewer(modeOf(task)) && task.reviewHasCommit) || !executorBusy(project, task.id)));
+  const capacity = availableReviewSlots(watch);
+  const ready = readyReviews(watch);
   const independent = ready.filter(task => usesIndependentReviewer(modeOf(task))).slice(0, capacity);
   for (const task of independent) {
     const { id } = task;
     const mode = modeOf(task);
     const release = reserveAgent(project, "reviewer", "review:" + id, undefined, { id, mode });
     if (!release) continue;
-    watch.reviewAttempts.set(id, reviewAttempt(task));
+    watch.reviewAttempts.set(id, reviewAttempt(task, settings));
     watch.reviewerRuns.set(id, release.run(() => reviewSubmission(watch, id, 4, mode)).finally(() => {
       watch.reviewerRuns.delete(id);
       release();
@@ -3482,7 +3507,7 @@ function scheduleAutoReview(watch: BoardWatch) {
   if (!managerAvailable || capacity <= independent.length) return;
   const task = ready.find(task => modeOf(task) === "manager");
   if (!task) return;
-  watch.reviewAttempts.set(task.id, reviewAttempt(task));
+  watch.reviewAttempts.set(task.id, reviewAttempt(task, settings));
   const prompt = t("ui.ai_taskboard_automatic_review_follow_the_board_s_d65f54d4") + task.id;
   const failed = (error: string) => broadcastBoardChat(project, "orchestrator-review-error", { error });
   void runBoardRequest(tab.window.webContents, watch.board, prompt, [], false, false, undefined, [task.id], "manager").then(result => {
