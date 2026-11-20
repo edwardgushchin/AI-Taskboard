@@ -2317,9 +2317,13 @@ function draftComposer() {
   const workTimeline = element("div", undefined, "chat-run board-work-timeline");
   const workError = element("p", undefined, "muted");
   workError.hidden = true;
+  const workStatus = element("p", undefined, "muted");
+  workStatus.setAttribute("role", "status");
+  workStatus.hidden = true;
+  bindLocalized(workStatus, "textContent", () => t("ui.loading_2ad65fd8"));
   const workOlder = button(() => t("ui.earlier_activity_e8606f75"), () => void loadWork(workCursor), "quiet board-chat-older");
   workOlder.hidden = true;
-  work.append(workOlder, workTimeline, workError);
+  work.append(workOlder, workStatus, workTimeline, workError);
   let workCursor;
   let workLoading = false;
   let workReload = false;
@@ -2344,6 +2348,7 @@ function draftComposer() {
     }
     workLoading = true;
     workOlder.disabled = true;
+    workStatus.hidden = false;
     try {
       let next = cursor;
       const visited = new Set();
@@ -2401,6 +2406,7 @@ function draftComposer() {
     } finally {
       workLoading = false;
       workOlder.disabled = false;
+      workStatus.hidden = true;
       if (workReload) {
         workReload = false;
         void loadWork();

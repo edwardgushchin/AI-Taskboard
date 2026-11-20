@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, renameSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -12,9 +12,10 @@ import { sweepArchives } from "../src/cli/archive.ts";
 import { createTask } from "../src/cli/tasks.ts";
 import { statusNotice } from "../src/cli/task-messages.ts";
 import type { Task } from "../src/cli/model.ts";
-import { goalActivityItems, hasManagerImageView, managerChatItems, managerUnread, managerWorkItems, readManagerDialogue, readManagerHistory, readManagerMessages, saveManagerHistory } from "../src/desktop/manager-history.ts";
+import { goalActivityItems, hasManagerImageView, managerChatItems, managerUnread, managerWorkItems, readManagerDialogue, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView, saveManagerHistory } from "../src/desktop/manager-history.ts";
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
 import type { ReviewedSubmission } from "../src/desktop/board-actions.ts";
+import { backgroundGoalHistory } from "../src/desktop/goal-history-background.ts";
 
 function fixture(t: import("node:test").TestContext) {
   const project = mkdtempSync(join(tmpdir(), "ai-taskboard-local-history-"));
@@ -88,6 +89,103 @@ test("goal history skips ordinary dialogue pages and finds saved goal events", t
   assert.deepEqual(first.turns.flatMap(turn => turn.items.map(item => item.id)), ["saved-work"]);
   assert.equal(first.nextCursor, null);
   assert.ok(!readManagerHistory(project, null, "chat")!.turns.some(turn => turn.items.some(item => item.id === "saved-work")));
+});
+
+test("background goal pages preserve cursors and retry after an external replacement", async t => {
+  const project = fixture(t);
+  const folder = join(project, ".tasks", "manager-chat");
+  mkdirSync(folder);
+  const at = Date.now();
+  const dialogue = JSON.stringify({ lane: "chat", items: [{ text: "Dialogue".repeat(1000) }] });
+  for (let index = 0; index < 1161; index++) {
+    writeFileSync(join(folder, at + index + "-" + randomUUID() + ".json"), dialogue);
+  }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const empty = await backgroundGoalHistory(project, null, false);
+    assert.equal(empty.goalLogAvailable, false);
+    assert.deepEqual(empty.local?.turns, []);
+  }
+
+  const goalRun = randomUUID();
+  const goalId = randomUUID();
+  const items = Array.from({ length: 45 }, (_, index) => ({
+    id: "event-" + index,
+    type: "agentMessage",
+    title: "",
+    text: "Work " + index,
+    status: "completed",
+    at: new Date(at + index).toISOString(),
+  }));
+  saveManagerHistory(project, at, goalRun, { goalId, items });
+  const first = readManagerHistory(project, null, "work")!;
+  assert.ok(first.nextCursor);
+  assert.deepEqual((await backgroundGoalHistory(project, null, false)).local, first);
+  const older = readManagerHistory(project, first.nextCursor, "work")!;
+  assert.deepEqual((await backgroundGoalHistory(project, first.nextCursor, false)).local, older);
+  await assert.rejects(backgroundGoalHistory(project, 'goal:[1,"id","123abc",0]', false), /Invalid goal history cursor/);
+
+  const path = join(folder, at + "-" + goalRun + ".json");
+  writeFileSync(path, "{");
+  await assert.rejects(backgroundGoalHistory(project, null, false), /Invalid JSON/);
+  saveManagerHistory(project, at, goalRun, { goalId, items: [items[0]!] });
+  assert.deepEqual((await backgroundGoalHistory(project, null, false)).local, readManagerHistory(project, null, "work"));
+  rmSync(path);
+  assert.equal((await backgroundGoalHistory(project, null, false)).goalLogAvailable, false);
+});
+
+test("provider goal history keeps the legacy cutoff and crosses empty pages", async t => {
+  const project = fixture(t);
+  const at = Date.now();
+  const goalId = randomUUID();
+  const item = (id: string, time: number): BoardActivity => ({
+    id, at: new Date(time).toISOString(), type: "agentMessage", title: "", text: id, status: "completed",
+  });
+  saveManagerHistory(project, at - 1000, randomUUID(), { lane: "notice", items: [item("notice", at - 1000)] });
+  saveManagerHistory(project, at, randomUUID(), { items: [item("legacy local", at)] });
+  saveManagerHistory(project, at + 5, randomUUID(), { goalId, items: [item("local", at + 5)] });
+  const calls: (string | null)[] = [];
+  const provider = async (cursor: string | null) => {
+    calls.push(cursor);
+    return {
+      model: "saved model",
+      goal: undefined,
+      turns: [{
+        goalId, messages: [], durationMs: undefined,
+        items: cursor === null ? [item("overlap", at)] : [item("older", at - 1)],
+      }],
+      nextCursor: "older-page",
+    };
+  };
+  const laterRun = randomUUID();
+  const laterPath = join(project, ".tasks", "manager-chat", (at + 10) + "-" + laterRun + ".json");
+  writeFileSync(laterPath, "{");
+  const readOlderPage = async () => {
+    const cursor = "provider:";
+    const history = await backgroundGoalHistory(project, cursor, true);
+    assert.equal(history.providerCutoff, at);
+    const page = await readManagerProviderHistory(cursor, "work", history.providerCutoff!, provider);
+    const availability = await backgroundGoalHistory(project, null, false, true);
+    assert.equal(availability.goalLogAvailable, true);
+    return page;
+  };
+  const beforeRepair = await readOlderPage();
+  assert.deepEqual(calls, [null, "older-page"]);
+  assert.deepEqual(beforeRepair, await readManagerView(project, "provider:", "work", provider));
+  await assert.rejects(backgroundGoalHistory(project, null, true), /Invalid JSON/);
+
+  saveManagerHistory(project, at + 10, laterRun, { lane: "chat", items: [item("dialogue", at + 10)] });
+  assert.deepEqual(await readOlderPage(), beforeRepair);
+  calls.length = 0;
+  const local = (await backgroundGoalHistory(project, null, true)).local!;
+  assert.equal(local.nextCursor, "provider:");
+  assert.deepEqual(local, await readManagerView(project, null, "work", provider));
+  const history = await backgroundGoalHistory(project, local.nextCursor, true);
+  assert.equal(history.providerCutoff, at);
+  const page = await readManagerProviderHistory(local.nextCursor, "work", history.providerCutoff!, provider);
+  assert.deepEqual(calls, [null, "older-page"]);
+  assert.deepEqual(page?.turns.flatMap(turn => turn.items.map(entry => entry.id)), ["older"]);
+  assert.equal(page?.nextCursor, null);
+  assert.deepEqual(page, await readManagerView(project, local.nextCursor, "work", provider));
 });
 
 test("goal timeline merges late messages by original time and keeps stable IDs through save and pagination", t => {
