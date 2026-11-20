@@ -2020,10 +2020,9 @@ ipcMain.handle("board:history", async (event, project?: string, cursor: unknown 
     const readLegacy = saved && saved.history !== "local"
       ? (next: string | null) => readBoardHistory(profile, project, saved.id, next) : undefined;
     let data;
-    let goalLogAvailable: boolean;
+    let goalLogAvailable: boolean | undefined;
     if (view === "chat") {
       data = await readManagerView(project, cursor, view, readLegacy);
-      ({ goalLogAvailable } = await backgroundGoalHistory(project, null, false, true));
     } else {
       const history = await backgroundGoalHistory(project, cursor, Boolean(readLegacy));
       goalLogAvailable = history.goalLogAvailable;
@@ -2034,6 +2033,9 @@ ipcMain.handle("board:history", async (event, project?: string, cursor: unknown 
     }
     if (saved && saved.goal === undefined && data && "goal" in data && data.goal !== undefined) {
       saveBoardGoal(boardThreadPath(project), data.goal);
+    }
+    if (goalLogAvailable === undefined) {
+      ({ goalLogAvailable } = await backgroundGoalHistory(project, null, false, true));
     }
     const goalRunning = Boolean(boardWorkRequests.get(key)?.goalRunning ??
       agentSlots.entries(project).find(entry => entry.task === "manager:context")?.state?.goalRunning);

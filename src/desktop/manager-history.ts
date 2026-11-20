@@ -562,8 +562,15 @@ export class GoalHistoryIndex {
   private snapshots = new Map<string, GoalSnapshot>();
 
   read(project: string, cursor: string | null, hasProvider: boolean) {
-    const providerPage = cursor?.startsWith(providerCursorPrefix);
-    const before = providerPage ? undefined : parseGoalCursor(cursor);
+    if (cursor?.startsWith(providerCursorPrefix)) {
+      // Provider pages need the cutoff before the remote read. Availability is
+      // checked separately afterwards, as in the original history route.
+      return {
+        providerCutoff: hasProvider ? managerProviderCutoff(project, "work") : undefined,
+        goalLogAvailable: undefined,
+      };
+    }
+    const before = parseGoalCursor(cursor);
     const board = join(project, ".tasks");
     const folder = join(board, "manager-chat");
     directory(board);
@@ -606,7 +613,7 @@ export class GoalHistoryIndex {
     this.snapshots.set(project, snapshot);
     if (this.snapshots.size > 4) this.snapshots.delete(this.snapshots.keys().next().value!);
 
-    const local = present && !providerPage ? goalPage(snapshot.events, before) : undefined;
+    const local = present ? goalPage(snapshot.events, before) : undefined;
     const goalLogAvailable = snapshot.available;
     if (local && (local.turns.length || local.nextCursor || !hasProvider)) {
       return {
@@ -630,6 +637,10 @@ export async function readManagerView(project: string, cursor: string | null, vi
     }
   }
   if (!readLegacy) return;
+  return readManagerProviderHistory(cursor, view, managerProviderCutoff(project, view), readLegacy);
+}
+
+function managerProviderCutoff(project: string, view: "chat" | "work") {
   // Resumed threads can still have an old binding even though later runs are
   // journaled locally. Only the provider's history before that journal is needed.
   const folder = join(project, ".tasks", "manager-chat");
@@ -640,8 +651,7 @@ export async function readManagerView(project: string, cursor: string | null, vi
       if (view === "work") return Boolean(run.message || run.items.length);
       return managerHistoryForView(displayTurns(run), "chat").some(turn => turn.messages.length);
     }) : undefined;
-  const cutoff = firstRun ? Number(firstRun.slice(0, 13)) : Infinity;
-  return readManagerProviderHistory(cursor, view, cutoff, readLegacy);
+  return firstRun ? Number(firstRun.slice(0, 13)) : Infinity;
 }
 
 export async function readManagerProviderHistory(

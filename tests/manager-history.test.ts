@@ -156,6 +156,26 @@ test("provider goal history keeps the legacy cutoff and crosses empty pages", as
       nextCursor: "older-page",
     };
   };
+  const laterRun = randomUUID();
+  const laterPath = join(project, ".tasks", "manager-chat", (at + 10) + "-" + laterRun + ".json");
+  writeFileSync(laterPath, "{");
+  const readOlderPage = async () => {
+    const cursor = "provider:";
+    const history = await backgroundGoalHistory(project, cursor, true);
+    assert.equal(history.providerCutoff, at);
+    const page = await readManagerProviderHistory(cursor, "work", history.providerCutoff!, provider);
+    const availability = await backgroundGoalHistory(project, null, false, true);
+    assert.equal(availability.goalLogAvailable, true);
+    return page;
+  };
+  const beforeRepair = await readOlderPage();
+  assert.deepEqual(calls, [null, "older-page"]);
+  assert.deepEqual(beforeRepair, await readManagerView(project, "provider:", "work", provider));
+  await assert.rejects(backgroundGoalHistory(project, null, true), /Invalid JSON/);
+
+  saveManagerHistory(project, at + 10, laterRun, { lane: "chat", items: [item("dialogue", at + 10)] });
+  assert.deepEqual(await readOlderPage(), beforeRepair);
+  calls.length = 0;
   const local = (await backgroundGoalHistory(project, null, true)).local!;
   assert.equal(local.nextCursor, "provider:");
   assert.deepEqual(local, await readManagerView(project, null, "work", provider));
