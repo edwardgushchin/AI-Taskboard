@@ -243,6 +243,9 @@ function projectName() {
 }
 
 function boardError(error) {
+  if (error.code === "TASK_AWAITING_ANSWER") {
+    return t("task_question.approval_blocked");
+  }
   if (error.code === "BOARD_BUSY") {
     return t("ui.the_board_is_busy_with_another_operation_try_aga_e9c8de78");
   }
@@ -4284,7 +4287,14 @@ async function showTask(id, dialogue = false) {
     actions.append(button(() => t(task.schedule.paused ? "ui.resume_schedule" : "ui.pause_schedule"),
       () => act("update", { schedulePaused: !task.schedule.paused })));
   }
-  if (task.status === "draft" && !task.approvalRequirements?.length) actions.append(button(() => t("ui.approve_535c27a7"), () => act("approve"), "primary"));
+  if (task.status === "draft") {
+    if (task.awaitingAnswer === true) {
+      body.append(element("p", () => t("task_question.approval_blocked"), "muted"));
+      actions.append(button(() => t("task_question.open_dialogue_button"), () => showTask(task.id, true)));
+    } else if (!task.approvalRequirements?.length) {
+      actions.append(button(() => t("ui.approve_535c27a7"), () => act("approve"), "primary"));
+    }
+  }
   if (["ready", "in_progress", "blocked", "review", "cancelled"].includes(task.status) ||
       (task.status === "done" && !manualBoard())) {
     actions.append(button(() => t("ui.return_to_draft_ccd17679"), () => act("return-to-draft")));

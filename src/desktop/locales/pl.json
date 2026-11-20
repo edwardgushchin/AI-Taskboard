@@ -10,6 +10,8 @@
   "backup.empty": "Brak dostępnych kopii",
   "backup.retention": "Kopie wygasają po 24 godzinach od utworzenia. Przywrócona tablica otworzy się w nowym folderze z wyłączonym trybem automatycznym.",
   "backup.confirm": "Przywrócić tablicę z {project} z kopii utworzonej {date}?",
+  "task_question.approval_blocked": "Szkic można zatwierdzić, gdy agent zamknie pytanie w dialogu zadania.",
+  "task_question.open_dialogue_button": "Otwórz dialog",
   "task_question.needs_answer": "Wymaga odpowiedzi",
   "task_question.open_dialogue": "Wymaga odpowiedzi. Otwórz dialog zadania",
   "ui.reorder_queued_message": "Przenieś oczekującą wiadomość „{message}”. Użyj strzałek w górę i w dół.",
