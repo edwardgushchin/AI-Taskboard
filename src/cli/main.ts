@@ -256,6 +256,7 @@ function watchBoard(location: BoardLocation, compact: boolean): void {
   let nextCleanup = 0;
   let nextGitRefresh = 0;
   let gitChanged = false;
+  let gitWatched = false;
   let gitInfo: ReturnType<typeof boardGitInfo> = {};
   const read = (refreshGit: boolean) => {
     const previousRepository = location.repository;
@@ -266,6 +267,7 @@ function watchBoard(location: BoardLocation, compact: boolean): void {
       }
       return snapshotBoard(store, compact, cards);
     });
+    if (previousRepository !== location.repository) observeGit();
     if (Date.now() >= nextCleanup) {
       try { for (const id of maintainBoard(location)) cleanedTasks.add(id); }
       catch (error) {
@@ -274,15 +276,16 @@ function watchBoard(location: BoardLocation, compact: boolean): void {
       }
       nextCleanup = Date.now() + 15_000;
     }
-    if (gitChanged || (refreshGit && Date.now() >= nextGitRefresh) || previousRepository !== location.repository) {
+    if (gitChanged || (refreshGit && Date.now() >= nextGitRefresh)) {
       gitInfo = boardGitInfo(location);
-      nextGitRefresh = Date.now() + 4000;
+      // Local Git metadata normally refreshes on events. Still reconcile inputs
+      // outside those directories, such as included Git config files.
+      nextGitRefresh = Date.now() + (gitWatched && !gitInfo.gitError ? 10_000 : 4000);
       gitChanged = false;
     }
     return { ok: true, data: { ...board, gitInfo, cleanedTasks: [...cleanedTasks] } };
   };
-  let previous = JSON.stringify(read(true));
-  process.stdout.write(previous + "\n");
+  let previous: string;
   let refreshTimer: NodeJS.Timeout | undefined;
   const watchers: FSWatcher[] = [];
   const refresh = (refreshGit: boolean) => {
@@ -310,19 +313,33 @@ function watchBoard(location: BoardLocation, compact: boolean): void {
       const watcher = watch(path, { recursive }, (_event, filename) => {
         if (!filename || relevant(filename)) schedule(gitEvent);
       });
-      watcher.on("error", () => watcher.close());
+      watcher.on("error", () => {
+        watcher.close();
+        if (gitEvent) {
+          gitWatched = false;
+          schedule(true);
+        }
+      });
       watchers.push(watcher);
+      return true;
     } catch {
       // The periodic refresh covers filesystems that do not support watch.
+      return false;
     }
   };
+  const observeGit = () => {
+    if (!location.repository || location.repository.bare) return;
+    const gitDir = join(location.root, ".git");
+    const metadata = observe(gitDir, name => ["HEAD", "config", "packed-refs"].includes(name), true);
+    const refs = observe(join(gitDir, "refs"), name => !name.endsWith(".lock"), true, true);
+    gitWatched = metadata && refs;
+    gitChanged = true;
+  };
+  observeGit();
+  previous = JSON.stringify(read(true));
+  process.stdout.write(previous + "\n");
   observe(location.directory, name => name === "board.json");
   observe(join(location.directory, "tasks"), name => /^T-[0-9]{4,}\.json$/.test(name));
-  if (location.repository && !location.repository.bare) {
-    const gitDir = join(location.root, ".git");
-    observe(gitDir, name => ["HEAD", "config", "packed-refs"].includes(name), true);
-    observe(join(gitDir, "refs"), name => !name.endsWith(".lock"), true, true);
-  }
   const interval = setInterval(refresh, 1500, true);
   const stop = () => {
     clearInterval(interval);
