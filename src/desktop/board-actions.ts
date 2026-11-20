@@ -410,7 +410,7 @@ export function boardActions(project: string, attachments: { path: string; name:
   changes: BoardChange[], signal: AbortSignal, startTask: (id: string, revision: number, options?: {
     reason?: string; targetHead?: string | null; reviewMode?: ReviewMode; reviewModeVersion?: number; newThread?: boolean; resolveConflicts?: boolean;
   }) => Promise<CliReply<TaskLink>>,
-  activeGoal: () => { threadId: string; objective: string; signal: AbortSignal } | undefined,
+  activeGoal: () => { threadId: string; id?: string; objective: string; signal: AbortSignal } | undefined,
   isTaskRunning: (id: string) => boolean, observe: ObserveTasks, notifyExecutor: (id: string, sequence: number) => Promise<boolean>,
   deliveredMessages: Set<string> | undefined, waitInterrupt: () => AbortSignal,
   runReview?: ReviewRunner, reviewReports = new Map<string, ReviewedSubmission>(),
@@ -683,13 +683,15 @@ export function boardActions(project: string, attachments: { path: string; name:
         ? !result.data.settings.manualColumns?.some(c => c.id === status && c.terminal) : status !== "done" && status !== "cancelled") : tasks;
       return { ok: true, data: { ...(isManual(result.data.settings) ? { boardType: "manual", statuses: result.data.settings.manualColumns } : {}), tags: tags.map(tag => tag.name),
         tagColors: Object.fromEntries(tags.map(({ name, color }) => [name, color])),
-        tasks: active.map(({ id, title, status, revision, tags, priority, dueDate, dependencies, unfinishedDependencies, readySince, goalThreadId, milestone, schedule }) =>
+        tasks: active.map(({ id, title, status, revision, tags, priority, dueDate, dependencies, unfinishedDependencies, readySince, goalThreadId, managerGoalId, milestone, schedule }) =>
           ({ id, title, status, revision, tags, priority, dueDate, dependencies, unfinishedDependencies, readySince, running: isTaskRunning(id),
-            ...(goalThreadId ? { goalTask: goalThreadId === goal?.threadId } : {}), milestone, ...(schedule ? { schedule } : {}) })),
+            ...(managerGoalId || goalThreadId ? {
+              goalTask: managerGoalId ? managerGoalId === goal?.id : goalThreadId === goal?.threadId,
+            } : {}), milestone, ...(schedule ? { schedule } : {}) })),
         archived: input.activeOnly ? [] : archived.map(({ id, title, status, tags, milestone }) => ({ id, title, status, tags, milestone })),
       } };
     }
-    const { id, attachmentIds: selected, ...fields } = input;
+    const { id, attachmentIds: selected, goalThreadId: _goalThreadId, managerGoalId: _managerGoalId, ...fields } = input;
     let result: CliReply<TaskActionResult>;
     const command = action.slice("task_".length).replaceAll("_", "-");
     if (action === "task_create") {
@@ -711,7 +713,8 @@ export function boardActions(project: string, attachments: { path: string; name:
         return { path, name, ...(link ? { link } : {}) };
       });
       result = await callCli<Task>(project, ["create"], {
-        ...fields, actor: "manager", attachmentSources: sources, ...(goal ? { goalThreadId: goal.threadId } : {}),
+        ...fields, actor: "manager", attachmentSources: sources,
+        ...(goal ? { goalThreadId: goal.threadId, ...(goal.id ? { managerGoalId: goal.id } : {}) } : {}),
       });
     } else {
       if (!validId(id) ||
@@ -876,6 +879,7 @@ export function boardActions(project: string, attachments: { path: string; name:
         await callCli<Task>(project, [command, id], {
           ...fields, actor: "manager", ...(action === "task_block" ? { allowUnstarted: true } : {}),
           ...(action === "task_update" ? { preserveStatus: true } : {}),
+          ...(action === "task_approve" && goal?.id ? { managerGoalId: goal.id } : {}),
         });
     }
     if (!result.ok) return result;

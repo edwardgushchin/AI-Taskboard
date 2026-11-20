@@ -761,6 +761,10 @@ async function command(action, id, input) {
   const result = await api.command(action, id, input);
   if (generation !== projectGeneration) return undefined;
   if (!result.ok) {
+    if (result.error.code === "ACTIVE_GOAL_REQUIRED") {
+      notice(t("autoMode.goalRequired"));
+      return undefined;
+    }
     if (result.error.code === "ACCEPTANCE_CANCELLED") return undefined;
     const actions = {
       update: ["ui.editing_task_56c9ac84"], approve: ["ui.approving_task_68f23ece"],
@@ -1659,11 +1663,9 @@ function render(previousBoard) {
   quota.hidden = !frame.quotaWait;
   quota.textContent = frame.quotaWait ? quotaLabel() : "";
   const enabled = board?.settings.autoMode === true;
-  autoMode.setAttribute("aria-pressed", String(enabled));
+  autoMode.dataset.enabled = String(enabled);
+  renderAutoMode();
   autoMode.querySelector("i").className = `icon codicon codicon-${enabled ? "sync" : "play"}`;
-  bindLocalized(autoMode.querySelector("span"), "textContent", () => enabled ? t("ui.auto_on_81371019") : t("ui.auto_off_ef9f409f"));
-  bindLocalized(autoMode, "title", () => enabled ? t("ui.stop_new_automatic_starts_d1a902e4") :
-    t("ui.automatically_run_ready_tasks_d9661d7c"));
   const loading = Boolean(frame.loading || frame.restoring);
   byId("welcome").hidden = !noBoard || loading;
   byId("app-content").setAttribute("aria-busy", String(noBoard && loading));
@@ -2161,8 +2163,11 @@ function draftComposer() {
   };
   const syncGoal = () => {
     if (!currentGoal) return;
-    const waitingToResume = currentGoal.status === "active" && !goalRunning;
-    bindLocalized(goalStatus, "textContent", () => waitingToResume ? t("ui.goal_awaiting_continuation_27d0b1c3") :
+    const settings = frame.board?.settings;
+    const automatic = settings?.autoMode && settings.iterativeGoal === goalScope;
+    const waitingForWork = automatic && currentGoal.status === "active" && !goalRunning;
+    const waitingToResume = currentGoal.status === "active" && !goalRunning && !waitingForWork;
+    bindLocalized(goalStatus, "textContent", () => waitingForWork ? t("autoMode.waitingForWork") : waitingToResume ? t("ui.goal_awaiting_continuation_27d0b1c3") :
       t(...(goalLabels[currentGoal.status] ?? ["ui.goal_1730d64f"])));
     goalPanel.dataset.status = waitingToResume ? "idle" : currentGoal.status;
     pauseGoal.hidden = currentGoal.status !== "active" || waitingToResume;
@@ -5948,6 +5953,7 @@ function update(next) {
   const projectChanged = frame.project !== next.project;
   const previousBoard = projectChanged ? undefined : frame.board;
   const tagsChanged = JSON.stringify(frame.board?.tags) !== JSON.stringify(next.board?.tags);
+  if (projectChanged && byId("auto-mode-panel").matches(":popover-open")) byId("auto-mode-panel").hidePopover();
   if ((projectChanged || frame.localization?.locale !== next.localization?.locale || Boolean(frame.board) !== Boolean(next.board)) &&
       byId("settings-menu").matches(":popover-open")) byId("settings-menu").hidePopover();
   if (next.localization) localization.install(next.localization);
@@ -6050,12 +6056,45 @@ byId("git-branches").addEventListener("toggle", protect(event => {
 }));
 byId("status-publish").addEventListener("click", protect(publishToGitHub));
 byId("status-tracking").addEventListener("click", protect(pushTrackedBranch));
-byId("status-auto-mode").addEventListener("click", protect(async () => {
-  const control = byId("status-auto-mode");
-  control.disabled = true;
-  try { await command("settings", undefined, { autoMode: frame.board.settings.autoMode !== true }); }
-  finally { control.disabled = false; }
-}));
+let savingAutoMode = false;
+const autoModeSwitch = byId("auto-mode-switch");
+const iterativeGoalSwitch = byId("iterative-goal-switch");
+const goalHint = byId("iterative-goal-hint");
+
+function renderAutoMode() {
+  const settings = frame.board?.settings;
+  const activeGoal = frame.iterativeGoalId;
+  autoModeSwitch.checked = settings?.autoMode === true;
+  autoModeSwitch.disabled = savingAutoMode;
+  const enabled = settings?.iterativeGoal === activeGoal && Boolean(activeGoal);
+  iterativeGoalSwitch.checked = enabled;
+  iterativeGoalSwitch.setAttribute("aria-disabled", String(savingAutoMode || !activeGoal));
+  goalHint.hidden = Boolean(activeGoal);
+  if (activeGoal) {
+    iterativeGoalSwitch.removeAttribute("aria-describedby");
+  } else {
+    iterativeGoalSwitch.setAttribute("aria-describedby", goalHint.id);
+  }
+}
+
+async function saveAutoMode(input) {
+  savingAutoMode = true;
+  renderAutoMode();
+  try {
+    await command("settings", undefined, input);
+  } finally {
+    savingAutoMode = false;
+    renderAutoMode();
+  }
+}
+
+autoModeSwitch.addEventListener("change", protect(() => saveAutoMode({ autoMode: autoModeSwitch.checked })));
+iterativeGoalSwitch.addEventListener("click", event => {
+  if (iterativeGoalSwitch.getAttribute("aria-disabled") === "true") event.preventDefault();
+});
+iterativeGoalSwitch.addEventListener("change", protect(() => saveAutoMode({
+  iterativeGoal: iterativeGoalSwitch.checked ? frame.iterativeGoalId : false,
+})));
 byId("app-settings").setAttribute("aria-haspopup", "menu");
 byId("app-settings").setAttribute("aria-controls", "settings-menu");
 byId("app-settings").setAttribute("aria-expanded", "false");

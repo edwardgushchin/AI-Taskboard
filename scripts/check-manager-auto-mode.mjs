@@ -49,7 +49,7 @@ async function waitFor(probe, label) {
 }
 const evaluate = (window, js) => window.webContents.executeJavaScript(js);
 const pressed = window => evaluate(window,
-  "document.querySelector('#status-auto-mode')?.getAttribute('aria-pressed')");
+  "document.querySelector('#status-auto-mode')?.dataset.enabled");
 const expectMode = (windows, enabled) => waitFor(async () =>
   (await Promise.all(windows.map(pressed))).every(value => value === String(enabled)), "mode " + enabled);
 const ready = window => waitFor(async () => !window.webContents.isLoading() && await evaluate(window,
@@ -150,7 +150,11 @@ try {
     window.webContents.focus();
     await evaluate(window, "document.querySelector('#status-auto-mode').focus()");
     for (const type of ["keyDown", "char", "keyUp"]) window.webContents.sendInputEvent({ type, keyCode: "Return" });
+    await waitFor(() => evaluate(window, "document.querySelector('#auto-mode-panel').matches(':popover-open')"), "auto mode panel");
+    await evaluate(window, "document.querySelector('#auto-mode-switch').focus()");
+    for (const type of ["keyDown", "char", "keyUp"]) window.webContents.sendInputEvent({ type, keyCode: " " });
     await expectMode([window, mirror], true);
+    await evaluate(window, "document.querySelector('#auto-mode-panel').hidePopover()");
     await ask("Read auto mode");
     await expectMode([isolated], false);
     log.push(`Node ${process.env.TASKBOARD_CHECK_NODE}; Electron ${process.versions.electron}, Chromium ${process.versions.chrome}, ${process.platform}/${process.arch}.`,

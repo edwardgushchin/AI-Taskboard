@@ -1,4 +1,8 @@
 {
+  "autoMode.waitingForWork": "Goal waiting for work",
+  "autoMode.label": "Auto mode",
+  "autoMode.iterative": "Iterative goal execution",
+  "autoMode.goalRequired": "An active goal is required to enable iterative mode",
   "codexAuth.mode": "Sign-in method",
   "codexAuth.profile": "Existing Codex profile",
   "codexAuth.api": "OpenAI API key",

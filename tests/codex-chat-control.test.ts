@@ -417,6 +417,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
           return;
         }
         send({ method: "turn/completed", params: { threadId, turn: { id: "reply", status: "completed" } } });
+        if (process.argv[2] === "iterative") return;
         send({ method: "turn/started", params: { threadId, turn: { id: "continuation", status: "inProgress" } } });
         if (params.input[0].text === "Read this") {
           const entry = { title: "Менеджер продолжил цель", timeline: [{ time: null, items: ["Проверил доску."] }] };
@@ -644,6 +645,18 @@ test("board chat keeps a goal streaming across turns and times out only after in
     { method: "thread/goal/set", params: { threadId, status: "active", origin: "user" } },
     { method: "thread/unsubscribe", params: { threadId } },
   ]);
+  providerMode = "iterative";
+  const short = await runtime("profile", directory, "Prepare the queue", [], () => ({ ok: true }), [], "", controller.signal, {
+    ...session, goal: undefined, iterativeGoal: true,
+  });
+  assert.equal(short.text, "First turn");
+  assert.equal(short.goalStatus, "active");
+  const iterativeRequests = JSON.parse(readFileSync(captured, "utf8"));
+  assert.equal(iterativeRequests.find(({ method }: { method: string }) => method === "thread/resume").params.config["features.goals"], false);
+  assert.deepEqual(iterativeRequests.slice(-3).map(({ method }: { method: string }) => method), [
+    "thread/goal/get", "turn/start", "thread/unsubscribe",
+  ]);
+
   await assert.rejects(runtime("profile", directory, "Unsupported effort", [], () => {}, [], "", controller.signal, {
     ...session, settings: { model: "manager-model", effort: "max" },
   }), /model or reasoning effort is unavailable/);

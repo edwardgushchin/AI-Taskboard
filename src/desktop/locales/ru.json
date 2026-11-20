@@ -1,4 +1,8 @@
 {
+  "autoMode.waitingForWork": "Цель ждёт работы",
+  "autoMode.label": "Авторежим",
+  "autoMode.iterative": "Итеративное выполнение цели",
+  "autoMode.goalRequired": "Для включения итеративного режима нужна активная цель",
   "codexAuth.mode": "Способ входа",
   "codexAuth.profile": "Профиль Codex",
   "codexAuth.api": "Ключ OpenAI API",
