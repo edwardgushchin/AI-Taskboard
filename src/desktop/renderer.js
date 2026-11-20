@@ -4253,6 +4253,7 @@ async function showTask(id, dialogue = false) {
     section(() => (t("ui.schedule_dadf83ce")), schedule);
   }
   showSubmissionResult(task.result);
+  if (!manualBoard()) showTaskReviewHistory(task, openDetails.has("task-review-history"));
   showTaskArtifacts(task, body, openDetails.has("task-review-files"));
   if (task.git) showTaskGit(task.git, openDetails.has("task-git"));
   if (task.attachments.length) {
@@ -4387,6 +4388,33 @@ function taskDetails(id, title, hint, open) {
   if (hint) header.append(element("span", hint, "task-details-hint"));
   details.append(header);
   return details;
+}
+
+function showTaskReviewHistory(task, open) {
+  if (task.status !== "review" && !task.history.some(event => event.action === "submit" || event.actor === "reviewer")) return;
+  const area = taskDetails("task-review-history", () => t("ui.reviewer_messages_d84eb921"), undefined, open);
+  const journal = element("ol", undefined, "task-details-content task-review-history");
+  const decisions = [];
+  let submittedAt = "";
+  for (const event of task.history) {
+    if (event.action === "submit") submittedAt = event.at;
+    if (event.actor !== "reviewer" || !event.text ||
+        !["review-approve", "review-note", "request-changes"].includes(event.action)) continue;
+    const entry = element("li", undefined, "chat-entry chat-coordination");
+    entry.dataset.actor = "reviewer";
+    entry.dataset.historyAt = event.at;
+    entry.append(element("span", () => t("ui.reviewer_50c42665"), "chat-author"), reviewerFindings(event.text, task.id));
+    appendChatTime(entry, event.at);
+    journal.append(entry);
+    decisions.push({ entry, event, submittedAt });
+  }
+  area.append(journal);
+  area.refreshReview = reviewerHistory(task, journal, decisions);
+  area.addEventListener("toggle", () => {
+    if (area.open) area.refreshReview();
+  });
+  body.append(area);
+  if (area.open) area.refreshReview();
 }
 
 function showTaskArtifacts(task, target = body, open = false) {

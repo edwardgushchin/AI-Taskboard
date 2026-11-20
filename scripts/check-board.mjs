@@ -311,6 +311,8 @@ app.whenReady().then(async () => {
         history: [
           { actor: 'user', action: 'chat', text: 'Keep this in dialogue', chat: {} },
           { actor: 'agent', action: 'chat', text: 'Answer in dialogue', chat: {},
+            run: [{ id: 'discussion', type: 'reasoning', title: '', text: 'Separate discussion summary', status: 'completed' }] },
+          { actor: 'agent', action: 'run-log',
             run: [{ id: 'summary', type: 'reasoning', title: '', text: 'Saved work summary', status: 'completed' }] },
           { actor: 'agent', action: 'coordination', at: '2026-11-18T00:00:01Z', text: 'Hand off evidence', expertMessage: { from: 'work:verify', to: 'review:verify' } },
           { actor: 'agent', action: 'expert-stage', expertStageRun: { phase: 'work', key: 'verify', state: 'done' } },
@@ -319,6 +321,7 @@ app.whenReady().then(async () => {
         ],
       });
       fixture.board.tasks = [planned];
+      planned.codexThreadId = '00000000-0000-4000-8000-000000000123';
       window.taskboard.command = async action => ({ ok: true, data: action === 'experts' ?
         [{ id: 'product-owner', name: 'Product Owner' }, { id: 'qa-engineer', name: 'QA Engineer' }] : structuredClone(planned) });
       window.taskboard.themes = async () => [];
@@ -351,14 +354,14 @@ app.whenReady().then(async () => {
     await evaluate(`
       const laneButton = name => document.querySelector('#task-side [aria-controls="task-chat-' + name + '"]');
       laneButton('work').click();
-      updateChat({ project: fixture.project, id: planned.id, type: 'run', items: [
+      updateChat({ project: fixture.project, id: planned.id, type: 'run', runThreadId: planned.codexThreadId, items: [
         { id: 'live-summary', type: 'reasoning', title: '', text: 'Current work summary', status: 'inProgress' }
       ] });
       settle();
     `);
     await check(`byId('task-chat-work').checkVisibility() && byId('task-chat-input').closest('form').hidden &&
       /Current work summary/.test(byId('task-chat-work').textContent) && /Saved work summary/.test(byId('task-chat-work').textContent) &&
-      !/Answer in dialogue|Verify outcomes|Workflow|Hand off evidence/.test(byId('task-chat-work').textContent)`,
+      !/Answer in dialogue|Separate discussion summary|Verify outcomes|Workflow|Hand off evidence/.test(byId('task-chat-work').textContent)`,
       'work contains only saved and live Codex activity');
     await check(`document.querySelectorAll('#task-side .board-chat-views button').length === 2 &&
       body.querySelector('.expert-team .task-team-mail .expert-message').textContent.includes('Hand off evidence')`,

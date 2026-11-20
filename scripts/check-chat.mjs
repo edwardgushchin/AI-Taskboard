@@ -1501,7 +1501,7 @@ app.whenReady().then(async () => {
   await check(`(() => { const times = [...taskDialogue.querySelectorAll('.chat-entry > time'), ...log.querySelectorAll('.chat-entry > time')];
     return times.length > 2 && times.every(time => time.dateTime && /^\\d{2}:\\d{2}$/.test(time.textContent) && time.title === time.getAttribute('aria-label')) && !!taskDialogue.querySelector('.chat-day');
   })()`, 'task messages use compact accessible times and preserve date dividers');
-  await check(`log.querySelectorAll('.chat-work').length === 2 && log.querySelectorAll('.chat-work')[1].textContent.includes('Проверяю оформление обсуждения.')`, "discussion commentary folds above its final answer too");
+  await check(`log.querySelectorAll('.chat-work').length === 1 && !log.textContent.includes('Проверяю оформление обсуждения.')`, "separate discussion commentary stays out of executor work");
   await check(`getComputedStyle(log).backgroundColor !== getComputedStyle(body).backgroundColor`, "chat restores its distinct theme background");
   await evaluate(`completedWork.querySelector('summary').click()`);
   await check(`completedWork.open`, "the entire chronology can be disclosed");

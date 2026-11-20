@@ -284,10 +284,10 @@ void (async () => {
       await reopen();
       assert.equal(await evaluate("document.querySelector('.chat-turn').childElementCount"), 0);
       await evaluate("byId('task-side').querySelector('[aria-controls=task-chat-work]').click()");
-      assert.deepEqual(await evaluate(`Array.from(document.querySelectorAll('.task-work details[data-item^="item:reply-"]'),
-        node => node.dataset.item)`), ["item:reply-update", "item:reply-check"]);
+      assert.equal(await evaluate(`document.querySelectorAll('.task-work details[data-item^="item:reply-"]').length`), 0);
+      assert.deepEqual(messages()[2].run, activity);
       await evaluate("byId('task-side').firstElementChild.openDialogue()");
-      check("Completion leaves one reply in Диалог and saves both actions, once and in order, in Ход работы");
+      check("Completion leaves one reply in Диалог, with its separate provider activity retained in history and excluded from Ход работы");
     }
     card = show();
     assert.equal(card.status, "draft");

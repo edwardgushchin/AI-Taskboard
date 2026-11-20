@@ -657,6 +657,7 @@ function updateChat({ project, id, type, text, items, savedRun, runThreadId, goa
   const open = frame.project === project && sheet.open && sheetKind === "task" && taskInSheet?.id === id;
   if (type === "reviewer-chat") {
     if (frame.project === project) byId("board-composer").firstChild?.refreshWork();
+    if (open) byId("task-review-history")?.refreshReview?.();
     return;
   }
   if (type === "discussion" && frame.project === project) {
@@ -739,6 +740,98 @@ function isTaskChatReplacement(event, task) {
   return task.codexServiceThreads?.some(id => id !== task.codexThreadId && event.text?.endsWith("`" + id + "`"));
 }
 
+function reviewerHistory(task, journal, decisions) {
+  const project = frame.project;
+  const status = element("li", undefined, "muted");
+  status.setAttribute("role", "status");
+  status.hidden = true;
+  journal.append(status);
+  const nodes = new Map();
+  let timer;
+  let generation = 0;
+  return () => {
+    if (timer !== undefined) return;
+    timer = setTimeout(() => {
+      timer = undefined;
+      if (journal.closest("details")?.open) void load();
+    }, 200);
+  };
+
+  async function load() {
+    const request = ++generation;
+    try {
+      const result = await api.reviewerChat(task.id);
+      if (!journal.isConnected || project !== frame.project || request !== generation) return;
+      if (!result.ok) throw new Error(boardError(result.error));
+      const attempts = result.data;
+      const ids = new Set(attempts.map(attempt => attempt.id));
+      for (const [id, node] of nodes) {
+        if (ids.has(id)) continue;
+        node.entry.remove();
+        nodes.delete(id);
+      }
+      const history = decisions.map(({ entry }) => entry);
+      for (const [index, attempt] of attempts.entries()) {
+        let node = nodes.get(attempt.id);
+        if (!node) {
+          const entry = element("li", undefined, "chat-entry task-review-attempt");
+          entry.dataset.actor = "reviewer";
+          const label = element("span", undefined, "chat-coordination-header");
+          const activity = element("div", undefined, "chat-run");
+          const error = element("p", undefined, "chat-run-error");
+          entry.append(label, activity, error);
+          journal.insertBefore(entry, history.find(row => row.dataset.historyAt > attempt.at) ?? status);
+          node = { entry, label, activity, error };
+          nodes.set(attempt.id, node);
+        }
+        if (node.finished && node.index === index) continue;
+        node.index = index;
+        node.finished = attempt.durationMs !== undefined;
+        bindLocalized(node.label, "textContent", () => t("ui.reviewer_50c42665") + " #" + (index + 1) +
+          " · " + t(node.finished ? "ui.completed_a863c619" : "ui.in_progress_15929530") + " · " + shortDate(attempt.at));
+        node.error.textContent = attempt.error ?? "";
+        node.error.hidden = !attempt.error;
+        node.report = undefined;
+        const items = attempt.items.flatMap(item => {
+          if (collaborationItem(item)) return [];
+          if (item.type !== "agentMessage" || item.phase === "commentary") return [item];
+          if (item.status !== "completed") return [];
+          node.report = undefined;
+          try {
+            const { summary, findings, evidence } = JSON.parse(item.text);
+            if (typeof summary !== "string") return [item];
+            const reportFindings = Array.isArray(findings) ? findings.filter(text => typeof text === "string") : [];
+            node.report = { summary: summary.trim(), reason: reportFindings.join("\n\n").trim() };
+            const notes = reportFindings.map(text => "- " + text).join("\n");
+            const checks = Array.isArray(evidence) ? evidence.flatMap((text, index) =>
+              typeof text === "string" ? [(index + 1) + ". " + text] : []).join("\n") : "";
+            return [{ ...item, text: [summary, notes, checks].filter(Boolean).join("\n\n") }];
+          } catch { return [item]; }
+        });
+        renderRunActivity(node.activity, items, false, undefined, task.id, { reviewer: true });
+      }
+      const matched = new Set();
+      for (const { entry, event, submittedAt } of decisions) {
+        const attempt = attempts.findLast(attempt => attempt.at >= submittedAt && attempt.at <= event.at);
+        const node = attempt && nodes.get(attempt.id);
+        // Keep the card's decision event and hide only the text also shown in its attempt.
+        const reportText = event.action === "request-changes" ? node?.report?.reason : node?.report?.summary;
+        entry.hidden = Boolean(node?.finished && !attempt.error && !matched.has(attempt.id) &&
+          reportText === event.text.trim());
+        if (entry.hidden) matched.add(attempt.id);
+      }
+      status.hidden = attempts.length > 0 || decisions.length > 0;
+      if (!status.hidden) {
+        bindLocalized(status, "textContent", () => t("ui.no_reviewer_messages_yet_25b5caaf"));
+      }
+    } catch (error) {
+      if (!journal.isConnected || project !== frame.project || request !== generation) return;
+      status.hidden = false;
+      bindLocalized(status, "textContent", () => t("ui.could_not_load_reviewer_chat_5c01ba32") + error.message);
+    }
+  }
+}
+
 function taskChat(task) {
   const project = frame.project;
   const key = project + "\0" + task.id;
@@ -789,9 +882,9 @@ function taskChat(task) {
     const conversation = ["chat", "comment", "questions"].includes(event.action) || returned;
     if (event.expertMessage) continue;
 
-    const providerEvent = event.actor === "agent" && index > sessionStart &&
+    const executorEvent = event.action === "run-log" && event.actor === "agent" && index > sessionStart &&
       (!event.runThreadId || event.runThreadId === task.codexThreadId);
-    if (providerEvent && (event.action === "run-log" || event.action === "chat")) {
+    if (executorEvent) {
       const log = element("li", undefined, "chat-run");
       log.hidden = true;
       if (event.run?.length) {
@@ -800,15 +893,9 @@ function taskChat(task) {
           work.append(log);
           savedWork.push(() => renderRunActivity(log, items, true, event.durationMs, task.id));
         }
-      } else if (event.action === "run-log" && task.codexThreadId && event.durationMs !== undefined) {
+      } else if (task.codexThreadId && event.durationMs !== undefined) {
         work.append(log);
         missingRuns.set(index, { log, durationMs: event.durationMs });
-      } else if (event.chat?.commentary?.length) {
-        work.append(log);
-        const items = event.chat.commentary.map((text, index) => ({
-          id: String(index), type: "agentMessage", phase: "commentary", title: "", text, status: "completed",
-        }));
-        savedWork.push(() => renderRunActivity(log, items, true, event.durationMs, task.id));
       }
     }
     if (!conversation) continue;
@@ -917,32 +1004,32 @@ function taskChat(task) {
     const follow = work.scrollHeight - work.clientHeight - work.scrollTop <= 8;
     // A save receipt can reach the window before its card history is refreshed.
     const saved = draft.savedRun;
-    const executor = saved?.items ?? (frame.runActivityThreads?.[task.id] === task.codexThreadId ? liveItems : []);
-    const discussion = frame.discussionActivity?.[task.id] ?? [];
-    const byId = new Map();
-    for (const item of [...executor, ...discussion]) {
-      if (taskWorkItem(item) && !savedItems.has(item.id) && !byId.has(item.id)) byId.set(item.id, item);
-    }
-    const items = [...byId.values()];
-    if (executor.length && discussion.length && items.every(item => item.at)) {
-      items.sort((a, b) => a.at.localeCompare(b.at));
-    }
+    // Steered replies already arrive through the executor's run stream.
+    // Standalone discussions run in a separate provider session.
+    const threadId = frame.runActivityThreads?.[task.id];
+    const executor = saved?.items ?? (threadId && threadId === task.codexThreadId ? liveItems : []);
+    const seen = new Set();
+    const items = executor.filter(item => {
+      if (!taskWorkItem(item) || savedItems.has(item.id) || seen.has(item.id)) return false;
+      seen.add(item.id);
+      return true;
+    });
     renderRunActivity(liveRun, items, Boolean(saved), saved?.durationMs, task.id);
     emptyWork.hidden = [...work.children].some(row => row !== emptyWork && row !== workControls && !row.hidden);
     if (follow) work.scrollTop = work.scrollHeight;
   }
   area.updateRun = (items = []) => {
     liveItems = items;
-    area.updateDiscussion();
+    if (!work.hidden) renderLiveWork();
   };
   area.updateDiscussion = () => {
     const items = frame.discussionActivity?.[task.id];
     const savedReply = lastMessage?.actor === "agent" && items?.some(item =>
       item.type === "agentMessage" && item.phase === "final_answer" && item.at === lastMessage.at);
     renderChatTurn(list, draft, savedReply ? undefined : items, task.id);
-    if (!work.hidden) renderLiveWork();
   };
   area.updateRun(frame.runActivity?.[task.id]);
+  area.updateDiscussion();
 
   const composer = element("form", undefined, "chat-composer");
   const input = element("textarea");

@@ -46,6 +46,12 @@ const tool = activity("tool", "mcpToolCall", "docs / lookup", "Documentation fou
 const note = activity("note", "agentMessage", "", "Проверка завершена, результат сохранён.", 3);
 const finalReply = { ...activity("answer", "agentMessage", "", "Журнал проверен.", 4), phase: "final_answer" };
 const foreign = activity("previous", "commandExecution", "PREVIOUS SESSION", "PREVIOUS SESSION OUTPUT", 1);
+const discussionCommand = activity("standalone-command", "commandExecution", "STANDALONE COMMAND", "STANDALONE OUTPUT", 5);
+const discussionAnswer = {
+  ...activity("standalone-answer", "agentMessage", "", "Ответ отдельного чата.", 6),
+  phase: "final_answer",
+};
+const discussion = [tool, discussionCommand, discussionAnswer];
 const mixed = [
   command,
   activity("mail", "mcpToolCall", "ai_taskboard / team_message", "TEAM TOOL PRIVATE", 1),
@@ -163,6 +169,7 @@ app.whenReady().then(async () => {
       void 0;
     `);
     const rendered = () => evaluate(`[...document.querySelectorAll("#task-chat-work [data-item]")].map(node => node.dataset.item)`);
+    const dialogText = () => evaluate('document.querySelector("#task-chat-dialogue").textContent');
     if (!restart) {
       await press("dialogue", "Enter");
       await press("work", "Space");
@@ -172,7 +179,12 @@ app.whenReady().then(async () => {
       await publish("run", [foreign], oldThread);
       assert.deepEqual(await rendered(), []);
       await publish("run", mixed);
-      await publish("discussion", [tool]);
+      await publish("discussion", discussion, oldThread);
+      await press("dialogue", "Enter");
+      assert.ok((await dialogText()).includes(discussionAnswer.text));
+      assert.ok((await dialogText()).includes(discussionCommand.title));
+      await press("work", "Space");
+      record("Живой ответ отдельного чата и его команда видны в «Диалоге».");
     }
     const providerItems = async () => (await rendered())
       .filter(key => /^(item|message|final):/.test(key))
@@ -181,7 +193,7 @@ app.whenReady().then(async () => {
     const verifyWork = async () => {
       assert.deepEqual(await providerItems(), expected);
       const content = await evaluate('document.querySelector("#task-chat-work").textContent');
-      for (const forbidden of ["PRIVATE", "PREVIOUS SESSION", questionText, addressText]) {
+      for (const forbidden of ["PRIVATE", "PREVIOUS SESSION", "STANDALONE", discussionAnswer.text, questionText, addressText]) {
         assert.ok(!content.includes(forbidden), forbidden);
       }
       assert.ok(content.includes(command.text) && content.includes(tool.text));
@@ -190,14 +202,32 @@ app.whenReady().then(async () => {
     if (!restart) {
       record("Живой IPC сохраняет команду, инструмент, ответ инструмента и сообщения по порядку. Повторный инструмент и события другого сеанса скрыты.");
       cli(["run-log", taskId], { entries: mixed, durationMs: 4_000, runThreadId: thread });
-      const card = current();
-      await publish("run", [], thread, { sequence: card.history.length, threadId: thread, items: mixed, durationMs: 4_000 });
+      const sequence = current().history.length;
+      await publish("run", [], thread, { sequence, threadId: thread, items: mixed, durationMs: 4_000 });
       await verifyWork();
+      cli(["chat", taskId], {
+        actor: "user", text: "Проверь отдельный ответ.", revision: current().revision, model: "fixture", effort: "low",
+      });
+      const userCard = current();
+      const replyTo = userCard.history.findLastIndex(event => event.chat);
+      cli(["chat", taskId], {
+        actor: "agent", revision: userCard.revision, replyTo, text: discussionAnswer.text, at: discussionAnswer.at,
+        model: "fixture", effort: "low", run: discussion, durationMs: 2_000,
+      });
+      const card = current();
+      assert.equal(card.history.at(-1).runThreadId, undefined);
+      assert.deepEqual(card.history.at(-1).run.map(item => item.id), discussion.map(item => item.id));
+      await publish("discussion", undefined, oldThread);
       await evaluate(`window.card = ${JSON.stringify(card)}; showTask(card.id)`);
       await verifyWork();
       record("Квитанция записи и обновление карточки сохраняют исходный порядок без дублей.");
       writeFileSync(checksPath, JSON.stringify(checks));
     } else {
+      await press("dialogue", "Enter");
+      assert.ok((await dialogText()).includes(discussionAnswer.text));
+      await press("work", "Space");
+      await verifyWork();
+      record("После перезапуска сохранённый ответ отдельного чата остался в «Диалоге». Его журнал без ID сеанса отсутствует в «Ходе работы».");
       assert.equal(await evaluate('document.querySelectorAll(".expert-stage").length'), 2);
       assert.equal(await evaluate(`
         const mail = document.querySelector(".task-team-mail");
