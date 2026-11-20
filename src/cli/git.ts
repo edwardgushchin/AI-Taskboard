@@ -59,7 +59,13 @@ export function invokeGit(cwd: string, args: string[], overrides?: NodeJS.Proces
     if ((result.error as NodeJS.ErrnoException).code === "ENOENT" && existsSync(cwd)) {
       throw new TaskboardError("GIT_UNAVAILABLE", "Install Git 2.38 or newer, then reopen the project.");
     }
-    throw new TaskboardError("GIT_FAILED", result.error.message);
+    const error = result.error as NodeJS.ErrnoException;
+    throw new TaskboardError("GIT_FAILED", error.message, {
+      operation: args[0] === "-c" ? args[2] : args[0],
+      code: error.code,
+      errno: error.errno,
+      syscall: error.syscall,
+    });
   }
   return { code: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
 }
@@ -167,7 +173,9 @@ export function discoverRepository(cwd: string): Repository | null {
   }
   if (result.code !== 0 && result.stderr.includes("not a git repository")) return null;
   if (result.code !== 0) {
-    throw new TaskboardError("GIT_FAILED", "Could not discover the Git repository.", { output: result.stderr.trim() });
+    throw new TaskboardError("GIT_FAILED", "Could not discover the Git repository.", {
+      operation: "worktree list", exitCode: result.code, output: result.stderr.trim(),
+    });
   }
   const main = parseWorktrees(result.stdout)[0];
   if (!main) throw new TaskboardError("GIT_FAILED", "Git did not identify the main worktree.");
