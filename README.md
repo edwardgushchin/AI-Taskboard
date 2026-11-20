@@ -35,8 +35,8 @@ AI Taskboard brings a Kanban board, agent chats and Git review into one Electron
 - **Isolated Git work.** Each Git task gets its own branch and worktree. Submission records a commit; acceptance integrates the reviewed result into the chosen target branch.
 - **A local board shared with agents.** The app and agents use the same CLI and project `.tasks` storage. Non-Git tasks use an assigned directory and can submit artifacts without a commit.
 - **Several projects in view.** Project tabs, separate windows, column filters, English and Russian UI, and built-in themes.
-- **Auto mode.** The board starts eligible approved tasks and schedules independent reviews according to the selected review mode and concurrency limits. You can reorder or pause the queue, or hold individual tasks. [Auto mode and queue controls](docs/reference/board.md#управление-автоматической-очередью) (Russian).
-- **Iterative goals.** With an active goal, the manager runs short turns to replenish the queue or answer a question. Between these events, the goal waits without a manager session.
+- **Auto mode.** The board starts eligible approved tasks when Auto mode is on. Independent review is queued in the applicable review modes even when Auto mode is off. You can reorder or pause the run queue, or hold individual tasks. [Auto mode and queue controls](docs/reference/board.md#управление-автоматической-очередью) (Russian).
+- **Iterative goals.** Enable iterative execution in the Auto mode panel for an active goal. When Auto mode is on, the manager runs short turns to replenish the queue or respond to a question about the goal. Between triggers, the goal waits without a manager session. [Goal settings](docs/reference/board.md#управление-автоматической-очередью) (Russian).
 
 <a id="workflow"></a>
 ## From request to merged change
@@ -47,7 +47,7 @@ AI Taskboard brings a Kanban board, agent chats and Git review into one Electron
 | 2. Approve and start | Approve the draft. Start the executor from the card, or let auto mode start eligible work. For a Git task, the board assigns a branch and worktree. |
 | 3. Execute | The agent changes files, runs checks and records progress. A blocker includes the condition needed to continue. |
 | 4. Review | A submission includes a diff, checks and limitations. Return it with feedback when changes are needed. |
-| 5. Accept | In human review mode, you accept the result. The board creates or verifies the acceptance commit in the target branch. Conflicts require resolution before acceptance. |
+| 5. Accept | In Human and Review + human modes, you accept the result. The board creates or verifies the acceptance commit in the target branch. Conflicts require resolution before acceptance. |
 
 <a id="quick-start"></a>
 ## Quick start
@@ -77,12 +77,11 @@ npm start
 
 2. Open a project folder and choose **Create board** if needed. Select **Board for agents**. AI Taskboard detects Codex automatically. To select it manually, use **Settings → Codex model provider → Choose executable…**.
 3. Describe a change to the manager, approve its draft and start the executor from the card.
-4. Inspect the submitted diff and checks. In human review mode, choose **Accept** when the result is ready.
+4. Inspect the submitted diff and checks. In Human mode, choose **Accept** when the result is ready. In Review + human mode, accept it after independent approval.
 
 See the [first-task tutorial](docs/tutorials/first-task.md) and [setup guide](docs/how-to/setup.md) (Russian). The setup guide also covers the API-key option in the current source tree.
 
-<a id="platforms"></a>
-## Platform status
+## Platforms
 
 Native CI builds and checks packages on x64 and ARM64 for all three platforms. The public alpha includes these formats.
 
