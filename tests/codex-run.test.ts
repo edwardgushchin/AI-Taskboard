@@ -5,7 +5,7 @@ import { callCli } from "../src/desktop/cli.ts";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -100,7 +100,34 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '  fs.writeFileSync(capture, JSON.stringify({ cwd: process.cwd(), flags, requests, temp: process.env.TEMP, tmp: process.env.TMP, tmpdir: require("node:os").tmpdir(), electronLog: process.env.ELECTRON_LOG_FILE }));',
     '  let result = {};',
     '  if (method === "command/exec") {',
-    '    result = outcome === "denied" ? { exitCode: 1, stderr: "EACCES: permission denied" } : { exitCode: 0 };',
+    '    if (outcome === "spawn-error") {',
+    '      send({ id, error: { message: "failed to spawn command (os error 2)" } });',
+    '      return;',
+    '    }',
+    '    const [exe, flag, script, ...roots] = params.command;',
+    '    const fault = outcome === "denied" ? `',
+    '      const write = require("node:fs").writeFileSync;',
+    '      require("node:fs").writeFileSync = (file, data, options) => {',
+    '        if (data === "1") throw Object.assign(new Error("injected"), { code: "EACCES" });',
+    '        return write(file, data, options);',
+    '      };',
+    '    ` : "";',
+    '    if (outcome === "silent-exit") {',
+    '      result = { exitCode: 7, stdout: "", stderr: "" };',
+    '    } else if (outcome === "mxc-launch-error") {',
+    '      result = { exitCode: 1, stdout: "", stderr: "MXC launcher: CreateProcessW failed with error code 2 (0x00000002).\\n" };',
+    '    } else if (outcome === "timeout") {',
+    '      result = { exitCode: 124, stdout: "", stderr: "" };',
+    '    } else if (outcome === "missing-confirmation") {',
+    '      result = { exitCode: 0, stdout: "", stderr: "" };',
+    '    } else if (outcome === "denied") {',
+    '      const child = require("node:child_process").spawnSync(exe, [flag, fault + script, ...roots], {',
+    '        cwd: params.cwd, env: { ...process.env, ...params.env }, encoding: "utf8", windowsHide: true,',
+    '      });',
+    '      result = { exitCode: child.status, stdout: child.stdout, stderr: child.stderr };',
+    '    } else {',
+    '      result = { exitCode: 0, stdout: "taskboard-write-probe ok" };',
+    '    }',
     '  } else if (method === "config/read") {',
     '    result = { config: { mcp_servers: { ai_taskboard: { url: "http://127.0.0.1/mcp" } } } };',
     '  } else if (method === "mcpServerStatus/list") {',
@@ -319,7 +346,18 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     throw new Error("Board busy");
   }), /Board busy/);
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "mcpServerStatus/list");
-  await assert.rejects(launch("denied"), /Codex cannot write.*EACCES/s);
+  await assert.rejects(launch("silent-exit"), /process exited with code 7/);
+  await assert.rejects(launch("spawn-error"), /could not run the write probe.*os error 2/);
+  await assert.rejects(launch("mxc-launch-error"), /could not start the write probe.*launcher exit code 1.*error code 2/);
+  await assert.rejects(launch("timeout"), /write probe timed out after 15 seconds/);
+  await assert.rejects(launch("missing-confirmation"), /code 0 without confirming the write check/);
+  await assert.rejects(launch("denied"), error => {
+    assert.ok(error instanceof Error);
+    assert.ok(error.message.includes(JSON.stringify(worktree)));
+    assert.match(error.message, /overwrite \(EACCES\)/);
+    return true;
+  });
+  assert.ok(!readdirSync(worktree).some(name => name.startsWith(".taskboard-access-")));
   const denied = JSON.parse(readFileSync(capture, "utf8"));
   assert.equal(denied.requests.at(-1).method, "command/exec");
   if (process.platform === "win32") {

@@ -9,6 +9,7 @@ import { git, gitSafeDirectoryEnvironment, isolatedWorktreesDirectory } from "..
 import { boardReviewMode, codexThreadPattern } from "../cli/model.ts";
 import type { BoardSettings, RunActivity, Task } from "../cli/model.ts";
 import { directory } from "../cli/storage.ts";
+import { redactSecrets } from "../cli/redact.ts";
 import { runActivity } from "./run-activity.ts";
 import { boardAgentInstructions, boardCodexArgs, boardWorklog, worklogReminder, worklogTool } from "./board-agent-hooks.ts";
 import { githubCreateMilestoneTool, githubSetMilestoneDueTool, milestonesListTool, recurringChildTool } from "./board-actions.ts";
@@ -93,15 +94,71 @@ function gitAccessPaths(cwd: string, branch: string): string[] {
   ].filter(existsSync);
 }
 
-const verifyWrite = [
-  "const fs = require('node:fs'), path = require('node:path');",
-  "for (const root of process.argv.slice(1)) {",
-  "  const dir = fs.mkdtempSync(path.join(root, '.taskboard-access-'));",
-  "  const probe = path.join(dir, 'probe');",
-  "  try { fs.writeFileSync(probe, '0'); fs.writeFileSync(probe, '1'); }",
-  "  finally { try { fs.unlinkSync(probe); } finally { fs.rmdirSync(dir); } }",
-  "}",
-].join("\n");
+const writeProbeTimeoutMs = 15_000;
+const writeProbeOperations = ["mkdtemp", "create", "overwrite", "unlink", "rmdir"];
+const verifyWrite = `
+const fs = require("node:fs");
+const path = require("node:path");
+const roots = process.argv.slice(1);
+for (const [index, root] of roots.entries()) {
+  const failures = [];
+  const attempt = (operation, action) => {
+    try {
+      return action();
+    } catch (error) {
+      failures.push({ operation, code: error.code });
+    }
+  };
+  const dir = attempt("mkdtemp", () => fs.mkdtempSync(path.join(root, ".taskboard-access-")));
+  if (dir) {
+    const probe = path.join(dir, "probe");
+    try {
+      attempt("create", () => fs.writeFileSync(probe, "0", { flag: "wx" }));
+      if (!failures.length) {
+        attempt("overwrite", () => fs.writeFileSync(probe, "1"));
+      }
+    } finally {
+      attempt("unlink", () => {
+        try {
+          fs.unlinkSync(probe);
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
+        }
+      });
+      attempt("rmdir", () => fs.rmdirSync(dir));
+    }
+  }
+  if (failures.length) {
+    console.log("taskboard-write-probe " + JSON.stringify({ index, failures }));
+    process.exitCode = 1;
+    break;
+  }
+}
+if (!process.exitCode) console.log("taskboard-write-probe ok");
+`;
+
+function writeProbeFileFailure(stdout: string, paths: string[]): string | undefined {
+  const record = stdout.trim().split(/\r?\n/).at(-1);
+  const prefix = "taskboard-write-probe ";
+  if (!record?.startsWith(prefix)) return;
+  try {
+    const { index, failures } = JSON.parse(record.slice(prefix.length));
+    if (!Number.isInteger(index) || index < 0 || index >= paths.length ||
+        !Array.isArray(failures) || !failures.length) return;
+    const operations = failures.map(({ operation, code }) => {
+      if (!writeProbeOperations.includes(operation)) throw new Error("Unknown write probe operation.");
+      return operation + " (" + (typeof code === "string" && /^[A-Z][A-Z0-9_]{1,39}$/.test(code) ? code : "unknown error") + ")";
+    });
+    return "Codex write probe failed in " + JSON.stringify(paths[index]) + ": " + operations.join(", ") + ".";
+  } catch {
+    return undefined;
+  }
+}
+
+function writeProbeDetail(output: string): string {
+  const detail = redactSecrets(output).replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 300);
+  return detail ? " " + detail : "";
+}
 
 export type ExecutorTask = Pick<Task, "expertId" | "expertTeam" | "expertStage" | "expertStages" | "acceptanceRepair" | "id" | "title" | "description" | "criteria" | "dueDate" | "summary" | "nextStep" | "execution" | "git" | "codexThreadId" | "codexServiceThreads" | "workingDirectory" | "schedule" | "toolGrants"> &
   { feedback?: string; fullAccess?: boolean };
@@ -350,14 +407,30 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       capabilities: { experimentalApi: true },
     });
     send({ method: "initialized" });
-    try {
-      const probe = await request<{ exitCode: number; stderr: string; stdout: string }>("command/exec", {
-        cwd, permissionProfile: profile, timeoutMs: 15_000, env: { ELECTRON_RUN_AS_NODE: "1" },
-        command: [process.execPath, "-e", verifyWrite, ...paths],
-      });
-      if (probe.exitCode !== 0) throw new Error((probe.stderr || probe.stdout).trim());
-    } catch (error) {
-      throw new Error("Codex cannot write to the directories required for this task. " + (error as Error).message);
+    const probe = await request<{ exitCode: number; stderr: string; stdout: string }>("command/exec", {
+      cwd, permissionProfile: profile, timeoutMs: writeProbeTimeoutMs, env: { ELECTRON_RUN_AS_NODE: "1" },
+      command: [process.execPath, "-e", verifyWrite, ...paths],
+    }).catch((error: Error) => {
+      throw new Error("Codex could not run the write probe." + writeProbeDetail(error.message));
+    });
+    // command/exec uses 124 for its deadline. The helper only sets 0 or 1.
+    if (probe.exitCode === 124) {
+      throw new Error("Codex write probe timed out after " + writeProbeTimeoutMs / 1000 + " seconds.");
+    }
+    if (probe.exitCode !== 0) {
+      const failure = probe.exitCode === 1 && writeProbeFileFailure(probe.stdout ?? "", paths);
+      if (failure) throw new Error(failure);
+      const detail = writeProbeDetail(probe.stderr?.trim() || probe.stdout || "");
+      if (probe.stderr?.startsWith("MXC launcher: CreateProcessW failed with error code ")) {
+        throw new Error("Codex could not start the write probe (launcher exit code " + probe.exitCode + ")." + detail);
+      }
+      const windowsCode = process.platform === "win32" && (probe.exitCode >>> 0) >= 0x80000000
+        ? " (0x" + (probe.exitCode >>> 0).toString(16).toUpperCase() + ")" : "";
+      throw new Error("Codex write probe process exited with code " + probe.exitCode + windowsCode + "." + detail);
+    }
+    if (probe.stdout?.trim().split(/\r?\n/).at(-1) !== "taskboard-write-probe ok") {
+      throw new Error("Codex write probe process exited with code 0 without confirming the write check." +
+        writeProbeDetail(probe.stderr || probe.stdout || ""));
     }
     let existing = task.codexThreadId;
     if (recoveringThreadId && existing !== recoveringThreadId) {
