@@ -73,6 +73,11 @@ if (!process.versions.electron) {
     await ask({ action: "ready" });
     return worker;
   };
+  const exitWorker = async worker => {
+    const exited = once(worker.child, "exit");
+    await worker.ask({ action: "exit" });
+    assert.deepEqual(await exited, [0, null]);
+  };
   checks: try {
     symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), join(scratch, "node_modules"), process.platform === "win32" ? "junction" : "dir");
     if (returnOnly) {
@@ -557,7 +562,9 @@ if (!process.versions.electron) {
     await wait(async () => (await a.ask({ action: "goalPanels" }))[0]?.visible === false &&
       (await b.ask({ action: "goalPanels" }))[0]?.visible === false, "paused goal removed after the ordinary reply");
     assert.equal(await a.ask({ action: "goalClearCalls" }) + await b.ask({ action: "goalClearCalls" }), 1);
-    await start("profile-reopen-cleared").then(worker => worker.ask({ action: "reopenGoalBoard", expectedReply: "Finished held turn" }));
+    const reopened = await start("profile-reopen-cleared");
+    await reopened.ask({ action: "reopenGoalBoard", expectedReply: "Finished held turn" });
+    await exitWorker(reopened);
     record("PASS: one provider clear during the ordinary reply, across two processes; reopened board displays the preserved reply without the goal");
     for (const mode of ["resume", true]) {
       await a.ask({ action: "startGoal", mode });
@@ -577,15 +584,41 @@ if (!process.versions.electron) {
       await a.ask({ action: "finishGoal" });
     }
     await reloaded.ask({ action: "reopenGoalBoard" });
+    // The extra profiles can run the same queues as a and b while their boards
+    // are open. Finish their lifecycle before testing the two-process topology.
+    await exitWorker(reloaded);
     record("PASS: clearing a new or resumed goal removes it from both windows and from the reopened board");
     if (managerOnly) {
       if (output) writeFileSync(join(output, "shared-runtime.txt"), results.join("\n") + "\n");
       break checks;
     }
-    const expectCount = async total => {
-      let latest;
-      try { await wait(async () => { latest = await frames(); return latest.every(frame => frame.activeAgents.total === total) && [...await a.ask({action:"dom"}), ...await b.ask({action:"dom"})].every(view => view.count === total); }, "all windows count " + total); }
-      catch (error) { console.error(JSON.stringify(latest.map(frame => ({ count: frame.activeAgents, error: frame.error, tasks: frame.board.tasks.map(task => ({id:task.id,status:task.status,blocked:task.blocked})), settings: frame.board.settings })), null, 2)); throw error; }
+    const expectCount = async (total, desktops = [a, b]) => {
+      await wait(async () => {
+        const windows = (await Promise.all(desktops.map(worker => worker.ask({ action: "agentTrace" }))))
+          .flatMap(desktop => desktop.windows);
+        return windows.length > 0 && windows.every(window => window.total === total && window.count === String(total));
+      }, "all windows count " + total);
+    };
+    const runtimeEntries = () => {
+      const runtimePath = join(project, ".tasks", "runtime.json");
+      return existsSync(runtimePath) ? JSON.parse(readFileSync(runtimePath, "utf8")) : [];
+    };
+    const probe = pid => {
+      try {
+        process.kill(pid, 0);
+        return { pid, alive: true };
+      } catch (error) {
+        return { pid, probeError: error.code };
+      }
+    };
+    const traceAgents = async (label, desktopsToTrace = [a, b]) => {
+      const runtime = runtimeEntries();
+      const processes = [...new Set([...desktopsToTrace.map(worker => worker.child.pid), ...runtime.flatMap(entry => [entry.owner, entry.pid])])]
+        .filter(pid => Number.isInteger(pid) && pid > 0)
+        .map(probe);
+      const desktops = await Promise.all(desktopsToTrace.map(worker => worker.ask({ action: "agentTrace" })));
+      record(JSON.stringify({ label, processes, runtime: runtime.map(({ id, owner, parent, kind, task, pid, role }) =>
+        ({ id, owner, parent, kind, task, pid, role })), desktops }));
     };
     await a.ask({ action: "restoreBoards" });
     await delay(11000);
@@ -617,8 +650,13 @@ if (!process.versions.electron) {
     await owner.ask({ action: "stop", id: runningId });
     await wait(async () => (await frames()).every(frame => frame.runningTasks.includes(queued) && !frame.waitingTasks.includes(queued)), "queue continues after release");
     await expectCount(1);
-    await wait(async () => (await Promise.all([a, b].map(worker => worker.ask({ action: "canStop", id: queued })))).some(Boolean),
-      "queued agent has registered its stop control");
+    try {
+      await wait(async () => (await Promise.all([a, b].map(worker => worker.ask({ action: "canStop", id: queued })))).some(Boolean),
+        "queued agent has registered its stop control");
+    } catch (error) {
+      await traceAgents("queued stop control timeout");
+      throw error;
+    }
     await Promise.all([a.ask({ action: "stop", id: queued }), b.ask({ action: "stop", id: queued })]); await expectCount(0);
     record("PASS: both processes can repeat the waiting request; one provider starts it after release");
     assert.equal(await a.ask({ action: "reserve", role: "reviewer" }), true);
@@ -638,7 +676,33 @@ if (!process.versions.electron) {
     await expectCount(1);
     cli(project, ["settings"], { autoMode: false });
     await wait(async () => (await frames()).every(frame => !frame.board.settings.autoMode), "auto false propagation");
-    await a.ask({ action: "stopAll" }); await b.ask({ action: "stopAll" }); await expectCount(0); await delay(1300); await expectCount(0);
+    let automatic;
+    await wait(async () => {
+      const entries = runtimeEntries();
+      const slot = entries.find(entry => entry.kind === "slot" && entry.role === "executor");
+      if (!slot) return false;
+      const worker = [a, b].find(candidate => candidate.child.pid === slot.owner);
+      assert.ok(worker, "executor slot must belong to one of the two test processes");
+      if (!await worker.ask({ action: "canStop", id: slot.task })) return false;
+      const provider = entries.find(entry => entry.kind === "provider" && entry.parent === slot.id);
+      assert.ok(provider, "executor must have a provider");
+      automatic = { worker, slot, pid: provider.pid };
+      return true;
+    }, "automatic executor stop control");
+    await traceAgents("before stop");
+    assert.equal(probe(automatic.pid).alive, true);
+    assert.equal((await automatic.worker.ask({ action: "stopFromWindow", id: automatic.slot.task })).ok, true);
+    try {
+      await expectCount(0);
+      await delay(1300);
+      await expectCount(0);
+      assert.equal(probe(automatic.pid).probeError, "ESRCH");
+      assert.ok(!runtimeEntries().some(entry => entry.id === automatic.slot.id || entry.pid === automatic.pid));
+    } catch (error) {
+      await traceAgents("stop timeout");
+      throw error;
+    }
+    await traceAgents("after stop");
     record("PASS: limits, review mode, statuses and autoMode propagate; auto false prevents subsequent starts");
     await a.ask({ action: "failNext" });
     const failed = await a.ask({ action: "launch", id: tasks[4] }); assert.equal(failed.ok, false);
@@ -649,18 +713,48 @@ if (!process.versions.electron) {
     if (resumed.status === "blocked") cli(project, ["resume", tasks[5]], { reason: "isolated crash scenario" });
     const launched = await a.ask({ action: "launch", id: tasks[5] }); assert.equal(launched.ok, true, JSON.stringify(launched));
     await expectCount(1);
+    const crashRuntime = runtimeEntries();
+    const crashSlot = crashRuntime.find(entry => entry.kind === "slot" && entry.task === tasks[5]);
+    assert.equal(crashSlot?.owner, a.child.pid);
+    const crashProvider = crashRuntime.find(entry => entry.kind === "provider" && entry.parent === crashSlot.id);
+    assert.ok(crashProvider);
+    assert.equal(probe(crashProvider.pid).alive, true);
+    await traceAgents("before desktop crash");
     await a.ask({ action: "stopWatches" });
-    a.child.kill(); await once(a.child, "exit");
+    const crashedOwnerExit = once(a.child, "exit");
+    a.child.kill();
+    await crashedOwnerExit;
     const restarted = await start("profile-restarted");
     await wait(async () => (await restarted.ask({ action: "frames" })).every(frame => frame.runningTasks.includes(tasks[5])), "restart sees orphan provider");
     assert.equal((await restarted.ask({ action: "launch", id: tasks[5] })).ok, false);
-    for (const pid of providerPids) { try { process.kill(pid); } catch {} }
-    await wait(async () => Boolean(await restarted.ask({ action: "executorBinding", id: tasks[5] }) ||
-      await b.ask({ action: "executorBinding", id: tasks[5] })), "dead owner and provider reclaimed and continued");
-    await restarted.ask({ action: "stop", id: tasks[5] });
-    await b.ask({ action: "stop", id: tasks[5] });
-    await wait(async () => (await restarted.ask({ action: "frames" })).every(frame => frame.activeAgents.total === 0), "resumed provider stopped");
-    assert.equal(await restarted.ask({ action: "reserve", role: "executor" }), true); await restarted.ask({ action: "release", role: "executor" });
+    await expectCount(1, [b, restarted]);
+    assert.equal(probe(crashSlot.owner).probeError, "ESRCH");
+    assert.equal(probe(crashProvider.pid).alive, true);
+    await traceAgents("live provider after desktop crash", [b, restarted]);
+    process.kill(crashProvider.pid);
+    let recovered;
+    try {
+      await wait(async () => {
+        const candidates = [b, restarted];
+        const controls = await Promise.all(candidates.map(worker => worker.ask({ action: "canStop", id: tasks[5] })));
+        assert.ok(controls.filter(Boolean).length <= 1, "one owner may recover the executor");
+        recovered = candidates[controls.indexOf(true)];
+        return recovered;
+      }, "dead owner and provider reclaimed and continued");
+    } catch (error) {
+      await traceAgents("provider recovery timeout", [b, restarted]);
+      throw error;
+    }
+    await expectCount(1, [b, restarted]);
+    assert.equal(probe(crashProvider.pid).probeError, "ESRCH");
+    assert.ok(!runtimeEntries().some(entry => entry.id === crashSlot.id || entry.pid === crashProvider.pid));
+    await traceAgents("recovered executor", [b, restarted]);
+    assert.equal((await recovered.ask({ action: "stopFromWindow", id: tasks[5] })).ok, true);
+    await expectCount(0, [b, restarted]);
+    assert.equal(await restarted.ask({ action: "reserve", role: "executor" }), true);
+    assert.equal(await b.ask({ action: "reserve", role: "executor" }), false);
+    await restarted.ask({ action: "release", role: "executor" });
+    await traceAgents("released executor", [b, restarted]);
     record("PASS: launch failure releases slot; restart preserves living orphan; provider death reclaims slot");
     cli(project, ["settings"], { taskLimits: { executor: 6, reviewer: 7 } });
     const makeCards = (name, review) => Array.from({ length: 7 }, (_, index) => {
@@ -1038,9 +1132,20 @@ if (!process.versions.electron) {
           `window.taskboard.command("request-changes", ${JSON.stringify(id)}, ${JSON.stringify({ revision, reason })})`);
       }
       if (command.action === "canStop") data = qa.activeAgents.has(project + "\0" + command.id);
+      if (command.action === "agentTrace") {
+        const windows = await Promise.all(BrowserWindow.getAllWindows().map(async window => {
+          const count = await window.webContents.executeJavaScript("document.querySelector('#status-agents span')?.textContent");
+          const frame = await window.webContents.executeJavaScript("window.taskboard.bootstrap()");
+          return { id: window.id, count, total: frame.activeAgents.total, running: frame.runningTasks };
+        }));
+        data = { owner: process.pid, controls: [...qa.activeAgents.keys()].map(key => key.split("\0").at(-1)), windows };
+      }
       if (command.action === "stop") { await qa.activeAgents.get(project + "\0" + command.id)?.control.interrupt(); data = true; }
       if (command.action === "stopWatches") { for (const watch of qa.subscriptions.values()) watch.stop(); data = true; }
-      if (command.action === "stopAll") { for (const agent of qa.activeAgents.values()) await agent.control.interrupt(); data = true; }
+      if (command.action === "stopFromWindow") {
+        const window = BrowserWindow.getAllWindows().at(-1);
+        data = await window.webContents.executeJavaScript(`window.taskboard.chatStop(${JSON.stringify(command.id)})`);
+      }
       if (command.action === "queue") { qa.agentSlots.defer(project, command.id, { revision: command.revision }); qa.scheduleAgentWork(); data = true; }
       if (command.action === "reserve") {
         const lease = command.role === "manager" ? qa.agentSlots.claim(board, "manager:dialogue") : qa.reserveAgent(board, command.role, command.task);
