@@ -89,9 +89,9 @@ async function run() {
     const stage = `${viewer}?.querySelector('.image-preview-stage img:not([hidden])')`;
     const getPreview = (card, path, reviewer) =>
       evaluate(`api.runImagePreview(${JSON.stringify(card)}, ${JSON.stringify(path)}, ${reviewer})`);
-    async function openWork() {
+    async function openHistory() {
       await evaluate(`showTask('${id}')`);
-      await evaluate(`document.querySelector('[aria-controls="task-chat-work"]').click()`);
+      await evaluate(`document.querySelector('#task-review-history > summary').click()`);
     }
     async function reveal(item) {
       await waitUI(`Boolean(${tile(item)})`);
@@ -115,7 +115,7 @@ async function run() {
       await reveal("first");
       writeFileSync(join(artifacts, name), (await contents.capturePage()).toPNG());
     }
-    await openWork();
+    await openHistory();
     assert.equal((await evaluate(`api.reviewerChat('${id}')`)).data[0].durationMs, undefined);
     assert.equal(await getPreview(id, first, true), expected[0]);
     assert.equal(await getPreview(id, join(project, second), true), expected[1]);
@@ -133,14 +133,14 @@ async function run() {
     for (const type of ["keyDown", "keyUp"]) contents.sendInputEvent({ type, keyCode: "Right" });
     await waitUI(`${stage}?.src === ${JSON.stringify(expected[1])}`);
     await evaluate(`${viewer}.close()`);
-    report.push("В активном ревью клик открыл первое вложение, стрелка вправо — второе.");
+    report.push("В разделе «Сообщения ревьюера» клик открыл первое вложение, стрелка вправо — второе.");
 
     finishReview.resolve();
     await review;
     assert.equal(await getPreview(id, first, true), expected[0]);
     assert.equal(await getPreview(id, join(project, second), true), expected[1]);
     await evaluate("sheet.close()");
-    await openWork();
+    await openHistory();
     assert.equal(typeof (await evaluate(`api.reviewerChat('${id}')`)).data[0].durationMs, "number");
     await thumbnails();
     await capture("review-image-history.png");
@@ -152,6 +152,9 @@ async function run() {
     contents.sendInputEvent({ type: "keyUp", keyCode: "Enter" });
     await waitUI(`${stage}?.src === ${JSON.stringify(expected[1])}`);
     await evaluate(`${viewer}.close()`);
+    await evaluate(`document.querySelector('[aria-controls="task-chat-work"]').click()`);
+    assert.equal(await evaluate(`Boolean(document.querySelector('#task-chat-work [data-item="item:first"]'))`), false);
+    assert.equal(await evaluate(`Boolean(document.querySelector('#task-review-history [data-item="item:executor"]'))`), false);
     await reveal("executor");
     await waitUI(`${image("executor")}?.src === ${JSON.stringify(expected[1])}`);
     report.push("После завершения ревью IPC возвращает оба файла. После повторного открытия карточки обе миниатюры загружаются из сохранённой истории, Enter открывает вторую. Миниатюра исполнителя загружается.");

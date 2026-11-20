@@ -278,7 +278,11 @@ function frame(state: ProjectTab) {
     }) ?? []),
     runActivity: Object.fromEntries(state.board?.tasks.flatMap(task => {
       const log = runActivityByTask.get(state.project + "\0" + task.id);
-      return log ? [[task.id, log]] : [];
+      return log ? [[task.id, log.items]] : [];
+    }) ?? []),
+    runActivityThreads: Object.fromEntries(state.board?.tasks.flatMap(task => {
+      const threadId = runActivityByTask.get(state.project + "\0" + task.id)?.threadId;
+      return threadId ? [[task.id, threadId]] : [];
     }) ?? []),
     discussionActivity: Object.fromEntries(state.board?.tasks.flatMap(task => {
       const log = discussionActivityByTask.get(state.project + "\0" + task.id);
@@ -3907,7 +3911,7 @@ async function runImage(event: IpcMainInvokeEvent, id: unknown, path: unknown, r
   if (!task.ok) return null;
   if (reviewer === true) return readReviewerImage(project, task.data.id, path);
   const key = project + "\0" + id;
-  const items = [...(runActivityByTask.get(key) ?? []), ...(discussionActivityByTask.get(key) ?? [])];
+  const items = [...(runActivityByTask.get(key)?.items ?? []), ...(discussionActivityByTask.get(key) ?? [])];
   return readRunImage(project, task.data, items, path);
 }
 
@@ -3993,7 +3997,7 @@ ipcMain.handle("board:revealArtifact", async (event, id: unknown, source: unknow
 
 const launchingTasks = new Set<string>();
 const runningTasks = new Set<string>();
-const runActivityByTask = new Map<string, RunActivity[]>();
+const runActivityByTask = new Map<string, { items: RunActivity[]; threadId?: string }>();
 const discussionActivityByTask = new Map<string, RunActivity[]>();
 
 function publishDiscussionActivity(project: string, id: string, items?: RunActivity[]) {
@@ -4013,13 +4017,13 @@ function executorBusy(project: string, id: string) {
 }
 
 function publishRunActivity(project: string, id: string, items: RunActivity[],
-  savedRun?: { sequence: number; items: RunActivity[]; durationMs: number }) {
+  savedRun?: { sequence: number; items: RunActivity[]; durationMs: number; threadId?: string }, runThreadId?: string) {
   const key = project + "\0" + id;
-  if (items.length) runActivityByTask.set(key, items);
+  if (items.length) runActivityByTask.set(key, { items, threadId: runThreadId });
   else runActivityByTask.delete(key);
   for (const state of windowStates.values()) {
     if (state.active.project === project && !state.window.isDestroyed()) {
-      state.window.webContents.send("chat:update", { project, id, type: "run", items, savedRun });
+      state.window.webContents.send("chat:update", { project, id, type: "run", items, savedRun, runThreadId });
     }
   }
 }
@@ -4075,6 +4079,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     if (taskOperations.get(key) === operation) taskOperations.delete(key);
   });
   const activity = new Map<string, RunActivity>();
+  let runThreadId: string | undefined;
   const runStarted = performance.now();
   let prepared = false;
   let returnedRevision: number | undefined;
@@ -4099,7 +4104,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   };
   const publish = () => {
     updateTimer = undefined;
-    publishRunActivity(project, id, runLog(activity));
+    publishRunActivity(project, id, runLog(activity), undefined, runThreadId);
     if (steeredReply && latestReply() === steeredReply) publishReply();
   };
   const saveActivity = async () => {
@@ -4113,10 +4118,10 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     const items = runLog(activity);
     if (!items.length) return;
     const durationMs = Math.round(performance.now() - runStarted);
-    const saved = await callCli<{ runLogSequence?: number }>(project, ["run-log", id, "--compact"], { entries: items, durationMs });
+    const saved = await callCli<{ runLogSequence?: number }>(project, ["run-log", id, "--compact"], { entries: items, durationMs, runThreadId });
     if (saved.ok) {
       const sequence = saved.data.runLogSequence;
-      publishRunActivity(project, id, [], sequence === undefined ? undefined : { sequence, items, durationMs });
+      publishRunActivity(project, id, [], sequence === undefined ? undefined : { sequence, items, durationMs, threadId: runThreadId });
     }
     else publishRunActivity(project, id, [
       { id: "save-error", type: "error", title: "", text: saved.error.message, status: "failed" },
@@ -4301,6 +4306,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       activity.set(item.id, item);
       updateTimer ??= setTimeout(publish, 80);
     }, report => saveTaskTokenUsage(project, id, role, report), signal, async (codexThreadId, created) => {
+      runThreadId = codexThreadId;
       if (!queued && linked.codexThreadId === codexThreadId) {
         rememberExecutor(project, linked, cwd, continuation);
         return;

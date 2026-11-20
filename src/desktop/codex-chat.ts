@@ -509,9 +509,10 @@ export function readLastTaskTurn(profile: string, project: string, threadId: str
   }, async () => undefined, signal);
 }
 
-export function readTaskRunHistory(profile: string, project: string, threadId: string, history: Pick<TaskEvent, "at" | "durationMs" | "run" | "action">[]) {
+export function readTaskRunHistory(profile: string, project: string, threadId: string, history: Pick<TaskEvent, "at" | "durationMs" | "run" | "action" | "runThreadId">[]) {
   const runs = history.flatMap((event, index) => {
-    if (event.action !== "run-log" || event.run?.length || event.durationMs === undefined) return [];
+    if (event.action !== "run-log" || event.run?.length || event.durationMs === undefined ||
+      (event.runThreadId && event.runThreadId !== threadId)) return [];
     const end = Date.parse(event.at);
     return Number.isFinite(end) ? [{ index, start: end - event.durationMs, end, items: new Map<string, RunActivity>() }] : [];
   });

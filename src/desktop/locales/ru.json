@@ -638,6 +638,7 @@
   "ui.save_ceeee51c": "Сохранить ",
   "ui.load_codex_activity_4ba86e2d": "Загрузить ход работы из Codex",
   "ui.some_runs_are_unavailable_in_the_saved_codex_cha_7d8bfad3": "Часть запусков недоступна в сохранённом чате Codex.",
+  "ui.no_task_work": "В этом чате пока нет событий.",
   "ui.no_activity_for_these_runs_in_the_saved_codex_ch_261837a1": "В сохранённом чате Codex нет данных об этих запусках.",
   "ui.could_not_load_the_codex_activity_5cf03362": "Не удалось загрузить ход работы из Codex. ",
   "ui.message_the_agent_a84e2133": "Написать агенту…",
