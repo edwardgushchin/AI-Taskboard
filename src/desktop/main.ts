@@ -36,7 +36,7 @@ import type { CliReply } from "./cli.ts";
 import { executionModels } from "./codex-models.ts";
 import type { ArchiveLink, BoardSettings, BoardTag, ReviewMode, RunActivity, Task } from "../cli/model.ts";
 import { boardReviewMode, taskReviewMode, taskReviewModeVersion, codexThreadPattern, defaultBoardAgents, maxAttachmentBytes, reviewsAcceptanceRepair, reviewVerifier, taskIdPattern, TaskboardError, usesIndependentReviewer } from "../cli/model.ts";
-import { activeManagerGoal, managerGoalBinding } from "../cli/manager-goal.ts";
+import { managerGoalBinding, managerGoalState } from "../cli/manager-goal.ts";
 import { BoardStore, directory as storageDirectory, locateBoard, onBoard, readBoardSettings, readJson, writeJson } from "../cli/storage.ts";
 import { applyDesktopAcceptance } from "../cli/acceptance.ts";
 import { missingCodexThread, startCodexRun } from "./codex-run.ts";
@@ -222,6 +222,7 @@ function frame(state: ProjectTab) {
   const key = state.board && projectIdentity(state.board.project);
   const request = key ? boardRequests.get(key) : undefined;
   const work = key ? boardWorkRequests.get(key) : undefined;
+  const goal = state.board ? currentManagerGoal(state.board.project) : undefined;
   const reviewerRuns = state.project ? subscriptions.get(state.project)?.reviewerRuns : undefined;
   const sharedRuns = state.board ? agentSlots.entries(state.board.project) : [];
   const managerContext = sharedRuns.find(entry => entry.task === "manager:dialogue");
@@ -244,7 +245,8 @@ function frame(state: ProjectTab) {
     managerQuestion: key ? managerQuestion(key)?.view : undefined,
     managerAccess: state.project ? managerAccess(app.getPath("userData"), state.project) : "auto",
     managerBusy: Boolean(managerContext),
-    iterativeGoalId: state.board ? currentActiveGoal(state.board.project) : undefined,
+    iterativeGoalId: goal?.iterativeGoalId,
+    hasCurrentGoal: Boolean(goal?.status && goal.status !== "complete"),
     managerRun: request?.managerRun ?? (sharedManager?.lane === "chat" ? sharedManager : null),
     managerWork: work?.managerRun ?? (sharedGoal ? { ...sharedGoal, live: undefined } : undefined) ??
       (background ? { ...background, live: undefined } : null),
@@ -1832,9 +1834,13 @@ function broadcastBoardChat(project: string, type: string, details: { id?: strin
   }
 }
 
-function currentActiveGoal(project: string) {
-  try { return activeManagerGoal(project); }
+function currentManagerGoal(project: string) {
+  try { return managerGoalState(project); }
   catch { return undefined; }
+}
+
+function currentActiveGoal(project: string) {
+  return currentManagerGoal(project)?.iterativeGoalId;
 }
 
 function boardThreadPath(project: string, dialogue = false) {
