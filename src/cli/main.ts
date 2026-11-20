@@ -136,16 +136,29 @@ function taskLaunchState(task: Task) {
     reviewReturn: task.reviewReturn, ...(isMergeRepair(task) ? { mergeRepair: true as const } : {}) };
 }
 
+function currentReviewNote(task: Task) {
+  if (task.status !== "review") return;
+  const note = task.history.findLast(event => event.actor === "reviewer" && event.action === "review-note")?.reviewNote;
+  if (note?.revision === task.revision) return note;
+}
+
 function reviewWithSettings(store: BoardStore, task: Task, review: ReturnType<typeof inspectReview>, input: Record<string, unknown>) {
   if (input.includeReviewerSettings !== true) return review;
-  return { ...review, reviewTeam: task.expertTeam?.review, reviewDecision: reviewDecisionSequence(task) || undefined, settings: {
+  const note = currentReviewNote(task);
+  const reviewDecision = reviewDecisionSequence(task);
+  const reviewNoted = note && note.decision === reviewDecision &&
+    note.reviewMode === review.reviewMode && note.reviewModeVersion === review.reviewModeVersion &&
+    note.targetHead === review.targetHead;
+  return { ...review, ...(reviewNoted ? { reviewNoted: true } : {}), reviewTeam: task.expertTeam?.review,
+    reviewDecision: reviewDecision || undefined, settings: {
     reviewMode: review.reviewMode,
     reviewModeVersion: review.reviewModeVersion,
     reviewer: store.index.settings.reviewer,
   } };
 }
 
-type CachedCard = { file: Stats; task: CompactTask; approval?: NonNullable<Task["history"][number]["reviewApproval"]>; target?: string; inbox: ReturnType<typeof managerInbox> };
+type CachedCard = { file: Stats; task: CompactTask; approval?: NonNullable<Task["history"][number]["reviewApproval"]>;
+  note?: ReturnType<typeof currentReviewNote>; target?: string; inbox: ReturnType<typeof managerInbox> };
 
 function snapshotBoard(store: BoardStore, compact = false, cache = new Map<string, CachedCard>()) {
   upgradeTagCatalog(store, false);
@@ -161,17 +174,18 @@ function snapshotBoard(store: BoardStore, compact = false, cache = new Map<strin
       if (saved && saved.file.mtimeMs === file.mtimeMs && saved.file.ctimeMs === file.ctimeMs &&
           saved.file.ino === file.ino && saved.file.size === file.size) return saved;
       const task = store.card(id);
-      const card = { file, task: compactTask(task), approval: currentReviewApproval(task)?.reviewApproval,
+      const card = { file, task: compactTask(task), approval: currentReviewApproval(task)?.reviewApproval, note: currentReviewNote(task),
         target: task.status === "review" && !task.result?.noChanges ? task.git?.target : undefined, inbox: managerInbox([task]) };
       cache.set(id, card);
       return card;
     });
     const statuses = new Map([...cards.map(card => card.task), ...archived].map(task => [task.id, task.status]));
-    return { ...header, tasks: cards.map(({ task, target, approval }) => {
+    return { ...header, tasks: cards.map(({ task, target, approval, note }) => {
       let reviewTargetHead: string | null | undefined;
       const mode = taskReviewMode(task, header.settings);
       const reviewPending = task.status === "review" && exists(store.pendingPath(task.id)) ? true as const : undefined;
-      const checkReviewTarget = mode === "reviewer-human" || (mode === "reviewer" && !task.expertReviewPlanned && approval);
+      const checkReviewTarget = mode === "reviewer-human" ||
+        (mode === "reviewer" && (note || (approval && (!header.settings.autoMode || !task.expertReviewPlanned))));
       if (task.status === "review" && checkReviewTarget) {
         if (target && !targetHeads.has(target)) {
           targetHeads.set(target, store.location.repository && resolveCommit(store.location.repository.root, target) || undefined);
@@ -182,7 +196,11 @@ function snapshotBoard(store: BoardStore, compact = false, cache = new Map<strin
       } else if (approval && approval.reviewModeVersion !== taskReviewModeVersion(task, header.settings)) {
         task = { ...task, reviewApproved: false };
       }
-      return { ...task, reviewTargetHead, reviewPending, reviewApprovalTargetHead: approval?.targetHead, ...(task.dependencies?.length
+      const reviewNoted = note && note.decision === task.reviewDecision &&
+        note.reviewMode === mode && note.reviewModeVersion === taskReviewModeVersion(task, header.settings) &&
+        note.targetHead === reviewTargetHead;
+      return { ...task, reviewTargetHead, reviewPending, reviewApprovalTargetHead: approval?.targetHead,
+        ...(reviewNoted ? { reviewNoted: true } : {}), ...(task.dependencies?.length
         ? { unfinishedDependencies: unfinishedDependencies(task, id => statuses.get(id)) } : {}) };
     }),
       managerInbox: cards.flatMap(card => card.inbox).sort((left, right) => left.at.localeCompare(right.at) ||
@@ -739,9 +757,19 @@ function run(
           const saved = store.save(withReviewerUsage({ ...approved, revision: task.revision }));
           return filters.compact ? taskReceipt(saved) : saved;
         }
-        const submitted = task.history.findLastIndex(event => event.action === "submit");
-        const noted = task.history.slice(submitted + 1).findLast(event => event.action === "review-note")?.text === summary
-          ? task : { ...record(task, "review-note", "reviewer", task.status, summary), revision: task.revision };
+        const decision = reviewDecisionSequence(task);
+        if (input.reviewDecision !== undefined && input.reviewDecision !== decision) {
+          throw new TaskboardError("REVISION_CONFLICT", "The owner provided a decision. Review the submission again.");
+        }
+        const version = taskReviewModeVersion(task, store.index.settings);
+        const previous = task.history.findLast(event => event.actor === "reviewer" && event.action === "review-note");
+        const note = previous?.reviewNote;
+        let noted = task;
+        if (previous?.text !== summary || !note || note.revision !== task.revision || note.targetHead !== targetHead ||
+            note.reviewMode !== mode || note.reviewModeVersion !== version || note.decision !== decision) {
+          noted = { ...record(task, "review-note", "reviewer", task.status, summary), revision: task.revision };
+          noted.history.at(-1)!.reviewNote = { revision: task.revision, targetHead, reviewMode: mode, reviewModeVersion: version, decision };
+        }
         const recorded = withReviewerUsage(noted);
         if (recorded !== task) store.save(recorded);
         return filters.compact ? taskReceipt(recorded) : recorded;

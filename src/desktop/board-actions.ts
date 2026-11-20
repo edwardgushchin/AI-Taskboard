@@ -296,6 +296,7 @@ type TaskLink = Pick<Task, "id" | "title" | "status" | "revision">;
 export type BoardChange = TaskLink & { action: string; reason?: string };
 type ReviewChanges = { paths: string[]; total: number };
 type TaskReview = { revision: number; targetHead: string | null; stale: boolean; criteria: string[]; title: string; description: string;
+  reviewNoted?: boolean;
   result?: Task["result"];
   reviewerApproval?: NonNullable<Task["history"][number]["reviewApproval"]> & { summary?: string };
   artifacts: Pick<NonNullable<Task["artifacts"]>[number], "source" | "sha256">[];
@@ -748,7 +749,8 @@ export function boardActions(project: string, attachments: { path: string; name:
           reviewerApproved: Boolean(data.reviewerApproval),
         });
         const reviewerRunning = usesIndependentReviewer(data.reviewMode) && (isReviewRunning?.(id) ?? false);
-        if (reviewerRunning || !runReview || !usesIndependentReviewer(data.reviewMode) || data.stale || data.reviewerApproval?.targetHead === targetHead) {
+        if (reviewerRunning || !runReview || !usesIndependentReviewer(data.reviewMode) || data.stale ||
+            data.reviewNoted || data.reviewerApproval?.targetHead === targetHead) {
           const current = { ...data, targetChangesSinceApproval: data.reviewerApproval ? targetChangesSinceReview : undefined,
             executorRunning: isTaskRunning(id), reviewerRunning };
           if (!data.stale && fields.knownRevision === revision && previousRead?.revision === revision &&
