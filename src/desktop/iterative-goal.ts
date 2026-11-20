@@ -8,6 +8,7 @@ export type IterativeGoalState = {
   waitFor?: string;
   questions: string[];
   step?: string;
+  retryAt?: number;
 };
 
 export function readIterativeGoal(project: string, goalId: string): IterativeGoalState {

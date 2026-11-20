@@ -25,6 +25,8 @@ export interface RpcMessage {
   params?: unknown;
 }
 
+export class CodexRpcRejection extends Error {}
+
 export interface AgentControl {
   steer(text: string, images: string[], clientUserMessageId?: string): Promise<void>;
   interrupt(): Promise<void>;
@@ -83,7 +85,7 @@ export function codexRpc(child: ChildProcess,
         const reply = pending.get(message.id);
         pending.delete(message.id);
         if (reply) logReply(message.id, reply, message.error ? "error" : "ok", receivedAt);
-        if (message.error) reply?.reject(new Error(message.error.message ?? "Codex rejected the request."));
+        if (message.error) reply?.reject(new CodexRpcRejection(message.error.message ?? "Codex rejected the request."));
         else reply?.resolve(message.result);
       }
     } catch (error) { fail(error as Error); }

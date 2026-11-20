@@ -20,6 +20,7 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const project = join(scratch, "board");
 const binding = join(project, ".tasks", "manager-dialog.json");
 const launches = join(scratch, "launches.jsonl");
+const failures = join(scratch, "start-failures.jsonl");
 const observations = join(scratch, "observations.md");
 const profile = join(scratch, "profile");
 const restarted = process.argv.includes("--restart");
@@ -82,6 +83,17 @@ function count() {
   return existsSync(launches) ? readFileSync(launches, "utf8").trim().split("\n").length : 0;
 }
 
+function failureRecords() {
+  if (!existsSync(failures)) return [];
+  return readFileSync(failures, "utf8").trim().split("\n").map(line => JSON.parse(line));
+}
+
+function refuseOnce(reason) {
+  if (failureRecords().some(entry => entry.reason === reason)) return false;
+  appendFileSync(failures, JSON.stringify({ reason, at: Date.now() }) + "\n");
+  return true;
+}
+
 async function until(test, description) {
   const deadline = Date.now() + 25_000;
   while (Date.now() < deadline) {
@@ -100,6 +112,16 @@ async function unchanged(expected, description) {
   // The board's periodic autoqueue pass runs every second.
   await delay(2300);
   assert.equal(count(), expected, description);
+}
+
+async function retried(expected, reason) {
+  await until(() => failureRecords().some(entry => entry.reason === reason), reason);
+  const failure = failureRecords().find(entry => entry.reason === reason);
+  assert.equal(count(), expected - 1, "Failure must not start a turn.");
+  await settled(expected, "retry after " + reason);
+  const last = readFileSync(launches, "utf8").trim().split("\n").at(-1);
+  assert.ok(JSON.parse(last).at - failure.at >= 4900, "Retry began before the provider cooldown.");
+  assert.equal(failureRecords().filter(entry => entry.reason === reason).length, 1);
 }
 
 const evaluate = expression => window.webContents.executeJavaScript(expression);
@@ -228,14 +250,22 @@ globalThis.fixtureManager = async (_profile, cwd, prompt, _images, action, _tool
   assert.equal(context.target, 4);
   assert.equal(context.ready, 3);
   assert.equal(context.workingOrQueued, 2);
+  if (count() === 0 && refuseOnce("prepare")) throw new Error("Fixture: failed to prepare provider before sending");
+  assert.equal(typeof session.onTurnStarting, "function");
+  assert.equal(typeof session.onTurnRejected, "function");
   if (count() === 2) assert.match(prompt, new RegExp(goalQuestion));
+  session.onTurnStarting();
+  if (count() === 2 && refuseOnce("rejected")) {
+    session.onTurnRejected();
+    throw new Error("Fixture: provider explicitly rejected starting the turn");
+  }
   if (count() === 3) {
     const inbox = await action("goal_inbox", {});
     assert.equal(inbox.ok, true, JSON.stringify(inbox));
     assert.ok(inbox.data.some(message => message.text === ownerInstruction));
   }
   assert.equal(runtimeEntries(project).filter(entry => entry.task === "manager:context").length, 1);
-  appendFileSync(launches, JSON.stringify({ prompt }) + "\n");
+  appendFileSync(launches, JSON.stringify({ prompt, at: Date.now() }) + "\n");
   session.onGoal({ objective, status: "active" });
   if (count() === 1) {
     ids.refill = createReady("Карточка, подготовленная коротким ходом");
@@ -254,8 +284,8 @@ function writeReport() {
     "src/desktop/main.ts", "src/desktop/preload.cjs", "src/desktop/renderer.js", "src/desktop/styles.css",
   ];
   const revision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
-  const hashes = paths.map(path => {
-    const digest = createHash("sha256").update(readFileSync(join(root, path))).digest("hex");
+  const hashes = bytes => paths.map(path => {
+    const digest = createHash("sha256").update(bytes(path)).digest("hex");
     return `- \`${digest}\` \`${path}\``;
   });
   writeFileSync(join(artifacts, "iterative-goal-check.md"), [
@@ -275,9 +305,13 @@ function writeReport() {
     "node scripts/check-iterative-goal.mjs --artifacts .tasks/qa",
     "```",
     "",
-    "База Git: " + revision + ". SHA-256 байтов исходников рабочей папки перед инструментированием:",
+    "HEAD проверенной копии: " + revision + ". SHA-256 байтов checkout перед инструментированием:",
     "",
-    ...hashes,
+    ...hashes(path => readFileSync(join(root, path))),
+    "",
+    "SHA-256 исходных Git blobs (байты git cat-file blob HEAD:<path>):",
+    "",
+    ...hashes(path => execFileSync("git", ["cat-file", "blob", "HEAD:" + path], { cwd: root })),
     "",
   ].join("\n"), "utf8");
 }
@@ -308,7 +342,10 @@ async function run() {
   assert.equal(await evaluate("devicePixelRatio"), 1);
 
   if (restarted) {
-    await unchanged(4, "same condition after process restart");
+    // Allow a pending retry to fire if a successful launch was not persisted.
+    await delay(6200);
+    assert.equal(count(), 4, "Restart must not retry handled triggers.");
+    assert.deepEqual(failureRecords().map(entry => entry.reason), ["prepare", "rejected"]);
     log("Реальный перезапуск при сохранённых условии, вопросе и указании: +0 запусков, всего 4.");
     await click("#board-draft textarea[name=request]");
     await until(async () => await read(".board-goal-status", "?.textContent") === "Цель ждёт работы",
@@ -396,7 +433,8 @@ async function run() {
   await unchanged(0, "sufficient stock");
   log("Цель включена без правки текста, подпись кнопки прежняя. Два слота, четыре готовые карточки и две в работе, одна ожидает запуска: 0 итераций.");
   cli(["cancel", ids.ready[1]], { reason: "Создать нехватку готовых карточек." });
-  await settled(1, "first shortage");
+  await retried(1, "prepare");
+  log("Дефицит: ошибка подготовки провайдера до отправки, 0 ходов. Через пять секунд состоялся один повтор с запуском.");
   const pending = cli(["list", "--compact"]).tasks;
   assert.equal(pending.find(task => task.id === ids.refill).status, "ready");
   const history = await evaluate(`window.taskboard.boardHistory(${JSON.stringify(project)}, null, "work")`);
@@ -409,7 +447,8 @@ async function run() {
   await unchanged(2, "repeated events and unchanged dependency");
   log("Следующая нехватка: +1 ход, затем обычный прогресс незавершённой зависимости и повторные события дали +0 запусков.");
   cli(["message", ids.dependency], { kind: "question", text: goalQuestion });
-  await settled(3, "addressed question");
+  await retried(3, "rejected");
+  log("Вопрос по карточке цели: провайдер явно отклонил отправку хода, 0 запусков. Через пять секунд состоялся один повтор с запуском.");
   await unchanged(3, "question remains unread");
   log("Вопрос от карточки цели: +1 ход. Вопрос оставлен непрочитанным, следующие проходы дали +0.");
   cli(["message", ids.ordinary], { kind: "question", text: ordinaryQuestion });

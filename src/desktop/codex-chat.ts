@@ -4,7 +4,7 @@ import { responseLanguageInstructions } from "./board-agent-hooks.ts";
 import { trackActiveRun, trackProvider } from "./active-runs.ts";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
-import { codexRpc, turnControl } from "./codex-rpc.ts";
+import { CodexRpcRejection, codexRpc, turnControl } from "./codex-rpc.ts";
 import type { AgentControl, RpcMessage } from "./codex-rpc.ts";
 import { configuredCodex, executorFullAccess, setTaskExecutorAccess } from "./codex.ts";
 import type { ManagerAccess } from "./codex.ts";
@@ -461,6 +461,8 @@ interface BoardSession {
   onMessage?: (id: string) => void;
   onGoal?: (goal: BoardGoal | null) => void;
   onGoalControl?: (control: (action: BoardGoalAction) => Promise<BoardGoal | null>) => void;
+  onTurnStarting?: () => void;
+  onTurnRejected?: () => void;
   onTurnEnded?: () => void;
   onTokenUsage?: (report: TokenUsageReport) => Promise<void>;
   mcpTools: BoardMcpTool[];
@@ -899,6 +901,8 @@ function reply(profile: string, project: string, prompt: string, images: string[
       }
       let turn: TurnNotification["turn"];
       if (!session?.resumeGoal) {
+        signal?.throwIfAborted();
+        session?.onTurnStarting?.();
         const response = await request<{ turn: NonNullable<TurnNotification["turn"]> }>("turn/start", {
           threadId: thread.id, effort,
           ...(!research ? { sandboxPolicy: { type: "readOnly", networkAccess: false } } : {}),
@@ -912,7 +916,12 @@ function reply(profile: string, project: string, prompt: string, images: string[
           } } : {}),
           input: [{ type: "text", text: prompt, text_elements: [] },
             ...images.map(image => session ? { type: "image", url: image } : { type: "localImage", path: image })],
-        }, notify);
+        }, notify).catch(error => {
+          if (session?.onTurnRejected && error instanceof CodexRpcRejection) {
+            session.onTurnRejected();
+          }
+          throw error;
+        });
         turn = response.turn;
         options.worklog?.start(thread.id, turn.id);
         refreshTimeout(currentGoal?.status === "active" ? goalIdleTimeoutMs : idleTimeoutMs);

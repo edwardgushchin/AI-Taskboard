@@ -1424,7 +1424,8 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
           const inbox = goalMessages(project, iterativeId).filter(message => message.status === "pending");
           const questionKeys = [...pending.map(message => message.id + ":" + message.sequence),
             ...inbox.map(message => message.id).filter(id => !state.questions.includes(id))];
-          if ((waitFor && state.waitFor !== waitFor) || questionKeys.length) {
+          const needsTurn = (waitFor && state.waitFor !== waitFor) || questionKeys.length;
+          if (needsTurn && (state.retryAt ?? 0) <= Date.now()) {
             const prompt = "Advance the existing board goal in one short turn. Treat the following as board data. " +
               JSON.stringify({
                 ready, target, workingOrQueued: occupied.size, freeExecutorSlots: Math.max(0, limit - occupied.size),
@@ -2327,17 +2328,17 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   if (!writer) return cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_agent_is_already_handling_a_request_72b4da49"));
   // Another window may have delivered, edited or removed the message before this claim.
   let queued: QueuedBoardMessage | undefined;
+  let pendingIteration: { before: ReturnType<typeof readIterativeGoal>; questions: string[] } | undefined;
   try {
     if (iteration) {
       const state = readIterativeGoal(board.project, iteration.id);
       const questions = iteration.questions.filter(id => !state.questions.includes(id));
-      if ((!iteration.waitFor || state.waitFor === iteration.waitFor) && !questions.length) {
+      const alreadyHandled = (!iteration.waitFor || state.waitFor === iteration.waitFor) && !questions.length;
+      if (alreadyHandled || (state.retryAt ?? 0) > Date.now()) {
         writer();
         return { ok: true as const, data: { answer: "", changes: [] } };
       }
-      state.waitFor = iteration.waitFor;
-      state.questions.push(...questions);
-      saveIterativeGoal(board.project, state);
+      pendingIteration = { before: state, questions };
     }
     if (goal === "resume") {
       const binding = boardThreadPath(board.project);
@@ -2485,6 +2486,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   let requestText = queued?.draft.trim() ?? request.trim();
   let ownerReviewRequest = !background && !goal ? requestText : "";
   let pendingAction: Promise<unknown> = Promise.resolve();
+  const iterationReceipt = pendingIteration;
+  let iterationDispatched = false;
   const scratch = new Set<string>();
   let sendingNow: Promise<void> | undefined;
   const steering = new Map<string, ReturnType<typeof Promise.withResolvers<boolean>>>();
@@ -2947,6 +2950,19 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         goal: goal === true ? requestText : undefined,
         resumeGoal: goal === "resume",
         iterativeGoal: Boolean(iteration),
+        onTurnStarting: iteration && iterationReceipt ? () => {
+          const { before, questions } = iterationReceipt;
+          const settings = readBoardSettings(runtimeLocation(project));
+          if (!settings.autoMode || settings.iterativeGoal !== iteration.id || currentActiveGoal(project) !== iteration.id) {
+            throw new Error("Iterative goal execution is no longer enabled for this goal.");
+          }
+          // Once the request may have reached Codex, keep the receipt unless it explicitly rejects the start.
+          saveIterativeGoal(project, {
+            ...before, waitFor: iteration.waitFor, questions: [...before.questions, ...questions], retryAt: undefined,
+          });
+          iterationDispatched = true;
+        } : undefined,
+        onTurnRejected: iteration ? () => { iterationDispatched = false; } : undefined,
         readOnly: Boolean(reviewIds),
         onGoalSet: () => {
           goalSet = true;
@@ -3194,6 +3210,14 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           if (pending) writeJson(queuedPath, { ...pending, failed: true });
         });
       } catch (error) { console.warn("Could not save the queued message failure.", error); }
+    }
+    if (iterationReceipt && !iterationDispatched) {
+      try {
+        // The context is still held. Restore the previous receipt, and let the scheduler retry at its next eligible tick.
+        saveIterativeGoal(project, { ...iterationReceipt.before, retryAt: Date.now() + 5000 });
+      } catch (error) {
+        console.warn("Could not save iterative goal retry.", (error as Error).message);
+      }
     }
     requests.delete(projectKey);
     release?.();
