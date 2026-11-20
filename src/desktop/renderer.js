@@ -1016,7 +1016,7 @@ function renderAgentRunStatus(target, task, { compactQueue = false } = {}) {
     } else if (repair && !(hybridReview && repair.phase === "checking" && !task.reviewApproved)) {
       status = acceptanceRepairStatus(task.id, repair);
     } else if (waitsForReview || waitsForExecutor) {
-      if (task.mergeRepair || boardTask?.mergeRepair) {
+      if (!waitsForReview && (task.mergeRepair || boardTask?.mergeRepair)) {
         status = t(reviewerSlotLabel);
       } else {
         const queueLabel = () => t(waitsForReview ? reviewerSlotLabel : "ui.waiting_for_an_available_executor_cc0934a8");
