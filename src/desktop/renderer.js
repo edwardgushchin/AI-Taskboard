@@ -1170,8 +1170,7 @@ function card(task) {
     item.append(image);
   }
   const meta = element("span", undefined, "task-meta");
-  const id = element("span", undefined, "task-id task-stat");
-  id.append(icon("symbol-number"), task.id);
+  const id = element("span", task.id, "task-id task-stat");
   meta.append(id);
   if (task.awaitingAnswer) {
     const question = element("span", undefined, "task-question task-stat");
