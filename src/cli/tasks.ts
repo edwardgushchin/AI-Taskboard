@@ -202,6 +202,9 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
   switch (action) {
     case "approve":
       requireState(task, ["draft"]);
+      if (task.awaitingAnswer === true) {
+        throw new TaskboardError("TASK_AWAITING_ANSWER", "Finish the clarification in the task dialogue before approving the draft.");
+      }
       if (boardActor(input, "user") !== "user" &&
           task.history.findLast(event => event.action === "approve" || event.action === "return-to-draft")?.action === "return-to-draft") {
         throw new TaskboardError("USER_APPROVAL_REQUIRED", "The user must approve this returned draft on the board.");

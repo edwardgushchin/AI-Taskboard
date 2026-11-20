@@ -79,6 +79,58 @@ function cli(root: string, args: string[], input?: unknown, expectedCode?: strin
   return payload.data;
 }
 
+test("approval waits for the last saved clarification to close", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const draft = cli(root, ["create"], { title: "Clarify the export format" });
+  const chat = ["chat", draft.id];
+  const approve = ["approve", draft.id];
+  const discussion = { model: "fixture", effort: "low" };
+
+  const prompt = cli(root, chat, { ...discussion, text: "What information do you need?" });
+  const question = cli(root, chat, {
+    ...discussion,
+    actor: "agent",
+    text: "Which format and destination?",
+    replyTo: prompt.history.length - 1,
+    awaitingAnswer: true,
+  });
+  cli(root, approve, { revision: draft.revision }, "REVISION_CONFLICT");
+  cli(root, approve, undefined, "TASK_AWAITING_ANSWER");
+  cli(root, approve, { actor: "manager", revision: question.revision }, "TASK_AWAITING_ANSWER");
+  assert.equal(cli(root, ["show", draft.id, "--compact"]).revision, question.revision);
+
+  const answer = cli(root, chat, { ...discussion, text: "CSV." });
+  cli(root, approve, { revision: answer.revision }, "TASK_AWAITING_ANSWER");
+  const followUp = cli(root, chat, {
+    ...discussion,
+    actor: "agent",
+    text: "Which destination should I use?",
+    replyTo: answer.history.length - 1,
+    awaitingAnswer: true,
+  });
+  cli(root, approve, { actor: "manager", revision: followUp.revision }, "TASK_AWAITING_ANSWER");
+  const pending = cli(root, ["show", draft.id, "--compact"]);
+  assert.equal(pending.status, "draft");
+  assert.equal(pending.awaitingAnswer, true);
+  assert.ok(!cli(root, ["auto-queue"]).order.includes(draft.id));
+
+  const finalAnswer = cli(root, chat, { ...discussion, text: "Download it locally." });
+  const closed = cli(root, chat, {
+    ...discussion,
+    actor: "agent",
+    text: "The clarification is complete.",
+    replyTo: finalAnswer.history.length - 1,
+    awaitingAnswer: false,
+  });
+  assert.equal(closed.awaitingAnswer, false);
+  assert.equal(cli(root, approve, { actor: "manager", revision: closed.revision }).status, "ready");
+
+  const ordinary = cli(root, ["create"], { title: "A complete draft" });
+  assert.equal(ordinary.awaitingAnswer, undefined);
+  assert.equal(cli(root, ["approve", ordinary.id], { revision: ordinary.revision }).status, "ready");
+});
+
 test("repository Git menu lists commit metadata and changes only the main worktree", t => {
   const root = fixture(t, true);
   cli(root, ["init"]);

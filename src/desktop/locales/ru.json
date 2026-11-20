@@ -32,6 +32,8 @@
   "backup.empty": "Нет доступных копий",
   "backup.retention": "Копии хранятся 24 часа с момента создания. Восстановленная доска откроется в новой папке с выключенным авторежимом.",
   "backup.confirm": "Восстановить доску из папки {project} по копии от {date}?",
+  "task_question.approval_blocked": "Утверждение станет доступно, когда агент закроет вопрос в «Диалоге».",
+  "task_question.open_dialogue_button": "Открыть диалог",
   "task_question.needs_answer": "Нужен ответ",
   "task_question.open_dialogue": "Нужен ответ. Открыть диалог задачи",
   "agentActivity.title": "Активность по доскам",

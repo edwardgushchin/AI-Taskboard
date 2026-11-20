@@ -10,6 +10,8 @@
   "backup.empty": "Aucune sauvegarde disponible",
   "backup.retention": "Les sauvegardes expirent 24 heures après leur création. La copie restaurée s’ouvre dans un nouveau dossier avec le mode automatique désactivé.",
   "backup.confirm": "Restaurer le tableau situé dans {project} depuis la sauvegarde du {date} ?",
+  "task_question.approval_blocked": "Vous pourrez approuver le brouillon lorsque l’agent aura clos la question dans le dialogue de la tâche.",
+  "task_question.open_dialogue_button": "Ouvrir le dialogue",
   "task_question.needs_answer": "Réponse requise",
   "task_question.open_dialogue": "Réponse requise. Ouvrir le dialogue de la tâche",
   "ui.reorder_queued_message": "Déplacer le message en attente « {message} ». Utilisez les flèches haut et bas.",

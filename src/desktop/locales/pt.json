@@ -10,6 +10,8 @@
   "backup.empty": "Nenhuma cópia disponível",
   "backup.retention": "As cópias expiram 24 horas após a criação. A cópia restaurada abre numa nova pasta com o modo automático desativado.",
   "backup.confirm": "Restaurar o quadro em {project} a partir da cópia de {date}?",
+  "task_question.approval_blocked": "Poderá aprovar o rascunho quando o agente fechar a pergunta no diálogo da tarefa.",
+  "task_question.open_dialogue_button": "Abrir diálogo",
   "task_question.needs_answer": "Requer resposta",
   "task_question.open_dialogue": "Requer resposta. Abrir diálogo da tarefa",
   "ui.reorder_queued_message": "Mova a mensagem em espera «{message}». Use as setas para cima e para baixo.",
