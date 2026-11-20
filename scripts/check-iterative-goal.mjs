@@ -31,7 +31,7 @@ const goalQuestion = "Вопрос от карточки цели";
 const ordinaryQuestion = "Вопрос от карточки вне цели";
 const ownerInstruction = "Указание владельца активной цели";
 const label = "Авторежим";
-const hint = "Для включения итеративного режима нужна активная цель";
+const hint = "Нужна активная цель";
 const trigger = "#status-auto-mode";
 const panel = "#auto-mode-panel";
 const auto = "#auto-mode-switch";
@@ -152,6 +152,8 @@ async function key(selector, keyCode) {
 
 const panelOpen = () => read(panel, ".matches(':popover-open')");
 const disabled = () => read(iterative, ".getAttribute('aria-disabled') === 'true'");
+const hintVisible = () => read("#iterative-goal-hint", ".checkVisibility()");
+const hintDescription = () => read(iterative, ".getAttribute('aria-describedby')");
 
 async function capture(name) {
   await until(() => read(panel, ".matches(':popover-open') && getComputedStyle(document.querySelector('#auto-mode-panel')).opacity === '1'"),
@@ -358,19 +360,29 @@ async function run() {
     await until(() => JSON.parse(readFileSync(binding, "utf8")).goal.status === "paused", "manual pause saved");
     await click(trigger);
     await until(disabled, "manual pause inhibits the switch");
+    assert.equal(await hintVisible(), false);
+    assert.equal(await hintDescription(), null);
     assert.equal(cliReply(["settings"], { iterativeGoal: ids.goal }).error.code, "ACTIVE_GOAL_REQUIRED");
     cli(["message", ids.dependency], { text: "Вопрос на паузе", kind: "question" });
     await unchanged(4, "paused goal");
     log("В состоянии «Цель ждёт работы» нажата кнопка паузы. Новый вопрос дал +0 итеративных запусков. Повтор сохранения отклонён.");
     writeGoal("complete");
     globalThis.fixtureGoal(project);
-    await until(disabled, "completion inhibits the switch");
+    await until(hintVisible, "completion restores the hint");
+    assert.equal(await disabled(), true);
+    assert.equal(await hintDescription(), "iterative-goal-hint");
     assert.equal(cliReply(["settings"], { iterativeGoal: ids.goal }).error.code, "ACTIVE_GOAL_REQUIRED");
     await unchanged(4, "completed goal");
+    writeGoal("paused");
+    globalThis.fixtureGoal(project);
+    await until(async () => !await hintVisible(), "restored paused goal hides the hint");
     assert.equal((await evaluate('window.taskboard.boardGoal("clear")')).ok, true);
     assert.equal(JSON.parse(readFileSync(binding, "utf8")).goal, null);
+    await until(hintVisible, "clearing a paused goal restores the hint");
+    assert.equal(await hintDescription(), "iterative-goal-hint");
+    assert.equal(await disabled(), true);
     await unchanged(4, "cleared goal");
-    log("Завершение и снятие цели: +0 итеративных запусков.");
+    log("При паузе подсказка скрыта и исключена из описания. Завершение и снятие цели возвращают подсказку и её связь с недоступным переключателем, +0 итеративных запусков.");
     cli(["settings"], { iterativeGoal: false, autoMode: false });
     writeGoal("active");
     globalThis.fixtureGoal(project);
@@ -391,9 +403,9 @@ async function run() {
   assert.equal(await read(auto, ".checked"), false);
   assert.equal(await read(iterative, ".checked"), false);
   assert.equal(await disabled(), true);
-  assert.equal(await read(iterative, ".getAttribute('aria-describedby')"), "iterative-goal-hint");
+  assert.equal(await hintDescription(), "iterative-goal-hint");
   assert.equal(await read("#iterative-goal-hint", ".innerText.trim()"), hint);
-  assert.equal(await read("#iterative-goal-hint", ".checkVisibility()"), true);
+  assert.equal(await hintVisible(), true);
   window.webContents.debugger.attach("1.3");
   try {
     const { nodes } = await window.webContents.debugger.sendCommand("Accessibility.getFullAXTree");
@@ -426,6 +438,8 @@ async function run() {
   writeGoal("active");
   globalThis.fixtureGoal(project);
   await until(async () => !await disabled(), "active goal enables the switch");
+  assert.equal(await hintVisible(), false);
+  assert.equal(await hintDescription(), null);
   await click(iterative);
   await until(() => read(iterative, ".checked"), "iterative mode persisted");
   assert.equal(cli(["settings"]).iterativeGoal, ids.goal);

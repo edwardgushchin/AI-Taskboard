@@ -6069,8 +6069,8 @@ function renderAutoMode() {
   const enabled = settings?.iterativeGoal === activeGoal && Boolean(activeGoal);
   iterativeGoalSwitch.checked = enabled;
   iterativeGoalSwitch.setAttribute("aria-disabled", String(savingAutoMode || !activeGoal));
-  goalHint.hidden = Boolean(activeGoal);
-  if (activeGoal) {
+  goalHint.hidden = frame.hasCurrentGoal;
+  if (frame.hasCurrentGoal) {
     iterativeGoalSwitch.removeAttribute("aria-describedby");
   } else {
     iterativeGoalSwitch.setAttribute("aria-describedby", goalHint.id);
