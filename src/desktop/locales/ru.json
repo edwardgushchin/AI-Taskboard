@@ -224,6 +224,7 @@
   "ui.unpin_chat_5476c9a7": "Открепить чат",
   "ui.pin_chat_5352ca60": "Закрепить чат",
   "ui.goal_awaiting_continuation_27d0b1c3": "Цель ждёт продолжения",
+  "ui.waiting_for_goal_context": "Ждём освобождения контекста цели…",
   "ui.earlier_activity_e8606f75": "Более ранние события",
   "ui.working_85aeded8": "Работает…",
   "ui.waiting_for_a_session_67475e7f": "Ждёт освобождения сеанса…",
