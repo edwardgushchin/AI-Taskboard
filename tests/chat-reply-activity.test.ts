@@ -9,7 +9,7 @@ import { setTimeout as wait } from "node:timers/promises";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { changeTask, createTask } from "../src/cli/tasks.ts";
-import { TaskboardError } from "../src/cli/model.ts";
+import { TaskboardError, type RunActivity } from "../src/cli/model.ts";
 import { projectLabels } from "../src/desktop/project-tabs.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import type { RuntimeEntry } from "../src/desktop/board-runtime.ts";
@@ -22,6 +22,7 @@ const names = new Set([
   "scheduleAgentWork", "schedulingAgentWork", "queuedRecoveryDelay",
   "activeAgents", "stopChat", "beginOperation", "projectOperations", "closingProjects", "frame", "send", "notifyRunChange", "sendChat", "saveTaskTokenUsage", "windowStates", "chatRuns", "replyingTasks",
   "launchingTasks", "runningTasks", "runActivityByTask", "imageExtensions", "imageTypes", "recentBoards", "russian", "theme",
+  "discussionActivityByTask", "publishDiscussionActivity",
   "managerQuestion", "executorLimit",
   "returnTaskToDraft", "returningDrafts", "reviewOperations", "managerReviewOperations", "taskOperations", "steeringOperations",
 ]);
@@ -43,6 +44,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   const writes: { actor?: string; replyTo?: number }[] = [];
   const started = Promise.withResolvers<void>();
   let action: (name: string, args: unknown) => Promise<any>;
+  let publish: (items: RunActivity[]) => void;
   const corrections: string[] = [];
   const slots = createAgentSlots();
   const sharedRuns = new Map<string, RuntimeEntry[]>();
@@ -51,6 +53,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   const runtime = runInNewContext(stripTypeScriptTypes(activitySource.replace("function scheduleAgentWork() {", "function scheduleAgentWork() { if (!subscriptions.size) { noteSchedule(); return; }")) +
     "\n({ sendChat, stopChat, returnTaskToDraft, activeAgents, frame, windowStates, runningTasks, launchingTasks, notifyRunChange, chatRuns, replyingTasks, scheduleAgentWork })", {
     quotaWait: undefined, quotaInterruption: new Error("Fixture quota pause"), refreshQuota: async () => [],
+    applicationUpdates: { installing: false },
     agentSlots: { ...slots, entries: (project: string) => sharedRuns.get(project) ?? [] },
     registerRuntime: () => () => {}, matchesQueuedExecutor, activeRunSummary, basename, extname, join, performance, projectLabels, AbortController, AbortSignal, wait, subscriptions,
     isManual: () => options.manual, runtimeLocation: (project: string) => project, readBoardSettings: () => ({}),
@@ -109,6 +112,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
     },
     replyToTask: async (...args: unknown[]) => {
       action = args[6] as typeof action;
+      publish = args[13] as typeof publish;
       (args[10] as Function)({
         steer: async (prompt: string) => {
           if (options.steerFailure) throw new Error("Turn already ended");
@@ -125,17 +129,23 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   });
   const windows = ["project-a", "project-a", "project-b"].map((project, index) => {
     const updates: string[][] = [];
+    const discussion: unknown[] = [];
     const state = { project, board: { project, tasks: [task, { ...task, id: "T-0002" }] }, window: {
       isDestroyed: () => false, setTitle: () => {}, webContents: {
         id: index,
-        send: (channel: string, frame: { replyingTasks: string[] }) => {
+        send: (channel: string, frame: { replyingTasks: string[]; items?: RunActivity[]; type?: string }) => {
+          if (channel === "chat:update") {
+            assert.equal(frame.type, "discussion");
+            discussion.push(structuredClone(frame.items));
+            return;
+          }
           assert.equal(channel, "board:changed");
           updates.push(Array.from(frame.replyingTasks));
         },
       },
     } };
     runtime.windowStates.set(index, { window: state.window, tabs: [state], active: state });
-    return { state, updates };
+    return { state, updates, discussion };
   });
   if (options.attachmentFailure) {
     task.attachments.push({ file: "missing", name: "missing.png", bytes: 1, sha256: "0".repeat(64) });
@@ -146,7 +156,8 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
     { ...request, ...(retry ? { retryAt: task.history.length - 1 } : {}) }, () => {});
   const active = (index = 0): string[] => Array.from(runtime.frame(windows[index].state).replyingTasks);
   return { task, runtime, sharedRuns, windows, run, active, request, response, delivered, writes, slots, removed, scheduled, corrections,
-    action: (args: unknown, name = "task_request_changes") => action(name, args), started: started.promise, launches, subscriptions };
+    action: (args: unknown, name = "task_request_changes") => action(name, args),
+    publish: (items: RunActivity[]) => publish(items), started: started.promise, launches, subscriptions };
 }
 
 test("review correction hands off after the last chat write and respects occupied executor slots", async () => {
@@ -250,12 +261,18 @@ test("chat replies publish discussion activity in every window of their board", 
   assert.deepEqual(f.active(1), ["T-0001"]);
   assert.deepEqual(f.active(2), []);
   assert.deepEqual(f.windows.map(window => window.updates), [[["T-0001"]], [["T-0001"]], []]);
+  const tool: RunActivity = { id: "call", type: "dynamicToolCall", title: "task_update", text: "{}", status: "inProgress" };
+  f.publish([tool]);
+  assert.deepEqual(f.windows.map(window => window.discussion), [[[], [tool]], [[], [tool]], []]);
+  assert.deepEqual(Array.from(f.runtime.frame(f.windows[1].state).discussionActivity["T-0001"]), [tool]);
   assert.equal((await f.run(true)).result.error.code, "CHAT_BUSY");
   assert.deepEqual(f.active(), ["T-0001"]);
   f.response.resolve({ text: "Reply" });
   assert.equal((await pending).result.ok, true);
   assert.deepEqual(f.active(), []);
   assert.deepEqual(f.windows[1].updates, [["T-0001"], []]);
+  assert.deepEqual(f.windows[1].discussion, [[], [tool], undefined]);
+  assert.equal(f.runtime.frame(f.windows[1].state).discussionActivity["T-0001"], undefined);
 });
 
 test("a failed retry clears chat activity while a concurrent board run stays active", async () => {
@@ -286,6 +303,7 @@ test("provider and reply-storage errors remove the activity indicator", async ()
     assert.equal(f.runtime.activeAgents.size, 0);
     assert.deepEqual(f.removed, ["scratch/chat"]);
     assert.deepEqual(f.windows[0].updates, [["T-0001"], []]);
+    assert.deepEqual(f.windows[0].discussion, [[], undefined]);
   }
 });
 
@@ -394,17 +412,21 @@ test("a task being launched never starts a competing chat provider", async () =>
 
 test("discussions bypass work and review task limits and run independently", async () => {
   const f = fixture();
-  const occupied = [f.slots.acquire("project-a", "executor")!, f.slots.acquire("project-a", "reviewer")!];
+  const limits = { executor: 1, reviewer: 1 };
+  const occupied = [
+    f.slots.acquire("project-a", "executor", limits)!,
+    f.slots.acquire("project-a", "reviewer", limits)!,
+  ];
   const first = f.run();
   await f.started;
   const second = f.runtime.sendChat("project-a", "T-0002", f.request, () => {});
   for (let i = 0; i < 100 && !f.runtime.activeAgents.has("project-a\0T-0002"); i++) await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(f.active().sort(), ["T-0001", "T-0002"]);
   assert.deepEqual(Array.from(f.runtime.frame(f.windows[0].state).runningTasks), []);
-  assert.equal(f.slots.available("project-a", "executor"), 0);
+  assert.equal(f.slots.available("project-a", "executor", limits), 0);
   occupied[0]();
-  assert.equal(f.slots.available("project-a", "executor"), 1);
-  const executor = f.slots.acquire("project-a", "executor");
+  assert.equal(f.slots.available("project-a", "executor", limits), 1);
+  const executor = f.slots.acquire("project-a", "executor", limits);
   assert.ok(executor);
   f.response.resolve({ text: "Reply" });
   assert.equal((await first).result.ok, true);
@@ -424,7 +446,7 @@ test("discussion ignores status and unfinished dependencies and never starts exe
     f.task.dependencies = ["T-9999"];
     const pending = f.run();
     await f.started;
-    assert.equal(f.slots.available("project-a", "executor"), 1);
+    assert.equal(f.slots.available("project-a", "executor", { executor: 1 }), 1);
     assert.deepEqual(Array.from(f.runtime.frame(f.windows[0].state).runningTasks), []);
     f.response.resolve({ text: "Reply" });
     assert.equal((await pending).result.ok, true);

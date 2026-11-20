@@ -1,5 +1,5 @@
 // Real Electron, CLI, IPC and renderer; only the provider response is deterministic.
-// node scripts/check-task-chat-bubbles.mjs --artifacts .tasks/qa/T-0219
+// node scripts/check-task-chat-bubbles.mjs --artifacts .tasks/qa/T-0255
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -20,23 +20,25 @@ const project = join(scratch, "board");
 const staging = join(scratch, "staging");
 if (!restart) mkdirSync(staging);
 process.env.TMPDIR = process.env.TEMP = process.env.TMP = staging;
-const reportPath = join(artifacts, "task-chat-bubbles-check.txt");
+const reportPath = join(artifacts, "card-reply-activity-check.txt");
 const statePath = join(scratch, "saved.json");
 const settings = { model: "fixture", effort: "low" };
-const question = "Старые записи оставить в прежних вкладках или перенести в «Ход работы»?";
-const answer = "Сохранить в прежних вкладках.";
-const reply = "Старые записи останутся на месте. Новые реплики появятся в «Диалоге».";
+const question = "Если карточку отменили через CLI при закрытом Electron и без запущенного watch, должна ли рабочая копия удалиться автоматически после завершения сеанса или достаточно убрать её при следующем открытии доски или запуске watch?";
+const answer = "должна удаляться";
+const reply = "Рабочая копия должна удалиться автоматически после отмены карточки. Уточнение записано.";
 const report = restart ? JSON.parse(readFileSync(statePath, "utf8")).report : {
-  command: "node scripts/check-task-chat-bubbles.mjs --artifacts .tasks/qa/T-0219",
+  command: "node scripts/check-task-chat-bubbles.mjs --artifacts .tasks/qa/T-0255",
   revision: execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8", windowsHide: true }).trim(),
   representation: "SHA-256 of UTF-8 source with CRLF normalized to LF (Git text representation)",
   sources: Object.fromEntries([
     "src/desktop/chat.js", "src/desktop/styles.css", "src/desktop/codex-chat.ts", "src/desktop/main.ts",
+    "src/desktop/renderer.js", "src/desktop/preload.cjs", "src/desktop/run-activity.ts", "src/desktop/reviewer-chat.ts",
     "src/cli/archive.ts", "scripts/check-task-chat-bubbles.mjs", "scripts/electron-check.mjs",
     "tests/task-question.test.ts", "docs/explanation/architecture.md",
   ].map(path => [path, createHash("sha256").update(readFileSync(join(root, path), "utf8").replaceAll("\r\n", "\n")).digest("hex")])),
   environment: { platform: process.platform, node: process.versions.node, electron: process.versions.electron, chromium: process.versions.chrome },
   matrix: { Windows: "Electron runtime checked", Linux: "Not run; shared renderer, no process/path/packaging changes", macOS: "Not run; shared renderer, no process/path/packaging changes" },
+  fixture: "The T-0252 question and owner answer are reproduced in a local draft to seed the question. The reference showed an in-progress task. Provider events are deterministic.",
   checks: [],
 };
 const check = label => {
@@ -106,6 +108,8 @@ void (async () => {
     const preferences = window.webContents.getLastWebPreferences();
     assert.equal(preferences.sandbox, true);
     assert.equal(preferences.contextIsolation, true);
+    await evaluate("window.taskboard.setLanguage('ru')");
+    await until(() => evaluate("localization.locale === 'ru'"), "Russian localization");
     await evaluate("window.taskboard.menuAction('open-project')");
     await until(() => evaluate(`window.taskboard.bootstrap().then(f => !f.loading && f.board?.project === ${JSON.stringify(project)})`), "board");
     const saved = restart ? JSON.parse(readFileSync(statePath, "utf8")) : {};
@@ -120,10 +124,28 @@ void (async () => {
       await evaluate("document.querySelector('#close-sheet').click()");
       await display();
     };
+    const send = text => evaluate(`{
+      const input = document.querySelector('#task-chat-input');
+      input.value = ${JSON.stringify(text)};
+      input.dispatchEvent(new Event('input'));
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }));
+    }`);
+    const paint = () => evaluate("document.fonts.ready.then(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))))");
+    const capture = async (file, selector) => {
+      await paint();
+      assert.deepEqual(window.getContentSize(), [1280, 900]);
+      assert.equal(await evaluate(`(() => {
+        const node = document.querySelector(${JSON.stringify(selector)});
+        const viewport = document.querySelector('.task-dialogue').getBoundingClientRect();
+        const box = node?.getBoundingClientRect();
+        return Boolean(box?.height && box.top >= viewport.top && box.bottom <= viewport.bottom);
+      })()`), true, file + " target must be fully visible");
+      writeFileSync(join(artifacts, file), (await window.webContents.capturePage()).toPNG());
+    };
     await display();
     const snapshot = () => evaluate(`Array.from(document.querySelectorAll('.task-dialogue .chat-entry'), row => ({
       actor: row.dataset.actor,
-      text: row.querySelector('.chat-text')?.textContent,
+      text: row.querySelector('.chat-text')?.textContent.trim(),
       at: row.querySelector('time')?.dateTime,
       time: row.querySelector('time')?.textContent,
       side: getComputedStyle(row).alignSelf,
@@ -131,19 +153,50 @@ void (async () => {
     }))`);
     if (!restart) {
       await until(() => evaluate(`window.taskboard.bootstrap().then(f => !f.replyingTasks?.includes(${JSON.stringify(card.id)}))`), "initial writer released");
-      await evaluate(`{
-        const input = document.querySelector('#task-chat-input');
-        input.value = ${JSON.stringify(answer)};
-        input.dispatchEvent(new Event('input'));
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }));
-      }`);
+      nativeTheme.themeSource = "dark";
+      window.setContentSize(1280, 900);
+      await evaluate("applyTheme('dark'); void 0");
+      await send(answer);
       await until(() => provider, "provider");
-      await until(() => evaluate("Boolean(document.querySelector('.task-dialogue .chat-thinking[role=status]'))"), "waiting indicator");
+      await until(async () => (await snapshot()).length === 2 &&
+        await evaluate("Boolean(document.querySelector('.task-dialogue .chat-thinking[role=status]'))"), "saved user message and waiting indicator");
+      assert.equal(await evaluate("document.querySelector('.chat-thinking').textContent"), "Думаю…");
       assert.equal(await evaluate("getComputedStyle(document.querySelector('.chat-thinking')).borderRadius"), "0px");
-      check("Waiting indicator retains its separate status appearance");
+      assert.deepEqual((await snapshot()).map(row => row.text), [question, answer]);
+      await capture("card-reply-thinking.png", ".chat-turn .chat-thinking");
+      check("1280×900: the saved answer to the T-0252 question is followed by Думаю… before any provider activity");
+
+      const firstTool = {
+        id: "reply-update", type: "dynamicToolCall", title: "task_update", status: "inProgress",
+        text: JSON.stringify({ arguments: { criterion: "Рабочая копия должна удаляться" } }, null, 2),
+        at: provider.at,
+      };
+      provider.publish([firstTool]);
+      const action = ".chat-turn details[data-item='item:reply-update']";
+      await until(() => evaluate(`Boolean(document.querySelector(${JSON.stringify(action)}))`), "live tool call");
+      await evaluate(`document.querySelector(${JSON.stringify(action + " summary")}).click()`);
+      assert.equal(await evaluate(`(() => {
+        const row = document.querySelector(${JSON.stringify(action)});
+        return row.open && row.textContent.includes('task_update') && row.textContent.includes('Рабочая копия должна удаляться');
+      })()`), true);
+      assert.equal(await evaluate("Boolean(document.querySelector('.chat-turn .chat-thinking, .chat-turn .chat-entry'))"), false);
+      await capture("card-reply-tool-call.png", action + "[open] .chat-run-output");
+      check("1280×900: task_update expands and shows its arguments before any final reply");
+
+      const activity = [
+        { ...firstTool, status: "completed" },
+        { id: "reply-check", type: "mcpToolCall", title: "ai_taskboard / task_show", text: "Проверено", status: "completed", at: provider.at },
+      ];
+      await evaluate(`updateChat({
+        project: frame.project, id: ${JSON.stringify(card.id)}, type: 'run',
+        items: [{ id: 'foreign', type: 'mcpToolCall', title: 'Foreign executor event', text: '', status: 'completed' }]
+      })`);
       const encoded = JSON.stringify({ text: reply, awaitingAnswer: false });
-      const publish = text => provider.publish([{ id: "reply", type: "agentMessage", phase: "final_answer", text,
-        at: provider.at, status: "inProgress" }]);
+      const publish = text => {
+        provider.publish([...activity, {
+          id: "reply", type: "agentMessage", phase: "final_answer", text, at: provider.at, status: "inProgress",
+        }]);
+      };
       for (const length of [35, 60, encoded.length]) {
         publish(encoded.slice(0, length));
         await until(async () => (await snapshot()).length === 3, "stream bubble");
@@ -155,14 +208,50 @@ void (async () => {
         assert.ok(rows[2].text.length > 0);
         assert.doesNotMatch(rows[2].text, /awaitingAnswer|\{"text"/);
       }
+      assert.deepEqual(await evaluate(`Array.from(document.querySelectorAll('.chat-turn [data-item^="item:"], .chat-turn .chat-entry'),
+        node => node.dataset.item)`), ["item:reply-update", "item:reply-check", "message:reply"]);
+      assert.equal(await evaluate(`document.querySelector(${JSON.stringify(action)}).open`), true);
+      check("Live tool calls retain their order and expansion. The executor event stays out of the reply");
+
+      const { withReviewerChat } = require("../src/desktop/reviewer-chat.ts");
+      const reviewDone = Promise.withResolvers();
+      const review = withReviewerChat(project, card.id, () => {
+        window.webContents.send("chat:update", { project, id: card.id, type: "reviewer-chat" });
+      }, async publish => {
+        publish([{ id: "reviewer-foreign", type: "mcpToolCall", title: "Reviewer-only tool", text: "Fixture result", status: "inProgress" }]);
+        await reviewDone.promise;
+      });
+      try {
+        await evaluate(`{
+          const reviewCard = { ...taskInSheet, status: 'review' };
+          const area = taskChat(reviewCard);
+          byId('task-side').replaceChildren(area);
+          area.openReviewer();
+        }`);
+        await until(() => evaluate("Boolean(document.querySelector('.task-work .task-review-attempt [data-item=\"item:reviewer-foreign\"]'))"), "live reviewer item in work");
+        await evaluate("byId('task-side').firstElementChild.openDialogue()");
+        assert.equal(await evaluate("Boolean(document.querySelector('.chat-turn [data-item=\"item:reviewer-foreign\"]'))"), false);
+        assert.equal((await snapshot()).length, 3);
+        check("A live reviewer attempt uses its own IPC feed and shows its tool in Ход работы only");
+      } finally {
+        reviewDone.resolve();
+        await review;
+      }
       await reopen();
       await until(async () => (await snapshot()).length === 3, "stream after reopening");
       assert.equal((await snapshot())[2].at, provider.at);
       check("Incremental provider JSON renders text inside one agent bubble and survives reopening during the stream");
-      provider.finish.resolve({ text: encoded });
+      provider.finish.resolve({ text: encoded, run: activity });
       await until(() => messages().length === 3, "saved reply");
       await until(() => evaluate(`window.taskboard.bootstrap().then(f => !f.replyingTasks?.includes(${JSON.stringify(card.id)}))`), "writer released");
       assert.equal(messages()[2].at, provider.at);
+      await reopen();
+      assert.equal(await evaluate("document.querySelector('.chat-turn').childElementCount"), 0);
+      await evaluate("byId('task-side').firstElementChild.openReviewer()");
+      assert.deepEqual(await evaluate(`Array.from(document.querySelectorAll('.task-work details[data-item^="item:reply-"]'),
+        node => node.dataset.item)`), ["item:reply-update", "item:reply-check"]);
+      await evaluate("byId('task-side').firstElementChild.openDialogue()");
+      check("Completion leaves one reply in Диалог and saves both actions, once and in order, in Ход работы");
     }
     card = show();
     assert.equal(card.status, "draft");
@@ -175,24 +264,24 @@ void (async () => {
     check(restart ? "New Electron process restores the exact message order, text, source times and bubble positions" :
       "First automatic question, user answer and next agent reply keep their source times after completion and reopening");
     await evaluate(`{
-      frame.replyingTasks = [${JSON.stringify(card.id)}];
-      byId('task-side').firstElementChild.updateRun([{ id: 'saved-reply', type: 'agentMessage', phase: 'final_answer',
-        text: ${JSON.stringify(reply)}, at: ${JSON.stringify(expectedTimes[2])}, status: 'completed' }]);
+      updateChat({ project: frame.project, id: ${JSON.stringify(card.id)}, type: 'discussion',
+        items: [{ id: 'saved-reply', type: 'agentMessage', phase: 'final_answer',
+          text: ${JSON.stringify(reply)}, at: ${JSON.stringify(expectedTimes[2])}, status: 'completed' }] });
     }`);
     assert.equal((await snapshot()).length, 3);
-    await evaluate("frame.replyingTasks = []; byId('task-side').firstElementChild.updateRun([]); void 0");
+    await evaluate(`updateChat({ project: frame.project, id: ${JSON.stringify(card.id)}, type: 'discussion' })`);
     check("A saved reply and its late live snapshot never produce duplicate bubbles");
 
-    for (const [theme, width, height, name] of [
-      ["dark", 1280, 800, "task-chat-bubbles-dark.png"],
+    for (const [theme, width, height] of [
+      ["dark", 1280, 800],
       ["light", 1280, 800],
-      ["dark", 1024, 768],
-      ["light", 1024, 768, "task-chat-bubbles-light-narrow.png"],
+      ["dark", 1024, 900],
+      ["light", 1024, 900],
     ]) {
       nativeTheme.themeSource = theme;
       window.setContentSize(width, height);
       await evaluate(`applyTheme(${JSON.stringify(theme)}); document.querySelector('.task-dialogue').scrollTop = 0; void 0`);
-      await evaluate("document.fonts.ready.then(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))))");
+      await paint();
       const layout = await evaluate(`(() => {
         const log = document.querySelector('.task-dialogue');
         const rows = [...log.querySelectorAll('.chat-entry')];
@@ -225,7 +314,6 @@ void (async () => {
       }
       assert.ok(layout.entries[0].lines >= 2);
       assert.ok(layout.dividers.length > 0 && layout.dividers.every(row => row.side === "stretch" && row.rule === "1px"));
-      if (restart && name) writeFileSync(join(artifacts, name), (await window.webContents.capturePage()).toPNG());
       const luminance = color => {
         const values = color.match(/[\d.]+/g).map(Number);
         const components = color.startsWith("color(") ? values : values.map(value => value / 255);
@@ -263,12 +351,7 @@ void (async () => {
       await until(() => evaluate(`window.taskboard.bootstrap().then(f => !f.replyingTasks?.includes(${JSON.stringify(interrupted.id)}))`), "fixture writer");
       await evaluate(`showTask(${JSON.stringify(interrupted.id)})`);
       provider = undefined;
-      await evaluate(`{
-        const input = document.querySelector('#task-chat-input');
-        input.value = 'Stop this reply';
-        input.dispatchEvent(new Event('input'));
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }));
-      }`);
+      await send("Останови этот ответ");
       await until(() => provider, "interruptible provider");
       provider.publish([{ id: "interrupted", type: "agentMessage", phase: "final_answer", text: '{"text":"Незавершённый ответ',
         at: provider.at, status: "inProgress" }]);
@@ -277,8 +360,50 @@ void (async () => {
       await until(() => evaluate(`window.taskboard.bootstrap().then(f => !f.replyingTasks?.includes(${JSON.stringify(interrupted.id)}))`), "stopped writer");
       await evaluate(`showTask(${JSON.stringify(interrupted.id)})`);
       assert.equal(await evaluate("document.querySelector('.task-dialogue').textContent.includes('Незавершённый ответ')"), false);
+      assert.equal(await evaluate("document.querySelector('.chat-turn').childElementCount"), 0);
       assert.equal(cli(["show", interrupted.id]).history.filter(event => event.chat && event.actor === "agent").length, 1);
       check("Stopping a partial reply removes its live bubble without saving an unfinished agent message");
+
+      provider = undefined;
+      await until(() => evaluate("document.querySelector('.chat-retry-reply')?.disabled === false"), "retry enabled after stop");
+      await evaluate("document.querySelector('.chat-retry-reply').click()");
+      await until(() => provider, "retry after interruption");
+      await until(() => evaluate("Boolean(document.querySelector('.chat-turn .chat-thinking'))"), "retry thinking");
+      provider.finish.reject(new Error("Fixture provider error"));
+      await until(() => evaluate("document.querySelector('.chat-composer .chat-status')?.textContent.includes('Fixture provider error')"), "provider error shown");
+      assert.equal(await evaluate("document.querySelector('.chat-turn').childElementCount"), 0);
+      check("A failed retry reports the provider error and clears Думаю…");
+
+      const interruptedMessages = () => cli(["show", interrupted.id]).history.filter(event => event.chat);
+      const showInterrupted = () => evaluate(`showTask(${JSON.stringify(interrupted.id)})`);
+      provider = undefined;
+      await until(() => evaluate("document.querySelector('.chat-retry-reply')?.disabled === false"), "retry enabled after failure");
+      await evaluate("document.querySelector('.chat-retry-reply').click()");
+      await until(() => provider, "retry provider after error");
+      await until(() => evaluate("Boolean(document.querySelector('.chat-turn .chat-thinking'))"), "continued reply thinking");
+      const continued = "Обработка продолжена.";
+      provider.finish.resolve({ text: JSON.stringify({ text: continued, awaitingAnswer: false }) });
+      await until(() => interruptedMessages().length === 3, "continued reply saved");
+      await until(() => evaluate(`window.taskboard.bootstrap().then(f => !f.replyingTasks?.includes(${JSON.stringify(interrupted.id)}))`), "continued writer released");
+      await showInterrupted();
+      await until(async () => (await snapshot()).at(-1)?.text === continued, "continued reply rendered");
+      assert.deepEqual((await snapshot()).map(row => row.text), [question, "Останови этот ответ", continued]);
+      check("Continuing the interrupted reply keeps the saved user message and stores one completed response");
+
+      provider = undefined;
+      await send("Расскажи, что записано в карточке");
+      await until(() => provider, "ordinary message provider");
+      await until(() => evaluate("Boolean(document.querySelector('.chat-turn .chat-thinking'))"), "ordinary message thinking");
+      const ordinary = "В карточке записано требование автоматически удалить рабочую копию.";
+      const encoded = JSON.stringify({ text: ordinary, awaitingAnswer: false });
+      provider.finish.resolve({ text: encoded });
+      await until(() => interruptedMessages().length === 5, "ordinary reply without tool events saved");
+      await until(() => evaluate(`window.taskboard.bootstrap().then(f => !f.replyingTasks?.includes(${JSON.stringify(interrupted.id)}))`), "ordinary writer released");
+      await showInterrupted();
+      await until(async () => (await snapshot()).at(-1)?.text === ordinary, "ordinary reply rendered");
+      assert.deepEqual((await snapshot()).map(row => row.text), [question, "Останови этот ответ", continued, "Расскажи, что записано в карточке", ordinary]);
+      assert.equal(await evaluate("document.querySelector('.chat-turn').childElementCount"), 0);
+      check("An ordinary message gets Думаю… and exactly one saved reply without tool events");
       await display();
     }
 

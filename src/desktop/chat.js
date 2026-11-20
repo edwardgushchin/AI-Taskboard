@@ -69,28 +69,21 @@ function showChatPreview(tile, src) {
   preview.src = src;
 }
 
-function renderChatTurn(list, draft, items = [], replying = draft.pending === "replying") {
+function renderChatTurn(list, draft, items, taskId) {
   const turn = list.querySelector(".chat-turn");
-  const atBottom = draft.scroll === undefined;
-  turn.hidden = !replying;
-  turn.replaceChildren();
-  if (!turn.hidden) {
-    const replies = items.filter(item => item.type === "agentMessage" && item.phase === "final_answer" && item.text);
-    for (const item of replies) {
-      const entry = element("div", undefined, "chat-entry");
-      entry.dataset.actor = "agent";
-      entry.append(element("span", () => t("ui.agent_262834de"), "chat-author"),
-        chatText(item.text, { taskId: taskInSheet?.id, agent: true }));
-      appendChatTime(entry, item.at);
-      turn.append(entry);
-    }
-    if (!replies.length) {
-      const thinking = element("p", () => t("ui.thinking_14a886f3"), "chat-thinking");
-      thinking.setAttribute("role", "status");
-      turn.append(thinking);
-    }
+  turn.hidden = items === undefined;
+  const visible = (items ?? []).filter(item => !collaborationItem(item) && item.type !== "reasoning" &&
+    (item.type !== "agentMessage" || item.text.trim()));
+  if (visible.length) {
+    renderRunActivity(turn, visible, false, undefined, taskId, { taskId, taskDiscussion: true });
+  } else if (turn.hidden) {
+    turn.replaceChildren();
+  } else if (!turn.querySelector(".chat-thinking")) {
+    const thinking = element("p", () => t("ui.thinking_14a886f3"), "chat-thinking");
+    thinking.setAttribute("role", "status");
+    turn.replaceChildren(thinking);
   }
-  if (atBottom) list.scrollTop = list.scrollHeight;
+  if (draft.scroll === undefined) list.scrollTop = list.scrollHeight;
 }
 
 function readableRunCommand(command) {
@@ -508,9 +501,15 @@ function renderRunActivity(container, items, completed = false, durationMs, task
       flush();
       if (item.type === "agentMessage" || item.type === "plan") {
         const message = chatText(item.text, messageContext);
-        const entry = context?.dialogue && item.type === "agentMessage" && item.text.trim()
-          ? element("div", undefined, "board-manager-message") : message;
-        if (entry !== message) entry.append(message);
+        let entry = message;
+        if (context?.taskDiscussion && item.type === "agentMessage") {
+          entry = element("div", undefined, "chat-entry");
+          entry.dataset.actor = "agent";
+          entry.append(element("span", () => t("ui.agent_262834de"), "chat-author"), message);
+        } else if (context?.dialogue && item.type === "agentMessage" && item.text.trim()) {
+          entry = element("div", undefined, "board-manager-message");
+          entry.append(message);
+        }
         appendAnswerImages(entry, item);
         if (item.type === "agentMessage") appendChatTime(entry, item.at);
         entry.dataset.item = "message:" + item.id;
@@ -659,6 +658,13 @@ function updateChat({ project, id, type, text, items, savedRun, goal, goalId, go
   if (type === "reviewer-chat") {
     if (frame.project === project) byId("board-composer").firstChild?.refreshWork();
     if (open) byId("task-side").firstElementChild?.refreshReview();
+    return;
+  }
+  if (type === "discussion" && frame.project === project) {
+    const activity = frame.discussionActivity ??= {};
+    if (items) activity[id] = items;
+    else delete activity[id];
+    if (open) byId("task-side").firstElementChild?.updateDiscussion();
     return;
   }
   if (type === "run" && frame.project === project) {
@@ -908,6 +914,7 @@ function taskChat(task) {
   let submittedAt = "";
   let submissionRow;
   const savedRunItems = new Set();
+  const savedDiscussionItems = new Set();
   let day;
   let lastMessage;
   let lastMessageIndex = -1;
@@ -938,6 +945,9 @@ function taskChat(task) {
       if (event.run?.length) {
         savedTeam.push(...event.run.filter(collaborationItem));
         const activity = event.action === "chat" ? event.run.filter(item => item.phase !== "final_answer") : event.run;
+        if (event.action === "chat") {
+          for (const item of activity) savedDiscussionItems.add(item.id);
+        }
         savedWork.push(() => renderRunActivity(log, activity.filter(item => !collaborationItem(item)), true, event.durationMs, task.id));
         appendWork(log);
       } else if (task.codexThreadId && event.durationMs !== undefined) {
@@ -1091,7 +1101,6 @@ function taskChat(task) {
   const refreshReview = task.status === "review" || task.history.some(event => event.actor === "reviewer" || event.action === "submit")
     ? reviewerChat(task, work, submissionRow ? progress : liveRun, reviewDecisions, items => { reviewTeam = items; renderTeam(); }) : undefined;
   list.append(element("li", undefined, "chat-turn"));
-  renderChatTurn(list, draft);
   area.append(list, work, team);
 
   let liveTeam = [];
@@ -1150,24 +1159,26 @@ function taskChat(task) {
     const follow = work.scrollHeight - work.clientHeight - work.scrollTop <= 8;
     // A save receipt can reach the window before its card history is refreshed.
     const saved = draft.savedRun;
-    const items = saved?.items ?? liveItems;
+    const discussion = (frame.discussionActivity?.[task.id] ?? []).filter(item =>
+      item.phase !== "final_answer" && !savedDiscussionItems.has(item.id));
+    const items = [...(saved?.items ?? liveItems), ...discussion];
     renderRunActivity(liveRun, items.filter(item => !collaborationItem(item) && !savedRunItems.has(item.id) &&
       (submissionRow || saved || item.phase !== "final_answer")), Boolean(saved), saved?.durationMs, task.id);
     if (follow) work.scrollTop = work.scrollHeight;
   }
   area.updateRun = (items = []) => {
     liveItems = items;
-    liveTeam = items.filter(collaborationItem);
-    if (!work.hidden) renderLiveWork();
     area.updateDiscussion();
-    renderTeam();
   };
   area.updateDiscussion = () => {
-    const savedReply = lastMessage?.actor === "agent" && liveItems.some(item =>
+    const items = frame.discussionActivity?.[task.id];
+    const savedReply = lastMessage?.actor === "agent" && items?.some(item =>
       item.type === "agentMessage" && item.phase === "final_answer" && item.at === lastMessage.at);
-    renderChatTurn(list, draft, liveItems, !savedReply &&
-      (draft.pending === "replying" || frame.replyingTasks?.includes(task.id)));
-    const commentary = frame.runActivity?.[task.id]?.some(item => item.phase === "commentary") ? [] : draft.commentary ?? [];
+    renderChatTurn(list, draft, savedReply ? undefined : items, task.id);
+    liveTeam = [...liveItems, ...(items ?? [])].filter(collaborationItem);
+    if (!work.hidden) renderLiveWork();
+    renderTeam();
+    const commentary = items?.some(item => item.phase === "commentary") ? [] : draft.commentary ?? [];
     progress.replaceChildren(...commentary.map(text => chatText(text, { taskId: task.id, agent: true })));
     progress.hidden = !commentary.length;
   };
@@ -1371,7 +1382,6 @@ function taskChat(task) {
     draft.scroll = undefined;
     const text = draft.text;
     sync();
-    renderChatTurn(list, draft);
     try {
       const { model, effort } = retrying ? lastMessage.chat : await discussionSettings();
       const files = retrying ? [] : await Promise.all(draft.files.map(file => api.filePayload(file)));

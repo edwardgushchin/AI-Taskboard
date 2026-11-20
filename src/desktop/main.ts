@@ -275,6 +275,10 @@ function frame(state: ProjectTab) {
       const log = runActivityByTask.get(state.project + "\0" + task.id);
       return log ? [[task.id, log]] : [];
     }) ?? []),
+    discussionActivity: Object.fromEntries(state.board?.tasks.flatMap(task => {
+      const log = discussionActivityByTask.get(state.project + "\0" + task.id);
+      return log ? [[task.id, log]] : [];
+    }) ?? []),
     recentBoards: recentBoards.map(path => ({ name: basename(path) || path, path })),
   };
 }
@@ -945,7 +949,7 @@ interface ChatRequest {
   retryAt?: number;
 }
 
-type ChatUpdate = { type: "saved" | "changed" } | { type: "commentary"; text: string } | { type: "run"; items: RunActivity[] };
+type ChatUpdate = { type: "saved" | "changed" } | { type: "commentary"; text: string };
 
 async function saveTaskTokenUsage(project: string, id: string, role: TaskUsageRole, report: TokenUsageReport): Promise<void> {
   const saved = await callCli(project, ["token-usage", id, "--compact"], { ...report, role });
@@ -983,7 +987,6 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
   const directories = new Set<string>();
   let scratch: string | undefined;
   let saved = request.retryAt !== undefined;
-  let streamed = false;
   let discussionStarted = false;
   let discussionFailure = t("draft_discussion.interrupted");
   try {
@@ -1012,6 +1015,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       if (!reply.ok) return { saved, result: reply };
       discussionStarted = true;
       replyingTasks.add(key);
+      publishDiscussionActivity(project, id, []);
       notifyRunChange(project);
       const configured = task.execution ?? readBoardSettings(runtimeLocation(project)).executor;
       if (configured?.effort) ({ model, effort } = { model: configured.model, effort: configured.effort });
@@ -1049,7 +1053,10 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     if (!automatic && (message?.actor !== "user" || retryAt !== undefined && last !== retryAt)) {
       return { saved, result: cliFailure("CHAT_CHANGED", t("ui.this_message_is_no_longer_awaiting_a_reply_6ec519ec")) };
     }
-    if (!active) replyingTasks.add(key);
+    if (!active && !automatic) {
+      replyingTasks.add(key);
+      publishDiscussionActivity(project, id, []);
+    }
     notifyRunChange(project);
     const activeFiles = new Set(message?.chat?.files);
     const inspectDraft = task.status === "draft";
@@ -1141,10 +1148,8 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       (name, args) => runAction(name, args),
       scratch!, maxAttachmentBytes - task.attachments.reduce((sum, file) => sum + (file.link ? 0 : file.bytes), 0),
       report => saveTaskTokenUsage(project, id, "discussion", report),
-      control => ready.resolve(control), signal, id, items => {
-        streamed = true;
-        notify({ type: "run", items });
-      }, automatic === undefined ? undefined : "initial", task.status === "review", Boolean(task.closedAt))).finally(() => ready.reject(new Error("The agent session ended.")));
+      control => ready.resolve(control), signal, id, items => publishDiscussionActivity(project, id, items),
+      automatic === undefined ? undefined : "initial", task.status === "review", Boolean(task.closedAt))).finally(() => ready.reject(new Error("The agent session ended.")));
     if ("interrupted" in answer) return { saved, result: { ok: true as const, data: task } };
     signal.throwIfAborted();
     const result = await callCli<Task>(project, ["chat", id], {
@@ -1172,10 +1177,10 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
         }
       } catch (error) { console.warn("Could not save the draft discussion failure.", error); }
     }
-    if (streamed) notify({ type: "run", items: [] });
     if (!active) {
       activeAgents.delete(key);
       const wasReplying = replyingTasks.delete(key);
+      if (wasReplying) publishDiscussionActivity(project, id);
       for (const directory of directories) await rm(directory, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
       chatRuns.delete(key);
       taskOperations.delete(key);
@@ -1208,15 +1213,12 @@ ipcMain.handle("chat:send", async (event, id: unknown, request: unknown) => {
     return { saved: false, result: cliFailure("ATTACHMENT_LIMIT", t("ui.attachments_are_limited_to_64_mib_per_task_ae680c16")) };
   }
   return sendChat(project, id, input as ChatRequest, update => {
-    if (update.type === "run") return publishRunActivity(project, id, update.items);
     if (!event.sender.isDestroyed()) event.sender.send("chat:update", { project, id, ...update });
   }, undefined, event.sender.id);
 });
 
 function runDraftDiscussion(project: string, id: string, phase: NonNullable<Task["draftDiscussion"]>["phase"]) {
-  return sendChat(project, id, { model: "", effort: "", text: "", files: [] }, update => {
-    if (update.type === "run") publishRunActivity(project, id, update.items);
-  }, phase);
+  return sendChat(project, id, { model: "", effort: "", text: "", files: [] }, () => {}, phase);
 }
 
 ipcMain.handle("chat:retry-draft-discussion", async (event, id: unknown) => {
@@ -3746,7 +3748,9 @@ async function runImage(event: IpcMainInvokeEvent, id: unknown, path: unknown, r
   const task = await callCli<Task>(project, ["show", id]);
   if (!task.ok) return null;
   if (reviewer === true) return readReviewerImage(project, task.data.id, path);
-  return readRunImage(project, task.data, runActivityByTask.get(project + "\0" + id) ?? [], path);
+  const key = project + "\0" + id;
+  const items = [...(runActivityByTask.get(key) ?? []), ...(discussionActivityByTask.get(key) ?? [])];
+  return readRunImage(project, task.data, items, path);
 }
 
 ipcMain.handle("board:runImagePreview", async (event, id: unknown, path: unknown, reviewer: unknown) => {
@@ -3832,6 +3836,18 @@ ipcMain.handle("board:revealArtifact", async (event, id: unknown, source: unknow
 const launchingTasks = new Set<string>();
 const runningTasks = new Set<string>();
 const runActivityByTask = new Map<string, RunActivity[]>();
+const discussionActivityByTask = new Map<string, RunActivity[]>();
+
+function publishDiscussionActivity(project: string, id: string, items?: RunActivity[]) {
+  const key = project + "\0" + id;
+  if (items) discussionActivityByTask.set(key, items);
+  else discussionActivityByTask.delete(key);
+  for (const state of windowStates.values()) {
+    if (state.active.project === project && !state.window.isDestroyed()) {
+      state.window.webContents.send("chat:update", { project, id, type: "discussion", items });
+    }
+  }
+}
 
 function executorBusy(project: string, id: string) {
   const key = project + "\0" + id;
