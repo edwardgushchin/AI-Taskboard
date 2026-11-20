@@ -21,7 +21,8 @@ import { createInterface } from "node:readline";
 import { setTimeout as wait } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { callCli, cliChild, cliFailure } from "./cli.ts";
+import { callCli, cliChild, cliFailure, cliSpawnFailure } from "./cli.ts";
+import { TokenUsageQueue } from "./token-usage-queue.ts";
 import { githubReadTool, readBoardGitHub } from "./github-read.ts";
 import { codexAuthMode, codexStatus, configuredCodex, executorFullAccess, isManagerAccess, managerAccess, setCodexAuth, setCodexExecutable, setCodexWindowsSandbox, setTaskExecutorAccess } from "./codex.ts";
 import { chatModels, readBoardHistory, readLastTaskTurn, readTaskRunHistory, replyToBoard, replyToTask, reviewWithCodex, updateBoardGoal } from "./codex-chat.ts";
@@ -32,7 +33,7 @@ import { phaseStageReporter } from "./expert-tools.ts";
 import type { BoardChange, ReviewedSubmission, ReviewReport } from "./board-actions.ts";
 import type { AgentControl } from "./codex-rpc.ts";
 import type { TaskUsageRole, TokenUsageReport } from "../cli/token-usage.ts";
-import type { CliReply } from "./cli.ts";
+import type { CliError, CliReply } from "./cli.ts";
 import { executionModels } from "./codex-models.ts";
 import type { ArchiveLink, BoardSettings, BoardTag, ReviewMode, RunActivity, Task } from "../cli/model.ts";
 import { boardReviewMode, taskReviewMode, taskReviewModeVersion, codexThreadPattern, defaultBoardAgents, maxAttachmentBytes, reviewsAcceptanceRepair, reviewVerifier, taskIdPattern, TaskboardError, usesIndependentReviewer } from "../cli/model.ts";
@@ -407,7 +408,22 @@ function subscribe(project: string, board: Board): BoardWatch {
   }
   const launch = () => {
     if (stopped) return;
-    const active = cliChild(project, ["watch", "--compact"]);
+    const reconnect = (error?: CliError) => {
+      if (stopped) return;
+      for (const state of tabs) {
+        state.error = { ...(error ?? { code: "WATCH_STOPPED",
+          message: t("ui.updates_paused_reconnecting_4108c957") }), operation: "refresh" };
+        send(state);
+      }
+      retry = setTimeout(launch, 1500);
+    };
+    let active: ReturnType<typeof cliChild>;
+    try {
+      active = cliChild(project, ["watch", "--compact"]);
+    } catch (error) {
+      reconnect(cliSpawnFailure("watch", "spawn", error));
+      return;
+    }
     child = active;
     const lines = createInterface({ input: active.stdout });
     active.stderr.resume();
@@ -441,16 +457,11 @@ function subscribe(project: string, board: Board): BoardWatch {
         archive();
       }
     });
-    active.on("error", () => {});
+    let launchError: CliError | undefined;
+    active.on("error", error => { launchError = cliSpawnFailure("watch", "error", error); });
     active.once("close", () => {
       lines.close();
-      if (stopped) return;
-      for (const state of tabs) {
-        state.error = { code: "WATCH_STOPPED", operation: "refresh",
-          message: t("ui.updates_paused_reconnecting_4108c957") };
-        send(state);
-      }
-      retry = setTimeout(launch, 1500);
+      reconnect(launchError);
     });
   };
   queueNotices(board);
@@ -962,9 +973,15 @@ interface ChatRequest {
 
 type ChatUpdate = { type: "saved" | "changed" } | { type: "commentary"; text: string };
 
+let tokenUsage: TokenUsageQueue | undefined;
+const tokenUsageQueue = () => tokenUsage ??= new TokenUsageQueue(app.getPath("userData"));
+
 async function saveTaskTokenUsage(project: string, id: string, role: TaskUsageRole, report: TokenUsageReport): Promise<void> {
-  const saved = await callCli(project, ["token-usage", id, "--compact"], { ...report, role });
-  if (!saved.ok) console.warn("Could not save task token usage for %s (%s).", id, saved.error.code);
+  try {
+    await tokenUsageQueue().enqueue(project, id, { ...report, role });
+  } catch (error) {
+    console.warn("Could not queue task token usage for %s (%s).", id, (error as NodeJS.ErrnoException).code ?? "UNKNOWN");
+  }
 }
 
 async function sendChat(project: string, id: string, request: ChatRequest, notify: (update: ChatUpdate) => void,
@@ -1768,7 +1785,11 @@ async function scheduleMaintenance(project: string, watch: BoardWatch) {
   try {
     const jobs = await callCli<MaintenanceJob[]>(project, ["maintenance"]);
     const tab = [...watch.tabs].find(tab => !tab.window.isDestroyed());
-    if (!jobs.ok || !tab) return;
+    if (!jobs.ok) {
+      if (jobs.error.code === "CLI_UNAVAILABLE") console.warn("Private maintenance deferred", jobs.error);
+      return;
+    }
+    if (!tab) return;
     for (const job of jobs.data) {
       const result = await runBoardRequest(tab.window.webContents, watch.board,
         "Repair the assigned private lifecycle maintenance fault. Use --project " + project + " for the task CLI.",
@@ -4831,6 +4852,10 @@ else {
     } else if (app.isReady()) createWindow();
   });
   void app.whenReady().then(() => {
+    try { tokenUsageQueue().restore(); }
+    catch (error) {
+      console.warn("Could not restore pending task token usage (%s).", (error as NodeJS.ErrnoException).code ?? "UNKNOWN");
+    }
     void tickBackups();
     setInterval(() => void tickBackups(), 15_000).unref();
     if (process.platform === "win32") app.setAppUserModelId("org.aitaskboard.desktop");

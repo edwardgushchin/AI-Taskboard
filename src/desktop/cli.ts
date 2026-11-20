@@ -19,6 +19,20 @@ export function cliFailure(code: string, message: string): CliReply<never> {
   return { ok: false, error: { code, message } };
 }
 
+export function cliSpawnFailure(operation: string, phase: "spawn" | "error", cause: unknown): CliError {
+  const error = cause as NodeJS.ErrnoException | undefined;
+  const code = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]*$/.test(error.code) ? error.code : undefined;
+  return {
+    code: "CLI_UNAVAILABLE",
+    message: "Could not start the CLI for " + operation + (code ? " (" + code + ")." : "."),
+    details: {
+      operation, phase, platform: process.platform, runtime: existsSync(bundled) ? "bundled" : "source",
+      code, errno: typeof error?.errno === "number" ? error.errno : undefined,
+      syscall: error?.syscall?.split(" ")[0] === "spawn" ? "spawn" : undefined,
+    },
+  };
+}
+
 export function cliChild(project: string, args: string[], input?: unknown): ChildProcessWithoutNullStreams {
   const packaged = existsSync(bundled);
   const command = packaged ? bundled : process.execPath;
@@ -44,19 +58,24 @@ export async function callCli<T>(project: string, args: string[], input?: unknow
 
 function callCliOnce<T>(project: string, args: string[], input?: unknown): Promise<CliReply<T>> {
   return new Promise(resolve => {
-    const child = cliChild(project, args, input);
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = cliChild(project, args, input);
+    } catch (error) {
+      resolve({ ok: false, error: cliSpawnFailure(args[0], "spawn", error) });
+      return;
+    }
     child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
+    child.stderr.resume();
     let output = "";
-    let errorOutput = "";
     child.stdout.on("data", chunk => { output += chunk; });
-    child.stderr.on("data", chunk => { errorOutput += chunk; });
-    child.once("error", error => resolve(cliFailure("CLI_UNAVAILABLE", error.message)));
-    child.once("close", () => {
+    child.once("error", error => resolve({ ok: false, error: cliSpawnFailure(args[0], "error", error) }));
+    child.once("close", (exitCode, signal) => {
       try {
         resolve(JSON.parse(output));
       } catch {
-        resolve(cliFailure("CLI_UNAVAILABLE", errorOutput.trim() || "The CLI returned no result."));
+        resolve({ ok: false, error: { code: "CLI_UNAVAILABLE", message: "The CLI returned no result.",
+          details: { operation: args[0], phase: "reply", exitCode, signal } } });
       }
     });
   });
