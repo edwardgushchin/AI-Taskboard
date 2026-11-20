@@ -1950,6 +1950,22 @@ const activityRowKey = id => id.replace(/^final:/, "message:").replace(/^group:/
 function chatViewport(list) {
   const rows = "[data-item], [data-chat-anchor]";
   const key = row => row.dataset.chatAnchor ?? activityRowKey(row.dataset.item);
+  const report = ".chat-report-details";
+  const reportBlocks = report + "[open] > .chat-report-body > *";
+  const foldsSelector = "details[data-item], " + report;
+  function foldKey(fold) {
+    if (!fold.matches(report)) return fold.dataset.item;
+    const message = fold.parentElement.closest(rows);
+    if (!message) return fold.dataset.item;
+    const sections = [...fold.parentElement.querySelectorAll(":scope > " + report)];
+    return JSON.stringify(["report", key(message), sections.indexOf(fold)]);
+  }
+  function anchorKey(row) {
+    const body = row.parentElement;
+    if (!body.matches(".chat-report-body")) return key(row);
+    const section = foldKey(body.parentElement);
+    if (section) return JSON.stringify(["report-block", section, [...body.children].indexOf(row)]);
+  }
   const rowBounds = row => (row.matches("details") ? row.firstElementChild ?? row : row).getBoundingClientRect();
   const visible = row => row.checkVisibility({ visibilityProperty: true });
   let suspended = false;
@@ -1965,13 +1981,18 @@ function chatViewport(list) {
     const end = atEnd();
     const anchors = [];
     if (!end) {
-      for (const row of list.querySelectorAll(rows)) {
-        if (!visible(row)) continue;
-        const bounds = rowBounds(row);
-        if (bounds.height && bounds.bottom > top && bounds.top < top + list.clientHeight) {
-          anchors.push({ node: row, key: key(row), offset: bounds.top - top });
+      const bottom = top + list.clientHeight;
+      // Text wraps differently after a resize, so prefer anchors inside open reports.
+      for (const selector of [reportBlocks, rows]) {
+        for (const row of list.querySelectorAll(selector)) {
+          if (!visible(row)) continue;
+          const bounds = rowBounds(row);
+          if (!bounds.height || bounds.bottom <= top || bounds.top >= bottom) continue;
+          const id = anchorKey(row);
+          if (id) anchors.push({ node: row, key: id, offset: bounds.top - top });
           if (anchors.length === 4) break;
         }
+        if (anchors.length === 4) break;
       }
     }
     position = { end, top: list.scrollTop, anchors };
@@ -1981,11 +2002,11 @@ function chatViewport(list) {
     if (!hasViewport()) return;
     if (position.end) list.scrollTop = list.scrollHeight;
     else {
-      const candidates = [...list.querySelectorAll(rows)];
+      const candidates = [...list.querySelectorAll(rows + ", " + reportBlocks)];
       let top = position.top;
       for (const anchor of position.anchors) {
         const connected = anchor.node && list.contains(anchor.node);
-        const row = connected ? anchor.node : candidates.find(candidate => key(candidate) === anchor.key);
+        const row = connected ? anchor.node : candidates.find(candidate => anchorKey(candidate) === anchor.key);
         if (!row) continue;
         if (!connected && !visible(row)) {
           for (let fold = row.parentElement.closest(".chat-work"); fold; fold = fold.parentElement.closest(".chat-work")) fold.open = true;
@@ -2018,7 +2039,11 @@ function chatViewport(list) {
     remember,
     suspend(change) {
       remember();
-      folds = new Map([...list.querySelectorAll("details[data-item]")].map(row => [row.dataset.item, row.open]));
+      folds = new Map();
+      for (const fold of list.querySelectorAll(foldsSelector)) {
+        const id = foldKey(fold);
+        if (id) folds.set(id, fold.open);
+      }
       suspended = true;
       resize.disconnect();
       observed.clear();
@@ -2028,8 +2053,9 @@ function chatViewport(list) {
     resume(change) {
       change();
       if (!suspended) return;
-      for (const row of list.querySelectorAll("details[data-item]")) {
-        if (folds?.has(row.dataset.item)) row.open = folds.get(row.dataset.item);
+      for (const fold of list.querySelectorAll(foldsSelector)) {
+        const id = foldKey(fold);
+        if (folds.has(id)) fold.open = folds.get(id);
       }
       folds = undefined;
       restoring = true;
