@@ -2102,7 +2102,7 @@ function draftComposer() {
   let goalRunning = false;
   let goalResuming = false;
   let goalResumeWaiting = false;
-  let requestingResume = false;
+  let resumeRequest;
   let clearingGoal = false;
   const activeGoalRunId = () => currentGoal && currentGoal.status !== "complete" ? goalScope ?? (goalRunning && managerWork?.id) : undefined;
   let goalRevision = 0;
@@ -2129,17 +2129,22 @@ function draftComposer() {
   const pauseGoal = button("", () => changeGoal("pause"), "quiet");
   const resumeGoal = button("", async () => {
     if (!currentGoal || resumeGoal.hidden || resumeGoal.disabled) return;
-    requestingResume = true;
+    const request = Symbol();
+    resumeRequest = request;
     goalError.textContent = "";
     syncGoal();
     try {
       const result = await api.boardGoal("resume", currentGoal.objective);
       if (!result.ok) throw new Error(boardError(result.error));
     } catch (error) {
-      goalError.textContent = error.message;
+      if (resumeRequest === request) {
+        goalError.textContent = error.message;
+      }
     } finally {
-      requestingResume = false;
-      syncGoal();
+      if (resumeRequest === request) {
+        resumeRequest = undefined;
+        syncGoal();
+      }
     }
   }, "quiet");
   const clearGoal = button("", () => changeGoal("clear"), "quiet danger");
@@ -2159,8 +2164,9 @@ function draftComposer() {
     goalPanel.dataset.status = waitingToResume ? "idle" : currentGoal.status;
     pauseGoal.hidden = currentGoal.status !== "active" || waitingToResume;
     resumeGoal.hidden = currentGoal.status === "complete" || !pauseGoal.hidden;
-    resumeGoal.disabled = changingGoal || goalResuming || requestingResume;
-    goalPending.hidden = !clearingGoal && (!(goalResuming || requestingResume) || goalRunning);
+    const resuming = goalResuming || resumeRequest !== undefined;
+    resumeGoal.disabled = changingGoal || resuming;
+    goalPending.hidden = !clearingGoal && (!resuming || goalRunning);
     bindLocalized(goalPending, "textContent", () => t(clearingGoal
       ? "ui.waiting_for_the_codex_chat_to_become_available_ddb2e85f"
       : goalResumeWaiting ? "ui.waiting_for_goal_context" : "ui.starting_39fd3c7e"));
@@ -2181,6 +2187,10 @@ function draftComposer() {
     goalRevision++;
     if (running !== undefined) goalRunning = running;
     if (resuming !== undefined) goalResuming = resuming;
+    if (metadata.goalResumeEvent) {
+      // Once main broadcasts the attempt, the shared state owns the outcome in every window.
+      resumeRequest = undefined;
+    }
     if (metadata.goalResumeWaiting !== undefined) goalResumeWaiting = metadata.goalResumeWaiting;
     if (resuming === true) goalError.textContent = "";
     if (metadata.goalResumeError) goalError.textContent = metadata.goalResumeError;

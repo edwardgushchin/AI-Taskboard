@@ -34,6 +34,8 @@ let chat;
 let resumeFailure;
 let delayedReply;
 let delayedReplyReached = false;
+let delayedResumeReply;
+let replaceBeforeResume;
 
 function pass(result) {
   reports.push(result);
@@ -80,6 +82,8 @@ const pending = window => evaluate(window, "!!document.querySelector('.board-goa
 const history = (window, view = "chat") => api(window, "boardHistory", project, null, view);
 const resumes = () => requests.filter(request => request.resume).length;
 const clickResume = window => evaluate(window, "document.querySelector(" + JSON.stringify(button) + ").click()");
+const goalError = window => evaluate(window, "document.querySelector('.board-goal-error').textContent");
+const observedGoalReplies = window => evaluate(window, "Number(document.documentElement.dataset.fixtureGoalReplies ?? 0)");
 
 async function openGoal(window) {
   window.setContentSize(1280, 900);
@@ -128,7 +132,7 @@ function prepare() {
   app.requestSingleInstanceLock = () => true;
   app.on("web-contents-created", (_event, contents) => contents.setBackgroundThrottling(false));
   process.argv.push("--project", project);
-  // Delay delivery of one settled IPC result after the main process has released the goal writer.
+  // Hold settled IPC results after the main process has released the goal writer.
   const handle = ipcMain.handle;
   ipcMain.handle = function (channel, listener) {
     if (channel === "board:request") {
@@ -142,12 +146,44 @@ function prepare() {
         return result;
       };
     }
+    if (channel === "board:goal") {
+      const original = listener;
+      listener = async (event, kind, ...args) => {
+        if (kind === "resume" && replaceBeforeResume) {
+          writeGoal(replaceBeforeResume);
+          replaceBeforeResume = undefined;
+        }
+        const result = await original(event, kind, ...args);
+        const pendingReply = delayedResumeReply;
+        if (kind === "resume" && !result.ok && pendingReply && event.sender.id === pendingReply.sender) {
+          pendingReply.received.resolve(result);
+          await pendingReply.release.promise;
+        }
+        return result;
+      };
+    }
     return handle.call(this, channel, listener);
   };
   const sourceUrl = new URL("../src/desktop/main.ts", import.meta.url);
+  const preloadPath = join(scratch, "preload-under-test.cjs");
+  const preload = readFileSync(new URL("../src/desktop/preload.cjs", import.meta.url), "utf8");
+  const instrumentedPreload = preload.replace(
+    'boardGoal: (kind, objective) => ipcRenderer.invoke("board:goal", kind, objective),',
+    `boardGoal: async (kind, objective) => {
+      const reply = await ipcRenderer.invoke("board:goal", kind, objective);
+      if (kind === "resume") {
+        const data = document.documentElement.dataset;
+        data.fixtureGoalReplies = String(Number(data.fixtureGoalReplies ?? 0) + 1);
+      }
+      return reply;
+    },`,
+  );
+  assert.notEqual(instrumentedPreload, preload);
+  writeFileSync(preloadPath, instrumentedPreload);
   const source = readFileSync(sourceUrl, "utf8")
     .replace("readTaskRunHistory, replyToBoard, replyToTask, reviewWithCodex, updateBoardGoal",
       "readTaskRunHistory, replyToTask, reviewWithCodex")
+    .replace('preload: fileURLToPath(new URL("./preload.cjs", import.meta.url))', "preload: " + JSON.stringify(preloadPath))
     .replaceAll("import.meta.url", JSON.stringify(sourceUrl.href))
     .replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, sourceUrl).href));
   const fixture = [
@@ -352,25 +388,52 @@ async function run() {
     writeGoal(objective);
     globalThis.publishFixtureGoal(project);
     await until(() => resumeEnabled(wide), "available action before " + failure);
+    const originalReplyCount = await observedGoalReplies(wide);
+    const reply = { sender: wide.webContents.id, received: Promise.withResolvers(), release: Promise.withResolvers() };
+    delayedResumeReply = reply;
     resumeFailure = failure;
-    await clickResume(wide);
+    try {
+      await clickResume(wide);
+      for (const window of [wide, other]) {
+        await until(async () => (await goalError(window)).includes(message), failure + " reason");
+        assert.equal(await resumeEnabled(window), true, "Shared " + failure + " notification must unlock Resume before the initiating IPC reply");
+      }
+      const response = await reply.received.promise;
+      assert.match(response.error.message, new RegExp(message));
+      assert.equal(await observedGoalReplies(wide), originalReplyCount);
+      assert.equal(resumes(), before + 1);
+
+      resumeFailure = undefined;
+      await clickResume(other);
+      await until(async () => resumes() === before + 2 && await resumeEnabled(wide) && await resumeEnabled(other), "retry from other window");
+      for (const window of [wide, other]) {
+        assert.equal(await goalError(window), "");
+      }
+    } finally {
+      delayedResumeReply = undefined;
+      reply.release.resolve();
+    }
+    await until(async () => await observedGoalReplies(wide) === originalReplyCount + 1, "old IPC failure delivered to the first renderer");
+    await evaluate(wide, "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
     for (const window of [wide, other]) {
-      await until(() => evaluate(window,
-        "document.querySelector('.board-goal-error').textContent.includes(" + JSON.stringify(message) + ")"), failure + " reason");
+      assert.equal(await goalError(window), "", "A stale IPC failure must not restore an old error");
       assert.equal(await resumeEnabled(window), true);
     }
-    assert.equal(resumes(), before + 1);
-    resumeFailure = undefined;
-    await clickResume(other);
-    await until(async () => resumes() === before + 2 && await resumeEnabled(wide) && await resumeEnabled(other), "retry from other window");
-    for (const window of [wide, other]) {
-      assert.equal(await evaluate(window, "document.querySelector('.board-goal-error').textContent"), "");
-    }
-    pass("Provider " + failure + ": both windows show the reason and restore Resume; one retry from the second window succeeds and clears the error.");
+    assert.equal(resumes(), before + 2);
+    pass("Provider " + failure + ": both windows show the reason and unlock before individual IPC delivery. The second window retries once successfully; the late first reply never restores the error or starts another turn.");
   }
 
+  const beforeRejection = resumes();
+  replaceBeforeResume = "Replacement before resume validation";
+  await clickResume(wide);
+  await until(async () => (await goalError(wide)).includes("Сохранённой цели нет."), "rejection before any shared resume notification");
+  assert.equal(await goalError(other), "");
+  assert.equal(await resumeEnabled(wide), true);
+  assert.equal(resumes(), beforeRejection);
+  pass("A request for an obsolete objective shows a local error and unlocks Resume even when no shared resume notification was published.");
+
   const paths = ["src/desktop/main.ts", "src/desktop/chat.js", "src/desktop/renderer.js", "src/desktop/locales/ru.json",
-    "src/desktop/locales/en.json", "scripts/check-goal-resume.mjs", "scripts/electron-check.mjs"];
+    "src/desktop/locales/en.json", "src/desktop/preload.cjs", "scripts/check-goal-resume.mjs", "scripts/electron-check.mjs"];
   const hashes = paths.map(path => createHash("sha256").update(readFileSync(join(root, path))).digest("hex") + "  " + path);
   const revision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
   writeFileSync(join(artifacts, "goal-resume-after-reopen.txt"), [

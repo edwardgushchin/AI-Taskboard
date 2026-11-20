@@ -641,7 +641,12 @@ function updateChat({ project, id, type, text, items, savedRun, goal, goalId, go
     else if (type === "orchestrator-work-history") composer?.invalidateWork?.();
     else if (type === "orchestrator-work-accepted") composer?.acceptWork?.(id);
     else if (type === "orchestrator-goal") {
-      composer?.updateGoal?.(goal, goalRunning, goalResuming, { goalId, goalResumeWaiting, goalResumeError: error });
+      composer?.updateGoal?.(goal, goalRunning, goalResuming, {
+        goalId,
+        goalResumeWaiting,
+        goalResumeError: error,
+        goalResumeEvent: goalResuming !== undefined,
+      });
     }
     else if (type === "orchestrator-review-error") composer?.reviewError?.(error, id);
     else if (type === "orchestrator-ready") composer?.enableStop?.();
