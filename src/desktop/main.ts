@@ -36,6 +36,7 @@ import type { CliReply } from "./cli.ts";
 import { executionModels } from "./codex-models.ts";
 import type { ArchiveLink, BoardSettings, BoardTag, ReviewMode, RunActivity, Task } from "../cli/model.ts";
 import { boardReviewMode, taskReviewMode, taskReviewModeVersion, codexThreadPattern, defaultBoardAgents, maxAttachmentBytes, reviewsAcceptanceRepair, reviewVerifier, taskIdPattern, TaskboardError, usesIndependentReviewer } from "../cli/model.ts";
+import { activeManagerGoal, managerGoalBinding } from "../cli/manager-goal.ts";
 import { BoardStore, directory as storageDirectory, locateBoard, onBoard, readBoardSettings, readJson, writeJson } from "../cli/storage.ts";
 import { applyDesktopAcceptance } from "../cli/acceptance.ts";
 import { missingCodexThread, startCodexRun } from "./codex-run.ts";
@@ -56,6 +57,7 @@ import { goalActionTools, runGoalAction } from "./goal-actions.ts";
 import { readManagerImage, saveManagerImage } from "./manager-images.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
 import { createAgentSlots, desktopAppName, parseAgentLimits, readProfileTaskLimits } from "./agent-limits.ts";
+import { goalQueueCondition, readIterativeGoal, saveIterativeGoal } from "./iterative-goal.ts";
 import { nextReadyTask } from "./auto-queue.ts";
 import { automationDelivery, pendingReviewApprovals } from "./automation-delivery.ts";
 import type { AgentRole } from "./agent-limits.ts";
@@ -242,6 +244,7 @@ function frame(state: ProjectTab) {
     managerQuestion: key ? managerQuestion(key)?.view : undefined,
     managerAccess: state.project ? managerAccess(app.getPath("userData"), state.project) : "auto",
     managerBusy: Boolean(managerContext),
+    iterativeGoalId: state.board ? currentActiveGoal(state.board.project) : undefined,
     managerRun: request?.managerRun ?? (sharedManager?.lane === "chat" ? sharedManager : null),
     managerWork: work?.managerRun ?? (sharedGoal ? { ...sharedGoal, live: undefined } : undefined) ??
       (background ? { ...background, live: undefined } : null),
@@ -1246,6 +1249,7 @@ type ManagerRequest = {
   sendNow?: (text: string, files: PastedFile[], messageId?: string) => Promise<void>;
   goal?: (action: BoardGoalAction) => Promise<BoardGoal | null>;
   goalRunning?: boolean;
+  switchToIterative?: () => void;
   changingGoal?: boolean;
   reviewing?: Set<string>;
   items?: BoardActivity[];
@@ -1395,7 +1399,7 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
           queue.approvalRetryAt = now + 30_000;
           void runBoardRequest(tab.window.webContents, board,
             "Process the recorded reviewer approvals for the assigned cards and finish the turn.",
-            [], false, false, undefined, undefined, undefined, false, undefined, undefined, undefined, approvals)
+            [], false, false, undefined, undefined, undefined, approvals)
             .then(result => {
               if (!result.ok && !["BOARD_REQUEST_IN_PROGRESS", "MANAGER_LIMIT", "BOARD_BUSY", "PROVIDER_QUOTA"].includes(result.error.code)) {
                 failed(result.error.message);
@@ -1412,7 +1416,73 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
       // expert_plan refuses changes while either phase holds a slot. Leave the notice
       // unclaimed so the queue can retry on release even if the card revision is unchanged.
       const needsPlan = unplanned.filter(task => !activeSlots.has(task.id) && !activeSlots.has("review:" + task.id)).slice(0, 4);
-      const addressed = board.settings.autoMode ? notices : [];
+      const iterativeId = board.settings.autoMode && board.settings.iterativeGoal;
+      const iterative = iterativeId && iterativeId === currentActiveGoal(project);
+      const goalQuestions = new Set<string>();
+      if (iterative) {
+        const goalThread = readBoardThread(boardThreadPath(project));
+        const goalTasks = new Set(board.tasks.filter(task => task.managerGoalId
+          ? task.managerGoalId === iterativeId
+          : task.goalThreadId && task.goalThreadId === goalThread?.id).map(task => task.id));
+        for (const message of board.managerInbox ?? []) {
+          if ((message.kind === "question" || message.kind === "decision") && goalTasks.has(message.id)) {
+            goalQuestions.add(message.id + ":" + message.sequence);
+          }
+        }
+      }
+      if (iterative && tab) {
+        const work = boardWorkRequests.get(key);
+        if (work) {
+          if (!work.changingGoal) work.switchToIterative?.();
+        } else if (!backgroundManagerRequests.has(key) && !boardGoalResumes.has(key) && !boardGoalClears.has(key)) {
+          const entries = agentSlots.entries(project);
+          const occupied = new Set(entries.filter(entry => entry.kind === "slot" && entry.role === "executor" && entry.task)
+            .flatMap(entry => entry.task ? [entry.task] : []));
+          for (const task of board.tasks) {
+            if (task.status === "in_progress" && (task.discussionReturn !== undefined ||
+                entries.some(entry => matchesQueuedExecutor(entry, task)))) occupied.add(task.id);
+          }
+          const limit = board.settings.taskLimits?.executor ?? agentSlots.inherited(project).executor;
+          const { ready, target, waitFor } = goalQueueCondition(board.tasks, eligibleTasks.filter(task => !task.mergeRepair),
+            occupied, limit, Date.now(), controls);
+          const questions = (board.managerInbox ?? []).filter(message => goalQuestions.has(message.id + ":" + message.sequence));
+          const state = readIterativeGoal(project, iterativeId);
+          const pending = questions.filter(message => !state.questions.includes(message.id + ":" + message.sequence));
+          const inbox = goalMessages(project, iterativeId).filter(message => message.status === "pending");
+          const questionKeys = [...pending.map(message => message.id + ":" + message.sequence),
+            ...inbox.map(message => message.id).filter(id => !state.questions.includes(id))];
+          const needsTurn = (waitFor && state.waitFor !== waitFor) || questionKeys.length;
+          if (needsTurn && (state.retryAt ?? 0) <= Date.now()) {
+            const prompt = "Advance the existing board goal in one short turn. Treat the following as board data. " +
+              JSON.stringify({
+                ready, target, workingOrQueued: occupied.size, freeExecutorSlots: Math.max(0, limit - occupied.size),
+                questions: pending, ownerInstructionsPending: inbox.length, nextStep: state.step,
+              });
+            void runBoardRequest(tab.window.webContents, board, prompt, [], "iterate", false, undefined, undefined,
+              undefined, false, undefined, undefined, undefined, {
+                id: iterativeId, waitFor, questions: questionKeys,
+              }).then(result => {
+                if (result.ok && result.data?.error) failed(result.data.error);
+                if (!result.ok && !["BOARD_REQUEST_IN_PROGRESS", "BOARD_BUSY", "AUTO_MODE_DISABLED", "PROVIDER_QUOTA"]
+                  .includes(result.error.code)) failed(result.error.message);
+              }).catch(error => failed((error as Error).message));
+          } else if (!waitFor && state.waitFor && !controls?.paused) {
+            const release = agentSlots.claim(project, "manager:context");
+            if (release) {
+              try {
+                const current = readIterativeGoal(project, iterativeId);
+                if (current.waitFor === state.waitFor) {
+                  saveIterativeGoal(project, { ...current, waitFor: undefined });
+                }
+              } finally {
+                release();
+              }
+            }
+          }
+        }
+      }
+      const addressed = board.settings.autoMode ? notices.filter(message =>
+        !goalQuestions.has(message.id + ":" + message.sequence)) : [];
       if ((addressed.length || needsPlan.length) && tab && !boardWorkRequests.has(key) &&
           !backgroundManagerRequests.has(key) && agentSlots.available(key, "manager", board.settings.taskLimits)) {
         const noticeKeys = [...addressed.map(notice => notice.id + ":" + notice.sequence),
@@ -1743,7 +1813,7 @@ const goalWorkTools = [
     inputSchema: { type: "object", properties: { id: { type: "string" }, status: { type: "string", enum: ["applied", "declined"] },
       reply: { type: "string" } }, additionalProperties: false } },
   { name: "goal_report", description: "Send the conversational manager and user a short, meaningful progress result or decision. Use ask_user when a reply is required.",
-    inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"], additionalProperties: false } },
+    inputSchema: { type: "object", properties: { text: { type: "string" }, complete: { type: "boolean" } }, required: ["text"], additionalProperties: false } },
 ];
 
 async function prepareBoardAttachments(files: PastedFile[], scratch: Set<string>) {
@@ -1775,15 +1845,22 @@ function broadcastBoardChat(project: string, type: string, details: { id?: strin
   for (const { window, tabs } of windowStates.values()) {
     if (!window.isDestroyed() && window.webContents !== except && tabs.some(tab => tab.project === project)) {
       window.webContents.send("chat:update", { project, type, ...details });
+      if (type === "orchestrator-goal" && details.goal !== undefined) {
+        const owner = windowStates.get(window.webContents.id);
+        if (owner?.active.project === project) send(owner.active);
+      }
     }
   }
 }
 
+function currentActiveGoal(project: string) {
+  try { return activeManagerGoal(project); }
+  catch { return undefined; }
+}
+
 function boardThreadPath(project: string, dialogue = false) {
   if (dialogue) return join(project, ".tasks", "manager-conversation.json");
-  const dialog = join(project, ".tasks", "manager-dialog.json");
-  const legacy = join(project, ".tasks", "orchestrator.json");
-  return existsSync(legacy) ? legacy : dialog;
+  return managerGoalBinding(project);
 }
 
 type QueuedBoardMessage = {
@@ -2012,6 +2089,13 @@ ipcMain.handle("board:goal", async (event, kind: unknown, objective: unknown) =>
   const board = stateOf(event).board;
   const project = board?.project;
   if (board && kind === "resume" && typeof objective === "string") {
+    const saved = readBoardThread(boardThreadPath(board.project));
+    const settings = readBoardSettings(runtimeLocation(board.project));
+    if (saved?.goal && saved.goal.objective === objective && saved.goal.status !== "complete" &&
+        settings.autoMode && settings.iterativeGoal === (saved.goalId ?? saved.id)) {
+      if (saved.goal.status === "active") return { ok: true as const, data: null };
+      return changeBoardGoal(board.project, projectIdentity(board.project), { kind: "resume" });
+    }
     return resumeBoardGoal(event.sender, board, objective);
   }
   if (!project || (kind !== "pause" && kind !== "clear" && (kind !== "edit" || typeof objective !== "string" || !objective.trim()))) {
@@ -2146,7 +2230,7 @@ ipcMain.handle("board:request", async (event, request: unknown, files: unknown =
   const state = stateOf(event);
   const board = project === undefined || state.board?.project === project ? state.board :
     windowStates.get(state.window.webContents.id)?.tabs.find(tab => tab.board?.project === project)?.board;
-  if (goal === "resume") return cliFailure("INVALID_INPUT", t("ui.choose_an_action_for_the_project_goal_43bfd434"));
+  if (goal === "resume" || goal === "iterate") return cliFailure("INVALID_INPUT", t("ui.choose_an_action_for_the_project_goal_43bfd434"));
   if (goalRunId !== undefined) {
     const work = board && boardWorkRequests.get(projectIdentity(board.project));
     const saved = board && readBoardThread(boardThreadPath(board.project));
@@ -2173,15 +2257,18 @@ ipcMain.handle("board:request", async (event, request: unknown, files: unknown =
 });
 
 async function runBoardRequest(sender: Electron.WebContents, board: Board | undefined, request: unknown, files: unknown = [],
-  goal: unknown = false, immediate: unknown = false, messageId?: unknown, reviewIds?: string[], expectedReviewMode?: ReviewMode, autoNotice = false, repairTask?: Task, cleanupJob?: MaintenanceJob, goalRunId?: string,
-  approvalNotices?: ReturnType<typeof pendingReviewApprovals>) {
+  goal: unknown = false, immediate: unknown = false, messageId?: unknown, reviewIds?: string[], expectedReviewMode?: ReviewMode,
+  notice: boolean | ReturnType<typeof pendingReviewApprovals> = false, repairTask?: Task, cleanupJob?: MaintenanceJob, goalRunId?: string,
+  iteration?: { id: string; waitFor?: string; questions: string[] }) {
+  const autoNotice = notice === true;
+  const approvalNotices = Array.isArray(notice) ? notice : undefined;
   if (applicationUpdates.installing) {
     return cliFailure("UPDATE_IN_PROGRESS", t("updates.preparing"));
   }
   if (!board || typeof request !== "string" || typeof immediate !== "boolean" || (immediate && goal !== false) || !Array.isArray(files) ||
       (messageId !== undefined && (typeof messageId !== "string" || !codexThreadPattern.test(messageId))) ||
       !files.every(isPastedFile) || (goal === "resume" ? Boolean(request.trim() || files.length) :
-        typeof goal !== "boolean" || (!request.trim() && (goal || !files.length)))) {
+        (typeof goal !== "boolean" && !(goal === "iterate" && iteration)) || (!request.trim() && (goal || !files.length)))) {
     return cliFailure("INVALID_INPUT", t("ui.enter_a_request_on_an_open_board_3f8d0084"));
   }
   if (quotaWait) return quotaFailure();
@@ -2255,9 +2342,12 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   const claimWriter = () => agentSlots.claim(board.project, context);
   let writer;
   try {
-    writer = (autoNotice && board.settings.autoMode) || expectedReviewMode === "manager"
+    writer = iteration || (autoNotice && board.settings.autoMode) || expectedReviewMode === "manager"
       ? onBoard(runtimeLocation(board.project), store => {
         if (!store.index.settings.autoMode) throw new TaskboardError("AUTO_MODE_DISABLED", "Automatic dispatch is disabled.");
+        if (iteration && (store.index.settings.iterativeGoal !== iteration.id || currentActiveGoal(board.project) !== iteration.id)) {
+          throw new TaskboardError("AUTO_MODE_DISABLED", "Iterative goal execution is no longer enabled for this goal.");
+        }
         return claimWriter();
       }, 0)
       : claimWriter();
@@ -2268,7 +2358,18 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   if (!writer) return cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_agent_is_already_handling_a_request_72b4da49"));
   // Another window may have delivered, edited or removed the message before this claim.
   let queued: QueuedBoardMessage | undefined;
+  let pendingIteration: { before: ReturnType<typeof readIterativeGoal>; questions: string[] } | undefined;
   try {
+    if (iteration) {
+      const state = readIterativeGoal(board.project, iteration.id);
+      const questions = iteration.questions.filter(id => !state.questions.includes(id));
+      const alreadyHandled = (!iteration.waitFor || state.waitFor === iteration.waitFor) && !questions.length;
+      if (alreadyHandled || (state.retryAt ?? 0) > Date.now()) {
+        writer();
+        return { ok: true as const, data: { answer: "", changes: [] } };
+      }
+      pendingIteration = { before: state, questions };
+    }
     if (goal === "resume") {
       const binding = boardThreadPath(board.project);
       const current = readBoardThread(binding);
@@ -2345,6 +2446,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   const startedAt = Date.now();
   const managerRun: ManagerRun = { id: randomUUID(), phase: "starting", startedAt, lane: cleanupJob ? "maintenance" : lane };
   const running: ManagerRequest = { managerRun };
+  const switchMode = Symbol("iterative goal enabled");
+  if (goal && !iteration) running.switchToIterative = () => operation.controller.abort(switchMode);
   requests.set(projectKey, running);
   let live: NonNullable<import("./board-runtime.ts").RuntimeEntry["state"]>["live"];
   let liveTimer: NodeJS.Timeout | undefined;
@@ -2413,6 +2516,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   let requestText = queued?.draft.trim() ?? request.trim();
   let ownerReviewRequest = !background && !goal ? requestText : "";
   let pendingAction: Promise<unknown> = Promise.resolve();
+  const iterationReceipt = pendingIteration;
+  let iterationDispatched = false;
   const scratch = new Set<string>();
   let sendingNow: Promise<void> | undefined;
   const steering = new Map<string, ReturnType<typeof Promise.withResolvers<boolean>>>();
@@ -2644,7 +2749,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     if (goal) mcpTools = goalActionTools(mcpTools);
     if (approvalNotices) mcpTools = mcpTools.filter(({ name }) => name === "task_review" || name === "task_accept");
     const attachments = await prepareBoardAttachments(queued ? queuedFiles(queued) : files, scratch);
-    if (!reviewIds && !autoNotice && !approvalNotices && goal !== "resume") {
+    if (!reviewIds && !autoNotice && !approvalNotices && !iteration && goal !== "resume") {
       historyMessage = {
         at: new Date().toISOString(),
         text: requestText,
@@ -2677,7 +2782,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       (id, revision, { reason, targetHead, reviewMode, reviewModeVersion, newThread, resolveConflicts } = {}) => reason ?
         launchTask(board.project, id, { input: { revision, reason, targetHead, reviewMode, reviewModeVersion, actor: "manager" } }) :
         launchTask(board.project, id, undefined, newThread ? "manager" : false, revision, undefined, false, resolveConflicts),
-      () => activeGoal && threadId ? { threadId, objective: activeGoal.objective, signal: goalWork.signal } : undefined,
+      () => activeGoal && threadId ? { threadId, id: goalId, objective: activeGoal.objective, signal: goalWork.signal } : undefined,
       id => executorBusy(board.project, id), listener => observeBoardTasks(board, listener), async (id, sequence) => {
         const agent = activeAgents.get(board.project + "\0" + id);
         if (!agent) return false;
@@ -2717,9 +2822,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         return result;
       } catch (error) { return cliFailure("ACTION_FAILED", (error as Error).message); }
     };
-    function goalAction(name: string, args: unknown): CliReply | undefined {
+    async function goalAction(name: string, args: unknown): Promise<CliReply | undefined> {
       if (reviewIds || !(goal ? goalWorkTools : goalChatTools).some(tool => tool.name === name)) return;
-      const { text, id, status, reply } = (args ?? {}) as Record<string, unknown>;
+      const { text, id, status, reply, complete } = (args ?? {}) as Record<string, unknown>;
       const saved = readBoardThread(boardThreadPath(project));
       const scope = saved?.goalId ?? saved?.id;
       const work = boardWorkRequests.get(projectKey);
@@ -2768,6 +2873,19 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       if (typeof text !== "string" || !text.trim() || text.length > 4000) return cliFailure("INVALID_INPUT",
         t("errors.499ff15e65ec05d9"));
       if (name === "goal_report") {
+        if (complete !== undefined && (typeof complete !== "boolean" || !iteration)) {
+          return cliFailure("INVALID_INPUT", "Completion through goal_report is available during iterative execution.");
+        }
+        if (iteration) {
+          const state = readIterativeGoal(project, iteration.id);
+          saveIterativeGoal(project, { ...state, step: text.trim() });
+          if (complete) {
+            if (!running.goal || running.changingGoal || saved.goal.status !== "active") {
+              return cliFailure("GOAL_NOT_RUNNING", "The goal is no longer active.");
+            }
+            await running.goal({ kind: "complete" });
+          }
+        }
         publishGoalNotice(text.trim());
         return { ok: true, data: null };
       }
@@ -2849,8 +2967,11 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           }
           if (name === githubReadTool.name) return readBoardGitHub(board.project, args);
           if (name.startsWith("goal_")) {
-            try { return goalAction(name, args) ?? cliFailure("INVALID_INPUT", t("errors.63a61aea5ed6f41a")); }
+            try { return await goalAction(name, args) ?? cliFailure("INVALID_INPUT", t("errors.63a61aea5ed6f41a")); }
             catch (error) { return cliFailure("ACTION_FAILED", (error as Error).message); }
+          }
+          if (name === "task_wait" && iteration) {
+            return cliFailure("ITERATIVE_GOAL_WAIT", "Save the next step with goal_report and end the turn. The board will wait.");
           }
           if (name === "task_wait" && goal && goalId && goalMessages(project, goalId).some(message => message.status === "pending")) {
             return { ok: true, data: { goalMessagesPending: true, instruction: "Read goal_inbox before waiting." } };
@@ -2886,7 +3007,12 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           });
         };
         return goal && goalId ? runGoalAction(project, goalId, name, args, dispatch) : dispatch(args);
-      }, requestTools, instructions + (allowReviewModeChange ? "\n" + boardReviewModeTool.description : "") + "\n" + initialSettings.text, signal, {
+      }, requestTools, instructions + (allowReviewModeChange ? "\n" + boardReviewModeTool.description : "") + "\n" + initialSettings.text + (iteration ?
+        "\nThis is a single planning turn. Handle the specified goal questions and owner instructions. Only acknowledge the specified questions. " +
+        "When ready work is below target, prepare approved work to reach the ready target after free executor slots fill. " +
+        "Leave dispatch and routine review to the board. Use goal_report with the next concrete step or waiting condition, then finish the turn. " +
+        "Use goal_report with complete:true only if the existing goal is fully achieved. Do not use task_wait. Objective: " +
+        JSON.stringify(stored?.goal?.objective) : ""), signal, {
         id: threadId,
         separateTurn: reviewIds ? true : undefined,
         keepThread: Boolean(reviewThreadPath),
@@ -2901,6 +3027,20 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         bindProvider: stages?.bind,
         goal: goal === true ? requestText : undefined,
         resumeGoal: goal === "resume",
+        iterativeGoal: Boolean(iteration),
+        onTurnStarting: iteration && iterationReceipt ? () => {
+          const { before, questions } = iterationReceipt;
+          const settings = readBoardSettings(runtimeLocation(project));
+          if (!settings.autoMode || settings.iterativeGoal !== iteration.id || currentActiveGoal(project) !== iteration.id) {
+            throw new Error("Iterative goal execution is no longer enabled for this goal.");
+          }
+          // Once the request may have reached Codex, keep the receipt unless it explicitly rejects the start.
+          saveIterativeGoal(project, {
+            ...before, waitFor: iteration.waitFor, questions: [...before.questions, ...questions], retryAt: undefined,
+          });
+          iterationDispatched = true;
+        } : undefined,
+        onTurnRejected: iteration ? () => { iterationDispatched = false; } : undefined,
         readOnly: Boolean(reviewIds),
         onGoalSet: () => {
           goalSet = true;
@@ -3093,7 +3233,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       active: undefined,
       complete: undefined,
     };
-    const error = response.goalStatus && goalNotice[response.goalStatus];
+    const stoppedIteration = iteration && (response.goalStatus === "paused" || response.goalStatus === "cleared");
+    const error = !stoppedIteration && response.goalStatus ? goalNotice[response.goalStatus] : undefined;
     historyAccepted = true;
     historyModel = response.model ?? historyModel;
     if (response.text && !items.some(item => item.type === "agentMessage" && item.phase !== "commentary")) {
@@ -3109,6 +3250,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       keepQueued: Boolean(queuedPath && error && !acceptedMessage) } };
   } catch (error) {
     await pendingAction;
+    if (signal.reason === switchMode) return { ok: true as const, data: { answer: "", changes } };
     if (operation.controller.signal.reason === quotaInterruption) return quotaFailure();
     if (cancelledWhileWaiting) return cliFailure("BOARD_WAIT_CANCELLED", "");
     const message = t("ui.could_not_complete_the_board_request_91ea559c") + "\n" + (error instanceof Error ? error.message : String(error)).slice(0, 1500);
@@ -3146,6 +3288,14 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           if (pending) writeJson(queuedPath, { ...pending, failed: true });
         });
       } catch (error) { console.warn("Could not save the queued message failure.", error); }
+    }
+    if (iterationReceipt && !iterationDispatched) {
+      try {
+        // The context is still held. Restore the previous receipt, and let the scheduler retry at its next eligible tick.
+        saveIterativeGoal(project, { ...iterationReceipt.before, retryAt: Date.now() + 5000 });
+      } catch (error) {
+        console.warn("Could not save iterative goal retry.", (error as Error).message);
+      }
     }
     requests.delete(projectKey);
     release?.();

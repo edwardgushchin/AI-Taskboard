@@ -14,7 +14,7 @@ import { withBoardMcp } from "../src/desktop/board-mcp.ts";
 import { executorExpertTools, expertCommands } from "../src/desktop/expert-tools.ts";
 import { goalTaskWaitSeconds } from "../src/desktop/board-actions.ts";
 import { responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "../src/desktop/board-agent-hooks.ts";
-import { codexRpc, turnControl } from "../src/desktop/codex-rpc.ts";
+import { CodexRpcRejection, codexRpc, turnControl } from "../src/desktop/codex-rpc.ts";
 import type { AgentControl, RpcMessage } from "../src/desktop/codex-rpc.ts";
 import type { BoardGoal, BoardGoalAction } from "../src/desktop/codex-chat.ts";
 import { CodexTokenUsage } from "../src/desktop/codex-token-usage.ts";
@@ -311,7 +311,7 @@ test("discussion steering and interruption share the streaming connection, inclu
   releaseTool.resolve({ ok: true });
 });
 
-test("board chat keeps a goal streaming across turns and times out only after inactivity", { timeout: 10_000 }, async t => {
+test("board chat keeps a goal streaming across turns and times out only after inactivity", { timeout: 30_000 }, async t => {
   const directory = mkdtempSync(join(tmpdir(), "ai-taskboard-chat-test-"));
   mkdirSync(join(directory, ".tasks"), { recursive: true });
   writeFileSync(join(directory, ".tasks", "board.json"), JSON.stringify({ settings: { boardType: "manual" } }));
@@ -368,6 +368,13 @@ test("board chat keeps a goal streaming across turns and times out only after in
         send({ id, result: { cleared: true } });
         send({ method: "thread/goal/cleared", params: { threadId } });
       } else if (method === "turn/start") {
+        if (process.argv[2] === "reject-start") {
+          send({ id, error: { code: -32603, message: "Provider rejected the turn before starting" } });
+          return;
+        }
+        if (process.argv[2] === "disconnect-start") {
+          process.exit(0);
+        }
         const config = process.argv.find(value => value.startsWith("mcp_servers.ai_taskboard="));
         const native = process.argv[2] === "cli-ready";
         const url = config.match(/http[^"]+/)[0];
@@ -417,6 +424,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
           return;
         }
         send({ method: "turn/completed", params: { threadId, turn: { id: "reply", status: "completed" } } });
+        if (process.argv[2] === "iterative") return;
         send({ method: "turn/started", params: { threadId, turn: { id: "continuation", status: "inProgress" } } });
         if (params.input[0].text === "Read this") {
           const entry = { title: "Менеджер продолжил цель", timeline: [{ time: null, items: ["Проверил доску."] }] };
@@ -462,7 +470,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
     managerCliContext, probeManagerCli: async () => providerMode === "cli-ready"
       ? { gitOptions: ["--no-optional-locks", "-c", "core.fsmonitor=false"] } : {},
     manualContext: () => "", readBoardSettings: () => ({}), locateBoard: (path: string) => path, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
-    trackActiveRun, trackProvider, claimDiscussion, codexRpc: (child: Parameters<typeof codexRpc>[0], notify: Parameters<typeof codexRpc>[1], onRequest: Parameters<typeof codexRpc>[2]) =>
+    trackActiveRun, trackProvider, claimDiscussion, CodexRpcRejection, codexRpc: (child: Parameters<typeof codexRpc>[0], notify: Parameters<typeof codexRpc>[1], onRequest: Parameters<typeof codexRpc>[2]) =>
       codexRpc(child, (message: RpcMessage) => {
         elapsed += (message.params as { elapsed?: number })?.elapsed ?? 0;
         if (watchdog && elapsed >= watchdog.expires) watchdog.fail();
@@ -644,6 +652,37 @@ test("board chat keeps a goal streaming across turns and times out only after in
     { method: "thread/goal/set", params: { threadId, status: "active", origin: "user" } },
     { method: "thread/unsubscribe", params: { threadId } },
   ]);
+  const starts: string[] = [];
+  const iterativeCallbacks = {
+    onTurnStarting: () => starts.push("send"),
+    onTurnRejected: () => starts.push("reject"),
+  };
+  for (const [mode, error, expected] of [
+    ["reject-start", /Provider rejected the turn/, ["send", "reject"]],
+    ["disconnect-start", /Codex process closed/, ["send"]],
+  ] as const) {
+    providerMode = mode;
+    starts.length = 0;
+    await assert.rejects(runtime("profile", directory, "Prepare the queue", [], () => ({ ok: true }), [], "", controller.signal, {
+      ...session, goal: undefined, iterativeGoal: true, ...iterativeCallbacks,
+    }), error);
+    assert.deepEqual(starts, expected);
+  }
+
+  providerMode = "iterative";
+  starts.length = 0;
+  const short = await runtime("profile", directory, "Prepare the queue", [], () => ({ ok: true }), [], "", controller.signal, {
+    ...session, goal: undefined, iterativeGoal: true, ...iterativeCallbacks,
+  });
+  assert.deepEqual(starts, ["send"]);
+  assert.equal(short.text, "First turn");
+  assert.equal(short.goalStatus, "active");
+  const iterativeRequests = JSON.parse(readFileSync(captured, "utf8"));
+  assert.equal(iterativeRequests.find(({ method }: { method: string }) => method === "thread/resume").params.config["features.goals"], false);
+  assert.deepEqual(iterativeRequests.slice(-3).map(({ method }: { method: string }) => method), [
+    "thread/goal/get", "turn/start", "thread/unsubscribe",
+  ]);
+
   await assert.rejects(runtime("profile", directory, "Unsupported effort", [], () => {}, [], "", controller.signal, {
     ...session, settings: { model: "manager-model", effort: "max" },
   }), /model or reasoning effort is unavailable/);

@@ -9,7 +9,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { discoverRepository, excludeBoard, git } from "./git.ts";
 import type { Repository } from "./git.ts";
-import { boardAgentRoles, defaultBoardAgents, githubRepositoryPattern, hexTagColor, legacyTagColors, reasoningEffortPattern, registerTags, reviewModes, scheduleTimePattern, tagKey, TaskboardError, taskIdPattern, taskStates, validAgentLimitOverrides, validDueDate, validScheduleDate } from "./model.ts";
+import { boardAgentRoles, codexThreadPattern, defaultBoardAgents, githubRepositoryPattern, hexTagColor, legacyTagColors, reasoningEffortPattern, registerTags, reviewModes, scheduleTimePattern, tagKey, TaskboardError, taskIdPattern, taskStates, validAgentLimitOverrides, validDueDate, validScheduleDate } from "./model.ts";
 import type { BoardIndex, Task } from "./model.ts";
 import { parseUsageReport, tokenFields, totalTokenUsage } from "./token-usage.ts";
 
@@ -295,6 +295,7 @@ function readIndex(path: string): BoardIndex {
       !["merge", "squash"].includes(String(index.settings.integrationMode)) ||
       (index.settings.name !== undefined && typeof index.settings.name !== "string") ||
       (index.settings.showCardPreviews !== undefined && typeof index.settings.showCardPreviews !== "boolean") ||
+      (index.settings.iterativeGoal !== undefined && (typeof index.settings.iterativeGoal !== "string" || !codexThreadPattern.test(index.settings.iterativeGoal))) ||
       (index.settings.autoMode !== undefined && typeof index.settings.autoMode !== "boolean") ||
       (index.settings.autoReview !== undefined && typeof index.settings.autoReview !== "boolean") ||
       (index.settings.reviewMode !== undefined && !reviewModes.some(mode => mode === (index.settings as Record<string, unknown>).reviewMode)) ||
