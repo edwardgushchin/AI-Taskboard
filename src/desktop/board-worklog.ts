@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readdirSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, win32 } from "node:path";
 import { redactSecrets } from "../cli/redact.ts";
 import { directory, exists, readJson, removeFile, withLock, writeJson } from "../cli/storage.ts";
@@ -196,6 +196,22 @@ function entryId({ threadId, turnId }: Binding, index = 0) {
 const marker = (id: string) => "<!-- codex-worklog-entry:" + id + " -->";
 export class InvalidWorklogSubmission extends Error {}
 
+type IndexedPart = { version: string; ids: Set<string> };
+// Keep only IDs from the most recently used journal in this process or Worker.
+const history = { root: "", parts: new Map<string, IndexedPart>() };
+
+function partVersion(path: string) {
+  const stat = lstatSync(path, { bigint: true });
+  if (!stat.isFile()) throw new Error("Expected a regular Worklog part.");
+  return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(":");
+}
+
+function indexMarkers(text: string, ids: Set<string>) {
+  for (const match of text.matchAll(/<!-- codex-worklog-entry:([0-9a-f]{24}) -->/g)) {
+    ids.add(match[1]!);
+  }
+}
+
 function renderBlock(staged: Staged, entry: Entry, id: string) {
   const { stamp, threadId, turnId, role, taskId, submission } = staged;
   const ru = submission.language.toLowerCase().split("-")[0] === "ru";
@@ -243,9 +259,30 @@ function save(project: string, staged: Staged) {
     };
     // Identity, not delivery date, owns the record. Compare the whole block other than its timestamp.
     const parts = worklogParts(root);
+    const index = history.parts;
+    if (history.root !== root) {
+      index.clear();
+      history.root = root;
+    }
+    const paths = new Set(parts.map(part => part.path));
+    for (const path of index.keys()) {
+      if (!paths.has(path)) index.delete(path);
+    }
     for (const part of parts) {
-      const prior = read(part.path);
-      if (!entry_ids.some(id => prior.includes(marker(id)))) continue;
+      directory(dirname(dirname(part.path)));
+      directory(dirname(part.path));
+      const version = partVersion(part.path);
+      let prior: string | undefined;
+      let indexed = index.get(part.path);
+      if (indexed?.version !== version) {
+        prior = readWorklogPart(part.path);
+        const ids = new Set<string>();
+        indexMarkers(prior, ids);
+        indexed = { version, ids };
+        index.set(part.path, indexed);
+      }
+      if (!entry_ids.some(id => indexed.ids.has(id))) continue;
+      prior ??= readWorklogPart(part.path);
       if (!blocks.every(block => prior.includes(block.slice(block.indexOf(" — "))))) throw new InvalidWorklogSubmission(
         fact ? "Conflicting Worklog event identity." : "This turn already has a different Worklog submission.");
       return part.path;
@@ -263,7 +300,14 @@ function save(project: string, staged: Staged) {
       }
       if (missing.size) throw new InvalidWorklogSubmission("The entry to supersede is missing in this board's Worklog.");
     }
-    return appendWorklogBlocks(root, day, [blocks.join("")]).path;
+    const added = blocks.join("");
+    const { path } = appendWorklogBlocks(root, day, [added]);
+    // Publish the new IDs only after the atomic replacement succeeds.
+    const version = partVersion(path);
+    const ids = index.get(path)?.ids ?? new Set<string>();
+    indexMarkers(added, ids);
+    index.set(path, { version, ids });
+    return path;
   });
   return { recorded: true, staged: false, entry_ids, path };
 }
