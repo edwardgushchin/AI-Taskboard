@@ -4,7 +4,7 @@ import { responseLanguageInstructions } from "./board-agent-hooks.ts";
 import { trackActiveRun, trackProvider } from "./active-runs.ts";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
-import { codexRpc, turnControl } from "./codex-rpc.ts";
+import { CodexRpcRejection, codexRpc, turnControl } from "./codex-rpc.ts";
 import type { AgentControl, RpcMessage } from "./codex-rpc.ts";
 import { configuredCodex, executorFullAccess, setTaskExecutorAccess } from "./codex.ts";
 import type { ManagerAccess } from "./codex.ts";
@@ -222,7 +222,7 @@ export async function reviewWithCodex(profile: string, project: string, settings
 
 type GoalStatus = "active" | "paused" | "blocked" | "usageLimited" | "budgetLimited" | "complete";
 export type BoardGoal = { objective: string; status: GoalStatus };
-export type BoardGoalAction = { kind: "pause" | "resume" | "clear" } | { kind: "edit"; objective: string };
+export type BoardGoalAction = { kind: "pause" | "resume" | "clear" | "complete" } | { kind: "edit"; objective: string };
 type Request = <R>(method: string, params: object, listener?: Notification) => Promise<R>;
 
 async function readGoal(request: Request, threadId: string, notify?: Notification) {
@@ -239,7 +239,7 @@ async function changeGoal(request: Request, threadId: string, action: BoardGoalA
   }
   const { goal: updated } = await request<{ goal: BoardGoal }>("thread/goal/set", {
     threadId, origin: "user",
-    ...(action.kind === "edit" ? { objective: action.objective } : { status: action.kind === "pause" ? "paused" : "active" }),
+    ...(action.kind === "edit" ? { objective: action.objective } : { status: action.kind === "pause" ? "paused" : action.kind === "complete" ? "complete" : "active" }),
   }, notify);
   return updated;
 }
@@ -402,7 +402,7 @@ export async function replyToBoard(
   const dispatch: RunAction = (name, args, toolSignal) => name === "provider_tools" || name === "task_tool_grant" || name === "task_tool_revoke"
     ? providerAction?.(name, args) ?? Promise.resolve(cliFailure("PROVIDER_TOOLS_UNAVAILABLE", "Wait for the provider session to initialize."))
     : runAction(name, args, toolSignal);
-  const dialogue = !session.goal && !session.resumeGoal && !session.separateTurn;
+  const dialogue = !session.goal && !session.resumeGoal && !session.iterativeGoal && !session.separateTurn;
   const fullAccess = !session.separateTurn && !session.readOnly && session.access === "full";
   const permissionProfile = fullAccess ? hostPermissionProfile : managerResearchProfile;
   const accessInstructions = session.separateTurn || session.readOnly ? "" : fullAccess
@@ -453,6 +453,7 @@ interface BoardSession {
   saveGeneratedImage?: (image: ChatImage) => Promise<string | undefined>;
   goal?: string;
   resumeGoal?: boolean;
+  iterativeGoal?: boolean;
   separateTurn?: boolean;
   readOnly?: boolean;
   onGoalSet?: () => void;
@@ -460,6 +461,8 @@ interface BoardSession {
   onMessage?: (id: string) => void;
   onGoal?: (goal: BoardGoal | null) => void;
   onGoalControl?: (control: (action: BoardGoalAction) => Promise<BoardGoal | null>) => void;
+  onTurnStarting?: () => void;
+  onTurnRejected?: () => void;
   onTurnEnded?: () => void;
   onTokenUsage?: (report: TokenUsageReport) => Promise<void>;
   mcpTools: BoardMcpTool[];
@@ -740,7 +743,11 @@ function reply(profile: string, project: string, prompt: string, images: string[
       developerInstructions: [options.instructions, researchInstructions, options.specialistDelegation ? await subagentInstructions(request) : undefined,
         responseLanguageInstructions()].filter(Boolean).join("\n\n"),
       ...(research ? { permissions: permissionProfile } : { sandbox: "read-only" }),
-      ...(session && effort ? { config: { model_reasoning_effort: effort } } : {}),
+      ...(session && (effort || session.iterativeGoal) ? { config: {
+        ...(effort ? { model_reasoning_effort: effort } : {}),
+        // Keep the saved goal and its history. The board supplies the only turn trigger.
+        ...(session.iterativeGoal ? { "features.goals": false } : {}),
+      } } : {}),
     };
     type StartedThread = { thread: { id: string; name?: string | null; model?: string }; model?: string;
       activePermissionProfile?: { id: string }; approvalPolicy?: string; approvalsReviewer?: string };
@@ -886,10 +893,16 @@ function reply(profile: string, project: string, prompt: string, images: string[
         session.onGoalSet?.();
       } else if (existing) {
         const saved = await readGoal(request, thread.id, notify).catch(() => undefined);
+        if (session?.iterativeGoal && saved?.status !== "active") {
+          if (saved !== undefined) updateGoal(saved);
+          throw new Error("The saved goal is no longer active.");
+        }
         if (saved !== undefined) updateGoal(saved);
       }
       let turn: TurnNotification["turn"];
       if (!session?.resumeGoal) {
+        signal?.throwIfAborted();
+        session?.onTurnStarting?.();
         const response = await request<{ turn: NonNullable<TurnNotification["turn"]> }>("turn/start", {
           threadId: thread.id, effort,
           ...(!research ? { sandboxPolicy: { type: "readOnly", networkAccess: false } } : {}),
@@ -903,7 +916,12 @@ function reply(profile: string, project: string, prompt: string, images: string[
           } } : {}),
           input: [{ type: "text", text: prompt, text_elements: [] },
             ...images.map(image => session ? { type: "image", url: image } : { type: "localImage", path: image })],
-        }, notify);
+        }, notify).catch(error => {
+          if (session?.onTurnRejected && error instanceof CodexRpcRejection) {
+            session.onTurnRejected();
+          }
+          throw error;
+        });
         turn = response.turn;
         options.worklog?.start(thread.id, turn.id);
         refreshTimeout(currentGoal?.status === "active" ? goalIdleTimeoutMs : idleTimeoutMs);
@@ -949,7 +967,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
       if (turn) publishControl();
       // Codex can finish a turn and schedule the next one while the goal is still active.
       while (!turn || turn.status === "inProgress" ||
-        (followingGoal && turn.status === "completed" && currentGoal?.status === "active" && !stopping)) {
+        (followingGoal && !session?.iterativeGoal && turn.status === "completed" && currentGoal?.status === "active" && !stopping)) {
         const { method, params } = await receive(notify);
         const data = params as TurnNotification | undefined;
         if (data?.threadId !== thread.id) continue;

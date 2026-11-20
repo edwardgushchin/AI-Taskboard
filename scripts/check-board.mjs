@@ -761,14 +761,20 @@ app.whenReady().then(async () => {
       if (action === 'update') { Object.assign(fixture.board.tasks.find(task => task.id === id), input); push(); return {ok:true,data:fixture.board.tasks.find(task => task.id === id)}; }
       throw new Error('Unexpected action: ' + action);
     }; void 0`);
-    await check(`byId('status-auto-mode').getAttribute('aria-pressed') === 'false'`, "automatic mode is visibly off by default");
+    await check(`byId('status-auto-mode').dataset.enabled === 'false'`, "automatic mode is visibly off by default");
     await click('#status-auto-mode');
-    await check(`byId('status-auto-mode').getAttribute('aria-pressed') === 'true' && fixture.board.settings.autoMode === true`, "the toggle persists the enabled setting through the board command");
+    await check("byId('auto-mode-panel').matches(':popover-open')", "auto mode panel is open");
+    await click('#auto-mode-switch');
+    await check(`byId('status-auto-mode').dataset.enabled === 'true' && fixture.board.settings.autoMode === true`, "the toggle persists the enabled setting through the board command");
     await capture('auto-mode-on.png');
     await evaluate(`push(); void 0`);
-    await check(`byId('status-auto-mode').getAttribute('aria-pressed') === 'true'`, "a restored board snapshot retains the mode");
-    await click('#status-auto-mode');
-    await check(`byId('status-auto-mode').getAttribute('aria-pressed') === 'false'`, "the toggle turns automatic mode off");
+    await check(`byId('status-auto-mode').dataset.enabled === 'true'`, "a restored board snapshot retains the mode");
+    if (!await evaluate("byId('auto-mode-panel').matches(':popover-open')")) {
+      await click('#status-auto-mode');
+    }
+    await click('#auto-mode-switch');
+    await check("byId('status-auto-mode').dataset.enabled === 'false'", "the toggle turns automatic mode off");
+    await evaluate("byId('auto-mode-panel').hidePopover()");
     await evaluate(`fixture.board.tasks[1].unfinishedDependencies = ['T-0001']; push(); void 0`);
     await check(`lane('ready').contains(findCard('T-0002')) && findCard('T-0002').querySelector('.task-dependency-message').textContent.includes('T-0001')`, "dependency waiting retains the ready column and explanation");
     await evaluate(`showTask('T-0002')`);

@@ -61,18 +61,27 @@ try {
     await evaluate("window.taskboard.menuAction('open-project')");
     await wait(() => evaluate("window.taskboard.bootstrap().then(f => !f.loading && Boolean(f.board))"));
   };
-  const enabled = () => evaluate("document.querySelector('#status-auto-mode').getAttribute('aria-pressed')");
+  const enabled = () => evaluate("document.querySelector('#status-auto-mode').dataset.enabled");
   const checkIcon = async on => assert.equal(await evaluate("document.querySelector('#status-auto-mode i').className"),
     `icon codicon codicon-${on ? "sync" : "play"}`);
   await open(boards[0]);
   assert.equal(await enabled(), "false");
   await checkIcon(false);
   // Native mouse/keyboard input goes through the existing renderer listener and IPC.
-  const click = async () => {
-    const point = await evaluate(`(() => { const r = document.querySelector('#status-auto-mode').getBoundingClientRect(); return { x: Math.round(r.x+r.width/2), y: Math.round(r.y+r.height/2) }; })()`);
+  const click = async selector => {
+    const point = await evaluate("(" + (selector => {
+      const bounds = document.querySelector(selector).getBoundingClientRect();
+      return {
+        x: Math.round(bounds.x + bounds.width / 2),
+        y: Math.round(bounds.y + bounds.height / 2),
+      };
+    }) + ")(" + JSON.stringify(selector) + ")");
     for (const type of ["mouseDown", "mouseUp"]) window.webContents.sendInputEvent({ type, button: "left", clickCount: 1, ...point });
   };
-  await click();
+  await click("#status-auto-mode");
+  await wait(() => evaluate("document.querySelector('#auto-mode-panel').matches(':popover-open')"));
+  await click("#auto-mode-switch");
+  await evaluate("document.querySelector('#auto-mode-panel').hidePopover()");
   await wait(async () => await enabled() === "true");
   await checkIcon(true);
   assert.equal(cli(boards[0], ["list"]).settings.autoMode, true);
@@ -84,13 +93,20 @@ try {
   window.webContents.focus();
   await evaluate("document.querySelector('#status-auto-mode').focus()");
   for (const type of ["keyDown", "char", "keyUp"]) window.webContents.sendInputEvent({ type, keyCode: " " });
+  await wait(() => evaluate("document.querySelector('#auto-mode-panel').matches(':popover-open')"));
+  await evaluate("document.querySelector('#auto-mode-switch').focus()");
+  for (const type of ["keyDown", "char", "keyUp"]) window.webContents.sendInputEvent({ type, keyCode: " " });
   await wait(async () => await enabled() === "true");
   await checkIcon(true);
+  await evaluate("document.querySelector('#auto-mode-panel').hidePopover()");
   await wait(() => evaluate("!document.querySelector('#status-auto-mode').disabled"));
   await evaluate("document.querySelector('#status-auto-mode').focus()");
   for (const type of ["keyDown", "char", "keyUp"]) window.webContents.sendInputEvent({ type, keyCode: "Return" });
+  await wait(() => evaluate("document.querySelector('#auto-mode-panel').matches(':popover-open')"));
+  await click("#auto-mode-switch");
   await wait(async () => await enabled() === "false");
   await checkIcon(false);
+  await evaluate("document.querySelector('#auto-mode-panel').hidePopover()");
   assert.equal(cli(boards[0], ["list"]).settings.autoMode, true);
   assert.equal(cli(boards[1], ["list"]).settings.autoMode === true, false);
   await evaluate("location.reload()");

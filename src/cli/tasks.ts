@@ -125,8 +125,18 @@ export function boardActor(input: Record<string, unknown>, fallback: "agent" | "
   return input.actor === "manager" ? "manager" : actorFor(input, fallback);
 }
 
+function goalInstance(input: Record<string, unknown>): string | undefined {
+  const id = input.managerGoalId;
+  if (id === undefined) return;
+  if (input.actor !== "manager" || typeof id !== "string" || !codexThreadPattern.test(id)) {
+    throw new TaskboardError("INVALID_INPUT", "Expected the saved goal ID for a goal task.");
+  }
+  return id;
+}
+
 export function createTask(id: string, input: Record<string, unknown>): Task {
   const now = new Date().toISOString();
+  const managerGoalId = goalInstance(input);
   const goalThreadId = input.goalThreadId === undefined ? undefined : text(input.goalThreadId, "goalThreadId", true);
   if (goalThreadId && (input.actor !== "manager" || !codexThreadPattern.test(goalThreadId))) {
     throw new TaskboardError("INVALID_INPUT", "Expected the manager chat ID for a goal task.");
@@ -137,6 +147,7 @@ export function createTask(id: string, input: Record<string, unknown>): Task {
     description: "", criteria: [], questions: [], tags: [], priority: "normal", subtasks: [], attachments: [],
     status: "draft", revision: 1, createdAt: now, updatedAt: now, summary: "", nextStep: "",
     ...(goalThreadId ? { goalThreadId } : {}),
+    ...(managerGoalId ? { managerGoalId } : {}),
     history: [{ at: now, actor: boardActor(input), action: "create" }],
   }, input);
 }
@@ -200,7 +211,7 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
   }
   requireState(task, activeStates);
   switch (action) {
-    case "approve":
+    case "approve": {
       requireState(task, ["draft"]);
       if (task.awaitingAnswer === true) {
         throw new TaskboardError("TASK_AWAITING_ANSWER", "Finish the clarification in the task dialogue before approving the draft.");
@@ -212,7 +223,10 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
       if (!task.criteria.length) {
         throw new TaskboardError("CRITERIA_REQUIRED", "Add acceptance criteria before approving the task.");
       }
-      return record(task, action, boardActor(input, "user"), "ready");
+      const managerGoalId = goalInstance(input);
+      const approved = record(task, action, boardActor(input, "user"), "ready");
+      return managerGoalId ? { ...approved, managerGoalId } : approved;
+    }
     case "request-changes":
       requireState(task, ["review"]);
       return record(task, action, input.actor === "reviewer" ? "reviewer" : boardActor(input, "user"),

@@ -1,3 +1,4 @@
+import { activeManagerGoal } from "../src/cli/manager-goal.ts";
 import localization from "../src/desktop/localization.cjs";
 import { activeRunSummary } from "../src/desktop/active-runs.ts";
 import assert from "node:assert/strict";
@@ -52,6 +53,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   const launches: number[] = [];
   const runtime = runInNewContext(stripTypeScriptTypes(activitySource.replace("function scheduleAgentWork() {", "function scheduleAgentWork() { if (!subscriptions.size) { noteSchedule(); return; }")) +
     "\n({ sendChat, stopChat, returnTaskToDraft, activeAgents, frame, windowStates, runningTasks, launchingTasks, notifyRunChange, chatRuns, replyingTasks, scheduleAgentWork })", {
+    currentActiveGoal: activeManagerGoal,
     quotaWait: undefined, quotaInterruption: new Error("Fixture quota pause"), refreshQuota: async () => [],
     applicationUpdates: { installing: false },
     agentSlots: { ...slots, entries: (project: string) => sharedRuns.get(project) ?? [] },
