@@ -290,6 +290,7 @@ function readIndex(path: string): BoardIndex {
   if (!isRecord(index) || index.version !== 1 || typeof index.nextId !== "number" ||
       !Number.isSafeInteger(index.nextId) || index.nextId < 1 || !isRecord(index.tasks) ||
       !isRecord(index.archive) || !isRecord(index.settings) ||
+      (index.expertCatalogVersion !== undefined && typeof index.expertCatalogVersion !== "string") ||
       (index.tags !== undefined && !Array.isArray(index.tags)) ||
       (index.settings.boardType !== undefined && !["agent", "manual"].includes(String(index.settings.boardType))) ||
       !["merge", "squash"].includes(String(index.settings.integrationMode)) ||

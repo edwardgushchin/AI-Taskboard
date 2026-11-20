@@ -1,4 +1,5 @@
 import { constants, copyFileSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join, relative, resolve, sep, toNamespacedPath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isSea } from "node:sea";
@@ -90,6 +91,10 @@ export function saveExpert(store: BoardStore, input: Record<string, unknown>) {
   const library = readJson(join(expertAssets(), "library.json")) as Record<string, unknown>;
   for (const skill of expert.skills) if (skill.library && !Object.hasOwn(library, skill.library))
     throw new TaskboardError("INVALID_INPUT", "Unknown bundled skill: " + skill.library);
+  // The board lock covers both writes. Publish the version first so a failed
+  // index write cannot leave a changed profile behind an old version.
+  store.index.expertCatalogVersion = randomUUID();
+  store.saveIndex();
   writeJson(path, expert);
   return expert;
 }

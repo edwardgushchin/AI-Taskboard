@@ -323,6 +323,7 @@ export interface ArchiveLink {
 
 export interface BoardIndex {
   managerSettings?: import("./settings-notices.ts").SettingsJournal;
+  expertCatalogVersion?: string;
   version: 1;
   nextId: number;
   settings: BoardSettings;
