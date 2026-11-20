@@ -275,7 +275,7 @@ async function runCheck() {
       void 0;
     `);
     await verify(`byId("task-chat-work").textContent === rightSnapshot`, "Раскрытие этапа не меняет правый журнал.");
-    window.setContentSize(388, 920);
+    window.setContentSize(388, 1550);
     await evaluate(`
       for (let index = 1; index < 5; index++) stageAt(index).open = false;
       stageAt(0).querySelector("summary").focus();
