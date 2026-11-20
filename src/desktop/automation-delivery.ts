@@ -10,9 +10,11 @@ type BoardState = {
 
 export function pendingReviewApprovals(board: BoardState) {
   if (board.settings.autoMode) return [];
+  const approvals = (board.managerInbox ?? []).filter(message => message.kind === "review-approve");
+  if (!approvals.length) return approvals;
   const eligible = new Set(board.tasks.filter(task => task.status === "review" && task.reviewApproved &&
     !task.reviewPending && !task.acceptanceRepair && taskReviewMode(task, board.settings) === "reviewer").map(task => task.id));
-  return (board.managerInbox ?? []).filter(message => message.kind === "review-approve" && eligible.has(message.id));
+  return approvals.filter(message => eligible.has(message.id));
 }
 
 // Queue changes wake board tools internally; they are never conversation messages.
