@@ -1159,9 +1159,11 @@ function taskChat(task) {
     const follow = work.scrollHeight - work.clientHeight - work.scrollTop <= 8;
     // A save receipt can reach the window before its card history is refreshed.
     const saved = draft.savedRun;
+    const executor = saved?.items ?? liveItems;
+    const executorItems = new Set(executor.map(item => item.id));
     const discussion = (frame.discussionActivity?.[task.id] ?? []).filter(item =>
-      item.phase !== "final_answer" && !savedDiscussionItems.has(item.id));
-    const items = [...(saved?.items ?? liveItems), ...discussion];
+      item.phase !== "final_answer" && !savedDiscussionItems.has(item.id) && !executorItems.has(item.id));
+    const items = [...executor, ...discussion];
     renderRunActivity(liveRun, items.filter(item => !collaborationItem(item) && !savedRunItems.has(item.id) &&
       (submissionRow || saved || item.phase !== "final_answer")), Boolean(saved), saved?.durationMs, task.id);
     if (follow) work.scrollTop = work.scrollHeight;

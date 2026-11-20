@@ -861,6 +861,7 @@ interface ActiveAgent {
   draftDiscussion?: true;
   chatWindow?: number;
   updateMessage?: (task: Task, index: number) => () => void;
+  steerMessage?: (text: string, images: string[], index: number) => Promise<void>;
 }
 const activeAgents = new Map<string, ActiveAgent>();
 const returningDrafts = new Set<string>();
@@ -1113,7 +1114,10 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       active.directories.add(scratch!);
       directories.delete(scratch!);
       const undo = active.updateMessage?.(task, last);
-      try { await active.control.steer(prompt, images); }
+      try {
+        if (active.steerMessage) await active.steerMessage(prompt, images, last);
+        else await active.control.steer(prompt, images);
+      }
       catch (error) { undo?.(); throw error; }
       return { saved, result: { ok: true as const, data: task } };
     }
@@ -3925,9 +3929,24 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   let restart: import("./board-runtime.ts").RuntimeEntry["restart"];
   let release: ((restart?: boolean | "quota") => void) | undefined;
   let updateTimer: NodeJS.Timeout | undefined;
+  type SteeredReply = { index: number; activity: Map<string, RunActivity> };
+  let steeredReply: SteeredReply | undefined;
+  const pendingReplies = new Map<string, SteeredReply>();
+  const latestReply = () => {
+    let latest = steeredReply;
+    for (const reply of pendingReplies.values()) {
+      if (!latest || reply.index > latest.index) latest = reply;
+    }
+    return latest;
+  };
+  const publishReply = () => {
+    const latest = latestReply();
+    publishDiscussionActivity(project, id, latest && runLog(latest.activity, 96_000));
+  };
   const publish = () => {
     updateTimer = undefined;
     publishRunActivity(project, id, runLog(activity));
+    if (steeredReply && latestReply() === steeredReply) publishReply();
   };
   const saveActivity = async () => {
     clearTimeout(updateTimer);
@@ -4120,7 +4139,11 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     // Quota can interrupt this launch before Codex has opened or linked a thread.
     releaseSlot.run(() => rememberExecutor(project, task, cwd, continuation, threadChoice || undefined));
     signal.throwIfAborted();
-    const run = await releaseSlot.run(() => startCodexRun(client, project, cwd, task, item => {
+    const run = await releaseSlot.run(() => startCodexRun(client, project, cwd, task, (item, currentTurn = true) => {
+      // An action already present at the steering boundary belongs to the earlier work.
+      if (currentTurn && steeredReply && (!activity.has(item.id) || steeredReply.activity.has(item.id))) {
+        steeredReply.activity.set(item.id, item);
+      }
       activity.set(item.id, item);
       updateTimer ??= setTimeout(publish, 80);
     }, report => saveTaskTokenUsage(project, id, role, report), signal, async (codexThreadId, created) => {
@@ -4154,7 +4177,13 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         throw Object.assign(new Error("The queued start belongs to another Codex thread."), { code: "CODEX_START_UNCONFIRMED" });
       }
       return { ...pending, accepted: (turnId: string) => recordQueuedTurn(project, id, pending.clientId, turnId) };
-    }, desktopProfile, recoveringThreadId, Boolean(restart)));
+    }, desktopProfile, recoveringThreadId, Boolean(restart), clientId => {
+      const reply = pendingReplies.get(clientId);
+      if (!reply) return;
+      pendingReplies.delete(clientId);
+      if (!steeredReply || reply.index > steeredReply.index) steeredReply = reply;
+      publishReply();
+    }));
     const { threadId: codexThreadId, completion } = run;
     const directories = new Set<string>();
     let stopRequested = false;
@@ -4162,13 +4191,41 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       forgetExecutor(project, id);
       stopRequested = true;
       return run.interrupt();
-    } }, directories });
+    } }, directories, async steerMessage(text, images, index) {
+      const clientId = randomUUID();
+      pendingReplies.set(clientId, { index, activity: new Map() });
+      publishReply();
+      try {
+        await run.steer(text, images, clientId);
+      } catch (error) {
+        pendingReplies.delete(clientId);
+        publishReply();
+        throw error;
+      }
+    } });
     monitoring = true;
     runningTasks.add(key);
     notifyRunChange(project);
     let retry: { revision: number; reason: string; continuation: ExecutorContinuation } | undefined;
     let requeueRecoveredTurn = false;
     void completion.then(async outcome => {
+      const reply = steeredReply;
+      steeredReply = undefined;
+      pendingReplies.clear();
+      if (reply && !outcome && !stopRequested && !signal.aborted) {
+        const final = [...reply.activity.values()].findLast(item =>
+          item.type === "agentMessage" && item.phase === "final_answer" && item.status === "completed" && item.text.trim());
+        if (final) {
+          const saved = await callCli(project, ["chat", id], {
+            actor: "agent", text: final.text.trim(), at: final.at, replyTo: reply.index,
+            model: task.execution?.model ?? "", effort: task.execution?.effort ?? "",
+          });
+          if (!saved.ok && saved.error.code !== "CHAT_CHANGED") {
+            console.warn("Could not save the executor's reply:", saved.error.message);
+          }
+        }
+      }
+      if (discussionActivityByTask.has(key)) publishDiscussionActivity(project, id);
       if (signal.reason === quotaInterruption && !stopRequested) {
         await saveActivity();
         return;
@@ -4252,6 +4309,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         { id: "block-error", type: "error", title: "", text: failure, status: "failed" },
       ]);
     }).finally(async () => {
+      if (discussionActivityByTask.has(key)) publishDiscussionActivity(project, id);
       activeAgents.delete(key);
       for (const directory of directories) await rm(directory, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
       runningTasks.delete(key);

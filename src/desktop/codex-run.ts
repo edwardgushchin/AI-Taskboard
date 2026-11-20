@@ -168,9 +168,9 @@ export function missingCodexThread(message: string | undefined, threadId: string
 }
 
 export async function startCodexRun(client: Client, project: string, cwd: string, task: ExecutorTask,
-  onActivity?: (item: RunActivity) => void, onTokenUsage?: (report: TokenUsageReport) => Promise<void>, signal?: AbortSignal,
+  onActivity?: (item: RunActivity, currentTurn: boolean) => void, onTokenUsage?: (report: TokenUsageReport) => Promise<void>, signal?: AbortSignal,
   beforeTurn?: (threadId: string, created: boolean) => Promise<void | QueuedTurn>, desktopProfile?: string,
-  recoveringThreadId?: string, requireSavedThread = false): Promise<Run> {
+  recoveringThreadId?: string, requireSavedThread = false, onUserMessage?: (clientId: string) => void): Promise<Run> {
   signal?.throwIfAborted();
   const fullAccess = task.fullAccess === true;
   const profile = fullAccess ? ":danger-full-access" : taskProfile;
@@ -316,6 +316,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   const activity = new Map<string, RunActivity>();
   const tokens = new CodexTokenUsage();
   let activeThreadId: string | undefined;
+  let activeTurnId: string | undefined;
   let control: AgentControl | undefined;
   let stopMail: (() => void) | undefined;
   let interruptTimeout: NodeJS.Timeout | undefined;
@@ -339,10 +340,19 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   const rpc = codexRpc(child, message => {
     stages.observe(message, activeThreadId);
     tokens.queue(tokens.observe(message), onTokenUsage);
-    const params = message.params as { threadId?: string; turn: Turn; item?: { type?: string; server?: string; tool?: string; status?: string } };
+    const params = message.params as {
+      threadId?: string;
+      turnId?: string;
+      turn: Turn;
+      item?: { type?: string; server?: string; tool?: string; status?: string; clientId?: string };
+    };
     if (activeThreadId && params?.threadId === activeThreadId) {
       worklog.observe(message, activeThreadId);
       const item = params.item;
+      if (message.method === "item/completed" && params.turnId === activeTurnId && activeTurnId &&
+          item?.type === "userMessage" && item.clientId) {
+        onUserMessage?.(item.clientId);
+      }
       if (accessChange === "approved" && message.method === "item/completed" && item?.type === "mcpToolCall" &&
           item.server === "ai_taskboard" && item.tool === accessTool.name && item.status === "completed") {
         accessChange = "ready";
@@ -351,7 +361,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
         const item = runActivity(activity, message.method, params, new Date().toISOString());
         if (item) {
           activity.set(item.id, item);
-          onActivity(item);
+          onActivity(item, !params.turnId || params.turnId === activeTurnId);
         }
       }
       if (message.method === "turn/completed") turns.set(params.turn.id, params.turn);
@@ -534,6 +544,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       }
     }
     worklog.start(threadId, turn.id);
+    activeTurnId = turn.id;
     control = turnControl(request, threadId, turn.id);
     if (assigned.size || task.expertStage || task.expertStages?.length) {
       stopMail = watchTeamMail(project, task.id, control, "agent");

@@ -33,12 +33,13 @@ const report = restart ? JSON.parse(readFileSync(statePath, "utf8")).report : {
   sources: Object.fromEntries([
     "src/desktop/chat.js", "src/desktop/styles.css", "src/desktop/codex-chat.ts", "src/desktop/main.ts",
     "src/desktop/renderer.js", "src/desktop/preload.cjs", "src/desktop/run-activity.ts", "src/desktop/reviewer-chat.ts",
+    "src/desktop/codex-run.ts",
     "src/cli/archive.ts", "scripts/check-task-chat-bubbles.mjs", "scripts/electron-check.mjs",
     "tests/task-question.test.ts", "docs/explanation/architecture.md",
   ].map(path => [path, createHash("sha256").update(readFileSync(join(root, path), "utf8").replaceAll("\r\n", "\n")).digest("hex")])),
   environment: { platform: process.platform, node: process.versions.node, electron: process.versions.electron, chromium: process.versions.chrome },
   matrix: { Windows: "Electron runtime checked", Linux: "Not run; shared renderer, no process/path/packaging changes", macOS: "Not run; shared renderer, no process/path/packaging changes" },
-  fixture: "The T-0252 question and owner answer are reproduced in a local draft to seed the question. The reference showed an in-progress task. Provider events are deterministic.",
+  fixture: "The T-0252 question and owner answer are reproduced on an in-progress card with an active executor. The fixture replaces the provider launch and drives the real launchTask, chatSend, active control, CLI and renderer.",
   checks: [],
 };
 const check = label => {
@@ -70,6 +71,7 @@ process.env.GIT_CEILING_DIRECTORIES = scratch;
 dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [project] });
 
 let provider;
+let executor;
 globalThis.taskBubbleProvider = async (options, mode) => {
   options.onControl({ interrupt: async () => provider?.finish.resolve({ interrupted: true }), steer: async () => {} });
   if (mode === "initial") return { text: JSON.stringify({ questions: question }) };
@@ -77,13 +79,40 @@ globalThis.taskBubbleProvider = async (options, mode) => {
   provider = { publish: options.onActivity, finish, at: new Date().toISOString() };
   return finish.promise;
 };
+globalThis.taskBubbleExecutor = async (_client, _project, _cwd, task, onActivity, _onUsage, signal, beforeTurn,
+  _profile, _recoveringThread, _strict, onUserMessage) => {
+  const threadId = task.codexThreadId ?? "00000000-0000-4000-8000-000000000252";
+  await beforeTurn(threadId, !task.codexThreadId);
+  const finish = Promise.withResolvers();
+  const interrupt = () => finish.resolve({ interrupted: true, reason: "Fixture interrupted" });
+  signal.addEventListener("abort", interrupt, { once: true });
+  const run = { publish: onActivity, acknowledge: onUserMessage, finish, messages: [], steeringGate: undefined };
+  executor = run;
+  return {
+    threadId,
+    completion: finish.promise.finally(() => signal.removeEventListener("abort", interrupt)),
+    interrupt,
+    async steer(prompt, _images, messageId) {
+      run.messages.push({ messageId, text: JSON.parse(prompt).latestUserMessage.text });
+      await run.steeringGate?.promise;
+    },
+  };
+};
 
 void (async () => {
   try {
+    let activeCard;
     if (!restart) {
       mkdirSync(project);
       cli(["init"], { git: false });
       cli(["settings"], { executor: { provider: "codex", ...settings }, autoMode: false });
+      const draft = cli(["create"], plannedDraft({
+        title: "Удалять рабочую копию после отмены задачи",
+        description: "Проверить уточнение о моменте удаления рабочей копии.",
+        criteria: ["После отмены карточки рабочая копия удаляется автоматически."],
+        execution: settings,
+      }));
+      activeCard = cli(["approve", draft.id], { revision: draft.revision });
       symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), join(scratch, "node_modules"),
         process.platform === "win32" ? "junction" : "dir");
     }
@@ -98,7 +127,15 @@ void (async () => {
     const chatEntry = join(scratch, "chat-under-test.mjs");
     writeFileSync(chatEntry, compile(chatSource.replace(providerCall, "globalThis.taskBubbleProvider(options, mode)")));
     const entry = join(scratch, "main-under-test.mjs");
-    writeFileSync(entry, compile(readSource(mainUrl).replace(chatUrl.href, pathToFileURL(chatEntry).href)));
+    const mainSource = readSource(mainUrl)
+      .replace(chatUrl.href, pathToFileURL(chatEntry).href)
+      .replace("missingCodexThread, startCodexRun", "missingCodexThread")
+      .replace("codexStatus, configuredCodex,", "codexStatus,");
+    writeFileSync(entry, compile(`
+      const configuredCodex = async () => ({});
+      const startCodexRun = globalThis.taskBubbleExecutor;
+      ${mainSource}
+    `));
     app.on("web-contents-created", (_event, contents) => contents.setBackgroundThrottling(false));
     require(entry);
     await until(() => BrowserWindow.getAllWindows().length, "window");
@@ -163,8 +200,7 @@ void (async () => {
       assert.equal(await evaluate("document.querySelector('.chat-thinking').textContent"), "Думаю…");
       assert.equal(await evaluate("getComputedStyle(document.querySelector('.chat-thinking')).borderRadius"), "0px");
       assert.deepEqual((await snapshot()).map(row => row.text), [question, answer]);
-      await capture("card-reply-thinking.png", ".chat-turn .chat-thinking");
-      check("1280×900: the saved answer to the T-0252 question is followed by Думаю… before any provider activity");
+      check("A separate discussion shows Думаю… after the saved answer and before any provider activity");
 
       const firstTool = {
         id: "reply-update", type: "dynamicToolCall", title: "task_update", status: "inProgress",
@@ -180,8 +216,7 @@ void (async () => {
         return row.open && row.textContent.includes('task_update') && row.textContent.includes('Рабочая копия должна удаляться');
       })()`), true);
       assert.equal(await evaluate("Boolean(document.querySelector('.chat-turn .chat-thinking, .chat-turn .chat-entry'))"), false);
-      await capture("card-reply-tool-call.png", action + "[open] .chat-run-output");
-      check("1280×900: task_update expands and shows its arguments before any final reply");
+      check("A separate discussion expands task_update and shows its arguments before any final reply");
 
       const activity = [
         { ...firstTool, status: "completed" },
@@ -404,6 +439,128 @@ void (async () => {
       assert.deepEqual((await snapshot()).map(row => row.text), [question, "Останови этот ответ", continued, "Расскажи, что записано в карточке", ordinary]);
       assert.equal(await evaluate("document.querySelector('.chat-turn').childElementCount"), 0);
       check("An ordinary message gets Думаю… and exactly one saved reply without tool events");
+
+      const activeId = JSON.stringify(activeCard.id);
+      const showActive = () => evaluate(`showTask(${activeId})`);
+      const showActiveFromCli = () => cli(["show", activeCard.id]);
+      const launched = await evaluate(`window.taskboard.launchTask(${activeId})`);
+      assert.equal(launched.ok, true, JSON.stringify(launched));
+      await until(() => evaluate(`frame.runningTasks?.includes(${activeId})`), "active executor visible");
+      assert.equal(showActiveFromCli().status, "in_progress");
+      const contextMessage = "Уточни, когда должна удаляться рабочая копия.";
+      const questionRequest = cli(["chat", activeCard.id], { ...settings, text: contextMessage });
+      cli(["chat", activeCard.id], {
+        ...settings, actor: "agent", text: question, awaitingAnswer: true, replyTo: questionRequest.history.length - 1,
+      });
+      await showActive();
+      await until(async () => (await snapshot()).at(-1)?.text === question, "question visible during execution");
+      const active = executor;
+      const oldAction = {
+        id: "before-owner-reply", type: "commandExecution", title: "Existing executor action",
+        text: "Action started before the owner replied", status: "inProgress",
+      };
+      active.publish(oldAction);
+      await until(() => evaluate(`frame.runActivity?.[${activeId}]?.some(item => item.id === 'before-owner-reply')`), "pre-existing executor action");
+      assert.equal(await evaluate("document.querySelector('.chat-turn').childElementCount"), 0);
+      nativeTheme.themeSource = "dark";
+      window.setContentSize(1280, 900);
+      await evaluate("applyTheme('dark'); void 0");
+      await send(answer);
+      await until(() => active.messages.length === 1, "active executor steering");
+      const [steered] = active.messages;
+      assert.equal(steered.text, answer);
+      assert.ok(steered.messageId, "owner message has a client identifier");
+      await until(async () => (await snapshot()).at(-1)?.text === answer &&
+        await evaluate("Boolean(document.querySelector('.chat-turn .chat-thinking[role=status]'))"), "saved owner reply and thinking on in-progress card");
+      assert.equal(await evaluate(`taskInSheet.status === 'in_progress' && frame.runningTasks.includes(${activeId})`), true);
+      assert.equal(await evaluate("document.querySelector('.chat-thinking').textContent"), "Думаю…");
+      active.publish({ ...oldAction, text: "Completed after the owner replied", status: "completed" });
+      await until(() => evaluate(`frame.runActivity?.[${activeId}]?.some(item =>
+        item.id === 'before-owner-reply' && item.status === 'completed')`), "pre-existing executor action completes");
+      assert.equal(await evaluate("Boolean(document.querySelector('.chat-turn .chat-thinking'))"), true);
+      assert.equal(await evaluate("Boolean(document.querySelector('.chat-turn .chat-run-item'))"), false);
+      await capture("card-reply-thinking.png", ".chat-turn .chat-thinking");
+      check("1280×900: an in-progress card shows Думаю… after its active executor receives должна удаляться; the older running action stays in Ход работы");
+
+      active.acknowledge(steered.messageId);
+      const liveTool = {
+        id: "steered-task-update", type: "dynamicToolCall", title: "task_update", status: "inProgress",
+        text: JSON.stringify({ arguments: { criterion: "Рабочая копия должна удаляться" } }, null, 2),
+        at: new Date().toISOString(),
+      };
+      active.publish({
+        id: "old-provider-turn", type: "mcpToolCall", title: "Event from a different provider turn", status: "completed", text: "",
+      }, false);
+      active.publish(liveTool);
+      const liveAction = ".chat-turn details[data-item='item:steered-task-update']";
+      await until(() => evaluate(`Boolean(document.querySelector(${JSON.stringify(liveAction)}))`), "active executor tool in Dialogue");
+      await evaluate(`{
+        document.querySelector(${JSON.stringify(liveAction + " summary")}).click();
+        const log = document.querySelector('.task-dialogue');
+        log.scrollTop = log.scrollHeight;
+      }`);
+      assert.equal(await evaluate("Boolean(document.querySelector('.chat-turn .chat-thinking, .chat-turn .chat-entry'))"), false);
+      assert.equal(await evaluate("Boolean(document.querySelector('.chat-turn [data-item=\"item:old-provider-turn\"]'))"), false);
+      await capture("card-reply-tool-call.png", liveAction + "[open] .chat-run-output");
+      assert.equal(await evaluate(`document.querySelector(${JSON.stringify(liveAction)}).textContent.includes('Рабочая копия должна удаляться')`), true);
+      check("1280×900: the in-progress card shows the active executor’s expanded task_update with arguments before the final reply and excludes events from another provider turn");
+
+      active.publish({ ...liveTool, status: "completed" });
+      active.publish({
+        id: "steered-final", type: "agentMessage", title: "", phase: "final_answer", status: "completed",
+        text: reply, at: new Date().toISOString(),
+      });
+      await until(async () => (await snapshot()).at(-1)?.text === reply, "active executor final reply visible");
+      assert.deepEqual((await snapshot()).map(row => row.text), [contextMessage, question, answer, reply]);
+      active.finish.resolve();
+      await until(() => showActiveFromCli().history.some(event => event.chat && event.text === reply), "active executor final reply saved");
+      await evaluate("document.querySelector('#close-sheet').click()");
+      await showActive();
+      await until(async () => (await snapshot()).at(-1)?.text === reply, "active executor reply restored from history");
+      assert.deepEqual((await snapshot()).map(row => row.text), [contextMessage, question, answer, reply]);
+      assert.equal(await evaluate("document.querySelector('.chat-turn').childElementCount"), 0);
+      await evaluate("byId('task-side').firstElementChild.openReviewer()");
+      await until(() => evaluate("Boolean(document.querySelector('.task-work [data-item=\"item:before-owner-reply\"]'))"), "older executor action in work");
+      assert.equal(await evaluate("document.querySelectorAll('.task-work [data-item=\"item:steered-task-update\"]').length"), 1);
+      check("The active executor final reply is saved exactly once. Both old and new actions remain in Ход работы after reopening");
+
+      await until(() => executor !== active, "executor continues after the completed response");
+      await until(() => evaluate(`frame.runningTasks?.includes(${activeId})`), "continued executor visible");
+      await evaluate("byId('task-side').firstElementChild.openDialogue()");
+      const continuedExecutor = executor;
+      const rejected = "Уточни, как удалится рабочая копия.";
+      const requestError = "Fixture provider rejected steering";
+      continuedExecutor.steeringGate = Promise.withResolvers();
+      await send(rejected);
+      await until(() => continuedExecutor.messages.length === 1, "steering starts before simulated rejection");
+      await until(async () => (await snapshot()).at(-1)?.text === rejected &&
+        await evaluate("Boolean(document.querySelector('.chat-turn .chat-thinking'))"), "saved message and thinking before steering rejection");
+      continuedExecutor.steeringGate.reject(new Error(requestError));
+      await until(() => evaluate(`document.querySelector('.chat-composer .chat-status')?.textContent.includes(${JSON.stringify(requestError)})`), "steering rejection displayed");
+      assert.equal(await evaluate("document.querySelector('.chat-turn').childElementCount"), 0);
+      assert.equal((await snapshot()).at(-1)?.text, rejected);
+      assert.equal(await evaluate(`frame.runningTasks?.includes(${activeId})`), true);
+      await evaluate("byId('task-side').firstElementChild.openReviewer()");
+      await until(() => evaluate("Boolean(document.querySelector('.task-work [data-item=\"item:before-owner-reply\"]'))"), "old action kept after failed steering");
+      check("A rejected steering request clears Думаю…, keeps the owner’s message and preserves older work while the executor runs");
+
+      continuedExecutor.steeringGate = undefined;
+      await evaluate("byId('task-side').firstElementChild.openDialogue()");
+      const toStop = "Останови активного исполнителя.";
+      await send(toStop);
+      await until(() => continuedExecutor.messages.length === 2, "steering before stop");
+      await until(async () => (await snapshot()).at(-1)?.text === toStop &&
+        await evaluate("Boolean(document.querySelector('.chat-turn .chat-thinking'))"), "thinking before active executor stop");
+      await until(() => evaluate(`(() => {
+        const stop = document.querySelector('.task-chat .chat-send');
+        return stop && !stop.disabled && stop.getAttribute('aria-label') === 'Остановить агента';
+      })()`), "task Stop button enabled");
+      await evaluate("document.querySelector('.task-chat .chat-send').click()");
+      await until(() => evaluate(`!frame.runningTasks?.includes(${activeId}) &&
+        document.querySelector('.chat-turn').childElementCount === 0`), "active executor stopped and thinking cleared");
+      assert.deepEqual(showActiveFromCli().history.filter(event => event.chat).map(event => event.text),
+        [contextMessage, question, answer, reply, rejected, toStop]);
+      check("Stopping the executor before it acknowledges the latest message clears Думаю… and stores no unfinished reply");
       await display();
     }
 
