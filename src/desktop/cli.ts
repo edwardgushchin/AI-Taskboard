@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 
 export const entry = fileURLToPath(new URL("../cli/main.ts", import.meta.url));
 export const bundled = join(process.resourcesPath ?? dirname(process.execPath), "bin", process.platform === "win32" ? "ai-taskboard.exe" : "ai-taskboard");
@@ -33,20 +33,23 @@ export function cliSpawnFailure(operation: string, phase: "spawn" | "error", cau
   };
 }
 
-export function cliChild(project: string, args: string[], input?: unknown): ChildProcessWithoutNullStreams {
+export function cliChild(project: string, args: string[], onError: (error: Error) => void, input?: unknown): ChildProcess {
   const packaged = existsSync(bundled);
   const command = packaged ? bundled : process.execPath;
   const prefix = packaged ? [] : ["--disable-warning=ExperimentalWarning", entry];
+  const payload = input === undefined ? undefined : JSON.stringify(input);
   const child = spawn(command, [...prefix, "--project", project, "--json", ...args, ...(input === undefined ? [] : ["--stdin"])], {
     cwd: project,
     env: packaged ? process.env : { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
     windowsHide: true,
     stdio: "pipe",
   });
-  child.stdin.on("error", () => {
+  // EMFILE and ENFILE can return a child before its pipes have been created.
+  child.once("error", onError);
+  child.stdin?.on("error", () => {
     // The child may exit before reading stdin. Its own error is reported by the caller.
   });
-  child.stdin.end(input === undefined ? undefined : JSON.stringify(input));
+  child.stdin?.end(payload);
   return child;
 }
 
@@ -58,18 +61,19 @@ export async function callCli<T>(project: string, args: string[], input?: unknow
 
 function callCliOnce<T>(project: string, args: string[], input?: unknown): Promise<CliReply<T>> {
   return new Promise(resolve => {
-    let child: ChildProcessWithoutNullStreams;
+    let child: ChildProcess;
     try {
-      child = cliChild(project, args, input);
+      child = cliChild(project, args, error => {
+        resolve({ ok: false, error: cliSpawnFailure(args[0], "error", error) });
+      }, input);
     } catch (error) {
       resolve({ ok: false, error: cliSpawnFailure(args[0], "spawn", error) });
       return;
     }
-    child.stdout.setEncoding("utf8");
-    child.stderr.resume();
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.resume();
     let output = "";
-    child.stdout.on("data", chunk => { output += chunk; });
-    child.once("error", error => resolve({ ok: false, error: cliSpawnFailure(args[0], "error", error) }));
+    child.stdout?.on("data", chunk => { output += chunk; });
     child.once("close", (exitCode, signal) => {
       try {
         resolve(JSON.parse(output));

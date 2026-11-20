@@ -5,15 +5,34 @@ import { readJson, removeFile, writeJson } from "../cli/storage.ts";
 import { parseUsageReport } from "../cli/token-usage.ts";
 import type { TokenUsageReport } from "../cli/token-usage.ts";
 import { callCli } from "./cli.ts";
+import type { CliError } from "./cli.ts";
 
 type PendingReport = {
   project: string;
   task: string;
   report: TokenUsageReport;
-  failure?: { code: string; message?: string; details?: unknown };
+  failure?: CliError;
 };
 
 const retryable = new Set(["CLI_UNAVAILABLE", "BOARD_BUSY", "GIT_FAILED", "GIT_UNAVAILABLE"]);
+
+function pendingFailure({ code, message, details }: CliError): CliError {
+  if (code === "CLI_UNAVAILABLE") return { code, message, details };
+  if (code !== "GIT_FAILED") return { code, message };
+  const git = details as { operation?: unknown; code?: unknown; exitCode?: unknown; output?: unknown } | undefined;
+  // Git stderr can include paths and values from the repository configuration.
+  const configLine = typeof git?.output === "string" ?
+    /^fatal: bad config line ([0-9]+) in file /m.exec(git.output)?.[1] : undefined;
+  return {
+    code,
+    message: configLine ? "Invalid Git configuration at line " + configLine + "." : "Git failed while saving token usage.",
+    details: {
+      operation: git?.operation === "worktree" || git?.operation === "worktree list" ? "worktree list" : undefined,
+      exitCode: typeof git?.exitCode === "number" ? git.exitCode : undefined,
+      code: typeof git?.code === "string" && /^[A-Z][A-Z0-9_]*$/.test(git.code) ? git.code : undefined,
+    },
+  };
+}
 
 export class TokenUsageQueue {
   private readonly directory: string;
@@ -58,12 +77,11 @@ export class TokenUsageQueue {
         removeFile(path);
         return;
       }
-      const { code, message, details } = result.error;
-      const failure = code === "CLI_UNAVAILABLE" ? { code, message, details } : { code, message };
+      const failure = pendingFailure(result.error);
       writeJson(path, { ...entry, failure });
-      console.warn("Task token usage deferred for %s (%s).", entry.task, code);
+      console.warn("Task token usage deferred for %s (%s).", entry.task, failure.code);
       const delay = this.delays[attempt];
-      if (delay !== undefined && retryable.has(code)) {
+      if (delay !== undefined && retryable.has(failure.code)) {
         setTimeout(() => void this.send(path, entry, attempt + 1), delay).unref();
       }
     }).catch(error => {

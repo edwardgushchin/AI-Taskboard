@@ -418,16 +418,19 @@ function subscribe(project: string, board: Board): BoardWatch {
       retry = setTimeout(launch, 1500);
     };
     let active: ReturnType<typeof cliChild>;
+    let launchError: CliError | undefined;
     try {
-      active = cliChild(project, ["watch", "--compact"]);
+      active = cliChild(project, ["watch", "--compact"], error => {
+        launchError = cliSpawnFailure("watch", "error", error);
+      });
     } catch (error) {
       reconnect(cliSpawnFailure("watch", "spawn", error));
       return;
     }
     child = active;
-    const lines = createInterface({ input: active.stdout });
-    active.stderr.resume();
-    lines.on("line", line => {
+    const lines = active.stdout ? createInterface({ input: active.stdout }) : undefined;
+    active.stderr?.resume();
+    lines?.on("line", line => {
       if (stopped) return;
       let result: CliReply<Board>;
       try { result = JSON.parse(line); }
@@ -457,10 +460,8 @@ function subscribe(project: string, board: Board): BoardWatch {
         archive();
       }
     });
-    let launchError: CliError | undefined;
-    active.on("error", error => { launchError = cliSpawnFailure("watch", "error", error); });
     active.once("close", () => {
-      lines.close();
+      lines?.close();
       reconnect(launchError);
     });
   };

@@ -67,6 +67,36 @@ test("CLI reports synchronous UNKNOWN and asynchronous launch failure, and maint
   assert.equal(failures, 3);
 });
 
+test("CLI handles EMFILE and ENFILE from a child without stdio", async t => {
+  const mock = t.mock.method(childProcess, "spawn", () => {
+    const child = new childProcess.ChildProcess();
+    const code = mock.mock.callCount() === 0 ? "EMFILE" : "ENFILE";
+    assert.equal(child.stdin, undefined);
+    assert.equal(child.stdout, undefined);
+    assert.equal(child.stderr, undefined);
+    process.nextTick(() => {
+      child.emit("error", Object.assign(new Error("spawn " + code), { code, syscall: "spawn" }));
+      child.emit("close", -1, null);
+    });
+    return child;
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    mock.mock.restore();
+    syncBuiltinESMExports();
+  });
+  for (const code of ["EMFILE", "ENFILE"]) {
+    const result = await callCli(process.cwd(), ["token-usage", "T-0001"], {});
+    assert.ok(!result.ok);
+    assert.equal(result.error.code, "CLI_UNAVAILABLE");
+    assert.deepEqual(result.error.details, {
+      operation: "token-usage", phase: "error", platform: process.platform,
+      runtime: "source", code, errno: undefined, syscall: "spawn",
+    });
+  }
+  assert.equal(mock.mock.callCount(), 2);
+});
+
 test("token reports survive bounded retries and replay once after reopening the queue", async t => {
   const scratch = mkdtempSync(join(tmpdir(), "taskboard-token-recovery-"));
   t.after(() => rmSync(scratch, { recursive: true }));
@@ -136,8 +166,23 @@ test("token reports survive bounded retries and replay once after reopening the 
     assert.equal(details.operation, "worktree list");
     assert.equal(details.exitCode, 128);
     assert.match(details.output, /fatal: bad config line/);
+    await new TokenUsageQueue(profile, []).enqueue(board, first.id, report);
+    const files = readdirSync(pending);
+    assert.equal(files.length, 1);
+    const deferred = JSON.parse(readFileSync(join(pending, files[0]), "utf8"));
+    const configLine = /^fatal: bad config line ([0-9]+) in file /m.exec(details.output)?.[1];
+    assert.ok(configLine);
+    assert.deepEqual(deferred.failure, {
+      code: "GIT_FAILED",
+      message: "Invalid Git configuration at line " + configLine + ".",
+      details: { operation: "worktree list", exitCode: 128 },
+    });
   } finally {
     writeFileSync(config, original);
   }
-  await successful(board, ["token-usage", first.id], report);
+  new TokenUsageQueue(profile, []).restore();
+  await until(() => readdirSync(pending).length === 0);
+  const afterGitRecovery = await successful<Task>(board, ["show", first.id]);
+  assert.equal(afterGitRecovery.tokenUsage?.reports.length, 1);
+  assert.equal(afterGitRecovery.tokenUsage?.byModel[0].totalTokens, 17);
 });
