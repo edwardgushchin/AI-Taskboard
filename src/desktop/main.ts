@@ -67,6 +67,7 @@ import { settingsDelivery, syncSettingsNotices } from "./settings-notices.ts";
 
 interface Board {
   project: string;
+  expertCatalogVersion?: string;
   settings: BoardSettings;
   tags: BoardTag[];
   tasks: (Task & { historyLength?: number; reviewApproved?: boolean; reviewApprovalTargetHead?: string | null; reviewNoted?: true; reviewHasCommit?: true; reviewPending?: true; mergeRepair?: true; unfinishedDependencies?: string[];
@@ -240,7 +241,10 @@ function frame(state: ProjectTab) {
     restoring: windowStates.get(state.window.webContents.id)?.restoring ?? false,
     tabs: projectLabels(openTabs.flatMap(tab =>
       tab.project ? [{ path: tab.project, name: tab.board?.settings?.name }] : []))
-      .map(tab => ({ ...tab, unread: unreadTabs.has(tab.path), activity: activity.boards.find(board => board.path === tab.path) })),
+      .map(tab => ({
+        ...tab, unread: unreadTabs.has(tab.path), activity: activity.boards.find(board => board.path === tab.path),
+        expertCatalogVersion: subscriptions.get(tab.path)?.board.expertCatalogVersion,
+      })),
     activeAgents: activity,
     managerUnread: boardUnread(state.board?.project),
     project: state.project, board: state.board, error: state.error, loading: state.loading, localization: localization.state(), theme,

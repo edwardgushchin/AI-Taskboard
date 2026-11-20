@@ -164,7 +164,8 @@ function snapshotBoard(store: BoardStore, compact = false, cache = new Map<strin
   upgradeTagCatalog(store, false);
   const archived = store.archivedCards();
   const targetHeads = new Map<string, string | undefined>();
-  const header = { project: store.location.root, settings: store.index.settings, tags: store.index.tags ?? [], archived };
+  const header = { project: store.location.root, settings: store.index.settings, tags: store.index.tags ?? [], archived,
+    expertCatalogVersion: store.index.expertCatalogVersion };
   if (compact) {
     const ids = Object.keys(store.index.tasks);
     for (const id of cache.keys()) if (!Object.hasOwn(store.index.tasks, id)) cache.delete(id);

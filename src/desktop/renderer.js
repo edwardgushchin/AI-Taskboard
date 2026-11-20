@@ -758,7 +758,9 @@ function mountAppMenu() {
 
 async function command(action, id, input) {
   const generation = projectGeneration;
+  const project = frame.project;
   const result = await api.command(action, id, input);
+  if (action === "expert-save" && result.ok) taskExpertCatalog.delete(project);
   if (generation !== projectGeneration) return undefined;
   if (!result.ok) {
     if (result.error.code === "ACTIVE_GOAL_REQUIRED") {
@@ -4897,7 +4899,6 @@ function editExpert(expert, entries) {
   ], () => t("ui.save_settings_2173b7d7"), async values => {
     if (await command("expert-save", undefined, { ...values, id: expertId, skills,
       ...(expert ? { revision: expert.revision } : {}), requirements: expert?.requirements ?? [], limitations: expert?.limitations ?? "" })) {
-      taskExpertCatalog = undefined;
       await expertSettings();
     }
   });
@@ -4939,19 +4940,24 @@ function editExpert(expert, entries) {
   editor.querySelector('button[type="submit"]').before(panel, choose, add);
 }
 
-let taskExpertCatalog;
+const taskExpertCatalog = new Map();
 function expertRoleNames(project) {
-  if (taskExpertCatalog?.project !== project) {
-    const catalog = { project, names: api.command("experts").then(result => {
+  let catalog = taskExpertCatalog.get(project);
+  if (!catalog) {
+    const version = frame.board?.expertCatalogVersion;
+    const names = api.command("experts").then(result => {
       if (!result.ok) throw new Error(boardError(result.error));
+      if (taskExpertCatalog.get(project) !== catalog) return;
       return new Map(result.data.map(expert => [expert.id, expert.name]));
     }).catch(() => {
-      if (taskExpertCatalog === catalog) taskExpertCatalog = undefined;
-      return new Map();
-    }) };
-    taskExpertCatalog = catalog;
+      if (taskExpertCatalog.get(project) === catalog) {
+        taskExpertCatalog.delete(project);
+      }
+    });
+    catalog = { names, version };
+    taskExpertCatalog.set(project, catalog);
   }
-  return taskExpertCatalog.names;
+  return catalog.names;
 }
 
 function expertAvatar(id, name) {
@@ -4966,6 +4972,7 @@ function expertAvatar(id, name) {
 
 function expertTeamSection(task) {
   const area = element("section", undefined, "expert-team");
+  const project = frame.project;
   const panels = new Map();
   area.append(element("h3", () => t("experts.plan_title")));
   if (task.approvalRequirements?.length) {
@@ -5043,18 +5050,27 @@ function expertTeamSection(task) {
     phases.append(phaseArea);
   }
   area.append(phases);
+  let teamMail;
   if (task.history.some(event => event.expertMessage)) {
     const mail = element("details");
-    mail.append(element("summary", () => t("experts.conversation")), expertTeamMail(task));
+    teamMail = expertTeamMail(task);
+    mail.append(element("summary", () => t("experts.conversation")), teamMail);
     area.append(mail);
   }
   body.append(area);
-  if (labels.size) void expertRoleNames(frame.project).then(names => {
-    if (!area.isConnected) return;
-    for (const [id, nodes] of labels) for (const label of nodes) {
-      label.textContent = names.get(id) ?? label.textContent;
-    }
-  });
+  if (labels.size || teamMail?.setRoleNames) {
+    area.refreshRoleNames = async () => {
+      const names = await expertRoleNames(project);
+      if (!names || !area.isConnected || frame.project !== project) return;
+      for (const [id, nodes] of labels) {
+        for (const label of nodes) {
+          label.textContent = names.get(id) ?? id.replaceAll("-", " ");
+        }
+      }
+      teamMail?.setRoleNames?.(names);
+    };
+    void area.refreshRoleNames();
+  }
   return panels;
 }
 
@@ -5111,18 +5127,21 @@ function expertTeamMail(task) {
   if (!entries.length) log.append(element("p", () => t("experts.no_mail"), "muted"));
   else {
     log.append(list);
-    void expertRoleNames(frame.project).then(names => {
-      for (const { sender, recipient, author, recipientLabel, avatar } of entries) {
-        const name = names.get(sender.role);
-        if (name) {
-          if (sender.name !== name) author.title = sender.name;
+    log.setRoleNames = names => {
+      for (const entry of entries) {
+        const { sender, recipient, author, recipientLabel } = entry;
+        const name = names.get(sender.role) ?? sender.name;
+        if (author.textContent !== name) {
+          author.title = sender.name === name ? "" : sender.name;
           author.textContent = name;
-          avatar.replaceWith(expertAvatar(sender.role, name));
+          const avatar = expertAvatar(sender.role, name);
+          entry.avatar.replaceWith(avatar);
+          entry.avatar = avatar;
         }
         const target = names.get(recipient.role);
         recipientLabel.textContent = target && target !== recipient.name ? target + " · " + recipient.name : recipient.name;
       }
-    });
+    };
   }
   return log;
 }
@@ -6026,11 +6045,21 @@ function update(next) {
     if (sheet.open) sheet.close();
   }
   if (Array.isArray(next.tabs)) {
-    const openProjects = new Set(next.tabs.map(tab => tab.path));
+    const openProjects = new Map(next.tabs.map(tab => [tab.path, tab.expertCatalogVersion]));
     for (const [project, view] of boardViews) {
       if (openProjects.has(project)) continue;
       view.composer[0]?.dispose?.();
       boardViews.delete(project);
+    }
+    let refreshExpertNames = false;
+    for (const [project, catalog] of taskExpertCatalog) {
+      if (!openProjects.has(project) || openProjects.get(project) !== catalog.version) {
+        taskExpertCatalog.delete(project);
+        if (project === next.project && openProjects.has(project)) refreshExpertNames = true;
+      }
+    }
+    if (refreshExpertNames && sheet.open && sheetKind === "task") {
+      void body.querySelector(".expert-team")?.refreshRoleNames?.();
     }
   }
   render(previousBoard);
