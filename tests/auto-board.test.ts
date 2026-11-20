@@ -8,6 +8,7 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import { nextReadyTask } from "../src/desktop/auto-queue.ts";
+import { pendingReviewApprovals } from "../src/desktop/automation-delivery.ts";
 import { reviewsAcceptanceRepair, taskReviewMode, taskReviewModeVersion, usesIndependentReviewer } from "../src/cli/model.ts";
 
 const source = readFileSync(new URL("../src/desktop/main.ts", import.meta.url), "utf8");
@@ -26,13 +27,14 @@ function fixture(mode = "human") {
   const busy = new Map<string, () => void>();
   const launches: string[] = [], accepted: string[] = [], reviews: string[] = [], notices: any[] = [], calls: string[][] = [], errors: string[] = [];
   let afterLaunch: (() => void) | undefined, beforeAccept: (() => void) | undefined, afterReviewRead: (() => void) | undefined, launchError: string | undefined;
+  let noticeError: string | undefined;
   const fail = (code: string) => ({ ok: false, error: { code, message: code } });
   const runtime = runInNewContext(stripTypeScriptTypes(code) + "\n({scheduleAutoBoard, autoBoards})", {
     quotaWait: undefined,
     applicationUpdates: { installing: false },
     subscriptions: new Map([["project", watch]]), closingProjects: new Set(), boardWorkRequests: managers, boardRequests: dialogues,
     backgroundManagerRequests: new Map(),
-    isManual, nextReadyTask, taskReviewMode, taskReviewModeVersion, reviewsAcceptanceRepair, usesIndependentReviewer,
+    isManual, nextReadyTask, pendingReviewApprovals, taskReviewMode, taskReviewModeVersion, reviewsAcceptanceRepair, usesIndependentReviewer,
     agentSlots: slots, projectIdentity: (path: string) => path,
     executorBusy: (_: string, id: string) => busy.has(id), t: (key: string) => localization.text(key, {}, "en"),
     broadcastBoardChat: (_: string, __: string, value: any) => errors.push(value.error),
@@ -45,7 +47,15 @@ function fixture(mode = "human") {
       const task = board.tasks.find((task: any) => task.id === id);
       if (!task.needsHuman) task.approvalTarget = task.reviewApprovalTargetHead = "target";
     },
-    runBoardRequest: async (...args: any[]) => { notices.push(args); return { ok: true, data: {} }; },
+    runBoardRequest: async (...args: any[]) => {
+      notices.push(args);
+      if (noticeError) {
+        const error = noticeError;
+        noticeError = undefined;
+        return fail(error);
+      }
+      return { ok: true, data: {} };
+    },
     callCli: async (_: string, args: string[], input: any) => {
       calls.push(args);
       const task = board.tasks.find((task: any) => task.id === args[1]);
@@ -85,8 +95,9 @@ function fixture(mode = "human") {
       return { ok: true, data: {} };
     },
   });
-  const tick = async () => {
-    runtime.scheduleAutoBoard(watch); runtime.scheduleAutoBoard(watch);
+  const tick = async (now = Date.now()) => {
+    runtime.scheduleAutoBoard(watch, now);
+    runtime.scheduleAutoBoard(watch, now);
     for (let i = 0; i < 100; i++) {
       await new Promise(resolve => setImmediate(resolve));
       if (!runtime.autoBoards.get(watch)?.running) return;
@@ -101,11 +112,71 @@ function fixture(mode = "human") {
     const task = board.tasks.find((task: any) => task.id === id);
     task.status = "review"; task.revision++; task.reviewApproved = mode === "reviewer";
   };
-  return { board, watch, slots, launches, accepted, reviews, notices, calls, errors, tick, add, finish, managers,
+  return { board, watch, slots, launches, accepted, reviews, notices, calls, errors, tick, add, finish, managers, dialogues,
+    failNotice: (code: string) => { noticeError = code; },
     afterLaunch: (callback: () => void) => { afterLaunch = callback; }, beforeAccept: (callback: () => void) => { beforeAccept = callback; },
     afterReviewRead: (callback: () => void) => { afterReviewRead = callback; },
     failLaunch: (code: string) => { launchError = code; } };
 }
+
+test("acknowledged approval wakes one manager after dialogue release and retries a refused start", async () => {
+  const f = fixture("reviewer");
+  f.board.settings.autoMode = false;
+  f.add("T-0001", { status: "review", reviewApproved: true });
+  f.add("T-0002");
+  f.board.managerInbox.push({ id: "T-0001", sequence: 7, kind: "review-approve" });
+  f.dialogues.set("project", {});
+  await f.tick(100);
+  assert.equal(f.notices.length, 0);
+  f.board.managerInbox = [];
+  f.dialogues.clear();
+  f.failNotice("BOARD_BUSY");
+  await f.tick(200);
+  await f.tick(300);
+  assert.equal(f.notices.length, 1);
+  await f.tick(30_200);
+  assert.equal(f.notices.length, 2);
+  assert.equal(f.notices[1][4], false);
+  assert.deepEqual(f.notices[1].at(-1).map(({ id }: { id: string }) => id), ["T-0001"]);
+  assert.deepEqual(f.launches, []);
+  assert.deepEqual(f.errors, []);
+
+  f.board.tasks[0].status = "done";
+  await f.tick(60_200);
+  assert.equal(f.notices.length, 2);
+});
+
+test("untried approvals get a turn even when four failed approvals become retryable", async () => {
+  const f = fixture("reviewer");
+  f.board.settings.autoMode = false;
+  const first = ["T-0001", "T-0002", "T-0003", "T-0004"];
+  for (const [index, id] of [...first, "T-0005"].entries()) {
+    f.add(id, { status: "review", reviewApproved: true });
+    f.board.managerInbox.push({ id, sequence: index + 1, kind: "review-approve" });
+  }
+  const batch = (index: number) => f.notices[index].at(-1).map(({ id }: { id: string }) => id);
+
+  await f.tick(100);
+  assert.deepEqual(batch(0), first);
+  // The first batch remains in review, and its manager turn outlasts the retry delay.
+  await f.tick(30_101);
+  assert.deepEqual(batch(1), ["T-0005", ...first.slice(0, 3)]);
+  f.board.tasks[4].status = "done";
+  await f.tick(30_102);
+  assert.deepEqual(batch(2), ["T-0004"]);
+  assert.deepEqual(f.launches, []);
+});
+
+test("approved cards in human acceptance modes stay out of the background turn", async () => {
+  for (const mode of ["human", "reviewer-human"]) {
+    const f = fixture(mode);
+    f.board.settings.autoMode = false;
+    f.add("T-0001", { status: "review", reviewApproved: true });
+    f.board.managerInbox.push({ id: "T-0001", sequence: 2, kind: "review-approve" });
+    await f.tick();
+    assert.equal(f.notices.length, 0, mode);
+  }
+});
 
 test("automatic cycles share slots across windows and release dependencies only after acceptance in each mode", async () => {
   for (const mode of ["human", "reviewer"]) {

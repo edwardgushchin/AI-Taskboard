@@ -1,12 +1,22 @@
 import type { BoardSettings, Task } from "../cli/model.ts";
 import { autoQueueSettings } from "../cli/auto-queue.ts";
-import { boardReviewMode } from "../cli/model.ts";
+import { boardReviewMode, taskReviewMode, taskReviewModeVersion } from "../cli/model.ts";
 
 type BoardState = {
   settings: BoardSettings;
-  tasks: (Task & { reviewApproved?: boolean })[];
+  tasks: (Task & { reviewApproved?: boolean; reviewPending?: boolean; reviewApprovalTargetHead?: string | null })[];
   managerInbox?: { id: string; sequence: number; kind: string }[];
 };
+
+export function pendingReviewApprovals(board: BoardState) {
+  if (board.settings.autoMode) return [];
+  return board.tasks.filter(task => task.status === "review" && task.reviewApproved &&
+    !task.reviewPending && !task.acceptanceRepair && taskReviewMode(task, board.settings) === "reviewer")
+    .map(task => ({
+      id: task.id,
+      key: JSON.stringify([task.id, task.revision, taskReviewModeVersion(task, board.settings), task.reviewApprovalTargetHead]),
+    }));
+}
 
 // Queue changes wake board tools internally; they are never conversation messages.
 export function automationDelivery(wake: () => void, signal: AbortSignal) {
@@ -37,7 +47,15 @@ export function automationDelivery(wake: () => void, signal: AbortSignal) {
       if (disposed || signal.aborted) return;
       const wasEnabled = enabled;
       enabled = board.settings.autoMode === true;
-      if (!enabled && !wasEnabled) return;
+      if (!enabled && !wasEnabled) {
+        const unread = (board.managerInbox ?? []).filter(message => message.kind === "review-approve");
+        const pending = new Set(unread.length ? pendingReviewApprovals(board).map(({ id }) => id) : []);
+        const approvals = unread.filter(({ id }) => pending.has(id));
+        const serialized = JSON.stringify(approvals.map(({ id, sequence }) => ({ id, sequence })));
+        if (approvals.length && serialized !== previousInbox) schedule();
+        previousInbox = serialized;
+        return;
+      }
       const settings = { enabled, reviewMode: boardReviewMode(board.settings), queue: autoQueueSettings(board.settings),
         limits: board.settings.taskLimits };
       const serializedSettings = JSON.stringify(settings);

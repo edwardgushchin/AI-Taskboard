@@ -65,3 +65,28 @@ test("disposing cancels a pending wake and disabled automation stays silent", as
   await delay(400);
   assert.equal(wakes, 0);
 });
+
+test("disabled automation wakes an active wait for a current reviewer approval once", async t => {
+  const controller = new AbortController();
+  t.after(() => controller.abort());
+  const board = {
+    settings: { autoMode: false, reviewMode: "reviewer-human" } as BoardSettings,
+    tasks: [{ id: "T-0001", status: "review", reviewApproved: true }] as (Task & { reviewApproved: boolean })[],
+    managerInbox: [{ id: "T-0001", sequence: 7, kind: "review-approve" }],
+  };
+  let wakes = 0;
+  const delivery = automationDelivery(() => { wakes++; }, controller.signal);
+  const observe = () => delivery.observe(board, () => ({ running: false, reviewing: false }));
+  observe();
+  await delay(350);
+  assert.equal(wakes, 0);
+
+  board.settings.reviewMode = "reviewer";
+  observe();
+  observe();
+  await delay(350);
+  assert.equal(wakes, 1);
+  observe();
+  await delay(350);
+  assert.equal(wakes, 1);
+});
