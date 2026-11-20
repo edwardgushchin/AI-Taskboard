@@ -399,14 +399,21 @@ test("a resumed native specialist must complete in the current lead run", async 
   t.after(() => reporter.close());
   const lead = "f677da73-5436-4a47-a452-3ec00c2d3a40";
   const child = "95c19e7a-b829-4195-814b-922d28903c82";
-  const command = { id: "test-command", type: "commandExecution", command: "git status", status: "completed" };
+  const command = {
+    id: "test-command", type: "commandExecution", command: "git status",
+    status: "completed", aggregatedOutput: "", exitCode: 0,
+  };
+  const late = { ...command, id: "late-command" };
   const items = new Map<string, RunActivity>();
   let commandAt = 0;
+  let historyAvailable = true;
+  let additionalHistory: { item: typeof command; startedAtMs?: number; completedAtMs?: number }[] = [];
   reporter.bind(async <T>(method: string, params: object) => {
     assert.equal(method, "thread/items/list");
     assert.equal("threadId" in params && params.threadId, child);
+    if (!historyAvailable) throw new Error("Thread history unavailable");
     return {
-      data: [{ item: command, startedAtMs: commandAt }],
+      data: [...additionalHistory, { item: command, startedAtMs: commandAt }],
       nextCursor: null,
     } as T;
   }, lead);
@@ -414,8 +421,8 @@ test("a resumed native specialist must complete in the current lead run", async 
   const stage = { revision, key: "verify" };
   assert.ok((await reporter.report({ ...stage, state: "running" })).ok);
   const result = { ...stage, state: "done", agentId: child, result: "Retested", outputs: { "verify.md": "New checks passed." } };
-  const observe = (threadId: string, item: object) =>
-    reporter.observe({ method: "item/completed", params: { threadId, item } }, lead);
+  const observe = (threadId: string, item: object, method = "item/completed") =>
+    reporter.observe({ method, params: { threadId, item } }, lead);
   const followup = { type: "collabAgentToolCall", tool: "followupTask", status: "completed", receiverThreadIds: [child] };
   const expectError = async (code: string) => {
     const reply = await reporter.report(result);
@@ -439,6 +446,7 @@ test("a resumed native specialist must complete in the current lead run", async 
   const beforeCommentary = items.size;
   observe("foreign", commentary);
   assert.equal(items.size, beforeCommentary);
+  observe(child, { ...commentary, text: "" }, "item/started");
   observe(child, commentary);
   assert.equal(items.size, beforeCommentary + 1);
   assert.equal(items.get(child + ":" + commentary.id)?.text, commentary.text);
@@ -446,11 +454,25 @@ test("a resumed native specialist must complete in the current lead run", async 
     await new Promise(resolve => setTimeout(resolve, 50));
   }
   assert.equal(items.get(child + ":" + command.id)?.title, command.command);
+  assert.equal(items.get(child + ":" + command.id)?.text, "\nExit code: 0");
+  const firstCommandAt = items.get(child + ":" + command.id)?.at;
+  assert.ok((await reporter.report({ ...stage, state: "blocked", result: "Retry this stage" })).ok);
+  historyAvailable = false;
+  assert.ok((await reporter.report({ ...stage, state: "running", agentId: child })).ok);
+  observe(child, late);
+  assert.equal(items.has(child + ":" + late.id), false);
+  observe(child, command);
+  assert.equal(items.get(child + ":" + command.id)?.at, firstCommandAt);
+  assert.equal(items.get(child + ":" + command.id)?.text, "\nExit code: 0");
+  additionalHistory = [{ item: late, completedAtMs: Date.now() }];
+  historyAvailable = true;
   observe(lead, { type: "collabAgentToolCall", tool: "wait", agentsStates: { [child]: { status: "completed" } } });
   observe(lead, { ...followup, tool: "resumeAgent" });
   await expectError("EXPERT_AGENT_RUNNING");
   observe(lead, { type: "subAgentActivity", kind: "completed", agentThreadId: child, agentPath: "/root/qa" });
   assert.ok((await reporter.report({ ...result, agentId: "/root/qa" })).ok);
+  assert.equal(items.has(child + ":" + late.id), false);
+  assert.equal(items.get(child + ":" + command.id)?.text, "\nExit code: 0");
   const saved = await callCli<Task>(f.root, ["run-log", id], { entries: [...items.values()], runThreadId: lead });
   assert.ok(saved.ok, JSON.stringify(saved));
   const reopened = await callCli<Task>(f.root, ["show", id]);

@@ -193,8 +193,8 @@ async function runCheck() {
       var unscoped = activity(5, "unscoped", "СОБЫТИЕ БЕЗ СВЯЗИ", null, null);
       var overlap = childActivity(7, "overlap", "НЕОДНОЗНАЧНОЕ СОБЫТИЕ");
       var sameRole = childActivity(13, "same-role", "Запись другого этапа той же роли.");
-      var retry = childActivity(23, "retry", "Данные подтверждены после повторного запуска.", "worker", "run-2");
-      var wrongSession = childActivity(23, "wrong-session", "СОБЫТИЕ СТАРОЙ ПОПЫТКИ");
+      var retry = childActivity(23, "retry", "Данные подтверждены после повторного запуска.");
+      var wrongSession = childActivity(23, "wrong-session", "СОБЫТИЕ СТАРОЙ ПОПЫТКИ", "worker", "stale-run");
       fixture.history.push(stageEvent(2, "work", "analysis", "running", "executor", "run-1"));
       fixture.expertStageStatus.work[0].state = "running";
       openFixture();
@@ -220,6 +220,12 @@ async function runCheck() {
     await capture("stage-live.png", 680);
 
     await evaluate(`
+      var lateCommand = {
+        ...childActivity(8, "late-command", ""), phase: undefined,
+        type: "commandExecution", title: "git rev-parse HEAD", status: "inProgress",
+      };
+      update("run", [outside, early, command, later, workHandoff, lateCommand]);
+      var sawStartedCommand = Boolean(stageAt(0).querySelector('[data-item="item:late-command"]'));
       fixture.history.push(
         stageEvent(6, "work", "overlap", "running", "executor", "run-1", undefined, "worker"),
         stageEvent(8, "work", "overlap", "done", "executor", "run-1", "Итог параллельного этапа."),
@@ -232,8 +238,8 @@ async function runCheck() {
           runThreadId: "executor", run: [outside, early, command, later, unscoped, workHandoff, overlap, sameRole],
         }),
         event(18, "run-log", { runThreadId: "foreign", run: [foreign] }),
-        stageEvent(21, "work", "analysis", "running", "executor", "run-2"),
-        stageEvent(22, "work", "analysis", "running", "executor", "run-2", undefined, "worker")
+        stageEvent(21, "work", "analysis", "running", "executor", "run-1"),
+        stageEvent(22, "work", "analysis", "running", "executor", "run-1", undefined, "worker")
       );
       fixture.expertStageStatus.work.forEach((state, index) => state.state = index ? "done" : "running");
       openFixture();
@@ -245,6 +251,17 @@ async function runCheck() {
       stageAt(0).querySelectorAll('[data-item="message:later"]').length === 1 &&
       !/НЕОДНОЗНАЧНОЕ|СТАРОЙ ПОПЫТКИ|Запись другого этапа/.test(stageText(0))`,
       "Сохранённые и текущие события не дублируются. Повторная попытка того же потока обособлена.");
+    await evaluate(`
+      var lateCompletion = { ...lateCommand, text: "Проверка первой попытки завершилась позднее.", status: "completed" };
+      update("run", [early, later, wrongSession, retry, lateCompletion]);
+      void 0;
+    `);
+    await verify(`
+      sawStartedCommand &&
+      stageAt(0).querySelectorAll('[data-item="item:late-command"]').length === 1 &&
+      ordered(stageAt(0).textContent, ["Проверка первой попытки завершилась позднее.",
+        "Первая попытка отложена.", "Данные подтверждены после повторного запуска."])`,
+      "Поздний вывод известной команды остался в первой попытке по времени начала. Обе попытки используют тот же поток и сеанс.");
     await evaluate(`for (let index = 1; index < 4; index++) stageAt(index).open = true; void 0`);
     await verify(`stageText(1).includes("Запись другого этапа той же роли.") &&
       !stageText(1).includes("Открыт журнал исполнения.") &&
@@ -254,8 +271,8 @@ async function runCheck() {
 
     await evaluate(`
       fixture.history.push(
-        stageEvent(24, "work", "analysis", "done", "executor", "run-2", "Этап исполнения завершён."),
-        event(25, "run-log", { runThreadId: "executor", run: [wrongSession, retry] }),
+        stageEvent(24, "work", "analysis", "done", "executor", "run-1", "Этап исполнения завершён."),
+        event(25, "run-log", { runThreadId: "executor", run: [wrongSession, retry, lateCompletion] }),
         event(29, "submit", { to: "review" }),
         stageEvent(31, "review", "analysis", "running", "reviewer", "review-1"),
         stageEvent(32, "review", "analysis", "running", "reviewer", "review-1", undefined, "review-worker")
@@ -325,8 +342,10 @@ async function runCheck() {
     await verify(`stageAt(0).open && visible(stageAt(0).querySelector("h5")) &&
       ordered(stageText(0), ["Открыт журнал исполнения.", "Первая попытка отложена.",
         "Данные подтверждены после повторного запуска.", "Этап исполнения завершён."]) &&
+      stageAt(0).querySelectorAll('[data-item="item:late-command"]').length === 1 &&
+      ordered(stageAt(0).textContent, ["Проверка первой попытки завершилась позднее.", "Первая попытка отложена."]) &&
       body.scrollWidth === body.clientWidth`,
-      "В узкой панели Enter раскрывает этап. Сохранённые события и итог видны без горизонтальной прокрутки.");
+      "В узкой панели Enter раскрывает этап без горизонтальной прокрутки. Поздний вывод восстановлен в первой попытке, итог во второй.");
     await evaluate(`stageAt(0).scrollIntoView({ block: "start" }); void 0`);
     await capture("stage-restored-narrow.png", 360);
     assert.deepEqual(errors, []);
@@ -352,9 +371,10 @@ async function runCheck() {
       "Результат — " + checks.length + " проверок пройдены. Ошибок в консоли renderer нет.", "",
       "Windows " + process.getSystemVersion() + ", Electron " + process.versions.electron +
         ", Chromium " + process.versions.chrome + ", Node " + process.versions.node + " (Electron).", "",
-      fence + "powershell", "node scripts/check-stage-work.mjs --artifacts .tasks/qa/delegated", fence, "",
+      fence + "powershell", "node scripts/check-stage-work.mjs --artifacts .tasks/qa/retry", fence, "",
       "Проверен рабочий интерфейс Electron с тестовыми данными IPC в изолированном окне. Повторное открытие " +
-        "проверено через showTask. Реальный провайдер и запись его журнала здесь не вызываются.", "",
+        "проверено через showTask. Позднее завершение передаётся в renderer с уже сохранённым временем начала команды. " +
+        "Реальный провайдер, восстановление времени в нормализаторе и запись журнала здесь не вызываются.", "",
       "## Результаты", "", ...checks.map(check => "- " + check), "",
       "## Снимки", "", ...captures.map(capture => "- " + capture), "",
       "## Проверенные исходники", "", "HEAD рабочей копии " + head + ". SHA-256:", "",

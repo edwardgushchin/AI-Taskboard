@@ -139,23 +139,24 @@ export function phaseStageReporter(project: string, phase: "work" | "review", id
   let polling = false;
   let closed = false;
 
-  function childItem(child: string, method: string, params: Record<string, unknown>, at: string, restored = false) {
+  function childItem(child: string, method: string, params: Record<string, unknown>, at?: string, restored = false) {
     if (!onActivity || closed) return;
     const entries = activity.get(child) ?? new Map<string, RunActivity>();
     activity.set(child, entries);
     const item = runActivity(entries, method, params, at);
-    if (!item) return;
-    if (restored) item.at = at;
+    // A completion or delta without a confirmed start may belong to an earlier assignment.
+    if (!item?.at) return;
+    if (restored && at) item.at = at;
     const previous = entries.get(item.id);
-    if (JSON.stringify(previous) === JSON.stringify(item)) return;
     entries.set(item.id, item);
+    if (JSON.stringify(previous) === JSON.stringify(item)) return;
     onActivity({ ...item, id: child + ":" + item.id, stageSessionId: sessionId, stageChild: true });
   }
 
   async function readChild(child: string) {
     if (!provider || !onActivity || closed || !codexThreadPattern.test(child)) return;
     let cursor: string | null = null;
-    const items: { item: Record<string, unknown>; at: number }[] = [];
+    const items: { item: Record<string, unknown>; at?: number }[] = [];
     try {
       // Ask the same provider session for persisted items even if it did not notify the lead of child activity.
       for (let pageNumber = 0; pageNumber < 3; pageNumber++) {
@@ -165,10 +166,14 @@ export function phaseStageReporter(project: string, phase: "work" | "review", id
         } = await provider("thread/items/list", { threadId: child, cursor, limit: 100, sortDirection: "desc" });
         let reachedStart = false;
         for (const entry of page.data) {
-          const at = entry.startedAtMs ?? entry.completedAtMs;
-          if (typeof at !== "number" || !Number.isFinite(at)) continue;
-          if (at < startedAt) reachedStart = true;
-          else items.push({ item: entry.item, at });
+          const at = entry.startedAtMs;
+          if (typeof at !== "number" || !Number.isFinite(at)) {
+            items.push({ item: entry.item });
+          } else if (at < startedAt) {
+            reachedStart = true;
+          } else {
+            items.push({ item: entry.item, at });
+          }
         }
         if (closed || reachedStart || !page.nextCursor) break;
         cursor = page.nextCursor;
@@ -178,7 +183,7 @@ export function phaseStageReporter(project: string, phase: "work" | "review", id
     }
     for (const { item, at } of items.reverse()) {
       const method = item.status === "inProgress" ? "item/started" : "item/completed";
-      childItem(child, method, { item, threadId: child }, new Date(at).toISOString(), true);
+      childItem(child, method, { item, threadId: child }, at === undefined ? undefined : new Date(at).toISOString(), true);
     }
   }
 
@@ -223,7 +228,8 @@ export function phaseStageReporter(project: string, phase: "work" | "review", id
       const child = event?.threadId;
       if (child && child !== lead && codexThreadPattern.test(child) && [...assigned.values()].includes(child) &&
           message.method?.startsWith("item/")) {
-        childItem(child, message.method, event, new Date().toISOString());
+        const started = message.method === "item/started" || message.method === "item/autoApprovalReview/started";
+        childItem(child, message.method, event, started ? new Date().toISOString() : undefined);
       }
       if (!lead || event?.threadId !== lead || !item) return;
       if (message.method === "item/completed" && item.type === "collabAgentToolCall" &&
