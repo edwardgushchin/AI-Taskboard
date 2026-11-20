@@ -17,6 +17,7 @@
 .codicon-close::before { content: "\ea76"; }
 .codicon-copy::before { content: "\ebcc"; }
 .codicon-check::before { content: "\eab2"; }
+.codicon-lock::before { content: "\ea75"; }
 .codicon-add::before { content: "\ea60"; }
 .codicon-file::before { content: "\ea7b"; }
 .codicon-arrow-up::before { content: "\eaa1"; }

@@ -1135,13 +1135,6 @@ function card(task) {
   const item = element("span", undefined, "task-card-details");
   const heading = element("span", undefined, "task-card-heading");
   heading.append(element("strong", task.title));
-  if (task.status === "done") {
-    const done = element("span", undefined, "task-done");
-    done.setAttribute("role", "img");
-    bindLocalized(done, "aria-label", () => t("ui.completed_10b5dce8"), true);
-    done.append(icon("check"));
-    heading.append(done);
-  }
   item.append(heading);
   const block = task.status === "blocked" ? task.blocked : undefined;
   const manualWait = block && explicitDependencyWait(block.reason);
@@ -1198,7 +1191,19 @@ function card(task) {
     meta.append(badge);
   }
   const runStatus = element("span", undefined, "task-run-status");
-  renderAgentRunStatus(runStatus, task, { compactQueue: true });
+  if (task.status === "done" || task.status === "blocked") {
+    const done = task.status === "done";
+    const indicator = icon(done ? "check" : "lock");
+    indicator.classList.add(done ? "task-done" : "task-locked");
+    indicator.removeAttribute("aria-hidden");
+    indicator.setAttribute("role", "img");
+    const label = () => t(done ? "ui.completed_10b5dce8" : "ui.blocked_bd8f5170");
+    bindLocalized(indicator, "aria-label", label, true);
+    bindLocalized(indicator, "title", label);
+    runStatus.append(indicator);
+  } else {
+    renderAgentRunStatus(runStatus, task, { compactQueue: true });
+  }
   if (task.unfinishedDependencies?.length && task.status === "draft") {
     meta.append(taskIndicator("link", task.unfinishedDependencies.length,
       t("ui.unfinished_dependencies_5cfaaab6"), "dependency-warning"));
