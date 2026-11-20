@@ -163,7 +163,15 @@ export function parseRunEntries(value: unknown) {
 export function recordRunLog(task: Task, input: Record<string, unknown>): Task {
   if (task.status === "done" || task.status === "cancelled") return task;
   const updated = record(task, "run-log", "agent");
-  updated.history.at(-1)!.run = parseRunEntries(input.entries);
+  const event = updated.history.at(-1)!;
+  event.run = parseRunEntries(input.entries);
+  if (input.runThreadId !== undefined) {
+    const id = input.runThreadId;
+    if (typeof id !== "string" || !codexThreadPattern.test(id)) {
+      throw new TaskboardError("INVALID_INPUT", "Expected a valid Codex thread ID for the run log.");
+    }
+    event.runThreadId = id;
+  }
   if (input.durationMs !== undefined) updated.history.at(-1)!.durationMs = number(input.durationMs, "durationMs", 0);
   return { ...updated, revision: task.revision, closedAt: task.closedAt };
 }
@@ -291,7 +299,11 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
         throw new TaskboardError("STATUS_CHANGE_REQUIRED", "These requirements would reopen the task. Ask the user to apply the changes on the board.");
       }
       if (input.preserveStatus === true && isDeepStrictEqual(updated, task)) return task;
-      return record(updated, action, actor, status, note);
+      const result = record(updated, action, actor, status, note);
+      if (task.codexThreadId && task.codexThreadId !== updated.codexThreadId) {
+        result.history.at(-1)!.previousCodexThreadId = task.codexThreadId;
+      }
+      return result;
     }
     default:
       throw new TaskboardError("UNKNOWN_COMMAND", "Unknown task action " + action + ".");

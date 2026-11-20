@@ -307,13 +307,12 @@ app.whenReady().then(async () => {
     await press('#task-side [aria-controls="task-chat-work"]', "Enter");
     await check(`!byId('task-chat-work').hidden && byId('task-chat-dialogue').hidden &&
       taskSide.querySelector('.chat-composer').hidden`, "Work tab shows its own view");
-    await press('#task-side [aria-controls="task-chat-team"]', "Enter");
-    await check(`!byId('task-chat-team').hidden && byId('task-chat-work').hidden`, "Team tab shows its own view");
+    await check(`taskSide.querySelectorAll('.board-chat-views button').length === 2`, "Card has two chat tabs");
     await press('#task-side [aria-controls="task-chat-dialogue"]', "Enter");
     await check(`!byId('task-chat-dialogue').hidden && byId('task-chat-dialogue').textContent.includes(prompt) &&
       byId('task-chat-dialogue').textContent.includes('Проверка отправки') &&
       getComputedStyle(byId('task-chat-input')).resize === 'vertical'`, "Dialogue restores saved messages and its input");
-    report.push("1000 × 700. Оформление активной кнопки остановки совпало в обеих темах. В тёмной теме Enter и пробел активировали кнопки. Проверены выбор вложения, отправка текста с файлом, переключение отправки и остановки при изменении черновика, фокус поля и подсказка диктовки, возврат к сохранённым сообщениям из вкладок «Ход работы» и «Команда экспертов».");
+    report.push("1000 × 700. Оформление активной кнопки остановки совпало в обеих темах. В тёмной теме Enter и пробел активировали кнопки. Проверены выбор вложения, отправка текста с файлом, переключение отправки и остановки при изменении черновика, фокус поля и подсказка диктовки, возврат к сохранённым сообщениям из вкладки «Ход работы».");
     report.push("Использованы обычные компоненты рендерера Electron, тестовые данные и заглушки выбора файла и провайдера. Системное распознавание речи, macOS и Linux не проверялись.");
     const git = args => spawnSync("git", args, { cwd: root, encoding: "utf8", windowsHide: true }).stdout.trim();
     const sources = ["src/desktop/styles.css", "src/desktop/themes.css", "src/desktop/chat.js",
@@ -403,10 +402,8 @@ app.whenReady().then(async () => {
     await evaluate(`
       manager.dispose();
       const hexCard = { id: 'T-0184', createdAt: at, status: 'review', questions: [], attachments: [], history: [] };
-      let reviewSaved = false;
-      api.reviewerChat = async () => ({ ok: true, data: [{
-        id: 'hex-review', at, ...(reviewSaved ? { durationMs: 500 } : {}), items: [structuredClone(reply)],
-      }] });
+      hexCard.history.push({ action: 'run-log', actor: 'agent', at,
+        run: [{ ...structuredClone(reply), phase: 'final_answer' }] });
       const openCard = () => {
         taskInSheet = structuredClone(hexCard);
         body.replaceChildren(taskChat(taskInSheet));
@@ -421,14 +418,14 @@ app.whenReady().then(async () => {
     await evaluate("sheet.close(); openCard(); sheet.showModal(); void 0");
     await expectColors(".task-dialogue", "reopened card dialogue");
     await evaluate("showWork(); void 0");
-    await expectColors(".task-review-attempt", "active reviewer attempt");
-    await evaluate("reviewSaved = true; sheet.close(); openCard(); sheet.showModal(); showWork(); void 0");
-    await expectColors(".task-review-attempt", "reopened reviewer attempt");
+    await expectColors(".task-work", "card Work view");
+    await evaluate("sheet.close(); openCard(); sheet.showModal(); showWork(); void 0");
+    await expectColors(".task-work", "reopened card Work view");
 
     const report = [
       "Reproduce: node scripts/check-chat.mjs --hex-colors-only --artifacts .tasks/qa",
       JSON.stringify({ platform: process.platform, electron: process.versions.electron, chromium: process.versions.chrome }),
-      "Manager dialogue, card dialogue and reviewer Work view: exact six codes, new and reopened with IPC fixtures.",
+      "Manager dialogue, card dialogue and card Work view: exact six codes, new and reopened with IPC fixtures.",
       "A question mark stays outside the HEX swatch. Outgoing manager messages preserve literal URLs and code fences in live and saved views.",
     ];
     for (const theme of ["dark", "light"]) for (const width of [400, 1000]) {
@@ -436,7 +433,7 @@ app.whenReady().then(async () => {
       window.setSize(width, 740);
       await evaluate("applyTheme(" + JSON.stringify(theme) + "); void 0");
       const layout = await evaluate(`(() => {
-        const message = document.querySelector('.task-review-attempt .chat-text');
+        const message = document.querySelector('.task-work .chat-text');
         const labels = [...message.querySelectorAll('.chat-hex-color')];
         const feed = document.querySelector('.task-work');
         return {
@@ -465,7 +462,7 @@ app.whenReady().then(async () => {
         assert.equal(w, h);
       }
       for (const index of [0, 5]) {
-        const selected = await evaluate("getSelection().selectAllChildren(document.querySelectorAll('.task-review-attempt .chat-hex-color')[" + index + "]); getSelection().toString()");
+        const selected = await evaluate("getSelection().selectAllChildren(document.querySelectorAll('.task-work .chat-hex-color')[" + index + "]); getSelection().toString()");
         await clipboard.clear();
         window.webContents.copy();
         assert.equal(selected, colors[index]);
@@ -2376,28 +2373,22 @@ app.whenReady().then(async () => {
       };
       var handoffOrder = () => {
         const feed = byId('task-chat-work');
-        const submission = feed.querySelector('.chat-event');
-        const review = feed.querySelector('.task-review-attempt');
-        return review && submission.compareDocumentPosition(review) === Node.DOCUMENT_POSITION_FOLLOWING &&
-          submission.querySelector('time').dateTime === submissionAt &&
-          handoffItems.every(item => {
-            const rows = feed.querySelectorAll('[data-item="message:' + item.id + '"], [data-item="final:' + item.id + '"]');
-            return rows.length === 1 && rows[0].querySelector('time').dateTime === item.at &&
-              rows[0].compareDocumentPosition(submission) === Node.DOCUMENT_POSITION_FOLLOWING;
-          }) && review.querySelectorAll('[data-item="message:handoff-prep"]').length === 1 &&
-          review.querySelector('time').dateTime === reviewAt;
+        const rows = [...feed.querySelectorAll('[data-item^="message:handoff-"], [data-item^="final:handoff-"]')];
+        return !feed.querySelector('.chat-event') && !feed.textContent.includes('Reviewer preparation') &&
+          rows.length === handoffItems.length && rows.every((row, index) =>
+            row.dataset.item.endsWith(handoffItems[index].id) && row.querySelector('time').dateTime === handoffItems[index].at);
       };
       var handoffUpdate = (items, savedRun) => updateChat({
-        project: frame.project, id: handoff.id, type: 'run', items, savedRun,
+        project: frame.project, id: handoff.id, type: 'run', items, savedRun, runThreadId: handoff.codexThreadId,
       });
       mountHandoff().then(() => handoffUpdate(handoffItems));
     `);
-    await check("handoffOrder()", "live executor response precedes submission and review: " + times[2]);
+    await check("handoffOrder()", "live executor response stays ordered during review: " + times[2]);
     await evaluate(`
       var waitingForHistory = Promise.withResolvers();
       historyRead = waitingForHistory.promise;
       var refreshingHandoff = showTask(handoff.id);
-      handoffUpdate([], { sequence: 2, items: handoffItems, durationMs: 947258 });
+      handoffUpdate([], { sequence: 2, items: handoffItems, durationMs: 947258, threadId: handoff.codexThreadId });
     `);
     await check("taskInSheet.history.length === 1 && handoffOrder()",
       "the save receipt keeps one executor answer visible while the card waits for history: " + times[2]);
@@ -2416,7 +2407,7 @@ app.whenReady().then(async () => {
       delete savedRun.run;
       mountHandoff().then(() => byId('task-chat-work').querySelector('.task-work-controls button').click());
     `);
-    await check("handoffOrder()", "restored executor log precedes the completed review: " + times[2]);
+    await check("handoffOrder()", "restored executor log stays ordered during review: " + times[2]);
     if (keepArtifacts && times[3] === '12:03:30') await captureHandoff('handoff-restored.png');
   }
   await evaluate("api.command = beforeHandoffCommand; byId('task-side').replaceChildren(); byId('task-side').hidden = true");

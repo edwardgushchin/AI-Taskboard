@@ -4917,10 +4917,6 @@ function expertAvatar(id, name) {
   return avatar;
 }
 
-function expertStageLabel(task, phase, key) {
-  return task.expertTeam?.[phase]?.stages.find(stage => stage.key === key)?.title;
-}
-
 function expertTeamSection(task) {
   const area = element("section", undefined, "expert-team");
   area.append(element("h3", () => t("experts.plan_title")));
@@ -5003,6 +4999,11 @@ function expertTeamSection(task) {
     phases.append(phaseArea);
   }
   area.append(phases);
+  if (task.history.some(event => event.expertMessage)) {
+    const mail = element("details");
+    mail.append(element("summary", () => t("experts.conversation")), expertTeamMail(task));
+    area.append(mail);
+  }
   body.append(area);
   if (labels.size) void expertRoleNames(frame.project).then(names => {
     if (!area.isConnected) return;
@@ -5014,7 +5015,6 @@ function expertTeamSection(task) {
 
 function expertTeamMail(task) {
   const log = element("section", undefined, "task-team-mail");
-  log.append(element("h4", () => t("experts.conversation")));
   if (task.expertStage) {
     log.append(button(task.expertStage.parentId, () => showTask(task.expertStage.parentId), "quiet"));
     return log;

@@ -358,28 +358,11 @@ app.whenReady().then(async () => {
     `);
     await check(`byId('task-chat-work').checkVisibility() && byId('task-chat-input').closest('form').hidden &&
       /Current work summary/.test(byId('task-chat-work').textContent) && /Saved work summary/.test(byId('task-chat-work').textContent) &&
-      byId('task-chat-work').textContent.includes('Verify outcomes · Завершён') &&
-      byId('task-chat-work').textContent.includes('Скил подготовлен для контекста · Workflow') &&
-      !/Answer in dialogue|expert-stage/.test(byId('task-chat-work').textContent)`, 'work history names the stage and separates live activity from dialogue');
-    await evaluate(`laneButton('team').click(); settle()`);
-    await evaluate(`waitFor(() => byId('task-chat-team').querySelector('.expert-author')?.textContent === 'QA Engineer')`);
-    await check(`(() => {
-      const team = byId('task-chat-team');
-      const bubble = team.querySelector('.expert-message');
-      return team.checkVisibility() && bubble.querySelector('.expert-avatar').textContent === 'QA' &&
-        bubble.querySelector('time').dateTime === '2026-11-18T00:00:01Z' &&
-        bubble.querySelector('.expert-bubble').textContent.includes('Hand off evidence') &&
-        !team.querySelector('form, textarea, [type=submit]') && !bubble.querySelector('button') &&
-        byId('task-chat-input').closest('form').hidden;
-    })()`, 'team conversation has a named avatar, bubble, timestamp and no composer or reply');
-    await evaluate(`byId('task-chat-team').querySelector('.expert-agent-history > summary').click(); settle()`);
-    await check(`(() => {
-      const wait = byId('task-chat-team').querySelector('[data-agent-call="native-wait"]');
-      const started = byId('task-chat-team').querySelector('[data-agent-call="native-spawn"]');
-      return wait.checkVisibility() && wait.textContent.includes('В этот момент работали QA Engineer · Verify outcomes') &&
-        started.textContent.includes('gpt-6.1-sol') && started.textContent.includes('Verify outcomes') &&
-        !wait.textContent.includes('child-session');
-    })()`, 'App Server v2 events correlate a named agent with wait and show the reported model');
+      !/Answer in dialogue|Verify outcomes|Workflow|Hand off evidence/.test(byId('task-chat-work').textContent)`,
+      'work contains only saved and live Codex activity');
+    await check(`document.querySelectorAll('#task-side .board-chat-views button').length === 2 &&
+      body.querySelector('.expert-team .task-team-mail .expert-message').textContent.includes('Hand off evidence')`,
+      'the card has two chat tabs and retains its mail in the expert plan');
     await check(`(() => {
       const target = document.createElement('div');
       showSubmissionResult(planned.result, target);
@@ -1383,77 +1366,22 @@ app.whenReady().then(async () => {
     await evaluate(`
       const reviewed = fixture.board.tasks[1];
       reviewed.status = 'review';
-      reviewed.history.push({ action: 'review-approve', actor: 'reviewer', text: 'Сохранённое согласование.',
-        at: reviewed.updatedAt });
-      let attempts = [];
+      reviewed.history.push({ action: 'review-approve', actor: 'reviewer',
+        text: 'Сохранённое согласование.', at: reviewed.updatedAt });
       let reviewerReads = 0;
-      const work = () => byId('task-chat-work');
-      const reviewRows = () => [...work().querySelectorAll('.task-review-attempt')];
       window.taskboard.command = async () => ({ ok: true, data: structuredClone(reviewed) });
       window.taskboard.chatModels = async () => ({ ok: true, data: [] });
       window.taskboard.reviewerChat = async () => {
         reviewerReads++;
-        return { ok: true, data: structuredClone(attempts) };
+        return { ok: true, data: [] };
       };
       push();
       showTask(reviewed.id);
-      waitFor(work);
+      waitFor(() => byId('task-chat-work'));
     `);
-    await check(`reviewRows().length === 0 && reviewerReads === 0`, "the dialogue leaves review history unloaded");
-    await evaluate(`document.querySelector('[aria-controls="task-chat-work"]').click();
-      waitFor(() => reviewerReads === 1 && work().textContent.includes('Сохранённое согласование.'))`);
-    await check(`reviewRows().length === 0`, "legacy decisions appear in the work feed without an attempt record");
-    await evaluate(`
-      const summary = { id: 'summary', title: '', type: 'reasoning', text: 'Сводка проверки', status: 'inProgress' };
-      const live = { id: 'review-1', at: '2025-03-01T00:00:00.000Z', items: [
-        { id: 'commentary', title: '', type: 'agentMessage', phase: 'commentary', text: 'Сверяю критерии.', status: 'completed' },
-        summary,
-        { id: 'tool', title: 'task_review_diff', type: 'dynamicToolCall', text: '[]', status: 'completed' }
-      ] };
-      attempts = [live];
-      const publishReview = () => window.pushChat({ project: fixture.project, id: reviewed.id, type: 'reviewer-chat' });
-      publishReview();
-      waitFor(() => reviewRows()[0]?.textContent.includes('Сводка проверки'));
-    `);
-    await check(`getComputedStyle(reviewRows()[0].firstElementChild).clipPath === 'none' &&
-      reviewRows()[0].firstElementChild.checkVisibility() && reviewRows()[0].textContent.includes('Ревьюер #1') &&
-      reviewRows()[0].querySelector('[data-item="item:summary"] pre').checkVisibility() &&
-      reviewRows()[0].textContent.includes('Сверяю критерии.') &&
-      reviewRows()[0].textContent.includes('task_review_diff')`, "the open work feed shows a live summary, commentary and action");
-    if (keepArtifacts) await capture("review-live.png");
-    await evaluate(`
-      live.durationMs = 1200;
-      summary.status = 'completed';
-      summary.text += ' завершена';
-      live.items.push({ id: 'result', title: '', type: 'agentMessage', phase: 'final_answer', status: 'completed',
-        text: JSON.stringify({ summary: 'Результат согласован.', findings: [], evidence: ['Критерий проверен.'], needsHuman: false }) });
-      attempts.push({ id: 'review-2', at: '2025-03-02T00:00:00.000Z', durationMs: 900, items: [
-        { ...summary, text: ' ' }, { ...live.items[2] }, { ...live.items[3], text: '{"summary":"Повторная проверка завершена."}' }
-      ] });
-      publishReview();
-      waitFor(() => reviewRows().length === 2);
-    `);
-    await check(`reviewRows()[0].textContent.includes('Критерий проверен.') &&
-      !reviewRows()[0].textContent.includes('needsHuman') &&
-      reviewRows()[0].querySelectorAll('[data-item="item:summary"]').length === 1 &&
-      [...reviewRows()[0].querySelector('.chat-run').children].map(node => node.dataset.item).join(',') ===
-        'message:commentary,item:summary,item:tool,message:result' &&
-      reviewRows()[1].textContent.includes('Ревьюер #2') && reviewRows()[1].textContent.includes('task_review_diff') &&
-      reviewRows()[1].textContent.includes('Повторная проверка завершена.') &&
-      !reviewRows()[1].querySelector('[data-item="item:summary"]')`, "completed attempts keep event order and show checks and outcome without a summary");
-    await evaluate(`(async () => {
-      sheet.close();
-      chatDrafts.clear();
-      reviewed.status = 'done';
-      await showTask(reviewed.id);
-      document.querySelector('[aria-controls="task-chat-work"]').click();
-      await waitFor(() => reviewRows().length === 2);
-      publishReview();
-      await waitFor(() => reviewerReads >= 5);
-    })()`);
-    await check(`reviewRows().length === 2 && reviewRows()[0].textContent.includes('Сводка проверки завершена') &&
-      reviewRows()[1].textContent.includes('Повторная проверка завершена.')`, "reopening and refreshing load each saved attempt once");
-    if (keepArtifacts) await capture("review-reopened.png");
+    await evaluate(`document.querySelector('[aria-controls="task-chat-work"]').click(); settle();`);
+    await check(`reviewerReads === 0 && !byId('task-chat-work').textContent.includes('Сохранённое согласование.')`,
+      "the task work feed does not load reviewer attempts or display board decisions");
     console.log("Reviewer chat Chromium checks passed: " + checks);
     return;
   }

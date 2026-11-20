@@ -85,8 +85,6 @@ async function run() {
     const waitUI = code => waitFor(() => evaluate(code), code);
     const tile = item => `document.querySelector('[data-item="item:${item}"] .chat-attachment')`;
     const image = item => `${tile(item)}?.querySelector('img')`;
-    const viewer = "document.querySelector('.image-preview[open]')";
-    const stage = `${viewer}?.querySelector('.image-preview-stage img:not([hidden])')`;
     const getPreview = (card, path, reviewer) =>
       evaluate(`api.runImagePreview(${JSON.stringify(card)}, ${JSON.stringify(path)}, ${reviewer})`);
     async function openWork() {
@@ -103,37 +101,12 @@ async function run() {
         tile.scrollIntoView({block: 'center'});
       })()`);
     }
-    async function thumbnails() {
-      for (const [index, item] of ["first", "second"].entries()) {
-        await reveal(item);
-        await waitUI(`${image(item)}?.naturalWidth === 320`);
-        assert.equal(await evaluate(`${image(item)}.src`), expected[index]);
-      }
-    }
-    async function capture(name) {
-      if (!keepArtifacts) return;
-      await reveal("first");
-      writeFileSync(join(artifacts, name), (await contents.capturePage()).toPNG());
-    }
     await openWork();
     assert.equal((await evaluate(`api.reviewerChat('${id}')`)).data[0].durationMs, undefined);
     assert.equal(await getPreview(id, first, true), expected[0]);
     assert.equal(await getPreview(id, join(project, second), true), expected[1]);
-    await thumbnails();
-    await capture("review-image-live.png");
-    await reveal("first");
-    const point = await evaluate(`(() => {
-      const rect = ${tile("first")}.getBoundingClientRect();
-      return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
-    })()`);
-    window.focus();
-    contents.sendInputEvent({ type: "mouseDown", ...point, button: "left", clickCount: 1 });
-    contents.sendInputEvent({ type: "mouseUp", ...point, button: "left", clickCount: 1 });
-    await waitUI(`${stage}?.src === ${JSON.stringify(expected[0])}`);
-    for (const type of ["keyDown", "keyUp"]) contents.sendInputEvent({ type, keyCode: "Right" });
-    await waitUI(`${stage}?.src === ${JSON.stringify(expected[1])}`);
-    await evaluate(`${viewer}.close()`);
-    report.push("В активном ревью клик открыл первое вложение, стрелка вправо — второе.");
+    assert.equal(await evaluate(`Boolean(${tile("first")} || ${tile("second")})`), false);
+    report.push("Во время ревью IPC возвращает оба файла, а журнал открытого чата не содержит действий ревьюера.");
 
     finishReview.resolve();
     await review;
@@ -142,29 +115,16 @@ async function run() {
     await evaluate("sheet.close()");
     await openWork();
     assert.equal(typeof (await evaluate(`api.reviewerChat('${id}')`)).data[0].durationMs, "number");
-    await thumbnails();
-    await capture("review-image-history.png");
-    await reveal("second");
-    await evaluate(`${tile("second")}.focus()`);
-    assert.equal(await evaluate(`document.activeElement === ${tile("second")}`), true);
-    contents.sendInputEvent({ type: "keyDown", keyCode: "Enter" });
-    contents.sendInputEvent({ type: "char", keyCode: "\r" });
-    contents.sendInputEvent({ type: "keyUp", keyCode: "Enter" });
-    await waitUI(`${stage}?.src === ${JSON.stringify(expected[1])}`);
-    await evaluate(`${viewer}.close()`);
+    assert.equal(await evaluate(`Boolean(${tile("first")} || ${tile("second")})`), false);
     await reveal("executor");
     await waitUI(`${image("executor")}?.src === ${JSON.stringify(expected[1])}`);
-    report.push("После завершения ревью IPC возвращает оба файла. После повторного открытия карточки обе миниатюры загружаются из сохранённой истории, Enter открывает вторую. Миниатюра исполнителя загружается.");
+    report.push("После завершения ревью оба файла доступны через IPC. После повторного открытия в журнале видна миниатюра исполнителя.");
 
-    await reveal("missing");
-    await waitUI(`/недоступ/i.test(${tile("missing")}.textContent)`);
-    await evaluate(`${tile("missing")}.click()`);
-    await waitUI(`${viewer}?.querySelector('.image-preview-status').textContent.includes('${missing}')`);
     assert.equal(await getPreview(id, missing, true), null);
     assert.equal(await getPreview(id, unviewed, true), null);
     assert.equal(await getPreview(other, first, true), null);
     assert.equal(await getPreview(id, first, false), null);
-    report.push("Отсутствующий файл помечен в миниатюре и просмотрщике. IPC отклоняет путь из неудавшегося действия, путь другой карточки и запрос пути ревьюера в журнале исполнителя.");
+    report.push("IPC отклоняет отсутствующий файл, путь из неудавшегося действия, путь другой карточки и запрос пути ревьюера в журнале исполнителя.");
     const result = [`PASS Electron ${process.versions.electron}, Node ${process.versions.node}, ${process.platform}/${process.arch}, окно ${window.getSize().join("×")}`,
       "Изолированная доска, тестовые вложения и события без внешнего провайдера. Renderer, preload и IPC приложения.",
       ...report, "Команда: node scripts/check-reviewer-images.mjs --artifacts .tasks/qa", ""].join("\n");

@@ -91,62 +91,33 @@ async function run() {
   const evaluate = code => window.webContents.executeJavaScript(code);
   await evaluate(`showTask(${JSON.stringify(id)})`);
   await evaluate(`document.querySelector('[aria-controls="task-chat-work"]').click()`);
-  const rows = await waitFor(() => evaluate(`(() => {
-    const feed = document.querySelector('#task-chat-work');
-    const attempts = [...feed.querySelectorAll('.task-review-attempt')];
-    if (attempts.length !== 3) return null;
-    return {
-      text: feed.innerText,
-      handoff: [...feed.children].flatMap(row => {
-        if (row.textContent.includes('Executor response saved during review.')) return ['executor'];
-        if (row.textContent.includes('Submission before review')) return ['submission'];
-        return row === attempts[0] ? ['reviewer'] : [];
-      }),
-      decisionCount: [...feed.querySelectorAll('.chat-event > .chat-author')]
-        .filter(label => label.textContent === 'Ревьюер').length,
-      attempts: attempts.map(row => ({
-        label: row.firstElementChild.innerText,
-        events: [...row.querySelector('.chat-run').children].map(node => node.dataset.item),
-        summaryVisible: row.querySelector('[data-item="item:summary-1"] pre')?.checkVisibility() ?? false
-      }))
-    };
-  })()`));
-  assert.match(rows.attempts[0].label, /Ревьюер #1/);
-  assert.match(rows.attempts[1].label, /Ревьюер #2/);
-  assert.match(rows.attempts[2].label, /Ревьюер #3/);
-  assert.deepEqual(rows.handoff, ["executor", "submission", "reviewer"]);
-  assert.equal(rows.decisionCount, 3);
-  assert.deepEqual(rows.attempts.map(row => row.events), [
-    ["item:summary-1", "item:tool-1", "message:result-1"], ["item:tool-2", "message:result-2"], ["message:result-3"],
+  const history = await evaluate(`api.reviewerChat(${JSON.stringify(id)})`);
+  assert.equal(history.ok, true);
+  assert.deepEqual(history.data.map(attempt => attempt.items.map(item => item.id)), [
+    ["summary-1", "tool-1", "result-1"], ["tool-2", "result-2"], ["result-3"],
   ]);
-  assert.deepEqual(rows.attempts.map(row => row.summaryVisible), [true, false, false]);
-  for (const text of ["Provider summary for attempt one.", "task_review_diff 1", "task_review_diff 2",
-    "Need a human decision.", "Review approved.", "Evidence for attempt 1", "Evidence for attempt 2",
-    "Fix the finding from the saved report."]) {
-    assert.equal(rows.text.split(text).length - 1, 1, text);
-  }
+  const work = await evaluate(`document.querySelector('#task-chat-work').innerText`);
+  assert.match(work, /Executor response saved during review/);
+  assert.doesNotMatch(work, /Provider summary|task_review_diff|Submission before review|Review approved|Fix the finding/);
   if (!writing && keepArtifacts) {
-    await window.webContents.capturePage();
-    await delay(200);
     writeFileSync(join(artifacts, "review-after-restart.png"), (await window.webContents.capturePage()).toPNG());
   }
   await evaluate(`sheet.close(); showTask("T-0002")`);
   await evaluate(`document.querySelector('[aria-controls="task-chat-work"]').click()`);
   assert.deepEqual(await evaluate(`api.reviewerChat("T-0002")`), { ok: true, data: [] });
-  assert.match(await evaluate(`document.querySelector('#task-chat-work').innerText`), /Decision from the card history/);
+  assert.doesNotMatch(await evaluate(`document.querySelector('#task-chat-work').innerText`), /Decision from the card history/);
   await evaluate(`sheet.close(); showTask("T-0003")`);
   assert.deepEqual(await evaluate(`api.reviewerChat("T-0003")`), { ok: true, data: [] });
   assert.match(await evaluate(`document.querySelector('#task-chat-dialogue').innerText`), /Repair the missing evaluation/);
   await evaluate(`document.querySelector('[aria-controls="task-chat-work"]').click()`);
   const fallbackReason = await evaluate(`document.querySelector('#task-chat-work').innerText`);
-  assert.match(fallbackReason, /Ревьюер/);
-  assert.equal(fallbackReason.split("Repair the missing evaluation.").length - 1, 1);
+  assert.doesNotMatch(fallbackReason, /Repair the missing evaluation/);
   if (!writing && keepArtifacts) {
     await window.webContents.capturePage();
     await delay(200);
     writeFileSync(join(artifacts, "review-return-without-journal.png"), (await window.webContents.capturePage()).toPNG());
   }
-  console.log(`PASS Electron ${process.versions.electron}, ${process.platform}, PID ${process.pid} (${writing ? "initial process" : "restarted process"}): three ordered attempts, one copy per decision, note and return available without a journal`);
+  console.log(`PASS Electron ${process.versions.electron}, ${process.platform}, PID ${process.pid} (${writing ? "initial process" : "restarted process"}): three ordered attempts available through IPC, with reviewer data excluded from the task work feed`);
 }
 
 run().then(() => app.quit(), error => { console.error(error); app.exit(1); });

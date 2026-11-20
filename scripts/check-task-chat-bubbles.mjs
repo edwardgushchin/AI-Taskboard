@@ -261,13 +261,14 @@ void (async () => {
           const reviewCard = { ...taskInSheet, status: 'review' };
           const area = taskChat(reviewCard);
           byId('task-side').replaceChildren(area);
-          area.openReviewer();
+          area.querySelector('[aria-controls="task-chat-work"]').click();
         }`);
-        await until(() => evaluate("Boolean(document.querySelector('.task-work .task-review-attempt [data-item=\"item:reviewer-foreign\"]'))"), "live reviewer item in work");
+        await delay(200);
+        assert.equal(await evaluate("Boolean(document.querySelector('.task-work [data-item=\"item:reviewer-foreign\"]'))"), false);
         await evaluate("byId('task-side').firstElementChild.openDialogue()");
         assert.equal(await evaluate("Boolean(document.querySelector('.chat-turn [data-item=\"item:reviewer-foreign\"]'))"), false);
         assert.equal((await snapshot()).length, 3);
-        check("A live reviewer attempt uses its own IPC feed and shows its tool in Ход работы only");
+        check("The reviewer tool stays out of both tabs of the task dialogue");
       } finally {
         reviewDone.resolve();
         await review;
@@ -282,7 +283,7 @@ void (async () => {
       assert.equal(messages()[2].at, provider.at);
       await reopen();
       assert.equal(await evaluate("document.querySelector('.chat-turn').childElementCount"), 0);
-      await evaluate("byId('task-side').firstElementChild.openReviewer()");
+      await evaluate("byId('task-side').querySelector('[aria-controls=task-chat-work]').click()");
       assert.deepEqual(await evaluate(`Array.from(document.querySelectorAll('.task-work details[data-item^="item:reply-"]'),
         node => node.dataset.item)`), ["item:reply-update", "item:reply-check"]);
       await evaluate("byId('task-side').firstElementChild.openDialogue()");
@@ -519,7 +520,7 @@ void (async () => {
       await until(async () => (await snapshot()).at(-1)?.text === reply, "active executor reply restored from history");
       assert.deepEqual((await snapshot()).map(row => row.text), [contextMessage, question, answer, reply]);
       assert.equal(await evaluate("document.querySelector('.chat-turn').childElementCount"), 0);
-      await evaluate("byId('task-side').firstElementChild.openReviewer()");
+      await evaluate("byId('task-side').querySelector('[aria-controls=task-chat-work]').click()");
       await until(() => evaluate("Boolean(document.querySelector('.task-work [data-item=\"item:before-owner-reply\"]'))"), "older executor action in work");
       assert.equal(await evaluate("document.querySelectorAll('.task-work [data-item=\"item:steered-task-update\"]').length"), 1);
       check("The active executor final reply is saved exactly once. Both old and new actions remain in Ход работы after reopening");
@@ -540,7 +541,7 @@ void (async () => {
       assert.equal(await evaluate("document.querySelector('.chat-turn').childElementCount"), 0);
       assert.equal((await snapshot()).at(-1)?.text, rejected);
       assert.equal(await evaluate(`frame.runningTasks?.includes(${activeId})`), true);
-      await evaluate("byId('task-side').firstElementChild.openReviewer()");
+      await evaluate("byId('task-side').querySelector('[aria-controls=task-chat-work]').click()");
       await until(() => evaluate("Boolean(document.querySelector('.task-work [data-item=\"item:before-owner-reply\"]'))"), "old action kept after failed steering");
       check("A rejected steering request clears Думаю…, keeps the owner’s message and preserves older work while the executor runs");
 

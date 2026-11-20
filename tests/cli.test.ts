@@ -1408,14 +1408,20 @@ test("task chat stores messages and attachments together and archives the conver
   assert.deepEqual(answered.history.at(-1).run, reply.run);
   cli(root, ["chat", task.id], { ...reply, replyTo: sent.history.length - 1 }, "CHAT_CHANGED");
   const entries = [{ id: "final", type: "agentMessage", phase: "final_answer", title: "", text: "Saved result", status: "completed" }];
+  const runThreadId = "10000000-0000-0000-0000-000000000001";
   cli(root, ["run-log", task.id], { entries, durationMs: -1 }, "INVALID_INPUT");
   cli(root, ["run-log", task.id], { entries: [{ ...entries[0], phase: "unknown" }] }, "INVALID_INPUT");
-  const loggedReceipt = cli(root, ["run-log", task.id, "--compact"], { entries, durationMs: 433_000 });
+  for (const invalid of [123, " " + runThreadId, runThreadId + "x", runThreadId.replace("10000000", "1000000z")]) {
+    cli(root, ["run-log", task.id], { entries, runThreadId: invalid }, "INVALID_INPUT");
+  }
+  const loggedReceipt = cli(root, ["run-log", task.id, "--compact"], { entries, durationMs: 433_000, runThreadId });
   assert.equal(loggedReceipt.id, task.id);
   assert.equal(loggedReceipt.history, undefined);
   const logged = cli(root, ["show", task.id]);
   assert.equal(loggedReceipt.runLogSequence, logged.history.length);
+  assert.equal(logged.history.length, answered.history.length + 1);
   assert.deepEqual(logged.history.at(-1).run, entries);
+  assert.equal(logged.history.at(-1).runThreadId, runThreadId);
   const compact = cli(root, ["list", "--compact"]).tasks.find((entry: { id: string }) => entry.id === task.id);
   assert.equal(compact.revision, logged.revision);
   assert.equal(compact.historyLength, logged.history.length);
