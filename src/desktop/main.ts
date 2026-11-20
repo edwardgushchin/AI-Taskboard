@@ -13,6 +13,7 @@ import { forgetExecutor, matchesQueuedExecutor, prepareQueuedTurn, recordQueuedT
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, Notification, protocol, session, shell } from "electron";
 import type { IpcMainInvokeEvent } from "electron";
 import { randomUUID } from "node:crypto";
+import { serialize } from "node:v8";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { lstat, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -96,6 +97,7 @@ interface WindowState {
   ready?: Promise<void>;
   restoring: boolean;
   restoredActive?: ProjectTab;
+  lastFrame?: Buffer;
 }
 
 interface BoardWatch {
@@ -106,7 +108,7 @@ interface BoardWatch {
   board: Board;
   stop: () => void;
   reviewAttempts: Map<string, string>;
-  shared?: { runtime: string; context?: string; activity: string; queue: number; history: number; binding: number; unread: number };
+  shared?: { runtime: string; context?: string; goalRunning: boolean; activity: string; queue: number; history: number; binding: number; unread: number };
   reviewReports: Map<string, ReviewedSubmission>;
   reviewerRuns: Map<string, Promise<void>>;
 }
@@ -301,10 +303,19 @@ function frame(state: ProjectTab) {
 
 function send(state: ProjectTab): void {
   if (state.window.isDestroyed()) return;
-  const owner = windowStates.get(state.window.webContents.id);
+  const contents = state.window.webContents;
+  const owner = windowStates.get(contents.id);
   if (owner) {
     state = owner.active;
-    state.window.webContents.send("board:changed", frame(state));
+    if (!contents.isLoadingMainFrame()) {
+      const next = frame(state);
+      // Keep a value snapshot: some run objects are updated in place.
+      const serialized = serialize(next);
+      if (!owner.lastFrame?.equals(serialized)) {
+        contents.send("board:changed", next);
+        owner.lastFrame = serialized;
+      }
+    }
     state.window.setTitle(state.project ? basename(state.project) + " · AI Taskboard" : "AI Taskboard");
   }
 }
@@ -749,6 +760,12 @@ function createWindow(initial: string[] = [], selected?: string): WindowState {
     state.restoredActive = state.active;
   }
   windowStates.set(id, state);
+  window.webContents.on("did-start-loading", () => {
+    state.lastFrame = undefined;
+  });
+  window.webContents.on("did-finish-load", () => {
+    if (!state.restoring) send(state.active);
+  });
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-navigate", event => event.preventDefault());
   window.on("close", event => {
@@ -4921,6 +4938,7 @@ else {
           const next = watch.shared = {
             runtime: JSON.stringify(entries, (key, value) => key === "live" ? undefined : value),
             context: context?.id,
+            goalRunning: Boolean(goalContext?.state?.goalRunning),
             activity: [live && context!.id + ":" + live.sequence,
               goalLive && goalContext!.id + ":" + goalLive.sequence,
               backgroundLive && background!.id + ":" + backgroundLive.sequence].join("|"),
@@ -4938,13 +4956,15 @@ else {
               (previous?.context && previous.context !== next.context)) {
             broadcastBoardChat(project, "orchestrator-history");
             broadcastBoardChat(project, "orchestrator-work-history");
+          } else if (previous.goalRunning !== next.goalRunning) {
+            broadcastBoardChat(project, "orchestrator-work-history");
           }
           if (previous?.activity !== next.activity) {
+            // Live items have a separate reader. Saved pages are invalidated above.
             if (live && context?.state?.lane === "chat") {
               broadcastBoardChat(project, "orchestrator", { items: managerChatItems(live.items) });
             }
             broadcastBoardChat(project, "orchestrator-work-activity");
-            broadcastBoardChat(project, "orchestrator-work-history");
           }
           if (previous?.queue !== next.queue) {
             broadcastBoardChat(project, "orchestrator-queue");
