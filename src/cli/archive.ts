@@ -225,8 +225,18 @@ function withNewAttachments(
 
 export function addChatMessage(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
   const draftDiscussion = input.draftDiscussion === true;
-  requireRevision(task, input.revision, draftDiscussion);
   const actor = actorFor(input, "user");
+  if (draftDiscussion) {
+    if (actor !== "agent" || task.status !== "draft" || task.draftDiscussion?.phase !== "running") {
+      throw new TaskboardError("CHAT_CHANGED", "The draft discussion is no longer awaiting a reply.");
+    }
+    const revision = number(input.revision, "revision");
+    if (revision < task.revision) {
+      // Discard the answer and requeue under the same board lock.
+      return store.save(record({ ...task, draftDiscussion: { phase: "queued" } }, "draft-discussion-queued", "agent"));
+    }
+  }
+  requireRevision(task, input.revision, draftDiscussion);
   const at = input.at;
   if (at !== undefined && (actor !== "agent" || typeof at !== "string" ||
       !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(at) ||
@@ -239,11 +249,7 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
   if (input.awaitingAnswer !== undefined && (actor !== "agent" || typeof input.awaitingAnswer !== "boolean")) {
     throw new TaskboardError("INVALID_INPUT", "Only an agent reply can set a boolean awaitingAnswer state.");
   }
-  if (draftDiscussion) {
-    if (actor !== "agent" || task.status !== "draft" || task.draftDiscussion?.phase !== "running") {
-      throw new TaskboardError("CHAT_CHANGED", "The draft discussion is no longer awaiting a reply.");
-    }
-  } else if (actor === "agent") {
+  if (!draftDiscussion && actor === "agent") {
     const last = task.history.findLastIndex(event => event.chat);
     if (last !== number(input.replyTo, "replyTo", 0) || task.history[last]?.actor !== "user") {
       throw new TaskboardError("CHAT_CHANGED", "The last chat message changed before the reply was saved.");
