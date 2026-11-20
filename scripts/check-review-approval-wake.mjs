@@ -8,6 +8,7 @@ import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { electronCheck } from "./electron-check.mjs";
+import { registerRuntime } from "../src/desktop/board-runtime.ts";
 import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
 
 const baselinePhase = ["baseline"];
@@ -22,6 +23,7 @@ const { transformSync } = require("esbuild");
 const cliEntry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
 const counts = new Map();
 const scenarios = new Map();
+const reviewerSlots = [];
 let providerError;
 
 function cli(project, args, input, errorCode) {
@@ -65,7 +67,11 @@ function prepare(name, { useGit = false, autoMode = false, reviewMode = "reviewe
     git(project, "commit", "--allow-empty", "-m", "Initialize fixture");
   }
   cli(project, ["init"], { git: useGit });
-  cli(project, ["settings"], { autoMode, reviewMode });
+  cli(project, ["settings"], { autoMode, reviewMode, taskLimits: { reviewer: 1 } });
+  // This fixture records reviewer decisions itself at the time required by each scenario.
+  const release = registerRuntime(project, { task: "fixture:reviewer", kind: "slot", role: "reviewer" });
+  assert.ok(release, "reserve the fixture reviewer slot");
+  reviewerSlots.push(release);
   const result = submitCard(project, "Supplied result", useGit, reviewMode);
   const queued = cli(project, ["create"], plannedDraft({ title: "Unrelated ready task" }));
   cli(project, ["approve", queued.id]);
@@ -346,7 +352,11 @@ async function checkBaseline(first, noChanges, gate) {
   done(hybrid, "review");
 }
 
-run().then(() => app.exit(0), error => {
+run().finally(() => {
+  for (const release of reviewerSlots) {
+    release();
+  }
+}).then(() => app.exit(0), error => {
   console.error(error);
   app.exit(1);
 });
