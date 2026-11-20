@@ -1407,10 +1407,19 @@ test("task chat stores messages and attachments together and archives the conver
   assert.equal(answered.history.at(-1).durationMs, reply.durationMs);
   assert.deepEqual(answered.history.at(-1).run, reply.run);
   cli(root, ["chat", task.id], { ...reply, replyTo: sent.history.length - 1 }, "CHAT_CHANGED");
-  const entries = [{ id: "final", type: "agentMessage", phase: "final_answer", title: "", text: "Saved result", status: "completed" }];
-  const runThreadId = "10000000-0000-0000-0000-000000000001";
+  const entries = [
+    {
+      id: "action", type: "commandExecution", title: "check", text: "Passed", status: "completed",
+      at: "2026-11-20T12:00:00.000Z", threadId: "89a8fd97-2b31-4f76-b3e9-895bdc219a81",
+      stageSessionId: "915f5a9d-9d17-4600-8d15-e20298d8ad01",
+    },
+    { id: "final", type: "agentMessage", phase: "final_answer", title: "", text: "Saved result", status: "completed" },
+  ];
   cli(root, ["run-log", task.id], { entries, durationMs: -1 }, "INVALID_INPUT");
   cli(root, ["run-log", task.id], { entries: [{ ...entries[0], phase: "unknown" }] }, "INVALID_INPUT");
+  cli(root, ["run-log", task.id], { entries: [{ ...entries[0], threadId: " " + entries[0].threadId }] }, "INVALID_INPUT");
+  cli(root, ["run-log", task.id], { entries: [{ ...entries[0], stageSessionId: 12 }] }, "INVALID_INPUT");
+  const runThreadId = "10000000-0000-0000-0000-000000000001";
   for (const invalid of [123, " " + runThreadId, runThreadId + "x", runThreadId.replace("10000000", "1000000z")]) {
     cli(root, ["run-log", task.id], { entries, runThreadId: invalid }, "INVALID_INPUT");
   }

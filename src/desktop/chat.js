@@ -724,7 +724,7 @@ function collaborationItem(item) {
 }
 
 function taskWorkItem(item) {
-  if (collaborationItem(item)) return false;
+  if (item.stageChild || collaborationItem(item)) return false;
   if (item.type === "error" && ["project-closed", "save-error", "discussion-launch-error", "schedule-error", "block-error"].includes(item.id)) {
     return false;
   }
@@ -740,7 +740,7 @@ function isTaskChatReplacement(event, task) {
   return task.codexServiceThreads?.some(id => id !== task.codexThreadId && event.text?.endsWith("`" + id + "`"));
 }
 
-function reviewerHistory(task, journal, decisions) {
+function reviewerHistory(task, journal, decisions, onActivity) {
   const project = frame.project;
   const status = element("li", undefined, "muted");
   status.setAttribute("role", "status");
@@ -753,7 +753,7 @@ function reviewerHistory(task, journal, decisions) {
     if (timer !== undefined) return;
     timer = setTimeout(() => {
       timer = undefined;
-      if (journal.closest("details")?.open) void load();
+      if (journal.isConnected && (onActivity || journal.closest("details")?.open)) void load();
     }, 200);
   };
 
@@ -764,6 +764,8 @@ function reviewerHistory(task, journal, decisions) {
       if (!journal.isConnected || project !== frame.project || request !== generation) return;
       if (!result.ok) throw new Error(boardError(result.error));
       const attempts = result.data;
+      onActivity?.(attempts.flatMap(attempt => attempt.items));
+      if (!journal.closest("details")?.open) return;
       const ids = new Set(attempts.map(attempt => attempt.id));
       for (const [id, node] of nodes) {
         if (ids.has(id)) continue;
@@ -793,7 +795,7 @@ function reviewerHistory(task, journal, decisions) {
         node.error.hidden = !attempt.error;
         node.report = undefined;
         const items = attempt.items.flatMap(item => {
-          if (collaborationItem(item)) return [];
+          if (item.stageChild || collaborationItem(item)) return [];
           if (item.type !== "agentMessage" || item.phase === "commentary") return [item];
           if (item.status !== "completed") return [];
           node.report = undefined;
@@ -832,7 +834,130 @@ function reviewerHistory(task, journal, decisions) {
   }
 }
 
-function taskChat(task) {
+function collaborationData(item) {
+  try { return JSON.parse(item.text) ?? {}; } catch { return {}; }
+}
+
+function stageWork(task, panels) {
+  if (!panels?.size) return;
+  const attempts = [];
+  const active = new Map();
+  for (const event of task.history) {
+    const run = event.expertStageRun;
+    if (!run) {
+      // An open stage from an interrupted run cannot claim later activity.
+      for (const [address, attempt] of active) {
+        const phase = attempt.run.phase;
+        const planChanged = event.action === "expert-plan" && (!event.expertPhase || event.expertPhase === phase);
+        if (planChanged || event.action === "update" || (event.action === "progress" && event.to === "ready") ||
+            ["start", "submit", "pause", "resume", "block", "cancel",
+          "return-to-draft", "request-changes", "review-approve", "accept"].includes(event.action)) {
+          attempt.until = event.at;
+          active.delete(address);
+        }
+      }
+      if (event.action === "expert-plan") {
+        for (const attempt of attempts) {
+          if (!event.expertPhase || event.expertPhase === attempt.run.phase) attempt.previousPlan = true;
+        }
+      }
+      continue;
+    }
+
+    const address = run.phase + ":" + run.key;
+    let attempt = active.get(address);
+    if (run.state === "running" && run.agentId && attempt?.run.sessionId &&
+        run.sessionId === attempt.run.sessionId && run.threadId === attempt.run.threadId &&
+        run.targetHead === attempt.run.targetHead) {
+      attempt.agentId = run.agentId;
+      continue;
+    }
+    if (attempt) {
+      attempt.until = event.at;
+      active.delete(address);
+    }
+    if (run.state === "running" || !attempt ||
+        (run.threadId && run.threadId !== attempt.run.threadId) || run.targetHead !== attempt.run.targetHead) {
+      attempt = { address, run, agentId: run.agentId, at: event.at, activity: element("div", undefined, "chat-run") };
+      attempts.push(attempt);
+    }
+    if (run.state === "running") active.set(address, attempt);
+    else {
+      attempt.finish = { run, at: event.at };
+      attempt.agentId ??= run.agentId;
+    }
+  }
+
+  function statusRow(run, at) {
+    const row = element("div", undefined, "chat-entry chat-event");
+    row.append(element("span", () => t("experts.stage_" + run.state), "chat-action"));
+    appendChatTime(row, at);
+    return row;
+  }
+
+  for (const [address, panel] of panels) {
+    for (const attempt of attempts) {
+      if (attempt.address !== address || attempt.previousPlan) continue;
+      const { run, activity, finish } = attempt;
+      if (run.state === "running") panel.append(statusRow(run, attempt.at), activity);
+      if (!finish) continue;
+      panel.append(statusRow(finish.run, finish.at));
+      if (finish.run.result) panel.append(chatText(finish.run.result, { taskId: task.id, agent: true }));
+      if (finish.run.fallback) panel.append(element("p", () => t("experts.local_execution") + " · " + finish.run.fallback, "muted"));
+      for (const [name, evidence] of Object.entries(finish.run.outputs ?? {})) {
+        panel.append(chatText(name + " · " + evidence, { taskId: task.id, agent: true }));
+      }
+    }
+    if (!panel.hasChildNodes()) panel.append(element("p", () => t("experts.no_stage_activity"), "muted"));
+  }
+
+  return (phase, items) => {
+    const byAttempt = new Map();
+    const unique = new Map();
+    for (const item of items) {
+      if (item.threadId && item.at) unique.set(item.threadId + "\0" + item.id, item);
+    }
+    const ordered = [...unique.values()].sort((first, second) => first.at.localeCompare(second.at));
+    for (const item of ordered) {
+      if (item.phase === "final_answer" || item.type === "truncated" ||
+          item.title === "ai_taskboard / expert_stage") continue;
+      let matches = attempts.filter(({ run, agentId, at, until, previousPlan }) => !previousPlan &&
+        run.state === "running" && run.phase === phase &&
+        (item.stageChild ? agentId === item.threadId && Boolean(item.stageSessionId) : run.threadId === item.threadId) &&
+        (item.stageSessionId ? item.stageSessionId === run.sessionId : Boolean(until)) &&
+        item.at > at && (!until || item.at < until));
+      const collaboration = collaborationItem(item);
+      if (collaboration && !item.stageChild) {
+        const data = collaborationData(item);
+        const receivers = Array.isArray(data.receiverThreadIds) ? data.receiverThreadIds : [];
+        const ids = new Set([...receivers, ...Object.keys(data.agentsStates ?? {}),
+          ...(data.agentThreadId ? [data.agentThreadId] : [])]);
+        if (ids.size !== 1) continue;
+        const [id] = ids;
+        matches = matches.filter(attempt => attempt.agentId === id);
+      }
+      if (matches.length !== 1) continue;
+      const [attempt] = matches;
+      const plan = task.expertTeam[phase];
+      const isLead = plan.stages.find(stage => stage.key === attempt.run.key)?.expertId === plan.lead;
+      const local = isLead || Boolean(attempt.finish?.run.fallback);
+      if (!item.stageChild && !collaboration && (!local || attempt.agentId)) continue;
+      const log = byAttempt.get(attempt) ?? [];
+      log.push(item);
+      byAttempt.set(attempt, log);
+    }
+    for (const attempt of attempts) {
+      if (attempt.run.phase !== phase || !attempt.activity.isConnected) continue;
+      const log = byAttempt.get(attempt) ?? [];
+      const snapshot = JSON.stringify(log);
+      if (attempt.snapshot === snapshot) continue;
+      attempt.snapshot = snapshot;
+      renderRunActivity(attempt.activity, log, false, undefined, task.id, { taskId: task.id, reviewer: phase === "review" });
+    }
+  };
+}
+
+function taskChat(task, renderStageWork) {
   const project = frame.project;
   const key = project + "\0" + task.id;
   const latestReply = task.history.findLast(event => event.chat && event.actor === "agent")?.chat;
@@ -857,6 +982,7 @@ function taskChat(task) {
   bindLocalized(work, "aria-label", () => t("ui.work_activity_e01957b7"), true);
   work.tabIndex = 0;
   const savedWork = [];
+  const savedStageItems = new Map();
   const files = new Map(task.attachments.map(file => [file.file, file]));
   const events = task.history.map((event, index) => ({ event, index }));
   if (task.questions.length) events.splice(1, 0, {
@@ -882,6 +1008,7 @@ function taskChat(task) {
     const conversation = ["chat", "comment", "questions"].includes(event.action) || returned;
     if (event.expertMessage) continue;
 
+    if (renderStageWork && event.action === "run-log" && event.run?.length) savedStageItems.set(index, event.run);
     const executorEvent = event.action === "run-log" && event.actor === "agent" && index > sessionStart &&
       (!event.runThreadId || event.runThreadId === task.codexThreadId);
     if (executorEvent) {
@@ -969,12 +1096,15 @@ function taskChat(task) {
         let restored = 0;
         let lastRestored;
         for (const [index, { log, durationMs }] of missingRuns) {
-          const items = addSavedItems(result.data[index] ?? []);
+          const restoredItems = result.data[index] ?? [];
+          if (renderStageWork && restoredItems.length) savedStageItems.set(index, restoredItems);
+          const items = addSavedItems(restoredItems);
           if (!items.length) continue;
           renderRunActivity(log, items, true, durationMs, task.id);
           restored++;
           lastRestored = log;
         }
+        renderLiveStageWork();
         renderLiveWork();
         if (restored) load.remove();
         bindLocalized(status, "textContent", () => restored === missingRuns.size ? "" : restored
@@ -1000,6 +1130,13 @@ function taskChat(task) {
   area.append(list, work);
 
   let liveItems = [];
+  function renderLiveStageWork() {
+    if (!renderStageWork) return;
+    const saved = [...savedStageItems.keys()].sort((a, b) => a - b).flatMap(index => savedStageItems.get(index));
+    const savedIds = new Set(saved.map(item => item.threadId + "\0" + item.id));
+    const live = (draft.savedRun?.items ?? liveItems).filter(item => !savedIds.has(item.threadId + "\0" + item.id));
+    renderStageWork("work", [...saved, ...live]);
+  }
   function renderLiveWork() {
     const follow = work.scrollHeight - work.clientHeight - work.scrollTop <= 8;
     // A save receipt can reach the window before its card history is refreshed.
@@ -1020,6 +1157,7 @@ function taskChat(task) {
   }
   area.updateRun = (items = []) => {
     liveItems = items;
+    renderLiveStageWork();
     if (!work.hidden) renderLiveWork();
   };
   area.updateDiscussion = () => {

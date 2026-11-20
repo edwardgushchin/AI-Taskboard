@@ -4219,7 +4219,8 @@ async function showTask(id, dialogue = false) {
     details.open = descriptionOpen[index] ?? false;
   });
   section(() => (t("ui.acceptance_criteria_7e3779c2")), task.criteria);
-  if (!manualBoard() && !task.expertStage) expertTeamSection(task);
+  const stagePanels = !manualBoard() && !task.expertStage ? expertTeamSection(task) : undefined;
+  const renderStageWork = stageWork(task, stagePanels);
   const stateLabel = (done, text) => {
     const label = element("div", undefined, "task-state-label");
     const state = icon(done ? "check" : "circle");
@@ -4258,7 +4259,10 @@ async function showTask(id, dialogue = false) {
     section(() => (t("ui.schedule_dadf83ce")), schedule);
   }
   showSubmissionResult(task.result);
-  if (!manualBoard()) showTaskReviewHistory(task, openDetails.has("task-review-history"));
+  const renderReviewStage = stagePanels && [...stagePanels.keys()].some(key => key.startsWith("review:"))
+    ? items => renderStageWork("review", items)
+    : undefined;
+  if (!manualBoard()) showTaskReviewHistory(task, openDetails.has("task-review-history"), renderReviewStage);
   showTaskArtifacts(task, body, openDetails.has("task-review-files"));
   if (task.git) showTaskGit(task.git, openDetails.has("task-git"));
   if (task.attachments.length) {
@@ -4369,7 +4373,7 @@ async function showTask(id, dialogue = false) {
   if (codexAction) actions.append(codexAction);
   body.append(actions);
   const side = byId("task-side");
-  side.replaceChildren(taskChat(task));
+  side.replaceChildren(taskChat(task, renderStageWork));
   side.hidden = false;
   if (dialogue) {
     side.firstChild.openDialogue();
@@ -4395,7 +4399,7 @@ function taskDetails(id, title, hint, open) {
   return details;
 }
 
-function showTaskReviewHistory(task, open) {
+function showTaskReviewHistory(task, open, onActivity) {
   if (task.status !== "review" && !task.history.some(event => event.action === "submit" || event.actor === "reviewer")) return;
   const area = taskDetails("task-review-history", () => t("ui.reviewer_messages_d84eb921"), undefined, open);
   const journal = element("ol", undefined, "task-details-content task-review-history");
@@ -4414,12 +4418,12 @@ function showTaskReviewHistory(task, open) {
     decisions.push({ entry, event, submittedAt });
   }
   area.append(journal);
-  area.refreshReview = reviewerHistory(task, journal, decisions);
+  area.refreshReview = reviewerHistory(task, journal, decisions, onActivity);
   area.addEventListener("toggle", () => {
     if (area.open) area.refreshReview();
   });
   body.append(area);
-  if (area.open) area.refreshReview();
+  if (area.open || onActivity) area.refreshReview();
 }
 
 function showTaskArtifacts(task, target = body, open = false) {
@@ -4952,6 +4956,7 @@ function expertAvatar(id, name) {
 
 function expertTeamSection(task) {
   const area = element("section", undefined, "expert-team");
+  const panels = new Map();
   area.append(element("h3", () => t("experts.plan_title")));
   if (task.approvalRequirements?.length) {
     const reason = element("p", () => t("experts.approval_incomplete") + " " +
@@ -5009,15 +5014,11 @@ function expertTeamSection(task) {
         title.append(status);
       }
       details.append(title);
-      if (stage.description) details.append(chatText(stage.description, { taskId: task.id }));
-      for (const [label, values] of [["stage_inputs", stage.inputs], ["stage_outputs", stage.outputs],
-        ["stage_prerequisites", stage.dependsOn.map(id => plan.stages.find(entry => entry.key === id)?.title ?? id)]]) {
-        if (values.length) details.append(element("p", () => t("experts." + label) + " · " + values.join(", "), "muted"));
-      }
-      section(() => t("ui.acceptance_criteria_7e3779c2"), stage.criteria, details);
-      if (state?.run?.result) details.append(chatText(state.run.result, { taskId: task.id }));
-      if (state?.run?.fallback) details.append(element("p", () => t("experts.local_execution") + " · " + state.run.fallback, "muted"));
-      for (const [output, evidence] of Object.entries(state?.run?.outputs ?? {})) details.append(chatText(output + " · " + evidence, { taskId: task.id }));
+      const work = element("div", undefined, "expert-stage-work");
+      const log = element("div", undefined, "expert-stage-log");
+      work.append(element("h5", () => t("ui.work_activity_e01957b7")), log);
+      details.append(work);
+      panels.set(key, log);
       phaseArea.append(details);
     }
     const legacy = phase === "work" ? task.expertStages ?? [] : [];
@@ -5044,6 +5045,7 @@ function expertTeamSection(task) {
       label.textContent = names.get(id) ?? label.textContent;
     }
   });
+  return panels;
 }
 
 function expertTeamMail(task) {

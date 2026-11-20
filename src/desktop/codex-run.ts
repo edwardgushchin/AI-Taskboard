@@ -326,6 +326,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     rpc.close();
   }, 60_000);
   const close = async () => {
+    stages.close();
     stopMail?.();
     clearTimeout(timeout);
     clearTimeout(interruptTimeout);
@@ -360,6 +361,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       if (onActivity && message.method?.startsWith("item/")) {
         const item = runActivity(activity, message.method, params, new Date().toISOString());
         if (item) {
+          item.stageSessionId = stages.sessionId;
           activity.set(item.id, item);
           onActivity(item, !params.turnId || params.turnId === activeTurnId);
         }
@@ -526,6 +528,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     ].join("\n");
     activeThreadId = threadId;
     stages.bind(request, threadId);
+    if (onActivity) stages.listen(item => onActivity(item, false));
     tokens.track(threadId, started.model ?? started.thread.model ?? null, true);
     const recovered = queued && queued.recover ? await findQueuedTurn(request, threadId, queued) : undefined;
     signal?.throwIfAborted();

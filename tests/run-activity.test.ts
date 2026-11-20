@@ -12,6 +12,28 @@ test("nonzero command exit codes remain visible as failures in collapsed activit
   assert.equal(runActivity(new Map(), "item/completed", { item: { ...item, exitCode: 0 } })!.status, "completed");
 });
 
+test("repeated command snapshots render one exit code and keep streamed output", () => {
+  const entries = new Map();
+  const command = { id: "command", type: "commandExecution", command: "npm test" };
+  const update = (method: string, params: Record<string, unknown>) => {
+    const item = runActivity(entries, method, params)!;
+    entries.set(item.id, item);
+    return item;
+  };
+  update("item/started", { item: command });
+  update("item/commandExecution/outputDelta", { itemId: command.id, delta: "Exit code: 42\nExample output" });
+  const completed = { ...command, aggregatedOutput: "", exitCode: 42 };
+  const expected = "Exit code: 42\nExample output\nExit code: 42";
+  for (let poll = 0; poll < 3; poll++) {
+    const item = update("item/completed", { item: completed });
+    assert.equal(item.text, expected);
+    assert.equal(item.status, "failed");
+  }
+  const replaced = { ...completed, aggregatedOutput: "Full output", exitCode: 0 };
+  assert.equal(update("item/completed", { item: replaced }).text, "Full output\nExit code: 0");
+  assert.equal(update("item/completed", { item: { ...replaced, aggregatedOutput: "" } }).status, "completed");
+});
+
 test("agent message phases survive streaming updates and completion", () => {
   const entries = new Map();
   const started = runActivity(entries, "item/started", { item: { id: "answer", type: "agentMessage", phase: "final_answer" } })!;

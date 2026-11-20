@@ -1552,7 +1552,11 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 .expert-stage-row::-webkit-details-marker, .expert-agent-event summary::-webkit-details-marker { display: none; }
 .expert-stage-row:hover, .expert-agent-event summary:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
 .expert-stage[open] > .expert-stage-row > .codicon { transform: rotate(90deg); }
-.expert-stage > :not(summary) { margin: 6px 12px 10px 62px; }
+.expert-stage-work { margin: 6px 12px 10px; min-width: 0; }
+.expert-stage-work h5 { margin: 0 0 8px; font-size: 13px; }
+.expert-stage-log { display: grid; gap: 8px; min-width: 0; overflow-wrap: anywhere; }
+.expert-stage-log > p { margin: 0; }
+.expert-stage-log .chat-run { gap: 8px; }
 .expert-stage-copy { display: grid; gap: 2px; }
 .expert-stage-copy > span, .expert-stage-status { color: var(--muted); font-size: 11px; }
 .expert-stage-status { text-align: end; }

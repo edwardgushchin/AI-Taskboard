@@ -158,9 +158,12 @@ export async function reviewWithCodex(profile: string, project: string, settings
   if (lead && !lead.ok) throw new Error(lead.error.message);
   const skills = taskId && lead?.ok ? await leadSkillInstructions(project, taskId, lead.data[0], plan, "reviewer", context) : [];
   const options = {
-    role: "reviewer" as const, settings, tools, signal, onActivity, specialistDelegation: Boolean(plan?.stages.length),
+    role: "reviewer" as const, settings, tools, signal, onActivity: stages && onActivity
+      ? (items: RunActivity[]) => onActivity(items.map(item => ({ ...item, stageSessionId: stages.sessionId })))
+      : onActivity,
+    specialistDelegation: Boolean(plan?.stages.length),
     onControl: taskId ? (control: AgentControl) => { stopMail = watchTeamMail(project, taskId, control, "reviewer", submissionSequence); } : undefined,
-    observeProvider: stages?.observe, onProviderReady: stages?.bind, reviewThread,
+    observeProvider: stages?.observe, onProviderReady: stages?.bind, stageReporter: stages, reviewThread,
     onTokenUsage: async (report: TokenUsageReport) => { usage = report; }, finalAnswerSchema: {
       type: "object", additionalProperties: false, required: ["summary", "findings", "evidence", "needsHuman", "verifyRisk"],
       properties: {
@@ -530,7 +533,7 @@ export function readTaskRunHistory(profile: string, project: string, threadId: s
         if (typeof at !== "number" || !Number.isFinite(at) || item.type === "userMessage") continue;
         const run = runs.findLast(entry => at >= entry.start && at <= entry.end);
         if (!run) continue;
-        const activity = runActivity(run.items, "item/completed", { item }, new Date(at).toISOString());
+        const activity = runActivity(run.items, "item/completed", { item, threadId }, new Date(at).toISOString());
         if (activity) run.items.set(activity.id, activity);
       }
       cursor = page.nextCursor;
@@ -696,6 +699,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
   onProviderReady?: (request: import("./provider-tools.ts").ProviderRequest, threadId: string) => void;
   worklog?: ReturnType<typeof boardWorklog>;
   specialistDelegation?: boolean;
+  stageReporter?: ReturnType<typeof phaseStageReporter>;
   observeProvider?: (message: RpcMessage, threadId: string) => void;
 }) {
   const { onCommentary, onTokenUsage, onControl, onActivity, signal, imageDirectory, imageLimit = 0, session } = options;
@@ -805,6 +809,12 @@ function reply(profile: string, project: string, prompt: string, images: string[
       session?.onActivity([...activity.values()]);
       if (onActivity) onActivity(runLog(activity, 96_000, options.role === "reviewer"));
     };
+    if (onActivity) {
+      options.stageReporter?.listen(item => {
+        activity.set(item.id, item);
+        activityTimer ??= setTimeout(publish, 80);
+      });
+    }
     let currentGoal: BoardGoal | null | undefined;
     let followingGoal = false;
     let goalChange: Promise<BoardGoal | null> | undefined;
@@ -1007,6 +1017,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
       return { text, usage, commentary, attachmentSources, model: started.model ?? thread.model, goalStatus,
         ...(run.length ? { run } : {}) } as const;
     } finally {
+      options.stageReporter?.close();
       clearTimeout(activityTimer);
       if (activityTimer) publish();
       await goalChange?.catch(() => {});

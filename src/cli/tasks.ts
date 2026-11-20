@@ -162,8 +162,20 @@ export function parseRunEntries(value: unknown) {
     if (item.at !== undefined && (typeof item.at !== "string" || !item.at.trim() || !Number.isFinite(Date.parse(item.at)))) {
       throw new TaskboardError("INVALID_INPUT", "Expected a valid item timestamp.");
     }
+    for (const key of ["threadId", "stageSessionId"]) {
+      const id = item[key];
+      if (id !== undefined && (typeof id !== "string" || !codexThreadPattern.test(id))) {
+        throw new TaskboardError("INVALID_INPUT", "Expected a valid run item " + key + ".");
+      }
+    }
+    if (item.stageChild !== undefined && (item.stageChild !== true || !item.threadId || !item.stageSessionId)) {
+      throw new TaskboardError("INVALID_INPUT", "A specialist activity item requires a thread and stage session.");
+    }
     return {
       ...(item.at === undefined ? {} : { at: item.at as string }),
+      ...(typeof item.threadId === "string" ? { threadId: item.threadId } : {}),
+      ...(typeof item.stageSessionId === "string" ? { stageSessionId: item.stageSessionId } : {}),
+      ...(item.stageChild === true ? { stageChild: true as const } : {}),
       id: text(item.id, "item ID", true), type: text(item.type, "item type", true),
       title: text(item.title, "item title"), text: item.text, status: text(item.status, "item status"),
       ...(item.phase === undefined ? {} : { phase: member(item.phase, ["commentary", "final_answer"], "item phase") }),

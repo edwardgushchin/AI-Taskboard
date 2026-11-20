@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { callCli, cliFailure } from "./cli.ts";
 import { skillEvidence } from "./skill-evidence.ts";
+import { runActivity } from "./run-activity.ts";
 import type { AgentControl, RpcMessage } from "./codex-rpc.ts";
 import type { teamInbox } from "../cli/expert-team.ts";
 import type { Expert } from "../cli/experts.ts";
-import type { ExpertPhase } from "../cli/model.ts";
+import { codexThreadPattern } from "../cli/model.ts";
+import type { ExpertPhase, RunActivity } from "../cli/model.ts";
 
 const s = { type: "string", minLength: 1 };
 const list = { type: "array", items: s };
@@ -27,7 +29,7 @@ export const expertActions = {
         artifactOutputs: { type: "object", description: "On a work stage of a task submitted for review, map an exact string from this stage's outputs array to png or text. Example: outputs contains desktop, artifactOutputs is {\"desktop\":\"png\"}.",
           additionalProperties: { type: "string", enum: ["png", "text"] } }, skills: list, skillChecks },
       required: ["key", "expertId", "title", "criteria", "outputs"], additionalProperties: false } } }, required: ["id", "revision", "reason", "stages"] },
-  expert_stage: { description: "Start, block, or finish an assigned stage. Returns the specialist package and prerequisite results. For done, provide each exact output. For artifactOutputs, give the path of the individual file relative to the worktree. For delegated work, give the actual provider agent ID.",
+  expert_stage: { description: "Start, block, or finish an assigned stage. Returns the specialist package and prerequisite results. Once the provider confirms a delegated agent, repeat running with its ID to bind its live activity. For done, provide each exact output and the same agent ID. For artifactOutputs, give the path of the individual file relative to the worktree.",
     properties: { ...task, phase: { type: "string", enum: ["work", "review"] }, targetHead: { type: ["string", "null"] },
       revision: { type: "integer", minimum: 1 }, key: s, state: { type: "string", enum: ["running", "blocked", "done"] },
       result: s, outputs: { type: "object", additionalProperties: s }, agentId: s, fallback: s },
@@ -112,6 +114,7 @@ export const expertInstructions = "Board experts are internal instruction packag
   "Do not globally install skills or enable provider plugins. Read only the skills relevant to this phase and use their returned board paths.";
 
 export const leadInstructions = "You are responsible for this card's current phase and its final result. Apply the assigned lead specialization and read your team inbox before delegating or reporting a decision. " +
+  "After spawning a specialist, repeat expert_stage with state running and the provider agent ID before waiting. For a reused specialist, bind that ID to the new stage before sending the next assignment. " +
   "Read the current revision and recorded stage states before opening work with expert_stage. On REVISION_CONFLICT, reread the card and reconcile changed requirements before retrying. A completed stage already has a result; reuse it. After collecting the result, use expert_stage with state done, a summary, and an outputs object keyed by each exact declared output. For delegated work pass the actual child agent ID after waiting for its result. " +
   "Apply the preloaded lead skills. If your lead has explicit skillChecks in this phase, perform them and call expert_verify_skills before submitting or approving when the tool is available. The implicit workflow alone requires no verification call. When opening a stage, select library skills from the returned specialist package for that stage's outputs. Reuse the instructions in assignedSkills and call expert_skill for relevant skills that are still missing. Pass the loaded instructions and any assigned actions to the specialist. For a stage with assigned skills, the specialist must perform the actions personally and return JSON with an outputs object keyed by the exact declared output names. Pass those outputs unchanged to expert_stage. Handle your own stages yourself and reuse the same native subagent for later stages of its specialization. " +
   "Run only independent, non-conflicting stages in parallel. Wait for prerequisites and pass their results to dependent specialists. Use the provider's messaging and wait mechanisms to coordinate. Wait for the current run to report completion after following up with a previous specialist. " +
@@ -125,9 +128,96 @@ export function phaseStageReporter(project: string, phase: "work" | "review", id
   const children = new Map<string, string>();
   const completed = new Set<string>();
   const sessionId = randomUUID();
+  const startedAt = Date.now();
   const evidence = skillEvidence(project, phase, sessionId, id, targetHead);
+  let threadId: string | undefined;
+  let provider: Parameters<typeof evidence.bind>[0] | undefined;
+  let onActivity: ((item: RunActivity) => void) | undefined;
+  const assigned = new Map<string, string>();
+  const activity = new Map<string, Map<string, RunActivity>>();
+  let timer: NodeJS.Timeout | undefined;
+  let polling = false;
+  let closed = false;
+
+  function childItem(child: string, method: string, params: Record<string, unknown>, at?: string, restored = false) {
+    if (!onActivity || closed) return;
+    const entries = activity.get(child) ?? new Map<string, RunActivity>();
+    activity.set(child, entries);
+    const item = runActivity(entries, method, params, at);
+    // A completion or delta without a confirmed start may belong to an earlier assignment.
+    if (!item?.at) return;
+    if (restored && at) item.at = at;
+    const previous = entries.get(item.id);
+    entries.set(item.id, item);
+    if (JSON.stringify(previous) === JSON.stringify(item)) return;
+    onActivity({ ...item, id: child + ":" + item.id, stageSessionId: sessionId, stageChild: true });
+  }
+
+  async function readChild(child: string) {
+    if (!provider || !onActivity || closed || !codexThreadPattern.test(child)) return;
+    let cursor: string | null = null;
+    const items: { item: Record<string, unknown>; at?: number }[] = [];
+    try {
+      // Ask the same provider session for persisted items even if it did not notify the lead of child activity.
+      for (let pageNumber = 0; pageNumber < 3; pageNumber++) {
+        const page: {
+          data: { item: Record<string, unknown>; startedAtMs?: number | null; completedAtMs?: number | null }[];
+          nextCursor: string | null;
+        } = await provider("thread/items/list", { threadId: child, cursor, limit: 100, sortDirection: "desc" });
+        let reachedStart = false;
+        for (const entry of page.data) {
+          const at = entry.startedAtMs;
+          if (typeof at !== "number" || !Number.isFinite(at)) {
+            items.push({ item: entry.item });
+          } else if (at < startedAt) {
+            reachedStart = true;
+          } else {
+            items.push({ item: entry.item, at });
+          }
+        }
+        if (closed || reachedStart || !page.nextCursor) break;
+        cursor = page.nextCursor;
+      }
+    } catch {
+      // Some providers expose child notifications but do not support listing their threads.
+    }
+    for (const { item, at } of items.reverse()) {
+      const method = item.status === "inProgress" ? "item/started" : "item/completed";
+      childItem(child, method, { item, threadId: child }, at === undefined ? undefined : new Date(at).toISOString(), true);
+    }
+  }
+
+  function schedule() {
+    if (timer || polling || closed || !assigned.size || !onActivity) return;
+    timer = setTimeout(async () => {
+      timer = undefined;
+      polling = true;
+      try {
+        await Promise.all([...new Set(assigned.values())].map(readChild));
+      } finally {
+        polling = false;
+        schedule();
+      }
+    }, 700);
+    timer.unref();
+  }
+
   return {
-    bind: evidence.bind,
+    sessionId,
+    bind(request: Parameters<typeof evidence.bind>[0], lead: string) {
+      threadId = lead;
+      provider = request;
+      evidence.bind(request, lead);
+    },
+    listen(listener: (item: RunActivity) => void) {
+      onActivity = listener;
+      schedule();
+    },
+    close() {
+      closed = true;
+      clearTimeout(timer);
+      assigned.clear();
+    },
     verify(args: unknown) { return evidence.verify(args as Record<string, unknown>); },
     observe(message: RpcMessage, lead: string | undefined) {
       if (lead) evidence.observe(message, lead);
@@ -135,6 +225,12 @@ export function phaseStageReporter(project: string, phase: "work" | "review", id
         receiverThreadIds?: string[]; agentsStates?: Record<string, { status: string }>;
         kind?: string; agentThreadId?: string; agentPath?: string } } | undefined;
       const item = event?.item;
+      const child = event?.threadId;
+      if (child && child !== lead && codexThreadPattern.test(child) && [...assigned.values()].includes(child) &&
+          message.method?.startsWith("item/")) {
+        const started = message.method === "item/started" || message.method === "item/autoApprovalReview/started";
+        childItem(child, message.method, event, started ? new Date().toISOString() : undefined);
+      }
       if (!lead || event?.threadId !== lead || !item) return;
       if (message.method === "item/completed" && item.type === "collabAgentToolCall" &&
           item.status === "completed" && ["spawnAgent", "resumeAgent", "followupTask"].includes(item.tool ?? "")) {
@@ -169,10 +265,20 @@ export function phaseStageReporter(project: string, phase: "work" | "review", id
         const proof = await evidence.verify(input, input.key, agentId);
         if (!proof.ok) return proof;
       }
-      const updated = await callCli<{ skills?: string[]; expertId: string; package: Expert }>(project, ["expert-stage", taskId], { ...input, agentId, sessionId,
+      const updated = await callCli<{ skills?: string[]; expertId: string; package: Expert; run?: { agentId?: string } }>(project, ["expert-stage", taskId], { ...input, agentId, sessionId, threadId,
         actor: phase === "work" ? "agent" : id ? "reviewer" : "manager", phase,
         targetHead: id ? targetHead : input.targetHead });
-      if (!updated.ok || input.state !== "running") return updated;
+      if (!updated.ok) return updated;
+      const key = taskId + ":" + input.key;
+      if (input.state === "running" && updated.data.run?.agentId) {
+        assigned.set(key, updated.data.run.agentId);
+        schedule();
+      } else if (input.state !== "running") {
+        const child = agentId ?? assigned.get(key);
+        assigned.delete(key);
+        if (child) await readChild(child);
+      }
+      if (input.state !== "running") return updated;
       const skills = new Set(updated.data.skills);
       if (updated.data.package.skills.some(skill => skill.id === "workflow")) skills.add("workflow");
       if (!skills.size) return updated;

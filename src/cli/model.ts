@@ -95,6 +95,9 @@ export interface ChatUsage {
 
 export interface RunActivity {
   at?: string;
+  threadId?: string;
+  stageSessionId?: string;
+  stageChild?: true;
   id: string;
   type: string;
   title: string;
@@ -111,7 +114,8 @@ export interface TaskEvent {
     outputs?: Record<string, string> };
   expertPhase?: "work" | "review";
   expertStageRun?: { phase: "work" | "review"; key: string; state: "running" | "blocked" | "done";
-    result?: string; outputs?: Record<string, string>; agentId?: string; sessionId?: string; fallback?: string; targetHead?: string | null };
+    result?: string; outputs?: Record<string, string>; agentId?: string; sessionId?: string; threadId?: string;
+    fallback?: string; targetHead?: string | null };
   at: string;
   durationMs?: number;
   startTiming?: { lockWaitMs: number; prepareMs: number; gitWorktreeAddMs?: number };

@@ -1,5 +1,8 @@
 import type { RunActivity } from "../cli/model.ts";
 
+// Keep the rendered suffix out of the output reused by later provider snapshots.
+const commandResults = new WeakMap<RunActivity, { output: string; exitCode?: number }>();
+
 function string(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
@@ -11,8 +14,11 @@ function bounded(value: string): string {
 export function runActivity(entries: Map<string, RunActivity>, method: string, params: Record<string, unknown>, at?: string): RunActivity | undefined {
   const item = parseRunActivity(entries, method, params);
   if (item) {
-    const firstAt = entries.get(item.id)?.at ?? at;
+    const previous = entries.get(item.id);
+    const firstAt = previous?.at ?? at;
     if (firstAt !== undefined) item.at = firstAt;
+    const threadId = previous?.threadId ?? params.threadId;
+    if (typeof threadId === "string" && threadId) item.threadId = threadId;
   }
   return item;
 }
@@ -46,10 +52,10 @@ function parseRunActivity(entries: Map<string, RunActivity>, method: string, par
       return { id, type, title: "", text: bounded(summary || previous?.text || ""), status };
     }
     if (type === "commandExecution") {
-      const output = string(item.aggregatedOutput) || previous?.text || "";
-      const exit = typeof item.exitCode === "number" ? "\nExit code: " + item.exitCode : "";
-      return { id, type, title: bounded(string(item.command)), text: bounded(output + exit),
-        status: typeof item.exitCode === "number" && item.exitCode !== 0 ? "failed" : status };
+      const prior = previous && commandResults.get(previous);
+      const output = string(item.aggregatedOutput) || prior?.output || "";
+      const exitCode = typeof item.exitCode === "number" ? item.exitCode : prior?.exitCode;
+      return commandResult({ id, type, title: bounded(string(item.command)), text: "", status }, output, exitCode);
     }
     const { id: _id, type: _type, status: _status, ...details } = item;
     const title = [string(item.server), string(item.tool)].filter(Boolean).join(" / ") || string(item.query);
@@ -68,8 +74,20 @@ function parseRunActivity(entries: Map<string, RunActivity>, method: string, par
   const delta = string(params.delta) || string(params.message);
   if (!delta) return;
   const previous = entries.get(id) ?? { id, type: itemType, title: "", text: "", status: "inProgress" };
+  if (itemType === "commandExecution") {
+    const prior = commandResults.get(previous);
+    return commandResult({ ...previous }, (prior?.output ?? "") + delta, prior?.exitCode);
+  }
   const separator = update === "progress" && previous.text ? "\n" : "";
   return { ...previous, text: bounded(previous.text + separator + delta) };
+}
+
+function commandResult(item: RunActivity, output: string, exitCode?: number) {
+  const renderedExit = exitCode === undefined ? "" : "\nExit code: " + exitCode;
+  item.text = bounded(output + renderedExit);
+  if (exitCode !== undefined && exitCode !== 0) item.status = "failed";
+  commandResults.set(item, { output: bounded(output), exitCode });
+  return item;
 }
 
 export function runLog(entries: Map<string, RunActivity>, maxBytes = 900_000, keepSummaries = false): RunActivity[] {

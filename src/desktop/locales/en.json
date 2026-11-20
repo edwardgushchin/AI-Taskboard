@@ -1296,6 +1296,7 @@
   "experts.local_execution": "Handled by the lead",
   "experts.subagents": "Subagents",
   "experts.no_agent_activity": "No subagent activity recorded",
+  "experts.no_stage_activity": "No activity recorded for this stage yet.",
   "experts.no_mail": "No team messages yet",
   "experts.agent_spawn": "Started a subagent",
   "experts.agent_send": "Sent instructions to a subagent",
