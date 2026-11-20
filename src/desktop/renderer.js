@@ -758,7 +758,9 @@ function mountAppMenu() {
 
 async function command(action, id, input) {
   const generation = projectGeneration;
+  const project = frame.project;
   const result = await api.command(action, id, input);
+  if (action === "expert-save" && result.ok) taskExpertCatalog.delete(project);
   if (generation !== projectGeneration) return undefined;
   if (!result.ok) {
     if (result.error.code === "ACTIVE_GOAL_REQUIRED") {
@@ -4887,7 +4889,6 @@ function editExpert(expert, entries) {
   ], () => t("ui.save_settings_2173b7d7"), async values => {
     if (await command("expert-save", undefined, { ...values, id: expertId, skills,
       ...(expert ? { revision: expert.revision } : {}), requirements: expert?.requirements ?? [], limitations: expert?.limitations ?? "" })) {
-      taskExpertCatalog = undefined;
       await expertSettings();
     }
   });
@@ -4929,19 +4930,21 @@ function editExpert(expert, entries) {
   editor.querySelector('button[type="submit"]').before(panel, choose, add);
 }
 
-let taskExpertCatalog;
+const taskExpertCatalog = new Map();
 function expertRoleNames(project) {
-  if (taskExpertCatalog?.project !== project) {
-    const catalog = { project, names: api.command("experts").then(result => {
+  let names = taskExpertCatalog.get(project);
+  if (!names) {
+    names = api.command("experts").then(result => {
       if (!result.ok) throw new Error(boardError(result.error));
+      if (taskExpertCatalog.get(project) !== names) return new Map();
       return new Map(result.data.map(expert => [expert.id, expert.name]));
     }).catch(() => {
-      if (taskExpertCatalog === catalog) taskExpertCatalog = undefined;
+      if (taskExpertCatalog.get(project) === names) taskExpertCatalog.delete(project);
       return new Map();
-    }) };
-    taskExpertCatalog = catalog;
+    });
+    taskExpertCatalog.set(project, names);
   }
-  return taskExpertCatalog.names;
+  return names;
 }
 
 function expertAvatar(id, name) {
@@ -6021,6 +6024,9 @@ function update(next) {
       if (openProjects.has(project)) continue;
       view.composer[0]?.dispose?.();
       boardViews.delete(project);
+    }
+    for (const project of taskExpertCatalog.keys()) {
+      if (!openProjects.has(project)) taskExpertCatalog.delete(project);
     }
   }
   render(previousBoard);
