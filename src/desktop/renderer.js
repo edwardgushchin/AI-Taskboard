@@ -1007,26 +1007,30 @@ function renderAgentRunStatus(target, task, { compactQueue = false } = {}) {
     const boardTask = frame.board?.tasks.find(card => card.id === task.id);
     const repair = boardTask?.acceptanceRepair;
     const hybridReview = task.status === "review" && (task.reviewModeOverride?.mode ?? frame.board?.settings.reviewMode) === "reviewer-human";
+    const waitsForReview = frame.waitingReviewTasks?.includes(task.id);
+    const waitsForExecutor = frame.waitingTasks?.includes(task.id);
+    const reviewerSlotLabel = "ui.waiting_for_a_reviewer_slot_8918dd95";
     let status = "";
     if (frame.quotaTasks?.includes(task.id)) {
       status = quotaLabel();
     } else if (repair && !(hybridReview && repair.phase === "checking" && !task.reviewApproved)) {
       status = acceptanceRepairStatus(task.id, repair);
-    } else if (frame.waitingTasks?.includes(task.id)) {
-      if (task.mergeRepair || boardTask?.mergeRepair) {
-        status = t("ui.waiting_for_a_reviewer_slot_8918dd95");
-      } else if (compactQueue) {
-        // Request text presentation of U+231B.
-        const hourglass = element("span", "\u231B\uFE0E", "task-queue-indicator");
-        hourglass.setAttribute("role", "img");
-        const queueLabel = () => t("ui.waiting_for_an_available_executor_cc0934a8");
-        bindLocalized(hourglass, "title", queueLabel);
-        bindLocalized(hourglass, "aria-label", queueLabel, true);
-        target.replaceChildren(hourglass);
-        target.hidden = false;
-        return;
+    } else if (waitsForReview || waitsForExecutor) {
+      if (!waitsForReview && (task.mergeRepair || boardTask?.mergeRepair)) {
+        status = t(reviewerSlotLabel);
       } else {
-        status = t("ui.waiting_for_an_available_executor_cc0934a8");
+        const queueLabel = () => t(waitsForReview ? reviewerSlotLabel : "ui.waiting_for_an_available_executor_cc0934a8");
+        if (compactQueue) {
+          // Request text presentation of U+231B.
+          const hourglass = element("span", "\u231B\uFE0E", "task-queue-indicator");
+          hourglass.setAttribute("role", "img");
+          bindLocalized(hourglass, "title", queueLabel);
+          bindLocalized(hourglass, "aria-label", queueLabel, true);
+          target.replaceChildren(hourglass);
+          target.hidden = false;
+          return;
+        }
+        status = queueLabel();
       }
     } else if (task.status === "in_progress" && task.codexThreadId) {
       status = t("ui.board_run_inactive_2a932a2f");
@@ -1102,7 +1106,8 @@ function card(task) {
   const signature = JSON.stringify([frame.localization?.locale, task.title, task.description,
     task.tags?.map(name => boardTags.get(tagKey(name)) ?? { name }), cover?.file,
     frame.runningTasks?.includes(task.id) ?? false, frame.waitingTasks?.includes(task.id) ?? false,
-    frame.reviewingTasks?.[task.id], frame.quotaTasks?.includes(task.id) ? frame.quotaWait : null, task.status, task.mergeRepair, task.acceptanceRepair, Boolean(task.codexThreadId),
+    frame.reviewingTasks?.[task.id], frame.waitingReviewTasks?.includes(task.id),
+    frame.quotaTasks?.includes(task.id) ? frame.quotaWait : null, task.status, task.mergeRepair, task.acceptanceRepair, Boolean(task.codexThreadId),
     task.reviewModeOverride?.mode ?? frame.board?.settings.reviewMode, task.reviewApproved,
     task.unfinishedDependencies, task.blocked, task.subtasks?.map(entry => entry.done),
     task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule, task.awaitingAnswer,
