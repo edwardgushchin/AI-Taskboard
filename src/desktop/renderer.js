@@ -2101,6 +2101,7 @@ function draftComposer() {
   let goalLogAvailable = false;
   let goalRunning = false;
   let goalResuming = false;
+  let goalResumeWaiting = false;
   let requestingResume = false;
   let clearingGoal = false;
   const activeGoalRunId = () => currentGoal && currentGoal.status !== "complete" ? goalScope ?? (goalRunning && managerWork?.id) : undefined;
@@ -2123,7 +2124,6 @@ function draftComposer() {
   const goalPending = element("div");
   goalPending.setAttribute("role", "status");
   goalPending.hidden = true;
-  bindLocalized(goalPending, "textContent", () => t("ui.waiting_for_the_codex_chat_to_become_available_ddb2e85f"));
   const goalActions = element("div", undefined, "board-goal-actions");
   const saveGoal = button("", () => changeGoal("edit", goalText.value.trim()), "quiet");
   const pauseGoal = button("", () => changeGoal("pause"), "quiet");
@@ -2159,8 +2159,11 @@ function draftComposer() {
     goalPanel.dataset.status = waitingToResume ? "idle" : currentGoal.status;
     pauseGoal.hidden = currentGoal.status !== "active" || waitingToResume;
     resumeGoal.hidden = currentGoal.status === "complete" || !pauseGoal.hidden;
-    resumeGoal.disabled = changingGoal || goalResuming || requestingResume || startingWork;
-    goalPending.hidden = !clearingGoal && (!goalResuming || goalRunning);
+    resumeGoal.disabled = changingGoal || goalResuming || requestingResume;
+    goalPending.hidden = !clearingGoal && (!(goalResuming || requestingResume) || goalRunning);
+    bindLocalized(goalPending, "textContent", () => t(clearingGoal
+      ? "ui.waiting_for_the_codex_chat_to_become_available_ddb2e85f"
+      : goalResumeWaiting ? "ui.waiting_for_goal_context" : "ui.starting_39fd3c7e"));
     saveGoal.disabled = changingGoal || !goalText.value.trim() || goalText.value.trim() === currentGoal.objective;
     pauseGoal.disabled = clearGoal.disabled = changingGoal;
   };
@@ -2178,6 +2181,9 @@ function draftComposer() {
     goalRevision++;
     if (running !== undefined) goalRunning = running;
     if (resuming !== undefined) goalResuming = resuming;
+    if (metadata.goalResumeWaiting !== undefined) goalResumeWaiting = metadata.goalResumeWaiting;
+    if (resuming === true) goalError.textContent = "";
+    if (metadata.goalResumeError) goalError.textContent = metadata.goalResumeError;
     if (metadata.goalLogAvailable !== undefined) goalLogAvailable = metadata.goalLogAvailable;
     if (metadata.goalId !== undefined) goalScope = metadata.goalId;
     if (goal !== undefined) showGoal(goal);
@@ -2325,12 +2331,13 @@ function draftComposer() {
       const oldestMessage = oldest?.messages[0]?.clientId;
       const oldestItem = oldest?.items[0]?.id;
       let reachedOldest = !oldest;
+      const revision = goalRevision;
       do {
         visited.add(next);
         const result = await api.boardHistory(project, next, "work");
         if (disposed || work.hidden) return;
         if (!result.ok) throw new Error(boardError(result.error));
-        if (visited.size === 1) {
+        if (visited.size === 1 && revision === goalRevision) {
           editor.updateGoal(result.data.goal, result.data.goalRunning, result.data.goalResuming, result.data);
           if (work.hidden) return;
         }
@@ -2404,8 +2411,11 @@ function draftComposer() {
   }
   editor.invalidateWork = () => {
     if (work.hidden) {
+      const revision = goalRevision;
       void api.boardHistory(project, null, "work").then(result => {
-        if (!disposed && result.ok) editor.updateGoal(result.data.goal, result.data.goalRunning, result.data.goalResuming, result.data);
+        if (!disposed && result.ok && revision === goalRevision) {
+          editor.updateGoal(result.data.goal, result.data.goalRunning, result.data.goalResuming, result.data);
+        }
       }).catch(() => {});
       return;
     }
