@@ -9,12 +9,18 @@ import type { BoardStore } from "./storage.ts";
 import { checkProtectedPaths, collidingPaths, findWorktree, gitStatus, requireNoGitOperation, usableWorktree, taskResourcesInUse } from "./worktree.ts";
 
 const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const restoreAttemptId = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 const destinations = ["target", "worktree"] as const;
 
 interface Backup {
   marker: string;
   base: string;
   restored?: { destination: typeof destinations[number]; path: string };
+  restoredStartAttempt?: string;
+}
+
+export function isRestoreAttemptId(value: unknown): value is string {
+  return typeof value === "string" && restoreAttemptId.test(value);
 }
 
 function backupPath(store: BoardStore, task: Task): string {
@@ -33,6 +39,8 @@ function readBackup(store: BoardStore, task: Task): Backup | undefined {
   if (typeof backup.marker !== "string" || !backup.marker.startsWith("AI Taskboard " + task.id + " ") ||
       !/^AI Taskboard T-\d{4,} [a-f0-9-]{36}$/.test(backup.marker) ||
       typeof backup.base !== "string" || !oid.test(backup.base) ||
+      (backup.restoredStartAttempt !== undefined &&
+        (!isRestoreAttemptId(backup.restoredStartAttempt) || restored?.destination !== "worktree")) ||
       (restored && (!destinations.some(value => value === restored.destination) || typeof restored.path !== "string"))) {
     throw new TaskboardError("CORRUPT_STORAGE", "Invalid saved changes record.");
   }
@@ -57,18 +65,30 @@ export function describeSavedChanges(store: BoardStore, task: Task) {
   return sha ? { sha, restored: backup.restored } : undefined;
 }
 
-export function restoreChangesOnStart(store: BoardStore, task: Task, path: string): void {
+export function restoredForStart(store: BoardStore, task: Task, path: string, attempt: string | undefined): boolean {
+  if (!attempt) return false;
+  const backup = readBackup(store, task);
+  return backup?.restoredStartAttempt === attempt && backup.restored?.path === path &&
+    Boolean(savedCommit(path, task, backup));
+}
+
+export function restoreChangesOnStart(store: BoardStore, task: Task, path: string, attempt?: string): void {
   const backup = readBackup(store, task);
   if (!backup || backup.restored) return;
   const sha = savedCommit(path, task, backup);
   if (!sha) return;
   requireNoGitOperation(path);
-  if (resolveCommit(path, "HEAD") !== backup.base || gitStatus(path)) {
+  const entries = gitStatus(path).split("\0").filter(Boolean);
+  if (resolveCommit(path, "HEAD") !== backup.base || entries.some(entry => !entry.startsWith("? "))) {
     throw new TaskboardError("RESTORE_CONFLICT", "Restore the saved changes into a separate worktree before starting.", { path });
   }
-  checkRestorePaths(path, backup.base, sha);
+  checkRestorePaths(path, backup.base, sha, entries.map(entry => entry.slice(2)));
   applyBackup(path, sha);
-  writeJson(backupPath(store, task), { ...backup, restored: { destination: "worktree", path } });
+  writeJson(backupPath(store, task), {
+    ...backup,
+    restored: { destination: "worktree", path },
+    restoredStartAttempt: attempt,
+  });
 }
 
 export function inspectLocalChanges(path: string, head: string, status = gitStatus(path)) {
