@@ -10,6 +10,8 @@
   "backup.empty": "Keine Sicherungen verfügbar",
   "backup.retention": "Sicherungen laufen 24 Stunden nach der Erstellung ab. Die wiederhergestellte Kopie öffnet sich in einem neuen Ordner mit deaktiviertem Automatikmodus.",
   "backup.confirm": "Board unter {project} aus der Sicherung vom {date} wiederherstellen?",
+  "task_question.approval_blocked": "Der Entwurf kann freigegeben werden, sobald der Agent die Frage im Aufgabendialog schließt.",
+  "task_question.open_dialogue_button": "Dialog öffnen",
   "task_question.needs_answer": "Antwort nötig",
   "task_question.open_dialogue": "Antwort nötig. Aufgabendialog öffnen",
   "ui.reorder_queued_message": "Wartende Nachricht „{message}“ verschieben. Pfeil nach oben oder unten verwenden.",

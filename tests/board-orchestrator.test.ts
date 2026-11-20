@@ -1,3 +1,4 @@
+import { activeManagerGoal, managerGoalBinding } from "../src/cli/manager-goal.ts";
 import { boardReviewModeTool, reviewModeReceipt, setReviewModeFromChat } from "../src/desktop/chat-actions.ts";
 import { plannedDraft } from "./fixtures/planned-draft.ts";
 import { isManual, manualContext } from "../src/cli/manual-board.ts";
@@ -137,6 +138,7 @@ function fixture(t: TestContext) {
   });
   const runtime = runInNewContext(handlerSource + "\n({ frame, scheduleAutoReview, boardRequests, boardWorkRequests, backgroundManagerRequests, acceptanceWork, managerQuestion, runBoardRequest, scheduleRecurringTasks })", {
     quotaWait: undefined, quotaInterruption: new Error("Fixture quota pause"), refreshQuota: async () => [],
+    currentActiveGoal: activeManagerGoal, managerGoalBinding,
     applicationUpdates, applicationUpdateTools, updateOwner: undefined, updateProject: undefined,
     scheduleAutoBoard: () => {}, scheduleDraftDiscussions: () => {},
     activeRunSummary, runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
@@ -1904,6 +1906,41 @@ test("manager can create and dispatch a task in an existing working directory", 
     return { text: "Запущено." };
   });
   assert.equal(result.ok, true, JSON.stringify(result.error));
+});
+
+test("the manager cannot approve a draft with a newly saved question", async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"])).ok, true);
+  const result = await f.run("Approve the draft when the clarification is complete.", async act => {
+    const { data: draft } = await act("task_create", plannedDraft({ title: "Choose an export format" }));
+    const chat = ["chat", draft.id];
+    const settings = { model: "fixture", effort: "low" };
+    const { data: prompt } = await f.cli(chat, { ...settings, text: "What information is missing?" });
+    const { data: question } = await f.cli(chat, {
+      ...settings,
+      actor: "agent",
+      text: "Which format should I use?",
+      replyTo: prompt.history.length - 1,
+      awaitingAnswer: true,
+    });
+
+    const approve = (revision: number) => act("task_approve", { id: draft.id, revision });
+    assert.equal((await approve(draft.revision)).error.code, "REVISION_CONFLICT");
+    assert.equal((await approve(question.revision)).error.code, "TASK_AWAITING_ANSWER");
+    assert.equal((await f.cli(["show", draft.id])).data.status, "draft");
+
+    const { data: answer } = await f.cli(chat, { ...settings, text: "Use CSV." });
+    const { data: closed } = await f.cli(chat, {
+      ...settings,
+      actor: "agent",
+      text: "The format is clear.",
+      replyTo: answer.history.length - 1,
+      awaitingAnswer: false,
+    });
+    assert.equal((await approve(closed.revision)).data.status, "ready");
+    return { text: "Draft approved after clarification." };
+  });
+  assert.equal(result.data?.answer, "Draft approved after clarification.", JSON.stringify(result.error ?? result.data?.error));
 });
 
 test("the manager can approve drafts created while the goal was paused", async t => {

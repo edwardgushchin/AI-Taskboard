@@ -243,6 +243,9 @@ function projectName() {
 }
 
 function boardError(error) {
+  if (error.code === "TASK_AWAITING_ANSWER") {
+    return t("task_question.approval_blocked");
+  }
   if (error.code === "BOARD_BUSY") {
     return t("ui.the_board_is_busy_with_another_operation_try_aga_e9c8de78");
   }
@@ -758,6 +761,10 @@ async function command(action, id, input) {
   const result = await api.command(action, id, input);
   if (generation !== projectGeneration) return undefined;
   if (!result.ok) {
+    if (result.error.code === "ACTIVE_GOAL_REQUIRED") {
+      notice(t("autoMode.goalRequired"));
+      return undefined;
+    }
     if (result.error.code === "ACCEPTANCE_CANCELLED") return undefined;
     const actions = {
       update: ["ui.editing_task_56c9ac84"], approve: ["ui.approving_task_68f23ece"],
@@ -1656,11 +1663,9 @@ function render(previousBoard) {
   quota.hidden = !frame.quotaWait;
   quota.textContent = frame.quotaWait ? quotaLabel() : "";
   const enabled = board?.settings.autoMode === true;
-  autoMode.setAttribute("aria-pressed", String(enabled));
+  autoMode.dataset.enabled = String(enabled);
+  renderAutoMode();
   autoMode.querySelector("i").className = `icon codicon codicon-${enabled ? "sync" : "play"}`;
-  bindLocalized(autoMode.querySelector("span"), "textContent", () => enabled ? t("ui.auto_on_81371019") : t("ui.auto_off_ef9f409f"));
-  bindLocalized(autoMode, "title", () => enabled ? t("ui.stop_new_automatic_starts_d1a902e4") :
-    t("ui.automatically_run_ready_tasks_d9661d7c"));
   const loading = Boolean(frame.loading || frame.restoring);
   byId("welcome").hidden = !noBoard || loading;
   byId("app-content").setAttribute("aria-busy", String(noBoard && loading));
@@ -2101,7 +2106,8 @@ function draftComposer() {
   let goalLogAvailable = false;
   let goalRunning = false;
   let goalResuming = false;
-  let requestingResume = false;
+  let goalResumeWaiting = false;
+  let resumeRequest;
   let clearingGoal = false;
   const activeGoalRunId = () => currentGoal && currentGoal.status !== "complete" ? goalScope ?? (goalRunning && managerWork?.id) : undefined;
   let goalRevision = 0;
@@ -2123,23 +2129,27 @@ function draftComposer() {
   const goalPending = element("div");
   goalPending.setAttribute("role", "status");
   goalPending.hidden = true;
-  bindLocalized(goalPending, "textContent", () => t("ui.waiting_for_the_codex_chat_to_become_available_ddb2e85f"));
   const goalActions = element("div", undefined, "board-goal-actions");
   const saveGoal = button("", () => changeGoal("edit", goalText.value.trim()), "quiet");
   const pauseGoal = button("", () => changeGoal("pause"), "quiet");
   const resumeGoal = button("", async () => {
     if (!currentGoal || resumeGoal.hidden || resumeGoal.disabled) return;
-    requestingResume = true;
+    const request = Symbol();
+    resumeRequest = request;
     goalError.textContent = "";
     syncGoal();
     try {
       const result = await api.boardGoal("resume", currentGoal.objective);
       if (!result.ok) throw new Error(boardError(result.error));
     } catch (error) {
-      goalError.textContent = error.message;
+      if (resumeRequest === request) {
+        goalError.textContent = error.message;
+      }
     } finally {
-      requestingResume = false;
-      syncGoal();
+      if (resumeRequest === request) {
+        resumeRequest = undefined;
+        syncGoal();
+      }
     }
   }, "quiet");
   const clearGoal = button("", () => changeGoal("clear"), "quiet danger");
@@ -2153,14 +2163,21 @@ function draftComposer() {
   };
   const syncGoal = () => {
     if (!currentGoal) return;
-    const waitingToResume = currentGoal.status === "active" && !goalRunning;
-    bindLocalized(goalStatus, "textContent", () => waitingToResume ? t("ui.goal_awaiting_continuation_27d0b1c3") :
+    const settings = frame.board?.settings;
+    const automatic = settings?.autoMode && settings.iterativeGoal === goalScope;
+    const waitingForWork = automatic && currentGoal.status === "active" && !goalRunning;
+    const waitingToResume = currentGoal.status === "active" && !goalRunning && !waitingForWork;
+    bindLocalized(goalStatus, "textContent", () => waitingForWork ? t("autoMode.waitingForWork") : waitingToResume ? t("ui.goal_awaiting_continuation_27d0b1c3") :
       t(...(goalLabels[currentGoal.status] ?? ["ui.goal_1730d64f"])));
     goalPanel.dataset.status = waitingToResume ? "idle" : currentGoal.status;
     pauseGoal.hidden = currentGoal.status !== "active" || waitingToResume;
     resumeGoal.hidden = currentGoal.status === "complete" || !pauseGoal.hidden;
-    resumeGoal.disabled = changingGoal || goalResuming || requestingResume || startingWork;
-    goalPending.hidden = !clearingGoal && (!goalResuming || goalRunning);
+    const resuming = goalResuming || resumeRequest !== undefined;
+    resumeGoal.disabled = changingGoal || resuming;
+    goalPending.hidden = !clearingGoal && (!resuming || goalRunning);
+    bindLocalized(goalPending, "textContent", () => t(clearingGoal
+      ? "ui.waiting_for_the_codex_chat_to_become_available_ddb2e85f"
+      : goalResumeWaiting ? "ui.waiting_for_goal_context" : "ui.starting_39fd3c7e"));
     saveGoal.disabled = changingGoal || !goalText.value.trim() || goalText.value.trim() === currentGoal.objective;
     pauseGoal.disabled = clearGoal.disabled = changingGoal;
   };
@@ -2178,6 +2195,13 @@ function draftComposer() {
     goalRevision++;
     if (running !== undefined) goalRunning = running;
     if (resuming !== undefined) goalResuming = resuming;
+    if (metadata.goalResumeEvent) {
+      // Once main broadcasts the attempt, the shared state owns the outcome in every window.
+      resumeRequest = undefined;
+    }
+    if (metadata.goalResumeWaiting !== undefined) goalResumeWaiting = metadata.goalResumeWaiting;
+    if (resuming === true) goalError.textContent = "";
+    if (metadata.goalResumeError) goalError.textContent = metadata.goalResumeError;
     if (metadata.goalLogAvailable !== undefined) goalLogAvailable = metadata.goalLogAvailable;
     if (metadata.goalId !== undefined) goalScope = metadata.goalId;
     if (goal !== undefined) showGoal(goal);
@@ -2325,12 +2349,13 @@ function draftComposer() {
       const oldestMessage = oldest?.messages[0]?.clientId;
       const oldestItem = oldest?.items[0]?.id;
       let reachedOldest = !oldest;
+      const revision = goalRevision;
       do {
         visited.add(next);
         const result = await api.boardHistory(project, next, "work");
         if (disposed || work.hidden) return;
         if (!result.ok) throw new Error(boardError(result.error));
-        if (visited.size === 1) {
+        if (visited.size === 1 && revision === goalRevision) {
           editor.updateGoal(result.data.goal, result.data.goalRunning, result.data.goalResuming, result.data);
           if (work.hidden) return;
         }
@@ -2404,8 +2429,11 @@ function draftComposer() {
   }
   editor.invalidateWork = () => {
     if (work.hidden) {
+      const revision = goalRevision;
       void api.boardHistory(project, null, "work").then(result => {
-        if (!disposed && result.ok) editor.updateGoal(result.data.goal, result.data.goalRunning, result.data.goalResuming, result.data);
+        if (!disposed && result.ok && revision === goalRevision) {
+          editor.updateGoal(result.data.goal, result.data.goalRunning, result.data.goalResuming, result.data);
+        }
       }).catch(() => {});
       return;
     }
@@ -4284,7 +4312,14 @@ async function showTask(id, dialogue = false) {
     actions.append(button(() => t(task.schedule.paused ? "ui.resume_schedule" : "ui.pause_schedule"),
       () => act("update", { schedulePaused: !task.schedule.paused })));
   }
-  if (task.status === "draft" && !task.approvalRequirements?.length) actions.append(button(() => t("ui.approve_535c27a7"), () => act("approve"), "primary"));
+  if (task.status === "draft") {
+    if (task.awaitingAnswer === true) {
+      body.append(element("p", () => t("task_question.approval_blocked"), "muted"));
+      actions.append(button(() => t("task_question.open_dialogue_button"), () => showTask(task.id, true)));
+    } else if (!task.approvalRequirements?.length) {
+      actions.append(button(() => t("ui.approve_535c27a7"), () => act("approve"), "primary"));
+    }
+  }
   if (["ready", "in_progress", "blocked", "review", "cancelled"].includes(task.status) ||
       (task.status === "done" && !manualBoard())) {
     actions.append(button(() => t("ui.return_to_draft_ccd17679"), () => act("return-to-draft")));
@@ -5916,6 +5951,7 @@ function update(next) {
   const projectChanged = frame.project !== next.project;
   const previousBoard = projectChanged ? undefined : frame.board;
   const tagsChanged = JSON.stringify(frame.board?.tags) !== JSON.stringify(next.board?.tags);
+  if (projectChanged && byId("auto-mode-panel").matches(":popover-open")) byId("auto-mode-panel").hidePopover();
   if ((projectChanged || frame.localization?.locale !== next.localization?.locale || Boolean(frame.board) !== Boolean(next.board)) &&
       byId("settings-menu").matches(":popover-open")) byId("settings-menu").hidePopover();
   if (next.localization) localization.install(next.localization);
@@ -6018,12 +6054,45 @@ byId("git-branches").addEventListener("toggle", protect(event => {
 }));
 byId("status-publish").addEventListener("click", protect(publishToGitHub));
 byId("status-tracking").addEventListener("click", protect(pushTrackedBranch));
-byId("status-auto-mode").addEventListener("click", protect(async () => {
-  const control = byId("status-auto-mode");
-  control.disabled = true;
-  try { await command("settings", undefined, { autoMode: frame.board.settings.autoMode !== true }); }
-  finally { control.disabled = false; }
-}));
+let savingAutoMode = false;
+const autoModeSwitch = byId("auto-mode-switch");
+const iterativeGoalSwitch = byId("iterative-goal-switch");
+const goalHint = byId("iterative-goal-hint");
+
+function renderAutoMode() {
+  const settings = frame.board?.settings;
+  const activeGoal = frame.iterativeGoalId;
+  autoModeSwitch.checked = settings?.autoMode === true;
+  autoModeSwitch.disabled = savingAutoMode;
+  const enabled = settings?.iterativeGoal === activeGoal && Boolean(activeGoal);
+  iterativeGoalSwitch.checked = enabled;
+  iterativeGoalSwitch.setAttribute("aria-disabled", String(savingAutoMode || !activeGoal));
+  goalHint.hidden = frame.hasCurrentGoal;
+  if (frame.hasCurrentGoal) {
+    iterativeGoalSwitch.removeAttribute("aria-describedby");
+  } else {
+    iterativeGoalSwitch.setAttribute("aria-describedby", goalHint.id);
+  }
+}
+
+async function saveAutoMode(input) {
+  savingAutoMode = true;
+  renderAutoMode();
+  try {
+    await command("settings", undefined, input);
+  } finally {
+    savingAutoMode = false;
+    renderAutoMode();
+  }
+}
+
+autoModeSwitch.addEventListener("change", protect(() => saveAutoMode({ autoMode: autoModeSwitch.checked })));
+iterativeGoalSwitch.addEventListener("click", event => {
+  if (iterativeGoalSwitch.getAttribute("aria-disabled") === "true") event.preventDefault();
+});
+iterativeGoalSwitch.addEventListener("change", protect(() => saveAutoMode({
+  iterativeGoal: iterativeGoalSwitch.checked ? frame.iterativeGoalId : false,
+})));
 byId("app-settings").setAttribute("aria-haspopup", "menu");
 byId("app-settings").setAttribute("aria-controls", "settings-menu");
 byId("app-settings").setAttribute("aria-expanded", "false");

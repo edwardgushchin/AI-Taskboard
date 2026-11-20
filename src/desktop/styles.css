@@ -12,7 +12,7 @@
 }
 :where(
   .app-menu-popup, .draft-add-menu, .draft-task-mentions, .lane-filter-options,
-  .git-branches, .notifications, #provider-limits, #agent-activity,
+  .git-branches, .notifications, #provider-limits, #agent-activity, #auto-mode-panel,
   .board-chat, .board-draft-field, .sheet, .markdown-preview, #update-dialog
 ),
 .image-preview :is(.image-preview-header > strong, .image-preview-toolbar),
@@ -1294,12 +1294,12 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 .status-tracking[aria-busy="true"] { opacity: 1; }
 @media (prefers-reduced-motion: no-preference) {
   .status-tracking[aria-busy="true"] .codicon { animation: agent-spin .8s linear infinite; }
-  #status-auto-mode[aria-pressed="true"] .codicon { animation: agent-spin .8s linear infinite; }
+  #status-auto-mode[data-enabled="true"] .codicon { animation: agent-spin .8s linear infinite; }
 }
 .status-activity { margin-inline-start: auto; flex: none; display: flex; align-items: center; gap: 4px; }
 #status-agents { display: flex; align-items: center; gap: 4px; padding-inline: 4px; font-variant-numeric: tabular-nums; }
 #status-auto-mode { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
-#status-auto-mode[aria-pressed="true"] { color: var(--focus); background: color-mix(in srgb, var(--focus) 15%, var(--toolbar)); }
+#status-auto-mode[data-enabled="true"] { color: var(--focus); background: color-mix(in srgb, var(--focus) 15%, var(--toolbar)); }
 .git-branches {
   inset: auto auto 42px 8px; margin: 0; width: min(600px, calc(100vw - 16px)); max-height: min(70vh, 480px);
   padding: var(--surface-menu-inset);
@@ -1359,7 +1359,7 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 #provider-limits h3 { font-size: 14px; font-weight: 650; }
 #agent-activity h2 { margin-bottom: var(--surface-section-gap); }
 #agent-activity h3 { margin: 0 0 8px; font-size: 13px; }
-:is(#provider-limits, #agent-activity) section + section {
+:is(#provider-limits, #agent-activity, #auto-mode-panel) section + section {
   margin-top: var(--surface-section-gap);
   padding-top: var(--surface-section-gap);
   border-top: 1px solid var(--border);
@@ -1375,11 +1375,80 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 #status-limits.quota-low:hover:not(:disabled) {
   color: color-mix(in srgb, var(--accent) 40%, var(--text));
 }
+#status-auto-mode { anchor-name: --auto-mode; }
+#auto-mode-panel {
+  position-anchor: --auto-mode;
+  inset: auto auto calc(anchor(top) + 8px) clamp(8px, anchor(left), calc(100vw - 398px));
+}
+#auto-mode-panel label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-block: 4px;
+}
+#auto-mode-panel label:has(input[role="switch"]) {
+  cursor: pointer;
+}
+#auto-mode-panel input[role="switch"] {
+  appearance: none;
+  display: grid;
+  place-items: center start;
+  flex: none;
+  width: 34px;
+  height: 20px;
+  margin: 0;
+  padding: 2px;
+  border: 1px solid var(--muted);
+  border-radius: 999px;
+  background-color: color-mix(in srgb, var(--muted) 55%, var(--panel));
+  cursor: inherit;
+}
+#auto-mode-panel input[role="switch"]::before {
+  content: "";
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background-color: var(--accent-text);
+  transition: transform 160ms ease;
+}
+#auto-mode-panel input[role="switch"]:checked {
+  border-color: var(--green);
+  background-color: color-mix(in srgb, var(--green) 72%, var(--bg));
+}
+#auto-mode-panel input[role="switch"]:checked::before {
+  transform: translateX(14px);
+}
+#auto-mode-panel label:has(input[role="switch"]:is(:disabled, [aria-disabled="true"])) {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+#auto-mode-panel input[role="switch"]:is(:disabled, [aria-disabled="true"]) {
+  opacity: .55;
+}
+#iterative-goal-hint {
+  padding-inline-start: 42px;
+  color: var(--muted);
+}
+@media (prefers-reduced-motion: reduce) {
+  #auto-mode-panel input[role="switch"]::before {
+    transition: none;
+  }
+}
+@media (forced-colors: active) {
+  #auto-mode-panel input[role="switch"]::before {
+    forced-color-adjust: none;
+    background-color: ButtonText;
+  }
+  #auto-mode-panel input[role="switch"]:is(:disabled, [aria-disabled="true"])::before {
+    background-color: GrayText;
+  }
+}
+
 #provider-limits {
   position-anchor: --provider-limits;
   inset: auto auto calc(anchor(top) + 8px) clamp(8px, anchor(left), calc(100vw - 398px));
 }
-:is(#provider-limits, #agent-activity) {
+:is(#provider-limits, #agent-activity, #auto-mode-panel) {
   position: fixed;
   margin: 0; width: min(390px, calc(100vw - 16px)); max-height: min(65vh, 500px);
   overflow: auto; padding: var(--surface-inset);
@@ -1388,7 +1457,7 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
   transition: opacity var(--hover-time) ease, transform var(--hover-time) ease,
     display var(--hover-time) allow-discrete, overlay var(--hover-time) allow-discrete;
 }
-:is(#provider-limits, #agent-activity):popover-open { opacity: 1; transform: translateY(0); }
+:is(#provider-limits, #agent-activity, #auto-mode-panel):popover-open { opacity: 1; transform: translateY(0); }
 #agent-activity {
   overflow: hidden;
 }
@@ -1403,7 +1472,7 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 .agent-activity-scroll:focus-visible {
   outline: none;
 }
-@starting-style { :is(#provider-limits, #agent-activity):popover-open { opacity: 0; transform: translateY(4px); } }
+@starting-style { :is(#provider-limits, #agent-activity, #auto-mode-panel):popover-open { opacity: 0; transform: translateY(4px); } }
 #provider-limits .limits-header {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   margin-bottom: var(--surface-section-gap);

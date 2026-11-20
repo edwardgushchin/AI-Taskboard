@@ -16,6 +16,7 @@ import {
   setAttachmentCover, upgradeTagCatalog,
 } from "./archive.ts";
 import { boardAgentRoles, boardReviewMode, taskReviewMode, taskReviewModeVersion, hexTagColor, member, number, object, reasoningEffortPattern, record, registerTags, requireRevision, requireState, reviewModes, strings, tagKey, taskIdPattern, TaskboardError, text, usesIndependentReviewer, validAgentLimitOverrides } from "./model.ts";
+import { activeManagerGoal } from "./manager-goal.ts";
 import type { GitHubMilestone, Task } from "./model.ts";
 import { exists, initializeBoard, locateBoard, onBoard, readBoardSettings, withMilestoneLinksLock, withTaskStartLock } from "./storage.ts";
 import { inheritedLimits, recordSettings } from "./settings-notices.ts";
@@ -107,10 +108,10 @@ function isMergeRepair(task: Task) {
 
 function compactTask(task: Task) {
   const { id, title, description, status, revision, tags, priority, attachments, coverAttachment, codexThreadId,
-    createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep, dependencies, milestone, workingDirectory, schedule, origin, launchRequested } = task;
+    createdAt, updatedAt, blocked, subtasks, goalThreadId, managerGoalId, summary, nextStep, dependencies, milestone, workingDirectory, schedule, origin, launchRequested } = task;
   return { reviewModeOverride: task.reviewModeOverride, expertId: task.expertId, expertTeam: task.expertTeam, expertStage: task.expertStage, expertStages: task.expertStages,
     reviewDecision: status === "review" ? reviewDecisionSequence(task) : undefined, acceptanceRepair: task.acceptanceRepair, id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
-    coverAttachment, codexThreadId, codexArchivePending: task.codexArchivePending, createdAt, updatedAt, blocked, subtasks, goalThreadId, summary, nextStep,
+    coverAttachment, codexThreadId, codexArchivePending: task.codexArchivePending, createdAt, updatedAt, blocked, subtasks, goalThreadId, managerGoalId, summary, nextStep,
     dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, origin, launchRequested, discussionReturn: task.discussionReturn,
     awaitingAnswer: task.awaitingAnswer, reviewReturn: task.reviewReturn,
     draftDiscussion: status === "draft" ? task.draftDiscussion : undefined, historyLength: task.history.length,
@@ -583,6 +584,17 @@ function run(
     if (input.autoMode !== undefined) {
       if (typeof input.autoMode !== "boolean") throw new TaskboardError("INVALID_INPUT", "autoMode must be a boolean.");
       store.index.settings.autoMode = input.autoMode;
+    }
+    if (input.iterativeGoal !== undefined) {
+      if (input.iterativeGoal === false) {
+        delete store.index.settings.iterativeGoal;
+      } else {
+        if (typeof input.iterativeGoal !== "string" || isManual(store.index.settings) ||
+            input.iterativeGoal !== activeManagerGoal(store.location.root)) {
+          throw new TaskboardError("ACTIVE_GOAL_REQUIRED", "An active goal is required to enable iterative mode.");
+        }
+        store.index.settings.iterativeGoal = input.iterativeGoal;
+      }
     }
     if (input.reviewMode !== undefined) {
       store.index.settings.reviewMode = member(input.reviewMode, reviewModes, "review mode");

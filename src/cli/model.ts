@@ -229,6 +229,7 @@ export interface Task {
   codexServiceThreads?: string[];
   codexArchivePending?: string[];
   goalThreadId?: string;
+  managerGoalId?: string;
   managerReadThrough?: number;
   revision: number;
   createdAt: string;
@@ -270,6 +271,7 @@ export interface BoardSettings {
   reviewModeVersion?: number;
   autoReview?: boolean;
   autoMode?: boolean;
+  iterativeGoal?: string;
   autoQueue?: { revision: number; paused: boolean; order: string[]; held: string[] };
 }
 
