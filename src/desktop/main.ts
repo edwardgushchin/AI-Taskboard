@@ -97,6 +97,7 @@ interface WindowState {
 
 interface BoardWatch {
   failedDiscussionStarts?: Map<string, number>;
+  draftDiscussionCursor?: number;
   tabs: Set<ProjectTab>;
   listeners: Set<(board: Board, runChanged?: boolean) => void>;
   board: Board;
@@ -1010,6 +1011,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     let reply: CliReply<Task>;
     if (automatic) {
       const current = await callCli<Task>(project, ["show", id]);
+      signal.throwIfAborted();
       if (!current.ok) return { saved, result: current };
       const task = current.data;
       if (task.status !== "draft" || task.draftDiscussion?.phase !== automatic) {
@@ -1611,23 +1613,46 @@ function scheduleAgentWork() {
         }
         scheduleAutoReview(watch);
         scheduleAutoBoard(watch);
-        scheduleDraftDiscussions(watch);
       }
+      scheduleDraftDiscussions();
     } catch (error) { console.error(error); }
   });
 }
 
-function scheduleDraftDiscussions({ board }: BoardWatch) {
-  if (applicationUpdates.installing) {
-    return;
-  }
-  const { project, tasks } = board;
-  if (isManual(board.settings) || closingProjects.has(project)) return;
-  const writers = new Set(agentSlots.entries(project).filter(entry => entry.kind !== "queue").map(entry => entry.task));
-  for (const task of tasks) {
-    const phase = task.draftDiscussion?.phase;
-    if (task.status !== "draft" || (phase !== "queued" && phase !== "running") || writers.has(task.id)) continue;
-    void runDraftDiscussion(project, task.id, phase).catch(error => console.warn("Could not run draft discussion", error));
+const maxRestoredDraftDiscussions = 2;
+let restoredDraftDiscussions = 0;
+let lastDraftDiscussionProject: string | undefined;
+
+function scheduleDraftDiscussions() {
+  if (restoredDraftDiscussions >= maxRestoredDraftDiscussions) return;
+  const watches = [...subscriptions.values()];
+  if (!watches.length) return;
+  const start = (watches.findIndex(watch => watch.board.project === lastDraftDiscussionProject) + 1) % watches.length;
+  const ordered = [...watches.slice(start), ...watches.slice(0, start)];
+  // Admit one card per board per pass so a large restored queue cannot monopolize both places.
+  while (restoredDraftDiscussions < maxRestoredDraftDiscussions) {
+    const before = restoredDraftDiscussions;
+    for (const watch of ordered) {
+      const { project, settings, tasks } = watch.board;
+      if (isManual(settings) || closingProjects.has(project)) continue;
+      const writers = new Set(agentSlots.entries(project).filter(entry => entry.kind !== "queue").map(entry => entry.task));
+      for (let offset = 0; offset < tasks.length; offset++) {
+        const index = ((watch.draftDiscussionCursor ?? 0) + offset) % tasks.length;
+        const task = tasks[index];
+        const phase = task.draftDiscussion?.phase;
+        if (task.status !== "draft" || (phase !== "queued" && phase !== "running") || writers.has(task.id)) continue;
+        watch.draftDiscussionCursor = index + 1;
+        lastDraftDiscussionProject = project;
+        restoredDraftDiscussions++;
+        void runDraftDiscussion(project, task.id, phase)
+          .catch(error => console.warn("Could not run draft discussion", error))
+          .finally(() => { restoredDraftDiscussions--; });
+        break;
+      }
+      if (restoredDraftDiscussions >= maxRestoredDraftDiscussions) return;
+    }
+    // A watch event or the runtime poll retries temporary refusals, including when the board revision did not change.
+    if (restoredDraftDiscussions === before) return;
   }
 }
 
