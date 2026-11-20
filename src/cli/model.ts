@@ -121,6 +121,7 @@ export interface TaskEvent {
   mergedInto?: { id: string; title: string; transferred: string };
   messageKind?: "question" | "update" | "decision";
   reviewApproval?: { reviewModeVersion?: number; revision: number; targetHead: string | null; evidence: string[] };
+  reviewNote?: { reviewMode: ReviewMode; reviewModeVersion?: number; revision: number; targetHead: string | null; decision: number };
   replyToMessage?: number;
   attachment?: string;
   from?: TaskState;

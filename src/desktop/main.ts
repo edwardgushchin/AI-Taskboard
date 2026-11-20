@@ -68,7 +68,7 @@ interface Board {
   project: string;
   settings: BoardSettings;
   tags: BoardTag[];
-  tasks: (Task & { historyLength?: number; reviewApproved?: boolean; reviewApprovalTargetHead?: string | null; reviewHasCommit?: true; reviewPending?: true; mergeRepair?: true; unfinishedDependencies?: string[];
+  tasks: (Task & { historyLength?: number; reviewApproved?: boolean; reviewApprovalTargetHead?: string | null; reviewNoted?: true; reviewHasCommit?: true; reviewPending?: true; mergeRepair?: true; unfinishedDependencies?: string[];
     expertWorkPlanned?: boolean; expertReviewPlanned?: boolean })[];
   managerInbox?: ReturnType<typeof import("../cli/task-messages.ts").managerInbox>;
   archived: (ArchiveLink & { id: string })[];
@@ -3299,7 +3299,7 @@ function scheduleAutoReview(watch: BoardWatch) {
   const ready = submissions.filter(task => (settings.autoMode || usesIndependentReviewer(modeOf(task))) &&
     modeOf(task) !== "human" && !task.reviewPending &&
     (!task.acceptanceRepair || reviewsAcceptanceRepair(task, settings)) && !watch.reviewerRuns.has(task.id) &&
-    task.expertReviewPlanned && (!usesIndependentReviewer(modeOf(task)) || !task.reviewApproved) &&
+    task.expertReviewPlanned && (!usesIndependentReviewer(modeOf(task)) || (!task.reviewApproved && !task.reviewNoted)) &&
     watch.reviewAttempts.get(task.id) !== reviewAttempt(task) &&
     ((usesIndependentReviewer(modeOf(task)) && task.reviewHasCommit) || !executorBusy(project, task.id)));
   const independent = ready.filter(task => usesIndependentReviewer(modeOf(task))).slice(0, capacity);
@@ -3453,9 +3453,9 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
         if (!["INVALID_TRANSITION", "REVISION_CONFLICT", "REVIEW_MODE_CHANGED"].includes(result.error.code)) notify(result.error.message);
         return;
       }
-      const { reviewMode, reviewModeVersion, stale, revision, targetHead, reviewer } = result.data as {
+      const { reviewMode, reviewModeVersion, stale, revision, targetHead, reviewer, reviewDecision } = result.data as {
         reviewMode: ReviewMode; reviewModeVersion?: number; stale: boolean; revision: number; targetHead: string | null;
-        reviewer?: ReviewReport;
+        reviewer?: ReviewReport; reviewDecision?: number;
       };
       if (reviewMode !== expectedMode) return;
       if (stale) {
@@ -3469,7 +3469,9 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
       const input = { revision, targetHead, reviewMode, reviewModeVersion, actor: "reviewer", reviewerUsage: usage };
       const needsMoreEvidence = !reviewer.findings.length && (!reviewer.evidence.length || reviewer.evidence.includes(null));
       const recordDecision = async () => {
-        const note = (summary: string) => callCli(project, ["review-note", id, "--compact"], { ...input, summary });
+        const note = (summary: string) => callCli(project, ["review-note", id, "--compact"], {
+          ...input, summary, reviewDecision: reviewDecision ?? 0,
+        });
         if (reviewer.needsHuman || needsMoreEvidence) {
           return note(reviewer.summary);
         }
