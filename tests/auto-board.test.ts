@@ -9,7 +9,7 @@ import ts from "typescript";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import { nextReadyTask } from "../src/desktop/auto-queue.ts";
 import { pendingReviewApprovals } from "../src/desktop/automation-delivery.ts";
-import { reviewsAcceptanceRepair, taskReviewMode, taskReviewModeVersion } from "../src/cli/model.ts";
+import { reviewsAcceptanceRepair, taskReviewMode, taskReviewModeVersion, usesIndependentReviewer } from "../src/cli/model.ts";
 
 const source = readFileSync(new URL("../src/desktop/main.ts", import.meta.url), "utf8");
 const parsed = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, true);
@@ -34,7 +34,8 @@ function fixture(mode = "human") {
     applicationUpdates: { installing: false },
     subscriptions: new Map([["project", watch]]), closingProjects: new Set(), boardWorkRequests: managers, boardRequests: dialogues,
     backgroundManagerRequests: new Map(),
-    isManual, nextReadyTask, pendingReviewApprovals, taskReviewMode, taskReviewModeVersion, reviewsAcceptanceRepair, agentSlots: slots, projectIdentity: (path: string) => path,
+    isManual, nextReadyTask, pendingReviewApprovals, taskReviewMode, taskReviewModeVersion, reviewsAcceptanceRepair, usesIndependentReviewer,
+    agentSlots: slots, projectIdentity: (path: string) => path,
     executorBusy: (_: string, id: string) => busy.has(id), t: (key: string) => localization.text(key, {}, "en"),
     broadcastBoardChat: (_: string, __: string, value: any) => errors.push(value.error),
     reserveAgent: (_: string, role: "reviewer", _task: string, _revision: number | undefined, review: { id: string; mode: string }) =>
@@ -267,6 +268,22 @@ test("a legacy approval that becomes stale cannot launch an unplanned reviewer",
   f.board.tasks[0].reviewApproved = false;
   await f.tick();
   assert.match(f.notices[0][2], /T-0001/);
+});
+
+test("with automatic dispatch off, a legacy reviewer submission requests a plan but ready work waits", async () => {
+  const f = fixture("human");
+  f.board.settings.autoMode = false;
+  f.add("T-0001", {
+    status: "review", expertReviewPlanned: false, reviewModeOverride: { mode: "reviewer", version: 1 },
+  });
+  f.add("T-0002", { status: "review", expertReviewPlanned: false });
+  f.add("T-0003", { expertWorkPlanned: false });
+  await f.tick();
+  await f.tick();
+  assert.deepEqual(f.errors, []);
+  assert.deepEqual(f.launches, []);
+  assert.equal(f.notices.length, 1);
+  assert.deepEqual(f.notices[0][2].match(/T-\d+/g), ["T-0001"]);
 });
 
 test("an explicitly requested child gets a plan even with automatic dispatch off", async () => {

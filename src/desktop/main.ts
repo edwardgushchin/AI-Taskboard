@@ -36,7 +36,7 @@ import type { CliReply } from "./cli.ts";
 import { executionModels } from "./codex-models.ts";
 import type { ArchiveLink, BoardSettings, BoardTag, ReviewMode, RunActivity, Task } from "../cli/model.ts";
 import { boardReviewMode, taskReviewMode, taskReviewModeVersion, codexThreadPattern, defaultBoardAgents, maxAttachmentBytes, reviewsAcceptanceRepair, reviewVerifier, taskIdPattern, TaskboardError, usesIndependentReviewer } from "../cli/model.ts";
-import { activeManagerGoal, managerGoalBinding } from "../cli/manager-goal.ts";
+import { managerGoalBinding, managerGoalState } from "../cli/manager-goal.ts";
 import { BoardStore, directory as storageDirectory, locateBoard, onBoard, readBoardSettings, readJson, writeJson } from "../cli/storage.ts";
 import { applyDesktopAcceptance } from "../cli/acceptance.ts";
 import { missingCodexThread, startCodexRun } from "./codex-run.ts";
@@ -68,7 +68,7 @@ interface Board {
   project: string;
   settings: BoardSettings;
   tags: BoardTag[];
-  tasks: (Task & { historyLength?: number; reviewApproved?: boolean; reviewApprovalTargetHead?: string | null; reviewHasCommit?: true; reviewPending?: true; mergeRepair?: true; unfinishedDependencies?: string[];
+  tasks: (Task & { historyLength?: number; reviewApproved?: boolean; reviewApprovalTargetHead?: string | null; reviewNoted?: true; reviewHasCommit?: true; reviewPending?: true; mergeRepair?: true; unfinishedDependencies?: string[];
     expertWorkPlanned?: boolean; expertReviewPlanned?: boolean })[];
   managerInbox?: ReturnType<typeof import("../cli/task-messages.ts").managerInbox>;
   archived: (ArchiveLink & { id: string })[];
@@ -222,6 +222,7 @@ function frame(state: ProjectTab) {
   const key = state.board && projectIdentity(state.board.project);
   const request = key ? boardRequests.get(key) : undefined;
   const work = key ? boardWorkRequests.get(key) : undefined;
+  const goal = state.board ? currentManagerGoal(state.board.project) : undefined;
   const reviewerRuns = state.project ? subscriptions.get(state.project)?.reviewerRuns : undefined;
   const sharedRuns = state.board ? agentSlots.entries(state.board.project) : [];
   const managerContext = sharedRuns.find(entry => entry.task === "manager:dialogue");
@@ -244,7 +245,8 @@ function frame(state: ProjectTab) {
     managerQuestion: key ? managerQuestion(key)?.view : undefined,
     managerAccess: state.project ? managerAccess(app.getPath("userData"), state.project) : "auto",
     managerBusy: Boolean(managerContext),
-    iterativeGoalId: state.board ? currentActiveGoal(state.board.project) : undefined,
+    iterativeGoalId: goal?.iterativeGoalId,
+    hasCurrentGoal: Boolean(goal?.status && goal.status !== "complete"),
     managerRun: request?.managerRun ?? (sharedManager?.lane === "chat" ? sharedManager : null),
     managerWork: work?.managerRun ?? (sharedGoal ? { ...sharedGoal, live: undefined } : undefined) ??
       (background ? { ...background, live: undefined } : null),
@@ -276,7 +278,11 @@ function frame(state: ProjectTab) {
     }) ?? []),
     runActivity: Object.fromEntries(state.board?.tasks.flatMap(task => {
       const log = runActivityByTask.get(state.project + "\0" + task.id);
-      return log ? [[task.id, log]] : [];
+      return log ? [[task.id, log.items]] : [];
+    }) ?? []),
+    runActivityThreads: Object.fromEntries(state.board?.tasks.flatMap(task => {
+      const threadId = runActivityByTask.get(state.project + "\0" + task.id)?.threadId;
+      return threadId ? [[task.id, threadId]] : [];
     }) ?? []),
     discussionActivity: Object.fromEntries(state.board?.tasks.flatMap(task => {
       const log = discussionActivityByTask.get(state.project + "\0" + task.id);
@@ -1292,7 +1298,7 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
     (task.expertWorkPlanned && (task.schedule || taskReviewMode(task, settings) === "human" || task.expertReviewPlanned));
   const missingPlan = (task: Board["tasks"][number], settings: BoardSettings) => {
     const mode = taskReviewMode(task, settings);
-    if (task.status === "review") return (settings.autoMode || mode === "reviewer-human") && mode !== "human" && !task.expertReviewPlanned &&
+    if (task.status === "review") return (settings.autoMode || usesIndependentReviewer(mode)) && mode !== "human" && !task.expertReviewPlanned &&
       !task.reviewPending && !task.reviewApproved && (!task.acceptanceRepair || reviewsAcceptanceRepair(task, settings));
     const controls = settings.autoMode ? settings.autoQueue : undefined;
     return task.status === "ready" && !controls?.paused && !controls?.held.includes(task.id) &&
@@ -1645,7 +1651,6 @@ function reserveAgent(project: string, role: AgentRole, task?: string, queuedRev
         const { settings } = store.index;
         const mode = taskReviewMode(card, settings);
         if (card.status !== "review" || mode !== review.mode || !usesIndependentReviewer(mode) ||
-            (!settings.autoMode && mode !== "reviewer-human") ||
             (card.acceptanceRepair && !reviewsAcceptanceRepair(card, settings))) return;
         return acquire(settings);
       }, 0)
@@ -1862,9 +1867,13 @@ function broadcastBoardChat(project: string, type: string, details: { id?: strin
   }
 }
 
-function currentActiveGoal(project: string) {
-  try { return activeManagerGoal(project); }
+function currentManagerGoal(project: string) {
+  try { return managerGoalState(project); }
   catch { return undefined; }
+}
+
+function currentActiveGoal(project: string) {
+  return currentManagerGoal(project)?.iterativeGoalId;
 }
 
 function boardThreadPath(project: string, dialogue = false) {
@@ -3381,10 +3390,10 @@ function scheduleAutoReview(watch: BoardWatch) {
 
   const reviewAttempt = (task: Task & { reviewDecision?: number; reviewTargetHead?: string | null }) =>
     JSON.stringify([modeOf(task), taskReviewModeVersion(task, settings), task.revision, task.reviewDecision, task.reviewTargetHead]);
-  const ready = submissions.filter(task => (settings.autoMode || modeOf(task) === "reviewer-human") &&
+  const ready = submissions.filter(task => (settings.autoMode || usesIndependentReviewer(modeOf(task))) &&
     modeOf(task) !== "human" && !task.reviewPending &&
     (!task.acceptanceRepair || reviewsAcceptanceRepair(task, settings)) && !watch.reviewerRuns.has(task.id) &&
-    task.expertReviewPlanned && (!usesIndependentReviewer(modeOf(task)) || !task.reviewApproved) &&
+    task.expertReviewPlanned && (!usesIndependentReviewer(modeOf(task)) || (!task.reviewApproved && !task.reviewNoted)) &&
     watch.reviewAttempts.get(task.id) !== reviewAttempt(task) &&
     ((usesIndependentReviewer(modeOf(task)) && task.reviewHasCommit) || !executorBusy(project, task.id)));
   const independent = ready.filter(task => usesIndependentReviewer(modeOf(task))).slice(0, capacity);
@@ -3538,9 +3547,9 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
         if (!["INVALID_TRANSITION", "REVISION_CONFLICT", "REVIEW_MODE_CHANGED"].includes(result.error.code)) notify(result.error.message);
         return;
       }
-      const { reviewMode, reviewModeVersion, stale, revision, targetHead, reviewer } = result.data as {
+      const { reviewMode, reviewModeVersion, stale, revision, targetHead, reviewer, reviewDecision } = result.data as {
         reviewMode: ReviewMode; reviewModeVersion?: number; stale: boolean; revision: number; targetHead: string | null;
-        reviewer?: ReviewReport;
+        reviewer?: ReviewReport; reviewDecision?: number;
       };
       if (reviewMode !== expectedMode) return;
       if (stale) {
@@ -3554,7 +3563,9 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
       const input = { revision, targetHead, reviewMode, reviewModeVersion, actor: "reviewer", reviewerUsage: usage };
       const needsMoreEvidence = !reviewer.findings.length && (!reviewer.evidence.length || reviewer.evidence.includes(null));
       const recordDecision = async () => {
-        const note = (summary: string) => callCli(project, ["review-note", id, "--compact"], { ...input, summary });
+        const note = (summary: string) => callCli(project, ["review-note", id, "--compact"], {
+          ...input, summary, reviewDecision: reviewDecision ?? 0,
+        });
         if (reviewer.needsHuman || needsMoreEvidence) {
           return note(reviewer.summary);
         }
@@ -3985,7 +3996,7 @@ async function runImage(event: IpcMainInvokeEvent, id: unknown, path: unknown, r
   if (!task.ok) return null;
   if (reviewer === true) return readReviewerImage(project, task.data.id, path);
   const key = project + "\0" + id;
-  const items = [...(runActivityByTask.get(key) ?? []), ...(discussionActivityByTask.get(key) ?? [])];
+  const items = [...(runActivityByTask.get(key)?.items ?? []), ...(discussionActivityByTask.get(key) ?? [])];
   return readRunImage(project, task.data, items, path);
 }
 
@@ -4071,7 +4082,7 @@ ipcMain.handle("board:revealArtifact", async (event, id: unknown, source: unknow
 
 const launchingTasks = new Set<string>();
 const runningTasks = new Set<string>();
-const runActivityByTask = new Map<string, RunActivity[]>();
+const runActivityByTask = new Map<string, { items: RunActivity[]; threadId?: string }>();
 const discussionActivityByTask = new Map<string, RunActivity[]>();
 
 function publishDiscussionActivity(project: string, id: string, items?: RunActivity[]) {
@@ -4091,13 +4102,13 @@ function executorBusy(project: string, id: string) {
 }
 
 function publishRunActivity(project: string, id: string, items: RunActivity[],
-  savedRun?: { sequence: number; items: RunActivity[]; durationMs: number }) {
+  savedRun?: { sequence: number; items: RunActivity[]; durationMs: number; threadId?: string }, runThreadId?: string) {
   const key = project + "\0" + id;
-  if (items.length) runActivityByTask.set(key, items);
+  if (items.length) runActivityByTask.set(key, { items, threadId: runThreadId });
   else runActivityByTask.delete(key);
   for (const state of windowStates.values()) {
     if (state.active.project === project && !state.window.isDestroyed()) {
-      state.window.webContents.send("chat:update", { project, id, type: "run", items, savedRun });
+      state.window.webContents.send("chat:update", { project, id, type: "run", items, savedRun, runThreadId });
     }
   }
 }
@@ -4153,6 +4164,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     if (taskOperations.get(key) === operation) taskOperations.delete(key);
   });
   const activity = new Map<string, RunActivity>();
+  let runThreadId: string | undefined;
   const runStarted = performance.now();
   let prepared = false;
   let returnedRevision: number | undefined;
@@ -4177,7 +4189,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   };
   const publish = () => {
     updateTimer = undefined;
-    publishRunActivity(project, id, runLog(activity));
+    publishRunActivity(project, id, runLog(activity), undefined, runThreadId);
     if (steeredReply && latestReply() === steeredReply) publishReply();
   };
   const saveActivity = async () => {
@@ -4191,10 +4203,10 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     const items = runLog(activity);
     if (!items.length) return;
     const durationMs = Math.round(performance.now() - runStarted);
-    const saved = await callCli<{ runLogSequence?: number }>(project, ["run-log", id, "--compact"], { entries: items, durationMs });
+    const saved = await callCli<{ runLogSequence?: number }>(project, ["run-log", id, "--compact"], { entries: items, durationMs, runThreadId });
     if (saved.ok) {
       const sequence = saved.data.runLogSequence;
-      publishRunActivity(project, id, [], sequence === undefined ? undefined : { sequence, items, durationMs });
+      publishRunActivity(project, id, [], sequence === undefined ? undefined : { sequence, items, durationMs, threadId: runThreadId });
     }
     else publishRunActivity(project, id, [
       { id: "save-error", type: "error", title: "", text: saved.error.message, status: "failed" },
@@ -4379,6 +4391,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       activity.set(item.id, item);
       updateTimer ??= setTimeout(publish, 80);
     }, report => saveTaskTokenUsage(project, id, role, report), signal, async (codexThreadId, created) => {
+      runThreadId = codexThreadId;
       if (!queued && linked.codexThreadId === codexThreadId) {
         rememberExecutor(project, linked, cwd, continuation);
         return;

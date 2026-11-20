@@ -613,7 +613,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
   }
 }
 
-function updateChat({ project, id, type, text, items, savedRun, goal, goalId, goalRunning, goalResuming, goalResumeWaiting, error, question, managerRun, managerWork, at }) {
+function updateChat({ project, id, type, text, items, savedRun, runThreadId, goal, goalId, goalRunning, goalResuming, goalResumeWaiting, error, question, managerRun, managerWork, at }) {
   if (type === "orchestrator-question") {
     if (frame.project === project) {
       frame.managerQuestion = question;
@@ -657,7 +657,7 @@ function updateChat({ project, id, type, text, items, savedRun, goal, goalId, go
   const open = frame.project === project && sheet.open && sheetKind === "task" && taskInSheet?.id === id;
   if (type === "reviewer-chat") {
     if (frame.project === project) byId("board-composer").firstChild?.refreshWork();
-    if (open) byId("task-side").firstElementChild?.refreshReview();
+    if (open) byId("task-review-history")?.refreshReview?.();
     return;
   }
   if (type === "discussion" && frame.project === project) {
@@ -669,9 +669,10 @@ function updateChat({ project, id, type, text, items, savedRun, goal, goalId, go
   }
   if (type === "run" && frame.project === project) {
     (frame.runActivity ??= {})[id] = items;
+    (frame.runActivityThreads ??= {})[id] = runThreadId;
     byId("board-composer").firstChild?.updateManagerWork();
     if (open) {
-      if (savedRun && savedRun.sequence > taskInSheet.history.length) {
+      if (savedRun && savedRun.threadId === taskInSheet.codexThreadId && savedRun.sequence > taskInSheet.history.length) {
         const draft = chatDrafts.get(project + "\0" + id);
         if (draft) draft.savedRun = savedRun;
       }
@@ -702,25 +703,6 @@ function legacyTokenUsageFailure(reason) {
   }
 }
 
-function chatEventLabel(action) {
-  const labels = {
-    create: ["ui.created_the_task_834cf85a"], update: ["ui.updated_the_task_c7fa8e4b"],
-    approve: ["ui.approved_the_task_52081998"], start: ["ui.started_work_86e3b286"],
-    "return-to-draft": ["ui.returned_the_task_to_draft_0224ff4e"],
-    progress: ["ui.updated_progress_fde6405d"], block: ["ui.blocked_the_task_c97388fb"],
-    checklist: ["ui.updated_progress_fde6405d"],
-    pause: ["ui.paused_work_5608a24c"],
-    resume: ["ui.resumed_work_8bc90aaa"], submit: ["ui.submitted_for_review_99b989f4"],
-    accept: ["ui.accepted_the_task_f6df7973"], cancel: ["ui.cancelled_the_task_07a3cdd4"],
-    cover: ["ui.changed_the_card_cover_c445cf83"],
-    "request-changes": ["ui.requested_changes_480ce0d7"], attach: ["ui.attached_a_file_f4ead942"],
-    "review-note": ["ui.left_on_review_8da49b68"],
-    "review-approve": ["ui.approved_the_submission_04c4f1df"],
-    "expert-plan": ["experts.plan_event"], "expert-stage": ["experts.stage_event"],
-  };
-  return Object.hasOwn(labels, action) ? t(...labels[action]) : action;
-}
-
 function reasoningName(effort) {
   const labels = {
     none: ["ui.none_643e51f5"], minimal: ["ui.minimal_2a7a811b"], low: ["ui.low_94c1f5ae"], medium: ["ui.medium_7f640a23"],
@@ -737,12 +719,33 @@ function chatEventAttachments(event, files) {
   return matches.length === 1 ? matches : [];
 }
 
-function reviewerChat(task, work, tail, decisions, onCollaboration) {
+function collaborationItem(item) {
+  return item.type === "collabAgentToolCall" || item.type === "subAgentActivity";
+}
+
+function taskWorkItem(item) {
+  if (collaborationItem(item)) return false;
+  if (item.type === "error" && ["project-closed", "save-error", "discussion-launch-error", "schedule-error", "block-error"].includes(item.id)) {
+    return false;
+  }
+  if (item.type !== "mcpToolCall" && item.type !== "dynamicToolCall") return true;
+  const tool = item.title?.split(" / ").at(-1) ?? "";
+  return !/^(team_(message|inbox|findings)|expert_(plan|stage|verify_skills))$/.test(tool);
+}
+
+function isTaskChatReplacement(event, task) {
+  if (event.action !== "update" || event.actor !== "user") return false;
+  if (event.previousCodexThreadId) return true;
+  // Older launchers included the previous thread only in the update note.
+  return task.codexServiceThreads?.some(id => id !== task.codexThreadId && event.text?.endsWith("`" + id + "`"));
+}
+
+function reviewerHistory(task, journal, decisions) {
   const project = frame.project;
   const status = element("li", undefined, "muted");
   status.setAttribute("role", "status");
   status.hidden = true;
-  work.insertBefore(status, tail);
+  journal.append(status);
   const nodes = new Map();
   let timer;
   let generation = 0;
@@ -750,7 +753,7 @@ function reviewerChat(task, work, tail, decisions, onCollaboration) {
     if (timer !== undefined) return;
     timer = setTimeout(() => {
       timer = undefined;
-      if (work.isConnected) void load();
+      if (journal.closest("details")?.open) void load();
     }, 200);
   };
 
@@ -758,18 +761,16 @@ function reviewerChat(task, work, tail, decisions, onCollaboration) {
     const request = ++generation;
     try {
       const result = await api.reviewerChat(task.id);
-      if (!work.isConnected || project !== frame.project || request !== generation) return;
+      if (!journal.isConnected || project !== frame.project || request !== generation) return;
       if (!result.ok) throw new Error(boardError(result.error));
-      const follow = !work.hidden && work.scrollHeight - work.clientHeight - work.scrollTop <= 8;
       const attempts = result.data;
-      onCollaboration(attempts.flatMap(attempt => attempt.items.filter(collaborationItem)));
       const ids = new Set(attempts.map(attempt => attempt.id));
       for (const [id, node] of nodes) {
         if (ids.has(id)) continue;
         node.entry.remove();
         nodes.delete(id);
       }
-      const history = [...work.children].filter(entry => entry.dataset.historyAt);
+      const history = decisions.map(({ entry }) => entry);
       for (const [index, attempt] of attempts.entries()) {
         let node = nodes.get(attempt.id);
         if (!node) {
@@ -779,7 +780,7 @@ function reviewerChat(task, work, tail, decisions, onCollaboration) {
           const activity = element("div", undefined, "chat-run");
           const error = element("p", undefined, "chat-run-error");
           entry.append(label, activity, error);
-          work.insertBefore(entry, history.find(row => row.dataset.historyAt > attempt.at) ?? status);
+          journal.insertBefore(entry, history.find(row => row.dataset.historyAt > attempt.at) ?? status);
           node = { entry, label, activity, error };
           nodes.set(attempt.id, node);
         }
@@ -819,57 +820,16 @@ function reviewerChat(task, work, tail, decisions, onCollaboration) {
           reportText === event.text.trim());
         if (entry.hidden) matched.add(attempt.id);
       }
-      status.hidden = true;
-      if (follow) work.scrollTop = work.scrollHeight;
+      status.hidden = attempts.length > 0 || decisions.length > 0;
+      if (!status.hidden) {
+        bindLocalized(status, "textContent", () => t("ui.no_reviewer_messages_yet_25b5caaf"));
+      }
     } catch (error) {
-      if (!work.isConnected || project !== frame.project || request !== generation) return;
+      if (!journal.isConnected || project !== frame.project || request !== generation) return;
       status.hidden = false;
       bindLocalized(status, "textContent", () => t("ui.could_not_load_reviewer_chat_5c01ba32") + error.message);
     }
   }
-}
-
-function collaborationItem(item) {
-  return item.type === "collabAgentToolCall" || item.type === "subAgentActivity";
-}
-
-function collaborationData(item) {
-  try { return JSON.parse(item.text) ?? {}; } catch { return {}; }
-}
-
-function teamActivity(task, item, details, agents) {
-  const operation = item.type === "subAgentActivity" ? { started: "spawn", interacted: "interaction", completed: "completed" }[details.kind] :
-    { spawnAgent: "spawn", sendInput: "send", wait: "wait", closeAgent: "close", resumeAgent: "resume", followupTask: "resume" }[details.tool ?? item.title];
-  if (!operation) return;
-  const ids = [...new Set([...(details.receiverThreadIds ?? []), ...Object.keys(details.agentsStates ?? {}),
-    ...(details.agentThreadId ? [details.agentThreadId] : [])])];
-  const active = operation === "wait" && !ids.length && details.startedAtMs ? [...agents.values()].filter(agent =>
-    agent.startedAtMs && agent.startedAtMs <= details.startedAtMs && (!agent.firstCompletion || agent.firstCompletion >= details.startedAtMs)) : [];
-  const labels = [...new Set(ids.map(id => agents.get(id)?.name ?? t("experts.unnamed_agent")))];
-  const expand = Boolean(details.prompt || Object.values(details.agentsStates ?? {}).some(state => state?.message));
-  const row = element(expand ? "details" : "div", undefined, "expert-agent-event");
-  const summary = element(expand ? "summary" : "div", undefined, "expert-agent-event-line");
-  const glyph = operation === "completed" ? "check" : operation === "wait" ? "debug-pause" :
-    operation === "send" || operation === "interaction" ? "comment-discussion" : "hubot";
-  const caption = element("span", undefined, "expert-agent-caption");
-  caption.append(element("strong", () => t("experts.agent_" + operation)));
-  if (labels.length) caption.append(element("span", labels.join(", "), "muted"));
-  else if (active.length) caption.append(element("span", () => t("experts.active_at_wait") + " " +
-    [...new Set(active.map(agent => agent.name))].join(", "), "muted"));
-  else if (operation === "wait") caption.append(element("span", () => t("experts.wait_target_unavailable"), "muted"));
-  const model = details.model && [details.model, details.reasoningEffort && reasoningName(details.reasoningEffort)].filter(Boolean).join(" · ");
-  if (model) caption.append(element("span", model, "muted"));
-  const state = activityState([item]);
-  if (state.code === "running" || state.code === "failed") caption.append(element("span", state.text, "muted"));
-  summary.append(icon(glyph), caption);
-  appendChatTime(summary, item.at);
-  row.dataset.agentCall = item.id;
-  row.append(summary);
-  for (const status of Object.values(details.agentsStates ?? {})) {
-    if (typeof status?.message === "string" && status.message) row.append(chatText(status.message, { taskId: task.id, agent: true }));
-  }
-  if (typeof details.prompt === "string") row.append(chatText(details.prompt, { taskId: task.id, agent: true }));
-  return row;
 }
 
 function taskChat(task) {
@@ -881,7 +841,8 @@ function taskChat(task) {
     draft = { text: "", files: [] };
     chatDrafts.set(key, draft);
   }
-  if (draft.savedRun?.sequence <= task.history.length) delete draft.savedRun;
+  if (draft.savedRun && (draft.savedRun.sequence <= task.history.length ||
+      draft.savedRun.threadId !== task.codexThreadId)) delete draft.savedRun;
   const area = element("section", undefined, "task-chat");
   bindLocalized(area, "aria-label", () => t("ui.agent_chat_065b4b62"), true);
   const header = element("div", undefined, "chat-header");
@@ -895,12 +856,6 @@ function taskChat(task) {
   work.hidden = true;
   bindLocalized(work, "aria-label", () => t("ui.work_activity_e01957b7"), true);
   work.tabIndex = 0;
-  const team = element("div", undefined, "chat-log task-team");
-  team.hidden = true;
-  bindLocalized(team, "aria-label", () => t("experts.team"), true);
-  team.tabIndex = 0;
-  const teamLog = element("div", undefined, "task-team-activity");
-  const savedTeam = [];
   const savedWork = [];
   const files = new Map(task.attachments.map(file => [file.file, file]));
   const events = task.history.map((event, index) => ({ event, index }));
@@ -910,24 +865,40 @@ function taskChat(task) {
   const missingRuns = new Map();
   const locale = localization.locale;
   const dayFormat = new Intl.DateTimeFormat(locale, { dateStyle: "medium" });
-  const reviewDecisions = [];
-  let submittedAt = "";
-  let submissionRow;
-  const savedRunItems = new Set();
-  const savedDiscussionItems = new Set();
+  const sessionStart = task.history.findLastIndex(event => isTaskChatReplacement(event, task));
+  const savedItems = new Set();
+  const addSavedItems = items => items.filter(item => {
+    if (!taskWorkItem(item)) return false;
+    if (item.type === "truncated") return true;
+    if (savedItems.has(item.id)) return false;
+    savedItems.add(item.id);
+    return true;
+  });
   let day;
   let lastMessage;
   let lastMessageIndex = -1;
   for (const { event, index } of events) {
-    if (event.action === "submit") submittedAt = event.at;
-    if (event.action === "start" || (event.to && event.to !== "review")) submissionRow = undefined;
     const returned = event.actor === "reviewer" && event.action === "request-changes";
     const conversation = ["chat", "comment", "questions"].includes(event.action) || returned;
     if (event.expertMessage) continue;
-    const appendWork = row => {
-      row.dataset.historyAt = event.at;
-      work.append(row);
-    };
+
+    const executorEvent = event.action === "run-log" && event.actor === "agent" && index > sessionStart &&
+      (!event.runThreadId || event.runThreadId === task.codexThreadId);
+    if (executorEvent) {
+      const log = element("li", undefined, "chat-run");
+      log.hidden = true;
+      if (event.run?.length) {
+        const items = addSavedItems(event.run);
+        if (items.length) {
+          work.append(log);
+          savedWork.push(() => renderRunActivity(log, items, true, event.durationMs, task.id));
+        }
+      } else if (task.codexThreadId && event.durationMs !== undefined) {
+        work.append(log);
+        missingRuns.set(index, { log, durationMs: event.durationMs });
+      }
+    }
+    if (!conversation) continue;
     if (event.chat) {
       lastMessage = event;
       lastMessageIndex = index;
@@ -940,71 +911,16 @@ function taskChat(task) {
       divider.append(element("span", () => new Intl.DateTimeFormat(localization.locale, { dateStyle: "medium" }).format(timestamp)));
       list.append(divider);
     }
-    if (event.action === "run-log" || event.run?.length) {
-      const log = element("li", undefined, "chat-run");
-      if (event.run?.length) {
-        savedTeam.push(...event.run.filter(collaborationItem));
-        const activity = event.action === "chat" ? event.run.filter(item => item.phase !== "final_answer") : event.run;
-        if (event.action === "chat") {
-          for (const item of activity) savedDiscussionItems.add(item.id);
-        }
-        savedWork.push(() => renderRunActivity(log, activity.filter(item => !collaborationItem(item)), true, event.durationMs, task.id));
-        appendWork(log);
-      } else if (task.codexThreadId && event.durationMs !== undefined) {
-        log.hidden = true;
-        appendWork(log);
-        missingRuns.set(index, { log, durationMs: event.durationMs });
-      }
-      if (event.action === "run-log") {
-        // The turn that submitted the card can finish saving after review has started.
-        // Keep the history index for restoration and use the submission only for placement.
-        if (submissionRow && log.parentNode === work) {
-          for (const item of event.run ?? []) savedRunItems.add(item.id);
-          log.dataset.historyAt = submissionRow.dataset.historyAt;
-          work.insertBefore(log, submissionRow);
-          submissionRow = undefined;
-        }
-        continue;
-      }
-    }
-    if (!event.run?.length && event.chat?.commentary?.length) {
-      const commentary = element("li", undefined, "chat-run");
-      savedWork.push(() => renderRunActivity(commentary, event.chat.commentary.map((text, index) => ({
-        id: String(index), type: "agentMessage", phase: "commentary", title: "", text, status: "completed",
-      })), true, event.durationMs));
-      appendWork(commentary);
-    }
     const attachments = chatEventAttachments(event, files);
     const author = () => event.actor === "manager" ? t("ui.project_manager_48697fa0") :
       event.actor === "reviewer" ? t("ui.reviewer_50c42665") :
       event.actor === "user" ? t("ui.you_05444001") : t("ui.agent_262834de");
 
-    if ((!conversation || returned) && event.action !== "coordination") {
-      const status = lanes.find(([code]) => code === event.to);
-      const service = element("li", undefined, "chat-entry chat-event");
-      const stage = event.expertStageRun;
-      const label = () => stage ? [
-        expertStageLabel(task, stage.phase, stage.key) ?? t("experts.stage_event"),
-        t("experts.stage_" + stage.state),
-      ].join(" · ") : event.expertSkill ? [
-        t(event.expertSkill.source === "plan" ? "experts.skill_preloaded" : "experts.skill_loaded"),
-        event.expertSkill.name, event.expertSkill.expertId,
-      ].join(" · ") : chatEventLabel(event.action) + (status ? " · " + t(status[1]) : "");
-      service.append(element("span", author, "chat-author"), element("span", label, "chat-action"));
-      appendChatTime(service, event.at);
-      appendWork(service);
-      if (event.action === "submit" && event.actor === "agent") submissionRow = service;
-      if (!event.text && !attachments.length) continue;
-      // A chat edit can quote the pending request as its audit note.
-      if (event.action === "update" && event.actor === "user" &&
-          lastMessage?.actor === "user" && event.text === lastMessage.text) continue;
-    }
     const entry = element("li", undefined, "chat-entry");
     entry.dataset.actor = event.actor;
-    const coordination = returned || event.action === "coordination" || (event.actor === "manager" && event.text);
+    const coordination = returned || (event.actor === "manager" && event.text);
     if (coordination) entry.classList.add("chat-coordination");
-    const label = () => event.action === "coordination" && event.actor === "agent" ? t("ui.executor_92197b27") : author();
-    entry.append(element("span", label, "chat-author"));
+    entry.append(element("span", author, "chat-author"));
     if (attachments.length) {
       const images = attachments.filter(isImageAttachment);
       const tiles = element("div", undefined, "chat-attachments");
@@ -1032,25 +948,12 @@ function taskChat(task) {
       entry.append(tiles);
     }
     if (event.text && !(event.action === "attach" && attachments.length)) {
-      const text = event.action === "block" ? legacyTokenUsageFailure(event.text) ?? event.text : event.text;
+      const text = event.text;
       entry.append(returned ? reviewerFindings(text, task.id) :
         chatText(text, { taskId: task.id, coordination, agent: event.action === "chat" && event.actor === "agent" }));
     }
     appendChatTime(entry, event.at);
-    if (returned && event.text) {
-      const fallback = element("li", undefined, "chat-entry chat-coordination");
-      fallback.dataset.actor = event.actor;
-      fallback.append(element("span", author, "chat-author"), reviewerFindings(event.text, task.id));
-      appendChatTime(fallback, event.at);
-      appendWork(fallback);
-      reviewDecisions.push({ entry: fallback, event, submittedAt });
-    }
-    if (event.actor === "reviewer" && event.text && !attachments.length &&
-        ["review-approve", "review-note"].includes(event.action)) {
-      reviewDecisions.push({ entry, event, submittedAt });
-    }
-    if (conversation) list.append(entry);
-    else appendWork(entry);
+    list.append(entry);
   }
   const workControls = element("li", undefined, "task-work-controls");
   if (missingRuns.size) {
@@ -1066,16 +969,13 @@ function taskChat(task) {
         let restored = 0;
         let lastRestored;
         for (const [index, { log, durationMs }] of missingRuns) {
-          const items = result.data[index];
-          if (!items?.length) continue;
-          savedTeam.push(...items.filter(collaborationItem));
-          renderRunActivity(log, items.filter(item => !collaborationItem(item)), true, durationMs, task.id);
-          if (items.length) {
-            restored++;
-            lastRestored = log;
-          }
+          const items = addSavedItems(result.data[index] ?? []);
+          if (!items.length) continue;
+          renderRunActivity(log, items, true, durationMs, task.id);
+          restored++;
+          lastRestored = log;
         }
-        renderTeam();
+        renderLiveWork();
         if (restored) load.remove();
         bindLocalized(status, "textContent", () => restored === missingRuns.size ? "" : restored
           ? t("ui.some_runs_are_unavailable_in_the_saved_codex_cha_7d8bfad3")
@@ -1094,97 +994,42 @@ function taskChat(task) {
   }
   if (workControls.childElementCount) work.prepend(workControls);
   const liveRun = element("li", undefined, "chat-run chat-run-live");
-  const progress = element("li", undefined, "chat-run");
-  if (submissionRow) work.insertBefore(liveRun, submissionRow);
-  else work.append(liveRun);
-  work.append(progress);
-  const refreshReview = task.status === "review" || task.history.some(event => event.actor === "reviewer" || event.action === "submit")
-    ? reviewerChat(task, work, submissionRow ? progress : liveRun, reviewDecisions, items => { reviewTeam = items; renderTeam(); }) : undefined;
+  const emptyWork = element("li", () => t("ui.no_task_work"), "muted");
+  work.append(liveRun, emptyWork);
   list.append(element("li", undefined, "chat-turn"));
-  area.append(list, work, team);
+  area.append(list, work);
 
-  let liveTeam = [];
-  let reviewTeam = [];
-  let renderedTeam;
-  let teamRoleNames;
-  let loadingTeamRoles = false;
-  function renderTeam() {
-    if (team.hidden) return;
-    if (!loadingTeamRoles && task.expertTeam) {
-      loadingTeamRoles = true;
-      void expertRoleNames(project).then(names => {
-        if (!team.isConnected) return;
-        teamRoleNames = names;
-        renderedTeam = undefined;
-        renderTeam();
-      });
-    }
-    const items = [...savedTeam, ...liveTeam, ...reviewTeam];
-    const byId = new Map(items.map(item => [item.id, item]));
-    const snapshot = JSON.stringify([...byId.values()]);
-    if (snapshot === renderedTeam) return;
-    renderedTeam = snapshot;
-    const opened = new Set([...teamLog.querySelectorAll("details[open]")].map(row => row.dataset.agentCall));
-    const plan = Object.values(task.expertTeam ?? {}).flatMap(phase => phase.stages);
-    const roleAndStage = stage => [teamRoleNames?.get(stage.expertId), stage.title].filter(Boolean).join(" · ");
-    const agents = new Map();
-    for (const stages of Object.values(task.expertStageStatus ?? {})) for (const stage of stages) {
-      if (stage.run?.agentId) agents.set(stage.run.agentId, { name: roleAndStage(stage) });
-    }
-    const activity = [...byId.values()].sort((a, b) => (a.at ?? "").localeCompare(b.at ?? ""))
-      .map(item => [item, collaborationData(item)]);
-    for (const [item, data] of activity) {
-      if (item.type !== "subAgentActivity" || !data.agentThreadId) continue;
-      const key = data.agentPath?.split("/").at(-1);
-      const matching = plan.filter(stage => stage.key === key || stage.expertId === key);
-      const agent = agents.get(data.agentThreadId) ?? {
-        name: matching.length === 1 ? roleAndStage(matching[0]) : key?.replaceAll("-", " ") || t("experts.unnamed_agent"),
-      };
-      if (data.kind === "started") agent.startedAtMs ??= data.startedAtMs;
-      if (data.kind === "completed") agent.firstCompletion ??= data.completedAtMs;
-      agents.set(data.agentThreadId, agent);
-    }
-    const rows = [];
-    for (const [item, data] of activity) {
-      const row = teamActivity(task, item, data, agents);
-      if (!row) continue;
-      if (row.tagName === "DETAILS") row.open = opened.has(item.id);
-      rows.push(row);
-    }
-    if (!rows.length) rows.push(element("p", () => t("experts.no_agent_activity"), "muted"));
-    teamLog.replaceChildren(...rows);
-  }
   let liveItems = [];
   function renderLiveWork() {
     const follow = work.scrollHeight - work.clientHeight - work.scrollTop <= 8;
     // A save receipt can reach the window before its card history is refreshed.
     const saved = draft.savedRun;
-    const executor = saved?.items ?? liveItems;
-    const executorItems = new Set(executor.map(item => item.id));
-    const discussion = (frame.discussionActivity?.[task.id] ?? []).filter(item =>
-      item.phase !== "final_answer" && !savedDiscussionItems.has(item.id) && !executorItems.has(item.id));
-    const items = [...executor, ...discussion];
-    renderRunActivity(liveRun, items.filter(item => !collaborationItem(item) && !savedRunItems.has(item.id) &&
-      (submissionRow || saved || item.phase !== "final_answer")), Boolean(saved), saved?.durationMs, task.id);
+    // Steered replies already arrive through the executor's run stream.
+    // Standalone discussions run in a separate provider session.
+    const threadId = frame.runActivityThreads?.[task.id];
+    const executor = saved?.items ?? (threadId && threadId === task.codexThreadId ? liveItems : []);
+    const seen = new Set();
+    const items = executor.filter(item => {
+      if (!taskWorkItem(item) || savedItems.has(item.id) || seen.has(item.id)) return false;
+      seen.add(item.id);
+      return true;
+    });
+    renderRunActivity(liveRun, items, Boolean(saved), saved?.durationMs, task.id);
+    emptyWork.hidden = [...work.children].some(row => row !== emptyWork && row !== workControls && !row.hidden);
     if (follow) work.scrollTop = work.scrollHeight;
   }
   area.updateRun = (items = []) => {
     liveItems = items;
-    area.updateDiscussion();
+    if (!work.hidden) renderLiveWork();
   };
   area.updateDiscussion = () => {
     const items = frame.discussionActivity?.[task.id];
     const savedReply = lastMessage?.actor === "agent" && items?.some(item =>
       item.type === "agentMessage" && item.phase === "final_answer" && item.at === lastMessage.at);
     renderChatTurn(list, draft, savedReply ? undefined : items, task.id);
-    liveTeam = [...liveItems, ...(items ?? [])].filter(collaborationItem);
-    if (!work.hidden) renderLiveWork();
-    renderTeam();
-    const commentary = items?.some(item => item.phase === "commentary") ? [] : draft.commentary ?? [];
-    progress.replaceChildren(...commentary.map(text => chatText(text, { taskId: task.id, agent: true })));
-    progress.hidden = !commentary.length;
   };
   area.updateRun(frame.runActivity?.[task.id]);
+  area.updateDiscussion();
 
   const composer = element("form", undefined, "chat-composer");
   const input = element("textarea");
@@ -1244,18 +1089,9 @@ function taskChat(task) {
   }
   area.append(composer);
 
-  if (!manualBoard()) {
-    const agents = element("details", undefined, "expert-agent-history");
-    agents.open = draft.agentHistoryOpen ?? false;
-    agents.addEventListener("toggle", () => {
-      if (agents.isConnected) draft.agentHistoryOpen = agents.open;
-    });
-    agents.append(element("summary", () => t("experts.subagents")), teamLog);
-    team.append(agents, expertTeamMail(task));
-  }
   const views = [
-    ["dialogue", "ui.dialogue_e154ab04", list], ["work", "ui.work_activity_e01957b7", work],
-    ...(!manualBoard() ? [["team", "experts.team", team]] : []),
+    ["dialogue", "ui.dialogue_e154ab04", list],
+    ["work", "ui.work_activity_e01957b7", work],
   ].map(([name, label, panel]) => {
     const control = button(() => t(label), () => selectView(name), "quiet");
     control.setAttribute("aria-controls", panel.id = "task-chat-" + name);
@@ -1281,13 +1117,9 @@ function taskChat(task) {
       for (const render of savedWork.splice(0)) render();
       renderLiveWork();
     }
-    if (name === "team") renderTeam();
-    area.refreshReview();
   }
-  area.refreshReview = () => { if (draft.view !== "dialogue") refreshReview?.(); };
-  area.openReviewer = () => selectView("work");
   area.openDialogue = () => selectView("dialogue");
-  selectView(views.some(view => view.name === draft.view) ? draft.view : "dialogue");
+  selectView(draft.view === "team" || draft.view === "work" ? "work" : "dialogue");
 
   function working() { return Boolean(draft.pending || frame.runningTasks?.includes(task.id) || frame.replyingTasks?.includes(task.id)); }
   function stopping() { return working() && !draft.text.trim() && !draft.files.length; }
