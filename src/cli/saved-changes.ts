@@ -57,6 +57,20 @@ export function describeSavedChanges(store: BoardStore, task: Task) {
   return sha ? { sha, restored: backup.restored } : undefined;
 }
 
+export function restoreChangesOnStart(store: BoardStore, task: Task, path: string, head: string): void {
+  const backup = readBackup(store, task);
+  if (!backup || backup.restored) return;
+  const sha = savedCommit(path, task, backup);
+  if (!sha) return;
+  requireNoGitOperation(path);
+  if (head !== backup.base || gitStatus(path)) {
+    throw new TaskboardError("RESTORE_CONFLICT", "Restore the saved changes into a separate worktree before starting.", { path });
+  }
+  checkRestorePaths(path, backup.base, sha);
+  applyBackup(path, sha);
+  writeJson(backupPath(store, task), { ...backup, restored: { destination: "worktree", path } });
+}
+
 export function inspectLocalChanges(path: string, head: string, status = gitStatus(path)) {
   if (!status) return undefined;
   const paths: string[] = [];

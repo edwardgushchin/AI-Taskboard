@@ -1,8 +1,8 @@
 import { beginBoardOperation } from "../desktop/board-worklog.ts";
 import { migrateWorklog, removeMigratedWorklog } from "./worklog-migration.ts";
 import { maintenanceFailure, maintenanceSuccess } from "./maintenance-state.ts";
-import { inspectLocalChanges, saveLocalChanges } from "./saved-changes.ts";
-import { lstatSync, readdirSync, realpathSync, rmSync, rmdirSync, unlinkSync } from "node:fs";
+import { describeSavedChanges, inspectLocalChanges, restoreChangesOnStart, saveLocalChanges } from "./saved-changes.ts";
+import { lstatSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, unlinkSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { artifactFiles, removeSavedSource, saveArtifacts } from "./artifacts.ts";
 import { dependencyStatus, unfinishedDependencies } from "./dependencies.ts";
@@ -406,14 +406,8 @@ export function checkoutTaskWorktree({ id, repo, branch, managedPath, intent: { 
   }
   if (restore && existing) {
     requireNoGitOperation(worktree);
-    // An interrupted Git command can leave a valid registration before populating the index and files.
-    if (gitStatus(worktree, "tracked")) {
-      throw new TaskboardError("WORKTREE_CHECKOUT_INCOMPLETE",
-        "The interrupted checkout could not be verified: tracked files or the index differ from the saved commit. Inspect and preserve local changes before completing the checkout and retrying.",
-        { path: worktree, head: base });
-    }
   }
-  return { worktree, gitWorktreeAddMs };
+  return { worktree, gitWorktreeAddMs, reusedCheckout: Boolean(existing) };
 }
 
 export function finishTaskStart(store: BoardStore, plan: TaskCheckout, checkout: ReturnType<typeof checkoutTaskWorktree>,
@@ -437,6 +431,16 @@ export function finishTaskStart(store: BoardStore, plan: TaskCheckout, checkout:
   const prepareMs = Math.max(0, Math.round(performance.now() - preparing) - finalLockWaitMs);
   if (restore && (!task.git || task.git.branch !== branch || task.git.target !== target)) {
     throw new TaskboardError("PENDING_OPERATION", "The saved task branch or target changed during checkout.");
+  }
+  if (restore) {
+    // An interrupted Git command can register a worktree before populating its files.
+    if (checkout.reusedCheckout && gitStatus(worktree, "tracked") &&
+        describeSavedChanges(store, task)?.restored?.path !== worktree) {
+      throw new TaskboardError("WORKTREE_CHECKOUT_INCOMPLETE",
+        "The interrupted checkout could not be verified: tracked files or the index differ from the saved commit. Inspect and preserve local changes before completing the checkout and retrying.",
+        { path: worktree, head: base });
+    }
+    restoreChangesOnStart(store, task, worktree, base);
   }
   const updatedTask = { ...task, git: { ...(restore ? task.git! : { target, base, branch }), worktree } };
   const preserveRevision = task.status === "in_progress" && task.discussionReturn === undefined;
@@ -522,6 +526,9 @@ export function cleanTaskWorktree(store: BoardStore, task: Task, artifacts?: unk
   requireState(task, ["done", "cancelled"]);
   let finish: ReturnType<typeof beginBoardOperation> | undefined;
   try {
+    if (taskResourcesInUse(store, task.id)) {
+      throw new TaskboardError("WORKTREE_IN_USE", "A live agent still uses the task resources.");
+    }
     const result = cleanTaskWorktreeNow(store, task, artifacts, () => {
       finish = beginBoardOperation(store.location.root, "worktree cleanup", task.id);
     });
@@ -529,6 +536,8 @@ export function cleanTaskWorktree(store: BoardStore, task: Task, artifacts?: unk
     finish?.(result.removed ? "worktree removed" : result.branchRemoved ? "retired branch removed" : "resources already absent");
     return result;
   } catch (error) {
+    // A live session is an expected deferral. Retry as soon as it releases the worktree.
+    if (error instanceof TaskboardError && error.code === "WORKTREE_IN_USE") throw error;
     maintenanceFailure(store, "cleanup", error, task.id);
     finish?.("failed; resources retained for retry");
     throw error;
@@ -536,8 +545,6 @@ export function cleanTaskWorktree(store: BoardStore, task: Task, artifacts?: unk
 }
 
 function cleanTaskWorktreeNow(store: BoardStore, task: Task, artifacts: unknown, audit: () => void) {
-  requireState(task, ["done", "cancelled"]);
-  if (taskResourcesInUse(store, task.id)) throw new TaskboardError("WORKTREE_IN_USE", "A live agent still uses the task resources.");
   if (!task.git || task.git.branch !== worktreeBranch(task)) {
     return { removed: false };
   }
@@ -668,6 +675,19 @@ function removeTaskWorktree(store: BoardStore, task: Task, repo: Repository, ite
   }
   directory(managedRoot);
   requireNoGitOperation(path);
+  if (task.status === "cancelled" && process.platform === "win32") {
+    // Git for Windows can drop the registration even when an open handle blocks
+    // removal. A same-path rename checks for existing locks without moving files.
+    try {
+      renameSync(path, path);
+    } catch (error) {
+      const { code, message } = error as NodeJS.ErrnoException;
+      if (code === "EACCES" || code === "EPERM" || code === "EBUSY") {
+        throw worktreeAccessDenied(path, message);
+      }
+      throw error;
+    }
+  }
   if (exists(join(path, ".dev-diary"))) {
     if (git(path, ["ls-files", "-z", "--", ".dev-diary"])) migrateWorklog(store.location.root, [join(path, ".dev-diary")]);
     else removeMigratedWorklog(store.location.root, join(path, ".dev-diary"));

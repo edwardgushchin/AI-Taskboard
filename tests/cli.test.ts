@@ -16,6 +16,8 @@ import { locateBoard, onBoard } from "../src/cli/storage.ts";
 import { applyDesktopAcceptance } from "../src/cli/acceptance.ts";
 import { saveLocalChanges, inspectLocalChanges } from "../src/cli/saved-changes.ts";
 import { maxWorklogPartBytes } from "../src/cli/worklog-files.ts";
+import { maintenanceFailure } from "../src/cli/maintenance-state.ts";
+import { TaskboardError } from "../src/cli/model.ts";
 import type { Task } from "../src/cli/model.ts";
 import { boardToolContent } from "../src/desktop/board-mcp.ts";
 import { setReviewModeFromChat, taskChatActions } from "../src/desktop/chat-actions.ts";
@@ -2259,6 +2261,76 @@ test("maintenance migrates idle legacy worktrees and repeatedly removes only pro
   assert.ok(JSON.parse(readFileSync(join(root, ".tasks", "maintenance.json"), "utf8")).some((job: { operation: string }) => job.operation === "attachments"));
 });
 
+test("watch cleans an active cancelled task after its session releases the worktree", { timeout: 90_000 }, async t => {
+  const root = fixture(t, true);
+  cli(root, ["init"]);
+  cli(root, ["settings"], { autoMode: false });
+  const start = (title: string) => {
+    const card = cli(root, ["create"], { title });
+    cli(root, ["approve", card.id]);
+    return cli(root, ["start", card.id]);
+  };
+  const { task, worktree } = start("Cancelled while active");
+  const neighbor = start("Neighbor");
+  git(root, "worktree", "add", "--detach", join(root, "external"));
+  const head = git(worktree, "rev-parse", "HEAD");
+  const registrations = () => git(root, "worktree", "list", "--porcelain");
+  const before = registrations();
+  writeFileSync(join(worktree, "source.txt"), "staged change\n");
+  git(worktree, "add", "source.txt");
+  writeFileSync(join(worktree, "source.txt"), "working change\n");
+  writeFileSync(join(worktree, "user.txt"), "untracked data\n");
+  const release = registerRuntime(root, { kind: "slot", role: "executor", task: task.id })!;
+  let closed;
+  try {
+    closed = cli(root, ["cancel", task.id], { reason: "Stop active work" });
+    assert.equal(closed.status, "cancelled");
+    assert.equal(existsSync(worktree), true);
+    assert.equal(registrations(), before);
+    assert.equal(readFileSync(join(worktree, "user.txt"), "utf8"), "untracked data\n");
+    assert.equal(existsSync(join(root, ".tasks", "maintenance.json")), false);
+    // A job persisted by an older version must not prevent cleanup on watch startup.
+    onBoard(locateBoard(root), store => maintenanceFailure(store, "cleanup",
+      new TaskboardError("WORKTREE_IN_USE", "A live agent still uses the task resources."), task.id));
+    assert.deepEqual(cli(root, ["maintain"]).cleaned, []);
+    assert.equal(registrations(), before);
+  } finally {
+    release();
+  }
+  const watcher = spawn(process.execPath, commandArgs(root, ["watch"]), {
+    env, stdio: ["ignore", "pipe", "inherit"], windowsHide: true,
+  });
+  const exited = once(watcher, "close");
+  const reader = createInterface({ input: watcher.stdout });
+  const frames = reader[Symbol.asyncIterator]();
+  t.signal.addEventListener("abort", () => watcher.kill(), { once: true });
+  try {
+    const { value } = await frames.next();
+    assert.equal(typeof value, "string");
+    assert.deepEqual(JSON.parse(value!).data.cleanedTasks, [task.id]);
+  } finally {
+    reader.close();
+    watcher.kill();
+    await exited;
+  }
+  assert.equal(existsSync(worktree), false);
+  assert.equal(registrations().includes("branch " + task.git.branch), false);
+  assert.deepEqual(cli(root, ["maintain"]).cleaned, []);
+  assert.equal(registrations().includes("branch " + neighbor.task.git.branch), true);
+  assert.equal(existsSync(neighbor.worktree), true);
+  assert.equal(existsSync(join(root, "external", "source.txt")), true);
+  assert.equal(git(root, "rev-parse", task.git.branch), head);
+
+  const draft = cli(root, ["return-to-draft", task.id], { revision: closed.revision });
+  assert.deepEqual(draft.history.slice(0, closed.history.length), closed.history);
+  cli(root, ["approve", draft.id], { revision: draft.revision });
+  const resumed = cli(root, ["start", draft.id]);
+  assert.equal(git(resumed.worktree, "rev-parse", "HEAD"), head);
+  assert.equal(readFileSync(join(resumed.worktree, "source.txt"), "utf8"), "working change\n");
+  assert.equal(readFileSync(join(resumed.worktree, "user.txt"), "utf8"), "untracked data\n");
+  assert.equal(git(resumed.worktree, "show", ":source.txt"), "staged change");
+});
+
 test("cancelled task maintenance preserves staged and untracked edits in the existing saved-changes mechanism", t => {
   const root = fixture(t, true);
   cli(root, ["init"]);
@@ -2292,6 +2364,66 @@ test("cancelled task maintenance preserves staged and untracked edits in the exi
   assert.equal(readFileSync(join(recovered.path, "user.txt"), "utf8"), "untracked user data\n");
   assert.equal(git(recovered.path, "diff", "--cached", "--name-only"), "source.txt");
   assert.deepEqual(JSON.parse(readFileSync(join(root, ".tasks", "maintenance.json"), "utf8")), []);
+});
+
+test("Windows watch retries cancelled cleanup after a file lock is released", {
+  skip: process.platform !== "win32",
+  timeout: 75_000,
+}, async t => {
+  const root = fixture(t, true);
+  cli(root, ["init"]);
+  const card = cli(root, ["create"], { title: "Cancelled with an open file" });
+  cli(root, ["approve", card.id]);
+  const { task, worktree } = cli(root, ["start", card.id]);
+  const file = join(worktree, "source.txt");
+  const registrations = () => git(root, "worktree", "list", "--porcelain");
+  const before = registrations();
+  const script = [
+    "$file = [IO.File]::Open($env:TASKBOARD_TEST_LOCKED_FILE, 'Open', 'Read', 'Read')",
+    "try { [Console]::WriteLine('locked'); [Console]::ReadLine() } finally { $file.Dispose() }",
+  ].join("\n");
+  const holder = spawn("powershell.exe", ["-NoProfile", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], {
+    env: { ...env, TASKBOARD_TEST_LOCKED_FILE: file },
+    windowsHide: true,
+    stdio: ["pipe", "pipe", "inherit"],
+  });
+  const released = once(holder, "close");
+  try {
+    const lock = await Promise.race([once(holder.stdout, "data"), released]);
+    assert.equal(String(lock[0]).trim(), "locked");
+    cli(root, ["cancel", task.id], { reason: "Retry after the handle closes" });
+    assert.equal(existsSync(worktree), true);
+    assert.equal(registrations(), before);
+    assert.equal(readFileSync(file, "utf8"), "baseline\n");
+    const jobs = JSON.parse(readFileSync(join(root, ".tasks", "maintenance.json"), "utf8"));
+    assert.equal(jobs.find((job: { task?: string }) => job.task === task.id)?.error.code, "WORKTREE_ACCESS_DENIED");
+    assert.deepEqual(cli(root, ["maintain"]).cleaned, []);
+  } finally {
+    holder.stdin.end();
+    await released;
+  }
+  const watcher = spawn(process.execPath, commandArgs(root, ["watch"]), {
+    env, stdio: ["ignore", "pipe", "inherit"], windowsHide: true,
+  });
+  const exited = once(watcher, "close");
+  const reader = createInterface({ input: watcher.stdout });
+  t.signal.addEventListener("abort", () => watcher.kill(), { once: true });
+  try {
+    let cleaned = false;
+    for await (const line of reader) {
+      if (JSON.parse(line).data?.cleanedTasks.includes(task.id)) {
+        cleaned = true;
+        break;
+      }
+    }
+    assert.equal(cleaned, true);
+  } finally {
+    reader.close();
+    watcher.kill();
+    await exited;
+  }
+  assert.equal(existsSync(worktree), false);
+  assert.equal(registrations().includes("branch " + task.git.branch), false);
 });
 
 test("T-0138 cleanup retains QA and unknown files, queues dependency repair and closes its internal fault after retry", t => {
