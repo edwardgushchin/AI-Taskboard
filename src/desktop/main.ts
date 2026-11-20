@@ -52,7 +52,8 @@ import { startWindowsDictation } from "./windows-dictation.ts";
 import { needsManagerAttention } from "../cli/task-messages.ts";
 import { readReviewReports, saveReviewReports } from "./review-history.ts";
 import { readReviewerChat, reviewerActivity, withReviewerChat } from "./reviewer-chat.ts";
-import { goalActivityItems, goalMessages, hasGoalHistory, hasManagerImageView, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory, sendGoalMessage } from "./manager-history.ts";
+import { goalActivityItems, goalMessages, hasManagerImageView, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView, saveManagerHistory, sendGoalMessage } from "./manager-history.ts";
+import { backgroundGoalHistory } from "./goal-history-background.ts";
 import { goalActionTools, runGoalAction } from "./goal-actions.ts";
 import { readManagerImage, saveManagerImage } from "./manager-images.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
@@ -2015,8 +2016,22 @@ ipcMain.handle("board:history", async (event, project?: string, cursor: unknown 
         [id, reviewerActivity(board.project, id)])),
     } };
     const saved = readBoardThread(boardThreadPath(project));
-    const data = await readManagerView(project, cursor, view, saved && saved.history !== "local" ?
-      next => readBoardHistory(app.getPath("userData"), project, saved.id, next) : undefined);
+    const profile = app.getPath("userData");
+    const readLegacy = saved && saved.history !== "local"
+      ? (next: string | null) => readBoardHistory(profile, project, saved.id, next) : undefined;
+    let data;
+    let goalLogAvailable: boolean;
+    if (view === "chat") {
+      data = await readManagerView(project, cursor, view, readLegacy);
+      ({ goalLogAvailable } = await backgroundGoalHistory(project, null, false, true));
+    } else {
+      const history = await backgroundGoalHistory(project, cursor, Boolean(readLegacy));
+      goalLogAvailable = history.goalLogAvailable;
+      data = history.local;
+      if (history.providerCutoff !== undefined && readLegacy) {
+        data = await readManagerProviderHistory(cursor, view, history.providerCutoff, readLegacy);
+      }
+    }
     if (saved && saved.goal === undefined && data && "goal" in data && data.goal !== undefined) {
       saveBoardGoal(boardThreadPath(project), data.goal);
     }
@@ -2026,7 +2041,7 @@ ipcMain.handle("board:history", async (event, project?: string, cursor: unknown 
     return { ok: true, data: { turns: [], nextCursor: null, ...data,
       goal: saved?.goal !== undefined ? saved.goal : (data && "goal" in data ? data.goal : undefined),
       model: data?.model ?? board.settings.manager?.model, goalId: saved?.goalId ?? saved?.id,
-      goalLogAvailable: hasGoalHistory(project), goalRunning, goalResuming: Boolean(resume),
+      goalLogAvailable, goalRunning, goalResuming: Boolean(resume),
       goalResumeWaiting: resume?.waiting ?? false } };
   } catch (error) {
     return cliFailure("BOARD_HISTORY_FAILED", (error as Error).message);
