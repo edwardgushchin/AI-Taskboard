@@ -11,12 +11,12 @@ import { electronCheck } from "./electron-check.mjs";
 const restart = process.argv.includes("--restart");
 const { scratch, artifacts } = electronCheck(import.meta.url, "manager-viewed-images", 100_000, [[], ["--restart"]]);
 const require = createRequire(import.meta.url);
-const { app, BrowserWindow, dialog } = require("electron");
+const { app, BrowserWindow, dialog, nativeImage } = require("electron");
 const root = fileURLToPath(new URL("../", import.meta.url));
 const board = join(scratch, "board");
 const otherBoard = join(scratch, "other-board");
 const first = "docs/images/board.png";
-const second = "docs/images/git-status.png";
+const second = "docs/images/board-small.png";
 const missing = "docs/images/removed.png";
 const unconfirmed = "docs/images/unconfirmed.png";
 const dialogue = ".board-chat-log:not(.board-work)";
@@ -146,15 +146,17 @@ async function checkSeries(feed, lane, screenshot) {
 
 async function check() {
   if (!restart) {
+    const smallImage = nativeImage.createFromPath(join(root, first)).resize({ width: 320 }).toPNG();
     symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), join(scratch, "node_modules"),
       process.platform === "win32" ? "junction" : "dir");
     for (const project of [board, otherBoard]) {
       mkdirSync(join(project, "docs/images"), { recursive: true });
       cli(project, ["init"], { git: false });
       cli(project, ["settings"], { autoMode: false });
-      for (const [source, target] of [[first, first], [second, second], [second, missing], [first, unconfirmed]]) {
-        copyFileSync(join(root, source), join(project, target));
-      }
+      copyFileSync(join(root, first), join(project, first));
+      copyFileSync(join(root, first), join(project, unconfirmed));
+      writeFileSync(join(project, second), smallImage);
+      writeFileSync(join(project, missing), smallImage);
     }
   } else {
     unlinkSync(join(board, missing));
@@ -253,7 +255,7 @@ void check().then(() => {
       "scripts/check-manager-viewed-images.mjs", "scripts/electron-check.mjs",
       "src/desktop/chat.js", "src/desktop/main.ts", "src/desktop/manager-history.ts",
       "src/desktop/run-images.ts", "src/desktop/codex-chat.ts", "src/desktop/image-preview.js",
-      "src/desktop/renderer.js", "src/desktop/preload.cjs", "docs/images/board.png", "docs/images/git-status.png",
+      "src/desktop/renderer.js", "src/desktop/preload.cjs", first,
     ];
     const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8", windowsHide: true }).trim();
     writeFileSync(report, [

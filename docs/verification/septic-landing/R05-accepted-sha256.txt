@@ -1,9 +1,0 @@
-Representation: PNG raw; text UTF-8 LF, Git blob representation. Tested source snapshot at Git HEAD 1700a33ce74b5472f4aba1ddc4fc6d81d27fe913; uncommitted source deltas identified by hashes below
-8e56587efae070ab5541c9e279fa613b593a21bda38196901893c2545645d410  server.cjs
-cc4294c7a6444c1e156ade6c85b1081bf48ccfa7067eb67640f535e7c8391cc1  site/template.html
-d3bc5c08928b8207489ed7ecad1a9b245a62226286924abd11eb10937f9b73a7  site/profile.json
-5547621d5db5a06ab5e2fda22946a7aa9ff5017821a4c78b883ec8f7d5219b53  site/app.js
-4a7f235521a23e352250cdd4300ea87fcb401359ea6d6d7e21afac2960a9b4c4  site/style.css
-d79a1624a0fea80e2bbe89d1408bbfd3496f325f6fc850d919fbb8ae521ff7f3  qa/check.cjs
-952ea3625501ae50fbbd14f83444887d9ca62db833b749c7b2199316ba973bc5  design/assets/hero-v2.png
-63693f83bbf06d646d951a179dd84cff2095aafb98257cc39c3645b47226d065  design/assets/access.svg

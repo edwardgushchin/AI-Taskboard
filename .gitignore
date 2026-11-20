@@ -6,3 +6,5 @@ release/
 .codex-attachments/
 
 .worktrees/
+/benchmark/
+/docs/verification/
