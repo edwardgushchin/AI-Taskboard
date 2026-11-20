@@ -4191,7 +4191,7 @@ async function showTask(id, dialogue = false) {
     details.open = descriptionOpen[index] ?? false;
   });
   section(() => (t("ui.acceptance_criteria_7e3779c2")), task.criteria);
-  if (!manualBoard() && !task.expertStage) expertTeamSection(task);
+  const stagePanels = !manualBoard() && !task.expertStage ? expertTeamSection(task) : undefined;
   const stateLabel = (done, text) => {
     const label = element("div", undefined, "task-state-label");
     const state = icon(done ? "check" : "circle");
@@ -4333,7 +4333,7 @@ async function showTask(id, dialogue = false) {
   if (codexAction) actions.append(codexAction);
   body.append(actions);
   const side = byId("task-side");
-  side.replaceChildren(taskChat(task));
+  side.replaceChildren(taskChat(task, stagePanels));
   side.hidden = false;
   if (dialogue) {
     side.firstChild.openDialogue();
@@ -4893,6 +4893,7 @@ function expertStageLabel(task, phase, key) {
 
 function expertTeamSection(task) {
   const area = element("section", undefined, "expert-team");
+  const panels = new Map();
   area.append(element("h3", () => t("experts.plan_title")));
   if (task.approvalRequirements?.length) {
     const reason = element("p", () => t("experts.approval_incomplete") + " " +
@@ -4950,15 +4951,11 @@ function expertTeamSection(task) {
         title.append(status);
       }
       details.append(title);
-      if (stage.description) details.append(chatText(stage.description, { taskId: task.id }));
-      for (const [label, values] of [["stage_inputs", stage.inputs], ["stage_outputs", stage.outputs],
-        ["stage_prerequisites", stage.dependsOn.map(id => plan.stages.find(entry => entry.key === id)?.title ?? id)]]) {
-        if (values.length) details.append(element("p", () => t("experts." + label) + " · " + values.join(", "), "muted"));
-      }
-      section(() => t("ui.acceptance_criteria_7e3779c2"), stage.criteria, details);
-      if (state?.run?.result) details.append(chatText(state.run.result, { taskId: task.id }));
-      if (state?.run?.fallback) details.append(element("p", () => t("experts.local_execution") + " · " + state.run.fallback, "muted"));
-      for (const [output, evidence] of Object.entries(state?.run?.outputs ?? {})) details.append(chatText(output + " · " + evidence, { taskId: task.id }));
+      const work = element("div", undefined, "expert-stage-work");
+      const log = element("div", undefined, "expert-stage-log");
+      work.append(element("h5", () => t("ui.work_activity_e01957b7")), log);
+      details.append(work);
+      panels.set(key, log);
       phaseArea.append(details);
     }
     const legacy = phase === "work" ? task.expertStages ?? [] : [];
@@ -4980,6 +4977,7 @@ function expertTeamSection(task) {
       label.textContent = names.get(id) ?? label.textContent;
     }
   });
+  return panels;
 }
 
 function expertTeamMail(task) {

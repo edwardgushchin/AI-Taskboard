@@ -158,7 +158,10 @@ export async function reviewWithCodex(profile: string, project: string, settings
   if (lead && !lead.ok) throw new Error(lead.error.message);
   const skills = taskId && lead?.ok ? await leadSkillInstructions(project, taskId, lead.data[0], plan, "reviewer", context) : [];
   const options = {
-    role: "reviewer" as const, settings, tools, signal, onActivity, specialistDelegation: Boolean(plan?.stages.length),
+    role: "reviewer" as const, settings, tools, signal, onActivity: stages && onActivity
+      ? (items: RunActivity[]) => onActivity(items.map(item => ({ ...item, stageSessionId: stages.sessionId })))
+      : onActivity,
+    specialistDelegation: Boolean(plan?.stages.length),
     onControl: taskId ? (control: AgentControl) => { stopMail = watchTeamMail(project, taskId, control, "reviewer", submissionSequence); } : undefined,
     observeProvider: stages?.observe, onProviderReady: stages?.bind, reviewThread,
     onTokenUsage: async (report: TokenUsageReport) => { usage = report; }, finalAnswerSchema: {
@@ -526,7 +529,7 @@ export function readTaskRunHistory(profile: string, project: string, threadId: s
         if (typeof at !== "number" || !Number.isFinite(at) || item.type === "userMessage") continue;
         const run = runs.findLast(entry => at >= entry.start && at <= entry.end);
         if (!run) continue;
-        const activity = runActivity(run.items, "item/completed", { item }, new Date(at).toISOString());
+        const activity = runActivity(run.items, "item/completed", { item, threadId }, new Date(at).toISOString());
         if (activity) run.items.set(activity.id, activity);
       }
       cursor = page.nextCursor;

@@ -1304,6 +1304,7 @@
   "experts.local_execution": "Выполнено ответственным",
   "experts.subagents": "Сабагенты",
   "experts.no_agent_activity": "Действий сабагентов пока нет",
+  "experts.no_stage_activity": "У этого этапа пока нет записей.",
   "experts.no_mail": "В команде пока нет сообщений",
   "experts.agent_spawn": "Запуск сабагента",
   "experts.agent_send": "Сообщение сабагенту",

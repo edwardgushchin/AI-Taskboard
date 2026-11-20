@@ -11,8 +11,11 @@ function bounded(value: string): string {
 export function runActivity(entries: Map<string, RunActivity>, method: string, params: Record<string, unknown>, at?: string): RunActivity | undefined {
   const item = parseRunActivity(entries, method, params);
   if (item) {
-    const firstAt = entries.get(item.id)?.at ?? at;
+    const previous = entries.get(item.id);
+    const firstAt = previous?.at ?? at;
     if (firstAt !== undefined) item.at = firstAt;
+    const threadId = previous?.threadId ?? params.threadId;
+    if (typeof threadId === "string" && threadId) item.threadId = threadId;
   }
   return item;
 }

@@ -293,6 +293,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       if (onActivity && message.method?.startsWith("item/")) {
         const item = runActivity(activity, message.method, params, new Date().toISOString());
         if (item) {
+          item.stageSessionId = stages.sessionId;
           activity.set(item.id, item);
           onActivity(item);
         }

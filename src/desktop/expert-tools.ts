@@ -126,8 +126,13 @@ export function phaseStageReporter(project: string, phase: "work" | "review", id
   const completed = new Set<string>();
   const sessionId = randomUUID();
   const evidence = skillEvidence(project, phase, sessionId, id, targetHead);
+  let threadId: string | undefined;
   return {
-    bind: evidence.bind,
+    sessionId,
+    bind(request: Parameters<typeof evidence.bind>[0], lead: string) {
+      threadId = lead;
+      evidence.bind(request, lead);
+    },
     verify(args: unknown) { return evidence.verify(args as Record<string, unknown>); },
     observe(message: RpcMessage, lead: string | undefined) {
       if (lead) evidence.observe(message, lead);
@@ -169,7 +174,7 @@ export function phaseStageReporter(project: string, phase: "work" | "review", id
         const proof = await evidence.verify(input, input.key, agentId);
         if (!proof.ok) return proof;
       }
-      const updated = await callCli<{ skills?: string[]; expertId: string; package: Expert }>(project, ["expert-stage", taskId], { ...input, agentId, sessionId,
+      const updated = await callCli<{ skills?: string[]; expertId: string; package: Expert }>(project, ["expert-stage", taskId], { ...input, agentId, sessionId, threadId,
         actor: phase === "work" ? "agent" : id ? "reviewer" : "manager", phase,
         targetHead: id ? targetHead : input.targetHead });
       if (!updated.ok || input.state !== "running") return updated;

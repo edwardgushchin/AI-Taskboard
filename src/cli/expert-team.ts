@@ -263,6 +263,12 @@ export function updateExpertStage(store: BoardStore, id: string, phase: Phase, i
     throw new TaskboardError("EXPERT_DEPENDENCIES_INCOMPLETE", "Complete every prerequisite before starting this stage.");
   const role = readExpert(store, stage.expertId, state === "running");
   const run: StageRun = { phase, key: stage.key, state, ...(phase === "review" ? { targetHead } : {}) };
+  if (input.threadId !== undefined) {
+    run.threadId = text(input.threadId, "provider thread ID", true);
+    if (state === "running" && input.sessionId !== undefined) {
+      run.sessionId = text(input.sessionId, "provider session ID", true);
+    }
+  }
   if (state !== "running") {
     run.result = text(input.result, "stage result", true);
     if (run.result.length > 8000) throw new TaskboardError("INVALID_INPUT", "Stage summaries are limited to 8000 characters.");
@@ -308,9 +314,14 @@ export function updateExpertStage(store: BoardStore, id: string, phase: Phase, i
       }
     }
   }
-  if (stage.run?.state === "done" || JSON.stringify(stage.run) === JSON.stringify(run)) {
-    if (JSON.stringify(stage.run) !== JSON.stringify(run)) throw new TaskboardError("EXPERT_STAGE_COMPLETE", "This stage already has a recorded result.");
-  } else {
+  const previous = stage.run && { ...stage.run };
+  const recordedThread = previous?.threadId;
+  if (previous) delete previous.threadId;
+  const { threadId: _threadId, ...stageRun } = run;
+  const sameResult = JSON.stringify(previous) === JSON.stringify(stageRun);
+  if (stage.run?.state === "done") {
+    if (!sameResult) throw new TaskboardError("EXPERT_STAGE_COMPLETE", "This stage already has a recorded result.");
+  } else if (!sameResult || (state === "running" && recordedThread !== run.threadId)) {
     if (state === "done" && stage.state !== "running") throw new TaskboardError("EXPERT_STAGE_NOT_RUNNING", "Start the stage before recording its result.");
     const event: TaskEvent = { at: new Date().toISOString(), action: "expert-stage", actor: phase === "review" ? "reviewer" : "agent", expertStageRun: run };
     store.save({ ...task, history: [...task.history, event] });
