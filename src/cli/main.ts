@@ -42,7 +42,7 @@ import { approvalRequirements, createExpertPlan, expertStagesStatus, planNewTask
 import { syncTaskStatusNotices } from "../desktop/manager-history.ts";
 import { syncSettingsNotices } from "../desktop/settings-notices.ts";
 import { cachedTaskLimits, readProfileTaskLimits } from "../desktop/agent-limits.ts";
-import { deferExecutor, forgetExecutor, linkQueuedExecutor, matchesQueuedExecutor, queueEarlyExecutor, registerRuntime, runtimeEntries } from "../desktop/board-runtime.ts";
+import { deferExecutor, forgetExecutor, linkQueuedExecutor, matchesQueuedExecutor, preserveLegacyFirstLaunch, queueEarlyExecutor, registerRuntime, runtimeEntries } from "../desktop/board-runtime.ts";
 
 const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "checklist", "pause", "block", "resume", "unblock", "update"]);
 const help = [
@@ -884,6 +884,7 @@ function run(
     updated.reviewReturn = updated.revision;
     deferExecutor(store.location.root, id, { revision: updated.reviewReturn, reviewReturn: true });
   }
+  if (command === "comment") preserveLegacyFirstLaunch(store.location.root, task);
   const saved = store.save(command === "request-changes" && input.actor === "reviewer" ? withReviewerUsage(updated) :
     command === "update" && input.tags !== undefined ? assignTags(store, updated) : updated);
   if (task.status === "in_progress" && saved.status !== "in_progress") forgetExecutor(store.location.root, id);
@@ -899,7 +900,9 @@ function run(
 function startTask(location: BoardLocation, id: string, input: Record<string, unknown>, compact: boolean) {
   const launchSlot = typeof input.launchSlot === "string" ? input.launchSlot : undefined;
   const enqueue = input.queueExecutor === true ? (task: Task) => {
-    if (!deferExecutor(location.root, id, { revision: task.revision }, undefined, true)) {
+    const cwd = task.git?.worktree ?? task.workingDirectory;
+    const pending = { revision: task.revision, earlyLaunch: !task.codexThreadId && cwd ? { cwd } : undefined };
+    if (!deferExecutor(location.root, id, pending, undefined, true)) {
       throw new TaskboardError("CHAT_BUSY", "This task already has an active writer.");
     }
   } : launchSlot ? (task: Task) => {

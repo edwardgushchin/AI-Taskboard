@@ -222,14 +222,17 @@ if (!process.versions.electron) {
       const queue = id => JSON.parse(readFileSync(join(project, ".tasks", "runtime.json"), "utf8"))
         .find(entry => entry.kind === "queue" && entry.task === id);
       const profiles = [
+        { autoMode: false, occupied: true, manual: true },
+        { autoMode: true, occupied: true, manual: true },
         { autoMode: false, occupied: true },
         { autoMode: true, occupied: true },
         { autoMode: true, occupied: false },
       ];
-      for (const { autoMode, occupied } of profiles) {
-        const profile = `${autoMode}-${occupied}`;
+      for (const { autoMode, occupied, manual = false } of profiles) {
+        const profile = `${manual}-${autoMode}-${occupied}`;
         cli(project, ["settings"], { autoMode: false, reviewMode: "human", taskLimits: { executor: 4, reviewer: 1 } });
-        const id = makeCard("Recover first launch");
+        const title = manual ? "Manual first launch" : "Recover first launch";
+        const id = makeCard(title);
         const stopped = makeCard("Stopped before chat");
         const failedTitle = "Unavailable worktree, profile " + profile;
         const failed = makeCard(failedTitle);
@@ -239,24 +242,36 @@ if (!process.versions.electron) {
           id: "project-closed", type: "error", title: "", text: "Project closed.", status: "interrupted",
         }] });
         const first = await start("early-" + profile);
-        const held = [id, stopped, failed].map(task => first.ask({ action: "holdBeforeChat", id: task }));
+        const tasksToHold = manual ? [stopped, failed] : [id, stopped, failed];
+        const held = tasksToHold.map(task => first.ask({ action: "holdBeforeChat", id: task }));
         await wait(async () => (await first.ask({ action: "heldStarts" })).length === held.length, "launches paused before chat creation");
+        const peer = await start("early-peer-" + profile);
+        if (!manual) {
+          await peer.ask({ action: "launch", id });
+          assert.equal(await peer.ask({ action: "executorBinding", id }), undefined, "a live launch owns the shared slot");
+        }
+        assert.ok(await peer.ask({ action: "reserve", role: "executor", task: "fixture-holder" }));
+        if (manual) {
+          cli(project, ["settings"], { autoMode: false, taskLimits: { executor: 1, reviewer: 1 } });
+          const queued = await first.ask({ action: "launch", id });
+          assert.equal(queued.ok, true, JSON.stringify(queued));
+          assert.equal(await first.ask({ action: "executorBinding", id }), undefined);
+          assert.ok(queue(id), "manual start saved a request without a slot");
+        }
         const original = show(id);
         assert.equal(original.status, "in_progress");
         assert.equal(original.codexThreadId, undefined);
         writeFileSync(join(original.git.worktree, "prior.txt"), "Preserved");
-        const peer = await start("early-peer-" + profile);
-        await peer.ask({ action: "launch", id });
-        assert.equal(await peer.ask({ action: "executorBinding", id }), undefined, "a live launch owns the shared slot");
-        assert.ok(await peer.ask({ action: "reserve", role: "executor", task: "fixture-holder" }));
         const stop = await first.ask({ action: "stopFromWindow", id: stopped });
         assert.equal(queue(stopped), undefined);
         cli(project, ["settings"], { autoMode, taskLimits: { executor: 1, reviewer: 1 } });
         await first.ask({ action: "closeEarlyBoard" });
         await Promise.all(held);
         await exitWorker(first);
-        assert.match(JSON.stringify(show(id).history), /project-closed/);
-        assert.equal(queue(id)?.earlyLaunch?.cwd, original.git.worktree, "closing before chat must preserve the launch");
+        if (!manual) {
+          assert.match(JSON.stringify(show(id).history), /project-closed/);
+          assert.equal(queue(id)?.earlyLaunch?.cwd, original.git.worktree, "closing before chat must preserve the launch");
+        }
         assert.equal(stop.ok, true);
         assert.equal(show(id).codexThreadId, undefined);
         const failedTree = show(failed).git.worktree;
@@ -268,7 +283,7 @@ if (!process.versions.electron) {
           await wait(async () => (await reopened.ask({ action: "frames" })).every(frame =>
             frame.waitingTasks.includes(id) && !frame.waitingTasks.includes(legacy) && !frame.waitingTasks.includes(stopped)),
           "queue visible in both windows");
-          const waitingCard = { action: "dom", title: "Recover first launch" };
+          const waitingCard = { action: "dom", title };
           await wait(async () => (await reopened.ask(waitingCard)).every(frame => frame.waiting), "visible hourglasses");
           const pending = queue(id);
           const beforeComment = show(id);
@@ -283,8 +298,9 @@ if (!process.versions.electron) {
           assert.ok(frames.every(frame => frame.waitingTasks.includes(id)), "a comment must preserve the queued launch");
           await wait(async () => (await reopened.ask(waitingCard)).every(frame => frame.waiting), "hourglasses remain after the comment");
           assert.deepEqual(queue(id), pending);
-          record(`PASS waiting after comment, autoMode=${autoMode}, revision ${commented.revision}`);
-          if (output && !autoMode) {
+          assert.equal(pending?.earlyLaunch?.cwd, original.git.worktree);
+          record(`PASS waiting after comment, manual=${manual}, autoMode=${autoMode}, revision ${commented.revision}`);
+          if (output && manual && !autoMode) {
             mkdirSync(output, { recursive: true });
             const viewport = await reopened.ask({ action: "screenshot", path: join(output, "early-launch-queue.png"), earlyViewport: true });
             record("CSS viewport: " + JSON.stringify(viewport));
@@ -332,7 +348,7 @@ if (!process.versions.electron) {
         record(JSON.stringify({ platform: process.platform, electron, chrome, node }));
         await exitWorker(reopened);
         if (occupied) await exitWorker(peer);
-        record(`PASS early launch, autoMode=${autoMode}, occupied=${occupied}: one first turn, original worktree, stop, missing worktree and explicit legacy retry`);
+        record(`PASS early launch, manual=${manual}, autoMode=${autoMode}, occupied=${occupied}: one turn, original worktree and recovery actions`);
       }
       break checks;
     }

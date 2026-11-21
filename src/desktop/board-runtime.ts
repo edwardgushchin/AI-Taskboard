@@ -159,7 +159,7 @@ export function runtimeEntries(project: string) {
   return liveEntries(readEntries(join(runtimeLocation(project).directory, "runtime.json")));
 }
 
-export type DeferredExecutor = Pick<RuntimeEntry, "continuation" | "quotaPaused" | "newThread" | "reviewReturn"> & { revision: number };
+export type DeferredExecutor = Pick<RuntimeEntry, "continuation" | "quotaPaused" | "newThread" | "reviewReturn" | "earlyLaunch"> & { revision: number };
 
 type QueuedTask = Pick<Task, "id" | "revision" | "status" | "codexThreadId" | "reviewReturn">;
 
@@ -175,6 +175,22 @@ export function matchesQueuedExecutor(entry: RuntimeEntry, task: QueuedTask) {
   }
   return entry.revision === task.revision || (entry.linkedThread?.revision === task.revision &&
     entry.linkedThread.codexThreadId === task.codexThreadId);
+}
+
+export function preserveLegacyFirstLaunch(project: string, task: QueuedTask & Pick<Task, "git" | "workingDirectory">) {
+  const cwd = task.git?.worktree ?? task.workingDirectory;
+  if (!cwd || task.status !== "in_progress" || task.codexThreadId) return;
+  // An older manual queue entry can only be upgraded while it still matches
+  // the card, before the comment publishes the next revision.
+  const legacy = (entry: RuntimeEntry) => entry.revision === task.revision &&
+    !entry.earlyLaunch && !entry.reviewReturn && !entry.restart && !entry.newThread &&
+    !entry.quotaPaused && !entry.continuation && !entry.linkedThread && !entry.turnRequest &&
+    matchesQueuedExecutor(entry, task);
+  if (!runtimeEntries(project).some(legacy)) return;
+  runtimeTransaction(project, entries => {
+    const pending = entries.find(legacy);
+    if (pending) pending.earlyLaunch = { cwd };
+  });
 }
 
 export function linkQueuedExecutor(project: string, task: QueuedTask, updated: QueuedTask) {

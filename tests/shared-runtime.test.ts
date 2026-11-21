@@ -4,10 +4,54 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import type { Task } from "../src/cli/model.ts";
 import { initializeBoard, locateBoard, onBoard, withLock } from "../src/cli/storage.ts";
 import { cachedTaskLimits, createAgentSlots, readProfileTaskLimits } from "../src/desktop/agent-limits.ts";
 import { projectIdentity } from "../src/desktop/project-tabs.ts";
-import { runtimeEntries } from "../src/desktop/board-runtime.ts";
+import { forgetExecutor, matchesQueuedExecutor, runtimeEntries, runtimeTransaction } from "../src/desktop/board-runtime.ts";
+import { plannedDraft } from "./fixtures/planned-draft.ts";
+
+test("comments retain a queued first launch in an assigned directory, including older manual requests", t => {
+  const project = mkdtempSync(join(tmpdir(), "taskboard-manual-first-launch-"));
+  t.after(() => rmSync(project, { recursive: true, maxRetries: 5 }));
+  initializeBoard(locateBoard(project, true), () => {});
+  const cliPath = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
+  const taskCommand = (args: string[], input?: Record<string, unknown>): Task => {
+    const result = spawnSync(process.execPath,
+      [cliPath, "--project", project, "--json", ...args, ...(input ? ["--stdin"] : [])],
+      { encoding: "utf8", input: input && JSON.stringify(input), windowsHide: true });
+    assert.equal(result.status, 0, result.stdout || result.stderr);
+    return JSON.parse(result.stdout).data;
+  };
+  const { id } = taskCommand(["create"], plannedDraft({
+    title: "Manual first launch", criteria: ["Keep the assigned directory"], workingDirectory: project,
+  }));
+  taskCommand(["approve", id]);
+  taskCommand(["start", id], { actor: "user", queueExecutor: true });
+  const queued = () => runtimeEntries(project).find(entry => entry.kind === "queue" && entry.task === id);
+  const first = queued();
+  assert.ok(first);
+  assert.deepEqual(first.earlyLaunch, { cwd: project });
+
+  // Recreate the queue entry shape written before the metadata was added.
+  runtimeTransaction(project, entries => {
+    const entry = entries.find(candidate => candidate.id === first.id);
+    assert.ok(entry);
+    delete entry.earlyLaunch;
+  });
+  for (const text of ["First comment", "Second comment"]) {
+    const task = taskCommand(["comment", id], { text });
+    const pending = queued();
+    assert.ok(pending);
+    assert.deepEqual(pending.earlyLaunch, { cwd: project });
+    assert.equal(pending.revision, first.revision);
+    assert.ok(matchesQueuedExecutor(pending, task));
+  }
+  forgetExecutor(project, id);
+  taskCommand(["comment", id], { text: "Comment after stopping the launch" });
+  assert.equal(queued(), undefined);
+});
 
 test("shared defaults, overrides and canonical aliases use one pool without interrupting current leases", t => {
   const scratch = mkdtempSync(join(tmpdir(), "taskboard-shared-limits-"));
