@@ -3,6 +3,7 @@ import { chmodSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from 
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const config = {};
@@ -31,6 +32,10 @@ if (release && process.platform !== "linux") {
 }
 const stage = join(root, "dist", "installer");
 mkdirSync(stage, { recursive: true });
+const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+config.extraMetadata = {
+  taskboardBuild: { commit, date: new Date().toISOString() },
+};
 
 if (process.platform === "linux") {
   const homepage = process.env.AI_TASKBOARD_PROJECT_URL;
@@ -38,7 +43,7 @@ if (process.platform === "linux") {
   if (!homepage || !/^https?:\/\//.test(homepage) || !maintainer) {
     throw new Error("Set AI_TASKBOARD_PROJECT_URL and AI_TASKBOARD_MAINTAINER for Linux package metadata.");
   }
-  config.extraMetadata = { homepage };
+  config.extraMetadata.homepage = homepage;
   config.linux = { maintainer };
   const require = createRequire(import.meta.url);
   const templates = join(dirname(require.resolve("app-builder-lib/package.json")), "templates", "linux");

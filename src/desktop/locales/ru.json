@@ -1,4 +1,13 @@
 {
+  "about.version": "Версия",
+  "about.commit": "Коммит",
+  "about.build_date": "Дата сборки",
+  "about.os": "ОС",
+  "about.architecture": "Архитектура",
+  "about.author": "Автор",
+  "about.repository": "Репозиторий",
+  "about.no_build_metadata": "Нет данных о сборке",
+  "about.repository_error": "Не удалось открыть репозиторий в браузере.",
   "autoMode.waitingForWork": "Цель ждёт работы",
   "autoMode.label": "Авторежим",
   "autoMode.iterative": "Итеративное выполнение цели",

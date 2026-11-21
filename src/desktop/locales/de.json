@@ -1,4 +1,13 @@
 {
+  "about.version": "Version",
+  "about.commit": "Commit",
+  "about.build_date": "Build-Datum",
+  "about.os": "Betriebssystem",
+  "about.architecture": "Architektur",
+  "about.author": "Autor",
+  "about.repository": "Repository",
+  "about.no_build_metadata": "Keine Build-Metadaten verfügbar",
+  "about.repository_error": "Das Repository konnte nicht im Browser geöffnet werden.",
   "backup.title": "Sicherungen",
   "backup.restore": "Sicherung wiederherstellen",
   "backup.automatic": "Dieses Board stündlich sichern",
