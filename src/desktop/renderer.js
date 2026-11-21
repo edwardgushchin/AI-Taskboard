@@ -1681,7 +1681,10 @@ function animateCardMoves(moves) {
 }
 
 function render(previousBoard) {
-  document.documentElement.lang = localization.locale;
+  // Writing lang invalidates inherited styles throughout the board and chat.
+  if (document.documentElement.lang !== localization.locale) {
+    document.documentElement.lang = localization.locale;
+  }
   renderAppUpdate();
   const board = frame.board;
   const noBoard = !board;
