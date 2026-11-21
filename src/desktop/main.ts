@@ -4,7 +4,7 @@ import { russianWriting } from "./russian-writing.ts";
 import { showAbout } from "./about.ts";
 import { captureFileLink, isFileLink, verifyFileLink } from "../cli/attachment-links.ts";
 import type { FileLink } from "../cli/attachment-links.ts";
-import { watchCodexQuotaExceeded } from "./codex-rpc.ts";
+import { CodexRpcRejection, watchCodexQuotaExceeded } from "./codex-rpc.ts";
 import { archiveAcceptedCodexChats, rememberTaskCodexThread } from "./codex-task-archive.ts";
 import { confirmedQuota, providerLimitSource, readCodexLimits, type QuotaWait } from "./provider-limits.ts";
 import localization from "./localization.cjs";
@@ -4403,6 +4403,9 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   let probeLaunch: Pick<NonNullable<RuntimeEntry["writeProbeRetry"]>, "cwd" | "fullAccess" | "windowsSandbox"> &
     { task: LaunchState; slotId: string } | undefined;
   let currentRevisionAfterStart = revision;
+  const blockUnconfirmedTurn = (revision: number, reason: string) => callCli<LaunchState>(project, ["block", id, "--compact"], {
+    revision, reason, unconfirmedTurn: true, condition: t("ui.write_probe_recovery_condition"),
+  });
   let release: ((restart?: boolean | "quota") => void) | undefined;
   let updateTimer: NodeJS.Timeout | undefined;
   type SteeredReply = { index: number; activity: Map<string, RunActivity> };
@@ -4454,6 +4457,9 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       : known ? { ok: true, data: known }
         : await callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
     if (!current.ok) return current;
+    if (current.data.status === "blocked" && current.data.blocked?.unconfirmedTurn) {
+      return cliFailure("INVALID_TRANSITION", current.data.blocked.condition);
+    }
     currentRevisionAfterStart = current.data.revision;
     if (revisionRequest) {
       const task = current.data;
@@ -4513,6 +4519,9 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         ? current.data.codexThreadId ?? pending.linkedThread?.codexThreadId : undefined;
       threadChoice = pending.newThread ?? newThread;
       writeProbeRetry = pending.writeProbeRetry;
+      if (writeProbeRetry?.unconfirmedTurn && writeProbeRetry.failure) {
+        return await blockUnconfirmedTurn(task.revision, writeProbeRetry.failure);
+      }
       if (writeProbeRetry?.failure && !recoveringThreadId) {
         return await callCli<LaunchState>(project, ["block", id, "--compact"], {
           revision: task.revision, reason: writeProbeRetry.failure, retryExecutor: true,
@@ -4644,7 +4653,9 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
           !recordWriteProbeRetryFailure(project, slotId, linked, t("ui.write_probe_retry_interrupted")))) {
         return cliFailure("CHAT_BUSY", "The queued write probe retry is no longer pending.");
       }
-      if (writeProbeRetry.fullAccess && !fullAccess) throw new Error(t("ui.write_probe_retry_access_changed"));
+      if (writeProbeRetry.fullAccess && !fullAccess) {
+        throw Object.assign(new Error(t("ui.write_probe_retry_access_changed")), { code: "CODEX_WRITE_PROBE_ACCESS_REVOKED" });
+      }
     }
     const run = await releaseSlot.run(() => startCodexRun(client, project, cwd, task, (item, currentTurn = true) => {
       // An action already present at the steering boundary belongs to the earlier work.
@@ -4691,7 +4702,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         accepted: (turnId: string) => recordQueuedTurn(project, id, pending.clientId, turnId),
         rejected: writeProbeRetry && slotId ? (reason: string) => {
           // An explicit RPC rejection settles this request even if the server closes next.
-          if (recordWriteProbeRetryFailure(project, slotId, linked, reason, pending.clientId)) {
+          if (recordWriteProbeRetryFailure(project, slotId, linked, reason, { rejectedClientId: pending.clientId })) {
             rejectedWriteProbeTurn = { revision: linked.revision, reason };
           }
         } : undefined,
@@ -4884,6 +4895,17 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     }
     if (code === "BOARD_BUSY" || (queued && (code === "INVALID_TRANSITION" || code === "REVISION_CONFLICT"))) {
       return cliFailure(code, (error as Error).message);
+    }
+    if (writeProbeRetry && recoveringThreadId && probeLaunch && !signal.aborted) {
+      const missingThread = error instanceof CodexRpcRejection && missingCodexThread(error.message, recoveringThreadId);
+      if (missingThread || code === "CODEX_WRITE_PROBE_ACCESS_REVOKED") {
+        const { task, slotId } = probeLaunch;
+        const reason = t(missingThread ? "ui.write_probe_recovery_thread_missing" : "ui.write_probe_recovery_access_revoked");
+        if (!recordWriteProbeRetryFailure(project, slotId, task, reason, { unconfirmedTurn: true })) {
+          return cliFailure("CHAT_BUSY", "The write probe retry was cancelled.");
+        }
+        return await blockUnconfirmedTurn(task.revision, reason);
+      }
     }
     if ((recoveringThreadId && (writeProbeRetry || (!restart && !missingCodexThread((error as Error).message, earlyThreadId)))) ||
         code === "CODEX_START_UNCONFIRMED") {

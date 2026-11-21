@@ -32,6 +32,7 @@ export interface RuntimeEntry {
     threadId?: string;
     notBefore: number;
     failure?: string;
+    unconfirmedTurn?: true;
   };
   launchStopped?: true;
   continuation?: { afterDisconnect?: boolean; withoutProgress?: boolean };
@@ -209,14 +210,18 @@ export function queueWriteProbeRetry(project: string, slotId: string, task: Queu
 }
 
 export function recordWriteProbeRetryFailure(project: string, slotId: string, task: QueuedTask, failure: string,
-  rejectedClientId?: string) {
+  outcome?: { rejectedClientId: string } | { unconfirmedTurn: true }) {
   return runtimeTransaction(project, entries => {
     const slot = entries.find(entry => entry.id === slotId && entry.task === task.id && entry.kind === "slot");
     const queued = entries.find(entry => matchesQueuedExecutor(entry, task));
     if (!slot || slot.launchStopped || !queued?.writeProbeRetry) return false;
-    if (rejectedClientId) {
-      if (queued.turnRequest?.clientId !== rejectedClientId || queued.turnRequest.turnId) return false;
+    if (outcome && "rejectedClientId" in outcome) {
+      if (queued.turnRequest?.clientId !== outcome.rejectedClientId || queued.turnRequest.turnId) return false;
       delete queued.turnRequest;
+    }
+    if (outcome && "unconfirmedTurn" in outcome) {
+      if (!queued.turnRequest || queued.turnRequest.threadId !== task.codexThreadId) return false;
+      queued.writeProbeRetry.unconfirmedTurn = true;
     }
     queued.writeProbeRetry.failure = failure;
     return true;

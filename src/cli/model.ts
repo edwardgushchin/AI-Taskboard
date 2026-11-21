@@ -252,7 +252,7 @@ export interface Task {
   discussionReturn?: number;
   reviewReturn?: number;
   childWork?: { key: string; basis: string; id: string }[];
-  blocked?: { reason: string; condition: string; previousStatus?: "draft" | "ready"; retryExecutor?: true };
+  blocked?: { reason: string; condition: string; previousStatus?: "draft" | "ready"; retryExecutor?: true; unconfirmedTurn?: true };
   result?: { summary: string; checks: string[]; limitations: string[]; noChanges?: { head: string | null };
     artifactEvidence?: { stage: string; output: string; kind: ArtifactKind; source: string; sha256: string }[] };
   artifacts?: { source: string; file: string; sha256: string }[];

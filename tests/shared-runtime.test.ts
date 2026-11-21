@@ -99,8 +99,9 @@ test("write probe retry persists its delay and respects shared slots and cancell
   const recovery = first.acquire(project, "executor", undefined, task.id, task.revision);
   assert.ok(recovery?.id);
   assert.deepEqual(prepareQueuedTurn(project, task, threadId), { ...turn, recover: true });
-  assert.equal(recordWriteProbeRetryFailure(project, recovery.id, task, "old reply", "another-request"), false);
-  assert.ok(recordWriteProbeRetryFailure(project, recovery.id, task, "server rejected start", turn.clientId));
+  assert.equal(recordWriteProbeRetryFailure(project, recovery.id, task, "wrong chat", { unconfirmedTurn: true }), false);
+  assert.equal(recordWriteProbeRetryFailure(project, recovery.id, task, "old reply", { rejectedClientId: "another-request" }), false);
+  assert.ok(recordWriteProbeRetryFailure(project, recovery.id, task, "server rejected start", { rejectedClientId: turn.clientId }));
   const rejected = runtimeEntries(project).find(entry => entry.id === pending.id);
   assert.equal(rejected?.turnRequest, undefined);
   assert.equal(rejected?.writeProbeRetry?.failure, "server rejected start");
@@ -108,6 +109,31 @@ test("write probe retry persists its delay and respects shared slots and cancell
   assert.equal(queueWriteProbeRetry(project, recovery.id, task, retry, undefined, undefined), false);
   recovery();
   assert.equal(runtimeEntries(project).some(entry => entry.task === task.id), false);
+});
+
+test("blocking an unconfirmed write probe turn retains its identity until the card is blocked", t => {
+  const project = mkdtempSync(join(tmpdir(), "taskboard-unconfirmed-write-probe-"));
+  t.after(() => rmSync(project, { recursive: true, maxRetries: 5 }));
+  initializeBoard(locateBoard(project, true), () => {});
+  const slots = createAgentSlots(true);
+  slots.remember(project);
+  const threadId = "01234567-1234-5678-1234-123456789012";
+  const task = { id: "T-0001", revision: 4, status: "in_progress" as const, codexThreadId: threadId };
+  const initial = slots.acquire(project, "executor", undefined, task.id);
+  assert.ok(initial?.id);
+  assert.ok(queueWriteProbeRetry(project, initial.id, task, {
+    cwd: project, fullAccess: true, threadId, notBefore: 0,
+  }, undefined, undefined));
+  const turn = prepareQueuedTurn(project, task, threadId);
+  assert.ok(turn);
+  assert.ok(recordWriteProbeRetryFailure(project, initial.id, task, "access revoked", { unconfirmedTurn: true }));
+  initial();
+  const pending = runtimeEntries(project).find(entry => matchesQueuedExecutor(entry, task));
+  assert.equal(pending?.turnRequest?.clientId, turn.clientId);
+  assert.equal(pending?.writeProbeRetry?.unconfirmedTurn, true);
+  assert.equal(pending?.writeProbeRetry?.failure, "access revoked");
+  forgetExecutor(project, task.id);
+  assert.equal(runtimeEntries(project).some(entry => matchesQueuedExecutor(entry, task)), false);
 });
 
 test("shared defaults, overrides and canonical aliases use one pool without interrupting current leases", t => {

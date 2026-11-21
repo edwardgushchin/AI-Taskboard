@@ -7,10 +7,12 @@ import { join } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
+import { executorFullAccess } from "../src/desktop/codex.ts";
+import { runtimeEntries } from "../src/desktop/board-runtime.ts";
 import { electronCheck } from "./electron-check.mjs";
 
 const phases = [["--seed"], ["--restore"], ["--recover-turn"]];
-const { scratch, artifacts } = electronCheck(import.meta.url, "write-probe-retry", 135_000, phases);
+const { scratch, artifacts } = electronCheck(import.meta.url, "write-probe-retry", 240_000, phases);
 const { app, BrowserWindow } = await import("electron");
 const require = createRequire(import.meta.url);
 const project = join(scratch, "board");
@@ -94,14 +96,25 @@ require("node:readline").createInterface({ input: process.stdin })
       cwd = params.cwd;
       const hash = createHash("sha256").update(cwd).digest("hex");
       threadId = params.threadId ?? "81234567-1234-5678-1234-" + hash.slice(0, 12);
-      record({ method, cwd: params.cwd, profile: params.permissions });
+      const scenario = fs.readFileSync(path.join(cwd, "scenario"), "utf8");
+      const missing = method === "thread/resume" && scenario === "missing-chat";
+      record({ method, cwd, profile: params.permissions, missing });
+      if (missing) {
+        send({ id, error: { code: -32600, message: "no rollout found for thread id " + params.threadId } });
+        return;
+      }
       result = { thread: { id: threadId }, approvalPolicy: params.approvalPolicy,
         approvalsReviewer: params.approvalsReviewer, activePermissionProfile: { id: params.permissions } };
     }
     if (method === "thread/turns/list") {
       const accepted = read().find(item => item.method === "turn/start" && item.cwd === cwd);
       const visible = Boolean(accepted && fs.existsSync(path.join(cwd, "show-history")));
-      record({ method, cwd, threadId: params.threadId, visible });
+      const missing = fs.readFileSync(path.join(cwd, "scenario"), "utf8") === "missing-history";
+      record({ method, cwd, threadId: params.threadId, visible, missing });
+      if (missing) {
+        send({ id, error: { code: -32600, message: "no rollout found for thread id " + params.threadId } });
+        return;
+      }
       result = { data: visible ? [{
         id: "turn", status: "completed", itemsView: "full",
         items: [{ type: "userMessage", clientId: accepted.clientId }],
@@ -126,7 +139,9 @@ require("node:readline").createInterface({ input: process.stdin })
         process.stdout.write(JSON.stringify({ id, error }) + "\\n", () => process.exit(0));
         return;
       }
-      if (scenario === "lost" || scenario === "restart") process.exit(0);
+      if (["lost", "restart", "missing-chat", "missing-history", "revoked"].includes(scenario)) {
+        process.exit(0);
+      }
       result = { turn: { id: "turn", status: "inProgress" } };
     }
     send({ id, result });
@@ -151,6 +166,9 @@ if (seed) {
     ["lost", "Write check · lost turn response"],
     ["restart", "Write check · restart during turn recovery"],
     ["rejected", "Write check · explicit turn rejection"],
+    ["missing-chat", "Write check · chat missing at resume"],
+    ["missing-history", "Write check · chat missing at history lookup"],
+    ["revoked", "Write check · full access revoked"],
   ].map(([scenario, title]) => {
     const cwd = join(scratch, scenario);
     mkdirSync(cwd);
@@ -189,6 +207,13 @@ require(entry);
 
 const cases = JSON.parse(readFileSync(casesPath, "utf8"));
 if (recoverTurn) writeFileSync(join(cases.restart.cwd, "show-history"), "");
+const missingChatReason = /original Codex chat is missing|исходный чат Codex отсутствует/i;
+const revokedAccessReason = /full access was revoked|полный доступ отозван/i;
+const blockedRecoveryCases = [
+  { fixture: cases["missing-chat"], reason: missingChatReason, resumes: 1, history: 0 },
+  { fixture: cases["missing-history"], reason: missingChatReason, resumes: 1, history: 1 },
+  { fixture: cases.revoked, reason: revokedAccessReason, resumes: 0, history: 0 },
+];
 const frame = window => window.webContents.executeJavaScript("window.taskboard?.bootstrap()");
 const evaluate = (window, method, ...args) =>
   window.webContents.executeJavaScript("window.taskboard." + method + "(..." + JSON.stringify(args) + ")");
@@ -231,6 +256,25 @@ async function checkTurnRejection(window, testCase) {
   assert.equal(turns.length, 1);
   assert.equal(turns[0].rejected, true);
   assert.equal(historyRecords(testCase).length, 0);
+}
+
+async function checkBlockedRecovery(window, { fixture, reason, resumes, history }) {
+  const card = await block(window, fixture);
+  assert.match(card.blocked.reason, reason);
+  assert.match(card.blocked.condition, /check the outcome|проверьте исход/i);
+  assert.equal(card.blocked.unconfirmedTurn, true);
+  assert.equal(card.blocked.retryExecutor, undefined);
+  await until(async () => {
+    const state = await frame(window);
+    const entry = runtimeEntries(project).find(item => item.task === fixture.id);
+    return !entry && !state.waitingTasks?.includes(fixture.id) && !state.runningTasks?.includes(fixture.id);
+  }, "idle after blocking " + fixture.id);
+  const resumed = records().filter(event => event.cwd === fixture.cwd && event.method === "thread/resume");
+  assert.equal(resumed.length, resumes);
+  assert.equal(historyRecords(fixture).length, history);
+  assert.equal(probeRecords(fixture).length, 2);
+  assert.equal(turnRecords(fixture).length, 1);
+  return card;
 }
 
 async function checkTurnRecovery(window, testCase, visible) {
@@ -344,6 +388,24 @@ void app.whenReady().then(async () => {
     await checkTurnRecovery(window, cases.lost, false);
     writeFileSync(join(cases.lost.cwd, "show-history"), "");
     await checkTurnRecovery(window, cases.lost, true);
+    for (const testCase of blockedRecoveryCases) {
+      const { fixture } = testCase;
+      const revoked = fixture === cases.revoked;
+      if (revoked) {
+        const card = cli("show", fixture.id);
+        assert.equal(executorFullAccess(profile, project, card, true), true);
+      }
+      const started = await evaluate(window, "launchTask", fixture.id);
+      assert.equal(started.ok, true, JSON.stringify(started));
+      if (revoked) {
+        await until(() => turnRecords(fixture)[0], "dispatch under full access");
+        const card = cli("show", fixture.id);
+        assert.equal(executorFullAccess(profile, project, card, false), false);
+        assert.deepEqual(probeRecords(fixture).map(event => event.profile),
+          [":danger-full-access", ":danger-full-access"]);
+      }
+      await checkBlockedRecovery(window, testCase);
+    }
     const restart = await evaluate(window, "launchTask", cases.restart.id);
     assert.equal(restart.ok, true, JSON.stringify(restart));
     await checkTurnRecovery(window, cases.restart, false);
@@ -351,6 +413,22 @@ void app.whenReady().then(async () => {
       "provider closed after unconfirmed turn");
   } else {
     await checkTurnRecovery(window, cases.restart, true);
+    for (const testCase of blockedRecoveryCases) {
+      const { fixture } = testCase;
+      const card = await checkBlockedRecovery(window, testCase);
+      // A subsequent grant must not restore the direct launch action for an unconfirmed turn.
+      assert.equal(executorFullAccess(profile, project, card, true), true);
+      await openCard(window, fixture);
+      await until(() => window.webContents.executeJavaScript(`(() => {
+        const sheet = document.querySelector(".task-sheet");
+        return sheet?.textContent.includes(${JSON.stringify(card.blocked.reason)});
+      })()`), "visible blocked reason for " + fixture.id);
+      assert.equal(await window.webContents.executeJavaScript('Boolean(document.querySelector("#task-launch"))'), false);
+      const retry = await evaluate(window, "launchTask", fixture.id, { resumeWithFullAccess: true });
+      assert.equal(retry.ok, false);
+      assert.equal(retry.error.code, "INVALID_TRANSITION");
+      await checkBlockedRecovery(window, testCase);
+    }
     const rejected = cases.rejected;
     await checkTurnRejection(window, rejected);
     await openCard(window, rejected);
@@ -367,12 +445,16 @@ void app.whenReady().then(async () => {
     await until(() => records().filter(event => event.method === "command/exec").every(released), "all provider processes and temporary paths released");
     await until(() => records().filter(event => event.method === "thread/turns/list")
       .every(event => !running(event.pid) && !existsSync(event.temp)), "all history providers released");
+    await until(() => records().filter(event => event.method === "thread/resume")
+      .every(event => !running(event.pid) && !existsSync(event.temp)), "all resume providers released");
     const gitDirectory = fileURLToPath(new URL("..", import.meta.url));
     const git = (...args) => execFileSync("git", args, { cwd: gitDirectory, windowsHide: true });
     const base = git("rev-parse", "HEAD").toString("utf8").trim();
     const paths = [
-      "src/cli/main.ts", "src/desktop/agent-limits.ts", "src/desktop/board-runtime.ts", "src/desktop/codex-rpc.ts", "src/desktop/codex-run.ts",
-      "src/desktop/locales/en.json", "src/desktop/locales/ru.json", "src/desktop/main.ts", "scripts/check-write-probe-retry.mjs",
+      "src/cli/main.ts", "src/cli/model.ts", "src/cli/tasks.ts", "src/desktop/agent-limits.ts",
+      "src/desktop/board-runtime.ts", "src/desktop/codex-rpc.ts", "src/desktop/codex-run.ts", "src/desktop/codex.ts",
+      "src/desktop/locales/en.json", "src/desktop/locales/ru.json", "src/desktop/main.ts", "src/desktop/renderer.js",
+      "scripts/check-write-probe-retry.mjs",
     ];
     assert.equal(git("status", "--porcelain").toString("utf8"), "", "QA ran in a clean checkout");
     const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -404,6 +486,9 @@ void app.whenReady().then(async () => {
       "- После обрыва ответа на принятый `turn/start` пустая история оставила карточку в очереди. После появления сообщения с тем же идентификатором доска восстановила завершённый ход и сняла ожидание. Всего 2 проверки записи и 1 отправка хода.",
       "- После выхода Electron при неподтверждённом ходе новое приложение нашло принятый ход в истории и сняло ожидание. Всего 2 проверки записи и 1 отправка хода.",
       "- При явном ответе JSON-RPC с отказом и последующем закрытии App Server карточка показала причину отказа. После перезапуска сохранились блокировка и кнопка «Повторить запуск». До ручного запуска зарегистрированы две проверки записи, один отклонённый `turn/start` и ноль запросов истории. После исправления причины кнопка выполнила одну новую проверку и один ход.",
+      "- После потери ответа App Server подтвердил отсутствие исходного чата в отдельных сценариях `thread/resume` и `thread/turns/list`. Карточки заблокированы с причиной об отсутствующем чате.",
+      "- Две проверки записи и отправка хода выполнены с полным доступом. После потери ответа полный доступ отозван через хранилище профиля. Карточка заблокирована с причиной об отзыве доступа. Провайдер для сверки не запущен.",
+      "- Во всех трёх сценариях блокировки остаются две проверки записи и один `turn/start`. После перезапуска причины сохранены, очередь и слот освобождены. Новый полный доступ не возвращает прямую кнопку запуска, а её IPC-вызов отклоняется.",
       "- Все процессы проверок и сверки истории завершились. Выделенные временные каталоги исполнителя и файлы проверок удалены.",
       "",
       "Заглушка воспроизводит результат RPC 124 сразу. Тест не ждёт истечения реальных 15 секунд и не измеряет поведение реального App Server. При успехе и отказе выполняется штатный скрипт записи.",

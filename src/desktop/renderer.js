@@ -1350,6 +1350,7 @@ function codexTaskAction(task) {
     stop.id = "task-stop-waiting";
     return stop;
   }
+  if (task.status === "blocked" && task.blocked?.unconfirmedTurn) return null;
   const newThread = task.status === "blocked" && /already has an active writer/i.test(task.blocked?.reason ?? "");
   const missingThread = task.status === "blocked" && task.codexThreadId &&
     task.blocked?.reason === "no rollout found for thread id " + task.codexThreadId;

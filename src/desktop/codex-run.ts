@@ -48,7 +48,7 @@ type QueuedTurn = {
 };
 
 async function findQueuedTurn(request: <R>(method: string, params: object) => Promise<R>,
-  threadId: string, queued: QueuedTurn): Promise<Turn | undefined> {
+  threadId: string, queued: QueuedTurn, recoverWriteProbeTurn: boolean): Promise<Turn | undefined> {
   type SavedTurn = Turn & { itemsView?: string; items: { type: string; clientId?: string }[] };
   let cursor: string | undefined;
   const seen = new Set<string>();
@@ -72,6 +72,7 @@ async function findQueuedTurn(request: <R>(method: string, params: object) => Pr
     } while (cursor);
     if (queued.turnId || active) throw new Error("Codex has not confirmed the queued turn in history.");
   } catch (error) {
+    if (recoverWriteProbeTurn && error instanceof CodexRpcRejection && missingCodexThread(error.message, threadId)) throw error;
     throw Object.assign(new Error((error as Error).message), { code: "CODEX_START_UNCONFIRMED" });
   }
 }
@@ -572,7 +573,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     stages.bind(request, threadId);
     if (onActivity) stages.listen(item => onActivity(item, false));
     tokens.track(threadId, started.model ?? started.thread.model ?? null, true);
-    const recovered = queued && queued.recover ? await findQueuedTurn(request, threadId, queued) : undefined;
+    const recovered = queued?.recover ? await findQueuedTurn(request, threadId, queued, recoverWriteProbeTurn) : undefined;
     if (recoverWriteProbeTurn && !recovered) {
       throw Object.assign(new Error("Codex has not confirmed the write probe retry's turn in history."),
         { code: "CODEX_START_UNCONFIRMED" });
