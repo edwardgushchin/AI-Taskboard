@@ -135,6 +135,11 @@ function goalInstance(input: Record<string, unknown>): string | undefined {
 }
 
 export function createTask(id: string, input: Record<string, unknown>): Task {
+  if (input.actor === "manager" &&
+      (!Array.isArray(input.tags) || input.tags.length === 0 ||
+        input.tags.some(tag => typeof tag !== "string" || !tag.trim()))) {
+    throw new TaskboardError("TASK_TAGS_REQUIRED", "Supply at least one non-blank tag name in tags, then retry task_create.");
+  }
   const now = new Date().toISOString();
   const managerGoalId = goalInstance(input);
   const goalThreadId = input.goalThreadId === undefined ? undefined : text(input.goalThreadId, "goalThreadId", true);

@@ -406,12 +406,23 @@ test("manual manager edits personal tasks but cannot launch or move them", async
   const f = fixture(t);
   assert.equal((await f.cli(["init"], { boardType: "manual" })).ok, true);
   const result = await f.run("Plan the week", async act => {
-    const created = await act("task_create", { title: "Buy groceries" });
+    const brief = { title: "Buy groceries" };
+    for (const fields of [{}, { tags: [] }, { tags: [" ", "\t"] }, { tags: [42] }]) {
+      const rejected = await act("task_create", { ...brief, ...fields });
+      assert.equal(rejected.error.code, "TASK_TAGS_REQUIRED");
+      assert.match(rejected.error.message, /non-blank tag.*retry task_create/);
+    }
+    const { data: emptyBoard } = await act("board_list", {});
+    assert.deepEqual(emptyBoard.tasks, []);
+    assert.deepEqual(emptyBoard.tags, []);
+
+    const created = await act("task_create", { ...brief, tags: ["Groceries"] });
     assert.equal(created.ok, true, JSON.stringify(created));
     const id = created.data.id;
     const shown = await act("task_show", { id });
-    const updated = await act("task_update", { id, revision: shown.data.revision, description: "Milk", note: "User plan" });
+    const updated = await act("task_update", { id, revision: shown.data.revision, description: "Milk", tags: [], note: "User plan" });
     assert.equal(updated.ok, true, JSON.stringify(updated));
+    assert.deepEqual((await act("task_show", { id })).data.tags, []);
     assert.equal(updated.data.status, shown.data.status);
     for (const name of ["task_start", "task_approve", "task_cancel", "task_accept"]) {
       const blocked = await act(name, { id, revision: updated.data.revision });
@@ -419,6 +430,8 @@ test("manual manager edits personal tasks but cannot launch or move them", async
     }
     const board = await act("board_list", {});
     assert.equal(board.data.boardType, "manual");
+    assert.deepEqual(board.data.tasks.map((task: { id: string }) => task.id), [id]);
+    assert.deepEqual(board.data.tags, ["Groceries"]);
     const autoMode = await act("board_set_auto_mode", { enabled: true, reason: "Try the automatic queue" });
     assert.equal(autoMode.error.code, "MANUAL_BOARD");
     assert.match(autoMode.error.message, /авторежим недоступен|automatic mode/i);
@@ -479,8 +492,25 @@ test("a prepared update rejects new dialogue before claiming its writer and canc
 test("manager can set and read the board tag palette in HEX", async t => {
   const f = fixture(t);
   assert.equal((await f.cli(["init"])).ok, true);
-  const { data: card } = await f.cli(["create"], plannedDraft({ title: "Verify tag color", tags: ["Интеграции"] }));
+  const brief = plannedDraft({ title: "Verify tag color" });
   const result = await f.run("Set the tag color", async act => {
+    for (const fields of [{}, { tags: [] }, { tags: [" ", "\t"] }, { tags: "Интеграции" }]) {
+      const rejected = await act("task_create", { ...brief, ...fields });
+      assert.equal(rejected.error.code, "TASK_TAGS_REQUIRED");
+    }
+    const { data: emptyBoard } = await act("board_list", {});
+    assert.deepEqual(emptyBoard.tasks, []);
+    assert.deepEqual(emptyBoard.tags, []);
+
+    const created = await act("task_create", { ...brief, tags: ["Интеграции", "интеграции"] });
+    assert.equal(created.ok, true, JSON.stringify(created.error));
+    const card = created.data;
+    assert.deepEqual((await act("task_show", { id: card.id })).data.tags, ["Интеграции"]);
+    const { data: catalog } = await act("board_list", {});
+    assert.deepEqual(catalog.tags, ["Интеграции"]);
+    assert.equal(catalog.tasks.length, 1);
+    assert.match(catalog.tagColors["Интеграции"], /^#[0-9A-F]{6}$/);
+
     const saved = await act("tag_set_color", { name: "интеграции", color: "#217d79" });
     assert.equal(saved.data.name, "Интеграции");
     assert.equal(saved.data.color, "#217D79");
@@ -490,9 +520,39 @@ test("manager can set and read the board tag palette in HEX", async t => {
     assert.equal(board.tagColors["Интеграции"], "#217D79");
     assert.equal(board.tasks[0].tags[0], "Интеграции");
     assert.equal(board.tasks[0].revision, card.revision);
+    const reused = await act("task_create", plannedDraft({
+      title: "Document the integration", tags: [" интеграции ", "ИНТЕГРАЦИИ"],
+    }));
+    assert.equal(reused.ok, true, JSON.stringify(reused.error));
+    assert.deepEqual((await act("task_show", { id: reused.data.id })).data.tags, ["Интеграции"]);
+    const { data: updatedBoard } = await act("board_list", {});
+    assert.deepEqual(updatedBoard.tags, ["Интеграции"]);
+    assert.equal(updatedBoard.tagColors["Интеграции"], "#217D79");
     return { text: "Tag color saved." };
   });
   assert.equal(result.data?.answer, "Tag color saved.", JSON.stringify(result.error ?? result.data?.error));
+});
+
+test("manual card creation and tag editing allow an empty list on both board types", async t => {
+  for (const boardType of ["manual", "agent"]) {
+    await t.test(boardType, async t => {
+      const f = fixture(t);
+      const init = await f.cli(["init"], boardType === "manual" ? { boardType } : undefined);
+      assert.equal(init.ok, true, JSON.stringify(init.error));
+      const brief = { title: "Write a checklist", actor: "user" };
+      const created = await f.cli(["create"], boardType === "manual" ? brief : plannedDraft(brief));
+      assert.equal(created.ok, true, JSON.stringify(created.error));
+      assert.deepEqual(created.data.tags, []);
+
+      const { id, revision } = created.data;
+      const tagged = await f.cli(["update", id], { revision, actor: "user", tags: ["Checklists"] });
+      assert.equal(tagged.ok, true, JSON.stringify(tagged.error));
+      assert.deepEqual(tagged.data.tags, ["Checklists"]);
+      const cleared = await f.cli(["update", id], { revision: tagged.data.revision, actor: "user", tags: [] });
+      assert.equal(cleared.ok, true, JSON.stringify(cleared.error));
+      assert.deepEqual(cleared.data.tags, []);
+    });
+  }
 });
 
 test("a goal controls the persistent automatic queue and receives live board changes", async t => {
@@ -1102,7 +1162,7 @@ test("manager can route a draft to Luna or Sol without changing board defaults",
   const routed = await f.run("Assign a small inventory", async (act, _prompt, _images, _id, _context, _waiting, _signal, session) => {
     assert.deepEqual(session?.settings, defaultBoardAgents.manager);
     const execution = { model: "gpt-6-luna", effort: "high" };
-    const created = await act("task_create", plannedDraft({ title: "Inventory fixtures", execution }));
+    const created = await act("task_create", plannedDraft({ title: "Inventory fixtures", tags: ["Fixtures"], execution }));
     assert.equal(created.ok, true, JSON.stringify(created.error));
     const { id, revision } = created.data;
     assert.deepEqual((await f.cli(["show", id])).data.execution, execution);
@@ -1882,7 +1942,7 @@ test("send now steers the active manager with attachments and releases its execu
     const waiting = act("task_wait", { ids: [task.id] });
     ready.resolve();
     assert.equal((await waiting).error.code, "USER_MESSAGE_RECEIVED");
-    const created = await act("task_create", plannedDraft({ title: "Use attached notes", attachmentIds: [2] }));
+    const created = await act("task_create", plannedDraft({ title: "Use attached notes", tags: ["Notes"], attachmentIds: [2] }));
     assert.equal(created.ok, true);
     assert.equal((await f.cli(["show", created.data.id])).data.attachments[0].name, "new.png");
     await release.promise;
@@ -2048,7 +2108,7 @@ test("manager adopts expert roles, loads a board skill and plans an addressed sp
       { key: "analysis", expertId: "business-analyst", title: "Requirements", criteria: ["Acceptance criteria"], outputs: ["requirements.md"] },
       { key: "test", expertId: "qa-engineer", title: "Tests", criteria: ["Requirements covered"], inputs: ["requirements.md"], outputs: ["test-plan.md"], dependsOn: ["analysis"] },
     ];
-    const brief = { title: "Sprint", description: "Prepare requirements and a test plan.", criteria: ["Both plans are ready."] };
+    const brief = { title: "Sprint", description: "Prepare requirements and a test plan.", criteria: ["Both plans are ready."], tags: ["Planning"] };
     const incomplete = await act("task_create", brief);
     assert.equal(incomplete.error.code, "EXPERT_PLAN_REQUIRED");
     const invalidArtifact = await act("task_create", { ...brief,
@@ -2195,7 +2255,7 @@ test("manager can create and dispatch a task in an existing working directory", 
   assert.equal((await f.cli(["init"])).ok, true);
   const result = await f.run("Сохрани проверку в указанной папке", async act => {
     const draft = (await act("task_create", plannedDraft({
-      title: "Save a report", criteria: ["The report is present."], workingDirectory: f.folder,
+      title: "Save a report", criteria: ["The report is present."], tags: ["Reports"], workingDirectory: f.folder,
     }))).data;
     const approved = (await act("task_approve", { id: draft.id, revision: draft.revision })).data;
     const launched = await act("task_start", { id: draft.id, revision: approved.revision });
@@ -2212,7 +2272,7 @@ test("the manager cannot approve a draft with a newly saved question", async t =
   const f = fixture(t);
   assert.equal((await f.cli(["init"])).ok, true);
   const result = await f.run("Approve the draft when the clarification is complete.", async act => {
-    const { data: draft } = await act("task_create", plannedDraft({ title: "Choose an export format" }));
+    const { data: draft } = await act("task_create", plannedDraft({ title: "Choose an export format", tags: ["Export"] }));
     const chat = ["chat", draft.id];
     const settings = { model: "fixture", effort: "low" };
     const { data: prompt } = await f.cli(chat, { ...settings, text: "What information is missing?" });
@@ -2251,8 +2311,8 @@ test("the manager can approve drafts created while the goal was paused", async t
   let pending: { id: string; revision: number } | undefined;
   const paused = await f.run("Prepare the release cards while the goal is paused.", async act => {
     assert.equal((await act("goal_read", {})).data.goal.status, "paused");
-    const { data: draft } = await act("task_create", plannedDraft({ title: "Verify the release archive", criteria: ["The archive opens."] }));
-    const { data: other } = await act("task_create", plannedDraft({ title: "Update release notes", criteria: ["The notes list user-visible changes."] }));
+    const { data: draft } = await act("task_create", plannedDraft({ title: "Verify the release archive", criteria: ["The archive opens."], tags: ["Release"] }));
+    const { data: other } = await act("task_create", plannedDraft({ title: "Update release notes", criteria: ["The notes list user-visible changes."], tags: ["Release"] }));
     pending = other;
     assert.equal((await f.cli(["show", draft.id])).data.goalThreadId, undefined);
     const approval = await act("task_approve", { id: draft.id, revision: draft.revision });
@@ -2278,6 +2338,52 @@ test("the manager can approve drafts created while the goal was paused", async t
   assert.equal(saved.history.at(-1).actor, "manager");
 });
 
+test("the goal manager registers and reuses tags through task creation", async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"])).ok, true);
+  const objective = "Cover every applicable public API in the project";
+  const result = await f.run(objective, async (act, _text, _images, _id, _context, _waiting, _signal, goal) => {
+    goal!.update({ objective, status: "active" });
+    const brief = plannedDraft({
+      title: "Cover empty names",
+      description: "Specify the empty-name result in the parser.",
+      criteria: ["Empty names return a validation error."],
+    });
+    const rejected = await act("task_create", { ...brief, tags: [" "] });
+    assert.equal(rejected.error.code, "TASK_TAGS_REQUIRED");
+    const { data: beforeCreate } = await act("board_list", {});
+    assert.deepEqual(beforeCreate.tags, []);
+    assert.deepEqual(beforeCreate.tasks, []);
+
+    const created = await act("task_create", { ...brief, tags: ["Coverage"] });
+    assert.equal(created.ok, true, JSON.stringify(created.error));
+    const { data: saved } = await act("task_show", { id: created.data.id });
+    assert.equal(saved.goalThreadId, f.threadId);
+    assert.deepEqual(saved.tags, ["Coverage"]);
+    const { data: catalog } = await act("board_list", {});
+    assert.deepEqual(catalog.tags, ["Coverage"]);
+    assert.equal(catalog.tasks.length, 1);
+    assert.match(catalog.tagColors.Coverage, /^#[0-9A-F]{6}$/);
+    const { data: tagged } = await act("tag_set_color", { name: "Coverage", color: "#217D79" });
+    assert.equal(tagged.color, "#217D79");
+
+    const reused = await act("task_create", plannedDraft({
+      title: "Cover missing config",
+      description: "Specify behavior for an absent config file.",
+      criteria: ["Missing config uses defaults."],
+      tags: ["coverage", "COVERAGE"],
+    }));
+    assert.equal(reused.ok, true, JSON.stringify(reused.error));
+    const { data: second } = await act("task_show", { id: reused.data.id });
+    assert.deepEqual(second.tags, ["Coverage"]);
+    const { data: board } = await act("board_list", {});
+    assert.deepEqual(board.tags, ["Coverage"]);
+    assert.equal(board.tagColors.Coverage, "#217D79");
+    return { text: "Coverage tags saved." };
+  }, [], true);
+  assert.equal(result.data?.answer, "Coverage tags saved.", JSON.stringify(result.error ?? result.data?.error));
+});
+
 test("a goal delegates a bounded slice, waits for submission, and reviews before local integration", { timeout: 150_000 }, async t => {
   const f = fixture(t);
   assert.equal((await f.cli(["init"])).ok, true);
@@ -2299,14 +2405,20 @@ test("a goal delegates a bounded slice, waits for submission, and reviews before
     goal!.update({ objective, status: "active" });
     assert.equal((await act("task_create", { title: "All coverage", description: objective, criteria: ["100%"] })).error.code, "GOAL_SLICE_REQUIRED");
     const slice = (await act("task_create", plannedDraft({
-      title: "Cover empty names", description: "Specify the empty-name result in the parser.", criteria: ["Empty names return a validation error."],
+      title: "Cover empty names",
+      description: "Specify the empty-name result in the parser.",
+      criteria: ["Empty names return a validation error."],
+      tags: ["Coverage"],
     }))).data;
     sliceId = slice.id;
     assert.equal((await f.cli(["show", slice.id])).data.goalThreadId, f.threadId);
     const ready = (await act("task_approve", { id: slice.id, revision: slice.revision })).data;
     assert.equal(ready.status, "ready");
     const another = (await act("task_create", plannedDraft({
-      title: "Cover missing config", description: "Specify behavior for an absent config file.", criteria: ["Missing config uses defaults."],
+      title: "Cover missing config",
+      description: "Specify behavior for an absent config file.",
+      criteria: ["Missing config uses defaults."],
+      tags: ["Coverage"],
     }))).data;
     const anotherReady = (await act("task_approve", { id: another.id, revision: another.revision })).data;
     const { data: backlog } = await act("board_list", {});
@@ -2882,7 +2994,7 @@ test("manager keeps large file links through queue, provider context and card cr
     assert.equal(images.length, 0);
     assert.equal(context.attachments[0].path, link.path);
     assert.equal(context.attachments[0].link.size, link.size);
-    const created = await act("task_create", plannedDraft({ title: "Linked", attachmentIds: [1] }));
+    const created = await act("task_create", plannedDraft({ title: "Linked", tags: ["Attachments"], attachmentIds: [1] }));
     assert.equal(created.ok, true, JSON.stringify(created));
     assert.equal(created.data.attachments[0].link.path, link.path);
     return { text: "Linked" };
@@ -2912,7 +3024,7 @@ test("orchestrator preserves selected attachments, restores blocked drafts, and 
     ]);
     assert.deepEqual(Array.from(images, image => Buffer.from(image.split(",")[1], "base64").toString()), ["first", "second"]);
     assert.equal((await act("task_create", { title: "Draft", attachmentIds: [4] })).error.code, "INVALID_INPUT");
-    const draft = await act("task_create", plannedDraft({ title: "Draft", attachmentIds: [1, 2, 3] }));
+    const draft = await act("task_create", plannedDraft({ title: "Draft", tags: ["Attachments"], attachmentIds: [1, 2, 3] }));
     assert.equal(draft.ok, true);
     throw new Error("Provider failed after creation");
   }, files);

@@ -60,6 +60,25 @@ test("an in-flight or interrupted effect cannot run twice, even without a saved 
   assert.equal(effects, 1);
 });
 
+test("a goal can correct rejected tags using the same action key", async t => {
+  const { project, goal, message } = fixture(t);
+  const input = { goalMessageId: message.id, goalActionKey: "create-card", title: "One card" };
+  let creates = 0;
+  const invoke = async (fields: unknown) => {
+    if (!(fields as { tags?: string[] }).tags?.length) {
+      return { ok: false as const, error: { code: "TASK_TAGS_REQUIRED", message: "Supply tags." } };
+    }
+    return { ok: true as const, data: { created: ++creates } };
+  };
+  const rejected = await runGoalAction(project, goal, "task_create", input, invoke);
+  assert.ok(!rejected.ok && rejected.error.code === "TASK_TAGS_REQUIRED");
+  const corrected = { ...input, tags: ["Planning"] };
+  const result = await runGoalAction(project, goal, "task_create", corrected, invoke);
+  assert.deepEqual(result, { ok: true, data: { created: 1 } });
+  assert.deepEqual(await runGoalAction(project, goal, "task_create", corrected, invoke), result);
+  assert.equal(creates, 1);
+});
+
 test("invalid IDs and keys are rejected before conversion, and corrected input is accepted", async t => {
   const { project, goal, message } = fixture(t);
   let effects = 0;
