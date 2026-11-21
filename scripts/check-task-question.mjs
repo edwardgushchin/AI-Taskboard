@@ -19,7 +19,7 @@ const { transformSync } = require("esbuild");
 const project = join(scratch, "board");
 const other = join(scratch, "other");
 const profile = join(scratch, "profile");
-const report = join(artifacts, "task-question-check.txt");
+const report = join(artifacts, "cancelled-task-question-check.md");
 const cliPath = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
 const settings = { model: "fixture-sol", effort: "high" };
 const log = text => {
@@ -90,7 +90,7 @@ void (async () => {
       for (const path of [project, other, profile, staging]) {
         mkdirSync(path);
       }
-      writeFileSync(report, "Command: node scripts/check-task-question.mjs --artifacts .tasks/qa\n");
+      writeFileSync(report, "# Task question indicator\n\nCommand: node scripts/check-task-question.mjs --artifacts .tasks/qa/task-question\n\n");
       log("Source SHA-256: raw working-file bytes; compare these with the submitted snapshot (including checkout line endings).");
       const paths = ["src/cli/model.ts", "src/cli/archive.ts", "src/cli/main.ts", "src/cli/storage.ts",
         "src/desktop/main.ts", "src/desktop/codex-chat.ts", "src/desktop/renderer.js", "src/desktop/chat.js",
@@ -135,6 +135,7 @@ void (async () => {
     await until(() => BrowserWindow.getAllWindows().length, "window");
     const window = BrowserWindow.getAllWindows()[0];
     window.setContentSize(1280, 800);
+    window.webContents.setZoomFactor(1);
     const evaluate = code => window.webContents.executeJavaScript(code);
     await until(() => evaluate("Boolean(window.taskboard && document.querySelector('#app-menu button'))"), "renderer");
     const open = async path => {
@@ -176,9 +177,29 @@ void (async () => {
       await evaluate("document.fonts.ready.then(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))))");
       const image = await window.webContents.capturePage();
       assert.deepEqual(window.getContentSize(), [1280, 800]);
+      assert.deepEqual(await evaluate("[innerWidth, innerHeight]"), [1280, 800]);
       assert.ok(!image.isEmpty());
       writeFileSync(join(artifacts, name), image.toPNG());
     };
+    const assertCancelled = async () => {
+      await until(() => evaluate(`${card}?.dataset.state === 'cancelled'`), "cancelled card in board");
+      assert.equal(await evaluate(`Boolean(${card}.querySelector('.task-question'))`), false);
+      const metadata = await evaluate(`({
+        text: ${card}.textContent,
+        description: ${card}.getAttribute('aria-description')
+      })`);
+      assert.doesNotMatch(metadata.text, /Нужен ответ/);
+      assert.doesNotMatch(metadata.description, /Нужен ответ|Открыть диалог/);
+      assert.match(metadata.description, /0\/1/);
+      assert.equal(show().awaitingAnswer, true);
+      assert.match(show().history.find(event => event.text?.includes("Какой формат"))?.text, /Какой формат/);
+    };
+    if (restart) {
+      await assertCancelled();
+      cli(["return-to-draft", "T-0001"], { revision: show().revision });
+      await until(() => evaluate(`${card}?.dataset.state === 'draft'`), "returned draft in board");
+      log("PASS a fresh Electron process hides the badge on the saved cancelled card; its question history survives return to draft.");
+    }
     await until(() => show().awaitingAnswer === true, "saved first question");
     await badge(true);
     assert.equal(cli(["list", "--compact"]).tasks.find(task => task.id === "T-0001").awaitingAnswer, true);
@@ -212,7 +233,7 @@ void (async () => {
       assert.match(layout.icon, /codicon-question/);
       assert.equal(layout.glyph, '"\ueb32"');
       log("PASS dark narrow column retains question, ID, due date and subtask progress: " + JSON.stringify(layout));
-      await capture("task-question-indicator.png");
+      await capture("draft-task-question.png");
       // A real pointer click on the visible label uses the enclosing native card button.
       const point = await evaluate(`(() => {
         const r = ${card}.querySelector('.task-question').getBoundingClientRect();
@@ -226,8 +247,24 @@ void (async () => {
       await open(project);
       await badge(true);
       log("PASS pointer activates the badge; reopening the board preserves the question.");
+      await evaluate(`${card}.click()`);
+      await until(() => evaluate("Boolean(document.querySelector('[aria-controls=task-chat-work]'))"), "card chat tabs");
+      await evaluate("document.querySelector('[aria-controls=task-chat-work]').click()");
+      await close();
+      cli(["cancel", "T-0001"], { reason: "Проверка отмены черновика", revision: show().revision });
+      await assertCancelled();
+      await evaluate(`${card}.scrollIntoView({ block: 'nearest', inline: 'nearest' })`);
+      await capture("cancelled-task-question.png");
+      await evaluate(`${card}.click()`);
+      await until(() => evaluate("Boolean(document.querySelector('[aria-controls=task-chat-work]'))"), "cancelled card chat tabs");
+      await until(() => evaluate("document.querySelector('[aria-controls=task-chat-work]')?.getAttribute('aria-pressed') === 'true'"), "cancelled card preserves Work Activity");
+      await close();
+      await open(other);
+      await open(project);
+      await assertCancelled();
+      log("PASS cancellation removes the badge and its accessible prompt immediately. Opening the cancelled card preserves Work Activity. Reopening the board keeps the badge hidden.");
     } else {
-      log("PASS a fresh Electron process restores the unresolved question and leaves both neighboring cards unmarked.");
+      log("PASS the returned draft restores its unresolved question, badge and Dialogue navigation; neighboring cards stay unmarked.");
       await evaluate("window.taskboard.setTheme('light')");
       await until(() => evaluate("getComputedStyle(document.body).backgroundColor === 'rgb(238, 241, 247)'"), "light board background");
       const light = await evaluate(`(() => {
