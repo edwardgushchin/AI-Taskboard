@@ -750,6 +750,8 @@ function mountAppMenu() {
     const shortcut = key === "=" ? "+" : event.shiftKey && ["Z", "W"].includes(key) ? "Shift+" + key : key;
     const action = !api.isMac && shortcut === "Shift+Z" ? "redo" : shortcuts.get(shortcut);
     if (!action) return;
+    // Chromium handles these shortcuts against the current selection on Windows.
+    if (api.isWindows && !active && (action === "copy" || action === "paste")) return;
     event.preventDefault();
     if (!event.repeat) run(action);
   });
@@ -4168,6 +4170,17 @@ function draftComposer() {
     if (!event.dataTransfer.files.length) return;
     event.preventDefault();
     addFiles([...event.dataTransfer.files]);
+  });
+  input.addEventListener("mousedown", event => {
+    // Keep the current selection when the user opens the menu elsewhere in the field.
+    if (event.button === 2 && document.activeElement === input && input.selectionStart !== input.selectionEnd) {
+      event.preventDefault();
+    }
+  });
+  input.addEventListener("contextmenu", event => {
+    event.preventDefault();
+    input.focus();
+    void api.showManagerEditMenu(input.selectionStart !== input.selectionEnd);
   });
   input.addEventListener("paste", event => {
     const pasted = Array.from(event.clipboardData?.files ?? []);
