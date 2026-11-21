@@ -40,7 +40,7 @@ const managerTaskFields = {
       weekday: { type: "integer", minimum: 0, maximum: 6 }, dayOfMonth: { type: "integer", minimum: 1, maximum: 31 },
       month: { type: "integer", minimum: 1, maximum: 12 } }, additionalProperties: false },
   title: { ...taskFields.title, description: "Name the concrete change or result of this task." },
-  description: { ...taskFields.description, description: "For new briefs, follow the Markdown sections in Write task text: problem, expected result, essential constraints, and executor details under the exact heading '### Диагностика и связанные файлы'. Omit empty sections, keep criteria in their separate field, and do not reformat old cards just to match the structure." },
+  description: { ...taskFields.description, description: "Write a short, natural brief. Include the context, essential conditions, reproduction steps and links where they help the reader act. Keep acceptance criteria in their separate field." },
   criteria: { ...taskFields.criteria, description: "List distinct, observable conditions for accepting this specific result. Avoid repeating the description." },
   questions: { ...taskFields.questions, description: "Include unresolved decisions only when they affect this task." },
   priority: { ...taskFields.priority, description: "Follow the user's explicit choice. Otherwise use urgent for imminent serious harm or a critical incident needing immediate action, high for significant user impact or work that unblocks a release or other important tasks, normal for routine work, and low for improvements that can safely wait. Keep the existing level unless impact or urgency changes." },
