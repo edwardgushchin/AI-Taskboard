@@ -2090,7 +2090,6 @@ function draftComposer() {
   const files = [];
   const queued = [];
   let savingQueuedMessage = false;
-  let goalDeliveryDraft;
   let sendingQueuedMessage = false;
   let active;
   let managerRun;
@@ -2189,7 +2188,6 @@ function draftComposer() {
   let goalResumeWaiting = false;
   let resumeRequest;
   let clearingGoal = false;
-  const activeGoalRunId = () => currentGoal && currentGoal.status !== "complete" ? goalScope ?? (goalRunning && managerWork?.id) : undefined;
   let goalRevision = 0;
   let changingGoal = false;
   const goalPanel = element("details", undefined, "board-goal");
@@ -2501,7 +2499,6 @@ function draftComposer() {
     log.hidden = show;
     dialogueToggle.setAttribute("aria-pressed", String(!show));
     workToggle.setAttribute("aria-pressed", String(show));
-    syncPrompt();
     if (!show) {
       dialogueViewport.restore();
       dialogueViewport.update(updateUnreadMessages);
@@ -2925,13 +2922,11 @@ function draftComposer() {
   progress.hidden = true;
   progress.setAttribute("role", "status");
   const syncPrompt = () => {
-    const toGoal = !work.hidden && Boolean(activeGoalRunId());
     const status = !editor.matches("[data-open], [data-pinned]") && (active?.thinking.textContent || (managerWork &&
       (managerWork.lane === "maintenance" ? t("ui.checking_worktree_cleanup_1f82f9a8") : runningLabel(managerWork.item).status)));
-    const text = status || (goalMode ? t("ui.describe_the_goal_79e3a385") :
-      t(toGoal ? "ui.write_to_goal" : "ui.write_to_the_project_manager_49756120"));
+    const text = status || t(goalMode ? "ui.describe_the_goal_79e3a385" : "ui.write_to_the_project_manager_49756120");
     if (prompt.textContent !== text) prompt.textContent = text;
-    input.setAttribute("aria-label", t(toGoal ? "ui.message_the_goal" : "ui.message_the_project_manager_247ec40b"));
+    input.setAttribute("aria-label", t(goalMode ? "ui.describe_the_goal_79e3a385" : "ui.message_the_project_manager_247ec40b"));
   };
   editor.syncPrompt = syncPrompt;
   const hasDraft = () => Boolean(input.value.trim() || (!goalMode && files.length));
@@ -2963,7 +2958,6 @@ function draftComposer() {
     bindLocalized(resumeGoal, "textContent", () => t("ui.resume_b9681b5e"));
     bindLocalized(clearGoal, "textContent", () => t("ui.clear_goal_a38efd6d"));
     syncGoal();
-    bindLocalized(input, "aria-label", () => t(!work.hidden && activeGoalRunId() ? "ui.message_the_goal" : "ui.message_the_project_manager_247ec40b"), true);
     bindLocalized(chat, "aria-label", () => t("ui.project_manager_chat_a425db31"), true);
     bindLocalized(resize, "aria-label", () => t("ui.chat_height_145da15f"), true);
     bindLocalized(greeting, "textContent", () => t("ui.ask_about_the_project_or_discuss_what_needs_to_c_b07dfce4"));
@@ -4018,23 +4012,12 @@ function draftComposer() {
     if (dictation || savingQueuedMessage || !hasDraft()) return;
     const draft = input.value;
     const goal = goalMode;
-    const goalRunId = !goal && !work.hidden ? activeGoalRunId() : undefined;
     const submitted = [...files];
     let id;
     savingQueuedMessage = true;
     try {
-      if (goalRunId) {
-        if (goalDeliveryDraft?.scope !== goalRunId || goalDeliveryDraft?.text !== draft) {
-          goalDeliveryDraft = { scope: goalRunId, text: draft, id: crypto.randomUUID() };
-        }
-        id = goalDeliveryDraft.id;
-        const result = await api.boardRequest(draft, await pasteFiles(submitted), project, false, true, id, goalRunId);
-        if (!result.ok) throw new Error(boardError(result.error));
-        goalDeliveryDraft = undefined;
-      } else {
-        await restoreQueue();
-        id = await queueStorage("add", undefined, draft, goal, await pasteFiles(submitted));
-      }
+      await restoreQueue();
+      id = await queueStorage("add", undefined, draft, goal, await pasteFiles(submitted));
     } catch (error) {
       if (!disposed) message(error.message);
       return;
@@ -4053,10 +4036,12 @@ function draftComposer() {
     dismissedMention = undefined;
     attachments.hidden = !files.length;
     if (goalMode === goal) setGoalMode(false);
-    if (!goalRunId && active?.id !== id && !queued.some(job => job.id === id)) enqueue(id, draft, goal, submitted);
+    if (active?.id !== id && !queued.some(job => job.id === id)) {
+      enqueue(id, draft, goal, submitted);
+    }
     openChat();
-    showWork(goal || Boolean(goalRunId));
-    if (!goalRunId) sendNext();
+    showWork(goal);
+    sendNext();
     syncAction();
   });
   function updateQueuedPreview(job) {

@@ -1741,7 +1741,6 @@ app.whenReady().then(async () => {
   if (process.argv.includes("--goal-reply-only")) {
     await evaluate(`
       const activeGoal = { objective: 'Проверить карточки', status: 'active' };
-      fixture.managerBusy = true;
       fixture.managerWork = { id: 'goal-run', phase: 'running', lane: 'work', startedAt: Date.now(),
         item: { type: 'mcpToolCall', title: 'ai_taskboard / task_wait', text: '', status: 'inProgress' } };
       window.taskboard.boardHistory = async (_project, _cursor, view) => ({ ok: true, data: view === 'live'
@@ -1754,19 +1753,20 @@ app.whenReady().then(async () => {
     await evaluate(`
       const workForm = document.querySelector('#board-draft');
       const workSends = [];
-      window.taskboard.boardRequest = async (text, _files, project, goal, immediate, id, goalRunId) => {
-        workSends.push({ text, goal, immediate, goalRunId });
+      window.taskboard.boardRequest = async (text, _files, project, goal, immediate, id) => {
+        workSends.push({ text, goal, immediate, id });
         await window.taskboard.boardQueue(project, 'remove', id);
-        return { ok: true, data: null };
+        return { ok: true, data: { answer: 'Ответ менеджера', changes: [] } };
       };
       workForm.querySelector('.draft-input textarea').value = 'Выбираю первый вариант';
       workForm.requestSubmit();
       waitFor(() => workSends.length && !workForm.querySelector('.board-queued-row'));
     `);
-    await check(`workSends[0].text === 'Выбираю первый вариант' && workSends[0].immediate === true &&
-      workSends[0].goal === false && workSends[0].goalRunId === 'goal-run' &&
-      document.querySelector('.board-work').checkVisibility()`,
-      "sending from Work Activity reaches the active goal without leaving its tab");
+    await check(`workSends[0].text === 'Выбираю первый вариант' && workSends[0].immediate === false &&
+      workSends[0].goal === false && Boolean(workSends[0].id) &&
+      document.querySelector('.board-dialogue-toggle').getAttribute('aria-pressed') === 'true'`,
+      "sending from Goal Activity queues a dialogue message and opens Dialogue");
+    await click(".board-work-toggle");
     await evaluate(`
       const goalQuestion = { id: 'goal-question', text: 'Выбрать первый вариант?', options: ['Да', 'Нет'] };
       const updateQuestion = question => window.pushChat({ project: fixture.project, type: 'orchestrator-question', question });

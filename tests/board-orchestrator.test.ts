@@ -29,7 +29,12 @@ import type { BoardGoal, BoardGoalAction, readBoardHistory } from "../src/deskto
 import { commitFileHashes, inspectProjectPath, projectSha256 } from "../src/desktop/project-files.ts";
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
 import { reviewerActivity, withReviewerChat } from "../src/desktop/reviewer-chat.ts";
-import { goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory, sendGoalMessage } from "../src/desktop/manager-history.ts";
+import {
+  goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems,
+  readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView,
+  saveManagerHistory, sendGoalMessage,
+} from "../src/desktop/manager-history.ts";
+import { backgroundGoalHistory } from "../src/desktop/goal-history-background.ts";
 import { goalActionTools, runGoalAction } from "../src/desktop/goal-actions.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { autoQueueSettings } from "../src/cli/auto-queue.ts";
@@ -149,7 +154,9 @@ function fixture(t: TestContext) {
     executorFullAccess, managerAccess, setTaskExecutorAccess, phaseStageReporter,
     autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, taskReviewMode, taskReviewModeVersion, boardReviewModeTool, reviewModeReceipt, setReviewModeFromChat, reviewsAcceptanceRepair, usesIndependentReviewer, defaultBoardAgents, reviewVerifier,
     existsSync, storageDirectory, readdirSync, rmSync, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
-    goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerView, saveManagerHistory, sendGoalMessage, goalActionTools, runGoalAction,
+    backgroundGoalHistory, goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerUnread,
+    managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView,
+    saveManagerHistory, sendGoalMessage, goalActionTools, runGoalAction,
     send() {},
     readBoardHistory: (_profile: string, _project: string, _id: string, cursor: string | null) => {
       providerHistoryReads++;
@@ -384,8 +391,8 @@ function fixture(t: TestContext) {
       const managerRun = () => runtime.frame({ project, board: { project, tasks: [] }, window: { webContents: {} } }).managerWork;
       return { state, tab, notifications: questionNotifications, goalActivity, managerRuns, managerRun };
     },
-    sendNow: (request: string, files: unknown[] = [], id?: string, goalRunId?: string) =>
-      handlers.get("board:request")!({ sender }, request, files, undefined, false, true, id, goalRunId),
+    sendNow: (request: string, files: unknown[] = [], id?: string) =>
+      handlers.get("board:request")!({ sender }, request, files, undefined, false, true, id),
     queue: (action: string, ...args: unknown[]) => handlers.get("board:queue")!({ sender }, project, action, ...args),
     goal: (kind: string, objective?: string) => handlers.get("board:goal")!({ sender }, kind, objective),
   };
@@ -2994,7 +3001,7 @@ test("a running goal accepts queued instructions while ordinary questions use an
   const f = fixture(t); await f.cli(["init"]);
   const { data: task } = await f.cli(["create"], plannedDraft({ title: "Running task" }));
   f.setRunning(task.id, true);
-  const { managerRun } = f.backgroundWindow();
+  f.backgroundWindow();
   const asked = Promise.withResolvers<void>(), ready = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>();
   const work = f.run("Coordinate", async (act, _prompt, _images, _id, _context, _waiting, _signal, goal) => {
     goal!.accepted();
@@ -3013,19 +3020,21 @@ test("a running goal accepts queued instructions while ordinary questions use an
     await asked.promise;
     const question = f.pendingQuestion();
     assert.equal(question.text, "Which release?");
-    const turns = (await f.history(undefined, "work")).data.turns as { items: RunActivity[] }[];
+    const history = await f.history(undefined, "work");
+    assert.equal(history.ok, true, JSON.stringify(history));
+    const turns = history.data.turns as { items: RunActivity[] }[];
     assert.ok(turns.some(turn => turn.items.some(item => item.text.includes(question.text))));
     assert.equal((await f.answerQuestion(question.id, "Alpha")).ok, true);
     await ready.promise;
-    const goalRunId = managerRun().id;
     const parallel = await f.run("Parallel question", async () => ({ text: "Ordinary answer" }));
     assert.equal(parallel.data.answer, "Ordinary answer");
-    const messageId = "00000000-0000-4000-8000-000000000003";
-    assert.equal((await f.queue("add", messageId, "Hold publication", false, [])).ok, true);
-    assert.equal((await f.sendNow("Hold publication", [], messageId, "stale-run")).error.code, "CHAT_NOT_RUNNING");
-    assert.equal((await f.queue("list")).data.length, 1);
-    assert.equal((await f.sendNow("Hold publication", [], messageId, goalRunId)).ok, true);
-    assert.equal((await f.queue("list")).data.length, 0);
+    assert.deepEqual(f.managerNotifications, []);
+    const forwarded = await f.run("Pass Hold publication to the goal", async act => {
+      const result = await act("goal_send", { text: "Hold publication" });
+      assert.equal(result.ok, true, JSON.stringify(result));
+      return { text: "Instruction queued" };
+    });
+    assert.equal(forwarded.data.answer, "Instruction queued");
     assert.equal(f.managerNotifications.at(-1), "AI Taskboard: new user directions are available. Read goal_inbox.");
   } finally {
     finish.resolve();
