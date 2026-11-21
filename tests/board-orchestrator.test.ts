@@ -3623,6 +3623,10 @@ test("dialogue edits the selected paused goal and rejects missing, stale and una
   save(original);
   sendGoalMessage(f.project, goalId, "Сохрани отчёт по сборке.");
   for (const request of [
+    "Уточни цель: сделай формулировку более понятной, пожалуйста",
+    "Уточни цель в части Linux: сделай текст читабельным",
+    "Уточни цель: перепиши её более простыми словами",
+    "Clarify the goal: make the wording easier to understand, please",
     "Уточни цель: сформулируй её чётче, пожалуйста",
     "Пожалуйста, уточни цель в части Linux: сформулируй её немного чётче, пожалуйста.",
     "Clarify the goal: make it clearer, please.",
@@ -3664,7 +3668,10 @@ test("dialogue edits the selected paused goal and rejects missing, stale and una
   const finalObjective = replacement + "\nПроверить журнал ошибок.";
   const explicitEnglish = "Add a check of the error log to the goal, please.";
   assert.equal((await edit(explicitEnglish, finalObjective, replacement)).data.objective, finalObjective);
-  assert.deepEqual((await f.history()).data.goal, { objective: finalObjective, status: "paused" });
+  const explicitWording = "Проверить отчёт и журнал ошибок.";
+  const rewrite = "Уточни цель: перепиши её так: " + explicitWording;
+  assert.equal((await edit(rewrite, explicitWording, finalObjective)).data.objective, explicitWording);
+  assert.deepEqual((await f.history()).data.goal, { objective: explicitWording, status: "paused" });
   assert.equal((readJson(f.binding) as { goalId: string }).goalId, goalId);
   assert.equal(goalMessages(f.project, goalId)[0]?.text, "Сохрани отчёт по сборке.");
 });

@@ -1985,14 +1985,26 @@ function isOwnerGoalEdit(request: string) {
     return false;
   }
 
-  const wording = withoutCourtesy(detail.replace(/^[«“"']+|[»”"']+$/gu, ""));
-  if (!wording || endsWithQuestion.test(wording)) {
+  let wording = withoutCourtesy(detail.replace(/^[«“"']+|[»”"']+$/gu, ""));
+  // An instruction about the wording itself needs the replacement text.
+  const rewriteWording = /^(?:(?:сформулируй|переформулируй|перепиши|сделай|улучши)(?:те)?\s+(?:е[её]|цель|текст|формулировку)|(?:make|rewrite|rephrase|improve)\s+(?:it|the goal|the wording|the text))(?=$|[\s:,.!…])/iu;
+  const rewrite = rewriteWording.exec(wording);
+  if (rewrite) {
+    const replacement = /^\s*(?:(?:так|такой|следующим образом|as follows)\s*)?:\s*(.+)$/iu
+      .exec(wording.slice(rewrite[0].length));
+    if (!replacement) {
+      return false;
+    }
+    wording = withoutCourtesy(replacement[1].replace(/^[«“"']+|[»”"']+$/gu, ""));
+  }
+  if (!/[\p{L}\p{N}]/u.test(wording) || /^[>~\x60]/u.test(wording) ||
+      endsWithQuestion.test(wording) || rewriteWording.test(wording)) {
     return false;
   }
   const unspecified = /^(?:как-нибудь|что-нибудь|что-то|на своё усмотрение|пожалуйста|somehow|something|anything|whatever|please)(?![\p{L}\p{N}])/iu;
   const referenceOnly = /^(?:с уч[её]том|по итогам|по результатам|как обсуждали|как договорились|based on|taking into account|as discussed|as agreed)(?![\p{L}\p{N}])/iu;
-  const russianStyleOnly = /^(?:сформулируй|переформулируй|перепиши|сделай)(?:те)?\s+(?:(?:е[её]|цель|текст|формулировку)\s+)?(?:(?:чуть|немного|намного)\s+)?(?:ч[её]тче|яснее|понятнее|конкретнее|точнее|лучше|более\s+(?:ч[её]тко|ясно|понятно|конкретно|точно))[.!…»”"']*$/iu;
-  const englishStyleOnly = /^(?:make|rewrite|rephrase)(?:\s+(?:it|the goal|the wording))?\s+(?:(?:a little|much)\s+)?(?:clearer|more clearly|more specific|better)[.!…»”"']*$/iu;
+  const russianStyleOnly = /^(?:сформулируй|переформулируй|перепиши|сделай)(?:те)?\s+(?:(?:чуть|немного|намного)\s+)?(?:ч[её]тче|яснее|понятнее|конкретнее|точнее|лучше|более\s+(?:ч[её]тко|ясно|понятно|конкретно|точно))[.!…»”"']*$/iu;
+  const englishStyleOnly = /^(?:make|rewrite|rephrase)\s+(?:(?:a little|much)\s+)?(?:clearer|more clearly|more specific|better)[.!…»”"']*$/iu;
   return !unspecified.test(wording) && !referenceOnly.test(wording) &&
     !russianStyleOnly.test(wording) && !englishStyleOnly.test(wording);
 }
