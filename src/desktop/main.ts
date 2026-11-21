@@ -2081,11 +2081,16 @@ ipcMain.handle("board:history", async (event, project?: string, cursor: unknown 
   const board = project === undefined || state.board?.project === project ? state.board :
     windowStates.get(state.window.webContents.id)?.tabs.find(tab => tab.board?.project === project)?.board;
   if (!board) return cliFailure("BOARD_NOT_FOUND", t("errors.7b7b2fc6a65615f0"));
-  if ((cursor !== null && typeof cursor !== "string") || (view !== "chat" && view !== "work" && view !== "live")) {
+  if ((cursor !== null && typeof cursor !== "string") ||
+      (view !== "chat" && view !== "work" && view !== "live" && view !== "goal-availability")) {
     return cliFailure("INVALID_INPUT", t("errors.3dd06744fca3e722"));
   }
   project = board.project;
   try {
+    if (view === "goal-availability") {
+      const { goalLogAvailable } = await backgroundGoalHistory(project, null, false, true);
+      return { ok: true, data: goalLogAvailable };
+    }
     const key = projectIdentity(project);
     const entries = agentSlots.entries(project);
     const shared = entries.find(entry => entry.task === "manager:dialogue")?.state;
@@ -2117,7 +2122,7 @@ ipcMain.handle("board:history", async (event, project?: string, cursor: unknown 
     if (saved && saved.goal === undefined && data && "goal" in data && data.goal !== undefined) {
       saveBoardGoal(boardThreadPath(project), data.goal);
     }
-    if (goalLogAvailable === undefined) {
+    if (view === "work" && goalLogAvailable === undefined) {
       ({ goalLogAvailable } = await backgroundGoalHistory(project, null, false, true));
     }
     const goalRunning = Boolean(boardWorkRequests.get(key)?.goalRunning ??
