@@ -1,8 +1,9 @@
 import { priorities } from "../cli/model.ts";
 import type { BoardSettings, Task } from "../cli/model.ts";
+import { earliestOpenRelease, releaseWait } from "../cli/auto-queue.ts";
 
-export type QueueTask = Pick<Task, "id" | "status" | "priority" | "dueDate" | "milestone" | "schedule"> & {
-  readySince?: string; unfinishedDependencies?: string[];
+export type QueueTask = Pick<Task, "id" | "status" | "priority" | "dueDate" | "milestone" | "schedule" | "launchRequested"> & {
+  readySince?: string; unfinishedDependencies?: string[]; mergeRepair?: boolean;
 };
 
 // Lexicographic order; dates are deadlines, never start times.
@@ -20,10 +21,12 @@ export function launchableTasks<T extends QueueTask>(tasks: T[], now: number, qu
     !task.unfinishedDependencies?.length && (!task.schedule || (!task.schedule.paused && Date.parse(task.schedule.nextAt) <= now)));
 }
 
-export function nextReadyTask<T extends QueueTask>(tasks: T[], milestoneDates: ReadonlyMap<number, string | null>, busy: (id: string) => boolean, now = Date.now(), queue?: BoardSettings["autoQueue"]) {
+export function nextReadyTask<T extends QueueTask>(tasks: T[], milestoneDates: ReadonlyMap<number, string | null>, busy: (id: string) => boolean,
+  now = Date.now(), queue?: BoardSettings["autoQueue"], boardTasks: readonly QueueTask[] = tasks) {
   if (queue?.paused) return;
+  const release = earliestOpenRelease(boardTasks, now);
   const positions = new Map(queue?.order.map((id, index) => [id, index]));
-  return launchableTasks(tasks, now, queue).filter(task => !busy(task.id))
+  return launchableTasks(tasks, now, queue).filter(task => !releaseWait(task, release) && !busy(task.id))
     .sort((a, b) => {
       const left = positions.get(a.id) ?? Infinity, right = positions.get(b.id) ?? Infinity;
       return left === right ? compareReadyTasks(a, b, milestoneDates) : left - right;

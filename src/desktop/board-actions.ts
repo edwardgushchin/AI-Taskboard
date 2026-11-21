@@ -9,7 +9,7 @@ import { callCli, cliFailure } from "./cli.ts";
 import type { CliReply } from "./cli.ts";
 import { commitFileHashes, inspectProjectPath, projectSha256 } from "./project-files.ts";
 import { russianWriting } from "./russian-writing.ts";
-import { autoQueueSettings } from "../cli/auto-queue.ts";
+import { autoQueueSettings, earliestOpenRelease, releaseWait } from "../cli/auto-queue.ts";
 import { expertActions, expertCommands, leadInstructions } from "./expert-tools.ts";
 
 const string = { type: "string" };
@@ -558,8 +558,9 @@ export function boardActions(project: string, attachments: { path: string; name:
     if (action === "board_auto_queue") {
       const result = await callCli(project, ["auto-queue"], input);
       if (!result.ok) return result;
-      const current = await callCli<{ settings: BoardSettings; tasks: (Task & { unfinishedDependencies?: string[] })[] }>(project, ["list", "--compact"]);
+      const current = await callCli<{ settings: BoardSettings; tasks: (Task & { unfinishedDependencies?: string[]; mergeRepair?: boolean })[] }>(project, ["list", "--compact"]);
       if (!current.ok) return current;
+      const release = current.data.settings.autoMode ? earliestOpenRelease(current.data.tasks, Date.now()) : undefined;
       return { ok: true, data: {
         enabled: current.data.settings.autoMode ?? false, reviewMode: boardReviewMode(current.data.settings),
         queue: autoQueueSettings(current.data.settings),
@@ -567,7 +568,7 @@ export function boardActions(project: string, attachments: { path: string; name:
         tasks: current.data.tasks.filter(task => !["done", "cancelled"].includes(task.status)).map(task => ({
           id: task.id, title: task.title, status: task.status, revision: task.revision, priority: task.priority,
           dueDate: task.dueDate, dependencies: task.dependencies, unfinishedDependencies: task.unfinishedDependencies,
-          schedule: task.schedule, running: isTaskRunning(task.id),
+          schedule: task.schedule, running: isTaskRunning(task.id), releaseWait: releaseWait(task, release),
         })),
       } };
     }

@@ -20,7 +20,7 @@ import { activeManagerGoal } from "./manager-goal.ts";
 import type { GitHubMilestone, Task } from "./model.ts";
 import { exists, initializeBoard, locateBoard, onBoard, readBoardSettings, withMilestoneLinksLock, withTaskStartLock } from "./storage.ts";
 import { inheritedLimits, recordSettings } from "./settings-notices.ts";
-import { requireAutoQueue, updateAutoQueue } from "./auto-queue.ts";
+import { requireAutoQueue, requireReleaseTurn, updateAutoQueue } from "./auto-queue.ts";
 import type { BoardLocation, BoardStore } from "./storage.ts";
 import { discoverRepository, invokeGit, resolveCommit, scheduleGitMaintenance } from "./git.ts";
 import { boardGitInfo, changeRepository, createGitHubMilestone, deleteGitHubMilestone, githubMilestones, githubRepository, inspectRepository, manageRepositoryBranches, publishRepository, pushRepositoryBranch, readGitHub, repositoryRefs, setGitHubMilestoneDueDate, updateGitHubMilestone } from "./repository.ts";
@@ -846,7 +846,10 @@ function run(
     return filters.compact ? { ...taskReceipt(logged),
       ...(logged !== task ? { runLogSequence: logged.history.length } : {}) } : logged;
   }
-  if (command === "block" && input.autoMode === true) requireAutoQueue(store.index.settings, id, input.autoQueueRevision);
+  if (command === "block" && input.autoMode === true) {
+    requireAutoQueue(store.index.settings, id, input.autoQueueRevision);
+    requireReleaseTurn(store, { ...task, mergeRepair: isMergeRepair(task) });
+  }
   if (command === "progress" && task.schedule && task.status === "in_progress") requireExpertResults(task, "work");
   if (command === "approve" && task.status === "draft") requireApprovalPlan(task, store.index.settings);
   let updated = changeTask(task, command, discussionReturn ? { ...input, actor: "agent" } : input);
@@ -910,6 +913,11 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
       execution: isMergeRepair(started.task) ? store.index.settings.reviewer : execution ?? store.index.settings.executor ?? undefined, git, dueDate, workingDirectory, schedule, toolGrants,
       feedback: history.findLast(event => event.action === "request-changes")?.text } };
   };
+  const checkAutomaticStart = (store: BoardStore, task: Task) => {
+    if (input.autoMode !== true) return;
+    requireAutoQueue(store.index.settings, id, input.autoQueueRevision);
+    requireReleaseTurn(store, { ...task, mergeRepair: isMergeRepair(task) });
+  };
   return withTaskStartLock(location, id, startLockWaitMs => {
     const prepared = onBoard(location, (store, lockWaitMs) => {
       const task = store.card(id);
@@ -925,7 +933,7 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
       if (input.queuedExecutor === true && !queued) {
         throw new TaskboardError("INVALID_TRANSITION", "The queued start is no longer pending.");
       }
-      if (input.autoMode === true) requireAutoQueue(store.index.settings, id, input.autoQueueRevision);
+      checkAutomaticStart(store, task);
       if ((input.scheduled === true || input.autoMode === true) && task.schedule?.paused) {
         throw new TaskboardError("INVALID_TRANSITION", "The recurring schedule is paused.");
       }
@@ -947,7 +955,7 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
     const plan = prepared.checkout;
     const worktree = checkoutTaskWorktree(plan);
     return onBoard(location, (store, lockWaitMs) => {
-      if (input.autoMode === true) requireAutoQueue(store.index.settings, id, input.autoQueueRevision);
+      if (input.autoMode === true) checkAutomaticStart(store, store.card(id));
       return reply(store, finishTaskStart(store, plan, worktree, lockWaitMs, input.isolatedWorktree === true, enqueue));
     });
   });

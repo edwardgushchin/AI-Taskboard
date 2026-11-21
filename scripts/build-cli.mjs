@@ -26,7 +26,8 @@ const nodeLicense = await fetch(nodeLicenseUrl, { signal: AbortSignal.timeout(30
 if (!nodeLicense.ok) throw new Error(`Cannot read Node.js license: ${nodeLicense.status} ${nodeLicenseUrl}`);
 writeFileSync(join(directory, "THIRD-PARTY-NOTICES.txt"),
   `Node.js ${process.versions.node} and bundled components\n${nodeLicenseUrl}\n\n${await nodeLicense.text()}\n\n` +
-  `fflate\n\n${readFileSync(join(root, "node_modules/fflate/LICENSE"), "utf8")}`);
+  `fflate\n\n${readFileSync(join(root, "node_modules/fflate/LICENSE"), "utf8")}\n\n` +
+  `semver\n\n${readFileSync(join(root, "node_modules/semver/LICENSE"), "utf8")}`);
 
 await build({
   entryPoints: [join(root, "src", "cli", "main.ts")],
