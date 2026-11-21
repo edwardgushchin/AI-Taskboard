@@ -20,6 +20,7 @@ const node = process.env.TASKBOARD_CHECK_NODE;
 const cliPath = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
 const seed = process.argv.includes("--seed");
 const recoverTurn = process.argv.includes("--recover-turn");
+const turnRejection = "Fixture server declined the queued turn";
 const records = () => existsSync(log)
   ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line))
   : [];
@@ -118,8 +119,13 @@ require("node:readline").createInterface({ input: process.stdin })
       result = { data: [{ name: "ai_taskboard", tools: Object.fromEntries(tools.map(tool => [tool.name, tool])) }] };
     }
     if (method === "turn/start") {
-      record({ method, cwd, threadId, clientId: params.clientUserMessageId });
       const scenario = fs.readFileSync(path.join(cwd, "scenario"), "utf8");
+      record({ method, cwd, threadId, clientId: params.clientUserMessageId, rejected: scenario === "rejected" });
+      if (scenario === "rejected") {
+        const error = { code: -32602, message: ${JSON.stringify(turnRejection)} };
+        process.stdout.write(JSON.stringify({ id, error }) + "\\n", () => process.exit(0));
+        return;
+      }
       if (scenario === "lost" || scenario === "restart") process.exit(0);
       result = { turn: { id: "turn", status: "inProgress" } };
     }
@@ -144,6 +150,7 @@ if (seed) {
     ["denied", "Write check · confirmed denial"],
     ["lost", "Write check · lost turn response"],
     ["restart", "Write check · restart during turn recovery"],
+    ["rejected", "Write check · explicit turn rejection"],
   ].map(([scenario, title]) => {
     const cwd = join(scratch, scenario);
     mkdirSync(cwd);
@@ -213,6 +220,17 @@ const running = pid => {
 };
 function released(probe) {
   return !running(probe.pid) && !existsSync(probe.temp) && !probe.targets.some(existsSync);
+}
+
+async function checkTurnRejection(window, testCase) {
+  const card = await block(window, testCase);
+  assert.equal(card.blocked.reason, turnRejection);
+  assert.match(card.blocked.condition, /Retry launch|Повторить запуск/);
+  assert.equal(probeRecords(testCase).length, 2);
+  const turns = turnRecords(testCase);
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].rejected, true);
+  assert.equal(historyRecords(testCase).length, 0);
 }
 
 async function checkTurnRecovery(window, testCase, visible) {
@@ -318,6 +336,9 @@ void app.whenReady().then(async () => {
     await until(() => turnRecords(twice)[0], "one normal turn after manual Retry launch");
     assert.equal(probeRecords(twice).length, 3);
     assert.equal(turnRecords(twice).length, 1);
+    const rejected = await evaluate(window, "launchTask", cases.rejected.id);
+    assert.equal(rejected.ok, true, JSON.stringify(rejected));
+    await checkTurnRejection(window, cases.rejected);
     const lost = await evaluate(window, "launchTask", cases.lost.id);
     assert.equal(lost.ok, true, JSON.stringify(lost));
     await checkTurnRecovery(window, cases.lost, false);
@@ -330,6 +351,19 @@ void app.whenReady().then(async () => {
       "provider closed after unconfirmed turn");
   } else {
     await checkTurnRecovery(window, cases.restart, true);
+    const rejected = cases.rejected;
+    await checkTurnRejection(window, rejected);
+    await openCard(window, rejected);
+    await until(() => window.webContents.executeJavaScript(`(() => {
+      const button = document.querySelector("#task-launch");
+      return button?.getClientRects().length && /Retry launch|Повторить запуск/.test(button.textContent);
+    })()`), "visible manual retry after explicit rejection");
+    writeFileSync(join(rejected.cwd, "scenario"), "recover");
+    await window.webContents.executeJavaScript('document.querySelector("#task-launch").click()');
+    await until(() => turnRecords(rejected)[1], "one accepted turn after manual retry");
+    assert.deepEqual(turnRecords(rejected).map(turn => turn.rejected), [true, false]);
+    assert.equal(probeRecords(rejected).length, 3);
+    assert.equal(historyRecords(rejected).length, 0);
     await until(() => records().filter(event => event.method === "command/exec").every(released), "all provider processes and temporary paths released");
     await until(() => records().filter(event => event.method === "thread/turns/list")
       .every(event => !running(event.pid) && !existsSync(event.temp)), "all history providers released");
@@ -337,7 +371,7 @@ void app.whenReady().then(async () => {
     const git = (...args) => execFileSync("git", args, { cwd: gitDirectory, windowsHide: true });
     const base = git("rev-parse", "HEAD").toString("utf8").trim();
     const paths = [
-      "src/cli/main.ts", "src/desktop/agent-limits.ts", "src/desktop/board-runtime.ts", "src/desktop/codex-run.ts",
+      "src/cli/main.ts", "src/desktop/agent-limits.ts", "src/desktop/board-runtime.ts", "src/desktop/codex-rpc.ts", "src/desktop/codex-run.ts",
       "src/desktop/locales/en.json", "src/desktop/locales/ru.json", "src/desktop/main.ts", "scripts/check-write-probe-retry.mjs",
     ];
     assert.equal(git("status", "--porcelain").toString("utf8"), "", "QA ran in a clean checkout");
@@ -369,6 +403,7 @@ void app.whenReady().then(async () => {
       "- После устранения причины кнопка «Повторить запуск» выполнила новую проверку и запустила один ход.",
       "- После обрыва ответа на принятый `turn/start` пустая история оставила карточку в очереди. После появления сообщения с тем же идентификатором доска восстановила завершённый ход и сняла ожидание. Всего 2 проверки записи и 1 отправка хода.",
       "- После выхода Electron при неподтверждённом ходе новое приложение нашло принятый ход в истории и сняло ожидание. Всего 2 проверки записи и 1 отправка хода.",
+      "- При явном ответе JSON-RPC с отказом и последующем закрытии App Server карточка показала причину отказа. После перезапуска сохранились блокировка и кнопка «Повторить запуск». До ручного запуска зарегистрированы две проверки записи, один отклонённый `turn/start` и ноль запросов истории. После исправления причины кнопка выполнила одну новую проверку и один ход.",
       "- Все процессы проверок и сверки истории завершились. Выделенные временные каталоги исполнителя и файлы проверок удалены.",
       "",
       "Заглушка воспроизводит результат RPC 124 сразу. Тест не ждёт истечения реальных 15 секунд и не измеряет поведение реального App Server. При успехе и отказе выполняется штатный скрипт записи.",

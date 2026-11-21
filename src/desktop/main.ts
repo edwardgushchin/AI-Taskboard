@@ -4399,6 +4399,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   let earlyLaunch = false;
   let earlyThreadId: string | undefined;
   let writeProbeRetry: RuntimeEntry["writeProbeRetry"];
+  let rejectedWriteProbeTurn: { revision: number; reason: string } | undefined;
   let probeLaunch: Pick<NonNullable<RuntimeEntry["writeProbeRetry"]>, "cwd" | "fullAccess" | "windowsSandbox"> &
     { task: LaunchState; slotId: string } | undefined;
   let currentRevisionAfterStart = revision;
@@ -4685,7 +4686,16 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         throw Object.assign(new Error("The queued start belongs to another Codex thread."), { code: "CODEX_START_UNCONFIRMED" });
       }
       if (writeProbeRetry) recoveringThreadId = pending.threadId;
-      return { ...pending, accepted: (turnId: string) => recordQueuedTurn(project, id, pending.clientId, turnId) };
+      return {
+        ...pending,
+        accepted: (turnId: string) => recordQueuedTurn(project, id, pending.clientId, turnId),
+        rejected: writeProbeRetry && slotId ? (reason: string) => {
+          // An explicit RPC rejection settles this request even if the server closes next.
+          if (recordWriteProbeRetryFailure(project, slotId, linked, reason, pending.clientId)) {
+            rejectedWriteProbeTurn = { revision: linked.revision, reason };
+          }
+        } : undefined,
+      };
     }, desktopProfile, recoveringThreadId, Boolean(restart || earlyThreadId), clientId => {
       const reply = pendingReplies.get(clientId);
       if (!reply) return;
@@ -4858,6 +4868,12 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     return { ok: true, data: linked };
   } catch (error) {
     const code = (error as { code?: string }).code;
+    if (rejectedWriteProbeTurn && (!signal.aborted || signal.reason === quotaInterruption)) {
+      await saveActivity();
+      return await callCli<LaunchState>(project, ["block", id, "--compact"], {
+        ...rejectedWriteProbeTurn, retryExecutor: true, condition: t("ui.write_probe_retry_condition"),
+      });
+    }
     if (signal.reason === quotaInterruption) {
       await saveActivity();
       return quotaFailure();

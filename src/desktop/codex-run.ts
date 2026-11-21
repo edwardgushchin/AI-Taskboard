@@ -27,7 +27,7 @@ import type { configuredCodex } from "./codex.ts";
 import { requestExecutorAccess } from "./codex-chat.ts";
 import { windowsGuiEvidence } from "./windows-gui.ts";
 import type { CliReply } from "./cli.ts";
-import { codexRpc, turnControl } from "./codex-rpc.ts";
+import { CodexRpcRejection, codexRpc, turnControl } from "./codex-rpc.ts";
 import type { AgentControl } from "./codex-rpc.ts";
 import { CodexTokenUsage } from "./codex-token-usage.ts";
 import type { TokenUsageReport } from "../cli/token-usage.ts";
@@ -39,7 +39,13 @@ type Client = NonNullable<Awaited<ReturnType<typeof configuredCodex>>>;
 type Turn = { id: string; status: string; error?: { message?: string } | null };
 type RunFailure = { reason: string; disconnected?: boolean; interrupted?: boolean };
 type Run = AgentControl & { threadId: string; completion: Promise<RunFailure | undefined>; recovered?: true };
-type QueuedTurn = { clientId: string; recover: boolean; turnId?: string; accepted: (turnId: string) => void };
+type QueuedTurn = {
+  clientId: string;
+  recover: boolean;
+  turnId?: string;
+  accepted: (turnId: string) => void;
+  rejected?: (reason: string) => void;
+};
 
 async function findQueuedTurn(request: <R>(method: string, params: object) => Promise<R>,
   threadId: string, queued: QueuedTurn): Promise<Turn | undefined> {
@@ -577,6 +583,10 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       ...(queued ? { clientUserMessageId: queued.clientId } : {}),
       additionalContext: { ai_taskboard_worklog: { value: worklogReminder, kind: "application" } },
     }).catch(error => {
+      if (error instanceof CodexRpcRejection && queued?.rejected) {
+        queued.rejected(error.message.trim() || "Codex rejected the turn start.");
+        throw error;
+      }
       if (queued && rpc.failed) throw Object.assign(error as Error, { code: "CODEX_START_UNCONFIRMED" });
       throw error;
     });

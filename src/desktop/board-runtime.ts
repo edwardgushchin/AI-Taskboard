@@ -208,11 +208,16 @@ export function queueWriteProbeRetry(project: string, slotId: string, task: Queu
   });
 }
 
-export function recordWriteProbeRetryFailure(project: string, slotId: string, task: QueuedTask, failure: string) {
+export function recordWriteProbeRetryFailure(project: string, slotId: string, task: QueuedTask, failure: string,
+  rejectedClientId?: string) {
   return runtimeTransaction(project, entries => {
     const slot = entries.find(entry => entry.id === slotId && entry.task === task.id && entry.kind === "slot");
     const queued = entries.find(entry => matchesQueuedExecutor(entry, task));
     if (!slot || slot.launchStopped || !queued?.writeProbeRetry) return false;
+    if (rejectedClientId) {
+      if (queued.turnRequest?.clientId !== rejectedClientId || queued.turnRequest.turnId) return false;
+      delete queued.turnRequest;
+    }
     queued.writeProbeRetry.failure = failure;
     return true;
   });

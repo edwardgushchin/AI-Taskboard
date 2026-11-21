@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { startCodexRun, writeProbeTimeoutCode } from "../src/desktop/codex-run.ts";
 import { executorFullAccess } from "../src/desktop/codex.ts";
-import { codexRpc } from "../src/desktop/codex-rpc.ts";
+import { CodexRpcRejection, codexRpc, watchCodexQuotaExceeded } from "../src/desktop/codex-rpc.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { createTask } from "../src/cli/tasks.ts";
 import type { RunActivity } from "../src/cli/model.ts";
@@ -68,6 +68,35 @@ test("closing the Codex connection does not wait for a descendant's output pipe"
         if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
       }
     }
+    child.kill();
+    await closed;
+  }
+});
+
+test("Codex quota rejection keeps the server error when the quota listener aborts the connection", async () => {
+  const child = spawn(process.execPath, ["-e", `
+    require("node:readline").createInterface({ input: process.stdin }).once("line", line => {
+      const { id } = JSON.parse(line);
+      console.log(JSON.stringify({
+        id,
+        error: { message: "Quota exhausted", data: { codexErrorInfo: "usageLimitExceeded" } },
+      }));
+    });
+  `], { stdio: "pipe", windowsHide: true });
+  const closed = once(child, "close");
+  const rpc = codexRpc(child, () => {});
+  const interruption = new Error("Local quota interruption");
+  watchCodexQuotaExceeded(() => rpc.fail(interruption));
+  try {
+    await assert.rejects(rpc.request("turn/start", {}), error => {
+      assert.ok(error instanceof CodexRpcRejection);
+      assert.equal(error.message, "Quota exhausted");
+      return true;
+    });
+    await assert.rejects(rpc.request("turn/start", {}), interruption);
+  } finally {
+    watchCodexQuotaExceeded(() => {});
+    rpc.close();
     child.kill();
     await closed;
   }

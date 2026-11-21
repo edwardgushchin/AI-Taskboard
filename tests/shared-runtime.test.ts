@@ -99,6 +99,11 @@ test("write probe retry persists its delay and respects shared slots and cancell
   const recovery = first.acquire(project, "executor", undefined, task.id, task.revision);
   assert.ok(recovery?.id);
   assert.deepEqual(prepareQueuedTurn(project, task, threadId), { ...turn, recover: true });
+  assert.equal(recordWriteProbeRetryFailure(project, recovery.id, task, "old reply", "another-request"), false);
+  assert.ok(recordWriteProbeRetryFailure(project, recovery.id, task, "server rejected start", turn.clientId));
+  const rejected = runtimeEntries(project).find(entry => entry.id === pending.id);
+  assert.equal(rejected?.turnRequest, undefined);
+  assert.equal(rejected?.writeProbeRetry?.failure, "server rejected start");
   forgetExecutor(project, task.id);
   assert.equal(queueWriteProbeRetry(project, recovery.id, task, retry, undefined, undefined), false);
   recovery();
