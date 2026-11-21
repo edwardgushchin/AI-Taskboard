@@ -683,6 +683,20 @@ test("board chat keeps a goal streaming across turns and times out only after in
     "thread/goal/get", "turn/start", "thread/unsubscribe",
   ]);
 
+  providerMode = "";
+  const handoff = await runtime("profile", directory, "Start interval checks", [], () => ({ ok: true }), [], "",
+    controller.signal, {
+      ...session,
+      goal: "Start interval checks",
+      finishGoalTurn: () => true,
+    });
+  assert.equal(handoff.text, "First turn");
+  assert.equal(handoff.goalStatus, "active");
+  const handoffRequests = JSON.parse(readFileSync(captured, "utf8"));
+  assert.deepEqual(handoffRequests.slice(-3).map(({ method }: { method: string }) => method), [
+    "thread/goal/set", "turn/start", "thread/unsubscribe",
+  ]);
+
   await assert.rejects(runtime("profile", directory, "Unsupported effort", [], () => {}, [], "", controller.signal, {
     ...session, settings: { model: "manager-model", effort: "max" },
   }), /model or reasoning effort is unavailable/);

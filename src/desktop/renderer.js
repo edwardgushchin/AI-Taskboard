@@ -2267,7 +2267,7 @@ function draftComposer() {
   const syncGoal = () => {
     if (!currentGoal) return;
     const settings = frame.board?.settings;
-    const automatic = settings?.autoMode && settings.iterativeGoal === goalScope;
+    const automatic = settings?.autoMode && frame.goalIteration?.enabled && frame.iterativeGoalId === goalScope;
     const waitingForWork = automatic && currentGoal.status === "active" && !goalRunning;
     const waitingToResume = currentGoal.status === "active" && !goalRunning && !waitingForWork;
     bindLocalized(goalStatus, "textContent", () => waitingForWork ? t("autoMode.waitingForWork") : waitingToResume ? t("ui.goal_awaiting_continuation_27d0b1c3") :
@@ -6359,22 +6359,60 @@ byId("status-publish").addEventListener("click", protect(publishToGitHub));
 byId("status-tracking").addEventListener("click", protect(pushTrackedBranch));
 let savingAutoMode = false;
 const autoModeSwitch = byId("auto-mode-switch");
-const iterativeGoalSwitch = byId("iterative-goal-switch");
 const goalHint = byId("iterative-goal-hint");
+const goalRule = byId("iterative-goal-rule");
 
 function renderAutoMode() {
   const settings = frame.board?.settings;
-  const activeGoal = frame.iterativeGoalId;
+  const goal = frame.goalIteration;
   autoModeSwitch.checked = settings?.autoMode === true;
   autoModeSwitch.disabled = savingAutoMode;
-  const enabled = settings?.iterativeGoal === activeGoal && Boolean(activeGoal);
-  iterativeGoalSwitch.checked = enabled;
-  iterativeGoalSwitch.setAttribute("aria-disabled", String(savingAutoMode || !activeGoal));
-  goalHint.hidden = frame.hasCurrentGoal;
-  if (frame.hasCurrentGoal) {
-    iterativeGoalSwitch.removeAttribute("aria-describedby");
+  let rule = "";
+  let hint;
+  const formatTime = value => new Date(value).toLocaleString(localization.locale, {
+    ...(new Date(value).toDateString() === new Date().toDateString() ? {} : { dateStyle: "medium" }),
+    timeStyle: "medium",
+  });
+  if (!goal || goal.status === "complete") {
+    hint = t("autoMode.goalRequired");
   } else {
-    iterativeGoalSwitch.setAttribute("aria-describedby", goalHint.id);
+    rule = t(goal.enabled ? "autoMode.enabled" : "autoMode.disabled");
+    if (goal.intervalMs) {
+      const seconds = goal.intervalMs / 1000;
+      const unit = seconds % 3600 === 0 ? "hour" : seconds % 60 === 0 ? "minute" : "second";
+      const divisor = { hour: 3600, minute: 60, second: 1 }[unit];
+      const duration = new Intl.NumberFormat(localization.locale, { style: "unit", unit, unitDisplay: "long" })
+        .format(seconds / divisor);
+      rule += " · " + t("autoMode.interval", { duration });
+    } else if (goal.enabled) {
+      rule += " · " + t("autoMode.queue");
+    }
+    const now = Date.now();
+    if (goal.status === "paused") {
+      hint = t("autoMode.paused");
+    } else if (!goal.enabled) {
+      hint = t(goal.running ? "autoMode.running" : "autoMode.manual");
+    } else if (!settings?.autoMode) {
+      hint = t("autoMode.autoOff");
+    } else if (frame.quotaWait) {
+      hint = t("autoMode.quota");
+    } else if (goal.status !== "active") {
+      hint = t("autoMode.manual");
+    } else if (goal.running) {
+      hint = t("autoMode.running");
+    } else if (goal.retryAt > now) {
+      hint = t("autoMode.retry", { time: formatTime(goal.retryAt) });
+    } else if (goal.nextAt > now) {
+      hint = t("autoMode.next", { time: formatTime(goal.nextAt) });
+    } else {
+      hint = t(goal.intervalMs ? "autoMode.due" : "autoMode.waitingForWork");
+    }
+  }
+  if (goalRule.textContent !== rule) {
+    goalRule.textContent = rule;
+  }
+  if (goalHint.textContent !== hint) {
+    goalHint.textContent = hint;
   }
 }
 
@@ -6390,12 +6428,6 @@ async function saveAutoMode(input) {
 }
 
 autoModeSwitch.addEventListener("change", protect(() => saveAutoMode({ autoMode: autoModeSwitch.checked })));
-iterativeGoalSwitch.addEventListener("click", event => {
-  if (iterativeGoalSwitch.getAttribute("aria-disabled") === "true") event.preventDefault();
-});
-iterativeGoalSwitch.addEventListener("change", protect(() => saveAutoMode({
-  iterativeGoal: iterativeGoalSwitch.checked ? frame.iterativeGoalId : false,
-})));
 byId("app-settings").setAttribute("aria-haspopup", "menu");
 byId("app-settings").setAttribute("aria-controls", "settings-menu");
 byId("app-settings").setAttribute("aria-expanded", "false");

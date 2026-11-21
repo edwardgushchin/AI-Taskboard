@@ -619,6 +619,7 @@ function run(
     }
     if (input.autoMode !== undefined) {
       if (typeof input.autoMode !== "boolean") throw new TaskboardError("INVALID_INPUT", "autoMode must be a boolean.");
+      if (input.autoMode && !store.index.settings.autoMode) store.index.settings.autoModeEnabledAt = Date.now();
       store.index.settings.autoMode = input.autoMode;
     }
     if (input.iterativeGoal !== undefined) {

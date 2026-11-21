@@ -35,7 +35,7 @@ const hint = "Нужна активная цель";
 const trigger = "#status-auto-mode";
 const panel = "#auto-mode-panel";
 const auto = "#auto-mode-switch";
-const iterative = "#iterative-goal-switch";
+const iterativeHint = "#iterative-goal-hint";
 let ids;
 let window;
 let releaseExecutor;
@@ -59,7 +59,7 @@ function cli(args, input) {
 }
 
 function createReady(title, fields = {}) {
-  const draft = cli(["create"], plannedDraft({ title, ...fields }));
+  const draft = cli(["create"], plannedDraft({ title, tags: ["QA"], ...fields }));
   cli(["approve", draft.id]);
   return draft.id;
 }
@@ -151,9 +151,7 @@ async function key(selector, keyCode) {
 }
 
 const panelOpen = () => read(panel, ".matches(':popover-open')");
-const disabled = () => read(iterative, ".getAttribute('aria-disabled') === 'true'");
-const hintVisible = () => read("#iterative-goal-hint", ".checkVisibility()");
-const hintDescription = () => read(iterative, ".getAttribute('aria-describedby')");
+const hintText = () => read(iterativeHint, ".textContent.trim()");
 
 async function capture(name) {
   await until(() => read(panel, ".matches(':popover-open') && getComputedStyle(document.querySelector('#auto-mode-panel')).opacity === '1'"),
@@ -172,6 +170,7 @@ function prepare() {
     mkdirSync(project);
     cli(["init"], { git: false });
     cli(["settings"], { autoMode: false, reviewMode: "reviewer", taskLimits: { executor: 2, reviewer: 2 } });
+    cli(["tag", "ensure"], { name: "QA", color: "#5B8DEF" });
     const goal = randomUUID();
     const dependency = createReady("Незавершённая зависимость", { managerGoalId: goal, actor: "manager" });
     cli(["start", dependency]);
@@ -359,30 +358,24 @@ async function run() {
     await read(pause, ".click()");
     await until(() => JSON.parse(readFileSync(binding, "utf8")).goal.status === "paused", "manual pause saved");
     await click(trigger);
-    await until(disabled, "manual pause inhibits the switch");
-    assert.equal(await hintVisible(), false);
-    assert.equal(await hintDescription(), null);
+    await until(async () => (await hintText()).includes("ручной паузе"), "manual pause visible");
     assert.equal(cliReply(["settings"], { iterativeGoal: ids.goal }).error.code, "ACTIVE_GOAL_REQUIRED");
     cli(["message", ids.dependency], { text: "Вопрос на паузе", kind: "question" });
     await unchanged(4, "paused goal");
-    log("В состоянии «Цель ждёт работы» нажата кнопка паузы. Новый вопрос дал +0 итеративных запусков. Повтор сохранения отклонён.");
+    log("При ручной паузе новый вопрос дал +0 итеративных запусков. Повтор сохранения отклонён.");
     writeGoal("complete");
     globalThis.fixtureGoal(project);
-    await until(hintVisible, "completion restores the hint");
-    assert.equal(await disabled(), true);
-    assert.equal(await hintDescription(), "iterative-goal-hint");
+    await until(async () => await hintText() === hint, "completion restores the hint");
     assert.equal(cliReply(["settings"], { iterativeGoal: ids.goal }).error.code, "ACTIVE_GOAL_REQUIRED");
     await unchanged(4, "completed goal");
     writeGoal("paused");
     globalThis.fixtureGoal(project);
-    await until(async () => !await hintVisible(), "restored paused goal hides the hint");
+    await until(async () => (await hintText()).includes("ручной паузе"), "restored paused goal");
     assert.equal((await evaluate('window.taskboard.boardGoal("clear")')).ok, true);
     assert.equal(JSON.parse(readFileSync(binding, "utf8")).goal, null);
-    await until(hintVisible, "clearing a paused goal restores the hint");
-    assert.equal(await hintDescription(), "iterative-goal-hint");
-    assert.equal(await disabled(), true);
+    await until(async () => await hintText() === hint, "clearing a paused goal restores the hint");
     await unchanged(4, "cleared goal");
-    log("При паузе подсказка скрыта и исключена из описания. Завершение и снятие цели возвращают подсказку и её связь с недоступным переключателем, +0 итеративных запусков.");
+    log("Завершение и снятие возвращают подсказку в блоке цели, +0 итеративных запусков.");
     cli(["settings"], { iterativeGoal: false, autoMode: false });
     writeGoal("active");
     globalThis.fixtureGoal(project);
@@ -401,51 +394,30 @@ async function run() {
   await until(panelOpen, "popover opened using mouse");
   assert.equal(await read(trigger, ".innerText.trim()"), label);
   assert.equal(await read(auto, ".checked"), false);
-  assert.equal(await read(iterative, ".checked"), false);
-  assert.equal(await disabled(), true);
-  assert.equal(await hintDescription(), "iterative-goal-hint");
-  assert.equal(await read("#iterative-goal-hint", ".innerText.trim()"), hint);
-  assert.equal(await hintVisible(), true);
-  window.webContents.debugger.attach("1.3");
-  try {
-    const { nodes } = await window.webContents.debugger.sendCommand("Accessibility.getFullAXTree");
-    const node = nodes.find(node => node.role?.value === "switch" && node.name?.value === "Итеративное выполнение цели");
-    assert.equal(node?.description?.value, hint);
-    assert.equal(node.properties.find(property => property.name === "disabled")?.value.value, true);
-  } finally {
-    window.webContents.debugger.detach();
-  }
+  assert.equal(await evaluate("document.querySelectorAll('#auto-mode-panel input').length"), 1);
+  assert.equal(await hintText(), hint);
   const buttonBounds = await read(trigger, ".getBoundingClientRect().toJSON()");
   const panelBounds = await read(panel, ".getBoundingClientRect().toJSON()");
   assert.ok(buttonBounds.top - panelBounds.bottom >= 0 && buttonBounds.top - panelBounds.bottom <= 12);
   assert.ok(panelBounds.left <= buttonBounds.left && panelBounds.right >= buttonBounds.left);
-  await key(iterative, " ");
-  assert.equal(await evaluate("document.activeElement.id"), "iterative-goal-switch");
-  assert.equal(await read(iterative, ".checked"), false);
-  await capture("iterative-goal-toggle.png");
-  await key(iterative, "Escape");
+  await key(auto, "Escape");
   await until(async () => !await panelOpen(), "Escape closes the panel");
   await key(trigger, "Return");
   await until(panelOpen, "keyboard opens the panel");
   assert.equal(await read(auto, ".checked"), false);
-  assert.equal(await read(iterative, ".checked"), false);
-  log("Мышь и Enter открывают привязанную панель при выключенном авторежиме. Escape закрывает её. Два значения сохранены. Недоступный переключатель фокусируется и связан с видимой подсказкой через aria-describedby.");
+  log("Мышь и Enter открывают панель с одним тумблером. Escape закрывает панель.");
 
   await click(auto);
   await until(() => read(auto, ".checked"), "ordinary autorun enabled");
   assert.equal(cli(["settings"]).autoMode, true);
   assert.equal(await read(trigger, ".innerText.trim()"), label);
   writeGoal("active");
+  cli(["settings"], { iterativeGoal: ids.goal });
   globalThis.fixtureGoal(project);
-  await until(async () => !await disabled(), "active goal enables the switch");
-  assert.equal(await hintVisible(), false);
-  assert.equal(await hintDescription(), null);
-  await click(iterative);
-  await until(() => read(iterative, ".checked"), "iterative mode persisted");
-  assert.equal(cli(["settings"]).iterativeGoal, ids.goal);
+  await until(async () => (await read("#iterative-goal-rule", ".textContent")).includes("Пополнение очереди"), "legacy queue rule visible");
   await capture("iterative-goal-active.png");
   await unchanged(0, "sufficient stock");
-  log("Цель включена без правки текста, подпись кнопки прежняя. Два слота, четыре готовые карточки и две в работе, одна ожидает запуска: 0 итераций.");
+  log("Для сохранённой настройки без интервала действует пополнение очереди. Два слота, четыре готовые карточки и две в работе, одна ожидает запуска: 0 итераций.");
   cli(["cancel", ids.ready[1]], { reason: "Создать нехватку готовых карточек." });
   await retried(1, "prepare");
   log("Дефицит: ошибка подготовки провайдера до отправки, 0 ходов. Через пять секунд состоялся один повтор с запуском.");

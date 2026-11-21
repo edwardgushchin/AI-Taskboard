@@ -298,6 +298,7 @@ function readIndex(path: string): BoardIndex {
       (index.settings.showCardPreviews !== undefined && typeof index.settings.showCardPreviews !== "boolean") ||
       (index.settings.iterativeGoal !== undefined && (typeof index.settings.iterativeGoal !== "string" || !codexThreadPattern.test(index.settings.iterativeGoal))) ||
       (index.settings.autoMode !== undefined && typeof index.settings.autoMode !== "boolean") ||
+      (index.settings.autoModeEnabledAt !== undefined && !Number.isSafeInteger(index.settings.autoModeEnabledAt)) ||
       (index.settings.autoReview !== undefined && typeof index.settings.autoReview !== "boolean") ||
       (index.settings.reviewMode !== undefined && !reviewModes.some(mode => mode === (index.settings as Record<string, unknown>).reviewMode)) ||
       (index.settings.taskLimits !== undefined && !validAgentLimitOverrides(index.settings.taskLimits)) ||
