@@ -2,7 +2,8 @@ import { createRequire } from "node:module";
 
 // Shared with the packaged app; independent of every open board and its remotes.
 export const releaseRepository = "edwardgushchin/AI-Taskboard";
-export const releasesUrl = `https://github.com/${releaseRepository}/releases`;
+export const repositoryUrl = `https://github.com/${releaseRepository}`;
+export const releasesUrl = `${repositoryUrl}/releases`;
 const semver = createRequire(import.meta.url)("semver");
 
 export async function checkForUpdates(currentVersion: string, fetcher: typeof fetch = fetch) {

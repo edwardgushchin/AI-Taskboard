@@ -1468,6 +1468,10 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
   margin: 4px 0 0;
   color: var(--muted);
 }
+#iterative-goal-events {
+  margin: 4px 0;
+  padding-inline-start: 18px;
+}
 @media (prefers-reduced-motion: reduce) {
   #auto-mode-panel input[role="switch"]::before {
     transition: none;
