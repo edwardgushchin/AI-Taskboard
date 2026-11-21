@@ -71,6 +71,7 @@ export async function showAbout(parent: BrowserWindow) {
         <dd>${content}</dd>
       </div>`;
   }).join("\n");
+  const themeStyles = readFileSync(new URL("./themes.css", import.meta.url), "utf8");
   const html = `<!doctype html>
 <html lang="${localization.locale}">
 <head>
@@ -78,17 +79,25 @@ export async function showAbout(parent: BrowserWindow) {
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
   <title>${title}</title>
   <style>
+    ${themeStyles}
     :root {
-      color-scheme: light dark;
       font: 14px/1.4 "Segoe UI", system-ui, sans-serif;
-      color: CanvasText;
-      background: Canvas;
-      --accent: light-dark(#005da8, #8bc9ff);
+      color: var(--text);
+      background: var(--panel);
     }
-    body { margin: 0; }
-    main { padding: 16px 20px; }
+    body {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      margin: 0;
+    }
+    main {
+      flex: 1;
+      overflow: auto;
+      padding: 20px;
+    }
     h1 {
-      margin: 0 0 12px;
+      margin: 1px 0 12px;
       font-size: 20px;
       font-weight: 600;
     }
@@ -107,24 +116,39 @@ export async function showAbout(parent: BrowserWindow) {
       margin: 0;
       overflow-wrap: anywhere;
     }
-    a { color: var(--accent); }
+    a { color: var(--blue); }
     footer {
-      position: sticky;
-      bottom: 0;
       display: flex;
       justify-content: end;
       gap: 8px;
       padding: 10px 20px;
-      border-top: 1px solid color-mix(in srgb, CanvasText 18%, Canvas);
-      background: Canvas;
+      border-top: 1px solid var(--border);
+      background: var(--toolbar);
     }
     button {
       font: inherit;
+      font-weight: 600;
       min-width: 76px;
-      padding: 3px 12px;
+      padding: 4px 12px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text);
+      background: var(--panel);
+      cursor: pointer;
+    }
+    button:hover {
+      background: color-mix(in srgb, var(--text) 8%, var(--panel));
+    }
+    #close {
+      color: var(--accent-text);
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+    #close:hover {
+      background: color-mix(in srgb, var(--accent-text) 10%, var(--accent));
     }
     :focus-visible {
-      outline: 2px solid var(--accent);
+      outline: 2px solid var(--blue);
       outline-offset: 2px;
     }
   </style>
@@ -147,7 +171,7 @@ export async function showAbout(parent: BrowserWindow) {
     title,
     useContentSize: true,
     width: 520,
-    height: 385,
+    height: 400,
     minimizable: false,
     maximizable: false,
     show: false,
