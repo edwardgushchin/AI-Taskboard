@@ -1,4 +1,7 @@
 {
+  "archive.cancelled.action": "Archiver les cartes annulées",
+  "archive.cancelled.count": "Cartes archivées : {count}",
+  "archive.cancelled.issues": "Erreurs :",
   "about.base_commit": "Commit de base",
   "about.local_changes": "modifications locales",
   "about.version": "Version",

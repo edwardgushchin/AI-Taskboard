@@ -67,6 +67,8 @@ const actions = {
     properties: { question: { ...string, minLength: 1, maxLength: 2000 },
       options: { type: "array", maxItems: 4, uniqueItems: true, items: { ...string, minLength: 1, maxLength: 200 } } },
     required: ["question"] },
+  board_archive_cancelled: { description: "On the user's request, archive all cancelled cards on this board regardless of cancellation date. Returns the count, archived IDs and individual issues. Safe to repeat.",
+    properties: {}, required: [] },
   board_list: { description: "List tasks, tag names, and tagColors keyed by name. Use activeOnly for the open queue. Ready cards include readySince, the time they entered that state. Omit activeOnly to include completed, cancelled and archived tasks.",
     properties: { activeOnly: { type: "boolean" } }, required: [] },
   tag_set_color: { description: "Create a board tag with a color or change an existing tag's color on every card. Pass an opaque HEX color in #RRGGBB format.",
@@ -197,6 +199,7 @@ const projectGitCommands = {
 for (const name of Object.keys(projectGitCommands)) mcpNames.add(name);
 mcpNames.add("board_auto_queue");
 mcpNames.add("board_set_auto_mode");
+mcpNames.add("board_archive_cancelled");
 mcpNames.add("task_return_to_draft");
 Object.keys(expertActions).forEach(name => mcpNames.add(name));
 export const boardTools = tools.filter(tool => !mcpNames.has(tool.name));
@@ -678,6 +681,9 @@ export function boardActions(project: string, attachments: { path: string; name:
         }
       }
       return result;
+    }
+    if (action === "board_archive_cancelled") {
+      return callCli(project, ["archive", "cancelled"]);
     }
     if (action === "board_list") {
       if (input.activeOnly !== undefined && typeof input.activeOnly !== "boolean") {
