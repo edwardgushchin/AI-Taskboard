@@ -3,7 +3,7 @@ import { lstatSync, readdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, win32 } from "node:path";
 import { redactSecrets } from "../cli/redact.ts";
 import { directory, exists, readJson, removeFile, withLock, writeJson } from "../cli/storage.ts";
-import { appendWorklogBlocks, maxWorklogPartBytes, readWorklogPart, worklogParts } from "../cli/worklog-files.ts";
+import { appendWorklogBlocks, maxWorklogPartBytes, readWorklogBytes, readWorklogPart, worklogParts } from "../cli/worklog-files.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
 import type { CliReply } from "./cli.ts";
 import type { RpcMessage } from "./codex-rpc.ts";
@@ -259,6 +259,8 @@ function save(project: string, staged: Staged) {
     };
     // Identity, not delivery date, owns the record. Compare the whole block other than its timestamp.
     const parts = worklogParts(root);
+    const latest = parts.findLast(part => part.day === day);
+    let latestBytes: Buffer | undefined;
     const index = history.parts;
     if (history.root !== root) {
       index.clear();
@@ -275,7 +277,9 @@ function save(project: string, staged: Staged) {
       let prior: string | undefined;
       let indexed = index.get(part.path);
       if (indexed?.version !== version) {
-        prior = readWorklogPart(part.path);
+        const bytes = readWorklogBytes(part.path);
+        if (part === latest) latestBytes = bytes;
+        prior = bytes.toString("utf8");
         const ids = new Set<string>();
         indexMarkers(prior, ids);
         indexed = { version, ids };
@@ -301,7 +305,7 @@ function save(project: string, staged: Staged) {
       if (missing.size) throw new InvalidWorklogSubmission("The entry to supersede is missing in this board's Worklog.");
     }
     const added = blocks.join("");
-    const { path } = appendWorklogBlocks(root, day, [added]);
+    const { path } = appendWorklogBlocks(root, day, [added], latest && { ...latest, bytes: latestBytes });
     // Publish the new IDs only after the atomic replacement succeeds.
     const version = partVersion(path);
     const ids = index.get(path)?.ids ?? new Set<string>();

@@ -17,42 +17,51 @@ export function worklogParts(root: string, day?: string) {
 }
 
 export function readWorklogPart(path: string, maxBytes = maxWorklogPartBytes) {
+  return readWorklogBytes(path, maxBytes).toString("utf8");
+}
+
+export function readWorklogBytes(path: string, maxBytes = maxWorklogPartBytes) {
   if (statSync(path).size > maxBytes) throw new Error("Worklog part exceeds its size limit.");
-  return readBinary(path).toString("utf8");
+  return readBinary(path);
 }
 
 // The caller holds the board's Worklog lock. Each block is independently atomic.
-export function appendWorklogBlocks(root: string, day: string, blocks: string[]) {
+export function appendWorklogBlocks(root: string, day: string, blocks: string[],
+  scanned?: { path: string; part: number; bytes?: Buffer }) {
   const year = join(root, day.slice(0, 4));
   const month = join(year, day.slice(5, 7));
   directory(year, true);
   directory(month, true);
-  const header = "# Codex Worklog — " + day + "\n";
-  let part = worklogParts(root, day).at(-1)?.part ?? 1;
+  const header = Buffer.from("# Codex Worklog — " + day + "\n");
+  let part = (scanned ?? worklogParts(root, day).at(-1))?.part ?? 1;
   const filename = () => join(month, day + (part === 1 ? "" : ".part-" + part) + ".md");
   let path = filename();
-  let prior = exists(path) ? readWorklogPart(path) : header;
-  if (!prior.startsWith(header) || !prior.endsWith("\n")) throw new Error("Invalid daily Worklog file.");
+  let prior = scanned?.path === path && scanned.bytes
+    ? scanned.bytes : exists(path) ? readWorklogBytes(path) : header;
+  if (!prior.subarray(0, header.length).equals(header) || prior.at(-1) !== 10) {
+    throw new Error("Invalid daily Worklog file.");
+  }
   let before = prior;
-  let size = Buffer.byteLength(prior);
-  let added = "";
-  const headerBytes = Buffer.byteLength(header);
-  const sizes = blocks.map(block => Buffer.byteLength(block));
-  if (sizes.some(bytes => bytes + headerBytes > maxWorklogPartBytes)) throw new Error("A Worklog block exceeds 32 MiB.");
-  for (const [index, block] of blocks.entries()) {
-    const bytes = sizes[index]!;
-    if (size + bytes > maxWorklogPartBytes) {
-      if (added) writeAtomic(path, prior + added);
+  let size = prior.length;
+  let added: Buffer[] = [];
+  const encoded = blocks.filter(Boolean).map(block => Buffer.from(block));
+  if (encoded.some(block => block.length + header.length > maxWorklogPartBytes)) {
+    throw new Error("A Worklog block exceeds 32 MiB.");
+  }
+  for (const block of encoded) {
+    if (size + block.length > maxWorklogPartBytes) {
+      if (added.length) writeAtomic(path, Buffer.concat([prior, ...added], size));
       part++;
       path = filename();
       prior = header;
       before = header;
-      size = headerBytes;
-      added = "";
+      size = header.length;
+      added = [];
     }
-    added += block;
-    size += bytes;
+    added.push(block);
+    size += block.length;
   }
-  if (added) writeAtomic(path, prior + added);
-  return { path, before, after: prior + added };
+  const after = added.length ? Buffer.concat([prior, ...added], size) : prior;
+  if (added.length) writeAtomic(path, after);
+  return { path, before, after };
 }
