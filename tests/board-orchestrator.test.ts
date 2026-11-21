@@ -3625,6 +3625,10 @@ test("dialogue edits the selected paused goal and rejects missing, stale and una
   for (const request of [
     "Замени текст цели на: «что-нибудь»",
     "Замени текст цели на: Сделай формулировку более понятной, пожалуйста",
+    "Замени текст цели на: Сделай формулировку цели более понятной, пожалуйста",
+    "Замени текст цели на: Перепиши текст текущей цели простыми словами.",
+    "Replace the goal with: Make the goal wording clearer, please.",
+    "Replace the goal with: Make the wording of the current goal clearer.",
     "Замени текст цели на: Сделай формулировку понятной.",
     "Замени текст цели на:\n«Перепиши цель простыми словами»",
     "Replace the goal with: Make the wording easier to understand, please.",

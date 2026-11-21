@@ -1963,7 +1963,8 @@ function parseOwnerGoalEdit(request: string): { replacement?: string } | undefin
 
   const unspecified = /^(?:как-нибудь|что-нибудь|что-то|на своё усмотрение|пожалуйста|somehow|something|anything|whatever|please)(?![\p{L}\p{N}])/iu;
   const referenceOnly = /^(?:с уч[её]том|по итогам|по результатам|как обсуждали|как договорились|based on|taking into account|as discussed|as agreed)(?![\p{L}\p{N}])/iu;
-  const rewriteWording = /^(?:(?:сформулируй|переформулируй|перепиши|сделай|улучши)(?:те)?\s+(?:е[её]|цель|текст|формулировку)|(?:make|rewrite|rephrase|improve)\s+(?:it|the goal|the wording|the text))(?=$|[\s:,.!…])/iu;
+  const russianRewrite = /^(?:сформулируй|переформулируй|перепиши|сделай|улучши)(?:те)?\s+(?:е[её]|(?:текущую\s+)?цель|(?:текст|формулировку)(?:\s+(?:текущей\s+)?цели)?)(?=$|[\s:,.!…])/iu;
+  const englishRewrite = /^(?:make|rewrite|rephrase|improve)\s+(?:it|the\s+(?:(?:current\s+)?goal(?:\s+(?:wording|text))?|(?:wording|text)(?:\s+of\s+the\s+(?:current\s+)?goal)?))(?=$|[\s:,.!…])/iu;
   const style = /^(?:более|менее|чуть|немного|намного|ч[её]тче|яснее|понятнее|проще|попроще|конкретнее|точнее|лучше|(?:ч[её]тк|ясн|понятн|прост|лаконичн|читабельн)(?:ой|ым|ую|о)|(?:простыми|своими|другими) словами|по-другому|more|less|a little|much|clear(?:er)?|easier|simpler|better|concise|readable|in plain language|in your own words)(?![\p{L}\p{N}])/iu;
   const rewriteVerb = /^(?:(?:сформулируй|переформулируй|перепиши|сделай)(?:те)?|make|rewrite|rephrase)\s+/iu;
 
@@ -1973,7 +1974,7 @@ function parseOwnerGoalEdit(request: string): { replacement?: string } | undefin
     }
     // A style modifier supplies no subject. In "Перепиши текст справки",
     // "справки" instead identifies the text the goal is about.
-    const rewrite = rewriteWording.exec(wording);
+    const rewrite = russianRewrite.exec(wording) ?? englishRewrite.exec(wording);
     if (rewrite) {
       const afterTarget = withoutCourtesy(wording.slice(rewrite[0].length).replace(/^\s*,/u, ""));
       return /^[.!…]*$/u.test(afterTarget) || style.test(afterTarget);
@@ -2022,7 +2023,7 @@ function parseOwnerGoalEdit(request: string): { replacement?: string } | undefin
 
   let wording = withoutCourtesy(detail.replace(/^[«“"']+|[»”"']+$/gu, ""));
   // An instruction about the wording itself needs the replacement text.
-  const rewrite = rewriteWording.exec(wording);
+  const rewrite = russianRewrite.exec(wording) ?? englishRewrite.exec(wording);
   if (rewrite) {
     const replacement = /^\s*(?:(?:так|такой|следующим образом|as follows)\s*)?:\s*(.+)$/iu
       .exec(wording.slice(rewrite[0].length));
@@ -2032,7 +2033,7 @@ function parseOwnerGoalEdit(request: string): { replacement?: string } | undefin
     wording = withoutCourtesy(replacement[1].replace(/^[«“"']+|[»”"']+$/gu, ""));
   }
   if (!/[\p{L}\p{N}]/u.test(wording) || /^[>~\x60]/u.test(wording) ||
-      endsWithQuestion.test(wording) || rewriteWording.test(wording)) {
+      endsWithQuestion.test(wording) || russianRewrite.test(wording) || englishRewrite.test(wording)) {
     return;
   }
   if (isVagueWording(wording)) {
