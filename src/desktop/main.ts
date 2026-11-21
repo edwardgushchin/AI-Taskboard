@@ -1963,8 +1963,19 @@ function parseOwnerGoalEdit(request: string): { replacement?: string } | undefin
 
   const unspecified = /^(?:как-нибудь|что-нибудь|что-то|на своё усмотрение|пожалуйста|somehow|something|anything|whatever|please)(?![\p{L}\p{N}])/iu;
   const referenceOnly = /^(?:с уч[её]том|по итогам|по результатам|как обсуждали|как договорились|based on|taking into account|as discussed|as agreed)(?![\p{L}\p{N}])/iu;
-  const russianRewrite = /^(?:сформулируй|переформулируй|перепиши|сделай|улучши)(?:те)?\s+(?:е[её]|(?:текущую\s+)?цель|(?:текст|формулировку)(?:\s+(?:текущей\s+)?цели)?)(?=$|[\s:,.!…])/iu;
-  const englishRewrite = /^(?:make|rewrite|rephrase|improve)\s+(?:it|the\s+(?:(?:current\s+)?goal(?:\s+(?:wording|text))?|(?:wording|text)(?:\s+of\s+the\s+(?:current\s+)?goal)?))(?=$|[\s:,.!…])/iu;
+  const goalAccusative = /(?:(?:эту|ту|мою|нашу|свою|вашу)\s+)?(?:(?:текущую|имеющуюся)\s+)?цель/u;
+  const goalGenitive = /(?:(?:этой|той|моей|нашей|своей|вашей)\s+)?(?:(?:текущей|имеющейся)\s+)?цели/u;
+  const englishGoal = /(?:the|this|that|my|our|your)\s+(?:(?:current|existing)\s+)?goal/u;
+  const russianRewrite = new RegExp(
+    `^(?:сформулируй|переформулируй|перепиши|сделай|улучши)(?:те)?\\s+` +
+    `(?:е[её]|${goalAccusative.source}|(?:текст|формулировку)(?:\\s+${goalGenitive.source})?)(?=$|[\\s:,.!…])`,
+    "iu",
+  );
+  const englishRewrite = new RegExp(
+    `^(?:make|rewrite|rephrase|improve)\\s+` +
+    `(?:it|${englishGoal.source}(?:\\s+(?:wording|text))?|the\\s+(?:wording|text)(?:\\s+of\\s+${englishGoal.source})?)(?=$|[\\s:,.!…])`,
+    "iu",
+  );
   const style = /^(?:более|менее|чуть|немного|намного|ч[её]тче|яснее|понятнее|проще|попроще|конкретнее|точнее|лучше|(?:ч[её]тк|ясн|понятн|прост|лаконичн|читабельн)(?:ой|ым|ую|о)|(?:простыми|своими|другими) словами|по-другому|more|less|a little|much|clear(?:er)?|easier|simpler|better|concise|readable|in plain language|in your own words)(?![\p{L}\p{N}])/iu;
   const rewriteVerb = /^(?:(?:сформулируй|переформулируй|перепиши|сделай)(?:те)?|make|rewrite|rephrase)\s+/iu;
 
