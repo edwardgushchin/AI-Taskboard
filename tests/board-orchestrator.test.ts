@@ -3510,6 +3510,9 @@ test("dialogue edits the selected paused goal and rejects missing, stale and una
   save(original);
   sendGoalMessage(f.project, goalId, "Сохрани отчёт по сборке.");
   for (const request of [
+    "Уточни цель: сформулируй её чётче",
+    "Уточни цель в части Linux: сформулируй её чётче",
+    "Clarify the goal: make it clearer",
     "Уточни цель с учётом обсуждения",
     "Add something to the goal",
     "Уточни цель: с учётом обсуждения",
@@ -3532,10 +3535,14 @@ test("dialogue edits the selected paused goal and rejects missing, stale and una
   const duplicate = added + "\nПроверить сборку Linux.";
   assert.deepEqual((await edit(add, duplicate, added)).data, { objective: added, status: "paused" });
   assert.equal(f.idleGoalActions.length, 1);
+  const refine = "Уточни цель в части Linux: укажи Ubuntu 24.04";
+  const refined = original + "\nПроверить сборку Linux на Ubuntu 24.04.";
+  assert.deepEqual((await edit(refine, refined, added)).data, { objective: refined, status: "paused" });
+  assert.deepEqual((await f.history()).data.goal, { objective: refined, status: "paused" });
   const replace = "Замени текст цели на: " + replacement;
   assert.equal((await edit(replace, replacement, original)).error.code, "GOAL_CHANGED");
-  assert.equal((await edit(replace, replacement, added, randomUUID())).error.code, "GOAL_CHANGED");
-  assert.equal((await edit(replace, replacement, added)).data.objective, replacement);
+  assert.equal((await edit(replace, replacement, refined, randomUUID())).error.code, "GOAL_CHANGED");
+  assert.equal((await edit(replace, replacement, refined)).data.objective, replacement);
   const finalObjective = replacement + "\nПроверить журнал ошибок.";
   const explicitEnglish = "Add a check of the error log to the goal.";
   assert.equal((await edit(explicitEnglish, finalObjective, replacement)).data.objective, finalObjective);

@@ -1940,7 +1940,7 @@ function isOwnerGoalEdit(request: string) {
 
   const englishAdd = /^(?:add|append)\s+(.+?)\s+to (?:the )?(?:current )?goal[.!]?$/iu.exec(command);
   const russianAdd = /^(?:добавь(?:те)?|впиши(?:те)?) (?:в (?:текущую )?цель|к (?:текущей )?цели)(?=[ :]|$)/iu;
-  const russianEdit = /^(?:замени(?:те)?|измени(?:те)?|уточни(?:те)?|обнови(?:те)?|перепиши(?:те)?) (?:(?:текст|формулировку) (?:текущей )?цели|(?:текущую )?цель)(?:\s+(?:на|так)(?=[ :]|$)|(?=:))/iu;
+  const russianEdit = /^(?:замени(?:те)?|измени(?:те)?|уточни(?:те)?|обнови(?:те)?|перепиши(?:те)?) (?:(?:текст|формулировку) (?:текущей )?цели|(?:текущую )?цель)(?:\s+в части\s+[^:\s][^:]*(?=:)|\s+(?:на|так)(?=[ :]|$)|(?=:))/iu;
   const englishEdit = /^(?:replace|update|edit|change|clarify) (?:the )?(?:current )?goal(?: text)?(?:\s+(?:to|with|as follows)(?=[ :]|$)|(?=:))/iu;
   const prefix = russianAdd.exec(command) ?? russianEdit.exec(command) ?? englishEdit.exec(command);
   if (!englishAdd && !prefix) {
@@ -1958,7 +1958,10 @@ function isOwnerGoalEdit(request: string) {
   const wording = detail.replace(/^[«“"']+/u, "");
   const unspecified = /^(?:как-нибудь|что-нибудь|что-то|на своё усмотрение|пожалуйста|somehow|something|anything|whatever|please)(?![\p{L}\p{N}])/iu;
   const referenceOnly = /^(?:с уч[её]том|по итогам|по результатам|как обсуждали|как договорились|based on|taking into account|as discussed|as agreed)(?![\p{L}\p{N}])/iu;
-  return !unspecified.test(wording) && !referenceOnly.test(wording);
+  const russianStyleOnly = /^(?:сформулируй|переформулируй|перепиши|сделай)(?:те)?\s+(?:(?:е[её]|цель|текст|формулировку)\s+)?(?:ч[её]тче|яснее|понятнее|конкретнее|точнее|лучше)[.!»”"']*$/iu;
+  const englishStyleOnly = /^(?:make|rewrite|rephrase)(?:\s+(?:it|the goal|the wording))?\s+(?:clearer|more clearly|more specific|better)[.!»”"']*$/iu;
+  return !unspecified.test(wording) && !referenceOnly.test(wording) &&
+    !russianStyleOnly.test(wording) && !englishStyleOnly.test(wording);
 }
 const goalChatTools = [
   goalReadTool,
