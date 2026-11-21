@@ -38,6 +38,7 @@ contextBridge.exposeInMainWorld("taskboard", {
   reorderTab: (project, target, after) => ipcRenderer.invoke("board:reorderTab", project, target, after),
   closeTab: project => ipcRenderer.invoke("board:closeTab", project),
   menuAction: action => ipcRenderer.invoke("menu:action", action),
+  showManagerEditMenu: canCopy => ipcRenderer.invoke("menu:manager-edit", canCopy),
   checkUpdates: () => ipcRenderer.invoke("app:checkUpdates"),
   updateState: () => ipcRenderer.invoke("app:updateState"),
   onUpdateChanged: listener => { ipcRenderer.on("app:updateChanged", (_event, update) => listener(update)); },

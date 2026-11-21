@@ -832,6 +832,14 @@ ipcMain.handle("menu:action", async (event, action: unknown) => {
   await menuActions[action](state);
 });
 
+ipcMain.handle("menu:manager-edit", (event, canCopy: unknown) => {
+  const state = stateOf(event);
+  Menu.buildFromTemplate([
+    { label: t("ui.copy_47162712"), enabled: canCopy === true, click: () => menuActions.copy(state) },
+    { label: t("ui.paste_e9f43536"), click: () => menuActions.paste(state) },
+  ]).popup({ window: state.window });
+});
+
 ipcMain.handle("board:bootstrap", event => {
   const state = stateOf(event);
   loadRecentBoards();
