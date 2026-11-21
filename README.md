@@ -36,7 +36,7 @@ AI Taskboard brings a Kanban board, agent chats and Git review into one Electron
 - **A local board shared with agents.** The app and agents use the same CLI and project `.tasks` storage. Non-Git tasks use an assigned directory and can submit artifacts without a commit.
 - **Several projects in view.** Project tabs, separate windows, column filters, English and Russian UI, and built-in themes.
 - **Auto mode.** The board starts eligible approved tasks when Auto mode is on. Independent review is queued in the applicable review modes even when Auto mode is off. You can reorder or pause the run queue, or hold individual tasks. [Auto mode and queue controls](docs/reference/board.md#управление-автоматической-очередью) (Russian).
-- **Iterative goals.** Enable iterative execution in the Auto mode panel for an active goal. When Auto mode is on, the manager runs short turns to replenish the queue or respond to a question about the goal. Between triggers, the goal waits without a manager session. [Goal settings](docs/reference/board.md#управление-автоматической-очередью) (Russian).
+- **Iterative goals.** Enable iterative execution in the Auto mode panel for an active goal. When Auto mode is on, the manager runs short turns as the queue needs work, when a question arrives, or according to the interval and event rules you configure. You can edit the active goal from manager Dialogue. [Goal settings](docs/reference/board.md#управление-автоматической-очередью) (Russian).
 
 <a id="workflow"></a>
 ## From request to merged change
