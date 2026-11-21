@@ -203,10 +203,23 @@ test("legacy draft confirmation survives metadata edits and expires on a brief c
   const retagged = cli(root, ["update", legacy.id], { tags: ["Export"], revision: legacy.revision });
   assert.equal(retagged.awaitingAnswer, false);
   assert.equal(retagged.draftDiscussion, undefined);
+  assert.equal(cli(root, ["approve", legacy.id], { revision: retagged.revision }).status, "ready");
+
   const discussion = { model: "fixture", effort: "low" };
-  const message = cli(root, ["chat", legacy.id], { ...discussion, text: "Thanks." });
-  assert.equal(message.awaitingAnswer, false);
-  assert.equal(cli(root, ["approve", legacy.id], { revision: message.revision }).status, "ready");
+  const clarified = cli(root, ["create"], { title: "Previously reviewed export" });
+  confirmFixtureDraft(root, clarified.id);
+  const message = cli(root, ["chat", clarified.id], { ...discussion, text: "Use XLSX instead of CSV." });
+  assert.equal(message.awaitingAnswer, undefined);
+  cli(root, ["approve", clarified.id], { revision: message.revision }, "DRAFT_DISCUSSION_REQUIRED");
+  const confirmed = cli(root, ["chat", clarified.id], {
+    ...discussion,
+    actor: "agent",
+    text: "The XLSX export is ready for approval.",
+    awaitingAnswer: false,
+    replyTo: message.history.length - 1,
+    revision: message.revision,
+  });
+  assert.equal(cli(root, ["approve", clarified.id], { revision: confirmed.revision }).status, "ready");
 
   const other = cli(root, ["create"], { title: "Previously reviewed, then edited" });
   confirmFixtureDraft(root, other.id);
@@ -222,6 +235,39 @@ test("legacy draft confirmation survives metadata edits and expires on a brief c
   });
   assert.equal(attached.awaitingAnswer, undefined);
   cli(root, ["approve", attachmentDraft.id], { revision: attached.revision }, "DRAFT_DISCUSSION_REQUIRED");
+});
+
+test("edits and attachments preserve an open question outside draft", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const draft = cli(root, ["create"], { title: "Export data", workingDirectory: root });
+  const id = draft.id;
+  approveFixture(root, ["approve", id]);
+  cli(root, ["start", id]);
+
+  const settings = { model: "fixture", effort: "low" };
+  const prompt = cli(root, ["chat", id], { ...settings, text: "What do you need?" });
+  cli(root, ["chat", id], {
+    ...settings, actor: "agent", text: "Which locale should the export use?",
+    replyTo: prompt.history.length - 1, awaitingAnswer: true,
+  });
+
+  const path = join(root, "sample.csv");
+  writeFileSync(path, "id,name\n1,example\n");
+  const checkQuestion = (status: string) => {
+    const updated = cli(root, ["update", id], { title: "Export data in " + status });
+    assert.equal(updated.status, status);
+    assert.equal(updated.awaitingAnswer, true);
+
+    const attached = cli(root, ["attachment", "add", id], { path, revision: updated.revision });
+    assert.equal(attached.status, status);
+    assert.equal(attached.awaitingAnswer, true);
+  };
+  checkQuestion("in_progress");
+
+  const token = cli(root, ["preview", id]).token;
+  cli(root, ["submit", id], { token, noChanges: true, summary: "Export ready", checks: ["Checked"] });
+  checkQuestion("review");
 });
 
 test("a late ordinary chat reply cannot confirm an edited draft", t => {

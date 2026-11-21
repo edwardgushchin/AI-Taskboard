@@ -939,7 +939,7 @@ interface ActiveAgent {
   directories: Set<string>;
   draftDiscussion?: true;
   chatWindow?: number;
-  updateMessage?: (task: Task, index: number) => () => void;
+  updateMessage?: (task: Task, index: number) => (accepted: boolean) => void;
   steerMessage?: (text: string, images: string[], index: number) => Promise<void>;
 }
 const activeAgents = new Map<string, ActiveAgent>();
@@ -1202,16 +1202,21 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       // The request owns its staging files until it hands them to the active turn.
       active.directories.add(scratch!);
       directories.delete(scratch!);
-      const undo = active.updateMessage?.(task, last);
+      const finishSteering = active.updateMessage?.(task, last);
       try {
         if (active.steerMessage) await active.steerMessage(prompt, images, last);
         else await active.control.steer(prompt, images);
+        finishSteering?.(true);
+      } catch (error) {
+        finishSteering?.(false);
+        throw error;
       }
-      catch (error) { undo?.(); throw error; }
       return { saved, result: { ok: true as const, data: task } };
     }
     const replyStarted = performance.now();
-    let replyTo = last;
+    let replyTarget = { index: last, revision: task.revision };
+    let actionIndex = last;
+    const pendingSteering = new Set<Promise<void>>();
     const requestChanges = async (card: Task, reason: string): Promise<CliReply> => {
       if (isManual(readBoardSettings(runtimeLocation(project)))) return cliFailure("MANUAL_BOARD", "На обычной доске статусы меняет пользователь.");
       const review = await callCli<{ revision: number; targetHead: string | null }>(project, ["review", id], { compact: true });
@@ -1230,11 +1235,24 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       steer: async (text, images) => (await ready.promise).steer(text, images),
       interrupt: async () => (await ready.promise).interrupt(),
     }, updateMessage: (latest, index) => {
-      if (index < replyTo) return () => {};
-      const previousIndex = replyTo, previousAction = runAction;
-      replyTo = index;
-      runAction = taskChatActions(project, latest, latest.history[index].text ?? "", () => notify({ type: "changed" }), requestChanges);
-      return () => { if (replyTo === index) { replyTo = previousIndex; runAction = previousAction; } };
+      const steering = Promise.withResolvers<void>();
+      pendingSteering.add(steering.promise);
+      const previousIndex = actionIndex;
+      const previousAction = runAction;
+      if (index >= actionIndex) {
+        actionIndex = index;
+        runAction = taskChatActions(project, latest, latest.history[index].text ?? "", () => notify({ type: "changed" }), requestChanges);
+      }
+      return accepted => {
+        if (accepted && index > replyTarget.index) {
+          replyTarget = { index, revision: latest.revision };
+        } else if (!accepted && actionIndex === index) {
+          actionIndex = previousIndex;
+          runAction = previousAction;
+        }
+        pendingSteering.delete(steering.promise);
+        steering.resolve();
+      };
     } });
     const answer = await writer.run(() => replyToTask(app.getPath("userData"), project, { model, effort }, prompt, images,
       text => notify({ type: "commentary", text }),
@@ -1244,12 +1262,13 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       control => ready.resolve(control), signal, id, items => publishDiscussionActivity(project, id, items),
       automatic === undefined ? undefined : "initial", task.status === "review", Boolean(task.closedAt))).finally(() => ready.reject(new Error("The agent session ended.")));
     if ("interrupted" in answer) return { saved, result: { ok: true as const, data: task } };
+    await Promise.all(pendingSteering);
     signal.throwIfAborted();
     const result = await callCli<Task>(project, ["chat", id], {
       ...answer,
       text: automatic && !answer.text ? t("draft_discussion.ready") : answer.text,
-      actor: "agent", model, effort, replyTo, durationMs: Math.round(performance.now() - replyStarted),
-      ...(inspectDraft ? { revision: task.revision } : {}),
+      actor: "agent", model, effort, replyTo: replyTarget.index, durationMs: Math.round(performance.now() - replyStarted),
+      ...(inspectDraft ? { revision: replyTarget.revision } : {}),
       ...(automatic ? { draftDiscussion: true } : {}),
     });
     if (result.ok) discussionStarted = false;

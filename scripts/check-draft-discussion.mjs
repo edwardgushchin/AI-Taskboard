@@ -77,6 +77,10 @@ const draftGates = new Map();
 let stopGate;
 let failMessage = true;
 let releaseClarification;
+let formatUpdate;
+const initialFormat = "Use CSV and save it in exports.";
+const formatChanges = ["Use XLSX instead of CSV.", "Use JSON instead of XLSX."];
+const revisedBrief = "Экспортировать архив с итоговым отчётом.";
 globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images, _commentary, _action, _scratch,
   _limit, _usage, onControl, _signal, id, _activity, mode) => {
   const context = JSON.parse(prompt);
@@ -94,9 +98,26 @@ globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images,
   }
   calls.push({ context, configured, mode, images: images.map(path => readFileSync(path).toString("base64")),
     documents: context.attachments.filter(file => file.path && file.name.endsWith(".txt")).map(file => readFileSync(file.path, "utf8")) });
+  const request = context.latestUserMessage?.text;
+  const update = approvalOnly && formatChanges.includes(request) ? {
+    request, completion: Promise.withResolvers(), returned: Promise.withResolvers(),
+    steeringGate: request === formatChanges[0] ? Promise.withResolvers() : undefined,
+    steered: [],
+  } : undefined;
   const interrupted = Promise.withResolvers();
   onControl({ interrupt: async () => interrupted.resolve({ interrupted: true }),
-    steer: async () => assert.fail("Unexpected steering request.") });
+    steer: async prompt => {
+      assert.ok(update, "Unexpected steering request.");
+      update.steered.push(JSON.parse(prompt).latestUserMessage.text);
+      await update.steeringGate?.promise;
+    },
+  });
+  if (update) {
+    formatUpdate = update;
+    const text = await update.completion.promise;
+    update.returned.resolve();
+    return { text: JSON.stringify({ text, awaitingAnswer: false }) };
+  }
   if (context.latestUserMessage?.text === "Fail once" && failMessage) {
     failMessage = false;
     throw Error("Fixture provider unavailable");
@@ -112,7 +133,7 @@ globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images,
   if (mode === "initial" && heldDrafts.has(context.task.title)) {
     await new Promise(resolve => draftGates.set(id, resolve));
   }
-  if (approvalOnly && context.latestUserMessage?.text === "Save it in exports.") {
+  if (approvalOnly && context.latestUserMessage?.text === initialFormat) {
     await new Promise(resolve => { releaseClarification = resolve; });
   }
   await delay(450);
@@ -120,7 +141,7 @@ globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images,
     let questions = "";
     if (context.task.title === "CLI with attachments") {
       questions = "Which viewport is required?";
-    } else if (context.task.title === "Partial answer") {
+    } else if (context.task.title === "Partial answer" && context.task.description !== revisedBrief) {
       questions = "Which format and destination are required?";
     } else if (context.task.title === "Concurrent edits") {
       questions = "Clarify: " + context.task.description;
@@ -385,6 +406,8 @@ try {
       cli(["create"], plannedDraft({
         title, description, criteria: ["Указаны формат и место сохранения."], execution: settings,
       }));
+    const send = (id, text) => evaluate(
+      `window.taskboard.chatSend(${JSON.stringify(id)}, ${JSON.stringify({ ...settings, text, files: [] })})`);
     const waitWriter = async (id, label) => {
       const { runtimeEntries } = await import("../src/desktop/board-runtime.ts");
       await until(() => !runtimeEntries(project).some(entry => entry.task === id), label);
@@ -443,9 +466,7 @@ try {
     await capture("approval-question.png");
     check("A running review and an open question both hide approval; the mouse opens the question in its dialogue");
 
-    const answer = evaluate(`window.taskboard.chatSend(${JSON.stringify(pending.id)}, ${JSON.stringify({
-      ...settings, text: "Save it in exports.", files: [],
-    })})`);
+    const answer = send(pending.id, initialFormat);
     await until(() => Boolean(releaseClarification), "provider reading owner's answer");
     cli(["approve", pending.id], { revision: show(pending.id).revision }, project, "TASK_AWAITING_ANSWER");
     assert.equal(await available(), false);
@@ -456,6 +477,44 @@ try {
     assert.equal(show(pending.id).status, "draft");
     assert.equal(show(pending.id).awaitingAnswer, false);
     check("Sending an answer keeps approval unavailable until the agent confirms it in the same card");
+
+    const beginFormatUpdate = async (id, request, steering) => {
+      await waitWriter(id, "writer released before changing the format");
+      const originalCalls = calls.length;
+      const reply = send(id, request);
+      await until(() => formatUpdate?.request === request, "provider receives " + request);
+      await until(async () => !(await available()), "new text hides approval");
+      assert.notEqual(show(id).awaitingAnswer, false);
+      cli(["approve", id], { revision: show(id).revision }, project, "DRAFT_DISCUSSION_REQUIRED");
+      const steeringReply = send(id, steering);
+      await until(() => formatUpdate.steered.length > 0, "second message reaches the active provider");
+      assert.deepEqual(formatUpdate.steered, [steering]);
+      assert.equal(calls.length, originalCalls + 1, "Steering belongs to the active provider turn");
+      assert.equal(await available(), false);
+      return { reply, steeringReply, update: formatUpdate };
+    };
+    const waitForSteering = async ({ steeringReply }) => {
+      const accepted = await steeringReply;
+      assert.equal(accepted.saved, true, JSON.stringify(accepted));
+      assert.equal(accepted.result.ok, true, JSON.stringify(accepted));
+    };
+    const xlsxFilename = "Name the file report.xlsx.";
+    const xlsx = await beginFormatUpdate(pending.id, formatChanges[0], xlsxFilename);
+    const xlsxConfirmation = "Подтверждаю выгрузку XLSX в report.xlsx.";
+    xlsx.update.completion.resolve(xlsxConfirmation);
+    await xlsx.update.returned.promise;
+    const completedBeforeSteering = await Promise.race([xlsx.reply.then(() => true), delay(300, false)]);
+    assert.equal(completedBeforeSteering, false, "The completed provider answer waits for steering acceptance");
+    assert.notEqual(show(pending.id).awaitingAnswer, false);
+    xlsx.update.steeringGate.resolve();
+    await waitForSteering(xlsx);
+    const confirmed = await xlsx.reply;
+    assert.equal(confirmed.result.ok, true, JSON.stringify(confirmed));
+    await until(available, "valid steered reply restores approval");
+    assert.equal(show(pending.id).awaitingAnswer, false);
+    assert.deepEqual(messages(show(pending.id)).slice(-3).map(event => event.text),
+      [formatChanges[0], xlsxFilename, xlsxConfirmation]);
+    check("Changing CSV to XLSX blocks approval; the same turn saves its reply after the delayed acceptance of the steered filename");
 
     const failure = create("Provider inactive");
     await until(() => show(failure.id).draftDiscussion?.phase === "failed", "provider failure");
@@ -493,6 +552,28 @@ try {
     await waitReady(failure.id, 2);
     await until(() => available(evaluateOther), "same edited card ready after a fresh review");
     check("A substantive edit blocks an older window's approval and requires a fresh review");
+
+    await display(pending.id);
+    await until(available, "confirmed XLSX draft is visible");
+    const json = await beginFormatUpdate(pending.id, formatChanges[1], "Name the file report.json.");
+    await waitForSteering(json);
+    const outdatedText = "Устаревшее подтверждение JSON.";
+    heldDrafts.add(pending.title);
+    cli(["update", pending.id], { description: revisedBrief, revision: show(pending.id).revision });
+    json.update.completion.resolve(outdatedText);
+    const outdated = await json.reply;
+    assert.equal(outdated.result.error?.code, "REVISION_CONFLICT", JSON.stringify(outdated));
+    await until(() => draftGates.has(pending.id), "fresh review after the external edit");
+    assert.notEqual(show(pending.id).awaitingAnswer, false);
+    assert.equal(messages(show(pending.id)).some(event => event.text === outdatedText), false);
+    assert.equal(calls.at(-1).context.task.description, revisedBrief);
+    cli(["approve", pending.id], { revision: show(pending.id).revision }, project, "DRAFT_DISCUSSION_REQUIRED");
+    assert.equal(await available(), false);
+    continueDraft(pending);
+    await until(() => show(pending.id).awaitingAnswer === false, "fresh draft confirmation");
+    await until(available, "approval after fresh review of the external edit");
+    assert.equal(messages(show(pending.id)).at(-1).text, readyText);
+    check("An external CLI edit after steering rejects the stale reply by revision and requires fresh confirmation");
     report.approvalDraft = pending.id;
     report.approvalMessages = messages(show(pending.id));
   };

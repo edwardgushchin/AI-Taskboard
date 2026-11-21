@@ -270,11 +270,11 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
 
   return withNewAttachments(store, task, input.attachmentSources, attachments => {
     if (!message && !attachments.length) throw new TaskboardError("INVALID_INPUT", "Write a message or attach a file.");
-    const addsDraftSources = actor === "user" && task.status === "draft" && attachments.length > 0;
+    const reopensDraftDiscussion = actor === "user" && task.status === "draft" && task.awaitingAnswer === false;
     const updated = record({
       ...task, attachments: [...task.attachments, ...attachments],
       ...(actor === "agent" && input.awaitingAnswer !== undefined ? { awaitingAnswer: input.awaitingAnswer as boolean } : {}),
-      ...(addsDraftSources && task.awaitingAnswer === false ? { awaitingAnswer: undefined } : {}),
+      ...(reopensDraftDiscussion ? { awaitingAnswer: undefined } : {}),
       draftDiscussion: draftDiscussion || actor === "user" ? undefined : task.draftDiscussion,
     }, "chat", actor, task.status, message);
     updated.history.at(-1)!.chat = {

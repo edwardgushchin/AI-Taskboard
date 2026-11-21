@@ -128,7 +128,7 @@ const actions = {
   task_start_batch: { description: "Start several approved, independent tasks concurrently in separate executor chats. Check dependencies and overlapping work before selecting the batch. Returns each launch outcome.",
     properties: { tasks: { type: "array", minItems: 1, items: { type: "object", properties: taskReference,
       required: ["id", "revision"], additionalProperties: false } } }, required: ["tasks"] },
-  task_approve: { description: "import { isDeepStrictEqual, parseArgs }",
+  task_approve: { description: "Approve a complete draft after the agent confirms its current brief. For a running draft in board_list, use task_wait, then reread task_show. Retry when awaitingAnswer is false, draftDiscussion is absent and approvalRequirements is empty. If the review failed, the owner can retry it in the task dialogue.",
     properties: taskReference, required: ["id", "revision"] },
   task_wait: { description: `Wait for the listed executors to finish, for the listed submissions to leave review, or for a new question, blocker, submission or reviewer approval anywhere on the board. Put each card in one list. Once status is review, pass it only in reviewIds, even while the executor is finishing. Use ids for the remaining active executors and drafts. Returns task states and relevant messages not yet delivered in this request, or timedOut after ${goalTaskWaitSeconds} seconds in a background goal and ${taskWaitSeconds} seconds in a conversation.`,
     properties: { ids: { type: "array", minItems: 1, uniqueItems: true, items: taskReference.id }, id: taskReference.id,

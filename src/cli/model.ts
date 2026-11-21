@@ -391,11 +391,11 @@ export function requireState(task: Task, allowed: readonly TaskState[]): void {
 }
 
 export function invalidateDraftDiscussion(task: Task): Task {
+  if (task.status !== "draft") return task;
   return {
     ...task,
     awaitingAnswer: undefined,
-    ...(task.status === "draft" && task.draftDiscussion?.phase !== "running"
-      ? { draftDiscussion: { phase: "queued" } as const } : {}),
+    draftDiscussion: task.draftDiscussion?.phase === "running" ? task.draftDiscussion : { phase: "queued" },
   };
 }
 
