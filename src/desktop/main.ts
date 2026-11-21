@@ -1963,15 +1963,34 @@ function parseOwnerGoalEdit(request: string): { replacement?: string } | undefin
 
   const unspecified = /^(?:как-нибудь|что-нибудь|что-то|на своё усмотрение|пожалуйста|somehow|something|anything|whatever|please)(?![\p{L}\p{N}])/iu;
   const referenceOnly = /^(?:с уч[её]том|по итогам|по результатам|как обсуждали|как договорились|based on|taking into account|as discussed|as agreed)(?![\p{L}\p{N}])/iu;
+  const rewriteWording = /^(?:(?:сформулируй|переформулируй|перепиши|сделай|улучши)(?:те)?\s+(?:е[её]|цель|текст|формулировку)|(?:make|rewrite|rephrase|improve)\s+(?:it|the goal|the wording|the text))(?=$|[\s:,.!…])/iu;
+  const style = /^(?:более|менее|чуть|немного|намного|ч[её]тче|яснее|понятнее|проще|попроще|конкретнее|точнее|лучше|(?:ч[её]тк|ясн|понятн|прост|лаконичн|читабельн)(?:ой|ым|ую|о)|(?:простыми|своими|другими) словами|по-другому|more|less|a little|much|clear(?:er)?|easier|simpler|better|concise|readable|in plain language|in your own words)(?![\p{L}\p{N}])/iu;
+  const rewriteVerb = /^(?:(?:сформулируй|переформулируй|перепиши|сделай)(?:те)?|make|rewrite|rephrase)\s+/iu;
+
+  function isVagueWording(wording: string) {
+    if (unspecified.test(wording) || referenceOnly.test(wording)) {
+      return true;
+    }
+    // A style modifier supplies no subject. In "Перепиши текст справки",
+    // "справки" instead identifies the text the goal is about.
+    const rewrite = rewriteWording.exec(wording);
+    if (rewrite) {
+      const afterTarget = withoutCourtesy(wording.slice(rewrite[0].length).replace(/^\s*,/u, ""));
+      return /^[.!…]*$/u.test(afterTarget) || style.test(afterTarget);
+    }
+    const verb = rewriteVerb.exec(wording);
+    return Boolean(verb && style.test(wording.slice(verb[0].length)));
+  }
+
   const literalPrefix = /^(?:(?:пожалуйста|please),?\s+)?(?:замени(?:те)? (?:(?:текст|формулировку) (?:текущей )?цели|(?:текущую )?цель)(?: на)?|replace (?:the )?(?:current )?goal(?: text)?(?: (?:with|to|as follows))?)[ \t]*:/iu;
   const literal = literalPrefix.exec(request);
   if (literal) {
     // The composer appends quoted references after the owner's message.
     const replacement = request.slice(literal[0].length).split(/\r?\n\r?\nQuote 1:\r?\n(?=\x60{3,})/u, 1)[0].trim();
     const firstLine = replacement.split(/\r?\n/, 1)[0];
-    const wording = firstLine.replace(/^[«“"']+/u, "");
+    const wording = withoutCourtesy(firstLine.replace(/^[«“"']+|[»”"']+$/gu, ""));
     if (!/[\p{L}\p{N}]/u.test(firstLine) || /^[>~\x60]/u.test(firstLine) ||
-        unspecified.test(wording) || referenceOnly.test(wording)) {
+        isVagueWording(wording)) {
       return;
     }
     return { replacement };
@@ -2003,7 +2022,6 @@ function parseOwnerGoalEdit(request: string): { replacement?: string } | undefin
 
   let wording = withoutCourtesy(detail.replace(/^[«“"']+|[»”"']+$/gu, ""));
   // An instruction about the wording itself needs the replacement text.
-  const rewriteWording = /^(?:(?:сформулируй|переформулируй|перепиши|сделай|улучши)(?:те)?\s+(?:е[её]|цель|текст|формулировку)|(?:make|rewrite|rephrase|improve)\s+(?:it|the goal|the wording|the text))(?=$|[\s:,.!…])/iu;
   const rewrite = rewriteWording.exec(wording);
   if (rewrite) {
     const replacement = /^\s*(?:(?:так|такой|следующим образом|as follows)\s*)?:\s*(.+)$/iu
@@ -2017,10 +2035,7 @@ function parseOwnerGoalEdit(request: string): { replacement?: string } | undefin
       endsWithQuestion.test(wording) || rewriteWording.test(wording)) {
     return;
   }
-  const russianStyleOnly = /^(?:сформулируй|переформулируй|перепиши|сделай)(?:те)?\s+(?:(?:чуть|немного|намного)\s+)?(?:ч[её]тче|яснее|понятнее|конкретнее|точнее|лучше|более\s+(?:ч[её]тко|ясно|понятно|конкретно|точно))[.!…»”"']*$/iu;
-  const englishStyleOnly = /^(?:make|rewrite|rephrase)\s+(?:(?:a little|much)\s+)?(?:clearer|more clearly|more specific|better)[.!…»”"']*$/iu;
-  if (unspecified.test(wording) || referenceOnly.test(wording) ||
-      russianStyleOnly.test(wording) || englishStyleOnly.test(wording)) {
+  if (isVagueWording(wording)) {
     return;
   }
   return {};

@@ -3624,6 +3624,10 @@ test("dialogue edits the selected paused goal and rejects missing, stale and una
   sendGoalMessage(f.project, goalId, "Сохрани отчёт по сборке.");
   for (const request of [
     "Замени текст цели на: «что-нибудь»",
+    "Замени текст цели на: Сделай формулировку более понятной, пожалуйста",
+    "Замени текст цели на: Сделай формулировку понятной.",
+    "Замени текст цели на:\n«Перепиши цель простыми словами»",
+    "Replace the goal with: Make the wording easier to understand, please.",
     "Замени текст цели на:\n\nQuote 1:\n```\nПерепиши текст справки.\n```",
     "Уточни цель: сделай формулировку более понятной, пожалуйста",
     "Уточни цель в части Linux: сделай текст читабельным",
