@@ -163,7 +163,7 @@ export function createAgentSlots(shared = false) {
         counts[role]--;
         if (Object.values(counts).every(count => count === 0)) active.delete(project);
       };
-      return Object.assign(release, { run: <T>(callback: () => T) => callback() });
+      return Object.assign(release, { id: undefined, run: <T>(callback: () => T) => callback() });
     },
   };
 }

@@ -42,7 +42,7 @@ import { approvalRequirements, createExpertPlan, expertStagesStatus, planNewTask
 import { syncTaskStatusNotices } from "../desktop/manager-history.ts";
 import { syncSettingsNotices } from "../desktop/settings-notices.ts";
 import { cachedTaskLimits, readProfileTaskLimits } from "../desktop/agent-limits.ts";
-import { deferExecutor, forgetExecutor, linkQueuedExecutor, matchesQueuedExecutor, registerRuntime, runtimeEntries } from "../desktop/board-runtime.ts";
+import { deferExecutor, forgetExecutor, linkQueuedExecutor, matchesQueuedExecutor, queueEarlyExecutor, registerRuntime, runtimeEntries } from "../desktop/board-runtime.ts";
 
 const taskActions = new Set(["approve", "return-to-draft", "request-changes", "cancel", "comment", "progress", "checklist", "pause", "block", "resume", "unblock", "update"]);
 const help = [
@@ -889,7 +889,7 @@ function run(
   if (task.status === "in_progress" && saved.status !== "in_progress") forgetExecutor(store.location.root, id);
   if (!filters.compact) return saved;
   if (command === "checklist") return { id: saved.id, status: saved.status, revision: saved.revision, subtasks: saved.subtasks };
-  if (input.launchDetails === true && ["request-changes", "resume", "update"].includes(command)) return taskLaunchState(saved);
+  if (input.launchDetails === true && ["request-changes", "resume", "unblock", "update"].includes(command)) return taskLaunchState(saved);
   if (["progress", "pause", "block", "resume"].includes(command)) {
     return taskLaunchState(saved);
   }
@@ -897,10 +897,15 @@ function run(
 }
 
 function startTask(location: BoardLocation, id: string, input: Record<string, unknown>, compact: boolean) {
+  const launchSlot = typeof input.launchSlot === "string" ? input.launchSlot : undefined;
   const enqueue = input.queueExecutor === true ? (task: Task) => {
     if (!deferExecutor(location.root, id, { revision: task.revision }, undefined, true)) {
       throw new TaskboardError("CHAT_BUSY", "This task already has an active writer.");
     }
+  } : launchSlot ? (task: Task) => {
+    const cwd = task.git?.worktree ?? task.workingDirectory;
+    if (!cwd) throw new TaskboardError("CORRUPT_STORAGE", "The executor has no assigned directory.");
+    queueEarlyExecutor(location.root, task, launchSlot, cwd);
   } : undefined;
   const reply = <T extends { task: Task }>(store: BoardStore, started: T) => {
     if (!compact) return started;
@@ -913,13 +918,13 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
   return withTaskStartLock(location, id, startLockWaitMs => {
     const prepared = onBoard(location, (store, lockWaitMs) => {
       const task = store.card(id);
-      if (enqueue && (input.actor !== "user" || input.autoMode || input.scheduled || input.resolveConflicts ||
+      if (input.queueExecutor === true && (input.actor !== "user" || input.autoMode || input.scheduled || input.resolveConflicts ||
           isMergeRepair(task) || task.acceptanceRepair)) {
         throw new TaskboardError("INVALID_INPUT", "Only manual executor starts can be queued.");
       }
       const queued = (enqueue || input.queuedExecutor === true)
         ? runtimeEntries(location.root).find(entry => matchesQueuedExecutor(entry, task)) : undefined;
-      if (enqueue && queued) {
+      if (input.queueExecutor === true && queued) {
         return { started: { task: taskLaunchState(task) } };
       }
       if (input.queuedExecutor === true && !queued) {
@@ -939,7 +944,8 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
       if (task.status !== "in_progress" && input.resolveConflicts === true) {
         return { started: reply(store, reopenConflictingReview(store, task, input)) };
       }
-      const result = prepareTaskStart(store, task, input, startLockWaitMs + lockWaitMs, enqueue, queued?.restart?.cwd);
+      const result = prepareTaskStart(store, task, input, startLockWaitMs + lockWaitMs, enqueue,
+        queued?.restart?.cwd ?? queued?.earlyLaunch?.cwd);
       if ("task" in result && task.status === "in_progress") enqueue?.(result.task);
       return "task" in result ? { started: reply(store, result) } : { checkout: result };
     });

@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { directory, exists, locateBoard, readJson, withRuntimeLock, writeJson } from "../cli/storage.ts";
+import { TaskboardError } from "../cli/model.ts";
 import type { BoardLocation } from "../cli/storage.ts";
 import type { AgentLimits, RunActivity, Task } from "../cli/model.ts";
 import type { BoardActivity } from "./codex-chat.ts";
@@ -23,6 +24,8 @@ export interface RuntimeEntry {
   linkedThread?: { revision: number; codexThreadId: string };
   turnRequest?: { threadId: string; clientId: string; turnId?: string };
   restart?: { threadId: string; cwd: string };
+  earlyLaunch?: { cwd: string };
+  launchStopped?: true;
   continuation?: { afterDisconnect?: boolean; withoutProgress?: boolean };
   quotaPaused?: boolean;
   reviewReturn?: true;
@@ -93,7 +96,7 @@ export function rememberExecutor(project: string, task: QueuedTask, cwd: string,
   continuation: RuntimeEntry["continuation"], newThread?: RuntimeEntry["newThread"]) {
   runtimeTransaction(project, entries => {
     const slot = entries.find(entry => entry.id === context.getStore() && entry.kind === "slot" && entry.task === task.id);
-    if (slot && task.status === "in_progress") {
+    if (slot && !slot.launchStopped && task.status === "in_progress") {
       slot.revision = task.revision;
       slot.newThread = newThread;
       if (task.codexThreadId && !newThread) {
@@ -116,12 +119,25 @@ export function forgetExecutor(project: string, task: string) {
   runtimeTransaction(project, entries => {
     for (const entry of entries) {
       if (entry.kind !== "slot" || entry.task !== task) continue;
+      entry.launchStopped = true;
       delete entry.restart;
       delete entry.revision;
       delete entry.newThread;
     }
     const index = entries.findIndex(entry => entry.kind === "queue" && entry.task === task);
     if (index >= 0) entries.splice(index, 1);
+  });
+}
+
+export function queueEarlyExecutor(project: string, task: QueuedTask, slotId: string, cwd: string) {
+  runtimeTransaction(project, entries => {
+    const slot = entries.find(entry => entry.id === slotId && entry.kind === "slot" &&
+      entry.role === "executor" && entry.task === task.id);
+    if (!slot || slot.launchStopped || entries.some(entry => entry.kind === "queue" && entry.task === task.id)) {
+      throw new TaskboardError("CHAT_BUSY", "This executor no longer owns the launch.");
+    }
+    entries.push({ id: "queue:" + task.id, kind: "queue", owner: 0, task: task.id,
+      revision: task.revision, earlyLaunch: { cwd } });
   });
 }
 
@@ -229,5 +245,5 @@ export function registerRuntime(project: string, value: Omit<RuntimeEntry, "id" 
       if (restart) queueRestart(entries, entry, restart === "quota" || undefined);
     }
   });
-  return Object.assign(release, { run: <T>(callback: () => T) => context.run(id, callback) });
+  return Object.assign(release, { id, run: <T>(callback: () => T) => context.run(id, callback) });
 }

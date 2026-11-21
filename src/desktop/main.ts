@@ -287,7 +287,7 @@ function frame(state: ProjectTab) {
       const failedRevision = subscriptions.get(state.project ?? "")?.failedDiscussionStarts?.get(task.id);
       return task.status === "in_progress" && ((task.discussionReturn !== undefined && (failedRevision ?? -1) < task.revision) ||
         sharedRuns.some(entry => matchesQueuedExecutor(entry, task) &&
-          (!entry.quotaPaused || entry.reviewReturn || quotaWait || state.board?.settings.autoMode))) &&
+          (!entry.quotaPaused || entry.reviewReturn || entry.earlyLaunch || quotaWait || state.board?.settings.autoMode))) &&
         !runningTasks.has(key) && !replyingTasks.has(key) && !sharedRuns.some(entry => entry.kind === "slot" && entry.task === task.id);
     }).map(task => task.id),
     reviewingTasks,
@@ -970,9 +970,12 @@ async function returnTaskToDraft(project: string, id: string, revision: unknown,
 }
 
 async function stopChat(project: string, id: string) {
-  const active = activeAgents.get(project + "\0" + id);
-  if (!active && agentSlots.defer(project, id)) {
-    taskOperations.get(project + "\0" + id)?.controller.abort();
+  const key = project + "\0" + id;
+  const active = activeAgents.get(key);
+  const launch = launchingTasks.has(key) ? taskOperations.get(key) : undefined;
+  if (!active && (launch || agentSlots.entries(project).some(entry => entry.kind === "queue" && entry.task === id))) {
+    forgetExecutor(project, id);
+    launch?.controller.abort();
     notifyRunChange(project);
     return { ok: true as const, data: null };
   }
@@ -1632,7 +1635,7 @@ function scheduleAgentWork() {
         const { project, tasks, settings } = watch.board;
         if (closingProjects.has(project)) continue;
         for (const entry of agentSlots.entries(project)) {
-          const { kind, task: id, revision, continuation, quotaPaused, reviewReturn } = entry;
+          const { kind, task: id, revision, continuation, quotaPaused, reviewReturn, earlyLaunch } = entry;
           if (kind !== "queue" || !id || revision === undefined) continue;
           const task = tasks.find(task => task.id === id);
           // The queue can be saved before the watch sees the new card revision.
@@ -1644,7 +1647,7 @@ function scheduleAgentWork() {
           }
           const role = task.mergeRepair ? "reviewer" : "executor";
           const key = project + "\0" + id;
-          if ((quotaPaused && !settings.autoMode && !reviewReturn) || queuedRecoveryDelay.has(key) ||
+          if ((quotaPaused && !settings.autoMode && !reviewReturn && !earlyLaunch) || queuedRecoveryDelay.has(key) ||
               !agentSlots.available(projectIdentity(project), role, settings?.taskLimits) || executorBusy(project, id)) continue;
           const failed = (error: string) => broadcastBoardChat(project, "orchestrator-review-error", { error: id + " · " + error });
           void launchTask(project, id, undefined, false, task.revision, continuation,
@@ -1745,7 +1748,7 @@ function reserveAgent(project: string, role: AgentRole, task?: string, queuedRev
     release(restart);
     scheduleAgentWork();
     void callCli(project, ["maintain"]).catch(error => console.warn("Private lifecycle maintenance deferred", error));
-  }, { run: release.run });
+  }, { id: release.id, run: release.run });
 }
 
 function taskRunLimit(role: "executor" | "reviewer") {
@@ -4279,6 +4282,9 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   let monitoring = false;
   let recoveringThreadId: string | undefined;
   let restart: import("./board-runtime.ts").RuntimeEntry["restart"];
+  let earlyLaunch = false;
+  let earlyThreadId: string | undefined;
+  let currentRevisionAfterStart = revision;
   let release: ((restart?: boolean | "quota") => void) | undefined;
   let updateTimer: NodeJS.Timeout | undefined;
   type SteeredReply = { index: number; activity: Map<string, RunActivity> };
@@ -4302,7 +4308,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   };
   const saveActivity = async () => {
     clearTimeout(updateTimer);
-    if (prepared && signal.aborted && signal.reason !== quotaInterruption) {
+    if (prepared && signal.aborted && closingProjects.has(project)) {
       activity.set("project-closed", {
         id: "project-closed", type: "error", status: "interrupted", title: "",
         text: t("ui.the_project_was_closed_ef8bc05a"),
@@ -4330,6 +4336,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       : known ? { ok: true, data: known }
         : await callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
     if (!current.ok) return current;
+    currentRevisionAfterStart = current.data.revision;
     if (revisionRequest) {
       const task = current.data;
       queuedRevision = task.reviewReturn;
@@ -4345,7 +4352,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     }
     if (manual && !newThread && queuedRevision === undefined) {
       const task = current.data;
-      const pending = agentSlots.entries(project).find(entry => entry.reviewReturn && matchesQueuedExecutor(entry, task));
+      const pending = agentSlots.entries(project).find(entry => matchesQueuedExecutor(entry, task));
       queuedRevision = pending?.revision;
       queued = queuedRevision !== undefined;
     }
@@ -4383,6 +4390,9 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       if (pending.reviewReturn) returnedRevision = task.revision;
       recoveringThreadId = pending.turnRequest?.threadId;
       restart = pending.restart;
+      earlyLaunch = Boolean(pending.earlyLaunch);
+      earlyThreadId = pending.earlyLaunch
+        ? current.data.codexThreadId ?? pending.linkedThread?.codexThreadId : undefined;
       threadChoice = pending.newThread ?? newThread;
     }
     const attemptedRevision = current.data.revision;
@@ -4403,7 +4413,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     const client = await configuredCodex(app.getPath("userData"));
     if (!client) {
       const reason = t("ui.choose_the_codex_executable_in_settings_06a08a7e");
-      if (prepared || recoveringThreadId || restart || returnedRevision !== undefined) throw new Error(reason);
+      if (prepared || recoveringThreadId || restart || earlyLaunch || returnedRevision !== undefined) throw new Error(reason);
       await failDiscussionStart("CODEX_UNAVAILABLE", reason);
       return cliFailure("CODEX_UNAVAILABLE", reason);
     }
@@ -4441,8 +4451,9 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       return cliFailure("INVALID_INPUT", t("ui.choose_full_access_in_the_blocked_task_before_co_976e5686"));
     }
     signal.throwIfAborted();
-    if (newThread || missingThread || resumeWithFullAccess) {
-      current = await callCli<LaunchState>(project, ["resume", id, "--compact"], {
+    const retryExecutor = manual && current.data.status === "blocked" && current.data.blocked?.retryExecutor;
+    if (newThread || missingThread || resumeWithFullAccess || retryExecutor) {
+      current = await callCli<LaunchState>(project, [retryExecutor && !missingThread ? "unblock" : "resume", id, "--compact"], {
         launchDetails: true, actor: manual ? "user" : "agent",
         revision: revision ?? current.data.revision,
         reason: resumeWithFullAccess
@@ -4451,11 +4462,11 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
           ? t("ui.retrying_after_codex_could_not_find_the_saved_ch_893b7408")
           : newThread === "manager"
             ? t("ui.the_project_manager_requested_continuation_in_a__121b1302")
-            : t("ui.the_user_chose_to_continue_in_a_new_codex_chat_3484ac0c"),
+            : retryExecutor ? t("ui.retry_executor_launch") : t("ui.the_user_chose_to_continue_in_a_new_codex_chat_3484ac0c"),
       });
       if (!current.ok) return current;
       revision = current.data.revision;
-      prepared = true;
+      prepared = current.data.status === "in_progress";
       if (newThread) {
         queuedRevision = revision;
         agentSlots.defer(project, id, {
@@ -4465,16 +4476,18 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       }
     }
     signal.throwIfAborted();
+    const launchSlot = !queued && role === "executor" && !current.data.codexThreadId ? releaseSlot.id : undefined;
     const started = await callCli<{ task: LaunchState & ExecutorTask } & ({ worktree: string } | { cwd: string })>(project, ["start", id, "--compact"],
       { revision: revision ?? current.data.revision, actor: manual ? "user" : "agent", launchDetails: true, ...(scheduled ? { scheduled } : {}),
         ...(queued ? { queuedExecutor: true } : {}),
+        ...(launchSlot ? { launchSlot } : {}),
         ...(discussionReturn !== undefined ? { discussionReturn } : {}),
         ...(autoMode ? { autoMode: true, autoQueueRevision } : {}),
         ...(resolveConflicts ? { resolveConflicts } : {}),
         ...(process.platform === "win32" && client.windowsSandbox === "elevated" ? { isolatedWorktree: true } : {}) });
     if (!started.ok) {
       if (queued && ["BOARD_BUSY", "REVISION_CONFLICT", "INVALID_TRANSITION"].includes(started.error.code)) return started;
-      if (restart || returnedRevision !== undefined) {
+      if (restart || earlyLaunch || returnedRevision !== undefined) {
         throw new Error(started.error.code + ": " + started.error.message);
       }
       if (prepared && started.error.code !== "BOARD_BUSY") throw new Error(started.error.message);
@@ -4482,10 +4495,12 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       return started;
     }
     prepared = true;
+    if (launchSlot) queued = earlyLaunch = true;
     const desktopProfile = app.getPath("userData");
     const task = { ...started.data.task, fullAccess: executorFullAccess(desktopProfile, project, started.data.task),
-      ...(threadChoice ? { codexThreadId: undefined } : {}) };
+      ...(threadChoice ? { codexThreadId: undefined } : earlyThreadId ? { codexThreadId: earlyThreadId } : {}) };
     let linked: LaunchState = started.data.task;
+    currentRevisionAfterStart = linked.revision;
     if (returnedRevision !== undefined) returnedRevision = linked.revision;
     const cwd = "cwd" in started.data ? started.data.cwd : started.data.worktree;
     // Quota can interrupt this launch before Codex has opened or linked a thread.
@@ -4520,6 +4535,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
           (queued && ["INVALID_TRANSITION", "REVISION_CONFLICT"].includes(saved.error.code)) ? saved.error.code : "CODEX_LINK_FAILED",
       });
       linked = saved.data;
+      currentRevisionAfterStart = linked.revision;
       if (returnedRevision !== undefined) returnedRevision = linked.revision;
       if (created) rememberTaskCodexThread(project, id, codexThreadId);
       rememberExecutor(project, linked, cwd, continuation);
@@ -4530,13 +4546,13 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         throw Object.assign(new Error("The queued start belongs to another Codex thread."), { code: "CODEX_START_UNCONFIRMED" });
       }
       return { ...pending, accepted: (turnId: string) => recordQueuedTurn(project, id, pending.clientId, turnId) };
-    }, desktopProfile, recoveringThreadId, Boolean(restart), clientId => {
+    }, desktopProfile, recoveringThreadId, Boolean(restart || earlyThreadId), clientId => {
       const reply = pendingReplies.get(clientId);
       if (!reply) return;
       pendingReplies.delete(clientId);
       if (!steeredReply || reply.index > steeredReply.index) steeredReply = reply;
       publishReply();
-    }));
+    }, earlyLaunch));
     const { threadId: codexThreadId, completion } = run;
     const directories = new Set<string>();
     let stopRequested = false;
@@ -4705,11 +4721,15 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       await saveActivity();
       return quotaFailure();
     }
-    if (queued && signal.aborted) return cliFailure("CHAT_BUSY", (error as Error).message);
+    if (queued && signal.aborted) {
+      await saveActivity();
+      return cliFailure("CHAT_BUSY", (error as Error).message);
+    }
     if (code === "BOARD_BUSY" || (queued && (code === "INVALID_TRANSITION" || code === "REVISION_CONFLICT"))) {
       return cliFailure(code, (error as Error).message);
     }
-    if ((recoveringThreadId && !restart) || code === "CODEX_START_UNCONFIRMED") {
+    if ((recoveringThreadId && !restart && !missingCodexThread((error as Error).message, earlyThreadId)) ||
+        code === "CODEX_START_UNCONFIRMED") {
       queuedRecoveryDelay.add(key);
       setTimeout(() => queuedRecoveryDelay.delete(key), 5_000).unref();
       return cliFailure("CODEX_START_UNCONFIRMED", (error as Error).message);
@@ -4718,9 +4738,12 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     const reason = busy ? t("ui.this_codex_chat_is_already_open_in_another_proce_9d6a0201") + "\n\n" + (error as Error).message : (error as Error).message;
     await saveActivity();
     const condition = busy ? t("ui.continue_in_the_existing_chat_or_stop_work_there_635dd251") : undefined;
-    if (returnedRevision !== undefined && !signal.aborted) {
+    const failedRevision = returnedRevision ?? (earlyLaunch ? currentRevisionAfterStart : undefined);
+    if (failedRevision !== undefined && !signal.aborted) {
       const blocked = await callCli<LaunchState>(project, ["block", id, "--compact"], {
-        revision: returnedRevision, reason,
+        revision: failedRevision,
+        reason,
+        ...(earlyLaunch ? { retryExecutor: true } : {}),
         condition: condition ?? t("ui.resolve_the_reported_issue_and_resume_the_task_2b49bf6d"),
       });
       if (blocked.ok) return blocked;
