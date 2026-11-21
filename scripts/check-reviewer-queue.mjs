@@ -5,13 +5,20 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { electronCheck } from "./electron-check.mjs";
 
+const checks = ["push-review", "push-accept", "approval", "advanced-target", "human", "note",
+  "busy-approval", "busy-return", "busy-target", "busy-revision", "busy-mode", "busy-reopen", "busy-failure"];
+const requested = process.argv.find(arg => arg.startsWith("--scenario="))?.slice("--scenario=".length);
+if (requested && !checks.includes(requested)) throw new Error("Unknown review queue scenario: " + requested);
 const { scratch, artifacts } = electronCheck(import.meta.url, "reviewer-queue", 120_000,
-  [["push-review"], ["push-accept"], ["approval"], ["advanced-target"], ["human"], ["note"]]);
+  (requested ? [requested] : checks).map(name => [name]));
 const scenario = process.argv.at(-1);
+const busyScenario = scenario.startsWith("busy-");
+const decisionCommand = scenario === "busy-return" ? "request-changes" : "review-approve";
 const racedCommand = { "push-review": "review", "push-accept": "accept" }[scenario];
 const require = createRequire(import.meta.url);
 const { app, BrowserWindow } = require("electron");
@@ -53,7 +60,7 @@ async function run() {
     git("commit", "--allow-empty", "-m", "Commit to push");
   }
   cli(["init"]);
-  cli(["settings"], { reviewMode: "reviewer", autoMode: scenario !== "note" });
+  cli(["settings"], { reviewMode: "reviewer", autoMode: !busyScenario && scenario !== "note" });
   const task = cli(["create"], plannedDraft({ title: "Review a submitted change", criteria: ["Result is present"] }));
   const ready = cli(["approve", task.id]);
   const started = cli(["start", task.id], { revision: ready.revision });
@@ -74,7 +81,8 @@ async function run() {
   const show = () => cli(["show", task.id]);
   const report = {
     summary: "Test provider reviewed the submission.", needsHuman: scenario === "note",
-    findings: [], evidence: ["Result is present."],
+    findings: scenario === "busy-return" ? ["The result needs a corrected heading."] : [],
+    evidence: ["Result is present."],
   };
   const initialHead = head();
   const preapprove = racedCommand || scenario === "advanced-target" || scenario === "human";
@@ -125,32 +133,72 @@ async function run() {
   const sourceUrl = new URL("../src/desktop/main.ts", import.meta.url);
   const source = readFileSync(sourceUrl, "utf8")
     .replace("replyToTask, reviewWithCodex, updateBoardGoal", "replyToTask, updateBoardGoal")
-    .replace("import { callCli, cliChild, cliFailure }", "import { callCli as realCallCli, cliChild, cliFailure }")
+    .replace("import { callCli,", "import { callCli as realCallCli,")
     .replaceAll("import.meta.url", JSON.stringify(sourceUrl.href))
     .replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, sourceUrl).href));
   const entry = join(scratch, "main-under-test.mjs");
   writeFileSync(entry, transformSync(`const reviewWithCodex = globalThis.reviewQueueProvider;
 const callCli = (...args) => globalThis.reviewQueueCli(realCallCli, ...args);
-` + source,
+` + source + "\nglobalThis.openReviewTestWindow = projects => createWindow(projects).window;\n",
     { loader: "ts", format: "esm" }).code);
   const raceReleased = Promise.withResolvers();
   const autoErrors = [];
   let raceResult, pushResult;
   let held = false;
-  globalThis.reviewQueueCli = async (call, board, args, input) => {
+  let busy = busyScenario;
+  const decisions = [];
+  const startedReviews = [];
+  const pendingFile = join(project, ".tasks", "review-history.json");
+  const pendingDecision = () => existsSync(pendingFile) &&
+    new Map(JSON.parse(readFileSync(pendingFile, "utf8"))).get(task.id)?.pendingDecision;
+  globalThis.reviewQueueCli = async (call, board, args, input, options) => {
+    if (scenario === "busy-return" && board === project && args[0] === "start" && args[1] === task.id) {
+      // Verify the saved return and queue without starting an external executor.
+      return { ok: false, error: { code: "EXECUTOR_LIMIT", message: "Test executor slot is occupied." } };
+    }
     const race = !held && board === project && args[0] === racedCommand && args[1] === task.id;
     if (race) {
       held = true;
       await raceReleased.promise;
     }
-    const result = await call(board, args, input);
+    if (busyScenario && board === project && args[0] === decisionCommand && args[1] === task.id) {
+      assert.equal(options?.retryBusy, false);
+      const attempt = {
+        at: performance.now(), revision: input.revision, targetHead: input.targetHead, modeVersion: input.reviewModeVersion,
+      };
+      decisions.push(attempt);
+      let result;
+      if (busy) {
+        if (scenario === "busy-approval" && decisions.length === 1) {
+          const lock = new DatabaseSync(join(project, ".tasks", ".lock.sqlite"));
+          lock.exec("BEGIN IMMEDIATE");
+          try {
+            result = await call(board, args, input, options);
+            assert.equal(result.error?.code, "BOARD_BUSY");
+          } finally {
+            lock.close();
+          }
+        } else {
+          result = { ok: false, error: { code: "BOARD_BUSY", message: "Test board is temporarily busy." } };
+        }
+      } else {
+        if (scenario === "busy-failure") writeFileSync(join(project, ".tasks", "pending", task.id + ".json"), "{}");
+        result = await call(board, args, input, options);
+      }
+      attempt.code = result.ok ? "OK" : result.error.code;
+      attempt.message = result.error?.message;
+      attempt.completed = performance.now();
+      return result;
+    }
+    const result = await call(board, args, input, options);
     if (race) raceResult = result;
     if (board === project && args[0] === "git" && args[1] === "push") pushResult = result;
     return result;
   };
   const calls = [];
   globalThis.reviewQueueProvider = async (_profile, board, _settings, context, _tools, _call, _signal, _usage, id, publish) => {
-    const { submitted: submission, targetHead } = JSON.parse(context);
+    const { submitted: submission, targetHead, revision, reviewModeVersion, candidateReview } = JSON.parse(context);
+    if (!candidateReview) startedReviews.push({ revision, targetHead, reviewModeVersion });
     calls.push({ board, id, submission, targetHead });
     assert.equal(cli(["show", id]).status, "review");
     assert.equal(head(), targetHead);
@@ -162,7 +210,9 @@ const callCli = (...args) => globalThis.reviewQueueCli(realCallCli, ...args);
   app.on("browser-window-created", (_event, { webContents }) => {
     const send = webContents.send.bind(webContents);
     webContents.send = (channel, ...args) => {
-      if (channel === "chat:update" && args[0]?.type === "orchestrator-review-error") autoErrors.push(args[0].error);
+      if (channel === "chat:update" && args[0]?.type === "orchestrator-review-error" && args[0].error) {
+        autoErrors.push(args[0].error);
+      }
       return send(channel, ...args);
     };
   });
@@ -172,6 +222,108 @@ const callCli = (...args) => globalThis.reviewQueueCli(realCallCli, ...args);
     return win && !win.webContents.isLoading() && await win.webContents.executeJavaScript(
       "window.taskboard?.bootstrap().then(frame => Boolean(frame.board) && !frame.loading)") && win;
   }, "the isolated board");
+  if (busyScenario) {
+    const frameReady = win => !win.webContents.isLoading() && win.webContents.executeJavaScript(
+      "window.taskboard?.bootstrap().then(frame => Boolean(frame.board) && !frame.loading)");
+    let checkWindow = window;
+    if (scenario === "busy-approval") {
+      const second = globalThis.openReviewTestWindow([project]);
+      await waitFor(() => frameReady(second), "the second window");
+    }
+    submitted = submit();
+    await waitFor(() => decisions[0]?.code === "BOARD_BUSY" && pendingDecision(), "the stored decision");
+    assert.equal(startedReviews.length, 1);
+    assert.deepEqual(autoErrors.filter(Boolean), []);
+
+    if (scenario === "busy-approval" || scenario === "busy-return") {
+      await waitFor(() => decisions[1]?.code === "BOARD_BUSY", "a second blocked write");
+      assert.ok(decisions[1].at - decisions[0].completed >= 995, "the next write must wait at least one second");
+      assert.equal(show().status, "review");
+    } else if (scenario === "busy-target") {
+      git("commit", "--allow-empty", "-m", "Advance the target during the deferred write");
+    } else if (scenario === "busy-revision") {
+      const revised = cli(["update", task.id, "--compact"], {
+        title: "Updated review fixture", revision: submitted.revision, preserveStatus: true,
+      });
+      assert.equal(revised.status, "review");
+      assert.notEqual(revised.revision, submitted.revision);
+    } else if (scenario === "busy-mode") {
+      cli(["settings"], { reviewMode: "human" });
+      await waitFor(() => !pendingDecision(), "discarding the decision in manual review mode");
+      assert.equal(startedReviews.length, 1);
+      assert.equal(decisions.length, 1);
+      assert.equal(show().history.filter(event => event.action === decisionCommand).length, 0);
+      cli(["settings"], { reviewMode: "reviewer" });
+    } else if (scenario === "busy-reopen") {
+      globalThis.openReviewTestWindow([]);
+      window.close();
+      await waitFor(() => window.isDestroyed(), "the original board window to close");
+      const attemptsWhileClosed = decisions.length;
+      await delay(1300);
+      assert.equal(decisions.length, attemptsWhileClosed);
+      assert.ok(pendingDecision());
+      checkWindow = globalThis.openReviewTestWindow([project]);
+      await waitFor(() => frameReady(checkWindow), "the reopened board");
+    }
+    busy = false;
+    if (scenario === "busy-failure") {
+      const cause = await waitFor(() => decisions.find(attempt => attempt.code && attempt.code !== "BOARD_BUSY"), "the terminal CLI error");
+      assert.equal(cause.code, "PENDING_OPERATION");
+      await waitFor(() => autoErrors.some(error => error?.includes(cause.message)), "the reported cause");
+      await waitFor(() => checkWindow.webContents.executeJavaScript(`document.body.innerText.includes(
+        ${JSON.stringify(cause.message)})`), "the cause visible in the renderer");
+      await delay(1600);
+      assert.equal(decisions.at(-1), cause);
+      assert.equal(startedReviews.length, 1);
+      assert.equal(pendingDecision(), undefined);
+    } else {
+      const action = decisionCommand;
+      const finished = await waitFor(() => {
+        const card = show();
+        return card.history.some(event => event.action === action) && card;
+      }, action);
+      const events = finished.history.filter(event => event.action === action);
+      assert.equal(events.length, 1);
+      const stale = ["busy-target", "busy-revision", "busy-mode"].includes(scenario);
+      assert.equal(startedReviews.length, stale ? 2 : 1);
+      if (scenario === "busy-mode") assert.notEqual(decisions[0].modeVersion, events[0].reviewApproval.reviewModeVersion);
+      if (action === "review-approve") {
+        assert.equal(events[0].reviewApproval.targetHead, head());
+        assert.equal(events[0].reviewApproval.revision, finished.revision);
+      } else {
+        assert.equal(events[0].text, report.findings[0]);
+        assert.equal(finished.status, "in_progress");
+        assert.equal(finished.reviewReturn, finished.revision);
+      }
+      await waitFor(() => decisions.some(attempt => attempt.code === "OK"), "the completed decision command");
+      assert.equal(decisions.filter(attempt => attempt.code === "OK").length, 1);
+      assert.deepEqual(autoErrors.filter(Boolean), []);
+      if (scenario === "busy-reopen") {
+        const attemptsAfterSave = decisions.length;
+        await delay(1300);
+        assert.equal(decisions.length, attemptsAfterSave);
+        assert.equal(pendingDecision(), undefined);
+      }
+      if (scenario === "busy-approval") {
+        const windows = BrowserWindow.getAllWindows();
+        assert.equal(windows.length, 2);
+        for (const win of windows) {
+          await waitFor(() => win.webContents.executeJavaScript(`window.taskboard.bootstrap().then(frame =>
+            frame.board?.tasks.some(task => task.id === ${JSON.stringify(task.id)} && task.reviewApproved))`), "approval in both windows");
+        }
+        checkWindow.setContentSize(1280, 800);
+        checkWindow.webContents.setZoomFactor(1);
+        await delay(350);
+        const view = await checkWindow.webContents.executeJavaScript("({ width: innerWidth, height: innerHeight, text: document.body.innerText })");
+        assert.deepEqual([view.width, view.height], [1280, 800]);
+        assert.match(view.text, /Review a submitted change/);
+        assert.doesNotMatch(view.text, /Авторевью прервалось|Automatic review was interrupted/i);
+        writeFileSync(join(artifacts, "review-busy-recovery.png"), (await checkWindow.webContents.capturePage()).toPNG());
+      }
+    }
+    console.log(JSON.stringify({ scenario, startedReviews, decisions, errors: autoErrors.filter(Boolean) }));
+    return;
+  }
   if (racedCommand) {
     await waitFor(() => held, "queued " + racedCommand);
     const evaluate = code => window.webContents.executeJavaScript(code);

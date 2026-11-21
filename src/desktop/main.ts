@@ -34,7 +34,7 @@ import type { BoardActivity, BoardGoal, BoardGoalAction } from "./codex-chat.ts"
 import { boardReviewModeTool, reviewModeReceipt, setReviewModeFromChat, taskChatActions } from "./chat-actions.ts";
 import { autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools } from "./board-actions.ts";
 import { phaseStageReporter } from "./expert-tools.ts";
-import type { BoardChange, ReviewedSubmission, ReviewReport } from "./board-actions.ts";
+import type { BoardChange, PendingReviewDecision, ReviewedSubmission, ReviewReport } from "./board-actions.ts";
 import type { AgentControl } from "./codex-rpc.ts";
 import type { TaskUsageRole, TokenUsageReport } from "../cli/token-usage.ts";
 import type { CliError, CliReply } from "./cli.ts";
@@ -3809,10 +3809,13 @@ function readyReviews(watch: BoardWatch) {
     if (task.status !== "review") return false;
     const mode = taskReviewMode(task, settings);
     const independent = usesIndependentReviewer(mode);
+    const pending = watch.reviewReports.get(task.id)?.pendingDecision;
     return (settings.autoMode || independent) && mode !== "human" && !task.reviewPending &&
       (!task.acceptanceRepair || reviewsAcceptanceRepair(task, settings)) && !watch.reviewerRuns.has(task.id) &&
       task.expertReviewPlanned && (!independent || (!task.reviewApproved && !task.reviewNoted)) &&
-      watch.reviewAttempts.get(task.id) !== reviewAttempt(task, settings) &&
+      (independent && pending
+        ? pending.retryAfter <= Date.now()
+        : watch.reviewAttempts.get(task.id) !== reviewAttempt(task, settings)) &&
       ((independent && task.reviewHasCommit) || !executorBusy(project, task.id));
   });
 }
@@ -3981,7 +3984,65 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
   const notify = (error: string) => {
     if (!signal.aborted && !quotaWait) broadcastBoardChat(project, "orchestrator-review-error", { id, error: id + " · " + error });
   };
+  const queueRetry = { retryBusy: false };
+  const recordDecision = async (report: ReviewReport, pending: PendingReviewDecision) => {
+    const { retryAfter: _retryAfter, ...binding } = pending;
+    const input = { ...binding, reviewModeVersion: binding.reviewModeVersion ?? null, actor: "reviewer" };
+    const note = (summary: string) => callCli(project, ["review-note", id, "--compact"], { ...input, summary }, queueRetry);
+    const needsMoreEvidence = !report.findings.length && (!report.evidence.length || report.evidence.includes(null));
+    if (report.needsHuman || needsMoreEvidence) return note(report.summary);
+    const findings = report.findings.join("\n\n");
+    const decision = findings
+      ? await callCli(project, ["request-changes", id, "--compact"], { ...input, reason: findings }, queueRetry)
+      : await callCli(project, ["review-approve", id, "--compact"], {
+        ...input, summary: report.summary, evidence: report.evidence,
+      }, queueRetry);
+    if (!decision.ok && decision.error.code === "EXPERT_STAGES_INCOMPLETE") {
+      return note([decision.error.message, report.summary, findings].filter(Boolean).join("\n\n"));
+    }
+    if (decision.ok && findings) notifyRunChange(project);
+    return decision;
+  };
+  const transientChange = ["TARGET_CHANGED", "REVIEW_MODE_CHANGED", "AUTO_REVIEW_DISABLED", "REVISION_CONFLICT", "INVALID_TRANSITION"];
+  const postpone = (saved: ReviewedSubmission, decision: PendingReviewDecision) => {
+    saved.pendingDecision = { ...decision, retryAfter: Date.now() + 1000 };
+    saveReviewReports(project, reports);
+  };
+  const saved = reports.get(id);
   try {
+    const pending = saved?.pendingDecision;
+    if (saved && pending) {
+      const current = await callCli<{
+        revision: number; targetHead: string | null; stale: boolean; submitted?: string;
+        reviewDecision?: number; reviewNoted?: boolean; reviewerApproval?: { targetHead: string | null };
+        settings: { reviewMode: ReviewMode; reviewModeVersion?: number };
+      }>(project, ["review", id, "--compact"], { includeReviewerSettings: true }, queueRetry);
+      signal.throwIfAborted();
+      if (executorBusy(project, id)) return;
+      const matches = current.ok && !current.data.stale && !current.data.reviewNoted &&
+        (!current.data.reviewerApproval || current.data.reviewerApproval.targetHead !== current.data.targetHead) &&
+        current.data.submitted === saved.submitted && current.data.revision === pending.revision &&
+        current.data.targetHead === pending.targetHead && (current.data.reviewDecision ?? 0) === pending.reviewDecision &&
+        current.data.settings.reviewMode === pending.reviewMode &&
+        current.data.settings.reviewModeVersion === pending.reviewModeVersion;
+      const decided = matches ? await recordDecision(saved.report, pending) : current;
+      if (!decided.ok && decided.error.code === "BOARD_BUSY") {
+        postpone(saved, pending);
+        return;
+      }
+      delete saved.pendingDecision;
+      saveReviewReports(project, reports);
+      if (matches && decided.ok) {
+        broadcastBoardChat(project, "orchestrator-review-error", { id });
+      } else {
+        usage = pending.reviewerUsage;
+        if (decided.ok || transientChange.includes(decided.error.code)) {
+          delete saved.snapshot;
+          watch.reviewAttempts.delete(id);
+        } else notify(decided.error.message);
+      }
+      return;
+    }
     // The manager can advance the target while this reviewer is reading.
     for (let attempt = 0; attempt <= retryLimit; attempt++) {
       signal.throwIfAborted();
@@ -4010,30 +4071,15 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
       if (reports.get(id) !== previous) saveReviewReports(project, reports);
       if (!(await waitForExecutor(revision)) || executorBusy(project, id)) return;
       signal.throwIfAborted();
-      const input = { revision, targetHead, reviewMode, reviewModeVersion, actor: "reviewer", reviewerUsage: usage };
-      const needsMoreEvidence = !reviewer.findings.length && (!reviewer.evidence.length || reviewer.evidence.includes(null));
-      const recordDecision = async () => {
-        const note = (summary: string) => callCli(project, ["review-note", id, "--compact"], {
-          ...input, summary, reviewDecision: reviewDecision ?? 0,
-        });
-        if (reviewer.needsHuman || needsMoreEvidence) {
-          return note(reviewer.summary);
-        }
-        const findings = reviewer.findings.join("\n\n");
-        const decision = findings
-          ? await launchTask(project, id, { input: { ...input, reason: findings } })
-          : await callCli(project, ["review-approve", id, "--compact"], { ...input, summary: reviewer.summary, evidence: reviewer.evidence });
-        if (!decision.ok && decision.error.code === "EXPERT_STAGES_INCOMPLETE") {
-          return note([decision.error.message, reviewer.summary, findings].filter(Boolean).join("\n\n"));
-        }
-        return decision;
+      const decision = {
+        revision, targetHead, reviewMode, reviewModeVersion, reviewDecision: reviewDecision ?? 0,
+        retryAfter: 0, reviewerUsage: usage,
       };
-      let decided = await recordDecision();
-      // BOARD_BUSY means the command never started. Keep the report and retry the write.
-      for (let retry = 0; retry < 2 && !decided.ok && decided.error.code === "BOARD_BUSY"; retry++) {
-        signal.throwIfAborted();
-        if (executorBusy(project, id)) return;
-        decided = await recordDecision();
+      const decided = await recordDecision(reviewer, decision);
+      if (!decided.ok && decided.error.code === "BOARD_BUSY") {
+        postpone(reports.get(id)!, decision);
+        usage = undefined;
+        return;
       }
       if (decided.ok) {
         usage = undefined;
@@ -4045,14 +4091,21 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
         usage = undefined;
         continue;
       }
-      if (!["REVIEW_MODE_CHANGED", "AUTO_REVIEW_DISABLED", "REVISION_CONFLICT", "INVALID_TRANSITION"].includes(decided.error.code)) {
+      if (!transientChange.includes(decided.error.code)) {
         notify(decided.error.message);
       }
       return;
     }
     notify(t("ui.the_target_branch_kept_changing_during_review_b111fe46"));
   } catch (error) {
-    if (!signal.aborted) notify((error as Error).message);
+    if (!signal.aborted) {
+      if (saved?.pendingDecision) {
+        usage = saved.pendingDecision.reviewerUsage;
+        delete saved.pendingDecision;
+        saveReviewReports(project, reports);
+      }
+      notify((error as Error).message);
+    }
   } finally {
     try {
       if (usage) await saveTaskTokenUsage(project, id, "reviewer", usage);
