@@ -10,6 +10,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
 import { DatabaseSync } from "node:sqlite";
+import { checkMemoryCycles, memoryWindowAction } from "./memory-cycles.mjs";
 const require = createRequire(import.meta.url);
 const root = fileURLToPath(new URL("../", import.meta.url));
 const script = fileURLToPath(import.meta.url);
@@ -36,10 +37,12 @@ if (!process.versions.electron) {
   const recoveryOnly = process.argv.includes("--worktree-recovery-only");
   const restartOnly = process.argv.includes("--task-restart-only");
   const returnOnly = process.argv.includes("--review-return-only");
+  const memoryOnly = process.argv.includes("--memory-only");
   const failedReviewLaunch = join(scratch, "failed-review-launch");
   const outputIndex = process.argv.indexOf("--artifacts");
   const output = outputIndex < 0 ? undefined : resolve(process.argv[outputIndex + 1]);
   const workers = [], providerPids = new Set();
+  const electronPids = new Set();
   const results = [];
   const env = { ...process.env, TASKBOARD_CHECK_NODE: process.execPath, GIT_CEILING_DIRECTORIES: scratch };
   delete env.ELECTRON_RUN_AS_NODE;
@@ -80,6 +83,32 @@ if (!process.versions.electron) {
   };
   checks: try {
     symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), join(scratch, "node_modules"), process.platform === "win32" ? "junction" : "dir");
+    if (memoryOnly) {
+      assert.equal(process.platform, "win32", "Memory check requires Windows private bytes");
+      for (const board of [project, other]) {
+        mkdirSync(board);
+        cli(board, ["init"], { git: false });
+        cli(board, ["settings"], { autoMode: false, reviewMode: "human" });
+      }
+      const { id } = cli(project, ["create"], plannedDraft({
+        title: "Memory cycle card", criteria: ["Fixture completes"], workingDirectory: project,
+      }));
+      cli(project, ["approve", id]);
+      const worker = await start("memory");
+      await checkMemoryCycles({
+        worker, id, providerPids, electronPids, wait, output, record,
+        retain: process.argv.includes("--retain-memory-control"),
+        resetCard: () => cli(project, ["unblock", id], { reason: "Repeat memory cycle" }),
+      });
+      await exitWorker(worker);
+      await wait(() => {
+        return [...electronPids].every(pid => {
+          try { process.kill(pid, 0); return false; } catch (error) { return error.code === "ESRCH"; }
+        });
+      }, "sampled Electron processes exited");
+      record("PASS: sampled Electron processes exited");
+      break checks;
+    }
     if (returnOnly) {
       mkdirSync(project);
       const git = (...args) => execFileSync("git", ["-C", project, ...args], { env, windowsHide: true });
@@ -989,13 +1018,15 @@ if (!process.versions.electron) {
   source = source.replaceAll("import.meta.url", JSON.stringify(sourceUrl.href)).replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, sourceUrl).href));
   const entry = join(scratch, name + ".mjs");
   writeFileSync(entry, transformSync(source + "\nglobalThis.sharedCheck = {createWindow,activateTab,windowStates,launchTask,agentSlots,reserveAgent,scheduleAgentWork,scheduleMaintenance,activeAgents,subscriptions};", { loader: "ts", format: "esm" }).code);
-  if (restartOnly && name === "restart-false") {
+  if (name === "memory" || (restartOnly && name === "restart-false")) {
     const profile = app.getPath("userData"), layout = join(profile, "project-tabs.json");
     mkdirSync(profile, { recursive: true });
-    if (!existsSync(layout)) writeFileSync(layout, JSON.stringify([{ projects: [other, project], active: other }]));
+    const activeProject = name === "memory" ? project : other;
+    if (!existsSync(layout)) writeFileSync(layout, JSON.stringify([{ projects: [other, project], active: activeProject }]));
   } else process.argv.push("--project", project);
   require(entry);
   const ready = wait(async () => BrowserWindow.getAllWindows().length && BrowserWindow.getAllWindows()[0].webContents.executeJavaScript("window.taskboard?.bootstrap().then(frame => Boolean(frame.board) && !frame.loading)"), "initial window");
+  const mainWindow = ready.then(() => BrowserWindow.getAllWindows()[0]);
   process.on("message", async command => {
     if (command.providerSpawned) { providerRequests.get(command.providerSpawned)?.(command.pid); providerRequests.delete(command.providerSpawned); return; }
     try {
@@ -1003,6 +1034,9 @@ if (!process.versions.electron) {
       const qa = globalThis.sharedCheck; let data;
       const board = command.other ? other : project, key = command.role + (command.other ? ":other" : "") + (command.task ?? "");
       if (command.action === "ready") data = true;
+      if (command.action.startsWith("memory")) {
+        data = await memoryWindowAction(command, await mainWindow, { app, BrowserWindow, project, other, wait });
+      }
       if (command.action === "quit") setImmediate(() => app.quit());
       if (command.action === "activateFixtureBoard") {
         const owner = [...qa.windowStates.values()][0];
