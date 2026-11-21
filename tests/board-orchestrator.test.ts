@@ -1811,6 +1811,7 @@ test("goal history pages retain scoped local events and hide unclassified provid
   });
   writeJson(f.binding, { provider: "codex", id: f.threadId });
   assert.deepEqual((await f.history(undefined, "work")).data.turns, []);
+  assert.equal((await f.history(undefined, "goal-availability")).data, false);
   cursors.length = 0;
   saveManagerHistory(f.project, start, randomUUID(), {
     lane: "work", goalId: f.threadId, message: { text: "Cancel T-0001", files: [] }, items: [local],
@@ -1832,6 +1833,8 @@ test("goal history pages retain scoped local events and hide unclassified provid
   assert.equal(provider.data.nextCursor, null);
   const chat = await f.history();
   assert.deepEqual(chat.data.turns, []);
+  assert.equal(chat.data.goalLogAvailable, undefined);
+  assert.equal((await f.history(undefined, "goal-availability")).data, true);
   assert.deepEqual((await f.history(chat.data.nextCursor)).data.turns, []);
   const reopened = await f.history(undefined, "work");
   assert.deepEqual(reopened.data, first.data);

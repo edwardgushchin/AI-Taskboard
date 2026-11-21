@@ -2186,6 +2186,7 @@ function draftComposer() {
   let currentGoal;
   let goalScope;
   let goalLogAvailable = false;
+  let goalAvailabilityRevision = 0;
   let goalRunning = false;
   let goalResuming = false;
   let goalResumeWaiting = false;
@@ -2283,7 +2284,10 @@ function draftComposer() {
     if (metadata.goalResumeWaiting !== undefined) goalResumeWaiting = metadata.goalResumeWaiting;
     if (resuming === true) goalError.textContent = "";
     if (metadata.goalResumeError) goalError.textContent = metadata.goalResumeError;
-    if (metadata.goalLogAvailable !== undefined) goalLogAvailable = metadata.goalLogAvailable;
+    if (metadata.goalLogAvailable !== undefined) {
+      goalAvailabilityRevision++;
+      goalLogAvailable = metadata.goalLogAvailable;
+    }
     if (metadata.goalId !== undefined) goalScope = metadata.goalId;
     if (goal !== undefined) showGoal(goal);
     else syncGoal();
@@ -3297,6 +3301,20 @@ function draftComposer() {
       updateOlderHistory();
     }
   }
+  async function refreshGoalAvailability() {
+    const revision = ++goalAvailabilityRevision;
+    try {
+      const result = await api.boardHistory(project, null, "goal-availability");
+      if (!disposed && revision === goalAvailabilityRevision && result.ok && typeof result.data === "boolean") {
+        goalLogAvailable = result.data;
+        syncViews();
+        syncPrompt();
+      }
+    } catch {
+      // A failed availability check leaves the last known state in place.
+    }
+  }
+
   const loadHistory = () => {
     if (!historyLoaded && !loadingHistory) {
       const revision = goalRevision;
@@ -3304,6 +3322,7 @@ function draftComposer() {
         if (!result.ok) throw new Error(boardError(result.error));
         if (disposed || reloadAfterHistory || !canBrowseHistory()) return;
         if (revision === goalRevision) editor.updateGoal(result.data.goal, result.data.goalRunning, result.data.goalResuming, result.data);
+        void refreshGoalAvailability();
         const oldImages = [...log.querySelectorAll(".chat-attachments img")];
         let delivered;
         dialogueViewport.update(() => {
