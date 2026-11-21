@@ -39,7 +39,8 @@ import { goalActionTools, runGoalAction } from "../src/desktop/goal-actions.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { autoQueueSettings, updateAutoQueue } from "../src/cli/auto-queue.ts";
 import { nextReadyTask } from "../src/desktop/auto-queue.ts";
-import { goalQueueCondition, readIterativeGoal, saveIterativeGoal } from "../src/desktop/iterative-goal.ts";
+import { advanceInterval, goalQueueCondition, intervalDeadline, iterativeEnabled, ownerIterationDirective,
+  readIterativeGoal, saveIterativeGoal } from "../src/desktop/iterative-goal.ts";
 import { automationDelivery, pendingReviewApprovals } from "../src/desktop/automation-delivery.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import { settingsDelivery, syncSettingsNotices } from "../src/desktop/settings-notices.ts";
@@ -106,6 +107,7 @@ function fixture(t: TestContext) {
   type GoalRequest = { objective?: string; resume?: boolean; accepted: () => void; delivered: (id: string) => void; controls: (control: GoalControl) => void;
     update: (goal: BoardGoal | null) => void; activity: (items: RunActivity[]) => void; settings?: ChatSettings | null;
     enableNotifications: (steer?: (text: string, images: string[]) => Promise<void>) => void; endTurn: () => void;
+    finishTurn?: () => boolean;
     role?: string; access?: ManagerAccess; confirmApproval?: (details: string) => Promise<boolean> };
   type Reply = (action: RunAction, prompt: string, images: string[], id?: string, context?: any,
     waiting?: (waiting: boolean) => void, signal?: AbortSignal, goal?: GoalRequest) => Promise<{ text: string } | { interrupted: true }>;
@@ -150,6 +152,7 @@ function fixture(t: TestContext) {
     get quotaWait() { return quotaPaused ? {} : undefined; },
     quotaInterruption: new Error("Fixture quota pause"), refreshQuota: async () => [],
     currentActiveGoal: activeManagerGoal, managerGoalBinding,
+    advanceInterval, intervalDeadline, iterativeEnabled, ownerIterationDirective, readIterativeGoal, saveIterativeGoal,
     applicationUpdates, applicationUpdateTools, updateOwner: undefined, updateProject: undefined,
     scheduleAutoBoard: () => {}, scheduleDraftDiscussions: () => {},
     activeRunSummary, discussionActivityByTask: new Map(), runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
@@ -228,6 +231,7 @@ function fixture(t: TestContext) {
       session: { id?: string; title: string; save: (id: string) => void; attachmentContext?: string; mcpTools: { name: string; description: string }[];
         role?: "manager" | "reviewer"; separateTurn?: boolean; readOnly?: boolean; access?: ManagerAccess; confirmApproval?: (details: string) => Promise<boolean>;
         onWaiting: (waiting: boolean) => void; onTurnEnded: () => void; goal?: string; resumeGoal?: boolean; onGoalSet: () => void;
+        finishGoalTurn?: () => boolean;
         onControl: (control: { steer: (text: string, images: string[], id?: string) => Promise<void>; interrupt: () => Promise<void> }) => void;
         onMessage: (id: string) => void; onActivity: (items: RunActivity[]) => void;
         onGoalControl: (control: GoalControl) => void; onGoal: (goal: BoardGoal | null) => void; settings?: ChatSettings | null }) => {
@@ -266,7 +270,11 @@ function fixture(t: TestContext) {
         ...(!manualTurn && !cleanupTurn && !instructions.includes("This turn repairs") ? ["task_return_to_draft"] : []),
         ...(!manualTurn && !cleanupTurn && !reviewTurn && !instructions.includes("This turn repairs") && !prompt.startsWith("AI Taskboard queue:") ? ["board_set_auto_mode"] : []),
         ...(!manualTurn && !cleanupTurn && mode === "manager" ? ["expert_stage", "expert_verify_skills"] : []),
-        ...(!reviewTurn && !cleanupTurn && !instructions.includes("This turn repairs") ? (session.goal || session.resumeGoal ? ["goal_dialogue", "goal_inbox", "goal_report"] : ["goal_read", "goal_send"]) : []),
+        ...(!reviewTurn && !cleanupTurn && !instructions.includes("This turn repairs")
+          ? (session.goal || session.resumeGoal
+            ? ["goal_dialogue", "goal_inbox", "goal_report", "goal_configure_iteration"]
+            : ["goal_read", "goal_send"])
+          : []),
         ...(!reviewTurn && !cleanupTurn && !instructions.includes("This turn repairs") && !session.goal && !session.resumeGoal &&
           !prompt.startsWith("AI Taskboard queue:") ? ["app_check_updates", "app_install_update"] : []),
         ...(!reviewTurn && !manualTurn && !cleanupTurn && !session.goal && !session.resumeGoal &&
@@ -285,7 +293,8 @@ function fixture(t: TestContext) {
       return respond(action, prompt, images, session.id, session.attachmentContext && JSON.parse(session.attachmentContext),
         session.onWaiting, _signal, { objective: session.goal, resume: session.resumeGoal, accepted: session.onGoalSet, delivered: session.onMessage,
           controls: session.onGoalControl, update: session.onGoal, activity: session.onActivity,
-          role: session.role, settings: session.settings, endTurn: session.onTurnEnded, access: session.access, confirmApproval: session.confirmApproval,
+          role: session.role, settings: session.settings, endTurn: session.onTurnEnded, access: session.access,
+          confirmApproval: session.confirmApproval, finishTurn: session.finishGoalTurn,
           enableNotifications: steer => session.onControl({
             steer: async (text, images, id) => {
               if (steer) await steer(text, images);
@@ -392,7 +401,7 @@ function fixture(t: TestContext) {
         },
       } };
       windowStates.set(1, state);
-      const managerRun = () => runtime.frame({ project, board: { project, tasks: [] }, window: { webContents: {} } }).managerWork;
+      const managerRun = () => runtime.frame({ project, board: { project, tasks: [], settings: {} }, window: { webContents: {} } }).managerWork;
       return { state, tab, notifications: questionNotifications, goalActivity, managerRuns, managerRun };
     },
     sendNow: (request: string, files: unknown[] = [], id?: string) =>
@@ -555,6 +564,27 @@ test("manual card creation and tag editing allow an empty list on both board typ
   }
 });
 
+test("an explicit disable during a manual goal turn releases the manager afterwards", async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"], { git: false })).ok, true);
+  const objective = "Отключи итеративный режим";
+  const result = await f.run(objective, async (act, _prompt, _images, _id, _context, _waiting, _signal, goal) => {
+    assert.ok(goal?.finishTurn);
+    goal.update({ objective, status: "active" });
+    goal.accepted();
+    assert.equal(goal.finishTurn(), false);
+    const changed = await act("goal_configure_iteration", { enabled: false });
+    assert.equal(changed.ok, true, JSON.stringify(changed));
+    assert.equal(goal.finishTurn(), true);
+    return { text: "Автоматические ходы отключены." };
+  }, [], true);
+  assert.equal(result.data.answer, "Автоматические ходы отключены.", JSON.stringify(result));
+  const saved = readJson(f.binding) as { goalId: string; goal: BoardGoal };
+  assert.equal(saved.goal.status, "active");
+  assert.equal(readIterativeGoal(f.project, saved.goalId).enabled, false);
+  assert.ok(!runtimeEntries(f.project).some(entry => entry.task === "manager:context"));
+});
+
 test("a goal controls the persistent automatic queue and receives live board changes", async t => {
   const f = fixture(t);
   assert.equal((await f.cli(["init"], { git: false })).ok, true);
@@ -703,7 +733,7 @@ test("acceptance of a converted queue hold dispatches once when a slot opens", {
           subscriptions: new Map([[f.project, watch]]), isManual, taskReviewMode, usesIndependentReviewer,
           nextReadyTask, pendingReviewApprovals, agentSlots: slots, projectIdentity: (project: string) => project,
           currentActiveGoal: activeManagerGoal, readBoardThread: () => goalId ? { id: goalId } : undefined,
-          boardThreadPath: managerGoalBinding, goalMessages, goalQueueCondition, readIterativeGoal,
+          boardThreadPath: managerGoalBinding, goalMessages, goalQueueCondition, readIterativeGoal, intervalDeadline, iterativeEnabled,
           boardWorkRequests: new Map(), boardRequests: new Map(), backgroundManagerRequests: new Map(),
           boardGoalResumes: new Set(), boardGoalClears: new Set(), executorBusy: () => false,
           runBoardRequest: () => assert.fail("Dispatch must not need a manager or goal turn"),

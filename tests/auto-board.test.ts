@@ -35,6 +35,7 @@ function fixture(mode = "human") {
     subscriptions: new Map([["project", watch]]), closingProjects: new Set(), boardWorkRequests: managers, boardRequests: dialogues,
     backgroundManagerRequests: new Map(),
     isManual, nextReadyTask, pendingReviewApprovals, taskReviewMode, taskReviewModeVersion, reviewsAcceptanceRepair, usesIndependentReviewer,
+    currentActiveGoal: () => undefined,
     agentSlots: slots, projectIdentity: (path: string) => path,
     executorBusy: (_: string, id: string) => busy.has(id), t: (key: string) => localization.text(key, {}, "en"),
     broadcastBoardChat: (_: string, __: string, value: any) => errors.push(value.error),

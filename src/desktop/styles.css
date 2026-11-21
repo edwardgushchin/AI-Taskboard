@@ -1430,8 +1430,14 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 #auto-mode-panel input[role="switch"]:is(:disabled, [aria-disabled="true"]) {
   opacity: .55;
 }
+#auto-mode-panel > section {
+  margin-top: var(--surface-section-gap);
+  padding-top: var(--surface-section-gap);
+  border-top: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
 #iterative-goal-hint {
-  padding-inline-start: 42px;
+  margin: 4px 0 0;
   color: var(--muted);
 }
 @media (prefers-reduced-motion: reduce) {

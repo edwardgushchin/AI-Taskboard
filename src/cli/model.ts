@@ -275,6 +275,7 @@ export interface BoardSettings {
   reviewModeVersion?: number;
   autoReview?: boolean;
   autoMode?: boolean;
+  autoModeEnabledAt?: number;
   iterativeGoal?: string;
   autoQueue?: { revision: number; paused: boolean; order: string[]; held: string[] };
 }

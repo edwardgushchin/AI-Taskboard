@@ -16,7 +16,7 @@ export function managerGoalState(project: string) {
   const id = saved.goalId ?? saved.id;
   const status = saved.goal.status;
   const iterativeGoalId = status === "active" && typeof id === "string" && codexThreadPattern.test(id) ? id : undefined;
-  return { status, iterativeGoalId };
+  return { status, iterativeGoalId, id };
 }
 
 export function activeManagerGoal(project: string): string | undefined {
