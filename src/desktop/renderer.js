@@ -1102,6 +1102,7 @@ function quotaLabel() {
 }
 
 function card(task) {
+  const needsAnswer = task.status !== "cancelled" && task.awaitingAnswer === true;
   const showCover = archiveView || frame.board.settings?.showCardPreviews !== false;
   const cover = showCover ? selectedCover(task, (task.attachments ?? []).filter(isImageAttachment)) : undefined;
   // Only visible card data belongs in this key: chat/log/revision updates must not rebuild it.
@@ -1112,12 +1113,12 @@ function card(task) {
     frame.quotaTasks?.includes(task.id) ? frame.quotaWait : null, task.status, task.mergeRepair, task.acceptanceRepair, Boolean(task.codexThreadId),
     task.reviewModeOverride?.mode ?? frame.board?.settings.reviewMode, task.reviewApproved,
     task.unfinishedDependencies, task.blocked, task.subtasks?.map(entry => entry.done),
-    task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule, task.awaitingAnswer,
+    task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule, needsAnswer,
     manualColumns().find(c => c.id === task.status)]);
   const previous = boardCards.get(task.id);
   if (previous?.signature === signature) return previous.node;
   const card = previous?.node ?? button("", () => showTask(task.id, card.dataset.awaitingAnswer === "true"));
-  card.dataset.awaitingAnswer = String(task.awaitingAnswer === true);
+  card.dataset.awaitingAnswer = String(needsAnswer);
   const oldDetails = card.querySelector(".task-card-details");
   const oldImage = card.querySelector(".task-card-cover");
   if (oldDetails) cardCovers.unobserve(oldDetails);
@@ -1133,11 +1134,11 @@ function card(task) {
   }
   const subtasks = task.subtasks ?? [];
   const completed = subtasks.filter(entry => entry.done).length;
-  if (hasPriority || subtasks.length || task.awaitingAnswer) {
+  if (hasPriority || subtasks.length || needsAnswer) {
     bindLocalized(card, "aria-description", () => [
       hasPriority ? t("ui.priority_b114c9b5") + " · " + priorityName(task.priority) : "",
       subtasks.length ? t("ui.subtasks_b409bda5") + " " + completed + "/" + subtasks.length : "",
-      task.awaitingAnswer ? t("task_question.open_dialogue") : "",
+      needsAnswer ? t("task_question.open_dialogue") : "",
     ].filter(Boolean).join(". "), true);
   } else {
     card.removeAttribute("aria-description");
@@ -1175,7 +1176,7 @@ function card(task) {
   const meta = element("span", undefined, "task-meta");
   const id = element("span", task.id, "task-id task-stat");
   meta.append(id);
-  if (task.awaitingAnswer) {
+  if (needsAnswer) {
     const question = element("span", undefined, "task-question task-stat");
     question.append(icon("question"), element("span", () => t("task_question.needs_answer")));
     bindLocalized(question, "title", () => t("task_question.open_dialogue"));
