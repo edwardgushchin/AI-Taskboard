@@ -839,12 +839,18 @@ ipcMain.handle("menu:action", async (event, action: unknown) => {
   await menuActions[action](state);
 });
 
-ipcMain.handle("menu:manager-edit", (event, canCopy: unknown) => {
+ipcMain.handle("menu:manager-edit", (event, canCopy: unknown, canQuote: unknown) => {
   const state = stateOf(event);
-  Menu.buildFromTemplate([
-    { label: t("ui.copy_47162712"), enabled: canCopy === true, click: () => menuActions.copy(state) },
-    { label: t("ui.paste_e9f43536"), click: () => menuActions.paste(state) },
-  ]).popup({ window: state.window });
+  return new Promise<boolean>(resolve => {
+    const copy = { label: t("ui.copy_47162712"), enabled: canCopy === true, click: () => menuActions.copy(state) };
+    const action = canQuote === true
+      ? { label: t("chat_quote.add"), click: () => resolve(true) }
+      : { label: t("ui.paste_e9f43536"), click: () => menuActions.paste(state) };
+    Menu.buildFromTemplate([copy, action]).popup({
+      window: state.window,
+      callback: () => resolve(false),
+    });
+  });
 });
 
 ipcMain.handle("board:bootstrap", event => {

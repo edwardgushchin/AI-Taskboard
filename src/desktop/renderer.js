@@ -1302,6 +1302,7 @@ function switchBoardRendering(previousProject, project) {
   previousComposer?.closeMentions?.();
   previousComposer?.cancelDictation?.();
   previousComposer?.closeQuestion?.();
+  previousComposer?.closeQuoteEditor?.();
   if (previousProject && (boardCards.size || boardLanes.size)) {
     boardViews.set(previousProject, {
       cards: boardCards, lanes: boardLanes, covers: cardCoverCache, preferences: lanePreferences,
@@ -2101,6 +2102,7 @@ function chatViewport(list) {
 function draftComposer() {
   const project = frame.project;
   const files = [];
+  const quotes = [];
   const queued = [];
   let savingQueuedMessage = false;
   let sendingQueuedMessage = false;
@@ -2946,7 +2948,7 @@ function draftComposer() {
     input.setAttribute("aria-label", t(goalMode ? "ui.describe_the_goal_79e3a385" : "ui.message_the_project_manager_247ec40b"));
   };
   editor.syncPrompt = syncPrompt;
-  const hasDraft = () => Boolean(input.value.trim() || (!goalMode && files.length));
+  const hasDraft = () => Boolean(input.value.trim() || quotes.length || (!goalMode && files.length));
   function setGoalMode(value) {
     goalMode = value;
     goalChip.hidden = !value;
@@ -2999,6 +3001,20 @@ function draftComposer() {
   editor.localize();
   setGoalMode(false);
   const field = element("div", undefined, "board-draft-field");
+  const quoteDraft = chatQuoteDraft({
+    panel: editor,
+    input,
+    logs: [log, work],
+    quotes,
+    locked: () => savingQueuedMessage,
+    changed: syncAction,
+    focusComposer: () => {
+      openChat();
+      showWork(false);
+      input.focus();
+    },
+  });
+  editor.closeQuoteEditor = quoteDraft.close;
   let question;
   let questionDialog;
   let shownQuestionId;
@@ -3021,7 +3037,7 @@ function draftComposer() {
   editor.updateQuestion(undefined);
   const inputArea = element("div", undefined, "draft-input");
   inputArea.append(input, prompt);
-  field.append(add, inputArea, controls, voiceRow, menu, mentions, picker, hint, goalChip, attachments, voiceStatus, progress);
+  field.append(quoteDraft.root, add, inputArea, controls, voiceRow, menu, mentions, picker, hint, goalChip, attachments, voiceStatus, progress);
   field.append(answer);
   editor.append(chat, field);
   const previewImages = (images, file) => openImagePreview(undefined, images, images.indexOf(file), file.url, {
@@ -3236,6 +3252,7 @@ function draftComposer() {
   };
   editor.dispose = () => {
     disposed = true;
+    quoteDraft.close();
     clearTimeout(readRetry);
     cancelAnimationFrame(readFrame);
     readObserver.disconnect();
@@ -3450,6 +3467,7 @@ function draftComposer() {
   };
   editor.closeChat = () => {
     if (pinned || !editor.hasAttribute("data-open")) return;
+    quoteDraft.close();
     clearTimeout(readRetry);
     cancelAnimationFrame(readFrame);
     readFrame = undefined;
@@ -3520,7 +3538,7 @@ function draftComposer() {
     if (event.deltaY < 0 && log.scrollTop === 0) void loadOlderHistory();
   }, { passive: true });
   field.addEventListener("click", event => {
-    if (dictation || event.target.closest(".draft-controls, .draft-add, .draft-add-menu, .draft-task-mentions, .draft-goal-chip, .draft-attachments, .draft-progress")) return;
+    if (dictation || event.target.closest(".draft-controls, .draft-add, .draft-add-menu, .draft-task-mentions, .draft-goal-chip, .draft-attachments, .draft-progress, .chat-quote-draft")) return;
     openChat();
     if (event.target !== input) input.focus({ preventScroll: true });
   });
@@ -4064,11 +4082,13 @@ function draftComposer() {
   editor.addEventListener("submit", async event => {
     event.preventDefault();
     if (dictation || savingQueuedMessage || !hasDraft()) return;
-    const draft = input.value;
+    const text = input.value;
+    const draft = quoteMessage(text, quotes);
     const goal = goalMode;
     const submitted = [...files];
     let id;
     savingQueuedMessage = true;
+    quoteDraft.sync();
     try {
       await restoreQueue();
       id = await queueStorage("add", undefined, draft, goal, await pasteFiles(submitted));
@@ -4077,9 +4097,12 @@ function draftComposer() {
       return;
     } finally {
       savingQueuedMessage = false;
+      quoteDraft.sync();
     }
     if (disposed) return;
-    if (input.value === draft) input.value = "";
+    if (input.value === text) input.value = "";
+    quotes.length = 0;
+    quoteDraft.render();
     for (const file of submitted) {
       const index = files.indexOf(file);
       if (index === -1) continue;
