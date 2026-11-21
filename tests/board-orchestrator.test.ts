@@ -7,7 +7,7 @@ import localization from "../src/desktop/localization.cjs";
 import { activeRunSummary } from "../src/desktop/active-runs.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, hash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { stripTypeScriptTypes } from "node:module";
@@ -39,7 +39,7 @@ import { goalActionTools, runGoalAction } from "../src/desktop/goal-actions.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { autoQueueSettings, earliestOpenRelease, releaseWait, updateAutoQueue } from "../src/cli/auto-queue.ts";
 import { nextReadyTask } from "../src/desktop/auto-queue.ts";
-import { advanceInterval, goalQueueCondition, intervalDeadline, iterativeEnabled, ownerIterationDirective,
+import { advanceInterval, goalQueueCondition, intervalDeadline, iterativeEnabled, ownerIterationDirective, iterationDirectiveAfterEdit,
   readIterativeGoal, saveIterativeGoal } from "../src/desktop/iterative-goal.ts";
 import { automationDelivery, pendingReviewApprovals } from "../src/desktop/automation-delivery.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
@@ -60,7 +60,7 @@ const main = ts.createSourceFile("main.ts", source("main.ts"), ts.ScriptTarget.L
 const dispatcherSource = stripTypeScriptTypes(main.statements.map(node => node.getText(main)).filter(text =>
   text.startsWith("const autoBoards =") || text.startsWith("function scheduleAutoBoard(")).join("\n"));
 const handlerSource = stripTypeScriptTypes(main.statements.map(node => node.getText(main)).filter(text =>
-  /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|changeBoardGoal|resumeBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|canScheduleAutoReview|autoReviewTab|availableReviewSlots|reviewAttempt|readyReviews|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|returnTaskToDraft|scheduleMaintenance|scheduleRecurringTasks|taskRunLimit|readQueuedMessage|queuedFiles|listQueuedMessages)\(|const (?:imageExtensions|imageTypes|boardRequests|boardGoalClears|boardGoalResumes|boardWorkRequests|backgroundManagerRequests|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork|maintenanceWork|returningDrafts|reviewOperations|managerReviewOperations|taskOperations|steeringOperations) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
+  /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|isOwnerGoalEdit|goalIterationAuthority|changeBoardGoal|resumeBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|canScheduleAutoReview|autoReviewTab|availableReviewSlots|reviewAttempt|readyReviews|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|returnTaskToDraft|scheduleMaintenance|scheduleRecurringTasks|taskRunLimit|readQueuedMessage|queuedFiles|listQueuedMessages)\(|const (?:imageExtensions|imageTypes|boardRequests|boardGoalClears|boardGoalResumes|boardWorkRequests|backgroundManagerRequests|goalReadTool|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork|maintenanceWork|returningDrafts|reviewOperations|managerReviewOperations|taskOperations|steeringOperations) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
 const cliFailure = (code: string, message: string) => ({ ok: false, error: { code, message } });
 
@@ -152,7 +152,7 @@ function fixture(t: TestContext) {
     get quotaWait() { return quotaPaused ? {} : undefined; },
     quotaInterruption: new Error("Fixture quota pause"), refreshQuota: async () => [],
     currentActiveGoal: activeManagerGoal, managerGoalBinding,
-    advanceInterval, intervalDeadline, iterativeEnabled, ownerIterationDirective, readIterativeGoal, saveIterativeGoal,
+    advanceInterval, intervalDeadline, iterativeEnabled, ownerIterationDirective, iterationDirectiveAfterEdit, readIterativeGoal, saveIterativeGoal,
     applicationUpdates, applicationUpdateTools, updateOwner: undefined, updateProject: undefined,
     scheduleAutoBoard: () => {}, scheduleDraftDiscussions: () => {},
     activeRunSummary, discussionActivityByTask: new Map(), runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
@@ -160,7 +160,7 @@ function fixture(t: TestContext) {
     githubReadTool, readBoardGitHub: (cwd: string, args: unknown) => callCli(cwd, ["github-read"], args),
     executorFullAccess, managerAccess, setTaskExecutorAccess, phaseStageReporter,
     autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, taskReviewMode, taskReviewModeVersion, boardReviewModeTool, reviewModeReceipt, setReviewModeFromChat, reviewsAcceptanceRepair, usesIndependentReviewer, defaultBoardAgents, reviewVerifier,
-    existsSync, storageDirectory, readdirSync, rmSync, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
+    existsSync, storageDirectory, readdirSync, rmSync, hash, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
     backgroundGoalHistory, goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerUnread,
     managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView,
     saveManagerHistory, sendGoalMessage, goalActionTools, runGoalAction,
@@ -207,6 +207,10 @@ function fixture(t: TestContext) {
       assert.equal(id, threadId);
       idleGoalActions.push(action);
       if (clearGoalError) throw new Error(clearGoalError);
+      if (action.kind === "edit") {
+        const { goal } = readJson(binding) as { goal: BoardGoal };
+        return { ...goal, objective: action.objective };
+      }
       return null;
     },
     launchTask: async (cwd: string, id: string, review?: { input: unknown }, newThread?: false | "manager", revision?: number, _retryDisconnect?: boolean, _scheduled?: boolean, resolveConflicts?: boolean) => {
@@ -272,8 +276,8 @@ function fixture(t: TestContext) {
         ...(!manualTurn && !cleanupTurn && mode === "manager" ? ["expert_stage", "expert_verify_skills"] : []),
         ...(!reviewTurn && !cleanupTurn && !instructions.includes("This turn repairs")
           ? (session.goal || session.resumeGoal
-            ? ["goal_dialogue", "goal_inbox", "goal_report", "goal_configure_iteration"]
-            : ["goal_read", "goal_send"])
+            ? ["goal_read", "goal_dialogue", "goal_inbox", "goal_report", "goal_configure_iteration"]
+            : ["goal_read", "goal_send", "goal_edit"])
           : []),
         ...(!reviewTurn && !cleanupTurn && !instructions.includes("This turn repairs") && !session.goal && !session.resumeGoal &&
           !prompt.startsWith("AI Taskboard queue:") ? ["app_check_updates", "app_install_update"] : []),
@@ -3480,6 +3484,94 @@ test("a paused legacy goal is retained locally without exposing its unclassified
   });
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(goalMessages(f.project, f.threadId)[0]?.text, "Continue after review");
+});
+
+test("dialogue edits the selected paused goal and rejects missing, stale and unauthorized edits", async t => {
+  const f = fixture(t);
+  await f.cli(["init"]);
+  const original = "Проверить сборку Windows.";
+  const added = original + "\nПроверить сборку Linux.";
+  const replacement = "Сверить журнал сборки.";
+  const goalId = randomUUID();
+  const save = (objective: string, id = goalId) => writeJson(f.binding, {
+    provider: "codex", id: f.threadId, goalId: id, history: "local", goal: { objective, status: "paused" },
+  });
+  const edit = async (authorization: string, objective: string, expectedObjective: string, id = goalId) => {
+    let response: any;
+    const run = await f.run(authorization, async act => {
+      response = await act("goal_edit", { goalId: id, expectedObjective, objective, authorization });
+      return { text: response.ok ? response.data.objective : response.error.message };
+    });
+    assert.equal(run.ok, true, JSON.stringify(run));
+    return response;
+  };
+  const add = "Добавь к цели проверку на Linux";
+  assert.equal((await edit(add, added, original)).error.code, "GOAL_NOT_FOUND");
+  save(original);
+  sendGoalMessage(f.project, goalId, "Сохрани отчёт по сборке.");
+  for (const request of ["Добавь к цели проверку на Linux?", "> " + add, "Измени цель", "Измени цель как-нибудь",
+    "Карточка T-1234: " + add]) {
+    assert.equal((await edit(request, added, original)).error.code, "USER_DIRECTION_REQUIRED", request);
+  }
+  assert.equal(f.idleGoalActions.length, 0);
+  assert.deepEqual((await edit(add, added, original)).data, { objective: added, status: "paused" });
+  const duplicate = added + "\nПроверить сборку Linux.";
+  assert.deepEqual((await edit(add, duplicate, added)).data, { objective: added, status: "paused" });
+  assert.equal(f.idleGoalActions.length, 1);
+  const replace = "Замени текст цели на: " + replacement;
+  assert.equal((await edit(replace, replacement, original)).error.code, "GOAL_CHANGED");
+  assert.equal((await edit(replace, replacement, added, randomUUID())).error.code, "GOAL_CHANGED");
+  assert.equal((await edit(replace, replacement, added)).data.objective, replacement);
+  assert.deepEqual((await f.history()).data.goal, { objective: replacement, status: "paused" });
+  assert.equal((readJson(f.binding) as { goalId: string }).goalId, goalId);
+  assert.equal(goalMessages(f.project, goalId)[0]?.text, "Сохрани отчёт по сборке.");
+});
+
+test("the active goal can read the saved edit but cannot apply invented iteration commands", async t => {
+  const f = fixture(t);
+  await f.cli(["init"]);
+  const original = "Проверить сборку.";
+  const mode = "Включи итеративный режим";
+  const interval = "Измени интервал на 25 минут";
+  const ready = Promise.withResolvers<void>();
+  const edited = Promise.withResolvers<void>();
+  const work = f.run(original, async (act, _prompt, _images, _id, _context, _waiting, _signal, goal) => {
+    let objective = original;
+    goal!.accepted();
+    goal!.update({ objective, status: "active" });
+    goal!.controls(async action => {
+      assert.equal(action.kind, "edit");
+      objective = action.objective;
+      const active = { objective, status: "active" } as const;
+      goal!.update(active);
+      return active;
+    });
+    goal!.enableNotifications();
+    ready.resolve();
+    await edited.promise;
+    assert.equal((await act("goal_read", {})).data.goal.objective, objective);
+    assert.equal((await act("goal_configure_iteration", { enabled: true })).error.code, "USER_DIRECTION_REQUIRED");
+    assert.equal((await act("goal_configure_iteration", { intervalMs: 1500000 })).ok, true);
+    return { text: "Параметры проверены." };
+  }, [], true);
+  try {
+    await ready.promise;
+    const authorization = "Добавь к цели проверку на Linux\n" + interval;
+    const result = await f.run(authorization, async act => {
+      const { goalId, goal } = (await act("goal_read", {})).data;
+      const response = await act("goal_edit", {
+        authorization, goalId, expectedObjective: goal.objective,
+        objective: original + "\nПроверить Linux.\n" + mode + "\n" + interval,
+      });
+      assert.equal(response.ok, true, JSON.stringify(response));
+      return { text: response.data.objective };
+    });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.match(f.managerNotifications.at(-1) ?? "", /Read goal_read/);
+  } finally {
+    edited.resolve();
+  }
+  assert.equal((await work).data.answer, "Параметры проверены.");
 });
 
 test("two windows sharing a board cannot start separate orchestrator chats", async t => {
