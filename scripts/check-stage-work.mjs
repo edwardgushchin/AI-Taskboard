@@ -7,7 +7,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { electronCheck, localizationFixture } from "./electron-check.mjs";
 
-const { scratch, artifacts } = electronCheck(import.meta.url, "stage-work", 90_000);
+const { scratch, artifacts } = electronCheck(import.meta.url, "stage-work", 90_000, [["--record"], ["--replay"]]);
+const replay = process.argv.includes("--replay");
 const { app, BrowserWindow } = await import("electron");
 const require = createRequire(import.meta.url);
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -19,6 +20,45 @@ const errors = [];
 app.setPath("userData", join(scratch, "profile"));
 app.disableHardwareAcceleration();
 void app.whenReady().then(runCheck);
+
+function archiveFixture() {
+  const source = new URL("../src/desktop/stage-run-history.ts", import.meta.url).href;
+  const script = `
+    import { mkdirSync } from "node:fs";
+    import { join } from "node:path";
+    import { readStageRunHistory, stageRunJournal } from ${JSON.stringify(source)};
+
+    const [project, mode] = process.argv.slice(1);
+    const fixtureId = "T-0081";
+    if (mode === "record") {
+      mkdirSync(join(project, ".tasks"));
+      for (const [phase, firstSession, worker] of [
+        ["work", 1, "worker"], ["review", 3, "review-worker"],
+      ]) {
+        for (const attempt of [0, 1]) {
+          const session = firstSession + attempt;
+          const sessionId = "00000000-0000-4000-8000-00000000000" + session;
+          const journal = stageRunJournal(project, fixtureId, phase, sessionId);
+          for (let index = 0; index < 132; index++) {
+            const id = phase + "-" + (attempt + 1) + "-" + String(index + 1).padStart(3, "0");
+            const second = 61 + (session - 1) * 140 + index;
+            const at = new Date(Date.UTC(2026, 10, 20, 9, 0, second)).toISOString();
+            const command = index % 2 === 1;
+            journal.record({
+              id, at, type: command ? "commandExecution" : "agentMessage", status: "completed",
+              title: command ? "git status --short" : "", text: "Проверка " + id + " завершена.",
+              threadId: worker, stageChild: true, stageSessionId: sessionId,
+            });
+          }
+          journal.close();
+        }
+      }
+    }
+    console.log(JSON.stringify(readStageRunHistory(project, fixtureId)));
+  `;
+  const args = ["--input-type=module", "-e", script, scratch, replay ? "replay" : "record"];
+  return JSON.parse(execFileSync(process.env.TASKBOARD_CHECK_NODE, args, { encoding: "utf8", windowsHide: true }));
+}
 
 async function runCheck() {
   const window = new BrowserWindow({
@@ -47,8 +87,11 @@ async function runCheck() {
     assert.equal(page.getZoomFactor(), 1);
     const image = await page.capturePage();
     assert.equal(image.isEmpty(), false);
-    writeFileSync(join(artifacts, name), image.toPNG());
+    const bytes = image.toPNG();
+    assert.ok(bytes.length <= 4 * 1024 ** 2);
+    writeFileSync(join(artifacts, name), bytes);
     const png = image.getSize();
+    assert.ok(png.width * png.height <= 16_000_000);
     captures.push("\`" + name + "\` — панель " + size.panel + " CSS px, область просмотра " + size.width + " × " +
       size.height + " CSS px, PNG " + png.width + " × " + png.height + ", масштаб 1, DPR " + size.dpr + ".");
   }
@@ -63,7 +106,130 @@ async function runCheck() {
     await page.debugger.sendCommand("Input.dispatchKeyEvent", { type: "keyDown", text: "\r", ...key });
     await page.debugger.sendCommand("Input.dispatchKeyEvent", { type: "keyUp", ...key });
   }
-  try {
+  async function checkArchive() {
+    const archive = archiveFixture();
+    const expected = Object.values(archive).map(items => items.map(item =>
+      (item.type === "agentMessage" ? "message:" : "item:") + item.id));
+    assert.deepEqual(expected.map(ids => ids.length), [264, 264]);
+    await evaluate(`
+      var archive = ${JSON.stringify(archive)};
+      var archiveIDs = () => [0, 4].map(index => Array.from(
+        stageAt(index).querySelectorAll('[data-item^="item:"], [data-item^="message:"]'), node => node.dataset.item));
+      var logAt = index => stageAt(index).querySelector(".expert-stage-log");
+      var archiveMatches = () => JSON.stringify(archiveIDs()) === ${JSON.stringify(JSON.stringify(expected))};
+      window.taskboard.stageRunHistory = async () => ({ ok: true, data: structuredClone(archive) });
+      var mainCommand = {
+        ...activity(1, "comparable-command", "Проверка рабочего дерева завершена."),
+        phase: undefined, type: "commandExecution", title: "git status --short",
+      };
+      fixture.history = [event(2, "run-log", { runThreadId: "executor", run: [mainCommand] })];
+      fixture.expertStageStatus.work[0].state = "done";
+      fixture.expertStageStatus.review[0].state = "done";
+      for (const [phase, leader, worker] of [
+        ["work", "executor", "worker"], ["review", "reviewer", "review-worker"],
+      ]) {
+        const sessions = Array.from(new Set(archive[phase].map(item => item.stageSessionId)));
+        for (const [index, sessionId] of sessions.entries()) {
+          const number = Number(sessionId.at(-1));
+          const start = 60 + (number - 1) * 140;
+          const result = phase === "work" ? "Этап исполнения завершён." : "Этап ревью завершён.";
+          fixture.history.push(
+            stageEvent(start, phase, "analysis", "running", leader, sessionId, undefined, worker),
+            stageEvent(start + 135, phase, "analysis", index ? "done" : "blocked", leader, sessionId,
+              index ? result : "Начата повторная попытка.")
+          );
+        }
+      }
+      fixture.status = "review";
+      fixture.revision += 1;
+      reviewers = [];
+      frame.runActivity = {};
+      reopenFixture();
+    `);
+    await verify("archiveMatches()", replay
+      ? "Новый процесс Electron отобразил по 264 идентификатора исполнения и ревью в исходном порядке."
+      : "Из архива прочитаны и по порядку показаны 264 события исполнения и 264 события ревью из двух попыток каждой фазы.");
+    const ids = await evaluate("archiveIDs()");
+    const manifest = join(scratch, "stage-event-ids.json");
+    if (replay) {
+      assert.deepEqual(ids, JSON.parse(readFileSync(manifest, "utf8")));
+      checks.push("Число, порядок и точные идентификаторы в DOM совпали до и после перезапуска Electron.");
+      return;
+    }
+    writeFileSync(manifest, JSON.stringify(ids));
+    await evaluate("reopenFixture()");
+    await verify("archiveMatches()", "Повторное открытие карточки сохраняет число и порядок идентификаторов.");
+    const backgrounds = new Map();
+    for (const [palette, width] of [["dark", 1375], ["dark", 388], ["light", 1375], ["light", 388]]) {
+      const wide = width > 1000;
+      const stage = wide ? 0 : 4;
+      window.setContentSize(width, wide ? 900 : 1670);
+      await evaluate(`
+        document.documentElement.dataset.palette = ${JSON.stringify(palette)};
+        document.querySelector('[aria-controls="task-chat-work"]').click();
+        for (let index = 0; index < 5; index++) stageAt(index).open = index === ${stage};
+        var logUnderTest = logAt(${stage});
+        var mainLog = byId("task-chat-work");
+        var stageAction = Array.from(logUnderTest.querySelectorAll(".chat-run-item")).at(-1);
+        var mainAction = mainLog.querySelector(".chat-run-item");
+        mainAction.closest(".chat-work").open = true;
+        stageAction.open = false;
+        mainAction.open = false;
+        logUnderTest.scrollTop = 0;
+        logUnderTest.scrollIntoView({ block: "center" });
+        logUnderTest.focus({ preventScroll: true });
+        void 0;
+      `);
+      const label = palette + ", " + width + " px";
+      const layout = await evaluate(`({
+        background: getComputedStyle(logUnderTest).backgroundColor,
+        mainBackground: getComputedStyle(mainLog).backgroundColor,
+        border: getComputedStyle(logUnderTest).borderColor,
+        mainBorder: getComputedStyle(mainLog).borderColor,
+        color: getComputedStyle(stageAction).color,
+        mainColor: getComputedStyle(mainAction).color,
+        focused: document.activeElement === logUnderTest,
+        closed: !stageAction.open && !mainAction.open,
+        logHeight: logUnderTest.clientHeight,
+        scrollHeight: logUnderTest.scrollHeight,
+        logWidth: logUnderTest.clientWidth,
+        scrollWidth: logUnderTest.scrollWidth,
+        bodyWidth: body.clientWidth,
+        bodyScrollWidth: body.scrollWidth,
+      })`);
+      assert.equal(layout.background, layout.mainBackground, label + " — фон");
+      assert.equal(layout.border, layout.mainBorder, label + " — рамка");
+      assert.equal(layout.color, layout.mainColor, label + " — цвет действия");
+      assert.ok(layout.closed && layout.focused, label + " — раскрытие и фокус: " + JSON.stringify(layout));
+      assert.ok(layout.scrollHeight > layout.logHeight * 2, label + " — высота ленты");
+      assert.equal(layout.scrollWidth, layout.logWidth, label + " — ширина ленты");
+      assert.equal(layout.bodyScrollWidth, layout.bodyWidth, label + " — ширина панели");
+      checks.push(label + " — фон, рамка и цвет действия совпадают. Журнал этапа прокручивается отдельно, без горизонтальной прокрутки.");
+      backgrounds.set(palette, await evaluate("getComputedStyle(logUnderTest).backgroundColor"));
+      const end = { key: "End", code: "End", windowsVirtualKeyCode: 35 };
+      await page.debugger.sendCommand("Input.dispatchKeyEvent", { type: "keyDown", ...end });
+      await page.debugger.sendCommand("Input.dispatchKeyEvent", { type: "keyUp", ...end });
+      await verify(`logUnderTest.scrollTop > 0 &&
+        logUnderTest.scrollHeight - logUnderTest.scrollTop - logUnderTest.clientHeight <= 2`,
+        label + " — End прокручивает журнал до результата второй попытки.");
+      await evaluate(`stageAction.open = true; mainAction.open = true;
+        logUnderTest.scrollTop = logUnderTest.scrollHeight;
+        logUnderTest.scrollIntoView({ block: "center" });
+        void 0`);
+      await verify(`
+        stageAction.open && mainAction.open &&
+        stageAction.getBoundingClientRect().bottom <= logUnderTest.getBoundingClientRect().bottom &&
+        stageAction.getBoundingClientRect().top >= logUnderTest.getBoundingClientRect().top &&
+        logUnderTest.getBoundingClientRect().bottom <= body.getBoundingClientRect().bottom &&
+        stageAt(${stage}).querySelector("h5").getBoundingClientRect().top >= body.getBoundingClientRect().top &&
+        stageAction.textContent.includes("Проверка " + (${wide} ? "work" : "review") + "-2-132 завершена.")
+      `, label + " — раскрытый вывод последней команды полностью виден.");
+      if (wide && palette === "dark") await capture("stage-work-dark.png", 680);
+      if (!wide && palette === "light") await capture("stage-work-light-narrow.png", 360);
+    }
+    assert.notEqual(backgrounds.get("dark"), backgrounds.get("light"));
+  }
+  async function initialize() {
     const html = read("index.html").replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, "")
       .replace(/<link\b[^>]*>/g, "").replace(/<meta http-equiv="Content-Security-Policy"[^>]*>/, "");
     await window.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
@@ -164,6 +330,9 @@ async function runCheck() {
       };
       openFixture();
     `);
+  }
+
+  async function checkExistingBehavior() {
     await click(".expert-stage-row");
     await verify(`stageAt(0).open && visible(stageAt(0).querySelector("h5")) &&
       stageText(0).includes("Ход работы") && stageText(0).includes("пока нет записей")`,
@@ -178,7 +347,7 @@ async function runCheck() {
       taskInSheet.expertTeam.work.stages[1].dependsOn.includes("analysis") &&
       taskInSheet.expertTeam.work.stages[0].inputs.includes("STATIC_INPUT")`,
       "Enter раскрывает этап. Поля плана остались в данных карточки, карточка их под строкой не показывает.");
-    await capture("stage-empty.png", 680);
+    await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
 
     await evaluate(`
       var outside = activity(1, "outside", "ПОДГОТОВКА СЕАНСА");
@@ -217,7 +386,6 @@ async function runCheck() {
       !/ЧУЖОЙ|ЧУЖАЯ|ПОДГОТОВКА СЕАНСА|СОБЫТИЕ БЕЗ СВЯЗИ/.test(stageText(0)) &&
       stageAt(0).querySelector(".chat-run-item").open`,
       "Позднее пояснение специалиста и координация ведущего видны до завершения этапа. Порядок и раскрытие команды сохраняются.");
-    await capture("stage-live.png", 680);
 
     await evaluate(`
       var lateCommand = {
@@ -346,9 +514,21 @@ async function runCheck() {
       ordered(stageAt(0).textContent, ["Проверка первой попытки завершилась позднее.", "Первая попытка отложена."]) &&
       body.scrollWidth === body.clientWidth`,
       "В узкой панели Enter раскрывает этап без горизонтальной прокрутки. Поздний вывод восстановлен в первой попытке, итог во второй.");
-    await evaluate(`stageAt(0).scrollIntoView({ block: "start" }); void 0`);
-    await capture("stage-restored-narrow.png", 360);
+  }
+
+  try {
+    await initialize();
+    if (!replay) await checkExistingBehavior();
+    await checkArchive();
     assert.deepEqual(errors, []);
+    if (!replay) {
+      writeFileSync(join(scratch, "first-checks.json"), JSON.stringify({ checks, captures }));
+      return;
+    }
+
+    const first = JSON.parse(readFileSync(join(scratch, "first-checks.json"), "utf8"));
+    checks.unshift(...first.checks);
+    captures.unshift(...first.captures);
 
     const head = git("rev-parse", "HEAD").toString().trim();
     const sources = [
@@ -356,14 +536,12 @@ async function runCheck() {
       "src/desktop/codex-chat.ts", "src/desktop/codex-run.ts", "src/desktop/expert-tools.ts",
       "src/desktop/locales/en.json", "src/desktop/locales/ru.json", "src/desktop/renderer.js",
       "src/desktop/reviewer-chat.ts", "src/desktop/run-activity.ts", "src/desktop/styles.css",
+      "src/desktop/stage-run-history.ts", "src/desktop/themes.css", "src/desktop/index.html",
+      "src/desktop/preload.cjs", "src/desktop/main.ts", "scripts/check-stage-work.mjs", "scripts/electron-check.mjs",
     ];
     const hashes = sources.map(path => {
-      const current = git("hash-object", "--path=" + path, path).toString().trim();
-      const committed = git("rev-parse", head + ":" + path).toString().trim();
-      const bytes = current === committed ? git("cat-file", "blob", committed) :
-        Buffer.from(readFileSync(join(root, path), "utf8").replace(/\r\n/g, "\n"));
-      const representation = current === committed ? "Git blob" : "рабочая копия UTF-8 LF";
-      return path + " — " + createHash("sha256").update(bytes).digest("hex") + " (" + representation + ")";
+      const bytes = readFileSync(join(root, path), "utf8").replace(/\r\n/g, "\n");
+      return path + " — " + createHash("sha256").update(bytes).digest("hex");
     });
     const fence = String.fromCharCode(96).repeat(3);
     const report = [
@@ -372,15 +550,16 @@ async function runCheck() {
       "Windows " + process.getSystemVersion() + ", Electron " + process.versions.electron +
         ", Chromium " + process.versions.chrome + ", Node " + process.versions.node + " (Electron).", "",
       fence + "powershell", "node scripts/check-stage-work.mjs --artifacts .tasks/qa/retry", fence, "",
-      "Проверен рабочий интерфейс Electron с тестовыми данными IPC в изолированном окне. Повторное открытие " +
-        "проверено через showTask. Позднее завершение передаётся в renderer с уже сохранённым временем начала команды. " +
-        "Реальный провайдер, восстановление времени в нормализаторе и запись журнала здесь не вызываются.", "",
+      "Рабочий интерфейс запущен в изолированных окнах двух отдельных процессов Electron. " +
+        "Граница IPC заменена тестовым адаптером. Первый процесс создаёт архив через штатное хранилище, " +
+        "второй читает те же файлы из временной доски. Сохранённые идентификаторы сверены с DOM при обоих запусках. " +
+        "Провайдер заменён тестовыми записями. Чтение пяти страниц и поздний вывод покрывает тест в tests/experts.test.ts.", "",
       "## Результаты", "", ...checks.map(check => "- " + check), "",
       "## Снимки", "", ...captures.map(capture => "- " + capture), "",
-      "## Проверенные исходники", "", "HEAD рабочей копии " + head + ". SHA-256:", "",
+      "## Проверенные исходники", "", "HEAD рабочей копии " + head + ". SHA-256 байтов UTF-8 с LF.", "",
       ...hashes.map(hash => "- " + hash), "",
     ].join("\n");
-    writeFileSync(join(artifacts, "stage-work-check.md"), report);
+    writeFileSync(join(artifacts, "stage-journal-check.md"), report);
     console.log("Stage work checks:", checks.length);
   } catch (error) {
     console.error(error);

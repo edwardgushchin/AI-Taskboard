@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { callCli, cliFailure } from "./cli.ts";
 import { skillEvidence } from "./skill-evidence.ts";
-import { runActivity } from "./run-activity.ts";
+import { previewRunActivity, runActivity } from "./run-activity.ts";
+import { stageRunJournal } from "./stage-run-history.ts";
 import type { AgentControl, RpcMessage } from "./codex-rpc.ts";
 import type { teamInbox } from "../cli/expert-team.ts";
 import type { Expert } from "../cli/experts.ts";
@@ -134,48 +135,88 @@ export function phaseStageReporter(project: string, phase: "work" | "review", id
   let provider: Parameters<typeof evidence.bind>[0] | undefined;
   let onActivity: ((item: RunActivity) => void) | undefined;
   const assigned = new Map<string, string>();
+  const open = new Map<string, string>();
+  const journals = new Map<string, ReturnType<typeof stageRunJournal>>();
+  const owners = new Map<string, string>();
   const activity = new Map<string, Map<string, RunActivity>>();
+  const leadActivity = new Map<string, RunActivity>();
+  const latestChildItem = new Map<string, string>();
   let timer: NodeJS.Timeout | undefined;
   let polling = false;
   let closed = false;
 
+  function journal(taskId: string) {
+    let value = journals.get(taskId);
+    if (!value) {
+      value = stageRunJournal(project, taskId, phase, sessionId);
+      journals.set(taskId, value);
+    }
+    return value;
+  }
+
+  function saveActivity(item: RunActivity, taskIds: Set<string>) {
+    const key = item.threadId + "\0" + item.id;
+    let taskId = owners.get(key);
+    if (!taskId && taskIds.size === 1) {
+      taskId = [...taskIds][0];
+      owners.set(key, taskId);
+    }
+    if (taskId) journal(taskId).record({ ...item, stageSessionId: sessionId });
+  }
+
   function childItem(child: string, method: string, params: Record<string, unknown>, at?: string, restored = false) {
-    if (!onActivity || closed) return;
+    if (closed) return;
     const entries = activity.get(child) ?? new Map<string, RunActivity>();
     activity.set(child, entries);
-    const item = runActivity(entries, method, params, at);
+    const item = runActivity(entries, method, params, at, true);
     // A completion or delta without a confirmed start may belong to an earlier assignment.
     if (!item?.at) return;
     if (restored && at) item.at = at;
     const previous = entries.get(item.id);
+    if (restored && item.status === "inProgress" && previous && previous.status !== "inProgress") return;
     entries.set(item.id, item);
     if (JSON.stringify(previous) === JSON.stringify(item)) return;
-    onActivity({ ...item, id: child + ":" + item.id, stageSessionId: sessionId, stageChild: true });
+    const entry = { ...item, id: child + ":" + item.id, stageSessionId: sessionId, stageChild: true as const };
+    const taskIds = new Set([...open].filter(([key]) => assigned.get(key) === child).map(([, taskId]) => taskId));
+    saveActivity(entry, taskIds);
+    onActivity?.(previewRunActivity(entry));
   }
 
-  async function readChild(child: string) {
-    if (!provider || !onActivity || closed || !codexThreadPattern.test(child)) return;
+  async function readChild(child: string, final = false) {
+    if (!provider || closed || !codexThreadPattern.test(child)) return;
     let cursor: string | null = null;
+    const seen = new Set<string>();
     const items: { item: Record<string, unknown>; at?: number }[] = [];
+    const previousLatest = final ? undefined : latestChildItem.get(child);
+    let latest: string | undefined;
+    let complete = false;
     try {
       // Ask the same provider session for persisted items even if it did not notify the lead of child activity.
-      for (let pageNumber = 0; pageNumber < 3; pageNumber++) {
+      while (!closed) {
         const page: {
           data: { item: Record<string, unknown>; startedAtMs?: number | null; completedAtMs?: number | null }[];
           nextCursor: string | null;
         } = await provider("thread/items/list", { threadId: child, cursor, limit: 100, sortDirection: "desc" });
-        let reachedStart = false;
+        latest ??= typeof page.data[0]?.item.id === "string" ? page.data[0].item.id : undefined;
+        let reachedStart = page.data.length > 0;
+        let reachedPrevious = false;
         for (const entry of page.data) {
           const at = entry.startedAtMs;
+          if (entry.item.id === previousLatest) reachedPrevious = true;
           if (typeof at !== "number" || !Number.isFinite(at)) {
+            reachedStart = false;
             items.push({ item: entry.item });
-          } else if (at < startedAt) {
-            reachedStart = true;
-          } else {
+          } else if (at >= startedAt) {
+            reachedStart = false;
             items.push({ item: entry.item, at });
           }
         }
-        if (closed || reachedStart || !page.nextCursor) break;
+        if (reachedStart || reachedPrevious || !page.nextCursor) {
+          complete = true;
+          break;
+        }
+        if (seen.has(page.nextCursor)) break;
+        seen.add(page.nextCursor);
         cursor = page.nextCursor;
       }
     } catch {
@@ -185,15 +226,16 @@ export function phaseStageReporter(project: string, phase: "work" | "review", id
       const method = item.status === "inProgress" ? "item/started" : "item/completed";
       childItem(child, method, { item, threadId: child }, at === undefined ? undefined : new Date(at).toISOString(), true);
     }
+    if (complete && latest) latestChildItem.set(child, latest);
   }
 
   function schedule() {
-    if (timer || polling || closed || !assigned.size || !onActivity) return;
+    if (timer || polling || closed || !assigned.size) return;
     timer = setTimeout(async () => {
       timer = undefined;
       polling = true;
       try {
-        await Promise.all([...new Set(assigned.values())].map(readChild));
+        await Promise.all([...new Set(assigned.values())].map(child => readChild(child)));
       } finally {
         polling = false;
         schedule();
@@ -217,16 +259,28 @@ export function phaseStageReporter(project: string, phase: "work" | "review", id
       closed = true;
       clearTimeout(timer);
       assigned.clear();
+      for (const value of journals.values()) value.close();
     },
     verify(args: unknown) { return evidence.verify(args as Record<string, unknown>); },
     observe(message: RpcMessage, lead: string | undefined) {
+      if (closed) return;
       if (lead) evidence.observe(message, lead);
       const event = message.params as { threadId?: string; item?: { type?: string; tool?: string; status?: string;
         receiverThreadIds?: string[]; agentsStates?: Record<string, { status: string }>;
         kind?: string; agentThreadId?: string; agentPath?: string } } | undefined;
       const item = event?.item;
       const child = event?.threadId;
-      if (child && child !== lead && codexThreadPattern.test(child) && [...assigned.values()].includes(child) &&
+      if (lead && event && child === lead && message.method?.startsWith("item/")) {
+        const taskIds = new Set(open.values());
+        const entry = runActivity(leadActivity, message.method, event, new Date().toISOString(), true);
+        if (entry) {
+          const seen = leadActivity.has(entry.id);
+          leadActivity.set(entry.id, entry);
+          saveActivity(entry, seen ? new Set() : taskIds);
+        }
+      }
+      if (child && child !== lead && codexThreadPattern.test(child) &&
+          ([...assigned.values()].includes(child) || activity.has(child) || children.has(child)) &&
           message.method?.startsWith("item/")) {
         const started = message.method === "item/started" || message.method === "item/autoApprovalReview/started";
         childItem(child, message.method, event, started ? new Date().toISOString() : undefined);
@@ -270,13 +324,20 @@ export function phaseStageReporter(project: string, phase: "work" | "review", id
         targetHead: id ? targetHead : input.targetHead });
       if (!updated.ok) return updated;
       const key = taskId + ":" + input.key;
+      if (input.state === "running") open.set(key, taskId);
       if (input.state === "running" && updated.data.run?.agentId) {
         assigned.set(key, updated.data.run.agentId);
+        const child = updated.data.run.agentId;
+        for (const item of activity.get(child)?.values() ?? []) {
+          saveActivity({ ...item, id: child + ":" + item.id, stageChild: true }, new Set([taskId]));
+        }
         schedule();
       } else if (input.state !== "running") {
         const child = agentId ?? assigned.get(key);
+        if (child) await readChild(child, true);
         assigned.delete(key);
-        if (child) await readChild(child);
+        open.delete(key);
+        journals.get(taskId)?.flush();
       }
       if (input.state !== "running") return updated;
       const skills = new Set(updated.data.skills);

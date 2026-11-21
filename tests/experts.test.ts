@@ -13,6 +13,7 @@ import { createExpertPlan, expertStagesStatus, reviewDecisionSequence, sendTeamM
 import { managerInbox } from "../src/cli/task-messages.ts";
 import { callCli } from "../src/desktop/cli.ts";
 import { leadSkillInstructions, phaseStageReporter, watchTeamMail } from "../src/desktop/expert-tools.ts";
+import { readStageRunHistory } from "../src/desktop/stage-run-history.ts";
 import type { RunActivity, Task } from "../src/cli/model.ts";
 
 function fixture(t: TestContext) {
@@ -408,14 +409,16 @@ test("a resumed native specialist must complete in the current lead run", async 
   let commandAt = 0;
   let historyAvailable = true;
   let additionalHistory: { item: typeof command; startedAtMs?: number; completedAtMs?: number }[] = [];
+  const pages = new Set<number>();
   reporter.bind(async <T>(method: string, params: object) => {
     assert.equal(method, "thread/items/list");
     assert.equal("threadId" in params && params.threadId, child);
     if (!historyAvailable) throw new Error("Thread history unavailable");
-    return {
-      data: [...additionalHistory, { item: command, startedAtMs: commandAt }],
-      nextCursor: null,
-    } as T;
+    const offset = "cursor" in params && params.cursor ? Number(params.cursor) : 0;
+    pages.add(offset);
+    const history = [...additionalHistory, { item: command, startedAtMs: commandAt }];
+    const next = offset + 100;
+    return { data: history.slice(offset, next), nextCursor: next < history.length ? String(next) : null } as T;
   }, lead);
   reporter.listen(item => items.set(item.id, item));
   const stage = { revision, key: "verify" };
@@ -466,14 +469,25 @@ test("a resumed native specialist must complete in the current lead run", async 
   assert.equal(items.get(child + ":" + command.id)?.text, "\nExit code: 0");
   additionalHistory = [{ item: late, completedAtMs: Date.now() }];
   historyAvailable = true;
+  const longOutput = "result line\n".repeat(3000);
+  const observedAt = Date.now();
+  const providerItems = Array.from({ length: 405 }, (_, index) => ({
+    item: { ...command, id: "paged-" + index, aggregatedOutput: index === 0 ? longOutput : longOutput.slice(0, 3100) },
+    startedAtMs: observedAt,
+  }));
+  additionalHistory.unshift(...[...providerItems].reverse());
+  const pending = { ...command, id: "finishes-late", status: "inProgress" };
+  observe(child, pending, "item/started");
   observe(lead, { type: "collabAgentToolCall", tool: "wait", agentsStates: { [child]: { status: "completed" } } });
   observe(lead, { ...followup, tool: "resumeAgent" });
   await expectError("EXPERT_AGENT_RUNNING");
   observe(lead, { type: "subAgentActivity", kind: "completed", agentThreadId: child, agentPath: "/root/qa" });
   assert.ok((await reporter.report({ ...result, agentId: "/root/qa" })).ok);
+  observe(child, { ...pending, status: "completed", aggregatedOutput: longOutput });
   assert.equal(items.has(child + ":" + late.id), false);
   assert.equal(items.get(child + ":" + command.id)?.text, "\nExit code: 0");
-  const saved = await callCli<Task>(f.root, ["run-log", id], { entries: [...items.values()], runThreadId: lead });
+  const legacySample = [items.get(child + ":" + command.id), items.get(child + ":" + commentary.id)];
+  const saved = await callCli<Task>(f.root, ["run-log", id], { entries: legacySample, runThreadId: lead });
   assert.ok(saved.ok, JSON.stringify(saved));
   const reopened = await callCli<Task>(f.root, ["show", id]);
   assert.ok(reopened.ok, JSON.stringify(reopened));
@@ -481,6 +495,19 @@ test("a resumed native specialist must complete in the current lead run", async 
   assert.equal(reopened.data.history.at(-1)?.run?.length, 2);
   assert.ok(reopened.data.history.at(-1)?.run?.every(item =>
     item.threadId === child && item.stageSessionId === reporter.sessionId && item.stageChild));
+  const beforeClose = readStageRunHistory(f.root, id).work;
+  assert.ok(beforeClose.some(item => item.id === child + ":" + command.id));
+  assert.ok(beforeClose.some(item => item.id === child + ":" + commentary.id));
+  assert.ok(!beforeClose.some(item => item.id === child + ":" + late.id));
+  assert.deepEqual([...pages].sort((a, b) => a - b), [0, 100, 200, 300, 400]);
+  assert.deepEqual(
+    beforeClose.filter(item => item.id.startsWith(child + ":paged-")).map(item => item.id),
+    providerItems.map(entry => child + ":" + entry.item.id),
+  );
+  assert.equal(beforeClose.find(item => item.id === child + ":paged-0")?.text, longOutput + "\nExit code: 0");
+  assert.equal(beforeClose.find(item => item.id === child + ":" + pending.id)?.text, longOutput + "\nExit code: 0");
+  reporter.close();
+  assert.deepEqual(readStageRunHistory(f.root, id).work, beforeClose);
 });
 
 for (const mode of ["reviewer", "manager"] as const) {

@@ -54,6 +54,7 @@ import { startWindowsDictation } from "./windows-dictation.ts";
 import { needsManagerAttention } from "../cli/task-messages.ts";
 import { readReviewReports, saveReviewReports } from "./review-history.ts";
 import { readReviewerChat, reviewerActivity, withReviewerChat } from "./reviewer-chat.ts";
+import { readStageRunHistory } from "./stage-run-history.ts";
 import { goalActivityItems, goalMessages, hasManagerImageView, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView, saveManagerHistory, sendGoalMessage } from "./manager-history.ts";
 import { backgroundGoalHistory } from "./goal-history-background.ts";
 import { goalActionTools, runGoalAction } from "./goal-actions.ts";
@@ -2152,6 +2153,16 @@ ipcMain.handle("board:taskRunHistory", async (event, id: unknown) => {
   }
 });
 
+ipcMain.handle("board:stageRunHistory", (event, id: unknown) => {
+  const { project } = stateOf(event);
+  if (!project || typeof id !== "string" || !taskIdPattern.test(id)) return cliFailure("INVALID_INPUT", t("errors.f6cce3ef8b13aaf9"));
+  try {
+    return { ok: true, data: readStageRunHistory(project, id) };
+  } catch (error) {
+    return cliFailure("TASK_HISTORY_FAILED", (error as Error).message);
+  }
+});
+
 ipcMain.handle("board:reviewerChat", (event, id: unknown) => {
   const { project } = stateOf(event);
   if (!project || typeof id !== "string" || !taskIdPattern.test(id)) return cliFailure("INVALID_INPUT", t("errors.f6cce3ef8b13aaf9"));
@@ -3134,6 +3145,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         mcpTools,
         observeProvider: stages?.observe,
         bindProvider: stages?.bind,
+        stageReporter: stages,
         goal: goal === true ? requestText : undefined,
         resumeGoal: goal === "resume",
         iterativeGoal: Boolean(iteration),
