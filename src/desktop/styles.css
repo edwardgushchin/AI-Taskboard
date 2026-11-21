@@ -449,6 +449,8 @@ body:has(> .project-tabs:not([hidden]))::before {
   height: min(var(--board-chat-height, clamp(220px, 44vh, 390px)), max(0px, calc(100vh - 160px)));
   opacity: 1; visibility: visible;
 }
+/* Restore the reading position in a viewport that already has its final height. */
+:where(.board-draft[data-chat-remount]) .board-chat { transition: opacity 140ms ease; }
 .board-draft[data-resizing] .board-chat { transition: none; }
 .board-chat-bar {
   display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 6px; flex: none;
