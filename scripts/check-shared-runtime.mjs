@@ -36,6 +36,7 @@ if (!process.versions.electron) {
   const hybridOnly = process.argv.includes("--reviewer-human-only");
   const recoveryOnly = process.argv.includes("--worktree-recovery-only");
   const restartOnly = process.argv.includes("--task-restart-only");
+  const earlyOnly = process.argv.includes("--early-launch-only");
   const returnOnly = process.argv.includes("--review-return-only");
   const memoryOnly = process.argv.includes("--memory-only");
   const failedReviewLaunch = join(scratch, "failed-review-launch");
@@ -204,6 +205,151 @@ if (!process.versions.electron) {
       const { node, electron, chrome } = await restarted.ask({ action: "versions" });
       record(JSON.stringify({ platform: process.platform, node, electron, chrome }));
       if (output) writeFileSync(join(output, "review-return-check.txt"), results.join("\n") + "\n");
+      break checks;
+    }
+    if (earlyOnly) {
+      mkdirSync(project);
+      const git = (...args) => execFileSync("git", args, { cwd: project, env, windowsHide: true, encoding: "utf8" }).trim();
+      git("init", "-b", "main");
+      git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "Fixture");
+      cli(project, ["init"]);
+      const show = id => cli(project, ["show", id]);
+      const makeCard = title => {
+        const { id } = cli(project, ["create"], plannedDraft({ title, criteria: ["Preserve the assigned worktree"] }));
+        cli(project, ["approve", id]);
+        return id;
+      };
+      const queue = id => JSON.parse(readFileSync(join(project, ".tasks", "runtime.json"), "utf8"))
+        .find(entry => entry.kind === "queue" && entry.task === id);
+      const profiles = [
+        { autoMode: false, occupied: true, manual: true },
+        { autoMode: true, occupied: true, manual: true },
+        { autoMode: false, occupied: true },
+        { autoMode: true, occupied: true },
+        { autoMode: true, occupied: false },
+      ];
+      for (const { autoMode, occupied, manual = false } of profiles) {
+        const profile = `${manual}-${autoMode}-${occupied}`;
+        cli(project, ["settings"], { autoMode: false, reviewMode: "human", taskLimits: { executor: 4, reviewer: 1 } });
+        const title = manual ? "Manual first launch" : "Recover first launch";
+        const id = makeCard(title);
+        const stopped = makeCard("Stopped before chat");
+        const failedTitle = "Unavailable worktree, profile " + profile;
+        const failed = makeCard(failedTitle);
+        const legacy = makeCard("Legacy interrupted launch");
+        const { worktree: legacyTree } = cli(project, ["start", legacy]);
+        cli(project, ["run-log", legacy], { entries: [{
+          id: "project-closed", type: "error", title: "", text: "Project closed.", status: "interrupted",
+        }] });
+        const first = await start("early-" + profile);
+        const tasksToHold = manual ? [stopped, failed] : [id, stopped, failed];
+        const held = tasksToHold.map(task => first.ask({ action: "holdBeforeChat", id: task }));
+        await wait(async () => (await first.ask({ action: "heldStarts" })).length === held.length, "launches paused before chat creation");
+        const peer = await start("early-peer-" + profile);
+        if (!manual) {
+          await peer.ask({ action: "launch", id });
+          assert.equal(await peer.ask({ action: "executorBinding", id }), undefined, "a live launch owns the shared slot");
+        }
+        assert.ok(await peer.ask({ action: "reserve", role: "executor", task: "fixture-holder" }));
+        if (manual) {
+          cli(project, ["settings"], { autoMode: false, taskLimits: { executor: 1, reviewer: 1 } });
+          const queued = await first.ask({ action: "launch", id });
+          assert.equal(queued.ok, true, JSON.stringify(queued));
+          assert.equal(await first.ask({ action: "executorBinding", id }), undefined);
+          assert.ok(queue(id), "manual start saved a request without a slot");
+        }
+        const original = show(id);
+        assert.equal(original.status, "in_progress");
+        assert.equal(original.codexThreadId, undefined);
+        writeFileSync(join(original.git.worktree, "prior.txt"), "Preserved");
+        const stop = await first.ask({ action: "stopFromWindow", id: stopped });
+        assert.equal(queue(stopped), undefined);
+        cli(project, ["settings"], { autoMode, taskLimits: { executor: 1, reviewer: 1 } });
+        await first.ask({ action: "closeEarlyBoard" });
+        await Promise.all(held);
+        await exitWorker(first);
+        if (!manual) {
+          assert.match(JSON.stringify(show(id).history), /project-closed/);
+          assert.equal(queue(id)?.earlyLaunch?.cwd, original.git.worktree, "closing before chat must preserve the launch");
+        }
+        assert.equal(stop.ok, true);
+        assert.equal(show(id).codexThreadId, undefined);
+        const failedTree = show(failed).git.worktree;
+        git("worktree", "remove", failedTree);
+        if (!occupied) await exitWorker(peer);
+        const reopened = await start("early-reopened-" + profile);
+        await reopened.ask({ action: "newWindow" });
+        if (occupied) {
+          await wait(async () => (await reopened.ask({ action: "frames" })).every(frame =>
+            frame.waitingTasks.includes(id) && !frame.waitingTasks.includes(legacy) && !frame.waitingTasks.includes(stopped)),
+          "queue visible in both windows");
+          const waitingCard = { action: "dom", title };
+          await wait(async () => (await reopened.ask(waitingCard)).every(frame => frame.waiting), "visible hourglasses");
+          const pending = queue(id);
+          const beforeComment = show(id);
+          const comment = "Keep the pending first launch";
+          const commented = cli(project, ["comment", id], { actor: "user", text: comment });
+          assert.equal(commented.revision, beforeComment.revision + 1);
+          assert.equal(commented.status, "in_progress");
+          await wait(async () => (await reopened.ask({ action: "frames" })).every(frame =>
+            frame.board?.tasks.some(task => task.id === id && task.revision === commented.revision)),
+          "comment revision visible in both windows");
+          const frames = await reopened.ask({ action: "frames" });
+          assert.ok(frames.every(frame => frame.waitingTasks.includes(id)), "a comment must preserve the queued launch");
+          await wait(async () => (await reopened.ask(waitingCard)).every(frame => frame.waiting), "hourglasses remain after the comment");
+          assert.deepEqual(queue(id), pending);
+          assert.equal(pending?.earlyLaunch?.cwd, original.git.worktree);
+          record(`PASS waiting after comment, manual=${manual}, autoMode=${autoMode}, revision ${commented.revision}`);
+          if (output && manual && !autoMode) {
+            mkdirSync(output, { recursive: true });
+            const viewport = await reopened.ask({ action: "screenshot", path: join(output, "early-launch-queue.png"), earlyViewport: true });
+            record("CSS viewport: " + JSON.stringify(viewport));
+          }
+          await peer.ask({ action: "release", role: "executor", task: "fixture-holder" });
+        }
+        const owners = occupied ? [peer, reopened] : [reopened];
+        const activeOwner = async task => {
+          const stoppedControls = await Promise.all(owners.map(worker => worker.ask({ action: "canStop", id: task })));
+          return owners[stoppedControls.indexOf(true)];
+        };
+        const stopRetry = async (task, cwd) => {
+          let owner;
+          await wait(async () => {
+            owner = await activeOwner(task);
+            return owner;
+          }, "manual retry reached the first turn: " + task);
+          assert.equal((await owner.ask({ action: "reviewBinding", id: task }))?.cwd, cwd);
+          await owner.ask({ action: "stop", id: task });
+          await wait(() => show(task).status === "blocked", "manual retry released the slot: " + task);
+        };
+        await wait(async () => (await Promise.all(owners.map(worker => worker.ask({ action: "canStop", id })))).some(Boolean),
+          "first turn starts after reopening");
+        const bindings = await Promise.all(owners.map(worker => worker.ask({ action: "reviewBinding", id })));
+        const executions = bindings.filter(Boolean);
+        assert.equal(executions.length, 1);
+        assert.equal(executions[0].count, 1);
+        assert.equal(executions[0].cwd, original.git.worktree);
+        assert.equal(readFileSync(join(original.git.worktree, "prior.txt"), "utf8"), "Preserved");
+        assert.ok(show(id).codexThreadId);
+        await owners[bindings.findIndex(Boolean)].ask({ action: "stop", id });
+        await wait(() => show(failed).status === "blocked", "missing worktree reported on the card");
+        assert.match(show(failed).blocked.reason, /WORKTREE_MISSING/);
+        assert.ok(show(failed).blocked.condition);
+        assert.equal(show(stopped).codexThreadId, undefined);
+        assert.equal(show(legacy).codexThreadId, undefined);
+        assert.equal(queue(legacy), undefined);
+        const explanation = await reopened.ask({ action: "retryLegacy" });
+        assert.ok(explanation);
+        await stopRetry(legacy, legacyTree);
+        git("worktree", "add", failedTree, "ai-taskboard/" + failed);
+        assert.ok(await reopened.ask({ action: "retryFailed", title: failedTitle }));
+        await stopRetry(failed, failedTree);
+        const { electron, chrome, node } = await reopened.ask({ action: "versions" });
+        record(JSON.stringify({ platform: process.platform, electron, chrome, node }));
+        await exitWorker(reopened);
+        if (occupied) await exitWorker(peer);
+        record(`PASS early launch, manual=${manual}, autoMode=${autoMode}, occupied=${occupied}: one turn, original worktree and recovery actions`);
+      }
       break checks;
     }
     if (restartOnly) {
@@ -957,7 +1103,13 @@ if (!process.versions.electron) {
     await delay(3000);
     return { text: "Isolated manager fixture" };
   };
+  const heldStarts = new Map();
   globalThis.runtimeCheckStart = async (_client, board, _cwd, task, _activity, _usage, signal, beforeTurn, _profile, _recoveringThread, strict) => {
+    if (heldStarts.has(task.id)) {
+      heldStarts.set(task.id, true);
+      while (!signal.aborted) await delay(30);
+      signal.throwIfAborted();
+    }
     if (failNext) { failNext = false; throw Error("Isolated provider launch failure"); }
     const failedReviewLaunch = join(scratch, "failed-review-launch");
     if (existsSync(failedReviewLaunch) && task.id === readFileSync(failedReviewLaunch, "utf8")) {
@@ -1064,10 +1216,13 @@ if (!process.versions.electron) {
       if (command.action === "newWindow") { const state = qa.createWindow([project]); await state.ready; data = true; }
       if (command.action === "compactWindows") for (const win of BrowserWindow.getAllWindows()) win.setSize(700, 550);
       if (command.action === "dom") {
-        data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript(`({
-          count: Number(document.querySelector('#status-agents span')?.textContent),
-          waiting: Boolean(document.querySelector('.task-card .task-queue-indicator'))
-        })`)));
+        data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript(`(() => {
+          const title = ${JSON.stringify(command.title ?? null)};
+          const cards = [...document.querySelectorAll('.task-card')];
+          const waiting = cards.some(card =>
+            (!title || card.querySelector('strong')?.textContent === title) && card.querySelector('.task-queue-indicator'));
+          return { count: Number(document.querySelector('#status-agents span')?.textContent), waiting };
+        })()`)));
       }
       if (command.action === "order") data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript(`(() => {
         const titles = state => [...document.querySelectorAll('#lane-cards-' + state + ' .task-card-heading strong')].map(node => node.textContent);
@@ -1160,6 +1315,42 @@ if (!process.versions.electron) {
         data = true;
       }
       if (command.action === "launch") data = await qa.launchTask(project, command.id, undefined, false, undefined, undefined, false, false, false, false, true);
+      if (command.action === "holdBeforeChat") {
+        heldStarts.set(command.id, false);
+        data = await qa.launchTask(project, command.id, undefined, false, undefined, undefined, false, false, false, false, true);
+      }
+      if (command.action === "heldStarts") data = [...heldStarts].filter(([, reached]) => reached).map(([id]) => id);
+      if (command.action === "closeEarlyBoard") {
+        const original = dialog.showMessageBox;
+        dialog.showMessageBox = async () => ({ response: 1 });
+        try {
+          const contents = (await mainWindow).webContents;
+          await contents.executeJavaScript(`window.taskboard.closeTab(${JSON.stringify(project)})`);
+          data = await contents.executeJavaScript("window.taskboard.bootstrap().then(frame => !frame.project)");
+          assert.equal(data, true);
+        } finally {
+          dialog.showMessageBox = original;
+        }
+      }
+      if (command.action === "retryLegacy" || command.action === "retryFailed") {
+        const legacy = command.action === "retryLegacy";
+        const lane = legacy ? "in_progress" : "blocked";
+        const title = legacy ? "Legacy interrupted launch" : command.title;
+        const contents = (await mainWindow).webContents;
+        await contents.executeJavaScript(`[...document.querySelectorAll('#lane-cards-${lane} .task-card')].find(card =>
+          card.querySelector('strong')?.textContent === ${JSON.stringify(title)})?.click()`);
+        data = await contents.executeJavaScript(`(async () => {
+          const deadline = Date.now() + 5000;
+          while (!document.querySelector('#task-launch') && Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 40));
+          }
+          const button = document.querySelector('#task-launch');
+          const text = ${legacy} ? document.querySelector('#task-unconfirmed-launch')?.textContent : button?.textContent;
+          button?.click();
+          return text;
+        })()`);
+        await contents.executeJavaScript("document.querySelector('dialog[open]')?.close()");
+      }
       if (command.action === "returnReview") {
         const { id, revision, reason } = command;
         data = await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(
@@ -1315,13 +1506,21 @@ if (!process.versions.electron) {
       if (command.action === "endDiscussion") { leases.get("discussion")?.(); leases.delete("discussion"); data = true; }
       if (command.action === "failNext") { failNext = true; data = true; }
       if (command.action === "screenshot") {
-        const win = BrowserWindow.getAllWindows()[0]; win.showInactive();
+        const win = BrowserWindow.getAllWindows()[0];
+        win.showInactive();
+        if (command.earlyViewport) {
+          win.setContentSize(1280, 800);
+          win.webContents.setZoomFactor(1);
+          await wait(() => win.webContents.executeJavaScript("innerWidth === 1280 && innerHeight === 800"), "standard screenshot viewport");
+        }
         for (let attempt = 0; ; attempt++) {
           await delay(250);
           try { writeFileSync(command.path, (await win.webContents.capturePage()).toPNG()); break; }
           catch (error) { if (attempt >= 2) throw error; }
         }
-        data = true;
+        data = command.earlyViewport
+          ? await win.webContents.executeJavaScript("({ width: innerWidth, height: innerHeight, scale: devicePixelRatio })")
+          : true;
       }
       if (command.action === "exit") { for (const watch of globalThis.sharedCheck.subscriptions.values()) watch.stop(); for (const run of runs.values()) await run.interrupt(); for (const lease of leases.values()) lease(); process.send({ sequence: command.sequence, data: true }); setTimeout(() => app.exit(0), 100); return; }
       process.send({ sequence: command.sequence, data, pids: [...pids] });

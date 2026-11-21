@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { directory, exists, locateBoard, readJson, withRuntimeLock, writeJson } from "../cli/storage.ts";
+import { TaskboardError } from "../cli/model.ts";
 import type { BoardLocation } from "../cli/storage.ts";
 import type { AgentLimits, RunActivity, Task } from "../cli/model.ts";
 import type { BoardActivity } from "./codex-chat.ts";
@@ -23,6 +24,8 @@ export interface RuntimeEntry {
   linkedThread?: { revision: number; codexThreadId: string };
   turnRequest?: { threadId: string; clientId: string; turnId?: string };
   restart?: { threadId: string; cwd: string };
+  earlyLaunch?: { cwd: string };
+  launchStopped?: true;
   continuation?: { afterDisconnect?: boolean; withoutProgress?: boolean };
   quotaPaused?: boolean;
   reviewReturn?: true;
@@ -93,7 +96,7 @@ export function rememberExecutor(project: string, task: QueuedTask, cwd: string,
   continuation: RuntimeEntry["continuation"], newThread?: RuntimeEntry["newThread"]) {
   runtimeTransaction(project, entries => {
     const slot = entries.find(entry => entry.id === context.getStore() && entry.kind === "slot" && entry.task === task.id);
-    if (slot && task.status === "in_progress") {
+    if (slot && !slot.launchStopped && task.status === "in_progress") {
       slot.revision = task.revision;
       slot.newThread = newThread;
       if (task.codexThreadId && !newThread) {
@@ -116,12 +119,25 @@ export function forgetExecutor(project: string, task: string) {
   runtimeTransaction(project, entries => {
     for (const entry of entries) {
       if (entry.kind !== "slot" || entry.task !== task) continue;
+      entry.launchStopped = true;
       delete entry.restart;
       delete entry.revision;
       delete entry.newThread;
     }
     const index = entries.findIndex(entry => entry.kind === "queue" && entry.task === task);
     if (index >= 0) entries.splice(index, 1);
+  });
+}
+
+export function queueEarlyExecutor(project: string, task: QueuedTask, slotId: string, cwd: string) {
+  runtimeTransaction(project, entries => {
+    const slot = entries.find(entry => entry.id === slotId && entry.kind === "slot" &&
+      entry.role === "executor" && entry.task === task.id);
+    if (!slot || slot.launchStopped || entries.some(entry => entry.kind === "queue" && entry.task === task.id)) {
+      throw new TaskboardError("CHAT_BUSY", "This executor no longer owns the launch.");
+    }
+    entries.push({ id: "queue:" + task.id, kind: "queue", owner: 0, task: task.id,
+      revision: task.revision, earlyLaunch: { cwd } });
   });
 }
 
@@ -143,7 +159,7 @@ export function runtimeEntries(project: string) {
   return liveEntries(readEntries(join(runtimeLocation(project).directory, "runtime.json")));
 }
 
-export type DeferredExecutor = Pick<RuntimeEntry, "continuation" | "quotaPaused" | "newThread" | "reviewReturn"> & { revision: number };
+export type DeferredExecutor = Pick<RuntimeEntry, "continuation" | "quotaPaused" | "newThread" | "reviewReturn" | "earlyLaunch"> & { revision: number };
 
 type QueuedTask = Pick<Task, "id" | "revision" | "status" | "codexThreadId" | "reviewReturn">;
 
@@ -151,17 +167,39 @@ export function matchesQueuedExecutor(entry: RuntimeEntry, task: QueuedTask) {
   if (entry.kind !== "queue" || entry.task !== task.id || task.status !== "in_progress") return false;
   if (entry.reviewReturn) return task.reviewReturn !== undefined && entry.revision === task.reviewReturn;
   if (entry.restart) return entry.restart.threadId === task.codexThreadId && (entry.revision ?? Infinity) <= task.revision;
+  if (entry.earlyLaunch) {
+    // The revision is the first card snapshot covered by this launch.
+    // Comments and other edits may advance it while the task stays in progress.
+    return entry.revision !== undefined && entry.revision <= task.revision &&
+      (task.codexThreadId === undefined || task.codexThreadId === entry.linkedThread?.codexThreadId);
+  }
   return entry.revision === task.revision || (entry.linkedThread?.revision === task.revision &&
     entry.linkedThread.codexThreadId === task.codexThreadId);
+}
+
+export function preserveLegacyFirstLaunch(project: string, task: QueuedTask & Pick<Task, "git" | "workingDirectory">) {
+  const cwd = task.git?.worktree ?? task.workingDirectory;
+  if (!cwd || task.status !== "in_progress" || task.codexThreadId) return;
+  // An older manual queue entry can only be upgraded while it still matches
+  // the card, before the comment publishes the next revision.
+  const legacy = (entry: RuntimeEntry) => entry.revision === task.revision &&
+    !entry.earlyLaunch && !entry.reviewReturn && !entry.restart && !entry.newThread &&
+    !entry.quotaPaused && !entry.continuation && !entry.linkedThread && !entry.turnRequest &&
+    matchesQueuedExecutor(entry, task);
+  if (!runtimeEntries(project).some(legacy)) return;
+  runtimeTransaction(project, entries => {
+    const pending = entries.find(legacy);
+    if (pending) pending.earlyLaunch = { cwd };
+  });
 }
 
 export function linkQueuedExecutor(project: string, task: QueuedTask, updated: QueuedTask) {
   return runtimeTransaction(project, entries => {
     const entry = entries.find(entry => matchesQueuedExecutor(entry, task));
     if (!entry) return false;
-    // Publish both revisions before saving the card, so either snapshot survives a crash.
+    // Publish the chat binding before saving the card, so either snapshot survives a crash.
     if (!entry.reviewReturn && updated.revision !== task.revision && updated.codexThreadId) {
-      entry.revision = task.revision;
+      if (!entry.earlyLaunch) entry.revision = task.revision;
       entry.linkedThread = { revision: updated.revision, codexThreadId: updated.codexThreadId };
     }
     return true;
@@ -229,5 +267,5 @@ export function registerRuntime(project: string, value: Omit<RuntimeEntry, "id" 
       if (restart) queueRestart(entries, entry, restart === "quota" || undefined);
     }
   });
-  return Object.assign(release, { run: <T>(callback: () => T) => context.run(id, callback) });
+  return Object.assign(release, { id, run: <T>(callback: () => T) => context.run(id, callback) });
 }

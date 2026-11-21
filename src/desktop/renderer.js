@@ -1321,6 +1321,11 @@ function switchBoardRendering(previousProject, project) {
   return saved?.preferences;
 }
 
+function showUnconfirmedLaunch(task) {
+  return !manualBoard() && task.status === "in_progress" && !task.codexThreadId &&
+    !frame.runningTasks?.includes(task.id) && !frame.waitingTasks?.includes(task.id);
+}
+
 function codexTaskAction(task) {
   if (manualBoard()) return null;
   const generation = projectGeneration;
@@ -1338,9 +1343,10 @@ function codexTaskAction(task) {
   const missingThread = task.status === "blocked" && task.codexThreadId &&
     task.blocked?.reason === "no rollout found for thread id " + task.codexThreadId;
   const resumeWithFullAccess = task.status === "blocked" && task.executorFullAccess && !newThread && !missingThread;
-  if (task.status !== "ready" && task.status !== "in_progress" && !newThread && !missingThread && !resumeWithFullAccess) return null;
+  const retryExecutor = task.status === "blocked" && task.blocked?.retryExecutor;
+  if (task.status !== "ready" && task.status !== "in_progress" && !newThread && !missingThread && !resumeWithFullAccess && !retryExecutor) return null;
   const label = resumeWithFullAccess ? t("ui.continue_with_full_access_18d73ae8")
-    : newThread ? t("ui.continue_in_a_new_chat_7364ce62") : missingThread || task.status === "in_progress" || task.git
+    : newThread ? t("ui.continue_in_a_new_chat_7364ce62") : retryExecutor ? t("ui.retry_executor_launch") : missingThread || task.status === "in_progress" || task.git
     ? t("ui.continue_06e52fca")
     : t("ui.send_to_work_1c1a04e6");
   const launch = button(label, async () => {
@@ -4428,6 +4434,11 @@ async function showTask(id, dialogue = false) {
   taskInSheet = task;
   openTaskSheet(task);
   if (task.status === "blocked" && task.blocked) body.append(blockerBanner(task.blocked));
+  if (showUnconfirmedLaunch(task)) {
+    const explanation = element("p", () => t("ui.unconfirmed_executor_launch"), "muted");
+    explanation.id = "task-unconfirmed-launch";
+    body.append(explanation);
+  }
   savedChangesSection(task, task.savedChanges);
   if (task.tags.length) {
     const tags = element("div", undefined, "task-tags");
@@ -6321,7 +6332,8 @@ function update(next) {
     const task = frame.board?.tasks.find(entry => entry.id === taskInSheet.id);
     const archived = frame.board?.archived.find(entry => entry.id === taskInSheet.id);
     const cleaned = taskInSheet.cleanupAvailable && frame.board?.cleanedTasks?.includes(taskInSheet.id);
-    if (Boolean(byId("task-stop-waiting")) !== Boolean(frame.waitingTasks?.includes(taskInSheet.id)) ||
+    if (Boolean(byId("task-unconfirmed-launch")) !== showUnconfirmedLaunch(taskInSheet) ||
+        Boolean(byId("task-stop-waiting")) !== Boolean(frame.waitingTasks?.includes(taskInSheet.id)) ||
         previousBoard?.settings.reviewMode !== frame.board?.settings.reviewMode ||
         JSON.stringify(previousBoard?.settings.manualColumns) !== JSON.stringify(frame.board?.settings.manualColumns) || cleaned || (task && (task.revision !== taskInSheet.revision ||
         (task.historyLength ?? task.history?.length) !== taskInSheet.history.length ||

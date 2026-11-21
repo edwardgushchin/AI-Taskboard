@@ -170,7 +170,8 @@ export function missingCodexThread(message: string | undefined, threadId: string
 export async function startCodexRun(client: Client, project: string, cwd: string, task: ExecutorTask,
   onActivity?: (item: RunActivity, currentTurn: boolean) => void, onTokenUsage?: (report: TokenUsageReport) => Promise<void>, signal?: AbortSignal,
   beforeTurn?: (threadId: string, created: boolean) => Promise<void | QueuedTurn>, desktopProfile?: string,
-  recoveringThreadId?: string, requireSavedThread = false, onUserMessage?: (clientId: string) => void): Promise<Run> {
+  recoveringThreadId?: string, requireSavedThread = false, onUserMessage?: (clientId: string) => void,
+  linkBeforeTools = false): Promise<Run> {
   signal?.throwIfAborted();
   const fullAccess = task.fullAccess === true;
   const profile = fullAccess ? ":danger-full-access" : taskProfile;
@@ -486,12 +487,16 @@ export async function startCodexRun(client: Client, project: string, cwd: string
         "Codex did not enable automatic approval review. Check the connected Codex version and its approval policy.");
     }
     const threadId = started.thread.id;
+    if (!codexThreadPattern.test(threadId) || (existing && threadId !== existing)) throw new Error("Codex returned an unexpected thread ID.");
+    // The early start already owns a durable request. Link the chat as soon as
+    // Codex returns its ID, before tool discovery can be interrupted by closing.
+    const earlyLink = linkBeforeTools ? await beforeTurn?.(threadId, !existing) : undefined;
+    signal?.throwIfAborted();
     const localTools = await verifyExecutorTools(request, threadId, task.toolGrants, [
       ...(assigned.size ? executorExpertTools.map(tool => tool.name) : []), ...(task.schedule ? [recurringChildTool.name] : [])]);
     const githubTools = localTools.filter(name => name.startsWith("github_") || name === milestonesListTool.name);
-    if (!codexThreadPattern.test(threadId) || (existing && threadId !== existing)) throw new Error("Codex returned an unexpected thread ID.");
     signal?.throwIfAborted();
-    const queued = await beforeTurn?.(threadId, !existing);
+    const queued = linkBeforeTools ? earlyLink : await beforeTurn?.(threadId, !existing);
     signal?.throwIfAborted();
     timeout.refresh();
     const prompt = [
