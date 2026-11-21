@@ -312,9 +312,19 @@ type TaskReview = { revision: number; targetHead: string | null; stale: boolean;
   submitted?: string; mergeBase?: string; submissionSequence: number;
   targetChangesSinceReview?: ReviewChanges; submissionChangesSinceReview?: ReviewChanges };
 export type ReviewReport = { summary: string; findings: string[]; evidence: (string | null)[]; needsHuman: boolean; verifyRisk?: boolean };
+export type PendingReviewDecision = {
+  revision: number;
+  targetHead: string | null;
+  reviewMode: ReviewMode;
+  reviewModeVersion?: number;
+  reviewDecision: number;
+  retryAfter: number;
+  reviewerUsage?: import("../cli/token-usage.ts").TokenUsageReport;
+};
 export type ReviewedSubmission = Pick<TaskReview, "targetHead" | "submitted" | "mergeBase" | "description" | "criteria" | "artifacts"> & {
   snapshot?: string;
   report: ReviewReport;
+  pendingDecision?: PendingReviewDecision;
 };
 type ReviewRunner = (settings: BoardAgentSettings | null | undefined, context: string,
   runAction: (name: string, args: unknown) => Promise<CliReply>, signal: AbortSignal, submissionSequence: number) => Promise<unknown>;

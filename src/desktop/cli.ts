@@ -53,10 +53,11 @@ export function cliChild(project: string, args: string[], onError: (error: Error
   return child;
 }
 
-export async function callCli<T>(project: string, args: string[], input?: unknown): Promise<CliReply<T>> {
+export async function callCli<T>(project: string, args: string[], input?: unknown,
+  { retryBusy = true }: { retryBusy?: boolean } = {}): Promise<CliReply<T>> {
   const result = await callCliOnce<T>(project, args, input);
   // BOARD_BUSY is returned before the CLI starts the operation.
-  return !result.ok && result.error.code === "BOARD_BUSY" ? callCliOnce<T>(project, args, input) : result;
+  return retryBusy && !result.ok && result.error.code === "BOARD_BUSY" ? callCliOnce<T>(project, args, input) : result;
 }
 
 function callCliOnce<T>(project: string, args: string[], input?: unknown): Promise<CliReply<T>> {

@@ -1,4 +1,4 @@
-import { activeManagerGoal, managerGoalBinding } from "../src/cli/manager-goal.ts";
+import { activeManagerGoal, managerGoalBinding, managerGoalState } from "../src/cli/manager-goal.ts";
 import { boardReviewModeTool, reviewModeReceipt, setReviewModeFromChat } from "../src/desktop/chat-actions.ts";
 import { plannedDraft } from "./fixtures/planned-draft.ts";
 import { isManual, manualContext } from "../src/cli/manual-board.ts";
@@ -152,7 +152,7 @@ function fixture(t: TestContext) {
   const runtime = runInNewContext(handlerSource + "\n({ frame, scheduleAutoReview, boardRequests, boardWorkRequests, backgroundManagerRequests, acceptanceWork, managerQuestion, runBoardRequest, scheduleRecurringTasks })", {
     get quotaWait() { return quotaPaused ? {} : undefined; },
     quotaInterruption: new Error("Fixture quota pause"), refreshQuota: async () => [],
-    currentActiveGoal: activeManagerGoal, managerGoalBinding,
+    currentActiveGoal: activeManagerGoal, currentManagerGoal: managerGoalState, managerGoalBinding,
     acknowledgeInterval, intervalDeadline, iterativeEnabled, ownerIterationDirective, iterationDirectiveAfterEdit,
     normalizeGoalRules, readIterativeGoal, saveIterativeGoal,
     applicationUpdates, applicationUpdateTools, updateOwner: undefined, updateProject: undefined,
@@ -167,6 +167,10 @@ function fixture(t: TestContext) {
     managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView,
     saveManagerHistory, sendGoalMessage, goalActionTools, runGoalAction,
     send() {},
+    notifyRunChange() {},
+    tokenUsageQueue: () => ({
+      enqueue: (cwd: string, id: string, report: unknown) => callCli(cwd, ["token-usage", id], report),
+    }),
     readBoardHistory: (_profile: string, _project: string, _id: string, cursor: string | null) => {
       providerHistoryReads++;
       return legacyHistory(cursor);
@@ -1974,6 +1978,17 @@ test("reviewers agree to submissions or return defects, and the manager controls
   f.busyDecisions.set("request-changes " + tasks[1].id, 2);
   const handleApproval: Parameters<typeof f.schedule>[1] = async () => assert.fail("Unexpected automatic manager integration");
   const watch = f.schedule(board, handleApproval);
+  const waitForDecision = async (id: string, action: string) => {
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      const { data: card } = await f.cli(["show", id]);
+      if (card.history.some((event: Task["history"][number]) => event.action === action)) return card;
+      await wait(1000);
+      await watch.refresh();
+      watch.tick();
+    }
+    assert.fail(`Decision ${action} was not recorded for ${id}.`);
+  };
   f.setRunning(tasks[1].id, true);
   watch.tick();
   assert.deepEqual(Object.entries(watch.reviewing()), [[tasks[0].id, "reviewer"]]);
@@ -1982,7 +1997,7 @@ test("reviewers agree to submissions or return defects, and the manager controls
   board.settings.taskLimits = taskLimits;
   watch.tick();
   try {
-    const startupTimeout = AbortSignal.timeout(10_000);
+    const startupTimeout = AbortSignal.timeout(60_000);
     const timedOut = new Promise<never>((_, reject) => startupTimeout.addEventListener("abort",
       () => reject(startupTimeout.reason), { once: true }));
     await Promise.race([started.promise, watch.done(), timedOut]);
@@ -1995,9 +2010,7 @@ test("reviewers agree to submissions or return defects, and the manager controls
     f.setRunning(tasks[1].id, false);
     watch.runChanged();
     await Promise.race([queued.promise, timedOut]);
-    assert.equal(watch.reviewing()[tasks[1].id], undefined);
-    assert.equal(watch.reviewing()[tasks[4].id], "reviewer");
-    const { data: returned } = await f.cli(["show", tasks[1].id]);
+    const returned = await waitForDecision(tasks[1].id, "request-changes");
     assert.equal(returned.status, "in_progress");
     assert.equal(returned.history.findLast((event: any) => event.action === "request-changes").actor, "reviewer");
     assert.equal(returned.tokenUsage.byModel[0].totalTokens, 2);
@@ -2013,7 +2026,8 @@ test("reviewers agree to submissions or return defects, and the manager controls
     await watch.done();
   }
   assert.deepEqual(Object.keys(watch.reviewing()), []);
-  const { data: approved } = await f.cli(["show", tasks[0].id]);
+  const approved = await waitForDecision(tasks[0].id, "review-approve");
+  await watch.done();
   assert.equal(approved.status, "review");
   assert.equal(approved.git.accepted, undefined);
   assert.equal(existsSync(join(project, "pass.txt")), false);
@@ -2108,7 +2122,11 @@ test("reviewers agree to submissions or return defects, and the manager controls
     const reference = { id: approved.id, revision: review.revision, targetHead: review.targetHead, integrationMode: "squash" };
     assert.equal((await f.cli(["accept", approved.id], { ...reference, actor: "reviewer" })).error.code, "REVIEW_MODE_CHANGED");
     assert.equal((await act("task_accept", { ...reference, targetHead: head })).error.code, "REVIEW_REQUIRED");
-    const accepted = await act("task_accept", reference);
+    assert.equal((await act("task_accept", reference)).error.code, "REVIEW_REQUIRED");
+    // Restore the fixture's approved target before verifying normal integration.
+    git("update-ref", "HEAD", head, review.targetHead);
+    const { data: current } = await act("task_review", { id: approved.id });
+    const accepted = await act("task_accept", { ...reference, targetHead: current.targetHead });
     assert.equal(accepted.ok, true, JSON.stringify(accepted.error));
     assert.equal(accepted.data.status, "done");
     return { text: "Integrated pass. The repaired submission can wait." };

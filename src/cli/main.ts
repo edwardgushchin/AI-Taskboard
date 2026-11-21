@@ -738,7 +738,8 @@ function run(
       usesIndependentReviewer(mode) ? "reviewer" : mode;
     if (actor !== decisionActor || (input.reviewMode !== undefined && input.reviewMode !== mode) ||
         (command !== "accept" && (input.reviewModeVersion !== undefined || (actor === "reviewer" && mode === "reviewer-human")) &&
-          input.reviewModeVersion !== taskReviewModeVersion(task, store.index.settings))) {
+          (input.reviewModeVersion === null ? undefined : input.reviewModeVersion) !==
+            taskReviewModeVersion(task, store.index.settings))) {
       throw new TaskboardError("REVIEW_MODE_CHANGED", "The board's review mode changed. Review the submission again.");
     }
     if (command === "accept" && mode === "reviewer" && task.status === "review") {
@@ -750,6 +751,10 @@ function run(
     }
     if (command === "request-changes" || reviewerReport) {
       requireRevision(task, input.revision, true);
+      const decision = reviewDecisionSequence(task);
+      if (actor === "reviewer" && input.reviewDecision !== undefined && input.reviewDecision !== decision) {
+        throw new TaskboardError("REVISION_CONFLICT", "The owner provided a decision. Review the submission again.");
+      }
       const verificationStarted = performance.now();
       const targetHead = verifyReviewDecision(store, task, input.targetHead);
       decisionTiming = { lockWaitMs, verificationMs: Math.round(performance.now() - verificationStarted) };
@@ -779,10 +784,6 @@ function run(
           approved.history.at(-1)!.reviewApproval = { revision: task.revision, targetHead, evidence, reviewModeVersion: version };
           const saved = store.save(withReviewerUsage({ ...approved, revision: task.revision }));
           return filters.compact ? taskReceipt(saved) : saved;
-        }
-        const decision = reviewDecisionSequence(task);
-        if (input.reviewDecision !== undefined && input.reviewDecision !== decision) {
-          throw new TaskboardError("REVISION_CONFLICT", "The owner provided a decision. Review the submission again.");
         }
         const version = taskReviewModeVersion(task, store.index.settings);
         const previous = task.history.findLast(event => event.actor === "reviewer" && event.action === "review-note");
