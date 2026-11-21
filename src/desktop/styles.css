@@ -646,10 +646,15 @@ select:hover:not(:disabled) {
   color: var(--accent); font-size: 15px; text-align: start; white-space: normal; overflow-wrap: anywhere;
 }
 .task-card {
+  --task-card-background: var(--panel);
   position: relative; width: 100%; min-width: 0; display: grid; padding: 0;
   border: 1px solid var(--border); border-radius: var(--surface-radius);
-  background: var(--panel); overflow-wrap: anywhere; overflow: hidden;
+  background: var(--task-card-background); overflow-wrap: anywhere; overflow: hidden;
   transition: background-color var(--hover-time) ease;
+}
+.task-card-scheduled {
+  --task-card-background: light-dark(#f3e8d2, #3b3226);
+  border-color: light-dark(#b09869, #806946);
 }
 .task-card[data-priority="low"] { --task-priority-color: var(--muted); }
 .task-card[data-priority="high"] { --task-priority-color: var(--yellow); }
@@ -672,7 +677,7 @@ select:hover:not(:disabled) {
 }
 @media (hover: hover) {
   .task-card:hover {
-    background-color: color-mix(in srgb, var(--text) 3%, var(--panel));
+    background-color: color-mix(in srgb, var(--text) 3%, var(--task-card-background));
   }
 }
 .task-card strong { display: block; font-size: clamp(13px, 1vw, 16px); line-height: 1.25; font-weight: 600; }

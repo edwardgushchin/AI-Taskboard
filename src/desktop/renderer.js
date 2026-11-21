@@ -1122,6 +1122,7 @@ function card(task) {
   const oldImage = card.querySelector(".task-card-cover");
   if (oldDetails) cardCovers.unobserve(oldDetails);
   card.className = "task-card";
+  card.classList.toggle("task-card-scheduled", Boolean(task.schedule));
   card.dataset.state = task.status;
   card.style.borderLeft = manualBoard() ? `3px solid ${manualColumns().find(c => c.id === task.status)?.color ?? "transparent"}` : "";
   const hasPriority = task.priority && task.priority !== "normal";
@@ -1528,6 +1529,7 @@ function laneTools(state, title, tasks, total, count, content) {
       matching.sort((a, b) => Number(active.has(b.id)) - Number(active.has(a.id)));
       activeCount = matching.filter(task => active.has(task.id)).length;
     }
+    matching.sort((a, b) => Number(Boolean(b.schedule)) - Number(Boolean(a.schedule)));
     const previous = document.activeElement === more ? new Set(content.children) : undefined;
     visibleLimit = Math.max(visibleLimit, activeCount, focusedCardPosition());
     renderBatch();
