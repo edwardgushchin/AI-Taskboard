@@ -49,7 +49,7 @@ const help = [
   "Usage: ai-taskboard [--project PATH] [--json] COMMAND [TASK-ID] [--stdin]",
   "Commands: init, list, show, create, update, comment, approve, return-to-draft, start, progress,",
   "          pause, block, resume, unblock, preview, submit, review, accept, restore-changes, request-changes, cancel, cleanup, cleanup-status, settings, watch, doctor",
-  "          auto-queue (read controls), auto-queue --stdin (revision, paused, order, hold, release)",
+  "          auto-queue (read controls), auto-queue --stdin (revision, paused, order, hold, release, replaceHold)",
   "          list --archived, archive sweep, chat TASK-ID, attachment add TASK-ID, attachment read TASK-ID",
   "          review-artifact TASK-ID --stdin (revision, source, sha256 and optional offset)",
   "          review-queue (Git status and submission time for tasks in review)",

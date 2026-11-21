@@ -1531,7 +1531,7 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
                 questions: pending, ownerInstructionsPending: inbox.length, nextStep: state.step,
               });
             void runBoardRequest(tab.window.webContents, board, prompt, [], "iterate", false, undefined, undefined,
-              undefined, false, undefined, undefined, undefined, {
+              undefined, false, undefined, undefined, {
                 id: iterativeId, waitFor, questions: questionKeys,
               }).then(result => {
                 if (result.ok && result.data?.error) failed(result.data.error);
@@ -2359,39 +2359,17 @@ async function changeBoardGoal(project: string, key: string, action: BoardGoalAc
 }
 
 ipcMain.handle("board:request", async (event, request: unknown, files: unknown = [], project?: string, goal: unknown = false,
-  immediate: unknown = false, messageId?: unknown, goalRunId?: unknown) => {
+  immediate: unknown = false, messageId?: unknown) => {
   const state = stateOf(event);
   const board = project === undefined || state.board?.project === project ? state.board :
     windowStates.get(state.window.webContents.id)?.tabs.find(tab => tab.board?.project === project)?.board;
   if (goal === "resume" || goal === "iterate") return cliFailure("INVALID_INPUT", t("ui.choose_an_action_for_the_project_goal_43bfd434"));
-  if (goalRunId !== undefined) {
-    const work = board && boardWorkRequests.get(projectIdentity(board.project));
-    const saved = board && readBoardThread(boardThreadPath(board.project));
-    if (!board || immediate !== true || typeof goalRunId !== "string" ||
-        !saved?.goal || saved.goal.status === "complete" ||
-        (goalRunId !== (saved.goalId ?? saved.id) && work?.managerRun?.id !== goalRunId)) {
-      return cliFailure("CHAT_NOT_RUNNING", t("ui.the_manager_has_no_active_reply_the_message_is_s_1148c98d"));
-    }
-    if (typeof request !== "string" || !request.trim() || request.length > 4000 || !Array.isArray(files) || files.length ||
-        (messageId !== undefined && (typeof messageId !== "string" || !codexThreadPattern.test(messageId)))) {
-      return cliFailure("INVALID_INPUT", t("ui.goal_instruction_text"));
-    }
-    sendGoalMessage(board.project, saved.goalId ?? saved.id, request.trim(), typeof messageId === "string" ? messageId : undefined);
-    if (typeof messageId === "string" && codexThreadPattern.test(messageId)) {
-      runtimeTransaction(board.project, () => rmSync(join(board.project, ".tasks", "manager-queue", messageId + ".json"), { force: true }));
-    }
-    work?.wakeGoal?.();
-    broadcastBoardChat(board.project, "orchestrator-queue");
-    broadcastBoardChat(board.project, "orchestrator-work-history");
-    return { ok: true, data: null };
-  }
-  return runBoardRequest(event.sender, board, request, files, goal, immediate, messageId,
-    undefined, undefined, false, undefined, undefined, typeof goalRunId === "string" ? goalRunId : undefined);
+  return runBoardRequest(event.sender, board, request, files, goal, immediate, messageId);
 });
 
 async function runBoardRequest(sender: Electron.WebContents, board: Board | undefined, request: unknown, files: unknown = [],
   goal: unknown = false, immediate: unknown = false, messageId?: unknown, reviewIds?: string[], expectedReviewMode?: ReviewMode,
-  notice: boolean | ReturnType<typeof pendingReviewApprovals> = false, repairTask?: Task, cleanupJob?: MaintenanceJob, goalRunId?: string,
+  notice: boolean | ReturnType<typeof pendingReviewApprovals> = false, repairTask?: Task, cleanupJob?: MaintenanceJob,
   iteration?: { id: string; waitFor?: string; questions: string[] }) {
   const autoNotice = notice === true;
   const approvalNotices = Array.isArray(notice) ? notice : undefined;
@@ -2429,7 +2407,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       { ok: true as const, data: { answer: "", changes: [] } };
   }
   if (immediate) {
-    const current = (goalRunId ? boardWorkRequests : boardRequests).get(projectKey);
+    const current = boardRequests.get(projectKey);
     if (!current?.sendNow || current.changingGoal) {
       return cliFailure("CHAT_NOT_RUNNING", t("ui.the_manager_has_no_active_reply_the_message_is_s_1148c98d"));
     }

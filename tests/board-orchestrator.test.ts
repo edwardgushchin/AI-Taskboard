@@ -29,12 +29,18 @@ import type { BoardGoal, BoardGoalAction, readBoardHistory } from "../src/deskto
 import { commitFileHashes, inspectProjectPath, projectSha256 } from "../src/desktop/project-files.ts";
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
 import { reviewerActivity, withReviewerChat } from "../src/desktop/reviewer-chat.ts";
+import {
+  goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems,
+  readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView,
+  saveManagerHistory, sendGoalMessage,
+} from "../src/desktop/manager-history.ts";
 import { backgroundGoalHistory } from "../src/desktop/goal-history-background.ts";
-import { goalMessages, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView, saveManagerHistory, sendGoalMessage } from "../src/desktop/manager-history.ts";
 import { goalActionTools, runGoalAction } from "../src/desktop/goal-actions.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
-import { autoQueueSettings } from "../src/cli/auto-queue.ts";
-import { automationDelivery } from "../src/desktop/automation-delivery.ts";
+import { autoQueueSettings, updateAutoQueue } from "../src/cli/auto-queue.ts";
+import { nextReadyTask } from "../src/desktop/auto-queue.ts";
+import { goalQueueCondition, readIterativeGoal, saveIterativeGoal } from "../src/desktop/iterative-goal.ts";
+import { automationDelivery, pendingReviewApprovals } from "../src/desktop/automation-delivery.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import { settingsDelivery, syncSettingsNotices } from "../src/desktop/settings-notices.ts";
 import { githubReadTool } from "../src/desktop/github-read.ts";
@@ -50,8 +56,10 @@ process.env.GIT_CONFIG_GLOBAL = process.platform === "win32" ? "NUL" : "/dev/nul
 const source = (file: string) => readFileSync(new URL("../src/desktop/" + file, import.meta.url), "utf8");
 const boardSource = stripTypeScriptTypes(source("board-actions.ts").replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, ""));
 const main = ts.createSourceFile("main.ts", source("main.ts"), ts.ScriptTarget.Latest, true);
+const dispatcherSource = stripTypeScriptTypes(main.statements.map(node => node.getText(main)).filter(text =>
+  text.startsWith("const autoBoards =") || text.startsWith("function scheduleAutoBoard(")).join("\n"));
 const handlerSource = stripTypeScriptTypes(main.statements.map(node => node.getText(main)).filter(text =>
-  /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|changeBoardGoal|resumeBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|returnTaskToDraft|scheduleMaintenance|scheduleRecurringTasks|taskRunLimit|readQueuedMessage|queuedFiles|listQueuedMessages)\(|const (?:imageExtensions|imageTypes|boardRequests|boardGoalClears|boardGoalResumes|boardWorkRequests|backgroundManagerRequests|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork|maintenanceWork|returningDrafts|reviewOperations|managerReviewOperations|taskOperations|steeringOperations) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
+  /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|changeBoardGoal|resumeBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|canScheduleAutoReview|autoReviewTab|availableReviewSlots|reviewAttempt|readyReviews|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|returnTaskToDraft|scheduleMaintenance|scheduleRecurringTasks|taskRunLimit|readQueuedMessage|queuedFiles|listQueuedMessages)\(|const (?:imageExtensions|imageTypes|boardRequests|boardGoalClears|boardGoalResumes|boardWorkRequests|backgroundManagerRequests|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork|maintenanceWork|returningDrafts|reviewOperations|managerReviewOperations|taskOperations|steeringOperations) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
 const cliFailure = (code: string, message: string) => ({ ok: false, error: { code, message } });
 
@@ -150,8 +158,8 @@ function fixture(t: TestContext) {
     executorFullAccess, managerAccess, setTaskExecutorAccess, phaseStageReporter,
     autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, taskReviewMode, taskReviewModeVersion, boardReviewModeTool, reviewModeReceipt, setReviewModeFromChat, reviewsAcceptanceRepair, usesIndependentReviewer, defaultBoardAgents, reviewVerifier,
     existsSync, storageDirectory, readdirSync, rmSync, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
-    backgroundGoalHistory, goalMessages, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems,
-    readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView,
+    backgroundGoalHistory, goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerUnread,
+    managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView,
     saveManagerHistory, sendGoalMessage, goalActionTools, runGoalAction,
     send() {},
     readBoardHistory: (_profile: string, _project: string, _id: string, cursor: string | null) => {
@@ -387,8 +395,8 @@ function fixture(t: TestContext) {
       const managerRun = () => runtime.frame({ project, board: { project, tasks: [] }, window: { webContents: {} } }).managerWork;
       return { state, tab, notifications: questionNotifications, goalActivity, managerRuns, managerRun };
     },
-    sendNow: (request: string, files: unknown[] = [], id?: string, goalRunId?: string) =>
-      handlers.get("board:request")!({ sender }, request, files, undefined, false, true, id, goalRunId),
+    sendNow: (request: string, files: unknown[] = [], id?: string) =>
+      handlers.get("board:request")!({ sender }, request, files, undefined, false, true, id),
     queue: (action: string, ...args: unknown[]) => handlers.get("board:queue")!({ sender }, project, action, ...args),
     goal: (kind: string, objective?: string) => handlers.get("board:goal")!({ sender }, kind, objective),
   };
@@ -541,6 +549,158 @@ test("a goal controls the persistent automatic queue and receives live board cha
   const before = notifications.length;
   await f.pushBoard(); await wait(400);
   assert.equal(notifications.length, before, "the completed turn removes its live subscription");
+});
+
+test("acceptance of a converted queue hold dispatches once when a slot opens", { timeout: 360_000 }, async t => {
+  for (const iterative of [true, false]) {
+    await t.test(iterative ? "iterative goal enabled" : "iterative goal disabled", async testContext => {
+      const f = fixture(testContext);
+      const cli = async (args: string[], input?: unknown) => {
+        const result = await f.cli(args, input);
+        assert.equal(result.ok, true, JSON.stringify(result));
+        return result.data;
+      };
+      await cli(["init"], { git: false });
+      const create = (title: string, dependencies: string[] = []) =>
+        cli(["create"], plannedDraft({ title, criteria: ["Verified"], dependencies }));
+      const submit = async (id: string) => {
+        const { token } = await cli(["preview", id]);
+        return cli(["submit", id], { token, noChanges: true, summary: "Verified result", checks: ["Verified"] });
+      };
+      const accept = async (id: string) => {
+        const { revision } = await cli(["show", id, "--compact"]);
+        const done = await cli(["accept", id], { actor: "user", revision });
+        assert.equal(done.status, "done");
+      };
+      const previous = await create("Already accepted input");
+      await cli(["approve", previous.id]);
+      await cli(["start", previous.id]);
+      await submit(previous.id);
+      await accept(previous.id);
+      const formatter = await create("Formatter correction");
+      await cli(["approve", formatter.id]);
+      await cli(["start", formatter.id]);
+      await submit(formatter.id);
+      const dependent = await create("Work waiting for formatter acceptance", [previous.id]);
+      const heldForDecision = await create("Work waiting for a separate decision", [formatter.id]);
+      const cancelled = await create("Cancelled input");
+      const needsCancelled = await create("Work waiting for cancelled input", [cancelled.id]);
+      const ready = await cli(["approve", dependent.id]);
+      await cli(["approve", heldForDecision.id]);
+      await cli(["approve", needsCancelled.id]);
+      await cli(["cancel", cancelled.id], { reason: "Cancelled before acceptance" });
+      await cli(["auto-queue"], { revision: 0, hold: [dependent.id, heldForDecision.id] });
+
+      const managed = await f.run("Record the formatter prerequisite", async (act, _prompt, _images, _id, _context, _waiting, _signal, goal) => {
+        if (iterative) {
+          goal!.accepted();
+          goal!.update({ objective: "Record the formatter prerequisite", status: "active" });
+        }
+        const before = await act("board_auto_queue", {});
+        const replacement = { id: dependent.id, revision: ready.revision, dependency: formatter.id };
+        const change = { revision: before.data.queue.revision, replaceHold: replacement };
+        if (iterative) {
+          const invalid = await act("board_auto_queue", { ...change, replaceHold: { ...replacement, dependency: formatter.id + "x" } });
+          assert.equal(invalid.error.code, "INVALID_INPUT");
+          const stale = await act("board_auto_queue", { ...change, replaceHold: { ...replacement, revision: ready.revision - 1 } });
+          assert.equal(stale.error.code, "REVISION_CONFLICT");
+          const cycle = await act("board_auto_queue", { ...change, replaceHold: { ...replacement, dependency: dependent.id } });
+          assert.equal(cycle.error.code, "DEPENDENCY_CYCLE");
+          onBoard(locateBoard(f.project), store => {
+            store.save = () => { throw new Error("Injected card write failure"); };
+            assert.throws(() => updateAutoQueue(store, change), /Injected card write failure/);
+          });
+          assert.deepEqual((await act("board_auto_queue", {})).data.queue, before.data.queue);
+          assert.deepEqual((await cli(["show", dependent.id])).dependencies, [previous.id]);
+        }
+        const changed = await act("board_auto_queue", change);
+        assert.equal(changed.ok, true, JSON.stringify(changed));
+        assert.deepEqual(changed.data.queue.held, [heldForDecision.id]);
+        const saved = changed.data.tasks.find((task: Task) => task.id === dependent.id);
+        assert.deepEqual(saved.dependencies, [previous.id, formatter.id]);
+        assert.deepEqual(saved.unfinishedDependencies, [formatter.id]);
+        return { text: "Formatter prerequisite saved." };
+      }, [], iterative);
+      assert.equal(managed.data?.answer, "Formatter prerequisite saved.", JSON.stringify(managed));
+      const goalId = activeManagerGoal(f.project);
+      if (iterative) {
+        assert.ok(goalId);
+        saveIterativeGoal(f.project, { goalId, questions: [], retryAt: Date.now() + 180_000 });
+      }
+      await cli(["settings"], { autoMode: true, iterativeGoal: iterative ? goalId : false,
+        taskLimits: { executor: 1, reviewer: 1 } });
+
+      const launches: string[] = [];
+      const slots = createAgentSlots();
+      const occupy = () => slots.acquire(f.project, "executor", { executor: 1 })!;
+      let release = occupy();
+      const windows = [{ isDestroyed: () => false, webContents: {} }, { isDestroyed: () => false, webContents: {} }];
+      const openDispatcher = async () => {
+        const board = await cli(["list", "--compact"]);
+        const watch = { board, tabs: new Set(windows.map(window => ({ window }))), reviewerRuns: new Map() };
+        const runtime = runInNewContext(dispatcherSource + "\n({ scheduleAutoBoard, autoBoards })", {
+          quotaWait: undefined, applicationUpdates: { installing: false }, closingProjects: new Set(),
+          subscriptions: new Map([[f.project, watch]]), isManual, taskReviewMode, usesIndependentReviewer,
+          nextReadyTask, pendingReviewApprovals, agentSlots: slots, projectIdentity: (project: string) => project,
+          currentActiveGoal: activeManagerGoal, readBoardThread: () => goalId ? { id: goalId } : undefined,
+          boardThreadPath: managerGoalBinding, goalMessages, goalQueueCondition, readIterativeGoal,
+          boardWorkRequests: new Map(), boardRequests: new Map(), backgroundManagerRequests: new Map(),
+          boardGoalResumes: new Set(), boardGoalClears: new Set(), executorBusy: () => false,
+          runBoardRequest: () => assert.fail("Dispatch must not need a manager or goal turn"),
+          broadcastBoardChat: (_project: string, _event: string, { error }: { error: string }) => { errors.push(error); },
+          callCli: (_project: string, args: string[], input: unknown) => f.cli(args, input),
+          launchTask: async (_project: string, id: string, _review: unknown, _thread: unknown, revision: number,
+            _retry: unknown, _schedule: unknown, _resolve: unknown, _extra: unknown, autoMode: boolean, _manual: boolean,
+            autoQueueRevision: number) => {
+            launches.push(id);
+            release = occupy();
+            return f.cli(["start", id], { revision, autoMode, autoQueueRevision });
+          },
+        });
+        const errors: string[] = [];
+        return async () => {
+          for (const _window of windows) runtime.scheduleAutoBoard(watch);
+          while (runtime.autoBoards.get(watch)?.running) await wait(1);
+          assert.deepEqual(errors, []);
+        };
+      };
+      const tick = await openDispatcher();
+      await tick();
+      assert.deepEqual(launches, []);
+      // The second window commits acceptance while the first window still holds its old snapshot.
+      await accept(formatter.id);
+      await tick();
+      const eligible = await cli(["show", dependent.id, "--compact"]);
+      assert.equal(eligible.status, "ready");
+      assert.deepEqual(eligible.unfinishedDependencies, []);
+      assert.deepEqual(launches, []);
+      const restarted = await openDispatcher();
+      await restarted();
+      assert.deepEqual(launches, []);
+      let queue = await cli(["auto-queue"]);
+      queue = await cli(["auto-queue"], { revision: queue.revision, paused: true });
+      release();
+      await restarted();
+      assert.deepEqual(launches, []);
+      await cli(["auto-queue"], { revision: queue.revision, paused: false });
+      await cli(["settings"], { autoMode: false });
+      await restarted();
+      assert.deepEqual(launches, []);
+      release = occupy();
+      await cli(["settings"], { autoMode: true });
+      await restarted();
+      assert.deepEqual(launches, []);
+      release();
+      await restarted();
+      assert.deepEqual(launches, [dependent.id]);
+      release();
+      await (await openDispatcher())();
+      assert.deepEqual(launches, [dependent.id]);
+      assert.equal((await cli(["show", dependent.id])).status, "in_progress");
+      assert.equal((await cli(["show", heldForDecision.id])).status, "ready");
+      assert.deepEqual((await cli(["show", needsCancelled.id])).unfinishedDependencies, [cancelled.id]);
+    });
+  }
 });
 
 test("internal queue wakes preserve sequential questions through the manager inbox", async t => {
@@ -3000,7 +3160,7 @@ test("a running goal accepts queued instructions while ordinary questions use an
   const f = fixture(t); await f.cli(["init"]);
   const { data: task } = await f.cli(["create"], plannedDraft({ title: "Running task" }));
   f.setRunning(task.id, true);
-  const { managerRun } = f.backgroundWindow();
+  f.backgroundWindow();
   const asked = Promise.withResolvers<void>(), ready = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>();
   const work = f.run("Coordinate", async (act, _prompt, _images, _id, _context, _waiting, _signal, goal) => {
     goal!.accepted();
@@ -3019,19 +3179,21 @@ test("a running goal accepts queued instructions while ordinary questions use an
     await asked.promise;
     const question = f.pendingQuestion();
     assert.equal(question.text, "Which release?");
-    const turns = (await f.history(undefined, "work")).data.turns as { items: RunActivity[] }[];
+    const history = await f.history(undefined, "work");
+    assert.equal(history.ok, true, JSON.stringify(history));
+    const turns = history.data.turns as { items: RunActivity[] }[];
     assert.ok(turns.some(turn => turn.items.some(item => item.text.includes(question.text))));
     assert.equal((await f.answerQuestion(question.id, "Alpha")).ok, true);
     await ready.promise;
-    const goalRunId = managerRun().id;
     const parallel = await f.run("Parallel question", async () => ({ text: "Ordinary answer" }));
     assert.equal(parallel.data.answer, "Ordinary answer");
-    const messageId = "00000000-0000-4000-8000-000000000003";
-    assert.equal((await f.queue("add", messageId, "Hold publication", false, [])).ok, true);
-    assert.equal((await f.sendNow("Hold publication", [], messageId, "stale-run")).error.code, "CHAT_NOT_RUNNING");
-    assert.equal((await f.queue("list")).data.length, 1);
-    assert.equal((await f.sendNow("Hold publication", [], messageId, goalRunId)).ok, true);
-    assert.equal((await f.queue("list")).data.length, 0);
+    assert.deepEqual(f.managerNotifications, []);
+    const forwarded = await f.run("Pass Hold publication to the goal", async act => {
+      const result = await act("goal_send", { text: "Hold publication" });
+      assert.equal(result.ok, true, JSON.stringify(result));
+      return { text: "Instruction queued" };
+    });
+    assert.equal(forwarded.data.answer, "Instruction queued");
     assert.equal(f.managerNotifications.at(-1), "AI Taskboard: new user directions are available. Read goal_inbox.");
   } finally {
     finish.resolve();
