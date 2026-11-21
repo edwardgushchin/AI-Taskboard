@@ -1600,7 +1600,7 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
         const candidate = board.tasks.find(task => task.id === id)!;
         return !available[candidate.mergeRepair ? "reviewer" : "executor"] || executorBusy(project, id) ||
           queue.launches.has(id + ":" + candidate.revision);
-      }, Date.now(), controls);
+      }, Date.now(), controls, board.tasks);
       if (!task) return;
       const attempt = task.id + ":" + task.revision;
       queue.launches.add(attempt);
@@ -1608,7 +1608,8 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
         Boolean(board.settings.autoMode), false, controls?.revision ?? 0);
       if (!result.ok) {
         if (["BOARD_BUSY", "REVISION_CONFLICT", "INVALID_TRANSITION", "LAUNCH_IN_PROGRESS", "CHAT_BUSY", "EXECUTOR_LIMIT", "REVIEWER_LIMIT",
-            "PROVIDER_QUOTA", "PROJECT_CLOSING", "DEPENDENCIES_INCOMPLETE", "EXPERT_PLAN_REQUIRED", "AUTO_MODE_DISABLED", "AUTO_QUEUE_PAUSED", "AUTO_QUEUE_CHANGED"].includes(result.error.code)) {
+            "PROVIDER_QUOTA", "PROJECT_CLOSING", "DEPENDENCIES_INCOMPLETE", "EXPERT_PLAN_REQUIRED",
+            "AUTO_MODE_DISABLED", "AUTO_QUEUE_PAUSED", "AUTO_QUEUE_CHANGED", "AUTO_RELEASE_WAIT"].includes(result.error.code)) {
           queue.launches.delete(attempt);
           return; // Retry on the next event/tick, never spin on the same snapshot.
         }
@@ -1616,7 +1617,7 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
         const blocked = await callCli(project, ["block", task.id, "--compact"], { revision: task.revision, allowUnstarted: true,
           reason: result.error.message, condition: t("ui.fix_the_launch_error_and_unblock_the_task_9eea19ab"),
           autoMode: true, autoQueueRevision: controls?.revision ?? 0 });
-        if (!blocked.ok && ["AUTO_MODE_DISABLED", "AUTO_QUEUE_PAUSED", "AUTO_QUEUE_CHANGED"].includes(blocked.error.code)) {
+        if (!blocked.ok && ["AUTO_MODE_DISABLED", "AUTO_QUEUE_PAUSED", "AUTO_QUEUE_CHANGED", "AUTO_RELEASE_WAIT"].includes(blocked.error.code)) {
           queue.launches.delete(attempt);
         }
       }

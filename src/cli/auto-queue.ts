@@ -1,9 +1,40 @@
-import type { BoardSettings } from "./model.ts";
+import semver from "semver";
+import type { BoardSettings, Task } from "./model.ts";
 import { requireRevision, TaskboardError, taskIdPattern } from "./model.ts";
 import type { BoardStore } from "./storage.ts";
 import { isManual } from "./manual-board.ts";
 import { validateDependencies } from "./dependencies.ts";
 import { changeTask } from "./tasks.ts";
+
+type ReleaseTask = Pick<Task, "id" | "status" | "milestone" | "schedule" | "launchRequested"> & { mergeRepair?: boolean };
+
+function releaseVersion(task: ReleaseTask) {
+  return task.milestone && semver.valid(task.milestone.title);
+}
+
+export function earliestOpenRelease(tasks: Iterable<ReleaseTask>, now: number) {
+  let earliest: { version: string; taskIds: string[] } | undefined;
+  for (const task of tasks) {
+    if (task.status === "draft" || task.status === "done" || task.status === "cancelled") continue;
+    if (task.status === "ready" && task.schedule &&
+        (task.schedule.paused || Date.parse(task.schedule.nextAt) > now)) continue;
+
+    const version = releaseVersion(task);
+    if (!version) continue;
+    if (!earliest || semver.compare(version, earliest.version) < 0) {
+      earliest = { version, taskIds: [task.id] };
+    } else if (semver.compare(version, earliest.version) === 0) {
+      earliest.taskIds.push(task.id);
+    }
+  }
+  return earliest;
+}
+
+export function releaseWait(task: ReleaseTask, earliest: ReturnType<typeof earliestOpenRelease>) {
+  if (!earliest || task.status !== "ready" || task.schedule || task.launchRequested || task.mergeRepair) return;
+  const version = releaseVersion(task);
+  if (version && semver.compare(version, earliest.version) > 0) return earliest;
+}
 
 export function autoQueueSettings(settings: BoardSettings): NonNullable<BoardSettings["autoQueue"]> {
   return settings.autoQueue ?? { revision: 0, paused: false, order: [], held: [] };
@@ -73,4 +104,13 @@ export function requireAutoQueue(settings: BoardSettings, id: string, revision?:
   const queue = autoQueueSettings(settings);
   if (queue.paused || queue.held.includes(id)) throw new TaskboardError("AUTO_QUEUE_PAUSED", "The automatic queue or task is paused by its manager.");
   if (revision !== undefined && revision !== queue.revision) throw new TaskboardError("AUTO_QUEUE_CHANGED", "The automatic queue changed before this launch.");
+}
+
+export function requireReleaseTurn(store: BoardStore, task: ReleaseTask) {
+  if (task.status !== "ready" || task.schedule || task.launchRequested || task.mergeRepair || !releaseVersion(task)) return;
+  const cards = Object.keys(store.index.tasks).map(id => store.card(id));
+  const waiting = releaseWait(task, earliestOpenRelease(cards, Date.now()));
+  if (waiting) {
+    throw new TaskboardError("AUTO_RELEASE_WAIT", "Automatic launch is waiting for release " + waiting.version + ".", waiting);
+  }
 }
