@@ -10,7 +10,9 @@ import { confirmedQuota, providerLimitSource, readCodexLimits, type QuotaWait } 
 import localization from "./localization.cjs";
 import { BackupService } from "./backup-service.ts";
 import { activeRunSummary, observeActiveRuns, enableSharedRuns } from "./active-runs.ts";
-import { forgetExecutor, matchesQueuedExecutor, prepareQueuedTurn, recordQueuedTurn, registerRuntime, rememberExecutor, runtimeLocation, runtimeTransaction } from "./board-runtime.ts";
+import { forgetExecutor, matchesQueuedExecutor, prepareQueuedTurn, queueWriteProbeRetry, recordQueuedTurn,
+  recordWriteProbeRetryFailure, registerRuntime, rememberExecutor, runtimeLocation, runtimeTransaction } from "./board-runtime.ts";
+import type { RuntimeEntry } from "./board-runtime.ts";
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, Notification, protocol, session, shell } from "electron";
 import type { IpcMainInvokeEvent } from "electron";
 import { randomUUID } from "node:crypto";
@@ -42,7 +44,7 @@ import { boardReviewMode, taskReviewMode, taskReviewModeVersion, codexThreadPatt
 import { managerGoalBinding, managerGoalState } from "../cli/manager-goal.ts";
 import { BoardStore, directory as storageDirectory, locateBoard, onBoard, readBoardSettings, readJson, writeJson } from "../cli/storage.ts";
 import { applyDesktopAcceptance } from "../cli/acceptance.ts";
-import { missingCodexThread, startCodexRun } from "./codex-run.ts";
+import { missingCodexThread, startCodexRun, writeProbeTimeoutCode } from "./codex-run.ts";
 import type { ExecutorTask } from "./codex-run.ts";
 import { runLog } from "./run-activity.ts";
 import { imageViewPath, readReviewerImage, readRunImage, readViewedImage } from "./run-images.ts";
@@ -298,7 +300,7 @@ function frame(state: ProjectTab) {
       const failedRevision = subscriptions.get(state.project ?? "")?.failedDiscussionStarts?.get(task.id);
       return task.status === "in_progress" && ((task.discussionReturn !== undefined && (failedRevision ?? -1) < task.revision) ||
         sharedRuns.some(entry => matchesQueuedExecutor(entry, task) &&
-          (!entry.quotaPaused || entry.reviewReturn || entry.earlyLaunch || quotaWait || state.board?.settings.autoMode))) &&
+          (!entry.quotaPaused || entry.reviewReturn || entry.earlyLaunch || entry.writeProbeRetry || quotaWait || state.board?.settings.autoMode))) &&
         !runningTasks.has(key) && !replyingTasks.has(key) && !sharedRuns.some(entry => entry.kind === "slot" && entry.task === task.id);
     }).map(task => task.id),
     reviewingTasks,
@@ -1655,7 +1657,7 @@ function scheduleAgentWork() {
         const { project, tasks, settings } = watch.board;
         if (closingProjects.has(project)) continue;
         for (const entry of agentSlots.entries(project)) {
-          const { kind, task: id, revision, continuation, quotaPaused, reviewReturn, earlyLaunch } = entry;
+          const { kind, task: id, revision, continuation, quotaPaused, reviewReturn, earlyLaunch, writeProbeRetry } = entry;
           if (kind !== "queue" || !id || revision === undefined) continue;
           const task = tasks.find(task => task.id === id);
           // The queue can be saved before the watch sees the new card revision.
@@ -1667,7 +1669,8 @@ function scheduleAgentWork() {
           }
           const role = task.mergeRepair ? "reviewer" : "executor";
           const key = project + "\0" + id;
-          if ((quotaPaused && !settings.autoMode && !reviewReturn && !earlyLaunch) || queuedRecoveryDelay.has(key) ||
+          if ((quotaPaused && !settings.autoMode && !reviewReturn && !earlyLaunch && !writeProbeRetry) ||
+              (writeProbeRetry && writeProbeRetry.notBefore > Date.now()) || queuedRecoveryDelay.has(key) ||
               !agentSlots.available(projectIdentity(project), role, settings?.taskLimits) || executorBusy(project, id)) continue;
           const failed = (error: string) => broadcastBoardChat(project, "orchestrator-review-error", { error: id + " · " + error });
           void launchTask(project, id, undefined, false, task.revision, continuation,
@@ -4395,6 +4398,9 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   let restart: import("./board-runtime.ts").RuntimeEntry["restart"];
   let earlyLaunch = false;
   let earlyThreadId: string | undefined;
+  let writeProbeRetry: RuntimeEntry["writeProbeRetry"];
+  let probeLaunch: Pick<NonNullable<RuntimeEntry["writeProbeRetry"]>, "cwd" | "fullAccess" | "windowsSandbox"> &
+    { task: LaunchState; slotId: string } | undefined;
   let currentRevisionAfterStart = revision;
   let release: ((restart?: boolean | "quota") => void) | undefined;
   let updateTimer: NodeJS.Timeout | undefined;
@@ -4505,6 +4511,13 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       earlyThreadId = pending.earlyLaunch
         ? current.data.codexThreadId ?? pending.linkedThread?.codexThreadId : undefined;
       threadChoice = pending.newThread ?? newThread;
+      writeProbeRetry = pending.writeProbeRetry;
+      if (writeProbeRetry?.failure) {
+        return await callCli<LaunchState>(project, ["block", id, "--compact"], {
+          revision: task.revision, reason: writeProbeRetry.failure, retryExecutor: true,
+          condition: t("ui.write_probe_retry_condition"),
+        });
+      }
     }
     const attemptedRevision = current.data.revision;
     // Record a permanent failure while this launch still owns the task slot.
@@ -4521,13 +4534,14 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         publishRunActivity(project, id, [{ id: "discussion-launch-error", type: "error", title: "", text: message + "\n" + failure, status: "failed" }]);
       }
     };
-    const client = await configuredCodex(app.getPath("userData"));
+    let client = await configuredCodex(app.getPath("userData"));
     if (!client) {
       const reason = t("ui.choose_the_codex_executable_in_settings_06a08a7e");
       if (prepared || recoveringThreadId || restart || earlyLaunch || returnedRevision !== undefined) throw new Error(reason);
       await failDiscussionStart("CODEX_UNAVAILABLE", reason);
       return cliFailure("CODEX_UNAVAILABLE", reason);
     }
+    if (writeProbeRetry) client = { ...client, windowsSandbox: writeProbeRetry.windowsSandbox };
     if (newThread) {
       if (revision !== undefined && current.data.revision !== revision) {
         return cliFailure("REVISION_CONFLICT", t("ui.the_task_changed_read_the_current_revision_befor_1dce8f11"));
@@ -4598,7 +4612,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         ...(process.platform === "win32" && client.windowsSandbox === "elevated" ? { isolatedWorktree: true } : {}) });
     if (!started.ok) {
       if (queued && ["BOARD_BUSY", "REVISION_CONFLICT", "INVALID_TRANSITION"].includes(started.error.code)) return started;
-      if (restart || earlyLaunch || returnedRevision !== undefined) {
+      if (restart || earlyLaunch || returnedRevision !== undefined || writeProbeRetry) {
         throw new Error(started.error.code + ": " + started.error.message);
       }
       if (prepared && started.error.code !== "BOARD_BUSY") throw new Error(started.error.message);
@@ -4608,7 +4622,8 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     prepared = true;
     if (launchSlot) queued = earlyLaunch = true;
     const desktopProfile = app.getPath("userData");
-    const task = { ...started.data.task, fullAccess: executorFullAccess(desktopProfile, project, started.data.task),
+    const fullAccess = executorFullAccess(desktopProfile, project, started.data.task);
+    const task = { ...started.data.task, fullAccess: writeProbeRetry?.fullAccess ?? fullAccess,
       ...(threadChoice ? { codexThreadId: undefined } : earlyThreadId ? { codexThreadId: earlyThreadId } : {}) };
     let linked: LaunchState = started.data.task;
     currentRevisionAfterStart = linked.revision;
@@ -4617,6 +4632,17 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     // Quota can interrupt this launch before Codex has opened or linked a thread.
     releaseSlot.run(() => rememberExecutor(project, task, cwd, continuation, threadChoice || undefined));
     signal.throwIfAborted();
+    const slotId = releaseSlot.id;
+    if (role === "executor" && slotId) {
+      probeLaunch = { task: linked, slotId, cwd, fullAccess: task.fullAccess, windowsSandbox: client.windowsSandbox };
+    }
+    if (writeProbeRetry) {
+      // Persist the claim before starting Codex so a desktop exit cannot grant another automatic attempt.
+      if (!slotId || !recordWriteProbeRetryFailure(project, slotId, linked, t("ui.write_probe_retry_interrupted"))) {
+        return cliFailure("CHAT_BUSY", "The queued write probe retry is no longer pending.");
+      }
+      if (writeProbeRetry.fullAccess && !fullAccess) throw new Error(t("ui.write_probe_retry_access_changed"));
+    }
     const run = await releaseSlot.run(() => startCodexRun(client, project, cwd, task, (item, currentTurn = true) => {
       // An action already present at the steering boundary belongs to the earlier work.
       if (currentTurn && steeredReply && (!activity.has(item.id) || steeredReply.activity.has(item.id))) {
@@ -4836,6 +4862,23 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       await saveActivity();
       return cliFailure("CHAT_BUSY", (error as Error).message);
     }
+    if (!signal.aborted && probeLaunch && (code === writeProbeTimeoutCode || writeProbeRetry)) {
+      const { task, slotId, cwd, fullAccess, windowsSandbox } = probeLaunch;
+      if (!writeProbeRetry) {
+        const deferred = queueWriteProbeRetry(project, slotId, task, {
+          cwd, fullAccess, windowsSandbox, threadId: task.codexThreadId, notBefore: Date.now() + 5_000,
+        }, continuation, threadChoice || undefined);
+        return deferred ? { ok: true, data: task } : cliFailure("CHAT_BUSY", "The write probe retry was cancelled.");
+      }
+      const reason = code === writeProbeTimeoutCode ? t("ui.write_probe_retry_timed_out") : (error as Error).message;
+      if (!recordWriteProbeRetryFailure(project, slotId, task, reason)) {
+        return cliFailure("CHAT_BUSY", "The write probe retry was cancelled.");
+      }
+      await saveActivity();
+      return await callCli<LaunchState>(project, ["block", id, "--compact"], {
+        revision: task.revision, reason, retryExecutor: true, condition: t("ui.write_probe_retry_condition"),
+      });
+    }
     if (code === "BOARD_BUSY" || (queued && (code === "INVALID_TRANSITION" || code === "REVISION_CONFLICT"))) {
       return cliFailure(code, (error as Error).message);
     }
@@ -4849,12 +4892,12 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     const reason = busy ? t("ui.this_codex_chat_is_already_open_in_another_proce_9d6a0201") + "\n\n" + (error as Error).message : (error as Error).message;
     await saveActivity();
     const condition = busy ? t("ui.continue_in_the_existing_chat_or_stop_work_there_635dd251") : undefined;
-    const failedRevision = returnedRevision ?? (earlyLaunch ? currentRevisionAfterStart : undefined);
+    const failedRevision = returnedRevision ?? (earlyLaunch || writeProbeRetry ? currentRevisionAfterStart : undefined);
     if (failedRevision !== undefined && !signal.aborted) {
       const blocked = await callCli<LaunchState>(project, ["block", id, "--compact"], {
         revision: failedRevision,
         reason,
-        ...(earlyLaunch ? { retryExecutor: true } : {}),
+        ...(earlyLaunch || writeProbeRetry ? { retryExecutor: true } : {}),
         condition: condition ?? t("ui.resolve_the_reported_issue_and_resume_the_task_2b49bf6d"),
       });
       if (blocked.ok) return blocked;

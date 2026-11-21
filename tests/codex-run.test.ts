@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpath
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { startCodexRun } from "../src/desktop/codex-run.ts";
+import { startCodexRun, writeProbeTimeoutCode } from "../src/desktop/codex-run.ts";
 import { executorFullAccess } from "../src/desktop/codex.ts";
 import { codexRpc } from "../src/desktop/codex-rpc.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
@@ -117,6 +117,10 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '    } else if (outcome === "mxc-launch-error") {',
     '      result = { exitCode: 1, stdout: "", stderr: "MXC launcher: CreateProcessW failed with error code 2 (0x00000002).\\n" };',
     '    } else if (outcome === "timeout") {',
+    '      const path = require("node:path");',
+    '      const dir = path.join(roots[1], roots[0]);',
+    '      fs.mkdirSync(dir);',
+    '      fs.writeFileSync(path.join(dir, "probe"), "0");',
     '      result = { exitCode: 124, stdout: "", stderr: "" };',
     '    } else if (outcome === "missing-confirmation") {',
     '      result = { exitCode: 0, stdout: "", stderr: "" };',
@@ -354,7 +358,14 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   await assert.rejects(launch("silent-exit"), /process exited with code 7/);
   await assert.rejects(launch("spawn-error"), /could not run the write probe.*os error 2/);
   await assert.rejects(launch("mxc-launch-error"), /could not start the write probe.*launcher exit code 1.*error code 2/);
-  await assert.rejects(launch("timeout"), /write probe timed out after 15 seconds/);
+  await assert.rejects(launch("timeout"), {
+    code: writeProbeTimeoutCode,
+    message: "Codex write probe timed out after 15 seconds.",
+  });
+  assert.ok(!readdirSync(worktree).some(name => name.startsWith(".taskboard-access-")));
+  const timedOut = JSON.parse(readFileSync(capture, "utf8"));
+  assert.equal(timedOut.requests.at(-1).method, "command/exec");
+  if (process.platform === "win32") assert.ok(!existsSync(timedOut.temp));
   await assert.rejects(launch("missing-confirmation"), /code 0 without confirming the write check/);
   await assert.rejects(launch("denied"), error => {
     assert.ok(error instanceof Error);
@@ -521,7 +532,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   const externalRun = JSON.parse(readFileSync(capture, "utf8"));
   const externalProbe = externalRun.requests.find((req: { method: string }) => req.method === "command/exec");
   assert.equal(externalProbe.params.cwd, externalFolder);
-  assert.deepEqual(externalProbe.params.command.slice(3), [
+  assert.deepEqual(externalProbe.params.command.slice(4), [
     externalFolder, join(folder, ".tasks"), ...(process.platform === "win32" ? [externalRun.temp] : []),
   ]);
   const externalThread = externalRun.requests.find((req: { method: string }) => req.method === "thread/start");

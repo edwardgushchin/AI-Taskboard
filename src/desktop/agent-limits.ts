@@ -147,7 +147,8 @@ export function createAgentSlots(shared = false) {
         return registerRuntime(path, { kind: "slot", role, task, operation }, entries => {
           const limit = role === "manager" ? 0 : readBoardSettings(runtimeLocation(path)).taskLimits?.[role] ?? cachedTaskLimits(entries)?.[role] ?? limits[role];
           const queued = entries.find(entry => entry.kind === "queue" && entry.task === task);
-          return queued?.revision === queuedRevision && (!task || !entries.some(entry => entry.kind !== "queue" && (entry.task === task ||
+          return queued?.revision === queuedRevision && (queued?.writeProbeRetry?.notBefore ?? 0) <= Date.now() &&
+            (!task || !entries.some(entry => entry.kind !== "queue" && (entry.task === task ||
             entry.kind === "slot" && entry.role === role && taskId(entry.task) === taskId(task)))) &&
             (limit === 0 || entries.filter(entry => entry.kind === "slot" && entry.role === role).length < limit);
         });

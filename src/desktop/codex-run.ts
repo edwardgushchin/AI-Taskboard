@@ -1,8 +1,9 @@
 import { trackActiveRun, trackProvider } from "./active-runs.ts";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, realpathSync } from "node:fs";
-import { rm } from "node:fs/promises";
+import { rm, rmdir, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { git, gitSafeDirectoryEnvironment, isolatedWorktreesDirectory } from "../cli/git.ts";
@@ -95,11 +96,12 @@ function gitAccessPaths(cwd: string, branch: string): string[] {
 }
 
 const writeProbeTimeoutMs = 15_000;
-const writeProbeOperations = ["mkdtemp", "create", "overwrite", "unlink", "rmdir"];
+export const writeProbeTimeoutCode = "CODEX_WRITE_PROBE_TIMEOUT";
+const writeProbeOperations = ["mkdir", "create", "overwrite", "unlink", "rmdir"];
 const verifyWrite = `
 const fs = require("node:fs");
 const path = require("node:path");
-const roots = process.argv.slice(1);
+const [name, ...roots] = process.argv.slice(1);
 for (const [index, root] of roots.entries()) {
   const failures = [];
   const attempt = (operation, action) => {
@@ -109,7 +111,11 @@ for (const [index, root] of roots.entries()) {
       failures.push({ operation, code: error.code });
     }
   };
-  const dir = attempt("mkdtemp", () => fs.mkdtempSync(path.join(root, ".taskboard-access-")));
+  const dir = attempt("mkdir", () => {
+    const directory = path.join(root, name);
+    fs.mkdirSync(directory);
+    return directory;
+  });
   if (dir) {
     const probe = path.join(dir, "probe");
     try {
@@ -321,6 +327,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   let control: AgentControl | undefined;
   let stopMail: (() => void) | undefined;
   let interruptTimeout: NodeJS.Timeout | undefined;
+  const probeDirectory = ".taskboard-access-" + randomUUID();
+  let probePending = false;
   const timeout = setTimeout(() => {
     rpc.fail(new Error("Codex did not start the task in time."));
     child.kill();
@@ -336,7 +344,25 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     child.stdin.end();
     child.kill();
     await exited;
-    try { await closeTools(); } finally { await removeRunTemp(); }
+    try {
+      if (probePending) {
+        for (const root of paths) {
+          const directory = join(root, probeDirectory);
+          try {
+            await unlink(join(directory, "probe")).catch(error => {
+              if (error.code !== "ENOENT") throw error;
+            });
+            await rmdir(directory);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+              throw new Error("Could not clean up the Codex write probe in " + directory + ".", { cause: error });
+            }
+          }
+        }
+      }
+    } finally {
+      try { await closeTools(); } finally { await removeRunTemp(); }
+    }
   };
   child.stderr.resume();
   const rpc = codexRpc(child, message => {
@@ -420,16 +446,19 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       capabilities: { experimentalApi: true },
     });
     send({ method: "initialized" });
+    probePending = true;
     const probe = await request<{ exitCode: number; stderr: string; stdout: string }>("command/exec", {
       cwd, permissionProfile: profile, timeoutMs: writeProbeTimeoutMs, env: { ELECTRON_RUN_AS_NODE: "1" },
-      command: [process.execPath, "-e", verifyWrite, ...paths],
+      command: [process.execPath, "-e", verifyWrite, probeDirectory, ...paths],
     }).catch((error: Error) => {
       throw new Error("Codex could not run the write probe." + writeProbeDetail(error.message));
     });
     // command/exec uses 124 for its deadline. The helper only sets 0 or 1.
     if (probe.exitCode === 124) {
-      throw new Error("Codex write probe timed out after " + writeProbeTimeoutMs / 1000 + " seconds.");
+      throw Object.assign(new Error("Codex write probe timed out after " + writeProbeTimeoutMs / 1000 + " seconds."),
+        { code: writeProbeTimeoutCode });
     }
+    probePending = false;
     if (probe.exitCode !== 0) {
       const failure = probe.exitCode === 1 && writeProbeFileFailure(probe.stdout ?? "", paths);
       if (failure) throw new Error(failure);
