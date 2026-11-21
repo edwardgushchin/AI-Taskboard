@@ -1,7 +1,9 @@
 import type { BoardSettings } from "./model.ts";
-import { TaskboardError, taskIdPattern } from "./model.ts";
+import { requireRevision, TaskboardError, taskIdPattern } from "./model.ts";
 import type { BoardStore } from "./storage.ts";
 import { isManual } from "./manual-board.ts";
+import { validateDependencies } from "./dependencies.ts";
+import { changeTask } from "./tasks.ts";
 
 export function autoQueueSettings(settings: BoardSettings): NonNullable<BoardSettings["autoQueue"]> {
   return settings.autoQueue ?? { revision: 0, paused: false, order: [], held: [] };
@@ -9,12 +11,37 @@ export function autoQueueSettings(settings: BoardSettings): NonNullable<BoardSet
 
 export function updateAutoQueue(store: BoardStore, input: Record<string, unknown>) {
   if (isManual(store.index.settings)) throw new TaskboardError("MANUAL_BOARD", "Automatic queues require an agent board.");
-  if (Object.keys(input).some(key => !["revision", "paused", "order", "hold", "release"].includes(key))) {
-    throw new TaskboardError("INVALID_INPUT", "Use revision, paused, order, hold and release for the automatic queue.");
+  if (Object.keys(input).some(key => !["revision", "paused", "order", "hold", "release", "replaceHold"].includes(key))) {
+    throw new TaskboardError("INVALID_INPUT", "Use revision, paused, order, hold, release or replaceHold for the automatic queue.");
   }
   const previous = autoQueueSettings(store.index.settings);
   if (!Object.keys(input).length) return previous;
   if (input.revision !== previous.revision) throw new TaskboardError("REVISION_CONFLICT", "The automatic queue changed. Read it before updating.");
+  if (Object.hasOwn(input, "replaceHold")) {
+    const replacement = input.replaceHold as Record<string, unknown> | undefined;
+    if (Object.keys(input).length !== 2 || !replacement || typeof replacement !== "object" ||
+        Object.keys(replacement).length !== 3 ||
+        typeof replacement.id !== "string" || !taskIdPattern.test(replacement.id) ||
+        typeof replacement.dependency !== "string" || !taskIdPattern.test(replacement.dependency)) {
+      throw new TaskboardError("INVALID_INPUT", "Use replaceHold with id, revision and dependency, without other queue changes.");
+    }
+    const { id, revision, dependency } = replacement;
+    const task = store.card(id);
+    requireRevision(task, revision, true);
+    if (!previous.held.includes(id) || !["draft", "ready", "blocked"].includes(task.status)) {
+      throw new TaskboardError("INVALID_TRANSITION", "Only a held waiting task can replace its hold with a dependency.");
+    }
+    const dependencies = [...new Set([...(task.dependencies ?? []), dependency])];
+    const updated = changeTask(task, "update", { revision, dependencies, actor: "manager", preserveStatus: true,
+      note: "Replace the automatic queue hold with a dependency on " + dependency + "." });
+    validateDependencies(store, updated);
+    // Keep the hold if saving the card fails. If saving the queue fails, both gates remain.
+    if (updated !== task) store.save({ ...updated, acceptanceRepair: undefined });
+    const next = { ...previous, revision: previous.revision + 1, held: previous.held.filter(held => held !== id) };
+    store.index.settings.autoQueue = next;
+    store.saveIndex();
+    return next;
+  }
   if (input.paused !== undefined && typeof input.paused !== "boolean") throw new TaskboardError("INVALID_INPUT", "paused must be a boolean.");
   const ids = (name: string) => {
     const value = input[name] === undefined ? [] : input[name];
