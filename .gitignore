@@ -1,6 +1,7 @@
 node_modules/
 dist/
 release/
+/ci-results/
 .tasks/
 .dev-diary/
 .codex-attachments/
