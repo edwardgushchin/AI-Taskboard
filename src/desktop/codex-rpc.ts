@@ -67,7 +67,18 @@ export function codexRpc(child: ChildProcess,
       const error = (message.error ?? (message.method === "error" ? notification?.error :
         message.method === "turn/completed" ? notification?.turn?.error : undefined)) as
         { codexErrorInfo?: unknown; data?: { codexErrorInfo?: unknown } } | undefined;
-      if ((error?.codexErrorInfo ?? error?.data?.codexErrorInfo) === "usageLimitExceeded") onQuotaExceeded?.();
+      const quotaExceeded = (error?.codexErrorInfo ?? error?.data?.codexErrorInfo) === "usageLimitExceeded";
+      if (!message.method && typeof message.id === "number") {
+        const reply = pending.get(message.id);
+        pending.delete(message.id);
+        if (reply) logReply(message.id, reply, message.error ? "error" : "ok", receivedAt);
+        if (message.error) reply?.reject(new CodexRpcRejection(message.error.message ?? "Codex rejected the request."));
+        else reply?.resolve(message.result);
+        // The quota listener may synchronously abort the connection. Keep this reply authoritative.
+        if (quotaExceeded) onQuotaExceeded?.();
+        return;
+      }
+      if (quotaExceeded) onQuotaExceeded?.();
       if (message.method && message.id !== undefined) {
         void Promise.resolve().then(() => onRequest?.(message)).then(result => {
           if (!failure) send(result ? { id: message.id, result } :
@@ -81,12 +92,6 @@ export function codexRpc(child: ChildProcess,
         notifications.push(message);
         waiting?.();
         waiting = undefined;
-      } else if (typeof message.id === "number") {
-        const reply = pending.get(message.id);
-        pending.delete(message.id);
-        if (reply) logReply(message.id, reply, message.error ? "error" : "ok", receivedAt);
-        if (message.error) reply?.reject(new CodexRpcRejection(message.error.message ?? "Codex rejected the request."));
-        else reply?.resolve(message.result);
       }
     } catch (error) { fail(error as Error); }
   }

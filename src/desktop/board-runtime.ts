@@ -25,6 +25,15 @@ export interface RuntimeEntry {
   turnRequest?: { threadId: string; clientId: string; turnId?: string };
   restart?: { threadId: string; cwd: string };
   earlyLaunch?: { cwd: string };
+  writeProbeRetry?: {
+    cwd: string;
+    fullAccess: boolean;
+    windowsSandbox?: "mxc" | "elevated";
+    threadId?: string;
+    notBefore: number;
+    failure?: string;
+    unconfirmedTurn?: true;
+  };
   launchStopped?: true;
   continuation?: { afterDisconnect?: boolean; withoutProgress?: boolean };
   quotaPaused?: boolean;
@@ -169,6 +178,11 @@ export function matchesQueuedExecutor(entry: RuntimeEntry, task: QueuedTask) {
   if (entry.kind !== "queue" || entry.task !== task.id || task.status !== "in_progress") return false;
   if (entry.reviewReturn) return task.reviewReturn !== undefined && entry.revision === task.reviewReturn;
   if (entry.restart) return entry.restart.threadId === task.codexThreadId && (entry.revision ?? Infinity) <= task.revision;
+  if (entry.writeProbeRetry) {
+    return entry.revision !== undefined && entry.revision <= task.revision &&
+      (entry.writeProbeRetry.threadId === task.codexThreadId || entry.linkedThread?.codexThreadId === task.codexThreadId &&
+        entry.linkedThread !== undefined);
+  }
   if (entry.earlyLaunch) {
     // The revision is the first card snapshot covered by this launch.
     // Comments and other edits may advance it while the task stays in progress.
@@ -177,6 +191,43 @@ export function matchesQueuedExecutor(entry: RuntimeEntry, task: QueuedTask) {
   }
   return entry.revision === task.revision || (entry.linkedThread?.revision === task.revision &&
     entry.linkedThread.codexThreadId === task.codexThreadId);
+}
+
+export function queueWriteProbeRetry(project: string, slotId: string, task: QueuedTask,
+  retry: NonNullable<RuntimeEntry["writeProbeRetry"]>, continuation: RuntimeEntry["continuation"],
+  newThread: RuntimeEntry["newThread"]) {
+  return runtimeTransaction(project, entries => {
+    const slot = entries.find(entry => entry.id === slotId && entry.task === task.id && entry.kind === "slot");
+    if (!slot || slot.launchStopped) return false;
+    const queued = entries.find(entry => entry.kind === "queue" && entry.task === task.id);
+    if (queued) {
+      if (!matchesQueuedExecutor(queued, task) || queued.writeProbeRetry) return false;
+      queued.writeProbeRetry = retry;
+    } else {
+      entries.push({ id: "queue:" + task.id, kind: "queue", owner: 0, task: task.id, revision: task.revision,
+        writeProbeRetry: retry, continuation, newThread });
+    }
+    return true;
+  });
+}
+
+export function recordWriteProbeRetryFailure(project: string, slotId: string, task: QueuedTask, failure: string,
+  outcome?: { rejectedClientId: string } | { unconfirmedTurn: true }) {
+  return runtimeTransaction(project, entries => {
+    const slot = entries.find(entry => entry.id === slotId && entry.task === task.id && entry.kind === "slot");
+    const queued = entries.find(entry => matchesQueuedExecutor(entry, task));
+    if (!slot || slot.launchStopped || !queued?.writeProbeRetry) return false;
+    if (outcome && "rejectedClientId" in outcome) {
+      if (queued.turnRequest?.clientId !== outcome.rejectedClientId || queued.turnRequest.turnId) return false;
+      delete queued.turnRequest;
+    }
+    if (outcome && "unconfirmedTurn" in outcome) {
+      if (!queued.turnRequest || queued.turnRequest.threadId !== task.codexThreadId) return false;
+      queued.writeProbeRetry.unconfirmedTurn = true;
+    }
+    queued.writeProbeRetry.failure = failure;
+    return true;
+  });
 }
 
 export function preserveLegacyFirstLaunch(project: string, task: QueuedTask & Pick<Task, "git" | "workingDirectory">) {
@@ -269,7 +320,7 @@ export function registerRuntime(project: string, value: Omit<RuntimeEntry, "id" 
         const queued = entries.find(candidate => candidate.kind === "queue" && candidate.task === entry.task);
         if (queued) {
           queued.quotaPaused = true;
-          delete queued.turnRequest;
+          if (!queued.writeProbeRetry) delete queued.turnRequest;
         }
       }
       if (restart) queueRestart(entries, entry, restart === "quota" || undefined);

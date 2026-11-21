@@ -1,8 +1,9 @@
 import { trackActiveRun, trackProvider } from "./active-runs.ts";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, realpathSync } from "node:fs";
-import { rm } from "node:fs/promises";
+import { rm, rmdir, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { git, gitSafeDirectoryEnvironment, isolatedWorktreesDirectory } from "../cli/git.ts";
@@ -26,7 +27,7 @@ import type { configuredCodex } from "./codex.ts";
 import { requestExecutorAccess } from "./codex-chat.ts";
 import { windowsGuiEvidence } from "./windows-gui.ts";
 import type { CliReply } from "./cli.ts";
-import { codexRpc, turnControl } from "./codex-rpc.ts";
+import { CodexRpcRejection, codexRpc, turnControl } from "./codex-rpc.ts";
 import type { AgentControl } from "./codex-rpc.ts";
 import { CodexTokenUsage } from "./codex-token-usage.ts";
 import type { TokenUsageReport } from "../cli/token-usage.ts";
@@ -38,10 +39,16 @@ type Client = NonNullable<Awaited<ReturnType<typeof configuredCodex>>>;
 type Turn = { id: string; status: string; error?: { message?: string } | null };
 type RunFailure = { reason: string; disconnected?: boolean; interrupted?: boolean };
 type Run = AgentControl & { threadId: string; completion: Promise<RunFailure | undefined>; recovered?: true };
-type QueuedTurn = { clientId: string; recover: boolean; turnId?: string; accepted: (turnId: string) => void };
+type QueuedTurn = {
+  clientId: string;
+  recover: boolean;
+  turnId?: string;
+  accepted: (turnId: string) => void;
+  rejected?: (reason: string) => void;
+};
 
 async function findQueuedTurn(request: <R>(method: string, params: object) => Promise<R>,
-  threadId: string, queued: QueuedTurn): Promise<Turn | undefined> {
+  threadId: string, queued: QueuedTurn, recoverWriteProbeTurn: boolean): Promise<Turn | undefined> {
   type SavedTurn = Turn & { itemsView?: string; items: { type: string; clientId?: string }[] };
   let cursor: string | undefined;
   const seen = new Set<string>();
@@ -65,6 +72,7 @@ async function findQueuedTurn(request: <R>(method: string, params: object) => Pr
     } while (cursor);
     if (queued.turnId || active) throw new Error("Codex has not confirmed the queued turn in history.");
   } catch (error) {
+    if (recoverWriteProbeTurn && error instanceof CodexRpcRejection && missingCodexThread(error.message, threadId)) throw error;
     throw Object.assign(new Error((error as Error).message), { code: "CODEX_START_UNCONFIRMED" });
   }
 }
@@ -95,11 +103,12 @@ function gitAccessPaths(cwd: string, branch: string): string[] {
 }
 
 const writeProbeTimeoutMs = 15_000;
-const writeProbeOperations = ["mkdtemp", "create", "overwrite", "unlink", "rmdir"];
+export const writeProbeTimeoutCode = "CODEX_WRITE_PROBE_TIMEOUT";
+const writeProbeOperations = ["mkdir", "create", "overwrite", "unlink", "rmdir"];
 const verifyWrite = `
 const fs = require("node:fs");
 const path = require("node:path");
-const roots = process.argv.slice(1);
+const [name, ...roots] = process.argv.slice(1);
 for (const [index, root] of roots.entries()) {
   const failures = [];
   const attempt = (operation, action) => {
@@ -109,7 +118,11 @@ for (const [index, root] of roots.entries()) {
       failures.push({ operation, code: error.code });
     }
   };
-  const dir = attempt("mkdtemp", () => fs.mkdtempSync(path.join(root, ".taskboard-access-")));
+  const dir = attempt("mkdir", () => {
+    const directory = path.join(root, name);
+    fs.mkdirSync(directory);
+    return directory;
+  });
   if (dir) {
     const probe = path.join(dir, "probe");
     try {
@@ -171,7 +184,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   onActivity?: (item: RunActivity, currentTurn: boolean) => void, onTokenUsage?: (report: TokenUsageReport) => Promise<void>, signal?: AbortSignal,
   beforeTurn?: (threadId: string, created: boolean) => Promise<void | QueuedTurn>, desktopProfile?: string,
   recoveringThreadId?: string, requireSavedThread = false, onUserMessage?: (clientId: string) => void,
-  linkBeforeTools = false): Promise<Run> {
+  linkBeforeTools = false, recoverWriteProbeTurn = false): Promise<Run> {
   signal?.throwIfAborted();
   const fullAccess = task.fullAccess === true;
   const profile = fullAccess ? ":danger-full-access" : taskProfile;
@@ -321,6 +334,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   let control: AgentControl | undefined;
   let stopMail: (() => void) | undefined;
   let interruptTimeout: NodeJS.Timeout | undefined;
+  const probeDirectory = ".taskboard-access-" + randomUUID();
+  let probePending = false;
   const timeout = setTimeout(() => {
     rpc.fail(new Error("Codex did not start the task in time."));
     child.kill();
@@ -336,7 +351,25 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     child.stdin.end();
     child.kill();
     await exited;
-    try { await closeTools(); } finally { await removeRunTemp(); }
+    try {
+      if (probePending) {
+        for (const root of paths) {
+          const directory = join(root, probeDirectory);
+          try {
+            await unlink(join(directory, "probe")).catch(error => {
+              if (error.code !== "ENOENT") throw error;
+            });
+            await rmdir(directory);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+              throw new Error("Could not clean up the Codex write probe in " + directory + ".", { cause: error });
+            }
+          }
+        }
+      }
+    } finally {
+      try { await closeTools(); } finally { await removeRunTemp(); }
+    }
   };
   child.stderr.resume();
   const rpc = codexRpc(child, message => {
@@ -420,30 +453,35 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       capabilities: { experimentalApi: true },
     });
     send({ method: "initialized" });
-    const probe = await request<{ exitCode: number; stderr: string; stdout: string }>("command/exec", {
-      cwd, permissionProfile: profile, timeoutMs: writeProbeTimeoutMs, env: { ELECTRON_RUN_AS_NODE: "1" },
-      command: [process.execPath, "-e", verifyWrite, ...paths],
-    }).catch((error: Error) => {
-      throw new Error("Codex could not run the write probe." + writeProbeDetail(error.message));
-    });
-    // command/exec uses 124 for its deadline. The helper only sets 0 or 1.
-    if (probe.exitCode === 124) {
-      throw new Error("Codex write probe timed out after " + writeProbeTimeoutMs / 1000 + " seconds.");
-    }
-    if (probe.exitCode !== 0) {
-      const failure = probe.exitCode === 1 && writeProbeFileFailure(probe.stdout ?? "", paths);
-      if (failure) throw new Error(failure);
-      const detail = writeProbeDetail(probe.stderr?.trim() || probe.stdout || "");
-      if (probe.stderr?.startsWith("MXC launcher: CreateProcessW failed with error code ")) {
-        throw new Error("Codex could not start the write probe (launcher exit code " + probe.exitCode + ")." + detail);
+    if (!recoverWriteProbeTurn) {
+      probePending = true;
+      const probe = await request<{ exitCode: number; stderr: string; stdout: string }>("command/exec", {
+        cwd, permissionProfile: profile, timeoutMs: writeProbeTimeoutMs, env: { ELECTRON_RUN_AS_NODE: "1" },
+        command: [process.execPath, "-e", verifyWrite, probeDirectory, ...paths],
+      }).catch((error: Error) => {
+        throw new Error("Codex could not run the write probe." + writeProbeDetail(error.message));
+      });
+      // command/exec uses 124 for its deadline. The helper only sets 0 or 1.
+      if (probe.exitCode === 124) {
+        throw Object.assign(new Error("Codex write probe timed out after " + writeProbeTimeoutMs / 1000 + " seconds."),
+          { code: writeProbeTimeoutCode });
       }
-      const windowsCode = process.platform === "win32" && (probe.exitCode >>> 0) >= 0x80000000
-        ? " (0x" + (probe.exitCode >>> 0).toString(16).toUpperCase() + ")" : "";
-      throw new Error("Codex write probe process exited with code " + probe.exitCode + windowsCode + "." + detail);
-    }
-    if (probe.stdout?.trim().split(/\r?\n/).at(-1) !== "taskboard-write-probe ok") {
-      throw new Error("Codex write probe process exited with code 0 without confirming the write check." +
-        writeProbeDetail(probe.stderr || probe.stdout || ""));
+      probePending = false;
+      if (probe.exitCode !== 0) {
+        const failure = probe.exitCode === 1 && writeProbeFileFailure(probe.stdout ?? "", paths);
+        if (failure) throw new Error(failure);
+        const detail = writeProbeDetail(probe.stderr?.trim() || probe.stdout || "");
+        if (probe.stderr?.startsWith("MXC launcher: CreateProcessW failed with error code ")) {
+          throw new Error("Codex could not start the write probe (launcher exit code " + probe.exitCode + ")." + detail);
+        }
+        const windowsCode = process.platform === "win32" && (probe.exitCode >>> 0) >= 0x80000000
+          ? " (0x" + (probe.exitCode >>> 0).toString(16).toUpperCase() + ")" : "";
+        throw new Error("Codex write probe process exited with code " + probe.exitCode + windowsCode + "." + detail);
+      }
+      if (probe.stdout?.trim().split(/\r?\n/).at(-1) !== "taskboard-write-probe ok") {
+        throw new Error("Codex write probe process exited with code 0 without confirming the write check." +
+          writeProbeDetail(probe.stderr || probe.stdout || ""));
+      }
     }
     let existing = task.codexThreadId;
     if (recoveringThreadId && existing !== recoveringThreadId) {
@@ -535,13 +573,21 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     stages.bind(request, threadId);
     if (onActivity) stages.listen(item => onActivity(item, false));
     tokens.track(threadId, started.model ?? started.thread.model ?? null, true);
-    const recovered = queued && queued.recover ? await findQueuedTurn(request, threadId, queued) : undefined;
+    const recovered = queued?.recover ? await findQueuedTurn(request, threadId, queued, recoverWriteProbeTurn) : undefined;
+    if (recoverWriteProbeTurn && !recovered) {
+      throw Object.assign(new Error("Codex has not confirmed the write probe retry's turn in history."),
+        { code: "CODEX_START_UNCONFIRMED" });
+    }
     signal?.throwIfAborted();
     const { turn } = recovered ? { turn: recovered } : await request<{ turn: Turn }>("turn/start", {
       threadId, effort: task.execution?.effort, input: [{ type: "text", text: prompt, text_elements: [] }],
       ...(queued ? { clientUserMessageId: queued.clientId } : {}),
       additionalContext: { ai_taskboard_worklog: { value: worklogReminder, kind: "application" } },
     }).catch(error => {
+      if (error instanceof CodexRpcRejection && queued?.rejected) {
+        queued.rejected(error.message.trim() || "Codex rejected the turn start.");
+        throw error;
+      }
       if (queued && rpc.failed) throw Object.assign(error as Error, { code: "CODEX_START_UNCONFIRMED" });
       throw error;
     });

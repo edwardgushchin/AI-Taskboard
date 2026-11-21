@@ -9,7 +9,8 @@ import type { Task } from "../src/cli/model.ts";
 import { initializeBoard, locateBoard, onBoard, withLock } from "../src/cli/storage.ts";
 import { cachedTaskLimits, createAgentSlots, readProfileTaskLimits } from "../src/desktop/agent-limits.ts";
 import { projectIdentity } from "../src/desktop/project-tabs.ts";
-import { forgetExecutor, matchesQueuedExecutor, runtimeEntries, runtimeTransaction } from "../src/desktop/board-runtime.ts";
+import { forgetExecutor, matchesQueuedExecutor, prepareQueuedTurn, queueWriteProbeRetry, recordWriteProbeRetryFailure,
+  runtimeEntries, runtimeTransaction } from "../src/desktop/board-runtime.ts";
 import { plannedDraft } from "./fixtures/planned-draft.ts";
 
 test("comments retain a queued first launch in an assigned directory, including older manual requests", t => {
@@ -51,6 +52,88 @@ test("comments retain a queued first launch in an assigned directory, including 
   forgetExecutor(project, id);
   taskCommand(["comment", id], { text: "Comment after stopping the launch" });
   assert.equal(queued(), undefined);
+});
+
+test("write probe retry persists its delay and respects shared slots and cancellation", t => {
+  const project = mkdtempSync(join(tmpdir(), "taskboard-write-probe-retry-"));
+  t.after(() => rmSync(project, { recursive: true, maxRetries: 5 }));
+  initializeBoard(locateBoard(project, true), () => {});
+  const first = createAgentSlots(true);
+  first.configure({ executor: 1, manager: 0, reviewer: 1 });
+  first.remember(project);
+  const task = { id: "T-0001", revision: 4, status: "in_progress" as const };
+  const initial = first.acquire(project, "executor", undefined, task.id);
+  assert.ok(initial?.id);
+  const retry = { cwd: project, fullAccess: false, windowsSandbox: "mxc" as const, notBefore: Date.now() + 60_000 };
+  assert.ok(queueWriteProbeRetry(project, initial.id, task, retry, undefined, undefined));
+  initial();
+
+  const reopened = createAgentSlots(true);
+  reopened.remember(project);
+  const pending = runtimeEntries(project).find(entry => entry.kind === "queue");
+  assert.ok(pending);
+  assert.deepEqual(pending.writeProbeRetry, retry);
+  assert.ok(matchesQueuedExecutor(pending, { ...task, revision: 5 }));
+  assert.equal(matchesQueuedExecutor(pending, { ...task, status: "blocked" }), false);
+  assert.equal(reopened.acquire(project, "executor", undefined, task.id, task.revision), undefined);
+  runtimeTransaction(project, entries => {
+    const queued = entries.find(entry => entry.id === pending.id);
+    assert.ok(queued?.writeProbeRetry);
+    queued.writeProbeRetry.notBefore = 0;
+  });
+
+  const occupied = first.acquire(project, "executor", undefined, "T-0002");
+  assert.ok(occupied);
+  assert.equal(reopened.acquire(project, "executor", undefined, task.id, task.revision), undefined);
+  occupied();
+  const attempt = reopened.acquire(project, "executor", undefined, task.id, task.revision);
+  assert.ok(attempt?.id);
+  assert.equal(first.acquire(project, "executor", undefined, task.id, task.revision), undefined);
+  assert.ok(recordWriteProbeRetryFailure(project, attempt.id, task, "retry interrupted"));
+  assert.equal(runtimeEntries(project).find(entry => entry.id === pending.id)?.writeProbeRetry?.failure, "retry interrupted");
+  const threadId = "01234567-1234-5678-1234-123456789012";
+  const turn = prepareQueuedTurn(project, task, threadId);
+  assert.ok(turn);
+  assert.equal(turn.recover, false);
+  attempt("quota");
+  const recovery = first.acquire(project, "executor", undefined, task.id, task.revision);
+  assert.ok(recovery?.id);
+  assert.deepEqual(prepareQueuedTurn(project, task, threadId), { ...turn, recover: true });
+  assert.equal(recordWriteProbeRetryFailure(project, recovery.id, task, "wrong chat", { unconfirmedTurn: true }), false);
+  assert.equal(recordWriteProbeRetryFailure(project, recovery.id, task, "old reply", { rejectedClientId: "another-request" }), false);
+  assert.ok(recordWriteProbeRetryFailure(project, recovery.id, task, "server rejected start", { rejectedClientId: turn.clientId }));
+  const rejected = runtimeEntries(project).find(entry => entry.id === pending.id);
+  assert.equal(rejected?.turnRequest, undefined);
+  assert.equal(rejected?.writeProbeRetry?.failure, "server rejected start");
+  forgetExecutor(project, task.id);
+  assert.equal(queueWriteProbeRetry(project, recovery.id, task, retry, undefined, undefined), false);
+  recovery();
+  assert.equal(runtimeEntries(project).some(entry => entry.task === task.id), false);
+});
+
+test("blocking an unconfirmed write probe turn retains its identity until the card is blocked", t => {
+  const project = mkdtempSync(join(tmpdir(), "taskboard-unconfirmed-write-probe-"));
+  t.after(() => rmSync(project, { recursive: true, maxRetries: 5 }));
+  initializeBoard(locateBoard(project, true), () => {});
+  const slots = createAgentSlots(true);
+  slots.remember(project);
+  const threadId = "01234567-1234-5678-1234-123456789012";
+  const task = { id: "T-0001", revision: 4, status: "in_progress" as const, codexThreadId: threadId };
+  const initial = slots.acquire(project, "executor", undefined, task.id);
+  assert.ok(initial?.id);
+  assert.ok(queueWriteProbeRetry(project, initial.id, task, {
+    cwd: project, fullAccess: true, threadId, notBefore: 0,
+  }, undefined, undefined));
+  const turn = prepareQueuedTurn(project, task, threadId);
+  assert.ok(turn);
+  assert.ok(recordWriteProbeRetryFailure(project, initial.id, task, "access revoked", { unconfirmedTurn: true }));
+  initial();
+  const pending = runtimeEntries(project).find(entry => matchesQueuedExecutor(entry, task));
+  assert.equal(pending?.turnRequest?.clientId, turn.clientId);
+  assert.equal(pending?.writeProbeRetry?.unconfirmedTurn, true);
+  assert.equal(pending?.writeProbeRetry?.failure, "access revoked");
+  forgetExecutor(project, task.id);
+  assert.equal(runtimeEntries(project).some(entry => matchesQueuedExecutor(entry, task)), false);
 });
 
 test("shared defaults, overrides and canonical aliases use one pool without interrupting current leases", t => {

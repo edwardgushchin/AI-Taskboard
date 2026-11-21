@@ -959,7 +959,7 @@ function startTask(location: BoardLocation, id: string, input: Record<string, un
         return { started: reply(store, reopenConflictingReview(store, task, input)) };
       }
       const result = prepareTaskStart(store, task, input, startLockWaitMs + lockWaitMs, enqueue,
-        queued?.restart?.cwd ?? queued?.earlyLaunch?.cwd);
+        queued?.writeProbeRetry?.cwd ?? queued?.restart?.cwd ?? queued?.earlyLaunch?.cwd);
       if ("task" in result && task.status === "in_progress") enqueue?.(result.task);
       return "task" in result ? { started: reply(store, result) } : { checkout: result };
     });

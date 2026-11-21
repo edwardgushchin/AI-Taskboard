@@ -291,7 +291,8 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
       const condition = text(input.condition, "condition", true);
       const previousStatus = task.status === "draft" || task.status === "ready" ? task.status : undefined;
       const retryExecutor = input.retryExecutor === true ? true : undefined;
-      return record({ ...task, blocked: { reason, condition, previousStatus, retryExecutor } }, action, boardActor(input), "blocked", reason);
+      const unconfirmedTurn = input.unconfirmedTurn === true ? true : undefined;
+      return record({ ...task, blocked: { reason, condition, previousStatus, retryExecutor, unconfirmedTurn } }, action, boardActor(input), "blocked", reason);
     }
     case "resume":
     case "unblock": {
