@@ -9,9 +9,11 @@ const reportSentences = new Intl.Segmenter(undefined, { granularity: "sentence" 
 function localDocumentLink(value) {
   try {
     const path = decodeURIComponent(value);
+    const lineLink = /^([^#]+)#L[1-9]\d*$/.exec(value);
     return !/[\0-\x1f\x7f]/.test(path) &&
       (!/^[a-z][a-z\d+.-]*:/i.test(path) || /^(?:file:|[a-z]:[\\/])/i.test(path)) &&
-      (/\.(?:md|markdown|txt|log|json)(?::\d+(?::\d+)?)?(?:#.*)?$/i.test(path) || sourceLocation.test(path));
+      (/\.(?:md|markdown|txt|log|json)(?::\d+(?::\d+)?)?(?:#.*)?$/i.test(path) || sourceLocation.test(path) ||
+        Boolean(lineLink && sourceFile.test(decodeURIComponent(lineLink[1]))));
   } catch { return false; }
 }
 
