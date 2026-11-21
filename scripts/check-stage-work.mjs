@@ -546,7 +546,7 @@ async function runCheck() {
     const fence = String.fromCharCode(96).repeat(3);
     const report = [
       "# Проверка журнала этапов в Windows Electron", "",
-      "Результат — " + checks.length + " проверок пройдены. Ошибок в консоли renderer нет.", "",
+      "Проверок пройдено — " + checks.length + ". Ошибок в консоли renderer нет.", "",
       "Windows " + process.getSystemVersion() + ", Electron " + process.versions.electron +
         ", Chromium " + process.versions.chrome + ", Node " + process.versions.node + " (Electron).", "",
       fence + "powershell", "node scripts/check-stage-work.mjs --artifacts .tasks/qa/retry", fence, "",

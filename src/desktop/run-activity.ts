@@ -1,7 +1,11 @@
 import type { RunActivity } from "../cli/model.ts";
 
-// Keep the rendered suffix out of the output reused by later provider snapshots.
-const commandResults = new WeakMap<RunActivity, { output: string; exitCode?: number }>();
+type CommandResult = { output: string; snapshots?: string[]; exitCode?: number };
+type ToolResult = { details?: Record<string, unknown>; progress?: string };
+
+// Keep the provider data separate from the rendered text used by the journal.
+const commandResults = new WeakMap<RunActivity, CommandResult>();
+const toolResults = new WeakMap<RunActivity, ToolResult>();
 
 function string(value: unknown): string {
   return typeof value === "string" ? value : "";
@@ -18,7 +22,7 @@ export function previewRunActivity(item: RunActivity): RunActivity {
 export function runActivity(entries: Map<string, RunActivity>, method: string, params: Record<string, unknown>, at?: string,
   full = false): RunActivity | undefined {
   const limit = full ? (value: string) => value : bounded;
-  const item = parseRunActivity(entries, method, params, limit);
+  const item = parseRunActivity(entries, method, params, limit, full);
   if (item) {
     const previous = entries.get(item.id);
     const firstAt = previous?.at ?? at;
@@ -30,7 +34,7 @@ export function runActivity(entries: Map<string, RunActivity>, method: string, p
 }
 
 function parseRunActivity(entries: Map<string, RunActivity>, method: string, params: Record<string, unknown>,
-  limit: (value: string) => string): RunActivity | undefined {
+  limit: (value: string) => string, full: boolean): RunActivity | undefined {
   if (method === "item/autoApprovalReview/started" || method === "item/autoApprovalReview/completed") {
     const reviewId = string(params.reviewId);
     const review = params.review as Record<string, unknown> | undefined;
@@ -60,11 +64,32 @@ function parseRunActivity(entries: Map<string, RunActivity>, method: string, par
     }
     if (type === "commandExecution") {
       const prior = previous && commandResults.get(previous);
-      const output = string(item.aggregatedOutput) || prior?.output || "";
+      const snapshot = string(item.aggregatedOutput);
+      let output = prior?.output ?? "";
+      let snapshots = prior?.snapshots ?? [];
+      // A paged snapshot can trail the output already received from the same command.
+      if (!output.startsWith(snapshot)) {
+        if (snapshot.startsWith(output) || !full) {
+          output = snapshot;
+        } else if (!snapshots.some(saved => saved.startsWith(snapshot))) {
+          snapshots = snapshots.filter(saved => !snapshot.startsWith(saved));
+          snapshots.push(snapshot);
+        }
+      }
       const exitCode = typeof item.exitCode === "number" ? item.exitCode : prior?.exitCode;
-      return commandResult({ id, type, title: limit(string(item.command) || previous?.title || ""), text: "", status }, output, exitCode, limit);
+      return commandResult({
+        id, type, title: limit(string(item.command) || previous?.title || ""), text: "", status,
+      }, { output, snapshots, exitCode }, limit);
     }
     const { id: _id, type: _type, status: _status, ...details } = item;
+    if (type === "mcpToolCall" || type === "dynamicToolCall") {
+      const prior = previous && toolResults.get(previous);
+      const available = Object.entries(details).filter(([key, value]) =>
+        value != null || !prior?.details || !Object.hasOwn(prior.details, key));
+      const snapshot = { ...prior?.details, ...Object.fromEntries(available) };
+      const title = [string(snapshot.server), string(snapshot.tool)].filter(Boolean).join(" / ") || string(snapshot.query);
+      return toolResult({ id, type, title: limit(title), text: "", status }, { details: snapshot, progress: prior?.progress }, limit);
+    }
     const title = [string(item.server), string(item.tool)].filter(Boolean).join(" / ") || string(item.query);
     const result = JSON.stringify(details, null, 2);
     return { id, type, title: limit(title), text: limit(result), status };
@@ -83,17 +108,31 @@ function parseRunActivity(entries: Map<string, RunActivity>, method: string, par
   const previous = entries.get(id) ?? { id, type: itemType, title: "", text: "", status: "inProgress" };
   if (itemType === "commandExecution") {
     const prior = commandResults.get(previous);
-    return commandResult({ ...previous }, (prior?.output ?? "") + delta, prior?.exitCode, limit);
+    return commandResult({ ...previous }, { ...prior, output: (prior?.output ?? "") + delta }, limit);
+  }
+  if (update === "progress" && (itemType === "mcpToolCall" || itemType === "dynamicToolCall")) {
+    const prior = toolResults.get(previous);
+    const progress = limit(prior?.progress ? prior.progress + "\n" + delta : delta);
+    return toolResult({ ...previous }, { details: prior?.details, progress }, limit);
   }
   const separator = update === "progress" && previous.text ? "\n" : "";
   return { ...previous, text: limit(previous.text + separator + delta) };
 }
 
-function commandResult(item: RunActivity, output: string, exitCode: number | undefined, limit: (value: string) => string) {
+function commandResult(item: RunActivity, { output, snapshots, exitCode }: CommandResult, limit: (value: string) => string) {
+  const alternatives = snapshots?.filter(saved => !output.startsWith(saved));
   const renderedExit = exitCode === undefined ? "" : "\nExit code: " + exitCode;
-  item.text = limit(output + renderedExit);
+  const details = [output, ...(alternatives ?? [])].join("\n\n--- Provider output snapshot ---\n");
+  item.text = limit(details + renderedExit);
   if (exitCode !== undefined && exitCode !== 0) item.status = "failed";
-  commandResults.set(item, { output: limit(output), exitCode });
+  commandResults.set(item, { output: limit(output), snapshots: alternatives, exitCode });
+  return item;
+}
+
+function toolResult(item: RunActivity, state: ToolResult, limit: (value: string) => string) {
+  const snapshot = state.details && JSON.stringify(state.details, null, 2);
+  item.text = limit([snapshot, state.progress].filter(Boolean).join("\n"));
+  toolResults.set(item, state);
   return item;
 }
 

@@ -408,7 +408,7 @@ test("a resumed native specialist must complete in the current lead run", async 
   const items = new Map<string, RunActivity>();
   let commandAt = 0;
   let historyAvailable = true;
-  let additionalHistory: { item: typeof command; startedAtMs?: number; completedAtMs?: number }[] = [];
+  let additionalHistory: { item: Record<string, unknown>; startedAtMs?: number; completedAtMs?: number }[] = [];
   const pages = new Set<number>();
   reporter.bind(async <T>(method: string, params: object) => {
     assert.equal(method, "thread/items/list");
@@ -476,14 +476,37 @@ test("a resumed native specialist must complete in the current lead run", async 
     startedAtMs: observedAt,
   }));
   additionalHistory.unshift(...[...providerItems].reverse());
-  const pending = { ...command, id: "finishes-late", status: "inProgress" };
+  const pending = { ...command, id: "finishes-late", status: "inProgress", exitCode: null };
   observe(child, pending, "item/started");
+  const tool = {
+    id: "tool-with-progress", type: "mcpToolCall", server: "fixture", tool: "check", arguments: { scope: "stage" },
+  };
+  observe(child, tool, "item/started");
+  const stream = (method: string, itemId: string, update: { delta: string } | { message: string }) =>
+    reporter.observe({ method, params: { threadId: child, itemId, ...update } }, lead);
+  stream("item/commandExecution/outputDelta", pending.id, { delta: longOutput });
+  stream("item/mcpToolCall/progress", tool.id, { message: "Preparing checks" });
+  stream("item/mcpToolCall/progress", tool.id, { message: "Running checks" });
+  const toolResult = {
+    id: tool.id, type: tool.type, status: "completed", result: { ok: true },
+  };
+  observe(child, toolResult);
+  const shortOutput = longOutput.slice(0, 800);
+  const otherSnapshot = { ...pending, aggregatedOutput: "Output from the alternate snapshot" };
+  additionalHistory.unshift(
+    { item: toolResult, startedAtMs: observedAt },
+    { item: { ...toolResult, arguments: null, result: null }, startedAtMs: observedAt },
+    { item: otherSnapshot, startedAtMs: observedAt },
+    { item: otherSnapshot, startedAtMs: observedAt },
+    { item: { ...pending, aggregatedOutput: shortOutput }, startedAtMs: observedAt },
+  );
   observe(lead, { type: "collabAgentToolCall", tool: "wait", agentsStates: { [child]: { status: "completed" } } });
   observe(lead, { ...followup, tool: "resumeAgent" });
   await expectError("EXPERT_AGENT_RUNNING");
   observe(lead, { type: "subAgentActivity", kind: "completed", agentThreadId: child, agentPath: "/root/qa" });
   assert.ok((await reporter.report({ ...result, agentId: "/root/qa" })).ok);
-  observe(child, { ...pending, status: "completed", aggregatedOutput: longOutput });
+  const afterPoll = readStageRunHistory(f.root, id).work.find(item => item.id === child + ":" + pending.id);
+  observe(child, { ...pending, status: "completed", exitCode: 7 });
   assert.equal(items.has(child + ":" + late.id), false);
   assert.equal(items.get(child + ":" + command.id)?.text, "\nExit code: 0");
   const legacySample = [items.get(child + ":" + command.id), items.get(child + ":" + commentary.id)];
@@ -505,9 +528,30 @@ test("a resumed native specialist must complete in the current lead run", async 
     providerItems.map(entry => child + ":" + entry.item.id),
   );
   assert.equal(beforeClose.find(item => item.id === child + ":paged-0")?.text, longOutput + "\nExit code: 0");
-  assert.equal(beforeClose.find(item => item.id === child + ":" + pending.id)?.text, longOutput + "\nExit code: 0");
   reporter.close();
-  assert.deepEqual(readStageRunHistory(f.root, id).work, beforeClose);
+  const archive = readStageRunHistory(f.root, id).work;
+  assert.deepEqual(archive, beforeClose);
+  await t.test("a short polled snapshot and late completion keep full command output", () => {
+    assert.equal(afterPoll?.status, "inProgress");
+    const expectedOutput = [longOutput, otherSnapshot.aggregatedOutput].join("\n\n--- Provider output snapshot ---\n");
+    assert.ok(afterPoll.text === expectedOutput, "Polling must preserve the stream and a diverging snapshot once");
+    const match = archive.filter(item => item.id === child + ":" + pending.id);
+    assert.equal(match.length, 1);
+    assert.equal(match[0].status, "failed");
+    assert.ok(
+      match[0].text === expectedOutput + "\nExit code: 7",
+      "The archive must preserve both command outputs and one final exit code",
+    );
+  });
+  await t.test("a completed tool retains its arguments, result and ordered progress once", () => {
+    const match = archive.filter(item => item.id === child + ":" + tool.id);
+    assert.equal(match.length, 1);
+    assert.equal(match[0].title, "fixture / check");
+    assert.equal(match[0].status, "completed");
+    assert.equal(match[0].text, JSON.stringify({
+      server: "fixture", tool: "check", arguments: { scope: "stage" }, result: { ok: true },
+    }, null, 2) + "\nPreparing checks\nRunning checks");
+  });
 });
 
 for (const mode of ["reviewer", "manager"] as const) {

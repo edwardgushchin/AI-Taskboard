@@ -34,6 +34,20 @@ test("repeated command snapshots render one exit code and keep streamed output",
   assert.equal(update("item/completed", { item: { ...replaced, aggregatedOutput: "" } }).status, "completed");
 });
 
+test("a complete command snapshot extends the streamed prefix without duplicating it", () => {
+  const entries = new Map();
+  const command = { id: "command", type: "commandExecution", command: "npm test" };
+  const partial = runActivity(entries, "item/commandExecution/outputDelta", {
+    itemId: command.id, delta: "first line\n",
+  })!;
+  entries.set(partial.id, partial);
+  const result = runActivity(entries, "item/completed", {
+    item: { ...command, aggregatedOutput: "first line\nsecond line", exitCode: 0 },
+  })!;
+  assert.equal(result.text, "first line\nsecond line\nExit code: 0");
+  assert.equal(result.status, "completed");
+});
+
 test("agent message phases survive streaming updates and completion", () => {
   const entries = new Map();
   const started = runActivity(entries, "item/started", { item: { id: "answer", type: "agentMessage", phase: "final_answer" } })!;
