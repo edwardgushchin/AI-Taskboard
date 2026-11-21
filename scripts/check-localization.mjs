@@ -152,6 +152,15 @@ app.whenReady().then(async () => {
     await check(`byId('board-composer').firstChild === composer && input.value === 'User content Save Русский 日本語' && limit === limitIdentity && limit.value === '7' && frame.project === 'board-fixture' && composer.querySelector('.board-queued-row') === queuedIdentity && queuedIdentity.textContent.includes('Queued Save 日本語')`, 'switch keeps composer, inputs and project ' + locale);
     await check(`byId('sheet-title').textContent === t('ui.application_settings_b131bcd2') && byId('close-sheet').getAttribute('aria-label') === t('html.7d9eb7acb13e2462')`, 'open settings and accessibility labels update ' + locale);
   }
+  await check(`(() => {
+    const root = document.documentElement;
+    const observer = new MutationObserver(() => {});
+    observer.observe(root, { attributeFilter: ['lang'] });
+    changeLanguage('en');
+    const unchanged = root.lang === 'en' && observer.takeRecords().length === 0;
+    observer.disconnect();
+    return unchanged;
+  })()`, 'refreshing the board with the same language leaves the document language untouched');
   await evaluate(`byId('language-select').focus(); void 0`);
   window.webContents.sendInputEvent({type:'keyDown',keyCode:'Tab'});
   window.webContents.sendInputEvent({type:'keyUp',keyCode:'Tab'});
