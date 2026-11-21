@@ -1,4 +1,6 @@
 {
+  "about.base_commit": "Commit base",
+  "about.local_changes": "cambios locales",
   "about.version": "Versión",
   "about.commit": "Commit",
   "about.build_date": "Fecha de compilación",

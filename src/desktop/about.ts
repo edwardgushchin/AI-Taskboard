@@ -10,13 +10,14 @@ const title = "AI Taskboard";
 const openDialogs = new WeakMap<BrowserWindow, BrowserWindow>();
 const t = localization.text;
 
-function buildMetadata(): { commit?: string; date?: string } {
+function buildMetadata(): { commit?: string; date?: string; dirty?: boolean } {
   if (app.isPackaged) {
     try {
       const { taskboardBuild } = JSON.parse(readFileSync(join(app.getAppPath(), "package.json"), "utf8"));
       return {
         commit: typeof taskboardBuild?.commit === "string" ? taskboardBuild.commit : undefined,
         date: typeof taskboardBuild?.date === "string" ? taskboardBuild.date : undefined,
+        dirty: taskboardBuild?.dirty === true,
       };
     } catch {
       // Packages built before build metadata was introduced can still open the dialog.
@@ -26,7 +27,11 @@ function buildMetadata(): { commit?: string; date?: string } {
 }
 
 function escapeHtml(value: string) {
-  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }
 
 export async function showAbout(parent: BrowserWindow) {
@@ -38,9 +43,14 @@ export async function showAbout(parent: BrowserWindow) {
 
   const build = buildMetadata();
   const unavailable = t("about.no_build_metadata");
+  const commitLabel = t(build.dirty ? "about.base_commit" : "about.commit");
+  let commit = build.commit || unavailable;
+  if (build.dirty) {
+    commit += ` (${t("about.local_changes")})`;
+  }
   const rows = [
     [t("about.version"), app.getVersion()],
-    [t("about.commit"), build.commit || unavailable],
+    [commitLabel, commit],
     [t("about.build_date"), build.date || unavailable],
     ["Electron", process.versions.electron],
     ["Chromium", process.versions.chrome],
@@ -55,7 +65,11 @@ export async function showAbout(parent: BrowserWindow) {
   const rowHtml = rows.map(([label, value]) => {
     const text = escapeHtml(value);
     const content = value === repositoryUrl ? `<a href="${text}">${text}</a>` : text;
-    return `<div class="row"><dt>${escapeHtml(label)}</dt><dd>${content}</dd></div>`;
+    return `
+      <div class="row">
+        <dt>${escapeHtml(label)}</dt>
+        <dd>${content}</dd>
+      </div>`;
   }).join("\n");
   const html = `<!doctype html>
 <html lang="${localization.locale}">
@@ -73,11 +87,26 @@ export async function showAbout(parent: BrowserWindow) {
     }
     body { margin: 0; }
     main { padding: 16px 20px; }
-    h1 { margin: 0 0 12px; font-size: 20px; font-weight: 600; }
-    dl { display: grid; gap: 4px; margin: 0; }
-    .row { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 8px; }
+    h1 {
+      margin: 0 0 12px;
+      font-size: 20px;
+      font-weight: 600;
+    }
+    dl {
+      display: grid;
+      gap: 4px;
+      margin: 0;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 112px minmax(0, 1fr);
+      gap: 8px;
+    }
     dt { font-weight: 600; }
-    dd { margin: 0; overflow-wrap: anywhere; }
+    dd {
+      margin: 0;
+      overflow-wrap: anywhere;
+    }
     a { color: var(--accent); }
     footer {
       position: sticky;
@@ -89,8 +118,15 @@ export async function showAbout(parent: BrowserWindow) {
       border-top: 1px solid color-mix(in srgb, CanvasText 18%, Canvas);
       background: Canvas;
     }
-    button { font: inherit; min-width: 76px; padding: 3px 12px; }
-    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    button {
+      font: inherit;
+      min-width: 76px;
+      padding: 3px 12px;
+    }
+    :focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
   </style>
 </head>
 <body>

@@ -1,4 +1,6 @@
 {
+  "about.base_commit": "ベースコミット",
+  "about.local_changes": "ローカル変更あり",
   "about.version": "バージョン",
   "about.commit": "コミット",
   "about.build_date": "ビルド日時",

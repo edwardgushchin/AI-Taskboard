@@ -33,8 +33,17 @@ if (release && process.platform !== "linux") {
 const stage = join(root, "dist", "installer");
 mkdirSync(stage, { recursive: true });
 const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+const changes = execFileSync(
+  "git",
+  ["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"],
+  { cwd: root, encoding: "utf8" },
+);
 config.extraMetadata = {
-  taskboardBuild: { commit, date: new Date().toISOString() },
+  taskboardBuild: {
+    commit,
+    dirty: changes.length > 0,
+    date: new Date().toISOString(),
+  },
 };
 
 if (process.platform === "linux") {

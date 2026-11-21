@@ -1,4 +1,6 @@
 {
+  "about.base_commit": "Базовый коммит",
+  "about.local_changes": "есть локальные изменения",
   "about.version": "Версия",
   "about.commit": "Коммит",
   "about.build_date": "Дата сборки",
