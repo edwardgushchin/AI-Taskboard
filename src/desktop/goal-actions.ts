@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { codexThreadPattern } from "../cli/model.ts";
 import { directory, exists, readJson, withRuntimeLock, writeJson } from "../cli/storage.ts";
@@ -105,6 +106,13 @@ export async function runGoalAction(project: string, goalId: string, name: strin
     return prior;
   }
   const result = await invoke(input);
-  withRuntimeLock(folder, () => writeJson(path, { signature, result }));
+  withRuntimeLock(folder, () => {
+    if (name === "task_create" && !result.ok && result.error.code === "TASK_TAGS_REQUIRED") {
+      // Creation stopped before saving a card or registering tags. Allow corrected arguments for this key.
+      unlinkSync(path);
+    } else {
+      writeJson(path, { signature, result });
+    }
+  });
   return result;
 }

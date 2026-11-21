@@ -589,7 +589,7 @@ try {
     const never = () => assert.fail("Unrelated manager action");
     const manager = boardActions(project, [], [], new AbortController().signal, never, () => undefined,
       () => false, never, never, undefined, never);
-    const created = await manager("task_create", plannedDraft({ title: "Created by manager" }));
+    const created = await manager("task_create", plannedDraft({ title: "Created by manager", tags: ["Draft discussion"] }));
     assert.equal(created.ok, true, JSON.stringify(created));
     await waitReady(created.data.id);
     await evaluateOther(`showTask(${JSON.stringify(created.data.id)})`);
