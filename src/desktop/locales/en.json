@@ -1,4 +1,7 @@
 {
+  "archive.cancelled.action": "Archive cancelled cards",
+  "archive.cancelled.count": "Cards archived: {count}",
+  "archive.cancelled.issues": "Errors:",
   "autoMode.eventBoard": "Board",
   "autoMode.eventMultiplier": "{value} × executor limit = {target}",
   "autoMode.eventReserve": "{scope} — fewer than {threshold} cards ready to start",

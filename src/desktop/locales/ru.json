@@ -1,4 +1,7 @@
 {
+  "archive.cancelled.action": "Архивировать отменённые",
+  "archive.cancelled.count": "Перенесено карточек: {count}",
+  "archive.cancelled.issues": "Ошибки:",
   "autoMode.eventBoard": "Доска",
   "autoMode.eventMultiplier": "{value} × лимит исполнителей = {target}",
   "autoMode.eventReserve": "{scope} — готовых к запуску карточек меньше {threshold}",

@@ -64,7 +64,8 @@ function openArchive(store: BoardStore, id: string, link: ArchiveLink): Archived
     if (!card) throw new Error("Archive has no readable task.json.");
     const bytes = Buffer.from(card);
     const task = validateCard(JSON.parse(bytes.toString("utf8")), id);
-    if (task.status !== link.status || task.title !== link.title || closedAt(task) !== link.closedAt ||
+    const closure = closedAt(task) ?? (task.status === "cancelled" ? task.updatedAt : undefined);
+    if (task.status !== link.status || task.title !== link.title || closure !== link.closedAt ||
         (link.tags !== undefined && JSON.stringify(link.tags) !== JSON.stringify(task.tags)) ||
         zipped !== (task.attachments.length > 0) ||
         task.attachments.reduce((total, entry) => total + (entry.link ? 0 : entry.bytes), 0) > maxAttachmentBytes) {
@@ -411,9 +412,16 @@ function archiveTask(store: BoardStore, task: Task, now: Date, closure: string):
     if (!archive.card.equals(card)) throw new TaskboardError("ARCHIVE_CORRUPT", "The archived JSON differs from the original.");
     archivedBytes(archive, archive.task.attachments);
 
+    const activeLink = store.index.tasks[task.id];
     delete store.index.tasks[task.id];
     store.index.archive[task.id] = link;
-    store.saveIndex();
+    try {
+      store.saveIndex();
+    } catch (error) {
+      store.index.tasks[task.id] = activeLink;
+      delete store.index.archive[task.id];
+      throw error;
+    }
     removeOriginals(store, archive);
     finish("archived; original card removed after verification");
   } catch (error) { finish("failed; inspect archive recovery state"); throw error; }
@@ -461,4 +469,22 @@ export function sweepArchives(store: BoardStore, now = new Date()) {
     }
   }
   return { archived, cleaned, issues };
+}
+
+// The CLI opens the store under the board lock before reading candidate cards.
+export function archiveCancelled(store: BoardStore, now = new Date()) {
+  const archived: string[] = [];
+  const issues: { id: string; problem: string }[] = [];
+  for (const id of Object.keys(store.index.tasks)) {
+    try {
+      const task = store.card(id);
+      if (task.status !== "cancelled") continue;
+      archiveTask(store, task, now, closedAt(task) ?? task.updatedAt);
+    } catch (error) {
+      issues.push({ id, problem: (error as Error).message });
+    }
+    // The move is visible once the index is saved, even if original cleanup fails.
+    if (store.index.archive[id]) archived.push(id);
+  }
+  return { count: archived.length, archived, issues };
 }

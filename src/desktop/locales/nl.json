@@ -1,4 +1,7 @@
 {
+  "archive.cancelled.action": "Geannuleerde kaarten archiveren",
+  "archive.cancelled.count": "Gearchiveerde kaarten: {count}",
+  "archive.cancelled.issues": "Fouten:",
   "about.base_commit": "Basiscommit",
   "about.local_changes": "lokale wijzigingen",
   "about.version": "Versie",

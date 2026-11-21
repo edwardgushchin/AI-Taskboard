@@ -1,4 +1,7 @@
 {
+  "archive.cancelled.action": "Arquivar cartões cancelados",
+  "archive.cancelled.count": "Cartões arquivados: {count}",
+  "archive.cancelled.issues": "Erros:",
   "about.base_commit": "Commit base",
   "about.local_changes": "alterações locais",
   "about.version": "Versão",

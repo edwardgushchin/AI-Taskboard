@@ -12,7 +12,7 @@ import { parseArgs } from "node:util";
 import { applyAcceptance, cleanAcceptedTask, compareAcceptedTree, inspectReview, inspectReviewDiff, inspectReviewQueue, reopenConflictingReview, reviewDetails, verifyReviewDecision } from "./acceptance.ts";
 import { describeSavedChanges, restoreSavedChanges } from "./saved-changes.ts";
 import {
-  addAttachment, addChatMessage, archiveDiagnostics, createWithAttachments, isArchived, reactivateArchivedTask, readAttachment, readTask, restoreReplyImages, sweepArchives,
+  addAttachment, addChatMessage, archiveCancelled, archiveDiagnostics, createWithAttachments, isArchived, reactivateArchivedTask, readAttachment, readTask, restoreReplyImages, sweepArchives,
   setAttachmentCover, upgradeTagCatalog,
 } from "./archive.ts";
 import { boardAgentRoles, boardReviewMode, taskReviewMode, taskReviewModeVersion, hexTagColor, member, number, object, reasoningEffortPattern, record, registerTags, requireRevision, requireState, reviewModes, strings, tagKey, taskIdPattern, TaskboardError, text, usesIndependentReviewer, validAgentLimitOverrides } from "./model.ts";
@@ -51,7 +51,7 @@ const help = [
   "Commands: init, list, show, create, update, comment, approve, return-to-draft, start, progress,",
   "          pause, block, resume, unblock, preview, submit, review, accept, restore-changes, request-changes, cancel, cleanup, cleanup-status, settings, watch, doctor",
   "          auto-queue (read controls), auto-queue --stdin (revision, paused, order, hold, release, replaceHold)",
-  "          list --archived, archive sweep, chat TASK-ID, attachment add TASK-ID, attachment read TASK-ID",
+  "          list --archived, archive sweep, archive cancelled, chat TASK-ID, attachment add TASK-ID, attachment read TASK-ID",
   "          review-artifact TASK-ID --stdin (revision, source, sha256 and optional offset)",
   "          review-queue (Git status and submission time for tasks in review)",
   "          attachment cover TASK-ID --stdin (file and revision)",
@@ -564,8 +564,9 @@ function run(
     return tag;
   }
   if (command === "archive") {
-    if (id !== "sweep") throw new TaskboardError("INVALID_INPUT", "Use archive sweep.");
-    return sweepArchives(store);
+    if (id === "sweep") return sweepArchives(store);
+    if (id === "cancelled") return archiveCancelled(store);
+    throw new TaskboardError("INVALID_INPUT", "Use archive sweep or archive cancelled.");
   }
   if (command === "attachment") {
     if (!extra || !id || !["add", "read", "cover", "restore-reply"].includes(id)) {

@@ -145,6 +145,7 @@ const commands = new Map<string, string[]>([
   ["request-changes", ["request-changes"]], ["cancel", ["cancel"]], ["cleanup", ["cleanup"]],
   ["cleanup-status", ["cleanup-status"]],
   ["settings", ["settings"]], ["archive", ["archive", "sweep"]], ["doctor", ["doctor"]],
+  ["archive-cancelled", ["archive", "cancelled"]],
   ["tag-color", ["tag", "set"]],
   ["tag-create", ["tag", "ensure"]],
   ["tag-assign", ["tag", "assign"]],
