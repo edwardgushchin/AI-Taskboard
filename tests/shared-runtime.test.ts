@@ -9,7 +9,7 @@ import type { Task } from "../src/cli/model.ts";
 import { initializeBoard, locateBoard, onBoard, withLock } from "../src/cli/storage.ts";
 import { cachedTaskLimits, createAgentSlots, readProfileTaskLimits } from "../src/desktop/agent-limits.ts";
 import { projectIdentity } from "../src/desktop/project-tabs.ts";
-import { forgetExecutor, matchesQueuedExecutor, queueWriteProbeRetry, recordWriteProbeRetryFailure,
+import { forgetExecutor, matchesQueuedExecutor, prepareQueuedTurn, queueWriteProbeRetry, recordWriteProbeRetryFailure,
   runtimeEntries, runtimeTransaction } from "../src/desktop/board-runtime.ts";
 import { plannedDraft } from "./fixtures/planned-draft.ts";
 
@@ -91,9 +91,17 @@ test("write probe retry persists its delay and respects shared slots and cancell
   assert.equal(first.acquire(project, "executor", undefined, task.id, task.revision), undefined);
   assert.ok(recordWriteProbeRetryFailure(project, attempt.id, task, "retry interrupted"));
   assert.equal(runtimeEntries(project).find(entry => entry.id === pending.id)?.writeProbeRetry?.failure, "retry interrupted");
+  const threadId = "01234567-1234-5678-1234-123456789012";
+  const turn = prepareQueuedTurn(project, task, threadId);
+  assert.ok(turn);
+  assert.equal(turn.recover, false);
+  attempt("quota");
+  const recovery = first.acquire(project, "executor", undefined, task.id, task.revision);
+  assert.ok(recovery?.id);
+  assert.deepEqual(prepareQueuedTurn(project, task, threadId), { ...turn, recover: true });
   forgetExecutor(project, task.id);
-  assert.equal(queueWriteProbeRetry(project, attempt.id, task, retry, undefined, undefined), false);
-  attempt();
+  assert.equal(queueWriteProbeRetry(project, recovery.id, task, retry, undefined, undefined), false);
+  recovery();
   assert.equal(runtimeEntries(project).some(entry => entry.task === task.id), false);
 });
 

@@ -302,7 +302,7 @@ export function registerRuntime(project: string, value: Omit<RuntimeEntry, "id" 
         const queued = entries.find(candidate => candidate.kind === "queue" && candidate.task === entry.task);
         if (queued) {
           queued.quotaPaused = true;
-          delete queued.turnRequest;
+          if (!queued.writeProbeRetry) delete queued.turnRequest;
         }
       }
       if (restart) queueRestart(entries, entry, restart === "quota" || undefined);

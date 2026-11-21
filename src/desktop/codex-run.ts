@@ -177,7 +177,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   onActivity?: (item: RunActivity, currentTurn: boolean) => void, onTokenUsage?: (report: TokenUsageReport) => Promise<void>, signal?: AbortSignal,
   beforeTurn?: (threadId: string, created: boolean) => Promise<void | QueuedTurn>, desktopProfile?: string,
   recoveringThreadId?: string, requireSavedThread = false, onUserMessage?: (clientId: string) => void,
-  linkBeforeTools = false): Promise<Run> {
+  linkBeforeTools = false, recoverWriteProbeTurn = false): Promise<Run> {
   signal?.throwIfAborted();
   const fullAccess = task.fullAccess === true;
   const profile = fullAccess ? ":danger-full-access" : taskProfile;
@@ -446,33 +446,35 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       capabilities: { experimentalApi: true },
     });
     send({ method: "initialized" });
-    probePending = true;
-    const probe = await request<{ exitCode: number; stderr: string; stdout: string }>("command/exec", {
-      cwd, permissionProfile: profile, timeoutMs: writeProbeTimeoutMs, env: { ELECTRON_RUN_AS_NODE: "1" },
-      command: [process.execPath, "-e", verifyWrite, probeDirectory, ...paths],
-    }).catch((error: Error) => {
-      throw new Error("Codex could not run the write probe." + writeProbeDetail(error.message));
-    });
-    // command/exec uses 124 for its deadline. The helper only sets 0 or 1.
-    if (probe.exitCode === 124) {
-      throw Object.assign(new Error("Codex write probe timed out after " + writeProbeTimeoutMs / 1000 + " seconds."),
-        { code: writeProbeTimeoutCode });
-    }
-    probePending = false;
-    if (probe.exitCode !== 0) {
-      const failure = probe.exitCode === 1 && writeProbeFileFailure(probe.stdout ?? "", paths);
-      if (failure) throw new Error(failure);
-      const detail = writeProbeDetail(probe.stderr?.trim() || probe.stdout || "");
-      if (probe.stderr?.startsWith("MXC launcher: CreateProcessW failed with error code ")) {
-        throw new Error("Codex could not start the write probe (launcher exit code " + probe.exitCode + ")." + detail);
+    if (!recoverWriteProbeTurn) {
+      probePending = true;
+      const probe = await request<{ exitCode: number; stderr: string; stdout: string }>("command/exec", {
+        cwd, permissionProfile: profile, timeoutMs: writeProbeTimeoutMs, env: { ELECTRON_RUN_AS_NODE: "1" },
+        command: [process.execPath, "-e", verifyWrite, probeDirectory, ...paths],
+      }).catch((error: Error) => {
+        throw new Error("Codex could not run the write probe." + writeProbeDetail(error.message));
+      });
+      // command/exec uses 124 for its deadline. The helper only sets 0 or 1.
+      if (probe.exitCode === 124) {
+        throw Object.assign(new Error("Codex write probe timed out after " + writeProbeTimeoutMs / 1000 + " seconds."),
+          { code: writeProbeTimeoutCode });
       }
-      const windowsCode = process.platform === "win32" && (probe.exitCode >>> 0) >= 0x80000000
-        ? " (0x" + (probe.exitCode >>> 0).toString(16).toUpperCase() + ")" : "";
-      throw new Error("Codex write probe process exited with code " + probe.exitCode + windowsCode + "." + detail);
-    }
-    if (probe.stdout?.trim().split(/\r?\n/).at(-1) !== "taskboard-write-probe ok") {
-      throw new Error("Codex write probe process exited with code 0 without confirming the write check." +
-        writeProbeDetail(probe.stderr || probe.stdout || ""));
+      probePending = false;
+      if (probe.exitCode !== 0) {
+        const failure = probe.exitCode === 1 && writeProbeFileFailure(probe.stdout ?? "", paths);
+        if (failure) throw new Error(failure);
+        const detail = writeProbeDetail(probe.stderr?.trim() || probe.stdout || "");
+        if (probe.stderr?.startsWith("MXC launcher: CreateProcessW failed with error code ")) {
+          throw new Error("Codex could not start the write probe (launcher exit code " + probe.exitCode + ")." + detail);
+        }
+        const windowsCode = process.platform === "win32" && (probe.exitCode >>> 0) >= 0x80000000
+          ? " (0x" + (probe.exitCode >>> 0).toString(16).toUpperCase() + ")" : "";
+        throw new Error("Codex write probe process exited with code " + probe.exitCode + windowsCode + "." + detail);
+      }
+      if (probe.stdout?.trim().split(/\r?\n/).at(-1) !== "taskboard-write-probe ok") {
+        throw new Error("Codex write probe process exited with code 0 without confirming the write check." +
+          writeProbeDetail(probe.stderr || probe.stdout || ""));
+      }
     }
     let existing = task.codexThreadId;
     if (recoveringThreadId && existing !== recoveringThreadId) {
@@ -565,6 +567,10 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     if (onActivity) stages.listen(item => onActivity(item, false));
     tokens.track(threadId, started.model ?? started.thread.model ?? null, true);
     const recovered = queued && queued.recover ? await findQueuedTurn(request, threadId, queued) : undefined;
+    if (recoverWriteProbeTurn && !recovered) {
+      throw Object.assign(new Error("Codex has not confirmed the write probe retry's turn in history."),
+        { code: "CODEX_START_UNCONFIRMED" });
+    }
     signal?.throwIfAborted();
     const { turn } = recovered ? { turn: recovered } : await request<{ turn: Turn }>("turn/start", {
       threadId, effort: task.execution?.effort, input: [{ type: "text", text: prompt, text_elements: [] }],

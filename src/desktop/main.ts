@@ -4512,7 +4512,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         ? current.data.codexThreadId ?? pending.linkedThread?.codexThreadId : undefined;
       threadChoice = pending.newThread ?? newThread;
       writeProbeRetry = pending.writeProbeRetry;
-      if (writeProbeRetry?.failure) {
+      if (writeProbeRetry?.failure && !recoveringThreadId) {
         return await callCli<LaunchState>(project, ["block", id, "--compact"], {
           revision: task.revision, reason: writeProbeRetry.failure, retryExecutor: true,
           condition: t("ui.write_probe_retry_condition"),
@@ -4633,12 +4633,14 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     releaseSlot.run(() => rememberExecutor(project, task, cwd, continuation, threadChoice || undefined));
     signal.throwIfAborted();
     const slotId = releaseSlot.id;
+    const recoveringWriteProbeTurn = Boolean(writeProbeRetry && recoveringThreadId);
     if (role === "executor" && slotId) {
       probeLaunch = { task: linked, slotId, cwd, fullAccess: task.fullAccess, windowsSandbox: client.windowsSandbox };
     }
     if (writeProbeRetry) {
       // Persist the claim before starting Codex so a desktop exit cannot grant another automatic attempt.
-      if (!slotId || !recordWriteProbeRetryFailure(project, slotId, linked, t("ui.write_probe_retry_interrupted"))) {
+      if (!recoveringWriteProbeTurn && (!slotId ||
+          !recordWriteProbeRetryFailure(project, slotId, linked, t("ui.write_probe_retry_interrupted")))) {
         return cliFailure("CHAT_BUSY", "The queued write probe retry is no longer pending.");
       }
       if (writeProbeRetry.fullAccess && !fullAccess) throw new Error(t("ui.write_probe_retry_access_changed"));
@@ -4682,6 +4684,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       if (pending.threadId !== codexThreadId) {
         throw Object.assign(new Error("The queued start belongs to another Codex thread."), { code: "CODEX_START_UNCONFIRMED" });
       }
+      if (writeProbeRetry) recoveringThreadId = pending.threadId;
       return { ...pending, accepted: (turnId: string) => recordQueuedTurn(project, id, pending.clientId, turnId) };
     }, desktopProfile, recoveringThreadId, Boolean(restart || earlyThreadId), clientId => {
       const reply = pendingReplies.get(clientId);
@@ -4689,7 +4692,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       pendingReplies.delete(clientId);
       if (!steeredReply || reply.index > steeredReply.index) steeredReply = reply;
       publishReply();
-    }, earlyLaunch));
+    }, earlyLaunch && !writeProbeRetry, recoveringWriteProbeTurn));
     const { threadId: codexThreadId, completion } = run;
     const directories = new Set<string>();
     let stopRequested = false;
@@ -4736,8 +4739,9 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         await saveActivity();
         return;
       }
-      if (run.recovered && !stopRequested && (!outcome || outcome.interrupted) && (!restart || outcome?.interrupted)) {
-        requeueRecoveredTurn = Boolean(restart && outcome?.interrupted);
+      if (run.recovered && !stopRequested && (!outcome || outcome.interrupted) &&
+          (recoveringWriteProbeTurn || !restart || outcome?.interrupted)) {
+        requeueRecoveredTurn = Boolean(!recoveringWriteProbeTurn && restart && outcome?.interrupted);
         await saveActivity();
         return;
       }
@@ -4754,7 +4758,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       const reconnect = outcome?.disconnected && !continuation.afterDisconnect;
       const accessGranted = !task.fullAccess && !signal.aborted && !stopRequested && executorFullAccess(desktopProfile, project, task);
       let unfinishedRevision: number | undefined;
-      if ((!run.recovered || restart) && (accessGranted || reconnect || (!outcome && !task.schedule)) &&
+      if ((!run.recovered || (restart && !recoveringWriteProbeTurn)) && (accessGranted || reconnect || (!outcome && !task.schedule)) &&
           !signal.aborted && !stopRequested && (!rejected || accessGranted)) {
         const current = await callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
         if (current.ok) {
@@ -4862,6 +4866,15 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       await saveActivity();
       return cliFailure("CHAT_BUSY", (error as Error).message);
     }
+    if (code === "BOARD_BUSY" || (queued && (code === "INVALID_TRANSITION" || code === "REVISION_CONFLICT"))) {
+      return cliFailure(code, (error as Error).message);
+    }
+    if ((recoveringThreadId && (writeProbeRetry || (!restart && !missingCodexThread((error as Error).message, earlyThreadId)))) ||
+        code === "CODEX_START_UNCONFIRMED") {
+      queuedRecoveryDelay.add(key);
+      setTimeout(() => queuedRecoveryDelay.delete(key), 5_000).unref();
+      return cliFailure("CODEX_START_UNCONFIRMED", (error as Error).message);
+    }
     if (!signal.aborted && probeLaunch && (code === writeProbeTimeoutCode || writeProbeRetry)) {
       const { task, slotId, cwd, fullAccess, windowsSandbox } = probeLaunch;
       if (!writeProbeRetry) {
@@ -4878,15 +4891,6 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       return await callCli<LaunchState>(project, ["block", id, "--compact"], {
         revision: task.revision, reason, retryExecutor: true, condition: t("ui.write_probe_retry_condition"),
       });
-    }
-    if (code === "BOARD_BUSY" || (queued && (code === "INVALID_TRANSITION" || code === "REVISION_CONFLICT"))) {
-      return cliFailure(code, (error as Error).message);
-    }
-    if ((recoveringThreadId && !restart && !missingCodexThread((error as Error).message, earlyThreadId)) ||
-        code === "CODEX_START_UNCONFIRMED") {
-      queuedRecoveryDelay.add(key);
-      setTimeout(() => queuedRecoveryDelay.delete(key), 5_000).unref();
-      return cliFailure("CODEX_START_UNCONFIRMED", (error as Error).message);
     }
     const busy = code === "CODEX_THREAD_BUSY";
     const reason = busy ? t("ui.this_codex_chat_is_already_open_in_another_proce_9d6a0201") + "\n\n" + (error as Error).message : (error as Error).message;

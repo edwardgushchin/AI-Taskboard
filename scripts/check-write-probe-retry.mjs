@@ -9,7 +9,8 @@ import { fileURLToPath } from "node:url";
 import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
 import { electronCheck } from "./electron-check.mjs";
 
-const { scratch, artifacts } = electronCheck(import.meta.url, "write-probe-retry", 135_000, [["--seed"], ["--restore"]]);
+const phases = [["--seed"], ["--restore"], ["--recover-turn"]];
+const { scratch, artifacts } = electronCheck(import.meta.url, "write-probe-retry", 135_000, phases);
 const { app, BrowserWindow } = await import("electron");
 const require = createRequire(import.meta.url);
 const project = join(scratch, "board");
@@ -18,6 +19,7 @@ const log = join(scratch, "probe.jsonl");
 const node = process.env.TASKBOARD_CHECK_NODE;
 const cliPath = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
 const seed = process.argv.includes("--seed");
+const recoverTurn = process.argv.includes("--recover-turn");
 const records = () => existsSync(log)
   ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line))
   : [];
@@ -88,11 +90,21 @@ require("node:readline").createInterface({ input: process.stdin })
       }
     }
     if (method === "thread/start" || method === "thread/resume") {
-      const hash = createHash("sha256").update(params.cwd).digest("hex");
+      cwd = params.cwd;
+      const hash = createHash("sha256").update(cwd).digest("hex");
       threadId = params.threadId ?? "81234567-1234-5678-1234-" + hash.slice(0, 12);
       record({ method, cwd: params.cwd, profile: params.permissions });
       result = { thread: { id: threadId }, approvalPolicy: params.approvalPolicy,
         approvalsReviewer: params.approvalsReviewer, activePermissionProfile: { id: params.permissions } };
+    }
+    if (method === "thread/turns/list") {
+      const accepted = read().find(item => item.method === "turn/start" && item.cwd === cwd);
+      const visible = Boolean(accepted && fs.existsSync(path.join(cwd, "show-history")));
+      record({ method, cwd, threadId: params.threadId, visible });
+      result = { data: visible ? [{
+        id: "turn", status: "completed", itemsView: "full",
+        items: [{ type: "userMessage", clientId: accepted.clientId }],
+      }] : [] };
     }
     if (method === "config/read") {
       result = { config: { mcp_servers: { ai_taskboard: { url: "http://127.0.0.1/mcp" } } } };
@@ -106,7 +118,9 @@ require("node:readline").createInterface({ input: process.stdin })
       result = { data: [{ name: "ai_taskboard", tools: Object.fromEntries(tools.map(tool => [tool.name, tool])) }] };
     }
     if (method === "turn/start") {
-      record({ method, cwd });
+      record({ method, cwd, threadId, clientId: params.clientUserMessageId });
+      const scenario = fs.readFileSync(path.join(cwd, "scenario"), "utf8");
+      if (scenario === "lost" || scenario === "restart") process.exit(0);
       result = { turn: { id: "turn", status: "inProgress" } };
     }
     send({ id, result });
@@ -128,6 +142,8 @@ if (seed) {
     ["twice", "Write check · repeated timeout"],
     ["cancel", "Write check · cancelled retry"],
     ["denied", "Write check · confirmed denial"],
+    ["lost", "Write check · lost turn response"],
+    ["restart", "Write check · restart during turn recovery"],
   ].map(([scenario, title]) => {
     const cwd = join(scratch, scenario);
     mkdirSync(cwd);
@@ -165,11 +181,13 @@ process.argv.push("--project", project);
 require(entry);
 
 const cases = JSON.parse(readFileSync(casesPath, "utf8"));
+if (recoverTurn) writeFileSync(join(cases.restart.cwd, "show-history"), "");
 const frame = window => window.webContents.executeJavaScript("window.taskboard?.bootstrap()");
 const evaluate = (window, method, ...args) =>
   window.webContents.executeJavaScript("window.taskboard." + method + "(..." + JSON.stringify(args) + ")");
 const probeRecords = ({ cwd }) => records().filter(event => event.cwd === cwd && event.method === "command/exec");
 const turnRecords = ({ cwd }) => records().filter(event => event.cwd === cwd && event.method === "turn/start");
+const historyRecords = ({ cwd }) => records().filter(event => event.cwd === cwd && event.method === "thread/turns/list");
 const openCard = (window, testCase) => until(() => window.webContents.executeJavaScript(`(() => {
   const card = [...document.querySelectorAll(".task-card")]
     .find(card => card.textContent.includes(${JSON.stringify(testCase.title)}));
@@ -195,6 +213,25 @@ const running = pid => {
 };
 function released(probe) {
   return !running(probe.pid) && !existsSync(probe.temp) && !probe.targets.some(existsSync);
+}
+
+async function checkTurnRecovery(window, testCase, visible) {
+  await until(() => historyRecords(testCase).some(event => event.visible === visible), "turn history for " + testCase.id);
+  if (visible) {
+    await until(async () => {
+      const state = await frame(window);
+      return !state.waitingTasks?.includes(testCase.id) && !state.runningTasks?.includes(testCase.id);
+    }, "queue acknowledgement after matching history for " + testCase.id);
+  } else {
+    await waiting(window, testCase);
+  }
+  assert.equal(probeRecords(testCase).length, 2);
+  const turns = turnRecords(testCase);
+  assert.equal(turns.length, 1);
+  assert.ok(turns[0].clientId);
+  assert.ok(historyRecords(testCase).every(event => event.threadId === turns[0].threadId));
+  const card = (await frame(window)).board.tasks.find(task => task.id === testCase.id);
+  assert.equal(card.status, "in_progress");
 }
 
 void app.whenReady().then(async () => {
@@ -229,7 +266,7 @@ void app.whenReady().then(async () => {
     writeFileSync(join(artifacts, "write-probe-retry.png"), capture.toPNG());
     writeFileSync(join(scratch, "viewport.json"), JSON.stringify({ ...viewport, pixels: capture.getSize(), zoom: window.webContents.getZoomFactor() }));
     assert.equal(probeRecords(cases.success).length, 1);
-  } else {
+  } else if (!recoverTurn) {
     await until(() => turnRecords(cases.success)[0], "one normal turn after restart");
     const [first, second] = probeRecords(cases.success);
     assert.equal(second.at - first.at >= 5000, true);
@@ -281,15 +318,35 @@ void app.whenReady().then(async () => {
     await until(() => turnRecords(twice)[0], "one normal turn after manual Retry launch");
     assert.equal(probeRecords(twice).length, 3);
     assert.equal(turnRecords(twice).length, 1);
+    const lost = await evaluate(window, "launchTask", cases.lost.id);
+    assert.equal(lost.ok, true, JSON.stringify(lost));
+    await checkTurnRecovery(window, cases.lost, false);
+    writeFileSync(join(cases.lost.cwd, "show-history"), "");
+    await checkTurnRecovery(window, cases.lost, true);
+    const restart = await evaluate(window, "launchTask", cases.restart.id);
+    assert.equal(restart.ok, true, JSON.stringify(restart));
+    await checkTurnRecovery(window, cases.restart, false);
+    await until(() => historyRecords(cases.restart).every(event => !running(event.pid) && !existsSync(event.temp)),
+      "provider closed after unconfirmed turn");
+  } else {
+    await checkTurnRecovery(window, cases.restart, true);
     await until(() => records().filter(event => event.method === "command/exec").every(released), "all provider processes and temporary paths released");
-    const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: fileURLToPath(new URL("..", import.meta.url)), encoding: "utf8" }).trim();
+    await until(() => records().filter(event => event.method === "thread/turns/list")
+      .every(event => !running(event.pid) && !existsSync(event.temp)), "all history providers released");
+    const gitDirectory = fileURLToPath(new URL("..", import.meta.url));
+    const git = (...args) => execFileSync("git", args, { cwd: gitDirectory, windowsHide: true });
+    const base = git("rev-parse", "HEAD").toString("utf8").trim();
     const paths = [
       "src/cli/main.ts", "src/desktop/agent-limits.ts", "src/desktop/board-runtime.ts", "src/desktop/codex-run.ts",
       "src/desktop/locales/en.json", "src/desktop/locales/ru.json", "src/desktop/main.ts", "scripts/check-write-probe-retry.mjs",
     ];
+    assert.equal(git("status", "--porcelain").toString("utf8"), "", "QA ran in a clean checkout");
+    const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
     const hashes = paths.map(path => {
-      const hash = createHash("sha256").update(readFileSync(new URL("../" + path, import.meta.url))).digest("hex");
-      return "- `" + hash + "` · `" + path + "`";
+      const checkout = sha256(readFileSync(new URL("../" + path, import.meta.url)));
+      const blob = git("rev-parse", "HEAD:" + path).toString("utf8").trim();
+      const stored = sha256(git("cat-file", "blob", blob));
+      return "| `" + path + "` | `" + blob + "` | `" + stored + "` | `" + checkout + "` |";
     });
     const viewport = JSON.parse(readFileSync(join(scratch, "viewport.json"), "utf8"));
     writeFileSync(join(artifacts, "write-probe-retry-check.md"), [
@@ -310,13 +367,19 @@ void app.whenReady().then(async () => {
       "- Два окна видят одну очередь. Пока слот занят, второй запрос не отправляется. После освобождения слота повторный код 124 блокирует карточку, третьего запроса нет.",
       "- Остановка из второго окна отменяет отложенный запуск. Подтверждённый отказ `overwrite (EACCES)` сохраняет каталог и операцию.",
       "- После устранения причины кнопка «Повторить запуск» выполнила новую проверку и запустила один ход.",
-      "- Для всех семи проверок App Server завершился. Выделенные временные каталоги исполнителя и файлы каждой проверки удалены.",
+      "- После обрыва ответа на принятый `turn/start` пустая история оставила карточку в очереди. После появления сообщения с тем же идентификатором доска восстановила завершённый ход и сняла ожидание. Всего 2 проверки записи и 1 отправка хода.",
+      "- После выхода Electron при неподтверждённом ходе новое приложение нашло принятый ход в истории и сняло ожидание. Всего 2 проверки записи и 1 отправка хода.",
+      "- Все процессы проверок и сверки истории завершились. Выделенные временные каталоги исполнителя и файлы проверок удалены.",
       "",
       "Заглушка воспроизводит результат RPC 124 сразу. Тест не ждёт истечения реальных 15 секунд и не измеряет поведение реального App Server. При успехе и отказе выполняется штатный скрипт записи.",
       "Linux, macOS и установочные пакеты в этом прогоне не проверялись.",
       "",
-      "Проверенный Git HEAD до сдачи — `" + base + "`. SHA-256 рабочих байтов исходников",
+      "Проверенный Git HEAD — `" + base + "`. Рабочая копия после прогона чистая.",
       "",
+      "Git blob ID получен через `git rev-parse HEAD:<путь>`. SHA-256 Git blob вычислен по бинарному результату `git cat-file blob <ID>`. SHA-256 checkout вычислен по байтам рабочего файла.",
+      "",
+      "| Путь | Git blob ID | SHA-256 Git blob | SHA-256 checkout |",
+      "| --- | --- | --- | --- |",
       ...hashes, "",
     ].join("\n"));
   }
