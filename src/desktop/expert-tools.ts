@@ -173,7 +173,6 @@ export function phaseStageReporter(project: string, phase: "work" | "review", id
     if (!item?.at) return;
     if (restored && at) item.at = at;
     const previous = entries.get(item.id);
-    if (restored && item.status === "inProgress" && previous && previous.status !== "inProgress") return;
     entries.set(item.id, item);
     if (JSON.stringify(previous) === JSON.stringify(item)) return;
     const entry = { ...item, id: child + ":" + item.id, stageSessionId: sessionId, stageChild: true as const };
@@ -223,7 +222,19 @@ export function phaseStageReporter(project: string, phase: "work" | "review", id
       // Some providers expose child notifications but do not support listing their threads.
     }
     for (const { item, at } of items.reverse()) {
-      const method = item.status === "inProgress" ? "item/started" : "item/completed";
+      const running = item.status === "inProgress";
+      const previous = typeof item.id === "string" ? activity.get(child)?.get(item.id) : undefined;
+      if (running && previous && previous.status !== "inProgress") {
+        if (item.type === "commandExecution" && previous.type === "commandExecution") {
+          // Keep the terminal metadata and merge any output that only the older snapshot carries.
+          const output = {
+            id: previous.id, type: previous.type, status: previous.status, aggregatedOutput: item.aggregatedOutput,
+          };
+          childItem(child, "item/completed", { item: output, threadId: child });
+        }
+        continue;
+      }
+      const method = running ? "item/started" : "item/completed";
       childItem(child, method, { item, threadId: child }, at === undefined ? undefined : new Date(at).toISOString(), true);
     }
     if (complete && latest) latestChildItem.set(child, latest);

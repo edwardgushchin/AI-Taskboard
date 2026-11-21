@@ -500,6 +500,22 @@ test("a resumed native specialist must complete in the current lead run", async 
     { item: otherSnapshot, startedAtMs: observedAt },
     { item: { ...pending, aggregatedOutput: shortOutput }, startedAtMs: observedAt },
   );
+  const completedBeforePoll = [
+    { id: "success-before-poll", output: "Successful command output", exitCode: 0, staleExitCode: null },
+    { id: "success-with-stale-exit-code", output: "Command succeeded", exitCode: 0, staleExitCode: 9 },
+    { id: "failure-before-poll", output: "Failed command output", exitCode: 7, staleExitCode: 0 },
+  ].map(({ id, output, exitCode, staleExitCode }) => {
+    const execution = { id, type: "commandExecution", command: "git status" };
+    observe(child, execution, "item/started");
+    observe(child, { ...execution, exitCode });
+    const completed = items.get(child + ":" + id);
+    assert.ok(completed?.at);
+    additionalHistory.unshift({
+      item: { ...execution, status: "inProgress", aggregatedOutput: output, exitCode: staleExitCode },
+      startedAtMs: Date.parse(completed.at) - 100,
+    });
+    return { completed, output, exitCode };
+  });
   observe(lead, { type: "collabAgentToolCall", tool: "wait", agentsStates: { [child]: { status: "completed" } } });
   observe(lead, { ...followup, tool: "resumeAgent" });
   await expectError("EXPERT_AGENT_RUNNING");
@@ -551,6 +567,14 @@ test("a resumed native specialist must complete in the current lead run", async 
     assert.equal(match[0].text, JSON.stringify({
       server: "fixture", tool: "check", arguments: { scope: "stage" }, result: { ok: true },
     }, null, 2) + "\nPreparing checks\nRunning checks");
+  });
+  await t.test("a history snapshot after completion adds output and preserves the terminal command", () => {
+    for (const { completed, output, exitCode } of completedBeforePoll) {
+      const expectedText = output + "\nExit code: " + exitCode;
+      const match = archive.filter(item => item.id === completed.id);
+      assert.equal(completed.text, "\nExit code: " + exitCode);
+      assert.deepEqual(match, [{ ...completed, text: expectedText }]);
+    }
   });
 });
 
