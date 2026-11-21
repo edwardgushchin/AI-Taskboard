@@ -1188,9 +1188,16 @@ function card(task) {
     meta.append(badge);
   }
   if (task.schedule) {
-    const badge = task.schedule.paused ? schedulePauseIndicator() : element("span", task.schedule.time ?? scheduleInterval(task.schedule.everyMinutes, "short"));
+    const { schedule } = task;
+    const badge = schedule.paused
+      ? schedulePauseIndicator()
+      : element("span", undefined, "task-stat");
+    if (!schedule.paused) {
+      const value = schedule.time ?? scheduleInterval(schedule.everyMinutes, "short");
+      badge.append(icon("clock"), value);
+    }
     badge.classList.add("task-schedule");
-    badge.title = (task.schedule.paused ? t("ui.schedule_paused") + " · " : "") + scheduleLabel(task.schedule);
+    badge.title = (schedule.paused ? t("ui.schedule_paused") + " · " : "") + scheduleLabel(schedule);
     badge.setAttribute("aria-label", badge.title);
     meta.append(badge);
   }
