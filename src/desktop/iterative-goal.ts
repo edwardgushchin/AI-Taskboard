@@ -216,6 +216,19 @@ export function ownerIterationDirective(objective: string) {
   return { enabled, intervalMs, ...(normalized ? { rules: normalized } : {}) };
 }
 
+export type IterationDirective = Partial<ReturnType<typeof ownerIterationDirective>>;
+
+export function iterationDirectiveAfterEdit(previous: IterationDirective, request: string, objective: string): IterationDirective {
+  const requested = ownerIterationDirective(request);
+  const current = ownerIterationDirective(objective);
+  const rules = requested.rules ?? previous.rules;
+  return {
+    enabled: current.enabled === (requested.enabled ?? previous.enabled) ? current.enabled : undefined,
+    intervalMs: current.intervalMs === (requested.intervalMs ?? previous.intervalMs) ? current.intervalMs : undefined,
+    rules: rules && JSON.stringify(current.rules) === JSON.stringify(rules) ? rules : undefined,
+  };
+}
+
 export function readIterativeGoal(project: string, goalId: string): IterativeGoalState {
   const path = join(project, ".tasks", "iterative-goal.json");
   const saved = exists(path) ? readJson(path) as IterativeGoalState : undefined;

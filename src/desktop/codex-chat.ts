@@ -225,7 +225,8 @@ export async function reviewWithCodex(profile: string, project: string, settings
 
 type GoalStatus = "active" | "paused" | "blocked" | "usageLimited" | "budgetLimited" | "complete";
 export type BoardGoal = { objective: string; status: GoalStatus };
-export type BoardGoalAction = { kind: "pause" | "resume" | "clear" | "complete" } | { kind: "edit"; objective: string };
+export type BoardGoalAction = { kind: "pause" | "resume" | "clear" | "complete" } |
+  { kind: "edit"; objective: string; expectedObjective?: string };
 type Request = <R>(method: string, params: object, listener?: Notification) => Promise<R>;
 
 async function readGoal(request: Request, threadId: string, notify?: Notification) {
@@ -235,6 +236,9 @@ async function readGoal(request: Request, threadId: string, notify?: Notificatio
 async function changeGoal(request: Request, threadId: string, action: BoardGoalAction, goal: BoardGoal | null | undefined,
   notify?: Notification) {
   if (!goal) throw new Error("No goal in this Codex chat.");
+  if (action.kind === "edit" && action.expectedObjective !== undefined && goal.objective !== action.expectedObjective) {
+    throw new Error("The goal text changed. Read the current goal before editing.");
+  }
   if (action.kind === "resume" && goal.status === "complete") throw new Error("This goal is already complete.");
   if (action.kind === "clear") {
     await request("thread/goal/clear", { threadId, origin: "user" }, notify);

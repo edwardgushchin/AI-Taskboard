@@ -7,7 +7,7 @@ import localization from "../src/desktop/localization.cjs";
 import { activeRunSummary } from "../src/desktop/active-runs.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, hash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { stripTypeScriptTypes } from "node:module";
@@ -40,7 +40,8 @@ import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { autoQueueSettings, earliestOpenRelease, releaseWait, updateAutoQueue } from "../src/cli/auto-queue.ts";
 import { nextReadyTask } from "../src/desktop/auto-queue.ts";
 import { acknowledgeInterval, advanceInterval, goalQueueCondition, intervalDeadline, iterativeEnabled, ownerIterationDirective,
-  goalEventConditions, goalReserveTarget, normalizeGoalRules, readIterativeGoal, saveIterativeGoal } from "../src/desktop/iterative-goal.ts";
+  goalEventConditions, goalReserveTarget, iterationDirectiveAfterEdit, normalizeGoalRules,
+  readIterativeGoal, saveIterativeGoal } from "../src/desktop/iterative-goal.ts";
 import { automationDelivery, pendingReviewApprovals } from "../src/desktop/automation-delivery.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import { settingsDelivery, syncSettingsNotices } from "../src/desktop/settings-notices.ts";
@@ -60,7 +61,7 @@ const main = ts.createSourceFile("main.ts", source("main.ts"), ts.ScriptTarget.L
 const dispatcherSource = stripTypeScriptTypes(main.statements.map(node => node.getText(main)).filter(text =>
   text.startsWith("const autoBoards =") || text.startsWith("function scheduleAutoBoard(")).join("\n"));
 const handlerSource = stripTypeScriptTypes(main.statements.map(node => node.getText(main)).filter(text =>
-  /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|changeBoardGoal|resumeBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|canScheduleAutoReview|autoReviewTab|availableReviewSlots|reviewAttempt|readyReviews|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|returnTaskToDraft|scheduleMaintenance|scheduleRecurringTasks|taskRunLimit|readQueuedMessage|queuedFiles|listQueuedMessages)\(|const (?:imageExtensions|imageTypes|boardRequests|boardGoalClears|boardGoalResumes|boardWorkRequests|backgroundManagerRequests|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork|maintenanceWork|returningDrafts|reviewOperations|managerReviewOperations|taskOperations|steeringOperations) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
+  /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|parseOwnerGoalEdit|goalIterationAuthority|changeBoardGoal|resumeBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|canScheduleAutoReview|autoReviewTab|availableReviewSlots|reviewAttempt|readyReviews|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|returnTaskToDraft|scheduleMaintenance|scheduleRecurringTasks|taskRunLimit|readQueuedMessage|queuedFiles|listQueuedMessages)\(|const (?:imageExtensions|imageTypes|boardRequests|boardGoalClears|boardGoalResumes|boardWorkRequests|backgroundManagerRequests|goalReadTool|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork|maintenanceWork|returningDrafts|reviewOperations|managerReviewOperations|taskOperations|steeringOperations) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
 const cliFailure = (code: string, message: string) => ({ ok: false, error: { code, message } });
 
@@ -152,7 +153,8 @@ function fixture(t: TestContext) {
     get quotaWait() { return quotaPaused ? {} : undefined; },
     quotaInterruption: new Error("Fixture quota pause"), refreshQuota: async () => [],
     currentActiveGoal: activeManagerGoal, managerGoalBinding,
-    acknowledgeInterval, intervalDeadline, iterativeEnabled, ownerIterationDirective, normalizeGoalRules, readIterativeGoal, saveIterativeGoal,
+    acknowledgeInterval, intervalDeadline, iterativeEnabled, ownerIterationDirective, iterationDirectiveAfterEdit,
+    normalizeGoalRules, readIterativeGoal, saveIterativeGoal,
     applicationUpdates, applicationUpdateTools, updateOwner: undefined, updateProject: undefined,
     scheduleAutoBoard: () => {}, scheduleDraftDiscussions: () => {},
     activeRunSummary, discussionActivityByTask: new Map(), runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
@@ -160,7 +162,7 @@ function fixture(t: TestContext) {
     githubReadTool, readBoardGitHub: (cwd: string, args: unknown) => callCli(cwd, ["github-read"], args),
     executorFullAccess, managerAccess, setTaskExecutorAccess, phaseStageReporter,
     autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, taskReviewMode, taskReviewModeVersion, boardReviewModeTool, reviewModeReceipt, setReviewModeFromChat, reviewsAcceptanceRepair, usesIndependentReviewer, defaultBoardAgents, reviewVerifier,
-    existsSync, storageDirectory, readdirSync, rmSync, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
+    existsSync, storageDirectory, readdirSync, rmSync, hash, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
     backgroundGoalHistory, goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerUnread,
     managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView,
     saveManagerHistory, sendGoalMessage, goalActionTools, runGoalAction,
@@ -207,6 +209,10 @@ function fixture(t: TestContext) {
       assert.equal(id, threadId);
       idleGoalActions.push(action);
       if (clearGoalError) throw new Error(clearGoalError);
+      if (action.kind === "edit") {
+        const { goal } = readJson(binding) as { goal: BoardGoal };
+        return { ...goal, objective: action.objective };
+      }
       return null;
     },
     launchTask: async (cwd: string, id: string, review?: { input: unknown }, newThread?: false | "manager", revision?: number, _retryDisconnect?: boolean, _scheduled?: boolean, resolveConflicts?: boolean) => {
@@ -272,8 +278,8 @@ function fixture(t: TestContext) {
         ...(!manualTurn && !cleanupTurn && mode === "manager" ? ["expert_stage", "expert_verify_skills"] : []),
         ...(!reviewTurn && !cleanupTurn && !instructions.includes("This turn repairs")
           ? (session.goal || session.resumeGoal
-            ? ["goal_dialogue", "goal_inbox", "goal_report", "goal_configure_iteration"]
-            : ["goal_read", "goal_send"])
+            ? ["goal_read", "goal_dialogue", "goal_inbox", "goal_report", "goal_configure_iteration"]
+            : ["goal_read", "goal_send", "goal_edit"])
           : []),
         ...(!reviewTurn && !cleanupTurn && !instructions.includes("This turn repairs") && !session.goal && !session.resumeGoal &&
           !prompt.startsWith("AI Taskboard queue:") ? ["app_check_updates", "app_install_update"] : []),
@@ -3591,6 +3597,158 @@ test("a paused legacy goal is retained locally without exposing its unclassified
   });
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(goalMessages(f.project, f.threadId)[0]?.text, "Continue after review");
+});
+
+test("dialogue edits the selected paused goal and rejects missing, stale and unauthorized edits", async t => {
+  const f = fixture(t);
+  await f.cli(["init"]);
+  const original = "Проверить сборку Windows.";
+  const added = original + "\nПроверить сборку Linux.";
+  const replacement = "Перепиши текст справки.";
+  const goalId = randomUUID();
+  const save = (objective: string, id = goalId) => writeJson(f.binding, {
+    provider: "codex", id: f.threadId, goalId: id, history: "local", goal: { objective, status: "paused" },
+  });
+  const edit = async (authorization: string, objective: string, expectedObjective: string, id = goalId) => {
+    let response: any;
+    const run = await f.run(authorization, async act => {
+      response = await act("goal_edit", { goalId: id, expectedObjective, objective, authorization });
+      return { text: response.ok ? response.data.objective : response.error.message };
+    });
+    assert.equal(run.ok, true, JSON.stringify(run));
+    return response;
+  };
+  const add = "Добавь к цели проверку на Linux";
+  assert.equal((await edit(add, added, original)).error.code, "GOAL_NOT_FOUND");
+  save(original);
+  sendGoalMessage(f.project, goalId, "Сохрани отчёт по сборке.");
+  for (const request of [
+    "Замени текст цели на: «что-нибудь»",
+    "Замени текст цели на: Сделай формулировку более понятной, пожалуйста",
+    "Замени текст цели на: Сделай формулировку цели более понятной, пожалуйста",
+    "Замени текст цели на: Сделай формулировку этой цели понятнее",
+    "Замени текст цели на: Сделай формулировку нашей текущей цели понятнее.",
+    "Замени текст цели на: Перепиши эту цель простыми словами.",
+    "Замени текст цели на: Перепиши эту цель по итогам обсуждения.",
+    "Замени текст цели на: Перепиши эту цель, пожалуйста, с учётом обсуждения.",
+    "Замени текст цели на: Перепиши эту цель: как договорились.",
+    "Replace the goal with: Rewrite this goal as discussed.",
+    "Replace the goal with: Rewrite the current goal somehow, please.",
+    "Замени текст цели на: Перепиши текст текущей цели простыми словами.",
+    "Replace the goal with: Make the goal wording clearer, please.",
+    "Replace the goal with: Make the wording of the current goal clearer.",
+    "Replace the goal with: Make the wording of this goal clearer.",
+    "Replace the goal with: Rewrite this goal in plain language.",
+    "Замени текст цели на: Сделай формулировку понятной.",
+    "Замени текст цели на:\n«Перепиши цель простыми словами»",
+    "Replace the goal with: Make the wording easier to understand, please.",
+    "Замени текст цели на:\n\nQuote 1:\n```\nПерепиши текст справки.\n```",
+    "Уточни цель: сделай формулировку более понятной, пожалуйста",
+    "Уточни цель в части Linux: сделай текст читабельным",
+    "Уточни цель: перепиши её более простыми словами",
+    "Clarify the goal: make the wording easier to understand, please",
+    "Уточни цель: сформулируй её чётче, пожалуйста",
+    "Пожалуйста, уточни цель в части Linux: сформулируй её немного чётче, пожалуйста.",
+    "Clarify the goal: make it clearer, please.",
+    "Уточни цель: «сформулируй её чётче, пожалуйста»",
+    "Добавь к цели проверку на Linux, пожалуйста?",
+    "Уточни цель: сформулируй её чётче",
+    "Уточни цель в части Linux: сформулируй её чётче",
+    "Clarify the goal: make it clearer",
+    "Уточни цель с учётом обсуждения",
+    "Add something to the goal",
+    "Уточни цель: с учётом обсуждения",
+    "Update the goal based on the discussion",
+    "Replace the goal with something else",
+    "Добавь к цели проверку на Linux?",
+    "> " + add,
+    "Измени цель",
+    "Измени цель как-нибудь",
+    "Карточка T-1234: " + add,
+  ]) {
+    const rejected = await edit(request, added, original);
+    assert.equal(rejected.ok, false, request);
+    assert.equal(rejected.error.code, "USER_DIRECTION_REQUIRED", request);
+    assert.match(rejected.error.message, /specifying what to change/u);
+    assert.deepEqual((readJson(f.binding) as { goal: BoardGoal }).goal, { objective: original, status: "paused" }, request);
+  }
+  assert.equal(f.idleGoalActions.length, 0);
+  assert.deepEqual((await edit(add, added, original)).data, { objective: added, status: "paused" });
+  const duplicate = added + "\nПроверить сборку Linux.";
+  assert.deepEqual((await edit(add, duplicate, added)).data, { objective: added, status: "paused" });
+  assert.equal(f.idleGoalActions.length, 1);
+  const refine = "Пожалуйста, уточни цель в части Linux: укажи Ubuntu 24.04, пожалуйста.";
+  const refined = original + "\nПроверить сборку Linux на Ubuntu 24.04.";
+  assert.deepEqual((await edit(refine, refined, added)).data, { objective: refined, status: "paused" });
+  assert.deepEqual((await f.history()).data.goal, { objective: refined, status: "paused" });
+  const replace = "Замени текст цели на: " + replacement;
+  assert.equal((await edit(replace, replacement, original)).error.code, "GOAL_CHANGED");
+  assert.equal((await edit(replace, replacement, refined, randomUUID())).error.code, "GOAL_CHANGED");
+  assert.deepEqual((await edit(replace, replacement, refined)).data, { objective: replacement, status: "paused" });
+  const multiline = replacement + "\n\nПроверь ссылки и примеры, пожалуйста.";
+  const replaceEnglish = "Replace the goal with:\n" + multiline + "\n\nQuote 1:\n```\nКонтекст обсуждения.\n```";
+  const result = await edit(replaceEnglish, "Обновить справку.", replacement);
+  assert.deepEqual(result.data, { objective: multiline, status: "paused" });
+  const finalObjective = multiline + "\nПроверить журнал ошибок.";
+  const explicitEnglish = "Add a check of the error log to the goal, please.";
+  assert.equal((await edit(explicitEnglish, finalObjective, multiline)).data.objective, finalObjective);
+  const explicitWording = "Проверить отчёт и журнал ошибок.";
+  const rewrite = "Уточни цель: перепиши её так: " + explicitWording;
+  assert.equal((await edit(rewrite, explicitWording, finalObjective)).data.objective, explicitWording);
+  assert.deepEqual((await f.history()).data.goal, { objective: explicitWording, status: "paused" });
+  assert.equal((readJson(f.binding) as { goalId: string }).goalId, goalId);
+  assert.equal(goalMessages(f.project, goalId)[0]?.text, "Сохрани отчёт по сборке.");
+});
+
+test("the active goal can read the saved edit but cannot apply invented iteration commands", async t => {
+  const f = fixture(t);
+  await f.cli(["init"]);
+  const original = "Проверить сборку.";
+  const mode = "Включи итеративный режим";
+  const interval = "Измени интервал на 25 минут";
+  const eventRule = "Настрой правило: смена статуса доски";
+  const rules = [{ kind: "status", scope: "board" }];
+  const ready = Promise.withResolvers<void>();
+  const edited = Promise.withResolvers<void>();
+  const work = f.run(original, async (act, _prompt, _images, _id, _context, _waiting, _signal, goal) => {
+    let objective = original;
+    goal!.accepted();
+    goal!.update({ objective, status: "active" });
+    goal!.controls(async action => {
+      assert.equal(action.kind, "edit");
+      objective = action.objective;
+      const active = { objective, status: "active" } as const;
+      goal!.update(active);
+      return active;
+    });
+    goal!.enableNotifications();
+    ready.resolve();
+    await edited.promise;
+    assert.equal((await act("goal_read", {})).data.goal.objective, objective);
+    assert.equal((await act("goal_configure_iteration", { enabled: true })).error.code, "USER_DIRECTION_REQUIRED");
+    assert.equal((await act("goal_configure_iteration", { rules: [] })).error.code, "USER_DIRECTION_REQUIRED");
+    const configured = await act("goal_configure_iteration", { intervalMs: 1500000, rules });
+    assert.equal(configured.ok, true, JSON.stringify(configured));
+    return { text: "Параметры проверены." };
+  }, [], true);
+  try {
+    await ready.promise;
+    const authorization = ["Добавь к цели проверку на Linux", interval, eventRule].join("\n");
+    const result = await f.run(authorization, async act => {
+      const { goalId, goal } = (await act("goal_read", {})).data;
+      const response = await act("goal_edit", {
+        authorization, goalId, expectedObjective: goal.objective,
+        objective: [original, "Проверить Linux.", mode, interval, eventRule].join("\n"),
+      });
+      assert.equal(response.ok, true, JSON.stringify(response));
+      return { text: response.data.objective };
+    });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.match(f.managerNotifications.at(-1) ?? "", /Read goal_read/);
+  } finally {
+    edited.resolve();
+  }
+  assert.equal((await work).data.answer, "Параметры проверены.");
 });
 
 test("two windows sharing a board cannot start separate orchestrator chats", async t => {
