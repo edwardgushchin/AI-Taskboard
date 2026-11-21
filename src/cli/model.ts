@@ -391,7 +391,9 @@ export function requireState(task: Task, allowed: readonly TaskState[]): void {
 }
 
 export function invalidateDraftDiscussion(task: Task): Task {
-  if (task.status !== "draft") return task;
+  if (task.status !== "draft") {
+    return task.awaitingAnswer === false ? { ...task, awaitingAnswer: undefined } : task;
+  }
   return {
     ...task,
     awaitingAnswer: undefined,

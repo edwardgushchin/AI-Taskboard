@@ -81,7 +81,7 @@ let formatUpdate;
 const initialFormat = "Use CSV and save it in exports.";
 const formatChanges = ["Use XLSX instead of CSV.", "Use JSON instead of XLSX."];
 const revisedBrief = "Экспортировать архив с итоговым отчётом.";
-globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images, _commentary, _action, _scratch,
+globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images, _commentary, action, _scratch,
   _limit, _usage, onControl, _signal, id, _activity, mode) => {
   const context = JSON.parse(prompt);
   assert.equal(cwd, project);
@@ -103,6 +103,7 @@ globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images,
     request, completion: Promise.withResolvers(), returned: Promise.withResolvers(),
     steeringGate: request === formatChanges[0] ? Promise.withResolvers() : undefined,
     steered: [],
+    applyBrief: (authorization, description) => action("task_update", { authorization, description }),
   } : undefined;
   const interrupted = Promise.withResolvers();
   onControl({ interrupt: async () => interrupted.resolve({ interrupted: true }),
@@ -498,8 +499,25 @@ try {
       assert.equal(accepted.saved, true, JSON.stringify(accepted));
       assert.equal(accepted.result.ok, true, JSON.stringify(accepted));
     };
+    const applyBrief = async (id, { update }, description) => {
+      const before = show(id);
+      const result = await update.applyBrief(update.steered.at(-1), description);
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.equal(result.data.changed, true);
+      assert.equal(result.data.revision, before.revision + 1);
+      const saved = show(id);
+      assert.equal(saved.revision, result.data.revision);
+      assert.equal(saved.description, description);
+      assert.notEqual(saved.awaitingAnswer, false);
+      assert.equal(saved.draftDiscussion?.phase, "queued");
+      cli(["approve", id], { revision: saved.revision }, project, "DRAFT_DISCUSSION_REQUIRED");
+      return saved;
+    };
     const xlsxFilename = "Name the file report.xlsx.";
     const xlsx = await beginFormatUpdate(pending.id, formatChanges[0], xlsxFilename);
+    const xlsxBrief = "Выгрузить данные в файл report.xlsx.";
+    const callsBeforeUpdate = calls.length;
+    const xlsxEdit = await applyBrief(pending.id, xlsx, xlsxBrief);
     const xlsxConfirmation = "Подтверждаю выгрузку XLSX в report.xlsx.";
     xlsx.update.completion.resolve(xlsxConfirmation);
     await xlsx.update.returned.promise;
@@ -511,10 +529,15 @@ try {
     const confirmed = await xlsx.reply;
     assert.equal(confirmed.result.ok, true, JSON.stringify(confirmed));
     await until(available, "valid steered reply restores approval");
-    assert.equal(show(pending.id).awaitingAnswer, false);
-    assert.deepEqual(messages(show(pending.id)).slice(-3).map(event => event.text),
+    const confirmedCard = show(pending.id);
+    assert.equal(confirmedCard.revision, xlsxEdit.revision + 1);
+    assert.equal(confirmedCard.description, xlsxBrief);
+    assert.equal(confirmedCard.awaitingAnswer, false);
+    assert.equal(confirmedCard.draftDiscussion, undefined);
+    assert.equal(calls.length, callsBeforeUpdate, "The agent edit needs no extra automatic review");
+    assert.deepEqual(messages(confirmedCard).slice(-3).map(event => event.text),
       [formatChanges[0], xlsxFilename, xlsxConfirmation]);
-    check("Changing CSV to XLSX blocks approval; the same turn saves its reply after the delayed acceptance of the steered filename");
+    check("An authorized XLSX edit advances the draft revision and blocks approval until the same turn confirms it after steering, without an extra review");
 
     const failure = create("Provider inactive");
     await until(() => show(failure.id).draftDiscussion?.phase === "failed", "provider failure");
@@ -557,9 +580,11 @@ try {
     await until(available, "confirmed XLSX draft is visible");
     const json = await beginFormatUpdate(pending.id, formatChanges[1], "Name the file report.json.");
     await waitForSteering(json);
+    const jsonEdit = await applyBrief(pending.id, json, "Выгрузить данные в файл report.json.");
     const outdatedText = "Устаревшее подтверждение JSON.";
     heldDrafts.add(pending.title);
-    cli(["update", pending.id], { description: revisedBrief, revision: show(pending.id).revision });
+    const externalEdit = cli(["update", pending.id], { description: revisedBrief, revision: jsonEdit.revision });
+    assert.equal(externalEdit.revision, jsonEdit.revision + 1);
     json.update.completion.resolve(outdatedText);
     const outdated = await json.reply;
     assert.equal(outdated.result.error?.code, "REVISION_CONFLICT", JSON.stringify(outdated));
@@ -573,7 +598,7 @@ try {
     await until(() => show(pending.id).awaitingAnswer === false, "fresh draft confirmation");
     await until(available, "approval after fresh review of the external edit");
     assert.equal(messages(show(pending.id)).at(-1).text, readyText);
-    check("An external CLI edit after steering rejects the stale reply by revision and requires fresh confirmation");
+    check("An external CLI edit after the same turn successfully updated the draft rejects the stale reply by revision and requires fresh confirmation");
     report.approvalDraft = pending.id;
     report.approvalMessages = messages(show(pending.id));
   };
@@ -934,7 +959,7 @@ try {
     check("Transient chat staging is cleaned");
   }
   if (!live && !(approvalOnly && restart)) {
-    const paths = ["src/desktop/main.ts", "src/desktop/codex-chat.ts", "src/cli/archive.ts", "src/cli/main.ts",
+    const paths = ["src/desktop/main.ts", "src/desktop/codex-chat.ts", "src/desktop/chat-actions.ts", "src/cli/archive.ts", "src/cli/main.ts",
       "src/cli/model.ts", "src/cli/tasks.ts", "src/desktop/renderer.js", "src/desktop/chat.js",
       "src/desktop/locales/ru.json", "src/desktop/preload.cjs", "scripts/check-draft-discussion.mjs",
       "scripts/electron-check.mjs", "tests/fixtures/planned-draft.ts"];

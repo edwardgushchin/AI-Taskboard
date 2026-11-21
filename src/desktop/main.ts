@@ -1228,7 +1228,13 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       if (!returned.ok) return returned;
       return { ok: true, data: { ...returned.data, feedback: reason, executorState: "waiting_for_discussion" } };
     };
-    let runAction = taskChatActions(project, task, message?.text ?? "", () => notify({ type: "changed" }), requestChanges);
+    const actionsFor = (card: Task, target: typeof replyTarget) => taskChatActions(
+      project, card, card.history[target.index]?.text ?? "", revision => {
+        target.revision = revision;
+        notify({ type: "changed" });
+      }, requestChanges,
+    );
+    let runAction = actionsFor(task, replyTarget);
     const ready = Promise.withResolvers<AgentControl>();
     void ready.promise.catch(() => {});
     activeAgents.set(key, { directories, chatWindow, draftDiscussion: automatic ? true : undefined, control: {
@@ -1237,15 +1243,16 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     }, updateMessage: (latest, index) => {
       const steering = Promise.withResolvers<void>();
       pendingSteering.add(steering.promise);
+      const target = { index, revision: latest.revision };
       const previousIndex = actionIndex;
       const previousAction = runAction;
       if (index >= actionIndex) {
         actionIndex = index;
-        runAction = taskChatActions(project, latest, latest.history[index].text ?? "", () => notify({ type: "changed" }), requestChanges);
+        runAction = actionsFor(latest, target);
       }
       return accepted => {
         if (accepted && index > replyTarget.index) {
-          replyTarget = { index, revision: latest.revision };
+          replyTarget = target;
         } else if (!accepted && actionIndex === index) {
           actionIndex = previousIndex;
           runAction = previousAction;

@@ -258,6 +258,8 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
   if (!draftDiscussion && actor === "agent" && task.status === "draft" && input.awaitingAnswer === false) {
     requireRevision(task, input.revision, true);
   }
+  const completesQueuedReview = actor === "agent" && task.status === "draft" &&
+    task.draftDiscussion?.phase === "queued" && typeof input.awaitingAnswer === "boolean" && input.revision !== undefined;
   const usage = actor === "agent" && input.usage !== undefined ? object(input.usage) : undefined;
   const commentary = actor === "agent" && input.commentary !== undefined ? strings(input.commentary, "commentary") : [];
   const durationMs = actor === "agent" && input.durationMs !== undefined ? number(input.durationMs, "durationMs", 0) : undefined;
@@ -275,7 +277,7 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
       ...task, attachments: [...task.attachments, ...attachments],
       ...(actor === "agent" && input.awaitingAnswer !== undefined ? { awaitingAnswer: input.awaitingAnswer as boolean } : {}),
       ...(reopensDraftDiscussion ? { awaitingAnswer: undefined } : {}),
-      draftDiscussion: draftDiscussion || actor === "user" ? undefined : task.draftDiscussion,
+      draftDiscussion: draftDiscussion || actor === "user" || completesQueuedReview ? undefined : task.draftDiscussion,
     }, "chat", actor, task.status, message);
     updated.history.at(-1)!.chat = {
       ...chat,

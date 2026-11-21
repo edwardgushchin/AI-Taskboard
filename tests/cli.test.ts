@@ -270,6 +270,46 @@ test("edits and attachments preserve an open question outside draft", t => {
   checkQuestion("review");
 });
 
+test("a brief changed after approval needs a fresh review when returned to draft", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const path = join(root, "sample.csv");
+  writeFileSync(path, "id,name\n1,example\n");
+
+  for (const change of ["description", "attachment"]) {
+    const draft = cli(root, ["create"], { title: "Export data", workingDirectory: root });
+    const id = draft.id;
+    approveFixture(root, ["approve", id]);
+    cli(root, ["start", id]);
+    assert.equal(cli(root, ["show", id]).awaitingAnswer, false);
+
+    let changed: Task;
+    if (change === "description") {
+      changed = cli(root, ["update", id], {
+        actor: "user", description: "Export XLSX instead of CSV.", note: "Use XLSX.",
+      });
+      assert.equal(changed.status, "in_progress");
+    } else {
+      const token = cli(root, ["preview", id]).token;
+      const reviewed = cli(root, ["submit", id], {
+        token, noChanges: true, summary: "Export ready", checks: ["Checked"],
+      });
+      changed = cli(root, ["attachment", "add", id], { path, revision: reviewed.revision });
+      assert.equal(changed.status, "review");
+    }
+
+    assert.equal(changed.awaitingAnswer, undefined);
+    const returned = cli(root, ["return-to-draft", id], { revision: changed.revision });
+    cli(root, ["approve", id], { revision: returned.revision }, "DRAFT_DISCUSSION_REQUIRED");
+    const started = cli(root, ["draft-discussion", id], { revision: returned.revision, phase: "running" });
+    const confirmed = cli(root, ["chat", id], {
+      actor: "agent", model: "fixture", effort: "low", text: "The current brief is ready for approval.",
+      revision: started.revision, draftDiscussion: true, awaitingAnswer: false,
+    });
+    assert.equal(cli(root, ["approve", id], { revision: confirmed.revision }).status, "ready");
+  }
+});
+
 test("a late ordinary chat reply cannot confirm an edited draft", t => {
   const root = fixture(t);
   cli(root, ["init"]);
