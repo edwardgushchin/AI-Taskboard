@@ -1125,6 +1125,31 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 }
 :where(:root[data-keyboard-focus]) .chat-composer:has(textarea:focus-visible) { border-color: var(--focus); }
 .chat-composer textarea { width: 100%; resize: vertical; border: 0; padding: 5px 6px; background: transparent; outline: none; }
+.chat-quote-draft { grid-column: 1 / -1; min-width: 0; }
+.chat-quote-toggle { min-height: 26px; padding: 2px 8px; color: var(--muted); }
+.chat-quote-list {
+  list-style: none; margin: 4px 0 0; padding: 0;
+  max-height: min(160px, 26vh); overflow: auto;
+  border: 1px solid var(--border); border-radius: 10px;
+}
+.chat-quote-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: start;
+  gap: 4px; padding: 6px 8px;
+}
+.chat-quote-row + .chat-quote-row { border-top: 1px solid var(--border); }
+.chat-quote-row button { min-height: 26px; padding: 3px 6px; }
+.chat-quote-content { white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-quote-content blockquote { margin: 0; padding-inline-start: 8px; border-inline-start: 2px solid var(--border); }
+.chat-quote-content p { margin: 4px 0 0; color: var(--muted); }
+.chat-quote-editor {
+  position: fixed; inset: auto; margin: 0; max-width: calc(100vw - 16px);
+  align-items: center; gap: 6px; padding: 6px;
+  color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 4px 18px rgb(0 0 0 / 20%);
+}
+.chat-quote-editor:popover-open { display: flex; }
+.chat-quote-editor input { flex: 1; min-width: 0; }
+.chat-quote-editor button { flex: none; }
 .chat-composer .draft-attachments { max-height: 176px; overflow: auto; }
 .chat-composer .draft-attachments img { max-width: 112px; max-height: 88px; }
 .chat-composer .draft-attachments .has-preview button { position: absolute; inset: 3px 3px auto auto; background: var(--panel); }

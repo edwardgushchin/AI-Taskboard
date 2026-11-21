@@ -685,8 +685,10 @@ function updateChat({ project, id, type, text, items, savedRun, runThreadId, goa
     if (draft?.saving) {
       draft.text = "";
       draft.files = [];
+      if (draft.quotes) draft.quotes.length = 0;
       draft.saving = undefined;
       draft.pending = "replying";
+      if (open) byId("task-side").firstElementChild?.renderQuotes?.();
     }
     if (open) void protect(() => showTask(id))();
   } else if (type === "changed") {
@@ -1211,6 +1213,19 @@ function taskChat(task, renderStageWork) {
   fileInput.multiple = true;
   fileInput.hidden = true;
   const pendingFiles = element("ul", undefined, "draft-attachments");
+  const quotes = draft.quotes ??= [];
+  const quoteDraft = chatQuoteDraft({
+    panel: area,
+    input,
+    logs: [list, work],
+    quotes,
+    locked: () => Boolean(draft.saving),
+    changed: sync,
+    focusComposer: () => {
+      selectView("dialogue");
+      input.focus();
+    },
+  });
   const controls = element("div", undefined, "chat-controls");
   const feedback = element("p", undefined, "chat-status");
   feedback.setAttribute("role", "status");
@@ -1232,7 +1247,7 @@ function taskChat(task, renderStageWork) {
   microphone.append(icon("mic"));
   controlLabelForIcon(microphone, () => t("ui.voice_input_a05b7480"));
   controls.append(attach, microphone, retryReply, send);
-  composer.append(pendingFiles, input, fileInput, controls, feedback);
+  composer.append(quoteDraft.root, pendingFiles, input, fileInput, controls, feedback);
   if (task.status === "draft" && task.draftDiscussion && task.draftDiscussion.phase !== "running") {
     const { phase, reason } = task.draftDiscussion;
     const discussion = element("div", undefined, "chat-status");
@@ -1272,6 +1287,7 @@ function taskChat(task, renderStageWork) {
     return { name, control, panel };
   });
   function selectView(name) {
+    quoteDraft.close();
     draft.view = name;
     composer.hidden = name !== "dialogue";
     for (const view of views) {
@@ -1290,14 +1306,16 @@ function taskChat(task, renderStageWork) {
   selectView(draft.view === "team" || draft.view === "work" ? "work" : "dialogue");
 
   function working() { return Boolean(draft.pending || frame.runningTasks?.includes(task.id) || frame.replyingTasks?.includes(task.id)); }
-  function stopping() { return working() && !draft.text.trim() && !draft.files.length; }
+  function hasDraft() { return Boolean(draft.text.trim() || draft.files.length || quotes.length); }
+  function stopping() { return working() && !hasDraft(); }
   function sync() {
     input.readOnly = Boolean(draft.saving);
     attach.disabled = microphone.disabled = input.readOnly;
     const stop = stopping();
     syncChatActionIcon(send, stop);
     controlLabelForIcon(send, () => stop ? t("ui.stop_agent_f50db092") : t("ui.send_message_173c4807"));
-    send.disabled = Boolean(draft.saving || draft.stopping) || (!stop && !draft.text.trim() && !draft.files.length);
+    send.disabled = Boolean(draft.saving || draft.stopping) || (!stop && !hasDraft());
+    quoteDraft.sync();
     retryReply.hidden = lastMessage?.actor !== "user" || working() ||
       Boolean(frame.board?.archived?.some(card => card.id === task.id));
     retryReply.disabled = retryReply.hidden || Boolean(draft.saving || draft.stopping);
@@ -1307,6 +1325,7 @@ function taskChat(task, renderStageWork) {
   }
 
   area.syncAgentState = sync;
+  area.renderQuotes = quoteDraft.render;
 
   function renderPendingFiles() {
     pendingFiles.hidden = !draft.files.length;
@@ -1382,7 +1401,7 @@ function taskChat(task, renderStageWork) {
     draft.commentary ??= [];
     draft.error = "";
     draft.scroll = undefined;
-    const text = draft.text;
+    const text = quoteMessage(draft.text, quotes);
     sync();
     try {
       const { model, effort } = retrying ? lastMessage.chat : await discussionSettings();
@@ -1394,6 +1413,8 @@ function taskChat(task, renderStageWork) {
       if (saved && !retrying && draft.saving === submission) {
         draft.text = "";
         draft.files = [];
+        quotes.length = 0;
+        quoteDraft.render();
       }
       if (!result.ok) draft.error = boardError(result.error);
     } catch (error) {
@@ -1427,6 +1448,172 @@ function taskChat(task, renderStageWork) {
   renderPendingFiles();
   sync();
   return area;
+}
+
+function quoteMessage(text, quotes) {
+  if (!quotes.length) return text;
+  const block = value => {
+    let length = 3;
+    for (const match of value.matchAll(/`+/g)) length = Math.max(length, match[0].length + 1);
+    const fence = "`".repeat(length);
+    return fence + "\n" + value + "\n" + fence;
+  };
+  const blocks = quotes.map(({ source, comment }, index) => {
+    // A longer fence preserves any backticks from the selection or comment.
+    const quote = "Quote " + (index + 1) + ":\n" + block(source);
+    return comment ? quote + "\nUser comment:\n" + block(comment) : quote;
+  });
+  return [text, ...blocks].filter(Boolean).join("\n\n");
+}
+
+function chatQuoteDraft({ panel, input, logs, quotes, locked, changed, focusComposer }) {
+  const root = element("div", undefined, "chat-quote-draft");
+  const list = element("ul", undefined, "chat-quote-list");
+  const toggle = button("", () => {
+    list.hidden = !list.hidden;
+    toggle.setAttribute("aria-expanded", String(!list.hidden));
+  }, "quiet chat-quote-toggle");
+  const label = element("span", t("chat_quote.count"));
+  label.dataset.i18nText = "chat_quote.count";
+  const count = element("span");
+  toggle.append(label, count);
+  toggle.setAttribute("aria-expanded", "false");
+  list.hidden = true;
+  root.append(toggle, list);
+
+  const popup = element("div", undefined, "chat-quote-editor");
+  popup.popover = "auto";
+  popup.setAttribute("role", "group");
+  const field = element("input");
+  field.type = "text";
+  field.dataset.i18nPlaceholder = "chat_quote.comment";
+  field.placeholder = t("chat_quote.comment");
+  field.setAttribute("data-i18n-aria-label", "chat_quote.comment");
+  field.setAttribute("aria-label", field.placeholder);
+  let editing;
+  const confirm = button("", () => {
+    if (!editing || locked()) return;
+    const { quote, index } = editing;
+    const confirmed = { source: quote.source, comment: field.value };
+    close();
+    if (index === undefined) quotes.push(confirmed);
+    else quotes[index] = confirmed;
+    render();
+    changed();
+    if (index === undefined) focusComposer();
+    else list.children[index].querySelector("button").focus();
+  }, "primary");
+  confirm.append(icon("check"));
+  labelQuoteAction(confirm, "chat_quote.confirm");
+  popup.append(field, confirm);
+  panel.append(popup);
+
+  function close() {
+    if (popup.matches(":popover-open")) popup.hidePopover();
+    editing = undefined;
+    field.value = "";
+  }
+
+  popup.addEventListener("toggle", () => {
+    if (!popup.matches(":popover-open")) close();
+  });
+  popup.addEventListener("keydown", event => {
+    if (event.isComposing) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      const origin = editing?.origin;
+      close();
+      if (origin?.isConnected) origin.focus({ preventScroll: true });
+    } else if (event.key === "Enter" && event.target === field) {
+      event.preventDefault();
+      confirm.click();
+    }
+  });
+
+  function open(quote, index, anchor, origin) {
+    if (locked() || !panel.isConnected || !origin.getClientRects().length) return;
+    close();
+    editing = { quote, index, origin };
+    field.value = quote.comment;
+    const bounds = panel.getBoundingClientRect();
+    const left = Math.max(8, bounds.left + 8);
+    const right = Math.min(innerWidth, bounds.right) - 8;
+    popup.style.width = Math.min(320, right - left) + "px";
+    popup.showPopover();
+    const { width, height } = popup.getBoundingClientRect();
+    const top = Math.max(8, bounds.top + 8);
+    const bottom = Math.min(innerHeight, bounds.bottom) - height - 8;
+    const above = anchor.top - height - 6;
+    popup.style.left = Math.max(left, Math.min(anchor.left, right - width)) + "px";
+    popup.style.top = Math.max(top, Math.min(above >= top ? above : anchor.bottom + 6, bottom)) + "px";
+    field.focus({ preventScroll: true });
+  }
+
+  function render() {
+    root.hidden = !quotes.length;
+    if (root.hidden) {
+      list.hidden = true;
+      toggle.setAttribute("aria-expanded", "false");
+    }
+    count.textContent = " (" + quotes.length + ")";
+    list.replaceChildren(...quotes.map((quote, index) => {
+      const row = element("li", undefined, "chat-quote-row");
+      const content = element("div", undefined, "chat-quote-content");
+      content.append(element("blockquote", quote.source));
+      if (quote.comment) content.append(element("p", quote.comment));
+      const edit = button("", () => open(quote, index, row.getBoundingClientRect(), edit), "quiet");
+      edit.append(icon("edit"));
+      labelQuoteAction(edit, "chat_quote.edit");
+      const remove = button("", () => {
+        if (locked()) return;
+        close();
+        quotes.splice(index, 1);
+        render();
+        changed();
+        const nearest = list.children[Math.min(index, quotes.length - 1)]?.querySelector("button");
+        (nearest ?? (quotes.length ? toggle : input)).focus();
+      }, "quiet");
+      remove.append(icon("trash"));
+      labelQuoteAction(remove, "chat_quote.remove");
+      row.append(content, edit, remove);
+      return row;
+    }));
+    sync();
+  }
+
+  function sync() {
+    const busy = locked();
+    if (busy) close();
+    for (const action of list.querySelectorAll("button")) action.disabled = busy;
+  }
+
+  for (const log of logs) {
+    if (!log.hasAttribute("tabindex")) log.tabIndex = 0;
+    log.addEventListener("contextmenu", event => {
+      if (locked()) return;
+      const selection = window.getSelection();
+      if (!selection?.rangeCount || !log.contains(selection.anchorNode) || !log.contains(selection.focusNode)) return;
+      const source = selection.toString();
+      if (!source.trim()) return;
+      event.preventDefault();
+      const range = selection.getRangeAt(0);
+      const anchor = Array.from(range.getClientRects()).find(rect =>
+        event.clientY >= rect.top && event.clientY <= rect.bottom) ?? range.getBoundingClientRect();
+      void api.showManagerEditMenu(true, true).then(add => {
+        if (add) open({ source, comment: "" }, undefined, anchor, log);
+      }).catch(error => notice(error.message));
+    });
+  }
+  render();
+  return { root, render, sync, close };
+}
+
+function labelQuoteAction(control, key) {
+  control.dataset.i18nTitle = key;
+  control.setAttribute("data-i18n-aria-label", key);
+  control.title = t(key);
+  control.setAttribute("aria-label", control.title);
 }
 
 function syncChatActionIcon(control, stop) {
