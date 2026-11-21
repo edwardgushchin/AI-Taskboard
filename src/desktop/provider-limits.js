@@ -115,9 +115,16 @@ if (typeof document !== "undefined") {
     render();
   }
   panel.addEventListener("toggle", event => {
-    control.setAttribute("aria-expanded", String(event.newState === "open"));
-    if (event.newState === "open") panel.focus();
-    else if (panel.contains(document.activeElement)) control.focus();
+    const open = event.newState === "open";
+    control.setAttribute("aria-expanded", String(open));
+    if (open) {
+      panel.focus();
+      if (providers.some(provider => provider.state === "error")) {
+        void refresh();
+      }
+    } else if (panel.contains(document.activeElement)) {
+      control.focus();
+    }
   });
   control.setAttribute("aria-controls", panel.id);
   control.setAttribute("aria-expanded", "false");
@@ -125,5 +132,11 @@ if (typeof document !== "undefined") {
   window.renderProviderLimits = render;
   void refresh();
   setInterval(refresh, 60_000);
-  setInterval(render, 15_000);
+  setInterval(() => {
+    if (providers.some(provider => provider.state === "error")) {
+      void refresh();
+    } else {
+      render();
+    }
+  }, 15_000);
 }

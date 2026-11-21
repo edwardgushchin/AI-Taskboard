@@ -112,7 +112,10 @@ export function providerLimitSource(read: () => Promise<ProviderLimits | undefin
     const started = generation;
     const request: Promise<ProviderLimits[]> = read().then(value => {
       if (started !== generation) { pending = undefined; return get(); }
-      cached = value ? [value] : []; expires = now() + 60_000; return cached;
+      cached = value ? [value] : [];
+      // Throttle repeat failures across windows without keeping a transient error for a full poll.
+      expires = now() + (value?.state === "error" ? 5_000 : 60_000);
+      return cached;
     }).finally(() => { if (pending === request) pending = undefined; });
     pending = request;
     return request;

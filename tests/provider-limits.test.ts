@@ -40,6 +40,35 @@ test('reconnection during a pending read discards old account; failed reads allo
  let fail=true;const retry=providerLimitSource(async()=>{if(fail)throw new Error('failed');return undefined;});
  await assert.rejects(retry());fail=false;assert.deepEqual(await retry(),[]);
 });
+
+test('RPC error snapshots share a short cooldown and recover through a single read', async () => {
+  let now = 1000;
+  const error: ProviderLimits = { provider: 'Codex', state: 'error', plan: 'pro', windows: [] };
+  const ready = codexLimitSnapshot({
+    rateLimits: { primary: { usedPercent: 23 }, secondary: null },
+  }, 11_000);
+  const responses = [error, error, ready].values();
+  let calls = 0;
+  const get = providerLimitSource(async () => {
+    calls++;
+    return responses.next().value;
+  }, () => now);
+
+  assert.deepEqual(await Promise.all([get(), get()]), [[error], [error]]);
+  now = 5999;
+  assert.deepEqual(await get(), [error]);
+  assert.equal(calls, 1);
+  assert.equal(confirmedQuota(error, now), undefined);
+  now = 6000;
+  assert.deepEqual(await Promise.all([get(), get()]), [[error], [error]]);
+  assert.equal(calls, 2);
+  now = 11_000;
+  assert.deepEqual(await Promise.all([get(), get()]), [[ready], [ready]]);
+  assert.equal(confirmedQuota(ready, now), 'available');
+  now += 59_999;
+  assert.deepEqual(await get(), [ready]);
+  assert.equal(calls, 3);
+});
 test('explicit absence of windows differs from missing or malformed data',()=>{
  assert.equal(codexLimitState({rateLimits:{primary:null,secondary:null}}),'no_windows');
  assert.equal(codexLimitState({}),'unknown');
