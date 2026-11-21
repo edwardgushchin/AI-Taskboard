@@ -15,7 +15,7 @@ contextBridge.exposeInMainWorld("taskboard", {
   backupCreate: () => ipcRenderer.invoke("backups:create"),
   backupRestore: id => ipcRenderer.invoke("backups:restore", id),
   open: () => ipcRenderer.invoke("board:open"),
-  boardRequest: (request, files, project, goal, immediate, id, goalRunId) => ipcRenderer.invoke("board:request", request, files, project, goal, immediate, id, goalRunId),
+  boardRequest: (request, files, project, goal, immediate, id) => ipcRenderer.invoke("board:request", request, files, project, goal, immediate, id),
   boardHistory: (project, cursor, view) => ipcRenderer.invoke("board:history", project, cursor, view),
   readManagerMessages: (project, ids) => ipcRenderer.invoke("board:readManagerMessages", project, ids),
   taskRunHistory: id => ipcRenderer.invoke("board:taskRunHistory", id),

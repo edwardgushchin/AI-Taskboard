@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { runtimeEntries } from "../src/desktop/board-runtime.ts";
-import { saveManagerHistory } from "../src/desktop/manager-history.ts";
+import { goalMessages, saveManagerHistory } from "../src/desktop/manager-history.ts";
 import { electronCheck } from "./electron-check.mjs";
 
 const { scratch, artifacts } = electronCheck(import.meta.url, "manager-parallel", 120_000, [[], ["--reopen"]]);
@@ -22,6 +22,10 @@ const statePath = join(scratch, "continuation.json");
 const objective = "Проверить параллельную работу цели и диалога";
 const dialogueQuestion = "Как идёт работа?";
 const dialogueAnswer = "Цель продолжает работу, сейчас выполняется следующий шаг";
+const busyQuestion = "Когда будет готов отчёт?";
+const pausedQuestion = "Какой результат уже готов?";
+const attachmentQuestion = "Проверь приложенный снимок";
+const attachment = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/6uYUV8AAAAASUVORK5CYII=";
 const queuedAnswer = "Указание поставлено в очередь цели. Жду подтверждения выполнения.";
 const reports = reopen ? JSON.parse(readFileSync(statePath)).reports : [];
 const requests = [];
@@ -76,23 +80,42 @@ async function openChat(window) {
   assert.equal(window.webContents.getLastWebPreferences().sandbox, true);
 }
 
-async function sendForm(window, text, work = false) {
-  await until(() => evaluate(window, "document.querySelector('#board-draft').getAttribute('aria-busy') === 'false'"), "available composer");
+async function selectChatView(window, work) {
   await evaluate(window, `document.querySelector(${JSON.stringify(work ? ".board-work-toggle" : ".board-dialogue-toggle")}).click();`);
   await until(() => evaluate(window, "document.querySelector('.board-work').hidden === " + String(!work)), "selected chat view");
-  await evaluate(window, `
-    document.querySelector('#board-draft textarea[name=request]').value = ${JSON.stringify(text)};
-    document.querySelector('#board-draft textarea[name=request]').dispatchEvent(new Event('input', {bubbles:true}));
-    document.querySelector('#board-draft').requestSubmit();`);
+  const prompt = await evaluate(window, `({
+    placeholder: document.querySelector('#board-draft .draft-placeholder').textContent,
+    name: document.querySelector('#board-draft textarea[name=request]').getAttribute('aria-label')
+  })`);
+  assert.deepEqual(prompt, { placeholder: "Напишите менеджеру проекта…", name: "Сообщение менеджеру проекта" });
 }
 
-async function capture(window, name) {
+async function sendForm(window, text, work = false, keyboard = false) {
+  await selectChatView(window, work);
+  await evaluate(window, `{
+    const input = document.querySelector('#board-draft textarea[name=request]');
+    input.value = ${JSON.stringify(text)};
+    input.dispatchEvent(new Event('input', {bubbles:true}));
+    ${keyboard
+      ? "input.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true}));"
+      : "input.form.querySelector('.draft-send').click();"}
+  }`);
+  await until(() => evaluate(window, `document.querySelector('#board-draft textarea[name=request]').value === '' &&
+    document.querySelector('.board-dialogue-toggle').getAttribute('aria-pressed') === 'true'`), "saved draft in Dialogue");
+}
+
+async function capture(window, name, retain = false) {
   await evaluate(window, "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+  if (retain) {
+    await window.webContents.capturePage();
+    await delay(250);
+  }
+  assert.deepEqual(await evaluate(window, "[innerWidth, innerHeight, devicePixelRatio]"), [1280, 800, 1]);
   const image = await window.webContents.capturePage();
   assert.deepEqual(image.getSize(), { width: 1280, height: 800 });
   const png = image.toPNG();
   assert.ok(png.length < 4 * 1024 * 1024);
-  writeFileSync(join(artifacts, name), png);
+  writeFileSync(join(retain ? artifacts : scratch, name), png);
 }
 
 async function checkManagerBubble(window, phase) {
@@ -190,7 +213,7 @@ function prepare() {
   require(entry);
 }
 
-globalThis.parallelProvider = async (_profile, cwd, prompt, _images, action, _tools, _instructions, signal, session) => {
+globalThis.parallelProvider = async (_profile, cwd, prompt, images, action, _tools, _instructions, signal, session) => {
   assert.equal(cwd, project);
   const isGoal = Boolean(session.goal || session.resumeGoal);
   const id = session.id ?? randomUUID();
@@ -222,9 +245,21 @@ globalThis.parallelProvider = async (_profile, cwd, prompt, _images, action, _to
   }
   if (prompt === "Удержать ответ") {
     await chatHold.promise;
+    return { text: "Диалог снова свободен.", model: "Fixture provider" };
   }
-  if (prompt === "Передай цели второе указание") {
-    assert.equal((await action("goal_send", { text: "Запиши второй результат" })).ok, true);
+  if (prompt === busyQuestion || prompt === pausedQuestion) {
+    return { text: "Проверка отчёта уже завершена.", model: "Fixture provider" };
+  }
+  if (prompt === attachmentQuestion) {
+    assert.deepEqual(images, ["data:image/png;base64," + attachment]);
+    if (requests.filter(request => request.prompt === attachmentQuestion).length === 1) {
+      throw new Error("Fixture declined the first attempt");
+    }
+    return { text: "Снимок получен.", model: "Fixture provider" };
+  }
+  if (prompt === "Передай цели первое указание" || prompt === "Передай цели второе указание") {
+    const text = prompt.includes("первое") ? "Запиши первый результат" : "Запиши второй результат";
+    assert.equal((await action("goal_send", { text })).ok, true);
     return { text: queuedAnswer, model: "Fixture provider" };
   }
   return { text: dialogueAnswer, model: "Fixture provider" };
@@ -252,11 +287,28 @@ async function run() {
     await capture(wide, "manager-dialog-without-goal.png");
     pass("No goal/log: dialogue and composer are visible; the tab switch and visible Dialogue caption are absent. Unclassified local history is hidden.");
 
-    const goalReply = await startCall(wide, "goalReply", "boardRequest", objective, [], project, true);
+    await evaluate(wide, `{
+      const form = document.querySelector('#board-draft');
+      form.querySelector('.draft-add').click();
+      form.querySelector('.draft-menu-item:last-child').click();
+    }`);
+    await until(() => evaluate(wide, `(() => {
+      const form = document.querySelector('#board-draft');
+      return form.querySelector('.draft-placeholder').textContent === 'Опишите цель…' &&
+        form.querySelector('textarea[name=request]').getAttribute('aria-label') === 'Опишите цель…';
+    })()`), "objective prompt and accessible name");
+    await evaluate(wide, `{
+      const form = document.querySelector('#board-draft');
+      const input = form.querySelector('textarea[name=request]');
+      input.value = ${JSON.stringify(objective)};
+      input.dispatchEvent(new Event('input', {bubbles:true}));
+      form.querySelector('.draft-send').click();
+    }`);
     await until(() => goalRun, "goal provider");
     await until(() => evaluate(other, "!document.querySelector('.board-chat-views').hidden"), "tabs in second window");
+    pass("The separate goal action switches the composer to objective mode and starts exactly one goal turn.");
     assert.equal((await api(other, "boardRequest", "Duplicate goal", [], project, true)).error.code, "BOARD_REQUEST_IN_PROGRESS");
-    await sendForm(wide, dialogueQuestion);
+    await sendForm(wide, dialogueQuestion, true);
     await until(() => evaluate(wide, "document.querySelector('#board-chat').textContent.includes(" + JSON.stringify(dialogueAnswer) + ")"), "ordinary answer");
     const dialogueText = await evaluate(wide, "document.querySelector('#board-chat').textContent");
     assert.equal(dialogueText.includes("Ответ менеджера:"), false);
@@ -264,9 +316,16 @@ async function run() {
     assert.equal((await history(other)).data.goalRunning, true);
     assert.equal(requests.filter(request => request.isGoal).length, 1);
     assert.notEqual(requests.find(request => request.isGoal).id, requests.find(request => !request.isGoal).id);
+    await capture(wide, "manager-dialogue-route.png", true);
+    assert.deepEqual(signals, []);
+    assert.equal(goalRun.signal.aborted, false);
+    await selectChatView(wide, true);
+    await until(() => evaluate(wide, "document.querySelector('.board-work').innerText.includes('Цель выполняется.')"), "active goal history");
+    assert.equal(await evaluate(wide, `document.querySelector('.board-work').innerText.includes(${JSON.stringify(dialogueQuestion)})`), false);
+    await capture(wide, "goal-history-route.png", true);
+    pass("Clicking Send from Goal Activity opens Dialogue with one question and answer. The same goal remains active and receives no interrupt, inbox entry, history item or signal. Both tabs label the composer for the manager.");
+    await selectChatView(wide, false);
     await checkManagerBubble(wide, "live");
-    await capture(wide, "manager-parallel-dialog.png");
-    pass("An ordinary question submitted through the form receives its answer while the original goal is still running, without pause/restart. Goal and dialogue have distinct provider thread IDs and one writer each.");
 
     const reference = await goalRun.action("goal_dialogue", {});
     assert.equal(reference.ok, true);
@@ -281,7 +340,7 @@ async function run() {
     pass("goal_dialogue reads the same board's question and answer with stable IDs, author and time. Two reads and the ordinary message leave the inbox empty and the goal turn count at one.");
 
     const task = effectTask;
-    await sendForm(wide, "Запиши первый результат", true);
+    await sendForm(wide, "Передай цели первое указание", true);
     const first = await until(async () => (await goalRun.action("goal_inbox", {})).data[0], "first inbox instruction");
     const actionInput = { id: task, revision: cli(["show", task]).revision, text: "Измеримый эффект", goalMessageId: first.id, goalActionKey: "record-result" };
     const result = await goalRun.action("task_comment", actionInput);
@@ -298,7 +357,7 @@ async function run() {
     assert.ok(signals.filter(signal => signal.isGoal).every(signal =>
       !signal.text.includes(first.text) && !signal.text.includes(second.text)));
     assert.equal(commentCount(task, "Измеримый эффект"), 1);
-    pass("Both form submission from Goal Activity and goal_send from the manager use goal_inbox. Repeated active-turn signals carry only: AI Taskboard: new user directions are available. Read goal_inbox. First instruction: one actual comment.");
+    pass("Explicit delegation from both tabs uses the manager's goal_send and goal_inbox. Repeated active-turn signals carry only a request to read goal_inbox. First instruction: one actual comment.");
     await evaluate(wide, "document.querySelector('.board-work-toggle').click()");
     await until(() => evaluate(wide, "document.querySelector('.board-work').textContent.includes('Цель выполняется.')"), "goal log");
     await evaluate(wide, `(async () => {
@@ -314,9 +373,64 @@ async function run() {
     })()`);
     await capture(wide, "manager-goal-log.png");
     assert.equal((await api(wide, "boardGoal", "pause")).ok, true);
-    assert.equal((await goalReply()).ok, true);
+    await until(async () => !(await history(wide, "work")).data.goalRunning, "original goal turn stopped");
     await until(() => evaluate(other, "document.querySelector('.board-goal-status').textContent.includes('паузе')"), "paused status");
     await capture(other, "manager-goal-paused.png");
+    const pausedGoalId = (await history(wide, "work")).data.goalId;
+    assert.ok(pausedGoalId);
+    const pausedInbox = goalMessages(project, pausedGoalId);
+    chatHold = Promise.withResolvers();
+    await sendForm(wide, "Удержать ответ");
+    await until(() => requests.some(request => request.prompt === "Удержать ответ"), "busy dialogue");
+    await sendForm(wide, busyQuestion, false, true);
+    await sendForm(wide, pausedQuestion, true, true);
+    const queue = (await api(wide, "boardQueue", project, "list")).data;
+    for (const question of [busyQuestion, pausedQuestion]) {
+      assert.equal(queue.filter(entry => entry.draft === question).length, 1);
+      assert.equal(requests.filter(request => request.prompt === question).length, 0);
+    }
+    chatHold.resolve();
+    await until(async () => !(await api(wide, "boardQueue", project, "list")).data.length, "both queued messages delivered");
+    const chatHistory = JSON.stringify((await history(wide)).data.turns);
+    const workHistory = JSON.stringify((await history(wide, "work")).data.turns);
+    for (const question of [busyQuestion, pausedQuestion]) {
+      assert.equal(chatHistory.split(question).length - 1, 1);
+      assert.equal(workHistory.includes(question), false);
+      assert.equal(requests.filter(request => request.prompt === question).length, 1);
+    }
+    assert.equal((await history(wide, "work")).data.goal.status, "paused");
+    assert.equal(requests.filter(request => request.isGoal).length, 1);
+    assert.deepEqual(goalMessages(project, pausedGoalId), pausedInbox);
+    pass("Enter from both tabs saves exactly one entry each while Dialogue is busy. Both messages are delivered once; the paused goal stays paused and its journal excludes them.");
+
+    await selectChatView(wide, false);
+    await evaluate(wide, `{
+      const input = document.querySelector('#board-draft textarea[name=request]');
+      const clipboardData = new DataTransfer();
+      const bytes = Uint8Array.from(atob(${JSON.stringify(attachment)}), character => character.charCodeAt(0));
+      clipboardData.items.add(new File([bytes], 'route.png', { type: 'image/png' }));
+      input.value = ${JSON.stringify(attachmentQuestion)};
+      input.dispatchEvent(new Event('input', {bubbles:true}));
+      input.dispatchEvent(new ClipboardEvent('paste', { clipboardData, bubbles:true, cancelable:true }));
+    }`);
+    await selectChatView(wide, true);
+    assert.equal(await evaluate(wide, "document.querySelector('#board-draft textarea[name=request]').value"), attachmentQuestion);
+    assert.match(await evaluate(wide, "document.querySelector('#board-draft .draft-attachments').innerHTML"), /route\.png/);
+    await sendForm(wide, attachmentQuestion, true);
+    const failed = await until(async () => (await api(wide, "boardQueue", project, "list")).data.find(job => job.failed), "saved failed queue entry");
+    assert.equal(failed.draft, attachmentQuestion);
+    assert.equal(failed.files[0].name, "route.png");
+    await until(() => evaluate(wide, `Array.from(document.querySelectorAll('.board-queued-status button'))
+      .some(button => button.textContent === 'Повторить')`), "Retry control");
+    await evaluate(wide, `Array.from(document.querySelectorAll('.board-queued-status button'))
+      .find(button => button.textContent === 'Повторить').click()`);
+    await until(async () => !(await api(wide, "boardQueue", project, "list")).data.length, "attachment message retried");
+    const delivered = JSON.stringify((await history(wide)).data.turns);
+    assert.equal(delivered.split(attachmentQuestion).length - 1, 1);
+    assert.ok(delivered.includes("route.png") && delivered.includes("Снимок получен."));
+    assert.equal(requests.filter(request => request.prompt === attachmentQuestion).length, 2);
+    assert.deepEqual(goalMessages(project, pausedGoalId), pausedInbox);
+    pass("The draft and pasted image survive switching tabs. A provider failure keeps the image and text in the failed dialogue job. Retry delivers both with one saved message and leaves the paused inbox unchanged.");
     const before = (await history(wide)).data;
     assert.ok((await history(wide, "work")).data.turns.some(turn => turn.items.some(item => item.text === "Цель на паузе")));
     writeFileSync(statePath, JSON.stringify({ reports, task, actionInput, result, first: first.id, second: second.id,
@@ -382,19 +496,53 @@ async function run() {
   assert.equal(await evaluate(wide, "!document.querySelector('.board-chat-log:not(.board-work)').hidden"), true);
   pass("Goal Activity remains available with explicit paused/completed statuses. Removing the available goal log while it is open returns the UI to dialogue and hides both tab captions without reopening the app.");
 
-  const paths = ["src/desktop/main.ts", "src/desktop/renderer.js", "src/desktop/chat.js", "src/desktop/manager-history.ts", "src/desktop/goal-actions.ts",
-    "src/desktop/active-runs.ts", "src/desktop/locales/ru.json", "scripts/check-manager-parallel.mjs"];
+  const paths = [
+    "src/desktop/main.ts", "src/desktop/preload.cjs", "src/desktop/renderer.js", "src/desktop/styles.css",
+    "src/desktop/chat.js", "src/desktop/manager-history.ts", "src/desktop/goal-actions.ts",
+    "src/desktop/active-runs.ts", "src/desktop/locales/ru.json",
+    "scripts/check-manager-parallel.mjs", "scripts/electron-check.mjs", "package-lock.json",
+  ];
   const hashes = paths.map(path => createHash("sha256").update(readFileSync(join(root, path))).digest("hex") + "  " + path);
-  writeFileSync(join(artifacts, "manager-parallel-check.txt"), [
-    "Command: node scripts/check-manager-parallel.mjs --artifacts .tasks/qa",
-    "Tested commit: " + execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim(),
-    "SHA-256 of tested worktree bytes before provider substitution:", ...hashes,
-    "Runtime: " + [process.platform, process.arch, "Electron " + process.versions.electron,
-      "Chromium " + process.versions.chrome, "Node " + process.versions.node].join(", "),
-    "Windows: PASS, two 1280x800 sandboxed renderer windows, full Electron process restart.",
-    "Linux/macOS: not run; context paths use node:path, shared locking uses existing cross-platform SQLite runtime. No packaging changes.",
-    "Provider: deterministic boundary; application IPC, locks, history, inbox and task_comment actions are production code. Context compaction is simulated by discarding provider context and restarting; no live Codex compaction claim.",
-    ...reports,
+  writeFileSync(join(artifacts, "manager-message-routing.md"), [
+    "# Проверка отправки сообщений менеджеру",
+    "",
+    "Windows Electron прошёл два запуска с одним временным профилем. Проверены два окна 1280×800 CSS-пикселей с масштабом 100% и изоляцией Chromium.",
+    "",
+    "- [Диалог после отправки](manager-dialogue-route.png) показывает вопрос, ответ, подсказку менеджера и активную цель.",
+    "- [Ход цели после отправки](goal-history-route.png) показывает журнал той же цели и подсказку менеджера.",
+    "",
+    "Кнопка переносит обычный вопрос из «Хода цели» в «Диалог». Цель продолжает тот же ход без сигнала и без новой записи в очереди или журнале.",
+    "Enter в обеих вкладках сохраняет по одному сообщению, пока диалог занят. После доставки и полного перезапуска текст сохранён ровно один раз, а цель остаётся на паузе.",
+    "Черновик с PNG переживает смену вкладки. При отказе провайдера текст и PNG остаются в очереди, а «Повторить» отправляет их с одной записью в истории.",
+    "Отдельно проверены постановка цели из поля и доставка явно порученных указаний через `goal_send`.",
+    "",
+    "| Платформа | Результат |",
+    "| --- | --- |",
+    "| Windows | Пройдено в Electron. |",
+    "| Linux | Не запускалась. |",
+    "| macOS | Не запускалась. |",
+    "",
+    "Стенд использует реальные события поля, мост IPC, очередь, журналы и действия цели. Ответы и сбой провайдера воспроизводятся локально. Реальный Codex, упаковка и обновление не проверялись.",
+    "",
+    "## Воспроизведение",
+    "",
+    "```powershell",
+    "node scripts/check-manager-parallel.mjs --artifacts .tasks/qa",
+    "```",
+    "",
+    "## Технические детали",
+    "",
+    "Среда — " + [process.platform, process.arch, "Electron " + process.versions.electron,
+      "Chromium " + process.versions.chrome, "Node в Electron " + process.versions.node,
+      "Node запуска " + execFileSync(process.env.TASKBOARD_CHECK_NODE, ["--version"], { encoding: "utf8" }).trim()].join(", "),
+    "",
+    "HEAD — `" + execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim() + "`. SHA-256 исходных байтов worktree до тестовой подмены провайдера.",
+    "",
+    "```text", ...hashes, "```",
+    "",
+    "### Наблюдения стенда",
+    "",
+    ...reports.map(report => "- " + report),
   ].join("\n") + "\n");
 }
 
