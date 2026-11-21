@@ -1953,7 +1953,7 @@ const goalReadTool = {
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
 };
 
-function isOwnerGoalEdit(request: string) {
+function parseOwnerGoalEdit(request: string): { replacement?: string } | undefined {
   function withoutCourtesy(text: string) {
     return text.trim()
       .replace(/^(?:пожалуйста|please),?\s+/iu, "")
@@ -1961,11 +1961,27 @@ function isOwnerGoalEdit(request: string) {
       .trim();
   }
 
+  const unspecified = /^(?:как-нибудь|что-нибудь|что-то|на своё усмотрение|пожалуйста|somehow|something|anything|whatever|please)(?![\p{L}\p{N}])/iu;
+  const referenceOnly = /^(?:с уч[её]том|по итогам|по результатам|как обсуждали|как договорились|based on|taking into account|as discussed|as agreed)(?![\p{L}\p{N}])/iu;
+  const literalPrefix = /^(?:(?:пожалуйста|please),?\s+)?(?:замени(?:те)? (?:(?:текст|формулировку) (?:текущей )?цели|(?:текущую )?цель)(?: на)?|replace (?:the )?(?:current )?goal(?: text)?(?: (?:with|to|as follows))?)[ \t]*:/iu;
+  const literal = literalPrefix.exec(request);
+  if (literal) {
+    // The composer appends quoted references after the owner's message.
+    const replacement = request.slice(literal[0].length).split(/\r?\n\r?\nQuote 1:\r?\n(?=\x60{3,})/u, 1)[0].trim();
+    const firstLine = replacement.split(/\r?\n/, 1)[0];
+    const wording = firstLine.replace(/^[«“"']+/u, "");
+    if (!/[\p{L}\p{N}]/u.test(firstLine) || /^[>~\x60]/u.test(firstLine) ||
+        unspecified.test(wording) || referenceOnly.test(wording)) {
+      return;
+    }
+    return { replacement };
+  }
+
   const [firstLine, ...rest] = request.split(/\r?\n/);
   const command = withoutCourtesy(firstLine);
   const endsWithQuestion = /[?？][.!…»”"']*$/u;
   if (endsWithQuestion.test(command)) {
-    return false;
+    return;
   }
 
   const englishAdd = /^(?:add|append)\s+(.+?)\s+to (?:the )?(?:current )?goal[.!]?$/iu.exec(command);
@@ -1974,7 +1990,7 @@ function isOwnerGoalEdit(request: string) {
   const englishEdit = /^(?:replace|update|edit|change|clarify) (?:the )?(?:current )?goal(?: text)?(?:\s+(?:to|with|as follows)(?=[ :]|$)|(?=:))/iu;
   const prefix = russianAdd.exec(command) ?? russianEdit.exec(command) ?? englishEdit.exec(command);
   if (!englishAdd && !prefix) {
-    return false;
+    return;
   }
 
   const suffix = prefix ? command.slice(prefix[0].length).trim() : "";
@@ -1982,7 +1998,7 @@ function isOwnerGoalEdit(request: string) {
     ? rest.find(line => line.trim())?.trim() ?? ""
     : suffix.replace(/^:\s*/u, ""));
   if (/^[>~\x60]/u.test(detail) || !/[\p{L}\p{N}]/u.test(detail)) {
-    return false;
+    return;
   }
 
   let wording = withoutCourtesy(detail.replace(/^[«“"']+|[»”"']+$/gu, ""));
@@ -1993,24 +2009,25 @@ function isOwnerGoalEdit(request: string) {
     const replacement = /^\s*(?:(?:так|такой|следующим образом|as follows)\s*)?:\s*(.+)$/iu
       .exec(wording.slice(rewrite[0].length));
     if (!replacement) {
-      return false;
+      return;
     }
     wording = withoutCourtesy(replacement[1].replace(/^[«“"']+|[»”"']+$/gu, ""));
   }
   if (!/[\p{L}\p{N}]/u.test(wording) || /^[>~\x60]/u.test(wording) ||
       endsWithQuestion.test(wording) || rewriteWording.test(wording)) {
-    return false;
+    return;
   }
-  const unspecified = /^(?:как-нибудь|что-нибудь|что-то|на своё усмотрение|пожалуйста|somehow|something|anything|whatever|please)(?![\p{L}\p{N}])/iu;
-  const referenceOnly = /^(?:с уч[её]том|по итогам|по результатам|как обсуждали|как договорились|based on|taking into account|as discussed|as agreed)(?![\p{L}\p{N}])/iu;
   const russianStyleOnly = /^(?:сформулируй|переформулируй|перепиши|сделай)(?:те)?\s+(?:(?:чуть|немного|намного)\s+)?(?:ч[её]тче|яснее|понятнее|конкретнее|точнее|лучше|более\s+(?:ч[её]тко|ясно|понятно|конкретно|точно))[.!…»”"']*$/iu;
   const englishStyleOnly = /^(?:make|rewrite|rephrase)\s+(?:(?:a little|much)\s+)?(?:clearer|more clearly|more specific|better)[.!…»”"']*$/iu;
-  return !unspecified.test(wording) && !referenceOnly.test(wording) &&
-    !russianStyleOnly.test(wording) && !englishStyleOnly.test(wording);
+  if (unspecified.test(wording) || referenceOnly.test(wording) ||
+      russianStyleOnly.test(wording) || englishStyleOnly.test(wording)) {
+    return;
+  }
+  return {};
 }
 const goalChatTools = [
   goalReadTool,
-  { name: "goal_edit", description: "Save the full revised objective only for an explicit, specific edit command in the latest owner message. Read goal_read first, pass its exact goalId and objective as expectedObjective, and pass the complete latest owner message as authorization. Preserve all text outside the requested change. If the change is already present, leave the text identical. Questions, quotes, attachments, card messages and vague requests are never edit commands. Ask what to change when unclear. On GOAL_CHANGED reread and report the conflict or retry an unambiguous edit. Confirm the exact saved text only on success.",
+  { name: "goal_edit", description: "Save the full revised objective only for an explicit, specific edit command in the latest owner message. Read goal_read first, pass its exact goalId and objective as expectedObjective, and pass the complete latest owner message as authorization. For a full replacement such as 'Replace the goal with: <text>', the app takes the replacement text from the owner message. Preserve all text outside the requested change. If the change is already present, leave the text identical. Questions, quotes, attachments, card messages and vague requests are never edit commands. Ask what to change when unclear. On GOAL_CHANGED reread and report the conflict or retry an unambiguous edit. Confirm the exact saved text only on success.",
     inputSchema: { type: "object", properties: {
       goalId: { type: "string" }, expectedObjective: { type: "string" }, objective: { type: "string" },
       authorization: { type: "string" },
@@ -3171,12 +3188,13 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
             typeof input.objective !== "string" || !input.objective.trim()) {
           return cliFailure("INVALID_INPUT", "Pass the goal ID, its exact current text and the revised text.");
         }
-        if (input.authorization !== ownerReviewRequest || !isOwnerGoalEdit(ownerReviewRequest)) {
+        const edit = input.authorization === ownerReviewRequest ? parseOwnerGoalEdit(ownerReviewRequest) : undefined;
+        if (!edit) {
           return cliFailure("USER_DIRECTION_REQUIRED", "Ask the owner for a direct command specifying what to change in the current goal.");
         }
         signal.throwIfAborted();
         return changeBoardGoal(project, projectKey, {
-          kind: "edit", objective: input.objective.trim(), expectedObjective: input.expectedObjective,
+          kind: "edit", objective: edit.replacement ?? input.objective.trim(), expectedObjective: input.expectedObjective,
         }, { goalId: input.goalId, request: ownerReviewRequest });
       }
       if (name === "goal_configure_iteration") {

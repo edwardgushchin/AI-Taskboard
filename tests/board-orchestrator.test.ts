@@ -61,7 +61,7 @@ const main = ts.createSourceFile("main.ts", source("main.ts"), ts.ScriptTarget.L
 const dispatcherSource = stripTypeScriptTypes(main.statements.map(node => node.getText(main)).filter(text =>
   text.startsWith("const autoBoards =") || text.startsWith("function scheduleAutoBoard(")).join("\n"));
 const handlerSource = stripTypeScriptTypes(main.statements.map(node => node.getText(main)).filter(text =>
-  /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|isOwnerGoalEdit|goalIterationAuthority|changeBoardGoal|resumeBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|canScheduleAutoReview|autoReviewTab|availableReviewSlots|reviewAttempt|readyReviews|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|returnTaskToDraft|scheduleMaintenance|scheduleRecurringTasks|taskRunLimit|readQueuedMessage|queuedFiles|listQueuedMessages)\(|const (?:imageExtensions|imageTypes|boardRequests|boardGoalClears|boardGoalResumes|boardWorkRequests|backgroundManagerRequests|goalReadTool|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork|maintenanceWork|returningDrafts|reviewOperations|managerReviewOperations|taskOperations|steeringOperations) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
+  /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|parseOwnerGoalEdit|goalIterationAuthority|changeBoardGoal|resumeBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|canScheduleAutoReview|autoReviewTab|availableReviewSlots|reviewAttempt|readyReviews|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|returnTaskToDraft|scheduleMaintenance|scheduleRecurringTasks|taskRunLimit|readQueuedMessage|queuedFiles|listQueuedMessages)\(|const (?:imageExtensions|imageTypes|boardRequests|boardGoalClears|boardGoalResumes|boardWorkRequests|backgroundManagerRequests|goalReadTool|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork|maintenanceWork|returningDrafts|reviewOperations|managerReviewOperations|taskOperations|steeringOperations) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
 const cliFailure = (code: string, message: string) => ({ ok: false, error: { code, message } });
 
@@ -3604,7 +3604,7 @@ test("dialogue edits the selected paused goal and rejects missing, stale and una
   await f.cli(["init"]);
   const original = "Проверить сборку Windows.";
   const added = original + "\nПроверить сборку Linux.";
-  const replacement = "Сверить журнал сборки.";
+  const replacement = "Перепиши текст справки.";
   const goalId = randomUUID();
   const save = (objective: string, id = goalId) => writeJson(f.binding, {
     provider: "codex", id: f.threadId, goalId: id, history: "local", goal: { objective, status: "paused" },
@@ -3623,6 +3623,8 @@ test("dialogue edits the selected paused goal and rejects missing, stale and una
   save(original);
   sendGoalMessage(f.project, goalId, "Сохрани отчёт по сборке.");
   for (const request of [
+    "Замени текст цели на: «что-нибудь»",
+    "Замени текст цели на:\n\nQuote 1:\n```\nПерепиши текст справки.\n```",
     "Уточни цель: сделай формулировку более понятной, пожалуйста",
     "Уточни цель в части Linux: сделай текст читабельным",
     "Уточни цель: перепиши её более простыми словами",
@@ -3664,10 +3666,14 @@ test("dialogue edits the selected paused goal and rejects missing, stale and una
   const replace = "Замени текст цели на: " + replacement;
   assert.equal((await edit(replace, replacement, original)).error.code, "GOAL_CHANGED");
   assert.equal((await edit(replace, replacement, refined, randomUUID())).error.code, "GOAL_CHANGED");
-  assert.equal((await edit(replace, replacement, refined)).data.objective, replacement);
-  const finalObjective = replacement + "\nПроверить журнал ошибок.";
+  assert.deepEqual((await edit(replace, replacement, refined)).data, { objective: replacement, status: "paused" });
+  const multiline = replacement + "\n\nПроверь ссылки и примеры, пожалуйста.";
+  const replaceEnglish = "Replace the goal with:\n" + multiline + "\n\nQuote 1:\n```\nКонтекст обсуждения.\n```";
+  const result = await edit(replaceEnglish, "Обновить справку.", replacement);
+  assert.deepEqual(result.data, { objective: multiline, status: "paused" });
+  const finalObjective = multiline + "\nПроверить журнал ошибок.";
   const explicitEnglish = "Add a check of the error log to the goal, please.";
-  assert.equal((await edit(explicitEnglish, finalObjective, replacement)).data.objective, finalObjective);
+  assert.equal((await edit(explicitEnglish, finalObjective, multiline)).data.objective, finalObjective);
   const explicitWording = "Проверить отчёт и журнал ошибок.";
   const rewrite = "Уточни цель: перепиши её так: " + explicitWording;
   assert.equal((await edit(rewrite, explicitWording, finalObjective)).data.objective, explicitWording);
