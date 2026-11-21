@@ -3,7 +3,7 @@
 - Use the language of the source or the user's requested language. Preserve technical names, numbers, decisions, and the difference between confirmed and uncertain information.
 - Give a draft a title that says what changes. Keep the context needed to act. State open questions explicitly and phrase each acceptance criterion as something a reviewer can verify.
 - Write new task descriptions as a short, natural brief. Say what to do, add the context needed to understand why, and include essential conditions where they matter. Use ordinary paragraphs or a list when it helps. Do not use the stock headings Problem, Expected result, or Constraints (including their translated equivalents).
-- Keep acceptance criteria in the separate `criteria` field. If low-level reproduction details or references would interrupt the brief, place them under the optional Markdown heading `### Диагностика и связанные файлы`, which the card can collapse. Preserve facts, uncertainty, links, and existing requirements when updating a card.
+- Keep acceptance criteria in the separate `criteria` field. Include relevant reproduction steps and links in the description where they help the reader act. Preserve facts, uncertainty, links, and existing requirements when updating a card.
 - When creating or refining a checklist (`subtasks`), write one observable result per item. Name the change, artifact, or condition that confirms completion. Split an item if it contains results that can be verified and marked complete independently. Let the task determine the number of items. Preserve existing checklist items and their completion marks unless the user authorizes a change.
 
 For example, split “Add CSV export and document it” into two checklist items:
@@ -20,9 +20,7 @@ Title: «Восстановить запуск исполнителя после
 ```markdown
 Дать исполнителю продолжить задачу после прерванного запуска, когда сохранённый чат недоступен. Сейчас это заканчивается ошибкой `no rollout found for thread id`. При восстановлении нужно сохранить назначенный worktree и уже сделанные изменения.
 
-### Диагностика и связанные файлы
-Путь запуска и продолжения: `src/desktop/codex-run.ts`.
-Для воспроизведения продолжить задачу, чей сохранённый чат недоступен.
+Для воспроизведения продолжи задачу, чей сохранённый чат недоступен. Запуск и продолжение обрабатывает `src/desktop/codex-run.ts`.
 ```
 
 Separate `criteria` field:

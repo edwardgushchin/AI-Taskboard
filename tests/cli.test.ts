@@ -2016,7 +2016,9 @@ test("watch streams compact cards and sees new messages without a revision chang
     cli(root, ["settings"], { manager: null });
     assert.equal((await frame()).data.settings.manager, null);
     const task = cli(root, ["create"], { title: "Visible to watcher", criteria: ["Git is available."] });
-    assert.equal((await frame()).data.tasks[0].id, task.id);
+    const preview = (await frame()).data.tasks[0];
+    assert.equal(preview.id, task.id);
+    assert.deepEqual(preview.criteria, task.criteria);
     const tag = cli(root, ["tag", "ensure"], { name: "Watched", color: "#F196B2" });
     assert.deepEqual((await frame()).data.tags, [hexTag, tag]);
     const recolored = cli(root, ["tag", "set"], { name: tag.name, color: "#91B6F9" });

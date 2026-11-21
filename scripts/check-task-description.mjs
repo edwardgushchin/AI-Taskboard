@@ -1,124 +1,327 @@
-// Real Chromium check of description rendering; fixtures never reach board storage.
+// Run the real renderer in Windows Electron with a disposable board and delayed task loading.
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { electronCheck, localizationFixture } from "./electron-check.mjs";
 
 const { scratch, artifacts } = electronCheck(import.meta.url, "task-description", 90_000);
-const { app, BrowserWindow, clipboard } = await import("electron");
+const { app, BrowserWindow } = await import("electron");
 app.setPath("userData", join(scratch, "profile"));
 app.disableHardwareAcceleration();
-const read = name => readFileSync(new URL("../src/desktop/" + name, import.meta.url), "utf8");
+
+const root = fileURLToPath(new URL("../", import.meta.url));
+const project = join(scratch, "board");
+mkdirSync(project);
+const read = name => readFileSync(join(root, "src", "desktop", name), "utf8");
 const require = createRequire(import.meta.url);
+
+function cli(args, input) {
+  const flags = input === undefined ? [] : ["--stdin"];
+  const output = execFileSync(process.env.TASKBOARD_CHECK_NODE, [
+    "--disable-warning=ExperimentalWarning", join(root, "src", "cli", "main.ts"),
+    "--project", project, "--json", ...args, ...flags,
+  ], { encoding: "utf8", input: input === undefined ? undefined : JSON.stringify(input), windowsHide: true });
+  return JSON.parse(output);
+}
+
 let window;
-let checks = 0;
+const checks = [];
+const captures = [];
+const headings = ["Описание", "Подзадачи", "Критерии приёмки"];
+const states = ["Выполнено", "Ожидает"];
+const link = "https://example.com/guide?q=full#setup";
+
 app.whenReady().then(async () => {
-  window = new BrowserWindow({ width: 1280, height: 900, show: false,
-    webPreferences: { sandbox: true, contextIsolation: true, backgroundThrottling: false } });
-  window.webContents.on('console-message', event => { if (event.level === 'error') console.error(event.message); });
+  window = new BrowserWindow({
+    width: 1280, height: 800, useContentSize: true, show: false,
+    webPreferences: { sandbox: true, contextIsolation: true, backgroundThrottling: false },
+  });
+  window.webContents.on("console-message", details => {
+    if (details.level === "error") console.error(details.message);
+  });
   const html = read("index.html").replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, "")
     .replace(/<link\b[^>]*>/g, "").replace(/<meta http-equiv="Content-Security-Policy"[^>]*>/, "");
   const fixturePath = join(scratch, "description.html");
   writeFileSync(fixturePath, html);
   await window.loadFile(fixturePath);
-  const font = readFileSync(new URL("../src/desktop/vendor/codicons/codicon.ttf", import.meta.url)).toString("base64");
-  await window.webContents.insertCSS(read("themes.css") + read("vendor/codicons/codicon.css").replace("./codicon.ttf", "data:font/ttf;base64," + font) + read("styles.css"));
+  const font = readFileSync(join(root, "src/desktop/vendor/codicons/codicon.ttf")).toString("base64");
+  const icons = read("vendor/codicons/codicon.css").replace("./codicon.ttf", "data:font/ttf;base64," + font);
+  await window.webContents.insertCSS(read("themes.css") + icons + read("styles.css"));
   const evaluate = async code => {
-    try { return await window.webContents.executeJavaScript(code); }
-    catch (error) { console.error('Failed expression:', code); throw error; }
-  };
-  const check = async (code, label) => { assert.equal(await evaluate(code), true, label); checks++; };
-  await evaluate(`window.taskboard = { subscribe() {}, onChatUpdate() {}, onTheme() {}, bootstrap: () => new Promise(() => {}),
-    openLink: async href => { window.lastLink = href; }, command: () => new Promise(resolve => { window.releaseTask = resolve; }) };
-    ${readFileSync(require.resolve("markdown-it/browser"), "utf8")}
-    ${read("image-preview.js")}
-    ${read("source-files.cjs")}
-    ${read("markdown.js")}
-    ${read("chat.js")}
-    ${localizationFixture()}
-    ${read("renderer.js")}
-    void 0;`);
-  const description = '### Проблема\nДлинная **карточка** со [ссылкой](https://example.com/full?q=value) и `inline code`.\n\n' +
-    'Абзац с полным значением `C:/Projects/a-long-path/report.md`. '.repeat(12) +
-    '\n\n- Первый пункт\n- Второй пункт\n\n### Диагностика и связанные файлы\nСкрытая диагностика.\n\n#### Вложенный раздел\n' +
-    '```text\n  full value\nsecond line\n```\n\n### Следующий раздел\nВидимый конец.\n';
-  await evaluate(`window.fixture = { id: 'T-0073', title: 'Читаемость описания', status: 'ready', priority: 'normal', revision: 1,
-    description: ${JSON.stringify(description)}, tags: [], attachments: [], history: [], questions: [], criteria: ['Обычный критерий'], subtasks: [] };
-    frame = { project: 'description-fixture', russian: true, runningTasks: [], board: { settings: {}, tasks: [fixture], archived: [] } };
-    window.settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    byId('workspace').hidden = false; byId('welcome').hidden = true;
-    byId('lanes').append(card(fixture)); void 0;`);
-  await check(`(() => { const p = document.querySelector('.task-description'); return p.textContent.startsWith('Длинная карточка') && !/[#*\x60]/.test(p.textContent) && p.textContent.includes('Первый пункт') && p.textContent.includes('inline code') && !p.querySelector('*') && getComputedStyle(p).webkitLineClamp === '2' && p.clientHeight <= 37; })()`, "board Markdown and height without old template headings");
-  await check(`cardDescription('<img src=x onerror=alert(1)> [link](javascript:alert(1)) ![alt](https://example.com/x.png)').childElementCount === 0`, "inert unsafe preview");
-  for (const theme of ['light', 'dark']) {
-    await evaluate(`
-      document.documentElement.dataset.palette = '${theme}';
-      settle();
-    `);
-    const backdrop = theme === "dark" ? "rgb(27, 29, 40)" : "rgb(238, 241, 247)";
-    assert.equal(await evaluate("getComputedStyle(document.body).backgroundColor"), backdrop, `${theme} board background`);
-    checks++;
-    await window.webContents.capturePage();
-    writeFileSync(join(artifacts, 'board-' + theme + '.png'), (await window.webContents.capturePage()).toPNG());
-    for (const width of [1280, 600]) {
-      window.setSize(width, 900);
-      await evaluate(`document.querySelector('.task-card').click(); settle()`);
-      await check(`body.querySelector('.task-sheet-description .chat-text p').textContent.startsWith('Длинная карточка') &&
-        ![...body.querySelectorAll('.task-sheet-description .chat-text h3')].some(heading => heading.textContent === 'Проблема') &&
-        !body.querySelector('details').open`, "preview keeps the brief and collapses technical details");
-      await check(`(() => { const p = body.querySelector('.chat-text p'); const s = getComputedStyle(p); return s.fontSize === '15px' && s.lineHeight === '24px' && parseFloat(s.marginBottom) > 0; })()`, "description typography");
-      await check(`(() => { const d = body.querySelector('details'); return d.textContent.includes('Вложенный раздел') && !d.textContent.includes('Видимый конец') && d.nextElementSibling.textContent === 'Следующий раздел'; })()`, "section boundaries");
-      await evaluate(`body.querySelector('summary').focus(); void 0;`);
-      await evaluate(`body.querySelector('summary').scrollIntoView({block:'center'}); settle()`);
-      writeFileSync(join(artifacts, 'collapsed-' + theme + '-' + width + '.png'), (await window.webContents.capturePage()).toPNG());
-      window.webContents.focus();
-      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
-      window.webContents.sendInputEvent({ type: 'char', keyCode: '\r' });
-      window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
-      await evaluate(`settle()`);
-      await check(`body.querySelector('details').open`, "native keyboard expansion");
-      await evaluate(`window.previewHTML = body.querySelector('.task-sheet-description').innerHTML; releaseTask({ok:true,data:fixture}); settle()`);
-      await check(`body.querySelector('.task-sheet-description').innerHTML === previewHTML && body.querySelector('details').open`, "full load preserves rendering and expansion");
-      await check(`getComputedStyle(body.querySelectorAll('.sheet-section')[1].querySelector('p')).fontSize !== '15px'`, "criteria typography unchanged");
-      await evaluate(`body.querySelector('.chat-text a').click(); settle()`);
-      await check(`window.lastLink === 'https://example.com/full?q=value'`, "complete link target");
-      await evaluate(`body.querySelector('.chat-code-copy').click(); settle()`);
-      assert.equal((await clipboard.readText()).replaceAll('\r\n', '\n'), '  full value\nsecond line\n'); checks++;
-      await check(`body.scrollWidth <= body.clientWidth + 1`, "no horizontal sheet overflow");
-      await evaluate(`body.querySelector('summary').scrollIntoView({block:'center'}); settle()`);
-      const point = await evaluate(`(() => { const r = body.querySelector('summary').getBoundingClientRect(); return {x:Math.round(r.x+20),y:Math.round(r.y+r.height/2)}; })()`);
-      window.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...point});
-      window.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,...point});
-      await evaluate(`settle()`);
-      await check(`!body.querySelector('details').open`, "native mouse collapse");
-      await evaluate(`body.querySelector('summary').click(); settle()`);
-      await evaluate(`body.scrollTop = 0; settle()`);
-      await window.webContents.capturePage();
-      writeFileSync(join(artifacts, 'description-' + theme + '-' + width + '.png'), (await window.webContents.capturePage()).toPNG());
-      await evaluate(`byId('close-sheet').click(); settle()`);
+    try {
+      return await window.webContents.executeJavaScript(code);
+    } catch (error) {
+      console.error("Renderer expression failed:", code.slice(-500));
+      throw error;
     }
+  };
+  const check = async (actual, expected, label) => {
+    assert.deepEqual(await evaluate(actual), expected, label);
+    checks.push(label);
+  };
+  const settle = "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))";
+  const description = [
+    "### Проблема",
+    "Проверим **сроки проекта** и " + "[план работ](" + link + ").",
+    "",
+    "### Диагностика и связанные файлы",
+    "Скрытые сведения.",
+    "",
+    "#### Вложенный раздел",
+    "Скрытые вложенные сведения.",
+    "",
+    "### Ограничения",
+    "Сроки указаны в рабочих днях.",
+    "",
+    "### Следующий раздел",
+    "Согласование выполняется по [инструкции](" + link + ").",
+    "",
+    "~~~text",
+    "  full value",
+    "second line",
+    "~~~",
+  ].join("\n");
+  const subtasks = [
+    { title: "Собрать исходные данные", done: true },
+    { title: "Проверить [план](docs/plan.md)", done: false },
+  ];
+  const criteria = ["Изменения согласованы по [справке](docs/help.md)."];
+  cli(["init"], { boardType: "manual" });
+  const fixture = cli(["create"], { title: "Проверка плана проекта", description, subtasks, criteria }).data;
+  const empty = cli(["create"], {
+    title: "Карточка без подзадач", description: "Обычный Markdown с **выделением**.", criteria: ["Текст виден."],
+  }).data;
+  let board = cli(["list", "--compact"]).data;
+  assert.deepEqual(board.tasks.find(task => task.id === fixture.id).criteria, criteria);
+  checks.push("Компактный список CLI содержит критерии");
+
+  window.webContents.setZoomFactor(1);
+  await evaluate([
+    "window.taskboard = {",
+    "  subscribe() {},",
+    "  onChatUpdate() {}, onTheme() {}, bootstrap: () => new Promise(() => {}),",
+    "  openLink: async href => { window.lastLink = href; },",
+    "  async readMarkdown(id, path) {",
+    "    window.markdownReads.push([id, path]);",
+    "    return { ok: true, data: { name: path.split('/').at(-1), path, text: 'Текст документа.' } };",
+    "  },",
+    "  command(action, id, input) {",
+    "    if (action === 'show') return new Promise(resolve => { window.releaseTask = resolve; });",
+    "    if (action === 'update') return new Promise(resolve => { window.pendingEdit = { id, input, resolve }; });",
+    "    throw new Error('Unexpected command: ' + action);",
+    "  }",
+    "};",
+    readFileSync(require.resolve("markdown-it/browser"), "utf8"),
+    read("image-preview.js"),
+    read("source-files.cjs"),
+    read("markdown.js"),
+    read("chat.js"),
+    localizationFixture(),
+    read("renderer.js"),
+    "window.settle = () => " + settle + ";",
+    "window.sectionNames = () => [...body.querySelectorAll(':scope > .sheet-section > h3')].map(el => el.textContent);",
+    "window.subtaskStates = () => {",
+    "  const section = [...body.querySelectorAll('.sheet-section')].find(el => el.firstChild.textContent === 'Подзадачи');",
+    "  return [...section.querySelectorAll('[role=img]')].map(el => el.getAttribute('aria-label'));",
+    "};",
+    "void 0;",
+  ].join("\n"));
+  await evaluate([
+    "frame = { project: " + JSON.stringify(project) + ", russian: true, runningTasks: [], board: " + JSON.stringify(board) + " };",
+    "byId('workspace').hidden = false;",
+    "byId('welcome').hidden = true;",
+    "byId('lanes').append(...frame.board.tasks.map(task => card(task)));",
+    "void 0;",
+  ].join("\n"));
+
+  await check(String.raw`(() => {
+    const plain = cardDescription("### Проблема\nАбзац с **выделением**, " + String.fromCharCode(96) + "код" + String.fromCharCode(96));
+    return plain.textContent === "Абзац с выделением, код" && !plain.childElementCount;
+  })()`, true, "Безопасное Markdown-превью на доске");
+  await check(
+    "cardDescription('<img src=x onerror=alert(1)> [link](javascript:alert(1)) ![alt](https://example.com/x.png)').childElementCount",
+    0, "На доске карточка не получает интерактивные узлы из Markdown",
+  );
+  const open = id => evaluate("void showTask(" + JSON.stringify(id) + "); settle()");
+  const release = task => evaluate("releaseTask(" + JSON.stringify({ ok: true, data: task }) + "); settle()");
+  const checkContent = async label => {
+    await check("sectionNames()", headings, label + " — порядок");
+    await check("subtaskStates()", states, label + " — отметки");
+    await check(String.raw`(() => {
+      const description = body.querySelector('.task-sheet-description .chat-text');
+      return !description.querySelector('details') &&
+        !/Диагностика и связанные файлы|Скрытые|Вложенный раздел|Ограничения/.test(description.textContent) &&
+        description.textContent.includes('Сроки указаны в рабочих днях.') &&
+        description.textContent.includes('Следующий раздел');
+    })()`, true, label + " — границы Markdown");
+  };
+
+  for (const [name, width, height] of [["wide", 1280, 800], ["narrow", 900, 700]]) {
+    window.setContentSize(width, height);
+    if (name === "wide") {
+      await evaluate("[...document.querySelectorAll('.task-card')].find(card => card.textContent.includes(" +
+        JSON.stringify(fixture.title) + ")).focus(); void 0");
+      window.webContents.focus();
+      window.webContents.sendInputEvent({ type: "keyDown", keyCode: "Space" });
+      window.webContents.sendInputEvent({ type: "keyUp", keyCode: "Space" });
+      await evaluate("settle()");
+      await check("sheet.open", true, "Карточка открывается клавишей пробела");
+    } else {
+      await open(fixture.id);
+    }
+    await checkContent(name + " до загрузки");
+    await check("Boolean(body.querySelector('[role=status]'))", true, name + " — загрузка ещё идёт");
+    await evaluate("window.markdownReads = []; void 0;");
+    for (const heading of headings.slice(1)) {
+      await evaluate(`[...body.querySelectorAll('.sheet-section')]
+        .find(section => section.firstChild.textContent === ${JSON.stringify(heading)})
+        .querySelector('a').click(); settle()`);
+      await check("document.querySelector('.markdown-preview[open] .chat-text').textContent.trim()", "Текст документа.",
+        name + " — предпросмотр ссылки из секции «" + heading + "»");
+      await evaluate("document.querySelector('.markdown-preview[open] button').click(); settle()");
+    }
+    await check("markdownReads", [[fixture.id, "docs/plan.md"], [fixture.id, "docs/help.md"]],
+      name + " — обе относительные ссылки используют ID карточки до загрузки");
+    await release(fixture);
+    await checkContent(name + " после загрузки");
+    await check("Boolean(body.querySelector('[role=status]'))", false, name + " — загрузка завершена");
+    await evaluate("body.querySelector('.task-sheet-description a:last-of-type').click(); settle()");
+    await check("lastLink", link, name + " — полный URL в описании");
+    await check("[innerWidth, innerHeight, body.scrollWidth <= body.clientWidth + 1]", [width, height, true],
+      name + " — размер CSS и отсутствие горизонтальной прокрутки");
+    await check(String.raw`(() => {
+      const p = body.querySelector('.task-sheet-description .chat-text p');
+      const style = getComputedStyle(p);
+      return style.fontSize === '15px' && style.lineHeight === '24px';
+    })()`, true, name + " — типографика описания");
+    const filename = "task-sections-" + name + ".png";
+    const image = await window.webContents.capturePage();
+    const png = image.toPNG();
+    assert.ok(png.length > 0 && png.length <= 4 * 1024 * 1024);
+    const size = image.getSize();
+    assert.ok(size.width * size.height <= 16_000_000);
+    writeFileSync(join(artifacts, filename), png);
+    captures.push({ filename, viewport: width + "×" + height, size: size.width + "×" + size.height, sha: sha256(png) });
+    if (name === "wide") await evaluate("byId('close-sheet').click(); settle()");
   }
-  for (const text of ['Обычный текст\n\nДиагностика без заголовка', '```text\n### Диагностика и связанные файлы\n```', '> ### Диагностика и связанные файлы\n> Цитата']) {
-    await evaluate(`body.replaceChildren(); taskDescription(${JSON.stringify(text)}, 'T-0073'); void 0`);
-    await check(`!body.querySelector('details')`, "legacy, code and quoted headings stay visible");
+
+  await check("body.querySelector('.task-sheet-description pre code').textContent",
+    "  full value\nsecond line\n", "Текст блока кода после скрытого раздела");
+
+  const refreshed = cli(["update", fixture.id], {
+    revision: fixture.revision, criteria: ["Уточнённый критерий"], subtasks: subtasks.map(item => ({ ...item, done: !item.done })),
+  }).data;
+  await open(fixture.id);
+  await check("sectionNames()", headings, "Секции сохраняют порядок при ожидании обновления");
+  await release(refreshed);
+  await check("sectionNames()", headings, "Порядок после обновления");
+  await check("subtaskStates()", states.toReversed(), "Новые отметки после обновления");
+  await check("body.textContent.includes('Уточнённый критерий')", true, "Новый критерий после обновления");
+  await evaluate("[...body.querySelectorAll('button')].find(button => button.textContent === 'Редактировать').click(); settle()");
+  await check("body.querySelector('textarea[name=description]').value", description, "Исходный Markdown в форме редактирования");
+  await evaluate("body.querySelector('input[name=title]').value = 'Уточнённый план'; body.querySelector('form').requestSubmit(); settle()");
+  const input = await evaluate("pendingEdit.input");
+  assert.equal(input.description, description);
+  const saved = cli(["update", fixture.id], input).data;
+  const stored = cli(["show", fixture.id, "--compact"]).data;
+  assert.equal(stored.description, description);
+  assert.deepEqual(stored.subtasks, refreshed.subtasks);
+  assert.equal(stored.title, "Уточнённый план");
+  checks.push("Публичный CLI сохранил исходный Markdown и обе отметки после отправки формы");
+  await evaluate("pendingEdit.resolve(" + JSON.stringify({ ok: true, data: saved }) + "); settle()");
+  await release(stored);
+  await check("sectionNames()", headings, "Порядок после сохранения через форму");
+
+  board = cli(["list", "--compact"]).data;
+  await evaluate("frame.board = " + JSON.stringify(board) + "; byId('close-sheet').click(); settle()");
+  await open(empty.id);
+  await check("sectionNames()", ["Описание", "Критерии приёмки"], "Пустые подзадачи до загрузки");
+  await release(empty);
+  await check("sectionNames()", ["Описание", "Критерии приёмки"], "Пустые подзадачи после загрузки");
+  await check("body.querySelector('.task-sheet-description strong').textContent", "выделением", "Обычный Markdown");
+
+  const examples = [
+    ["### Диагностика и связанные файлы\nСкрыто\n\n### Конец\nВидно", false],
+    ["### Диагностика и связанные файлы\nСкрыто\n\n## Конец\nВидно", false],
+    ["Диагностика и связанные файлы\n---\nСкрыто\n\n# Конец\nВидно", false],
+    ["~~~\n### Диагностика и связанные файлы\nВидно\n~~~", true],
+    ["> ### Диагностика и связанные файлы\n> Видно", true],
+    ["Диагностика и связанные файлы без заголовка\n\nВидно", true],
+  ];
+  for (const [text, plain] of examples) {
+    await evaluate("body.replaceChildren(); taskDescription(" + JSON.stringify(text) + ", " + JSON.stringify(fixture.id) + "); void 0");
+    await check("body.textContent.includes('Видно') && !body.textContent.includes('Скрыто') && !body.querySelector('details')", true,
+      (plain ? "Обычное упоминание" : "Граница старого раздела") + " — " + text.split("\n")[0]);
   }
-  for (const heading of ['#', '##', '###']) {
-    await evaluate(`body.replaceChildren(); taskDescription(${JSON.stringify('### Диагностика и связанные файлы\nСкрыто\n\n' + heading + ' Конец\nВидно')}, 'T-0073'); void 0`);
-    await check(`body.querySelector('details') === body.querySelector('.chat-text').firstElementChild && !body.querySelector('details').textContent.includes('Видно')`, "first section and equal/higher boundary");
-  }
-  await evaluate(`body.replaceChildren(); taskDescription(${JSON.stringify('Диагностика и связанные файлы\n---\nСкрыто\n\n## Конец\nВидно')}, 'T-0073'); void 0`);
-  await check(`body.querySelector('details') && !body.querySelector('details').textContent.includes('Видно')`, "setext heading");
-  await check(String.raw`(() => { const b = chatText('Intro\n\n### Technical details\nEvidence', {agent:true}); return b.querySelector('.chat-report-details') !== null; })()`, "existing report folding preserved");
-  await evaluate(`byId('lanes').replaceChildren(card(fixture)); document.querySelector('.task-card').focus(); void 0`);
-  window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
-  window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
-  await evaluate(`settle()`);
-  await check(`sheet.open && body.querySelector('.task-sheet-description') !== null`, "keyboard opens card");
-  const report = { checks, electron: process.versions.electron, node: process.versions.node, platform: process.platform, result: 'passed' };
-  writeFileSync(join(artifacts, 'description-report.json'), JSON.stringify(report, null, 2));
-  console.log(JSON.stringify(report));
-}).catch(async error => {
-  console.error(error); process.exitCode = 1;
-  if (window) writeFileSync(join(artifacts, 'description-failure.png'), (await window.webContents.capturePage()).toPNG());
-}).finally(() => { window?.destroy(); app.exit(process.exitCode ?? 0); });
+  await check(String.raw`(() => {
+    const report = chatText('Введение.\n\n### Технические детали\n\nТекст.', {agent:true});
+    const details = report.querySelector('.chat-report-details');
+    return details?.open === false && details.textContent.includes('Текст.');
+  })()`, true, "Технические детали чата по-прежнему свёрнуты");
+  await check("Boolean(document.querySelector('.task-card'))", true, "На доске остаются карточки");
+
+  const guide = readFileSync(join(root, "docs/reference/board.md"), "utf8");
+  assert.match(guide, /за описанием идут подзадачи, затем критерии приёмки/);
+  assert.match(guide, /Его текст остаётся в исходном Markdown и доступен при редактировании/);
+  assert.doesNotMatch(read("agent-instructions/task-writing.md") + read("board-actions.ts"), /### Диагностика и связанные файлы/);
+  checks.push("Справка описывает проверенное поведение, подсказки не предлагают скрытый раздел");
+
+  const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+  const changed = execFileSync("git", ["diff", "--name-only", "HEAD"], { cwd: root, encoding: "utf8" }).trim().split(/\r?\n/).filter(Boolean);
+  const relevant = [
+    "scripts/check-task-description.mjs", "src/desktop/renderer.js", "src/desktop/markdown.js", "src/desktop/styles.css",
+    "src/cli/main.ts", "src/desktop/agent-instructions/task-writing.md", "src/desktop/board-actions.ts", "docs/reference/board.md",
+  ];
+  const sources = [...new Set([...changed, ...relevant])].sort();
+  const report = [
+    "# Проверка порядка секций карточки",
+    "",
+    "Пройдено проверок — " + checks.length + ". Electron " + process.versions.electron +
+      ", Chromium " + process.versions.chrome + ", Node.js " + process.versions.node + ", " + process.platform + " " + process.arch + ".",
+    "",
+    "Масштаб 100%. Реальные HTML, CSS, Markdown и рендерер открыты в BrowserWindow с sandbox и contextIsolation. " +
+      "Команды выполнялись на временной доске через штатный CLI. Подмена IPC задерживала ответ show до проверки предварительного состояния.",
+    "",
+    "## Наблюдения",
+    "",
+    ...checks.map(label => "- " + label + "."),
+    "",
+    "## Воспроизведение",
+    "",
+    "Из корня репозитория с установленными по lock-файлу зависимостями выполните:",
+    "",
+    "~~~powershell",
+    "node scripts/check-task-description.mjs --artifacts .tasks/qa",
+    "~~~",
+    "",
+    "## Снимки",
+    "",
+    ...captures.map(entry => "- [" + entry.filename + "](" + entry.filename + "), " + entry.viewport + " CSS px, PNG " + entry.size +
+      " px, SHA-256 " + entry.sha + "."),
+    "",
+    "## Проверенный снимок исходников",
+    "",
+    "Git HEAD " + base + ". SHA-256 от фактических байтов файлов в рабочей копии.",
+    "",
+    "~~~text",
+    ...sources.map(path => sha256(readFileSync(join(root, path))) + "  " + path),
+    "~~~",
+    "",
+  ].join("\n");
+  writeFileSync(join(artifacts, "task-sections-check.md"), report);
+  console.log(JSON.stringify({ result: "passed", checks: checks.length, electron: process.versions.electron, captures }));
+}).catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+}).finally(() => {
+  window?.destroy();
+  app.exit(process.exitCode ?? 0);
+});
+
+function sha256(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
