@@ -1993,8 +1993,18 @@ function chatViewport(list) {
     if (!end) {
       const bottom = top + list.clientHeight;
       // Text wraps differently after a resize, so prefer anchors inside open reports.
+      const anchorContainers = [...list.children].filter(child => {
+        // Reading a descendant's bounds would lay out a skipped history run.
+        if (child.style.contentVisibility !== "auto") return true;
+        const bounds = child.getBoundingClientRect();
+        return bounds.bottom > top && bounds.top < bottom;
+      });
       for (const selector of [reportBlocks, rows]) {
-        for (const row of list.querySelectorAll(selector)) {
+        const candidates = anchorContainers.flatMap(child => [
+          ...(child.matches(selector) ? [child] : []),
+          ...child.querySelectorAll(selector),
+        ]);
+        for (const row of candidates) {
           if (!visible(row)) continue;
           const bounds = rowBounds(row);
           if (!bounds.height || bounds.bottom <= top || bounds.top >= bottom) continue;
@@ -3197,6 +3207,9 @@ function draftComposer() {
   const olderNodes = [];
   const olderPages = [];
   const historyMarkup = new WeakMap();
+  const historyRuns = new WeakMap();
+  const historyRunHeights = new WeakMap();
+  let savedLogWidth;
   let recentTurns;
   let recentNodes = [];
   let historyUnmounted = false;
@@ -3234,7 +3247,7 @@ function draftComposer() {
     for (const url of previewUrls.splice(0)) URL.revokeObjectURL(url);
     for (const file of pendingPreviews.keys()) releasePreview(file);
   };
-  function renderHistoryPage(turns) {
+  function renderHistoryPage(turns, reuseHeights = false) {
     const page = document.createDocumentFragment();
     const delivered = new Set();
     const liveIds = new Set(active?.items?.map(item => item.id));
@@ -3254,7 +3267,15 @@ function draftComposer() {
       renderRunActivity(container, turn.items.filter(item => !liveIds.has(item.id)), true, turn.durationMs, undefined,
         { dialogue: true, seenMessages, markdownCache });
       rememberMessages(container);
-      if (!container.hidden) page.append(container);
+      if (!container.hidden) {
+        historyRuns.set(container, turn);
+        const height = reuseHeights ? historyRunHeights.get(turn) : undefined;
+        if (height) {
+          container.style.contentVisibility = "auto";
+          container.style.containIntrinsicBlockSize = "auto " + height + "px";
+        }
+        page.append(container);
+      }
     }
     return { page, delivered };
   }
@@ -3385,6 +3406,7 @@ function draftComposer() {
     return loadingHistory;
   };
   const revealHistory = () => {
+    const remounting = historyUnmounted;
     if (historyUnmounted && historyInvalidated && atEndOfHistory()) {
       historyInvalidated = false;
       historyLoaded = false;
@@ -3393,12 +3415,13 @@ function draftComposer() {
     dialogueViewport.resume(() => {
       if (!historyUnmounted) return;
       historyUnmounted = false;
+      const reuseHeights = log.clientWidth === savedLogWidth;
       // Keep the reading anchor until the saved pages are back in the viewport.
-      const { page } = renderHistoryPage(recentTurns);
+      const { page } = renderHistoryPage(recentTurns, reuseHeights);
       recentNodes = [...page.children];
       greeting.after(page);
       for (const turns of olderPages) {
-        const { page } = renderHistoryPage(turns);
+        const { page } = renderHistoryPage(turns, reuseHeights);
         olderNodes.push(...page.children);
         greeting.after(page);
       }
@@ -3406,7 +3429,7 @@ function draftComposer() {
       updateUnreadMessages();
     });
     lastScrollTop = log.scrollTop;
-    if (historyLoaded) {
+    if (historyLoaded && !remounting) {
       dialogueViewport.restore();
       dialogueViewport.update(updateUnreadMessages);
     }
@@ -3416,6 +3439,7 @@ function draftComposer() {
   };
   const openChat = () => {
     if (editor.hasAttribute("data-open") && (historyLoaded || loadingHistory)) return;
+    editor.toggleAttribute("data-chat-remount", historyUnmounted);
     editor.setAttribute("data-open", "");
     syncPrompt();
     revealHistory();
@@ -3436,6 +3460,13 @@ function draftComposer() {
       node.remove();
     };
     const removed = [...recentNodes, ...olderNodes, ...workTimeline.children];
+    if (!log.hidden) {
+      savedLogWidth = log.clientWidth;
+      for (const node of [...recentNodes, ...olderNodes]) {
+        const turn = historyRuns.get(node);
+        if (turn) historyRunHeights.set(turn, node.getBoundingClientRect().height);
+      }
+    }
     dialogueViewport.suspend(() => {
       unreadDivider.remove();
       for (const node of recentNodes) removeHistory(node);
@@ -3453,6 +3484,7 @@ function draftComposer() {
       if (!binding.node.isConnected && removed.some(node => node.contains(binding.node))) localizedBindings.delete(binding);
     }
     editor.removeAttribute("data-open");
+    editor.removeAttribute("data-chat-remount");
     syncPrompt();
   };
   editor.revealPinned = () => { if (pinned && !loadingHistory && !historyLoaded) revealHistory(); };
