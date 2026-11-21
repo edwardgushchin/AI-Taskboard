@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld("taskboard", {
   boardHistory: (project, cursor, view) => ipcRenderer.invoke("board:history", project, cursor, view),
   readManagerMessages: (project, ids) => ipcRenderer.invoke("board:readManagerMessages", project, ids),
   taskRunHistory: id => ipcRenderer.invoke("board:taskRunHistory", id),
+  stageRunHistory: id => ipcRenderer.invoke("board:stageRunHistory", id),
   reviewerChat: id => ipcRenderer.invoke("board:reviewerChat", id),
   boardQueue: (project, action, id, draft, goal, files) => ipcRenderer.invoke("board:queue", project, action, id, draft, goal, files),
   boardGoal: (kind, objective) => ipcRenderer.invoke("board:goal", kind, objective),

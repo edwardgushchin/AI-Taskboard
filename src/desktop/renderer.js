@@ -5184,7 +5184,10 @@ function expertTeamSection(task) {
       }
       details.append(title);
       const work = element("div", undefined, "expert-stage-work");
-      const log = element("div", undefined, "expert-stage-log");
+      const log = element("div", undefined, "chat-log expert-stage-log");
+      log.tabIndex = 0;
+      log.setAttribute("role", "region");
+      bindLocalized(log, "aria-label", () => t("ui.work_activity_e01957b7"), true);
       work.append(element("h5", () => t("ui.work_activity_e01957b7")), log);
       details.append(work);
       panels.set(key, log);

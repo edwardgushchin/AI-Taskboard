@@ -911,21 +911,23 @@ function stageWork(task, panels) {
     if (!panel.hasChildNodes()) panel.append(element("p", () => t("experts.no_stage_activity"), "muted"));
   }
 
-  return (phase, items) => {
+  function render(phase, items, saved = []) {
     const byAttempt = new Map();
     const unique = new Map();
-    for (const item of items) {
-      if (item.threadId && item.at) unique.set(item.threadId + "\0" + item.id, item);
+    const savedItems = new Set(saved.map(item => item.threadId + "\0" + item.id));
+    for (const item of [...saved, ...items]) {
+      if (!item.stageSessionId && savedItems.has(item.threadId + "\0" + item.id)) continue;
+      const key = item.stageSessionId + "\0" + item.threadId + "\0" + item.id;
+      if (item.threadId && item.at && !unique.has(key)) unique.set(key, item);
     }
     const ordered = [...unique.values()].sort((first, second) => first.at.localeCompare(second.at));
     for (const item of ordered) {
-      if (item.phase === "final_answer" || item.type === "truncated" ||
-          item.title === "ai_taskboard / expert_stage") continue;
+      if (item.type === "truncated") continue;
       let matches = attempts.filter(({ run, agentId, at, until, previousPlan }) => !previousPlan &&
         run.state === "running" && run.phase === phase &&
         (item.stageChild ? agentId === item.threadId && Boolean(item.stageSessionId) : run.threadId === item.threadId) &&
         (item.stageSessionId ? item.stageSessionId === run.sessionId : Boolean(until)) &&
-        item.at > at && (!until || item.at < until));
+        item.at >= at && (!until || item.at < until));
       const collaboration = collaborationItem(item);
       if (collaboration && !item.stageChild) {
         const data = collaborationData(item);
@@ -954,6 +956,34 @@ function stageWork(task, panels) {
       attempt.snapshot = snapshot;
       renderRunActivity(attempt.activity, log, false, undefined, task.id, { taskId: task.id, reviewer: phase === "review" });
     }
+  }
+
+  const project = frame.project;
+  const recent = {};
+  let saved = {};
+  let request;
+  let dirty = false;
+  function refresh() {
+    if (!api.stageRunHistory || request) return;
+    dirty = false;
+    request = api.stageRunHistory(task.id).then(result => {
+      if (!result.ok || project !== frame.project || ![...panels.values()].some(panel => panel.isConnected)) return;
+      saved = result.data;
+      for (const phase of ["work", "review"]) {
+        render(phase, recent[phase] ?? [], saved[phase]);
+      }
+    }).catch(() => {
+      // Keep available entries and the stage result if the journal cannot be read.
+    }).finally(() => {
+      request = undefined;
+      if (dirty && project === frame.project && [...panels.values()].some(panel => panel.isConnected)) refresh();
+    });
+  }
+  return (phase, items) => {
+    recent[phase] = items;
+    render(phase, items, saved[phase]);
+    dirty = true;
+    refresh();
   };
 }
 

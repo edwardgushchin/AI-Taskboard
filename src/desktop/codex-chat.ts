@@ -423,6 +423,7 @@ export async function replyToBoard(
       signal, session, worklog, role: session.role, onTokenUsage: session.onTokenUsage,
       mcp: { config, env: { ...env, ...browser?.env }, browserConfig: browser?.config },
       observeProvider: session.observeProvider,
+      stageReporter: session.stageReporter,
       prepareResearch: async (request, client) => {
         const launchKey = JSON.stringify([profile, client.path, client.args, client.version, client.windowsSandbox, permissionProfile]);
         const availability = await probeManagerCli(project, launchKey, mcpTools, (cwd, command, env) =>
@@ -449,6 +450,7 @@ interface BoardSession {
   title: string;
   onActivity: (items: BoardActivity[]) => void;
   observeProvider?: (message: RpcMessage, threadId: string) => void;
+  stageReporter?: ReturnType<typeof phaseStageReporter>;
   bindProvider?: (request: RpcRequest, threadId: string) => void;
   onControl: (control: AgentControl, model?: string) => void;
   onWaiting: (waiting: boolean) => void;
