@@ -1934,19 +1934,31 @@ const goalReadTool = {
 function isOwnerGoalEdit(request: string) {
   const [firstLine, ...rest] = request.split(/\r?\n/);
   const command = firstLine.trim().replace(/^(?:пожалуйста|please),?\s+/iu, "");
-  if (command.endsWith("?")) return false;
-  if (/^(?:add|append) \S.* to (?:the )?(?:current )?goal[.!]?$/iu.test(command)) return true;
-  const add = /^(?:добавь(?:те)?|впиши(?:те)?) (?:в (?:текущую )?цель|к (?:текущей )?цели)(?=[ :]|$)/iu;
-  const edit = /^(?:замени(?:те)?|измени(?:те)?|уточни(?:те)?|обнови(?:те)?|перепиши(?:те)?) (?:(?:текст|формулировку) (?:текущей )?цели|(?:текущую )?цель)(?=[ :]|$)/iu;
-  const english = /^(?:replace|update|edit|change) (?:the )?(?:current )?goal(?: text)?(?=[ :]|$)/iu;
-  const prefix = add.exec(command) ?? edit.exec(command) ?? english.exec(command);
-  if (!prefix) return false;
-  const suffix = command.slice(prefix[0].length);
-  const detail = suffix.replace(/^(?:\s+|:\s*)/u, "").trim();
-  if (!detail) {
-    return suffix === ":" && /^[^\s>`~]/u.test(rest.join("\n").trim());
+  if (command.endsWith("?")) {
+    return false;
   }
-  return !/^(?:на |to )?(?:как-нибудь|что-нибудь|что-то|пожалуйста|somehow|something)[.!]?$/iu.test(detail);
+
+  const englishAdd = /^(?:add|append)\s+(.+?)\s+to (?:the )?(?:current )?goal[.!]?$/iu.exec(command);
+  const russianAdd = /^(?:добавь(?:те)?|впиши(?:те)?) (?:в (?:текущую )?цель|к (?:текущей )?цели)(?=[ :]|$)/iu;
+  const russianEdit = /^(?:замени(?:те)?|измени(?:те)?|уточни(?:те)?|обнови(?:те)?|перепиши(?:те)?) (?:(?:текст|формулировку) (?:текущей )?цели|(?:текущую )?цель)(?:\s+(?:на|так)(?=[ :]|$)|(?=:))/iu;
+  const englishEdit = /^(?:replace|update|edit|change|clarify) (?:the )?(?:current )?goal(?: text)?(?:\s+(?:to|with|as follows)(?=[ :]|$)|(?=:))/iu;
+  const prefix = russianAdd.exec(command) ?? russianEdit.exec(command) ?? englishEdit.exec(command);
+  if (!englishAdd && !prefix) {
+    return false;
+  }
+
+  const suffix = prefix ? command.slice(prefix[0].length).trim() : "";
+  const detail = englishAdd?.[1] ?? (suffix === ":"
+    ? rest.find(line => line.trim())?.trim() ?? ""
+    : suffix.replace(/^:\s*/u, ""));
+  if (/^[>~\x60]/u.test(detail) || !/[\p{L}\p{N}]/u.test(detail)) {
+    return false;
+  }
+
+  const wording = detail.replace(/^[«“"']+/u, "");
+  const unspecified = /^(?:как-нибудь|что-нибудь|что-то|на своё усмотрение|пожалуйста|somehow|something|anything|whatever|please)(?![\p{L}\p{N}])/iu;
+  const referenceOnly = /^(?:с уч[её]том|по итогам|по результатам|как обсуждали|как договорились|based on|taking into account|as discussed|as agreed)(?![\p{L}\p{N}])/iu;
+  return !unspecified.test(wording) && !referenceOnly.test(wording);
 }
 const goalChatTools = [
   goalReadTool,
