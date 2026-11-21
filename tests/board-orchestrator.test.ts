@@ -888,6 +888,85 @@ test("release dispatch rechecks the queue and milestone under the start lock", {
   assert.deepEqual(attempts.slice(5), [[scheduled.id, "started"], [ordinary.id, "started"]]);
 });
 
+test("the goal dispatcher wakes when release order leaves its ready queue below target", async () => {
+  const project = "release-goal";
+  const goalId = "current-goal";
+  const early = {
+    id: "T-0001",
+    status: "ready",
+    priority: "normal",
+    expertWorkPlanned: true,
+    milestone: { repository: "owner/repo", number: 1, title: "0.1.2-alpha" },
+    unfinishedDependencies: ["T-0002"],
+  };
+  const later = ["T-0002", "T-0003"].map(id => ({
+    id,
+    status: "ready",
+    priority: "normal",
+    expertWorkPlanned: true,
+    milestone: { repository: "owner/repo", number: 2, title: "0.1.3-alpha" },
+  }));
+  const board = {
+    project,
+    settings: { autoMode: true, reviewMode: "human", iterativeGoal: goalId, taskLimits: { executor: 1 } },
+    tasks: [early, ...later],
+  };
+  const watch = {
+    board,
+    tabs: new Set([{ window: { isDestroyed: () => false, webContents: {} } }]),
+    reviewerRuns: new Map(),
+  };
+  const turns: { ready: number; target: number; freeExecutorSlots: number }[] = [];
+  const launches: string[] = [];
+  const errors: string[] = [];
+  let waitFor: string | undefined;
+  const runtime = runInNewContext(dispatcherSource + "\n({ scheduleAutoBoard, autoBoards })", {
+    applicationUpdates: { installing: false }, quotaWait: undefined, closingProjects: new Set(),
+    subscriptions: new Map([[project, watch]]), isManual, taskReviewMode, usesIndependentReviewer,
+    nextReadyTask, pendingReviewApprovals, projectIdentity: (key: string) => key,
+    agentSlots: { entries: () => [], available: () => true, claim: () => undefined },
+    currentActiveGoal: () => goalId, readBoardThread: () => ({ id: goalId }), boardThreadPath: () => project,
+    goalMessages: () => [], goalQueueCondition, readIterativeGoal: () => ({ goalId, questions: [], waitFor }),
+    boardWorkRequests: new Map(), boardRequests: new Map(), backgroundManagerRequests: new Map(),
+    boardGoalResumes: new Set(), boardGoalClears: new Set(), executorBusy: () => false,
+    broadcastBoardChat: (_project: string, _event: string, { error }: { error: string }) => {
+      errors.push(error);
+    },
+    callCli: (_project: string, [command]: string[]) => {
+      if (command === "list") return { ok: true, data: board };
+      assert.equal(command, "milestones");
+      return { ok: true, data: { milestones: [] } };
+    },
+    runBoardRequest: async (...args: unknown[]) => {
+      assert.equal(args[4], "iterate");
+      const prompt = String(args[2]);
+      const { ready, target, freeExecutorSlots } = JSON.parse(prompt.slice(prompt.indexOf("{")));
+      turns.push({ ready, target, freeExecutorSlots });
+      waitFor = (args[12] as { waitFor: string }).waitFor;
+      assert.ok(waitFor);
+      return { ok: true };
+    },
+    launchTask: async (_project: string, id: string) => {
+      launches.push(id);
+      return cliFailure("EXECUTOR_LIMIT", "Slot taken before launch");
+    },
+  });
+  const tick = async () => {
+    runtime.scheduleAutoBoard(watch);
+    while (runtime.autoBoards.get(watch)?.running) await wait(1);
+    assert.deepEqual(errors, []);
+  };
+  await tick();
+  await tick();
+  assert.deepEqual(launches, []);
+  assert.deepEqual(turns, [{ ready: 0, target: 2, freeExecutorSlots: 1 }]);
+
+  early.status = "done";
+  await tick();
+  assert.deepEqual(launches, ["T-0002"]);
+  assert.equal(turns.length, 1);
+});
+
 test("internal queue wakes preserve sequential questions through the manager inbox", async t => {
   const f = fixture(t);
   await f.cli(["init"], { git: false });

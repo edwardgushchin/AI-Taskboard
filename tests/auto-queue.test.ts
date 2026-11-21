@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { nextReadyTask } from "../src/desktop/auto-queue.ts";
 import type { QueueTask } from "../src/desktop/auto-queue.ts";
 import { earliestOpenRelease, releaseWait } from "../src/cli/auto-queue.ts";
+import { goalQueueCondition } from "../src/desktop/iterative-goal.ts";
 
 const task = (id: string, extra: Partial<QueueTask> = {}): QueueTask => ({ id, status: "ready", priority: "normal", ...extra });
 const milestone = (number: number) => ({ repository: "owner/repo", number, title: "Release" });
@@ -113,4 +114,28 @@ test("open release work holds later ordinary starts while independent launch pat
     earlier.schedule = waiting;
     assert.equal(nextReadyTask(tasks, new Map(), () => false, now), later);
   }
+});
+
+test("the goal counts scheduled and unversioned starts using the full board's release order", () => {
+  const now = Date.parse("2026-11-21T00:00:00Z");
+  const early = task("T-0001", {
+    status: "review",
+    milestone: { ...milestone(1), title: "0.1.2-alpha" },
+  });
+  const late = task("T-0002", { milestone: { ...milestone(2), title: "0.1.3-alpha" } });
+  const due = task("T-0003", {
+    milestone: late.milestone,
+    schedule: { everyMinutes: 60, nextAt: new Date(now).toISOString() },
+  });
+  const unversioned = task("T-0004");
+  const planned = [late, due, unversioned];
+  const board = [early, ...planned];
+  const countReady = () => goalQueueCondition(board, planned, new Set(), 2, now).ready;
+  assert.equal(countReady(), 2, "review blocks only the ordinary late release");
+
+  early.status = "ready";
+  early.schedule = { everyMinutes: 60, nextAt: new Date(now + 60_000).toISOString() };
+  assert.equal(countReady(), 3, "a future early release does not hold the ordinary late task");
+  early.schedule = { everyMinutes: 60, nextAt: new Date(now).toISOString(), paused: true };
+  assert.equal(countReady(), 3, "a paused early schedule does not hold the ordinary late task");
 });

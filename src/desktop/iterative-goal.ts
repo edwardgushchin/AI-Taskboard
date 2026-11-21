@@ -23,7 +23,7 @@ export function saveIterativeGoal(project: string, state: IterativeGoalState) {
 
 export function goalQueueCondition(tasks: QueueTask[], planned: QueueTask[], occupied: ReadonlySet<string>,
   limit: number, now: number, controls?: BoardSettings["autoQueue"]) {
-  const ready = launchableTasks(planned, now, controls).filter(task => !occupied.has(task.id));
+  const ready = launchableTasks(planned, now, controls, tasks).filter(task => !occupied.has(task.id));
   const target = 2 * (limit || 1);
   if (controls?.paused || ready.length >= target) return { ready: ready.length, target };
   const available = new Set(ready.map(task => task.id));

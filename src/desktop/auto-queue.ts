@@ -15,18 +15,19 @@ export function compareReadyTasks(a: QueueTask, b: QueueTask, milestoneDates: Re
     compare(date(a.readySince), date(b.readySince)) || a.id.localeCompare(b.id, "en", { numeric: true });
 }
 
-export function launchableTasks<T extends QueueTask>(tasks: T[], now: number, queue?: BoardSettings["autoQueue"]) {
+export function launchableTasks<T extends QueueTask>(tasks: T[], now: number, queue?: BoardSettings["autoQueue"],
+  boardTasks: readonly QueueTask[] = tasks) {
   if (queue?.paused) return [];
-  return tasks.filter(task => task.status === "ready" && !queue?.held.includes(task.id) &&
+  const release = earliestOpenRelease(boardTasks, now);
+  return tasks.filter(task => task.status === "ready" && !queue?.held.includes(task.id) && !releaseWait(task, release) &&
     !task.unfinishedDependencies?.length && (!task.schedule || (!task.schedule.paused && Date.parse(task.schedule.nextAt) <= now)));
 }
 
 export function nextReadyTask<T extends QueueTask>(tasks: T[], milestoneDates: ReadonlyMap<number, string | null>, busy: (id: string) => boolean,
   now = Date.now(), queue?: BoardSettings["autoQueue"], boardTasks: readonly QueueTask[] = tasks) {
   if (queue?.paused) return;
-  const release = earliestOpenRelease(boardTasks, now);
   const positions = new Map(queue?.order.map((id, index) => [id, index]));
-  return launchableTasks(tasks, now, queue).filter(task => !releaseWait(task, release) && !busy(task.id))
+  return launchableTasks(tasks, now, queue, boardTasks).filter(task => !busy(task.id))
     .sort((a, b) => {
       const left = positions.get(a.id) ?? Infinity, right = positions.get(b.id) ?? Infinity;
       return left === right ? compareReadyTasks(a, b, milestoneDates) : left - right;
