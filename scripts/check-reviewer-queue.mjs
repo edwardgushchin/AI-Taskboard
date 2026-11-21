@@ -11,13 +11,16 @@ import { fileURLToPath } from "node:url";
 import { electronCheck } from "./electron-check.mjs";
 
 const checks = ["push-review", "push-accept", "approval", "advanced-target", "human", "note",
-  "busy-approval", "busy-return", "busy-target", "busy-revision", "busy-mode", "busy-reopen", "busy-failure"];
+  "busy-approval", "busy-return", "busy-target", "busy-revision", "busy-mode", "busy-reopen",
+  "busy-failure", "busy-failure-observed", "busy-failure-reopen"];
 const requested = process.argv.find(arg => arg.startsWith("--scenario="))?.slice("--scenario=".length);
 if (requested && !checks.includes(requested)) throw new Error("Unknown review queue scenario: " + requested);
 const { scratch, artifacts } = electronCheck(import.meta.url, "reviewer-queue", 120_000,
   (requested ? [requested] : checks).map(name => [name]));
 const scenario = process.argv.at(-1);
 const busyScenario = scenario.startsWith("busy-");
+const failureScenario = scenario.startsWith("busy-failure");
+const reopensBoard = scenario === "busy-reopen" || scenario === "busy-failure-reopen";
 const decisionCommand = scenario === "busy-return" ? "request-changes" : "review-approve";
 const racedCommand = { "push-review": "review", "push-accept": "accept" }[scenario];
 const require = createRequire(import.meta.url);
@@ -139,7 +142,11 @@ async function run() {
   const entry = join(scratch, "main-under-test.mjs");
   writeFileSync(entry, transformSync(`const reviewWithCodex = globalThis.reviewQueueProvider;
 const callCli = (...args) => globalThis.reviewQueueCli(realCallCli, ...args);
-` + source + "\nglobalThis.openReviewTestWindow = projects => createWindow(projects).window;\n",
+` + source + `
+globalThis.openReviewTestWindow = projects => createWindow(projects).window;
+globalThis.reviewPendingInWatch = (project, id) =>
+  subscriptions.get(project)?.board.tasks.find(task => task.id === id)?.reviewPending;
+`,
     { loader: "ts", format: "esm" }).code);
   const raceReleased = Promise.withResolvers();
   const autoErrors = [];
@@ -151,6 +158,7 @@ const callCli = (...args) => globalThis.reviewQueueCli(realCallCli, ...args);
   const pendingFile = join(project, ".tasks", "review-history.json");
   const pendingDecision = () => existsSync(pendingFile) &&
     new Map(JSON.parse(readFileSync(pendingFile, "utf8"))).get(task.id)?.pendingDecision;
+  const interruptGitOperation = () => writeFileSync(join(project, ".tasks", "pending", task.id + ".json"), "{}");
   globalThis.reviewQueueCli = async (call, board, args, input, options) => {
     if (scenario === "busy-return" && board === project && args[0] === "start" && args[1] === task.id) {
       // Verify the saved return and queue without starting an external executor.
@@ -169,6 +177,10 @@ const callCli = (...args) => globalThis.reviewQueueCli(realCallCli, ...args);
       decisions.push(attempt);
       let result;
       if (busy) {
+        if (scenario === "busy-failure-observed" && decisions.length === 1) {
+          interruptGitOperation();
+          await waitFor(() => globalThis.reviewPendingInWatch(project, task.id), "the open board to see the Git operation");
+        }
         if (scenario === "busy-approval" && decisions.length === 1) {
           const lock = new DatabaseSync(join(project, ".tasks", ".lock.sqlite"));
           lock.exec("BEGIN IMMEDIATE");
@@ -182,7 +194,12 @@ const callCli = (...args) => globalThis.reviewQueueCli(realCallCli, ...args);
           result = { ok: false, error: { code: "BOARD_BUSY", message: "Test board is temporarily busy." } };
         }
       } else {
-        if (scenario === "busy-failure") writeFileSync(join(project, ".tasks", "pending", task.id + ".json"), "{}");
+        if (scenario === "busy-failure") {
+          interruptGitOperation();
+        } else if (failureScenario) {
+          assert.equal(globalThis.reviewPendingInWatch(project, task.id), true);
+          attempt.operationVisible = true;
+        }
         result = await call(board, args, input, options);
       }
       attempt.code = result.ok ? "OK" : result.error.code;
@@ -254,7 +271,7 @@ const callCli = (...args) => globalThis.reviewQueueCli(realCallCli, ...args);
       assert.equal(decisions.length, 1);
       assert.equal(show().history.filter(event => event.action === decisionCommand).length, 0);
       cli(["settings"], { reviewMode: "reviewer" });
-    } else if (scenario === "busy-reopen") {
+    } else if (reopensBoard) {
       globalThis.openReviewTestWindow([]);
       window.close();
       await waitFor(() => window.isDestroyed(), "the original board window to close");
@@ -262,19 +279,33 @@ const callCli = (...args) => globalThis.reviewQueueCli(realCallCli, ...args);
       await delay(1300);
       assert.equal(decisions.length, attemptsWhileClosed);
       assert.ok(pendingDecision());
+      if (failureScenario) {
+        interruptGitOperation();
+        busy = false;
+      }
       checkWindow = globalThis.openReviewTestWindow([project]);
       await waitFor(() => frameReady(checkWindow), "the reopened board");
     }
     busy = false;
-    if (scenario === "busy-failure") {
+    if (failureScenario) {
       const cause = await waitFor(() => decisions.find(attempt => attempt.code && attempt.code !== "BOARD_BUSY"), "the terminal CLI error");
       assert.equal(cause.code, "PENDING_OPERATION");
       await waitFor(() => autoErrors.some(error => error?.includes(cause.message)), "the reported cause");
       await waitFor(() => checkWindow.webContents.executeJavaScript(`document.body.innerText.includes(
         ${JSON.stringify(cause.message)})`), "the cause visible in the renderer");
+      if (scenario !== "busy-failure") assert.equal(cause.operationVisible, true);
+      if (scenario === "busy-failure-reopen") {
+        checkWindow.setContentSize(1280, 800);
+        checkWindow.webContents.setZoomFactor(1);
+        await waitFor(() => checkWindow.webContents.executeJavaScript(
+          "innerWidth === 1280 && innerHeight === 800"), "the failure screenshot viewport");
+        writeFileSync(join(artifacts, "review-busy-failure.png"), (await checkWindow.webContents.capturePage()).toPNG());
+      }
       await delay(1600);
       assert.equal(decisions.at(-1), cause);
-      assert.equal(startedReviews.length, 1);
+      assert.equal(calls.length, 1);
+      assert.equal(autoErrors.length, 1);
+      assert.equal(show().history.filter(event => event.action === decisionCommand).length, 0);
       assert.equal(pendingDecision(), undefined);
     } else {
       const action = decisionCommand;

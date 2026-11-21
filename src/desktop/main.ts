@@ -3809,11 +3809,11 @@ function readyReviews(watch: BoardWatch) {
     if (task.status !== "review") return false;
     const mode = taskReviewMode(task, settings);
     const independent = usesIndependentReviewer(mode);
-    const pending = watch.reviewReports.get(task.id)?.pendingDecision;
-    return (settings.autoMode || independent) && mode !== "human" && !task.reviewPending &&
+    const pending = independent ? watch.reviewReports.get(task.id)?.pendingDecision : undefined;
+    return (settings.autoMode || independent) && mode !== "human" && (!task.reviewPending || pending) &&
       (!task.acceptanceRepair || reviewsAcceptanceRepair(task, settings)) && !watch.reviewerRuns.has(task.id) &&
       task.expertReviewPlanned && (!independent || (!task.reviewApproved && !task.reviewNoted)) &&
-      (independent && pending
+      (pending
         ? pending.retryAfter <= Date.now()
         : watch.reviewAttempts.get(task.id) !== reviewAttempt(task, settings)) &&
       ((independent && task.reviewHasCommit) || !executorBusy(project, task.id));
