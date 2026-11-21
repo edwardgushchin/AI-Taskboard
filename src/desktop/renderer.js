@@ -1102,6 +1102,7 @@ function quotaLabel() {
 }
 
 function card(task) {
+  const needsAnswer = task.status !== "cancelled" && task.awaitingAnswer === true;
   const showCover = archiveView || frame.board.settings?.showCardPreviews !== false;
   const cover = showCover ? selectedCover(task, (task.attachments ?? []).filter(isImageAttachment)) : undefined;
   // Only visible card data belongs in this key: chat/log/revision updates must not rebuild it.
@@ -1112,12 +1113,12 @@ function card(task) {
     frame.quotaTasks?.includes(task.id) ? frame.quotaWait : null, task.status, task.mergeRepair, task.acceptanceRepair, Boolean(task.codexThreadId),
     task.reviewModeOverride?.mode ?? frame.board?.settings.reviewMode, task.reviewApproved,
     task.unfinishedDependencies, task.blocked, task.subtasks?.map(entry => entry.done),
-    task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule, task.awaitingAnswer,
+    task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule, needsAnswer,
     manualColumns().find(c => c.id === task.status)]);
   const previous = boardCards.get(task.id);
   if (previous?.signature === signature) return previous.node;
   const card = previous?.node ?? button("", () => showTask(task.id, card.dataset.awaitingAnswer === "true"));
-  card.dataset.awaitingAnswer = String(task.awaitingAnswer === true);
+  card.dataset.awaitingAnswer = String(needsAnswer);
   const oldDetails = card.querySelector(".task-card-details");
   const oldImage = card.querySelector(".task-card-cover");
   if (oldDetails) cardCovers.unobserve(oldDetails);
@@ -1133,11 +1134,11 @@ function card(task) {
   }
   const subtasks = task.subtasks ?? [];
   const completed = subtasks.filter(entry => entry.done).length;
-  if (hasPriority || subtasks.length || task.awaitingAnswer) {
+  if (hasPriority || subtasks.length || needsAnswer) {
     bindLocalized(card, "aria-description", () => [
       hasPriority ? t("ui.priority_b114c9b5") + " · " + priorityName(task.priority) : "",
       subtasks.length ? t("ui.subtasks_b409bda5") + " " + completed + "/" + subtasks.length : "",
-      task.awaitingAnswer ? t("task_question.open_dialogue") : "",
+      needsAnswer ? t("task_question.open_dialogue") : "",
     ].filter(Boolean).join(". "), true);
   } else {
     card.removeAttribute("aria-description");
@@ -1175,7 +1176,7 @@ function card(task) {
   const meta = element("span", undefined, "task-meta");
   const id = element("span", task.id, "task-id task-stat");
   meta.append(id);
-  if (task.awaitingAnswer) {
+  if (needsAnswer) {
     const question = element("span", undefined, "task-question task-stat");
     question.append(icon("question"), element("span", () => t("task_question.needs_answer")));
     bindLocalized(question, "title", () => t("task_question.open_dialogue"));
@@ -2266,7 +2267,7 @@ function draftComposer() {
   const syncGoal = () => {
     if (!currentGoal) return;
     const settings = frame.board?.settings;
-    const automatic = settings?.autoMode && settings.iterativeGoal === goalScope;
+    const automatic = settings?.autoMode && frame.goalIteration?.enabled && frame.iterativeGoalId === goalScope;
     const waitingForWork = automatic && currentGoal.status === "active" && !goalRunning;
     const waitingToResume = currentGoal.status === "active" && !goalRunning && !waitingForWork;
     bindLocalized(goalStatus, "textContent", () => waitingForWork ? t("autoMode.waitingForWork") : waitingToResume ? t("ui.goal_awaiting_continuation_27d0b1c3") :
@@ -6358,22 +6359,60 @@ byId("status-publish").addEventListener("click", protect(publishToGitHub));
 byId("status-tracking").addEventListener("click", protect(pushTrackedBranch));
 let savingAutoMode = false;
 const autoModeSwitch = byId("auto-mode-switch");
-const iterativeGoalSwitch = byId("iterative-goal-switch");
 const goalHint = byId("iterative-goal-hint");
+const goalRule = byId("iterative-goal-rule");
 
 function renderAutoMode() {
   const settings = frame.board?.settings;
-  const activeGoal = frame.iterativeGoalId;
+  const goal = frame.goalIteration;
   autoModeSwitch.checked = settings?.autoMode === true;
   autoModeSwitch.disabled = savingAutoMode;
-  const enabled = settings?.iterativeGoal === activeGoal && Boolean(activeGoal);
-  iterativeGoalSwitch.checked = enabled;
-  iterativeGoalSwitch.setAttribute("aria-disabled", String(savingAutoMode || !activeGoal));
-  goalHint.hidden = frame.hasCurrentGoal;
-  if (frame.hasCurrentGoal) {
-    iterativeGoalSwitch.removeAttribute("aria-describedby");
+  let rule = "";
+  let hint;
+  const formatTime = value => new Date(value).toLocaleString(localization.locale, {
+    ...(new Date(value).toDateString() === new Date().toDateString() ? {} : { dateStyle: "medium" }),
+    timeStyle: "medium",
+  });
+  if (!goal || goal.status === "complete") {
+    hint = t("autoMode.goalRequired");
   } else {
-    iterativeGoalSwitch.setAttribute("aria-describedby", goalHint.id);
+    rule = t(goal.enabled ? "autoMode.enabled" : "autoMode.disabled");
+    if (goal.intervalMs) {
+      const seconds = goal.intervalMs / 1000;
+      const unit = seconds % 3600 === 0 ? "hour" : seconds % 60 === 0 ? "minute" : "second";
+      const divisor = { hour: 3600, minute: 60, second: 1 }[unit];
+      const duration = new Intl.NumberFormat(localization.locale, { style: "unit", unit, unitDisplay: "long" })
+        .format(seconds / divisor);
+      rule += " · " + t("autoMode.interval", { duration });
+    } else if (goal.enabled) {
+      rule += " · " + t("autoMode.queue");
+    }
+    const now = Date.now();
+    if (goal.status === "paused") {
+      hint = t("autoMode.paused");
+    } else if (!goal.enabled) {
+      hint = t(goal.running ? "autoMode.running" : "autoMode.manual");
+    } else if (!settings?.autoMode) {
+      hint = t("autoMode.autoOff");
+    } else if (frame.quotaWait) {
+      hint = t("autoMode.quota");
+    } else if (goal.status !== "active") {
+      hint = t("autoMode.manual");
+    } else if (goal.running) {
+      hint = t("autoMode.running");
+    } else if (goal.retryAt > now) {
+      hint = t("autoMode.retry", { time: formatTime(goal.retryAt) });
+    } else if (goal.nextAt > now) {
+      hint = t("autoMode.next", { time: formatTime(goal.nextAt) });
+    } else {
+      hint = t(goal.intervalMs ? "autoMode.due" : "autoMode.waitingForWork");
+    }
+  }
+  if (goalRule.textContent !== rule) {
+    goalRule.textContent = rule;
+  }
+  if (goalHint.textContent !== hint) {
+    goalHint.textContent = hint;
   }
 }
 
@@ -6389,12 +6428,6 @@ async function saveAutoMode(input) {
 }
 
 autoModeSwitch.addEventListener("change", protect(() => saveAutoMode({ autoMode: autoModeSwitch.checked })));
-iterativeGoalSwitch.addEventListener("click", event => {
-  if (iterativeGoalSwitch.getAttribute("aria-disabled") === "true") event.preventDefault();
-});
-iterativeGoalSwitch.addEventListener("change", protect(() => saveAutoMode({
-  iterativeGoal: iterativeGoalSwitch.checked ? frame.iterativeGoalId : false,
-})));
 byId("app-settings").setAttribute("aria-haspopup", "menu");
 byId("app-settings").setAttribute("aria-controls", "settings-menu");
 byId("app-settings").setAttribute("aria-expanded", "false");

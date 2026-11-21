@@ -459,6 +459,7 @@ interface BoardSession {
   goal?: string;
   resumeGoal?: boolean;
   iterativeGoal?: boolean;
+  finishGoalTurn?: () => boolean;
   separateTurn?: boolean;
   readOnly?: boolean;
   onGoalSet?: () => void;
@@ -980,7 +981,8 @@ function reply(profile: string, project: string, prompt: string, images: string[
       if (turn) publishControl();
       // Codex can finish a turn and schedule the next one while the goal is still active.
       while (!turn || turn.status === "inProgress" ||
-        (followingGoal && !session?.iterativeGoal && turn.status === "completed" && currentGoal?.status === "active" && !stopping)) {
+        (followingGoal && !session?.iterativeGoal && !session?.finishGoalTurn?.() &&
+          turn.status === "completed" && currentGoal?.status === "active" && !stopping)) {
         const { method, params } = await receive(notify);
         const data = params as TurnNotification | undefined;
         if (data?.threadId !== thread.id) continue;
