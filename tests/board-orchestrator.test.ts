@@ -3510,6 +3510,11 @@ test("dialogue edits the selected paused goal and rejects missing, stale and una
   save(original);
   sendGoalMessage(f.project, goalId, "Сохрани отчёт по сборке.");
   for (const request of [
+    "Уточни цель: сформулируй её чётче, пожалуйста",
+    "Пожалуйста, уточни цель в части Linux: сформулируй её немного чётче, пожалуйста.",
+    "Clarify the goal: make it clearer, please.",
+    "Уточни цель: «сформулируй её чётче, пожалуйста»",
+    "Добавь к цели проверку на Linux, пожалуйста?",
     "Уточни цель: сформулируй её чётче",
     "Уточни цель в части Linux: сформулируй её чётче",
     "Clarify the goal: make it clearer",
@@ -3535,7 +3540,7 @@ test("dialogue edits the selected paused goal and rejects missing, stale and una
   const duplicate = added + "\nПроверить сборку Linux.";
   assert.deepEqual((await edit(add, duplicate, added)).data, { objective: added, status: "paused" });
   assert.equal(f.idleGoalActions.length, 1);
-  const refine = "Уточни цель в части Linux: укажи Ubuntu 24.04";
+  const refine = "Пожалуйста, уточни цель в части Linux: укажи Ubuntu 24.04, пожалуйста.";
   const refined = original + "\nПроверить сборку Linux на Ubuntu 24.04.";
   assert.deepEqual((await edit(refine, refined, added)).data, { objective: refined, status: "paused" });
   assert.deepEqual((await f.history()).data.goal, { objective: refined, status: "paused" });
@@ -3544,7 +3549,7 @@ test("dialogue edits the selected paused goal and rejects missing, stale and una
   assert.equal((await edit(replace, replacement, refined, randomUUID())).error.code, "GOAL_CHANGED");
   assert.equal((await edit(replace, replacement, refined)).data.objective, replacement);
   const finalObjective = replacement + "\nПроверить журнал ошибок.";
-  const explicitEnglish = "Add a check of the error log to the goal.";
+  const explicitEnglish = "Add a check of the error log to the goal, please.";
   assert.equal((await edit(explicitEnglish, finalObjective, replacement)).data.objective, finalObjective);
   assert.deepEqual((await f.history()).data.goal, { objective: finalObjective, status: "paused" });
   assert.equal((readJson(f.binding) as { goalId: string }).goalId, goalId);

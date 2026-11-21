@@ -1932,9 +1932,17 @@ const goalReadTool = {
 };
 
 function isOwnerGoalEdit(request: string) {
+  function withoutCourtesy(text: string) {
+    return text.trim()
+      .replace(/^(?:пожалуйста|please),?\s+/iu, "")
+      .replace(/(?:\s*,\s*|\s+)(?:пожалуйста|please)[.!…]*$/iu, "")
+      .trim();
+  }
+
   const [firstLine, ...rest] = request.split(/\r?\n/);
-  const command = firstLine.trim().replace(/^(?:пожалуйста|please),?\s+/iu, "");
-  if (command.endsWith("?")) {
+  const command = withoutCourtesy(firstLine);
+  const endsWithQuestion = /[?？][.!…»”"']*$/u;
+  if (endsWithQuestion.test(command)) {
     return false;
   }
 
@@ -1955,11 +1963,14 @@ function isOwnerGoalEdit(request: string) {
     return false;
   }
 
-  const wording = detail.replace(/^[«“"']+/u, "");
+  const wording = withoutCourtesy(detail.replace(/^[«“"']+|[»”"']+$/gu, ""));
+  if (!wording || endsWithQuestion.test(wording)) {
+    return false;
+  }
   const unspecified = /^(?:как-нибудь|что-нибудь|что-то|на своё усмотрение|пожалуйста|somehow|something|anything|whatever|please)(?![\p{L}\p{N}])/iu;
   const referenceOnly = /^(?:с уч[её]том|по итогам|по результатам|как обсуждали|как договорились|based on|taking into account|as discussed|as agreed)(?![\p{L}\p{N}])/iu;
-  const russianStyleOnly = /^(?:сформулируй|переформулируй|перепиши|сделай)(?:те)?\s+(?:(?:е[её]|цель|текст|формулировку)\s+)?(?:ч[её]тче|яснее|понятнее|конкретнее|точнее|лучше)[.!»”"']*$/iu;
-  const englishStyleOnly = /^(?:make|rewrite|rephrase)(?:\s+(?:it|the goal|the wording))?\s+(?:clearer|more clearly|more specific|better)[.!»”"']*$/iu;
+  const russianStyleOnly = /^(?:сформулируй|переформулируй|перепиши|сделай)(?:те)?\s+(?:(?:е[её]|цель|текст|формулировку)\s+)?(?:(?:чуть|немного|намного)\s+)?(?:ч[её]тче|яснее|понятнее|конкретнее|точнее|лучше|более\s+(?:ч[её]тко|ясно|понятно|конкретно|точно))[.!…»”"']*$/iu;
+  const englishStyleOnly = /^(?:make|rewrite|rephrase)(?:\s+(?:it|the goal|the wording))?\s+(?:(?:a little|much)\s+)?(?:clearer|more clearly|more specific|better)[.!…»”"']*$/iu;
   return !unspecified.test(wording) && !referenceOnly.test(wording) &&
     !russianStyleOnly.test(wording) && !englishStyleOnly.test(wording);
 }
