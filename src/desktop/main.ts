@@ -1,6 +1,7 @@
 import type { MaintenanceJob } from "../cli/maintenance-state.ts";
 import { isManual, manualContext } from "../cli/manual-board.ts";
 import { russianWriting } from "./russian-writing.ts";
+import { showAbout } from "./about.ts";
 import { captureFileLink, isFileLink, verifyFileLink } from "../cli/attachment-links.ts";
 import type { FileLink } from "../cli/attachment-links.ts";
 import { watchCodexQuotaExceeded } from "./codex-rpc.ts";
@@ -841,11 +842,7 @@ const menuActions: Record<string, (state: ProjectTab) => unknown> = {
   "zoom-out": ({ window }) => { window.webContents.zoomLevel -= 1; },
   "reset-zoom": ({ window }) => { window.webContents.zoomLevel = 0; },
   fullscreen: ({ window }) => window.setFullScreen(!window.isFullScreen()),
-  about: ({ window }) => dialog.showMessageBox(window, {
-    title: "AI Taskboard",
-    message: "AI Taskboard " + app.getVersion(),
-    detail: t("ui.a_local_task_board_for_software_projects_9cc9d29b"),
-  }),
+  about: ({ window }) => showAbout(window),
 };
 
 ipcMain.handle("menu:action", async (event, action: unknown) => {

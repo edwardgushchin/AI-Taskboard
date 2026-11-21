@@ -840,8 +840,17 @@ function taskDescription(text, taskId) {
   if (!text) return;
   const area = element("section", undefined, "sheet-section task-sheet-description");
   const content = chatText(text, { taskId });
+  for (const heading of content.querySelectorAll(":scope > :is(h1, h2, h3, h4, h5, h6)")) {
+    if (heading.parentElement !== content || heading.textContent.trim() !== "Диагностика и связанные файлы") continue;
+    const level = Number(heading.tagName[1]);
+    while (heading.nextElementSibling) {
+      const next = heading.nextElementSibling;
+      if (/^H[1-6]$/.test(next.tagName) && Number(next.tagName[1]) <= level) break;
+      next.remove();
+    }
+    heading.remove();
+  }
   removeLegacyTaskHeadings(content);
-  foldTechnicalDetails(content, /^Диагностика и связанные файлы$/, "task-description-details", false);
   area.append(element("h3", () => t("ui.description_b4571c10")), content);
   body.append(area);
 }
@@ -4404,6 +4413,24 @@ function openTaskSheet(task) {
   if (metadata.length) body.append(element("p", metadata.join(" · "), "muted"));
 }
 
+function stateLabel(done, text, taskId = taskInSheet?.id) {
+  const label = element("div", undefined, "task-state-label");
+  const state = icon(done ? "check" : "circle");
+  state.removeAttribute("aria-hidden");
+  state.setAttribute("role", "img");
+  bindLocalized(state, "aria-label", () => done ? t("ui.completed_a863c619") : t("ui.pending_f3563d6f"), true);
+  label.append(state, chatText(text, { taskId }));
+  return label;
+}
+
+function taskBriefSections(task) {
+  taskDescription(task.description, task.id);
+  const subtasks = task.subtasks?.map(item => stateLabel(item.done, item.title, task.id));
+  section(() => t("ui.subtasks_b409bda5"), subtasks);
+  const criteria = task.criteria?.map(criterion => chatText(criterion, { taskId: task.id }));
+  section(() => t("ui.acceptance_criteria_7e3779c2"), criteria);
+}
+
 async function showTask(id, dialogue = false) {
   const request = ++taskSheetRequest;
   const project = frame.project;
@@ -4414,7 +4441,7 @@ async function showTask(id, dialogue = false) {
       frame.board?.archived?.find(task => task.id === id) ?? { id };
     taskInSheet = undefined;
     openTaskSheet(preview);
-    taskDescription(preview.description, id);
+    taskBriefSections(preview);
     loading = element("p", () => t("ui.loading_task_details_35f0b01e"), "muted");
     loading.setAttribute("role", "status");
     body.append(loading);
@@ -4430,7 +4457,6 @@ async function showTask(id, dialogue = false) {
     return;
   }
   const task = result.data;
-  const descriptionOpen = [...body.querySelectorAll(".task-description-details")].map(details => details.open);
   const scroll = refresh ? body.scrollTop : 0;
   const focusedChat = refresh && document.activeElement.id === "task-chat-input" ? document.activeElement : undefined;
   const openDetails = new Set(refresh ? [...body.querySelectorAll(".task-details[open]")].map(details => details.id) : []);
@@ -4454,23 +4480,9 @@ async function showTask(id, dialogue = false) {
     body.append(button(() => t("ui.github_milestone_11d33bfa") + " · " + title,
       () => api.openLink("https://github.com/" + repository + "/milestone/" + number), "quiet task-milestone-link"));
   }
-  taskDescription(task.description, id);
-  body.querySelectorAll(".task-description-details").forEach((details, index) => {
-    details.open = descriptionOpen[index] ?? false;
-  });
-  section(() => (t("ui.acceptance_criteria_7e3779c2")), task.criteria);
+  taskBriefSections(task);
   const stagePanels = !manualBoard() && !task.expertStage ? expertTeamSection(task) : undefined;
   const renderStageWork = stageWork(task, stagePanels);
-  const stateLabel = (done, text) => {
-    const label = element("div", undefined, "task-state-label");
-    const state = icon(done ? "check" : "circle");
-    state.removeAttribute("aria-hidden");
-    state.setAttribute("role", "img");
-    bindLocalized(state, "aria-label", () => done ? t("ui.completed_a863c619") : t("ui.pending_f3563d6f"), true);
-    label.append(state, chatText(text));
-    return label;
-  };
-  section(() => (t("ui.subtasks_b409bda5")), task.subtasks.map(item => stateLabel(item.done, item.title)));
   if (!manualBoard()) {
     if (task.expertStage) body.append(button(task.expertStage.parentId, () => showTask(task.expertStage.parentId), "quiet"));
   }

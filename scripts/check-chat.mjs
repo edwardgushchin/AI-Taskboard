@@ -1438,23 +1438,6 @@ app.whenReady().then(async () => {
       !raw.querySelector('script') && !first.querySelector('details') && !empty.querySelector('details');
   })()`, "inline code survives; URL and raw HTML restrictions and folding eligibility remain intact");
   await evaluate("foldDialog.close(); foldDialog.remove(); api.openLink = foldOriginalOpenLink");
-  await check(`(() => {
-    // Compose this fix with T-0073's parameterization without importing its other changes.
-    const source = foldTechnicalDetails.toString()
-      .replace('function foldTechnicalDetails(block)', 'function foldTechnicalDetails(block, title = /^(?:Technical details|Технические детали)$/i, className = "chat-report-details", requirePrevious = true)')
-      .replace('!heading.previousElementSibling', '(requirePrevious && !heading.previousElementSibling)')
-      .replace('!/^(?:Technical details|Технические детали)$/i.test', '!title.test')
-      .replace('"chat-report-details");', 'className);');
-    const fold = new Function('element', 'return (' + source + ')')(element);
-    const block = element('div');
-    block.innerHTML = chatMarkdown.render('### [Диагностика и связанные файлы](https://example.com/report?a=1&b=2)\\n\\nТело.\\n\\n### Дальше\\n\\nСледующий раздел.');
-    fold(block, /^Диагностика и связанные файлы$/i, 'task-description-details', false);
-    const details = block.querySelector('details.task-description-details');
-    return !!details && !details.open &&
-      details.querySelector('summary a')?.getAttribute('href') === 'https://example.com/report?a=1&b=2' &&
-      details.querySelector('.chat-report-body').textContent.trim() === 'Тело.' &&
-      details.nextElementSibling.textContent === 'Дальше';
-  })()`, "T-0073 parameterized composition preserves diagnostic heading links and boundaries");
   console.log("Folded heading link, markup, boundaries, mouse, keyboard and safety checks passed");
   await check(`(() => {
     const tick = String.fromCharCode(96);

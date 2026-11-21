@@ -339,12 +339,12 @@ function formatReportReferences(block) {
   }
 }
 
-function foldTechnicalDetails(block, title = /^(?:Technical details|Технические детали)$/i, className = "chat-report-details", requirePrevious = true) {
+function foldTechnicalDetails(block) {
   for (const heading of block.querySelectorAll(":scope > :is(h1, h2, h3, h4, h5, h6)")) {
-    if (heading.parentElement !== block || (requirePrevious && !heading.previousElementSibling) ||
-        !title.test(heading.textContent.trim())) continue;
+    if (heading.parentElement !== block || !heading.previousElementSibling ||
+        !/^(?:Technical details|Технические детали)$/i.test(heading.textContent.trim())) continue;
     const level = Number(heading.tagName[1]);
-    const details = element("details", undefined, className);
+    const details = element("details", undefined, "chat-report-details");
     const content = element("div", undefined, "chat-report-body");
     while (heading.nextElementSibling) {
       const next = heading.nextElementSibling;
