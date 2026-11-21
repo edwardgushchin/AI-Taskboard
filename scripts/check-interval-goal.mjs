@@ -311,18 +311,26 @@ async function startGoal(text) {
 }
 
 function writeReport() {
-  const tracked = execFileSync("git", ["ls-files", "--", "src/", "package.json", "package-lock.json"], {
+  const tracked = execFileSync("git", ["ls-files", "--", "src/cli/", "src/desktop/"], {
     cwd: root, encoding: "utf8",
   }).trim().split(/\r?\n/).filter(path => !/[^\w .\/-]/.test(path));
   const paths = [
     ...tracked.filter(path => path.startsWith("src/cli/")),
     ...tracked.filter(path => path.startsWith("src/desktop/") && /\.(?:[cm]?[jt]s|css|html|json)$/.test(path)),
-    "package.json", "package-lock.json", "scripts/electron-check.mjs", "scripts/check-interval-goal.mjs", "tests/fixtures/planned-draft.ts",
+    "package.json", "package-lock.json", "scripts/electron-check.mjs", "scripts/check-interval-goal.mjs",
+    "scripts/check-iterative-goal.mjs", "tests/fixtures/planned-draft.ts",
   ];
   const revision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
   const tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: root, encoding: "utf8" }).trim();
   const hashes = paths.map(path => {
-    const digest = createHash("sha256").update(readFileSync(join(root, path))).digest("hex");
+    const blob = revision + ":" + path;
+    const storedId = execFileSync("git", ["rev-parse", blob], { cwd: root, encoding: "utf8" }).trim();
+    const checkoutId = execFileSync("git", ["hash-object", "--path=" + path, "--", path], {
+      cwd: root, encoding: "utf8",
+    }).trim();
+    assert.equal(checkoutId, storedId, "Checked source differs from Git after checkout filters: " + path);
+    const bytes = execFileSync("git", ["cat-file", "blob", blob], { cwd: root });
+    const digest = createHash("sha256").update(bytes).digest("hex");
     return `- \`${digest}\` \`${path}\``;
   });
   writeFileSync(join(artifacts, "interval-goal-check.md"), [
@@ -343,7 +351,7 @@ function writeReport() {
     "```",
     "",
     "Коммит тестовой копии: " + revision + ". Git-дерево: " + tree + ".",
-    "SHA-256 байтов checkout до инструментирования:",
+    "SHA-256 сырых Git-блобов. Для каждого файла git hash-object с фильтрами пути подтвердил соответствие checkout блобу:",
     "",
     ...hashes,
     "",
@@ -368,10 +376,14 @@ async function beforeRestart() {
   expectSuccess(await api("boardGoal", "clear"));
   await startGoal("«Включи итеративный режим»");
   expectSuccess(await api("boardGoal", "clear"));
+  const htmlQuote = ["<blockquote>", "Включи итеративный режим", "", "Измени интервал на 25 минут", "</blockquote>"];
+  await startGoal(htmlQuote.join("\n"));
+  assert.equal(existsSync(iterationFile), false);
+  expectSuccess(await api("boardGoal", "clear"));
   await startGoal(objective);
   assert.equal(iteration().enabled, true);
   assert.equal(iteration().intervalMs, 1500000);
-  log("Инструмент отклонил все три действия при неявной формулировке и цитате, а также недействительные числа, чужой ID и изменившийся текст. Точное поручение сохранило режим и 25 минут.");
+  log("Инструмент отклонил все три действия при неявной формулировке, обычной цитате и многострочном HTML-блоке <blockquote>. Отдельно отклонены недействительные числа, чужой ID и изменившийся текст. Точное поручение сохранило режим и 25 минут.");
 
   await showPanel();
   await until(async () => (await content(rule)).includes("25 минут") && (await content(hint)).includes("Авторежим выключен"), "saved rule with Auto mode off");

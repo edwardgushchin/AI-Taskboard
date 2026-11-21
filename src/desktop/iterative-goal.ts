@@ -27,9 +27,65 @@ export function advanceInterval(nextAt: number, intervalMs: number, now: number)
   return nextAt + (1 + Math.floor((now - nextAt) / intervalMs)) * intervalMs;
 }
 
+function hideHtmlQuotes(text: string) {
+  const tokens = /^ {0,3}(`{3,}|~{3,})([^\r\n]*)|<!--[\s\S]*?(?:-->|$)|<(\/?)([a-z][\w:-]*)(?=[\s/>])(?:"[^"]*"|'[^']*'|[^'"<>])*>/gim;
+  let fence: string | undefined;
+  let rawText: string | undefined;
+  let depth = 0;
+  let start = 0;
+  let end = 0;
+  let visible = "";
+  for (const token of text.matchAll(tokens)) {
+    const [, marker, suffix, slash, tag] = token;
+    const name = tag?.toLowerCase();
+    if (rawText) {
+      if (name === rawText && slash) {
+        rawText = undefined;
+      }
+      continue;
+    }
+    if (fence) {
+      if (marker?.startsWith(fence) && !suffix.trim()) {
+        fence = undefined;
+      }
+      continue;
+    }
+    if (marker) {
+      fence = marker;
+      continue;
+    }
+    if (depth > 0 && !slash && name && /^(?:script|style|textarea|title|xmp|iframe|noembed|noframes|plaintext)$/.test(name)) {
+      rawText = name;
+    }
+    if (name !== "blockquote") {
+      continue;
+    }
+    if (!slash) {
+      if (depth === 0) {
+        start = token.index;
+      }
+      depth++;
+      continue;
+    }
+    if (depth === 0) {
+      continue;
+    }
+    depth--;
+    if (depth === 0) {
+      const next = token.index + token[0].length;
+      visible += text.slice(end, start) + text.slice(start, next).replace(/[^\r\n]/g, " ");
+      end = next;
+    }
+  }
+  if (depth > 0) {
+    return visible + text.slice(end, start);
+  }
+  return visible + text.slice(end);
+}
+
 export function ownerIterationDirective(objective: string) {
   // Ignore quoted passages, including quotations that span several lines.
-  const unquoted = objective.replace(/«[^»]*(?:»|$)|“[^”]*(?:”|$)|"[^"]*(?:"|$)|<!--[\s\S]*?(?:-->|$)/g,
+  const unquoted = hideHtmlQuotes(objective).replace(/«[^»]*(?:»|$)|“[^”]*(?:”|$)|"[^"]*(?:"|$)|<!--[\s\S]*?(?:-->|$)/g,
     passage => passage.replace(/[^\r\n]/g, " "));
   let fence: string | undefined;
   let blockQuote = false;
