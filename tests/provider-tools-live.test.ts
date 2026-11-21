@@ -1,4 +1,4 @@
-import { plannedDraft } from "./fixtures/planned-draft.ts";
+import { confirmFixtureDraft, plannedDraft } from "./fixtures/planned-draft.ts";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -64,6 +64,7 @@ test("live provider: request, assignment, real MCP call, process restart and tas
     for (const title of ["First", "Second"]) {
       const task = await command<Task>(["create"], plannedDraft({ title, criteria: ["Verify provider tool access"], workingDirectory: root }));
       ids.push(task.id);
+      confirmFixtureDraft(root, task.id);
       await command(["approve", task.id], { revision: task.revision });
       await command(["start", task.id]);
     }

@@ -1046,7 +1046,7 @@ async function saveTaskTokenUsage(project: string, id: string, role: TaskUsageRo
 }
 
 async function sendChat(project: string, id: string, request: ChatRequest, notify: (update: ChatUpdate) => void,
-  automatic?: NonNullable<Task["draftDiscussion"]>["phase"], chatWindow?: number) {
+  automatic?: NonNullable<Task["draftDiscussion"]>["phase"] | "unreviewed", chatWindow?: number) {
   if (applicationUpdates.installing) {
     return { saved: false, result: cliFailure("UPDATE_IN_PROGRESS", t("updates.preparing")) };
   }
@@ -1092,7 +1092,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       signal.throwIfAborted();
       if (!current.ok) return { saved, result: current };
       const task = current.data;
-      if (task.status !== "draft" || task.draftDiscussion?.phase !== automatic) {
+      if (task.status !== "draft" || task.draftDiscussion?.phase !== (automatic === "unreviewed" ? undefined : automatic)) {
         return { saved, result: cliFailure("CHAT_CHANGED", "The draft discussion changed.") };
       }
       if (automatic === "running") {
@@ -1249,7 +1249,8 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       ...answer,
       text: automatic && !answer.text ? t("draft_discussion.ready") : answer.text,
       actor: "agent", model, effort, replyTo, durationMs: Math.round(performance.now() - replyStarted),
-      ...(automatic ? { draftDiscussion: true, revision: task.revision } : {}),
+      ...(inspectDraft ? { revision: task.revision } : {}),
+      ...(automatic ? { draftDiscussion: true } : {}),
     });
     if (result.ok) discussionStarted = false;
     else discussionFailure = result.error.message;
@@ -1310,14 +1311,14 @@ ipcMain.handle("chat:send", async (event, id: unknown, request: unknown) => {
   }, undefined, event.sender.id);
 });
 
-function runDraftDiscussion(project: string, id: string, phase: NonNullable<Task["draftDiscussion"]>["phase"]) {
+function runDraftDiscussion(project: string, id: string, phase: NonNullable<Task["draftDiscussion"]>["phase"] | "unreviewed") {
   return sendChat(project, id, { model: "", effort: "", text: "", files: [] }, () => {}, phase);
 }
 
-ipcMain.handle("chat:retry-draft-discussion", async (event, id: unknown) => {
+ipcMain.handle("chat:retry-draft-discussion", async (event, id: unknown, unreviewed: unknown) => {
   const project = stateOf(event).board?.project;
   if (!project || typeof id !== "string" || !taskIdPattern.test(id)) return cliFailure("INVALID_INPUT", t("errors.f6cce3ef8b13aaf9"));
-  return (await runDraftDiscussion(project, id, "failed")).result;
+  return (await runDraftDiscussion(project, id, unreviewed === true ? "unreviewed" : "failed")).result;
 });
 
 type ManagerQuestion = { id: string; text: string; options: string[]; approval?: true };

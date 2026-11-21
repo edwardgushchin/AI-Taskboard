@@ -1,4 +1,4 @@
-import { plannedDraft } from "./fixtures/planned-draft.ts";
+import { confirmFixtureDraft, plannedDraft } from "./fixtures/planned-draft.ts";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import childProcess, { spawn, spawnSync } from "node:child_process";
@@ -59,13 +59,20 @@ function fixture(t: TestContext, repository = false): string {
   return root;
 }
 
+function approveFixture(root: string, args: string[], input?: unknown) {
+  confirmFixtureDraft(root, args[1]);
+  return cli(root, args, input);
+}
+
 function commandArgs(root: string, args: string[], input?: unknown): string[] {
   return ["--disable-warning=ExperimentalWarning", entry, "--project", root, "--json", ...args,
     ...(input === undefined ? [] : ["--stdin"])];
 }
 
 function cli(root: string, args: string[], input?: unknown, expectedCode?: string, spoofDesktopEnvironment = false) {
-  if (args[0] === "create" && input && typeof input === "object") input = plannedDraft(input);
+  if (args[0] === "create" && input && typeof input === "object" && !("initialStatus" in input)) {
+    input = plannedDraft(input);
+  }
   const result = spawnSync(process.execPath, commandArgs(root, args, input), {
     env: { ...env, TASKBOARD_DESKTOP_ACCEPTANCE: spoofDesktopEnvironment ? "1" : "" },
     encoding: "utf8", input: input === undefined ? undefined : JSON.stringify(input), windowsHide: true,
@@ -124,6 +131,7 @@ test("approval waits for the last saved clarification to close", t => {
     actor: "agent",
     text: "The clarification is complete.",
     replyTo: finalAnswer.history.length - 1,
+    revision: finalAnswer.revision,
     awaitingAnswer: false,
   });
   assert.equal(closed.awaitingAnswer, false);
@@ -131,7 +139,107 @@ test("approval waits for the last saved clarification to close", t => {
 
   const ordinary = cli(root, ["create"], { title: "A complete draft" });
   assert.equal(ordinary.awaitingAnswer, undefined);
-  assert.equal(cli(root, ["approve", ordinary.id], { revision: ordinary.revision }).status, "ready");
+  const ordinaryApproval = ["approve", ordinary.id];
+  cli(root, ordinaryApproval, { revision: ordinary.revision }, "DRAFT_DISCUSSION_REQUIRED");
+  const startDiscussion = (task: Task) => cli(root, ["draft-discussion", task.id], {
+    revision: task.revision, phase: "running",
+  });
+  const saveConfirmation = (task: Task) => cli(root, ["chat", task.id], {
+    ...discussion, actor: "agent", text: "Ready for approval.",
+    draftDiscussion: true, revision: task.revision, awaitingAnswer: false,
+  });
+  const running = startDiscussion(ordinary);
+  cli(root, ordinaryApproval, { revision: running.revision }, "DRAFT_DISCUSSION_REQUIRED");
+  const failed = cli(root, ["draft-discussion", ordinary.id], {
+    revision: running.revision, phase: "failed", reason: "Fixture provider unavailable",
+  });
+  cli(root, ordinaryApproval, { revision: failed.revision }, "DRAFT_DISCUSSION_REQUIRED");
+  const retry = startDiscussion(failed);
+  const confirmed = saveConfirmation(retry);
+  assert.equal(confirmed.status, "draft");
+  assert.equal(confirmed.awaitingAnswer, false);
+
+  const edited = cli(root, ["update", ordinary.id], {
+    revision: confirmed.revision, description: "A different export format.",
+  });
+  assert.equal(edited.awaitingAnswer, undefined);
+  cli(root, ordinaryApproval, { revision: confirmed.revision }, "REVISION_CONFLICT");
+  cli(root, ordinaryApproval, { revision: edited.revision }, "DRAFT_DISCUSSION_REQUIRED");
+  const rerun = startDiscussion(edited);
+  const latest = cli(root, ["update", ordinary.id], {
+    revision: rerun.revision, description: "A third export format.",
+  });
+  const requeued = saveConfirmation(rerun);
+  assert.equal(requeued.draftDiscussion.phase, "queued");
+  assert.equal(requeued.awaitingAnswer, undefined);
+  assert.equal(requeued.history.length, latest.history.length + 1);
+  const current = saveConfirmation(startDiscussion(requeued));
+  assert.equal(cli(root, ordinaryApproval, { revision: current.revision }).status, "ready");
+
+  const existing = cli(root, ["create"], { title: "Older draft without a review request" });
+  onBoard(locateBoard(root), store => {
+    store.save({ ...store.card(existing.id), draftDiscussion: undefined });
+  });
+  cli(root, ["approve", existing.id], { revision: existing.revision }, "DRAFT_DISCUSSION_REQUIRED");
+  const reviewed = saveConfirmation(startDiscussion(existing));
+  assert.equal(cli(root, ["approve", existing.id], { revision: reviewed.revision }).status, "ready");
+});
+
+test("manual boards move tasks without draft discussion", t => {
+  const root = fixture(t);
+  const board = cli(root, ["init"], { boardType: "manual" });
+  const [first, second] = board.settings.manualColumns;
+  const card = cli(root, ["create"], { actor: "user", title: "Plan the week", initialStatus: first.id });
+  const moved = cli(root, ["manual-move", card.id], { actor: "user", revision: card.revision, to: second.id });
+  assert.equal(moved.status, second.id);
+  assert.equal(moved.draftDiscussion, undefined);
+});
+
+test("legacy draft confirmation survives metadata edits and expires on a brief change", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const legacy = cli(root, ["create"], { title: "Previously reviewed" });
+  confirmFixtureDraft(root, legacy.id);
+  const retagged = cli(root, ["update", legacy.id], { tags: ["Export"], revision: legacy.revision });
+  assert.equal(retagged.awaitingAnswer, false);
+  assert.equal(retagged.draftDiscussion, undefined);
+  const discussion = { model: "fixture", effort: "low" };
+  const message = cli(root, ["chat", legacy.id], { ...discussion, text: "Thanks." });
+  assert.equal(message.awaitingAnswer, false);
+  assert.equal(cli(root, ["approve", legacy.id], { revision: message.revision }).status, "ready");
+
+  const other = cli(root, ["create"], { title: "Previously reviewed, then edited" });
+  confirmFixtureDraft(root, other.id);
+  const updated = cli(root, ["update", other.id], { title: "New brief", revision: other.revision });
+  cli(root, ["approve", other.id], { revision: updated.revision }, "DRAFT_DISCUSSION_REQUIRED");
+
+  const attachmentDraft = cli(root, ["create"], { title: "Previously reviewed without supporting data" });
+  confirmFixtureDraft(root, attachmentDraft.id);
+  const path = join(root, "sample.csv");
+  writeFileSync(path, "id,name\n1,example\n");
+  const attached = cli(root, ["chat", attachmentDraft.id], {
+    ...discussion, text: "Use this sample.", attachmentSources: [{ path }],
+  });
+  assert.equal(attached.awaitingAnswer, undefined);
+  cli(root, ["approve", attachmentDraft.id], { revision: attached.revision }, "DRAFT_DISCUSSION_REQUIRED");
+});
+
+test("a late ordinary chat reply cannot confirm an edited draft", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const draft = cli(root, ["create"], { title: "Export data" });
+  const settings = { model: "fixture", effort: "low" };
+  const user = cli(root, ["chat", draft.id], { ...settings, text: "Use CSV." });
+  const edited = cli(root, ["update", draft.id], { description: "Export only active rows.", revision: user.revision });
+  cli(root, ["chat", draft.id], {
+    ...settings,
+    text: "Ready for approval.",
+    actor: "agent",
+    replyTo: user.history.length - 1,
+    revision: user.revision,
+    awaitingAnswer: false,
+  }, "REVISION_CONFLICT");
+  cli(root, ["approve", draft.id], { revision: edited.revision }, "DRAFT_DISCUSSION_REQUIRED");
 });
 
 test("repository Git menu lists commit metadata and changes only the main worktree", t => {
@@ -164,7 +272,7 @@ test("repository Git menu lists commit metadata and changes only the main worktr
   cli(root, ["git", "switch"], { ...current(), ref: "refs/heads/main" });
 
   const task = cli(root, ["create"], { title: "Active task", criteria: ["Checked"] });
-  cli(root, ["approve", task.id]);
+  approveFixture(root, ["approve", task.id]);
   const { worktree } = cli(root, ["start", task.id]);
   cli(worktree, ["git", "switch"], { ...current(), ref: "refs/heads/feature" });
   assert.equal(git(root, "branch", "--show-current"), "feature");
@@ -212,7 +320,7 @@ test("review diff by line reads the hunk containing that line in the newer commi
   const targetHead = git(root, "rev-parse", "HEAD");
   cli(root, ["init"]);
   const task = cli(root, ["create"], { title: "Edit separated lines", criteria: ["Both changes are recorded"] });
-  cli(root, ["approve", task.id]);
+  approveFixture(root, ["approve", task.id]);
   const { worktree } = cli(root, ["start", task.id]);
   lines.splice(2, 1, "first change");
   lines.splice(29, 1, "second change");
@@ -853,7 +961,7 @@ test("dependencies prevent worktree creation until every dependency is completed
   });
   cli(root, ["update", first.id], { dependencies: [task.id] }, "DEPENDENCY_CYCLE");
   cli(root, ["update", task.id], { dependencies: ["T-9999"] }, "TASK_NOT_FOUND");
-  cli(root, ["approve", task.id]);
+  approveFixture(root, ["approve", task.id]);
   const manual = cli(root, ["block", task.id], {
     allowUnstarted: true, actor: "manager", reason: "Waiting for acceptance", condition: "Accept the prerequisites",
   });
@@ -871,7 +979,7 @@ test("dependencies prevent worktree creation until every dependency is completed
   assert.ok(!existsSync(join(root, ".worktrees", task.id)));
 
   function complete(dependency: string, file: string) {
-    cli(root, ["approve", dependency]);
+    approveFixture(root, ["approve", dependency]);
     const { worktree } = cli(root, ["start", dependency]);
     writeFileSync(join(worktree, file), "dependency\n");
     const preview = cli(root, ["preview", dependency]);
@@ -900,7 +1008,7 @@ test("cancelled dependencies keep an existing-directory task ready and unavailab
   const task = cli(root, ["create"], {
     title: "Waiting task", criteria: ["Verified"], workingDirectory: root, dependencies: [dependency.id],
   });
-  const ready = cli(root, ["approve", task.id]);
+  const ready = approveFixture(root, ["approve", task.id]);
   for (const archived of [false, true]) {
     if (archived) {
       cli(root, ["settings"], { archiveAfterDays: 0 });
@@ -926,7 +1034,7 @@ test("manual start respects the next scheduled time for both worktrees and exist
       title: "Scheduled task", criteria: ["Verified"], schedule: { everyMinutes: 60 },
       ...(existingDirectory ? { workingDirectory: root } : {}),
     });
-    const ready = cli(root, ["approve", task.id]);
+    const ready = approveFixture(root, ["approve", task.id]);
     cli(root, ["start", task.id], { revision: ready.revision }, "INVALID_TRANSITION");
     assert.equal(cli(root, ["show", task.id]).status, "ready");
     assert.ok(!existsSync(join(root, ".worktrees", task.id)));
@@ -950,7 +1058,7 @@ test("automatic settings and task deadlines survive CLI restarts and guard start
   cli(root, ["update", task.id], { dueDate: null });
   assert.equal(cli(root, ["show", task.id]).dueDate, undefined);
   cli(root, ["update", task.id], { dueDate: "2028-02-29" });
-  const ready = cli(root, ["approve", task.id]);
+  const ready = approveFixture(root, ["approve", task.id]);
   cli(root, ["start", task.id], { revision: ready.revision, autoMode: true }, "AUTO_MODE_DISABLED");
   cli(root, ["settings"], { autoMode: true, reviewMode: "human" });
   assert.equal(cli(root, ["settings"]).autoMode, true);
@@ -986,7 +1094,7 @@ test("automatic integration reports conflicts once and repaired submissions requ
     assert.equal(notices.length, 1); assert.match(notices[0].text, /MERGE_CONFLICT/);
     assert.equal(cli(root, ["show", task.id]).status, "review");
     const dependent = cli(root, ["create"], { title: "After integration", criteria: ["Verified"], dependencies: [task.id] });
-    cli(root, ["approve", dependent.id]);
+    approveFixture(root, ["approve", dependent.id]);
     cli(root, ["start", dependent.id], undefined, "DEPENDENCIES_INCOMPLETE");
     const reopened = cli(root, ["start", task.id], { revision: task.revision, resolveConflicts: true });
     assert.equal(reopened.worktree, worktree);
@@ -1176,7 +1284,7 @@ test("normal commands enforce task state, criteria, and revisions", t => {
   cli(root, ["approve", task.id], { revision: task.revision }, "EXPERT_PLAN_REQUIRED");
   task = cli(root, ["update", task.id], { criteria: ["A CSV file can be downloaded."], revision: task.revision });
   cli(root, ["approve", task.id], { revision: 1 }, "REVISION_CONFLICT");
-  task = cli(root, ["approve", task.id], { revision: task.revision });
+  task = approveFixture(root, ["approve", task.id], { revision: task.revision });
   assert.equal(task.status, "ready");
   cli(root, ["return-to-draft", task.id], { revision: task.revision - 1 }, "REVISION_CONFLICT");
   task = cli(root, ["return-to-draft", task.id], { revision: task.revision });
@@ -1184,7 +1292,7 @@ test("normal commands enforce task state, criteria, and revisions", t => {
   assert.equal(task.history.at(-1).from, "ready");
   assert.deepEqual(cli(root, ["return-to-draft", task.id], { revision: task.revision }), task);
   cli(root, ["approve", task.id], { actor: "manager", revision: task.revision }, "USER_APPROVAL_REQUIRED");
-  task = cli(root, ["approve", task.id], { revision: task.revision });
+  task = approveFixture(root, ["approve", task.id], { revision: task.revision });
   cli(root, ["update", task.id], { criteria: ["Download XLSX."] }, "USER_REQUIREMENTS_REQUIRED");
   task = cli(root, ["update", task.id], { criteria: ["Download XLSX."], actor: "user", note: "Use XLSX" });
   assert.equal(task.status, "ready");
@@ -1209,7 +1317,7 @@ test("return to draft preserves the card and invalidates queued and late lifecyc
     return draft;
   };
   const create = () => cli(root, ["create"], { title: "Fixture", description: "Keep this brief", criteria: ["Confirmed"], workingDirectory: root });
-  const approve = (task: Task) => cli(root, ["approve", task.id], { revision: task.revision });
+  const approve = (task: Task) => approveFixture(root, ["approve", task.id], { revision: task.revision });
   const start = (task: Task) => cli(root, ["start", task.id], { revision: task.revision }).task;
   const submit = (task: Task) => {
     const { token } = cli(root, ["preview", task.id]);
@@ -1330,9 +1438,11 @@ test("task chat records a clarification once, with its sources and lifecycle int
   const first = await edit("task_update", update);
   assert.ok(first.ok && (first.data as { changed: boolean }).changed);
   const edited = show();
-  assert.deepEqual({ ...edited, description: sent.description, history: sent.history,
+  const { draftDiscussion, ...editedBrief } = edited;
+  assert.deepEqual({ ...editedBrief, description: sent.description, history: sent.history,
     revision: sent.revision, updatedAt: sent.updatedAt }, sent);
   assert.equal(edited.description, description);
+  assert.equal(draftDiscussion?.phase, "queued");
   assert.deepEqual(edited.history.slice(0, -1), sent.history);
   assert.equal(edited.history.at(-1)?.text, clarification);
   assert.equal(edited.attachments.length, 1);
@@ -1363,7 +1473,7 @@ test("task chat records a clarification once, with its sources and lifecycle int
   assert.equal(show().history.some(event => event.action === "start"), false);
   assert.deepEqual(cli(root, ["show", other.id]), other);
 
-  cli(root, ["approve", draft.id]);
+  approveFixture(root, ["approve", draft.id]);
   cli(root, ["start", draft.id]);
   const token = cli(root, ["preview", draft.id]).token;
   cli(root, ["submit", draft.id], { token, noChanges: true, summary: "Layout checked", checks: ["Checked"] });
@@ -1558,8 +1668,8 @@ for (const legacyRoot of [".taskboard-worktrees", ".tasks/worktrees"]) test("wor
   cli(root, ["init"]);
   const legacy = cli(root, ["create"], { title: "Already started", criteria: ["Keep local files."] });
   const next = cli(root, ["create"], { title: "Start in Elevated", criteria: ["Create a worktree."] });
-  cli(root, ["approve", legacy.id]);
-  cli(root, ["approve", next.id]);
+  approveFixture(root, ["approve", legacy.id]);
+  approveFixture(root, ["approve", next.id]);
   const initial = cli(root, ["start", legacy.id]).worktree;
   const old = join(root, legacyRoot, legacy.id);
   mkdirSync(dirname(old), { recursive: true });
@@ -1598,7 +1708,7 @@ test("migration waits for a live provider and retries after it releases the work
   const root = fixture(t, true);
   cli(root, ["init"]);
   const card = cli(root, ["create"], { title: "Protect a live provider", criteria: ["Keep its working directory."] });
-  cli(root, ["approve", card.id]);
+  approveFixture(root, ["approve", card.id]);
   const started = cli(root, ["start", card.id]);
   const legacy = join(root, ".taskboard-worktrees", card.id);
   mkdirSync(dirname(legacy));
@@ -1616,7 +1726,7 @@ test("linked worktrees share the board and cleanup preserves local files and the
   const root = fixture(t, true);
   cli(root, ["init"]);
   const task = cli(root, ["create"], { title: "Change source", criteria: ["Source changes."] });
-  cli(root, ["approve", task.id]);
+  approveFixture(root, ["approve", task.id]);
   const started = cli(root, ["start", task.id]);
   const initialStart = cli(root, ["metrics", task.id]).starts[0];
   assert.deepEqual(initialStart, { at: started.task.history.at(-1).at, ...started.task.history.at(-1).startTiming });
@@ -1676,7 +1786,7 @@ test("starting on a branch without commits creates an empty base and preserves t
   git(root, "add", "staged.txt");
   const before = git(root, "status", "--porcelain");
   const draft = cli(root, ["create"], { title: "Start task", criteria: ["Task has its own worktree."] });
-  const ready = cli(root, ["approve", draft.id]);
+  const ready = approveFixture(root, ["approve", draft.id]);
   cli(root, ["start", ready.id], { target: "missing" }, "TARGET_HAS_NO_COMMIT");
   assert.equal(git(root, "for-each-ref"), "");
 
@@ -1698,7 +1808,7 @@ test("failed start without a branch or worktree keeps the ready task editable", 
   git(root, "branch", "ai-taskboard");
   cli(root, ["init"]);
   const draft = cli(root, ["create"], { title: "Start task", criteria: ["Task has its own worktree."] });
-  const ready = cli(root, ["approve", draft.id]);
+  const ready = approveFixture(root, ["approve", draft.id]);
   cli(root, ["start", ready.id], undefined, "GIT_FAILED");
   assert.equal(cli(root, ["show", ready.id]).status, "ready");
   assert.equal(git(root, "branch", "--list", "ai-taskboard/" + ready.id), "");
@@ -1712,7 +1822,7 @@ for (const restoring of [false, true]) test(
   const root = fixture(t, true);
   const restored = restoring ? returnedWorktree(root) : undefined;
   if (!restored) cli(root, ["init"]);
-  const ready = (title: string) => cli(root, ["approve", cli(root, ["create"], {
+  const ready = (title: string) => approveFixture(root, ["approve", cli(root, ["create"], {
     title, criteria: ["The worktree was created."],
   }).id]);
   const task = restored?.ready ?? ready("Slow checkout");
@@ -1778,7 +1888,7 @@ test("new worktrees use the Windows checkout default and honor an explicit Git s
   for (const configured of [false, true]) {
     if (configured) git(root, "config", "--local", "checkout.workers", "1");
     const draft = cli(root, ["create"], { title: "Verify checkout options", criteria: ["Worktree ready"] });
-    const ready = cli(root, ["approve", draft.id]);
+    const ready = approveFixture(root, ["approve", draft.id]);
     const trace = join(root, ".tasks", ready.id + "-checkout.jsonl");
     const started = spawnSync(process.execPath, commandArgs(root, ["start", ready.id]), {
       env: { ...env, GIT_TRACE2_EVENT: trace }, encoding: "utf8", windowsHide: true,
@@ -1829,7 +1939,7 @@ test("schedule pause persists across CLI processes, rejects stale automatic star
   for (const rule of [{ everyMinutes: 60 }, { time: "09:00" }, { time: "09:00", weekday: 1 },
     { time: "09:00", dayOfMonth: 31 }, { time: "09:00", dayOfMonth: 29, month: 2 }]) {
     const created = cli(root, ["create"], { title: "Recurring", criteria: ["Checked"], schedule: rule, workingDirectory: root });
-    let task = cli(root, ["approve", created.id]);
+    let task = approveFixture(root, ["approve", created.id]);
     task.schedule.nextAt = "2000-01-01T00:00:00.000Z";
     const path = join(root, ".tasks", "tasks", task.id + ".json");
     writeFileSync(path, JSON.stringify(task));
@@ -1860,7 +1970,7 @@ test("schedule pause persists across CLI processes, rejects stale automatic star
   const plain = cli(root, ["create"], { title: "Plain" });
   cli(root, ["update", plain.id], { schedulePaused: true }, "INVALID_INPUT");
   const dependent = cli(root, ["create"], { title: "Dependent", criteria: ["Checked"], schedule: { everyMinutes: 60 }, dependencies: [plain.id], workingDirectory: root });
-  cli(root, ["approve", dependent.id]);
+  approveFixture(root, ["approve", dependent.id]);
   const paused = cli(root, ["update", dependent.id], { schedulePaused: true });
   cli(root, ["start", dependent.id], { revision: paused.revision }, "DEPENDENCIES_INCOMPLETE");
   const changed = cli(root, ["update", dependent.id], { schedule: { time: "10:00" } });
@@ -1873,7 +1983,7 @@ test("concurrent scheduler start and pause serialize on the board lock", async t
   cli(root, ["init"]);
   for (const schedule of [{ everyMinutes: 1 }, { time: "09:00" }]) {
     const created = cli(root, ["create"], { title: "Race", criteria: ["Checked"], schedule, workingDirectory: root });
-    const task = cli(root, ["approve", created.id]);
+    const task = approveFixture(root, ["approve", created.id]);
     task.schedule.nextAt = "2000-01-01T00:00:00Z";
     writeFileSync(join(root, ".tasks/tasks", task.id + ".json"), JSON.stringify(task));
     const run = async (args: string[], input: object) => {
@@ -1921,7 +2031,7 @@ test("a recurring card starts only when due and approved and keeps its history f
   const schedule = { time: "09:00", weekday: 1 };
   const task = cli(root, ["create"], { title: "Run the weekly check", criteria: ["Report the check result."], workingDirectory: root, schedule });
   cli(root, ["start", task.id], { revision: task.revision, scheduled: true }, "INVALID_TRANSITION");
-  const ready = cli(root, ["approve", task.id]);
+  const ready = approveFixture(root, ["approve", task.id]);
   cli(root, ["start", task.id], { revision: ready.revision, scheduled: true }, "INVALID_TRANSITION");
   cli(root, ["update", task.id], { schedule: { time: "25:00" } }, "INVALID_INPUT");
   cli(root, ["update", task.id], { schedule: { time: "09:00", weekday: 7 } }, "INVALID_INPUT");
@@ -2023,7 +2133,7 @@ test("watch streams compact cards and sees new messages without a revision chang
     assert.deepEqual((await frame()).data.tags, [hexTag, tag]);
     const recolored = cli(root, ["tag", "set"], { name: tag.name, color: "#91B6F9" });
     assert.deepEqual((await frame()).data.tags, [hexTag, recolored]);
-    const ready = cli(root, ["approve", task.id]);
+    const ready = approveFixture(root, ["approve", task.id]);
     assert.equal((await frame()).data.tasks[0].status, "ready");
     cli(root, ["start", task.id], { revision: ready.revision - 1 }, "REVISION_CONFLICT");
     assert.ok(!existsSync(join(root, ".git")));
@@ -2167,7 +2277,7 @@ test("submission commits the confirmed snapshot and rejects changed or incomplet
   const root = fixture(t, true);
   cli(root, ["init"]);
   const task = cli(root, ["create"], { title: "Update source", criteria: ["Source is updated."] });
-  cli(root, ["approve", task.id]);
+  approveFixture(root, ["approve", task.id]);
   const { worktree, task: started } = cli(root, ["start", task.id, "--compact"]);
   assert.equal(started.status, "in_progress");
   assert.equal(started.git.worktree, worktree);
@@ -2241,7 +2351,7 @@ test("submission preview pages reconstruct a long diff for an existing commit", 
   const root = fixture(t, true);
   cli(root, ["init"]);
   const task = cli(root, ["create"], { title: "Add long report", criteria: ["Report is visible."] });
-  cli(root, ["approve", task.id]);
+  approveFixture(root, ["approve", task.id]);
   const { worktree } = cli(root, ["start", task.id]);
   const path = "long.txt";
   writeFileSync(join(worktree, path), "😀".repeat(9_000) + "\n");
@@ -2294,7 +2404,7 @@ test("maintenance migrates idle legacy worktrees and repeatedly removes only pro
   cli(root, ["init"]);
   git(root, "branch", "side");
   const card = cli(root, ["create"], { title: "Idle migration", criteria: ["Keep the index"] });
-  cli(root, ["approve", card.id]);
+  approveFixture(root, ["approve", card.id]);
   const started = cli(root, ["start", card.id], { target: "side" });
   const integration = join(root, ".tasks", "worktrees", ".accept-" + card.id);
   mkdirSync(dirname(integration), { recursive: true });
@@ -2337,7 +2447,7 @@ test("watch cleans an active cancelled task after its session releases the workt
   cli(root, ["settings"], { autoMode: false });
   const start = (title: string) => {
     const card = cli(root, ["create"], { title });
-    cli(root, ["approve", card.id]);
+    approveFixture(root, ["approve", card.id]);
     return cli(root, ["start", card.id]);
   };
   const { task, worktree } = start("Cancelled while active");
@@ -2393,7 +2503,7 @@ test("watch cleans an active cancelled task after its session releases the workt
 
   const draft = cli(root, ["return-to-draft", task.id], { revision: closed.revision });
   assert.deepEqual(draft.history.slice(0, closed.history.length), closed.history);
-  cli(root, ["approve", draft.id], { revision: draft.revision });
+  approveFixture(root, ["approve", draft.id], { revision: draft.revision });
   const resumed = cli(root, ["start", draft.id]);
   assert.equal(git(resumed.worktree, "rev-parse", "HEAD"), head);
   assert.equal(readFileSync(join(resumed.worktree, "source.txt"), "utf8"), "working change\n");
@@ -2405,7 +2515,7 @@ test("start restores cancelled edits in a retained worktree with ignored files",
   const root = fixture(t, true);
   cli(root, ["init"]);
   const card = cli(root, ["create"], { title: "Resume with local cache" });
-  cli(root, ["approve", card.id]);
+  approveFixture(root, ["approve", card.id]);
   const { task, worktree } = cli(root, ["start", card.id]);
   const head = git(worktree, "rev-parse", "HEAD");
   const registrations = git(root, "worktree", "list", "--porcelain");
@@ -2432,7 +2542,7 @@ test("start restores cancelled edits in a retained worktree with ignored files",
 
   const draft = cli(root, ["return-to-draft", task.id], { revision: closed.revision });
   assert.deepEqual(draft.history.slice(0, closed.history.length), closed.history);
-  const ready = cli(root, ["approve", draft.id], { revision: draft.revision });
+  const ready = approveFixture(root, ["approve", draft.id], { revision: draft.revision });
   writeFileSync(exclude, "local.cache\nuser.txt\n");
   writeFileSync(untracked, "new ignored data\n");
   cli(root, ["start", ready.id], { revision: ready.revision }, "PROTECTED_PATH_COLLISION");
@@ -2461,7 +2571,7 @@ test("cancelled task maintenance preserves staged and untracked edits in the exi
   const root = fixture(t, true);
   cli(root, ["init"]);
   const card = cli(root, ["create"], { title: "Cancelled local edits", criteria: ["Keep edits"] });
-  cli(root, ["approve", card.id]);
+  approveFixture(root, ["approve", card.id]);
   const { worktree } = cli(root, ["start", card.id]);
   writeFileSync(join(worktree, "source.txt"), "staged change\n"); git(worktree, "add", "source.txt");
   writeFileSync(join(worktree, "user.txt"), "untracked user data\n");
@@ -2499,7 +2609,7 @@ test("Windows watch retries cancelled cleanup after a file lock is released", {
   const root = fixture(t, true);
   cli(root, ["init"]);
   const card = cli(root, ["create"], { title: "Cancelled with an open file" });
-  cli(root, ["approve", card.id]);
+  approveFixture(root, ["approve", card.id]);
   const { task, worktree } = cli(root, ["start", card.id]);
   const file = join(worktree, "source.txt");
   const registrations = () => git(root, "worktree", "list", "--porcelain");
@@ -2603,7 +2713,7 @@ test("T-0138 cleanup retains QA and unknown files, queues dependency repair and 
 function submitFixture(root: string, edit: (worktree: string) => void, target?: string) {
   cli(root, ["init"]);
   const task = cli(root, ["create"], { title: "Deliver result", criteria: ["Result is delivered."] });
-  cli(root, ["approve", task.id]);
+  approveFixture(root, ["approve", task.id]);
   const { worktree } = cli(root, ["start", task.id], target ? { target } : undefined);
   edit(worktree);
   const { token } = cli(worktree, ["preview", task.id]);
@@ -2670,7 +2780,7 @@ test("discussion return does not decide the manager's independent review", t => 
       key: "verify", expertId: "qa-engineer", title: "Verify", criteria: ["Checked"], outputs: ["Decision"],
     }] },
   } });
-  cli(root, ["approve", id]);
+  approveFixture(root, ["approve", id]);
   cli(root, ["start", id]);
   const { token } = cli(root, ["preview", id]);
   const submitted = cli(root, ["submit", id], { token, noChanges: true, summary: "Submitted", checks: ["Checked"] });
@@ -2810,7 +2920,7 @@ test("an existing working directory supports start, resume, review and acceptanc
   const executor = { provider: "codex", model: "board-executor", effort: "low" };
   cli(root, ["settings"], { executor });
   const task = cli(root, ["create"], { title: "Check external files", criteria: ["A report was saved."], workingDirectory: cwd });
-  cli(root, ["approve", task.id]);
+  approveFixture(root, ["approve", task.id]);
   const started = cli(root, ["start", task.id, "--compact"], { launchDetails: true });
   assert.equal(started.cwd, cwd);
   assert.equal(started.task.workingDirectory, cwd);
@@ -2846,7 +2956,7 @@ test("completed work outside Git can be submitted and accepted without a commit"
   const head = git(root, "rev-parse", "HEAD");
   cli(root, ["init"]);
   const task = cli(root, ["create"], { title: "Remove local data", criteria: ["The old local file is absent."] });
-  cli(root, ["approve", task.id]);
+  approveFixture(root, ["approve", task.id]);
   const { worktree } = cli(root, ["start", task.id]);
   const local = join(root, "old.local");
   writeFileSync(local, "old data");
@@ -2908,7 +3018,7 @@ test("interrupted start and submit recover the existing worktree and commit", t 
   const root = fixture(t, true);
   cli(root, ["init"]);
   const draft = cli(root, ["create"], { title: "Recover a task", criteria: ["A result is delivered."] });
-  const ready = cli(root, ["approve", draft.id]);
+  const ready = approveFixture(root, ["approve", draft.id]);
   const pending = join(root, ".tasks", "pending", ready.id + ".json");
   let worktree = join(root, ".tasks", "worktrees", ready.id);
   const base = git(root, "rev-parse", "HEAD");
@@ -2956,7 +3066,7 @@ test("interrupted start and submit recover the existing worktree and commit", t 
 function returnedWorktree(root: string) {
   cli(root, ["init"]);
   const card = cli(root, ["create"], { title: "Recover a worktree", criteria: ["Keep the branch tip."] });
-  cli(root, ["approve", card.id]);
+  approveFixture(root, ["approve", card.id]);
   const { task, worktree } = cli(root, ["start", card.id]);
   const codexThreadId = "10000000-0000-0000-0000-000000000001";
   cli(root, ["update", card.id], { codexThreadId });
@@ -2970,7 +3080,7 @@ function returnedWorktree(root: string) {
   assert.doesNotMatch(git(root, "worktree", "list", "--porcelain"), new RegExp(task.git.branch));
   const saved = cli(root, ["show", card.id]).savedChanges.sha;
   const draft = cli(root, ["return-to-draft", card.id], { revision: cancelled.revision });
-  const ready = cli(root, ["approve", card.id], { revision: draft.revision, actor: "user" });
+  const ready = approveFixture(root, ["approve", card.id], { revision: draft.revision, actor: "user" });
   return { ready, worktree, head, branch: task.git.branch, saved, codexThreadId };
 }
 
@@ -3117,7 +3227,7 @@ test("an interrupted worktree recovery trusts only the current restore attempt",
   const closed = cli(root, ["cancel", ready.id], { reason: "Test another checkout" });
   assert.equal(existsSync(worktree), false);
   const draft = cli(root, ["return-to-draft", ready.id], { revision: closed.revision });
-  const again = cli(root, ["approve", draft.id], { revision: draft.revision });
+  const again = approveFixture(root, ["approve", draft.id], { revision: draft.revision });
   const backup = cli(root, ["show", ready.id]).savedChanges;
   assert.equal(backup.sha, saved);
   assert.deepEqual(backup.restored, { destination: "worktree", path: worktree });
@@ -3183,7 +3293,7 @@ test("an executor can resume its own unfinished rebase in the registered worktre
   const root = fixture(t, true);
   cli(root, ["init"]);
   const card = cli(root, ["create"], { title: "Resume a rebase", criteria: ["Resolve the source change."] });
-  cli(root, ["approve", card.id]);
+  approveFixture(root, ["approve", card.id]);
   const { task, worktree } = cli(root, ["start", card.id]);
   git(worktree, "switch", "--detach");
   cli(root, ["start", card.id], { revision: task.revision }, "WORKTREE_COLLISION");
@@ -3365,7 +3475,7 @@ test("accept creates a merge commit and protects the source and ignored files", 
   const reopened = cli(root, ["return-to-draft", task.id], { revision: done.revision });
   assert.equal(reopened.status, "draft");
   assert.equal(reopened.git, undefined);
-  const ready = cli(root, ["approve", task.id], { revision: reopened.revision });
+  const ready = approveFixture(root, ["approve", task.id], { revision: reopened.revision });
   const started = cli(root, ["start", task.id], { revision: ready.revision });
   assert.equal(started.task.status, "in_progress");
   assert.equal(git(started.worktree, "rev-parse", "HEAD"), done.git.accepted);
@@ -3499,7 +3609,7 @@ test("required stage artifacts are pinned to the submitted snapshot and availabl
     review: plannedDraft({}).expertTeam.review,
     work: { lead: "qa-engineer", reason: "Verify the screen and the action from the same version.", stages: [stage] },
   } });
-  cli(root, ["approve", task.id]);
+  approveFixture(root, ["approve", task.id]);
   const { task: active, worktree } = cli(root, ["start", task.id]);
   const args = { revision: active.revision, key: stage.key, phase: "work", actor: "agent" };
   cli(root, ["expert-stage", task.id], { ...args, state: "running" });
@@ -3569,7 +3679,7 @@ test("artifact retention is bounded until cleanup and changed or unknown origina
   const root = fixture(t, true);
   cli(root, ["init"]);
   const draft = cli(root, ["create"], { title: "Preserve reports", criteria: ["Report is saved."] });
-  cli(root, ["approve", draft.id]);
+  approveFixture(root, ["approve", draft.id]);
   const started = cli(root, ["start", draft.id]);
   const { worktree } = started;
   const report = join(worktree, "report.local");
@@ -3993,7 +4103,7 @@ test("submission checks for conflicts against changes accepted after preview", t
   const root = fixture(t, true);
   cli(root, ["init"]);
   const task = cli(root, ["create"], { title: "Edit source", criteria: ["Source is updated."] });
-  cli(root, ["approve", task.id]);
+  approveFixture(root, ["approve", task.id]);
   const { worktree } = cli(root, ["start", task.id]);
   const source = join(worktree, "source.txt");
   writeFileSync(source, "task version\n");
@@ -4292,7 +4402,7 @@ test("card review mode validates owner scope and preserves other cards", async t
   assert.deepEqual(restored.data, { id: card.id, revision: set.data.revision + 1, reviewMode: "human", inherited: true });
   assert.deepEqual(cli(root, ["show", other.id]), other);
 
-  const ready = cli(root, ["approve", card.id]);
+  const ready = approveFixture(root, ["approve", card.id]);
   cli(root, ["start", card.id], { revision: ready.revision });
   const preview = cli(root, ["preview", card.id]);
   const submission = cli(root, ["submit", card.id], { token: preview.token, noChanges: true, summary: "Result", checks: ["Checked"] });
@@ -4313,7 +4423,7 @@ test("reviewer-human requires fresh reviewer approval and desktop acceptance", a
   let settings = cli(root, ["settings"], { reviewMode: "reviewer-human", autoMode: true });
   assert.equal(cli(root, ["settings"]).reviewMode, "reviewer-human");
   const draft = cli(root, ["create"], { title: "External result", criteria: ["Result is checked"] });
-  const task = cli(root, ["start", cli(root, ["approve", draft.id]).id]).task;
+  const task = cli(root, ["start", approveFixture(root, ["approve", draft.id]).id]).task;
   const dependent = cli(root, ["create"], { title: "Dependent work", dependencies: [task.id] });
   const submit = () => cli(root, ["submit", task.id], { token: cli(root, ["preview", task.id]).token,
     noChanges: true, summary: "External result", checks: ["Checked"] });
@@ -4618,7 +4728,7 @@ test("user acceptance repairs remain review and continue only after checked subm
 test("recurring child work deduplicates local and external occurrences and recovers creation", async t => {
   const root = fixture(t); cli(root, ["init"]);
   const p = cli(root, ["create"], { title: "Local and issue checks", criteria: ["Inspect sources"], schedule: { everyMinutes: 5 }, workingDirectory: root });
-  let parent = cli(root, ["approve", p.id], { revision: p.revision });
+  let parent = approveFixture(root, ["approve", p.id], { revision: p.revision });
   const parentPath = join(root, ".tasks", "tasks", p.id + ".json");
   const due = JSON.parse(readFileSync(parentPath, "utf8")); due.schedule.nextAt = "2020-01-01T00:00:00Z";
   writeFileSync(parentPath, JSON.stringify(due));
@@ -4672,7 +4782,7 @@ test("recurring child work deduplicates local and external occurrences and recov
   assert.equal(linkedParent.childWork[0].id, first.id);
   assert.equal(linkedParent.childWork[0].basis, brief.basis);
   const ordinary = cli(root, ["create"], { title: "Ordinary", criteria: ["Done"], workingDirectory: root });
-  const approved = cli(root, ["approve", ordinary.id], { revision: ordinary.revision });
+  const approved = approveFixture(root, ["approve", ordinary.id], { revision: ordinary.revision });
   cli(root, ["start", ordinary.id], { revision: approved.revision });
   cli(root, ["spawn-child", ordinary.id], brief, "INVALID_TRANSITION");
   parent = cli(root, ["show", p.id]);
@@ -4686,7 +4796,7 @@ test("recurring child work deduplicates local and external occurrences and recov
 test("recurring children use independent Git worktrees and ordinary review modes", t => {
   const root = fixture(t, true); cli(root, ["init"]);
   const created = cli(root, ["create"], { title: "Inspect local results", criteria: ["Record pass"], schedule: { everyMinutes: 5 }, workingDirectory: root });
-  const approved = cli(root, ["approve", created.id], { revision: created.revision });
+  const approved = approveFixture(root, ["approve", created.id], { revision: created.revision });
   const parentPath = join(root, ".tasks", "tasks", created.id + ".json");
   const saved = JSON.parse(readFileSync(parentPath, "utf8")); saved.schedule.nextAt = "2020-01-01T00:00:00Z";
   writeFileSync(parentPath, JSON.stringify(saved)); cli(root, ["start", created.id], { revision: approved.revision });
@@ -4714,7 +4824,7 @@ test("canonical journal survives cancellation, worktree cleanup, archival and ph
   const root = fixture(t, true);
   cli(root, ["init"]);
   const card = cli(root, ["create"], { title: "Preserve interrupted journal", criteria: ["History survives"] });
-  cli(root, ["approve", card.id]);
+  approveFixture(root, ["approve", card.id]);
   const { worktree } = cli(root, ["start", card.id]);
   const { boardWorklog } = await import("../src/desktop/board-worklog.ts");
   const log = boardWorklog(worktree, "executor", card.id);

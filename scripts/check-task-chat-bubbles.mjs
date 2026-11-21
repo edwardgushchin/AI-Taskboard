@@ -8,7 +8,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
+import { confirmFixtureDraft, plannedDraft } from "../tests/fixtures/planned-draft.ts";
 import { electronCheck } from "./electron-check.mjs";
 
 const { scratch, artifacts } = electronCheck(import.meta.url, "task-bubbles", 120000, [["--first"], ["--restart"]]);
@@ -112,6 +112,7 @@ void (async () => {
         criteria: ["После отмены карточки рабочая копия удаляется автоматически."],
         execution: settings,
       }));
+      confirmFixtureDraft(project, draft.id);
       activeCard = cli(["approve", draft.id], { revision: draft.revision });
       symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), join(scratch, "node_modules"),
         process.platform === "win32" ? "junction" : "dir");

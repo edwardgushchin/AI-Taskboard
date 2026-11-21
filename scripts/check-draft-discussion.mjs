@@ -14,6 +14,7 @@ import localization from "../src/desktop/localization.cjs";
 const live = process.argv.includes("--live");
 const creationOnly = process.argv.includes("--creation-only");
 const revisionOnly = process.argv.includes("--revision-only");
+const approvalOnly = process.argv.includes("--approval-only");
 const { scratch, artifacts } = electronCheck(import.meta.url, "draft-discussion", 240000,
   live || creationOnly || revisionOnly ? [[]] : [["--first-pass"], ["--restart"]]);
 const require = createRequire(import.meta.url);
@@ -22,7 +23,7 @@ const restart = process.argv.includes("--restart");
 const project = join(scratch, "board");
 const manual = join(scratch, "personal");
 const profile = join(scratch, "profile");
-const evidence = join(artifacts, "draft-discussion.json");
+const evidence = join(approvalOnly ? scratch : artifacts, "draft-discussion.json");
 const cliPath = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
 const cli = (args, input, root = project, error, { nodeArgs = [], env } = {}) => {
   const result = spawnSync(process.env.TASKBOARD_CHECK_NODE, [
@@ -75,6 +76,7 @@ const heldDrafts = new Set();
 const draftGates = new Map();
 let stopGate;
 let failMessage = true;
+let releaseClarification;
 globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images, _commentary, _action, _scratch,
   _limit, _usage, onControl, _signal, id, _activity, mode) => {
   const context = JSON.parse(prompt);
@@ -109,6 +111,9 @@ globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images,
   if (mode === "initial" && context.task.title === "Provider inactive" && failProvider) throw Error("Fixture provider unavailable");
   if (mode === "initial" && heldDrafts.has(context.task.title)) {
     await new Promise(resolve => draftGates.set(id, resolve));
+  }
+  if (approvalOnly && context.latestUserMessage?.text === "Save it in exports.") {
+    await new Promise(resolve => { releaseClarification = resolve; });
   }
   await delay(450);
   if (mode === "initial") {
@@ -166,7 +171,8 @@ try {
   require(entry);
   await until(() => BrowserWindow.getAllWindows().length > 0, "window");
   const window = BrowserWindow.getAllWindows()[0];
-  window.setContentSize(1280, 800);
+  const viewport = [1280, approvalOnly ? 900 : 800];
+  window.setContentSize(...viewport);
   const evaluate = code => window.webContents.executeJavaScript(code);
   await until(() => evaluate("Boolean(window.taskboard && document.querySelector('#app-menu button'))"), "renderer");
   const open = async (path, run = evaluate) => {
@@ -186,7 +192,7 @@ try {
     }, "visible draft retry " + id);
   };
   const waitReply = (id, count = 1) => until(() => messages(show(id)).length === count, "chat reply " + id);
-  const waitReady = async id => {
+  const waitReady = async (id, count = 1) => {
     await until(() => {
       const card = show(id);
       assert.notEqual(card.draftDiscussion?.phase, "failed", card.draftDiscussion?.reason);
@@ -196,10 +202,11 @@ try {
     assert.equal(card.status, "draft");
     assert.equal(card.git, undefined);
     assert.equal(card.awaitingAnswer, false);
-    assert.equal(messages(card).length, 1);
-    assert.equal(messages(card)[0].actor, "agent");
-    assert.equal(messages(card)[0].text, readyText);
-    assert.ok(Number.isFinite(Date.parse(messages(card)[0].at)));
+    assert.equal(messages(card).length, count);
+    const confirmation = messages(card).at(-1);
+    assert.equal(confirmation.actor, "agent");
+    assert.equal(confirmation.text, readyText);
+    assert.ok(Number.isFinite(Date.parse(confirmation.at)));
   };
   const reopen = async id => {
     await evaluate("document.querySelector('#close-sheet').click()");
@@ -215,7 +222,7 @@ try {
     window.focus();
     await evaluate("document.fonts.ready.then(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))))");
     const image = await window.webContents.capturePage();
-    assert.deepEqual(window.getContentSize(), [1280, 800]);
+    assert.deepEqual(window.getContentSize(), viewport);
     writeFileSync(join(artifacts, name), image.toPNG());
   };
   const verifyRevision = async (evaluateOther, runtimeEntries) => {
@@ -310,7 +317,14 @@ try {
     ]);
     check("Rapid edits across two attempts coalesce, and both windows show one question about the final brief");
 
-    for (const action of ["cancel", "approve", "chat"]) {
+    const unapproved = await held("Approval during review");
+    const unapprovedRevision = show(unapproved.id).revision;
+    cli(["approve", unapproved.id], { revision: unapprovedRevision }, project, "DRAFT_DISCUSSION_REQUIRED");
+    releaseDraft(unapproved);
+    await waitReady(unapproved.id);
+    check("Approval during automatic discussion is rejected and the review can finish");
+
+    for (const action of ["cancel", "chat"]) {
       const superseded = await held("Superseded by " + action);
       const revision = show(superseded.id).revision;
       const input = { revision };
@@ -324,7 +338,7 @@ try {
         input.effort = settings.effort;
       }
       const updated = cli([action, superseded.id], input);
-      const expected = action === "cancel" ? "cancelled" : action === "approve" ? "ready" : "draft";
+      const expected = action === "cancel" ? "cancelled" : "draft";
       assert.equal(updated.status, expected);
       releaseDraft(superseded);
       await until(() => !runtimeEntries(project).some(entry => entry.task === superseded.id), "superseded writer released");
@@ -334,9 +348,157 @@ try {
       assert.deepEqual(messages(current).map(event => event.actor), action === "chat" ? ["user"] : []);
       assert.equal(turnsFor(superseded).length, 1);
     }
-    check("Cancelling, approving or sending an ordinary chat message supersedes the automatic turn without a reply or retry");
+    check("Cancelling or sending an ordinary chat message supersedes the automatic turn without a reply or retry");
   };
-  if (live) {
+  const verifyApproval = async () => {
+    const approvedLabel = localization.text("ui.approve_535c27a7", {}, "ru");
+    const openLabel = localization.text("task_question.open_dialogue_button", {}, "ru");
+    const button = label => `[...document.querySelectorAll('#sheet[open] button')]
+      .find(button => button.textContent.trim() === ${JSON.stringify(label)} &&
+        !button.disabled && button.checkVisibility())`;
+    const available = (run = evaluate) => run(`Boolean(${button(approvedLabel)})`);
+    const sheetHas = value => evaluate(`document.querySelector('#sheet[open]')?.textContent.includes(${JSON.stringify(value)})`);
+    const activate = async (label, method) => {
+      window.focus();
+      await delay(100);
+      const point = await evaluate(`(() => {
+        const control = ${button(label)};
+        if (!control) throw Error("Expected a visible action");
+        control.scrollIntoView({ block: "center" });
+        if (${JSON.stringify(method)} === "keyboard") control.focus();
+        const { x, y, width, height } = control.getBoundingClientRect();
+        return { x: Math.round(x + width / 2), y: Math.round(y + height / 2) };
+      })()`);
+      if (method === "keyboard") {
+        assert.equal(await evaluate("document.activeElement.textContent.trim()"), label);
+        window.webContents.sendInputEvent({ type: "keyDown", keyCode: "Enter" });
+        window.webContents.sendInputEvent({ type: "char", keyCode: "\r" });
+        window.webContents.sendInputEvent({ type: "keyUp", keyCode: "Enter" });
+      } else {
+        window.webContents.sendInputEvent({ type: "mouseDown", button: "left", clickCount: 1, ...point });
+        window.webContents.sendInputEvent({ type: "mouseUp", button: "left", clickCount: 1, ...point });
+      }
+    };
+    const showStatus = (key, values = {}) => until(
+      () => sheetHas(localization.text(key, values, "ru")), key);
+    const create = (title, description = "Определить формат и место сохранения результата.") =>
+      cli(["create"], plannedDraft({
+        title, description, criteria: ["Указаны формат и место сохранения."], execution: settings,
+      }));
+    const waitWriter = async (id, label) => {
+      const { runtimeEntries } = await import("../src/desktop/board-runtime.ts");
+      await until(() => !runtimeEntries(project).some(entry => entry.task === id), label);
+    };
+    const continueDraft = card => {
+      heldDrafts.delete(card.title);
+      const release = draftGates.get(card.id);
+      draftGates.delete(card.id);
+      release();
+    };
+    if (restart) {
+      await display(report.approvalDraft);
+      await until(available, "approval after restart");
+      assert.equal(show(report.approvalDraft).awaitingAnswer, false);
+      assert.deepEqual(messages(show(report.approvalDraft)), report.approvalMessages);
+      assert.equal(calls.length, 0);
+      await capture("approval-ready.png");
+      await activate(approvedLabel, "keyboard");
+      try {
+        await until(() => show(report.approvalDraft).status === "ready", "keyboard approves the same card");
+      } catch (error) {
+        const notice = await evaluate("document.querySelector('#sheet-notice:not([hidden])')?.textContent");
+        throw new Error(notice ? error.message + ": " + notice : error.message, { cause: error });
+      }
+      check("After Electron restarts, the same draft can be approved with Enter, with its saved reply intact");
+      writeFileSync(join(artifacts, "approval-check.txt"), [
+        "Ручное утверждение в Windows Electron",
+        "Команда: node scripts/check-draft-discussion.mjs --approval-only --artifacts .tasks/qa/T-0314",
+        "Git HEAD перед проверкой: " + report.head,
+        `ОС: ${report.platform}; Electron: ${report.electron}; Chromium: ${report.chromium}; область содержимого: ${viewport.join("×")}`,
+        "Представление хешей исходников: UTF-8, переводы строк CRLF приведены к LF, SHA-256.",
+        ...Object.entries(report.sourceHashes).map(([path, hash]) => `${hash}  ${path}`),
+        "Запущен реальный Electron и CLI. Провайдер заменён детерминированной фикстурой. Linux и macOS не проверялись.",
+        ...report.checks.map(line => "PASS " + line), "",
+      ].join("\n"));
+      return;
+    }
+
+    heldDrafts.add("Partial answer");
+    const pending = create("Partial answer");
+    await until(() => draftGates.has(pending.id), "provider is reviewing the pending draft");
+    await display(pending.id);
+    await showStatus("draft_discussion.running");
+    assert.equal(await available(), false);
+    cli(["approve", pending.id], { revision: show(pending.id).revision }, project, "DRAFT_DISCUSSION_REQUIRED");
+    await capture("approval-pending.png");
+    continueDraft(pending);
+    await waitReply(pending.id);
+    await waitWriter(pending.id, "initial question writer released");
+    assert.equal(show(pending.id).awaitingAnswer, true);
+    await until(() => evaluate(`Boolean(${button(openLabel)})`), "open dialogue action");
+    await activate(openLabel, "mouse");
+    await until(() => evaluate(`document.querySelector('.task-dialogue:not([hidden])')
+      ?.textContent.includes("Which format and destination are required?")`), "question visible after mouse opens dialogue");
+    assert.equal(await available(), false);
+    await capture("approval-question.png");
+    check("A running review and an open question both hide approval; the mouse opens the question in its dialogue");
+
+    const answer = evaluate(`window.taskboard.chatSend(${JSON.stringify(pending.id)}, ${JSON.stringify({
+      ...settings, text: "Save it in exports.", files: [],
+    })})`);
+    await until(() => Boolean(releaseClarification), "provider reading owner's answer");
+    cli(["approve", pending.id], { revision: show(pending.id).revision }, project, "TASK_AWAITING_ANSWER");
+    assert.equal(await available(), false);
+    releaseClarification();
+    const reply = await answer;
+    assert.equal(reply.result.ok, true, JSON.stringify(reply));
+    await until(available, "approval after clarification");
+    assert.equal(show(pending.id).status, "draft");
+    assert.equal(show(pending.id).awaitingAnswer, false);
+    check("Sending an answer keeps approval unavailable until the agent confirms it in the same card");
+
+    const failure = create("Provider inactive");
+    await until(() => show(failure.id).draftDiscussion?.phase === "failed", "provider failure");
+    await waitWriter(failure.id, "failed discussion writer released");
+    await display(failure.id);
+    await showStatus("draft_discussion.failed", { reason: "Fixture provider unavailable" });
+    assert.equal(await available(), false);
+    cli(["approve", failure.id], { revision: show(failure.id).revision }, project, "DRAFT_DISCUSSION_REQUIRED");
+    failProvider = false;
+    const failedRevision = show(failure.id).revision;
+    await activate(localization.text("draft_discussion.retry", {}, "ru"), "mouse");
+    await until(() => show(failure.id).revision > failedRevision, "draft retry reaches the board");
+    await waitReady(failure.id);
+    await until(available, "approval enabled after retry");
+    check("Provider failure blocks approval; retry from the dialogue restores it after a successful review");
+
+    await evaluate("window.taskboard.menuAction('new-window')");
+    const other = BrowserWindow.getAllWindows().find(candidate => candidate.id !== window.id);
+    assert.ok(other);
+    const evaluateOther = code => other.webContents.executeJavaScript(code);
+    await until(() => evaluateOther("Boolean(window.taskboard)"), "second renderer");
+    await open(project, evaluateOther);
+    await evaluateOther(`showTask(${JSON.stringify(failure.id)})`);
+    await until(() => available(evaluateOther), "second window sees the approved brief");
+    const previous = show(failure.id);
+    heldDrafts.add(previous.title);
+    cli(["update", failure.id], { description: "Сохранять выгрузку в каталоге архива.", revision: previous.revision });
+    await until(() => draftGates.has(failure.id), "new review after substantive edit");
+    const stale = await evaluateOther(`window.taskboard.command("approve", ${JSON.stringify(failure.id)},
+      { revision: ${previous.revision} })`);
+    assert.equal(stale.error?.code, "REVISION_CONFLICT", JSON.stringify(stale));
+    assert.equal(show(failure.id).status, "draft");
+    await until(async () => !(await available(evaluateOther)), "second window hides the stale approval");
+    continueDraft(previous);
+    await waitReady(failure.id, 2);
+    await until(() => available(evaluateOther), "same edited card ready after a fresh review");
+    check("A substantive edit blocks an older window's approval and requires a fresh review");
+    report.approvalDraft = pending.id;
+    report.approvalMessages = messages(show(pending.id));
+  };
+  if (approvalOnly) {
+    await verifyApproval();
+  } else if (live) {
     const catalog = await evaluate("window.taskboard.chatModels()");
     assert.equal(catalog.ok, true, JSON.stringify(catalog));
     const model = catalog.data.find(entry => entry.default) ?? catalog.data[0];
@@ -690,9 +852,11 @@ try {
     report.interrupted = interrupted.id;
     check("Transient chat staging is cleaned");
   }
-  if (!live) {
+  if (!live && !(approvalOnly && restart)) {
     const paths = ["src/desktop/main.ts", "src/desktop/codex-chat.ts", "src/cli/archive.ts", "src/cli/main.ts",
-      "src/desktop/chat.js", "src/desktop/locales/ru.json", "scripts/check-draft-discussion.mjs"];
+      "src/cli/model.ts", "src/cli/tasks.ts", "src/desktop/renderer.js", "src/desktop/chat.js",
+      "src/desktop/locales/ru.json", "src/desktop/preload.cjs", "scripts/check-draft-discussion.mjs",
+      "scripts/electron-check.mjs", "tests/fixtures/planned-draft.ts"];
     report.sourceHashes = Object.fromEntries(paths.map(path => {
       const source = readFileSync(new URL("../" + path, import.meta.url), "utf8").replaceAll("\r\n", "\n");
       return [path, createHash("sha256").update(source).digest("hex")];

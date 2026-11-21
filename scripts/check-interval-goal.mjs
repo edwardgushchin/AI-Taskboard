@@ -9,7 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { runtimeEntries } from "../src/desktop/board-runtime.ts";
 import { sendGoalMessage } from "../src/desktop/manager-history.ts";
-import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
+import { confirmFixtureDraft, plannedDraft } from "../tests/fixtures/planned-draft.ts";
 import { electronCheck } from "./electron-check.mjs";
 
 const { scratch, artifacts } = electronCheck(import.meta.url, "interval-goal", 180_000, [[], ["--restart"]]);
@@ -122,6 +122,7 @@ function prepare(reopenAt) {
     cli(["tag", "ensure"], { name: "QA", color: "#5B8DEF" });
     const draft = cli(["create"], plannedDraft({ title: "Проверить очередь без цели", tags: ["QA"] }));
     queuedCard = draft.id;
+    confirmFixtureDraft(project, queuedCard);
     cli(["approve", queuedCard]);
     mkdirSync(profile);
     writeFileSync(join(profile, "appearance.json"), JSON.stringify({ language: "ru" }));

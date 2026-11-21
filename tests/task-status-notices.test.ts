@@ -1,4 +1,4 @@
-import { plannedDraft } from "./fixtures/planned-draft.ts";
+import { confirmFixtureDraft, plannedDraft } from "./fixtures/planned-draft.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, readFileSync, readdirSync } from "node:fs";
@@ -30,6 +30,7 @@ test("CLI transitions replay in order without goals, windows or a running manage
   cli(["settings"], { reviewMode: "manager" });
   const sync = () => cli(["sync-notices"], { language: "ru" }).changed;
   const task = cli(["create"], plannedDraft({ title: "Проверка доступа", criteria: ["Доступ проверен"], workingDirectory: root }));
+  confirmFixtureDraft(root, task.id);
   cli(["approve", task.id]);
   assert.equal(sync(), false); // First enable skips old events.
   const work = () => readManagerHistory(root)?.turns.flatMap(turn => turn.items) ?? [];
@@ -120,6 +121,7 @@ test("manual lifecycle actions retain audit history without notices; agents stil
     assert.deepEqual(managerUnread(root), []);
     assert.equal(cli(["show", task.id]).history.at(-1).actor, "user");
   };
+  confirmFixtureDraft(root, task.id);
   manual("approve");
   manual("return-to-draft", { revision: cli(["show", task.id]).revision });
   manual("approve"); manual("start");
@@ -176,6 +178,7 @@ test("manual Git checkout and resumed checkout preserve the actor of each start"
   };
   cli(["init"], { git: true });
   const task = cli(["create"], plannedDraft({ title: "Git source", criteria: ["Checked"] }));
+  confirmFixtureDraft(root, task.id);
   cli(["approve", task.id], { actor: "user" });
   syncTaskStatusNotices(root);
   cli(["start", task.id], { actor: "user" });

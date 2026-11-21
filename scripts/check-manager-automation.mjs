@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { electronCheck } from "./electron-check.mjs";
-import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
+import { confirmFixtureDraft, plannedDraft } from "../tests/fixtures/planned-draft.ts";
 import { registerRuntime } from "../src/desktop/board-runtime.ts";
 
 const { scratch, artifacts } = electronCheck(import.meta.url, "manager-automation", 120_000);
@@ -107,6 +107,7 @@ void (async () => {
     data(["settings"], { autoMode: true, reviewMode: "reviewer-human" });
     data(["auto-queue"], { revision: 0, paused: true });
     const draft = data(["create"], plannedDraft({ title: "Демонстрационная задача" }));
+    confirmFixtureDraft(project, draft.id);
     data(["approve", draft.id]);
     data(["start", draft.id]);
     releaseRuntime = registerRuntime(project, { task: draft.id, kind: "slot", role: "executor" });

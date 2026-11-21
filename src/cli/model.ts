@@ -390,6 +390,15 @@ export function requireState(task: Task, allowed: readonly TaskState[]): void {
   }
 }
 
+export function invalidateDraftDiscussion(task: Task): Task {
+  return {
+    ...task,
+    awaitingAnswer: undefined,
+    ...(task.status === "draft" && task.draftDiscussion?.phase !== "running"
+      ? { draftDiscussion: { phase: "queued" } as const } : {}),
+  };
+}
+
 export function requireRevision(task: Task, value: unknown, required = false): void {
   if (value === undefined && !required) return;
   const revision = number(value, "revision");

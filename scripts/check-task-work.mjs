@@ -1,4 +1,5 @@
 // Run with Node.js. The two phases use separate Electron processes and one disposable board.
+import { confirmFixtureDraft } from "../tests/fixtures/planned-draft.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -78,6 +79,7 @@ if (!restart) {
     criteria: ["Показать события текущего сеанса."], workingDirectory: project,
     expertTeam: { work: { ...lead, stages: [stage("analysis"), stage("verify", ["analysis"])] }, review: lead },
   });
+  confirmFixtureDraft(project, taskId);
   const ready = cli(["approve", taskId], { revision: draft.revision });
   cli(["start", taskId], { revision: ready.revision });
   cli(["update", taskId], { actor: "agent", codexThreadId: oldThread });

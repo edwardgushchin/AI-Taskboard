@@ -139,7 +139,9 @@ test("question state persists with replies, survives reads and partial answers, 
   for (const [text, awaitingAnswer] of [["Destination still needed?", true], ["Received both answers.", false]] as const) {
     task = addChatMessage(store, task, { ...settings, text: "Answer" });
     assert.equal(task.awaitingAnswer, true, "user sends do not clear state");
-    task = addChatMessage(store, task, { ...settings, actor: "agent", text, awaitingAnswer, replyTo: task.history.length - 1 });
+    task = addChatMessage(store, task, {
+      ...settings, actor: "agent", text, awaitingAnswer, replyTo: task.history.length - 1, revision: task.revision,
+    });
     assert.equal(readTask(new BoardStore(location), task.id).awaitingAnswer, awaitingAnswer);
   }
   // A legacy reply and a plain question mark do not retroactively mark a card.
@@ -167,6 +169,6 @@ test("state validation and stale reply protection preserve the last saved state"
   assert.throws(() => validateCard({ ...task, awaitingAnswer: "false" }, task.id), /Invalid card/);
   // Correcting a rejected value succeeds on the same pending user turn.
   task = addChatMessage(store, task, { ...settings, actor: "agent", text: "The question is no longer needed.",
-    replyTo: task.history.length - 1, awaitingAnswer: false });
+    replyTo: task.history.length - 1, revision: task.revision, awaitingAnswer: false });
   assert.equal(task.awaitingAnswer, false);
 });

@@ -1,4 +1,4 @@
-import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
+import { confirmFixtureDraft, plannedDraft } from "../tests/fixtures/planned-draft.ts";
 // Run the desktop review queue against an isolated Git board and a test provider.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -55,6 +55,7 @@ async function run() {
   cli(["init"]);
   cli(["settings"], { reviewMode: "reviewer", autoMode: scenario !== "note" });
   const task = cli(["create"], plannedDraft({ title: "Review a submitted change", criteria: ["Result is present"] }));
+  confirmFixtureDraft(project, task.id);
   const ready = cli(["approve", task.id]);
   const started = cli(["start", task.id], { revision: ready.revision });
   writeFileSync(join(started.worktree, "result.txt"), "Result for review\n");
@@ -102,6 +103,7 @@ async function run() {
   let independent;
   if (racedCommand) {
     const card = cli(["create"], plannedDraft({ title: "Independent submission", criteria: ["Result is present"] }));
+    confirmFixtureDraft(project, card.id);
     const ready = cli(["approve", card.id]);
     const started = cli(["start", card.id], { revision: ready.revision });
     writeFileSync(join(started.worktree, "independent.txt"), "Independent result\n");

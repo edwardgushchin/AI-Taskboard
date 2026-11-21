@@ -9,7 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { registerRuntime, runtimeEntries } from "../src/desktop/board-runtime.ts";
 import { sendGoalMessage } from "../src/desktop/manager-history.ts";
-import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
+import { confirmFixtureDraft, plannedDraft } from "../tests/fixtures/planned-draft.ts";
 import { electronCheck } from "./electron-check.mjs";
 
 const { scratch, artifacts } = electronCheck(import.meta.url, "iterative-goal", 120_000, [[], ["--restart"]]);
@@ -60,6 +60,7 @@ function cli(args, input) {
 
 function createReady(title, fields = {}) {
   const draft = cli(["create"], plannedDraft({ title, tags: ["QA"], ...fields }));
+  confirmFixtureDraft(project, draft.id);
   cli(["approve", draft.id]);
   return draft.id;
 }

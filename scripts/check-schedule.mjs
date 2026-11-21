@@ -1,4 +1,4 @@
-import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
+import { confirmFixtureDraft, plannedDraft } from "../tests/fixtures/planned-draft.ts";
 // Production IPC, manager action, persistence and two-window schedule checks.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -43,6 +43,7 @@ void (async () => { try {
   const indexPath = join(project, ".tasks", "board.json");
   for (const schedule of [{ everyMinutes: 60 }, { time: "09:00" }]) {
     const task = cli(["create"], plannedDraft({ title: "Schedule persistence", criteria: ["Checked"], schedule, workingDirectory: project }));
+    confirmFixtureDraft(project, task.id);
     cli(["approve", task.id]);
     const paused = cli(["update", task.id], { schedulePaused: true });
     paused.schedule.nextAt = "2000-01-01T00:00:00Z";
@@ -149,6 +150,7 @@ void (async () => { try {
   for (const autoMode of [false, true]) {
     cli(["settings"], { reviewMode: "reviewer-human", autoMode });
     const { id } = cli(["create"], plannedDraft({ title: "Legacy review", criteria: ["Checked"], workingDirectory: project }));
+    confirmFixtureDraft(project, id);
     cli(["approve", id]);
     cli(["start", id]);
     const { token } = cli(["preview", id]);

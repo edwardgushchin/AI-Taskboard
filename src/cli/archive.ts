@@ -5,7 +5,7 @@ import { readdirSync, realpathSync, rmdirSync, statSync, writeFileSync } from "n
 import { basename, join, resolve } from "node:path";
 import { gzipSync, gunzipSync } from "node:zlib";
 import { unzipSync, zipSync } from "fflate";
-import { imageAttachmentPattern, maxAttachmentBytes, number, object, record, registerTags, requireRevision, requireState, strings, TaskboardError, text } from "./model.ts";
+import { imageAttachmentPattern, invalidateDraftDiscussion, maxAttachmentBytes, number, object, record, registerTags, requireRevision, requireState, strings, TaskboardError, text } from "./model.ts";
 import type { ArchiveLink, Attachment, BoardTag, Task } from "./model.ts";
 import { directory, exists, readBinary, removeFile, validateCard, writeAtomic } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
@@ -255,6 +255,9 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
       throw new TaskboardError("CHAT_CHANGED", "The last chat message changed before the reply was saved.");
     }
   }
+  if (!draftDiscussion && actor === "agent" && task.status === "draft" && input.awaitingAnswer === false) {
+    requireRevision(task, input.revision, true);
+  }
   const usage = actor === "agent" && input.usage !== undefined ? object(input.usage) : undefined;
   const commentary = actor === "agent" && input.commentary !== undefined ? strings(input.commentary, "commentary") : [];
   const durationMs = actor === "agent" && input.durationMs !== undefined ? number(input.durationMs, "durationMs", 0) : undefined;
@@ -267,9 +270,11 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
 
   return withNewAttachments(store, task, input.attachmentSources, attachments => {
     if (!message && !attachments.length) throw new TaskboardError("INVALID_INPUT", "Write a message or attach a file.");
+    const addsDraftSources = actor === "user" && task.status === "draft" && attachments.length > 0;
     const updated = record({
       ...task, attachments: [...task.attachments, ...attachments],
       ...(actor === "agent" && input.awaitingAnswer !== undefined ? { awaitingAnswer: input.awaitingAnswer as boolean } : {}),
+      ...(addsDraftSources && task.awaitingAnswer === false ? { awaitingAnswer: undefined } : {}),
       draftDiscussion: draftDiscussion || actor === "user" ? undefined : task.draftDiscussion,
     }, "chat", actor, task.status, message);
     updated.history.at(-1)!.chat = {
@@ -310,9 +315,9 @@ export function addAttachment(store: BoardStore, task: Task, input: Record<strin
   const { attachment, data } = loadAttachment(input, limit);
   const actor = actorFor(input, "agent");
   if (data !== undefined) writeAtomic(join(attachmentFolder(store, task, true), attachment.file), data);
-  const attached = record({
+  const attached = record(invalidateDraftDiscussion({
     ...task, attachments: [...task.attachments, attachment],
-  }, "attach", actor, task.status, attachment.name);
+  }), "attach", actor, task.status, attachment.name);
   attached.history.at(-1)!.attachment = attachment.file;
   return store.save(attached);
 }

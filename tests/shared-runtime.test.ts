@@ -11,7 +11,7 @@ import { cachedTaskLimits, createAgentSlots, readProfileTaskLimits } from "../sr
 import { projectIdentity } from "../src/desktop/project-tabs.ts";
 import { forgetExecutor, matchesQueuedExecutor, prepareQueuedTurn, queueWriteProbeRetry, recordWriteProbeRetryFailure,
   runtimeEntries, runtimeTransaction } from "../src/desktop/board-runtime.ts";
-import { plannedDraft } from "./fixtures/planned-draft.ts";
+import { confirmFixtureDraft, plannedDraft } from "./fixtures/planned-draft.ts";
 
 test("comments retain a queued first launch in an assigned directory, including older manual requests", t => {
   const project = mkdtempSync(join(tmpdir(), "taskboard-manual-first-launch-"));
@@ -28,6 +28,7 @@ test("comments retain a queued first launch in an assigned directory, including 
   const { id } = taskCommand(["create"], plannedDraft({
     title: "Manual first launch", criteria: ["Keep the assigned directory"], workingDirectory: project,
   }));
+  confirmFixtureDraft(project, id);
   taskCommand(["approve", id]);
   taskCommand(["start", id], { actor: "user", queueExecutor: true });
   const queued = () => runtimeEntries(project).find(entry => entry.kind === "queue" && entry.task === id);
