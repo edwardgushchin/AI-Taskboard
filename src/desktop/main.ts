@@ -1979,16 +1979,20 @@ function parseOwnerGoalEdit(request: string): { replacement?: string } | undefin
   const style = /^(?:более|менее|чуть|немного|намного|ч[её]тче|яснее|понятнее|проще|попроще|конкретнее|точнее|лучше|(?:ч[её]тк|ясн|понятн|прост|лаконичн|читабельн)(?:ой|ым|ую|о)|(?:простыми|своими|другими) словами|по-другому|more|less|a little|much|clear(?:er)?|easier|simpler|better|concise|readable|in plain language|in your own words)(?![\p{L}\p{N}])/iu;
   const rewriteVerb = /^(?:(?:сформулируй|переформулируй|перепиши|сделай)(?:те)?|make|rewrite|rephrase)\s+/iu;
 
+  function isUnspecifiedEdit(wording: string) {
+    return /^[.!…]*$/u.test(wording) || unspecified.test(wording) || referenceOnly.test(wording);
+  }
+
   function isVagueWording(wording: string) {
-    if (unspecified.test(wording) || referenceOnly.test(wording)) {
+    if (isUnspecifiedEdit(wording)) {
       return true;
     }
     // A style modifier supplies no subject. In "Перепиши текст справки",
     // "справки" instead identifies the text the goal is about.
     const rewrite = russianRewrite.exec(wording) ?? englishRewrite.exec(wording);
     if (rewrite) {
-      const afterTarget = withoutCourtesy(wording.slice(rewrite[0].length).replace(/^\s*,/u, ""));
-      return /^[.!…]*$/u.test(afterTarget) || style.test(afterTarget);
+      const afterTarget = withoutCourtesy(wording.slice(rewrite[0].length).replace(/^\s*[,:]/u, ""));
+      return isUnspecifiedEdit(afterTarget) || style.test(afterTarget);
     }
     const verb = rewriteVerb.exec(wording);
     return Boolean(verb && style.test(wording.slice(verb[0].length)));
