@@ -9,6 +9,8 @@
 
 - Run the repository checks relevant to the change. For behavior changes, verify the affected workflow and any failure case the change can introduce.
 - Report the checks you ran, their results, and any gaps that affect verification.
+- A confirmed memory leak in a submitted change blocks acceptance. A confirmed leak in a release candidate blocks publication. Fix the retention and repeat the affected check before proceeding.
+- When a change touches the lifetime of a window, chat, subscription, timer, cache or process, repeat its create/use/release cycle and verify resource disposal. Follow the [memory regression procedure](docs/how-to/development.md#проверить-освобождение-памяти).
 
 ## Zero tolerance for leftover temporary files
 
