@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import MarkdownIt from "markdown-it";
@@ -62,6 +62,28 @@ test("rendered source and document destinations open the same real file without 
       assert.doesNotMatch(markdown.render(value, { agent: true }), /<a /);
     }
   } finally { await rm(root, { recursive: true }); }
+});
+
+test("source line fragments preserve chat captions and select the requested lines", async () => {
+  const root = new URL("../", import.meta.url);
+  const base = fileURLToPath(root);
+  const links = [
+    ["Код выбора результата", "src/desktop/renderer.js", 2823],
+    ["Код модели", "src/desktop/voice-transcription.ts", 18],
+    ["Выбор языка", "src/desktop/renderer.js", 2851],
+  ] as const;
+  for (const [caption, relative, line] of links) {
+    const path = fileURLToPath(new URL(relative, root));
+    for (const destination of [relative, path, pathToFileURL(path).href]) {
+      const html = markdown.render(`[${caption}](${destination}#L${line})`, { agent: true });
+      const match = /<a href="([^"]+)">([^<]+)<\/a>/.exec(html);
+      assert.ok(match, html);
+      assert.equal(match[2], caption);
+      const file = await readMarkdownFile(base, match[1]);
+      assert.equal(file.path, path);
+      assert.equal(file.line, line);
+    }
+  }
 });
 
 test("Markdown links preserve captions and local paths with spaces, slashes and parentheses", () => {
@@ -202,6 +224,14 @@ test("Markdown reader rejects invalid, absent, non-file and oversized sources", 
     await assert.rejects(readMarkdownFile(root, "large.md"), /MARKDOWN_TOO_LARGE/);
     await assert.rejects(readMarkdownFile(root, "large.css:582"), /MARKDOWN_TOO_LARGE/);
     await assert.rejects(readMarkdownFile(root, "missing.css:582"), /ENOENT/);
+    await assert.rejects(readMarkdownFile(root, "large.css#L582"), /MARKDOWN_TOO_LARGE/);
+    await assert.rejects(readMarkdownFile(root, "missing.css#L582"), /ENOENT/);
+    for (const suffix of ["#L0", "#L-2", "#L+2", "#L2x", "#L2e1", "#L0x2", "#L2.0", "#L2#L3", "%23L2"]) {
+      const link = "styles.css" + suffix;
+      assert.doesNotMatch(markdown.render(`[Source](${link})`), /<a /);
+      await assert.rejects(readMarkdownFile(root, link), /INVALID_MARKDOWN_LINK/, link);
+    }
+    await assert.rejects(readMarkdownFile(root, "styles.css#L9007199254740992"), /INVALID_MARKDOWN_LINK/);
     for (const link of ["javascript:styles.css:1", "https://example.com/styles.css:1", "styles.css", "styles.css:0", "styles.css:9007199254740992", "bad%00.css:1", "bad%0A.css:1"]) {
       await assert.rejects(readMarkdownFile(root, link), /INVALID_MARKDOWN_LINK/);
     }
@@ -220,7 +250,8 @@ test("local text links cannot read reports outside the project through paths or 
     await writeFile(join(outside, "styles.css"), "Outside");
     await symlink(outside, join(workspace, "linked"), process.platform === "win32" ? "junction" : "dir");
     for (const link of ["../outside/report.txt", "linked/report.txt", "file:///C:/report.txt",
-      "../outside/styles.css:1", "linked/styles.css:1", "../outside/Private.cs:1", "linked/Private.cs:1", "linked/Private.cs", "linked/Private.cs:0"]) {
+      "../outside/styles.css:1", "linked/styles.css:1", "../outside/Private.cs:1", "linked/Private.cs:1",
+      "../outside/styles.css#L1", "linked/styles.css#L1", "linked/Private.cs", "linked/Private.cs:0"]) {
       await assert.rejects(readMarkdownFile(workspace, link), /INVALID_MARKDOWN_LINK/);
     }
   } finally { await rm(root, { recursive: true }); }

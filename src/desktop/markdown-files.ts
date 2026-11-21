@@ -12,13 +12,18 @@ export async function readMarkdownFile(base: string, value: string, source?: str
   let line: number | undefined;
   try {
     if (/[\0-\x1f\x7f]/.test(value)) throw new Error();
-    const location = value.replace(/#.*$/, "");
+    const fragmentIndex = value.indexOf("#");
+    const location = fragmentIndex < 0 ? value : value.slice(0, fragmentIndex);
+    const fragment = fragmentIndex < 0 ? "" : value.slice(fragmentIndex);
     const suffix = /:(\d+)(?::\d+)?$/.exec(location);
     const link = suffix ? location.slice(0, suffix.index) : location;
     path = /^file:/i.test(link) ? fileURLToPath(link) : decodeURIComponent(link);
     if (process.platform === "win32") path = path.replace(/^\/(?=[a-z]:[\\/])/i, "");
     if (/^[a-z][a-z\d+.-]*:/i.test(path) && !/^[a-z]:[\\/]/i.test(path)) throw new Error();
-    if (sourceFile.test(path)) line = Number(suffix?.[1]);
+    if (sourceFile.test(path)) {
+      const fragmentLine = /^#L([1-9]\d*)$/.exec(fragment);
+      line = Number(suffix?.[1] ?? fragmentLine?.[1]);
+    }
     if ((line !== undefined ? !Number.isSafeInteger(line) || line < 1 : !/\.(md|markdown|txt|log|json)$/i.test(path)) ||
         /[\0-\x1f\x7f]/.test(path)) throw new Error();
     path = resolve(source ? dirname(source) : base, path.replaceAll("\\", "/"));
