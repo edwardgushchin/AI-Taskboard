@@ -1,7 +1,17 @@
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import type { BoardSettings } from "../cli/model.ts";
 import { exists, readJson, writeJson } from "../cli/storage.ts";
 import { launchableTasks, type QueueTask } from "./auto-queue.ts";
+
+type MarkdownBlock = {
+  type: string;
+  map: [startLine: number, endLine: number] | null;
+};
+
+const createMarkdown = createRequire(import.meta.url)("markdown-it") as
+  (options: { html: boolean }) => { parse(text: string, env: object): MarkdownBlock[] };
+const markdown = createMarkdown({ html: false });
 
 export type IterativeGoalState = {
   goalId: string;
@@ -84,36 +94,26 @@ function hideHtmlQuotes(text: string) {
 }
 
 export function ownerIterationDirective(objective: string) {
+  // The Markdown parser includes lazy continuation lines in the quote's source range.
+  const excludedLines = new Set<number>();
+  for (const block of markdown.parse(objective, {})) {
+    if (block.map && ["blockquote_open", "fence", "code_block"].includes(block.type)) {
+      const [start, end] = block.map;
+      for (let line = start; line < end; line++) {
+        excludedLines.add(line);
+      }
+    }
+  }
   // Ignore quoted passages, including quotations that span several lines.
   const unquoted = hideHtmlQuotes(objective).replace(/«[^»]*(?:»|$)|“[^”]*(?:”|$)|"[^"]*(?:"|$)|<!--[\s\S]*?(?:-->|$)/g,
     passage => passage.replace(/[^\r\n]/g, " "));
-  let fence: string | undefined;
-  let blockQuote = false;
   let enabled: boolean | undefined;
   let intervalMs: number | undefined;
-  for (const line of unquoted.split(/\r?\n/)) {
-    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
-    if (fence) {
-      if (marker?.[1].startsWith(fence) && !marker[2].trim()) {
-        fence = undefined;
-      }
+  for (const [index, line] of unquoted.split(/\r\n?|\n/).entries()) {
+    if (excludedLines.has(index) || /^(?: {4}|\t)/.test(line)) {
       continue;
     }
     const command = line.trim();
-    if (!command) {
-      blockQuote = false;
-      continue;
-    }
-    if (command.startsWith(">")) {
-      blockQuote = true;
-    }
-    if (blockQuote || /^(?: {4}|\t)/.test(line)) {
-      continue;
-    }
-    if (marker) {
-      fence = marker[1];
-      continue;
-    }
     const mode = /^(включи|выключи|отключи) итеративный режим[.!]?$/iu.exec(command);
     const interval = /^(?:(включи) итеративный режим и )?(?:настрой (?:проверку [^"'«»“”`<>]+? каждые|интервал(?: на)?)|измени интервал(?: на)?) ([1-9]\d{0,5}) (секунд[уы]?|минут[уы]?|час(?:а|ов)?)[.!]?$/iu.exec(command);
     if (mode) {

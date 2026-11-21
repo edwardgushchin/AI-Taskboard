@@ -27,6 +27,9 @@ test("implicit instructions, quotations and malformed numbers have no authority"
     "Цитата: «\nВключи итеративный режим\n»",
     "> Включи итеративный режим",
     "> Цитата\nВключи итеративный режим",
+    "- > Пример\n  Включи итеративный режим",
+    "1. > Пример\n   Измени интервал на 10 секунд",
+    "- Раздел\n  - > Пример\n    >\n    > Отключи итеративный режим",
     "<blockquote>\nВключи итеративный режим\n</blockquote>",
     "<BLOCKQUOTE title=\"пример > текста\">\n\nИзмени интервал на 10 секунд\n\n</BLOCKQUOTE>",
     "<blockquote>\n<blockquote>\nТекст\n</blockquote>\nОтключи итеративный режим\n</blockquote>",
@@ -47,6 +50,7 @@ test("implicit instructions, quotations and malformed numbers have no authority"
     "<blockquote>\nОтключи итеративный режим\n</blockquote>\n\nВключи итеративный режим",
   ), { enabled: true, intervalMs: undefined });
   assert.equal(ownerIterationDirective("```html\n<blockquote>\n```\n\nВключи итеративный режим").enabled, true);
+  assert.equal(ownerIterationDirective("- > Пример\n  Отключи итеративный режим\n\nВключи итеративный режим").enabled, true);
 });
 
 test("late launches keep their phase, resume starts a full interval and missed deadlines coalesce", () => {

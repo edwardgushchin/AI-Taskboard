@@ -322,6 +322,7 @@ function writeReport() {
   ];
   const revision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
   const tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: root, encoding: "utf8" }).trim();
+  const parents = execFileSync("git", ["show", "-s", "--format=%P", revision], { cwd: root, encoding: "utf8" }).trim();
   const hashes = paths.map(path => {
     const blob = revision + ":" + path;
     const storedId = execFileSync("git", ["rev-parse", blob], { cwd: root, encoding: "utf8" }).trim();
@@ -351,6 +352,7 @@ function writeReport() {
     "```",
     "",
     "Коммит тестовой копии: " + revision + ". Git-дерево: " + tree + ".",
+    "Родители тестового коммита: " + parents + ".",
     "SHA-256 сырых Git-блобов. Для каждого файла git hash-object с фильтрами пути подтвердил соответствие checkout блобу:",
     "",
     ...hashes,
@@ -380,10 +382,13 @@ async function beforeRestart() {
   await startGoal(htmlQuote.join("\n"));
   assert.equal(existsSync(iterationFile), false);
   expectSuccess(await api("boardGoal", "clear"));
+  await startGoal("- > Пример\n  Включи итеративный режим");
+  assert.equal(existsSync(iterationFile), false);
+  expectSuccess(await api("boardGoal", "clear"));
   await startGoal(objective);
   assert.equal(iteration().enabled, true);
   assert.equal(iteration().intervalMs, 1500000);
-  log("Инструмент отклонил все три действия при неявной формулировке, обычной цитате и многострочном HTML-блоке <blockquote>. Отдельно отклонены недействительные числа, чужой ID и изменившийся текст. Точное поручение сохранило режим и 25 минут.");
+  log("Инструмент отклонил все три действия при неявной формулировке, обычной цитате, многострочном HTML-блоке и продолжении Markdown-цитаты внутри списка. Отдельно отклонены недействительные числа, чужой ID и изменившийся текст. Точное поручение сохранило режим и 25 минут.");
 
   await showPanel();
   await until(async () => (await content(rule)).includes("25 минут") && (await content(hint)).includes("Авторежим выключен"), "saved rule with Auto mode off");
