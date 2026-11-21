@@ -221,25 +221,31 @@ if (!process.versions.electron) {
       };
       const queue = id => JSON.parse(readFileSync(join(project, ".tasks", "runtime.json"), "utf8"))
         .find(entry => entry.kind === "queue" && entry.task === id);
-      for (const autoMode of [false, true]) {
+      const profiles = [
+        { autoMode: false, occupied: true },
+        { autoMode: true, occupied: true },
+        { autoMode: true, occupied: false },
+      ];
+      for (const { autoMode, occupied } of profiles) {
+        const profile = `${autoMode}-${occupied}`;
         cli(project, ["settings"], { autoMode: false, reviewMode: "human", taskLimits: { executor: 4, reviewer: 1 } });
         const id = makeCard("Recover first launch");
         const stopped = makeCard("Stopped before chat");
-        const failedTitle = "Unavailable worktree, autoMode=" + autoMode;
+        const failedTitle = "Unavailable worktree, profile " + profile;
         const failed = makeCard(failedTitle);
         const legacy = makeCard("Legacy interrupted launch");
         const { worktree: legacyTree } = cli(project, ["start", legacy]);
         cli(project, ["run-log", legacy], { entries: [{
           id: "project-closed", type: "error", title: "", text: "Project closed.", status: "interrupted",
         }] });
-        const first = await start("early-" + autoMode);
+        const first = await start("early-" + profile);
         const held = [id, stopped, failed].map(task => first.ask({ action: "holdBeforeChat", id: task }));
         await wait(async () => (await first.ask({ action: "heldStarts" })).length === held.length, "launches paused before chat creation");
         const original = show(id);
         assert.equal(original.status, "in_progress");
         assert.equal(original.codexThreadId, undefined);
         writeFileSync(join(original.git.worktree, "prior.txt"), "Preserved");
-        const peer = await start("early-peer-" + autoMode);
+        const peer = await start("early-peer-" + profile);
         await peer.ask({ action: "launch", id });
         assert.equal(await peer.ask({ action: "executorBinding", id }), undefined, "a live launch owns the shared slot");
         assert.ok(await peer.ask({ action: "reserve", role: "executor", task: "fixture-holder" }));
@@ -255,22 +261,37 @@ if (!process.versions.electron) {
         assert.equal(show(id).codexThreadId, undefined);
         const failedTree = show(failed).git.worktree;
         git("worktree", "remove", failedTree);
-        if (autoMode) await exitWorker(peer);
-        const reopened = await start("early-reopened-" + autoMode);
+        if (!occupied) await exitWorker(peer);
+        const reopened = await start("early-reopened-" + profile);
         await reopened.ask({ action: "newWindow" });
-        if (!autoMode) {
+        if (occupied) {
           await wait(async () => (await reopened.ask({ action: "frames" })).every(frame =>
             frame.waitingTasks.includes(id) && !frame.waitingTasks.includes(legacy) && !frame.waitingTasks.includes(stopped)),
           "queue visible in both windows");
-          await wait(async () => (await reopened.ask({ action: "dom" })).every(frame => frame.waiting), "visible hourglasses");
-          if (output) {
+          const waitingCard = { action: "dom", title: "Recover first launch" };
+          await wait(async () => (await reopened.ask(waitingCard)).every(frame => frame.waiting), "visible hourglasses");
+          const pending = queue(id);
+          const beforeComment = show(id);
+          const comment = "Keep the pending first launch";
+          const commented = cli(project, ["comment", id], { actor: "user", text: comment });
+          assert.equal(commented.revision, beforeComment.revision + 1);
+          assert.equal(commented.status, "in_progress");
+          await wait(async () => (await reopened.ask({ action: "frames" })).every(frame =>
+            frame.board?.tasks.some(task => task.id === id && task.revision === commented.revision)),
+          "comment revision visible in both windows");
+          const frames = await reopened.ask({ action: "frames" });
+          assert.ok(frames.every(frame => frame.waitingTasks.includes(id)), "a comment must preserve the queued launch");
+          await wait(async () => (await reopened.ask(waitingCard)).every(frame => frame.waiting), "hourglasses remain after the comment");
+          assert.deepEqual(queue(id), pending);
+          record(`PASS waiting after comment, autoMode=${autoMode}, revision ${commented.revision}`);
+          if (output && !autoMode) {
             mkdirSync(output, { recursive: true });
             const viewport = await reopened.ask({ action: "screenshot", path: join(output, "early-launch-queue.png"), earlyViewport: true });
             record("CSS viewport: " + JSON.stringify(viewport));
           }
           await peer.ask({ action: "release", role: "executor", task: "fixture-holder" });
         }
-        const owners = autoMode ? [reopened] : [peer, reopened];
+        const owners = occupied ? [peer, reopened] : [reopened];
         const activeOwner = async task => {
           const stoppedControls = await Promise.all(owners.map(worker => worker.ask({ action: "canStop", id: task })));
           return owners[stoppedControls.indexOf(true)];
@@ -310,8 +331,8 @@ if (!process.versions.electron) {
         const { electron, chrome, node } = await reopened.ask({ action: "versions" });
         record(JSON.stringify({ platform: process.platform, electron, chrome, node }));
         await exitWorker(reopened);
-        if (!autoMode) await exitWorker(peer);
-        record(`PASS early launch, autoMode=${autoMode}: one first turn, original worktree, stop, missing worktree and explicit legacy retry`);
+        if (occupied) await exitWorker(peer);
+        record(`PASS early launch, autoMode=${autoMode}, occupied=${occupied}: one first turn, original worktree, stop, missing worktree and explicit legacy retry`);
       }
       break checks;
     }
@@ -1179,10 +1200,13 @@ if (!process.versions.electron) {
       if (command.action === "newWindow") { const state = qa.createWindow([project]); await state.ready; data = true; }
       if (command.action === "compactWindows") for (const win of BrowserWindow.getAllWindows()) win.setSize(700, 550);
       if (command.action === "dom") {
-        data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript(`({
-          count: Number(document.querySelector('#status-agents span')?.textContent),
-          waiting: Boolean(document.querySelector('.task-card .task-queue-indicator'))
-        })`)));
+        data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript(`(() => {
+          const title = ${JSON.stringify(command.title ?? null)};
+          const cards = [...document.querySelectorAll('.task-card')];
+          const waiting = cards.some(card =>
+            (!title || card.querySelector('strong')?.textContent === title) && card.querySelector('.task-queue-indicator'));
+          return { count: Number(document.querySelector('#status-agents span')?.textContent), waiting };
+        })()`)));
       }
       if (command.action === "order") data = await Promise.all(BrowserWindow.getAllWindows().map(win => win.webContents.executeJavaScript(`(() => {
         const titles = state => [...document.querySelectorAll('#lane-cards-' + state + ' .task-card-heading strong')].map(node => node.textContent);

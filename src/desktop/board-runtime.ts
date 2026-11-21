@@ -167,6 +167,12 @@ export function matchesQueuedExecutor(entry: RuntimeEntry, task: QueuedTask) {
   if (entry.kind !== "queue" || entry.task !== task.id || task.status !== "in_progress") return false;
   if (entry.reviewReturn) return task.reviewReturn !== undefined && entry.revision === task.reviewReturn;
   if (entry.restart) return entry.restart.threadId === task.codexThreadId && (entry.revision ?? Infinity) <= task.revision;
+  if (entry.earlyLaunch) {
+    // The revision is the first card snapshot covered by this launch.
+    // Comments and other edits may advance it while the task stays in progress.
+    return entry.revision !== undefined && entry.revision <= task.revision &&
+      (task.codexThreadId === undefined || task.codexThreadId === entry.linkedThread?.codexThreadId);
+  }
   return entry.revision === task.revision || (entry.linkedThread?.revision === task.revision &&
     entry.linkedThread.codexThreadId === task.codexThreadId);
 }
@@ -175,9 +181,9 @@ export function linkQueuedExecutor(project: string, task: QueuedTask, updated: Q
   return runtimeTransaction(project, entries => {
     const entry = entries.find(entry => matchesQueuedExecutor(entry, task));
     if (!entry) return false;
-    // Publish both revisions before saving the card, so either snapshot survives a crash.
+    // Publish the chat binding before saving the card, so either snapshot survives a crash.
     if (!entry.reviewReturn && updated.revision !== task.revision && updated.codexThreadId) {
-      entry.revision = task.revision;
+      if (!entry.earlyLaunch) entry.revision = task.revision;
       entry.linkedThread = { revision: updated.revision, codexThreadId: updated.codexThreadId };
     }
     return true;
