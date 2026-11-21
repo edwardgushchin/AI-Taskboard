@@ -560,7 +560,7 @@ export function boardActions(project: string, attachments: { path: string; name:
       if (!result.ok) return result;
       const current = await callCli<{ settings: BoardSettings; tasks: (Task & { unfinishedDependencies?: string[]; mergeRepair?: boolean })[] }>(project, ["list", "--compact"]);
       if (!current.ok) return current;
-      const release = current.data.settings.autoMode ? earliestOpenRelease(current.data.tasks, Date.now()) : undefined;
+      const release = current.data.settings.autoMode ? earliestOpenRelease(current.data.tasks) : undefined;
       return { ok: true, data: {
         enabled: current.data.settings.autoMode ?? false, reviewMode: boardReviewMode(current.data.settings),
         queue: autoQueueSettings(current.data.settings),

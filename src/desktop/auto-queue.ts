@@ -18,7 +18,7 @@ export function compareReadyTasks(a: QueueTask, b: QueueTask, milestoneDates: Re
 export function launchableTasks<T extends QueueTask>(tasks: T[], now: number, queue?: BoardSettings["autoQueue"],
   boardTasks: readonly QueueTask[] = tasks) {
   if (queue?.paused) return [];
-  const release = earliestOpenRelease(boardTasks, now);
+  const release = earliestOpenRelease(boardTasks);
   return tasks.filter(task => task.status === "ready" && !queue?.held.includes(task.id) && !releaseWait(task, release) &&
     !task.unfinishedDependencies?.length && (!task.schedule || (!task.schedule.paused && Date.parse(task.schedule.nextAt) <= now)));
 }

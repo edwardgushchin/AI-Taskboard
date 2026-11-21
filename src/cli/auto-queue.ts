@@ -12,12 +12,10 @@ function releaseVersion(task: ReleaseTask) {
   return task.milestone && semver.valid(task.milestone.title);
 }
 
-export function earliestOpenRelease(tasks: Iterable<ReleaseTask>, now: number) {
+export function earliestOpenRelease(tasks: Iterable<ReleaseTask>) {
   let earliest: { version: string; taskIds: string[] } | undefined;
   for (const task of tasks) {
-    if (task.status === "draft" || task.status === "done" || task.status === "cancelled") continue;
-    if (task.status === "ready" && task.schedule &&
-        (task.schedule.paused || Date.parse(task.schedule.nextAt) > now)) continue;
+    if (task.schedule || task.status === "draft" || task.status === "done" || task.status === "cancelled") continue;
 
     const version = releaseVersion(task);
     if (!version) continue;
@@ -109,7 +107,7 @@ export function requireAutoQueue(settings: BoardSettings, id: string, revision?:
 export function requireReleaseTurn(store: BoardStore, task: ReleaseTask) {
   if (task.status !== "ready" || task.schedule || task.launchRequested || task.mergeRepair || !releaseVersion(task)) return;
   const cards = Object.keys(store.index.tasks).map(id => store.card(id));
-  const waiting = releaseWait(task, earliestOpenRelease(cards, Date.now()));
+  const waiting = releaseWait(task, earliestOpenRelease(cards));
   if (waiting) {
     throw new TaskboardError("AUTO_RELEASE_WAIT", "Automatic launch is waiting for release " + waiting.version + ".", waiting);
   }

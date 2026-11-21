@@ -103,7 +103,7 @@ test("open release work holds later ordinary starts while independent launch pat
   earlier.status = "ready";
   earlier.unfinishedDependencies = [later.id];
   const tasks = [earlier, later];
-  assert.deepEqual(releaseWait(later, earliestOpenRelease(tasks, now)), { version: "0.1.2-alpha", taskIds: [earlier.id] });
+  assert.deepEqual(releaseWait(later, earliestOpenRelease(tasks)), { version: "0.1.2-alpha", taskIds: [earlier.id] });
   assert.equal(nextReadyTask(tasks, new Map(), () => false, now), undefined);
   const requested = { ...later, launchRequested: true };
   assert.equal(nextReadyTask([earlier, requested], new Map(), () => false, now), requested);
@@ -139,25 +139,37 @@ test("the goal reserves ordinary cards that pass the same release gate as dispat
   early.schedule = { everyMinutes: 60, nextAt: new Date(now).toISOString(), paused: true };
   assert.equal(countReady(), 2, "a paused early schedule does not hold the ordinary late task");
   early.schedule = { everyMinutes: 60, nextAt: new Date(now).toISOString() };
-  assert.equal(countReady(), 1, "a due early schedule holds the ordinary late task without joining the reserve");
-  assert.equal(nextReadyTask(planned.filter(card => !card.schedule), new Map(), () => false, now, undefined, board)?.id,
-    unversioned.id);
+  assert.equal(countReady(), 2, "a due early schedule leaves the ordinary late task eligible");
+  assert.equal(releaseWait(late, earliestOpenRelease(board)), undefined);
 });
 
-test("an early schedule can leave three ordinary cards available at a reserve threshold of four", () => {
+test("an early schedule becoming due leaves both reserve rules and ordinary dispatch unchanged", () => {
+  const due = 1_000;
   const release = { ...milestone(1), title: "0.1.2-alpha" };
-  const schedule = task("T-0001", { milestone: release, schedule: {
-    everyMinutes: 60,
-    nextAt: new Date(1_000).toISOString(),
-  } });
+  const rule = { everyMinutes: 60, nextAt: new Date(due).toISOString() };
+  const schedule = task("T-0001", { milestone: release, schedule: rule });
   const early = ["T-0002", "T-0003", "T-0004"].map(id => task(id));
   const later = task("T-0005", { milestone: { ...milestone(2), title: "0.1.3-alpha" } });
-  const ordinary = [...early, later];
-  const cards = [schedule, ...ordinary];
-  const reserve = () => goalQueueCondition(cards, cards, new Set(), 2, 1_000);
-  assert.equal(reserve().ready, 3);
-  assert.ok(reserve().waitFor);
-  schedule.schedule!.paused = true;
-  assert.equal(reserve().ready, 4);
-  assert.equal(reserve().waitFor, undefined);
+  for (const ordinary of [early, [...early, later]]) {
+    const cards = [schedule, ...ordinary];
+    for (const target of [undefined, 4]) {
+      const reserve = (now: number) => goalQueueCondition(cards, cards, new Set(), 2, now, undefined, target);
+      schedule.status = "ready";
+      schedule.schedule = rule;
+      const before = reserve(due - 1);
+      assert.equal(before.ready, ordinary.length);
+      assert.equal(Boolean(before.waitFor), ordinary.length < 4);
+      assert.deepEqual(reserve(due), before);
+      assert.equal(nextReadyTask([schedule], new Map(), () => false, due - 1, undefined, cards), undefined);
+      assert.equal(nextReadyTask([schedule], new Map(), () => false, due, undefined, cards), schedule);
+
+      schedule.status = "in_progress";
+      assert.deepEqual(reserve(due + 1), before);
+      schedule.status = "ready";
+      schedule.schedule = { ...rule, paused: true };
+      assert.deepEqual(reserve(due + 1), before);
+      assert.equal(nextReadyTask([schedule], new Map(), () => false, due + 1, undefined, cards), undefined);
+      assert.equal(releaseWait(later, earliestOpenRelease(cards)), undefined);
+    }
+  }
 });
