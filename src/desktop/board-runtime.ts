@@ -12,7 +12,7 @@ const context = new AsyncLocalStorage<string>();
 export interface RuntimeEntry {
   id: string;
   owner: number;
-  kind: "slot" | "provider" | "turn" | "task" | "defaults" | "queue";
+  kind: "slot" | "provider" | "turn" | "task" | "defaults" | "queue" | "executor-release";
   role?: keyof AgentLimits;
   task?: string;
   operation?: "maintenance" | "acceptanceRepair" | "managerReview" | "mergeRepair";
@@ -43,6 +43,7 @@ export interface RuntimeEntry {
     goalRunning?: boolean;
   };
   startedAt?: number;
+  releasedAt?: number;
 }
 
 function alive(pid: number) {
@@ -77,7 +78,8 @@ function liveEntries(entries: RuntimeEntry[]) {
       entry = entries.find(candidate => candidate.id === entry!.parent);
     }
   }
-  const live = entries.filter(entry => entry.kind === "defaults" || entry.kind === "queue" ? true : entry.kind === "provider"
+  const live = entries.filter(entry => entry.kind === "defaults" || entry.kind === "queue" || entry.kind === "executor-release"
+    ? true : entry.kind === "provider"
     ? providers.has(entry)
     : isAlive(entry.owner) || protectedIds.has(entry.id) || (entry.parent && protectedIds.has(entry.parent)));
   const retained = new Set(live);
@@ -257,6 +259,12 @@ export function registerRuntime(project: string, value: Omit<RuntimeEntry, "id" 
     const index = entries.findIndex(entry => entry.id === id);
     if (index >= 0) {
       const [entry] = entries.splice(index, 1);
+      if (entry.kind === "slot" && entry.role === "executor") {
+        // Keep one receipt even if acquire and release happen between dispatcher passes.
+        const previous = entries.findIndex(candidate => candidate.kind === "executor-release");
+        if (previous >= 0) entries.splice(previous, 1);
+        entries.push({ id: "executor-release:" + entry.id, owner: 0, kind: "executor-release", releasedAt: Date.now() });
+      }
       if (restart === "quota") {
         const queued = entries.find(candidate => candidate.kind === "queue" && candidate.task === entry.task);
         if (queued) {

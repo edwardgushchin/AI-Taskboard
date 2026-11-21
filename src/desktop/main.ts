@@ -62,7 +62,7 @@ import { goalActionTools, runGoalAction } from "./goal-actions.ts";
 import { readManagerImage, saveManagerImage } from "./manager-images.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
 import { createAgentSlots, desktopAppName, parseAgentLimits, readProfileTaskLimits } from "./agent-limits.ts";
-import { advanceInterval, goalQueueCondition, intervalDeadline, iterativeEnabled, ownerIterationDirective,
+import { acknowledgeInterval, goalQueueCondition, intervalDeadline, iterativeEnabled, ownerIterationDirective,
   goalEventConditions, goalReserveTarget, normalizeGoalRules, readIterativeGoal, saveIterativeGoal,
   type GoalReason, type IterativeGoalState } from "./iterative-goal.ts";
 import type { taskActivity } from "../cli/task-activity.ts";
@@ -1531,6 +1531,7 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
         } else if (!backgroundManagerRequests.has(key) && !boardGoalResumes.has(key) && !boardGoalClears.has(key)) {
           const entries = agentSlots.entries(project);
           const executorSlots = entries.filter(entry => entry.kind === "slot" && entry.role === "executor");
+          const executorRelease = entries.find(entry => entry.kind === "executor-release");
           const occupied = new Set(executorSlots
             .flatMap(entry => entry.task ? [entry.task] : []));
           const limit = board.settings.taskLimits?.executor ?? agentSlots.inherited(project).executor;
@@ -1554,8 +1555,10 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
           if (due !== undefined) reasons.unshift({ kind: "interval" });
           const reserveEpoch = Math.max(epoch, state.observingSince ?? 0);
           const resetReserve = state.reserveEpoch !== undefined && state.reserveEpoch !== reserveEpoch;
-          const reserveDue = waitFor && !resetReserve &&
-            (state.waitFor !== waitFor || freeExecutorSlots > (state.freeExecutorSlots ?? limit));
+          const slotReleased = freeExecutorSlots > 0 && executorRelease &&
+            (executorRelease.releasedAt ?? 0) > reserveEpoch && executorRelease.id !== state.executorReleaseId;
+          const reserveDue = waitFor && (slotReleased || (!resetReserve &&
+            (state.waitFor !== waitFor || freeExecutorSlots > (state.freeExecutorSlots ?? limit))));
           if (reserveDue && ready !== undefined && target !== undefined) {
             reasons.push({ kind: "reserve", ready, target, freeExecutorSlots });
           }
@@ -1573,6 +1576,7 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
               undefined, false, undefined, undefined, {
                 id: iterativeId, waitFor, questions: questionKeys, due, reasons,
                 snapshot: state, epoch, handled: events?.handled, freeExecutorSlots, reserveEpoch,
+                executorReleaseId: executorRelease?.id,
               }).then(result => {
                 if (result.ok && result.data?.error) failed(result.data.error);
                 if (!result.ok && !["BOARD_REQUEST_IN_PROGRESS", "BOARD_BUSY", "AUTO_MODE_DISABLED", "PROVIDER_QUOTA"]
@@ -1587,7 +1591,7 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
                 if (JSON.stringify(current) === JSON.stringify(state)) {
                   saveIterativeGoal(project, {
                     ...current, waitFor: resetReserve ? waitFor : waitFor ? current.waitFor : undefined,
-                    freeExecutorSlots, reserveEpoch,
+                    freeExecutorSlots, reserveEpoch, executorReleaseId: executorRelease?.id,
                   });
                 }
               } finally {
@@ -2443,7 +2447,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   notice: boolean | ReturnType<typeof pendingReviewApprovals> = false, repairTask?: Task, cleanupJob?: MaintenanceJob,
   iteration?: { id: string; waitFor?: string; questions: string[]; due?: number; reasons?: GoalReason[];
     snapshot?: IterativeGoalState; epoch?: number; handled?: IterativeGoalState["handled"]; freeExecutorSlots?: number;
-    reserveEpoch?: number }) {
+    reserveEpoch?: number; executorReleaseId?: string }) {
   const autoNotice = notice === true;
   const approvalNotices = Array.isArray(notice) ? notice : undefined;
   if (applicationUpdates.installing) {
@@ -3301,21 +3305,12 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
             if (iteration.epoch !== undefined && iteration.epoch !== (settings.autoModeEnabledAt ?? 0)) {
               throw new Error("The automatic dispatch period changed.");
             }
-            const deadline = intervalDeadline(before, settings.autoModeEnabledAt ?? 0);
-            const now = Date.now();
-            let nextAt = before.nextAt;
-            if (before.intervalMs) {
-              if (deadline !== undefined && deadline <= now) {
-                nextAt = advanceInterval(deadline, before.intervalMs, now);
-              } else if (!questions.length && !iteration.reasons?.some(reason => reason.kind !== "interval")) {
-                throw new Error("The interval is no longer due.");
-              }
-            }
+            const nextAt = acknowledgeInterval(before, settings.autoModeEnabledAt ?? 0, iteration.due, Date.now());
             // Keep the receipt once Codex may have received the request, unless it explicitly rejects the start.
             saveIterativeGoal(project, {
               ...before, waitFor: iteration.waitFor, questions: [...before.questions, ...questions], retryAt: undefined,
               nextAt, handled: iteration.handled ?? before.handled, freeExecutorSlots: iteration.freeExecutorSlots,
-              reserveEpoch: iteration.reserveEpoch,
+              reserveEpoch: iteration.reserveEpoch, executorReleaseId: iteration.executorReleaseId,
               lastRun: iteration.reasons ?? before.lastRun,
             });
           }, 0);

@@ -37,6 +37,7 @@ export type IterativeGoalState = {
   observingSince?: number;
   handled?: Record<string, { at: number; task: string; sequence: number }>;
   freeExecutorSlots?: number;
+  executorReleaseId?: string;
   reserveEpoch?: number;
   lastRun?: GoalReason[];
 };
@@ -52,6 +53,14 @@ export function intervalDeadline(state: IterativeGoalState, resumedAt: number) {
 
 export function advanceInterval(nextAt: number, intervalMs: number, now: number) {
   return nextAt + (1 + Math.floor((now - nextAt) / intervalMs)) * intervalMs;
+}
+
+export function acknowledgeInterval(state: IterativeGoalState, resumedAt: number, due: number | undefined, now: number) {
+  if (due === undefined) return state.nextAt;
+  if (!state.intervalMs || intervalDeadline(state, resumedAt) !== due || due > now) {
+    throw new Error("The interval is no longer due.");
+  }
+  return advanceInterval(due, state.intervalMs, now);
 }
 
 // Normalize through a single schema before comparing the tool call to the owner's text.
@@ -219,7 +228,7 @@ export function saveIterativeGoal(project: string, state: IterativeGoalState) {
 
 export function goalQueueCondition(tasks: QueueTask[], planned: QueueTask[], occupied: ReadonlySet<string>,
   limit: number, now: number, controls?: BoardSettings["autoQueue"], target = 2 * (limit || 1)) {
-  const ready = launchableTasks(planned.filter(task => !task.schedule), now, controls, tasks.filter(task => !task.schedule))
+  const ready = launchableTasks(planned.filter(task => !task.schedule), now, controls, tasks)
     .filter(task => !occupied.has(task.id));
   if (controls?.paused || ready.length >= target) return { ready: ready.length, target };
   const available = new Set(ready.map(task => task.id));

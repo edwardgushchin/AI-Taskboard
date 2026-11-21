@@ -39,7 +39,7 @@ import { goalActionTools, runGoalAction } from "../src/desktop/goal-actions.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { autoQueueSettings, earliestOpenRelease, releaseWait, updateAutoQueue } from "../src/cli/auto-queue.ts";
 import { nextReadyTask } from "../src/desktop/auto-queue.ts";
-import { advanceInterval, goalQueueCondition, intervalDeadline, iterativeEnabled, ownerIterationDirective,
+import { acknowledgeInterval, advanceInterval, goalQueueCondition, intervalDeadline, iterativeEnabled, ownerIterationDirective,
   goalEventConditions, goalReserveTarget, normalizeGoalRules, readIterativeGoal, saveIterativeGoal } from "../src/desktop/iterative-goal.ts";
 import { automationDelivery, pendingReviewApprovals } from "../src/desktop/automation-delivery.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
@@ -152,7 +152,7 @@ function fixture(t: TestContext) {
     get quotaWait() { return quotaPaused ? {} : undefined; },
     quotaInterruption: new Error("Fixture quota pause"), refreshQuota: async () => [],
     currentActiveGoal: activeManagerGoal, managerGoalBinding,
-    advanceInterval, intervalDeadline, iterativeEnabled, ownerIterationDirective, normalizeGoalRules, readIterativeGoal, saveIterativeGoal,
+    acknowledgeInterval, intervalDeadline, iterativeEnabled, ownerIterationDirective, normalizeGoalRules, readIterativeGoal, saveIterativeGoal,
     applicationUpdates, applicationUpdateTools, updateOwner: undefined, updateProject: undefined,
     scheduleAutoBoard: () => {}, scheduleDraftDiscussions: () => {},
     activeRunSummary, discussionActivityByTask: new Map(), runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
@@ -979,17 +979,23 @@ test("the goal dispatcher wakes when release order leaves its ready queue below 
   const errors: string[] = [];
   let state: ReturnType<typeof readIterativeGoal> = { goalId, questions: [] };
   let slots: { kind: string; role: string; task: string }[] = [];
+  let executorRelease: { kind: string; id: string; releasedAt: number } | undefined;
   let active = true;
   let automationPaused = false;
+  const goalWork = new Map();
   const runtime = runInNewContext(dispatcherSource + "\n({ scheduleAutoBoard, autoBoards })", {
     applicationUpdates: { installing: false }, quotaWait: undefined, closingProjects: new Set(),
     subscriptions: new Map([[project, watch]]), isManual, taskReviewMode, usesIndependentReviewer,
     nextReadyTask, pendingReviewApprovals, projectIdentity: (key: string) => key,
-    agentSlots: { entries: () => slots, available: () => !automationPaused, claim: () => () => {} },
+    agentSlots: {
+      entries: () => executorRelease ? [...slots, executorRelease] : slots,
+      available: () => !automationPaused,
+      claim: () => () => {},
+    },
     currentActiveGoal: () => active ? goalId : undefined, readBoardThread: () => ({ id: goalId }), boardThreadPath: () => project,
     goalMessages: () => [], goalQueueCondition, goalEventConditions, goalReserveTarget, iterativeEnabled, intervalDeadline,
     readIterativeGoal: () => state, saveIterativeGoal: (_project: string, next: typeof state) => { state = next; },
-    boardWorkRequests: new Map(), boardRequests: new Map(), backgroundManagerRequests: new Map(),
+    boardWorkRequests: goalWork, boardRequests: new Map(), backgroundManagerRequests: new Map(),
     boardGoalResumes: new Set(), boardGoalClears: new Set(), executorBusy: () => false,
     broadcastBoardChat: (_project: string, _event: string, { error }: { error: string }) => {
       errors.push(error);
@@ -1005,10 +1011,12 @@ test("the goal dispatcher wakes when release order leaves its ready queue below 
       const { ready, target, freeExecutorSlots, reasons } = JSON.parse(prompt.slice(prompt.indexOf("{")));
       turns.push({ ready, target, freeExecutorSlots });
       turnReasons.push(reasons);
-      const receipt = args[12] as Pick<typeof state, "waitFor" | "handled" | "freeExecutorSlots" | "reserveEpoch"> & { due?: number };
+      const receipt = args[12] as Pick<typeof state, "waitFor" | "handled" | "freeExecutorSlots" | "reserveEpoch" |
+        "executorReleaseId"> & { due?: number };
       state = {
         ...state, waitFor: receipt.waitFor, handled: receipt.handled,
         freeExecutorSlots: receipt.freeExecutorSlots, reserveEpoch: receipt.reserveEpoch,
+        executorReleaseId: receipt.executorReleaseId,
       };
       if (receipt.due !== undefined && state.intervalMs) {
         state.nextAt = advanceInterval(receipt.due, state.intervalMs, Date.now());
@@ -1072,6 +1080,18 @@ test("the goal dispatcher wakes when release order leaves its ready queue below 
   await tick();
   assert.equal(turns.length, 4, "the next release in the active period wakes once");
 
+  goalWork.set(project, { changingGoal: true });
+  slots = [{ kind: "slot", role: "executor", task: later[0].id }];
+  await tick();
+  slots = [];
+  executorRelease = { kind: "executor-release", id: "short-executor", releasedAt: Date.now() };
+  await tick();
+  assert.equal(turns.length, 4, "no second turn runs concurrently with the goal");
+  goalWork.delete(project);
+  await tick();
+  await tick();
+  assert.equal(turns.length, 5, "the saved release wakes once even though both slot snapshots matched");
+
   board.settings.autoModeEnabledAt = 0;
   state = {
     goalId, questions: [], intervalMs: 60_000, nextAt: Date.now() - 1,
@@ -1081,11 +1101,11 @@ test("the goal dispatcher wakes when release order leaves its ready queue below 
   watch.tabs.add({ window: { isDestroyed: () => false, webContents: {} } });
   runtime.scheduleAutoBoard(watch);
   await tick();
-  assert.equal(turns.length, 5);
+  assert.equal(turns.length, 6);
   assert.deepEqual(turnReasons.at(-1), [{ kind: "interval" }, { kind: "blocked", scope: early.id }]);
   state = JSON.parse(JSON.stringify(state));
   await tick();
-  assert.equal(turns.length, 5, "reading the saved receipt suppresses repeat delivery");
+  assert.equal(turns.length, 6, "reading the saved receipt suppresses repeat delivery");
 });
 
 test("internal queue wakes preserve sequential questions through the manager inbox", async t => {

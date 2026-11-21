@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { advanceInterval, goalEventConditions, goalQueueCondition, goalReserveTarget, intervalDeadline,
+import { acknowledgeInterval, advanceInterval, goalEventConditions, goalQueueCondition, goalReserveTarget, intervalDeadline,
   normalizeGoalRules, ownerIterationDirective, type IterativeGoalState } from "../src/desktop/iterative-goal.ts";
 import { taskActivity } from "../src/cli/task-activity.ts";
 import type { TaskEvent } from "../src/cli/model.ts";
+
+test("an event-only turn leaves an interval that falls due before turn start available to the next turn", () => {
+  const state = { goalId: "goal", questions: [], intervalMs: 1000, nextAt: 2000 };
+  assert.equal(acknowledgeInterval(state, 0, undefined, 2100), 2000);
+  assert.equal(acknowledgeInterval(state, 0, 2000, 2100), 3000);
+  assert.throws(() => acknowledgeInterval(state, 1600, 2000, 2100), /no longer due/);
+});
 
 test("the explicit owner directive authorizes the exact multiplier and supports correction", () => {
   const command = "Включи итеративный режим и настрой правило: если число карточек, доступных к запуску, меньше общего лимита исполнителей, умноженного на ";

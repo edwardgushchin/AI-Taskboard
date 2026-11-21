@@ -116,7 +116,7 @@ test("open release work holds later ordinary starts while independent launch pat
   }
 });
 
-test("the goal counts ordinary starts using the ordinary cards' release order", () => {
+test("the goal reserves ordinary cards that pass the same release gate as dispatch", () => {
   const now = Date.parse("2026-11-21T00:00:00Z");
   const early = task("T-0001", {
     status: "review",
@@ -139,5 +139,25 @@ test("the goal counts ordinary starts using the ordinary cards' release order", 
   early.schedule = { everyMinutes: 60, nextAt: new Date(now).toISOString(), paused: true };
   assert.equal(countReady(), 2, "a paused early schedule does not hold the ordinary late task");
   early.schedule = { everyMinutes: 60, nextAt: new Date(now).toISOString() };
-  assert.equal(countReady(), 2, "a due early schedule does not hold the ordinary late task");
+  assert.equal(countReady(), 1, "a due early schedule holds the ordinary late task without joining the reserve");
+  assert.equal(nextReadyTask(planned.filter(card => !card.schedule), new Map(), () => false, now, undefined, board)?.id,
+    unversioned.id);
+});
+
+test("an early schedule can leave three ordinary cards available at a reserve threshold of four", () => {
+  const release = { ...milestone(1), title: "0.1.2-alpha" };
+  const schedule = task("T-0001", { milestone: release, schedule: {
+    everyMinutes: 60,
+    nextAt: new Date(1_000).toISOString(),
+  } });
+  const early = ["T-0002", "T-0003", "T-0004"].map(id => task(id));
+  const later = task("T-0005", { milestone: { ...milestone(2), title: "0.1.3-alpha" } });
+  const ordinary = [...early, later];
+  const cards = [schedule, ...ordinary];
+  const reserve = () => goalQueueCondition(cards, cards, new Set(), 2, 1_000);
+  assert.equal(reserve().ready, 3);
+  assert.ok(reserve().waitFor);
+  schedule.schedule!.paused = true;
+  assert.equal(reserve().ready, 4);
+  assert.equal(reserve().waitFor, undefined);
 });
