@@ -116,7 +116,7 @@ test("open release work holds later ordinary starts while independent launch pat
   }
 });
 
-test("the goal counts scheduled and unversioned starts using the full board's release order", () => {
+test("the goal counts ordinary starts using the ordinary cards' release order", () => {
   const now = Date.parse("2026-11-21T00:00:00Z");
   const early = task("T-0001", {
     status: "review",
@@ -131,11 +131,13 @@ test("the goal counts scheduled and unversioned starts using the full board's re
   const planned = [late, due, unversioned];
   const board = [early, ...planned];
   const countReady = () => goalQueueCondition(board, planned, new Set(), 2, now).ready;
-  assert.equal(countReady(), 2, "review blocks only the ordinary late release");
+  assert.equal(countReady(), 1, "review blocks the ordinary late release and a due schedule is excluded");
 
   early.status = "ready";
   early.schedule = { everyMinutes: 60, nextAt: new Date(now + 60_000).toISOString() };
-  assert.equal(countReady(), 3, "a future early release does not hold the ordinary late task");
+  assert.equal(countReady(), 2, "a future early schedule does not hold the ordinary late task");
   early.schedule = { everyMinutes: 60, nextAt: new Date(now).toISOString(), paused: true };
-  assert.equal(countReady(), 3, "a paused early schedule does not hold the ordinary late task");
+  assert.equal(countReady(), 2, "a paused early schedule does not hold the ordinary late task");
+  early.schedule = { everyMinutes: 60, nextAt: new Date(now).toISOString() };
+  assert.equal(countReady(), 2, "a due early schedule does not hold the ordinary late task");
 });

@@ -34,6 +34,7 @@ import { dependencyStatus, unfinishedDependencies, validateDependencies } from "
 import { checkoutTaskWorktree, cleanTaskWorktree, finishTaskStart, hasPending, inspectCleanup, prepareTaskStart, taskWithCurrentWorktree } from "./worktree.ts";
 import { artifactFiles, openReviewArtifact, readReviewArtifact } from "./artifacts.ts";
 import { acknowledgeTaskMessages, currentReviewApproval, managerInbox, sendTaskMessage, taskMessages } from "./task-messages.ts";
+import { taskActivity } from "./task-activity.ts";
 import packageInfo from "../../package.json" with { type: "json" };
 import { grantTaskTool, requestTaskTool } from "./task-tools.ts";
 import { recoverTestData } from "./test-recovery.ts";
@@ -115,6 +116,7 @@ function compactTask(task: Task) {
     dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, origin, launchRequested, discussionReturn: task.discussionReturn,
     awaitingAnswer: task.awaitingAnswer, reviewReturn: task.reviewReturn,
     draftDiscussion: status === "draft" ? task.draftDiscussion : undefined, historyLength: task.history.length,
+    activity: taskActivity(task),
     expertWorkPlanned: Boolean(task.expertTeam?.work?.lead || task.expertStage),
     expertReviewPlanned: Boolean(task.expertTeam?.review?.lead),
     ...(status === "review" && task.git?.submission && !task.result?.noChanges ? { reviewHasCommit: true } : {}),

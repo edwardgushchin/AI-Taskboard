@@ -6361,6 +6361,8 @@ let savingAutoMode = false;
 const autoModeSwitch = byId("auto-mode-switch");
 const goalHint = byId("iterative-goal-hint");
 const goalRule = byId("iterative-goal-rule");
+const goalEvents = byId("iterative-goal-events");
+const goalLastRun = byId("iterative-goal-last-run");
 
 function renderAutoMode() {
   const settings = frame.board?.settings;
@@ -6369,6 +6371,16 @@ function renderAutoMode() {
   autoModeSwitch.disabled = savingAutoMode;
   let rule = "";
   let hint;
+  const events = [];
+  let lastRun = "";
+  const formatDuration = milliseconds => {
+    const seconds = milliseconds / 1000;
+    const unit = seconds % 3600 === 0 ? "hour" : seconds % 60 === 0 ? "minute" : "second";
+    const divisor = { hour: 3600, minute: 60, second: 1 }[unit];
+    return new Intl.NumberFormat(localization.locale, { style: "unit", unit, unitDisplay: "long" })
+      .format(seconds / divisor);
+  };
+  const scopeLabel = scope => scope === "board" ? t("autoMode.eventBoard") : scope;
   const formatTime = value => new Date(value).toLocaleString(localization.locale, {
     ...(new Date(value).toDateString() === new Date().toDateString() ? {} : { dateStyle: "medium" }),
     timeStyle: "medium",
@@ -6378,14 +6390,29 @@ function renderAutoMode() {
   } else {
     rule = t(goal.enabled ? "autoMode.enabled" : "autoMode.disabled");
     if (goal.intervalMs) {
-      const seconds = goal.intervalMs / 1000;
-      const unit = seconds % 3600 === 0 ? "hour" : seconds % 60 === 0 ? "minute" : "second";
-      const divisor = { hour: 3600, minute: 60, second: 1 }[unit];
-      const duration = new Intl.NumberFormat(localization.locale, { style: "unit", unit, unitDisplay: "long" })
-        .format(seconds / divisor);
-      rule += " · " + t("autoMode.interval", { duration });
-    } else if (goal.enabled) {
+      rule += " · " + t("autoMode.interval", { duration: formatDuration(goal.intervalMs) });
+    } else if (goal.enabled && !goal.rules?.length) {
       rule += " · " + t("autoMode.queue");
+    }
+    for (const event of goal.rules ?? []) {
+      const scope = scopeLabel(event.scope);
+      if (event.kind === "reserve") {
+        const threshold = event.threshold === "multiplier" ? t("autoMode.eventMultiplier", {
+          value: event.value, target: event.value * goal.executorLimit,
+        }) : event.value;
+        events.push(t("autoMode.eventReserve", { scope, threshold }));
+      } else {
+        const label = t("autoMode.event." + event.kind);
+        events.push(scope + " — " + label + (event.kind === "idle" ? " " + formatDuration(event.durationMs) : ""));
+      }
+    }
+    if (goal.lastRun?.length) {
+      const reasons = goal.lastRun.map(reason => {
+        if (reason.kind === "reserve") return t("autoMode.reasonReserve", reason);
+        const label = t("autoMode.event." + reason.kind);
+        return reason.scope ? scopeLabel(reason.scope) + " — " + label : label;
+      });
+      lastRun = t("autoMode.lastRun", { reasons: reasons.join(" · ") });
     }
     const now = Date.now();
     if (goal.status === "paused") {
@@ -6403,14 +6430,24 @@ function renderAutoMode() {
     } else if (goal.retryAt > now) {
       hint = t("autoMode.retry", { time: formatTime(goal.retryAt) });
     } else if (goal.nextAt > now) {
-      hint = t("autoMode.next", { time: formatTime(goal.nextAt) });
+      hint = t(goal.rules?.length ? "autoMode.waitingOrInterval" : "autoMode.next", { time: formatTime(goal.nextAt) });
     } else {
-      hint = t(goal.intervalMs ? "autoMode.due" : "autoMode.waitingForWork");
+      hint = t(goal.intervalMs ? "autoMode.due" : goal.rules?.length ? "autoMode.waitingForEvent" : "autoMode.waitingForWork");
     }
   }
   if (goalRule.textContent !== rule) {
     goalRule.textContent = rule;
   }
+  if (JSON.stringify([...goalEvents.children].map(item => item.textContent)) !== JSON.stringify(events)) {
+    goalEvents.replaceChildren(...events.map(label => {
+      const item = document.createElement("li");
+      item.textContent = label;
+      return item;
+    }));
+  }
+  goalEvents.hidden = !events.length;
+  goalLastRun.hidden = !lastRun;
+  if (goalLastRun.textContent !== lastRun) goalLastRun.textContent = lastRun;
   if (goalHint.textContent !== hint) {
     goalHint.textContent = hint;
   }

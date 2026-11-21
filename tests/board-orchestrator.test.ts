@@ -40,7 +40,7 @@ import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { autoQueueSettings, earliestOpenRelease, releaseWait, updateAutoQueue } from "../src/cli/auto-queue.ts";
 import { nextReadyTask } from "../src/desktop/auto-queue.ts";
 import { advanceInterval, goalQueueCondition, intervalDeadline, iterativeEnabled, ownerIterationDirective,
-  readIterativeGoal, saveIterativeGoal } from "../src/desktop/iterative-goal.ts";
+  goalEventConditions, goalReserveTarget, normalizeGoalRules, readIterativeGoal, saveIterativeGoal } from "../src/desktop/iterative-goal.ts";
 import { automationDelivery, pendingReviewApprovals } from "../src/desktop/automation-delivery.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import { settingsDelivery, syncSettingsNotices } from "../src/desktop/settings-notices.ts";
@@ -152,7 +152,7 @@ function fixture(t: TestContext) {
     get quotaWait() { return quotaPaused ? {} : undefined; },
     quotaInterruption: new Error("Fixture quota pause"), refreshQuota: async () => [],
     currentActiveGoal: activeManagerGoal, managerGoalBinding,
-    advanceInterval, intervalDeadline, iterativeEnabled, ownerIterationDirective, readIterativeGoal, saveIterativeGoal,
+    advanceInterval, intervalDeadline, iterativeEnabled, ownerIterationDirective, normalizeGoalRules, readIterativeGoal, saveIterativeGoal,
     applicationUpdates, applicationUpdateTools, updateOwner: undefined, updateProject: undefined,
     scheduleAutoBoard: () => {}, scheduleDraftDiscussions: () => {},
     activeRunSummary, discussionActivityByTask: new Map(), runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
@@ -585,6 +585,31 @@ test("an explicit disable during a manual goal turn releases the manager afterwa
   assert.ok(!runtimeEntries(f.project).some(entry => entry.task === "manager:context"));
 });
 
+test("only the current owner objective authorizes the reserve rule", async t => {
+  const f = fixture(t);
+  assert.equal((await f.cli(["init"], { git: false })).ok, true);
+  const rules = [{ kind: "reserve", scope: "board", threshold: "multiplier", value: 2 }];
+  const command = "Включи итеративный режим и настрой правило: если число карточек, доступных к запуску, меньше общего лимита исполнителей, умноженного на 2, создай четыре карточки и жди";
+  for (const objective of ["Нужны четыре карточки", command]) {
+    const result = await f.run(objective, async (act, _prompt, _images, _id, _context, _waiting, _signal, goal) => {
+      assert.ok(goal);
+      goal.update({ objective, status: "active" });
+      goal.accepted();
+      const incorrect = await act("goal_configure_iteration", { rules: [{ ...rules[0], value: 3 }] });
+      assert.equal(incorrect.error.code, "USER_DIRECTION_REQUIRED");
+      const configured = await act("goal_configure_iteration", { enabled: true, rules });
+      if (objective === command) {
+        assert.equal(configured.ok, true, JSON.stringify(configured));
+        assert.deepEqual(JSON.parse(JSON.stringify(configured.data.rules)), rules);
+      } else {
+        assert.equal(configured.error.code, "USER_DIRECTION_REQUIRED");
+      }
+      return { text: "Checked rule authorization." };
+    }, [], true);
+    assert.equal(result.data?.answer, "Checked rule authorization.", JSON.stringify(result));
+  }
+});
+
 test("a goal controls the persistent automatic queue and receives live board changes", async t => {
   const f = fixture(t);
   assert.equal((await f.cli(["init"], { git: false })).ok, true);
@@ -938,8 +963,10 @@ test("the goal dispatcher wakes when release order leaves its ready queue below 
   }));
   const board = {
     project,
-    settings: { autoMode: true, reviewMode: "human", iterativeGoal: goalId, taskLimits: { executor: 1 } },
-    tasks: [early, ...later],
+    settings: { autoMode: true, autoModeEnabledAt: 0, reviewMode: "human", iterativeGoal: goalId, taskLimits: { executor: 1 } },
+    tasks: [early, ...later] as (typeof later[number] & {
+      activity?: { blocked?: { at: string; sequence: number } };
+    })[],
   };
   const watch = {
     board,
@@ -947,16 +974,21 @@ test("the goal dispatcher wakes when release order leaves its ready queue below 
     reviewerRuns: new Map(),
   };
   const turns: { ready: number; target: number; freeExecutorSlots: number }[] = [];
+  const turnReasons: { kind: string; scope?: string }[][] = [];
   const launches: string[] = [];
   const errors: string[] = [];
-  let waitFor: string | undefined;
+  let state: ReturnType<typeof readIterativeGoal> = { goalId, questions: [] };
+  let slots: { kind: string; role: string; task: string }[] = [];
+  let active = true;
+  let automationPaused = false;
   const runtime = runInNewContext(dispatcherSource + "\n({ scheduleAutoBoard, autoBoards })", {
     applicationUpdates: { installing: false }, quotaWait: undefined, closingProjects: new Set(),
     subscriptions: new Map([[project, watch]]), isManual, taskReviewMode, usesIndependentReviewer,
     nextReadyTask, pendingReviewApprovals, projectIdentity: (key: string) => key,
-    agentSlots: { entries: () => [], available: () => true, claim: () => undefined },
-    currentActiveGoal: () => goalId, readBoardThread: () => ({ id: goalId }), boardThreadPath: () => project,
-    goalMessages: () => [], goalQueueCondition, readIterativeGoal: () => ({ goalId, questions: [], waitFor }),
+    agentSlots: { entries: () => slots, available: () => !automationPaused, claim: () => () => {} },
+    currentActiveGoal: () => active ? goalId : undefined, readBoardThread: () => ({ id: goalId }), boardThreadPath: () => project,
+    goalMessages: () => [], goalQueueCondition, goalEventConditions, goalReserveTarget, iterativeEnabled, intervalDeadline,
+    readIterativeGoal: () => state, saveIterativeGoal: (_project: string, next: typeof state) => { state = next; },
     boardWorkRequests: new Map(), boardRequests: new Map(), backgroundManagerRequests: new Map(),
     boardGoalResumes: new Set(), boardGoalClears: new Set(), executorBusy: () => false,
     broadcastBoardChat: (_project: string, _event: string, { error }: { error: string }) => {
@@ -970,10 +1002,17 @@ test("the goal dispatcher wakes when release order leaves its ready queue below 
     runBoardRequest: async (...args: unknown[]) => {
       assert.equal(args[4], "iterate");
       const prompt = String(args[2]);
-      const { ready, target, freeExecutorSlots } = JSON.parse(prompt.slice(prompt.indexOf("{")));
+      const { ready, target, freeExecutorSlots, reasons } = JSON.parse(prompt.slice(prompt.indexOf("{")));
       turns.push({ ready, target, freeExecutorSlots });
-      waitFor = (args[12] as { waitFor: string }).waitFor;
-      assert.ok(waitFor);
+      turnReasons.push(reasons);
+      const receipt = args[12] as Pick<typeof state, "waitFor" | "handled" | "freeExecutorSlots" | "reserveEpoch"> & { due?: number };
+      state = {
+        ...state, waitFor: receipt.waitFor, handled: receipt.handled,
+        freeExecutorSlots: receipt.freeExecutorSlots, reserveEpoch: receipt.reserveEpoch,
+      };
+      if (receipt.due !== undefined && state.intervalMs) {
+        state.nextAt = advanceInterval(receipt.due, state.intervalMs, Date.now());
+      }
       return { ok: true };
     },
     launchTask: async (_project: string, id: string) => {
@@ -995,6 +1034,58 @@ test("the goal dispatcher wakes when release order leaves its ready queue below 
   await tick();
   assert.deepEqual(launches, ["T-0002"]);
   assert.equal(turns.length, 1);
+
+  automationPaused = true;
+  early.status = "blocked";
+  // Empty reserve. The in-progress card itself and the live slot have independent lifetimes.
+  board.tasks.splice(1, 2, { ...later[0], status: "in_progress" });
+  slots = [{ kind: "slot", role: "executor", task: later[0].id }];
+  await tick();
+  assert.equal(turns.length, 2);
+  assert.deepEqual(turns.at(-1), { ready: 0, target: 2, freeExecutorSlots: 0 });
+  slots = [];
+  await tick();
+  await tick();
+  assert.equal(turns.length, 3);
+  assert.deepEqual(turns.at(-1), { ready: 0, target: 2, freeExecutorSlots: 1 });
+
+  slots = [{ kind: "slot", role: "executor", task: later[0].id }];
+  await tick();
+  slots = [];
+  active = false;
+  await tick();
+  board.settings.autoMode = false;
+  active = true;
+  await tick();
+  assert.equal(turns.length, 3);
+
+  board.settings.autoMode = true;
+  board.settings.autoModeEnabledAt = Date.now();
+  await tick();
+  await tick();
+  assert.equal(turns.length, 3, "a slot released during a paused period is ignored on resume");
+
+  slots = [{ kind: "slot", role: "executor", task: later[0].id }];
+  await tick();
+  slots = [];
+  await tick();
+  await tick();
+  assert.equal(turns.length, 4, "the next release in the active period wakes once");
+
+  board.settings.autoModeEnabledAt = 0;
+  state = {
+    goalId, questions: [], intervalMs: 60_000, nextAt: Date.now() - 1,
+    rules: [{ kind: "blocked", scope: early.id }],
+  };
+  board.tasks[0].activity = { blocked: { at: new Date().toISOString(), sequence: 2 } };
+  watch.tabs.add({ window: { isDestroyed: () => false, webContents: {} } });
+  runtime.scheduleAutoBoard(watch);
+  await tick();
+  assert.equal(turns.length, 5);
+  assert.deepEqual(turnReasons.at(-1), [{ kind: "interval" }, { kind: "blocked", scope: early.id }]);
+  state = JSON.parse(JSON.stringify(state));
+  await tick();
+  assert.equal(turns.length, 5, "reading the saved receipt suppresses repeat delivery");
 });
 
 test("internal queue wakes preserve sequential questions through the manager inbox", async t => {
