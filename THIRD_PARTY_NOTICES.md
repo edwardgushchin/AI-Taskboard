@@ -89,7 +89,7 @@ SOFTWARE.
 
 Adapted from mthines/agent-skills, commit 12b508bf9f955a2ebf839ce02189768eaf8b5f64.
 Source: https://github.com/mthines/agent-skills/tree/12b508bf9f955a2ebf839ce02189768eaf8b5f64/skills/authoring/docs
-The material retains its MIT license; it is not covered by the project noncommercial restriction.
+The material retains its MIT license.
 
 MIT License
 

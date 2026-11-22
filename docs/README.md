@@ -16,7 +16,7 @@ AI Taskboard хранит задачи проекта локально и свя
 - [Состояния, настройки и CLI](reference/board.md).
 - [Работа агентов и документация](reference/agents.md).
 - [Архитектура и решения](explanation/architecture.md).
-- [Лицензия и коммерческое разрешение](../README.md#license-and-commercial-permission).
+- [Лицензия](../README.md#license).
 
 ## Помочь проекту
 

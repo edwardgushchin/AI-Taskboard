@@ -8,7 +8,7 @@
 - Share short, redacted excerpts or a reproduction with demo data. Remove API keys, tokens, private paths, chat content and project data from logs and screenshots. Follow the [security policy](SECURITY.md#english) to report vulnerabilities privately.
 - For a substantial change, discuss its scope in an issue first. Fork the repository, create a branch from `main`, and read [AGENTS.md](AGENTS.md) and the [development guide](docs/development.md). Keep the diff focused, update affected documentation and run the relevant checks.
 - Open a pull request against `main`. Link the related issue if there is one, describe what changed, and report the checks and their results. Include screenshots for visible UI changes using demo data.
-- Follow the [code of conduct](CODE_OF_CONDUCT.md) and read the [project license](LICENSE) and [required notice](NOTICE) before redistributing copies or modifications.
+- Follow the [code of conduct](CODE_OF_CONDUCT.md) and read the [MIT License](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md) before redistributing copies or modifications.
 
 ## Русский
 
@@ -16,4 +16,4 @@
 - Прикладывайте короткие выдержки с удалёнными частными сведениями или пример на демонстрационных данных. Уберите ключи API, токены, частные пути, переписку и данные проекта из логов и снимков. Сообщайте об уязвимостях приватно по инструкции в [политике безопасности](SECURITY.md#русский).
 - Существенные изменения сначала обсудите в issue. Создайте форк и ветку от `main`. Прочитайте [AGENTS.md](AGENTS.md) и [руководство разработчика](docs/how-to/development.md). Меняйте только то, что относится к задаче, обновляйте затронутую документацию и запускайте связанные проверки.
 - Откройте pull request в `main`. Укажите связанную задачу, если она есть, опишите правку и результаты проверок. Для видимых изменений интерфейса приложите снимки с демонстрационными данными.
-- Соблюдайте [правила поведения](CODE_OF_CONDUCT.md). Перед распространением копий или модификаций прочитайте [лицензию проекта](LICENSE) и [обязательное уведомление](NOTICE).
+- Соблюдайте [правила поведения](CODE_OF_CONDUCT.md). Перед распространением копий или модификаций прочитайте [лицензию MIT](LICENSE) и [уведомления о сторонних компонентах](THIRD_PARTY_NOTICES.md).
