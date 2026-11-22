@@ -804,6 +804,7 @@ function openSheet(kind, title) {
   byId("task-side").replaceChildren();
   if (typeof title === "function") bindLocalized(byId("sheet-title"), "textContent", title);
   else byId("sheet-title").textContent = title;
+  byId("task-retry-load")?.remove();
   body.replaceChildren();
   byId("sheet-notice").hidden = true;
   if (!sheet.open) {
@@ -4486,12 +4487,25 @@ async function showTask(id, dialogue = false) {
   if (!result.ok) {
     notice(boardError(result.error));
     if (loading) {
-      loading.replaceWith(button(() => t("ui.retry_loading_d44dbc69"), () => showTask(id)));
+      loading.replaceWith(button(() => t("ui.retry_loading_d44dbc69"), () => showTask(id, dialogue)));
+    } else if (!byId("task-retry-load")) {
+      const retry = button(() => t("ui.retry_loading_d44dbc69"), async () => {
+        if (retry.disabled) return;
+        retry.disabled = true;
+        try {
+          await showTask(id, dialogue);
+        } finally {
+          retry.disabled = false;
+        }
+      }, "quiet");
+      retry.id = "task-retry-load";
+      byId("close-sheet").before(retry);
     }
     return;
   }
   const task = result.data;
   const scroll = refresh ? body.scrollTop : 0;
+  const discussionHandoff = refresh ? byId("task-side").firstElementChild?.discussionHandoff : undefined;
   const focusedChat = refresh && document.activeElement.id === "task-chat-input" ? document.activeElement : undefined;
   const openDetails = new Set(refresh ? [...body.querySelectorAll(".task-details[open]")].map(details => details.id) : []);
   taskInSheet = task;
@@ -4662,7 +4676,7 @@ async function showTask(id, dialogue = false) {
   if (codexAction) actions.append(codexAction);
   body.append(actions);
   const side = byId("task-side");
-  side.replaceChildren(taskChat(task, renderStageWork));
+  side.replaceChildren(taskChat(task, renderStageWork, discussionHandoff));
   side.hidden = false;
   if (dialogue) {
     side.firstChild.openDialogue();
@@ -6579,6 +6593,7 @@ sheet.addEventListener("close", () => {
   if (sheet.open) return;
   chatPreviews.disconnect();
   byId("task-side").replaceChildren();
+  byId("task-retry-load")?.remove();
   taskSheetRequest++;
   sheetKind = "";
   taskInSheet = undefined;

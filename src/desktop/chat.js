@@ -613,7 +613,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
   }
 }
 
-function updateChat({ project, id, type, text, items, savedRun, runThreadId, goal, goalId, goalRunning, goalResuming, goalResumeWaiting, error, question, managerRun, managerWork, at }) {
+function updateChat({ project, id, type, text, items, savedRevision, savedRun, runThreadId, goal, goalId, goalRunning, goalResuming, goalResumeWaiting, error, question, managerRun, managerWork, at }) {
   if (type === "orchestrator-question") {
     if (frame.project === project) {
       frame.managerQuestion = question;
@@ -662,9 +662,17 @@ function updateChat({ project, id, type, text, items, savedRun, runThreadId, goa
   }
   if (type === "discussion" && frame.project === project) {
     const activity = frame.discussionActivity ??= {};
+    const previousItems = activity[id];
     if (items) activity[id] = items;
     else delete activity[id];
-    if (open) byId("task-side").firstElementChild?.updateDiscussion();
+    const panel = open && byId("task-side").firstElementChild;
+    if (panel) {
+      // The save receipt can arrive before the open panel has loaded that revision.
+      panel.discussionHandoff = savedRevision > taskInSheet.revision
+        ? { revision: savedRevision, items: previousItems ?? [] } : undefined;
+      panel.updateDiscussion();
+      if (panel.discussionHandoff) void protect(() => showTask(id))();
+    }
     return;
   }
   if (type === "run" && frame.project === project) {
@@ -989,7 +997,7 @@ function stageWork(task, panels) {
   };
 }
 
-function taskChat(task, renderStageWork) {
+function taskChat(task, renderStageWork, discussionHandoff) {
   const project = frame.project;
   const key = project + "\0" + task.id;
   const latestReply = task.history.findLast(event => event.chat && event.actor === "agent")?.chat;
@@ -1192,8 +1200,9 @@ function taskChat(task, renderStageWork) {
     renderLiveStageWork();
     if (!work.hidden) renderLiveWork();
   };
+  if (discussionHandoff?.revision > task.revision) area.discussionHandoff = discussionHandoff;
   area.updateDiscussion = () => {
-    const items = frame.discussionActivity?.[task.id];
+    const items = frame.discussionActivity?.[task.id] ?? area.discussionHandoff?.items;
     const savedReply = lastMessage?.actor === "agent" && items?.some(item =>
       item.type === "agentMessage" && item.phase === "final_answer" && item.at === lastMessage.at);
     renderChatTurn(list, draft, savedReply ? undefined : items, task.id);

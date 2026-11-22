@@ -1102,6 +1102,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
   let saved = request.retryAt !== undefined;
   let discussionStarted = false;
   let discussionFailure = t("draft_discussion.interrupted");
+  let savedDiscussionRevision: number | undefined;
   let managerReply: number | undefined;
   try {
     let { model, effort } = request;
@@ -1315,8 +1316,12 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       ...(inspectDraft ? { revision: replyTarget.revision } : {}),
       ...(automatic ? { draftDiscussion: true, managerReply } : {}),
     });
-    if (result.ok) discussionStarted = false;
-    else discussionFailure = result.error.message;
+    if (result.ok) {
+      discussionStarted = false;
+      savedDiscussionRevision = result.data.revision;
+    } else {
+      discussionFailure = result.error.message;
+    }
     return { saved, result };
   } catch (error) {
     if (signal.reason === quotaInterruption) return { saved, result: quotaFailure() };
@@ -1328,19 +1333,20 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       try {
         const current = await callCli<Task>(project, ["show", id, "--compact"]);
         if (current.ok && current.data.status === "draft" && current.data.draftDiscussion?.phase === "running") {
-          await callCli(project, ["draft-discussion", id], {
+          const result = await callCli<Task>(project, ["draft-discussion", id], {
             revision: current.data.revision,
             phase: current.data.draftDiscussion.managerReply !== undefined &&
               current.data.draftDiscussion.managerReply !== managerReply ? "queued" : "failed",
             reason: discussionFailure || t("draft_discussion.interrupted"),
           });
+          if (result.ok) savedDiscussionRevision = result.data.revision;
         }
       } catch (error) { console.warn("Could not save the draft discussion failure.", error); }
     }
     if (!active) {
       activeAgents.delete(key);
       const wasReplying = replyingTasks.delete(key);
-      if (wasReplying) publishDiscussionActivity(project, id);
+      if (wasReplying) publishDiscussionActivity(project, id, undefined, savedDiscussionRevision);
       for (const directory of directories) await rm(directory, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
       chatRuns.delete(key);
       taskOperations.delete(key);
@@ -4721,13 +4727,16 @@ const runningTasks = new Set<string>();
 const runActivityByTask = new Map<string, { items: RunActivity[]; threadId?: string }>();
 const discussionActivityByTask = new Map<string, RunActivity[]>();
 
-function publishDiscussionActivity(project: string, id: string, items?: RunActivity[]) {
+function publishDiscussionActivity(project: string, id: string, items?: RunActivity[], savedRevision?: number) {
   const key = project + "\0" + id;
   if (items) discussionActivityByTask.set(key, items);
   else discussionActivityByTask.delete(key);
   for (const state of windowStates.values()) {
     if (state.active.project === project && !state.window.isDestroyed()) {
-      state.window.webContents.send("chat:update", { project, id, type: "discussion", items });
+      state.window.webContents.send("chat:update", {
+        project, id, type: "discussion", items,
+        ...(savedRevision === undefined ? {} : { savedRevision }),
+      });
     }
   }
 }
@@ -5153,20 +5162,23 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       const reply = steeredReply;
       steeredReply = undefined;
       pendingReplies.clear();
+      let savedRevision: number | undefined;
       if (reply && !outcome && !stopRequested && !signal.aborted) {
         const final = [...reply.activity.values()].findLast(item =>
           item.type === "agentMessage" && item.phase === "final_answer" && item.status === "completed" && item.text.trim());
         if (final) {
-          const saved = await callCli(project, ["chat", id], {
+          const saved = await callCli<Task>(project, ["chat", id], {
             actor: "agent", text: final.text.trim(), at: final.at, replyTo: reply.index,
             model: task.execution?.model ?? "", effort: task.execution?.effort ?? "",
           });
-          if (!saved.ok && saved.error.code !== "CHAT_CHANGED") {
+          if (saved.ok) {
+            savedRevision = saved.data.revision;
+          } else if (saved.error.code !== "CHAT_CHANGED") {
             console.warn("Could not save the executor's reply:", saved.error.message);
           }
         }
       }
-      if (discussionActivityByTask.has(key)) publishDiscussionActivity(project, id);
+      if (discussionActivityByTask.has(key)) publishDiscussionActivity(project, id, undefined, savedRevision);
       if (signal.reason === quotaInterruption && !stopRequested) {
         await saveActivity();
         return;

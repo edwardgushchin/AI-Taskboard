@@ -15,10 +15,12 @@ const live = process.argv.includes("--live");
 const creationOnly = process.argv.includes("--creation-only");
 const revisionOnly = process.argv.includes("--revision-only");
 const approvalOnly = process.argv.includes("--approval-only");
+const handoffOnly = process.argv.includes("--handoff-only");
+const handoffBaseline = process.argv.includes("--expect-handoff-gap");
 const { scratch, artifacts } = electronCheck(import.meta.url, "draft-discussion", 240000,
-  live || creationOnly || revisionOnly ? [[]] : [["--first-pass"], ["--restart"]]);
+  live || creationOnly || revisionOnly || handoffOnly ? [[]] : [["--first-pass"], ["--restart"]]);
 const require = createRequire(import.meta.url);
-const { app, BrowserWindow, dialog } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain } = require("electron");
 const restart = process.argv.includes("--restart");
 const project = join(scratch, "board");
 const manual = join(scratch, "personal");
@@ -90,6 +92,8 @@ const neutralRequest = "Как работает диалог карточки?";
 const neutralReply = "Здесь можно обсуждать постановку задачи.";
 const legacyTitle = "Черновик с подтверждением в старом формате";
 let releaseLegacyNeutral;
+const handoffTurns = new Map();
+const historyGates = new Map();
 globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images, _commentary, action, _scratch,
   _limit, _usage, onControl, _signal, id, _activity, mode) => {
   const context = JSON.parse(prompt);
@@ -109,6 +113,13 @@ globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images,
   calls.push({ context, configured, mode, images: images.map(path => readFileSync(path).toString("base64")),
     documents: context.attachments.filter(file => file.path && file.name.endsWith(".txt")).map(file => readFileSync(file.path, "utf8")) });
   const request = context.latestUserMessage?.text;
+  if (handoffOnly) {
+    const finish = Promise.withResolvers();
+    const turn = { finish, mode, request, activity: _activity };
+    handoffTurns.set(id, turn);
+    onControl({ interrupt: async () => finish.resolve({ interrupted: true }) });
+    return finish.promise;
+  }
   if (approvedDialogue) {
     assert.ok(request === requestArchive || request === archiveAnswer, "Unexpected ready card message");
     const awaitingAnswer = request === requestArchive;
@@ -215,10 +226,29 @@ try {
   writeFileSync(entry, compile(source));
   process.on("unhandledRejection", error => { console.error(error); app.exit(1); });
   app.on("web-contents-created", (_event, contents) => contents.setBackgroundThrottling(false));
+  if (handoffOnly) {
+    const handle = ipcMain.handle.bind(ipcMain);
+    ipcMain.handle = (channel, handler) => {
+      if (channel !== "board:command") return handle(channel, handler);
+      return handle(channel, async (event, command, id, input) => {
+        const result = await handler(event, command, id, input);
+        const gate = historyGates.get(id);
+        if (command === "show" && gate && result.ok && result.data.revision > gate.revision) {
+          if (gate.failure) {
+            gate.failures++;
+            return { ok: false, error: { code: "BOARD_BUSY", message: gate.failure } };
+          }
+          gate.waiting = true;
+          await gate.release?.promise;
+        }
+        return result;
+      });
+    };
+  }
   require(entry);
   await until(() => BrowserWindow.getAllWindows().length > 0, "window");
   const window = BrowserWindow.getAllWindows()[0];
-  const viewport = [1280, approvalOnly ? 900 : 800];
+  const viewport = [1280, approvalOnly || handoffOnly ? 900 : 800];
   window.setContentSize(...viewport);
   const evaluate = code => window.webContents.executeJavaScript(code);
   await until(() => evaluate("Boolean(window.taskboard && document.querySelector('#app-menu button'))"), "renderer");
@@ -272,6 +302,219 @@ try {
     assert.deepEqual(window.getContentSize(), viewport);
     writeFileSync(join(artifacts, name), image.toPNG());
   };
+  if (handoffOnly) {
+    const { runtimeEntries } = await import("../src/desktop/board-runtime.ts");
+    const create = title => cli(["create"], plannedDraft({ title, execution: settings }));
+    const active = () => evaluate("document.querySelector('.chat-turn:not([hidden])')?.textContent ?? ''");
+    const thinking = () => evaluate("Boolean(document.querySelector('.chat-turn:not([hidden]) .chat-thinking'))");
+    const count = text => evaluate(`[...document.querySelectorAll('.task-dialogue .chat-entry[data-actor="agent"]')]
+      .filter(row => row.textContent.includes(${JSON.stringify(text)})).length`);
+    const released = id => until(async () => !runtimeEntries(project).some(entry => entry.task === id) &&
+      await evaluate(`window.taskboard.bootstrap().then(f => !f.replyingTasks?.includes(${JSON.stringify(id)}) &&
+        !Object.hasOwn(f.discussionActivity ?? {}, ${JSON.stringify(id)}))`), "discussion released " + id);
+    const waitTurn = async id => {
+      await until(() => handoffTurns.has(id), "provider started " + id);
+      const turn = handoffTurns.get(id);
+      handoffTurns.delete(id);
+      return turn;
+    };
+    const send = text => evaluate(`(() => {
+      const input = document.querySelector("#task-chat-input");
+      input.value = ${JSON.stringify(text)};
+      input.dispatchEvent(new Event("input"));
+      input.form.requestSubmit();
+    })()`);
+    const withDelayedHistory = async (id, complete, duringDelay) => {
+      const gate = { revision: show(id).revision, release: Promise.withResolvers() };
+      historyGates.set(id, gate);
+      try {
+        complete();
+        await until(() => gate.waiting, "saved history pending");
+        await released(id);
+        await duringDelay();
+      } finally {
+        gate.release.resolve();
+        historyGates.delete(id);
+      }
+    };
+    const answer = async (id, turn, text, visible) => {
+      const response = turn.mode === "initial" ? { questions: text }
+        : { text, awaitingAnswer: true, confirmsDraft: false };
+      await withDelayedHistory(id, () => turn.finish.resolve({ text: JSON.stringify(response) }), async () => {
+        assert.equal(await count(text), 0, "saved reply not delivered yet");
+        const states = [];
+        for (let sample = 0; sample < 8; sample++) {
+          states.push(await visible());
+          await delay(40);
+        }
+        assert.deepEqual(states, Array(8).fill(!handoffBaseline), "active turn during the saved history delay");
+        check(`Active turn ${handoffBaseline ? "missing" : "visible"} in all eight observations: ${text}`);
+      });
+      await until(async () => await count(text) === 1 && !(await active()), "exactly one saved reply");
+      assert.equal(await evaluate("document.querySelector('.task-chat')?.discussionHandoff"), undefined);
+      await reopen(id);
+      assert.equal(await count(text), 1);
+      assert.equal(await active(), "");
+    };
+
+    const draft = create("Подготовить еженедельную выгрузку");
+    const initial = await waitTurn(draft.id);
+    assert.equal(initial.mode, "initial");
+    await display(draft.id);
+    await until(thinking, "initial thinking");
+    await capture("task-chat-thinking.png");
+    await answer(draft.id, initial, "В каком формате нужна выгрузка?", thinking);
+    await capture("task-chat-answer.png");
+
+    await send("Уточните, как хранить файлы");
+    const ordinary = await waitTurn(draft.id);
+    await until(thinking, "ordinary thinking before visible activity");
+    ordinary.activity([{
+      id: "export-check", type: "command", status: "completed", title: "Check export folder",
+      text: "fixture output", at: new Date().toISOString(),
+    }]);
+    await until(async () => Boolean(await active()) && !(await thinking()), "visible activity");
+    const visibleAction = await active();
+    await answer(draft.id, ordinary, "Как назвать папку для выгрузки?", async () => await active() === visibleAction);
+
+    await send("Проверить ошибку");
+    const failing = await waitTurn(draft.id);
+    await until(thinking, "error turn thinking");
+    failing.finish.reject(new Error("Fixture discussion failed"));
+    await until(() => evaluate(`document.querySelector('.chat-status:not([hidden])')?.textContent === "Fixture discussion failed"`),
+      "ordinary error shown");
+    await released(draft.id);
+    assert.equal(await active(), "");
+
+    const other = create("Соседняя карточка");
+    const otherInitial = await waitTurn(other.id);
+    otherInitial.finish.resolve({ text: JSON.stringify({ questions: "Какой нужен отчёт?" }) });
+    await released(other.id);
+    await display(draft.id);
+    await send("Проверить остановку");
+    await waitTurn(draft.id);
+    await until(thinking, "stopped turn thinking");
+    await display(other.id);
+    assert.equal(await active(), "");
+    await display(draft.id);
+    await until(thinking, "running turn restored after switching");
+    const stopButton = '.task-chat .chat-send[data-action="stop"]:enabled';
+    await until(() => evaluate(`Boolean(document.querySelector(${JSON.stringify(stopButton)}))`), "stop button enabled");
+    await evaluate(`document.querySelector(${JSON.stringify(stopButton)}).click()`);
+    await released(draft.id);
+    await until(() => evaluate("Boolean(document.querySelector('.chat-retry-reply:not([hidden]):enabled'))"),
+      "interrupted reply can be retried");
+    assert.equal(await active(), "");
+    assert.equal(messages(show(draft.id)).at(-1).actor, "user");
+    check("Error and stop remove live activity and expose the standard error and retry; switching cards isolates activity");
+
+    const failedDraft = create("Проверить сбой автоматического разбора");
+    const failedInitial = await waitTurn(failedDraft.id);
+    await display(failedDraft.id);
+    await until(thinking, "draft thinking before provider error");
+    const reason = "Fixture draft discussion failed";
+    await withDelayedHistory(failedDraft.id, () => failedInitial.finish.reject(new Error(reason)), async () => {
+      assert.equal(show(failedDraft.id).draftDiscussion?.phase, "failed");
+      assert.equal(await thinking(), !handoffBaseline, "draft indicator while saved failure is held");
+    });
+    await until(() => evaluate(`document.querySelector('.chat-status:not([hidden])')?.textContent.includes(${JSON.stringify(reason)})`),
+      "automatic discussion error shown");
+    assert.equal(await active(), "");
+    assert.equal(await evaluate("document.querySelector('.task-chat')?.discussionHandoff"), undefined);
+    check("Automatic draft error appears when the saved failed phase is delivered and releases the active turn");
+
+    if (!handoffBaseline) {
+      const retryButton = "#task-retry-load";
+      const failure = "Fixture history unavailable";
+      const notice = () => evaluate("document.querySelector('#sheet-notice:not([hidden])')?.textContent ?? ''");
+      const retryVisible = () => evaluate(`Boolean(document.querySelector('${retryButton}:enabled'))`);
+      const noRetry = () => evaluate(`!document.querySelector('${retryButton}')`);
+      const clickRetry = () => evaluate(`document.querySelector('${retryButton}').click()`);
+      const failHistory = async (text, onFailure) => {
+        await display(draft.id);
+        await send("Проверить чтение: " + text);
+        const turn = await waitTurn(draft.id);
+        await until(thinking, "thinking before the saved reply");
+        const gate = { revision: show(draft.id).revision, failure, failures: 0 };
+        historyGates.set(draft.id, gate);
+        try {
+          turn.finish.resolve({ text: JSON.stringify({ text, awaitingAnswer: true, confirmsDraft: false }) });
+          await released(draft.id);
+          assert.equal(messages(show(draft.id)).at(-1).text, text);
+          await until(() => gate.failures > 0, "saved history fails to load");
+          await until(retryVisible, "visible card retry after failing to load saved history");
+          assert.ok(await notice(), "load error notice");
+          assert.equal(await count(text), 0, "saved reply is still absent");
+          assert.equal(await thinking(), true, "thinking stays until the saved reply is visible");
+          await onFailure(gate);
+        } finally {
+          historyGates.delete(draft.id);
+        }
+      };
+      const recovered = "История восстановлена после повтора";
+      await failHistory(recovered, async gate => {
+        const failures = gate.failures;
+        await clickRetry();
+        await until(async () => gate.failures > failures && await retryVisible(), "retry available after another failed attempt");
+        gate.failure = undefined;
+        await clickRetry();
+        await until(async () => await count(recovered) === 1 && !(await active()) && await noRetry(),
+          "retry renders the saved reply and clears the active turn and retry button");
+        assert.equal(await notice(), "");
+        assert.equal(await evaluate("document.querySelector('.task-chat')?.discussionHandoff"), undefined);
+        await reopen(draft.id);
+        assert.equal(await count(recovered), 1);
+        assert.ok(await noRetry());
+      });
+      check("A saved reply survives a failed refresh and a failed retry. The next retry shows one reply and clears the error, the button and the active turn.");
+
+      const switched = "Сохранённый ответ после смены карточки";
+      await failHistory(switched, async () => {
+        await display(other.id);
+        assert.ok(await noRetry(), "retry must not carry over to another card");
+        assert.equal(await notice(), "");
+        assert.equal(await active(), "");
+      });
+      await display(draft.id);
+      assert.equal(await count(switched), 1);
+      assert.ok(await noRetry());
+      assert.equal(await active(), "");
+
+      const closed = "Сохранённый ответ после закрытия карточки";
+      await failHistory(closed, async () => {
+        await evaluate("document.querySelector('#close-sheet').click()");
+        await until(noRetry, "retry must not survive closing the affected card");
+      });
+      await display(draft.id);
+      assert.equal(await count(closed), 1);
+      assert.ok(await noRetry());
+      assert.equal(await active(), "");
+      check("Switching or closing a card drops the refresh retry. Reopening the affected card shows one saved reply.");
+    }
+
+    const testedFiles = ["src/desktop/main.ts", "src/desktop/renderer.js", "src/desktop/chat.js",
+      "src/desktop/codex-chat.ts", "docs/explanation/architecture.md", "scripts/check-draft-discussion.mjs"];
+    const base = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: fileURLToPath(new URL("../", import.meta.url)), encoding: "utf8", windowsHide: true,
+    }).trim();
+    const hashes = testedFiles.map(path => {
+      const source = readFileSync(new URL("../" + path, import.meta.url), "utf8").replaceAll("\r\n", "\n");
+      return path + " " + createHash("sha256").update(source).digest("hex");
+    });
+    writeFileSync(join(artifacts, "task-chat-handoff-check.txt"), [
+      "Windows Electron task dialogue handoff",
+      `Platform: ${process.platform}; Electron: ${process.versions.electron}; Chromium: ${process.versions.chrome}; viewport: 1280×900`,
+      "Command: node scripts/check-draft-discussion.mjs --handoff-only --artifacts .tasks/qa" +
+        (handoffBaseline ? " --expect-handoff-gap" : ""),
+      "Git HEAD of the tested worktree: " + base,
+      "Tested source SHA-256 (UTF-8, LF):", ...hashes,
+      "Ordering: provider held → provider final → CLI saves → show result gated → live runtime cleared → eight observations → history delivered → one persisted reply.",
+      ...report.checks,
+      "Architecture help: docs/explanation/architecture.md describes the hold through rendering the saved history.",
+      "Scope: Windows with a fixture provider. Linux, macOS, a reply steered into an active executor and streaming final text were not run.",
+    ].join("\n") + "\n");
+    return;
+  }
   const verifyRevision = async (evaluateOther, runtimeEntries) => {
     const failure = cli(["create"], plannedDraft({ title: "Provider inactive", execution: settings }));
     await until(() => show(failure.id).draftDiscussion?.phase === "failed", "provider failure");
