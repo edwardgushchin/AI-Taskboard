@@ -18,6 +18,7 @@
         "LICENSE",
         "NOTICE",
         "README.md",
+        "THIRD_PARTY_NOTICES.md",
         "THIRD-PARTY-NOTICES.txt",
         "experts/**/*"
       ]
@@ -28,7 +29,8 @@
       "filter": [
         "LICENSE",
         "NOTICE",
-        "README.md"
+        "README.md",
+        "THIRD_PARTY_NOTICES.md"
       ]
     }
   ],

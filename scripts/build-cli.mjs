@@ -20,7 +20,9 @@ function run(command, args) {
 mkdirSync(directory, { recursive: true });
 cpSync(join(root, "src", "experts"), join(directory, "experts"), { recursive: true });
 // Ship the terms alongside the standalone executable, including its Node runtime.
-for (const name of ["LICENSE", "NOTICE", "README.md"]) copyFileSync(join(root, name), join(directory, name));
+for (const name of ["LICENSE", "NOTICE", "README.md", "THIRD_PARTY_NOTICES.md"]) {
+  copyFileSync(join(root, name), join(directory, name));
+}
 const nodeLicenseUrl = `https://raw.githubusercontent.com/nodejs/node/v${process.versions.node}/LICENSE`;
 const nodeLicense = await fetch(nodeLicenseUrl, { signal: AbortSignal.timeout(30000) });
 if (!nodeLicense.ok) throw new Error(`Cannot read Node.js license: ${nodeLicense.status} ${nodeLicenseUrl}`);

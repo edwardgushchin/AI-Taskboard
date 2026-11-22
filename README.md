@@ -4,7 +4,7 @@
 <hr>
 <p align="center">
   <a href="https://github.com/edwardgushchin/AI-Taskboard/blob/main/package.json"><img src="https://img.shields.io/badge/Node.js-%E2%89%A524.12.0-339933?logo=node.js&amp;logoColor=white" alt="Node.js for source builds: 24.12.0 or newer"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-blue" alt="License: PolyForm Noncommercial 1.0.0"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue" alt="License: MIT"></a>
   <a href="https://github.com/edwardgushchin/AI-Taskboard/releases"><img src="https://img.shields.io/github/v/release/edwardgushchin/AI-Taskboard?include_prereleases&amp;label=alpha" alt="Latest published alpha release"></a>
 </p>
 <p align="center">
@@ -100,40 +100,25 @@ Cards and board state live in the project's local **`.tasks`** directory, outsid
 AI Taskboard uses Codex as its model provider.
 
 <a id="license"></a>
-## License and commercial permission
+## License
 
-Copyright 2026 Eduard Gushchin. AI Taskboard is source-available under the
-unchanged [PolyForm Noncommercial License 1.0.0](LICENSE). It is not OSI Open
-Source: the license restricts commercial use, which [OSD section 6](https://opensource.org/osd)
-does not allow.
+Copyright (c) 2026 Eduard Gushchin. AI Taskboard's own code and documentation
+are available under the [MIT License](LICENSE), which permits commercial use.
+Include the copyright and permission notices when distributing copies or
+substantial portions.
 
-The license permits noncommercial purposes, including personal research,
-experimentation, study, entertainment and hobby use without anticipated
-commercial application. It also permits use by charitable organizations,
-educational institutions, public research organizations, public safety or
-health organizations, environmental protection organizations and government
-institutions, **regardless of their funding source or obligations resulting
-from funding**. These exceptions are part of the license; this summary does
-not narrow them. Statutory rights such as fair use are unaffected.
-
-For commercial use outside those permitted purposes, request separate
-permission from **Eduard Gushchin** at **[eduardgushchin@yandex.ru](mailto:eduardgushchin@yandex.ru)**
-before using the software. Describe your organization, intended use and
-distribution, if any. Permission, scope and any payment terms must be agreed
-separately; sending a request grants no commercial permission.
-
-When distributing copies or permitted modifications, include the license
-text or its URL and the `Required Notice:` from [NOTICE](NOTICE). Third-party
-components keep their own licenses and notices, including Codicons (CC-BY-4.0)
-and Codex Worklog (MIT). No previously granted rights are revoked.
+Third-party components retain their own licenses and attribution. See
+[NOTICE](NOTICE) and [Third-party notices](THIRD_PARTY_NOTICES.md).
+Previously published versions retain their original license terms.
 
 Installed desktop applications include these project terms in
 `resources/licenses` (`Contents/Resources/licenses` on macOS). Vendor and
 dependency licenses remain in `resources/app.asar`; Electron and Chromium
 notices ship with the runtime. The CLI directory includes `LICENSE`, `NOTICE`,
-this README and `THIRD-PARTY-NOTICES.txt`; distribute them with the executable.
+this README, `THIRD_PARTY_NOTICES.md`, and `THIRD-PARTY-NOTICES.txt`.
+Distribute them with the executable.
 CLI builds download the license for the exact build-time Node.js version
-from the official Node.js repository and include it with the fflate license.
+from the official Node.js repository and include it with the fflate and semver licenses.
 
 <a id="documentation"></a>
 ## Documentation
