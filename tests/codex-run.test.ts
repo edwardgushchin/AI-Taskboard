@@ -508,7 +508,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   }
   assert.deepEqual(await (await launch("failed")).completion, { reason: "Provider disconnected" });
   const closed = await (await launch("closed")).completion;
-  assert.deepEqual(closed, { reason: "The Codex process closed.", disconnected: true });
+  assert.deepEqual(closed, { reason: "The Codex process closed.", disconnected: true, unconfirmed: true });
   const receivedMessages: string[] = [];
   const controlled = await startCodexRun(client("control"), folder, worktree, task, item => activity.push(item),
     undefined, undefined, undefined, undefined, undefined, false,
@@ -649,7 +649,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     });
     assert.deepEqual(await measured.completion, outcome === "usage" ? undefined :
       outcome === "usage-failed" ? { reason: "Provider disconnected" } :
-        { reason: "The Codex process closed.", disconnected: true });
+        { reason: "The Codex process closed.", disconnected: true, unconfirmed: true });
   }
   const interrupted = await launch("control");
   await interrupted.interrupt();
