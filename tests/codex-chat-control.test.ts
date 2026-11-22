@@ -4,12 +4,13 @@ import { providerActions } from "../src/desktop/provider-tools.ts";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import type { SpawnOptions } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
+import { boardProjectRulesPrompt, readBoardProjectRules, writeBoardProjectRules } from "../src/cli/board-agents.ts";
 import { withBoardMcp } from "../src/desktop/board-mcp.ts";
 import { executorExpertTools, expertCommands } from "../src/desktop/expert-tools.ts";
 import { goalTaskWaitSeconds } from "../src/desktop/board-actions.ts";
@@ -316,6 +317,14 @@ test("board chat keeps a goal streaming across turns and times out only after in
   mkdirSync(join(directory, ".tasks"), { recursive: true });
   writeFileSync(join(directory, ".tasks", "board.json"), JSON.stringify({ settings: { boardType: "manual" } }));
   t.after(() => rmSync(directory, { recursive: true, force: true, maxRetries: 3 }));
+  if (process.platform !== "win32") {
+    writeFileSync(join(directory, "manager-rules.md"), "# Manager project\n");
+    symlinkSync("manager-rules.md", join(directory, "AGENTS.md"), "file");
+  }
+  const oldRules = writeBoardProjectRules(directory, {
+    text: "Manager OLD rule", revision: readBoardProjectRules(directory).revision,
+  });
+  writeBoardProjectRules(directory, { text: "Manager CURRENT rule", revision: oldRules.revision });
   const script = join(directory, "provider.cjs");
   const captured = join(directory, "requests.json");
   const threadId = "00000000-0000-0000-0000-000000000001";
@@ -465,6 +474,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
   let watchdog: { expires: number; fail: () => void; refresh: () => void } | undefined;
   let providerMode = "";
   const { replyToBoard: runtime, updateBoardGoal } = runInNewContext(stripTypeScriptTypes(source) + "\n({ replyToBoard, updateBoardGoal })", {
+    boardProjectRulesPrompt,
     spawn, stopCodexProcess, turnControl, CodexTokenUsage, codexThreadPattern, Error, process, withBoardMcp, goalTaskWaitSeconds,
     openComputerUse: async () => undefined,
     managerCliContext, probeManagerCli: async () => providerMode === "cli-ready"
@@ -556,6 +566,9 @@ test("board chat keeps a goal streaming across turns and times out only after in
     "initialize", "model/list", ...Array(5).fill("thread/resume"), "thread/goal/set", "turn/start", "thread/unsubscribe",
   ]);
   assert.ok(requests.slice(2).every(({ params }: { params: { threadId: string } }) => params.threadId === threadId));
+  const suppliedRules = requests[8].params.additionalContext.ai_taskboard_project_rules.value;
+  assert.match(suppliedRules, /Manager CURRENT rule/);
+  assert.doesNotMatch(suppliedRules, /Manager OLD rule/);
   assert.equal(requests[6].params.model, "manager-model");
   assert.equal(requests[6].params.permissions, "ai-taskboard-manager");
   assert.equal(requests[6].params.sandbox, undefined);
@@ -721,6 +734,9 @@ test("board chat keeps a goal streaming across turns and times out only after in
 
   let savedThread: string | undefined;
   providerMode = "cli-ready";
+  writeBoardProjectRules(directory, {
+    text: "Manager NEW SESSION rule", revision: readBoardProjectRules(directory).revision,
+  });
   localization.select("ja");
   t.after(() => localization.select("en"));
   await runtime("profile", directory, "Start", [], () => ({ ok: true }), [], "", controller.signal, {
@@ -728,6 +744,10 @@ test("board chat keeps a goal streaming across turns and times out only after in
   });
   const newRequests: { method: string; params: Record<string, unknown> }[] = JSON.parse(readFileSync(captured, "utf8"));
   const start = newRequests.find(({ method }) => method === "thread/start");
+  const newTurn = newRequests.find(({ method }) => method === "turn/start");
+  const newContext = newTurn?.params.additionalContext as { ai_taskboard_project_rules: { value: string } };
+  assert.match(newContext.ai_taskboard_project_rules.value, /Manager NEW SESSION rule/);
+  assert.doesNotMatch(newContext.ai_taskboard_project_rules.value, /Manager CURRENT rule/);
   assert.match(start?.params.developerInstructions as string, /Default response language: 日本語 \(ja\)/);
   assert.equal(savedThread, threadId);
   assert.ok(flags().includes("network_proxy"));

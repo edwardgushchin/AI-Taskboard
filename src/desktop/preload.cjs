@@ -50,6 +50,7 @@ contextBridge.exposeInMainWorld("taskboard", {
   isMac: process.platform === "darwin",
   isWindows: process.platform === "win32",
   command: (action, id, input) => ipcRenderer.invoke("board:command", action, id, input),
+  projectRules: (project, input) => ipcRenderer.invoke("board:projectRules", project, input),
   saveAttachment: (id, file, name) => ipcRenderer.invoke("board:saveAttachment", id, file, name),
   attachmentPreview: (id, file) => ipcRenderer.invoke("board:attachmentPreview", id, file),
   artifactPreview: path => ipcRenderer.invoke("board:artifactPreview", path),

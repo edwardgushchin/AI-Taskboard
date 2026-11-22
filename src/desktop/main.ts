@@ -42,7 +42,8 @@ import { executionModels } from "./codex-models.ts";
 import type { ArchiveLink, BoardSettings, BoardTag, ReviewMode, RunActivity, Task } from "../cli/model.ts";
 import { boardReviewMode, taskReviewMode, taskReviewModeVersion, codexThreadPattern, defaultBoardAgents, maxAttachmentBytes, reviewsAcceptanceRepair, reviewVerifier, taskIdPattern, TaskboardError, usesIndependentReviewer } from "../cli/model.ts";
 import { managerGoalBinding, managerGoalState } from "../cli/manager-goal.ts";
-import { BoardStore, directory as storageDirectory, locateBoard, onBoard, readBoardSettings, readJson, writeJson } from "../cli/storage.ts";
+import { BoardStore, directory as storageDirectory, locateBoard, onBoard, readBoardSettings, readJson, withProjectRulesLock, writeJson } from "../cli/storage.ts";
+import { readBoardProjectRules, writeBoardProjectRules } from "../cli/board-agents.ts";
 import { applyDesktopAcceptance } from "../cli/acceptance.ts";
 import { missingCodexThread, startCodexRun, writeProbeTimeoutCode } from "./codex-run.ts";
 import type { ExecutorTask } from "./codex-run.ts";
@@ -4595,6 +4596,28 @@ async function confirmHumanAcceptance(state: ProjectTab, project: string, id: st
       details: error instanceof TaskboardError ? error.details : undefined } };
   }
 }
+
+ipcMain.handle("board:projectRules", (event, project: unknown, input?: { text: unknown; revision: unknown }) => {
+  const state = stateOf(event);
+  if (!state.board || !state.project || project !== state.project) {
+    return cliFailure("INVALID_INPUT", t("errors.38d774058da8c2d9"));
+  }
+  try {
+    const location = locateBoard(state.project);
+    const data = input === undefined ? readBoardProjectRules(location.root) :
+      withProjectRulesLock(location, () => writeBoardProjectRules(location.root, input));
+    return { ok: true as const, data };
+  } catch (error) {
+    return {
+      ok: false as const,
+      error: {
+        code: error instanceof TaskboardError ? error.code : "IO_ERROR",
+        message: (error as Error).message,
+        details: error instanceof TaskboardError ? error.details : undefined,
+      },
+    };
+  }
+});
 
 ipcMain.handle("board:command", async (event, command: unknown, id: unknown, input: unknown) => {
   const state = stateOf(event);

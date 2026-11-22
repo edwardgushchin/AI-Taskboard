@@ -1,4 +1,11 @@
 {
+  "projectRules.label": "Правила проекта",
+  "projectRules.help": "Markdown сохраняется в корневом AGENTS.md. Очистите поле и сохраните, чтобы убрать правила.",
+  "projectRules.current": "Текущие правила в AGENTS.md",
+  "projectRules.save": "Сохранить правила",
+  "projectRules.saved": "Правила сохранены.",
+  "projectRules.conflict": "AGENTS.md изменился. Сверьте текущие правила с вашим текстом и снова нажмите «Сохранить правила», чтобы применить свою версию.",
+  "projectRules.load": "Повторить загрузку",
   "archive.cancelled.action": "Архивировать отменённые",
   "archive.cancelled.count": "Перенесено карточек: {count}",
   "archive.cancelled.issues": "Ошибки:",
