@@ -111,7 +111,9 @@ function compactTask(task: Task) {
   const { id, title, description, status, revision, tags, priority, attachments, coverAttachment, codexThreadId,
     createdAt, updatedAt, blocked, subtasks, goalThreadId, managerGoalId, summary, nextStep, dependencies, milestone, workingDirectory, schedule, origin, launchRequested } = task;
   return { reviewModeOverride: task.reviewModeOverride, expertId: task.expertId, expertTeam: task.expertTeam, expertStage: task.expertStage, expertStages: task.expertStages,
-    reviewDecision: status === "review" ? reviewDecisionSequence(task) : undefined, acceptanceRepair: task.acceptanceRepair, id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
+    reviewDecision: status === "review" ? reviewDecisionSequence(task) : undefined,
+    reviewSubmissionSequence: status === "review" ? task.history.findLastIndex(event => event.action === "submit" && event.to === "review") + 1 : undefined,
+    acceptanceRepair: task.acceptanceRepair, id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
     coverAttachment, codexThreadId, codexArchivePending: task.codexArchivePending, createdAt, updatedAt, blocked, subtasks, criteria: task.criteria, goalThreadId, managerGoalId, summary, nextStep,
     dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, origin, launchRequested, discussionReturn: task.discussionReturn,
     awaitingAnswer: task.awaitingAnswer, draftConfirmed: task.draftConfirmed, reviewReturn: task.reviewReturn,
