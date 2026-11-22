@@ -5,7 +5,7 @@ import { readdirSync, realpathSync, rmdirSync, statSync, writeFileSync } from "n
 import { basename, join, resolve } from "node:path";
 import { gzipSync, gunzipSync } from "node:zlib";
 import { unzipSync, zipSync } from "fflate";
-import { imageAttachmentPattern, invalidateDraftDiscussion, maxAttachmentBytes, number, object, record, registerTags, requireRevision, requireState, strings, TaskboardError, text } from "./model.ts";
+import { hasDraftConfirmation, imageAttachmentPattern, invalidateDraftDiscussion, maxAttachmentBytes, number, object, record, registerTags, requireRevision, requireState, strings, TaskboardError, text } from "./model.ts";
 import type { ArchiveLink, Attachment, BoardTag, Task } from "./model.ts";
 import { directory, exists, readBinary, removeFile, validateCard, writeAtomic } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
@@ -291,15 +291,17 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
       ? invalidateDraftDiscussion({ ...task, attachments: [...task.attachments, ...attachments] })
       : { ...task };
     if (actor === "user" && task.status === "draft") {
+      // Keep the proof for an unchanged brief while awaiting the outcome of the dialogue.
+      current.draftConfirmed = current.draftConfirmed === true || hasDraftConfirmation(current);
       current.awaitingAnswer = task.awaitingAnswer === true ? true : undefined;
-      current.draftConfirmed = false;
       if (pendingManagerReply === undefined && task.draftDiscussion?.phase !== "failed") {
         current.draftDiscussion = undefined;
       }
     }
     if (typeof input.awaitingAnswer === "boolean") current.awaitingAnswer = input.awaitingAnswer;
     if (draftReply) {
-      current.draftConfirmed = confirmsDraft;
+      current.draftConfirmed = confirmsDraft || (!draftDiscussion && input.awaitingAnswer === false &&
+        current.draftConfirmed === true);
       if (draftDiscussion) {
         current.draftDiscussion = pendingManagerReply === managerReply
           ? undefined : { phase: "queued", managerReply: pendingManagerReply };

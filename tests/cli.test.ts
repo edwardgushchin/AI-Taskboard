@@ -279,6 +279,60 @@ test("legacy draft confirmation survives metadata edits and expires on a brief c
   cli(root, ["approve", attachmentDraft.id], { revision: attached.revision }, "DRAFT_DISCUSSION_REQUIRED");
 });
 
+test("a neutral dialogue preserves confirmation only for the unchanged draft", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const settings = { model: "fixture", effort: "low" };
+  for (const legacy of [true, false]) {
+    const draft = cli(root, ["create"], { title: legacy ? "Legacy export" : "Reviewed export" });
+    const id = draft.id;
+    if (legacy) {
+      confirmFixtureDraft(root, id);
+      assert.equal(cli(root, ["show", id]).draftConfirmed, undefined);
+    } else {
+      const running = cli(root, ["draft-discussion", id], { revision: draft.revision, phase: "running" });
+      cli(root, ["chat", id], {
+        ...settings,
+        actor: "agent",
+        text: "The brief is ready.",
+        draftDiscussion: true,
+        revision: running.revision,
+        awaitingAnswer: false,
+      });
+    }
+    const send = (text: string) => cli(root, ["chat", id], { ...settings, text });
+    const neutral = (message: Task, revision = message.revision, error?: string) => cli(root, ["chat", id], {
+      ...settings,
+      actor: "agent",
+      text: "You're welcome.",
+      replyTo: message.history.length - 1,
+      revision,
+      awaitingAnswer: false,
+      confirmsDraft: false,
+    }, error);
+
+    const first = send("Thanks.");
+    cli(root, ["approve", id], { revision: first.revision }, "DRAFT_DISCUSSION_REQUIRED");
+    const second = send("That's all.");
+    const unchanged = neutral(second);
+    assert.equal(unchanged.draftConfirmed, true);
+    assert.equal(unchanged.awaitingAnswer, false);
+    assert.equal(unchanged.draftDiscussion, undefined);
+    const approved = cli(root, ["approve", id], { revision: unchanged.revision });
+    assert.equal(approved.status, "ready");
+
+    const returned = cli(root, ["return-to-draft", id], { revision: approved.revision });
+    assert.equal(returned.draftConfirmed, true);
+    const newRequest = send("Use XLSX instead of CSV.");
+    const edited = cli(root, ["update", id], { revision: newRequest.revision, description: "Export as XLSX." });
+    neutral(newRequest, newRequest.revision, "REVISION_CONFLICT");
+    const afterEdit = neutral(newRequest, edited.revision);
+    assert.equal(afterEdit.draftConfirmed, false);
+    assert.equal(afterEdit.draftDiscussion?.phase, "queued");
+    cli(root, ["approve", id], { revision: afterEdit.revision }, "DRAFT_DISCUSSION_REQUIRED");
+  }
+});
+
 test("edits and attachments preserve an open question outside draft", t => {
   const root = fixture(t);
   cli(root, ["init"]);

@@ -88,6 +88,8 @@ const archiveAnswer = "Использовать недельный архив.";
 const archiveConfirmed = "Недельный архив подтверждён.";
 const neutralRequest = "Как работает диалог карточки?";
 const neutralReply = "Здесь можно обсуждать постановку задачи.";
+const legacyTitle = "Черновик с подтверждением в старом формате";
+let releaseLegacyNeutral;
 globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images, _commentary, action, _scratch,
   _limit, _usage, onControl, _signal, id, _activity, mode) => {
   const context = JSON.parse(prompt);
@@ -169,6 +171,9 @@ globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images,
     }) };
   }
   if (request === neutralRequest) {
+    if (context.task.title === legacyTitle) {
+      await new Promise(resolve => { releaseLegacyNeutral = resolve; });
+    }
     return { text: JSON.stringify({ text: neutralReply, awaitingAnswer: false, confirmsDraft: false }) };
   }
   const confirmsDraft = context.task.awaitingAnswer === true;
@@ -712,6 +717,46 @@ try {
     await until(() => show(returning.id).awaitingAnswer === false, "confirmation of the returned draft");
     await until(available, "approval of the returned draft after review");
     check("An ordinary ready-card reply closes the question, and returning the changed card to draft still requires a new review before approval");
+
+    const legacy = create(legacyTitle);
+    await waitReady(legacy.id);
+    await waitWriter(legacy.id, "legacy fixture initial review released");
+    const { locateBoard, onBoard } = await import("../src/cli/storage.ts");
+    onBoard(locateBoard(project), store => {
+      store.save({ ...store.card(legacy.id), draftConfirmed: undefined });
+    });
+    const legacyCard = show(legacy.id);
+    assert.equal(legacyCard.awaitingAnswer, false);
+    assert.equal(legacyCard.draftConfirmed, undefined);
+    await display(legacy.id);
+    await until(available, "approval of a legacy confirmation");
+    const neutral = send(legacy.id, neutralRequest);
+    await until(() => Boolean(releaseLegacyNeutral), "agent receives the neutral message on the legacy draft");
+    const awaitingNeutralReply = show(legacy.id);
+    assert.equal(awaitingNeutralReply.awaitingAnswer, undefined);
+    cli(["approve", legacy.id], { revision: awaitingNeutralReply.revision }, project, "DRAFT_DISCUSSION_REQUIRED");
+    await until(async () => !(await available()), "approval pauses during a neutral dialogue turn");
+    releaseLegacyNeutral();
+    const neutralResult = await neutral;
+    assert.equal(neutralResult.result.ok, true, JSON.stringify(neutralResult));
+    await until(available, "legacy confirmation remains valid after the neutral reply");
+    const afterNeutral = show(legacy.id);
+    assert.equal(afterNeutral.awaitingAnswer, false);
+    assert.equal(afterNeutral.draftConfirmed, true);
+    assert.equal(afterNeutral.draftDiscussion, undefined);
+    assert.equal(messages(afterNeutral).at(-1).text, neutralReply);
+    assert.deepEqual(calls.filter(call => call.context.task.id === legacy.id).map(call => call.mode), ["initial", undefined]);
+    heldDrafts.add(legacy.title);
+    const changedLegacyBrief = "Экспортировать отчёт с итогами сверки.";
+    cli(["update", legacy.id], { description: changedLegacyBrief, revision: afterNeutral.revision });
+    await until(() => draftGates.has(legacy.id), "new review of the edited legacy draft");
+    cli(["approve", legacy.id], { revision: show(legacy.id).revision }, project, "DRAFT_DISCUSSION_REQUIRED");
+    await until(async () => !(await available()), "approval blocked after a substantive edit");
+    assert.equal(calls.at(-1).context.task.description, changedLegacyBrief);
+    continueDraft(legacy);
+    await waitReady(legacy.id, 4);
+    await until(available, "edited legacy draft available after fresh confirmation");
+    check("A legacy confirmation survives a neutral dialogue, pauses approval while the reply is pending, and is invalidated by a substantive edit");
 
     report.approvalDraft = pending.id;
     report.approvalMessages = messages(show(pending.id));
