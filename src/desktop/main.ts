@@ -1097,7 +1097,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       if (task.status !== "draft" || task.draftDiscussion?.phase !== (automatic === "unreviewed" ? undefined : automatic)) {
         return { saved, result: cliFailure("CHAT_CHANGED", "The draft discussion changed.") };
       }
-      if (automatic === "running") {
+      if (automatic === "running" && task.draftDiscussion?.phase === "running") {
         const result = await callCli<Task>(project, ["draft-discussion", id], {
           revision: task.revision, phase: task.draftDiscussion.managerReply === undefined ? "failed" : "queued",
           reason: discussionFailure,
