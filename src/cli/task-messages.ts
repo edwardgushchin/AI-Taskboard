@@ -46,13 +46,15 @@ export function linkedDraftManagerReply(task: Task, event: TaskEvent | undefined
   if (!event || event.action !== "coordination" || event.messageKind === "question") return;
   const mail = event.expertMessage;
   if (mail?.from !== "manager" || mail.replyTo === undefined ||
-      draftManagerQuestion(task, mail.replyTo)?.from !== mail.to) return;
+      draftManagerQuestion(task, mail.replyTo)?.from !== mail.to ||
+      deferredDependencyReply(task, mail.replyTo, event)) return;
   return { text: event.text, replyTo: mail.replyTo, question: task.history[mail.replyTo - 1].text };
 }
 
 export function draftManagerReply(task: Task, sequence: number, to: string) {
   return task.history.findIndex(event => event.expertMessage?.from === "manager" &&
-    event.expertMessage.to === to && event.expertMessage.replyTo === sequence && event.messageKind !== "question") + 1;
+    event.expertMessage.to === to && event.expertMessage.replyTo === sequence &&
+    event.messageKind !== "question" && !deferredDependencyReply(task, sequence, event)) + 1;
 }
 
 export function pendingDraftDependency(task: Task, question: number) {
@@ -66,11 +68,34 @@ export function draftDependencySubject(message: string | undefined) {
   return /^(?:Обязательная зависимость|Required dependency): ([^\s«»"\r\n][^«»"\r\n]{0,199})$/u.exec(message ?? "")?.[1].trimEnd();
 }
 
-export function matchesDraftDependency(subject: string, task: Pick<Task, "id" | "title">) {
+export function draftDependencyRequest(task: Task, sequence: number) {
+  const message = task.history[sequence - 1]?.text;
+  const subject = draftDependencySubject(message);
+  if (subject) return { subject, legacy: false };
+
+  const legacy = /^Владелец выбрал отдельную карточку по ([^.\r\n]+)\./u.exec(message ?? "");
+  if (legacy && message?.includes("как обязательную зависимость")) {
+    const topic = legacy[1].replace(/^уч[её]ту /u, "учёт ");
+    if (draftDependencyDecision(task, topic, true, sequence).sequence) return { subject: topic, legacy: true };
+  }
+}
+
+function deferredDependencyReply(task: Task, sequence: number, event: TaskEvent) {
+  return !event.draftDependencyId && event.text?.includes("ID отдельной карточки неизвестен.") &&
+    event.text.includes("В этом сеансе нет инструментов для поиска, создания и связывания карточек.") &&
+    draftDependencyRequest(task, sequence)?.legacy === true;
+}
+
+export function matchesDraftDependency(subject: string, task: Pick<Task, "id" | "title">, legacy = false) {
+  if (legacy && subject === "учёт управляемой кучи") {
+    const title = task.title.toLowerCase();
+    return /^(?:(?:подключить|добавить) уч[её]т управляемой кучи|уч[её]т управляемой кучи)(?:$| )/u.test(title) ||
+      /^подключить управляемую кучу к общему сч[её]тчику памяти(?:$| )/u.test(title);
+  }
   return taskIdPattern.test(subject) ? task.id === subject : task.title === subject;
 }
 
-export function draftDependencyDecision(task: Task, subject: string) {
+export function draftDependencyDecision(task: Task, subject: string, legacy = false, before = task.history.length + 1) {
   const transition = task.history.findLastIndex(event => event.to !== undefined);
   let previousChat: TaskEvent | undefined;
   let sequence = 0;
@@ -80,15 +105,20 @@ export function draftDependencyDecision(task: Task, subject: string) {
     if (!event.chat || event.action !== "chat") continue;
     if (event.actor === "user") {
       const latestText = event.text ?? "";
+      const legacyQuestion = legacy && previousChat?.actor === "agent"
+        ? /(?:^|[.!?] )Как (?:оформляем|оформить) (.+?) [—–-] отдельной карточкой, которую нужно завершить до сдачи (T-\d+), или прямо в (T-\d+)\?$/u.exec(previousChat.text ?? "")
+        : null;
+      const answeredLegacy = legacyQuestion?.[1] === subject && legacyQuestion[2] === task.id &&
+        legacyQuestion[3] === task.id && /^отдельной ?карточкой$/iu.test(latestText);
       const answeredChoice = previousChat?.actor === "agent" &&
         ((previousChat.text === `Вынести «${subject}» в отдельную обязательную зависимость? Ответьте «отдельной карточкой» или «в этой задаче».` &&
           /^(?:отдельной карточкой|в этой задаче)$/iu.test(latestText)) ||
          (previousChat.text === `Make "${subject}" a separate required dependency? Reply "separate card" or "in this task".` &&
           /^(?:separate card|in this task)$/iu.test(latestText)));
-      if (answeredChoice || draftDependencySubject(latestText) === subject) {
+      if (answeredChoice || answeredLegacy || draftDependencySubject(latestText) === subject) {
         if (/^(?:в этой задаче|in this task)$/iu.test(latestText)) {
           cancellation = index + 1;
-        } else {
+        } else if (index + 1 < before) {
           sequence = index + 1;
         }
       } else if (latestText === `Отменить обязательную зависимость: ${subject}` ||

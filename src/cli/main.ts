@@ -33,7 +33,7 @@ import { managerUsage } from "./manager-usage.ts";
 import { dependencyStatus, unfinishedDependencies, validateDependencies } from "./dependencies.ts";
 import { checkoutTaskWorktree, cleanTaskWorktree, finishTaskStart, hasPending, inspectCleanup, prepareTaskStart, taskWithCurrentWorktree } from "./worktree.ts";
 import { artifactFiles, openReviewArtifact, readReviewArtifact } from "./artifacts.ts";
-import { acknowledgeTaskMessages, currentReviewApproval, draftDependencyDecision, draftDependencySubject, draftManagerQuestion, draftManagerReply, managerInbox, matchesDraftDependency, pendingDraftDependency, sendTaskMessage, taskMessages } from "./task-messages.ts";
+import { acknowledgeTaskMessages, currentReviewApproval, draftDependencyDecision, draftDependencyRequest, draftManagerQuestion, draftManagerReply, managerInbox, matchesDraftDependency, pendingDraftDependency, sendTaskMessage, taskMessages } from "./task-messages.ts";
 import { taskActivity } from "./task-activity.ts";
 import packageInfo from "../../package.json" with { type: "json" };
 import { grantTaskTool, requestTaskTool } from "./task-tools.ts";
@@ -232,14 +232,16 @@ function draftDependency(store: BoardStore, id: string, input: Record<string, un
     if (pendingDraftDependency(source, question)) return { cancelled: true, sequence: answered };
     throw new TaskboardError("INVALID_INPUT", "This draft question already has a reply.");
   }
-  const subject = draftDependencySubject(source.history[question - 1].text);
-  if (!subject) {
+  const scope = draftDependencyRequest(source, question);
+  if (!scope) {
     throw new TaskboardError("USER_DIRECTION_REQUIRED", "The draft question must name the specific required dependency.");
   }
-  const { sequence: ownerMessage, cancellation } = draftDependencyDecision(source, subject);
+  const { subject, legacy } = scope;
+  const { sequence: ownerMessage, cancellation } = draftDependencyDecision(source, subject, legacy, question);
 
   const prepareDraft = (draft: Record<string, unknown>) => {
-    if (taskIdPattern.test(subject) || draft.title !== subject) {
+    if (typeof draft.title !== "string" || taskIdPattern.test(subject) ||
+        !matchesDraftDependency(subject, { id: "", title: draft.title }, legacy)) {
       throw new TaskboardError("USER_DIRECTION_REQUIRED", "Use the exact dependency title chosen by the owner.");
     }
     const description = text(draft.description, "description", true);
@@ -256,7 +258,7 @@ function draftDependency(store: BoardStore, id: string, input: Record<string, un
   };
   const target = (targetId: string) => {
     const card = readTask(store, targetId);
-    if (!matchesDraftDependency(subject, card)) {
+    if (!matchesDraftDependency(subject, card, legacy)) {
       throw new TaskboardError("USER_DIRECTION_REQUIRED", "Use the dependency chosen by the owner.");
     }
     if (card.status === "cancelled") {
@@ -264,6 +266,11 @@ function draftDependency(store: BoardStore, id: string, input: Record<string, un
     }
     validateDependencies(store, { ...source, dependencies: [...(source.dependencies ?? []), card.id] });
     return card;
+  };
+  const matches = () => {
+    const { tasks, archived } = store.snapshot();
+    return [...tasks, ...archived].filter(card =>
+      card.id !== id && card.status !== "cancelled" && matchesDraftDependency(subject, card, legacy));
   };
 
   let saved = pendingDraftDependency(source, question);
@@ -274,7 +281,7 @@ function draftDependency(store: BoardStore, id: string, input: Record<string, un
       throw new TaskboardError("USER_DIRECTION_REQUIRED", "Cite the saved owner decision for the named dependency that precedes this draft question.");
     }
     requireRevision(source, input.revision, true);
-    if (input.authorizeOnly === true) return { subject };
+    if (input.authorizeOnly === true) return { subject, ...(legacy ? { legacy: true } : {}) };
     const existingId = input.existingId === undefined ? undefined : text(input.existingId, "existingId", true);
     const draft = input.draft === undefined ? undefined : object(input.draft);
     if (Boolean(existingId) === Boolean(draft)) {
@@ -283,9 +290,7 @@ function draftDependency(store: BoardStore, id: string, input: Record<string, un
     if (existingId) target(existingId);
     if (draft) {
       prepareDraft(draft);
-      const { tasks, archived } = store.snapshot();
-      if ([...tasks, ...archived].some(card =>
-        card.id !== id && card.status !== "cancelled" && matchesDraftDependency(subject, card))) {
+      if (matches().length) {
         throw new TaskboardError("DEPENDENCY_MATCH_FOUND", "Search for the existing named dependency and select its ID.");
       }
     }
@@ -305,14 +310,23 @@ function draftDependency(store: BoardStore, id: string, input: Record<string, un
     }
   }
 
-  // A crash after writing the new card can leave its index entry missing.
-  let dependency = saved.existingId ? target(saved.existingId) : store.storedCards().find(card =>
-    card.history[0]?.draftDependencySource?.id === id && card.history[0].draftDependencySource.question === question);
-  if (dependency && !store.index.tasks[dependency.id] && !store.index.archive[dependency.id]) {
-    dependency = store.create(dependency);
-  }
-  if (!dependency) {
-    dependency = createWithAttachments(store, assignTags(store, prepareDraft(saved.draft!)), undefined);
+  let dependency: Task;
+  if (saved.existingId) {
+    dependency = target(saved.existingId);
+  } else {
+    const created = store.storedCards().find(card => card.status !== "cancelled" &&
+      matchesDraftDependency(subject, card, legacy) && card.history[0]?.draftDependencySource?.id === id &&
+      card.history[0].draftDependencySource.question === question);
+    // A crash after writing the new card can leave its index entry missing.
+    if (created && !store.index.tasks[created.id] && !store.index.archive[created.id]) {
+      store.create(created);
+    }
+    const candidates = created ? [created] : matches();
+    if (candidates.length > 1) {
+      throw new TaskboardError("DEPENDENCY_MATCH_FOUND", "Several matching dependencies appeared. Keep the request pending until the match is resolved.");
+    }
+    dependency = candidates.length ? target(candidates[0].id) :
+      createWithAttachments(store, assignTags(store, prepareDraft(saved.draft!)), undefined);
   }
   const dependencies = source.dependencies ?? [];
   if (!dependencies.includes(dependency.id)) {

@@ -157,6 +157,57 @@ test("a named cancellation ends a saved draft dependency request after unrelated
   assert.equal(cli(root, ["list"]).tasks.length, 1);
 });
 
+test("draft dependency retry reuses new matches and skips cancelled drafts", async t => {
+  for (const { previouslyCreated, matchingCard } of [
+    { previouslyCreated: false, matchingCard: true },
+    { previouslyCreated: true, matchingCard: true },
+    { previouslyCreated: true, matchingCard: false },
+  ]) {
+    await t.test(`previously created: ${previouslyCreated}, new match: ${matchingCard}`, subtest => {
+      const root = fixture(subtest);
+      cli(root, ["init"]);
+      const prior = cli(root, ["create"], { title: "Measure CPU" });
+      const source = cli(root, ["create"], { title: "Report memory", dependencies: [prior.id] });
+      const subject = "Account for managed heap";
+      const text = `Required dependency: ${subject}`;
+      const owner = cli(root, ["chat", source.id], { model: "fixture", effort: "low", text });
+      const question = cli(root, ["expert-message", source.id], {
+        actor: "agent", to: "manager", kind: "question", text,
+      });
+      let cancelledId: string | undefined;
+      if (previouslyCreated) {
+        const dependency = cli(root, ["create"], { title: subject });
+        cancelledId = dependency.id;
+        onBoard(locateBoard(root), store => {
+          const created = store.card(dependency.id);
+          created.history[0].draftDependencySource = { id: source.id, question: question.sequence };
+          store.save(created);
+        });
+        cli(root, ["cancel", dependency.id], { revision: dependency.revision, reason: "Use a different card." });
+      }
+      onBoard(locateBoard(root), store => {
+        const pending = record(store.card(source.id), "draft-dependency-request", "manager");
+        pending.history.at(-1)!.draftDependency = {
+          subject, question: question.sequence, ownerMessage: owner.history.length,
+          draft: plannedDraft({ title: subject, tags: ["Memory"] }),
+        };
+        store.save(pending);
+      });
+      const existing = matchingCard ? cli(root, ["create"], { title: subject }) : undefined;
+      const command = ["draft-dependency", source.id];
+      const replay = { replyTo: question.sequence };
+      const saved = cli(root, command, replay);
+      assert.notEqual(saved.dependencyId, cancelledId);
+      if (existing) assert.equal(saved.dependencyId, existing.id);
+      assert.equal(cli(root, ["show", saved.dependencyId]).status, "draft");
+      assert.deepEqual(cli(root, command, replay), saved);
+      assert.deepEqual(cli(root, ["show", source.id]).dependencies, [prior.id, saved.dependencyId]);
+      const available = cli(root, ["list"]).tasks.filter((card: Task) => card.title === subject && card.status !== "cancelled");
+      assert.deepEqual(available.map((card: Task) => card.id), [saved.dependencyId]);
+    });
+  }
+});
+
 test("approval waits for the last saved clarification to close", t => {
   const root = fixture(t);
   cli(root, ["init"]);

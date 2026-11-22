@@ -8,6 +8,7 @@ import { arch, release } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
+import { locateBoard, onBoard } from "../src/cli/storage.ts";
 import { electronCheck } from "./electron-check.mjs";
 
 const { scratch, artifacts } = electronCheck(import.meta.url, "draft-dependency", 180_000, [[], ["--restart"]]);
@@ -19,6 +20,7 @@ const project = join(scratch, "board");
 const profile = join(scratch, "profile");
 const journal = join(scratch, "passes.txt");
 const fixtureState = join(scratch, "state.json");
+const initialHashes = join(scratch, "source-hashes.json");
 const failureHook = join(scratch, "failure.cjs");
 const node = process.env.TASKBOARD_CHECK_NODE;
 const cliEntry = join(root, "src", "cli", "main.ts");
@@ -37,6 +39,11 @@ let failSource;
 let failure;
 let managerCalls = 0;
 const handoffs = new Map();
+const legacySourceId = "T-0147";
+const legacyDependencyId = "T-0163";
+const legacyDependencyTitle = "Подключить управляемую кучу к общему счётчику памяти движка";
+const legacyEventsPath = "tests/fixtures/draft-dependency-t0147.json";
+const legacyEvents = JSON.parse(readFileSync(join(root, legacyEventsPath), "utf8"));
 
 function cliResult(args, input, hook) {
   const result = spawnSync(node, [
@@ -93,7 +100,8 @@ globalThis.dependencyManager = async (_profile, cwd, prompt, _images, run, _tool
   const inbox = await run("manager_inbox", {});
   assert.ok(inbox.ok, JSON.stringify(inbox));
   for (const { id, sequence, text } of inbox.data) {
-    assert.equal(text, managerQuestion);
+    const legacy = id === legacySourceId;
+    assert.equal(text, legacy ? legacyEvents.find(event => event.sequence === 30).text : managerQuestion);
     const source = await run("task_show", { id, historyLimit: 20 });
     assert.ok(source.ok, JSON.stringify(source));
     const { data: card } = source;
@@ -104,6 +112,27 @@ globalThis.dependencyManager = async (_profile, cwd, prompt, _images, run, _tool
       ...reference, ownerSequence: String(reference.ownerSequence) + "e0", operation: "search",
     });
     assert.equal(denied.error?.code, "USER_DIRECTION_REQUIRED", JSON.stringify(denied));
+
+    if (legacy) {
+      assert.equal(sequence, 30);
+      assert.equal(owner.sequence, 28);
+      assert.equal(owner.text, legacyEvents.find(event => event.sequence === 28).text);
+      const deferred = card.history.find(event => event.sequence === 32);
+      assert.equal(deferred.text, legacyEvents.find(event => event.sequence === 32).text);
+      assert.equal(deferred.expertMessage.replyTo, sequence);
+      const search = await run("draft_dependency", { ...reference, operation: "search" });
+      assert.ok(search.ok, JSON.stringify(search));
+      assert.deepEqual(search.data.tasks.map(entry => entry.id), [legacyDependencyId]);
+      const inspected = await run("draft_dependency", { ...reference, operation: "inspect", existingId: legacyDependencyId });
+      assert.ok(inspected.ok, JSON.stringify(inspected));
+      assert.equal(inspected.data.title, legacyDependencyTitle);
+      const request = { ...reference, operation: "save", existingId: legacyDependencyId };
+      const result = await run("draft_dependency", request);
+      assert.ok(result.ok, JSON.stringify(result));
+      assert.equal(result.data.dependencyId, legacyDependencyId);
+      assert.deepEqual(await run("draft_dependency", request), result);
+      continue;
+    }
 
     if (card.title.startsWith("Без решения")) {
       assert.equal(owner.text, unrelatedText);
@@ -268,9 +297,87 @@ async function verifyOutcome(id, dependencyId, priorId, expectedOwnerMessages = 
   assert.equal(dependency.history.some(event => ["approve", "start"].includes(event.action)), false);
 }
 
+function seedLegacyDraft(priorId) {
+  const location = locateBoard(project);
+  onBoard(location, store => {
+    store.index.nextId = 147;
+    store.saveIndex();
+  });
+  const source = create("Показывать текущий и пиковый объём памяти движка через OS", { dependencies: [priorId] });
+  assert.equal(source.id, legacySourceId);
+  onBoard(location, store => {
+    // Only the six relevant recorded events are imported. Unrelated earlier positions preserve sequence numbers.
+    const history = Array.from({ length: 26 }, (_, index) => ({
+      at: source.createdAt,
+      actor: "user",
+      action: index === 0 ? "create" : "comment",
+    }));
+    for (const { sequence, ...event } of legacyEvents) {
+      assert.equal(history.length + 1, sequence);
+      if (event.action === "chat") {
+        // The compact CLI representation omits these chat metadata fields.
+        event.chat = { model: execution.model, effort: execution.effort };
+      }
+      history.push(event);
+    }
+    store.save({
+      ...store.card(source.id), history, revision: 23,
+      awaitingAnswer: true, draftConfirmed: false, draftDiscussion: undefined,
+    });
+  });
+}
+
+async function verifyLegacyReplay(priorId) {
+  const location = locateBoard(project);
+  onBoard(location, store => {
+    store.index.nextId = 163;
+    store.saveIndex();
+  });
+  const candidate = create(legacyDependencyTitle, {
+    description: "Подключить учёт управляемой кучи к общему счётчику памяти по ADR 0016.",
+  });
+  // Seeding the lower source ID must happen before the candidate reserves the higher ID.
+  assert.equal(candidate.id, legacyDependencyId);
+  await until(() => show(legacySourceId).history.some(event => event.chat && event.text === ready(candidate.id)), "legacy T-0147 handoff");
+  const source = show(legacySourceId);
+  assert.deepEqual(source.dependencies, [priorId, candidate.id]);
+  const savedOwnerText = legacyEvents.find(event => event.sequence === 28).text;
+  assert.deepEqual(ownerMessages(source).map(event => event.text), [savedOwnerText]);
+  assert.equal(replies(source).length, 2);
+  assert.match(replies(source).at(-1).text, new RegExp(candidate.id));
+  assert.equal(handoffs.get(source.id), 1);
+  assert.equal(source.status, "draft");
+  assert.equal(source.awaitingAnswer, false);
+  assert.equal(cards().filter(card => card.title === legacyDependencyTitle).length, 1);
+  pass("Сохранённые сообщения Electron2D T-0147 №27–32: исходный выбор владельца и письмо №30 после отложенного ответа №32 привели к переиспользованию T-0163, записи связи и одному продолжению без нового вопроса владельцу.");
+}
+
+function sourceHashes(path) {
+  const git = (...args) => execFileSync("git", args, { cwd: root, windowsHide: true });
+  const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
+  const actual = sha256(readFileSync(join(root, path)));
+  const filteredBlob = git("hash-object", "--path=" + path, "--", path).toString().trim();
+  const head = spawnSync("git", ["rev-parse", "--verify", "HEAD:" + path], { cwd: root, windowsHide: true });
+  const gitBytes = head.status === 0 && head.stdout.toString().trim() === filteredBlob
+    ? sha256(git("cat-file", "blob", "HEAD:" + path))
+    : "HEAD differs";
+  return `${path}  Windows SHA-256 ${actual}  Git blob ${filteredBlob}  Git bytes SHA-256 ${gitBytes}`;
+}
+
+function checkedSourceHashes() {
+  return [
+    "src/cli/archive.ts", "src/cli/dependencies.ts", "src/cli/expert-team.ts", "src/cli/main.ts", "src/cli/model.ts",
+    "src/cli/storage.ts", "src/cli/task-messages.ts", "src/cli/tasks.ts", "src/desktop/board-actions.ts",
+    "src/desktop/cli.ts", "src/desktop/codex-chat.ts", "src/desktop/main.ts",
+    "scripts/check-draft-dependency.mjs", "scripts/electron-check.mjs", "tests/fixtures/planned-draft.ts",
+    legacyEventsPath,
+  ].map(sourceHashes);
+}
+
 async function run() {
   process.env.GIT_CEILING_DIRECTORIES = scratch;
   if (!restart) {
+    writeFileSync(initialHashes, JSON.stringify(checkedSourceHashes()));
     mkdirSync(project);
     mkdirSync(profile);
     cli(["init"], { git: false });
@@ -307,17 +414,15 @@ async function run() {
     assert.equal(handoffs.get(completeId), undefined);
     assert.equal(cards().filter(card => card.title === dependencyTitle && card.status !== "cancelled").length, 1);
     pass("После несвязанного уточнения владельца и перезапуска очередь завершила сохранённое действие без вызова провайдера менеджера. ID созданной до сбоя карточки сохранён, продолжение произошло один раз.");
-    const hashes = [
-      "src/cli/archive.ts", "src/cli/dependencies.ts", "src/cli/expert-team.ts", "src/cli/main.ts", "src/cli/model.ts",
-      "src/cli/storage.ts", "src/cli/task-messages.ts", "src/cli/tasks.ts", "src/desktop/board-actions.ts",
-      "src/desktop/cli.ts", "src/desktop/codex-chat.ts", "src/desktop/main.ts",
-      "scripts/check-draft-dependency.mjs", "scripts/electron-check.mjs", "tests/fixtures/planned-draft.ts",
-    ].map(path => createHash("sha256").update(readFileSync(join(root, path))).digest("hex") + "  " + path);
+    const hashes = checkedSourceHashes();
+    assert.deepEqual(hashes, JSON.parse(readFileSync(initialHashes, "utf8")), "The source bytes changed between Electron phases.");
     const gitHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8", windowsHide: true }).trim();
+    const gitTree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: root, encoding: "utf8", windowsHide: true }).trim();
     writeFileSync(join(artifacts, "draft-dependency-check.txt"), [
       "T-0322. Windows Electron, изолированная доска, подстановка ответов провайдеров.",
       "Команда: node scripts/check-draft-dependency.mjs --artifacts .tasks/qa/T-0322",
       "HEAD на момент проверки: " + gitHead + ". Тестировались исходники рабочего дерева из списка ниже.",
+      "Git-дерево HEAD: " + gitTree + ".",
       `ОС: ${process.platform} ${release()} ${arch()}. Electron ${process.versions.electron}. Chromium ${process.versions.chrome}.`,
       "Node для CLI: " + execFileSync(node, ["--version"], { encoding: "utf8", windowsHide: true }).trim() + ".",
       "Renderer: sandbox и contextIsolation включены, nodeIntegration выключен.",
@@ -326,7 +431,7 @@ async function run() {
       "",
       "Ответы моделей подставлены сценарием. Полномочия проверяет настоящий CLI. Поведение внешней модели, Linux и macOS не проверялось.",
       "",
-      "SHA-256 фактических байтов файлов рабочего дерева (включая окончания строк):",
+      "SHA-256 байтов рабочего дерева Windows, идентификатор blob после штатных Git-фильтров и SHA-256 байтов совпавшего blob HEAD:",
       ...hashes,
       "",
     ].join("\n"));
@@ -360,6 +465,9 @@ async function run() {
   await verifyOutcome(reusable.id, existing.id, prior.id);
   assert.equal(cards().filter(card => card.title === dependencyTitle).length, 1);
   pass("Авторежим выключен. Письмо дождалось занятого менеджера. Поиск и просмотр совпадения привели к переиспользованию карточки. Повтор вернул тот же ID и ответ. Исходный диалог продолжился без нового сообщения владельца.");
+
+  seedLegacyDraft(prior.id);
+  await verifyLegacyReplay(prior.id);
 
   const verifyDenial = async autoMode => {
     const denied = create("Без решения: T-0147", {
