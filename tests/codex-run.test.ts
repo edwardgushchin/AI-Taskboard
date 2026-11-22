@@ -5,7 +5,7 @@ import { callCli } from "../src/desktop/cli.ts";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -111,14 +111,20 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   const git = (...args: string[]) => execFileSync("git", args, { cwd: folder, encoding: "utf8", windowsHide: true }).trim();
   git("init", "-b", "main");
   assert.equal((await callCli(folder, ["init"])).ok, true);
-  const oldRules = writeBoardProjectRules(folder, {
+  writeBoardProjectRules(folder, {
     text: "Executor OLD rule", revision: readBoardProjectRules(folder).revision,
   });
   git("add", "AGENTS.md");
   git("-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--no-gpg-sign", "-m", "Initial");
   const base = git("rev-parse", "HEAD");
   git("worktree", "add", "-b", "ai-taskboard/T-0001", worktree);
-  writeBoardProjectRules(folder, { text: "Executor CURRENT rule", revision: oldRules.revision });
+  if (process.platform !== "win32") {
+    renameSync(join(folder, "AGENTS.md"), join(folder, "executor-rules.md"));
+    symlinkSync("executor-rules.md", join(folder, "AGENTS.md"), "file");
+  }
+  writeBoardProjectRules(folder, {
+    text: "Executor CURRENT rule", revision: readBoardProjectRules(folder).revision,
+  });
   const stub = join(folder, "codex.cjs");
   const capture = join(folder, "captured.json");
   const thread = "01234567-1234-5678-1234-123456789012";

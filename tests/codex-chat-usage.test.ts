@@ -2,7 +2,7 @@ import { trackActiveRun, trackProvider, claimDiscussion, activeRunSummary, obser
 import { providerActions } from "../src/desktop/provider-tools.ts";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,6 +28,10 @@ test("task discussion streams task usage before success, provider failure, or a 
   t.after(() => rmSync(folder, { recursive: true, force: true }));
   mkdirSync(join(folder, ".tasks"));
   writeFileSync(join(folder, ".tasks", "board.json"), JSON.stringify({ settings: { boardType: "manual" } }));
+  if (process.platform !== "win32") {
+    writeFileSync(join(folder, "reviewer-rules.md"), "# Reviewer project\n");
+    symlinkSync("reviewer-rules.md", join(folder, "AGENTS.md"), "file");
+  }
   const oldRules = writeBoardProjectRules(folder, {
     text: "Reviewer OLD rule", revision: readBoardProjectRules(folder).revision,
   });

@@ -1,3 +1,4 @@
+import { lstatSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { TaskboardError } from "./model.ts";
 import { readBinary, sha256, writeAtomic } from "./storage.ts";
@@ -29,17 +30,20 @@ function section(source: string, markers: typeof sections.rules) {
     content: source.slice(starts[0].index + markers.start.length, ends[0].index) };
 }
 
+function rulesRevision(path: string, bytes: Buffer) {
+  return sha256(Buffer.concat([Buffer.from(path + "\0"), bytes]));
+}
+
 function load(root: string) {
-  const path = join(root, "AGENTS.md");
-  let bytes: Buffer;
-  try {
-    bytes = readBinary(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    return { path, source: "", revision: "missing" };
-  }
+  const entry = join(root, "AGENTS.md");
+  const info = lstatSync(entry, { throwIfNoEntry: false });
+  if (!info) return { path: entry, source: "", revision: "missing" };
+
+  // Replace the regular file named by the link, leaving AGENTS.md itself in place.
+  const path = info.isSymbolicLink() ? realpathSync(entry) : entry;
+  const bytes = readBinary(path);
   const source = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
-  return { path, source, revision: sha256(bytes) };
+  return { path, source, revision: rulesRevision(path, bytes) };
 }
 
 function readRules(source: string) {
@@ -57,6 +61,12 @@ function readRules(source: string) {
 export function readBoardProjectRules(root: string) {
   const { source, revision } = load(root);
   return { text: readRules(source) ?? "", revision };
+}
+
+function rulesConflict(source: string, revision: string) {
+  return new TaskboardError("PROJECT_RULES_CONFLICT", "AGENTS.md changed since these rules were opened.", {
+    text: readRules(source) ?? "", revision,
+  });
 }
 
 /** The canonical rules take precedence over an older managed section in a worktree. */
@@ -79,9 +89,7 @@ export function writeBoardProjectRules(root: string, input?: { text: unknown; re
     throw new TaskboardError("INVALID_AGENTS_SECTIONS", "AI Taskboard sections in AGENTS.md must be separate.");
   }
   if (input && input.revision !== revision) {
-    throw new TaskboardError("PROJECT_RULES_CONFLICT", "AGENTS.md changed since these rules were opened.", {
-      text: savedText ?? "", revision,
-    });
+    throw rulesConflict(source, revision);
   }
   if (input && typeof input.text !== "string") {
     throw new TaskboardError("INVALID_INPUT", "Project rules must be Markdown text.");
@@ -106,6 +114,14 @@ export function writeBoardProjectRules(root: string, input?: { text: unknown; re
       updated += separator + block + newline;
     }
   }
-  if (updated !== source) writeAtomic(path, updated);
-  return { text: rules, revision: sha256(Buffer.from(updated)) };
+  if (updated === source) return { text: rules, revision };
+
+  const bytes = Buffer.from(updated);
+  writeAtomic(path, bytes, () => {
+    const latest = load(root);
+    if (latest.revision !== revision) {
+      throw rulesConflict(latest.source, latest.revision);
+    }
+  });
+  return { text: rules, revision: rulesRevision(path, bytes) };
 }

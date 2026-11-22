@@ -4,7 +4,7 @@ import { providerActions } from "../src/desktop/provider-tools.ts";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import type { SpawnOptions } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -317,6 +317,10 @@ test("board chat keeps a goal streaming across turns and times out only after in
   mkdirSync(join(directory, ".tasks"), { recursive: true });
   writeFileSync(join(directory, ".tasks", "board.json"), JSON.stringify({ settings: { boardType: "manual" } }));
   t.after(() => rmSync(directory, { recursive: true, force: true, maxRetries: 3 }));
+  if (process.platform !== "win32") {
+    writeFileSync(join(directory, "manager-rules.md"), "# Manager project\n");
+    symlinkSync("manager-rules.md", join(directory, "AGENTS.md"), "file");
+  }
   const oldRules = writeBoardProjectRules(directory, {
     text: "Manager OLD rule", revision: readBoardProjectRules(directory).revision,
   });

@@ -76,7 +76,7 @@ export function readJson(path: string): unknown {
   }
 }
 
-export function writeAtomic(path: string, contents: string | Uint8Array): void {
+export function writeAtomic(path: string, contents: string | Uint8Array, beforeReplace?: () => void): void {
   requireRegular(path);
   const temporary = join(dirname(path), "." + basename(path) + "." + randomUUID() + ".tmp");
   const file = openSync(temporary, "wx");
@@ -88,6 +88,7 @@ export function writeAtomic(path: string, contents: string | Uint8Array): void {
       closeSync(file);
     }
     for (let attempt = 0; ; attempt++) {
+      beforeReplace?.();
       try { renameSync(temporary, path); break; }
       catch (error) {
         if (process.platform !== "win32" || attempt >= 4 ||
