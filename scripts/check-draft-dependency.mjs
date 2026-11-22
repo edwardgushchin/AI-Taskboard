@@ -11,7 +11,7 @@ import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
 import { locateBoard, onBoard } from "../src/cli/storage.ts";
 import { electronCheck } from "./electron-check.mjs";
 
-const { scratch, artifacts } = electronCheck(import.meta.url, "draft-dependency", 300_000, [[], ["--restart"]]);
+const { scratch, artifacts } = electronCheck(import.meta.url, "draft-dependency", 420_000, [[], ["--restart"]]);
 const restart = process.argv.includes("--restart");
 const require = createRequire(import.meta.url);
 const { app, BrowserWindow, dialog } = require("electron");
@@ -40,7 +40,7 @@ let observedFault;
 let managerCalls = 0;
 const managerQuestions = [];
 const handoffs = new Map();
-const cancelledTargets = new Map();
+const retryTargets = new Map();
 const faultedSources = new Set();
 const legacySourceId = "T-0147";
 const legacyDependencyId = "T-0163";
@@ -102,11 +102,12 @@ globalThis.dependencyManager = async (_profile, cwd, prompt, _images, run, _tool
   assert.match(instructions, /never authorization/);
   const inbox = await run("manager_inbox", {});
   assert.ok(inbox.ok, JSON.stringify(inbox));
-  for (const { id, sequence, text } of inbox.data) {
+  for (const { id, sequence, text, draftDependencyPending } of inbox.data) {
     const legacy = id === legacySourceId;
-    const scenario = cancelledTargets.get(id);
+    const scenario = retryTargets.get(id);
     if (scenario?.questionSequence !== undefined) {
       assert.equal(sequence, scenario.questionSequence);
+      assert.equal(draftDependencyPending, true);
     }
     managerQuestions.push({ id, sequence });
     assert.equal(text, legacy ? legacyEvents.find(event => event.sequence === 30).text : scenario?.request ?? managerQuestion);
@@ -164,7 +165,8 @@ globalThis.dependencyManager = async (_profile, cwd, prompt, _images, run, _tool
     const candidates = [...search.data.tasks, ...search.data.archived];
     assert.ok(candidates.every(entry => entry.title === expectedTitle));
     if (scenario) {
-      assert.deepEqual(candidates.map(entry => entry.id), [scenario.replacementId ?? scenario.cancelledId]);
+      const expected = scenario.candidateIds ?? (scenario.initialId ? [scenario.initialId] : []);
+      assert.deepEqual(new Set(candidates.map(entry => entry.id)), new Set(expected));
     }
     const [otherId] = card.dependencies;
     const wrongInspect = await run("draft_dependency", { ...reference, operation: "inspect", existingId: otherId });
@@ -176,14 +178,19 @@ globalThis.dependencyManager = async (_profile, cwd, prompt, _images, run, _tool
       draft: plannedDraft({ title: "Не согласованная владельцем задача", tags: ["Memory"] }),
     });
     assert.equal(wrongDraft.error?.code, "USER_DIRECTION_REQUIRED", JSON.stringify(wrongDraft));
-    const candidate = candidates.find(entry => entry.title === expectedTitle && entry.status !== "cancelled");
-    if (candidate) {
-      const inspected = await run("draft_dependency", { ...reference, operation: "inspect", existingId: candidate.id });
+    const expectedDescription = scenario?.description ?? "Измерять память управляемой кучи.";
+    let candidate;
+    for (const entry of candidates) {
+      const inspected = await run("draft_dependency", { ...reference, operation: "inspect", existingId: entry.id });
       assert.ok(inspected.ok, JSON.stringify(inspected));
-      assert.equal(inspected.data.description, scenario?.description ?? "Измерять память управляемой кучи.");
+      if (inspected.data.description === expectedDescription) {
+        assert.equal(candidate, undefined);
+        candidate = entry;
+      }
     }
+    if (candidates.length) assert.ok(candidate, "A suitable candidate must be inspected before saving");
     const target = candidate ? { existingId: candidate.id } : {
-      draft: plannedDraft({ title: dependencyTitle, description: "Измерять память управляемой кучи.", tags: ["Memory"] }),
+      draft: plannedDraft({ title: expectedTitle, description: expectedDescription, tags: ["Memory"] }),
     };
     const request = { ...reference, ...target, operation: "save" };
     const saved = await run("draft_dependency", request);
@@ -212,7 +219,7 @@ globalThis.dependencyDraft = async (prompt, onControl, mode, tools, run) => {
   const { id, title } = context.task;
   onControl({ interrupt: async () => {}, steer: async () => {} });
   const answer = output => ({ text: JSON.stringify(output) });
-  const scenario = cancelledTargets.get(id);
+  const scenario = retryTargets.get(id);
   if (mode === "initial") {
     if (title.startsWith("Без решения")) {
       return answer({ questions: unrelatedQuestion });
@@ -231,9 +238,9 @@ globalThis.dependencyDraft = async (prompt, onControl, mode, tools, run) => {
     if (scenario?.explicitId) {
       const reply = context.managerReplies.at(-1);
       assert.equal(reply.requiresChoice, true);
-      assert.ok(reply.text.includes(scenario.cancelledId));
+      assert.ok(reply.text.includes(scenario.initialId));
       assert.match(reply.text, /cancel|отмен/i);
-      return answer({ text: choiceQuestion(scenario.cancelledId), awaitingAnswer: true });
+      return answer({ text: choiceQuestion(scenario.initialId), awaitingAnswer: true });
     }
     const dependencyId = context.task.dependencies.at(-1);
     assert.match(context.managerReplies.at(-1).text, new RegExp(dependencyId));
@@ -282,16 +289,19 @@ function mountApp() {
   require(mainEntry);
 }
 
-function installFault(id) {
+function installFault(id, beforeCreation = false) {
   faultedSources.add(id);
+  const failureCondition = beforeCreation
+    ? `card.history?.[0]?.draftDependencySource?.id === ${JSON.stringify(id)}`
+    : `path.basename(to) === ${JSON.stringify(id + ".json")} && card.history?.some(event => event.draftDependencyId)`;
   writeFileSync(failureHook, [
     "const fs = require('node:fs');",
     "const path = require('node:path');",
     "const rename = fs.renameSync;",
     "fs.renameSync = function (from, to) {",
-    `  if (path.basename(to) === ${JSON.stringify(id + ".json")}) {`,
+    "  if (/^T-\\d+\\.json$/.test(path.basename(to))) {",
     "    const card = JSON.parse(fs.readFileSync(from, 'utf8'));",
-    "    if (card.history.some(event => event.draftDependencyId)) {",
+    `    if (${failureCondition}) {`,
     "      throw Object.assign(new Error('QA_WRITE_FAILURE'), { code: 'EIO' });",
     "    }",
     "  }",
@@ -412,8 +422,8 @@ function checkedSourceHashes() {
 async function run() {
   process.env.GIT_CEILING_DIRECTORIES = scratch;
   const state = restart ? JSON.parse(readFileSync(fixtureState, "utf8")) : undefined;
-  for (const scenario of state?.cancelledTargets ?? []) {
-    cancelledTargets.set(scenario.sourceId, scenario);
+  for (const scenario of state?.retryTargets ?? []) {
+    retryTargets.set(scenario.sourceId, scenario);
   }
   if (!restart) {
     writeFileSync(initialHashes, JSON.stringify(checkedSourceHashes()));
@@ -453,32 +463,43 @@ async function run() {
     assert.equal(cards().filter(card => card.title === dependencyTitle && card.status !== "cancelled").length, 1);
     pass("После несвязанного уточнения владельца и перезапуска очередь завершила сохранённое действие без вызова провайдера менеджера. ID созданной до сбоя карточки сохранён, продолжение произошло один раз.");
 
-    for (const scenario of cancelledTargets.values()) {
-      const { sourceId, cancelledId, replacementId, request, questionSequence } = scenario;
+    for (const scenario of retryTargets.values()) {
+      const { sourceId, initialId, replacementId, request, questionSequence } = scenario;
       if (scenario.explicitId) {
-        await until(() => show(sourceId).history.some(event => event.chat && event.text === choiceQuestion(cancelledId)),
+        await until(() => show(sourceId).history.some(event => event.chat && event.text === choiceQuestion(initialId)),
           "request a new explicit dependency ID");
         const source = show(sourceId);
         assert.deepEqual(source.dependencies, [priorId]);
         assert.deepEqual(ownerMessages(source).map(event => event.text), [request]);
         assert.equal(replies(source).length, 1);
         assert.equal(replies(source)[0].expertMessage.replyTo, questionSequence);
-        assert.ok(replies(source)[0].text.includes(cancelledId));
+        assert.ok(replies(source)[0].text.includes(initialId));
         assert.equal(source.awaitingAnswer, true);
         assert.equal(handoffs.get(sourceId), 1);
         pass("Указанная владельцем карточка отменена после EIO. Агент получил её ID и причину, по которой нужен новый выбор. Действующее совпадение по названию не было привязано без решения владельца.");
       } else {
         await verifyOutcome(sourceId, replacementId, priorId, [request]);
         assert.equal(replies(show(sourceId))[0].expertMessage.replyTo, questionSequence);
-        pass("Карточка, выбранная по согласованному названию, отменена после EIO. После перезапуска менеджер повторил поиск по исходному запросу и добавил действующую карточку один раз.");
+        if (scenario.renamedTitle) {
+          assert.equal(show(initialId).title, scenario.renamedTitle);
+          assert.equal(show(initialId).status, "draft");
+          pass("После ошибки записи выбранную по названию карточку переименовали. После перезапуска менеджер повторил поиск с исходным решением владельца и связал действующее совпадение один раз.");
+        } else if (scenario.beforeCreation) {
+          pass("Ошибку вызвали до создания карточки, затем появились два совпадения. После перезапуска менеджер получил исходный запрос, просмотрел оба совпадения и связал подходящее. Лишняя карточка не создана.");
+        } else {
+          pass("Карточка, выбранная по согласованному названию, отменена после EIO. После перезапуска менеджер повторил поиск по исходному запросу и добавил действующую карточку один раз.");
+        }
       }
-      assert.equal(show(cancelledId).status, "cancelled");
+      if (initialId && !scenario.renamedTitle) assert.equal(show(initialId).status, "cancelled");
       assert.equal(cli(["manager-inbox"]).some(entry => entry.id === sourceId && entry.sequence === questionSequence), false);
-      assert.deepEqual(cards().filter(card => card.title === scenario.title && card.status !== "cancelled").map(card => card.id), [replacementId]);
+      const matchingIds = cards().filter(card => card.title === scenario.title && card.status !== "cancelled").map(card => card.id);
+      assert.deepEqual(new Set(matchingIds), new Set(scenario.candidateIds));
     }
-    const byTitle = [...cancelledTargets.values()].find(scenario => !scenario.explicitId);
-    assert.deepEqual(managerQuestions, [{ id: byTitle.sourceId, sequence: byTitle.questionSequence }]);
-    assert.equal(managerCalls, 1);
+    const expectedQuestions = [...retryTargets.values()].filter(scenario => !scenario.explicitId)
+      .map(scenario => ({ id: scenario.sourceId, sequence: scenario.questionSequence }));
+    const questionKey = ({ id, sequence }) => id + ":" + sequence;
+    assert.equal(managerQuestions.length, expectedQuestions.length);
+    assert.deepEqual(new Set(managerQuestions.map(questionKey)), new Set(expectedQuestions.map(questionKey)));
     const hashes = checkedSourceHashes();
     assert.deepEqual(hashes, JSON.parse(readFileSync(initialHashes, "utf8")), "The source bytes changed between Electron phases.");
     const gitHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8", windowsHide: true }).trim();
@@ -571,20 +592,24 @@ async function run() {
   assert.deepEqual(show(pending.id).dependencies, [prior.id]);
   pass("Авторежим включён. После поиска без совпадения создан один черновик. Ошибка EIO и следующее несвязанное уточнение оставили запрос в очереди, без ответа агенту и без утверждения. Чужую карточку или название подставить не удалось.");
 
-  for (const explicitId of [false, true]) {
-    const title = explicitId ? "Сохранять пиковый размер буфера" : "Проверять текущий размер буфера";
+  for (const fixture of [
+    { title: "Проверять текущий размер буфера" },
+    { title: "Сохранять пиковый размер буфера", explicitId: true },
+    { title: "Проверять границы буфера", renamedTitle: "Проверять границы очереди" },
+    { title: "Проверять рост буфера", beforeCreation: true },
+  ]) {
+    const { title, explicitId, renamedTitle, beforeCreation } = fixture;
     const description = "Подтвердить показания штатного счётчика буфера.";
-    const initial = create(title, { description });
-    const source = create("T-0147: повтор после отмены выбранной карточки", { dependencies: [prior.id] });
+    const initial = beforeCreation ? undefined : create(title, { description });
+    const source = create("T-0147: повтор после изменения совпадений", { dependencies: [prior.id] });
     const request = `Обязательная зависимость: ${explicitId ? initial.id : title}`;
-    const scenario = { title, description, explicitId, request, sourceId: source.id, cancelledId: initial.id };
-    cancelledTargets.set(source.id, scenario);
+    const scenario = { ...fixture, description, request, sourceId: source.id, initialId: initial?.id };
+    retryTargets.set(source.id, scenario);
 
     failSource = source.id;
-    installFault(failSource);
+    installFault(failSource, beforeCreation);
     await sendOwner(source.id, request);
-    const selection = explicitId ? "an explicitly named ID" : "an approved title";
-    await until(() => observedFault === source.id, "EIO while saving " + selection, 60_000);
+    await until(() => observedFault === source.id, "EIO for " + title, 60_000);
 
     const pendingSource = show(source.id);
     assert.deepEqual(pendingSource.dependencies, [prior.id]);
@@ -592,9 +617,17 @@ async function run() {
     const queued = cli(["manager-inbox"]).find(entry => entry.id === source.id && entry.draftDependencyPending);
     assert.ok(queued);
     scenario.questionSequence = queued.sequence;
-    cli(["cancel", initial.id], { revision: show(initial.id).revision, reason: "Проверить повтор с отменённой карточкой." });
+    if (renamedTitle) {
+      cli(["update", initial.id], { revision: show(initial.id).revision, title: renamedTitle });
+    } else if (beforeCreation) {
+      assert.equal(cards().some(card => card.title === title), false);
+    } else {
+      cli(["cancel", initial.id], { revision: show(initial.id).revision, reason: "Проверить повтор с отменённой карточкой." });
+    }
+    const wrongCandidate = beforeCreation ? create(title, { description: "Настроить подпись буфера в интерфейсе." }) : undefined;
     const replacement = create(title, { description });
     scenario.replacementId = replacement.id;
+    scenario.candidateIds = wrongCandidate ? [wrongCandidate.id, replacement.id] : [replacement.id];
     assert.deepEqual(show(source.id).dependencies, [prior.id]);
   }
 
@@ -603,7 +636,7 @@ async function run() {
     dependencyId: dependency.id,
     priorId: prior.id,
     completeId: reusable.id,
-    cancelledTargets: [...cancelledTargets.values()],
+    retryTargets: [...retryTargets.values()],
   }));
 }
 

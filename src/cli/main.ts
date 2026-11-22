@@ -274,6 +274,9 @@ function draftDependency(store: BoardStore, id: string, input: Record<string, un
     return [...tasks, ...archived].filter(card =>
       card.id !== id && card.status !== "cancelled" && matchesDraftDependency(subject, card, legacy));
   };
+  const previouslyCreated = () => store.storedCards().find(card => card.status !== "cancelled" &&
+    matchesDraftDependency(subject, card, legacy) && card.history[0]?.draftDependencySource?.id === id &&
+    card.history[0].draftDependencySource.question === question);
 
   let saved = pendingDraftDependency(source, question);
   if (saved && input.authorizeOnly !== true && cancellation > saved.ownerMessage) {
@@ -282,9 +285,16 @@ function draftDependency(store: BoardStore, id: string, input: Record<string, un
     }, { parent: source });
     return { cancelled: true, sequence: reply.sequence };
   }
-  const savedStatus = saved?.existingId ? dependencyStatus(store, saved.existingId) : undefined;
-  const reselect = Boolean(saved?.existingId && (!savedStatus || savedStatus === "cancelled"));
-  if (reselect && taskIdPattern.test(subject) && input.authorizeOnly !== true) {
+  const byId = taskIdPattern.test(subject);
+  const savedId = saved?.existingId;
+  const savedStatus = savedId ? dependencyStatus(store, savedId) : undefined;
+  const unavailable = savedId !== undefined && (!savedStatus || savedStatus === "cancelled");
+  const renamed = savedId !== undefined && !unavailable && !byId &&
+    !matchesDraftDependency(subject, readTask(store, savedId), legacy);
+  const created = saved?.draft ? previouslyCreated() : undefined;
+  const available = saved?.draft && !created ? matches() : [];
+  const searchAgain = !byId && (unavailable || renamed || available.length > 1);
+  if (unavailable && byId && input.authorizeOnly !== true) {
     const reason = savedStatus === "cancelled" ? "was cancelled" : "is no longer on the board";
     const reply = sendTeamMessage(store, id, "manager", {
       to: request.from, replyTo: question, kind: "decision",
@@ -292,10 +302,10 @@ function draftDependency(store: BoardStore, id: string, input: Record<string, un
     }, { parent: { ...source, awaitingAnswer: true, draftConfirmed: false }, requiresChoice: true });
     return { requiresChoice: true, sequence: reply.sequence };
   }
-  if (reselect && !taskIdPattern.test(subject) && input.revision === undefined && input.authorizeOnly !== true) {
+  if (searchAgain && input.revision === undefined && input.authorizeOnly !== true) {
     return { searchRequired: true };
   }
-  if (!saved || reselect && !taskIdPattern.test(subject)) {
+  if (!saved || searchAgain) {
     const { ownerSequence, ownerText } = input;
     const decision = saved?.ownerMessage ?? ownerMessage;
     if (decision <= cancellation || ownerSequence !== decision || decision >= question ||
@@ -328,18 +338,12 @@ function draftDependency(store: BoardStore, id: string, input: Record<string, un
   if (saved.existingId) {
     dependency = target(saved.existingId);
   } else {
-    const created = store.storedCards().find(card => card.status !== "cancelled" &&
-      matchesDraftDependency(subject, card, legacy) && card.history[0]?.draftDependencySource?.id === id &&
-      card.history[0].draftDependencySource.question === question);
     // A crash after writing the new card can leave its index entry missing.
     if (created && !store.index.tasks[created.id] && !store.index.archive[created.id]) {
       store.create(created);
     }
-    const candidates = created ? [created] : matches();
-    if (candidates.length > 1) {
-      throw new TaskboardError("DEPENDENCY_MATCH_FOUND", "Several matching dependencies appeared. Keep the request pending until the match is resolved.");
-    }
-    dependency = candidates.length ? target(candidates[0].id) :
+    const candidate = created ?? available[0];
+    dependency = candidate ? target(candidate.id) :
       createWithAttachments(store, assignTags(store, prepareDraft(saved.draft!)), undefined);
   }
   const dependencies = source.dependencies ?? [];
