@@ -117,7 +117,10 @@ test("draft dependency reads and writes require the owner's decision for the nam
     assert.deepEqual(cli(root, command, { ...authorized, authorizeOnly: true }), { subject: expected.title });
     cli(root, command, { ...authorized, existingId: unrelated.id }, "USER_DIRECTION_REQUIRED");
     cli(root, command, { ...authorized, draft: plannedDraft({ title: unrelated.title, tags: ["Memory"] }) }, "USER_DIRECTION_REQUIRED");
-    const saved = cli(root, command, { ...authorized, existingId: expected.id });
+    const selection = { ...authorized, existingId: expected.id };
+    cli(root, command, selection, "REVISION_CONFLICT");
+    cli(root, command, { ...selection, reviewedMatches: { [expected.id]: String(expected.revision) } }, "REVISION_CONFLICT");
+    const saved = cli(root, command, { ...selection, reviewedMatches: { [expected.id]: expected.revision } });
     assert.equal(saved.dependencyId, expected.id);
     assert.deepEqual(cli(root, ["show", source.id]).dependencies, [expected.id]);
   }
@@ -204,6 +207,7 @@ test("draft dependency retry rechecks new matches and skips cancelled drafts", a
         saved = cli(root, command, {
           ...replay, revision: before.revision, ownerSequence: owner.history.length, ownerText: text,
           existingId: existing.id,
+          reviewedMatches: { [existing.id]: existing.revision },
         });
         assert.equal(saved.dependencyId, existing.id);
       } else {
@@ -287,7 +291,7 @@ test("retry of a cancelled existing dependency respects title and ID authorizati
         cli(root, command, { ...reference, ownerSequence: String(reference.ownerSequence), authorizeOnly: true },
           "USER_DIRECTION_REQUIRED");
         assert.deepEqual(cli(root, command, { ...reference, authorizeOnly: true }), { subject });
-        const target = replacement ? { existingId: replacement.id } :
+        const target = replacement ? { existingId: replacement.id, reviewedMatches: { [replacement.id]: replacement.revision } } :
           { draft: plannedDraft({ title: subject, tags: ["Memory"] }) };
         const linked = cli(root, command, { ...reference, ...target });
         assert.notEqual(linked.dependencyId, selected.id);
@@ -303,7 +307,15 @@ test("retry of a cancelled existing dependency respects title and ID authorizati
 });
 
 test("draft dependency retry asks the manager to resolve changes in title matches", async t => {
-  for (const scenario of ["renamed title", "multiple matches", "renamed explicit ID", "unsuitable single match"] as const) {
+  for (const scenario of [
+    "renamed title",
+    "edited brief",
+    "unchanged",
+    "legacy selection",
+    "multiple matches",
+    "renamed explicit ID",
+    "unsuitable single match",
+  ] as const) {
     await t.test(scenario, subtest => {
       const root = fixture(subtest);
       cli(root, ["init"]);
@@ -323,11 +335,19 @@ test("draft dependency retry asks the manager to resolve changes in title matche
         pending.history.at(-1)!.draftDependency = {
           question: question.sequence, ownerMessage: owner.history.length, subject,
           ...(selected ? { existingId: selected.id } : { draft: plannedDraft({ title, tags: ["Memory"] }) }),
+          ...(selected && scenario !== "legacy selection" ?
+            { reviewedMatches: { [selected.id]: selected.revision } } : {}),
         };
         store.save(pending);
       });
-      if (selected) {
+      if (scenario === "renamed title" || scenario === "renamed explicit ID") {
         cli(root, ["update", selected.id], { revision: selected.revision, title: "Check garbage collection latency" });
+      } else if (scenario === "edited brief") {
+        cli(root, ["update", selected.id], {
+          revision: selected.revision,
+          description: "Changes a label.",
+          criteria: ["The label fits in the dialog."],
+        });
       } else if (scenario === "multiple matches") {
         cli(root, ["create"], { title, description: "Only measures allocation volume." });
       }
@@ -340,7 +360,7 @@ test("draft dependency retry asks the manager to resolve changes in title matche
       const command = ["draft-dependency", source.id];
       const replay = { replyTo: question.sequence };
       let linked;
-      if (scenario === "renamed explicit ID") {
+      if (scenario === "renamed explicit ID" || scenario === "unchanged") {
         linked = cli(root, command, replay);
         assert.equal(linked.dependencyId, selected.id);
       } else {
@@ -360,7 +380,10 @@ test("draft dependency retry asks the manager to resolve changes in title matche
           assert.notEqual(linked.dependencyId, replacement.id);
           assert.equal(cli(root, ["show", linked.dependencyId]).description, draft.description);
         } else {
-          linked = cli(root, command, { ...reference, existingId: replacement.id });
+          linked = cli(root, command, {
+            ...reference, existingId: replacement.id,
+            reviewedMatches: { [replacement.id]: replacement.revision },
+          });
           assert.equal(linked.dependencyId, replacement.id);
         }
       }

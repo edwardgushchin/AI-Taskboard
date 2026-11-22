@@ -190,6 +190,9 @@ globalThis.dependencyManager = async (_profile, cwd, prompt, _images, run, _tool
     for (const entry of candidates) {
       const inspected = await run("draft_dependency", { ...reference, operation: "inspect", existingId: entry.id });
       assert.ok(inspected.ok, JSON.stringify(inspected));
+      if (scenario && id === failSource && entry.id === scenario.initialId) {
+        scenario.inspectedRevision = inspected.data.revision;
+      }
       if (inspected.data.description === expectedDescription) {
         assert.equal(candidate, undefined);
         candidate = entry;
@@ -501,6 +504,12 @@ async function run() {
           assert.equal(show(initialId).title, scenario.renamedTitle);
           assert.equal(show(initialId).status, "draft");
           pass("После ошибки записи выбранную по названию карточку переименовали. После перезапуска менеджер повторил поиск с исходным решением владельца и связал действующее совпадение один раз.");
+        } else if (scenario.changedBrief) {
+          const changed = show(initialId);
+          assert.equal(changed.title, scenario.title);
+          assert.equal(changed.description, scenario.changedBrief.description);
+          assert.deepEqual(changed.criteria, scenario.changedBrief.criteria);
+          pass("После EIO описание и критерии выбранной карточки изменили при прежнем названии. Менеджер повторно просмотрел обе карточки, связал подходящую и передал её ID агенту один раз.");
         } else if (scenario.noSuitableMatch) {
           pass("После EIO до создания появился один одноимённый кандидат с другой постановкой. Менеджер проверил его, создал один подходящий черновик и передал его ID агенту.");
         } else if (scenario.singleMatch) {
@@ -511,7 +520,9 @@ async function run() {
           pass("Карточка, выбранная по согласованному названию, отменена после EIO. После перезапуска менеджер повторил поиск по исходному запросу и добавил действующую карточку один раз.");
         }
       }
-      if (initialId && !scenario.renamedTitle) assert.equal(show(initialId).status, "cancelled");
+      if (initialId && !scenario.renamedTitle && !scenario.changedBrief) {
+        assert.equal(show(initialId).status, "cancelled");
+      }
       assert.equal(cli(["manager-inbox"]).some(entry => entry.id === sourceId && entry.sequence === questionSequence), false);
       const matchingIds = cards().filter(card => card.title === scenario.title && card.status !== "cancelled").map(card => card.id);
       const expectedIds = scenario.noSuitableMatch ? [...scenario.candidateIds, linkedId] : scenario.candidateIds;
@@ -618,11 +629,18 @@ async function run() {
     { title: "Проверять текущий размер буфера" },
     { title: "Сохранять пиковый размер буфера", explicitId: true },
     { title: "Проверять границы буфера", renamedTitle: "Проверять границы очереди" },
+    {
+      title: "Измерять задержку буфера",
+      changedBrief: {
+        description: "Переименовать подпись буфера в интерфейсе.",
+        criteria: ["Подпись показывает новое название."],
+      },
+    },
     { title: "Проверять рост буфера", beforeCreation: true },
     { title: "Измерять заполнение буфера", beforeCreation: true, singleMatch: true },
     { title: "Измерять ёмкость буфера", beforeCreation: true, noSuitableMatch: true },
   ]) {
-    const { title, explicitId, renamedTitle, beforeCreation } = fixture;
+    const { title, explicitId, renamedTitle, changedBrief, beforeCreation } = fixture;
     const description = "Подтвердить показания штатного счётчика буфера.";
     const initial = beforeCreation ? undefined : create(title, { description });
     const source = create("T-0147: повтор после изменения совпадений", { dependencies: [prior.id] });
@@ -641,14 +659,24 @@ async function run() {
     const queued = cli(["manager-inbox"]).find(entry => entry.id === source.id && entry.draftDependencyPending);
     assert.ok(queued);
     scenario.questionSequence = queued.sequence;
+    if (initial && !explicitId) {
+      const saved = pendingSource.history.findLast(event => event.action === "draft-dependency-request");
+      assert.ok(Number.isInteger(scenario.inspectedRevision));
+      assert.equal(saved.draftDependency.reviewedMatches[initial.id], scenario.inspectedRevision);
+    }
     if (renamedTitle) {
       cli(["update", initial.id], { revision: show(initial.id).revision, title: renamedTitle });
+    } else if (changedBrief) {
+      cli(["update", initial.id], { revision: show(initial.id).revision, ...changedBrief });
     } else if (beforeCreation) {
       assert.equal(cards().some(card => card.title === title), false);
     } else {
       cli(["cancel", initial.id], { revision: show(initial.id).revision, reason: "Проверить повтор с отменённой карточкой." });
     }
     const candidates = [];
+    if (changedBrief) {
+      candidates.push(initial.id);
+    }
     if (beforeCreation && !fixture.singleMatch) {
       candidates.push(create(title, { description: "Настроить подпись буфера в интерфейсе." }).id);
     }

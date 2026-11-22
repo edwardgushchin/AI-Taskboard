@@ -291,11 +291,11 @@ function draftDependency(store: BoardStore, id: string, input: Record<string, un
   const savedId = saved?.existingId;
   const savedStatus = savedId ? dependencyStatus(store, savedId) : undefined;
   const unavailable = savedId !== undefined && (!savedStatus || savedStatus === "cancelled");
-  const renamed = savedId !== undefined && !unavailable && !byId &&
-    !matchesDraftDependency(subject, readTask(store, savedId), legacy);
+  const selectedChanged = savedId !== undefined && !unavailable && !byId &&
+    saved?.reviewedMatches?.[savedId] !== readTask(store, savedId).revision;
   const created = saved?.draft ? previouslyCreated() : undefined;
   const unreviewed = saved?.draft && !created && hasUnreviewedMatch(saved.reviewedMatches ?? {});
-  const searchAgain = !byId && (unavailable || renamed || unreviewed);
+  const searchAgain = !byId && (unavailable || selectedChanged || unreviewed);
   if (unavailable && byId && input.authorizeOnly !== true) {
     const reason = savedStatus === "cancelled" ? "was cancelled" : "is no longer on the board";
     const reply = sendTeamMessage(store, id, "manager", {
@@ -322,10 +322,18 @@ function draftDependency(store: BoardStore, id: string, input: Record<string, un
       throw new TaskboardError("INVALID_INPUT", "Supply either an existing dependency ID or one new draft.");
     }
     let reviewedMatches: Record<string, number> | undefined;
-    if (existingId) target(existingId);
+    const reviewed = input.reviewedMatches === undefined ? {} : object(input.reviewedMatches);
+    if (existingId) {
+      const card = target(existingId);
+      if (!byId) {
+        if (reviewed[card.id] !== card.revision) {
+          throw new TaskboardError("REVISION_CONFLICT", "Inspect the current revision of the selected dependency before saving.");
+        }
+        reviewedMatches = { [card.id]: card.revision };
+      }
+    }
     if (draft) {
       prepareDraft(draft);
-      const reviewed = input.reviewedMatches === undefined ? {} : object(input.reviewedMatches);
       if (hasUnreviewedMatch(reviewed)) {
         throw new TaskboardError("DEPENDENCY_MATCH_FOUND", "Inspect each current match before creating a new dependency draft.");
       }

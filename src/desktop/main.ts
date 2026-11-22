@@ -3555,7 +3555,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
                 const candidates = draftDependencySearches.get(key);
                 if (operation === "save" && candidates) {
                   draftDependencyAttempts.add(key);
-                  const reviewedMatches = draft ? Object.fromEntries(candidates) : undefined;
+                  const reviewedMatches = Object.fromEntries(candidates);
                   return callCli(board.project, command, { ...reference, existingId, draft, reviewedMatches });
                 }
               }
