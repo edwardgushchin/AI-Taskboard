@@ -248,7 +248,8 @@ function boardError(error) {
     return t("draft_discussion.confirmation_required");
   }
   if (error.code === "TASK_AWAITING_ANSWER") {
-    return t("task_question.approval_blocked");
+    return t(error.details?.questionAudience === "manager" ? "task_question.approval_waiting_for_manager" :
+      "task_question.approval_blocked");
   }
   if (error.code === "BOARD_BUSY") {
     return t("ui.the_board_is_busy_with_another_operation_try_aga_e9c8de78");
@@ -1130,7 +1131,8 @@ function quotaLabel() {
 }
 
 function card(task) {
-  const needsAnswer = task.status !== "cancelled" && task.awaitingAnswer === true;
+  const audience = task.questionAudience;
+  const questionDescription = audience === "owner" ? "task_question.open_dialogue" : "task_question.waiting_for_manager";
   const showCover = archiveView || frame.board.settings?.showCardPreviews !== false;
   const cover = showCover ? selectedCover(task, (task.attachments ?? []).filter(isImageAttachment)) : undefined;
   // Only visible card data belongs in this key: chat/log/revision updates must not rebuild it.
@@ -1142,12 +1144,12 @@ function card(task) {
     task.acceptanceWaitUnchanged, Boolean(task.codexThreadId),
     task.reviewModeOverride?.mode ?? frame.board?.settings.reviewMode, task.reviewApproved,
     task.unfinishedDependencies, task.blocked, task.subtasks?.map(entry => entry.done),
-    task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule, needsAnswer,
+    task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule, audience,
     manualColumns().find(c => c.id === task.status)]);
   const previous = boardCards.get(task.id);
   if (previous?.signature === signature) return previous.node;
   const card = previous?.node ?? button("", () => showTask(task.id, card.dataset.awaitingAnswer === "true"));
-  card.dataset.awaitingAnswer = String(needsAnswer);
+  card.dataset.awaitingAnswer = String(audience === "owner");
   const oldDetails = card.querySelector(".task-card-details");
   const oldImage = card.querySelector(".task-card-cover");
   if (oldDetails) cardCovers.unobserve(oldDetails);
@@ -1163,11 +1165,11 @@ function card(task) {
   }
   const subtasks = task.subtasks ?? [];
   const completed = subtasks.filter(entry => entry.done).length;
-  if (hasPriority || subtasks.length || needsAnswer) {
+  if (hasPriority || subtasks.length || audience) {
     bindLocalized(card, "aria-description", () => [
       hasPriority ? t("ui.priority_b114c9b5") + " · " + priorityName(task.priority) : "",
       subtasks.length ? t("ui.subtasks_b409bda5") + " " + completed + "/" + subtasks.length : "",
-      needsAnswer ? t("task_question.open_dialogue") : "",
+      audience ? t(questionDescription) : "",
     ].filter(Boolean).join(". "), true);
   } else {
     card.removeAttribute("aria-description");
@@ -1205,10 +1207,11 @@ function card(task) {
   const meta = element("span", undefined, "task-meta");
   const id = element("span", task.id, "task-id task-stat");
   meta.append(id);
-  if (needsAnswer) {
+  if (audience) {
     const question = element("span", undefined, "task-question task-stat");
-    question.append(icon("question"), element("span", () => t("task_question.needs_answer")));
-    bindLocalized(question, "title", () => t("task_question.open_dialogue"));
+    const label = audience === "owner" ? "task_question.needs_answer" : "task_question.waiting_for_manager";
+    question.append(icon("question"), element("span", () => t(label)));
+    bindLocalized(question, "title", () => t(questionDescription));
     meta.append(question);
   }
   if (task.milestone) {
@@ -4636,12 +4639,15 @@ async function showTask(id, dialogue = false) {
       () => act("update", { schedulePaused: !task.schedule.paused })));
   }
   if (task.status === "draft") {
-    if (task.awaitingAnswer === true || !manualBoard() && !hasDraftConfirmation(task)) {
+    if (task.questionAudience || task.awaitingAnswer === true || !manualBoard() && !hasDraftConfirmation(task)) {
       const phase = task.draftDiscussion?.phase;
-      const label = task.awaitingAnswer === true ? "task_question.approval_blocked" :
+      const label = task.questionAudience === "manager" ? "task_question.approval_waiting_for_manager" :
+        task.questionAudience === "owner" ? "task_question.approval_blocked" :
         phase ? "draft_discussion." + phase : "draft_discussion.confirmation_required";
       body.append(element("p", () => t(label, { reason: task.draftDiscussion?.reason }), "muted"));
-      actions.append(button(() => t("task_question.open_dialogue_button"), () => showTask(task.id, true)));
+      if (task.questionAudience !== "manager") {
+        actions.append(button(() => t("task_question.open_dialogue_button"), () => showTask(task.id, true)));
+      }
     } else if (!task.approvalRequirements?.length) {
       actions.append(button(() => t("ui.approve_535c27a7"), () => act("approve"), "primary"));
     }

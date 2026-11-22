@@ -754,8 +754,9 @@ select:hover:not(:disabled) {
 .task-stat .codicon-link { rotate: -45deg; }
 .task-question {
   color: var(--text); background: color-mix(in srgb, var(--accent) 14%, var(--panel));
-  border-radius: 4px; padding: 1px 4px; white-space: nowrap;
+  border-radius: 4px; padding: 1px 4px; max-width: 100%; white-space: normal;
 }
+.task-question > span:last-child { min-width: 0; overflow-wrap: anywhere; }
 .dependency-warning { color: var(--yellow); }
 .task-dependency-message {
   display: inline-flex; align-items: center; justify-self: start; min-width: 0; max-width: 100%;

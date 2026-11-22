@@ -88,6 +88,8 @@
   "task_question.approval_blocked": "You can approve the draft once the agent closes the question in the task dialogue.",
   "task_question.open_dialogue_button": "Open dialogue",
   "task_question.needs_answer": "Needs answer",
+  "task_question.waiting_for_manager": "Waiting for manager",
+  "task_question.approval_waiting_for_manager": "You can approve the draft once the agent finishes checking with the manager.",
   "task_question.open_dialogue": "Needs answer. Open task dialogue",
   "agentActivity.title": "Board activity",
   "agentActivity.busy": "Busy",

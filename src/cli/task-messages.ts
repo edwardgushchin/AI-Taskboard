@@ -58,6 +58,33 @@ export function draftManagerReply(task: Task, sequence: number, to: string) {
     event.messageKind !== "question" && !deferredDependencyReply(task, sequence, event)) + 1;
 }
 
+export function taskQuestionAudience(task: Task): "owner" | "manager" | undefined {
+  if (task.status === "cancelled") return;
+  if (task.awaitingAnswer === true && task.awaitingOwnerAnswer === true) return "owner";
+  if (task.status === "draft" && task.draftDiscussion?.managerReply !== undefined) return "manager";
+
+  const answered = new Set<number>();
+  for (let index = task.history.length - 1; index >= 0; index--) {
+    const event = task.history[index];
+    const mail = event.expertMessage;
+    if (event.action !== "coordination") continue;
+    // Executor messages cannot be answered through the task inbox while the card is a draft.
+    if (!mail && task.status === "draft") continue;
+    if (event.actor === "agent" && (!mail || mail.to === "manager") && event.messageKind === "question") {
+      if (!answered.has(index + 1)) return "manager";
+    } else if (event.actor === "manager" && !mail && event.replyToMessage !== undefined && event.messageKind !== "question") {
+      if (!task.history[event.replyToMessage - 1]?.expertMessage) answered.add(event.replyToMessage);
+    } else if (mail?.from === "manager" && mail.replyTo !== undefined && event.messageKind !== "question") {
+      const question = task.history[mail.replyTo - 1]?.expertMessage;
+      if (question?.from === mail.to && !deferredDependencyReply(task, mail.replyTo, event)) {
+        answered.add(mail.replyTo);
+      }
+    }
+  }
+  // Older replies recorded one flag for both audiences.
+  if (task.awaitingAnswer === true && task.awaitingOwnerAnswer === undefined) return "owner";
+}
+
 export function pendingDraftDependency(task: Task, question: number) {
   const transition = task.history.findLastIndex(event => event.to !== undefined);
   if (question <= transition + 1) return;
