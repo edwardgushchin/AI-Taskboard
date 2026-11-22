@@ -1193,8 +1193,6 @@
   "limits.duration": "Límite de {duration}",
   "limits.window": "Límite",
   "limits.unknown": "Sin datos",
-  "limits.reset_expires": "Caduca el {time}",
-  "limits.reset_expiry_unknown": "Fecha de caducidad no indicada",
   "limits.available_resets": "Restablecimientos disponibles: {count}",
   "limits.auth": "Inicia sesión",
   "limits.error": "No se pudieron leer los límites",

@@ -1290,8 +1290,6 @@
   "limits.duration": "Limit over {duration}",
   "limits.window": "Limit",
   "limits.unknown": "No data",
-  "limits.reset_expires": "Expires {time}",
-  "limits.reset_expiry_unknown": "Expiration not provided",
   "limits.available_resets": "Available resets: {count}",
   "limits.auth": "Sign in required",
   "limits.error": "Could not read limits",

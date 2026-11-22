@@ -1193,8 +1193,6 @@
   "limits.duration": "Limiet voor {duration}",
   "limits.window": "Limiet",
   "limits.unknown": "Geen gegevens",
-  "limits.reset_expires": "Verloopt op {time}",
-  "limits.reset_expiry_unknown": "Vervaldatum niet opgegeven",
   "limits.available_resets": "Beschikbare resets: {count}",
   "limits.auth": "Aanmelden vereist",
   "limits.error": "Limieten konden niet worden gelezen",

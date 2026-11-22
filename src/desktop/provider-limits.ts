@@ -9,7 +9,6 @@ export interface ProviderLimits {
   windows: LimitWindow[];
   observedAt?: number;
   availableResetCount?: number;
-  resetCreditExpirations?: (number | null)[];
   incomplete?: boolean;
   plan?: string;
 }
@@ -63,28 +62,12 @@ export function codexLimitSnapshot(data: unknown, observedAt = Date.now()): Prov
   const reported = buckets.flatMap(bucket => windowKeys.map(key => bucket?.[key])).filter(window => window != null);
   const incomplete = reported.length !== windows.length ||
     buckets.some(bucket => !bucket || typeof bucket !== "object" || Array.isArray(bucket));
-  const resetCredits = (data as {
-    rateLimitResetCredits?: { availableCount?: unknown; credits?: unknown };
-  } | null)?.rateLimitResetCredits;
-  const count = resetCredits?.availableCount;
+  const count = (data as { rateLimitResetCredits?: { availableCount?: unknown } } | null)?.rateLimitResetCredits?.availableCount;
   const availableResetCount = typeof count === "number" && Number.isSafeInteger(count) && count >= 0 ? count : undefined;
-  const resetCreditExpirations: (number | null)[] = [];
-  if (availableResetCount && Array.isArray(resetCredits?.credits)) {
-    for (const credit of resetCredits.credits) {
-      if (credit?.status !== "available") continue;
-      const expiresAt = credit.expiresAt;
-      if (expiresAt === null) {
-        resetCreditExpirations.push(null);
-      } else if (typeof expiresAt === "number" && expiresAt <= 8.64e12 && expiresAt * 1000 > observedAt) {
-        resetCreditExpirations.push(expiresAt * 1000);
-      }
-    }
-  }
   return {
     provider: "Codex", state: codexLimitState(data, windows), windows, observedAt,
     ...(incomplete ? { incomplete: true } : {}),
     ...(availableResetCount !== undefined ? { availableResetCount } : {}),
-    ...(resetCreditExpirations.length ? { resetCreditExpirations } : {}),
   };
 }
 

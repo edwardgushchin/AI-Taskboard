@@ -1193,8 +1193,6 @@
   "limits.duration": "Limit für {duration}",
   "limits.window": "Limit",
   "limits.unknown": "Keine Daten",
-  "limits.reset_expires": "Gültig bis {time}",
-  "limits.reset_expiry_unknown": "Kein Ablaufdatum angegeben",
   "limits.available_resets": "Verfügbare Zurücksetzungen: {count}",
   "limits.auth": "Anmeldung erforderlich",
   "limits.error": "Limits konnten nicht gelesen werden",

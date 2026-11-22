@@ -1306,8 +1306,6 @@
   "limits.duration": "Лимит на {duration}",
   "limits.window": "Лимит",
   "limits.unknown": "Нет данных",
-  "limits.reset_expires": "Действует до {time}",
-  "limits.reset_expiry_unknown": "Срок действия не указан",
   "limits.available_resets": "Доступно сбросов: {count}",
   "limits.auth": "Нужно войти в аккаунт",
   "limits.error": "Ошибка чтения лимитов",

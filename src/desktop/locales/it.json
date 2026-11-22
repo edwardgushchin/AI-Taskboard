@@ -1193,8 +1193,6 @@
   "limits.duration": "Limite per {duration}",
   "limits.window": "Limite",
   "limits.unknown": "Nessun dato",
-  "limits.reset_expires": "Scade il {time}",
-  "limits.reset_expiry_unknown": "Scadenza non indicata",
   "limits.available_resets": "Ripristini disponibili: {count}",
   "limits.auth": "Accesso richiesto",
   "limits.error": "Impossibile leggere i limiti",
