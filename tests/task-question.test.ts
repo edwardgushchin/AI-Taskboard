@@ -134,6 +134,37 @@ test("an active task waits only for explicitly linked manager answers", () => {
   assert.equal(taskQuestionAudience(answer), undefined);
 });
 
+test("team questions use the saved recipient and close only on a linked reply from that recipient", t => {
+  const root = mkdtempSync(join(tmpdir(), "task-team-question-"));
+  t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const location = { root, directory: join(root, ".tasks"), repository: null };
+  const store = initializeBoard(location, store => store);
+  const id = "T-0001";
+  const read = () => readTask(new BoardStore(location), id);
+  const audience = () => taskQuestionAudience(read());
+  store.create({ ...createTask(id, { title: "Report" }), status: "review" });
+  const ask = (sender: string, to: string, text: string) =>
+    sendTeamMessage(store, id, sender, { kind: "question", to, text });
+
+  const owner = ask(id, "owner", "Who should receive the report?");
+  const manager = ask("reviewer", "manager", "Which format is approved?");
+  const secondManager = ask(id, "manager", "Where should we publish it?");
+  assert.equal(audience(), "owner");
+
+  sendTeamMessage(store, id, "manager", { to: id, replyTo: owner.sequence, text: "The team." });
+  sendTeamMessage(store, id, "owner", { to: "reviewer", replyTo: owner.sequence, text: "The team." });
+  sendTeamMessage(store, id, "owner", { to: id, text: "Thanks." });
+  sendTeamMessage(store, id, "owner", { kind: "question", to: id, replyTo: owner.sequence, text: "Which report?" });
+  assert.equal(audience(), "owner");
+
+  sendTeamMessage(store, id, "owner", { to: id, replyTo: owner.sequence, text: "The team." });
+  assert.equal(audience(), "manager");
+  sendTeamMessage(store, id, "manager", { to: id, replyTo: secondManager.sequence, text: "Use the shared folder." });
+  assert.equal(audience(), "manager");
+  sendTeamMessage(store, id, "manager", { to: "reviewer", replyTo: manager.sequence, text: "Use CSV." });
+  assert.equal(audience(), undefined);
+});
+
 function providerResult(result: object, mode?: "initial" | "handoff", onActivity?: (items: any[]) => void, draft = false, prompt = "{}") {
   let options: any;
   let tools: { name: string }[] = [];
