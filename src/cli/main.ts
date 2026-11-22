@@ -837,12 +837,13 @@ function run(
     const phase = task.draftDiscussion?.phase;
     if (isManual(store.index.settings) || task.status !== "draft" ||
         !(input.phase === "running" && (phase === "queued" || phase === "failed") ||
-          (input.phase === "failed" || input.phase === "completed") && phase === "running")) {
+          (input.phase === "failed" || input.phase === "completed" ||
+            input.phase === "queued" && task.draftDiscussion?.managerReply !== undefined) && phase === "running")) {
       throw new TaskboardError("CHAT_CHANGED", "The draft discussion is no longer in this state.");
     }
     const draftDiscussion: Task["draftDiscussion"] = input.phase === "failed"
-      ? { phase: "failed", reason: text(input.reason, "reason", true).slice(0, 1500) }
-      : input.phase === "running" ? { phase: "running" } : undefined;
+      ? { phase: "failed", reason: text(input.reason, "reason", true).slice(0, 1500), managerReply: task.draftDiscussion?.managerReply }
+      : input.phase === "running" || input.phase === "queued" ? { phase: input.phase, managerReply: task.draftDiscussion?.managerReply } : undefined;
     return store.save(record({ ...task, draftDiscussion }, "draft-discussion-" + input.phase, "agent"));
   }
   if (command === "run-log") {

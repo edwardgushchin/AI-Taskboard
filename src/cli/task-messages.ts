@@ -36,6 +36,25 @@ export function currentReviewApproval(task: Task, settings?: Pick<BoardSettings,
     (!settings || event.reviewApproval.reviewModeVersion === taskReviewModeVersion(task, settings)));
 }
 
+export function draftManagerQuestion(task: Task, sequence: number | undefined) {
+  const event = sequence === undefined ? undefined : task.history[sequence - 1];
+  return task.status === "draft" && event?.action === "coordination" && event.actor === "agent" && event.messageKind === "question" &&
+    event.expertMessage?.to === "manager" ? event.expertMessage : undefined;
+}
+
+export function linkedDraftManagerReply(task: Task, event: TaskEvent | undefined) {
+  if (!event || event.action !== "coordination" || event.messageKind === "question") return;
+  const mail = event.expertMessage;
+  if (mail?.from !== "manager" || mail.replyTo === undefined ||
+      draftManagerQuestion(task, mail.replyTo)?.from !== mail.to) return;
+  return { text: event.text, replyTo: mail.replyTo, question: task.history[mail.replyTo - 1].text };
+}
+
+export function draftManagerReply(task: Task, sequence: number, to: string) {
+  return task.history.findIndex(event => event.expertMessage?.from === "manager" &&
+    event.expertMessage.to === to && event.expertMessage.replyTo === sequence && event.messageKind !== "question") + 1;
+}
+
 export function taskMessages(task: Task, recipient: "manager" | "agent") {
   const lifecycle = task.history.findLastIndex(event => event.to !== undefined || executorOutcome(event));
   const approval = recipient === "manager" ? currentReviewApproval(task) : undefined;
@@ -50,9 +69,12 @@ export function taskMessages(task: Task, recipient: "manager" | "agent") {
     const returned = index === latestSubmissionEvent && reviewerReturn(event);
     if (!message && !outcome && !accepted && !returned && event !== approval) return [];
     if (outcome && event.action === "submit" && approval) return [];
+    const question = message && recipient === "manager" ? draftManagerQuestion(task, index + 1) : undefined;
+    if (question && draftManagerReply(task, index + 1, question.from)) return [];
     return [{
       id: task.id, title: task.title, sequence: index + 1, at: event.at, status: task.status,
       ...(event.expertMessage ? { expertMessage: event.expertMessage } : {}),
+      ...(question ? { draftQuestion: true as const } : {}),
       kind: message ? event.messageKind ?? "update" : event.action, replyTo: event.replyToMessage,
       text: accepted ? task.result?.summary : event.text, ...(outcome && event.action === "submit" ? { result: task.result } : {}),
       ...(accepted ? { actor: "reviewer" as const, target: task.git?.target, commit: task.git?.accepted } : {}),
@@ -69,7 +91,8 @@ export function needsManagerAttention(kind: string) {
 }
 
 export function managerInbox(tasks: Task[]) {
-  return tasks.flatMap(task => taskMessages(task, "manager").filter(message => message.sequence > (task.managerReadThrough ?? 0)))
+  return tasks.flatMap(task => taskMessages(task, "manager").filter(message =>
+    message.draftQuestion || message.sequence > (task.managerReadThrough ?? 0)))
     .sort((left, right) => left.at.localeCompare(right.at) || left.id.localeCompare(right.id) || left.sequence - right.sequence);
 }
 

@@ -9,7 +9,7 @@ import { imageAttachmentPattern, maxAttachmentBytes, number, object, record, reg
 import type { ArchiveLink, Attachment, BoardTag, Task } from "./model.ts";
 import { directory, exists, readBinary, removeFile, validateCard, writeAtomic } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
-import { managerInbox } from "./task-messages.ts";
+import { linkedDraftManagerReply, managerInbox } from "./task-messages.ts";
 import { actorFor, parseRunEntries, withoutVerification } from "./tasks.ts";
 
 const maxCard = 16 * 1024 * 1024;
@@ -227,6 +227,9 @@ function withNewAttachments(
 export function addChatMessage(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
   const draftDiscussion = input.draftDiscussion === true;
   const actor = actorFor(input, "user");
+  const pendingManagerReply = task.draftDiscussion?.managerReply;
+  const managerReply = draftDiscussion && input.managerReply !== undefined
+    ? number(input.managerReply, "managerReply") : undefined;
   if (draftDiscussion) {
     if (actor !== "agent" || task.status !== "draft" || task.draftDiscussion?.phase !== "running") {
       throw new TaskboardError("CHAT_CHANGED", "The draft discussion is no longer awaiting a reply.");
@@ -234,7 +237,14 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
     const revision = number(input.revision, "revision");
     if (revision < task.revision) {
       // Discard the answer and requeue under the same board lock.
-      return store.save(record({ ...task, draftDiscussion: { phase: "queued" } }, "draft-discussion-queued", "agent"));
+      return store.save(record({
+        ...task, draftDiscussion: { phase: "queued", managerReply: pendingManagerReply },
+      }, "draft-discussion-queued", "agent"));
+    }
+    if (managerReply !== undefined && (managerReply > (pendingManagerReply ?? 0) ||
+        managerReply <= (task.draftManagerReplyThrough ?? 0) ||
+        !linkedDraftManagerReply(task, task.history[managerReply - 1]))) {
+      throw new TaskboardError("CHAT_CHANGED", "The manager reply is no longer awaiting discussion.");
     }
   }
   requireRevision(task, input.revision, draftDiscussion);
@@ -265,13 +275,20 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
     ...(commentary.length ? { commentary } : {}),
     ...(usage ? { usage: { used: number(usage.used, "used", 0), limit: number(usage.limit, "limit") } } : {}),
   };
+  let nextDiscussion = task.draftDiscussion;
+  if (draftDiscussion) {
+    nextDiscussion = pendingManagerReply === managerReply ? undefined : { phase: "queued", managerReply: pendingManagerReply };
+  } else if (actor === "user" && pendingManagerReply === undefined) {
+    nextDiscussion = undefined;
+  }
 
   return withNewAttachments(store, task, input.attachmentSources, attachments => {
     if (!message && !attachments.length) throw new TaskboardError("INVALID_INPUT", "Write a message or attach a file.");
     const updated = record({
       ...task, attachments: [...task.attachments, ...attachments],
       ...(actor === "agent" && input.awaitingAnswer !== undefined ? { awaitingAnswer: input.awaitingAnswer as boolean } : {}),
-      draftDiscussion: draftDiscussion || actor === "user" ? undefined : task.draftDiscussion,
+      draftDiscussion: nextDiscussion,
+      ...(managerReply === undefined ? {} : { draftManagerReplyThrough: managerReply }),
     }, "chat", actor, task.status, message);
     updated.history.at(-1)!.chat = {
       ...chat,

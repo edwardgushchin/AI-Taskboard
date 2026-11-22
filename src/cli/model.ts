@@ -210,7 +210,8 @@ export type ArtifactKind = "png" | "text";
 export interface Task {
   awaitingAnswer?: boolean;
   reviewModeOverride?: { mode: ReviewMode; version: number };
-  draftDiscussion?: { phase: "queued" | "running" } | { phase: "failed"; reason: string };
+  draftDiscussion?: ({ phase: "queued" | "running" } | { phase: "failed"; reason: string }) & { managerReply?: number };
+  draftManagerReplyThrough?: number;
   expertId?: string;
   expertTeam?: { work?: ExpertPhase; review?: ExpertPhase };
   expertStage?: { parentId: string; key: string; inputs: string[]; outputs: string[] };

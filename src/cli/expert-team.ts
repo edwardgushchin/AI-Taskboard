@@ -7,7 +7,7 @@ import { isManual } from "./manual-board.ts";
 import { readExpert } from "./experts.ts";
 import { readTask } from "./archive.ts";
 import { artifactSource } from "./artifacts.ts";
-import { currentReviewApproval } from "./task-messages.ts";
+import { currentReviewApproval, draftManagerQuestion, draftManagerReply } from "./task-messages.ts";
 import { runtimeEntries } from "../desktop/board-runtime.ts";
 
 type Phase = NonNullable<TaskEvent["expertPhase"]>;
@@ -374,11 +374,26 @@ export function sendTeamMessage(store: BoardStore, taskId: string, sender: strin
     ? parent.history[replyTo - 1]?.expertMessage
     : teamInbox(store, taskId, sender).messages.some(m => m.sequence === replyTo)))
     throw new TaskboardError("INVALID_INPUT", "Reply to a team message available to you.");
+  const question = sender === "manager" && kind !== "question" && !isManual(store.index.settings)
+    ? draftManagerQuestion(parent, replyTo) : undefined;
+  const answersDraft = question?.from === to && replyTo !== undefined;
+  if (answersDraft) {
+    const existing = draftManagerReply(parent, replyTo, to);
+    if (existing) return { parentId: parent.id, sequence: existing, at: parent.history[existing - 1].at };
+  }
   const event: Task["history"][number] = { at: new Date().toISOString(), action: "coordination",
     actor: sender === "owner" ? "user" : sender === "manager" || sender === "reviewer" ? sender : "agent", text: message,
     messageKind: kind as "update", expertMessage: { from: sender, to, replyTo } };
-  store.save({ ...parent, history: [...parent.history, event] });
-  return { parentId: parent.id, sequence: parent.history.length + 1, at: event.at };
+  const sequence = parent.history.length + 1;
+  store.save({
+    ...parent,
+    ...(answersDraft ? { draftDiscussion: {
+      phase: parent.draftDiscussion?.phase === "running" ? "running" : "queued",
+      managerReply: sequence,
+    } } : {}),
+    history: [...parent.history, event],
+  });
+  return { parentId: parent.id, sequence, at: event.at };
 }
 
 export function reviewDecisionSequence(task: Task) {
