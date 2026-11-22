@@ -4433,16 +4433,18 @@ test("reviewer acceptance waits without changing the target or invalidating appr
   approve(originalHead);
   const source = join(root, "source.txt");
   const index = join(root, ".git", "index");
-  writeFileSync(source, "local\n");
+  // A text patch for this change is larger than the Git command's 64 MiB output buffer.
+  const line = "x".repeat(1023) + "\n";
+  writeFileSync(source, line.repeat(65 * 1024));
   const indexBefore = readFileSync(index);
-  const fileBefore = readFileSync(source);
+  const fileBefore = git(root, "hash-object", "--no-filters", "--", source);
   const waiting = cli(root, ["accept", task.id, "--compact"], accept);
   assert.equal(waiting.status, "review");
   assert.equal(waiting.revision, task.revision);
   assert.equal(waiting.acceptanceWait.error.code, "LOCAL_CHANGES_CONFLICT");
   assert.deepEqual(waiting.acceptanceWait.paths, ["source.txt"]);
   assert.deepEqual(readFileSync(index), indexBefore);
-  assert.deepEqual(readFileSync(source), fileBefore);
+  assert.equal(git(root, "hash-object", "--no-filters", "--", source), fileBefore);
   assert.equal(git(root, "rev-parse", "HEAD"), originalHead);
   const card = () => cli(root, ["list", "--compact"]).tasks.find((entry: Task) => entry.id === task.id);
   assert.equal(card().acceptanceWaitUnchanged, true);

@@ -2,6 +2,7 @@ import type { BrowserWindow } from "electron";
 import localization from "../desktop/localization.cjs";
 import { setTimeout as wait } from "node:timers/promises";
 import { createHash } from "node:crypto";
+import { closeSync, lstatSync, openSync, readlinkSync, readSync } from "node:fs";
 import { beginBoardOperation } from "../desktop/board-worklog.ts";
 import { dirname, join, relative } from "node:path";
 import { artifactFiles } from "./artifacts.ts";
@@ -59,11 +60,36 @@ function reviewWorktreePath(item: Worktree | undefined): string | undefined {
   return item && !item.prunable && exists(item.path) ? usableWorktree(item) : undefined;
 }
 
+function workingFileFingerprint(path: string, buffer: Buffer): string | undefined {
+  const entry = lstatSync(path, { throwIfNoEntry: false });
+  if (entry?.isSymbolicLink()) {
+    return createHash("sha256").update(readlinkSync(path, { encoding: "buffer" })).digest("hex");
+  }
+  if (!entry?.isFile()) return undefined;
+  const file = openSync(path, "r");
+  try {
+    const hash = createHash("sha256");
+    for (let count = readSync(file, buffer); count > 0; count = readSync(file, buffer)) {
+      hash.update(buffer.subarray(0, count));
+    }
+    return hash.digest("hex");
+  } finally {
+    closeSync(file);
+  }
+}
+
 function localChangesFingerprint(path: string, head: string, status = gitStatus(path)): string {
-  // Porcelain includes staged object IDs and untracked names. Include the
-  // unstaged diff so edits with the same porcelain status can wake acceptance.
-  const unstaged = git(path, ["diff", ...diffOptions, "--binary", "--no-color", "--"], { GIT_OPTIONAL_LOCKS: "0" });
-  return createHash("sha256").update(JSON.stringify([path, head, status, unstaged])).digest("hex");
+  // Porcelain includes staged object IDs and untracked names. Read unstaged
+  // tracked files in chunks to detect edits without generating a Git patch.
+  const hash = createHash("sha256").update(JSON.stringify([path, head, status]));
+  const local = inspectLocalChanges(path, head, status);
+  if (local?.modifiedTracked.length) {
+    const buffer = Buffer.allocUnsafe(256 * 1024);
+    for (const name of local.modifiedTracked) {
+      hash.update(JSON.stringify([name, workingFileFingerprint(join(path, name), buffer)]));
+    }
+  }
+  return hash.digest("hex");
 }
 
 export function acceptanceWaitUnchanged(repo: Repository | null, target: string, fingerprint: string): boolean {
@@ -74,7 +100,7 @@ export function acceptanceWaitUnchanged(repo: Repository | null, target: string,
     return Boolean(path && localChangesFingerprint(path, head) === fingerprint);
   } catch (error) {
     // An unreadable checkout cannot establish that it is safe to retry.
-    if (error instanceof TaskboardError) return true;
+    if (error instanceof TaskboardError || (error as NodeJS.ErrnoException).syscall) return true;
     throw error;
   }
 }
