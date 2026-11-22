@@ -1092,6 +1092,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
         }
         if (method === "turn/completed" && data.turn && data.turn.id === turn?.id) {
           turn = data.turn;
+          if (followingGoal) await tokens.save(undefined, onTokenUsage);
           if (activityTimer) {
             clearTimeout(activityTimer);
             publish();

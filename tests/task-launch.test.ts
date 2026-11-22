@@ -68,6 +68,7 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "recovered
   const runtime = runInNewContext(stripTypeScriptTypes(lifecycle) + "\n({launchTask, returnTaskToDraft, scheduleAgentWork, scheduleRecurringTasks, beginOperation, confirmProjectClose, projectOperations, runningTasks, activeAgents})", {
     applicationUpdates: { installing: false },
     quotaWait: undefined, quotaInterruption: new Error("Fixture quota pause"), refreshQuota: async () => [],
+    boardBudgetFailure: () => undefined, saveDailyUsage: () => {},
     AbortController, AbortSignal, wait, performance, setTimeout, clearTimeout, setImmediate, subscriptions, agentSlots: slots,
     isManual, runtimeLocation: (project: string) => project,
     readBoardSettings: (project: string) => savedSettings.get(project) ?? subscriptions.get(project)?.board.settings ?? {},

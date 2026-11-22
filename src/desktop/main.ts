@@ -7,6 +7,7 @@ import type { FileLink } from "../cli/attachment-links.ts";
 import { CodexRpcRejection, watchCodexQuotaExceeded } from "./codex-rpc.ts";
 import { archiveAcceptedCodexChats, rememberTaskCodexThread } from "./codex-task-archive.ts";
 import { confirmedQuota, providerLimitSource, readCodexLimits, type QuotaWait } from "./provider-limits.ts";
+import { codexDailyBudget, type CodexBudgetRole } from "./codex-daily-budget.ts";
 import localization from "./localization.cjs";
 import { BackupService } from "./backup-service.ts";
 import { activeRunSummary, observeActiveRuns, enableSharedRuns } from "./active-runs.ts";
@@ -37,6 +38,7 @@ import { phaseStageReporter } from "./expert-tools.ts";
 import type { BoardChange, PendingReviewDecision, ReviewedSubmission, ReviewReport } from "./board-actions.ts";
 import type { AgentControl } from "./codex-rpc.ts";
 import type { TaskUsageRole, TokenUsageReport } from "../cli/token-usage.ts";
+import { usageKey } from "../cli/token-usage.ts";
 import type { CliError, CliReply } from "./cli.ts";
 import { executionModels } from "./codex-models.ts";
 import type { ArchiveLink, BoardSettings, BoardTag, ReviewMode, RunActivity, Task } from "../cli/model.ts";
@@ -111,6 +113,7 @@ interface WindowState {
 }
 
 interface BoardWatch {
+  lastBudget?: string;
   unreadMigration?: AbortController;
   unreadMigrationNeeded?: boolean;
   failedDiscussionStarts?: Map<string, number>;
@@ -264,6 +267,7 @@ function frame(state: ProjectTab) {
   const goal = state.board ? currentManagerGoal(state.board.project) : undefined;
   const goalIteration = goal?.id && state.board ? readIterativeGoal(state.board.project, goal.id) : undefined;
   const watch = state.project ? subscriptions.get(state.project) : undefined;
+  const dailyBudget = state.board && boardCodexBudget(state.board.project, state.board.settings);
   const reviewerRuns = watch?.reviewerRuns;
   const sharedRuns = state.board ? agentSlots.entries(state.board.project) : [];
   const managerContext = sharedRuns.find(entry => entry.task === "manager:dialogue");
@@ -314,7 +318,10 @@ function frame(state: ProjectTab) {
     managerWork: work?.managerRun ?? (sharedGoal ? { ...sharedGoal, live: undefined } : undefined) ??
       (background ? { ...background, live: undefined } : null),
     quotaWait: quotaWait && state.board && !isManual(state.board.settings) ? quotaWait : undefined,
-    quotaTasks: quotaWait ? state.board?.tasks.filter(task => task.status === "ready" ||
+    dailyBudget,
+    quotaTasks: quotaWait || dailyBudget?.reason ? state.board?.tasks.filter(task => task.status === "ready" ||
+      (dailyBudget?.reason && task.status === "draft" &&
+        (task.draftDiscussion?.phase === "queued" || task.draftDiscussion?.phase === "running")) ||
       (task.status === "in_progress" && sharedRuns.some(entry => matchesQueuedExecutor(entry, task))) ||
       (task.status === "review" && (task.acceptanceRepair
         ? task.acceptanceRepair.phase !== "failed"
@@ -1069,10 +1076,44 @@ interface ChatRequest {
 type ChatUpdate = { type: "saved" | "changed" } | { type: "commentary"; text: string };
 
 let tokenUsage: TokenUsageQueue | undefined;
-const tokenUsageQueue = () => tokenUsage ??= new TokenUsageQueue(app.getPath("userData"));
+const tokenUsageQueue = () => tokenUsage ??= new TokenUsageQueue(app.getPath("userData"), undefined, project => {
+  const watch = subscriptions.get(project);
+  if (watch) for (const tab of watch.tabs) send(tab);
+  scheduleAgentWork();
+});
 
-async function saveTaskTokenUsage(project: string, id: string, role: TaskUsageRole, report: TokenUsageReport): Promise<void> {
+function boardCodexBudget(project: string, settings = readBoardSettings(runtimeLocation(project))) {
+  const limit = settings.codexDailyTokens;
+  if (limit === undefined) return;
   try {
+    const now = Date.now();
+    const budget = codexDailyBudget(project, limit, now);
+    const midnight = new Date(now).setHours(0, 0, 0, 0);
+    if (!budget.reason && tokenUsage?.hasPendingBudget(project, midnight, now)) {
+      return { ...budget, reason: "unknown" as const };
+    }
+    return budget;
+  } catch (error) {
+    console.warn("Could not read the board Codex budget.", error);
+    const reset = new Date();
+    reset.setHours(24, 0, 0, 0);
+    return { limit, spent: 0, remaining: limit, resetsAt: reset.getTime(), reason: "unknown" as const };
+  }
+}
+
+function boardBudgetFailure(project: string, settings?: BoardSettings) {
+  const budget = boardCodexBudget(project, settings);
+  if (budget?.reason) return cliFailure("BOARD_CODEX_BUDGET", t("limits.board." + budget.reason));
+}
+
+function saveDailyUsage(project: string, role: CodexBudgetRole, report: TokenUsageReport, task?: string) {
+  tokenUsageQueue().enqueueBudget(project, role, report, task);
+}
+
+async function saveTaskTokenUsage(project: string, id: string, role: TaskUsageRole, report: TokenUsageReport,
+  budgetRole: CodexBudgetRole = role): Promise<void> {
+  try {
+    saveDailyUsage(project, budgetRole, report, id);
     await tokenUsageQueue().enqueue(project, id, { ...report, role });
   } catch (error) {
     console.warn("Could not queue task token usage for %s (%s).", id, (error as NodeJS.ErrnoException).code ?? "UNKNOWN");
@@ -1087,6 +1128,10 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
   const key = project + "\0" + id;
   const active = activeAgents.get(key);
   if (quotaWait) return { saved: false, result: quotaFailure() };
+  if (!active || automatic) {
+    const blocked = boardBudgetFailure(project);
+    if (blocked) return { saved: false, result: blocked };
+  }
   if (returningDrafts.has(key) || (!active && (chatRuns.has(key) || launchingTasks.has(key))) ||
       (active && (automatic || active.draftDiscussion || request.retryAt !== undefined ||
         active.chatWindow !== undefined && active.chatWindow !== chatWindow))) {
@@ -1312,7 +1357,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       text => notify({ type: "commentary", text }),
       (name, args) => runAction(name, args),
       scratch!, maxAttachmentBytes - task.attachments.reduce((sum, file) => sum + (file.link ? 0 : file.bytes), 0),
-      report => saveTaskTokenUsage(project, id, "discussion", report),
+      report => saveTaskTokenUsage(project, id, "discussion", report, automatic ? "draft" : "discussion"),
       control => ready.resolve(control), signal, id, items => publishDiscussionActivity(project, id, items),
       automatic === undefined ? undefined : managerReply === undefined ? "initial" : "handoff",
       task.status === "review", Boolean(task.closedAt), inspectDraft)).finally(() => ready.reject(new Error("The agent session ended.")));
@@ -1460,6 +1505,7 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
   }
   if (quotaWait) return;
   const { project } = watch.board;
+  if (boardBudgetFailure(project, watch.board.settings)) return;
   const planned = (task: Board["tasks"][number], settings: BoardSettings) => task.mergeRepair || task.expertStage ||
     (task.expertWorkPlanned && (task.schedule || taskReviewMode(task, settings) === "human" || task.expertReviewPlanned));
   const missingPlan = (task: Board["tasks"][number], settings: BoardSettings) => {
@@ -1499,7 +1545,7 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
       const current = await callCli<Board>(project, ["list", "--compact"]);
       if (!current.ok) { failed(current.error.message); return; }
       const board = current.data;
-      if (quotaWait || isManual(board.settings)) return;
+      if (quotaWait || isManual(board.settings) || boardBudgetFailure(project, board.settings)) return;
       const controls = board.settings.autoMode ? board.settings.autoQueue : undefined;
       const queued = board.settings.autoMode ? board.tasks : board.tasks.filter(task => task.launchRequested);
       const eligibleTasks = queued.filter(task => planned(task, board.settings));
@@ -1583,7 +1629,7 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
           void runBoardRequest(tab.window.webContents, board, "Answer the assigned draft questions.",
             [], false, false, undefined, undefined, undefined, { draftQuestions: questions })
             .then(result => {
-              if (!result.ok && ["BOARD_REQUEST_IN_PROGRESS", "MANAGER_LIMIT", "BOARD_BUSY", "PROVIDER_QUOTA"].includes(result.error.code)) {
+              if (!result.ok && ["BOARD_REQUEST_IN_PROGRESS", "MANAGER_LIMIT", "BOARD_BUSY", "PROVIDER_QUOTA", "BOARD_CODEX_BUDGET"].includes(result.error.code)) {
                 for (const message of questions) queue.draftQuestionRetries.delete(managerNoticeKey(message));
               } else if (!result.ok) failed(result.error.message);
               else if (result.data?.error) failed(result.data.error);
@@ -1613,7 +1659,7 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
             "Process the recorded reviewer approvals for the assigned cards and finish the turn.",
             [], false, false, undefined, undefined, undefined, approvals)
             .then(result => {
-              if (!result.ok && !["BOARD_REQUEST_IN_PROGRESS", "MANAGER_LIMIT", "BOARD_BUSY", "PROVIDER_QUOTA"].includes(result.error.code)) {
+              if (!result.ok && !["BOARD_REQUEST_IN_PROGRESS", "MANAGER_LIMIT", "BOARD_BUSY", "PROVIDER_QUOTA", "BOARD_CODEX_BUDGET"].includes(result.error.code)) {
                 failed(result.error.message);
               } else if (result.ok && result.data?.error) failed(result.data.error);
             })
@@ -1631,9 +1677,13 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
       const iterativeId = board.settings.autoMode && currentActiveGoal(project);
       const state = iterativeId ? readIterativeGoal(project, iterativeId) : undefined;
       const iterative = iterativeId && state && iterativeEnabled(board.settings, state);
+      const goalThread = iterativeId ? readBoardThread(boardThreadPath(project)) : undefined;
+      if (tab && !controls?.paused && !iterative && goalThread?.goal?.status === "active" && goalThread.budgetDeferred &&
+          !boardWorkRequests.has(key) && !boardGoalResumes.has(key) && !boardGoalClears.has(key)) {
+        void resumeBoardGoal(tab.window.webContents, board, goalThread.goal.objective).catch(error => failed(String(error)));
+      }
       const goalQuestions = new Set<string>();
       if (iterative) {
-        const goalThread = readBoardThread(boardThreadPath(project));
         const goalTasks = new Set(board.tasks.filter(task => task.managerGoalId
           ? task.managerGoalId === iterativeId
           : task.goalThreadId && task.goalThreadId === goalThread?.id).map(task => task.id));
@@ -1698,7 +1748,7 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
                 executorReleaseId: executorRelease?.id,
               }).then(result => {
                 if (result.ok && result.data?.error) failed(result.data.error);
-                if (!result.ok && !["BOARD_REQUEST_IN_PROGRESS", "BOARD_BUSY", "AUTO_MODE_DISABLED", "PROVIDER_QUOTA"]
+                if (!result.ok && !["BOARD_REQUEST_IN_PROGRESS", "BOARD_BUSY", "AUTO_MODE_DISABLED", "PROVIDER_QUOTA", "BOARD_CODEX_BUDGET"]
                   .includes(result.error.code)) failed(result.error.message);
               }).catch(error => failed((error as Error).message));
           } else if (!controls?.paused && (resetReserve ||
@@ -1732,7 +1782,7 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
             JSON.stringify(needsPlan.map(({ id, status, revision }) => ({ id, status, revision }))) : "");
         void runBoardRequest(tab.window.webContents, board, prompt, [], false, false, undefined, undefined, undefined, true)
           .then(result => {
-            if (!result.ok && ["BOARD_REQUEST_IN_PROGRESS", "MANAGER_LIMIT", "BOARD_BUSY", "AUTO_MODE_DISABLED", "PROVIDER_QUOTA"].includes(result.error.code)) {
+            if (!result.ok && ["BOARD_REQUEST_IN_PROGRESS", "MANAGER_LIMIT", "BOARD_BUSY", "AUTO_MODE_DISABLED", "PROVIDER_QUOTA", "BOARD_CODEX_BUDGET"].includes(result.error.code)) {
               for (const notice of noticeKeys) queue.notices.delete(notice);
             } else if (!result.ok) failed(result.error.message);
             else if (result.data?.error) failed(result.data.error);
@@ -1766,7 +1816,7 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
         Boolean(board.settings.autoMode), false, controls?.revision ?? 0);
       if (!result.ok) {
         if (["BOARD_BUSY", "REVISION_CONFLICT", "INVALID_TRANSITION", "LAUNCH_IN_PROGRESS", "CHAT_BUSY", "EXECUTOR_LIMIT", "REVIEWER_LIMIT",
-            "PROVIDER_QUOTA", "PROJECT_CLOSING", "DEPENDENCIES_INCOMPLETE", "EXPERT_PLAN_REQUIRED",
+            "PROVIDER_QUOTA", "BOARD_CODEX_BUDGET", "PROJECT_CLOSING", "DEPENDENCIES_INCOMPLETE", "EXPERT_PLAN_REQUIRED",
             "AUTO_MODE_DISABLED", "AUTO_QUEUE_PAUSED", "AUTO_QUEUE_CHANGED", "AUTO_RELEASE_WAIT"].includes(result.error.code)) {
           queue.launches.delete(attempt);
           return; // Retry on the next event/tick, never spin on the same snapshot.
@@ -1798,7 +1848,7 @@ function scheduleAgentWork() {
     try {
       for (const watch of subscriptions.values()) {
         const { project, tasks, settings } = watch.board;
-        if (closingProjects.has(project)) continue;
+        if (closingProjects.has(project) || boardBudgetFailure(project, settings)) continue;
         for (const entry of agentSlots.entries(project)) {
           const { kind, task: id, revision, continuation, quotaPaused, reviewReturn, earlyLaunch, writeProbeRetry, routingRetryAt } = entry;
           if (kind !== "queue" || !id || revision === undefined) continue;
@@ -1818,7 +1868,7 @@ function scheduleAgentWork() {
           const failed = (error: string) => broadcastBoardChat(project, "orchestrator-review-error", { error: id + " · " + error });
           void launchTask(project, id, undefined, false, task.revision, continuation,
             false, false, false, false, false, undefined, revision).then(result => {
-            if (result.ok || ["EXECUTOR_LIMIT", "REVIEWER_LIMIT", "BOARD_BUSY", "CHAT_BUSY",
+            if (result.ok || ["EXECUTOR_LIMIT", "REVIEWER_LIMIT", "BOARD_BUSY", "CHAT_BUSY", "BOARD_CODEX_BUDGET",
               "LAUNCH_IN_PROGRESS", "PROJECT_CLOSING", "REVISION_CONFLICT", "INVALID_TRANSITION", "CODEX_START_UNCONFIRMED", "PROVIDER_QUOTA"].includes(result.error.code)) return;
             agentSlots.defer(project, id, undefined, revision);
             notifyRunChange(project);
@@ -1828,7 +1878,7 @@ function scheduleAgentWork() {
       }
       for (const watch of subscriptions.values()) {
         const { project, settings, tasks } = watch.board;
-        if (!closingProjects.has(project) && !isManual(settings)) for (const task of tasks) {
+        if (!closingProjects.has(project) && !isManual(settings) && !boardBudgetFailure(project, settings)) for (const task of tasks) {
           if (task.status !== "in_progress" || task.discussionReturn === undefined || executorBusy(project, task.id) ||
               (watch.failedDiscussionStarts?.get(task.id) ?? -1) >= task.revision ||
               !agentSlots.available(projectIdentity(project), "executor", settings?.taskLimits)) continue;
@@ -1858,7 +1908,7 @@ function scheduleDraftDiscussions() {
     const before = restoredDraftDiscussions;
     for (const watch of ordered) {
       const { project, settings, tasks } = watch.board;
-      if (isManual(settings) || closingProjects.has(project)) continue;
+      if (isManual(settings) || closingProjects.has(project) || boardBudgetFailure(project, settings)) continue;
       const writers = new Set(agentSlots.entries(project).filter(entry => entry.kind !== "queue").map(entry => entry.task));
       for (let offset = 0; offset < tasks.length; offset++) {
         const index = ((watch.draftDiscussionCursor ?? 0) + offset) % tasks.length;
@@ -1886,6 +1936,7 @@ function reserveAgent(project: string, role: AgentRole, task?: string, queuedRev
     return;
   }
   if (quotaWait) return;
+  if (boardBudgetFailure(project)) return;
   agentSlots.remember(project);
   // A tool call can race the watch snapshot after CLI settings were saved.
   const location = runtimeLocation(project);
@@ -1938,7 +1989,7 @@ async function continueAcceptance(project: string, task: Task) {
           worktree: task.git?.worktree, acceptanceRepair: task.acceptanceRepair }) +
         " Read the current card with show --compact; use the AI Taskboard CLI with --project " + project +
         " for preview, submit or block. Do not launch another agent.", [], false, false, undefined, undefined, undefined, false, task);
-      if (!result.ok && result.error.code === "PROVIDER_QUOTA") {
+      if (!result.ok && ["PROVIDER_QUOTA", "BOARD_CODEX_BUDGET"].includes(result.error.code)) {
         const current = await callCli<Task>(project, ["show", task.id, "--compact"]);
         if (current.ok && current.data.acceptanceRepair?.phase === "running") {
           const paused = await callCli(project, ["accept", task.id], {
@@ -1973,7 +2024,7 @@ async function continueAcceptance(project: string, task: Task) {
       result = await callCli(project, ["accept", task.id], { revision: task.revision,
         repairFailure: "The repair process ended before submitting checked results. Inspect its saved activity and worktree before retrying." });
     } else return;
-    if (!returningDrafts.has(key) && !result.ok && !["PROVIDER_QUOTA", "BOARD_BUSY", "TARGET_CHANGED", "REVISION_CONFLICT", "CHAT_BUSY", "LAUNCH_IN_PROGRESS", "REVIEWER_LIMIT", "BOARD_REQUEST_IN_PROGRESS", "REVIEW_REQUIRED"].includes(result.error.code)) {
+    if (!returningDrafts.has(key) && !result.ok && !["PROVIDER_QUOTA", "BOARD_CODEX_BUDGET", "BOARD_BUSY", "TARGET_CHANGED", "REVISION_CONFLICT", "CHAT_BUSY", "LAUNCH_IN_PROGRESS", "REVIEWER_LIMIT", "BOARD_REQUEST_IN_PROGRESS", "REVIEW_REQUIRED"].includes(result.error.code)) {
       const current = await callCli<Task>(project, ["show", task.id]);
       if (current.ok && current.data.acceptanceRepair) await callCli(project, ["accept", task.id], {
         revision: current.data.revision, repairFailure: result.error.message });
@@ -2029,7 +2080,8 @@ function scheduleRecurringTasks(now = Date.now()) {
       const { id, revision } = task;
       void launchTask(project, id, undefined, false, revision, undefined, true).then(async result => {
         if (result.ok || ["BOARD_BUSY", "REVISION_CONFLICT", "INVALID_TRANSITION", "LAUNCH_IN_PROGRESS",
-          "CHAT_BUSY", "EXECUTOR_LIMIT", "REVIEWER_LIMIT", "PROVIDER_QUOTA", "PROJECT_CLOSING", "DEPENDENCIES_INCOMPLETE", "EXPERT_PLAN_REQUIRED"].includes(result.error.code)) return;
+          "CHAT_BUSY", "EXECUTOR_LIMIT", "REVIEWER_LIMIT", "PROVIDER_QUOTA", "BOARD_CODEX_BUDGET",
+          "PROJECT_CLOSING", "DEPENDENCIES_INCOMPLETE", "EXPERT_PLAN_REQUIRED"].includes(result.error.code)) return;
         await callCli(project, ["block", id], {
           revision, allowUnstarted: true, reason: result.error.message,
           condition: t("ui.fix_the_launch_error_and_unblock_the_task_to_res_279223d6"),
@@ -2349,13 +2401,14 @@ function readBoardThread(path: string) {
   if (!existsSync(path)) return;
   const stored = readJson(path) as { provider?: unknown; id?: unknown; history?: "local";
     goal?: BoardGoal | null; goalId?: string; ownerObjective?: string; ownerIteration?: IterationDirective;
-    dialogueEditFingerprint?: string } | null;
+    dialogueEditFingerprint?: string; budgetDeferred?: boolean } | null;
   if (stored?.provider !== "codex" || typeof stored.id !== "string" || !codexThreadPattern.test(stored.id)) {
     throw new Error(t("ui.invalid_saved_orchestrator_chat_ea530ebe"));
   }
   return { provider: stored.provider, id: stored.id, history: stored.history, goal: stored.goal, goalId: stored.goalId,
     ownerObjective: stored.ownerObjective, ownerIteration: stored.ownerIteration,
-    dialogueEditFingerprint: stored.dialogueEditFingerprint };
+    dialogueEditFingerprint: stored.dialogueEditFingerprint,
+    ...(stored.budgetDeferred === true ? { budgetDeferred: true } : {}) };
 }
 
 function goalIterationAuthority(thread: NonNullable<ReturnType<typeof readBoardThread>>): IterationDirective {
@@ -2746,6 +2799,10 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   const broadcastMaintenanceSafe: typeof broadcastBoardChat = (...args) => { if (!cleanupJob) broadcastBoardChat(...args); };
   const projectKey = projectIdentity(board.project);
   const background = Boolean(reviewIds || autoNotice || draftNotice || repairTask || cleanupJob || approvalNotices);
+  if (background || iteration || goal === "resume") {
+    const blocked = boardBudgetFailure(board.project);
+    if (blocked) return blocked;
+  }
   const lane = goal || background ? "work" : "chat";
   const requests = background ? backgroundManagerRequests : goal ? boardWorkRequests : boardRequests;
   const context = background ? "manager:background" : goal ? "manager:context" : "manager:dialogue";
@@ -3699,7 +3756,13 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         resumeGoal: goal === "resume",
         iterativeGoal: Boolean(iteration),
         finishGoalTurn: goal && !iteration
-          ? () => finishConfiguredTurn || Boolean(goalId && readIterativeGoal(project, goalId).enabled)
+          ? () => {
+            if (finishConfiguredTurn || Boolean(goalId && readIterativeGoal(project, goalId).enabled)) return true;
+            if (!boardBudgetFailure(project)) return false;
+            const saved = readBoardThread(binding);
+            if (saved?.goal?.status === "active") writeJson(binding, { ...saved, budgetDeferred: true });
+            return true;
+          }
           : undefined,
         onTurnStarting: iteration && iterationReceipt ? () => {
           const { before, questions } = iterationReceipt;
@@ -3775,11 +3838,22 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           publishGoal({ goal: updatedGoal, goalRunning });
         },
         onGoalControl: control => { if (goal) running.goal = control; },
-        onTurnEnded: () => { endReview(); saveHistory(); },
+        onTurnEnded: () => {
+          if (goal && !iteration) {
+            const saved = readBoardThread(binding);
+            if (saved?.budgetDeferred) {
+              delete saved.budgetDeferred;
+              writeJson(binding, saved);
+            }
+          }
+          endReview();
+          saveHistory();
+        },
         onTokenUsage: async report => {
-          if (cleanupJob?.task) return saveTaskTokenUsage(project, cleanupJob.task, "reviewer", report);
-          if (cleanupJob) return;
+          if (cleanupJob?.task) return saveTaskTokenUsage(project, cleanupJob.task, "reviewer", report, "background");
           if (repairTask) return saveTaskTokenUsage(project, repairTask.id, "reviewer", report);
+          saveDailyUsage(project, reviewIds ? "reviewer" : background || iteration ? "background" : "manager", report);
+          if (cleanupJob) return;
           const saved = await callCli(project, ["manager-usage"], report);
           if (!saved.ok) console.warn("Could not save manager token usage (%s).", saved.error.code);
         },
@@ -4025,7 +4099,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
 
 function canScheduleAutoReview(watch: BoardWatch) {
   const { project, settings } = watch.board;
-  return !applicationUpdates.installing && !quotaWait && !isManual(settings) && subscriptions.get(project) === watch;
+  return !applicationUpdates.installing && !quotaWait && !isManual(settings) &&
+    !boardBudgetFailure(project, settings) && subscriptions.get(project) === watch;
 }
 
 function autoReviewTab(watch: BoardWatch) {
@@ -4128,7 +4203,7 @@ function scheduleAutoReview(watch: BoardWatch) {
   const failed = (error: string) => broadcastBoardChat(project, "orchestrator-review-error", { error });
   void runBoardRequest(tab.window.webContents, watch.board, prompt, [], false, false, undefined, [task.id], "manager").then(result => {
     if (!result.ok) {
-      if (["MANAGER_LIMIT", "REVIEWER_LIMIT", "BOARD_REQUEST_IN_PROGRESS", "AUTO_MODE_DISABLED", "BOARD_BUSY", "PROVIDER_QUOTA"].includes(result.error.code)) {
+      if (["MANAGER_LIMIT", "REVIEWER_LIMIT", "BOARD_REQUEST_IN_PROGRESS", "AUTO_MODE_DISABLED", "BOARD_BUSY", "PROVIDER_QUOTA", "BOARD_CODEX_BUDGET"].includes(result.error.code)) {
         watch.reviewAttempts.delete(task.id);
       } else if (result.error.code !== "REVIEW_MODE_CHANGED") failed(result.error.message);
     } else if (result.data?.error) failed(result.data.error);
@@ -4195,7 +4270,10 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
       return withReviewerChat(project, id, () => broadcastBoardChat(project, "reviewer-chat", { id }), async onActivity => {
         const records: TokenUsageReport["records"] = [];
         const trackUsage = async (report: TokenUsageReport) => {
-          records.push(...report.records);
+          saveDailyUsage(project, "reviewer", report, id);
+          const snapshot = new Map(records.map(record => [usageKey(record), record]));
+          for (const record of report.records) snapshot.set(usageKey(record), record);
+          records.splice(0, records.length, ...snapshot.values());
           usage = {
             ...report, records: [...records],
             ...(submissionSequence > 0 ? {
@@ -5012,6 +5090,8 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   }
   const waitingForQuota = Boolean(quotaWait);
   if (waitingForQuota && !revisionRequest) return quotaFailure();
+  const dailyWait = boardBudgetFailure(project);
+  if (dailyWait && !revisionRequest) return dailyWait;
   if (manual && queuedRevision === undefined) {
     queuedRevision = agentSlots.entries(project).find(entry => entry.kind === "queue" && entry.task === id && entry.quotaPaused)?.revision;
   }
@@ -5118,7 +5198,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
           if (pending) pending.quotaPaused = true;
         });
       }
-      if (quotaWait && !signal.aborted) return current;
+      if ((quotaWait || boardBudgetFailure(project)) && !signal.aborted) return current;
     }
     if (manual && !newThread && queuedRevision === undefined) {
       const task = current.data;
@@ -5539,7 +5619,8 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         if (retry && !signal.aborted && !stopRequested && !closingProjects.has(project)) {
           const resumed = await launchTask(project, id, undefined, false, retry.revision, retry.continuation);
           if (!signal.aborted && !resumed.ok) {
-            if (["EXECUTOR_LIMIT", "REVIEWER_LIMIT", "PROVIDER_QUOTA"].includes(resumed.error.code) && subscriptions.has(project)) {
+            if (["EXECUTOR_LIMIT", "REVIEWER_LIMIT", "PROVIDER_QUOTA", "BOARD_CODEX_BUDGET"].includes(resumed.error.code) &&
+                subscriptions.has(project)) {
               agentSlots.defer(project, id, { revision: retry.revision, continuation: retry.continuation,
                 quotaPaused: resumed.error.code === "PROVIDER_QUOTA" || undefined });
               scheduleAgentWork();
@@ -5867,6 +5948,11 @@ else {
           const goalLive = goalContext?.owner !== process.pid ? goalContext?.state?.live : undefined;
           const stamp = (name: string) => statSync(join(project, ".tasks", name), { throwIfNoEntry: false })?.mtimeMs ?? 0;
           const previous = watch.shared;
+          const budget = JSON.stringify(boardCodexBudget(project, watch.board.settings));
+          if (budget !== watch.lastBudget) {
+            watch.lastBudget = budget;
+            for (const tab of watch.tabs) send(tab);
+          }
           const next = watch.shared = {
             runtime: JSON.stringify(entries, (key, value) => key === "live" ? undefined : value),
             context: context?.id,

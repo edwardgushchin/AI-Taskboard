@@ -1296,6 +1296,12 @@
     "other": "{count} files"
   },
   "limits.label": "Limits",
+  "limits.board.setting": "Daily Codex budget in tokens (blank for unlimited)",
+  "limits.board.invalid": "Enter a positive whole number of tokens in decimal digits or clear the field.",
+  "limits.board.title": "Daily Codex budget for this board",
+  "limits.board.tokens": "Tokens: {remaining} of {limit} remaining, {spent} used",
+  "limits.board.exhausted": "Daily Codex budget exhausted",
+  "limits.board.unknown": "Waiting for today's Codex usage data",
   "limits.provider": "{provider} limits",
   "limits.weekly": "Week",
   "limits.daily": "Daily limit",

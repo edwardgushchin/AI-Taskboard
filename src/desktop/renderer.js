@@ -1124,6 +1124,9 @@ function blockerBanner({ reason, condition }) {
 }
 
 function quotaLabel() {
+  if (!frame.quotaWait && frame.dailyBudget?.reason) {
+    return t("limits.board." + frame.dailyBudget.reason);
+  }
   return frame.quotaWait?.resetsAt
     ? t("ui.waiting_for_provider_quota_until", { time: new Date(frame.quotaWait.resetsAt).toLocaleString(frame.localization?.locale) })
     : t("ui.waiting_for_provider_quota");
@@ -1138,7 +1141,7 @@ function card(task) {
     task.tags?.map(name => boardTags.get(tagKey(name)) ?? { name }), cover?.file,
     frame.runningTasks?.includes(task.id) ?? false, frame.waitingTasks?.includes(task.id) ?? false,
     frame.reviewingTasks?.[task.id], frame.waitingReviewTasks?.includes(task.id), frame.routingRetries?.[task.id],
-    frame.quotaTasks?.includes(task.id) ? frame.quotaWait : null, task.status, task.mergeRepair, task.acceptanceRepair,
+    frame.quotaTasks?.includes(task.id) ? quotaLabel() : null, task.status, task.mergeRepair, task.acceptanceRepair,
     task.acceptanceWaitUnchanged, Boolean(task.codexThreadId),
     task.reviewModeOverride?.mode ?? frame.board?.settings.reviewMode, task.reviewApproved,
     task.unfinishedDependencies, task.blocked, task.subtasks?.map(entry => entry.done),
@@ -1398,12 +1401,12 @@ function codexTaskAction(task) {
         [t("ui.starting_task_1cd51aaa"), task.id, projectName()].join(" · "));
       else if (sheetKind === "task" && taskInSheet?.id === task.id) await showTask(task.id);
     } finally {
-      launch.disabled = Boolean(frame.quotaWait || task.unfinishedDependencies?.length);
+      launch.disabled = Boolean(frame.quotaWait || frame.dailyBudget?.reason || task.unfinishedDependencies?.length);
     }
   });
   launch.id = "task-launch";
   launch.hidden = frame.runningTasks?.includes(task.id) ?? false;
-  launch.disabled = Boolean(frame.quotaWait || task.unfinishedDependencies?.length);
+  launch.disabled = Boolean(frame.quotaWait || frame.dailyBudget?.reason || task.unfinishedDependencies?.length);
   return launch;
 }
 
@@ -5698,6 +5701,7 @@ function boardSettings() {
     ...agentFields.flat(),
     { name: "executorLimit", type: "number", label: () => t("limits.work"), value: current.taskLimits?.executor },
     { name: "reviewerLimit", type: "number", label: () => t("limits.review"), value: current.taskLimits?.reviewer },
+    { name: "codexDailyTokens", label: () => t("limits.board.setting"), value: current.codexDailyTokens },
     { name: "managerAccess", label: () => (t("ui.access_mode_on_this_computer_d6a20a28")),
       value: managerAccess, options: [
         ["ask", t("ui.ask_for_approval_cc8bdc3b")],
@@ -5705,6 +5709,12 @@ function boardSettings() {
         ["full", t("ui.full_access_47d69a72")],
       ] },
   ], () => (t("ui.save_settings_2173b7d7")), async values => {
+    const daily = values.codexDailyTokens;
+    if (daily !== "" && (!/^[0-9]+$/.test(daily) || !Number.isSafeInteger(Number(daily)) || Number(daily) < 1)) {
+      notice(t("limits.board.invalid"));
+      return;
+    }
+    const codexDailyTokens = daily === "" ? null : Number(daily);
     const agents = {};
     const taskLimits = {};
     for (const [role, title] of roles) {
@@ -5724,6 +5734,7 @@ function boardSettings() {
       showCardPreviews: values.showCardPreviews,
       ...(values.reviewMode !== reviewMode ? { reviewMode: values.reviewMode } : {}),
       ...(roles.some(([role]) => taskLimits[role] !== current.taskLimits?.[role]) ? { taskLimits } : {}),
+      ...(codexDailyTokens !== (current.codexDailyTokens ?? null) ? { codexDailyTokens } : {}),
       ...agents,
     })) {
       if (values.managerAccess !== managerAccess) {
@@ -6407,8 +6418,8 @@ function update(next) {
   if ((projectChanged || frame.localization?.locale !== next.localization?.locale || Boolean(frame.board) !== Boolean(next.board)) &&
       byId("settings-menu").matches(":popover-open")) byId("settings-menu").hidePopover();
   if (next.localization) localization.install(next.localization);
-  window.renderProviderLimits?.();
   frame = next;
+  window.renderProviderLimits?.(frame.dailyBudget);
   const languageSelect = byId("language-select");
   if (languageSelect) languageSelect.value = next.localization?.preference ?? "system";
   if (languageChanged) {
@@ -6491,7 +6502,7 @@ function update(next) {
     const launch = byId("task-launch");
     if (launch) {
       launch.hidden = frame.runningTasks?.includes(taskInSheet.id) ?? false;
-      launch.disabled = Boolean(frame.quotaWait || taskInSheet.unfinishedDependencies?.length);
+      launch.disabled = Boolean(frame.quotaWait || frame.dailyBudget?.reason || taskInSheet.unfinishedDependencies?.length);
     }
     if (tagsChanged) byId("task-sheet-tags")?.replaceChildren(...tagBadges(taskInSheet.tags));
     const task = frame.board?.tasks.find(entry => entry.id === taskInSheet.id);
@@ -6585,8 +6596,8 @@ function renderAutoMode() {
       hint = t(goal.running ? "autoMode.running" : "autoMode.manual");
     } else if (!settings?.autoMode) {
       hint = t("autoMode.autoOff");
-    } else if (frame.quotaWait) {
-      hint = t("autoMode.quota");
+    } else if (frame.quotaWait || frame.dailyBudget?.reason) {
+      hint = frame.quotaWait ? t("autoMode.quota") : quotaLabel();
     } else if (goal.status !== "active") {
       hint = t("autoMode.manual");
     } else if (goal.running) {

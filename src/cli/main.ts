@@ -813,6 +813,10 @@ function run(
       store.index.settings.reviewModeVersion = (store.index.settings.reviewModeVersion ?? 0) + 1;
     }
     const taskLimits = input.taskLimits === undefined ? input.agentLimits : input.taskLimits;
+    if (input.codexDailyTokens !== undefined) {
+      if (input.codexDailyTokens === null) delete store.index.settings.codexDailyTokens;
+      else store.index.settings.codexDailyTokens = number(input.codexDailyTokens, "codexDailyTokens");
+    }
     if (taskLimits !== undefined) {
       if (!validAgentLimitOverrides(taskLimits) || Object.hasOwn(taskLimits, "manager")) {
         throw new TaskboardError("INVALID_INPUT", "Task limits must be non-negative whole numbers for work and review.");

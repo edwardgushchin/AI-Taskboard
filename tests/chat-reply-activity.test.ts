@@ -55,6 +55,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
     "\n({ sendChat, stopChat, returnTaskToDraft, activeAgents, frame, windowStates, runningTasks, launchingTasks, notifyRunChange, chatRuns, replyingTasks, scheduleAgentWork })", {
     currentActiveGoal: activeManagerGoal,
     quotaWait: undefined, quotaInterruption: new Error("Fixture quota pause"), refreshQuota: async () => [],
+    boardCodexBudget: () => undefined, boardBudgetFailure: () => undefined, saveDailyUsage: () => {},
     applicationUpdates: { installing: false },
     agentSlots: { ...slots, entries: (project: string) => sharedRuns.get(project) ?? [] },
     registerRuntime: () => () => {}, matchesQueuedExecutor, activeRunSummary, basename, extname, join, performance, projectLabels, AbortController, AbortSignal, wait, subscriptions,

@@ -2,7 +2,15 @@ import { randomUUID } from "node:crypto";
 import { emptyTokenCounts, tokenFields, usageKey } from "../cli/token-usage.ts";
 import type { TokenCounts, TokenUsageRecord, TokenUsageReport } from "../cli/token-usage.ts";
 
-type ThreadUsage = { model: string | null; turnId?: string; previous?: TokenCounts; incomplete: boolean; finished: boolean };
+type ThreadUsage = {
+  model: string | null;
+  turnId?: string;
+  previous?: TokenCounts;
+  incomplete: boolean;
+  finished: boolean;
+  completedAt?: number;
+  totalUncertain?: boolean;
+};
 
 function counts(value: unknown): TokenCounts {
   const data = value as Partial<TokenCounts> | undefined;
@@ -89,6 +97,8 @@ export class CodexTokenUsage {
     thread.turnId = turnId;
     thread.incomplete = false;
     thread.finished = false;
+    thread.completedAt = undefined;
+    thread.totalUncertain = false;
     this.entry(threadId, thread);
     return this.snapshot();
   }
@@ -100,9 +110,17 @@ export class CodexTokenUsage {
     return this.records.get(key)!;
   }
 
+  private completeRecords(threadId: string, thread: ThreadUsage, at: number): void {
+    for (const entry of this.records.values()) {
+      if (entry.threadId !== threadId || entry.turnId !== thread.turnId) continue;
+      entry.completedAt ??= at;
+      entry.dailyTokens = thread.totalUncertain ? null : entry.totalTokens;
+    }
+  }
+
   observe(message: { method?: string; params?: unknown }): TokenUsageReport | undefined {
     const data = message.params as {
-      threadId?: string; turnId?: string; turn?: { id?: string; status?: string }; toModel?: string;
+      threadId?: string; turnId?: string; turn?: { id?: string; status?: string; completedAt?: number }; toModel?: string;
       thread?: { id: string; parentThreadId?: string; model?: string };
       threadSettings?: { model?: string };
       item?: { type?: string; kind?: string; tool?: string; agentThreadId?: string; model?: string; receiverThreadIds?: string[] };
@@ -125,7 +143,13 @@ export class CodexTokenUsage {
     }
     if (discovered) return this.snapshot();
     if (message.method === "turn/started" && data.turn?.id) return this.begin(threadId, data.turn.id);
-    if (message.method === "turn/completed" && data.turn?.id === thread.turnId) thread.finished = true;
+    if (message.method === "turn/completed" && data.turn?.id && data.turn.id === thread.turnId) {
+      thread.finished = true;
+      const ended = data.turn.completedAt;
+      thread.completedAt ??= typeof ended === "number" && ended > 0 && ended < 8.64e12
+        ? Math.trunc(ended * 1000) : Date.now();
+      this.completeRecords(threadId, thread, thread.completedAt);
+    }
     if (message.method === "model/rerouted" && data.turnId && data.turnId !== thread.turnId) return;
     const model = message.method === "model/rerouted" ? data.toModel :
       message.method === "thread/settings/updated" ? data.threadSettings?.model : undefined;
@@ -144,6 +168,7 @@ export class CodexTokenUsage {
       this.entry(threadId, thread).incomplete = true;
       return this.snapshot();
     }
+    if (message.method === "turn/completed" && thread.finished) return this.snapshot();
     if (message.method !== "thread/tokenUsage/updated" || !data.turnId) return;
     // Child turns can start before their discovery event reaches the parent.
     if (!thread.turnId && threadId !== this.root) this.begin(threadId, data.turnId);
@@ -159,11 +184,15 @@ export class CodexTokenUsage {
         current !== null && before !== null && before !== undefined && current >= before ? current - before : null;
       if (delta === null || current === null || !Number.isSafeInteger((entry[key] ?? 0) + delta)) {
         thread.incomplete = true;
+        if (key === "totalTokens") thread.totalUncertain = true;
       } else {
         entry[key] = (entry[key] ?? 0) + delta;
       }
     }
     thread.previous = total;
+    if (thread.completedAt !== undefined) {
+      this.completeRecords(threadId, thread, thread.completedAt);
+    }
     entry.incomplete = thread.incomplete || thread.model === null || tokenFields.some(key => entry[key] === null);
     return this.snapshot();
   }
@@ -177,6 +206,7 @@ export class CodexTokenUsage {
       }
       const entry = this.entry(threadId, thread);
       entry.incomplete ||= incomplete && !thread.finished;
+      this.completeRecords(threadId, thread, thread.completedAt ?? Date.now());
     }
     return this.snapshot();
   }

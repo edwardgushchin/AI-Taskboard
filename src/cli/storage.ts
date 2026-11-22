@@ -308,6 +308,9 @@ function readIndex(path: string): BoardIndex {
       (index.settings.autoReview !== undefined && typeof index.settings.autoReview !== "boolean") ||
       (index.settings.reviewMode !== undefined && !reviewModes.some(mode => mode === (index.settings as Record<string, unknown>).reviewMode)) ||
       (index.settings.taskLimits !== undefined && !validAgentLimitOverrides(index.settings.taskLimits)) ||
+      (index.settings.codexDailyTokens !== undefined &&
+        (typeof index.settings.codexDailyTokens !== "number" ||
+          !Number.isSafeInteger(index.settings.codexDailyTokens) || index.settings.codexDailyTokens < 1)) ||
       !boardAgentRoles.every(role => validRoleSettings((index.settings as Record<string, unknown>)[role])) ||
       !(index.settings.archiveAfterDays === null ||
         (Number.isSafeInteger(index.settings.archiveAfterDays) && Number(index.settings.archiveAfterDays) >= 0))) {
