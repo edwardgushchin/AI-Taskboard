@@ -260,6 +260,12 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
   if (input.awaitingAnswer !== undefined && (actor !== "agent" || typeof input.awaitingAnswer !== "boolean")) {
     throw new TaskboardError("INVALID_INPUT", "Only an agent reply can set a boolean awaitingAnswer state.");
   }
+  const awaitingOwnerAnswer = input.awaitingOwnerAnswer;
+  if (awaitingOwnerAnswer !== undefined &&
+      (typeof awaitingOwnerAnswer !== "boolean" || typeof input.awaitingAnswer !== "boolean" ||
+        (awaitingOwnerAnswer && !input.awaitingAnswer))) {
+    throw new TaskboardError("INVALID_INPUT", "Only an agent reply can identify an open owner question.");
+  }
   if (input.confirmsDraft !== undefined && (actor !== "agent" || task.status !== "draft" || draftDiscussion ||
       typeof input.confirmsDraft !== "boolean" || typeof input.awaitingAnswer !== "boolean" ||
       (input.confirmsDraft && input.awaitingAnswer))) {
@@ -300,7 +306,10 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
         current.draftDiscussion = undefined;
       }
     }
-    if (typeof awaitingAnswer === "boolean") current.awaitingAnswer = awaitingAnswer;
+    if (typeof awaitingAnswer === "boolean") {
+      current.awaitingAnswer = awaitingAnswer;
+      current.awaitingOwnerAnswer = requiresChoice ? true : awaitingOwnerAnswer;
+    }
     if (draftReply) {
       current.draftConfirmed = confirmsDraft || (!draftDiscussion && awaitingAnswer === false &&
         current.draftConfirmed === true);
